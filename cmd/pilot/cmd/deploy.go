@@ -16,12 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -55,24 +57,81 @@ type deployAnsibleRuntime struct {
 	LogPath string
 
 	// SSHControlDir is the directory Env's ANSIBLE_SSH_ARGS points its
-	// ControlPath at. Exposed separately (not just baked into Env) so a
-	// caller that needs a *scoped* ControlPath (see
+	// ControlPath at (see ensureSSHControlDir). Exposed separately (not just
+	// baked into Env) so a caller that needs a *scoped* ControlPath (see
 	// scopedDiagnoseAnsibleRuntime) can rebuild ANSIBLE_SSH_ARGS without
 	// parsing it back out of the opaque Env string.
 	SSHControlDir string
 }
 
+// sshControlBaseEnv overrides the directory ensureSSHControlDir puts
+// ControlMaster socket directories in. The default is /tmp on purpose, not
+// the data dir or os.TempDir(): a Unix socket path must fit in 108 bytes
+// (OpenSSH also appends a 17-byte temporary suffix while creating a
+// master), and both --data-dir and $TMPDIR can be arbitrarily deep. An
+// override must stay short too (for example /run/user/<uid>). Tests set it
+// so they and the pilot subprocesses they spawn stay out of the real /tmp.
+const sshControlBaseEnv = "PILOT_SSH_CONTROL_BASE"
+
+func sshControlBase() string {
+	if base := os.Getenv(sshControlBaseEnv); base != "" {
+		return base
+	}
+	return "/tmp"
+}
+
+// ensureSSHControlDir returns, creating it if needed, the private directory
+// for dataDir's SSH ControlMaster sockets:
+// <sshControlBase()>/pilot-ssh-<uid>-<first 4 bytes of sha256(abs dataDir), hex>.
+// One directory per data dir keeps the previous isolation, so a workspace
+// never reuses another workspace's authenticated master. The sockets inside
+// are named by %C, a fixed-length hash, so the whole path stays about 75
+// bytes however deep the data dir is and however long the host name is.
+//
+// The base is world-writable, so an existing path is accepted only if
+// it is a real directory (not a symlink) owned by this user; group and other
+// permission bits are removed. The sticky bit on /tmp stops other users from
+// replacing the directory afterwards.
+func ensureSSHControlDir(dataDir string) (string, error) {
+	abs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve data directory %s: %w", dataDir, err)
+	}
+	sum := sha256.Sum256([]byte(abs))
+	dir := filepath.Join(sshControlBase(), fmt.Sprintf("pilot-ssh-%d-%x", os.Getuid(), sum[:4]))
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return "", fmt.Errorf("create SSH control directory %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspect SSH control directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("SSH control directory %s is not a directory (%s); remove it and retry", dir, info.Mode().Type())
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return "", fmt.Errorf("SSH control directory %s is not owned by uid %d; remove it and retry", dir, os.Getuid())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return "", fmt.Errorf("restrict SSH control directory %s: %w", dir, err)
+		}
+	}
+	return dir, nil
+}
+
 type deployAnsibleEnvKey struct{}
 
 // prepareDeployAnsibleRuntime keeps every controller-side Ansible artifact
-// for a deploy under data-dir. Remote module files intentionally remain on
-// their managed host; they cannot be stored on the controller.
+// for a deploy under data-dir, except the SSH ControlMaster sockets, which
+// need a short path (see ensureSSHControlDir). Remote module files
+// intentionally remain on their managed host; they cannot be stored on the
+// controller.
 func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	root := filepath.Join(dir, "ansible")
 	home := filepath.Join(root, "home")
 	tmp := filepath.Join(root, "tmp")
 	factCache := filepath.Join(root, "fact-cache")
-	sshControl := filepath.Join(root, "ssh-control")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", root, err)
 	}
@@ -80,10 +139,14 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	if err := ansible.MaintainLog(logPath); err != nil {
 		return deployAnsibleRuntime{}, fmt.Errorf("maintain Ansible log: %w", err)
 	}
-	for _, path := range []string{home, tmp, factCache, sshControl} {
+	for _, path := range []string{home, tmp, factCache} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", path, err)
 		}
+	}
+	sshControl, err := ensureSSHControlDir(dir)
+	if err != nil {
+		return deployAnsibleRuntime{}, err
 	}
 	return deployAnsibleRuntime{
 		TempDir:       tmp,
@@ -95,7 +158,7 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 			"ANSIBLE_CACHE_PLUGIN=jsonfile",
 			"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + factCache,
 			"ANSIBLE_LOG_PATH=" + logPath,
-			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(sshControl, "pilot-%r@%h:%p")) + " -o ControlPersist=60s",
+			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(sshControl, "%C")) + " -o ControlPersist=60s",
 			"ANSIBLE_RETRY_FILES_ENABLED=False",
 			// Collapses each task to one SSH round-trip instead of a
 			// separate sftp-and-exec per task; safe because every target

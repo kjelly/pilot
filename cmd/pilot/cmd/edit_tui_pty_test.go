@@ -419,7 +419,21 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 }
 
 func TestMain(m *testing.M) {
+	// Keep the SSH control directories that prepareDeployAnsibleRuntime
+	// creates — here and in every pilot subprocess these tests spawn,
+	// which inherit the environment — out of the real /tmp. The
+	// ControlPath-length test switches back to "/tmp" itself.
+	controlBase, err := os.MkdirTemp("/tmp", "pilot-test-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create SSH control base:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv(sshControlBaseEnv, controlBase); err != nil {
+		fmt.Fprintln(os.Stderr, "set", sshControlBaseEnv+":", err)
+		os.Exit(1)
+	}
 	code := m.Run()
+	_ = os.RemoveAll(controlBase)
 	if pilotBinaryDir != "" {
 		_ = os.RemoveAll(pilotBinaryDir)
 	}

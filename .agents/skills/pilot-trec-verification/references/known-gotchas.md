@@ -131,19 +131,22 @@ VM rebuilds at the same IP get a new host key; a stale entry breaks any direct
 `ssh-keygen -R <ip>` (or pass `-o StrictHostKeyChecking=accept-new`) before the
 first real connection each rebuild.
 
-### A long `--data-dir` breaks `pilot deploy`'s SSH (ControlPath too long)
+### A long `--data-dir` broke `pilot deploy`'s SSH (ControlPath too long) — fixed
 
-`pilot deploy` puts its SSH ControlPath under the data dir:
+Builds before the fix put deploy's SSH ControlPath under the data dir:
 `<data-dir>/ansible/ssh-control/pilot-%r@%h:%p`. With a deep `--data-dir`, the
-path exceeds the 108-byte Unix socket limit. The full preflight then fails every
-host with `UNREACHABLE … ControlPath too long ('…' >= 108 bytes)` and asks
-`仍要繼續佈署嗎？`. `[live 2026-09-24, --data-dir under a scratch directory]`
+path exceeded the 108-byte Unix socket limit. The full preflight then failed
+every host with `UNREACHABLE … ControlPath too long ('…' >= 108 bytes)` and
+asked `仍要繼續佈署嗎？`. `[live 2026-09-24, --data-dir under a scratch
+directory]`
 
-**Workaround:** give scripted runs a short `--data-dir`, for example one
-directly under `/tmp`. This is a Pilot bug, not a driving issue:
-`prepareDeployAnsibleRuntime` in `cmd/pilot/cmd/deploy.go` still uses the
-unbounded `%r@%h:%p` form. `f469407` bounded only the MCP diagnose path
-(AGENTS.md §5.11).
+**Fixed:** the ControlPath is now
+`/tmp/pilot-ssh-<uid>-<hash of the data dir>/%C`, at most about 75 bytes
+however deep the data dir or long the host name.
+`$PILOT_SSH_CONTROL_BASE` replaces `/tmp` if you need to, and must stay
+short. `ansible.cfg` and the vm-target inventory use `%C` as well, and
+`internal/spec/ssh_controlpath_regression_test.go` rejects any ControlPath
+template that embeds the host. On an older binary, use a short `--data-dir`.
 
 ### `ControlMaster`/`ControlPersist` silently masks an auth-layer change
 
