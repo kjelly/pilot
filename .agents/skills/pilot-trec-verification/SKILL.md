@@ -111,10 +111,15 @@ grep -n 'Key:' cmd/pilot/cmd/deploy_catalog.go       # pilot deploy's single-com
 grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checklist (order roleContracts is defined in)
 ```
 
-- `deploy_catalog.go`'s `Key:` order is exactly the order
-  `pilot deploy`'s "單一元件" menu shows — the Nth line is index N-1.
+- **`deploy_catalog.go`'s `Key:` order no longer matches `pilot deploy`'s
+  "單一元件" menu `[live 2026-09-24]`.** The menu is contract-driven
+  (`挑一個要佈署的元件 (contract 驅動)`). It listed 29 rows in a different
+  order and without day-2 entries such as `freeipa-identity`, so a
+  `DOWN <n>` computed from that file lands on the wrong component. Select
+  by label (`ACTIVATE <row text> WITH ENTER`), or count on the live screen.
 - `contracts.go`'s `roleContracts` order is exactly the role checklist
-  order in `pilot edit`'s role editor.
+  order in `pilot edit`'s role editor (re-checked live 2026-09-24: 32
+  rows, same order).
 - **Count every entry, not just the ones you plan to touch.** The most
   common index bug in this workflow: forgetting a vault entry (e.g.
   `alertmanager_config`) you don't intend to edit still occupies a slot
@@ -237,9 +242,15 @@ FOCUS/ACTIVATE unless driving a scrolling checklist") and any `ENTER` or
 `TEXT_AND_ENTER` that no `EXPECT`/`ASSERT` guards `[live 2026-09-24]`. In
 `pilot edit` menus, use `ACTIVATE <label> WITH ENTER` (an alias of `CHOOSE`) or
 `FOCUS <label>` (an alias of `SELECT`) with the Huh `--pointer` from §4. For a
-scrolling checklist, `CHECKLIST_DOWN` is the form `--strict` accepts. The
-`DOWN <n>` advice in rules 13, 14 and 20 predates `--strict`, and the
-deploy, role-checklist and vault flows have not been re-driven under it yet.
+scrolling checklist, `CHECKLIST_DOWN` is the form `--strict` accepts.
+
+`[live 2026-09-24]` The deploy, role-checklist and vault flows were re-driven
+under `--strict` and the Huh `--pointer`, with label-based navigation only
+(rules 13, 14 and 20). The scenario was a single-host `host-monitoring`
+rollout on a disposable VM: `pilot edit` built `hosts.yml` (role via the
+checklist), `pilot inventory generate`, `pilot edit` filled `.vault/`, then
+`pilot deploy` ran preflight, preview and the real apply (✅ 套用完成). All
+four casts passed `trec verify`, and `pilot verify` then passed 11/11.
 
 Immediately after the child exits, verify that *one cast*, not a mixed
 directory, is eligible for promotion:
@@ -368,14 +379,14 @@ because you have not read its reference.**
 | # | Rule | Detail |
 |---|---|---|
 | 12 | `SELECT` is the default for `pilot edit`'s menus. Run with `--pointer '^\s*┃?\s*>\s'`, because Huh v2 rows start with `┃ ` and the default pointer regex never matches them. `SELECT` only moves the pointer — **every `SELECT` still needs its own `ENTER`** (or use `ACTIVATE <label> WITH ENTER`). | `references/select-labels.md` |
-| 13 | Prefer `DOWN <n>` for `pilot deploy`'s menus; `SELECT` there can lock onto a stale pointer left in scrollback by the just-exited Program. | `references/deploy-wizard.md` |
-| 14 | On the role checklist (`multiSelect`) use `DOWN <n>` + `SPACE`, never `SELECT` — only ~15 rows render, so a content scan cannot reach a scrolled-out row. This is a proven path; do not re-litigate it. | `references/role-checklist.md` |
+| 13 | Select `pilot deploy`'s menus by label (`ACTIVATE <row text> WITH ENTER`) after the rule-18 settle. It worked on every menu from scope select to preflight on 2026-09-24. The catalog order no longer follows `deploy_catalog.go`, so a `DOWN <n>` computed from source is wrong. | `references/deploy-wizard.md` |
+| 14 | On the role checklist use `TOGGLE <text unique to that row>`. The Huh checklist renders every row (32 on 2026-09-24), not the old 15-row window, so a content scan reaches them all. Role names recur in other rows' descriptions (`host-monitoring` appears in `prometheus`'s), so match on row-unique text. `CHECKLIST_DOWN <n>` + `SPACE` is the lint-accepted positional fallback. | `references/role-checklist.md` |
 | 15 | Never write `DOWN 0`; for index 0 omit the `DOWN` line entirely. | `references/role-checklist.md` |
 | 16 | Pick a `SELECT`/`TOGGLE` label substring unique to one row. Collisions come from three easy-to-miss sources: another row's hint text, another row's *description* prose, and `runEdit`/`runDeploy`'s own static startup banner (never cleared — no alt-screen). | `references/select-labels.md`, `references/known-gotchas.md` |
 | 17 | Use `TOGGLE docker-apply.yml`, not `TOGGLE docker` — bare `docker` is ambiguous across three rows. | `references/known-gotchas.md` |
 | 18 | After every `EXPECT` for a new `pilot deploy` screen, add a ~150ms settle pause before the first keystroke — `EXPECT` succeeding does not prove the new Program is reading input yet. | `references/deploy-wizard.md` |
 | 19 | A sub-editor's save/exit returns to its **immediate parent menu**. Verify the actual next screen for every return step; budget one extra return per nesting level. | `references/known-gotchas.md` |
-| 20 | The vault/group_vars key-list screen rebuilds with the cursor back at the **top** after every field edit — there is no auto-advance. Send `DOWN <index>` before the `ENTER` for *every* entry, recomputed from the top. | `references/pilot-edit-wizard.md` |
+| 20 | The vault/group_vars key-list screen rebuilds with the cursor back at the **top** after every field edit — there is no auto-advance (still true on 2026-09-24). Select each key by label, `ACTIVATE <key> = WITH ENTER`, so the reset cannot misdirect you. A `DOWN <index>` recomputed from the top also works, but `--strict` rejects it. | `references/pilot-edit-wizard.md` |
 
 ### Text entry and confirms
 
@@ -386,7 +397,7 @@ because you have not read its reference.**
 | 23 | The real-apply gate defaults to **No**. A script of bare `ENTER`s records a preview, not a deploy — you must send a single `y`. Check the cast for `✅ 套用完成`. | `references/deploy-wizard.md` |
 | 24 | Script the two easily-missed confirms between the inventory-path prompt and the preflight menu (topology graph `[Y/n]`, manual sudo password `[y/N]`) or the run stalls on unscripted input. | `references/deploy-wizard.md` |
 | 25 | For `freeipa-identity` with a canonical roster, answer **`y`** to the `.vault/main.yaml` prompt; do **not** redirect it at the roster path. The roster loads separately via the `freeipa_roster_file` host var. | `references/freeipa-identity-prompt.md` |
-| 26 | Declare `--secret-env`/`--secret-file` for **every** vault key that already holds a real value in the target workspace, not just the ones this script sets — the key-list screen re-renders every set value in plaintext. | `references/known-gotchas.md` |
+| 26 | Declare `--secret-env`/`--secret-file` for **every** vault key that already holds a real value in the target workspace, not just the ones this script sets — older builds re-rendered every set value in plaintext. Since the key list started showing `<已設定>` (seen 2026-09-24), trec's scan flags `…password = <已設定>` as `inline-secret-assignment`, so also redact that marker. | `references/known-gotchas.md` |
 
 ### Live-host checks
 

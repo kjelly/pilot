@@ -57,8 +57,10 @@ drifting (see `../SKILL.md` §2) without recomputing an index.
 
 **Two standing caveats:**
 
-- **Exception: the role checklist** (`multiSelect` toggle-many-rows screen) — use
-  `DOWN <n>` + `SPACE` there. See `role-checklist.md`.
+- **The role checklist** (multi-select) — pre-Huh this was an exception that
+  needed `DOWN <n>` + `SPACE`. The Huh checklist renders every row, and
+  `TOGGLE <row-unique text>` works there (live 2026-09-24). See
+  `role-checklist.md`.
 - **`SELECT` only moves the pointer — it does not submit.** Every `SELECT` needs
   its own following `ENTER`.
 

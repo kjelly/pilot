@@ -6,7 +6,35 @@
 
 ---
 
-## Use `DOWN <n>` + `SPACE`, not `SELECT` — and don't re-litigate this
+## Huh checklist: `TOGGLE` by row-unique text works
+
+`[live 2026-09-24]` The checklist is now a Huh multi-select (`internal/tui`).
+The hand-written `multiSelectModel` described in the next section, with its
+15-row scrolling window, was deleted in `521366e`.
+
+- The Huh screen renders **every** role row: all 32 in a 100×40 PTY. Long
+  descriptions wrap onto continuation lines that start with `┃ `, not with a
+  pointer.
+- Its hint line reads `x toggle • ↑ up • ↓ down • / filter • enter submit •
+  ctrl+a select all`, and a checked row shows `[•]`.
+- With the Huh `--pointer` (`select-labels.md`),
+  `TOGGLE node_exporter 強制 Basic Auth` checked `host-monitoring` (row 19 of
+  32) on the first try. `EXPECT [•] host-monitoring` and
+  `ENTER_IF [•] host-monitoring` then submitted it, and the saved `hosts.yml`
+  had `roles: [host-monitoring]`.
+- **Match on text unique to the row.** Role names recur in other rows'
+  descriptions: `host-monitoring` is also in `prometheus`'s (`自動從
+  host-monitoring/dcgm-exporter group 展開`). The row's own description is the
+  safe anchor.
+- `CHECKLIST_DOWN <n>` + `SPACE` is the positional form `trec drive lint
+  --strict` accepts, and remains a fallback. The next section's index arithmetic
+  still applies to it.
+
+The next section is the pre-Huh history. Its conclusion — do not hand-write
+`hosts.yml` because the checklist "can't be driven" — still stands. Its
+`SELECT` ban does not.
+
+## Use `DOWN <n>` + `SPACE`, not `SELECT` — and don't re-litigate this (pre-Huh)
 
 **A previous agent session concluded the role checklist "can't be reliably
 driven by `trec drive --script` for a full ~19-role pass" and proposed
@@ -90,7 +118,8 @@ the wizard's exit code — see `timing.md`.
 
 `☑ 逐項勾選角色(...)` is the **roles-menu** item that *leads into* the checklist.
 It does not appear anywhere on the checklist screen itself, whose own hint line
-reads `↑/↓ 移動　space 勾選/取消　enter 完成`.
+reads `x toggle • ↑ up • ↓ down • / filter • enter submit • ctrl+a select all`
+(Huh, 2026-09-24; pre-Huh it was `↑/↓ 移動　space 勾選/取消　enter 完成`).
 
 So a script that does `SELECT 逐項勾選角色` a *second* time while already inside
 the checklist will correctly fail to find that text — it is genuinely not part of

@@ -6,6 +6,11 @@ these scripts most often: miscounting the total item list.
 
 ## 1. `pilot deploy`'s single-component menu
 
+> **Stale `[live 2026-09-24]`:** the menu is now contract-driven and no longer
+> follows `deploy_catalog.go`'s order (`../SKILL.md` §2). Select it by label
+> with `ACTIVATE` (`deploy-wizard.md`). The walkthrough below is kept for the
+> counting technique only.
+
 ```bash
 grep -n 'Key:' cmd/pilot/cmd/deploy_catalog.go
 ```

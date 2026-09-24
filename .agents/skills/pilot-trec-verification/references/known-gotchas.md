@@ -57,6 +57,19 @@ script sets. Get the full current key list live — a quick MCP peek at the vaul
 screen, or `grep -oE '^[a-zA-Z_]+:' .vault/main.yaml` for names only, never
 values.
 
+**Update `[live 2026-09-24]`:** the key list now shows a set value as
+`<已設定>`, and value inputs echo `*`. Only untouched `CHANGE-ME-…` placeholders
+still appear in plaintext. Keep the rule above anyway, because the typed input
+events are recorded.
+
+The masked marker brings a new trap. trec's secret scan flags
+`node_exporter_basic_auth_password = <已設定>` as `inline-secret-assignment`, so
+`trec verify`/`cast_verify` fails with `safe_to_share=false` even though no
+secret is in the cast. Fix: export a variable holding the marker, for example
+`PILOT_MASKED_MARKER='<已設定>'`, and add `--secret-env PILOT_MASKED_MARKER`
+alongside the real secrets. `EXPECT`s that mention `<已設定>` still match,
+because they read the live screen before redaction.
+
 ### `TOGGLE`/`SELECT`/`CHOOSE docker` on the role checklist is ambiguous
 
 A bare `TOGGLE docker` errors `ambiguous selectable label rows [34 40 42]` —
@@ -117,6 +130,20 @@ VM rebuilds at the same IP get a new host key; a stale entry breaks any direct
 `ssh`/`sshpass` step with `Host key verification failed`. Expect to
 `ssh-keygen -R <ip>` (or pass `-o StrictHostKeyChecking=accept-new`) before the
 first real connection each rebuild.
+
+### A long `--data-dir` breaks `pilot deploy`'s SSH (ControlPath too long)
+
+`pilot deploy` puts its SSH ControlPath under the data dir:
+`<data-dir>/ansible/ssh-control/pilot-%r@%h:%p`. With a deep `--data-dir`, the
+path exceeds the 108-byte Unix socket limit. The full preflight then fails every
+host with `UNREACHABLE … ControlPath too long ('…' >= 108 bytes)` and asks
+`仍要繼續佈署嗎？`. `[live 2026-09-24, --data-dir under a scratch directory]`
+
+**Workaround:** give scripted runs a short `--data-dir`, for example one
+directly under `/tmp`. This is a Pilot bug, not a driving issue:
+`prepareDeployAnsibleRuntime` in `cmd/pilot/cmd/deploy.go` still uses the
+unbounded `%r@%h:%p` form. `f469407` bounded only the MCP diagnose path
+(AGENTS.md §5.11).
 
 ### `ControlMaster`/`ControlPersist` silently masks an auth-layer change
 

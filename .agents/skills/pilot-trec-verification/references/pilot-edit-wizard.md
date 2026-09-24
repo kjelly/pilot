@@ -50,6 +50,15 @@ other key still at `CHANGE-ME`, and the cast looks green throughout. `[live
 2026-07-17, v8: seven intended values all typed into `ipa_admin_password`,
 final state `pilot-secret-key`]`
 
+**Label-based fix `[live 2026-09-24]`:** the reset still happens, but selecting
+each key by its row text makes it harmless. The script added a probe key (row
+1), set `node_exporter_basic_auth_password` (row 0), then ran
+`ACTIVATE pilot_trec_probe = WITH ENTER` after the list had reset to row 0.
+It opened the probe key, and both values landed where intended on disk. This
+needs no index and passes `--strict`. Each row reads `<key> = <value>`, where
+the value is `<已設定>` once set, so the full `<key> =` is a unique label
+unless another key's name ends with the same text (the match is a substring).
+
 **Fix:** send `DOWN <index>` before the `ENTER` for *every* entry, recomputing
 the index from the top each time.
 
