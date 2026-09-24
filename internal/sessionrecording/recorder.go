@@ -90,6 +90,12 @@ type Options struct {
 	// type-asserting Run's outerIn/outerOut to *os.File.
 	Terminal *os.File
 	Identity AuditIdentity
+	// OnFailClosed, when set, runs once the moment fail_closed trips,
+	// before Run starts draining. The caller ends the child there: the
+	// relay already forwards nothing, but a command running on the target
+	// would otherwise keep running for the drain and the finish call. It
+	// must not block.
+	OnFailClosed func()
 }
 
 // Recorder wraps one recorded PTY session: it relays bytes between the
@@ -462,6 +468,9 @@ func (r *Recorder) triggerFailClosed(reason string) {
 		r.failed = true
 		r.markLostLocked("sink_error")
 		r.mu.Unlock()
+		if r.opts.OnFailClosed != nil {
+			r.opts.OnFailClosed()
+		}
 		r.emit(sessionaudit.KindRecordingFailed, reason)
 		close(r.failClosedCh)
 		r.cancelWriter()

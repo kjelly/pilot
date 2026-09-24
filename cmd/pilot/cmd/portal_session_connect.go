@@ -401,6 +401,10 @@ func runPortalTargetSessionRecorded(ctx context.Context, deps portalSessionDeps,
 			User: audit.base.User, TargetFQDN: target, GatewayID: audit.base.GatewayID, GatewayScope: audit.base.GatewayScope,
 			RecordingPolicySource: recording.PolicySource,
 		},
+		// End the target session as soon as recording fails closed, not
+		// after Run's drain and finish (up to FailureGrace plus the finish
+		// timeout later).
+		OnFailClosed: func() { _ = cmd.Process.Kill() },
 	}, sink, deps.Emitter)
 	audit.emit(sessionaudit.KindRecordingStarted, "", nil)
 	runErr := rec.Run(ctx, ptmx, deps.Stdin, deps.Stdout)

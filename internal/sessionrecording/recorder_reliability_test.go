@@ -471,3 +471,83 @@ func TestRecorderFailClosedStopsRelaying(t *testing.T) {
 		t.Fatal("Run did not return")
 	}
 }
+
+// TestRecorderFailClosedEndsChildAtTrip: OnFailClosed runs the moment
+// fail_closed trips, before Run returns, so the caller ends the target
+// session then instead of after the drain and finish.
+func TestRecorderFailClosedEndsChildAtTrip(t *testing.T) {
+	sink := &memSink{block: true}
+	childPtm, cmd := startCatChild(t)
+	var mu sync.Mutex
+	calls := 0
+	rec := New(Options{
+		Mode: ModeTerminalOutput, SessionID: "sess-kill", FailurePolicy: FailurePolicyFailClosed,
+		QueueEvents: 64, FlushInterval: 10 * time.Millisecond, FailureGrace: 150 * time.Millisecond,
+		OnFailClosed: func() {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			_ = cmd.Process.Kill()
+		},
+	}, sink, testEmitter(t))
+	outerPtm, outerPts := openOuterPty(t)
+	done := make(chan error, 1)
+	go func() { done <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+
+	if _, err := outerPts.Write([]byte("pending\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRecordingFailedClosed) {
+			t.Fatalf("Run = %v, want ErrRecordingFailedClosed", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("OnFailClosed ran %d times before Run returned, want exactly once", n)
+	}
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the child was still running after fail_closed")
+	}
+}
+
+// TestRecorderOnFailClosedNotCalledOnNormalEnd: a session that ends with a
+// healthy sink never runs OnFailClosed.
+func TestRecorderOnFailClosedNotCalledOnNormalEnd(t *testing.T) {
+	sink := &memSink{}
+	childPtm, cmd := startCatChild(t)
+	called := false
+	rec := New(Options{
+		Mode: ModeTerminalOutput, SessionID: "sess-normal", FailurePolicy: FailurePolicyFailClosed,
+		QueueEvents: 64, FlushInterval: 10 * time.Millisecond, FailureGrace: 150 * time.Millisecond,
+		OnFailClosed: func() { called = true },
+	}, sink, testEmitter(t))
+	outerPtm, outerPts := openOuterPty(t)
+	done := make(chan error, 1)
+	go func() { done <- rec.Run(context.Background(), childPtm, outerPtm, outerPtm) }()
+	if _, err := outerPts.Write([]byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	_ = cmd.Process.Kill() // the target session ends on its own
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	if called {
+		t.Fatal("OnFailClosed ran for a session that ended normally")
+	}
+}
