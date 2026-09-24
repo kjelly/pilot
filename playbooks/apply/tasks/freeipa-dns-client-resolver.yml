@@ -49,6 +49,8 @@
     freeipa_dns_client_servers: "{{ freeipa_dns_client_servers | default([], true) }}"
     freeipa_dns_client_resolv_conf_marker: "pilot-freeipa-dns-client"
     freeipa_dns_client_resolved_dropin_path: /etc/systemd/resolved.conf.d/90-pilot-freeipa-dns-client.conf
+    freeipa_dns_client_netplan_dropin_path: /etc/netplan/99-pilot-freeipa-dns-client.yaml
+    freeipa_dns_client_snapshot_dir: /var/lib/pilot/freeipa-dns-client/pre-apply
 
 # `-e freeipa_dns_client_servers=[10.0.0.10]` on an ansible-playbook/ansible
 # command line — a bare `[...]` with no surrounding quotes recognizable as
@@ -119,10 +121,32 @@
       explicitly, or make sure this inventory has a freeipa-server (or
       freeipa-server-replica with freeipa_setup_dns=true) host.
 
-- name: "FreeIPA DNS client — install dig (Debian)"
-  ansible.builtin.apt:
-    name: dnsutils
-    state: present
+# bind9-dnsutils is the package that ships /usr/bin/dig (Ubuntu 20.10+,
+# Debian 11+); `dnsutils` is only a transitional package that depends on
+# it, so asking for it made a host that already had dig download
+# something. It goes through the apt framework rather than plain
+# ansible.builtin.apt: on the vm-target golden image, whose apt index was
+# stale, the plain task hit a 404 and failed the apply before the block
+# below ran (2026-09-24, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
+# The framework does nothing when the package is already installed and
+# recovers from stale metadata when it is not.
+- name: "FreeIPA DNS client — install dig (Debian, apt framework)"
+  ansible.builtin.include_tasks:
+    file: apt-package-install.yml
+    # This file is included by two playbooks with different row tags, so
+    # it cannot name the caller's tags. `always` on the pulled-in tasks
+    # means "whenever this include runs": the include itself carries the
+    # caller's `apply` tags, so a --tags run that deselects the caller
+    # skips it too.
+    apply:
+      tags: [always]
+  vars:
+    pilot_apt_packages: [bind9-dnsutils]
+    pilot_apt_policy: tolerant
+    pilot_apt_component: freeipa-dns-client-dig
+    pilot_apt_required_sources:
+      - id: distro-os
+        class: os
   when:
     - ansible_os_family == 'Debian'
     - not ansible_check_mode
@@ -134,6 +158,49 @@
   when:
     - ansible_os_family == 'RedHat'
     - not ansible_check_mode
+
+# ── Pre-apply snapshot for the rescue below ────────────────────────────────
+# The rescue puts the host back the way this run found it. Before
+# 2026-09-24 it restored only /etc/resolv.conf, from the copy task's
+# `backup: true` file, and on Ubuntu that was not enough: the resolved.conf.d
+# and netplan drop-ins stayed, so lookups still went to the server that had
+# just failed; the backup was taken after systemd-resolved had already been
+# restarted with the new drop-in; and copying it back turned the stub
+# symlink into a regular file (docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
+# So this snapshots every file the block writes, with `cp -a
+# --no-dereference` (a symlink stays a symlink; an absent file is recorded
+# as absent) and, on EL, the active connection's DNS settings that the
+# nmcli task changes. It runs outside the block: if the snapshot fails,
+# nothing has been changed yet and the play stops here. It is refreshed on
+# every run and only read by the rescue, hence changed_when: false.
+- name: "FreeIPA DNS client — snapshot resolver state before changing it"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    snap={{ freeipa_dns_client_snapshot_dir | quote }}
+    rm -rf "$snap"
+    mkdir -p "$snap"
+    chmod 0700 "$snap"
+    for f in /etc/resolv.conf {{ freeipa_dns_client_resolved_dropin_path | quote }} {{ freeipa_dns_client_netplan_dropin_path | quote }}; do
+      if [ -e "$f" ] || [ -L "$f" ]; then
+        cp -a --no-dereference "$f" "$snap/$(printf '%s' "$f" | tr / _)"
+      fi
+    done
+    if [ {{ ansible_os_family | quote }} = RedHat ] && command -v nmcli >/dev/null; then
+      active="$(nmcli -t -f NAME,DEVICE connection show --active | head -n1)"
+      if [ -n "$active" ]; then
+        printf '%s' "${active%%:*}" > "$snap/nm.conn"
+        printf '%s' "${active#*:}" > "$snap/nm.device"
+        for field in ipv4.dns ipv4.dns-search ipv4.ignore-auto-dns; do
+          nmcli -g "$field" connection show "${active%%:*}" > "$snap/nm.$field"
+        done
+      fi
+    fi
+    ls -A "$snap"
+  args:
+    executable: /bin/bash
+  register: freeipa_dns_client_snapshot
+  changed_when: false
+  when: not ansible_check_mode
 
 - name: "FreeIPA DNS client — configure DNS resolver and verify it actually resolves via FreeIPA"
   block:
@@ -218,10 +285,12 @@
     # 50-cloud-init.yaml's mtime but never its dhcp4/dhcp6 content, and
     # never touches this file at all).
     #
-    # No rescue/rollback entry for this file (unlike /etc/resolv.conf
-    # above): there is no prior version to restore to, and reverting it
-    # after a later step fails would just silently re-enable the exact
-    # DHCP-DNS masking this task exists to prevent.
+    # The rescue removes this file again if this run created it (restores
+    # it if it existed before). An earlier version deliberately kept it,
+    # so DHCP DNS would not mask FreeIPA DNS; but a failed apply has not
+    # moved the host to FreeIPA DNS, and keeping this file (with DHCP DNS
+    # off and the resolved drop-in pointing at a server that just failed)
+    # left the host with no working DNS at all (2026-09-24 vm-target run).
     - name: "Debian(Ubuntu) — inspect the active interface kind for netplan"
       ansible.builtin.command:
         argv:
@@ -260,7 +329,7 @@
 
     - name: "Debian(Ubuntu) — write netplan drop-in disabling DHCP-supplied per-link DNS"
       ansible.builtin.copy:
-        dest: /etc/netplan/99-pilot-freeipa-dns-client.yaml
+        dest: "{{ freeipa_dns_client_netplan_dropin_path }}"
         owner: root
         group: root
         mode: '0600'
@@ -358,27 +427,88 @@
       failed_when: freeipa_dns_client_functional_check.stdout | trim != '0'
 
   rescue:
-    # bash, not the shell module's default /bin/sh: on Debian/Ubuntu that is
-    # dash, which rejects `set -o pipefail` (rc=2) before the cp ever runs —
-    # and failed_when: false below used to hide that the restore never
-    # happened. The outcome is echoed so the fail message reports it.
-    - name: "ROLLBACK — restore /etc/resolv.conf from the automatic backup"
-      ansible.builtin.shell: >-
-        set -o pipefail;
-        latest="$(ls -t /etc/resolv.conf.*.* 2>/dev/null | head -n1)";
-        if [ -z "$latest" ]; then echo "no backup found, left unchanged";
-        elif cp "$latest" /etc/resolv.conf; then echo "restored from $latest";
-        else echo "restore from $latest failed"; exit 1; fi
+    # Put back what the pre-apply snapshot recorded and say exactly what
+    # happened: each ROLLBACK task echoes one line per step, and the final
+    # message reports those lines instead of claiming success. bash, not
+    # the shell module's default /bin/sh (dash on Debian/Ubuntu rejects
+    # `set -o pipefail`; AGENTS.md §4.5 point 7). failed_when: false so a
+    # partial rollback still runs the remaining steps and reaches the
+    # message; a non-zero rc is reported there as "rollback incomplete".
+    - name: "ROLLBACK — restore resolver files from the pre-apply snapshot"
+      ansible.builtin.shell: |
+        set -uo pipefail
+        snap={{ freeipa_dns_client_snapshot_dir | quote }}
+        if [ ! -d "$snap" ]; then echo "no pre-apply snapshot at $snap, files left unchanged"; exit 1; fi
+        rc=0
+        for f in /etc/resolv.conf {{ freeipa_dns_client_resolved_dropin_path | quote }} {{ freeipa_dns_client_netplan_dropin_path | quote }}; do
+          saved="$snap/$(printf '%s' "$f" | tr / _)"
+          if [ -e "$saved" ] || [ -L "$saved" ]; then
+            if cp -a --no-dereference --remove-destination "$saved" "$f"; then echo "$f restored"; else echo "$f restore failed"; rc=1; fi
+          elif [ -e "$f" ] || [ -L "$f" ]; then
+            if rm -f "$f"; then echo "$f removed (did not exist before)"; else echo "$f removal failed"; rc=1; fi
+          fi
+        done
+        exit "$rc"
       args:
         executable: /bin/bash
-      register: freeipa_dns_client_rollback
+      register: freeipa_dns_client_rollback_files
       changed_when: true
       failed_when: false
 
+    - name: "ROLLBACK — reload systemd-resolved and netplan from the restored files (Debian)"
+      ansible.builtin.shell: |
+        set -uo pipefail
+        rc=0
+        if systemctl restart systemd-resolved; then echo "systemd-resolved restarted"; else echo "systemd-resolved restart failed"; rc=1; fi
+        if command -v netplan >/dev/null; then
+          if netplan apply; then echo "netplan applied"; else echo "netplan apply failed"; rc=1; fi
+        fi
+        exit "$rc"
+      args:
+        executable: /bin/bash
+      register: freeipa_dns_client_rollback_reload
+      changed_when: true
+      failed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: "ROLLBACK — restore the connection's DNS settings (EL NetworkManager)"
+      ansible.builtin.shell: |
+        set -uo pipefail
+        snap={{ freeipa_dns_client_snapshot_dir | quote }}
+        if [ ! -s "$snap/nm.conn" ]; then echo "no NetworkManager snapshot, connection left unchanged"; exit 1; fi
+        conn="$(cat "$snap/nm.conn")"
+        dev="$(cat "$snap/nm.device")"
+        if nmcli connection modify "$conn" \
+            ipv4.dns "$(cat "$snap/nm.ipv4.dns")" \
+            ipv4.dns-search "$(cat "$snap/nm.ipv4.dns-search")" \
+            ipv4.ignore-auto-dns "$(cat "$snap/nm.ipv4.ignore-auto-dns")"; then
+          echo "connection '$conn' DNS settings restored"
+        else
+          echo "connection '$conn' DNS settings restore failed"; exit 1
+        fi
+        if nmcli device reapply "$dev" >/dev/null; then echo "device $dev reapplied"
+        elif nmcli connection up "$conn" >/dev/null; then echo "connection '$conn' brought up again"
+        else echo "reapply of '$conn' failed"; exit 1; fi
+      args:
+        executable: /bin/bash
+      register: freeipa_dns_client_rollback_nm
+      changed_when: true
+      failed_when: false
+      when: ansible_os_family == 'RedHat'
+
     - name: "ROLLBACK — surface the original failure"
+      vars:
+        freeipa_dns_client_rollback_results: >-
+          {{ [freeipa_dns_client_rollback_files | default({}),
+              freeipa_dns_client_rollback_reload | default({}),
+              freeipa_dns_client_rollback_nm | default({})]
+             | select | rejectattr('skipped', 'defined') | list }}
       ansible.builtin.fail:
         msg: >-
-          freeipa-dns-client resolver apply failed; /etc/resolv.conf rollback:
-          {{ (freeipa_dns_client_rollback.stdout | default('') | trim)
-             or ('rollback task did not run cleanly (rc=' ~ (freeipa_dns_client_rollback.rc | default('?')) ~ ')') }}.
-          Fix the failing task and re-run.
+          freeipa-dns-client resolver apply failed.
+          {% if ansible_check_mode %}Check mode: nothing was changed, so nothing was rolled back.
+          {% else %}Rollback: {{ freeipa_dns_client_rollback_results | map(attribute='stdout_lines', default=[])
+          | flatten | join('; ') or 'no rollback step ran' }}.
+          {% if freeipa_dns_client_rollback_results | map(attribute='rc', default=0) | select('ne', 0) | list %}Rollback
+          incomplete: check the ROLLBACK tasks above before re-running.
+          {% endif %}{% endif %}Fix the failing task and re-run.

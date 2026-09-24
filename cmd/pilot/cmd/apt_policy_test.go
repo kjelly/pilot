@@ -11,6 +11,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,126 @@ var aptUpdateCacheAllowlist = map[string]string{
 }
 
 var updateCacheTruePattern = regexp.MustCompile(`update_cache:\s*true\b`)
+
+// aptDirectInstallAllowlist is a ratchet like aptUpdateCacheAllowlist, for
+// the other way around the framework: installing a package on the Debian
+// path with plain ansible.builtin.apt / ansible.builtin.package and no
+// update_cache at all. That installs from whatever apt index the host
+// already has, so a stale index 404s and fails the apply (2026-09-24:
+// tasks/freeipa-dns-client-resolver.yml's dnsutils install on the vm-target
+// golden image, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
+// The entries below were found by the same sweep and not migrated yet:
+// moving each one changes which apt path its playbook runs and needs its
+// own vm-target run. Keys are "<file>|<package list>".
+var aptDirectInstallAllowlist = map[string]string{
+	"playbooks/apply/dcgm-exporter-apply.yml|apache2-utils":                                                                                     "not yet migrated (2026-09-24 sweep)",
+	"playbooks/apply/freeipa-client-apply.yml|{{ ipa_audit_packages_debian":                                                                     "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
+	"playbooks/apply/freeipa-nfs-client-apply.yml|{{ ['nfs-utils', 'autofs'] if ansible_os_family == 'RedHat' else ['nfs-common', 'autofs'] }}": "not yet migrated (2026-09-24 sweep); package name is chosen per OS family",
+	"playbooks/apply/freeipa-nfs-server-apply.yml|{{ nfs_server_packages }}":                                                                    "not yet migrated (2026-09-24 sweep)",
+}
+
+// TestAptDirectInstallAllowlist fails on any Debian-reachable package
+// install in playbooks/apply that bypasses tasks/apt-package-install.yml
+// and is not in aptDirectInstallAllowlist, and on allowlist entries that
+// no longer match anything. A task counts as EL-only, and is skipped, when
+// its `when:` mentions RedHat.
+func TestAptDirectInstallAllowlist(t *testing.T) {
+	root := "../../.."
+	var paths []string
+	for _, pattern := range []string{
+		filepath.Join(root, "playbooks", "apply", "*.yml"),
+		filepath.Join(root, "playbooks", "apply", "tasks", "*.yml"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, matches...)
+	}
+	found := map[string]bool{}
+	for _, p := range paths {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "playbooks/apply/tasks/apt-package-install.yml" {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		for _, pkgs := range directDebianInstalls(doc) {
+			key := rel + "|" + pkgs
+			// Allowlist keys may be a prefix of a long templated name.
+			matched := ""
+			for allowed := range aptDirectInstallAllowlist {
+				if key == allowed || strings.HasPrefix(key, allowed) {
+					matched = allowed
+				}
+			}
+			if matched == "" {
+				t.Errorf("%s installs %q with plain ansible.builtin.apt/package on the Debian path — route it through playbooks/apply/tasks/apt-package-install.yml (a stale apt index otherwise 404s and fails the apply), or add %q to aptDirectInstallAllowlist with a reason", rel, pkgs, key)
+				continue
+			}
+			found[matched] = true
+		}
+	}
+	for allowed := range aptDirectInstallAllowlist {
+		if !found[allowed] {
+			t.Errorf("aptDirectInstallAllowlist entry %q no longer matches any install — drop the stale allowance", allowed)
+		}
+	}
+}
+
+// directDebianInstalls returns the package spec (as written) of every task
+// in doc that installs with ansible.builtin.apt or ansible.builtin.package
+// and is not limited to RedHat by its `when:`.
+func directDebianInstalls(doc any) []string {
+	var out []string
+	var walk func(n any)
+	walk = func(n any) {
+		switch v := n.(type) {
+		case []any:
+			for _, c := range v {
+				walk(c)
+			}
+		case map[string]any:
+			for _, key := range []string{"ansible.builtin.apt", "apt", "ansible.builtin.package", "package"} {
+				args, ok := v[key].(map[string]any)
+				if !ok {
+					continue
+				}
+				name, ok := args["name"]
+				if !ok {
+					continue
+				}
+				if strings.Contains(fmt.Sprint(v["when"]), "RedHat") {
+					continue
+				}
+				if list, ok := name.([]any); ok {
+					parts := make([]string, len(list))
+					for i, item := range list {
+						parts[i] = fmt.Sprint(item)
+					}
+					out = append(out, strings.Join(parts, ","))
+				} else {
+					out = append(out, strings.TrimSpace(fmt.Sprint(name)))
+				}
+			}
+			for _, c := range v {
+				walk(c)
+			}
+		}
+	}
+	walk(doc)
+	return out
+}
 
 func TestAptUpdateCacheAllowlist(t *testing.T) {
 	root := "../../.."
