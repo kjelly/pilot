@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -421,6 +423,43 @@ func TestMetricsTextfileGatewayCounters(t *testing.T) {
 	for _, leaked := range []string{currentUsername(t), testSID, "gpu-a.example.com"} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("metrics leak high-cardinality value %q", leaked)
+		}
+	}
+}
+
+// TestMetricsAuthorizeOutcomesStartAtZero: every authorize outcome exists
+// at 0 before the first connect, so an alert on recording denials sees the
+// first one after a restart.
+func TestMetricsAuthorizeOutcomesStartAtZero(t *testing.T) {
+	out := NewMetrics().Registry.Render()
+	for _, reason := range []string{DenyReasonRecordingPolicyUnavailable, DenyReasonRecordingPolicyInvalid, DenyReasonRecordingBackend, DenyReasonRecordingSessionID, metricsReasonAccessDenied, metricsReasonError} {
+		want := `pilot_gateway_connect_authorize_total{result="denied",reason="` + reason + `"} 0` + "\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("fresh metrics lack %q", want)
+		}
+	}
+}
+
+// TestAlertRulesMatchGatewayDenyReasons: the shipped recording-denial alert
+// selects every recording deny reason, and no other.
+func TestAlertRulesMatchGatewayDenyReasons(t *testing.T) {
+	rules, err := os.ReadFile("../../playbooks/apply/files/pilot-alert-rules-seed.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const selector = `pilot_gateway_connect_authorize_total{result="denied",reason=~"recording_.*"}`
+	if !strings.Contains(string(rules), selector) {
+		t.Fatalf("alert rules no longer select %s", selector)
+	}
+	re := regexp.MustCompile(`^recording_.*$`)
+	for _, reason := range []string{DenyReasonRecordingPolicyUnavailable, DenyReasonRecordingPolicyInvalid, DenyReasonRecordingBackend, DenyReasonRecordingSessionID} {
+		if !re.MatchString(reason) {
+			t.Errorf("recording deny reason %q is not selected by the alert", reason)
+		}
+	}
+	for _, reason := range []string{metricsReasonAccessDenied, metricsReasonError, metricsReasonNone} {
+		if re.MatchString(reason) {
+			t.Errorf("non-recording reason %q would trigger the recording alert", reason)
 		}
 	}
 }

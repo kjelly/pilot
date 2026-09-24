@@ -85,6 +85,12 @@ Full results, candidate/tree and scenario verdicts are in the
   live rows; the rest are unit-test evidence.
 - A recorded connect writes a session with `policy_source` and `last_seq`
   (`pilot session show <id>`).
+- With `host-monitoring` on the store and gateway hosts, the Prometheus seed
+  rules (`playbooks/apply/files/pilot-alert-rules-seed.yml`, group
+  `pilot-session-recording`) alert on an incomplete recording, ingest 5xx,
+  connects refused for recording reasons, and a store whose metrics
+  stopped updating. Both processes start the alerted series at 0, so the
+  first event after a restart alerts too.
 
 ## 4. Rollback
 

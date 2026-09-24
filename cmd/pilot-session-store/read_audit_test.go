@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -189,6 +190,46 @@ func TestMetricsTextfileStoreCounters(t *testing.T) {
 	for _, leaked := range []string{sidA, "alice", "target01.example.test"} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("metrics leak high-cardinality value %q", leaked)
+		}
+	}
+}
+
+// TestMetricsAlertedSeriesStartAtZero: the series the alert rules read
+// exist at 0 before anything happens, so Prometheus's increase() sees the
+// first 5xx or incomplete session after a restart.
+func TestMetricsAlertedSeriesStartAtZero(t *testing.T) {
+	out := newStoreMetrics().registry.Render()
+	for _, want := range []string{
+		`pilot_session_store_ingest_requests_total{endpoint="events",code="5xx"} 0`,
+		`pilot_session_store_ingest_requests_total{endpoint="finish",code="5xx"} 0`,
+		`pilot_session_store_sessions_finished_total{mode="terminal_output",complete="false"} 0`,
+		`pilot_session_store_ingest_auth_failures_total{reason="bad_signature"} 0`,
+		"pilot_session_store_gap_ranges_detected_total 0",
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("fresh metrics lack %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestAlertRulesMatchStoreSeries: every store series the shipped alert
+// rules select is one this process renders from start.
+func TestAlertRulesMatchStoreSeries(t *testing.T) {
+	rules, err := os.ReadFile("../../playbooks/apply/files/pilot-alert-rules-seed.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := newStoreMetrics().registry.Render()
+	for expr, series := range map[string]string{
+		`pilot_session_store_sessions_finished_total{complete="false"}`: `,complete="false"} 0`,
+		`pilot_session_store_ingest_requests_total{code="5xx"}`:         `,code="5xx"} 0`,
+		`pilot_session_store_metrics_last_write_timestamp_seconds`:      "# TYPE pilot_session_store_metrics_last_write_timestamp_seconds gauge",
+	} {
+		if !strings.Contains(string(rules), expr) {
+			t.Errorf("alert rules no longer select %s", expr)
+		}
+		if !strings.Contains(out, series) {
+			t.Errorf("store metrics do not render %q for rule selector %s", series, expr)
 		}
 	}
 }

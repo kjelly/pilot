@@ -23,7 +23,7 @@ type storeMetrics struct {
 
 func newStoreMetrics() *storeMetrics {
 	r := promtext.NewRegistry()
-	return &storeMetrics{
+	m := &storeMetrics{
 		registry: r,
 		ingestRequests: r.Counter("pilot_session_store_ingest_requests_total",
 			"Ingest requests by endpoint and status class.", "endpoint", "code"),
@@ -38,6 +38,25 @@ func newStoreMetrics() *storeMetrics {
 		lastWrite: r.Gauge("pilot_session_store_metrics_last_write_timestamp_seconds",
 			"Unix time of the last metrics textfile write."),
 	}
+	// The series the alert rules read start at 0: Prometheus's increase()
+	// cannot see the first increment of a series that appears already at
+	// 1, so the first 5xx or incomplete session after a restart would never
+	// alert.
+	for _, endpoint := range []string{"start", "events", "finish"} {
+		for _, code := range []string{"2xx", "4xx", "5xx"} {
+			m.ingestRequests.Add(0, endpoint, code)
+		}
+	}
+	for _, mode := range []string{"terminal_output", "terminal_io"} {
+		for _, complete := range []string{"true", "false"} {
+			m.sessionsFinished.Add(0, mode, complete)
+		}
+	}
+	for reason := range authFailureReasons {
+		m.authFailures.Add(0, reason)
+	}
+	m.gapRanges.Add(0)
+	return m
 }
 
 // authFailureReasons are the reason label values; anything else counts as
