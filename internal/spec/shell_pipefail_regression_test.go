@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -207,4 +208,162 @@ func executableOrDefault(exe string) string {
 		return "/bin/sh (default)"
 	}
 	return exe
+}
+
+// earlyExitReader matches a pipe into a reader that can exit before its
+// writer is done: head, grep -q/-m/--quiet/--max-count, sed ...q, awk
+// ...exit. Under pipefail the writer then dies of SIGPIPE and the pipeline
+// exits 141, even when the reader found what it wanted.
+var earlyExitReader = regexp.MustCompile(`\|\s*(head\b|grep\b[^|;&]*\s(-[A-Za-z]*[qm]|--quiet\b|--max-count\b)|sed\b[^|]*\bq\b|awk\b[^|]*\bexit\b)`)
+
+// TestRegression_PipefailShellTasksHaveNoEarlyExitReader is a repo-wide lint
+// over every playbooks/**/*.yml. tasks/freeipa-dns-client-resolver.yml's
+// snapshot ran `nmcli ... | head -n1` under `set -euo pipefail`: when head
+// exited before nmcli finished writing, the pipeline exited 141 and
+// `set -e` stopped the snapshot. TestFreeipaDNSClientRollback_ELRestores
+// NetworkManagerSettings hit it in about 1% of runs, which turned main's CI
+// red twice on 2026-09-24. A shell task that sets pipefail must not pipe
+// into such a reader; read the whole stream (`sed -n 1p`, `grep -c`) or
+// take the first line in bash (`${out%%$'\n'*}`).
+func TestRegression_PipefailShellTasksHaveNoEarlyExitReader(t *testing.T) {
+	var files []string
+	err := filepath.WalkDir("../../playbooks", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && (strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml")) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	scripts := 0
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		violations, checked, err := findEarlyExitReaderUnderPipefail(raw)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", path, err)
+		}
+		scripts += checked
+		for _, v := range violations {
+			t.Errorf("%s: %s", path, v)
+		}
+	}
+	// playbooks/** has dozens of pipefail shell tasks; a much smaller count
+	// means the walker stopped finding them.
+	if scripts < 20 {
+		t.Fatalf("only %d pipefail shell tasks found; the walker is broken", scripts)
+	}
+}
+
+func TestFindEarlyExitReaderUnderPipefail(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{"head under pipefail (the snapshot bug)", `
+- name: t
+  ansible.builtin.shell: |
+    set -euo pipefail
+    active="$(nmcli -t -f NAME,DEVICE connection show --active | head -n1)"
+  args: {executable: /bin/bash}
+`, 1},
+		{"grep -q under pipefail", `
+- name: t
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -ltn | grep -qE ':443\b'
+  args: {executable: /bin/bash}
+`, 1},
+		{"grep -m1 and awk exit under pipefail", `
+- name: t
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      a=$(ls | grep -m1 x)
+      b=$(ls | awk '{print; exit}')
+    executable: /bin/bash
+`, 2},
+		{"whole-stream readers are fine", `
+- name: t
+  ansible.builtin.shell: |
+    set -o pipefail
+    out="$(nmcli -t -f NAME connection show --active)"
+    first="${out%%$'\n'*}"
+    ls | sed -n 1p
+    ls | grep -c x
+    ls | grep -E 'quick|max'
+  args: {executable: /bin/bash}
+`, 0},
+		{"no pipefail", `
+- name: t
+  ansible.builtin.shell: ls | head -n1
+`, 0},
+		{"comment line", `
+- name: t
+  ansible.builtin.shell: |
+    set -o pipefail
+    # not "| head -n1" because of SIGPIPE
+    true
+  args: {executable: /bin/bash}
+`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := findEarlyExitReaderUnderPipefail([]byte(tc.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != tc.want {
+				t.Fatalf("got %d violations %v, want %d", len(got), got, tc.want)
+			}
+		})
+	}
+}
+
+// findEarlyExitReaderUnderPipefail returns one message per non-comment line,
+// in a shell task whose command mentions pipefail, that pipes into an
+// early-exit reader. It also returns how many pipefail shell tasks it saw.
+func findEarlyExitReaderUnderPipefail(raw []byte) ([]string, int, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, 0, err
+	}
+	var out []string
+	checked := 0
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind == yaml.MappingNode {
+			if cmd, _, ok := shellTaskCommand(n); ok && strings.Contains(cmd, "pipefail") {
+				checked++
+				label := "<unnamed>"
+				if name := mappingValue(n, "name"); name != nil {
+					label = name.Value
+				}
+				for line := range strings.SplitSeq(cmd, "\n") {
+					if strings.HasPrefix(strings.TrimSpace(line), "#") || !earlyExitReader.MatchString(line) {
+						continue
+					}
+					out = append(out, fmt.Sprintf(
+						"line %d: shell task %q pipes into an early-exit reader under pipefail (SIGPIPE makes the pipeline exit 141): %s",
+						n.Line, label, strings.TrimSpace(line)))
+				}
+			}
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	walk(&doc)
+	return out, checked, nil
 }
