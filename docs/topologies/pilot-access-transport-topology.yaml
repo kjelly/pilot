@@ -1,9 +1,10 @@
-# Four-node topology for the Pilot Access Gateway captive SSH transport
+# Five-node topology for the Pilot Access Gateway captive SSH transport
 # (docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md §15).
 #
 #   tx-ipa     FreeIPA server (ipa1.ipa.pilot.internal)
 #   tx-gw      FreeIPA client + pilot-access-gateway
 #   tx-target  FreeIPA client + pilot-access-target-policy (the transport target)
+#   tx-store   FreeIPA client + pilot-session-store (the `recording` phase's store)
 #   tx-ws      the "workstation": deliberately NOT enrolled in FreeIPA and only
 #              wired to the gateway's name — it has no DNS/hosts entry for the
 #              target, and playbooks/test/fixtures/pilot-access-transport-fixtures.yml
@@ -50,6 +51,7 @@ nodes:
     wire:
       - tx-ipa=ipa1.ipa.pilot.internal
       - tx-target=tx-target.ipa.pilot.internal
+      - tx-store=tx-store.ipa.pilot.internal
 
   - name: tx-target
     base_image: ubuntu-24.04
@@ -65,6 +67,22 @@ nodes:
     wire:
       - tx-ipa=ipa1.ipa.pilot.internal
       - tx-gw=tx-gw.ipa.pilot.internal
+
+  # Session store for the E2E's `recording` phase: terminal recording needs
+  # a store (per-host recording spec: there is no local recording fallback).
+  - name: tx-store
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - pilot-session-store
+    wire:
+      - tx-ipa=ipa1.ipa.pilot.internal
 
   - name: tx-ws
     base_image: ubuntu-24.04

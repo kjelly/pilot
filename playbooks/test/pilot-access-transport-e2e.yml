@@ -8,6 +8,8 @@
 #   -> identity fixtures (IPA user + workstation key)
 #   -> gateway-scope (publish tx-target into pilot-target-<gateway_scope>;
 #      pilot-access-gateway-apply.yml's Step 18 requires that hostgroup)
+#   -> pilot-session-store (tx-store; the gateway records into it only when
+#      a run sets pilot_access_gateway_recording_mode/_session_store_url)
 #   -> pilot-access-gateway
 #   -> pilot-access-target-policy (tx-target; joins pilot-transport-ready)
 #   -> isolation fixture (tx-ws -> tx-target tcp/22 dropped)
@@ -21,6 +23,11 @@
 #       --playbook playbooks/test/pilot-access-transport-e2e.yml \
 #       --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway \
 #       -- -e @~/.vault/<sandbox>.yaml
+#
+# with PILOT_INPUT_GATEWAY_ID=gpu-01 PILOT_INPUT_GATEWAY_SCOPE=gpu exported:
+# the gateway spec's AG01 compares the deployed id/scope against them. The
+# vault also needs pilot_session_store_master_key and
+# pilot_session_store_ingest_signing_key (64 hex characters each).
 - name: FreeIPA server
   ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
 
@@ -34,14 +41,23 @@
   ansible.builtin.import_playbook: ../apply/gateway-scope-apply.yml
   vars:
     gateway_scope: gpu
-    gateway_scope_hosts:
-      - tx-target.ipa.pilot.internal
+    # Every transport target (the pilot-access-target-policy group) by its
+    # FreeIPA FQDN, so a renamed copy of the topology works unchanged.
+    gateway_scope_hosts: "{{ groups['pilot-access-target-policy'] | map('regex_replace', '$', '.ipa.pilot.internal') | list }}"
+
+- name: Session store (the recording phase's store)
+  ansible.builtin.import_playbook: ../apply/pilot-session-store-apply.yml
+  vars:
+    pilot_binary_path: dist/pilot-linux-amd64
+    pilot_session_store_binary_path: dist/pilot-session-store-linux-amd64
+    pilot_session_store_retention_days: 30
+    pilot_session_store_key_id: transport-e2e-1
 
 - name: Pilot Access Gateway
   ansible.builtin.import_playbook: ../apply/pilot-access-gateway-apply.yml
   vars:
-    # Same identity as docs/verification/pilot-access-gateway.md's reference
-    # environment (AG01 checks id: gpu-01 / scope: gpu literally).
+    # AG01 of docs/verification/pilot-access-gateway.md compares these with
+    # its gateway_id/gateway_scope inputs (PILOT_INPUT_GATEWAY_ID/_SCOPE).
     gateway_id: gpu-01
     gateway_scope: gpu
     # Built on the controller first (repo-root relative), e.g.

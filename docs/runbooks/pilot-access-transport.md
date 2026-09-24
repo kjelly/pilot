@@ -130,13 +130,18 @@ Snapshot of the reference environment used for the latest verified run
 ## 3. Verification
 
 - `pilot verify docs/verification/pilot-access-gateway.md -i <inventory> -l
-  <gateway>` (includes AG41–AG44) and `pilot verify
+  <gateway> --input gateway_id=<id> --input gateway_scope=<scope>` (includes
+  AG41–AG44; AG01 compares the deployed id/scope with those inputs) and `pilot verify
   docs/verification/pilot-access-target-policy.md -i <inventory> -l <target>`
   (TP01–TP05).
 - On a disposable copy of the topology only:
   `scripts/pilot-access-gateway-lockout-test.sh` (with `TRANSPORT_TARGET=`) and
   `scripts/pilot-access-gateway-transport-e2e.sh --phase <state>`. Both
   require `CONFIRM_DISPOSABLE=yes` and must never be pointed at a real host.
+  The `recording` phase records into the topology's session store (`tx-store`):
+  set `pilot_access_gateway_recording_mode=terminal_output` and
+  `pilot_access_gateway_recording_session_store_url=https://tx-store.ipa.pilot.internal:8443`
+  on the gateway, and give the script `STORE_HOST`/`STORE_ADMIN_KEY`.
 - Audit: `journalctl -t pilot-access-gateway -o cat` on the gateway shows one
   JSON line per event. Each session produces
   `gateway_transport_requested` → `connected` → `closed` (target IP, bytes,

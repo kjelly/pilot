@@ -13,9 +13,9 @@
 #                       (strict), recording metadata: AG63-AG67, AG70-AG72,
 #                       TP06 (member), TP07 (-L/-D/-R/-A/-X/-w), TP09
 #   --phase remote-dev  same, target profile remote-dev: AG63 (ssh), TP08
-#   --phase recording   gateway recording terminal_output: AG69 (transport
-#                       refused; pilot-connect's local FileSink file holds
-#                       the session output while it runs)
+#   --phase recording   gateway recording terminal_output into the session
+#                       store: AG69 (transport refused; pilot-connect's
+#                       session lands in the store, complete)
 #   --phase not-ready   target policy absent: AG68, TP06 (not a member), TP10
 #   --phase disabled    gateway transport disabled/unset: AG62/AG73 (+AG72)
 #
@@ -43,6 +43,9 @@
 #   PORTAL_USER        FreeIPA portal user (default transportuser)
 #   PORTAL_KEY         controller-side copy of that user's private key; needed
 #                      for the pilot-connect / portal probes (AG69, AG72, AG73)
+#   STORE_HOST, STORE_ADMIN_KEY
+#                      root on the session store VM; needed for AG69's check
+#                      that the recorded pilot-connect session reached the store
 #   PORTAL_PASSWORD    the user's FreeIPA password for pilot-connect's
 #                      session-scoped kinit; read from the environment only
 #   OUT_OF_SCOPE_FQDN  an enrolled host outside the gateway scope
@@ -94,6 +97,7 @@ ADMIN_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLe
 on_ws()  { ssh -i "$WS_ADMIN_KEY" "${ADMIN_OPTS[@]}" "root@$WS_HOST" "$@"; }
 on_gw()  { ssh -i "$GATEWAY_ADMIN_KEY" "${ADMIN_OPTS[@]}" "root@$GATEWAY_HOST" "$@"; }
 on_tgt() { ssh -i "$TARGET_ADMIN_KEY" "${ADMIN_OPTS[@]}" "root@$TARGET_HOST" "$@"; }
+on_store() { ssh -i "$STORE_ADMIN_KEY" "${ADMIN_OPTS[@]}" "root@$STORE_HOST" "$@"; }
 # Run one shell command line as WS_USER on the workstation.
 as_ws() { on_ws "runuser -u $WS_USER -- bash -c $(printf %q "$1")"; }
 
@@ -296,7 +300,7 @@ PY
 # pilot-connect through the gateway with the session-scoped Kerberos
 # password, landing in the target shell (legacy path, AG72/AG69).
 # pilot-connect's session id is a caller-chosen UUID; a fixed one lets the
-# AG69 watcher find that session's FileSink file on the gateway.
+# AG69 check find that session in the session store.
 CONNECT_SID=0d33c638-83fa-4d77-9811-a97a7a7af1d5
 run_pilot_connect() {
   local marker=$1 hold=${2:-0} leave="exit"
@@ -327,32 +331,21 @@ expect eof
 EOF
 }
 
-# AG69: poll the gateway for pilot-connect's local FileSink file
-# (<runtime dir>/pilot-session-recordings/<session>.ndjson) until its decoded
-# terminal output contains the marker. Prints "FILE <path> <owner> <mode>
-# <events>" or "NO-FILE".
-watch_recording_file() {
-  local marker=$1
-  on_gw "bash -s -- $CONNECT_SID $(printf %q "$marker")" <<'EOS'
-sid=$1 marker=$2
-for _ in $(seq 1 90); do
-  for f in /run/user/*/pilot-session-recordings/$sid.ndjson /tmp/pilot-session-recordings/$sid.ndjson; do
-    [ -f "$f" ] || continue
-    n=$(python3 - "$f" "$marker" <<'PY'
-import base64, json, sys
-data, events = b"", 0
-for line in open(sys.argv[1]):
-    events += 1
-    data += base64.b64decode(json.loads(line).get("data_base64", ""))
-print(events if sys.argv[2].encode() in data else "")
+# AG69: the recorded pilot-connect session in the session store's index
+# (read-only, as root on the store host; no auditor account is needed for
+# metadata). Prints "SESSION user=<u> mode=<m> events=<n> complete=<0|1>" or
+# "NO-SESSION".
+store_session() {
+  on_store "python3 - $CONNECT_SID" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect("file:/var/lib/pilot-session-store/index.db?mode=ro", uri=True)
+row = c.execute("SELECT user, recording_mode, complete FROM sessions WHERE session_id=?", (sys.argv[1],)).fetchone()
+if row is None:
+    print("NO-SESSION")
+else:
+    n = c.execute("SELECT count(*) FROM session_events WHERE session_id=?", (sys.argv[1],)).fetchone()[0]
+    print("SESSION user=%s mode=%s events=%d complete=%d" % (row[0], row[1], n, row[2]))
 PY
-)
-    if [ -n "$n" ]; then echo "FILE $(stat -c '%n %U %a' "$f") $n"; exit 0; fi
-  done
-  sleep 0.5
-done
-echo NO-FILE
-EOS
 }
 
 probe_pilot_connect() { # AG72 (legacy one-shot connect still works)
@@ -501,17 +494,18 @@ case "$PHASE" in
       emit AG69-pilot-connect-still-records skip "PORTAL_KEY/PORTAL_PASSWORD unset"
     else
       since=$(on_gw "date +%s")
-      wtmp=$(mktemp)
-      watch_recording_file "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" >"$wtmp" 2>&1 &
-      wpid=$!
-      out=$(run_pilot_connect "RC-$MARK" 10)
-      wait "$wpid"
-      file=$(tail -1 "$wtmp"); rm -f "$wtmp"
+      out=$(run_pilot_connect "RC-$MARK")
       started=$(on_gw "journalctl -t pilot-access-gateway --since @$since --no-pager -o cat | grep -c '\"kind\":\"recording_started\"' || true")
-      if grep -q "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" <<<"$out" && [ "${started:-0}" -ge 1 ] && [ "${file%% *}" = FILE ]; then
-        emit AG69-pilot-connect-still-records pass "recorded pilot-connect reached the target shell; recording_started events=$started; ${file#FILE } (path owner mode events), output marker found in the decoded file"
+      if [ -z "${STORE_HOST:-}" ] || [ -z "${STORE_ADMIN_KEY:-}" ]; then
+        stored="SKIP"
       else
-        emit AG69-pilot-connect-still-records fail "recording_started=$started file=[$file] out=$(tail -c 400 <<<"$out")"
+        stored=$(store_session | tail -1)
+      fi
+      if grep -q "RC-$MARK-$PORTAL_USER-$TARGET_FQDN" <<<"$out" && [ "${started:-0}" -ge 1 ] \
+          && { [ "$stored" = SKIP ] || grep -qE "^SESSION user=$PORTAL_USER mode=terminal_output events=[1-9][0-9]* complete=1$" <<<"$stored"; }; then
+        emit AG69-pilot-connect-still-records pass "recorded pilot-connect reached the target shell; recording_started events=$started; store: $stored"
+      else
+        emit AG69-pilot-connect-still-records fail "recording_started=$started store=[$stored] out=$(tail -c 400 <<<"$out")"
       fi
     fi
     ;;
