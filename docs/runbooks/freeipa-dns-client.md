@@ -35,6 +35,9 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 - 正式結果（2026-07-31）：兩台 6/6 PASS + idempotent `changed=0`；
   過程中找到並修好 3 個 spec vacuous-check bug + 2 個 playbook bug + 1 個
   sandbox image gap（見 §5）。
+- rescue ROLLBACK（2026-09-24，candidate `583df40`，拋棄式 Ubuntu 24.04
+  vm-target `rbk-dns`）：有備份／無備份／還原失敗三種情境皆 PASS；修正前
+  `07f9b0f` 的 rollback 從未執行（見 §3）。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
@@ -43,6 +46,10 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 
 - 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa-server-replica`
   且 `freeipa_setup_dns: true`）已完成 `freeipa-server-apply.yml` 並健康。
+- Debian/Ubuntu 目標的 apt index 要是新的：`dnsutils` 是用
+  `ansible.builtin.apt` 直接裝的（沒走 apt framework），index 過期時下載會
+  404，apply 在 block 之前就失敗（2026-09-24 在 golden image 上實際發生；
+  見 §3 的 evidence）。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，
@@ -152,9 +159,21 @@ VM 收尾：兩台 `pilot vm-target down`，乾淨釋放，無殘留。
 
 `block/rescue` 包住整個 resolver mutate 區塊：任一步驟失敗，rescue 從
 `ansible.builtin.copy` 的自動 `backup: true` 備份還原 `/etc/resolv.conf`，
-再明確 fail 並提示重跑。不會回退 `resolved.conf.d` drop-in或 `nmcli`
-connection 設定本身（下一次重跑會用正確值覆蓋，屬於 forward-fix，不是
-必須手動 rollback 的狀態）。
+再明確 fail，訊息如實寫出還原結果（`restored from <備份>`／`no backup found,
+left unchanged`／`restore from <備份> failed`）。不會回退 `resolved.conf.d`
+drop-in、Ubuntu 的 `/etc/netplan/99-pilot-freeipa-dns-client.yaml` 或 `nmcli`
+connection 設定本身（下一次重跑會用正確值覆蓋，屬於 forward-fix）。
+
+2026-09-24 在 Ubuntu 24.04 vm-target 實測（candidate `583df40`，三種情境皆 PASS，
+見 [evidence](../evidence/freeipa-dns-client/2026-09-24-583df40.md)）。修正前
+（`07f9b0f`）rescue 在 Debian/Ubuntu 上因 dash 不認得 `set -o pipefail` 從未執行。
+操作上要知道：
+
+- **Ubuntu 上 rollback 之後 DNS 仍然是壞的**：還原的 `/etc/resolv.conf` 是
+  stub（`127.0.0.53`），查詢仍經 systemd-resolved 送到 drop-in 裡那台失敗的
+  server。要恢復解析，修正後重跑，或手動移除上述兩個 drop-in。
+- 還原只還原內容：原本的 symlink 會變成一般檔案，而且備份是在
+  systemd-resolved 重啟之後才取的，內容已帶 `search <freeipa_domain>`。
 
 ## 4. 與 freeipa-client / freeipa-dns 的關係
 
