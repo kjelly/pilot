@@ -358,17 +358,27 @@
       failed_when: freeipa_dns_client_functional_check.stdout | trim != '0'
 
   rescue:
+    # bash, not the shell module's default /bin/sh: on Debian/Ubuntu that is
+    # dash, which rejects `set -o pipefail` (rc=2) before the cp ever runs —
+    # and failed_when: false below used to hide that the restore never
+    # happened. The outcome is echoed so the fail message reports it.
     - name: "ROLLBACK — restore /etc/resolv.conf from the automatic backup"
       ansible.builtin.shell: >-
         set -o pipefail;
         latest="$(ls -t /etc/resolv.conf.*.* 2>/dev/null | head -n1)";
-        if [ -n "$latest" ]; then cp "$latest" /etc/resolv.conf; fi
+        if [ -z "$latest" ]; then echo "no backup found, left unchanged";
+        elif cp "$latest" /etc/resolv.conf; then echo "restored from $latest";
+        else echo "restore from $latest failed"; exit 1; fi
+      args:
+        executable: /bin/bash
+      register: freeipa_dns_client_rollback
       changed_when: true
       failed_when: false
 
     - name: "ROLLBACK — surface the original failure"
       ansible.builtin.fail:
         msg: >-
-          freeipa-dns-client resolver apply failed; /etc/resolv.conf was restored
-          from its most recent ansible.builtin.copy backup where possible.
+          freeipa-dns-client resolver apply failed; /etc/resolv.conf rollback:
+          {{ (freeipa_dns_client_rollback.stdout | default('') | trim)
+             or ('rollback task did not run cleanly (rc=' ~ (freeipa_dns_client_rollback.rc | default('?')) ~ ')') }}.
           Fix the failing task and re-run.

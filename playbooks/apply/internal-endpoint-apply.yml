@@ -495,6 +495,8 @@
       ansible.builtin.shell: |
         set -o pipefail
         printf '%s' "{{ ipa_admin_password }}" | kinit admin
+      args:
+        executable: /bin/bash
       no_log: true
       changed_when: false
       when:
@@ -608,6 +610,8 @@
       ansible.builtin.shell: |
         set -o pipefail
         printf '%s' "{{ ipa_admin_password }}" | kinit admin
+      args:
+        executable: /bin/bash
       no_log: true
       changed_when: false
       when:

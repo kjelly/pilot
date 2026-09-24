@@ -366,6 +366,8 @@
       ansible.builtin.shell: |
         set -o pipefail
         getcert list | sed -n "s/^Request ID '\(.*\)':$/\1/p"
+      args:
+        executable: /bin/bash
       register: ipa_certmonger_requests
       changed_when: false
       failed_when: false
