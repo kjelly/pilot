@@ -294,6 +294,69 @@
       register: ipa_client_dns_keytab_stat
       tags: [freeipa-client, C1, C11]
 
+    # The DNS preflight below queries authoritative DNS with dig. A fresh
+    # AlmaLinux 9 image has no bind-utils: the first dig returned rc=127 and
+    # the fail-closed gate stopped every fresh EL client before enrollment
+    # (2026-09-24 vm-target run). Ubuntu images ship dig (bind9-dnsutils), so
+    # this never showed there. Installing the query tool is the only change
+    # made before the preflight; it does not touch DNS or enrollment state.
+    # A check-mode preview on a host without dig ends here with a message
+    # (AGENTS.md §4.5 point 4); the real run installs it and continues.
+    - name: "FreeIPA client DNS — check whether dig is installed (read-only)"
+      ansible.builtin.command:
+        argv: [sh, -c, "command -v dig"]
+      register: ipa_client_dns_dig_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — install dig for the preflight (RedHat)"
+      ansible.builtin.dnf:
+        name: bind-utils
+        state: present
+      when:
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — install dig for the preflight (Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [freeipa-client, C11]
+      vars:
+        pilot_apt_packages: [bind9-dnsutils]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client-dig
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — check-mode preview without dig ends here"
+      when:
+        - ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+      block:
+        - name: "FreeIPA client DNS — explain why the preview stops"
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} has no dig yet, so the authoritative DNS
+              preflight cannot run in check mode. The real run installs
+              {{ 'bind-utils' if ansible_os_family == 'RedHat' else 'bind9-dnsutils' }}
+              first and then runs the preflight; nothing else is previewed for
+              this host.
+
+        - name: "FreeIPA client DNS — end the check-mode preview for this host"
+          ansible.builtin.meta: end_host
+
     # Host DNS registration preflight (spec.md freeipa-client-host-dns-registration
     # §9/§16: "DNS preflight" must run before ANY mutation, including the
     # /etc/hosts pin below — hence pre_tasks, not tasks. All read-only.

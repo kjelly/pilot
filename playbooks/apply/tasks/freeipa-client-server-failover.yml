@@ -54,9 +54,37 @@
     freeipa_client_sssd_desired_ipa_server: "ipa_server = _srv_, {{ freeipa_server_fqdns | join(', ') }}"
   tags: [always]
 
-- name: "FreeIPA client failover — read current krb5.conf"
+# ipa-client-install writes this realm's [realms] block into /etc/krb5.conf
+# on Ubuntu (freeipa-client 4.11), but into /etc/krb5.conf.d/freeipa-realm on
+# AlmaLinux 9 (ipa-client 4.13.1), where /etc/krb5.conf holds only includedir
+# and [libdefaults] (both captured on 2026-09-24 vm-targets). Reconcile
+# whichever file actually has the block; the block itself has the same shape
+# in both, so the anchors below apply to either.
+- name: "FreeIPA client failover — locate the file that holds this realm's server list"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for f in /etc/krb5.conf /etc/krb5.conf.d/freeipa-realm; do
+      if [ -f "$f" ] && grep -qF -- {{ ('  ' ~ ipa_realm ~ ' = {') | quote }} "$f"; then
+        echo "$f"
+        exit 0
+      fi
+    done
+    echo /etc/krb5.conf
+  args:
+    executable: /bin/bash
+  register: freeipa_client_krb5_locate
+  changed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "FreeIPA client failover — remember the krb5 file to reconcile"
+  ansible.builtin.set_fact:
+    freeipa_client_krb5_path: "{{ freeipa_client_krb5_locate.stdout | trim }}"
+  tags: [always]
+
+- name: "FreeIPA client failover — read current krb5 realm file"
   ansible.builtin.slurp:
-    src: /etc/krb5.conf
+    src: "{{ freeipa_client_krb5_path }}"
   register: freeipa_client_krb5_current_b64
   tags: [always]
 
@@ -82,7 +110,7 @@
       - (freeipa_client_krb5_post | default('', true) | length) > 0
     fail_msg: >-
       Could not locate the {{ ipa_realm }} realm's kdc/admin_server block in
-      /etc/krb5.conf — refusing to reconcile a file whose structure doesn't
+      /etc/krb5.conf or /etc/krb5.conf.d/freeipa-realm — refusing to reconcile a file whose structure doesn't
       match what ipa-client-install is known to produce (spec §9.2: never
       guess the format).
   tags: [always]
@@ -102,19 +130,19 @@
   register: freeipa_client_sssd_reconcile
   tags: [always]
 
-- name: "FreeIPA client failover — backup current krb5.conf before mutation"
+- name: "FreeIPA client failover — backup current krb5 realm file before mutation"
   ansible.builtin.copy:
-    src: /etc/krb5.conf
-    dest: /etc/krb5.conf.pilot-backup
+    src: "{{ freeipa_client_krb5_path }}"
+    dest: "{{ freeipa_client_krb5_path }}.pilot-backup"
     remote_src: true
     mode: preserve
   when: freeipa_client_krb5_new != freeipa_client_krb5_current
   tags: [always]
 
-- name: "FreeIPA client failover — write reconciled krb5.conf (atomic)"
+- name: "FreeIPA client failover — write reconciled krb5 realm file (atomic)"
   ansible.builtin.copy:
     content: "{{ freeipa_client_krb5_new }}"
-    dest: /etc/krb5.conf
+    dest: "{{ freeipa_client_krb5_path }}"
     owner: root
     group: root
     mode: "0644"
@@ -159,10 +187,10 @@
     - (freeipa_client_krb5_validate.rc | default(1)) != 0
   tags: [always]
   block:
-    - name: "FreeIPA client failover — restore krb5.conf backup after failed validation"
+    - name: "FreeIPA client failover — restore krb5 realm file backup after failed validation"
       ansible.builtin.copy:
-        src: /etc/krb5.conf.pilot-backup
-        dest: /etc/krb5.conf
+        src: "{{ freeipa_client_krb5_path }}.pilot-backup"
+        dest: "{{ freeipa_client_krb5_path }}"
         remote_src: true
         mode: preserve
 
