@@ -35,9 +35,12 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 - 正式結果（2026-07-31）：兩台 6/6 PASS + idempotent `changed=0`；
   過程中找到並修好 3 個 spec vacuous-check bug + 2 個 playbook bug + 1 個
   sandbox image gap（見 §5）。
-- rescue ROLLBACK（2026-09-24，candidate `583df40`，拋棄式 Ubuntu 24.04
-  vm-target `rbk-dns`）：有備份／無備份／還原失敗三種情境皆 PASS；修正前
-  `07f9b0f` 的 rollback 從未執行（見 §3）。
+- 最新實跑（2026-09-24，candidate `62d8069`，拋棄式 vm-target：Ubuntu 24.04
+  `rbk-dns`、AlmaLinux 9 一般 client `rbk-el`，DNS 由 AlmaLinux 9 FreeIPA server
+  `rbk-ipa` 提供）：兩台 `vm-target test` L1→L6 皆 PASS（verify 6/6、重跑
+  `changed=0`）；rescue 在 Ubuntu 首次／重跑／還原失敗、EL 首次四種情境都把主機
+  還原成套用前的狀態或如實回報失敗。見
+  [evidence](../evidence/freeipa-dns-client/2026-09-24-62d8069.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
@@ -46,10 +49,6 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 
 - 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa-server-replica`
   且 `freeipa_setup_dns: true`）已完成 `freeipa-server-apply.yml` 並健康。
-- Debian/Ubuntu 目標的 apt index 要是新的：`dnsutils` 是用
-  `ansible.builtin.apt` 直接裝的（沒走 apt framework），index 過期時下載會
-  404，apply 在 block 之前就失敗（2026-09-24 在 golden image 上實際發生；
-  見 §3 的 evidence）。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，
@@ -157,23 +156,25 @@ VM 收尾：兩台 `pilot vm-target down`，乾淨釋放，無殘留。
 
 ## 3. Rollback
 
-`block/rescue` 包住整個 resolver mutate 區塊：任一步驟失敗，rescue 從
-`ansible.builtin.copy` 的自動 `backup: true` 備份還原 `/etc/resolv.conf`，
-再明確 fail，訊息如實寫出還原結果（`restored from <備份>`／`no backup found,
-left unchanged`／`restore from <備份> failed`）。不會回退 `resolved.conf.d`
-drop-in、Ubuntu 的 `/etc/netplan/99-pilot-freeipa-dns-client.yaml` 或 `nmcli`
-connection 設定本身（下一次重跑會用正確值覆蓋，屬於 forward-fix）。
+套用前先把 resolver 會寫的東西存成快照（`/var/lib/pilot/freeipa-dns-client/pre-apply/`）：
+`/etc/resolv.conf`、`resolved.conf.d` drop-in、`/etc/netplan/99-pilot-freeipa-dns-client.yaml`
+用 `cp -a --no-dereference` 保存（symlink 保持 symlink；不存在就記成不存在），
+EL 另外存作用中 connection 的 `ipv4.dns`／`ipv4.dns-search`／`ipv4.ignore-auto-dns`。
+快照失敗時還沒有改任何東西，play 直接停止。
 
-2026-09-24 在 Ubuntu 24.04 vm-target 實測（candidate `583df40`，三種情境皆 PASS，
-見 [evidence](../evidence/freeipa-dns-client/2026-09-24-583df40.md)）。修正前
-（`07f9b0f`）rescue 在 Debian/Ubuntu 上因 dash 不認得 `set -o pipefail` 從未執行。
-操作上要知道：
+`block/rescue` 包住整個 resolver mutate 區塊。任一步驟失敗時，rescue 會：
 
-- **Ubuntu 上 rollback 之後 DNS 仍然是壞的**：還原的 `/etc/resolv.conf` 是
-  stub（`127.0.0.53`），查詢仍經 systemd-resolved 送到 drop-in 裡那台失敗的
-  server。要恢復解析，修正後重跑，或手動移除上述兩個 drop-in。
-- 還原只還原內容：原本的 symlink 會變成一般檔案，而且備份是在
-  systemd-resolved 重啟之後才取的，內容已帶 `search <freeipa_domain>`。
+1. 把上述檔案還原成快照，這次才新建的檔案則刪掉。
+2. Debian：重啟 systemd-resolved 並執行 `netplan apply`。EL：用 `nmcli connection
+   modify` 還原 DNS 設定，再 `nmcli device reapply`。
+3. 明確 fail，逐步列出做了什麼；有任何一步失敗時加上
+   `Rollback incomplete: check the ROLLBACK tasks above before re-running.`
+
+結果是主機回到「這次執行之前」的狀態：第一次套用失敗就回到原本的 DHCP DNS；
+對已經套用過的主機換 server 失敗，就回到上一次成功的設定。實測見 §0.5 的
+evidence；修正前（`583df40`）的 rescue 只還原 `/etc/resolv.conf`，Ubuntu 上 DNS
+仍指向失敗的 server，EL 上 NetworkManager profile 也留著新值
+（[舊 evidence](../evidence/freeipa-dns-client/2026-09-24-583df40.md)）。
 
 ## 4. 與 freeipa-client / freeipa-dns 的關係
 
@@ -233,3 +234,20 @@ connection 設定本身（下一次重跑會用正確值覆蓋，屬於 forward-
   控制端。凡是需要 `vm-target run --sandbox` 對外連線的情境(包含本檔),
   一律要用本 repo 自己的 `pilot-cli:latest`(控制平面 image),不能用那顆
   image 頂替。
+- **rescue 只還原 `/etc/resolv.conf` 等於沒有 rollback**（2026-09-24）：先是
+  dash 不認得 `set -o pipefail`，rescue 在 Debian/Ubuntu 上從未執行；修好之後
+  實測又發現只還原 resolv.conf 不夠——Ubuntu 的 resolved/netplan drop-in 與
+  EL 的 NetworkManager profile 都留著失敗的 server。現在改成套用前快照、失敗
+  時全部還原（見 §3）。
+- **`dnsutils` 用 `ansible.builtin.apt` 直接裝，apt index 過期就 404**
+  （2026-09-24，vm-target golden image）：主機其實已經有 `bind9-dnsutils`
+  提供的 `dig`。改走 `tasks/apt-package-install.yml` 安裝 `bind9-dnsutils`，
+  已安裝時完全不碰網路。
+- **include 的 tags 沒有 `apply`，`--tags C3` 什麼都不做**（2026-09-24）：
+  `freeipa-dns-client-apply.yml` 的 include 只在 include 那一行掛 tags，
+  被 include 的 resolver task 全部被跳過，而且不報錯。已改成 `apply`。
+- **EL 一般 client 的第二次 apply 永遠 `changed=1`**（2026-09-24）：
+  NetworkManager 在 `nmcli device reapply` 時會依 profile 重寫
+  `/etc/resolv.conf`，所以 playbook 自己寫的 resolv.conf 每次都被換掉又重寫。
+  2026-07-31 的 EL 證據只測過 FreeIPA server 指向自己（profile 本來就一致、
+  沒有 reapply），所以沒抓到。resolv.conf 的寫入改成只在 Debian 做。
