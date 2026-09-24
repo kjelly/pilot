@@ -92,6 +92,13 @@ unknown `NO_PUBKEY`.
     go test ./cmd/pilot/cmd/... -run TestAptInstallRetriesOnlyAfterStaleIndexFetch -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
+- id: C5
+  category: static-policy
+  check: every apt-get update the framework runs (global and scoped refresh) is capped by timeout(1) (pilot_apt_update_timeout_seconds, default 300), apt's Acquire::http(s)::Timeout (30s) and Acquire::Retries (3), and a timed-out attempt (rc 124) is retried like lock contention (spec.md §21 T12, §11)
+  probe: |
+    go test ./cmd/pilot/cmd/... -run TestAptUpdateIsBounded -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
 - id: T1
   category: live-vm
   check: "unrelated GPG key failure (HashiCorp NO_PUBKEY) does not block freeipa-client (C1) or sssd-tools (C8) install on a host with a healthy Ubuntu archive — LIVE-VERIFIED 2026-09-14 on pilot vm-target apt-tolerance-test (ubuntu-24.04); see Notes below for the captured evidence"
@@ -116,6 +123,13 @@ unknown `NO_PUBKEY`.
 - id: T11
   category: live-vm
   check: "a fresh cloud image whose cached indexes name superseded versions (install fails with 404 Failed to fetch) recovers with SUCCESS(stale_index_refresh) after one global refresh, and a re-run is already_present with changed=0 — LIVE-VERIFIED 2026-09-24 on vm-target apt-stale (ubuntu-24.04); see Notes below"
+  probe: |
+    echo "LIVE-VERIFIED"
+  expect: {stdout: {contains: "LIVE-VERIFIED"}}
+  verifyOnly: true
+- id: T12
+  category: live-vm
+  check: "an apt-get update that makes no progress is cut off and reported unhealthy instead of hanging the run, and the stale-index recovery (T11) still works through the bounded refresh — LIVE-VERIFIED 2026-09-24 on vm-target apt-stall (ubuntu-24.04); see Notes below"
   probe: |
     echo "LIVE-VERIFIED"
   expect: {stdout: {contains: "LIVE-VERIFIED"}}
@@ -165,6 +179,17 @@ unknown `NO_PUBKEY`.
   recording ephemeral topology run behind an apt proxy
   (`freeipa-client=4.11.1-2`); its captured message is the test fixture
   `cmd/pilot/cmd/testdata/apt-install-stale-index-404.txt`.
+- T12 was live-verified 2026-09-24 on a fresh `pilot vm-target`
+  (`apt-stall`, ubuntu-24.04). The unbounded refresh had hung a
+  per-host recording topology run: on one node `apt-get update` sat for
+  over 38 minutes with no network connection left open. With the bounded
+  refresh, the stale-index install recovered (`rescued=1 failed=0`,
+  `apt_mode=stale_index_refresh`, 23 s). With outbound TCP 80/443/3142
+  dropped, `pilot_apt_update_timeout_seconds=20` and
+  `pilot_apt_lock_retries=2`, the global refresh returned after 75 s with
+  rc 124, `required_sources_healthy=False`, `status=degraded`. The next
+  fresh-host topology run (`make recording-topology-test`, candidate
+  `bded49e`) recovered all five Ubuntu nodes this way and passed.
 - `docs/verification/freeipa-client.md` C1/C8 already cover the
   functional "does freeipa-client / sssd-tools install successfully"
   behavior on a healthy host; this spec only adds the fault-tolerance

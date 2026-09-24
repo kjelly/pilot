@@ -1117,6 +1117,20 @@ SUCCESS(stale_index_refresh)
 any other install failure, or offline policy → FATAL(install_failed)
 ```
 
+#### T12 — apt-get update makes no progress
+
+```text
+a refresh (global or scoped) runs while a mirror or proxy stops answering
+```
+
+Expected：
+
+```text
+each attempt ends at pilot_apt_update_timeout_seconds (rc 124)
+bounded retry like apt_lock
+still timing out → unhealthy (never read as healthy), no hang
+```
+
 ### 21.2 Security regression tests
 
 必須 grep/assert repository 中不存在新增：
