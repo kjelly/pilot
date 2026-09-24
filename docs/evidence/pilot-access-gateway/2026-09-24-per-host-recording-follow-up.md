@@ -20,6 +20,19 @@ test.
   `165f35e0…` pilot, `dfb0389e…` gateway, `e823dfc0…` Directory,
   `a08b420b…` store).
 
+### Spec rows for the bounded refresh (candidate `8435a9b`)
+
+`docs/verification/apt-repository-tolerance.md` gained C5
+(`TestAptUpdateIsBounded`) and T12 (the `apt-stall` live check below), and
+the design spec a T12 case, as a separate candidate: commit `8435a9b`,
+tree `c17ec6e1649a5090f037b7880cea51b39c78c605`. Against `bded49e` it
+changes only documents (these two specs, this record and the session store
+runbook), so no playbook or binary differs from the tested tree. From a
+clean checkout of `8435a9b`: spec lint 10 rows, 0 findings;
+`pilot verify docs/verification/apt-repository-tolerance.md --local` PASS
+10/10; `go test ./internal/spec/ ./cmd/pilot/cmd/` 1589 passed; `pilot
+contract lint` pass.
+
 ## Fixes in this round
 
 | Commit | Issue | How it was verified live |
@@ -221,9 +234,5 @@ of this make target is recorded.
   `freeipa-identity` reconcile, and ship a roster that matches
   `docs/topologies/minimal-poc-topology.yaml`, or drop the fixture-dependent
   specs from its verify list.
-- `docs/verification/apt-repository-tolerance.md` has no row for the
-  bounded refresh (`bded49e`); `TestAptUpdateIsBounded` covers it. The row
-  was not added after the candidate passed, so the tested tree stays
-  unchanged (AGENTS.md §1.5).
 - The real staging environment was not touched; the rehearsal used
   disposable hosts in a `staging` inventory group.
