@@ -128,6 +128,16 @@ grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checkl
   edited (existing hosts, existing group_vars keys including ones
   buried in commented-out example prose, existing vault keys). A static
   `grep` on source can't tell you this; you need the live menu.
+- **`PILOT_DEBUG_MENU=1` currently prints nothing `[2026-09-24]`.**
+  `dumpMenuDebug` (`cmd/pilot/cmd/deploy.go`) lost its only caller,
+  `newSelectModel` in `tui_select.go`, when `521366e` (2026-08-21)
+  deleted the hand-written widgets. The Huh menus never call it, and a
+  live `pilot edit` run with the variable set printed no `[pilot:menu]`
+  line. The Huh migration spec requires an equivalent capability, so
+  this is a Pilot regression to fix in code. Until then, read the live
+  item list from an MCP `trec drive --interactive` session's `SCREEN`
+  reply (`references/mcp-mode.md`). The rest of this bullet describes
+  the intended behaviour once it is wired back in.
 - **Set `PILOT_DEBUG_MENU=1` to get the live item list for free**, for
   *every* `promptSelectIndex` menu in `pilot edit`/`pilot deploy`
   (shared helper, `cmd/pilot/cmd/deploy.go`): it prints each menu's full
@@ -165,10 +175,10 @@ PILOT_DEBUG_MENU=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   you're an agent whose shell tool only spawns one-shot subprocesses
   (this session's `Bash` tool included), you cannot hold `trec drive
   --interactive`'s stdin open across calls to do this — use `trec
-  mcp`'s stateful tools instead (`references/mcp-mode.md`), with
-  `PILOT_DEBUG_MENU=1` set on
-  the driven process, rather than guessing from a short throwaway
-  script and hoping it matches.
+  mcp`'s stateful tools instead (`references/mcp-mode.md`): start a
+  `trec drive --interactive` session and read each step's `SCREEN`
+  reply, rather than guessing from a short throwaway script and hoping
+  it matches.
 
 See `references/index-computation.md` for a worked walkthrough.
 
@@ -222,6 +232,15 @@ Before running it, require:
 trec drive lint --strict "$SCRATCH/scripts/<checkpoint>.drive"
 ```
 
+`--strict` rejects a bare `DOWN` in a menu ("DOWN is position-dependent; prefer
+FOCUS/ACTIVATE unless driving a scrolling checklist") and any `ENTER` or
+`TEXT_AND_ENTER` that no `EXPECT`/`ASSERT` guards `[live 2026-09-24]`. In
+`pilot edit` menus, use `ACTIVATE <label> WITH ENTER` (an alias of `CHOOSE`) or
+`FOCUS <label>` (an alias of `SELECT`) with the Huh `--pointer` from §4. For a
+scrolling checklist, `CHECKLIST_DOWN` is the form `--strict` accepts. The
+`DOWN <n>` advice in rules 13, 14 and 20 predates `--strict`, and the
+deploy, role-checklist and vault flows have not been re-driven under it yet.
+
 Immediately after the child exits, verify that *one cast*, not a mixed
 directory, is eligible for promotion:
 
@@ -263,9 +282,15 @@ Drive every interactive step with `trec drive`:
 ```bash
 CI=1 trec drive --script "$SCRATCH/scripts/edit-hosts.txt" \
   --key-delay 150 --settle-delay 400 --timeout <generous> \
+  --pointer '^\s*┃?\s*>\s' \
   -o "$SCRATCH/casts/evidence/01-edit-hosts.cast" --title "pilot edit -- build hosts.yml" \
   -- pilot edit --presentation --dir "$SCRATCH/demo"
 ```
+
+The `--pointer` is required for any script that uses `SELECT`, `FOCUS`,
+`ACTIVATE`, `CHOOSE` or `TOGGLE`. Huh v2 draws every menu row behind a `┃ `
+border, and trec's default pointer regex never matches that. See
+`references/select-labels.md`.
 
 Always include `--presentation` in a TREC-wrapped `pilot edit`, `pilot deploy`,
 or `pilot reconcile` command. It keeps automation recordings in their
@@ -326,13 +351,13 @@ because you have not read its reference.**
 
 | # | Rule | Detail |
 |---|---|---|
-| 1 | Set `CI=1` on **every** `pilot edit`/`pilot deploy` invocation, full stop. Without it the run hangs ~5s on bubbletea's OSC background-colour query under a bare PTY. | `references/pilot-edit-wizard.md` |
+| 1 | Set `CI=1` on **every** `pilot edit`/`pilot deploy` invocation, full stop. Without it the run hung ~5s on bubbletea's OSC background-colour query under a bare PTY (not reproduced on bubbletea v2.0.9, 2026-09-24). | `references/pilot-edit-wizard.md` |
 | 2 | Pass `--presentation` on every TREC-wrapped `pilot edit`/`deploy`/`reconcile`. | §4 |
 | 3 | Recompute every catalog/checklist index from current source each session; never reuse a number from a prior run or from the runbook prose. | §2, `references/index-computation.md` |
-| 4 | Never combine `PILOT_DEBUG_MENU=1` with `SELECT` in a recorded run — its stderr lines confuse `SELECT`'s screen scan. Use it for exploration only. | §2 |
+| 4 | Never combine `PILOT_DEBUG_MENU=1` with `SELECT` in a recorded run — its stderr lines confuse `SELECT`'s screen scan. Use it for exploration only. (It currently prints nothing; see §2.) | §2 |
 | 5 | Verify success **by content** (`✅ 已存檔`, `✅ 套用完成`), never by exit code — a derailed script exits 0 just as cleanly. | `references/timing.md` |
 | 6 | After every save, `grep` the file on disk and compare each value against what you meant to type. A green cast proves a save happened, not that the right fields got the right values. | `references/pilot-edit-wizard.md` |
-| 7 | `EXPECT <text unique to the screen you expect to be on>` immediately after every `ENTER`, so a missed transition fails at the step it happened. | `references/role-checklist.md` |
+| 7 | `EXPECT <text unique to the screen you expect to be on>` immediately after every `ENTER`, so a missed transition fails at the step it happened. Guard input after a screen change with `EXPECT` (it waits), not `ASSERT` (it checks once): `EXPECT_QUIET` does not prove the frame is final. | `references/role-checklist.md`, `references/timing.md` |
 | 8 | Never `EXPECT` a string that already occurred earlier in the stream (e.g. `PLAY RECAP`); anchor on a string unique to the moment. | `references/deploy-wizard.md` |
 | 9 | End every `pilot edit` drive by exiting the wizard (`SELECT 離開` + `ENTER`), then `WAIT_CHILD_EXIT@<timeout>` + `ASSERT_EXIT 0`. Stopping after the last edit turns a successful edit into red evidence. | `references/timing.md` |
 | 10 | Pass `--timeout` explicitly, at least as large as your longest `EXPECT@` value; do not rely on a per-step override. | `references/timing.md` |
@@ -342,7 +367,7 @@ because you have not read its reference.**
 
 | # | Rule | Detail |
 |---|---|---|
-| 12 | `SELECT` is the default for `pilot edit`'s menus. It only moves the pointer — **every `SELECT` still needs its own `ENTER`**. | `references/select-labels.md` |
+| 12 | `SELECT` is the default for `pilot edit`'s menus. Run with `--pointer '^\s*┃?\s*>\s'`, because Huh v2 rows start with `┃ ` and the default pointer regex never matches them. `SELECT` only moves the pointer — **every `SELECT` still needs its own `ENTER`** (or use `ACTIVATE <label> WITH ENTER`). | `references/select-labels.md` |
 | 13 | Prefer `DOWN <n>` for `pilot deploy`'s menus; `SELECT` there can lock onto a stale pointer left in scrollback by the just-exited Program. | `references/deploy-wizard.md` |
 | 14 | On the role checklist (`multiSelect`) use `DOWN <n>` + `SPACE`, never `SELECT` — only ~15 rows render, so a content scan cannot reach a scrolled-out row. This is a proven path; do not re-litigate it. | `references/role-checklist.md` |
 | 15 | Never write `DOWN 0`; for index 0 omit the `DOWN` line entirely. | `references/role-checklist.md` |
@@ -443,7 +468,7 @@ above is complete on its own for planning and for every normative rule.
 | `references/pilot-edit-wizard.md` | Authoring or changing a `pilot edit` drive script. |
 | `references/deploy-wizard.md` | Authoring or changing a `pilot deploy` drive script. |
 | `references/role-checklist.md` | Driving the role checklist, or before claiming it can't be driven. |
-| `references/select-labels.md` | Choosing `SELECT` vs `DOWN <n>`, or a `SELECT` sticks at the first/last row. |
+| `references/select-labels.md` | Choosing `SELECT` vs `DOWN <n>`, a `SELECT` sticks at the first/last row, or it reports `no pointer row found`. |
 | `references/timing.md` | Setting `--key-delay`/`--settle-delay`/`--timeout`, or a run exits 0 having done nothing. |
 | `references/freeipa-identity-prompt.md` | Deploying or reconciling `freeipa-identity`. |
 | `references/known-gotchas.md` | A step behaves unexpectedly; skim once before a first full run. |

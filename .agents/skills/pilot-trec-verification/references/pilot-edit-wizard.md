@@ -21,6 +21,12 @@ under a bare PTY nothing answers it and the run hangs ~5s.
 Always set it — do **not** special-case it to "only when the role checklist is
 involved". `[Bubble Tea rewrite 2026-07-17]`
 
+`[live 2026-09-24]` The hang did not reproduce on bubbletea v2.0.9. Without
+`CI=1`, `origin/main` `583df40` and a build with the lipgloss v2.0.6 stack each
+rendered the top menu in under 50 ms in all 3 runs under `trec drive`, and
+exited 0. Pilot's own code never reads `CI`. Keep setting it anyway: the rule
+costs nothing, and dropping it has only been checked on those two builds.
+
 ## Text-entry fields pre-fill with the cursor at the end
 
 Every value field (`ansible_host`, `ansible_user`, ssh key path, vault entry
@@ -117,8 +123,10 @@ Don't hand-write `host_vars/*.yml` for a key this screen covers — use the wiza
 Inserting an item shifts every item at or after it by +1; the `freeipa-dns`
 insertion broke four unrelated existing teatest/PTY tests the same day, all
 fixed-count `DOWN` loops landing on the wrong item. If you must count,
-re-verify against the live item list (`PILOT_DEBUG_MENU=1`), not an old
-transcript.
+re-verify against the live item list (an MCP `trec drive --interactive`
+session's `SCREEN` reply, see `mcp-mode.md`; `PILOT_DEBUG_MENU=1` currently
+prints nothing), not an old transcript. `SELECT` needs the Huh `--pointer`
+described in `select-labels.md`.
 
 ## The FreeIPA identity roster is no longer 100% hand-authored
 
