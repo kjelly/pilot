@@ -132,9 +132,9 @@ Don't hand-write `host_vars/*.yml` for a key this screen covers — use the wiza
 Inserting an item shifts every item at or after it by +1; the `freeipa-dns`
 insertion broke four unrelated existing teatest/PTY tests the same day, all
 fixed-count `DOWN` loops landing on the wrong item. If you must count,
-re-verify against the live item list (an MCP `trec drive --interactive`
-session's `SCREEN` reply, see `mcp-mode.md`; `PILOT_DEBUG_MENU=1` currently
-prints nothing), not an old transcript. `SELECT` needs the Huh `--pointer`
+re-verify against the live item list (`PILOT_DEBUG_MENU=1`, or an MCP
+`trec drive --interactive` session's `SCREEN` reply, see `mcp-mode.md`), not
+an old transcript. `SELECT` needs the Huh `--pointer`
 described in `select-labels.md`.
 
 ## The FreeIPA identity roster is no longer 100% hand-authored
