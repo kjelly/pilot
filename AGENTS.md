@@ -535,6 +535,78 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
 - 跑 `internal/spec` 裡名稱含 `AlwaysTagPrerequisite` 的 regression lint,
   確認新 task 沒有漏掛。
 
+### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
+
+§4.0 已經記過一個(task `vars:` 蓋不掉同名的 `set_fact`)。2026-08-24~09-24
+的 fix 又踩到同一類的另外幾個;其中第 2、3、7 點都是修過之後又在別處重犯
+(見 §5.10)。它們全部通過 `--syntax-check`、執行時也不報錯,只有在真機上看
+結果才會發現:
+
+1. **block 的 `when:` 會在 block 內每個 task 各自重新判斷**,不是進 block 時
+   判斷一次。如果 block 的條件是一個會被 block 內 task 改掉的 fact,條件一翻,
+   block 後半段的 task 就被靜默跳過。`5b735ee`:apt refresh block 以
+   `not _pilot_apt_has_candidate` 當條件,block 內的 re-check 一成功,後面的
+   task 就全被跳過。**規則**:block 的條件只能用進 block 前就固定、block 內
+   不會再被改動的 fact;需要時先 `set_fact` 一個專用的 gate fact。
+2. **同一支 task 檔被 include 多次時,前一次 include 設的 `set_fact` 仍然有效**。
+   `6a32a00`(08-28)先在 `tasks/resolve-hosts-alias-target.yml` 修過一次:
+   第二次 include 沿用第一次留下的 `hosts_alias_resolved_ip`,detection-engine
+   的 Alertmanager alias 被釘成 Thanos 節點的 IP。`5b735ee`(09-23)又在
+   09-14 新增的 apt framework 修一次:`freeipa-client` 把它 include 兩次,
+   第二次安裝 `sssd-tools` 時讀到第一次留下的 `stale_metadata=True`。
+   **規則**:會被重複 include 的 task 檔(`playbooks/apply/tasks/*.yml`),
+   開頭必須重置自己的 per-include 狀態 fact。
+3. **play 層級的 `vars:` 優先順序高於 inventory 的 `group_vars`/`host_vars`**。
+   `360c6f2`(09-11)先修過 `internal-endpoint-apply.yml` 與
+   `detection-engine-apply.yml`(空字串預設值蓋掉 operator 在 inventory 設好的值);
+   4 天後 `81f7090` 又在 09-14 新增的 `pilot-access-gateway-apply.yml` 修一次:
+   它在 play `vars:` 把 `gateway_id`/`freeipa_servers`/`ipa_realm` 等寫成
+   字面值,contract-driven inventory 提供的值全部被蓋掉,不報錯。
+   **規則**:應該由 inventory 提供的
+   變數,不准在 play `vars:` 宣告;必填的讓既有 assert 擋,選填的用
+   `_effective_` 別名加 `default()`。(§4.3 的 `stage`/`confirm_*` 預設值不在
+   此限:它們由 `-e` 提供,而 `-e` 的優先順序高於 play vars。)
+4. **check mode 下被跳過的 task,register 出來的結果沒有 `stdout`**。直接對它做
+   `from_json` 或取 `.stdout`/`.json`,在 `--check --diff` 會崩潰(`81f7090`
+   Step 17/18)。依賴同一次 run 裡只被「模擬」的前置動作(建使用者、enroll)
+   的 task 也一樣(`4675b6b`)。**規則**:讀取「check mode 下可能被跳過的 task」
+   結果的 task,要加 `when: not ansible_check_mode` 或先判斷 `is skipped`。
+   全新主機的 preview 需要提早結束時,印明確訊息再 `meta: end_host`;真實 run
+   仍然 fail closed。
+5. **只為安裝器準備的 task 沒加條件,每次 apply 都把狀態重設回去**。
+   `875066d`:`freeipa-server-apply.yml` 預建 installer 目錄時強制
+   `root:root 0755`,但 installer 跑完後就接手了這些路徑的 owner(例如
+   `/var/lib/ipa/pki-ca/publish`)。全新安裝後的第一次重跑就 `changed=1`,還
+   改掉了 installer 設的權限;之後幾次看起來冪等,只是因為破壞已經發生過了。
+   **規則**:只為 installer 或一次性流程準備的 task,必須用「安裝已完成」的
+   marker(例如 `ipa_cfg`)擋住。驗證冪等要看「全新安裝**之後的第一次**重跑」,
+   不是對一台已經重跑過很多次的主機再跑一次。
+6. **同一個 task 裡重複的 YAML key(例如兩個 `register:`)只有最後一個生效**
+   (`c0890f6`)。`make playbook-lint` 會跑 `scripts/check-yaml-duplicate-keys.py`
+   抓這類錯誤,凍結 candidate 前要跑過。
+7. **`shell` 模組預設用 `/bin/sh`;在 Debian/Ubuntu 上那是 dash,不認得
+   `set -o pipefail`**:它會印出 `Illegal option -o pipefail` 並以 rc=2 結束,
+   後面的指令完全不會執行(2026-09-24 在本機 dash 0.5.12 + ansible 實測)。
+   `869f164` 修過 decommission 的一處;2026-09-24 全 repo 掃描又找到 5 處,
+   最嚴重的是 `tasks/freeipa-dns-client-resolver.yml` 的 rescue ROLLBACK:它設了
+   `failed_when: false`,所以在 Debian/Ubuntu 上 `/etc/resolv.conf` 從來沒被
+   還原,下一個 task 卻印出「was restored」。**規則**:用到 bash 語法
+   (`pipefail`、`[[`、`<<<`、陣列)的 shell task 必須加
+   `args: {executable: /bin/bash}`。`internal/spec/shell_pipefail_regression_test.go`
+   對全部 `playbooks/**` 檢查 `pipefail` 這一項。rescue 裡的 rollback 如果用
+   `failed_when: false`,要 register 結果,並在後續訊息如實說明有沒有還原,
+   不准寫死「已還原」。
+8. **`include_tasks` 的 `tags:` 只作用在 include 那一行,不會傳給被 include
+   進來的 task**。`374780b`:帶 `--tags C1` 時 apt framework 什麼都沒裝,也
+   不報錯。要讓 `--tags` 篩選生效,寫成
+   `include_tasks: {file: ..., apply: {tags: [...]}}`。目前只有 apt 的呼叫點由
+   `cmd/pilot/cmd/apt_policy_test.go::TestAptPackageInstallCallSitesUseApplyTags`
+   鎖住。
+
+驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
+`vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
+from-scratch install 之後。
+
 ---
 
 ## 5. 寫 / 改 Go code 時
@@ -678,6 +750,290 @@ vm-target 上跑出至少 11 個之前所有單元測試都是綠燈的真 bug(`
 package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下個測試
 看不到殘留。
 
+> §5.7~§5.15 是回顧 fix commit 歸納出的重複模式:§5.7~§5.9 來自 2026-09-23
+> 回顧的最近 20 個(`9550b38`~`5b735ee`,09-15~09-23),§5.10~§5.15 來自
+> 2026-09-24 再往前回顧的 50 個(`27ec586`~`81f7090`,08-24~09-15)。它們不只
+> 適用於 Go:playbook、測試、Dockerfile、contract 都適用。
+
+### 5.7 同一件事記在兩個以上的地方時,必須有一致性測試或改成單一來源
+
+這是那 20 個 fix 裡最常見的一類(8 個)。新增一個元件要改 N 個地方,漏改的那一處
+要嘛靜默失效,要嘛之後才在正式環境爆開。其中 `9550b38`(contract
+`site.include` 與 `site.yml` 的 import 清單不同步,deploy 記錄「成功」,其實
+什麼都沒套用)與 `c58d63a`(teatest 的固定終端高度被新 role 擠爆)都是
+**同一類問題第二次發生**。
+
+目前已有的一致性測試(新增同類配對時照抄):
+
+| 配對 | 測試 |
+|---|---|
+| contract `site.include`/`site.tags` ↔ `playbooks/site.yml` 的 `import_playbook` | `cmd/pilot/cmd/site_yml_consistency_test.go::TestSiteYMLImportsEveryReachableComponent` |
+| `group_vars/*.example.yml` 期待的 `dist/` artifact ↔ `images/Dockerfile.pilot-cli` | `cmd/pilot/cmd/dockerfile_artifact_consistency_test.go::TestDockerfileBakesEveryDistArtifactGroupVarsExpects` |
+| Go 常數 `pilotSSHConfig` ↔ `pilot-access-gateway-apply.yml` Step 12 的 ssh_config | `cmd/pilot/cmd/portal_ssh_config_sync_test.go::TestPilotSSHConfigMatchesApplyPlaybook` |
+| `docs/verification/*.md` 的 row ↔ apply playbook 的 tag | `cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`(見 §4.0) |
+
+規則:
+
+1. 新增一組「A 改了、B 就要跟著改」的配對時(Go 常數對 template、contract 對
+   `site.yml`、`deployCatalog` 對 MCP prompt schema(`a520bdc`)、config struct
+   對產生的設定檔……),同一個 PR 必須二選一:由單一來源產生另一邊,或加一個
+   一致性測試。一致性測試要**故意把 regression 放回去,確認它真的會 fail**
+   (`9550b38` 就用 reverse-proxy 的案例這樣驗過);沒驗過的測試只是另一份會
+   drift 的清單。
+2. 能從既有事實推導的值,不要要求操作者手抄到第二個地方。`b1e4349`:replica
+   的 `freeipa_roster_file` 改從同一份 `hosts.yml` 裡的 primary 推導;
+   `00cc3b3`:`ipa_realm`/`freeipa_servers` 改從 `freeipa_domain` 推導。明確
+   覆寫永遠優先,推導不出來時 fail closed。`*.example.yml` 不准帶「生效中的空值
+   覆寫」(例如 `freeipa_servers: []`),它會靜默蓋掉推導;要示範就寫成註解。
+3. 如果測試 fixture 的大小取決於一個會成長的 registry(role contract 數、
+   catalog 項目數),要依 registry 長度計算,不要寫死。已知欠債:
+   `cmd/pilot/cmd/edit_tui_role_presets_test.go` 的 teatest 終端高度仍寫死
+   52 列;下次新增 role 又被擠出畫面時,改成依 role 數量計算,不要再手動加大。
+4. 新增 component、spec 或 role 後,凍結 candidate 前一定要跑**完整的**
+   `go test ./...`,不能只跑自己的 package。`e238964`(新 spec 沒登記進
+   `tagCheckExemptSpecs`)與 `c58d63a` 都只在全量測試時才現形。
+5. 元件的 `site.include` 從 `false` 改成 `true` 時,要對 vm-target/docker-target
+   跑一次真實的全站 deploy。`a52e32a`:`pilot-access-gateway` 改成
+   `site.include: true` 當天,第一次全站 deploy 就在正式環境中斷,因為
+   Dockerfile 從沒 bake 它需要的 binary——這條路徑之前從來沒被走到過。
+
+### 5.8 沒有 error 不等於成功
+
+失敗被回報成成功,是最貴的一類 bug:操作者和下游 webhook 訂閱者都會以為事情做完了。
+
+1. `internal/ansible.Runner` 的 `Run`/`RunWithTimeout`/`RunWithExtraEnv` 在
+   playbook 失敗(結束碼非 0)時,回傳的 `err` 是 **`nil`**,失敗只記在
+   `Result.ExitCode`。每個呼叫點都必須檢查 `ExitCode`,不准用 `_` 丟掉
+   `*Result`。`df31248`:`runGatewayScope` 只看 `err`,真實的
+   `ipa hostgroup-add-member` 失敗被當成成功,還發出了
+   `operation.result:"success"` webhook。新增呼叫點時,照
+   `cmd/pilot/cmd/gateway_scope_test.go::TestRunGatewayScopeSurfacesAnsiblePlaybookFailure`
+   寫 regression test:在 `PATH` 放一個 `exit 1` 的假 `ansible-playbook`,確認
+   指令回傳 error。(2026-09-23 盤點過,當下所有呼叫點都有檢查。)
+2. delivery record、webhook 等「成功」紀錄只能根據實際執行結果產生,不能根據
+   執行計畫產生。`9550b38`:元件被排進全站 deploy 的 `--tags` 就被記成成功,
+   但它的 playbook 根本不在 `site.yml` 裡,從來沒執行過。
+3. 會碰網路的外部指令(`apt-get update`、下載探測等)一定要有時間上限。
+   `5b735ee`:`apt-get update` 卡在 caching proxy 的半關閉(CLOSE-WAIT)連線上,
+   整個 play 無限期卡住。現在一律包 coreutils `timeout`(先 TERM,30 秒後 KILL),
+   rc 124 或 -9 都視為失敗。
+4. 修復步驟失敗後,不准拿修復前的舊資料繼續往下做。`5b735ee`:refresh 失敗了,
+   舊 index 仍列著舊 candidate,re-check 因此通過,install 又撞上同樣的 404。
+   修復失敗要明確 fail(例如 `FATAL(stale_metadata_unrecovered)`)。
+5. 工具的設定或過濾也可能靜默失效。`c0890f6`:`.golangci.yml` 的
+   `exclude-functions` 還寫著舊的 module 路徑,排除規則全部失效,卻沒有任何
+   警告。golangci-lint 預設每個 linter 最多顯示 50 筆、相同訊息最多 3 筆,
+   畫面顯示 87 筆,實際有 276 筆。盤點 lint 問題數量時要加
+   `--max-issues-per-linter=0 --max-same-issues=0`;更改 module 路徑後,
+   `git grep` 舊路徑必須為空,`.golangci.yml` 這類設定檔也要算在內。
+
+### 5.9 決策要讀權威來源,不要讀快取或快照
+
+授權、信任與 mutation 的判斷,要讀「此刻真正生效的狀態」。快取和快照只能拿來
+顯示,不能拿來下決定。
+
+1. 授權判斷要讀 kernel 實際使用的憑證,不讀目錄服務快取的成員列表。`f1d1552`:
+   舊的 `internal/identity.IsMemberOfGroup` 掃 `getent group` 的成員列表,而
+   SSSD 會對整個 group 快取(`entry_cache_timeout` 預設 5400 秒)。結果新加入的
+   使用者最多被拒絕 90 分鐘,被移除的使用者也能繼續通過。現在改用
+   `identity.PeerInGroup`:從 `SO_PEERCRED` 取 pid/uid,讀 `/proc/<pid>/status`
+   的 GID,並確認該 `/proc` 條目仍屬於 peer uid(防止 pid 重用)。新增的
+   group-gated API 一律用它。
+2. 會隨時間變動的信任資料,不要在 apply 當下抓一次就存成快照。`c084b71`:
+   gateway 的 ssh_config 原本在 apply 時用 `ssh-keyscan` 產生
+   `GlobalKnownHostsFile`,apply 之後才加入 scope 的主機一律被
+   `StrictHostKeyChecking` 拒絕,而且 `ssh-keyscan` 是不經驗證就信任的 TOFU。
+   現在改成用 `sss_ssh_knownhostsproxy`,每次連線時向 SSSD/FreeIPA 查主機在
+   enrollment 時登記的 host key。
+3. 快取裡「看起來有」不等於「現在真的能用」。`ad6d552`:apt index 仍列著
+   Candidate,但它指向的 .deb 在 mirror 上已經被取代,下載會 404。現在 cache
+   hit 時會先用 `apt-get install --download-only` 探測一次。
+4. 長時間運作的服務要以自己的持久狀態為準,不以「這一輪外部查詢剛好回傳了
+   什麼」為準。`30d6b92`:detection engine 的 refresh 原本只處理當輪 Prometheus
+   還有回傳的 subject,短暫的資料缺口就讓 Alertmanager alert 自然過期;重啟後
+   也沒把 SQLite 裡的 active episode 載回記憶體。現在 refresh 掃描 SQLite 中
+   全部的 active episode,啟動時也會 hydrate。
+5. 在 evidence 或排錯過程中,如果要「清快取、重啟、手動同步」才能讓結果正確
+   (例如跑 `sss_cache`),那是 bug 的症狀。要開成 bug 追根本原因,不准只把
+   workaround 寫進 evidence 就收工。`f1d1552` 的根本原因,在 2026-09-18 的
+   session-store evidence 裡就已經出現過(空的 member list),當時用
+   `sss_cache` 繞過去,直到 2026-09-23 新使用者在全新 topology 上被拒絕才修掉。
+
+### 5.10 修 bug 時先掃同類;會在新程式碼重犯的,做成全 repo 檢查
+
+回顧 70 個 fix 時最重要的發現:好幾類 bug 修過之後,又在**新寫的程式碼**裡重犯,
+原因都是當初只修了發現的那一處。
+
+| 同類 bug | 第一次修 | 第二次修 | 為什麼重犯 |
+|---|---|---|---|
+| play `vars:` 蓋掉 inventory 的值(§4.5 第 3 點) | `360c6f2`(09-11,2 支 playbook) | `81f7090`(09-15) | 只有鎖住單一 playbook 的測試;09-14 新增的 `pilot-access-gateway-apply.yml` 照舊寫法 |
+| 同一支 task 檔 include 兩次,fact 殘留(§4.5 第 2 點) | `6a32a00`(08-28) | `5b735ee`(09-23) | 沒有規則;09-14 新增的 apt framework 又踩到 |
+| `dig` 的錯誤診斷被當成 DNS 紀錄 | `131ae5a`(08-25,依猜測加 rc 檢查) | `0bb39cc`(08-31,同一個檔案) | 第一次修沒有先擷取真實輸出:`dig` 出錯時 rc 也是 0 |
+| validator 要求目標已在 roster 的 `hosts:` 裡 | grants 的版本 | `687205f` | 新增 auth_policies validator 時照抄舊寫法 |
+| `/bin/sh` 下的 `pipefail`(§4.5 第 7 點) | `869f164`(09-13) | 2026-09-24 全 repo 掃描再修 5 處 | 只修了發現的那一個 task |
+
+對照組:`always` tag 這類 bug 在 09-07 寫進 §4.4、並有全 repo lint 之後,最近
+20 個 fix 裡就沒有再出現。
+
+規則:
+
+1. 修一個 bug 時,先用 `git grep` 找出同樣寫法在全 repo 的其他出現處並一起修;
+   commit message 寫出搜尋範圍與結果(例如「掃過 `playbooks/**`,另有 N 處,
+   一併修正」)。
+2. 如果這類 bug 會在**新寫的**程式碼裡再犯(某種 Ansible 寫法、共用 helper 的
+   誤用、某種 validator 形狀),就加一個**全 repo** 的 lint/regression test,
+   不要只加鎖住單一檔案的測試。範本:
+   `internal/spec/always_tag_prerequisite_regression_test.go`、
+   `internal/spec/shell_pipefail_regression_test.go`。新 lint 要先對修正前的程式碼
+   跑一次,確認它真的抓得到(§5.7 第 1 點)。
+3. 第一次修如果是依據「猜測的輸出格式」,就等於還沒修;依 §5.6 先擷取真實輸出。
+
+### 5.11 路徑在入口處轉成絕對路徑一次,不要讓不同執行環境各自解析
+
+7 個 fix 都是「在開發機上正常,到 pilot-cli 容器、全新 runtime 或換個工作目錄
+就壞」:
+
+- 路徑被接兩次:`a0a8375`(`--dir` 的預設值已經接過 dir,validator 和實際載入
+  又各接一次,變成 `dir/dir/inventory.yml`)、`db36b85`
+  (`.vault/.vault/main.yaml`)。
+- 相對路徑的基準不同:`0174f81`(Ansible 的 `lookup('file', ...)` 相對的是
+  playbook 所在目錄,不是 repo root 或 cwd)、`eaab7bd`(`--sandbox` 只複製
+  playbook 本身,同目錄的 `include_tasks`/template 全部找不到)。
+- `~` 沒被展開:`6eff4bf`(參數沒經過 shell,`@~/.vault/main.yaml` 的 `~` 在
+  容器裡變成 `/root`)。
+- 以為目錄存在、路徑夠短:`b7b2ecb`(全新容器裡沒有 ControlPath 目錄,
+  UNREACHABLE 又被 `no_log` 藏成看不懂的訊息)、`f469407`(ControlPath 超過
+  Unix socket 的 108 bytes 上限)、`374780b`(`ansible.builtin.tempfile` 不會
+  建立上層目錄)。
+
+規則:
+
+1. 使用者或設定檔給的路徑,在 CLI 入口處**只正規化一次**(展開 `~`、轉成絕對
+   路徑、canonicalize),之後一律傳絕對路徑。預設值、validator、實際載入不准
+   各自再 join 一次。
+2. 傳給 Ansible 的檔案路徑一律用絕對路徑。playbook 不准用 repo-relative 的預設值
+   去 `lookup('file')`;沒有值就明確跳過(`0174f81` 的作法)。
+3. 會在 pilot-cli image 或 `docker run --rm` 這類全新 runtime 執行的指令,要在
+   那個環境實際跑過一次,不能只在開發機驗證。需要的目錄(ControlPath、
+   tempfile 的上層目錄)由程式自己建立。
+4. 用路徑組 Unix socket 時要算 108 bytes 上限(`f469407` 改成
+   `/tmp/pilot-<scope>-%C`)。
+
+### 5.12 每個 gate、matcher、`changed_when` 都要證明它會觸發
+
+8 個 fix 是「檢查從一開始就比對不到任何東西」,等於沒有檢查,結果永遠 PASS 或
+永遠 `ok`:
+
+- `3b4ef4d`:比對的 FreeIPA 屬性名稱(`managedby_service:` 等)在真實的
+  `ipa host-show --all --raw` 輸出裡根本不存在,HD11/HD12 gate 永遠關閉;用
+  `^`/`(?m)$` 錨定的 regex 碰上 `debug` 印出的字面 `\n`,永遠比對不到。
+- `3f29243`:Verify 送出 `host_dns`/`hbac_references`/`sudo_references` 查詢,
+  playbook 卻從沒處理,HD10/HD11 永遠 pass。
+- `b2425e0`:`changed_when` 比對的 "Added policy" 等字串不存在,真的變更永遠
+  回報 `ok`。
+- `6a32a00`:`failed_when` 比對不含空白的 `"resultType":"vector"`,真實的
+  `json.dumps` 輸出從不這樣印。
+- `869f164`:`/bin/sh` 下 `pipefail` 沒有生效(§4.5 第 7 點)。
+- `374780b`:`include_tasks` 的 `tags:` 沒傳下去,`--tags C1` 時什麼都沒裝也
+  不報錯(§4.5 第 8 點);`apt-cache policy pkg1 pkg2` 對完全不認識的套件直接
+  略過不印,聯合查詢時誤判「有 candidate」。
+- `131ae5a`/`0bb39cc`:`dig` 的錯誤診斷被當成 DNS 紀錄。
+
+§5.6 規定 fixture 要來自真實擷取;這裡再加三條:
+
+1. 新增或修改任何 gate、matcher、`failed_when`、`changed_when`、verify regex 時,
+   regression test 要**同時**有「應該通過」和「應該觸發」兩種案例,兩者都用
+   真實擷取的輸出。只有一種案例的測試證明不了什麼。
+2. 對 vm-target 實跑時,只要能製造出 gate 要擋的狀態,就讓每個新 gate 真的
+   觸發一次,確認它會 fail,不是只看到它 PASS。
+3. 送出去的查詢或參數,要確認接收端真的有處理(`3f29243`)。接收端沒有對應
+   分支時要 fail,不能回傳空結果。
+
+### 5.13 主機身分統一用小寫 FQDN,在邊界轉換一次
+
+- `33f0b94`:`hosts.yml` 的 key 是短名稱(`client-vm`),跟 FreeIPA 回傳的 FQDN
+  永遠比對不到:每台主機都被誤判成有未知的 service principal,roster 條目也不會
+  收斂成 absent。
+- `3b4ef4d`:`firstNonEmpty(host.AnsibleHost, host.Name)` 優先用 SSH 連線位址
+  (通常是 IP)當主機身分,FreeIPA 操作全部打到 IP。
+- `0bb39cc`:HBAC 成員比對分大小寫,造成先移除再加回的來回變動。
+- `2a97765`:roster 自動補上的 FQDN 保留了大寫,產生重複條目。
+
+規則:
+
+1. `ansible_host`/`AnsibleHost` 是**連線位址**,永遠不是主機身分。主機身分用
+   inventory 名稱,或 FreeIPA 解析出的 FQDN(`internal/decommission/planner.go`
+   的 `providerFQDN`)。
+2. 跟 FreeIPA 互動前,先用權威來源(例如 `ipa host-show` 的結果)解析出完整
+   FQDN,後續所有比對與 roster 操作都用這個值
+   (`internal/decommission/providers/freeipa_client.go` 的
+   `resolveAuthoritativeFQDN`)。
+3. FQDN,以及 FreeIPA 的 user/group/host/hostgroup 名稱,比對前一律先轉小寫;
+   送給指令時可以保留原始拼法。
+4. 測試要涵蓋「inventory key 是短名稱」「大小寫混用」「`ansible_host` 是 IP」
+   三種輸入。
+
+### 5.14 移除、撤銷、清理的路徑要跟新增路徑一樣測
+
+§0.2 已經要求「reconciler 要測新增與撤銷」,但這 50 個 fix 裡仍有 5 個出在這一側
+(再加上最近 20 個裡的 `f1d1552`:被移除的使用者還能通過授權):
+
+- `5306f53`:indicator 清單為空時省略了參數,而不是送出清除參數,舊值留著;
+  主機從 `auth_policies` 移除後,永遠不會被清掉(後來加了本地 statefile,
+  記錄 Pilot 設定過哪些主機)。
+- `fde40f7`:`Down` 對已經刪除的 target 報錯,重試迴圈因此失敗。
+- `34a43ce`:process 被 SIGKILL 時 `defer` 不會執行,留下孤兒暫存檔。
+- `3b4ef4d`:cleanup 步驟本來就會改 live state,Finalize 卻拿清理前的 hash
+  比對,永遠回報 `plan_stale`。
+- `b7b2ecb`:只從 decommission 目標自己的變數找 roster 路徑,一般 client 永遠
+  找不到,`apply` 永遠卡在 `active_residue`。
+
+規則:
+
+1. reconciler 要有「從 desired state 移除 → live state 被清掉」的 regression test
+   與實跑證據;只測新增的 reconciler 不算完成。
+2. 「空清單」必須明確代表「清除」,不能等同「不處理」;兩種語意都需要時,用
+   不同欄位表示。
+3. 要清掉「Pilot 曾經設定、現在已從 desired state 消失」的東西,必須記錄 Pilot
+   設定過什麼;沒有記錄就無法 prune(`5306f53` 用 statefile 追蹤)。
+4. teardown、`Down`、cleanup 必須冪等:目標已經不存在就視為成功。要偵測打錯的
+   名字,放在 CLI 層處理(`fde40f7` 的作法)。
+5. 可能被 timeout 或 SIGKILL 中斷的程式,不能只靠 `defer` 清理;暫存檔要能在
+   下次執行時被辨識並清掉(`34a43ce` 用 PID 命名,`sweepStaleLogTemp` 只清
+   已結束 PID 的檔案)。
+6. 自己會改 live state 的步驟之後,後續的 freshness/drift 檢查要以改完之後的
+   狀態為基準。
+
+### 5.15 功能要從真實入口一路測到,不是只測函式
+
+6 個 fix 是「程式碼寫好了,卻沒有任何路徑會走到它」:
+
+- `06131ff`:SNMP catalog/credentials 畫面從 Monitoring 選單進不去;畫面每次
+  切換都從磁碟重讀 vault,之前加的內容被丟掉。
+- `a01e094`:`baseline_samples` 表從沒被寫入。預設部署下 baseline 永遠暖不起來
+  (`Observe` 要等 `Valid`,`Valid` 又需要 `Observe` 累積的歷史),之前所有的
+  告警其實都是 log hard-trigger 觸發的。
+- `3f29243`:Phase 3a 的註解寫著「Phase 3b contract」,playbook 卻從沒實作。
+- `4443269`:prompt-id 只串到一半,completeness 檢查卻無條件啟用,讓既有的
+  自動化情境全部失敗。
+- `bbaa4ba`:`Render()` 少了 `DeploymentAvailability` 欄位,TUI 存檔後值就
+  消失;Parse → Render → Parse 沒有 round-trip 測試。
+- `cd407d5`:git stash 失誤,commit 只包含新檔案,單獨 build 不過。
+
+規則:
+
+1. 新增 TUI 畫面、CLI 參數或設定欄位時,至少要有一個測試從真實入口(router、
+   cobra 指令、磁碟上的檔案)一路走到新功能,再把結果讀回來。範本:
+   `cmd/pilot/cmd/edit_automation_driver_test.go::TestEditAutomationDriver_HostSettingsRoundTrip`
+   (驅動真實 router,再從磁碟重新 parse `hosts.yml`)。
+2. 會序列化的 struct 新增欄位時,要有 Parse → Render → Parse 的 round-trip 測試。
+3. 程式碼註解裡「之後的 Phase 會補」的 contract,要寫進 spec 或 runbook 的已知
+   缺口;實作之前,對應的檢查要 fail 或標示「未實作」,不能回傳 pass。
+4. 每個 commit 都要能單獨 build。用過 `git stash` 或部分 staging 之後,commit 前
+   要在乾淨 checkout 對 staged 內容跑一次 `go build ./...`。
+5. 有「暖機」或啟動條件的狀態機,要有一個從冷啟動開始、不依賴其他觸發來源的
+   測試(`internal/detection/engine_test.go::TestEngine_RunCycle_BaselineWarmsUpWithoutCohortOrLog`)。
+
 ---
 
 ## 6. 不要做的事
@@ -701,6 +1057,17 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 新增/改 `playbooks/apply/*.yml` 的 task 標 `tags: [always]` 時，不要漏查它依賴的前置 fact/探測 task 是否也標了 `always`（見 §4.4）——`pre_tasks:` 跟 `tasks:` 都要檢查
 - ❌ 改動 `deploy.go` 的 `--limit`/依賴展開/tags 篩選邏輯時，不要只憑既有 mock 測試綠燈就合併；至少要有一個跨兩跳依賴的 regression test + 一次真實 topology 部署證據（見 §5.5）
 - ❌ 撰寫解析外部 CLI 輸出的程式碼或 task 時，不要手寫猜測的 expected string 當 fixture——必須來自真實 vm-target 擷取的 stdout/stderr（見 §5.6）
+- ❌ 不要在 play 層級 `vars:` 宣告應由 inventory 提供的變數，也不要讓 block 的 `when:` 依賴 block 內會被改動的 fact（見 §4.5）
+- ❌ 新增「A 改了 B 就要跟著改」的配對時，不要既沒有一致性測試、也沒有改成單一來源（見 §5.7）——這類 drift 已經兩度造成「deploy 記錄成功，其實什麼都沒套用」
+- ❌ 呼叫 `internal/ansible.Runner` 時不要只檢查 `err`；playbook 失敗記在 `Result.ExitCode`（見 §5.8）
+- ❌ 授權、信任、mutation 的判斷不要讀快取或 apply 當下抓的快照（見 §5.9）；要清快取才會正確的結果是 bug，不是可以寫進 evidence 的 workaround
+- ❌ shell task 用了 `pipefail` 或其他 bash 語法時，不要漏掉 `args: {executable: /bin/bash}`（見 §4.5 第 7 點）——Debian/Ubuntu 的 `/bin/sh` 是 dash，會以 rc=2 直接結束
+- ❌ 修 bug 時不要只修發現的那一處；先 `git grep` 同類寫法，會在新程式碼重犯的要做成全 repo lint（見 §5.10）
+- ❌ 不要讓預設值、validator、實際載入各自 join 同一個路徑，也不要把 repo-relative 路徑交給 Ansible `lookup('file')`（見 §5.11）
+- ❌ 新增 gate、matcher、`changed_when` 時，不要只寫「應該通過」的測試；也要有用真實輸出證明它會觸發的案例（見 §5.12）
+- ❌ 不要把 `ansible_host` 當成主機身分，也不要分大小寫比對 FQDN 或 FreeIPA 名稱（見 §5.13）
+- ❌ reconciler 不要只測新增；「從 desired state 移除 → live state 被清掉」與冪等 teardown 都要有測試（見 §5.14）
+- ❌ 新增畫面、參數、欄位時，不要只測函式本身；至少要有一個從真實入口走到底、再讀回結果的測試（見 §5.15）
 
 ---
 
@@ -850,3 +1217,5 @@ git status --short
 | 2026-09-14 | v1.27 | pilot-access-gateway Phase 8(收尾):在人員明確核准後(啟用 ForceCommand、模擬 FreeIPA 斷線皆被 auto-mode classifier 攔下要求人工確認)對 disposable vm-target 完整跑過 §55.1 三步鎖定回歸測試(AG20/21/25)+ 新增第二台 gateway 對 AG26/27 同/異 scope 隔離做強驗證(含同一使用者對兩個 scope 都有真實 HBAC 權限但互不外溢的案例)+ FreeIPA 斷線 fail-closed 活體驗證(AG16);過程中意外發現並修正一個真的 process-crash 可用性 bug:`internal/freeipaaccess.NewClient` 原本同步載入 keytab,缺檔會讓整個 process exit,因為服務是 socket-activated 很快撞上 systemd start-rate-limit 讓**整個 socket 單元**卡死、修好 keytab 也不會自動恢復——已改成跟既有 session 建立一樣 lazy + per-call retry(`internal/freeipaaccess/kerberos_test.go` 新增兩個回歸測試);也補上 playbook 原本只能開、不能透過旗標關閉 ForceCommand 的對稱性 gap。至此 8 個 Phase(§60)全數完成 | pilot |
 | 2026-09-18 | v1.28 | Pilot Access Directory/Gateway Handoff/Session Recording delivery(`docs/superpowers/specs/2026-09-16-pilot-access-directory-session-routing-recording-spec.md`)Phase 8(收尾):新增 `pilot-session-store` apply playbook(terminal recording 的獨立 stateful persistence,加密 index + TLS ingest API + 獨立 Unix socket read/replay API;從不是 SSH portal ingress,無 ForceCommand/HBAC;依賴 freeipa-client 取得機器 keytab 走 `ipa-getcert` 核發 ingest TLS 憑證,不需要 admin 密碼;已接進 `site.yml`,見 `docs/verification/pilot-session-store.md`);§4.3 playbook 清點更新為 38 支;順手補上 `internal/sessionstore.LoadMasterKeyFile` 原本完全沒有單元測試涵蓋的缺口(`internal/sessionstore/encryption_test.go`);read socket 權限設計刻意不沿用 Gateway/Directory 共用的 `/run/pilot`(該目錄的決定性權限來自 systemd `.socket` unit 的 `SocketUser`/`SocketGroup`/`SocketMode`,而這個元件的 read API 是 process 自己 `net.Listen`,沒有 socket activation),改用專屬 `RuntimeDirectory=pilot-session-store` + `UMask=0007` + `Group=role-pilot-session-auditor` 三者搭配才能讓 auditor group 成員真的連得上 | pilot |
 | 2026-09-23 | v1.29 | Captive SSH transport(`docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md`)Phase 4:新增第 39 支 apply playbook `pilot-access-target-policy-apply.yml`(transport target 端的 sshd 政策:以 `Match Address <gateway 位址>` 對 Gateway 來的每個 session 拒絕 sshd forwarding——刻意不用 `Match Group`,因為 opaque transport 無法強制 inner username;驗證通過後才加入 FreeIPA hostgroup `pilot-transport-ready`,gateway 只對這個 hostgroup 開 `pilot-transport-v1`;`absent` 先移出 hostgroup 再移除 drop-in;day-2/opt-in,不接進 `site.yml`,與 `pilot-access-gateway`/`pilot-access-directory` 互斥);§4.3 清點更新為 39 支;§4.2 不需新增 restic 範例(只寫 `/etc`,已被預設 `["/etc"]` 涵蓋) | pilot |
+| 2026-09-23 | v1.30 | 回顧最近 20 個 fix commit(`9550b38`~`5b735ee`,2026-09-15~09-23)後新增四條規則:§4.5(Ansible 語意陷阱:block `when:` 在每個 task 各自重新判斷、重複 include 的狀態外洩、play `vars:` 蓋掉 inventory、check mode 被跳過的 register、installer 準備 task 每次重設 owner、重複 YAML key)、§5.7(同一件事記在兩處時必須有一致性測試或單一來源,列出現有的四個一致性測試;起因:20 個 fix 裡 8 個屬於這類,`9550b38`/`c58d63a` 是同類第二次)、§5.8(沒有 error 不等於成功:`ansible.Runner` 失敗只記在 `Result.ExitCode`、網路步驟要有 timeout、修復失敗不准沿用舊資料、lint 設定/輸出上限會靜默失效)、§5.9(決策讀權威來源不讀快取/快照:SSSD member list、apply 時的 `ssh-keyscan`、過期 apt index、detection refresh;需要清快取才正確的結果要當 bug 處理);§6 補四條對應 ❌ 提醒 | pilot |
+| 2026-09-24 | v1.31 | 再往前回顧 50 個 fix commit(`27ec586`~`81f7090`,2026-08-24~09-15)後新增 §5.10~§5.15:§5.10(修 bug 先掃同類,會在新程式碼重犯的做成全 repo lint;起因:play `vars:` 覆蓋、include 兩次 fact 殘留、`dig` 診斷、validator 形狀、`pipefail` 都是修一處後在別處重犯)、§5.11(路徑在入口正規化一次,7 個 fix 是容器/全新 runtime/不同 cwd 下路徑解析不同)、§5.12(gate/matcher/`changed_when` 要有證明會觸發的測試,8 個 fix 是永遠比對不到的檢查)、§5.13(主機身分統一用小寫 FQDN,`ansible_host` 不是身分)、§5.14(移除/撤銷/清理路徑與冪等 teardown)、§5.15(從真實入口測到底、round-trip、每個 commit 單獨可 build);§4.5 補第 7 點(`shell` 預設 `/bin/sh`=dash 不認得 `pipefail`,新增全 repo lint `internal/spec/shell_pipefail_regression_test.go`,同時修正它抓到的 5 個 task,含 `tasks/freeipa-dns-client-resolver.yml` 在 Debian/Ubuntu 上從未生效的 rescue ROLLBACK)與第 8 點(`include_tasks` 的 `tags:` 不會傳給被 include 的 task),並在第 2、3 點補上第一次修的 commit;§6 補七條對應 ❌ 提醒 | pilot |
