@@ -84,7 +84,7 @@ func newRetentionSweepCmd() *cobra.Command {
 // openStore loads the master key and opens the index database — shared
 // by both "serve" and "retention-sweep" so they never diverge on how the
 // database is opened or encrypted.
-func openStore(cfg Config) (*sessionstore.Store, error) {
+func openStore(cfg Config, logger *slog.Logger) (*sessionstore.Store, error) {
 	key, err := sessionstore.LoadMasterKeyFile(cfg.Storage.MasterKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load master key: %w", err)
@@ -97,6 +97,10 @@ func openStore(cfg Config) (*sessionstore.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index database: %w", err)
 	}
+	if m := store.Migration(); m != nil {
+		logger.Info("index database migrated", "path", cfg.Storage.IndexDBPath,
+			"from_schema", m.FromVersion, "to_schema", m.ToVersion, "backup", m.BackupPath)
+	}
 	return store, nil
 }
 
@@ -106,7 +110,7 @@ func runRetentionSweepCmd(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	store, err := openStore(cfg)
+	store, err := openStore(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -127,7 +131,7 @@ func runServe(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	store, err := openStore(cfg)
+	store, err := openStore(cfg, logger)
 	if err != nil {
 		return err
 	}

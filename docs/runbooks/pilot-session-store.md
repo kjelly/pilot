@@ -51,8 +51,10 @@ Full results, candidate/tree and scenario verdicts are in the
    schema v1 database. It checks that the filesystem has at least twice the
    database's size free. Then, outside any transaction, it runs
    `VACUUM INTO index.db.pre-v1.bak` (0600, same owner). Only then does it
-   migrate to v2 in one transaction. With too little space, or a backup
-   file already present, it refuses to start and changes nothing.
+   migrate to v2 in one transaction, and logs one `index database migrated`
+   line with `from_schema`, `to_schema` and `backup`. With too little
+   space, or a backup file already present, it refuses to start and
+   changes nothing.
 3. Confirm the upgrade: the service is active, the backup exists, and an
    auditor can list and replay a recording made before the upgrade. On the
    store host:

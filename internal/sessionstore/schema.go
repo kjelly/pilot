@@ -186,44 +186,56 @@ func migrate(db *sql.DB, installed int) error {
 	return tx.Commit()
 }
 
+// Migration describes a schema upgrade that Open performed on an existing
+// database, so the caller can log it.
+type Migration struct {
+	FromVersion int
+	ToVersion   int
+	// BackupPath is the VACUUM INTO snapshot taken before migrating.
+	BackupPath string
+}
+
 // openDB opens (or creates) the SQLite index database at path. Schema is
 // tracked via PRAGMA user_version, matching internal/store/sqlite.go's
 // Open — no errors are swallowed, and a database newer than this binary
 // understands fails closed rather than silently truncating writes. An
-// existing older database is backed up (VACUUM INTO) before it is migrated.
-func openDB(path string) (*sql.DB, error) {
+// existing older database is backed up (VACUUM INTO) before it is migrated;
+// the returned Migration is non-nil only then.
+func openDB(path string) (*sql.DB, *Migration, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	var installed int
 	if err := db.QueryRow(`PRAGMA user_version;`).Scan(&installed); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("read user_version: %w", err)
+		return nil, nil, fmt.Errorf("read user_version: %w", err)
 	}
 	if installed > SchemaVersion {
 		_ = db.Close()
-		return nil, fmt.Errorf("index database is newer (%d) than this binary supports (%d); upgrade pilot-session-store", installed, SchemaVersion)
+		return nil, nil, fmt.Errorf("index database is newer (%d) than this binary supports (%d); upgrade pilot-session-store", installed, SchemaVersion)
 	}
+	var migration *Migration
 	if installed > 0 && installed < SchemaVersion {
 		if err := backupBeforeMigration(db, path, installed); err != nil {
 			_ = db.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if err := migrate(db, installed); err != nil {
 			_ = db.Close()
-			return nil, err
+			return nil, nil, err
 		}
+		migration = &Migration{FromVersion: installed, ToVersion: SchemaVersion, BackupPath: backupPath(path, installed)}
 	}
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("init schema: %w", err)
+		return nil, nil, fmt.Errorf("init schema: %w", err)
 	}
 	if installed == 0 {
 		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, SchemaVersion)); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("set user_version=%d: %w", SchemaVersion, err)
+			return nil, nil, fmt.Errorf("set user_version=%d: %w", SchemaVersion, err)
 		}
 	}
-	return db, nil
+	return db, migration, nil
 }

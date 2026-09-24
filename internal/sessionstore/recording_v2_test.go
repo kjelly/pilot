@@ -82,6 +82,10 @@ func TestStoreMigratesV1ToV2(t *testing.T) {
 	if v := userVersion(t, path); v != SchemaVersion {
 		t.Fatalf("user_version after migration = %d, want %d", v, SchemaVersion)
 	}
+	want := Migration{FromVersion: 1, ToVersion: SchemaVersion, BackupPath: backupPath(path, 1)}
+	if m := store.Migration(); m == nil || *m != want {
+		t.Fatalf("Migration() = %+v, want %+v", m, want)
+	}
 	// The migrated database accepts the new columns.
 	if err := store.StartSession(context.Background(), SessionStart{
 		SessionID: "new-1", User: "alice", GatewayID: "gw01", Scope: "gpu", Target: "t2.example.test",
@@ -159,6 +163,28 @@ func TestStoreFreshDatabaseIsV2WithoutBackup(t *testing.T) {
 	matches, _ := filepath.Glob(path + ".pre-v*.bak")
 	if len(matches) != 0 {
 		t.Fatalf("fresh database produced backups %v", matches)
+	}
+	if m := store.Migration(); m != nil {
+		t.Fatalf("fresh database reported a migration: %+v", m)
+	}
+}
+
+// TestStoreCurrentDatabaseReportsNoMigration: reopening an already
+// migrated database reports nothing to log.
+func TestStoreCurrentDatabaseReportsNoMigration(t *testing.T) {
+	path := writeV1Database(t)
+	first, err := Open(path, newTestEncryptor(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+	again, err := Open(path, newTestEncryptor(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = again.Close() }()
+	if m := again.Migration(); m != nil {
+		t.Fatalf("reopened current database reported a migration: %+v", m)
 	}
 }
 

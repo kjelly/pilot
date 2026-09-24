@@ -17,8 +17,9 @@ import (
 // openDB, serialize writers rather than erroring under light
 // concurrency).
 type Store struct {
-	db  *sql.DB
-	enc *Encryptor
+	db        *sql.DB
+	enc       *Encryptor
+	migration *Migration
 }
 
 // Open opens (or creates) the index database at path, using enc to seal
@@ -29,12 +30,16 @@ func Open(path string, enc *Encryptor) (*Store, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("sessionstore: encryptor is required")
 	}
-	db, err := openDB(path)
+	db, migration, err := openDB(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, enc: enc}, nil
+	return &Store{db: db, enc: enc, migration: migration}, nil
 }
+
+// Migration reports the schema upgrade Open performed, or nil when the
+// database was new or already current.
+func (s *Store) Migration() *Migration { return s.migration }
 
 func (s *Store) Close() error { return s.db.Close() }
 
