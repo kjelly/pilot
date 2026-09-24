@@ -216,4 +216,3 @@ func readManifestEndpointState(path string) (state string, found bool, err error
 	}
 	return "present", true, nil
 }
-
