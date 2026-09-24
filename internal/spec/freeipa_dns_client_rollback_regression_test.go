@@ -146,6 +146,30 @@ func TestRegression_FreeipaDNSClientRollback_Structure(t *testing.T) {
 	}
 }
 
+// TestRegression_FreeipaDNSClientResolvConfWriteIsDebianOnly locks the
+// 2026-09-24 idempotency fix: on EL, NetworkManager rewrites
+// /etc/resolv.conf on `nmcli device reapply`, so writing it there made the
+// second run report changed=1 on a plain EL client.
+func TestRegression_FreeipaDNSClientResolvConfWriteIsDebianOnly(t *testing.T) {
+	block := resolverTaskList(t)[taskIndexByName(resolverTaskList(t), resolverBlockTask)]
+	inner, _ := block["block"].([]any)
+	found := false
+	for _, raw := range inner {
+		task, _ := raw.(map[string]any)
+		copyArgs, ok := task["ansible.builtin.copy"].(map[string]any)
+		if !ok || copyArgs["dest"] != "/etc/resolv.conf" {
+			continue
+		}
+		found = true
+		if task["when"] != "ansible_os_family == 'Debian'" {
+			t.Errorf("/etc/resolv.conf copy task: when = %v, want %q", task["when"], "ansible_os_family == 'Debian'")
+		}
+	}
+	if !found {
+		t.Fatal("no ansible.builtin.copy task with dest /etc/resolv.conf in the resolver block")
+	}
+}
+
 // TestRegression_FreeipaDNSClientDigInstallUsesAptFramework locks the other
 // 2026-09-24 finding: plain ansible.builtin.apt for `dnsutils` hit a 404 on
 // a stale apt index and failed the apply before the resolver block.

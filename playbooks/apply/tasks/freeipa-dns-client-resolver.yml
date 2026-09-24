@@ -236,7 +236,14 @@
         - ansible_os_family == 'Debian'
         - freeipa_dns_client_resolved_dropin is changed
 
-    - name: "Debian/EL — write /etc/resolv.conf (glibc-resolver/dig path; symlink- and bind-mount-safe)"
+    # Debian only. On EL, NetworkManager owns /etc/resolv.conf and rewrites
+    # it from the connection profile on `nmcli device reapply` below, so a
+    # write here was replaced on the first run and written again on the
+    # second: a plain EL client never reached changed=0 (2026-09-24
+    # vm-target run; the EL FreeIPA server case had not shown it because
+    # its profile already matched, so no reapply ran).
+    - name: "Debian — write /etc/resolv.conf (glibc-resolver/dig path; symlink- and bind-mount-safe)"
+      when: ansible_os_family == 'Debian'
       ansible.builtin.copy:
         dest: /etc/resolv.conf
         owner: root
