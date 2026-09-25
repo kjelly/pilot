@@ -820,7 +820,10 @@
     # group. This runs only after "Ensure IPA groups exist" above, so a
     # failed group creation never produces a false "applied" marker.
     - name: "Ensure durable history marker for every applied group"
-      ansible.builtin.include_tasks: tasks/freeipa-group-history-marker.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-group-history-marker.yml
+        apply:
+          tags: [identity, groups]
       loop: "{{ ipa_active_groups }}"
       loop_control:
         loop_var: pilot_group_history_loop_item
@@ -1200,7 +1203,10 @@
     # already-absent group keeps whatever marker it already has (or lacks)
     # untouched, per §4.9's "history is ambiguous" legacy rule.
     - name: "Ensure durable history marker before deleting an existing group"
-      ansible.builtin.include_tasks: tasks/freeipa-group-history-marker.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-group-history-marker.yml
+        apply:
+          tags: [identity, groups]
       loop: "{{ canonical_group_absent_show.results | default([]) }}"
       loop_control:
         loop_var: pilot_group_history_loop_item

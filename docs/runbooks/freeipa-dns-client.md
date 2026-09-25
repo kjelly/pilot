@@ -41,6 +41,11 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   `changed=0`）；rescue 在 Ubuntu 首次／重跑／還原失敗、EL 首次四種情境都把主機
   還原成套用前的狀態或如實回報失敗。見
   [evidence](../evidence/freeipa-dns-client/2026-09-24-62d8069.md)。
+  之後只改過 EL 分支的 snapshot（`nmcli … | head -n1` 在 pipefail 下偶發
+  SIGPIPE rc=141）：candidate `f405753` 在 AlmaLinux 9 client `g11-el` 重跑，
+  `vm-target topology test` L1→L6 PASS（verify 6/6、重跑 `changed=0`），rescue
+  把 connection DNS 設定還原成上一次成功的值。Ubuntu 路徑未變動。見
+  [evidence](../evidence/freeipa-dns-client/2026-09-24-f405753.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_PamOidcSshdSpec v2.0 — aligned with kha7iq/kc-ssh-pam upstream.

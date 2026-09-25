@@ -113,11 +113,15 @@
           when: not ansible_check_mode
           failed_when: false
 
+        # Same base line freeipa-client-apply.yml writes, without autofs: on
+        # EL the sudo responder stays explicit (sssd-sudo.socket ships
+        # disabled there), so dropping it would leave IPA users with no
+        # sudo rules until freeipa-client is re-applied.
         - name: "Revert SSSD's services line to drop the autofs responder"
           ansible.builtin.lineinfile:
             path: /etc/sssd/sssd.conf
             regexp: '^services\s*='
-            line: "services = nss, pam, ssh"
+            line: "services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}"
             state: present
             create: false
           register: freeipa_nfs_client_decom_sssd_reverted

@@ -184,7 +184,10 @@
       tags: [always]
 
     - name: "FreeIPA server pool — compute desired pool + effective topology mode"
-      ansible.builtin.include_tasks: tasks/freeipa-server-pool.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-server-pool.yml
+        apply:
+          tags: [always]
       vars:
         freeipa_domain: "{{ freeipa_server_pool_domain_input }}"
       tags: [always]
@@ -196,7 +199,10 @@
     # that stays pinned to a single server even after HA client
     # enrollment).
     - name: "FreeIPA admin endpoint — select a live server for this playbook's own ipa CLI calls"
-      ansible.builtin.include_tasks: tasks/freeipa-admin-endpoint-select.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-admin-endpoint-select.yml
+        apply:
+          tags: [always]
       tags: [always]
 
     # freeipa-client-host-dns.yml's authoritative-DNS reads (plan/apply/
@@ -280,19 +286,85 @@
       ansible.builtin.stat:
         path: "{{ ipa_config_marker }}"
       register: ipa_cfg
-      tags: [freeipa-client, C1]
+      tags: [freeipa-client, C1, C11]
 
     - name: "FreeIPA client — detect host Kerberos keytab presence (read-only, Day-2 spec §6.1)"
       ansible.builtin.stat:
         path: /etc/krb5.keytab
       register: ipa_client_dns_keytab_stat
-      tags: [freeipa-client, C1]
+      tags: [freeipa-client, C1, C11]
+
+    # The DNS preflight below queries authoritative DNS with dig. A fresh
+    # AlmaLinux 9 image has no bind-utils: the first dig returned rc=127 and
+    # the fail-closed gate stopped every fresh EL client before enrollment
+    # (2026-09-24 vm-target run). Ubuntu images ship dig (bind9-dnsutils), so
+    # this never showed there. Installing the query tool is the only change
+    # made before the preflight; it does not touch DNS or enrollment state.
+    # A check-mode preview on a host without dig ends here with a message
+    # (AGENTS.md §4.5 point 4); the real run installs it and continues.
+    - name: "FreeIPA client DNS — check whether dig is installed (read-only)"
+      ansible.builtin.command:
+        argv: [sh, -c, "command -v dig"]
+      register: ipa_client_dns_dig_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — install dig for the preflight (RedHat)"
+      ansible.builtin.dnf:
+        name: bind-utils
+        state: present
+      when:
+        - ansible_os_family == 'RedHat'
+        - not ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — install dig for the preflight (Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [freeipa-client, C11]
+      vars:
+        pilot_apt_packages: [bind9-dnsutils]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client-dig
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+
+    - name: "FreeIPA client DNS — check-mode preview without dig ends here"
+      when:
+        - ansible_check_mode
+        - ipa_client_dns_dig_probe.rc != 0
+      tags: [freeipa-client, C11]
+      block:
+        - name: "FreeIPA client DNS — explain why the preview stops"
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} has no dig yet, so the authoritative DNS
+              preflight cannot run in check mode. The real run installs
+              {{ 'bind-utils' if ansible_os_family == 'RedHat' else 'bind9-dnsutils' }}
+              first and then runs the preflight; nothing else is previewed for
+              this host.
+
+        - name: "FreeIPA client DNS — end the check-mode preview for this host"
+          ansible.builtin.meta: end_host
 
     # Host DNS registration preflight (spec.md freeipa-client-host-dns-registration
     # §9/§16: "DNS preflight" must run before ANY mutation, including the
     # /etc/hosts pin below — hence pre_tasks, not tasks. All read-only.
     - name: "FreeIPA client DNS — resolve + preflight (plan, no mutation)"
-      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-host-dns.yml
+        apply:
+          tags: [freeipa-client, C11]
       vars:
         freeipa_client_dns_phase: plan
       tags: [freeipa-client, C11]
@@ -311,7 +383,10 @@
     # its template on every boot and silently drops them again (see
     # cloud-init-freeipa-incident-report.md, 2026-08-18: yk-pro6k-dev-01/02/03).
     - name: "FreeIPA client — stop cloud-init from wiping our /etc/hosts pins on next boot"
-      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      ansible.builtin.include_tasks:
+        file: tasks/cloud-init-etc-hosts-guard.yml
+        apply:
+          tags: [freeipa-client, C1, C3]
       tags: [freeipa-client, C1, C3]
 
     - name: "FreeIPA client — pin this host {{ ipa_client_fqdn }} to its own IP in /etc/hosts (FQDN canonical)"
@@ -409,14 +484,33 @@
         - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C1]
 
-    - name: "FreeIPA client — install host-audit daemon (auditd)"
+    # Debian through the apt framework, like C1/C8: a plain package install
+    # uses whatever apt index the host already has and 404s when it is
+    # stale (AGENTS.md §4.5 point 9).
+    - name: "FreeIPA client — install host-audit daemon (auditd, Debian)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [freeipa-client, C9]
+      vars:
+        pilot_apt_packages: "{{ ipa_audit_packages_debian }}"
+        pilot_apt_policy: tolerant
+        pilot_apt_component: freeipa-client-auditd
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+      tags: [freeipa-client, C9]
+
+    - name: "FreeIPA client — install host-audit daemon (audit, RedHat)"
       ansible.builtin.package:
-        name: >-
-          {{ ipa_audit_packages_debian
-             if ansible_os_family == 'Debian'
-             else ipa_audit_packages_redhat }}
+        name: "{{ ipa_audit_packages_redhat }}"
         state: present
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
       tags: [freeipa-client, C9]
 
     - name: "FreeIPA client — install SSSD cache tools (Debian)"
@@ -577,6 +671,13 @@
     # explicit responders, so their matching socket units must be disabled
     # before SSSD is restarted; otherwise systemd starts a second copy and
     # `sssd_check_socket_activated_responders` fails with exit status 17.
+    # EL is different (2026-09-24, AlmaLinux 9, sssd 2.9.8): sssd-sudo.socket
+    # ships disabled, and when enabled the socket-activated responder dies
+    # with "check_file failed for /var/lib/sss/pipes/private/sbus-dp_<domain>"
+    # (it cannot reach the backend), so `sudo -l` reported "not allowed" for
+    # every IPA user (spec C8). On RedHat "sudo" therefore stays in
+    # `services=` as an explicit responder, which is what worked live; the
+    # socket unit is only enabled on Debian (below).
     # Preserve the optional autofs responder installed by the NFS client role.
     # site.yml deliberately runs this base client role before the NFS overlay;
     # on later site runs, replacing the whole line with only nss/pam/ssh would
@@ -632,7 +733,7 @@
         path: /etc/sssd/sssd.conf
         regexp: '^services\s*='
         line: >-
-          services = nss, pam, ssh{{ ', autofs'
+          services = nss, pam, ssh{{ ', sudo' if ansible_os_family == 'RedHat' else '' }}{{ ', autofs'
           if 'autofs' in
           ((ipa_sssd_services_current.stdout | default(''))
           | split(',') | map('trim') | list) else '' }}
@@ -834,7 +935,10 @@
     # matrix for where this actually gets exercised, on the dedicated HA
     # topology).
     - name: "FreeIPA client — Day-2 server-list reconciliation (krb5.conf + sssd.conf)"
-      ansible.builtin.include_tasks: tasks/freeipa-client-server-failover.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-server-failover.yml
+        apply:
+          tags: [freeipa-client, C1]
       when: not ansible_check_mode
       tags: [freeipa-client, C1]
 
@@ -901,7 +1005,10 @@
     # authoritative DNS and failing loudly (never rolling back enrollment) if
     # it still doesn't match desired.
     - name: "FreeIPA client DNS — existing-client backfill + post-apply verify"
-      ansible.builtin.include_tasks: tasks/freeipa-client-host-dns.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-client-host-dns.yml
+        apply:
+          tags: [freeipa-client, C11]
       vars:
         freeipa_client_dns_phase: apply
       tags: [freeipa-client, C11]
@@ -913,5 +1020,8 @@
     # included, even when pilot_annotations is unset (a no-op reconcile in
     # that case, or a prune if annotations were previously set and removed).
     - name: "FreeIPA host annotations — reconcile pilot_annotations to FreeIPA userClass/nshostlocation"
-      ansible.builtin.include_tasks: tasks/freeipa-host-annotations.yml
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-host-annotations.yml
+        apply:
+          tags: [freeipa-client, host-annotations]
       tags: [freeipa-client, host-annotations]

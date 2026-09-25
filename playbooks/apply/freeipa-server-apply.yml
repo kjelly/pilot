@@ -272,7 +272,10 @@
     # cloud-init-freeipa-incident-report.md, 2026-08-18: same class of bug
     # found on the client side, applies equally to the server's own pin).
     - name: "FreeIPA — stop cloud-init from wiping our /etc/hosts pin on next boot"
-      ansible.builtin.include_tasks: tasks/cloud-init-etc-hosts-guard.yml
+      ansible.builtin.include_tasks:
+        file: tasks/cloud-init-etc-hosts-guard.yml
+        apply:
+          tags: [freeipa, freeipa-hosts]
       tags: [freeipa, freeipa-hosts]
 
     - name: "FreeIPA — pin server FQDN to its LAN IP (FQDN canonical) in /etc/hosts"
@@ -750,6 +753,47 @@
           register: audit_init
           changed_when: "'INITIALIZED' in audit_init.stdout"
           no_log: true
+
+        # 389-ds buffers the audit log (nsslapd-auditlog-logbuffering is on
+        # by default and left that way), so the entries above reach the file
+        # some seconds later: 8 s and 29 s on 389-ds-base 2.8.0 (2026-09-24).
+        # With no client enrolling after the server play, verify could check
+        # C16 before the flush and see an empty file. Wait for the flush
+        # here instead of changing 389-ds. This also catches a dummy write
+        # that failed: the task above hides its output (no_log) and does not
+        # check the ldapmodify exit code.
+        # wait_for rather than stat + until: when until runs out of retries,
+        # ansible-core 2.19 marks the task failed and prints an error even
+        # with failed_when: false. The gate below makes the decision.
+        - name: "FreeIPA — 389-ds audit log: wait until the buffered entries reach the audit file (spec C16)"
+          ansible.builtin.wait_for:
+            path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+            search_regex: '\S'
+            timeout: 120
+          register: ipa_ds_audit_wait
+          failed_when: false
+
+        - name: "FreeIPA — 389-ds audit log: read the audit file size"
+          ansible.builtin.stat:
+            path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+          register: ipa_ds_audit_file
+
+        - name: "Gate: the 389-ds audit file is non-empty (spec C16)"
+          ansible.builtin.assert:
+            that:
+              - ipa_ds_audit_file.stat.exists
+              - ipa_ds_audit_file.stat.size > 0
+            success_msg: >-
+              audit file has {{ ipa_ds_audit_file.stat.size }} bytes after
+              {{ ipa_ds_audit_wait.elapsed | default('?') }} s
+            fail_msg: >-
+              /var/log/dirsrv/{{ ipa_ds_instance }}/audit is still
+              {{ 'missing' if not ipa_ds_audit_file.stat.exists else 'empty' }}
+              after {{ ipa_ds_audit_wait.elapsed | default('?') }} s
+              ({{ ipa_ds_audit_wait.msg | default('') }}), although audit
+              logging is on and a directory write was made. Check that the
+              dummy write above succeeded (run it by hand with the Directory
+              Manager password) and that dirsrv can write the file.
 
   handlers:
     - name: "Validate httpd configuration after FreeIPA WSGI timeout change"

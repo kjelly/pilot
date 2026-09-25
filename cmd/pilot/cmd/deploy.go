@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.yaml.in/yaml/v3"
 	"golang.org/x/term"
-	"gopkg.in/yaml.v3"
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/contract"
@@ -50,6 +50,9 @@ var deployActionsPath string
 var deployPresentation bool
 var deployTracePath string
 var deployForceFlag bool
+
+// deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
+var deployStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 type deployAnsibleRuntime struct {
 	Env     []string
@@ -212,7 +215,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployActionsPath, "actions", "", "以 JSON scenario 自動回答 deploy TUI prompts")
 	deployCmd.Flags().BoolVar(&deployPresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
-	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示；所有欄位採用精靈顯示的預設值")
+	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示：各欄位採用精靈顯示的預設值，但預覽成功後會直接執行正式套用(略過預設為 No 的「要接著套用真正的變更嗎？」與正式套用確認)")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVar(&deployGraphDirFlag, "dir", ".", "workspace directory containing inventory.yml (default: current directory)")
@@ -348,8 +351,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	if !promptWorkflowAllowsNonTTY(term.IsTerminal(int(os.Stdin.Fd()))) {
-		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請直接用 ansible-playbook（見 DELIVERY.md）")
+	// --force answers every prompt through the automation driver, so it must
+	// be installed before the TTY gate: that is what lets `pilot deploy
+	// --force` run from CI, cron, or `ssh host pilot deploy --force`.
+	if deployForceFlag {
+		defaults := &promptAutomation{useDefaults: true, forceApply: true}
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = defaults
+		defer func() { activePromptAutomation = oldPrompt }()
+	}
+
+	if !promptWorkflowAllowsNonTTY(deployStdinIsTerminal()) {
+		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請加 --force（全部採用預設值並直接套用）、用 --actions 指定 JSON scenario 檔，或直接用 ansible-playbook（見 DELIVERY.md）")
 	}
 
 	timeout, err := parseDeployTimeout(deployTimeoutFlag)
@@ -368,13 +381,6 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
-
-	if deployForceFlag {
-		defaults := &promptAutomation{useDefaults: true, forceApply: true}
-		oldPrompt := activePromptAutomation
-		activePromptAutomation = defaults
-		defer func() { activePromptAutomation = oldPrompt }()
-	}
 
 	fmt.Fprintln(out, "═══ pilot deploy — 互動式部署精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")

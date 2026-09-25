@@ -17,10 +17,13 @@ type fakeAuditRecorder struct {
 	frames        int
 }
 
-func (f *fakeAuditRecorder) RecordActionStart(editAction) error         { f.actionStarts++; return nil }
-func (f *fakeAuditRecorder) RecordKeys([]string) error                  { f.keyBatches++; return nil }
-func (f *fakeAuditRecorder) RecordFrame(FrameEvent) error               { f.frames++; return nil }
-func (f *fakeAuditRecorder) RecordActionResult(editAction, error) error { f.actionResults++; return nil }
+func (f *fakeAuditRecorder) RecordActionStart(editAction) error { f.actionStarts++; return nil }
+func (f *fakeAuditRecorder) RecordKeys([]string) error          { f.keyBatches++; return nil }
+func (f *fakeAuditRecorder) RecordFrame(FrameEvent) error       { f.frames++; return nil }
+func (f *fakeAuditRecorder) RecordActionResult(editAction, error) error {
+	f.actionResults++
+	return nil
+}
 
 func TestAutomationDriver_RecorderReceivesOneCallPerActionAndKey(t *testing.T) {
 	dir := t.TempDir()

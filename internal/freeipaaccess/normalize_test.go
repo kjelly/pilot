@@ -124,8 +124,8 @@ func TestParseAnnotations(t *testing.T) {
 	got := parseAnnotations([]string{
 		"pilot.annotation.owner=ai-platform-team",
 		"pilot.annotation.project=alpha",
-		"some-foreign-userclass-value",  // no prefix at all
-		"pilot.annotation.",             // prefix with nothing after it (no "=")
+		"some-foreign-userclass-value",   // no prefix at all
+		"pilot.annotation.",              // prefix with nothing after it (no "=")
 		"pilot.annotation.=orphan-value", // empty key
 		"pilot.annotation.note=has=equals=signs",
 	})
