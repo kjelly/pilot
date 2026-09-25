@@ -163,7 +163,10 @@ docker rm -f infra-test
 
 ## 4. State 檔在哪
 
-`$HOME/.local/share/pilot/docker-targets.json`（可用 `--data-dir` 改）
+pilot data dir 底下的 `docker-targets.json`。Data dir 依序取 `--data-dir`、`PILOT_DATA_DIR`、
+config 檔的 `data_dir`、`~/.local/share/pilot`，所有命令一致。2026-09-25 之前 docker-target 不讀
+`PILOT_DATA_DIR` 與 `data_dir`；若舊檔還在 `~/.local/share/pilot`，會印一次
+`file=docker-targets.json found_in=<舊目錄>` 的 WARN，搬移檔案或加 `--data-dir <found_in>` 即可（pilot 不會自己搬）。
 
 ```json
 {
@@ -413,6 +416,7 @@ flag）,導致這兩個指令在乾淨的 CLI 呼叫下永遠因為空字串驗�
 
 | 日期 | 版本 | 變更 |
 |------|------|------|
+| 2026-09-25 | v1.4 | §4：data dir 與其他命令一致，舊位置 state 的遷移提示（`docs/evidence/data-dir/2026-09-25-92e6063.md`） |
 | 2026-07-03 | v1.3 | ＋`--engine podman`（opt-in，docker 仍是預設）：rootless/daemonless，消掉 docker-group root-equivalence；`Target`/`Options` 加 `Engine` 欄位、per-engine binary override（`PILOT_PODMAN_BIN`）、inventory 依 engine 切 `containers.podman.podman` connection plugin；真機 rootless podman 4.9.3 跑過 up/show-inventory/ping/run/snapshot/rollback/down + `--systemd` 全套驗證；順手修 `run`/`show-inventory` 誤檢查 `dtSnapshotTag` 的既有 bug |
 | 2026-06-30 | v1.2 | ＋`--systemd`（以 /sbin/init 開機，systemctl/service/systemd-resolved 可用，rollback 保留設定）；image 補 systemd+systemd-sysv+STOPSIGNAL；`up` 對 `pilot-target:*` image 缺漏時自動 build（Dockerfile embed 進 binary，免先跑 build.sh）；修 `pilot run --target` 的 inventory tmpfile 外洩 |
 | 2026-06-30 | v1.1 | ＋pre-bake image (`--image-pilot`) / ＋multi-host (`--hosts`) / ＋snapshot+rollback / ＋`pilot run --target` |
