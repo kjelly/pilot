@@ -49,6 +49,9 @@ var deployPresentation bool
 var deployTracePath string
 var deployForceFlag bool
 
+// deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
+var deployStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
 type deployAnsibleRuntime struct {
 	Env     []string
 	TempDir string
@@ -285,8 +288,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	if !promptWorkflowAllowsNonTTY(term.IsTerminal(int(os.Stdin.Fd()))) {
-		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請直接用 ansible-playbook（見 DELIVERY.md）")
+	// --force answers every prompt through the automation driver, so it must
+	// be installed before the TTY gate: that is what lets `pilot deploy
+	// --force` run from CI, cron, or `ssh host pilot deploy --force`.
+	if deployForceFlag {
+		defaults := &promptAutomation{useDefaults: true, forceApply: true}
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = defaults
+		defer func() { activePromptAutomation = oldPrompt }()
+	}
+
+	if !promptWorkflowAllowsNonTTY(deployStdinIsTerminal()) {
+		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請加 --force（全部採用預設值並直接套用）、用 --actions 指定 JSON scenario 檔，或直接用 ansible-playbook（見 DELIVERY.md）")
 	}
 
 	timeout, err := parseDeployTimeout(deployTimeoutFlag)
@@ -305,13 +318,6 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	runner.LogPath = runtime.LogPath
 	runner.StdoutWriter = out
 	runner.StderrWriter = cmd.ErrOrStderr()
-
-	if deployForceFlag {
-		defaults := &promptAutomation{useDefaults: true, forceApply: true}
-		oldPrompt := activePromptAutomation
-		activePromptAutomation = defaults
-		defer func() { activePromptAutomation = oldPrompt }()
-	}
 
 	fmt.Fprintln(out, "═══ pilot deploy — 互動式部署精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
