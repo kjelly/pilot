@@ -60,6 +60,7 @@ func buildPilotBinary(t *testing.T) string {
 		repoRoot := repoRootForPTYTest(t)
 		cmd := exec.Command("go", "build", "-o", out, "./cmd/pilot")
 		cmd.Dir = repoRoot
+		cmd.Env = hostToolEnv()
 		combined, err := cmd.CombinedOutput()
 		if err != nil {
 			pilotBinaryErr = fmt.Errorf("build pilot binary: %w\n%s", err, combined)
@@ -419,38 +420,31 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 }
 
 func TestMain(m *testing.M) {
-	// Point every test, and every pilot subprocess a test starts, at a
-	// throwaway data dir. A test that reaches prepareDeployAnsibleRuntime
-	// without its own dir (host decommission, `pilot mcp serve`) otherwise
-	// redacts and rotates the developer's real
-	// ~/.local/share/pilot/ansible/ansible.log. Against a 70 MB log that took
-	// one test 177s, and it rewrites a file the test has no business
-	// touching. Tests that need a specific dir still set dataDir or
-	// t.Setenv("PILOT_DATA_DIR", ...).
-	testDataDir, err := os.MkdirTemp("", "pilot-test-data-")
+	// Keep the SSH control directories that prepareDeployAnsibleRuntime
+	// creates — here and in every pilot subprocess these tests spawn,
+	// which inherit the environment — out of the real /tmp. The
+	// ControlPath-length test switches back to "/tmp" itself.
+	controlBase, err := os.MkdirTemp("/tmp", "pilot-test-")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "create test data dir:", err)
+		fmt.Fprintln(os.Stderr, "create SSH control base:", err)
 		os.Exit(1)
 	}
-	if err := os.Setenv("PILOT_DATA_DIR", testDataDir); err != nil {
-		fmt.Fprintln(os.Stderr, "set PILOT_DATA_DIR:", err)
+	if err := os.Setenv(sshControlBaseEnv, controlBase); err != nil {
+		fmt.Fprintln(os.Stderr, "set", sshControlBaseEnv+":", err)
+		_ = os.RemoveAll(controlBase)
+		os.Exit(1)
+	}
+	cleanup, err := isolatePilotUserDirs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate pilot data and config dirs:", err)
+		_ = os.RemoveAll(controlBase)
 		os.Exit(1)
 	}
 	code := m.Run()
+	cleanup()
+	_ = os.RemoveAll(controlBase)
 	if pilotBinaryDir != "" {
 		_ = os.RemoveAll(pilotBinaryDir)
 	}
-	_ = os.RemoveAll(testDataDir)
 	os.Exit(code)
-}
-
-// TestMainIsolatesPilotDataDir keeps TestMain's isolation in place: without
-// --data-dir, a test must resolve to the throwaway dir, never the real one.
-func TestMainIsolatesPilotDataDir(t *testing.T) {
-	prev := dataDir
-	dataDir = ""
-	t.Cleanup(func() { dataDir = prev })
-	if got := resolvePilotDataDir(); !strings.HasPrefix(filepath.Base(got), "pilot-test-data-") {
-		t.Fatalf("resolvePilotDataDir() = %q, want TestMain's throwaway pilot-test-data-* dir", got)
-	}
 }
