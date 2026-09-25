@@ -88,7 +88,7 @@ var (
 
 // dtNewManager builds a Manager against the resolved data dir.
 func dtNewManager() (*dockertarget.Manager, error) {
-	return dockertarget.NewManager(resolveStateDir())
+	return dockertarget.NewManager(resolveStateDir(dockerTargetStateFiles...))
 }
 
 // ---- up -------------------------------------------------------------------

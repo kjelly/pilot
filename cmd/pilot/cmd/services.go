@@ -71,7 +71,7 @@ func runServicesUp(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := services.NewManager(resolveStateDir(), nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func runServicesUp(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesStatus(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(), nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func runServicesStatus(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesDown(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(), nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func runServicesDown(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesPurge(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(), nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return err
 	}

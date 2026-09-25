@@ -4,20 +4,30 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"slices"
+	"sync"
 
 	"github.com/kjelly/pilot/internal/config"
 )
 
+// The local state files each command family keeps in the data dir.
+var (
+	vmTargetStateFiles     = []string{"vm-targets.json"}
+	dockerTargetStateFiles = []string{"docker-targets.json"}
+	accessStateFiles       = []string{"breakglass-activations.json", "auth-policy-hosts.json"}
+	servicesStateFiles     = []string{"services.json"}
+)
+
 // resolveStateDir is resolvePilotDataDir for commands that keep local state
-// (vm-target, docker-target, access grants, services). Before 2026-09-25
-// those commands ignored $PILOT_DATA_DIR, and some also ignored the config
-// file's data_dir, so their state may still sit in the directory they used
-// then. resolveStateDir reports that once per process; it never moves or
-// deletes anything.
-func resolveStateDir() string {
+// (vm-target, docker-target, access grants, services); files are the state
+// files the caller uses. Before 2026-09-25 those commands ignored
+// $PILOT_DATA_DIR, and some also ignored the config file's data_dir, so a
+// file may still sit in the directory they used then. resolveStateDir
+// reports each such file once per process; it never moves or deletes
+// anything.
+func resolveStateDir(files ...string) string {
 	dir := resolvePilotDataDir()
-	warnLegacyStateOnce(dir)
+	warnLegacyState(dir, files)
 	return dir
 }
 
@@ -56,15 +66,18 @@ func legacyStateLocations() []legacyStateLocation {
 	}
 }
 
-// legacyStateNotices lists the files in locs that are missing from current,
-// the data dir now in use, but present where an older pilot kept them.
-func legacyStateNotices(current string, locs []legacyStateLocation) []legacyStateNotice {
+// legacyStateNotices lists which of files are missing from current, the
+// data dir now in use, but present where an older pilot kept them.
+func legacyStateNotices(current string, files []string, locs []legacyStateLocation) []legacyStateNotice {
 	var out []legacyStateNotice
 	for _, loc := range locs {
 		if loc.dir == "" || samePath(loc.dir, current) {
 			continue
 		}
 		for _, f := range loc.files {
+			if !slices.Contains(files, f) {
+				continue
+			}
 			if fileExists(filepath.Join(loc.dir, f)) && !fileExists(filepath.Join(current, f)) {
 				out = append(out, legacyStateNotice{file: f, from: loc.dir})
 			}
@@ -73,13 +86,25 @@ func legacyStateNotices(current string, locs []legacyStateLocation) []legacyStat
 	return out
 }
 
-var legacyStateWarned atomic.Bool
+var (
+	legacyStateMu     sync.Mutex
+	legacyStateWarned = map[string]bool{}
+)
 
-func warnLegacyStateOnce(current string) {
-	if !legacyStateWarned.CompareAndSwap(false, true) {
+func warnLegacyState(current string, files []string) {
+	legacyStateMu.Lock()
+	defer legacyStateMu.Unlock()
+	var pending []string
+	for _, f := range files {
+		if !legacyStateWarned[f] {
+			legacyStateWarned[f] = true
+			pending = append(pending, f)
+		}
+	}
+	if len(pending) == 0 {
 		return
 	}
-	for _, n := range legacyStateNotices(current, legacyStateLocations()) {
+	for _, n := range legacyStateNotices(current, pending, legacyStateLocations()) {
 		slog.Warn("local state is in the data dir an older pilot used for it; move the file into data_dir, or pass --data-dir with found_in, to keep managing it",
 			"file", n.file, "found_in", n.from, "data_dir", current)
 	}
@@ -97,4 +122,19 @@ func samePath(a, b string) bool {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// applyRootFlags honours the root --data-dir and --config for the commands
+// that turn off cobra's flag parsing (vm-target run and verify), and
+// removes them from args so they are not passed on to ansible-playbook or
+// pilot verify.
+func applyRootFlags(args []string) []string {
+	var v string
+	if args, v = extractValueFlag(args, "--data-dir"); v != "" {
+		dataDir = v
+	}
+	if args, v = extractValueFlag(args, "--config"); v != "" {
+		cfgFile = v
+	}
+	return args
 }

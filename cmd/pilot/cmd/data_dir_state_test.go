@@ -27,9 +27,15 @@ func isolateDataDirInputs(t *testing.T) (home string) {
 	savedDataDir, savedCfgFile := dataDir, cfgFile
 	dataDir, cfgFile = "", ""
 	t.Cleanup(func() { dataDir, cfgFile = savedDataDir, savedCfgFile })
-	legacyStateWarned.Store(false)
-	t.Cleanup(func() { legacyStateWarned.Store(false) })
+	resetLegacyStateWarnings()
+	t.Cleanup(resetLegacyStateWarnings)
 	return home
+}
+
+func resetLegacyStateWarnings() {
+	legacyStateMu.Lock()
+	defer legacyStateMu.Unlock()
+	legacyStateWarned = map[string]bool{}
 }
 
 func writeConfigDataDir(t *testing.T, home, dir string) {
@@ -164,13 +170,17 @@ func TestVMTargetListReadsStateFromPilotDataDir(t *testing.T) {
 
 // TestVMTargetListNoticesStateLeftInTheOldDataDir: the state is only where
 // an older pilot kept it, so the command warns once, naming the file, where
-// it is and the data dir in use, and changes nothing.
+// it is and the data dir in use, and changes nothing. It reports only its
+// own state file, not another command's.
 func TestVMTargetListNoticesStateLeftInTheOldDataDir(t *testing.T) {
 	home := isolateDataDirInputs(t)
 	oldDir := filepath.Join(home, ".local", "share", "pilot")
 	envDir := filepath.Join(home, "isolated")
 	t.Setenv("PILOT_DATA_DIR", envDir)
 	saveVMTargetState(t, oldDir, "dd-in-default-dir")
+	if err := os.WriteFile(filepath.Join(oldDir, "services.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stderr := captureStderr(t)
 
 	if out := runVMTargetListJSON(t); strings.Contains(out, "dd-in-default-dir") {
@@ -184,6 +194,9 @@ func TestVMTargetListNoticesStateLeftInTheOldDataDir(t *testing.T) {
 	_ = runVMTargetListJSON(t)
 	if n := strings.Count(stderr(), "file=vm-targets.json"); n != 1 {
 		t.Fatalf("notice printed %d times, want once per process", n)
+	}
+	if strings.Contains(stderr(), "file=services.json") {
+		t.Fatalf("vm-target reported another command's state file: %s", stderr())
 	}
 	if _, err := os.Stat(filepath.Join(oldDir, "vm-targets.json")); err != nil {
 		t.Fatalf("old state was touched: %v", err)
@@ -216,12 +229,16 @@ func TestLegacyStateNotices(t *testing.T) {
 		{dir: def, files: []string{"vm-targets.json", "docker-targets.json", "breakglass-activations.json", "auth-policy-hosts.json"}},
 		{dir: cfgDir, files: []string{"services.json"}},
 	}
-	got := legacyStateNotices(cur, locs)
+	all := []string{"vm-targets.json", "docker-targets.json", "breakglass-activations.json", "auth-policy-hosts.json", "services.json"}
+	got := legacyStateNotices(cur, all, locs)
 	want := []legacyStateNotice{{file: "vm-targets.json", from: def}, {file: "services.json", from: cfgDir}}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("notices = %+v, want %+v", got, want)
 	}
-	if got := legacyStateNotices(def, locs[:1]); len(got) != 0 {
+	if got := legacyStateNotices(cur, servicesStateFiles, locs); len(got) != 1 || got[0] != want[1] {
+		t.Fatalf("notices for services only = %+v, want %+v", got, want[1:])
+	}
+	if got := legacyStateNotices(def, all, locs[:1]); len(got) != 0 {
 		t.Fatalf("notices for the dir itself = %+v, want none", got)
 	}
 	dataDir = "/explicit"
@@ -282,5 +299,40 @@ func TestDataDirIsResolvedInOnePlace(t *testing.T) {
 				t.Errorf("%s matches %s: resolve the data dir with resolvePilotDataDir or resolveStateDir", f, r.re)
 			}
 		}
+	}
+}
+
+// TestApplyRootFlags: vm-target run and verify turn off cobra's flag
+// parsing, so they take the root --data-dir and --config themselves and do
+// not pass them on to ansible-playbook or pilot verify.
+func TestApplyRootFlags(t *testing.T) {
+	isolateDataDirInputs(t)
+	rest := applyRootFlags([]string{"--name", "vm1", "--data-dir", "/srv/d", "spec.md", "-e", "a=b", "--config=/etc/pilot.yaml"})
+	if dataDir != "/srv/d" || cfgFile != "/etc/pilot.yaml" {
+		t.Fatalf("dataDir=%q cfgFile=%q, want /srv/d and /etc/pilot.yaml", dataDir, cfgFile)
+	}
+	if want := "--name vm1 spec.md -e a=b"; strings.Join(rest, " ") != want {
+		t.Fatalf("remaining args = %q, want %q", rest, want)
+	}
+}
+
+// TestVMTargetVerifyHonoursDataDirFlag drives the real command: vm-target
+// verify turns off cobra's flag parsing, so before applyRootFlags a
+// --data-dir given to it was ignored and the target was looked up in the
+// default data dir.
+func TestVMTargetVerifyHonoursDataDirFlag(t *testing.T) {
+	home := isolateDataDirInputs(t)
+	dir := filepath.Join(home, "flag-dir")
+	saveVMTargetState(t, dir, "dd-flag-target")
+	savedName := vtName
+	vtName = ""
+	t.Cleanup(func() { vtName = savedName })
+	rootCmd.SetArgs([]string{"vm-target", "verify", "--data-dir", dir, "--name", "dd-flag-target", filepath.Join(home, "spec.md")})
+	rootCmd.SetOut(io.Discard)
+	rootCmd.SetErr(io.Discard)
+	t.Cleanup(func() { rootCmd.SetOut(nil); rootCmd.SetErr(nil); rootCmd.SetArgs(nil) })
+	err := rootCmd.Execute()
+	if err != nil && strings.Contains(err.Error(), `no target named "dd-flag-target"`) {
+		t.Fatalf("vm-target verify looked outside --data-dir: %v", err)
 	}
 }

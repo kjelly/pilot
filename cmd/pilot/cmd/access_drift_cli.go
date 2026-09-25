@@ -85,7 +85,7 @@ func runAccessDriftCmd(cmd *cobra.Command, args []string) error {
 		Inventory:         accessDriftInventory,
 		TargetGroup:       accessDriftTargetGroup,
 		VaultPasswordFile: accessDriftVaultPasswordFile,
-		StateDir:          resolveStateDir(),
+		StateDir:          resolveStateDir(accessStateFiles...),
 		Now:               time.Now(),
 	}
 
@@ -102,7 +102,7 @@ func runAccessDriftCmd(cmd *cobra.Command, args []string) error {
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
 		RosterFile: readPath,
 		Inventory:  accessDriftInventory,
-		StateDir:   resolveStateDir(),
+		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        time.Now(),
 	})
 	if perr := printDriftReport(out, before); perr != nil {

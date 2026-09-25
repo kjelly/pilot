@@ -82,7 +82,7 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		Inventory:         identityDriftInventory,
 		TargetGroup:       identityDriftTargetGroup,
 		VaultPasswordFile: identityDriftVaultPasswordFile,
-		StateDir:          resolveStateDir(),
+		StateDir:          resolveStateDir(accessStateFiles...),
 		Now:               time.Now(),
 	}
 
@@ -99,7 +99,7 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
 		RosterFile: readPath,
 		Inventory:  identityDriftInventory,
-		StateDir:   resolveStateDir(),
+		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        time.Now(),
 	})
 	if perr := printIdentityDriftReport(out, before); perr != nil {

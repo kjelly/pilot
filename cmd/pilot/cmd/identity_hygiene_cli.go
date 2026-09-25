@@ -75,7 +75,7 @@ func runIdentityHygieneCmd(cmd *cobra.Command, args []string) error {
 		Inventory:         identityHygieneInventory,
 		TargetGroup:       identityHygieneTargetGroup,
 		VaultPasswordFile: identityHygieneVaultPasswordFile,
-		StateDir:          resolveStateDir(),
+		StateDir:          resolveStateDir(accessStateFiles...),
 		Now:               time.Now(),
 	})
 	if err != nil {

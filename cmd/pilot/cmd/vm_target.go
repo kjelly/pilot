@@ -113,7 +113,7 @@ func resolveVMDir() string {
 }
 
 func vtNewManager() (*vmtarget.Manager, error) {
-	return vmtarget.NewManager(resolveStateDir(), resolveVMDir())
+	return vmtarget.NewManager(resolveStateDir(vmTargetStateFiles...), resolveVMDir())
 }
 
 // ---- up -------------------------------------------------------------------
@@ -208,7 +208,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	m, err := services.NewManager(resolveStateDir(), nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -524,6 +524,7 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 	// DisableFlagParsing is on so -e foo=bar flows through to the
 	// child ansible-playbook. But we still need to honour --name
 	// and --sandbox. Parse them ourselves and strip from `args`.
+	args = applyRootFlags(args)
 	if vtName == "" {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "--name" && i+1 < len(args) {
@@ -966,6 +967,7 @@ func runVtVerify(cmd *cobra.Command, args []string) error {
 	// it ourselves when the global is empty, AND strip it from
 	// `args` so we don't re-forward it to `pilot verify` (which
 	// doesn't know --name).
+	args = applyRootFlags(args)
 	if vtName == "" {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "--name" && i+1 < len(args) {
