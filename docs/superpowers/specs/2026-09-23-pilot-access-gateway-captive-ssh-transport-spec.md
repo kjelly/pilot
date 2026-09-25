@@ -1,6 +1,6 @@
 # Pilot Access Gateway — Captive SSH Transport Broker 實作規格
 
-- **狀態**：VERIFIED / implemented（rev 4）— Phase 0–6 全部完成；全新 VM 拓樸實跑 PASS，見 `docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md` 與 `docs/runbooks/pilot-access-transport.md`
+- **狀態**：VERIFIED / implemented（rev 4）；rev 5 為待 transport spec 負責人決定的提案（D8 同時擋 `pilot-known-hosts-v1`，見 §8.2、§17 rev 5）— Phase 0–6 全部完成；全新 VM 拓樸實跑 PASS，見 `docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md` 與 `docs/runbooks/pilot-access-transport.md`
 - **日期**：2026-09-23
 - **Repository**：`kjelly/pilot`
 - **Baseline**：`main@c0890f66479c2aed189fd216ddeec87f72bb7306`（rev 1 的 `99a3a86` 之後只有 lint 修正，§3 事實已對 `c0890f6` 重新核對）
@@ -33,7 +33,7 @@
 | D5 | `transport_allowed` = 授權通過 ∧ `gateway.transport.enabled` ∧ target 屬於 FreeIPA hostgroup `pilot-transport-ready` | 只有已成功套用 target policy 的主機才可被 transport 到達，避免 inventory 與 FreeIPA scope 漂移造成「有 transport、沒限制」的主機 |
 | D6 | Host key 由 Gateway 從 FreeIPA `ipaSshPubKey` 提供（`pilot-known-hosts-v1`，搭配 OpenSSH `KnownHostsCommand`）；建議設定不使用 TOFU | 延續基礎 spec「Production 不做 runtime TOFU」；workstation 不需要是 FreeIPA client |
 | D7 | Target policy 以 `Match Address <Gateway 位址>` 套用，**不**以 `Match Group` 套用 | opaque 模式無法強制 inner username（§5.2）；以 group 限制時，用不在 group 的帳號登入即可繞過 |
-| D8 | Transport 只在 recording mode 為 `""`/`metadata` 時允許（allowlist）；其他值一律拒絕 | 不得把加密的 inner SSH 冒充 terminal recording；未知的新 mode 也 fail closed |
+| D8 | Transport 只在 recording mode 為 `""`/`metadata` 時允許（allowlist）；其他值一律拒絕。由 server 端的 transport gate 判定，所以 `pilot-known-hosts-v1` 也一併拒絕（rev 5 提案） | 不得把加密的 inner SSH 冒充 terminal recording；未知的新 mode 也 fail closed。Host key 只為 transport 而提供：transport 不能用時，不回傳 key |
 | D9 | 先修 Gateway playbook 會覆寫 recording 設定的既有缺陷（Phase 1），再做 transport | 否則為了開 transport 重新 apply，會把 recording 靜默降回 metadata，D8 在部署層失效 |
 | D10 | Transport 預設關閉（`pilot_access_gateway_transport_enabled: false`）；關閉即可停止新 transport，不影響 Portal / `pilot-connect` | 新 data plane 必須 opt-in；rollback 只需一個旗標 |
 | D11 | 網路隔離（workstation↛target:22、target↛workstation）是 operator 前提，不是本功能的保證；E2E 以 test fixture 模擬隔離，證明流量確實經過 Gateway | Pilot 不管理站台防火牆（使用者決策，2026-09-23） |
@@ -256,7 +256,7 @@ Host *.gpu.example.internal
 
 ```go
 TransportAllowed    bool   `json:"transport_allowed,omitempty"`
-TransportDenyReason string `json:"transport_deny_reason,omitempty"` // disabled | target_not_ready | ready_lookup_failed
+TransportDenyReason string `json:"transport_deny_reason,omitempty"` // disabled | recording_incompatible | target_not_ready | ready_lookup_failed
 ```
 
 - 只在 `Allowed == true` 時計算；`Allowed == false` 時兩者皆為零值。
@@ -269,8 +269,9 @@ TransportDenyReason string `json:"transport_deny_reason,omitempty"` // disabled 
 - 常數 `gatewayapi.TransportReadyHostgroup = "pilot-transport-ready"`（不可設定）。
 - 計算規則（僅 Allowed 時）：
   1. `!Transport.Enabled` → `false`、`disabled`，不呼叫 FreeIPA。
-  2. `HostgroupShow(TransportReadyHostgroup)` 失敗（含 hostgroup 不存在）→ `false`、`ready_lookup_failed`，並 `slog.Warn`。
-  3. `CanonicalizeFQDN(target)` ∈ `MemberHosts ∪ IndirectMemberHosts` → `true`；否則 `false`、`target_not_ready`。
+  2. `RecordingMode ∉ {"", "metadata"}`（D8，`gatewayapi.TransportRecordingCompatible`）→ `false`、`recording_incompatible`，不呼叫 FreeIPA。（rev 5 提案；rev 4 只在 client 端的 §9.1 步驟 9 檢查，所以 §8.3 會回傳 key。）
+  3. `HostgroupShow(TransportReadyHostgroup)` 失敗（含 hostgroup 不存在）→ `false`、`ready_lookup_failed`，並 `slog.Warn`。
+  4. `CanonicalizeFQDN(target)` ∈ `MemberHosts ∪ IndirectMemberHosts` → `true`；否則 `false`、`target_not_ready`。
 - Transport 開啟時，每次授權（含 `pilot-connect`）會多一次 `HostgroupShow`；v1 接受這個成本，不加快取（基礎 spec 不做 access 快取）。
 - 把 `handleConnectAuthorize` 的授權邏輯抽成共用 helper（例如 `s.authorizeConnect(ctx, peer, target)`），供 §8.3 共用——**只有一套 HBAC semantics**。
 
@@ -318,8 +319,8 @@ TransportDenyReason string `json:"transport_deny_reason,omitempty"` // disabled 
 | 5 | emit `gateway_transport_requested` | — |
 | 6 | `POST /v1/connect/authorize {"target"}` | 呼叫失敗 → emit denied(`authorize_error`)，unavailable |
 | 7 | `!authz.Allowed` | emit denied(`authorize_denied`)，access denied |
-| 8 | `!authz.TransportAllowed` | emit denied(`transport_<reason>`)，not enabled |
-| 9 | `authz.RecordingMode ∉ {"", "metadata"}` | emit denied(`recording_incompatible`)，recording policy |
+| 8 | `!authz.TransportAllowed` | reason 為 `recording_incompatible` → emit denied(`recording_incompatible`)，recording policy；其他 → emit denied(`transport_<reason>`)，not enabled |
+| 9 | `authz.RecordingMode ∉ {"", "metadata"}` | emit denied(`recording_incompatible`)，recording policy（server 端已在 §8.2 擋下；保留這一步是為了 rev 4 之前的 gateway daemon） |
 | 10 | `LookupIPAddr(authz.Target)`，timeout 5s | 錯誤或空結果 → emit failed(`dns`)，unavailable |
 | 11 | 過濾位址（§9.2） | 全數被拒 → emit denied(`no_valid_address`)，access denied |
 | 12 | 依 resolver 回傳順序 dial `<ip>:22`，每次 timeout 5s，最多 3 個位址 | 全失敗 → emit failed(`dial`)，unavailable |
@@ -642,7 +643,7 @@ Remote-dev（只列差異）：
 | AG66 | rsync：小型目錄樹 + ≥64 MiB 大檔，`sha256sum` 一致 |
 | AG67 | Host key：§6.1 設定、空的 known_hosts、`StrictHostKeyChecking yes` → 成功，且 workstation 上沒有任何 known_hosts 被寫入；把 KnownHostsCommand 換成輸出錯誤 key 的命令 → inner OpenSSH 回報 host key verification failed |
 | AG68 | Target 不在 `pilot-transport-ready`（target policy `absent` 之後）→ transport 與 known-hosts 都被拒 |
-| AG69 | Gateway `recording_mode=terminal_output` → transport 被拒（`recording policy`）；同一時間 `pilot-connect` 仍然產生 recording（local FileSink 檔案存在） |
+| AG69 | Gateway `recording_mode=terminal_output` → transport 被拒（`recording policy`），`pilot-known-hosts-v1` 也被拒（`access denied`，rev 5）；同一時間 `pilot-connect` 仍然產生 recording（local FileSink 檔案存在） |
 | AG70 | 經真實 sshd：AG46 的代表性子集（IP literal、`host:22`、`user@host`、shell metacharacter、wrong-scope target）全數被拒，target 端 sshd 在該時段沒有來自 Gateway 的連線紀錄 |
 | AG71 | Gateway journald 對一次成功 session 有 requested → connected → closed（含 target_ip、bytes、duration_ms）；對一次被拒的 session 有 denied；全部不含 §11.3 的禁止內容 |
 | AG72 | Legacy 回歸：互動 Portal（`ssh -tt`）正常；`pilot-connect` one-shot 對 target 正常；既有 AG35–AG40 unit tests 通過；Directory handoff 以既有 unit tests + `pilot-connect` grammar 未變證明未退化 |
@@ -852,7 +853,7 @@ S7  每次 transport 都 fresh 通過 FreeIPA HBAC ∩ Gateway scope 授權。
 S8  只能到達 pilot-transport-ready 內的 target。
 S9  永遠不接受呼叫者提供的 IP 作為 target。
 S10 DNS 只解析一次，只 dial 已驗證的 IP；特殊位址與 Gateway 本機位址被拒。
-S11 Recording mode 不是 metadata 時 transport 被拒；re-apply 不會靜默降級 recording。
+S11 Recording mode 不是 metadata 時 transport 與 known-hosts 都被拒（rev 5）；re-apply 不會靜默降級 recording。
 S12 已套用 policy 的 target：所有來自 Gateway 位址的 session，sshd remote forwarding、agent、X11、tun 被拒，與 inner username 無關。
 S13 已套用 policy 的 target：local forwarding 在 strict 全拒、在 remote-dev 只允許 loopback。
 S14 非 Gateway 來源的 session 不受 target policy 影響。
@@ -892,3 +893,4 @@ S17 既有 Portal 與 pilot-connect 行為相容。
 | rev 2 | 2026-09-23 | 對 `c0890f6` 核對 baseline 後修訂為可實作版本：新增 `pilot-known-hosts-v1` 與 FreeIPA 權威 host key（取代未定義的 host key 分發）；target policy 改為 `Match Address`，並以 `pilot-transport-ready` hostgroup 由 server 端 gate transport（修正以 group 限制可被繞過、以及 inventory 與 FreeIPA scope 漂移）；新增 Phase 1 修正 recording 設定被 re-apply 覆寫的既有缺陷；安全宣稱改為誠實邊界（stdio 自建通道、inner identity、撤銷時機）；移除 Match 內不合法的 `PermitUserEnvironment`；驗收重新編號為 AG41–AG73 + TP01–TP12，並區分 host/unit/e2e；bridge 改為不會卡住的 half-close 語意；recording 改為 allowlist；補齊新 component 的登記清單與 AGENTS.md 規則；移除 human-owned 工作（網路隔離、GUI smoke、staging/production rollout），改列於 §2.3 |
 | rev 3 | 2026-09-23 | Phase 0 實測結果回寫：新增 F20/F21；拓樸節點改名 `tx-*`；fixture 拆成 identity/isolation 兩份，HBAC 沿用 `allow_all`；topology、identity fixture、wrapper 提前到 Phase 1 提交 |
 | rev 4 | 2026-09-23 | Phase 5 實測回寫：§6.1 的 `ProxyCommand`/`KnownHostsCommand` 改用絕對路徑 `/usr/bin/ssh`（OpenSSH 要求 KnownHostsCommand 為絕對路徑）；§15.3 改為 `topology down/up` + 非 ephemeral `topology test`，讓後續步驟有環境可跑 |
+| rev 5 | 2026-09-25 | **提案，待 transport spec 負責人決定**：D8 改由 server 端 transport gate 判定（§8.2 新增第 2 步，`recording_incompatible`），所以 recording mode 不相容時 `/v1/transport/host-keys` 也回 `allowed:false`，`pilot-known-hosts-v1` 印 `access denied`。rev 4 的行為是 key 照發、只擋 transport：key 是公開的，但 §8.3 的定義是「此刻可以開 transport 的 target 的 key」，兩者不一致。Client 端 §9.1 步驟 9 保留，給舊 daemon。AG69、S11 同步。若不採用，改成在 §8.3 註明 key 在 recording 不相容時照發 |

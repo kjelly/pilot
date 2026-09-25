@@ -46,7 +46,7 @@ func (p *transportFakeProvider) HostShow(ctx context.Context, fqdn string) (free
 	return freeipaaccess.Host{FQDN: fqdn, SSHPublicKeys: p.hostKeys}, nil
 }
 
-func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled bool) (*http.Client, string) {
+func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled bool, recordingMode ...string) (*http.Client, string) {
 	t.Helper()
 	sockPath := filepath.Join(t.TempDir(), "gw.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -57,6 +57,9 @@ func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled 
 	gw := accessportal.GatewayConfig{ID: "gpu-01", Scope: "gpu", TargetHostgroup: "pilot-target-gpu"}
 	srv := NewServer(gw, provider, accessportal.NewResolver(provider, gw), nil)
 	srv.Transport = TransportPolicy{Enabled: enabled}
+	if len(recordingMode) > 0 {
+		srv.RecordingPolicy = RecordingPolicy{Mode: recordingMode[0]}
+	}
 	go srv.Serve(ln)                                         //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
 	return &http.Client{Transport: &http.Transport{
@@ -89,6 +92,7 @@ func TestConnectAuthorize_TransportGate(t *testing.T) {
 	cases := []struct {
 		name          string
 		enabled       bool
+		recording     string
 		provider      *transportFakeProvider
 		target        string
 		wantAllowed   bool
@@ -96,17 +100,24 @@ func TestConnectAuthorize_TransportGate(t *testing.T) {
 		wantReason    string
 		wantLookups   int32
 	}{
-		{"disabled never asks FreeIPA", false, &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyDisabled, 0},
-		{"enabled + direct member", true, &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, true, "", 1},
-		{"enabled + nested member", true, &transportFakeProvider{readyNested: []string{"GPU-A.example.com."}}, "gpu-a.example.com", true, true, "", 1},
-		{"enabled + not a member", true, &transportFakeProvider{ready: []string{"gpu-b.example.com"}}, "gpu-a.example.com", true, false, TransportDenyTargetNotReady, 1},
-		{"enabled + ready lookup fails", true, &transportFakeProvider{readyErr: errors.New("boom")}, "gpu-a.example.com", true, false, TransportDenyReadyLookupFailed, 1},
-		{"not authorized carries no transport fields", true, &transportFakeProvider{ready: []string{"gpu-z.example.com"}}, "gpu-z.example.com", false, false, "", 0},
+		{"disabled never asks FreeIPA", false, "", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyDisabled, 0},
+		{"enabled + direct member", true, "", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, true, "", 1},
+		{"enabled + nested member", true, "", &transportFakeProvider{readyNested: []string{"GPU-A.example.com."}}, "gpu-a.example.com", true, true, "", 1},
+		{"enabled + not a member", true, "", &transportFakeProvider{ready: []string{"gpu-b.example.com"}}, "gpu-a.example.com", true, false, TransportDenyTargetNotReady, 1},
+		{"enabled + ready lookup fails", true, "", &transportFakeProvider{readyErr: errors.New("boom")}, "gpu-a.example.com", true, false, TransportDenyReadyLookupFailed, 1},
+		{"not authorized carries no transport fields", true, "", &transportFakeProvider{ready: []string{"gpu-z.example.com"}}, "gpu-z.example.com", false, false, "", 0},
+		// D8: only "" and metadata may carry a transport; the gate refuses
+		// the rest before asking FreeIPA about readiness.
+		{"metadata recording + member", true, "metadata", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, true, "", 1},
+		{"terminal_output recording", true, "terminal_output", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyRecordingIncompatible, 0},
+		{"terminal_io recording", true, "terminal_io", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyRecordingIncompatible, 0},
+		{"unknown future recording mode", true, "keystrokes", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyRecordingIncompatible, 0},
+		{"disabled wins over recording", false, "terminal_output", &transportFakeProvider{ready: []string{"gpu-a.example.com"}}, "gpu-a.example.com", true, false, TransportDenyDisabled, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.provider.username = user
-			client, base := transportTestServer(t, tc.provider, tc.enabled)
+			client, base := transportTestServer(t, tc.provider, tc.enabled, tc.recording)
 			got, status := postJSON[ConnectAuthorizeResponse](t, client, base+"/v1/connect/authorize", ConnectAuthorizeRequest{Target: tc.target})
 			if status != http.StatusOK {
 				t.Fatalf("status = %d", status)
@@ -131,25 +142,29 @@ func TestTransportHostKeys(t *testing.T) {
 
 	t.Run("allowed", func(t *testing.T) {
 		p := &transportFakeProvider{fakeProvider: fakeProvider{username: user}, ready: []string{"gpu-a.example.com"}, hostKeys: keys}
-		client, base := transportTestServer(t, p, true)
+		client, base := transportTestServer(t, p, true, "metadata")
 		got, status := postJSON[TransportHostKeysResponse](t, client, base+"/v1/transport/host-keys", TransportHostKeysRequest{Target: "GPU-A.example.com"})
 		if status != http.StatusOK || !got.Allowed || got.Target != "gpu-a.example.com" || len(got.HostKeys) != 1 || got.HostKeys[0] != keys[0] {
 			t.Fatalf("status=%d got=%+v", status, got)
 		}
 	})
 	for _, tc := range []struct {
-		name    string
-		enabled bool
-		ready   []string
-		target  string
+		name      string
+		enabled   bool
+		recording string
+		ready     []string
+		target    string
 	}{
-		{"transport disabled", false, []string{"gpu-a.example.com"}, "gpu-a.example.com"},
-		{"target not ready", true, nil, "gpu-a.example.com"},
-		{"not authorized", true, []string{"gpu-z.example.com"}, "gpu-z.example.com"},
+		{"transport disabled", false, "", []string{"gpu-a.example.com"}, "gpu-a.example.com"},
+		{"target not ready", true, "", nil, "gpu-a.example.com"},
+		{"not authorized", true, "", []string{"gpu-z.example.com"}, "gpu-z.example.com"},
+		// D8 reaches the keys too: a target recorded in terminal mode
+		// cannot get a transport, so its keys are not served for one.
+		{"terminal_output recording", true, "terminal_output", []string{"gpu-a.example.com"}, "gpu-a.example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &transportFakeProvider{fakeProvider: fakeProvider{username: user}, ready: tc.ready, hostKeys: keys}
-			client, base := transportTestServer(t, p, tc.enabled)
+			client, base := transportTestServer(t, p, tc.enabled, tc.recording)
 			resp, err := client.Post(base+"/v1/transport/host-keys", "application/json", bytes.NewReader([]byte(`{"target":"`+tc.target+`"}`)))
 			if err != nil {
 				t.Fatalf("POST: %v", err)

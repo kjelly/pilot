@@ -14,8 +14,8 @@
 #                       TP06 (member), TP07 (-L/-D/-R/-A/-X/-w), TP09
 #   --phase remote-dev  same, target profile remote-dev: AG63 (ssh), TP08
 #   --phase recording   gateway recording terminal_output: AG69 (transport
-#                       refused; pilot-connect's local FileSink file holds
-#                       the session output while it runs)
+#                       and known-hosts refused; pilot-connect's local
+#                       FileSink file holds the session output while it runs)
 #   --phase not-ready   target policy absent: AG68, TP06 (not a member), TP10
 #   --phase disabled    gateway transport disabled/unset: AG62/AG73 (+AG72)
 #
@@ -497,6 +497,8 @@ case "$PHASE" in
     ;;
   recording)
     probe_transport_denied AG69-transport-denied-by-recording 'pilot-transport: transport disabled by recording policy'
+    out=$(as_ws "ssh -F $CFG -T pilot-gw -- pilot-known-hosts-v1 $TARGET_FQDN </dev/null 2>&1; echo rc=\$?")
+    ! grep -q 'rc=0' <<<"$out" && grep -q 'pilot-known-hosts: access denied' <<<"$out" && emit AG69-known-hosts-denied-by-recording pass "$(tr '\n' ' ' <<<"$out")" || emit AG69-known-hosts-denied-by-recording fail "$out"
     if [ -z "$PORTAL_KEY" ] || [ -z "${PORTAL_PASSWORD:-}" ]; then
       emit AG69-pilot-connect-still-records skip "PORTAL_KEY/PORTAL_PASSWORD unset"
     else
