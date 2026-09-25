@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // SNMPCredentialsKey is the vault variable name snmp-exporter-apply.yml

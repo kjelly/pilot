@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 var dockerfileCopyDistDestRE = regexp.MustCompile(`(?m)^\s*COPY\s+(?:--from=\S+\s+)?\S+\s+/pilot/(dist/\S+)\s*$`)
