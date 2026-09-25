@@ -1,9 +1,11 @@
 package spec
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -12,26 +14,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// preTaskGateNotAlwaysAllowlist lists pre_tasks gates that a tag-scoped
-// run can still skip in a play whose includes pass tags down with `apply`.
-// They were already skippable before the 2026-09-24 include migration: the
-// same plays also have plainly tagged tasks, so `--tags <row>` has always
-// run those without the gates. They belong to the repo-wide stage-gate
-// follow-up (every apply playbook's stage gates `always`, plus the §4.3
-// cross-check where it is missing). Keys are "<playbook>|<task name>".
-// Entries may only be removed.
+// preTaskGateNotAlwaysAllowlist lists pre_tasks input checks that a
+// tag-scoped run can still skip in a play whose includes pass tags down
+// with `apply`: they read inputs (infra_role, secrets, a resolvable backup
+// destination), not the stage. The stage gates that used to be listed here
+// are `always` since 2026-09-25 (TestRegression_StageGatesAlwaysRunInTaggedPlays).
+// Making these `always` needs each checked for facts set by untagged tasks
+// (AGENTS.md §4.4); that is a separate follow-up. Keys are
+// "<playbook>|<task name>". Entries may only be removed.
 var preTaskGateNotAlwaysAllowlist = map[string]bool{
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: infra_role must be dns or ntp":                            true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: staging or prod requires explicit confirm":                true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: stage must match this host's inventory environment group": true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: prod requires recent staging attestation":                 true,
-	"playbooks/apply/docker-apply.yml|Gate: staging or prod requires explicit confirm":                             true,
-	"playbooks/apply/docker-apply.yml|Gate: stage must match this host's inventory environment group":              true,
-	"playbooks/apply/docker-apply.yml|Gate: prod requires recent staging attestation":                              true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: required secrets present (fail early, before any mutation)":     true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: backup destination must be resolvable":                          true,
-	"playbooks/apply/reverse-proxy-apply.yml|Gate: staging or prod requires explicit confirm":                      true,
-	"playbooks/apply/reverse-proxy-apply.yml|Gate: prod requires recent staging attestation":                       true,
+	"playbooks/apply/core-infra-provider-apply.yml|Gate: infra_role must be dns or ntp":                        true,
+	"playbooks/apply/restic-backup-apply.yml|Gate: required secrets present (fail early, before any mutation)": true,
+	"playbooks/apply/restic-backup-apply.yml|Gate: backup destination must be resolvable":                      true,
 }
 
 // TestRegression_PreTaskGatesRunUnderApplyTags is a repo-wide lint over
@@ -381,4 +375,258 @@ func TestRegression_InternalEndpointDeleteDelegateToNeverEmpty(t *testing.T) {
 	if delegated < 7 {
 		t.Fatalf("found only %d delegated tasks; expected the nginx and certificate steps", delegated)
 	}
+}
+
+// stageGateNotAlwaysAllowlist lists stage gates that may carry a row or
+// action tag instead of `always`, with the reason. Keys are
+// "<playbook>|<task name>". Entries may only be removed.
+var stageGateNotAlwaysAllowlist = map[string]string{
+	"playbooks/decommission/wazuh-manager-agent-deregister.yml|Gate: staging or prod requires explicit confirm (deregister action only)": "tagged agent_deregister, the one mutating action, so the read-only agent_query action (the provider's pre-check) is not blocked by it",
+	"playbooks/decommission/wazuh-manager-agent-deregister.yml|Gate: prod requires recent staging attestation (deregister action only)":  "same as the confirm gate",
+}
+
+// stageGateText matches the stage variables and confirm/attestation inputs
+// a stage gate reads.
+var stageGateText = regexp.MustCompile(`\b(patch_)?stage\b|confirm_(staging|prod)|staging_attested_within_hours`)
+
+// TestRegression_StageGatesAlwaysRunInTaggedPlays is a repo-wide lint over
+// playbooks/**. In any play with a task tagged other than `always`, every
+// assert that reads the stage (confirm, environment-group cross-check,
+// prod attestation and other prod-only checks) must run under every
+// --tags selection, so it must be tagged `always`. Six apply playbooks
+// (core-infra-provider, docker, keycloak, keycloak-db, reverse-proxy,
+// seaweedfs-s3) had these gates untagged until 2026-09-25. pilot deploy's
+// single-component wizard passes its "只跑某幾個檢查項目" answer straight to
+// --tags, so a host in the prod group deployed at the default stage
+// (sandbox) with a row tag skipped the cross-check and was changed with
+// sandbox rules and no confirmation.
+func TestRegression_StageGatesAlwaysRunInTaggedPlays(t *testing.T) {
+	seen := map[string]bool{}
+	plays := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+		doc := loadYAML(t, path)
+		gates, checked := stageGatesNotAlways(doc)
+		plays += checked
+		for _, name := range gates {
+			key := rel + "|" + name
+			if _, ok := stageGateNotAlwaysAllowlist[key]; ok {
+				seen[key] = true
+				continue
+			}
+			t.Errorf("%s: stage gate %q is not tagged always, so --tags skips it while tagged tasks still run", rel, name)
+		}
+	}
+	if plays < 50 {
+		t.Fatalf("only %d plays with tagged tasks found; the walker is broken", plays)
+	}
+	for key := range stageGateNotAlwaysAllowlist {
+		if !seen[key] {
+			t.Errorf("stageGateNotAlwaysAllowlist entry %q no longer matches — drop it", key)
+		}
+	}
+}
+
+// TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck locks AGENTS.md
+// §4.3: every apply play that gates on confirm_staging/confirm_prod also
+// asserts that the stage matches the host's staging/prod inventory group.
+// freeipa-ca-trust, internal-endpoint (both plays) and reverse-proxy had no
+// such check until 2026-09-25, although §4.3 said every playbook had it.
+func TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck(t *testing.T) {
+	checked := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+		if !strings.HasPrefix(rel, "playbooks/apply/") {
+			continue
+		}
+		missing, n := playsMissingCrossCheck(loadYAML(t, path))
+		checked += n
+		for _, play := range missing {
+			t.Errorf("%s: play %q has a confirm gate but no stage/inventory-group cross-check (AGENTS.md §4.3)", rel, play)
+		}
+	}
+	if checked < 35 {
+		t.Fatalf("only %d apply plays with a confirm gate found; the walker is broken", checked)
+	}
+}
+
+func TestStageGateDetection(t *testing.T) {
+	const src = `
+- name: untagged gates in a tagged play
+  hosts: all
+  pre_tasks:
+    - name: confirm
+      ansible.builtin.assert: {that: ["(stage == 'sandbox') or (stage == 'prod' and confirm_prod | bool)"]}
+    - name: xcheck
+      tags: [always]
+      ansible.builtin.assert: {that: ["not ('prod' in group_names and stage != 'prod')"]}
+    - name: prod only
+      ansible.builtin.assert: {that: ["path | length > 0"]}
+      when: stage == 'prod'
+    - name: unrelated input check
+      ansible.builtin.assert: {that: ["foo is defined"]}
+  tasks:
+    - name: row task
+      tags: [C1]
+      ansible.builtin.debug: {msg: x}
+- name: confirm gate, no cross-check
+  hosts: all
+  pre_tasks:
+    - name: confirm
+      tags: [always]
+      ansible.builtin.assert: {that: ["stage == 'sandbox' or confirm_staging | bool"]}
+- name: nothing tagged
+  hosts: all
+  pre_tasks:
+    - name: confirm
+      ansible.builtin.assert: {that: ["confirm_prod | bool"]}
+  tasks:
+    - ansible.builtin.debug: {msg: x}
+`
+	var doc any
+	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatal(err)
+	}
+	gates, plays := stageGatesNotAlways(doc)
+	if strings.Join(gates, ",") != "confirm,prod only" || plays != 1 {
+		t.Errorf("stageGatesNotAlways = %v over %d plays, want [confirm prod only] over 1", gates, plays)
+	}
+	missing, n := playsMissingCrossCheck(doc)
+	if strings.Join(missing, ",") != "confirm gate, no cross-check,nothing tagged" || n != 3 {
+		t.Errorf("playsMissingCrossCheck = %v of %d, want the second and third play of 3", missing, n)
+	}
+}
+
+// stageGatesNotAlways returns, for every play in doc with a task tagged
+// other than `always`, the names of the asserts that read the stage but
+// are not tagged `always` (own or inherited), and how many such plays it
+// checked.
+func stageGatesNotAlways(doc any) ([]string, int) {
+	plays, _ := doc.([]any)
+	var out []string
+	checked := 0
+	for _, p := range plays {
+		play, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := play["hosts"]; !ok {
+			continue
+		}
+		playTags := yamlTags(play)
+		tagged := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], playTags, func(_ map[string]any, tags []string) {
+				if slices.ContainsFunc(tags, func(tag string) bool { return tag != "always" }) {
+					tagged = true
+				}
+			})
+		}
+		if !tagged {
+			continue
+		}
+		checked++
+		for _, section := range []string{"pre_tasks", "tasks"} {
+			walkTaskTree(play[section], playTags, func(task map[string]any, tags []string) {
+				if isStageGate(task) && !slices.Contains(tags, "always") {
+					name, _ := task["name"].(string)
+					out = append(out, name)
+				}
+			})
+		}
+	}
+	return out, checked
+}
+
+// playsMissingCrossCheck returns the names of the plays in doc that have a
+// confirm_staging/confirm_prod assert but no assert comparing the stage
+// with group_names, and how many plays with a confirm assert it checked.
+func playsMissingCrossCheck(doc any) ([]string, int) {
+	plays, _ := doc.([]any)
+	var out []string
+	checked := 0
+	for _, p := range plays {
+		play, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := play["hosts"]; !ok {
+			continue
+		}
+		confirm, cross := false, false
+		for _, section := range []string{"pre_tasks", "tasks"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				that := assertThat(task)
+				if strings.Contains(that, "confirm_staging") || strings.Contains(that, "confirm_prod") {
+					confirm = true
+				}
+				if strings.Contains(that, "group_names") && regexp.MustCompile(`\b(patch_)?stage\b`).MatchString(that) {
+					cross = true
+				}
+			})
+		}
+		if !confirm {
+			continue
+		}
+		checked++
+		if !cross {
+			name, _ := play["name"].(string)
+			out = append(out, name)
+		}
+	}
+	return out, checked
+}
+
+// isStageGate reports whether task is an assert whose that: or when: reads
+// the stage or its confirm/attestation inputs.
+func isStageGate(task map[string]any) bool {
+	if _, ok := task["ansible.builtin.assert"]; !ok {
+		if _, ok := task["assert"]; !ok {
+			return false
+		}
+	}
+	return stageGateText.MatchString(assertThat(task) + " " + fmt.Sprint(task["when"]))
+}
+
+// assertThat returns an assert task's that: as one string ("" for any other
+// task).
+func assertThat(task map[string]any) string {
+	for _, module := range []string{"ansible.builtin.assert", "assert"} {
+		if args, ok := task[module].(map[string]any); ok {
+			return fmt.Sprint(args["that"])
+		}
+	}
+	return ""
+}
+
+func playbookFiles(t *testing.T) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir("../../playbooks", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && (strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml")) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func loadYAML(t *testing.T, path string) any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s: parse: %v", path, err)
+	}
+	return doc
 }

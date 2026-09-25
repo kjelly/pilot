@@ -57,6 +57,7 @@
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (stage == 'sandbox') or
@@ -65,6 +66,7 @@
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
 
     - name: "Gate: stage must match this host's inventory environment group"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - not ('prod' in group_names and stage != 'prod')
@@ -77,6 +79,7 @@
           且要跟這台機器所屬的環境 group 一致。
 
     - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (staging_attested_within_hours | int) <= 168
@@ -84,6 +87,7 @@
       when: stage == 'prod'
 
     - name: "Gate: prod must not run with anonymous S3 access"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - seaweedfs_s3_config_path | length > 0

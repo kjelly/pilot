@@ -511,6 +511,20 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    有效時數的情況也一樣失敗)。
    `internal/spec/assert_negates_when_regression_test.go::TestRegression_AssertNeverNegatesItsOwnWhen`
    對全部 `playbooks/**` 檢查「assert 的 `that:` 不准是自己 `when:` 的反面」。
+6. stage gate(confirm、上面的 cross-check、prod attestation,以及其他只在
+   prod 才檢查的 assert)**一律標 `tags: [always]`**。沒標的話,帶 `--tags <row>`
+   時 gate 被跳過、帶 tag 的變更照跑。`pilot deploy` 單一元件精靈會把「要只跑
+   某幾個檢查項目嗎？」的答案原樣傳給 `--tags`,所以一台已經歸進 `prod` group
+   的主機、用預設 stage(sandbox)加上 row tag 部署時,cross-check 不會執行,
+   主機就在沒有任何確認下照 sandbox 規則被改(2026-09-25 修正 core-infra-provider、
+   docker、keycloak、keycloak-db、reverse-proxy、seaweedfs-s3;同時補上
+   freeipa-ca-trust、internal-endpoint 兩個 play、reverse-proxy 缺少的 cross-check——
+   在那之前本節「全部都有」的說法並不成立)。唯讀查詢若刻意用 action tag 避開
+   gate(`wazuh-manager-agent-deregister.yml`),或像 internal-endpoint 只在
+   decommission 唯讀查詢時跳過 cross-check,要在 gate 旁註明原因並登記 allowlist。
+   `internal/spec/tagged_run_gates_regression_test.go` 的
+   `TestRegression_StageGatesAlwaysRunInTaggedPlays` 與
+   `TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 對全 repo 鎖住這兩件事。
 
 另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的
 `assert target_group is not defined`),擋下「全站入口誤帶 `-e target_group=`
@@ -637,8 +651,8 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    play，pre_tasks 裡的 assert/fail 一律標 `always`（或帶齊該 play 所有 include
    apply 的 tag），由
    `internal/spec/tagged_run_gates_regression_test.go::TestRegression_PreTaskGatesRunUnderApplyTags`
-   鎖住（allowlist 只列遷移前就能被 `--tags` 跳過的 4 支，留給 repo-wide 的
-   stage gate 後續修正）；`tasks:` 裡的 gate 對 mutation 的對應無法從 YAML
+   鎖住（allowlist 只剩 core-infra-provider 的 `infra_role` 與 restic-backup
+   的兩道輸入檢查，留給後續修正；stage gate 已全部是 `always`，見 §4.3 第 6 點）；`tasks:` 裡的 gate 對 mutation 的對應無法從 YAML
    推導，要像 `TestRegression_InternalEndpointGatesCoverTaggedMutations` 那樣
    逐一鎖住。
 9. **`ansible.builtin.apt`/`package` 直接裝套件、不走 apt framework，會吃當下
@@ -1278,3 +1292,4 @@ git status --short
 | 2026-09-24 | v1.34 | §4.5 第 8 點：安全 gate 的 tag 要涵蓋它保護的每一個 mutation。修正 PR #10 review 抓到的兩個 `--tags` 繞過（`freeipa-ca-trust` stage gate 改 `always`；`internal-endpoint` C7/C8 gate 補 C4–C6、C12 preflight 補 C13/C15，fleet-wide baseline play 補上 stage gate），新增全 repo lint `TestRegression_PreTaskGatesRunUnderApplyTags`（allowlist 列 4 支既有、留給後續 repo-wide stage gate 修正的 playbook） | pilot |
 | 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader`；新增第 10 點：free-form shell 字串（含註解）的引號要成對，否則 `split_args` 讓整支 task 檔載入失敗，新增 `TestRegression_FreeFormCommandsSplitInAnsible` | pilot |
 | 2026-09-24 | v1.36 | §4.3 新增第 5 點：prod attestation gate 的 `that:` 不准放 `stage != 'prod'`（搭配 `when: stage == 'prod'` 會讓 prod 永遠失敗）。修正 9 支 playbook 共 10 道 gate，新增全 repo lint `TestRegression_AssertNeverNegatesItsOwnWhen` | pilot |
+| 2026-09-25 | v1.37 | §4.3 新增第 6 點：stage gate 一律標 `always`，否則 `--tags`（包括 `pilot deploy` 單一元件精靈的 tags 欄位）會跳過 cross-check，讓 prod group 主機以 sandbox 規則被改。6 支 playbook 的 18 道 gate 改標 `always`，freeipa-ca-trust、internal-endpoint（兩個 play）、reverse-proxy 補上 cross-check；新增 lint `TestRegression_StageGatesAlwaysRunInTaggedPlays`、`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` | pilot |

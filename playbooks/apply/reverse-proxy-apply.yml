@@ -30,6 +30,7 @@
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (stage == 'sandbox') or
@@ -37,7 +38,19 @@
             (stage == 'prod' and confirm_prod | bool)
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
 
+    - name: "Gate: stage must match this host's inventory environment group"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+
     - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (staging_attested_within_hours | int) <= 168
