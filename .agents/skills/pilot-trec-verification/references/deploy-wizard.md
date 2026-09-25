@@ -34,14 +34,15 @@ reading input.
 `ACTIVATE <row text> WITH ENTER` picked the right row on every menu of a
 single-component run. Each new screen got `EXPECT <prompt>`,
 `EXPECT_QUIET 200` and a guard (`ENTER_IF`/`TEXT_IF`/the `ACTIVATE` itself)
-before its first keystroke. The menus covered: 單一元件, the catalog (row 22
+before its first keystroke. The menus covered: 單一元件, the catalog (row 23
 of 29), the stage, and the preflight mode. The script passed
 `trec drive lint --strict`, and the run went through preview and the real
 apply to `✅ 套用完成`.
 
-Use labels rather than counting. The catalog is now contract-driven
-(`挑一個要佈署的元件 (contract 驅動)`), and its order no longer matches
-`deploy_catalog.go`'s `Key:` order (`../SKILL.md` §2).
+Use labels rather than counting. The catalog
+(`挑一個要佈署的元件 (contract 驅動)`) follows `deploy_catalog.go`'s order but
+leaves out `Reconcile: true` and experimental entries, so row numbers do not
+match `Key:` line numbers (`../SKILL.md` §2).
 
 The prompts of that run, in order (sandbox stage, no `staging`/`prod` group):
 
@@ -64,8 +65,8 @@ after 150 presses"). The cause was a stale pointer marker left in scrollback by
 the just-exited scope-select Program; `DOWN <n>` from `deploy_catalog.go`
 avoided it at the time. That finding is recorded in
 `docs/runbooks/archived/3vm-freeipa-wazuh-grafana-demo.md` §7. It did not
-reproduce on 2026-09-24, and the `DOWN <n>`-from-source fallback it relied on
-now counts the wrong list.
+reproduce on 2026-09-24. If you fall back to `DOWN <n>`, count only the
+entries the menu shows (`../SKILL.md` §2).
 
 ## Two easily-missed prompts before the confirm chain
 
