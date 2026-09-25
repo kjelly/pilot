@@ -1519,22 +1519,69 @@ func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[
 	return set
 }
 
-// withNetworkLock serializes libvirt network mutations (static DHCP host
-// entries) ACROSS processes via an advisory file lock. allocateStaticIP and
-// removeStaticIP each do a read-modify-write on the network XML through
+// networkLockDir holds the per-network lock files. It is a fixed host-wide
+// directory, not os.TempDir(): TMPDIR can differ between two pilots on one
+// host (sudo, CI, a shell profile), and the lock only works if every pilot
+// using a qemu:///system network opens the same file. Tests point it at a
+// temporary directory.
+var networkLockDir = "/tmp"
+
+// networkLockPath is the lock file for one libvirt network. It depends on
+// the network name only, never on the data dir or --vm-dir: two pilots that
+// share a network can set either one differently.
+func networkLockPath(network string) string {
+	if network == "" {
+		network = "default"
+	}
+	name := network
+	if !validName(name) {
+		name = fmt.Sprintf("sha256-%x", sha256.Sum256([]byte(network)))[:23]
+	}
+	return filepath.Join(networkLockDir, "pilot-vmtarget-network-"+name+".lock")
+}
+
+// openNetworkLock opens the lock file read-only, creating it if needed;
+// flock does not need write access. It opens an existing file without
+// O_CREATE: in a sticky world-writable directory such as /tmp, with
+// fs.protected_regular set (the default on current distributions), an
+// O_CREATE open of a file another user created fails with EACCES, even for
+// root.
+func openNetworkLock(path string) (*os.File, error) {
+	for range 5 {
+		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if !errors.Is(err, os.ErrNotExist) {
+			return f, err
+		}
+		f, err = os.OpenFile(path, os.O_RDONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			continue // another pilot created it first
+		}
+		if err != nil {
+			return nil, err
+		}
+		// The umask may have narrowed 0644; other users must be able to open it.
+		if err := f.Chmod(0o644); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return f, nil
+	}
+	return nil, fmt.Errorf("%s kept disappearing while it was being opened", path)
+}
+
+// withNetworkLock serializes mutations of one libvirt network (static DHCP
+// host entries) ACROSS processes via an advisory file lock. allocateStaticIP
+// and removeStaticIP each do a read-modify-write on the network XML through
 // `virsh net-update`; the Manager mutex only covers one process, so without
 // this lock two concurrent `pilot vm-target up` invocations could scan the
 // same free IP and reserve it for two different VMs.
 //
-// The network is shared by every pilot on the host whatever its data dir,
-// so the lock file lives in the VM directory, not next to the state json:
-// two processes with different data dirs must still serialize.
-func (m *Manager) withNetworkLock(fn func() error) error {
-	if err := os.MkdirAll(m.vmDir, 0o755); err != nil {
-		return fmt.Errorf("vmtarget: create VM dir for the network lock: %w", err)
-	}
-	lockPath := filepath.Join(m.vmDir, ".network.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+// The network is shared by every pilot on the host, so the lock is keyed on
+// the network alone (networkLockPath): two processes with different data
+// dirs or VM dirs must still serialize.
+func (m *Manager) withNetworkLock(network string, fn func() error) error {
+	lockPath := networkLockPath(network)
+	f, err := openNetworkLock(lockPath)
 	if err != nil {
 		return fmt.Errorf("vmtarget: open network lock %s: %w", lockPath, err)
 	}
@@ -1636,7 +1683,7 @@ func sleep(ctx context.Context, d time.Duration) error {
 // net-dumpxml, both pick the same first-free IP, and hand it to two VMs.
 func (m *Manager) allocateStaticIP(ctx context.Context, t *Target) (string, error) {
 	var ip string
-	err := m.withNetworkLock(func() error {
+	err := m.withNetworkLock(t.Network, func() error {
 		var e error
 		ip, e = m.allocateStaticIPLocked(ctx, t)
 		return e
@@ -1805,7 +1852,7 @@ func findFreeIP(rangeStart, rangeEnd string, used map[string]bool) (string, erro
 // concurrent teardown and bring-up cannot interleave their read-modify-write
 // of the network's <host> entries.
 func (m *Manager) removeStaticIP(ctx context.Context, t *Target) error {
-	return m.withNetworkLock(func() error { return m.removeStaticIPLocked(ctx, t) })
+	return m.withNetworkLock(t.Network, func() error { return m.removeStaticIPLocked(ctx, t) })
 }
 
 func (m *Manager) removeStaticIPLocked(ctx context.Context, t *Target) error {
