@@ -22,7 +22,7 @@ import (
 	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // SimulateRemoveRosterNFSServer reports what validating the roster at

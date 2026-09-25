@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // MigrateRosterV1ToV2 converts a parsed schema-v1 roster document (root is

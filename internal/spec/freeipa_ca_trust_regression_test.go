@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_FreeipaCaTrustSpec locks the Phase 1 shape (spec.md §63) of

@@ -1363,7 +1363,7 @@ func (t *Target) RenderInventory() (string, error) {
 		fmt.Fprintf(&sb, "      ansible_user: %s\n", t.SSHUser)
 		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
 		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
-		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%r@%%h:%%p -o ControlPersist=60s\n")
+		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%C -o ControlPersist=60s\n")
 		// Pipelining collapses each task to a single SSH round-trip
 		// (no per-task sftp of the module) — a large win on the many
 		// small tasks in a hardening playbook. Cloud images have no
@@ -1435,7 +1435,7 @@ func RenderGroupedInventory(targets map[string]*Target, groupOrder []string, gro
 		fmt.Fprintf(&sb, "      ansible_user: %s\n", t.SSHUser)
 		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
 		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
-		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%r@%%h:%%p -o ControlPersist=60s\n")
+		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%C -o ControlPersist=60s\n")
 		fmt.Fprintf(&sb, "      ansible_ssh_pipelining: true\n")
 	}
 	if len(groupOrder) > 0 {

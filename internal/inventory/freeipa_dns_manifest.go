@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // LoadDNSManifest reads and YAML-decodes a freeipa-dns manifest into a plain

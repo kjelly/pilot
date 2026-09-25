@@ -526,18 +526,18 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 
 	// Every other ansible.Runner caller (pilot deploy/reconcile/edit/mcp)
 	// goes through prepareDeployAnsibleRuntime first, which MkdirAlls a
-	// scratch ansible/{home,tmp,fact-cache,ssh-control} tree and points
-	// ANSIBLE_SSH_ARGS' ControlPath at it. Skipping that here left this
-	// runner relying on ansible.cfg's default `~/.ansible/cp/...`
-	// ControlPath, which silently doesn't exist in a fresh/ephemeral
-	// container (`docker run --rm ... pilot host decommission plan`) — the
-	// very first SSH connection then fails with "unix_listener: cannot
-	// bind to path ...: No such file or directory", which Ansible reports
-	// as UNREACHABLE on whatever task happens to run first, and no_log (as
-	// on freeipa-identity-apply.yml's "Kinit admin" task) censors that
-	// real reason into an opaque "censored" blob that looks like a
-	// Kerberos/credential failure. Found via a live decommission-plan
-	// repro against p6k-baremetal (2026-09-11).
+	// scratch ansible/{home,tmp,fact-cache} tree plus a private SSH control
+	// directory and points ANSIBLE_SSH_ARGS' ControlPath at the latter.
+	// Skipping that here left this runner relying on ansible.cfg's default
+	// `~/.ansible/cp/...` ControlPath, which silently doesn't exist in a
+	// fresh/ephemeral container (`docker run --rm ... pilot host
+	// decommission plan`) — the very first SSH connection then fails with
+	// "unix_listener: cannot bind to path ...: No such file or directory",
+	// which Ansible reports as UNREACHABLE on whatever task happens to run
+	// first, and no_log (as on freeipa-identity-apply.yml's "Kinit admin"
+	// task) censors that real reason into an opaque "censored" blob that
+	// looks like a Kerberos/credential failure. Found via a live
+	// decommission-plan repro against p6k-baremetal (2026-09-11).
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
 		return nil, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)

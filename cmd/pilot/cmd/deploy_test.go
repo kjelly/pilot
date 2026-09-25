@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,6 @@ func TestPrepareDeployAnsibleRuntimeKeepsControllerArtifactsInDataDir(t *testing
 		"ansible/home",
 		"ansible/tmp",
 		"ansible/fact-cache",
-		"ansible/ssh-control",
 	} {
 		if info, err := os.Stat(filepath.Join(dataDir, relative)); err != nil || !info.IsDir() {
 			t.Fatalf("runtime directory %s: info=%v err=%v", relative, info, err)
@@ -60,11 +60,154 @@ func TestPrepareDeployAnsibleRuntimeKeepsControllerArtifactsInDataDir(t *testing
 		"ANSIBLE_CACHE_PLUGIN=jsonfile",
 		"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + filepath.Join(dataDir, "ansible", "fact-cache"),
 		"ANSIBLE_LOG_PATH=" + filepath.Join(dataDir, "ansible", "ansible.log"),
-		"ANSIBLE_SSH_ARGS=",
+		"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(filepath.Join(runtime.SSHControlDir, "%C")),
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("runtime environment missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+// sshSocketPathBudget is the longest ControlPath OpenSSH can bind: a Unix
+// socket path must fit in 108 bytes including its NUL, and while creating a
+// master ssh binds "<ControlPath>.<16 random chars>" before renaming it.
+const sshSocketPathBudget = 108 - 1 - len(".0123456789abcdef")
+
+// deployControlPath returns the ControlPath template in runtime's
+// ANSIBLE_SSH_ARGS.
+func deployControlPath(t *testing.T, runtime deployAnsibleRuntime) string {
+	t.Helper()
+	for _, kv := range runtime.Env {
+		args, ok := strings.CutPrefix(kv, "ANSIBLE_SSH_ARGS=")
+		if !ok {
+			continue
+		}
+		_, rest, ok := strings.Cut(args, "ControlPath=")
+		if !ok {
+			t.Fatalf("ANSIBLE_SSH_ARGS has no ControlPath: %q", args)
+		}
+		path, err := strconv.QuotedPrefix(rest)
+		if err != nil {
+			t.Fatalf("ControlPath is not quoted in %q: %v", args, err)
+		}
+		unquoted, _ := strconv.Unquote(path)
+		return unquoted
+	}
+	t.Fatalf("runtime has no ANSIBLE_SSH_ARGS: %v", runtime.Env)
+	return ""
+}
+
+// TestPrepareDeployAnsibleRuntime_ControlPathFitsSocketLimitForDeepDataDir
+// is the regression for deploy's SSH failing with "ControlPath too long"
+// whenever --data-dir was deep: the socket used to live under
+// <data-dir>/ansible/ssh-control/pilot-%r@%h:%p, so its length grew with
+// the data dir and the host name. It now sits under the real /tmp base,
+// named by %C (OpenSSH's fixed-length hash of the connection tuple).
+func TestPrepareDeployAnsibleRuntime_ControlPathFitsSocketLimitForDeepDataDir(t *testing.T) {
+	t.Setenv(sshControlBaseEnv, "/tmp") // the production base, so the measured length is the real one
+	dataDir := filepath.Join(t.TempDir(), strings.Repeat("d", 60), strings.Repeat("e", 60), strings.Repeat("f", 60))
+	runtime, err := prepareDeployAnsibleRuntime(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtime.SSHControlDir) })
+
+	controlPath := deployControlPath(t, runtime)
+	if !strings.HasSuffix(controlPath, "/%C") || strings.Contains(controlPath, "%h") {
+		t.Fatalf("ControlPath %q should be named by %%C and never embed the host", controlPath)
+	}
+	expanded := strings.Replace(controlPath, "%C", strings.Repeat("0", 40), 1)
+	if len(expanded) > sshSocketPathBudget {
+		t.Fatalf("expanded ControlPath is %d bytes, over the %d-byte budget: %q", len(expanded), sshSocketPathBudget, expanded)
+	}
+	if strings.HasPrefix(controlPath, dataDir) {
+		t.Fatalf("ControlPath %q still lives under the data dir", controlPath)
+	}
+}
+
+// useSSHControlBase points PILOT_SSH_CONTROL_BASE at a scratch directory
+// for one test.
+func useSSHControlBase(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv(sshControlBaseEnv, base)
+	return base
+}
+
+func TestEnsureSSHControlDir_OnePrivateDirPerDataDir(t *testing.T) {
+	base := useSSHControlBase(t)
+	first, err := ensureSSHControlDir(filepath.Join(t.TempDir(), "workspace-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ensureSSHControlDir(filepath.Join(t.TempDir(), "workspace-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == first {
+		t.Fatalf("different data dirs share the control directory %q", first)
+	}
+	same := filepath.Join(t.TempDir(), "workspace-c")
+	x, err := ensureSSHControlDir(same)
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := ensureSSHControlDir(same)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x != y {
+		t.Fatalf("the same data dir got two control directories: %q and %q", x, y)
+	}
+	info, err := os.Lstat(x)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("control directory %q: mode %v, want a 0700 directory", x, info.Mode())
+	}
+	if filepath.Dir(x) != base {
+		t.Fatalf("control directory %q is not directly under %q", x, base)
+	}
+}
+
+func TestEnsureSSHControlDir_RejectsSymlink(t *testing.T) {
+	useSSHControlBase(t)
+	dataDir := filepath.Join(t.TempDir(), "workspace")
+	dir, err := ensureSSHControlDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureSSHControlDir(dataDir); err == nil {
+		t.Fatalf("ensureSSHControlDir accepted a symlink at %q", dir)
+	}
+}
+
+func TestEnsureSSHControlDir_TightensLoosePermissions(t *testing.T) {
+	useSSHControlBase(t)
+	dataDir := filepath.Join(t.TempDir(), "workspace")
+	dir, err := ensureSSHControlDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureSSHControlDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("control directory mode = %v, want 0700", info.Mode().Perm())
 	}
 }
 
