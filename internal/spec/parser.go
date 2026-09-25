@@ -53,15 +53,15 @@ type Spec struct {
 	// internal/tools/verify_spec.go, which already prefers a spec-declared
 	// Row.Timeout over the CLI --timeout fallback (previously only reachable
 	// from a v2 schema's per-check `timeout` field).
-	VerifyTimeout time.Duration
-	Defaults        Defaults
-	Inputs          []Input
-	Components      []string
-	Roles           []string
-	HostScope       string
-	Platforms       []Platform
-	EvidencePolicy  EvidencePolicy
-	Rows            []Row
+	VerifyTimeout  time.Duration
+	Defaults       Defaults
+	Inputs         []Input
+	Components     []string
+	Roles          []string
+	HostScope      string
+	Platforms      []Platform
+	EvidencePolicy EvidencePolicy
+	Rows           []Row
 	// Hosts are parsed from the optional `## 1. Targets` markdown
 	// table (or any H2 whose body is a Hosts table). Used by
 	// `Spec.GenerateInventory` to emit an ansible inventory

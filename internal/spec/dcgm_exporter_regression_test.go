@@ -352,7 +352,6 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 		t.Errorf("dcgm-exporter-apply.yml container restart must be gated on dcgm_exporter_webconfig_result is changed, not run unconditionally")
 	}
 
-
 	// DCGM's CacheManager needs these two privileges for active MIG instances,
 	// but they are a deliberate exception, not a global privilege escalation.
 	if !strings.Contains(applyRaw, "capabilities: \"{{ ['SYS_ADMIN'] if (dcgm_exporter_mig_enabled | bool) else omit }}\"") {

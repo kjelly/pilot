@@ -8,10 +8,10 @@ import (
 
 // Scheduler constants (spec §11).
 const (
-	CycleInterval       = 15 * time.Second
-	EvaluationDelay     = 20 * time.Second
-	QueryTimeout        = 5 * time.Second
-	QueryConcurrency    = 8
+	CycleInterval    = 15 * time.Second
+	EvaluationDelay  = 20 * time.Second
+	QueryTimeout     = 5 * time.Second
+	QueryConcurrency = 8
 	// MaxSampleAge/FutureSkewTolerance are the spec §9.3 backward-compatible
 	// defaults for a feature profile that never sets `sampling:` — see
 	// FeatureProfile.MaxSampleAge()/FutureSkewTolerance(), which every
