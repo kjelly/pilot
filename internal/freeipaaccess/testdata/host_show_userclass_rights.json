@@ -1,0 +1,143 @@
+{
+  "error": null,
+  "id": 0,
+  "principal": "pilot-access-gateway/phr-gw.ipa.pilot.internal@IPA.PILOT.INTERNAL",
+  "result": {
+    "messages": [
+      {
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        },
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "name": "VersionMissing",
+        "type": "warning"
+      }
+    ],
+    "result": {
+      "attributelevelrights": {
+        "aci": "",
+        "cn": "rsc",
+        "description": "rsc",
+        "enrolledby": "rsc",
+        "fqdn": "rsc",
+        "ipaassignedidview": "rsc",
+        "ipaclientversion": "rsc",
+        "ipakrbauthzdata": "rsc",
+        "ipasshpubkey": "rsc",
+        "ipauniqueid": "rsc",
+        "krballowedtodelegateto": "",
+        "krbcanonicalname": "rsc",
+        "krbextradata": "",
+        "krblastadminunlock": "",
+        "krblastfailedauth": "",
+        "krblastpwdchange": "rsc",
+        "krblastsuccessfulauth": "",
+        "krbloginfailedcount": "",
+        "krbobjectreferences": "",
+        "krbpasswordexpiration": "rsc",
+        "krbprincipalaliases": "rsc",
+        "krbprincipalauthind": "rsc",
+        "krbprincipalexpiration": "rsc",
+        "krbprincipalkey": "s",
+        "krbprincipalname": "rsc",
+        "krbprincipaltype": "",
+        "krbpwdhistory": "",
+        "krbpwdpolicyreference": "",
+        "krbticketpolicyreference": "",
+        "krbupenabled": "",
+        "l": "rsc",
+        "macaddress": "rsc",
+        "managedby": "rsc",
+        "memberof": "rsc",
+        "nsaccountlock": "",
+        "nshardwareplatform": "rsc",
+        "nshostlocation": "rsc",
+        "nsosversion": "rsc",
+        "o": "",
+        "objectclass": "rsc",
+        "ou": "",
+        "owner": "",
+        "seealso": "",
+        "serialnumber": "",
+        "serverhostname": "rsc",
+        "usercertificate": "rsc",
+        "userclass": "rsc",
+        "userpassword": "s"
+      },
+      "cn": [
+        "phr-ta.ipa.pilot.internal"
+      ],
+      "dn": "fqdn=phr-ta.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal",
+      "enrolledby_user": [
+        "admin"
+      ],
+      "fqdn": [
+        "phr-ta.ipa.pilot.internal"
+      ],
+      "has_keytab": true,
+      "has_password": false,
+      "ipakrbokasdelegate": false,
+      "ipakrboktoauthasdelegate": false,
+      "ipakrbrequirespreauth": true,
+      "ipasshpubkey": [
+        "<redacted>",
+        "<redacted>",
+        "<redacted>"
+      ],
+      "ipauniqueid": [
+        "8803f3d2-b749-11f1-9c9f-525400bdf26a"
+      ],
+      "krbcanonicalname": [
+        "host/phr-ta.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "krblastpwdchange": [
+        "20260923122306Z"
+      ],
+      "krbprincipalname": [
+        "host/phr-ta.ipa.pilot.internal@IPA.PILOT.INTERNAL"
+      ],
+      "managedby_host": [
+        "phr-ta.ipa.pilot.internal"
+      ],
+      "managing_host": [
+        "phr-ta.ipa.pilot.internal"
+      ],
+      "nshardwareplatform": [
+        "x86_64"
+      ],
+      "nsosversion": [
+        "6.8.0-124-generic"
+      ],
+      "objectclass": [
+        "ipaobject",
+        "nshost",
+        "ipahost",
+        "pkiuser",
+        "ipaservice",
+        "krbprincipalaux",
+        "krbprincipal",
+        "ieee802device",
+        "ipasshhost",
+        "top",
+        "ipaSshGroupOfPubKeys"
+      ],
+      "serverhostname": [
+        "phr-ta"
+      ],
+      "sshpubkeyfp": [
+        "<redacted>",
+        "<redacted>",
+        "<redacted>"
+      ],
+      "userclass": [
+        "external-provisioning",
+        "pilot.annotation.location=DC1",
+        "pilot.policy.ssh-recording=terminal_output"
+      ]
+    },
+    "summary": null,
+    "value": "phr-ta.ipa.pilot.internal"
+  },
+  "version": "4.13.1"
+}

@@ -54,6 +54,12 @@ type DirectoryTarget struct {
 	SSH    accessportal.SSHAccess
 	Sudo   accessportal.SudoAccess
 	Routes []TargetRoute
+	// Recording is the host's recording-policy override as seen by the
+	// Directory's own FreeIPA read (per-host recording spec §12). The
+	// Directory does not know any gateway's default, so it reports only the
+	// override; the effective mode comes from the target gateway's fresh
+	// authorize.
+	Recording accessportal.SSHRecordingAccessPolicy
 }
 
 // TargetRoute is one scope's routing detail for a DirectoryTarget

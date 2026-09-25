@@ -211,8 +211,8 @@ var schemaV1 = migration{
 //     (subject_id, subject_kind, feature, bucket_ts) — the OLD primary key
 //     (pilot_host, feature, bucket_ts) would have let two different-kind
 //     subjects silently alias each other's history bucket whenever
-//     pilot_host is empty for both (SQL NULL/'' does not violate a UNIQUE
-//     constraint against another NULL/'', so an ON CONFLICT upsert keyed
+//     pilot_host is empty for both (SQL NULL/” does not violate a UNIQUE
+//     constraint against another NULL/”, so an ON CONFLICT upsert keyed
 //     only on the old columns would never actually deduplicate two
 //     distinct non-managed subjects — this was verified empirically
 //     against modernc.org/sqlite, not merely assumed).

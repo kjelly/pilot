@@ -214,6 +214,12 @@ func (d *automationDriver) setHostField(r *editRouterModel, host, field, value, 
 		}
 		return d.chooseByID(r, "hosts.item.deployment_availability", value)
 	}
+	if field == "ssh_recording" {
+		if err := d.chooseByID(r, "hosts.item", "hosts.item.ssh_recording"); err != nil {
+			return err
+		}
+		return d.chooseByID(r, "hosts.item.ssh_recording", value)
+	}
 	if field == "env" {
 		if err := d.choose(r, "env(環境標籤)"); err != nil {
 			return err

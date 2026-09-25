@@ -261,7 +261,9 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 	proc.press(t, "\r") // "✅ 完成" -> back to host menu
 
 	waitForPTYOutput(t, proc.out, 5*time.Second, "選要編輯的項目")
-	for i := 0; i < 9; i++ {
+	// host menu: 0 ansible_host … 7 deployment_availability, 8 ssh_recording,
+	// 9 delete, 10 back (no host_vars item for this role set).
+	for i := 0; i < 10; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "↩ 返回主機清單"

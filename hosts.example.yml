@@ -78,5 +78,17 @@ hosts:
     env: prod
     deployment_availability: optional
 
+  # 範例:經 pilot-access-gateway 連線時要錄下終端輸出的機器(ssh_recording)。
+  #   省略            = 沿用 gateway 預設(內建預設 metadata = 不錄終端)
+  #   terminal_output = 錄下終端輸出(建議的錄影模式)
+  #   off             = 明確不錄終端,即使 gateway 預設會錄
+  # terminal_io 保留給未來版本(目前無法可靠遮蔽使用者輸入),寫了會 lint 失敗。
+  # 錄影主機需要 gateway 已設定 pilot-session-store,否則該主機的連線會被拒絕。
+  db-prod-01:
+    ansible_host: "<FILL-ME>"        # 例 10.0.0.41
+    roles: [freeipa-client, linux-servers]
+    env: prod
+    ssh_recording: terminal_output
+
   # 需要更多機器就照上面格式往下加;key(短名)自己取,全域唯一即可。
   # 用不到某個角色就別把它列進 roles —— 不用像 inventory.yml 那樣整段刪。

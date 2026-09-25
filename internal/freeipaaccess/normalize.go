@@ -175,11 +175,67 @@ func parseGroup(m map[string]any) Group {
 }
 
 func parseHost(m map[string]any) Host {
+	userClass := attrStrings(m, "userclass")
+	policy := parseHostSSHRecordingPolicy(userClass)
+	if !userClassReadable(m) {
+		policy = HostRecordingPolicy{Unreadable: true, Reason: "userclass_unreadable"}
+	}
 	return Host{
 		FQDN:          attrString(m, "fqdn"),
-		Annotations:   parseAnnotations(attrStrings(m, "userclass")),
+		Annotations:   parseAnnotations(userClass),
+		SSHRecording:  policy,
 		SSHPublicKeys: attrStrings(m, "ipasshpubkey"),
 	}
+}
+
+// pilotSSHRecordingPolicyPrefix is the managed userClass namespace for the
+// per-host SSH recording policy (per-host recording spec §7). It mirrors
+// playbooks/apply/tasks/freeipa-host-access-policy.yml's PREFIX verbatim.
+const pilotSSHRecordingPolicyPrefix = "pilot.policy.ssh-recording="
+
+// parseHostSSHRecordingPolicy classifies a host's userClass values per
+// per-host recording spec §7: a value is managed when it carries the prefix
+// case-insensitively (userClass equality is case-insensitive in LDAP, and
+// the write-side reconciler matches the same way); a managed value is only
+// valid with the exact-case prefix and a known value. Absence is valid.
+func parseHostSSHRecordingPolicy(userClass []string) HostRecordingPolicy {
+	var managed []string
+	for _, uc := range userClass {
+		if len(uc) >= len(pilotSSHRecordingPolicyPrefix) && strings.EqualFold(uc[:len(pilotSSHRecordingPolicyPrefix)], pilotSSHRecordingPolicyPrefix) {
+			managed = append(managed, uc)
+		}
+	}
+	switch len(managed) {
+	case 0:
+		return HostRecordingPolicy{Valid: true}
+	case 1:
+	default:
+		return HostRecordingPolicy{Present: true, Reason: "duplicate"}
+	}
+	value, ok := strings.CutPrefix(managed[0], pilotSSHRecordingPolicyPrefix)
+	if !ok || value == "" {
+		return HostRecordingPolicy{Present: true, Reason: "malformed"}
+	}
+	switch value {
+	case "off", "terminal_output":
+		return HostRecordingPolicy{Present: true, Mode: value, Valid: true}
+	default:
+		return HostRecordingPolicy{Present: true, Reason: "unknown_value"}
+	}
+}
+
+// userClassReadable reports whether a host_show(rights=true) response grants
+// read on userclass (per-host recording spec §9 branch R: FreeIPA returns
+// attributelevelrights.userclass = "rsc" for the gateway principal). A
+// missing attributelevelrights block, or a userclass entry without "r",
+// is unreadable — the absence of a policy marker then proves nothing.
+func userClassReadable(m map[string]any) bool {
+	rights, ok := m["attributelevelrights"].(map[string]any)
+	if !ok {
+		return false
+	}
+	uc, ok := rights["userclass"].(string)
+	return ok && strings.Contains(uc, "r")
 }
 
 func parseHostgroup(m map[string]any) Hostgroup {

@@ -39,7 +39,7 @@
 
 依 F16 慣例列在 checklist 之外，由 `docs/topologies/pilot-access-transport-topology.yaml` 上的實跑證明，結果寫入對應 Phase 的 evidence。
 
-目前有效摘要（2026-09-23，candidate `0f1a5c1`）：TP06–TP12 全部 PASS。strict 與 remote-dev 的 forwarding 探測經真實 transport 執行；`absent` 先移出 hostgroup、再刪 drop-in；每個 profile 的第二次 apply 都是 `changed=0`；7 種不合法輸入全部 rc=2，`*.conf` checksum 不變。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)（Phase 5）；首次的 profile／absent／TP12 實跑見 [`docs/evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md`](../evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md)（Phase 4）。
+目前有效摘要（2026-09-24，candidate `fcd3c03`，與 per-host SSH session recording 合併後）：TP01–TP05 在從未套用過的 VM 上與再次套用後皆 5/5；TP06–TP11 PASS——strict 與 remote-dev 的 forwarding 探測經真實 transport 執行（TP07／TP08／TP09），`absent` 先移出 hostgroup、再刪 drop-in（TP06／TP10），每個 profile 與 `absent` 的第二次 apply 都是 `changed=0`（TP11）。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-24-fcd3c03.md`](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md)。TP12（7 種不合法輸入全部 rc=2，`*.conf` checksum 不變）這輪未重跑，最後一次在 `0f1a5c1`，見 [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)（Phase 5）；首次的 profile／absent／TP12 實跑見 [`docs/evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md`](../evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md)（Phase 4）。
 
 | ID | 驗證內容 |
 |----|----------|

@@ -1,0 +1,57 @@
+# Fresh-host scenario for per-host SSH session recording
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md):
+# FreeIPA, a gateway recording to a session store, two targets (rec-tb is
+# marked ssh_recording: terminal_output by the test wrapper, rec-ta
+# inherits) and a Directory that hands off to the gateway.
+#
+# Run it with scripts/per-host-recording-topology-test.sh
+# (make recording-topology-test VAULT=<path>). By hand:
+#   pilot vm-target topology up        --topology docs/topologies/per-host-recording-topology.yaml
+#   pilot vm-target topology inventory --topology docs/topologies/per-host-recording-topology.yaml
+#   pilot vm-target topology down      --topology docs/topologies/per-host-recording-topology.yaml
+services: local
+nodes:
+  - name: rec-ipa
+    base_image: almalinux-9
+    memory: 3072
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server]
+  - name: rec-gw
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client, pilot-access-gateway]
+    wire: ["rec-ta=rec-ta.ipa.pilot.internal", "rec-tb=rec-tb.ipa.pilot.internal", "rec-store=rec-store.ipa.pilot.internal"]
+  - name: rec-ta
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client]
+  - name: rec-tb
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client]
+  - name: rec-store
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client, pilot-session-store]
+  - name: rec-dir
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client, pilot-access-directory]
+    wire: ["rec-gw=rec-gw.ipa.pilot.internal"]

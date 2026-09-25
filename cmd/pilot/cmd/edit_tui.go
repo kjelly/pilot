@@ -634,6 +634,7 @@ func hostMenuItems(h *inventory.Host) []hostMenuItem {
 	}
 	return append(items,
 		hostMenuItem{tui.Choice{ID: "hosts.item.deployment_availability", Label: fmt.Sprintf("部署可用性(離線時)：%s", deploymentAvailabilityLabel(h.DeploymentAvailability))}, pushDeploymentAvailabilityMenu},
+		hostMenuItem{tui.Choice{ID: "hosts.item.ssh_recording", Label: fmt.Sprintf("SSH recording(經 Access Gateway 的終端錄影)：%s", sshRecordingLabel(h.SSHRecording))}, pushSSHRecordingMenu},
 		hostMenuItem{tui.Choice{ID: "hosts.item.delete", Label: "🗑  下架 / Decommission 主機"}, pushDecommissionFlow},
 		hostMenuItem{tui.Choice{ID: "hosts.item.back", Label: "↩  返回主機清單"}, func(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
 			return pushHostList(r, dir, path, hf, "")
@@ -671,6 +672,54 @@ func pushDeploymentAvailabilityMenu(r *editRouterModel, dir, path string, hf *in
 		}
 		if h := findHost(hf, name); h != nil {
 			h.DeploymentAvailability = inventory.DeploymentAvailability(m.SelectedID())
+		}
+		return pushHostMenu(r, dir, path, hf, name)
+	})
+}
+
+// sshRecordingInherit is the choice/set_host_field value meaning "remove
+// ssh_recording from this host" (per-host recording spec §25).
+const sshRecordingInherit = "inherit"
+
+func sshRecordingLabel(value inventory.SSHRecording) string {
+	if value == "" {
+		return "inherit（沿用 gateway 預設）"
+	}
+	return string(value)
+}
+
+// pushSSHRecordingMenu edits the host's per-host SSH recording policy. The
+// choice IDs equal set_host_field's ssh_recording values so the automation
+// driver can select them by ID; "inherit" removes the field entirely, which
+// is deliberately distinct from an explicit "off".
+func pushSSHRecordingMenu(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string) tea.Cmd {
+	choices := []tui.Choice{
+		{ID: sshRecordingInherit, Label: "Inherit gateway default — 移除此欄位，沿用 gateway 設定（內建預設 metadata = 不錄終端）"},
+		{ID: string(inventory.SSHRecordingOff), Label: "Off — 明確不錄終端，即使 gateway 預設會錄"},
+		{ID: string(inventory.SSHRecordingTerminalOutput), Label: "Terminal output — 錄下這台主機 SSH session 的終端輸出"},
+		{ID: "back", Label: "↩  返回主機設定"},
+	}
+	initial := sshRecordingInherit
+	if h := findHost(hf, name); h != nil && h.SSHRecording != "" {
+		initial = string(h.SSHRecording)
+	}
+	spec := tui.SelectSpec{
+		ScreenID:  "hosts.item.ssh_recording",
+		Title:     "SSH recording — 經 pilot-access-gateway 連到這台主機時是否錄下終端",
+		Choices:   choices,
+		InitialID: initial,
+	}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.SelectScreen)
+		if m.Canceled() || m.SelectedID() == "back" {
+			return pushHostMenu(r, dir, path, hf, name)
+		}
+		if h := findHost(hf, name); h != nil {
+			if m.SelectedID() == sshRecordingInherit {
+				h.SSHRecording = ""
+			} else {
+				h.SSHRecording = inventory.SSHRecording(m.SelectedID())
+			}
 		}
 		return pushHostMenu(r, dir, path, hf, name)
 	})

@@ -199,8 +199,10 @@ func portalSessionHasAnyTTY() bool {
 // transport states that stderr is shown straight in the user's terminal by
 // their ProxyCommand/KnownHostsCommand.
 var portalSessionCmd = &cobra.Command{
-	Use:           "portal-session",
-	Hidden:        true,
+	Use:    "portal-session",
+	Hidden: true,
+	// The user's whole SSH session: a runtime failure must not print usage,
+	// and runPortalSession prints each error exactly once itself.
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {

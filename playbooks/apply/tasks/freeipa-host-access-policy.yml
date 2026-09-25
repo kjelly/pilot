@@ -1,0 +1,311 @@
+# Shared task file: FreeIPA host access policy projection
+# (docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md
+# §7/§8 — "per-host recording spec" below).
+#
+# Included ONCE from freeipa-client-apply.yml, AFTER enrollment, the
+# post-enroll health checks and the annotations reconcile. It projects the
+# `pilot_ssh_recording` host var (rendered by `pilot inventory generate`
+# from hosts.yml `ssh_recording:`) onto exactly one FreeIPA host userClass
+# value `pilot.policy.ssh-recording=<mode>` that pilot-access-gateway reads
+# at every connect/authorize. Undefined `pilot_ssh_recording` means inherit
+# the gateway default, so any existing managed value is pruned.
+#
+# Kept separate from freeipa-host-annotations.yml on purpose: annotations
+# are descriptive-only, this is a security/runtime policy input with
+# different ownership and failure semantics (spec §8.1). The two
+# reconcilers never touch each other's values — each treats the other's
+# prefix as foreign.
+#
+# Ownership (spec §7): a userClass value is managed by this file when it
+# matches the prefix `pilot.policy.ssh-recording=` case-insensitively
+# (userClass equality is case-insensitive in LDAP). Everything else is
+# foreign and is never deleted or rewritten. A managed value whose prefix
+# case differs, whose value is empty, duplicated, or unknown (including
+# the reserved `terminal_io`) fails closed BEFORE any mutation — it is
+# never auto-deleted.
+---
+# Phase A — validate desired before any live read. A hand-edited
+# inventory.yml bypasses `pilot inventory lint`, and Ansible parses YAML
+# 1.1, where an unquoted `off` is the boolean false.
+- name: "FreeIPA host access policy (Phase A) — validate pilot_ssh_recording"
+  ansible.builtin.assert:
+    that:
+      - >-
+        pilot_ssh_recording is not defined
+        or (pilot_ssh_recording is string and pilot_ssh_recording in ['off', 'terminal_output'])
+    fail_msg: >-
+      pilot_ssh_recording for {{ ipa_client_fqdn }} must be the string "off"
+      or "terminal_output", or undefined (got {{ pilot_ssh_recording | default('') | string }}
+      of type {{ pilot_ssh_recording | default('') | type_debug }}). terminal_io
+      is reserved for a future release. An unquoted `off` in a hand-edited
+      inventory.yml is parsed by Ansible as a boolean — regenerate it with
+      `pilot inventory generate`, or quote the value.
+
+- name: "FreeIPA host access policy — resolve desired policy"
+  ansible.builtin.set_fact:
+    ipa_host_policy_desired: "{{ pilot_ssh_recording | default('') }}"
+
+- name: "FreeIPA host access policy — define the reconcile-plan script"
+  ansible.builtin.set_fact:
+    ipa_host_policy_plan_script: |
+      import json, re, sys
+      data = json.loads(sys.argv[1])
+      desired = data['desired']
+      live = data['live_userclass']
+      PREFIX = 'pilot.policy.ssh-recording='
+      prefix_re = re.compile(r'^pilot\.policy\.ssh-recording=', re.IGNORECASE)
+      VALID = ('off', 'terminal_output')
+      errors = []
+      managed = [v for v in live if prefix_re.match(v)]
+      foreign = [v for v in live if not prefix_re.match(v)]
+      if len(managed) > 1:
+          errors.append('CONFLICT_DUPLICATE_SSH_RECORDING_POLICY: %d managed values %r' % (len(managed), managed))
+      elif len(managed) == 1:
+          raw = managed[0]
+          if not raw.startswith(PREFIX) or raw[len(PREFIX):] == '':
+              errors.append('CONFLICT_MALFORMED_SSH_RECORDING_POLICY: %r' % (raw,))
+          elif raw[len(PREFIX):] not in VALID:
+              errors.append('CONFLICT_UNKNOWN_SSH_RECORDING_POLICY: %r' % (raw,))
+      if errors:
+          print(json.dumps({'ok': False, 'errors': errors}))
+          sys.exit(1)
+      current = managed[0] if managed else None
+      want = PREFIX + desired if desired else None
+      add, delete = [], []
+      if current != want:
+          if current is not None:
+              delete.append(current)
+          if want is not None:
+              add.append(want)
+      print(json.dumps({
+          'ok': True,
+          'errors': [],
+          'add': add,
+          'delete': delete,
+          'noop': not add and not delete,
+          'preserve_foreign': foreign,
+          'expected_managed': [want] if want else [],
+      }))
+
+- name: "FreeIPA host access policy (Phase B-F) — check enrollment, then read/plan/apply/verify"
+  block:
+    # A --check preview of a never-enrolled host has no Kerberos realm
+    # configuration to authenticate with (enrollment itself is skipped under
+    # --check). A real run always finds this true: this file is included
+    # only after enrollment and the post-enroll health checks succeeded.
+    - name: "FreeIPA host access policy — check whether this host is currently enrolled (OS level)"
+      ansible.builtin.stat:
+        path: /etc/ipa/default.conf
+      register: ipa_host_policy_enrolled_stat
+      check_mode: false
+
+    - name: "FreeIPA host access policy — check-mode preview: host not yet enrolled"
+      ansible.builtin.debug:
+        msg: >-
+          FreeIPA host access policy plan for {{ ipa_client_fqdn }}: BLOCKED
+          (not yet enrolled) — no /etc/ipa/default.conf in this --check
+          preview; the policy is reconciled once enrollment actually applies.
+      when: ansible_check_mode and not ipa_host_policy_enrolled_stat.stat.exists
+
+    - name: "Gate: host must be enrolled before the access policy reconcile (real run)"
+      ansible.builtin.assert:
+        that:
+          - ipa_host_policy_enrolled_stat.stat.exists
+        fail_msg: >-
+          {{ ipa_client_fqdn }} has no /etc/ipa/default.conf after enrollment;
+          refusing to reconcile the FreeIPA host access policy.
+      when: not ansible_check_mode
+
+    - name: "FreeIPA host access policy (enrolled only) — read, plan, apply, verify"
+      when: ipa_host_policy_enrolled_stat.stat.exists | bool
+      block:
+        - name: "FreeIPA host access policy — create a dedicated Kerberos credential cache path"
+          ansible.builtin.tempfile:
+            state: file
+            prefix: pilot-freeipa-host-access-policy-
+            suffix: .ccache
+          register: ipa_host_policy_ccache_file
+          changed_when: false
+          check_mode: false
+
+        - name: "FreeIPA host access policy — kinit admin into the dedicated ccache"
+          ansible.builtin.command:
+            argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ ipa_enroll_password }}"
+          environment:
+            KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          changed_when: false
+          no_log: true
+          check_mode: false
+
+        # Phase B — read live. Runs under --check too (check_mode: false) so
+        # a --check --diff preview shows the plan.
+        - name: "FreeIPA host access policy (Phase B) — read the FreeIPA host object"
+          ansible.builtin.command:
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          register: ipa_host_policy_host_show
+          changed_when: false
+          check_mode: false
+          failed_when: false
+
+        # rc != 0 has two different meanings that must not be conflated: the
+        # host object is really absent (stderr carries FreeIPA's own
+        # not-found message), or FreeIPA could not be reached/queried.
+        - name: "FreeIPA host access policy — classify a failed host-show"
+          ansible.builtin.set_fact:
+            ipa_host_policy_read_state: >-
+              {{ 'ok' if ipa_host_policy_host_show.rc == 0
+                 else ('HOST_ABSENT' if (ipa_host_policy_host_show.stderr | default('')) is search(ipa_host_policy_not_found_re)
+                       else 'FREEIPA_UNREACHABLE') }}
+          vars:
+            ipa_host_policy_not_found_re: '(?i)host not found'
+
+        - name: "Gate: FreeIPA host object must be readable before the access policy reconcile (real run)"
+          ansible.builtin.assert:
+            that:
+              - ipa_host_policy_read_state == 'ok'
+            fail_msg: >-
+              {{ ipa_host_policy_read_state }}: could not read FreeIPA host object
+              {{ ipa_client_fqdn }} (ipa host-show rc={{ ipa_host_policy_host_show.rc }},
+              stderr={{ ipa_host_policy_host_show.stderr | default('') }}). This
+              reconcile never creates a host object.
+          when: not ansible_check_mode
+
+        - name: "FreeIPA host access policy — check-mode preview: host object unreadable"
+          ansible.builtin.debug:
+            msg: >-
+              FreeIPA host access policy plan for {{ ipa_client_fqdn }}: BLOCKED
+              ({{ ipa_host_policy_read_state }}) — the host object could not be
+              read in this --check preview.
+          when: ansible_check_mode and ipa_host_policy_read_state != 'ok'
+
+        - name: "FreeIPA host access policy (Phase C) — extract live userClass values"
+          ansible.builtin.set_fact:
+            ipa_host_policy_live_userclass: >-
+              {{ ipa_host_policy_host_show.stdout | default('') | regex_findall('(?im)^[ \t]*userclass: (.+)$') }}
+          when: ipa_host_policy_read_state == 'ok'
+
+        - name: "FreeIPA host access policy (Phase C/D) — compute the reconcile plan"
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_host_policy_plan_script }}"
+              - "{{ ipa_host_policy_plan_input | to_json }}"
+          vars:
+            ipa_host_policy_plan_input:
+              desired: "{{ ipa_host_policy_desired }}"
+              live_userclass: "{{ ipa_host_policy_live_userclass }}"
+          register: ipa_host_policy_plan_raw
+          changed_when: false
+          check_mode: false
+          failed_when: false
+          when: ipa_host_policy_read_state == 'ok'
+
+        - name: "FreeIPA host access policy — parse the reconcile plan"
+          ansible.builtin.set_fact:
+            ipa_host_policy_plan: "{{ ipa_host_policy_plan_raw.stdout | default('{}') | from_json }}"
+          when: ipa_host_policy_read_state == 'ok'
+
+        # Phase D — conflict gate, before any mutation. Unknown managed state
+        # is never auto-deleted.
+        - name: "Gate: access policy reconcile plan must have no conflicts before any mutation"
+          ansible.builtin.assert:
+            that:
+              - ipa_host_policy_plan.ok | default(false) | bool
+            fail_msg: >-
+              FreeIPA host access policy reconcile for {{ ipa_client_fqdn }}
+              found conflicts and will not mutate anything this run:
+              {{ ipa_host_policy_plan.errors | default([]) }}
+          when: ipa_host_policy_read_state == 'ok'
+
+        - name: "FreeIPA host access policy (Phase D) — report plan"
+          ansible.builtin.debug:
+            msg: |
+              FreeIPA host access policy plan for {{ ipa_client_fqdn }}:
+                desired pilot_ssh_recording: {{ ipa_host_policy_desired if ipa_host_policy_desired else '(inherit)' }}
+                DELETE: {{ ipa_host_policy_plan.delete | default([]) }}
+                ADD: {{ ipa_host_policy_plan.add | default([]) }}
+                NOOP: {{ ipa_host_policy_plan.noop | default(true) }}
+                preserve foreign userClass: {{ ipa_host_policy_plan.preserve_foreign | default([]) }}
+          when: ipa_host_policy_read_state == 'ok'
+
+        # Phase E — apply: delete the stale managed value, then add the new
+        # one. Only --delattr/--addattr: a full --setattr=userclass would
+        # wipe every foreign value.
+        - name: "FreeIPA host access policy (Phase E) — delete the stale managed userClass value"
+          ansible.builtin.command:
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-mod, "{{ ipa_client_fqdn }}", "--delattr=userclass={{ item }}"]
+          environment:
+            KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          loop: "{{ ipa_host_policy_plan.delete | default([]) }}"
+          loop_control: {label: "{{ item }}"}
+          when: ipa_host_policy_read_state == 'ok' and not ansible_check_mode
+          register: ipa_host_policy_delete
+          changed_when: ipa_host_policy_delete.rc | default(1) == 0
+
+        - name: "FreeIPA host access policy (Phase E) — add the desired managed userClass value"
+          ansible.builtin.command:
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-mod, "{{ ipa_client_fqdn }}", "--addattr=userclass={{ item }}"]
+          environment:
+            KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          loop: "{{ ipa_host_policy_plan.add | default([]) }}"
+          loop_control: {label: "{{ item }}"}
+          when: ipa_host_policy_read_state == 'ok' and not ansible_check_mode
+          register: ipa_host_policy_add
+          changed_when: ipa_host_policy_add.rc | default(1) == 0
+
+        # Phase F — verify, only when this run actually mutated something.
+        - name: "FreeIPA host access policy (Phase F) — re-read live state for verification"
+          ansible.builtin.command:
+            argv: [ipa, -e, "xmlrpc_uri=https://{{ freeipa_admin_server_fqdn }}/ipa/xml", host-show, "{{ ipa_client_fqdn }}", --all, --raw]
+          environment:
+            KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          register: ipa_host_policy_verify_show
+          changed_when: false
+          when: >-
+            ipa_host_policy_read_state == 'ok' and not ansible_check_mode
+            and not (ipa_host_policy_plan.noop | default(true) | bool)
+
+        - name: "FreeIPA host access policy (Phase F) — split post-apply userClass into managed/foreign"
+          ansible.builtin.set_fact:
+            ipa_host_policy_verify_managed: >-
+              {{ ipa_host_policy_verify_userclass | select('match', '(?i)^pilot\.policy\.ssh-recording=') | list }}
+            ipa_host_policy_verify_foreign: >-
+              {{ ipa_host_policy_verify_userclass | reject('match', '(?i)^pilot\.policy\.ssh-recording=') | list }}
+          vars:
+            ipa_host_policy_verify_userclass: >-
+              {{ ipa_host_policy_verify_show.stdout | default('') | regex_findall('(?im)^[ \t]*userclass: (.+)$') }}
+          when: ipa_host_policy_verify_show is not skipped
+
+        - name: "Gate: post-apply managed policy value exactly matches desired (no duplicate, no stale value)"
+          ansible.builtin.assert:
+            that:
+              - ipa_host_policy_verify_managed == ipa_host_policy_plan.expected_managed
+            fail_msg: >-
+              Post-apply verification FAILED for {{ ipa_client_fqdn }}: managed
+              userClass is {{ ipa_host_policy_verify_managed }}, want exactly
+              {{ ipa_host_policy_plan.expected_managed }}. Not rolled back —
+              a rerun re-enters this reconcile.
+          when: ipa_host_policy_verify_show is not skipped
+
+        - name: "Gate: foreign userClass values (including annotations) are unchanged after apply"
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ipa_host_policy_verify_foreign | map('lower') | sort | list)
+                == (ipa_host_policy_plan.preserve_foreign | map('lower') | sort | list)
+            fail_msg: >-
+              Post-apply verification FAILED for {{ ipa_client_fqdn }}: foreign
+              userClass values changed. Before: {{ ipa_host_policy_plan.preserve_foreign }}.
+              After: {{ ipa_host_policy_verify_foreign }}.
+          when: ipa_host_policy_verify_show is not skipped
+      always:
+        - name: "FreeIPA host access policy — destroy the Kerberos ticket in the dedicated ccache"
+          ansible.builtin.command:
+            argv: [kdestroy, -c, "FILE:{{ ipa_host_policy_ccache_file.path }}"]
+          changed_when: false
+          failed_when: false
+          when: ipa_host_policy_ccache_file is defined and ipa_host_policy_ccache_file.path is defined

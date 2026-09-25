@@ -24,7 +24,7 @@ type fakeProvider struct {
 	sudoCommandGroups map[string]freeipaaccess.SudoCommandGroup
 
 	// hostShowCalls counts HostShow invocations per fqdn — used only by
-	// tests proving PolicySnapshot's hostAnnotationCache dedupes across
+	// tests proving PolicySnapshot's hostMetadataCache dedupes across
 	// multiple ResolveScopeAccess calls (docs/tmp/now/spec.md §9.3).
 	hostShowCalls map[string]int
 }
@@ -62,7 +62,7 @@ func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess
 	if h, ok := f.hosts[fqdn]; ok {
 		return h, nil
 	}
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 
 func (f *fakeProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {

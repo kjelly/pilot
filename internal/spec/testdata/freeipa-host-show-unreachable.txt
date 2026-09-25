@@ -1,0 +1,8 @@
+# Real capture: `ipa host-show <fqdn> --all --raw` against ipa-server-4.13.1-3.el9_8.2
+# (AlmaLinux 9 server, Ubuntu 24.04 client), per-host recording spec §9 Phase 0, 2026-09-23.
+# Public-key / Kerberos blob values replaced with <redacted>; everything else verbatim.
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+ipa: ERROR: cannot connect to 'https://127.0.0.1:1/ipa/json': [Errno -2] Name or service not known

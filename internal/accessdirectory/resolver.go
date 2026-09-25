@@ -19,7 +19,7 @@ import (
 // service-group/command-group expansions happen exactly once per call,
 // regardless of how many scopes exist (spec.md §9.3) — and a host
 // reachable via more than one scope is HostShow'd for annotations only
-// once too, via the snapshot's shared hostAnnotationCache.
+// once too, via the snapshot's shared hostMetadataCache.
 //
 // Fail-closed semantics are per-scope, not per-call (spec.md §9.5/§20
 // Case B/D): if one scope's ResolveScopeAccess errors — its
@@ -68,9 +68,11 @@ func LoadDirectoryAccess(ctx context.Context, provider freeipaaccess.Provider, f
 		for _, host := range access.Hosts {
 			target, ok := byFQDN[host.FQDN]
 			if !ok {
-				target = &DirectoryTarget{FQDN: host.FQDN, SSH: host.SSH, Sudo: host.Sudo}
+				target = &DirectoryTarget{FQDN: host.FQDN, SSH: host.SSH, Sudo: host.Sudo, Recording: host.SSHRecording}
 				byFQDN[host.FQDN] = target
 				order = append(order, host.FQDN)
+			} else {
+				target.Recording = mergeRecordingPolicy(target.Recording, host.SSHRecording)
 			}
 			target.Routes = append(target.Routes, tr)
 		}
@@ -100,4 +102,22 @@ func routeStatus(route ScopeRoute) string {
 	// 3 has no network probing yet, so "a live pilot-gateway-<scope>
 	// member exists" is as far as readiness goes for now.
 	return "ready"
+}
+
+// mergeRecordingPolicy combines one FQDN's recording-policy facts seen
+// through two scopes (per-host recording spec §12). Every scope reads the
+// same FreeIPA host object, so they normally agree; when a read failed in
+// one scope, a known result from another wins, but an invalid marker always
+// wins so a misconfiguration is never hidden behind a successful read.
+func mergeRecordingPolicy(a, b accessportal.SSHRecordingAccessPolicy) accessportal.SSHRecordingAccessPolicy {
+	switch {
+	case a.Known && !a.Valid:
+		return a
+	case b.Known && !b.Valid:
+		return b
+	case a.Known:
+		return a
+	default:
+		return b
+	}
 }

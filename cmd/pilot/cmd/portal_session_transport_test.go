@@ -51,7 +51,9 @@ func (p *transportFakeGatewayProvider) HBACRuleFind(ctx context.Context) ([]free
 }
 
 func (p *transportFakeGatewayProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
-	return freeipaaccess.Host{FQDN: fqdn, SSHPublicKeys: p.hostKeys}, nil
+	h := freeipaaccess.NewHostWithoutPolicy(fqdn)
+	h.SSHPublicKeys = p.hostKeys
+	return h, nil
 }
 
 type transportGatewayOpts struct {
@@ -81,7 +83,14 @@ func startFakeTransportGateway(t *testing.T, opts transportGatewayOpts) (*portal
 	}
 	srv := gatewayapi.NewServer(gw, provider, accessportal.NewResolver(provider, gw), nil)
 	srv.Transport = gatewayapi.TransportPolicy{Enabled: opts.enabled}
-	srv.RecordingPolicy = gatewayapi.RecordingPolicy{Mode: opts.recording}
+	// A terminal gateway default needs a session store and signer, or the
+	// gateway refuses the connect (recording_backend_unavailable) before
+	// the transport's own recording allowlist (spec D8) is reached.
+	srv.RecordingPolicy = gatewayapi.RecordingPolicy{DefaultMode: opts.recording}
+	if opts.recording == "terminal_output" || opts.recording == "terminal_io" {
+		srv.RecordingPolicy = storeRecordingPolicy(t, "https://store.example.test:8443", "")
+		srv.RecordingPolicy.DefaultMode = opts.recording
+	}
 	go srv.Serve(ln)                                         //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
 	return newPortalClient(sockPath), provider

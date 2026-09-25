@@ -258,7 +258,7 @@ generates auditd/PAM events on the target.
 | `pilot spec <spec.md> --status` | Show compiled/applied/verified coverage for a spec. |
 | `pilot spec status <spec.md>` | Equivalent status subcommand, useful for scripts and explicit command discovery. |
 | `pilot verify <spec.md>` | Run every row of one spec locally by default, or use `--inventory` and `--limit` for remote/fleet verification. It writes NDJSON and Markdown reports and updates checkpoints. |
-| `pilot verify --dir <directory>` | Verify every Markdown spec in a directory and print a roll-up. |
+| `pilot verify --dir <directory>` | Verify every Markdown spec in a directory and print a roll-up. There is no default directory: without a spec.md, `--dir` is required. |
 | `pilot verify --probe <command>` | Test one candidate probe through the same pipeline and matcher as a spec row before committing its `Expected` value. |
 
 `--apply` and `--to-inventory` on `pilot spec` are retired. Production

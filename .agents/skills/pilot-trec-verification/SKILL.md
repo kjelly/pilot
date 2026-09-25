@@ -403,6 +403,7 @@ because you have not read its reference.**
 | 27 | Add `-o StrictHostKeyChecking=accept-new` (or `ssh-keygen -R <ip>`) to every raw `ssh` after a VM rebuild. | `references/known-gotchas.md` |
 | 28 | Add `-o ControlMaster=no` to any live-SSH re-auth check meant to prove a credential/policy state changed — a multiplexed session silently reuses the old authentication. | `references/known-gotchas.md` |
 | 29 | Before reporting a "Real bug" against a playbook or the wizard, cross-verify three ways: read the surrounding code, replay the cast with `trec transcript`, and `grep` the on-disk files your report claims were written. | `references/known-gotchas.md` |
+| 30 | Drive `pilot portal` / `pilot directory` sessions (Connect → target shell → back to the menu) with `trec`, not plain `expect`: under `expect` the menu redrawn after the SSH child returns renders but ignores every key. For Kerberos prompts, spawn `ssh` under a tiny `expect … interact` wrapper that reads the password from a file and answers only `Kerberos password for …:`, so no secret appears in a keystroke or tool argument. A Portal y/n confirm submits on the single `y` (row 22 applies here too). | — |
 
 ## 5. Choose the deploy strategy: one-shot vs per-component
 

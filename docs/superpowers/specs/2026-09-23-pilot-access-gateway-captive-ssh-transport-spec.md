@@ -473,6 +473,12 @@ Playbook 要求：
 4. Step 11 模板新增 `recording:` 區塊（mode、failure_policy；url 非空時才輸出 session_store_*），以及 `transport:` 區塊（§12.3）。
 5. 同步更新：`group_vars/pilot-access-gateway.example.yml`、`group_vars/pilot-session-store.example.yml`（「手動對應設定」段落改寫成新 group vars）、`cmd/pilot/cmd/deploy_catalog.go` 的 pilot-session-store Note、`contracts/pilot-access-gateway.yaml` 的 `groupVars`。
 
+> **2026-09-24 與 per-host SSH session recording 合併後**（`docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md`）：
+> `_mode` 沒有預設值（未設定＝built-in metadata，config 不寫 `mode:`）；`_failure_policy` 預設 `fail_closed`；`_session_store_ca_file`
+> 預設 `/etc/ipa/ca.crt`；另有 `_queue_events`、`_flush_interval`、`_failure_grace`、`_max_session_duration`。`_session_store_ingest_token_file`
+> 已移除：recorded session 改用 gateway 以 vault `pilot_session_store_ingest_signing_key` 簽發的 per-session PIT1 token。降級守門不變，
+> 未設定的 mode 視為 metadata 比較。D8 的 transport recording allowlist 讀的是 gateway 依每台主機的 FreeIPA policy 解析出的 effective mode。
+
 ### 12.3 Transport 旗標
 
 - Group var `pilot_access_gateway_transport_enabled`（boolean，預設 `false`）→ 模板輸出 `transport:\n    enabled: true|false`（縮排依既有模板）。

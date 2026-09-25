@@ -153,12 +153,33 @@
     # policy" guard tasks below refuse — before anything is written — to
     # lower an installed policy unless
     # pilot_access_gateway_recording_allow_downgrade=true says so explicitly.
-    pilot_access_gateway_effective_recording_mode: "{{ pilot_access_gateway_recording_mode | default('metadata', true) }}"
-    pilot_access_gateway_effective_recording_failure_policy: "{{ pilot_access_gateway_recording_failure_policy | default('best_effort', true) }}"
+    #
+    # The mode has NO default on purpose (per-host recording spec §14): when
+    # unset the rendered config omits `mode:`, so a host that inherits reports
+    # its source as built_in_default (metadata); per-host FreeIPA markers
+    # (pilot.policy.ssh-recording) override it. The downgrade guard reads an
+    # unset mode as metadata. failure_policy defaults to fail_closed (spec
+    # §14, G9): a recorded session is never silently left unrecorded.
+    # Recorded sessions carry per-session PIT1 ingest tokens that the
+    # gateway mints with pilot_session_store_ingest_signing_key (vault, the
+    # same value pilot-session-store verifies with); there is no static
+    # bearer token file.
+    pilot_access_gateway_effective_recording_mode: "{{ pilot_access_gateway_recording_mode | default('', true) }}"
+    pilot_access_gateway_effective_recording_failure_policy: "{{ pilot_access_gateway_recording_failure_policy | default('fail_closed', true) }}"
+    pilot_access_gateway_effective_recording_queue_events: "{{ pilot_access_gateway_recording_queue_events | default(1024, true) }}"
+    pilot_access_gateway_effective_recording_flush_interval: "{{ pilot_access_gateway_recording_flush_interval | default('500ms', true) }}"
+    pilot_access_gateway_effective_recording_failure_grace: "{{ pilot_access_gateway_recording_failure_grace | default('10s', true) }}"
+    pilot_access_gateway_effective_recording_max_session_duration: "{{ pilot_access_gateway_recording_max_session_duration | default('24h', true) }}"
     pilot_access_gateway_effective_recording_session_store_url: "{{ pilot_access_gateway_recording_session_store_url | default('', true) }}"
-    pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('', true) }}"
-    pilot_access_gateway_effective_recording_session_store_ingest_token_file: "{{ pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) }}"
+    pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('/etc/ipa/ca.crt', true) }}"
     pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
+    gateway_session_store_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    # Left behind by an earlier static-bearer-token session-store wiring;
+    # per-session tokens replace it, so it is removed.
+    gateway_legacy_session_store_token_file: /etc/pilot/session-store-ingest-token
+    # Metrics (per-host recording spec §31) are written only when
+    # node_exporter's textfile collector directory already exists.
+    gateway_metrics_textfile_dir: /var/lib/node_exporter/textfile
     # Captive opaque SSH transport (`pilot-transport-v1`, captive-transport
     # spec §12.3). Default FALSE and this spec must not flip it: turning it
     # on opens a new data plane, and a target is only reachable once
@@ -650,7 +671,9 @@
     - name: "Gate: portal-user group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - gateway_portal_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - gateway_portal_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ gateway_effective_portal_user_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally
@@ -773,12 +796,15 @@
       changed_when: true
       tags: [AG_keytab]
 
+    # Under --check on a host without the keytab yet, its retrieval above
+    # is skipped, so there is no file to fix up (AGENTS.md §4.0).
     - name: "Step 8: keytab ownership/mode (spec.md §10.3, AG03)"
       ansible.builtin.file:
         path: /etc/pilot/pilot-access-gateway.keytab
         owner: "{{ pilot_gateway_user }}"
         group: "{{ pilot_gateway_user }}"
         mode: "0400"
+      when: not (ansible_check_mode and not gateway_keytab_stat.stat.exists)
       tags: [AG_keytab, AG03]
 
     # Recording policy guard (captive-transport spec §12.2). Every task here
@@ -789,39 +815,29 @@
     - name: "Recording policy: rendered values are valid"
       ansible.builtin.assert:
         that:
-          - pilot_access_gateway_effective_recording_mode in gateway_recording_mode_rank
+          - >-
+            pilot_access_gateway_effective_recording_mode | length == 0
+            or pilot_access_gateway_effective_recording_mode in gateway_recording_mode_rank
           - pilot_access_gateway_effective_recording_failure_policy in ['best_effort', 'fail_closed']
           - >-
+            (pilot_access_gateway_effective_recording_mode or 'metadata') == 'metadata'
+            or pilot_access_gateway_effective_recording_session_store_url | length > 0
+          - >-
             pilot_access_gateway_effective_recording_session_store_url | length == 0
-            or pilot_access_gateway_effective_recording_session_store_ingest_token_file | length > 0
+            or pilot_access_gateway_effective_recording_session_store_url is match('^https://')
+          - >-
+            pilot_access_gateway_effective_recording_session_store_url | length == 0
+            or (pilot_session_store_ingest_signing_key is defined
+                and pilot_session_store_ingest_signing_key is match('^[0-9a-fA-F]{64}$'))
         fail_msg: >-
           pilot_access_gateway_recording_mode must be metadata|terminal_output|terminal_io
-          (got {{ pilot_access_gateway_effective_recording_mode }}),
+          or unset (got {{ pilot_access_gateway_effective_recording_mode }}),
           pilot_access_gateway_recording_failure_policy must be best_effort|fail_closed
-          (got {{ pilot_access_gateway_effective_recording_failure_policy }}), and a
-          session_store_url requires pilot_access_gateway_recording_session_store_ingest_token_file.
-      tags: [AG_config, AG01, AG41, AG42]
-
-    - name: "Recording policy: stat the session-store ingest token file"
-      ansible.builtin.stat:
-        path: "{{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}"
-      register: gateway_recording_token_stat
-      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
-      tags: [AG_config, AG01, AG41, AG42]
-
-    # Same rule cmd/pilot-access-gateway/config.go's loadSessionStoreIngestToken
-    # enforces at startup — failing here keeps a bad token file from
-    # turning into a service that cannot start after Step 11 is written.
-    - name: "Recording policy: the ingest token file exists and is not group/world accessible"
-      ansible.builtin.assert:
-        that:
-          - gateway_recording_token_stat.stat.exists | default(false)
-          - (gateway_recording_token_stat.stat.mode | default('0777'))[-2:] == '00'
-        fail_msg: >-
-          {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}
-          must exist on this host with no group/world permission bits (e.g. 0600)
-          before a session store can be configured.
-      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
+          (got {{ pilot_access_gateway_effective_recording_failure_policy }}); a terminal
+          recording mode requires pilot_access_gateway_recording_session_store_url, which
+          must be https:// and requires pilot_session_store_ingest_signing_key (vault,
+          64 hex characters, the same value pilot-session-store uses). There is no
+          local recording fallback.
       tags: [AG_config, AG01, AG41, AG42]
 
     - name: "Recording policy: stat the currently installed gateway config"
@@ -850,7 +866,7 @@
           - >-
             (pilot_access_gateway_effective_recording_allow_downgrade | bool)
             or (
-              (gateway_recording_mode_rank[pilot_access_gateway_effective_recording_mode]
+              (gateway_recording_mode_rank[pilot_access_gateway_effective_recording_mode or 'metadata']
                 >= gateway_recording_mode_rank.get(gateway_existing_recording.get('mode') or 'metadata', 0))
               and not (
                 (gateway_existing_recording.get('session_store_url') or '') | length > 0
@@ -861,15 +877,41 @@
           Refusing to lower this gateway's session-recording policy: installed
           mode={{ gateway_existing_recording.get('mode') or 'metadata' }}
           session_store_url={{ gateway_existing_recording.get('session_store_url') or '(none)' }},
-          requested mode={{ pilot_access_gateway_effective_recording_mode }}
+          requested mode={{ pilot_access_gateway_effective_recording_mode or 'metadata' }}
           session_store_url={{ pilot_access_gateway_effective_recording_session_store_url or '(none)' }}.
           Set pilot_access_gateway_recording_mode / _session_store_* to keep the
           current policy, or pass -e pilot_access_gateway_recording_allow_downgrade=true
           to lower it on purpose.
       tags: [AG_config, AG01, AG41, AG42]
 
+    # Metrics (per-host recording spec §31): soft — enabled only when the
+    # node_exporter textfile directory exists, never a failure. Both tasks
+    # are tagged always because Step 11 and the service unit read the
+    # result (AGENTS.md §4.4).
+    - name: "Metrics: check for the node_exporter textfile directory"
+      ansible.builtin.stat:
+        path: "{{ gateway_metrics_textfile_dir }}"
+      register: gateway_metrics_dir
+      tags: [always]
+
+    - name: "Metrics: decide the metrics textfile path"
+      ansible.builtin.set_fact:
+        gateway_metrics_textfile_path: >-
+          {{ gateway_metrics_dir.stat.get('isdir', false)
+             | ternary(gateway_metrics_textfile_dir ~ '/pilot_access_gateway.prom', '') }}
+      tags: [always]
+
+    - name: "Metrics: note that metrics stay disabled without node_exporter's textfile directory"
+      ansible.builtin.debug:
+        msg: >-
+          {{ gateway_metrics_textfile_dir }} does not exist, so pilot-access-gateway
+          writes no metrics textfile. Deploy host-monitoring (node_exporter) and
+          re-apply to enable them.
+      when: gateway_metrics_textfile_path | length == 0
+      tags: [AG94]
+
     # Step 11 (spec.md §55): access-gateway.yaml — matches
-    # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
+    # internal/gatewayconfig/config.go's Config struct exactly (kept in
     # sync manually; see docs/evidence for the cross-check test).
     #
     # 2026-09-16: cache_ttl/connect_max_age removed — spec.md §26's
@@ -902,19 +944,57 @@
               keytab: /etc/pilot/pilot-access-gateway.keytab
               request_timeout: 5s
             recording:
+          {% if pilot_access_gateway_effective_recording_mode | length > 0 %}
               mode: {{ pilot_access_gateway_effective_recording_mode | to_json }}
+          {% endif %}
               failure_policy: {{ pilot_access_gateway_effective_recording_failure_policy | to_json }}
+              queue_events: {{ pilot_access_gateway_effective_recording_queue_events | int }}
+              flush_interval: {{ pilot_access_gateway_effective_recording_flush_interval | to_json }}
+              failure_grace: {{ pilot_access_gateway_effective_recording_failure_grace | to_json }}
+              max_session_duration: {{ pilot_access_gateway_effective_recording_max_session_duration | to_json }}
           {% if pilot_access_gateway_effective_recording_session_store_url | length > 0 %}
               session_store_url: {{ pilot_access_gateway_effective_recording_session_store_url | to_json }}
-              session_store_ingest_token_file: {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file | to_json }}
-          {% if pilot_access_gateway_effective_recording_session_store_ca_file | length > 0 %}
               session_store_ca_file: {{ pilot_access_gateway_effective_recording_session_store_ca_file | to_json }}
+              session_store_ingest_signing_key_file: {{ gateway_session_store_signing_key_file | to_json }}
           {% endif %}
+          {% if gateway_metrics_textfile_path | length > 0 %}
+            metrics:
+              textfile_path: {{ gateway_metrics_textfile_path | to_json }}
           {% endif %}
             transport:
               enabled: {{ pilot_access_gateway_effective_transport_enabled | bool | to_json }}
       register: gateway_config_copy
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG94]
+
+    # Per-session ingest token signing key (per-host recording spec §16):
+    # present only when a session store is configured, owned by the service
+    # user like the keytab. The gateway mints one short-lived token per
+    # recorded session with it; the key itself never leaves this host.
+    - name: "Install the session-store ingest signing key (AG81)"
+      ansible.builtin.copy:
+        dest: "{{ gateway_session_store_signing_key_file }}"
+        owner: "{{ pilot_gateway_user }}"
+        group: "{{ pilot_gateway_user }}"
+        mode: "0400"
+        content: "{{ pilot_session_store_ingest_signing_key | lower }}\n"
+      no_log: true
+      register: gateway_signing_key_copy
+      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
+      tags: [AG_config, AG81]
+
+    - name: "Remove the session-store ingest signing key when no store is configured (AG81)"
+      ansible.builtin.file:
+        path: "{{ gateway_session_store_signing_key_file }}"
+        state: absent
+      register: gateway_signing_key_remove
+      when: pilot_access_gateway_effective_recording_session_store_url | length == 0
+      tags: [AG_config, AG81]
+
+    - name: "Remove the former static session-store bearer token file (AG82)"
+      ansible.builtin.file:
+        path: "{{ gateway_legacy_session_store_token_file }}"
+        state: absent
+      tags: [AG_config, AG82]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
@@ -1127,11 +1207,14 @@
 
           ReadOnlyPaths=/etc/pilot
           ReadOnlyPaths=/etc/ipa
+          {% if gateway_metrics_textfile_path | length > 0 %}
+          ReadWritePaths={{ gateway_metrics_textfile_dir }}
+          {% endif %}
 
           [Install]
           WantedBy=multi-user.target
       register: gateway_service_unit
-      tags: [AG_service]
+      tags: [AG_service, AG94]
 
     - name: "Step 15: daemon-reload"
       ansible.builtin.systemd:
@@ -1141,11 +1224,14 @@
 
     # Step 16 (spec.md §55): start the socket (not the service directly
     # — socket activation starts the service on first connection).
+    # A host previewed with --check --diff before its unit file was ever
+    # written has nothing systemd can find: skip rather than fail the preview.
     - name: "Step 16: enable + start pilot-access-gateway.socket"
       ansible.builtin.systemd:
         name: pilot-access-gateway.socket
         enabled: true
         state: started
+      when: not (ansible_check_mode and gateway_socket_unit.changed)
       tags: [AG_service]
 
     # `state: started` above is a no-op if the socket unit was already
@@ -1155,7 +1241,7 @@
       ansible.builtin.systemd:
         name: pilot-access-gateway.socket
         state: restarted
-      when: gateway_socket_unit.changed
+      when: gateway_socket_unit.changed and not ansible_check_mode
       tags: [AG_service]
 
     # A changed binary or config must actually take effect — restart the
@@ -1163,11 +1249,16 @@
     # binary/config instead of continuing to run the old in-memory one.
     # The socket itself is untouched (RemoveOnStop=true would drop
     # in-flight connections pointlessly here).
-    - name: "Restart pilot-access-gateway.service if the binary or config changed"
+    - name: "Restart pilot-access-gateway.service if its unit, binary, config or signing key changed"
       ansible.builtin.systemd:
         name: pilot-access-gateway.service
         state: restarted
-      when: gateway_binary_copy.changed or gateway_config_copy.changed
+      when:
+        - not ansible_check_mode
+        - >-
+          gateway_service_unit.changed or gateway_binary_copy.changed or gateway_config_copy.changed
+          or (gateway_signing_key_copy.changed | default(false))
+          or (gateway_signing_key_remove.changed | default(false))
       tags: [AG_service]
 
     # Step 17 (spec.md §55): capability probe — a real connection over

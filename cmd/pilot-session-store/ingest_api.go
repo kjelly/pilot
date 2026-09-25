@@ -1,63 +1,125 @@
 // ingest_api.go is pilot-session-store's write-only HTTPS ingest API
 // (docs/tmp/now/spec.md §28.1): POST /v1/sessions/start,
-// POST /v1/sessions/{id}/events, POST /v1/sessions/{id}/finish. Auth is a
-// single dedicated bearer token (spec.md §28.2) — this credential has no
-// read/replay capability at all; that lives entirely behind the separate
-// Unix-socket read API in read_api.go, a different listener with a
-// different trust model (SO_PEERCRED + group membership, not a token).
+// POST /v1/sessions/{id}/events, POST /v1/sessions/{id}/finish.
+//
+// Every request carries a per-session ingest token (PIT1, per-host
+// recording spec §16/§21.2) minted by pilot-access-gateway for exactly one
+// session. The token binds session id, user, gateway, scope, target, mode,
+// policy source and a random jti; this server refuses any request whose
+// path, body or stored session disagrees with the token, so a token
+// obtained for one session can never write into, reopen, or finish another.
+// The ingest credential has no read/replay capability at all; that lives
+// behind the separate Unix-socket read API in read_api.go.
 package main
 
 import (
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/kjelly/pilot/internal/ingesttoken"
 	"github.com/kjelly/pilot/internal/sessionstore"
 )
 
 type ingestServer struct {
-	store *sessionstore.Store
-	token string
+	store    *sessionstore.Store
+	verifier *ingesttoken.Verifier
+	logger   *slog.Logger
+	// metrics, when non-nil, counts requests for the textfile (§31).
+	metrics *storeMetrics
 }
 
-func newIngestServer(store *sessionstore.Store, token string) *ingestServer {
-	return &ingestServer{store: store, token: token}
+func newIngestServer(store *sessionstore.Store, verifier *ingesttoken.Verifier, logger *slog.Logger) *ingestServer {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ingestServer{store: store, verifier: verifier, logger: logger}
 }
 
 func (s *ingestServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/sessions/start", s.requireToken(s.handleStart))
-	mux.HandleFunc("POST /v1/sessions/{id}/events", s.requireToken(s.handleEvents))
-	mux.HandleFunc("POST /v1/sessions/{id}/finish", s.requireToken(s.handleFinish))
+	mux.HandleFunc("POST /v1/sessions/start", s.counted("start", s.authenticated(s.handleStart)))
+	mux.HandleFunc("POST /v1/sessions/{id}/events", s.counted("events", s.authenticated(s.handleEvents)))
+	mux.HandleFunc("POST /v1/sessions/{id}/finish", s.counted("finish", s.authenticated(s.handleFinish)))
 	return mux
 }
 
-func (s *ingestServer) requireToken(next http.HandlerFunc) http.HandlerFunc {
+type claimsHandler func(http.ResponseWriter, *http.Request, ingesttoken.Claims)
+
+// authenticated verifies the bearer PIT1 token. The token itself is never
+// logged; only the fixed rejection reason and the path's session id are.
+func (s *ingestServer) authenticated(next claimsHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, prefix) || !tokensEqual(strings.TrimPrefix(auth, prefix), s.token) {
-			writeIngestError(w, http.StatusUnauthorized, "unauthorized")
+		if !strings.HasPrefix(auth, prefix) {
+			s.reject(w, r, http.StatusUnauthorized, "unauthorized", "missing_bearer")
 			return
 		}
-		next(w, r)
+		claims, err := s.verifier.Verify(strings.TrimPrefix(auth, prefix))
+		if err != nil {
+			reason := ingesttoken.ReasonMalformed
+			var te *ingesttoken.Error
+			if errors.As(err, &te) {
+				reason = te.Reason
+			}
+			s.reject(w, r, http.StatusUnauthorized, "unauthorized", reason)
+			return
+		}
+		next(w, r, claims)
 	}
 }
 
-// tokensEqual compares in constant time — an ingest token is a bearer
-// credential shared by every session on this Gateway (spec.md §28.2), so
-// a timing side-channel here is worth closing even though it is not the
-// deployment's primary security boundary.
-func tokensEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
+// internalError answers 500 and logs why (e.g. SQLite "database or disk is
+// full"): the recorder only sees a retryable failure, so this log line is
+// where an operator finds the cause. Never logs a token or payload.
+func (s *ingestServer) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	s.logger.Error("ingest request failed", "path", r.URL.Path, "session_id", r.PathValue("id"), "error", err)
+	writeIngestError(w, http.StatusInternalServerError, "internal error")
+}
+
+func (s *ingestServer) reject(w http.ResponseWriter, r *http.Request, status int, message, reason string) {
+	s.logger.Warn("ingest request rejected", "path", r.URL.Path, "session_id", r.PathValue("id"), "status", status, "reason", reason)
+	s.metrics.authFailure(reason)
+	writeIngestError(w, status, message)
+}
+
+// sessionMatchesClaims reports whether a stored session belongs to the
+// token presenting claims: same identity and the jti recorded at start.
+func sessionMatchesClaims(sum sessionstore.SessionSummary, c ingesttoken.Claims) bool {
+	return sum.SessionID == c.SessionID && sum.User == c.User && sum.GatewayID == c.Gateway &&
+		sum.Scope == c.Scope && sum.Target == c.Target && sum.RecordingMode == c.Mode &&
+		sum.IngestJTI == c.JTI
+}
+
+// boundSession resolves the path's session for events/finish and checks it
+// against the token. It writes the error response and returns false when
+// the request must not proceed.
+func (s *ingestServer) boundSession(w http.ResponseWriter, r *http.Request, c ingesttoken.Claims) (string, bool) {
+	sessionID := r.PathValue("id")
+	if sessionID != c.SessionID {
+		s.reject(w, r, http.StatusForbidden, "session_id_mismatch", "session_id_mismatch")
+		return "", false
 	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	sum, err := s.store.GetSession(r.Context(), sessionID)
+	switch {
+	case errors.Is(err, sessionstore.ErrUnknownSession):
+		writeIngestError(w, http.StatusNotFound, "unknown session")
+		return "", false
+	case err != nil:
+		s.internalError(w, r, err)
+		return "", false
+	}
+	if !sessionMatchesClaims(sum, c) {
+		s.reject(w, r, http.StatusForbidden, "claims_mismatch", "claims_mismatch")
+		return "", false
+	}
+	return sessionID, true
 }
 
 type sessionStartRequest struct {
@@ -71,14 +133,24 @@ type sessionStartRequest struct {
 	StartedAt     string `json:"started_at"`
 }
 
-func (s *ingestServer) handleStart(w http.ResponseWriter, r *http.Request) {
+func (s *ingestServer) handleStart(w http.ResponseWriter, r *http.Request, c ingesttoken.Claims) {
+	if err := s.verifier.CheckStartWindow(c); err != nil {
+		s.reject(w, r, http.StatusUnauthorized, ingesttoken.ReasonStartWindowClosed, ingesttoken.ReasonStartWindowClosed)
+		return
+	}
 	var req sessionStartRequest
 	if err := decodeStrictJSON(r.Body, &req); err != nil {
 		writeIngestError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if req.SessionID == "" {
-		writeIngestError(w, http.StatusBadRequest, "session_id required")
+	if req.DirectoryID != "" {
+		// directory_id is not bound by the token, so it cannot be trusted.
+		writeIngestError(w, http.StatusBadRequest, "unbound_field")
+		return
+	}
+	if req.SessionID != c.SessionID || req.User != c.User || req.GatewayID != c.Gateway ||
+		req.Scope != c.Scope || req.Target != c.Target || req.RecordingMode != c.Mode {
+		s.reject(w, r, http.StatusForbidden, "claims_mismatch", "claims_mismatch")
 		return
 	}
 	startedAt := time.Now().UTC()
@@ -88,16 +160,19 @@ func (s *ingestServer) handleStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	err := s.store.StartSession(r.Context(), sessionstore.SessionStart{
-		SessionID: req.SessionID, User: req.User, DirectoryID: req.DirectoryID, GatewayID: req.GatewayID,
-		Scope: req.Scope, Target: req.Target, RecordingMode: req.RecordingMode, StartedAt: startedAt,
+		SessionID: c.SessionID, User: c.User, GatewayID: c.Gateway, Scope: c.Scope, Target: c.Target,
+		RecordingMode: c.Mode, StartedAt: startedAt, RecordingPolicySource: c.Source, IngestJTI: c.JTI,
 	})
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusOK)
+	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
+		writeIngestError(w, http.StatusConflict, "session_finished")
 	case errors.Is(err, sessionstore.ErrSessionConflict):
 		writeIngestError(w, http.StatusConflict, "session already started with different metadata")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 
@@ -121,8 +196,11 @@ type eventsRequest struct {
 	Events []wireEvent `json:"events"`
 }
 
-func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request, c ingesttoken.Claims) {
+	sessionID, ok := s.boundSession(w, r, c)
+	if !ok {
+		return
+	}
 	var req eventsRequest
 	if err := decodeStrictJSON(r.Body, &req); err != nil {
 		writeIngestError(w, http.StatusBadRequest, "bad request")
@@ -130,6 +208,10 @@ func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	events := make([]sessionstore.IngestEvent, 0, len(req.Events))
 	for _, ev := range req.Events {
+		if ev.SessionID != sessionID {
+			writeIngestError(w, http.StatusBadRequest, "event session_id mismatch")
+			return
+		}
 		data, err := base64.StdEncoding.DecodeString(ev.DataBase64)
 		if err != nil {
 			writeIngestError(w, http.StatusBadRequest, "invalid data_base64")
@@ -146,39 +228,56 @@ func (s *ingestServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	case errors.Is(err, sessionstore.ErrUnknownSession):
 		writeIngestError(w, http.StatusNotFound, "unknown session")
+	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
+		writeIngestError(w, http.StatusConflict, "session_finished")
 	case errors.Is(err, sessionstore.ErrEventConflict):
 		writeIngestError(w, http.StatusConflict, "event payload conflict")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 
+// sessionFinishRequest's ended_at and last_seq are both required (per-host
+// recording spec §20.1): ended_at is the retry-idempotency key, last_seq
+// reveals events lost at the tail.
 type sessionFinishRequest struct {
-	EndedAt  string `json:"ended_at"`
-	Complete bool   `json:"complete"`
+	EndedAt  string  `json:"ended_at"`
+	Complete bool    `json:"complete"`
+	LastSeq  *uint64 `json:"last_seq"`
 }
 
-func (s *ingestServer) handleFinish(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("id")
+func (s *ingestServer) handleFinish(w http.ResponseWriter, r *http.Request, c ingesttoken.Claims) {
+	sessionID, ok := s.boundSession(w, r, c)
+	if !ok {
+		return
+	}
 	var req sessionFinishRequest
 	if err := decodeStrictJSON(r.Body, &req); err != nil {
 		writeIngestError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	endedAt := time.Now().UTC()
-	if req.EndedAt != "" {
-		if t, err := time.Parse(time.RFC3339Nano, req.EndedAt); err == nil {
-			endedAt = t
-		}
+	endedAt, err := time.Parse(time.RFC3339Nano, req.EndedAt)
+	if err != nil || req.LastSeq == nil {
+		writeIngestError(w, http.StatusBadRequest, "ended_at (RFC3339Nano) and last_seq are required")
+		return
 	}
-	err := s.store.FinishSession(r.Context(), sessionID, endedAt, req.Complete)
+	res, err := s.store.FinishSessionResult(r.Context(), sessionID, endedAt, req.Complete, *req.LastSeq)
 	switch {
 	case err == nil:
+		if !res.Repeated {
+			s.metrics.sessionFinished(c.Mode, res.Complete, res.GapRanges)
+		}
 		w.WriteHeader(http.StatusOK)
 	case errors.Is(err, sessionstore.ErrUnknownSession):
 		writeIngestError(w, http.StatusNotFound, "unknown session")
+	case errors.Is(err, sessionstore.ErrSessionFinished):
+		s.metrics.authFailure("session_finished")
+		writeIngestError(w, http.StatusConflict, "session_finished")
+	case errors.Is(err, sessionstore.ErrLastSeqTooLow):
+		writeIngestError(w, http.StatusBadRequest, "last_seq below a stored event seq")
 	default:
-		writeIngestError(w, http.StatusInternalServerError, "internal error")
+		s.internalError(w, r, err)
 	}
 }
 

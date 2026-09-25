@@ -19,6 +19,10 @@ import (
 // proved correct — not a mock of the gateway itself.
 type fakeGatewayProvider struct {
 	username string
+	// recording, when set, is every host's FreeIPA recording policy;
+	// hostShowErr makes host_show fail (policy unknown).
+	recording   *freeipaaccess.HostRecordingPolicy
+	hostShowErr error
 }
 
 var _ freeipaaccess.Provider = (*fakeGatewayProvider)(nil)
@@ -36,7 +40,13 @@ func (f *fakeGatewayProvider) GroupShow(ctx context.Context, name string) (freei
 	return freeipaaccess.Group{}, &freeipaaccess.RPCError{Name: "NotFound"}
 }
 func (f *fakeGatewayProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	if f.hostShowErr != nil {
+		return freeipaaccess.Host{}, f.hostShowErr
+	}
+	if f.recording != nil {
+		return freeipaaccess.Host{FQDN: fqdn, SSHRecording: *f.recording}, nil
+	}
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 func (f *fakeGatewayProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
 	if name != "pilot-target-gpu" {
@@ -146,7 +156,7 @@ func TestPortalClientConnectAuthorize(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	allowed, err := client.ConnectAuthorize(ctx, "gpu-a.example.com")
+	allowed, err := client.ConnectAuthorize(ctx, "gpu-a.example.com", "")
 	if err != nil {
 		t.Fatalf("ConnectAuthorize: %v", err)
 	}
@@ -154,7 +164,7 @@ func TestPortalClientConnectAuthorize(t *testing.T) {
 		t.Fatalf("ConnectAuthorize = %+v, want allowed", allowed)
 	}
 
-	denied, err := client.ConnectAuthorize(ctx, "not-in-scope.example.com")
+	denied, err := client.ConnectAuthorize(ctx, "not-in-scope.example.com", "")
 	if err != nil {
 		t.Fatalf("ConnectAuthorize: %v", err)
 	}

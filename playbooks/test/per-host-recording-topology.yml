@@ -1,0 +1,36 @@
+---
+# Test entry point for docs/topologies/per-host-recording-topology.yaml,
+# run by scripts/per-host-recording-topology-test.sh: the per-host SSH
+# session recording components in site.yml order on fresh hosts, with
+# gateway-scope before the gateway and the canonical client fixture that
+# docs/verification/freeipa-client.md needs.
+#
+# There is no apt refresh here on purpose: fresh cloud images ship stale
+# indexes, and tasks/apt-package-install.yml must recover from that itself.
+
+- name: Per-host recording source policy for the marked target (hosts.yml stand-in)
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: The marked target records terminal output; the other inherits
+      ansible.builtin.set_fact:
+        pilot_ssh_recording: terminal_output
+      when: inventory_hostname == (per_host_recording_marked_host | default('rec-tb'))
+      tags: [always]
+
+- name: FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+# freeipa-client.md §7: fixtures before client apply, so each client's
+# SSSD sees the central sudo rule on its first lookup.
+- name: Client verification fixtures
+  ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+- name: FreeIPA clients (host access policy)
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
+- name: Gateway scope hostgroup
+  ansible.builtin.import_playbook: ../apply/gateway-scope-apply.yml
+- name: Session store
+  ansible.builtin.import_playbook: ../apply/pilot-session-store-apply.yml
+- name: Access gateway
+  ansible.builtin.import_playbook: ../apply/pilot-access-gateway-apply.yml
+- name: Access directory
+  ansible.builtin.import_playbook: ../apply/pilot-access-directory-apply.yml

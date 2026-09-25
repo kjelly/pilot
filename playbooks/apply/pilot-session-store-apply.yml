@@ -33,12 +33,12 @@
 #       -e pilot_session_store_retention_days=90 \
 #       -e pilot_session_store_key_id=v1 \
 #       -e pilot_session_store_master_key=<64-hex-char AES-256 key> \
-#       -e pilot_session_store_ingest_token=<random bearer token> \
+#       -e pilot_session_store_ingest_signing_key=<64-hex-char HMAC key, shared with pilot-access-gateway> \
 #       -e @~/.vault/main.yaml
 #
 # Secrets: ipa_admin_password (vault) is used ONLY at apply-time to
 # bootstrap the role-pilot-session-auditor FreeIPA group — the master key
-# and ingest token are themselves vault-provided secrets (spec.md §28.2/
+# and the ingest signing key are themselves vault-provided secrets (spec.md §28.2/
 # §28.4: "vault 提供"), never hard-coded, never logged (no_log: true on
 # every task that touches them), never passed as a CLI argument to the
 # binary itself (only written to root-readable-only files it loads at
@@ -65,7 +65,14 @@
     pilot_session_store_cert_file: /etc/pilot/session-store-tls.crt
     pilot_session_store_key_file: /etc/pilot/session-store-tls.key
     pilot_session_store_master_key_file: /etc/pilot/session-store-master.key
-    pilot_session_store_ingest_token_file: /etc/pilot/session-store-ingest.token
+    # Per-session ingest tokens (PIT1) are verified with this HMAC key,
+    # shared with every pilot-access-gateway (per-host recording spec
+    # §16/§27.2). The former static bearer token file is removed.
+    pilot_session_store_ingest_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    # Metrics (per-host recording spec §31) are written only when
+    # node_exporter's textfile collector directory already exists.
+    pilot_session_store_metrics_textfile_dir: /var/lib/node_exporter/textfile
+    pilot_session_store_legacy_ingest_token_file: /etc/pilot/session-store-ingest.token
 
     pilot_session_store_ingest_port: 8443
 
@@ -119,15 +126,18 @@
           - pilot_session_store_key_id | default('') | length > 0
           - pilot_session_store_master_key is defined
           - pilot_session_store_master_key | length == 64
-          - pilot_session_store_ingest_token is defined
-          - pilot_session_store_ingest_token | length > 0
+          - pilot_session_store_ingest_signing_key is defined
+          - pilot_session_store_ingest_signing_key is match('^[0-9a-fA-F]{64}$')
         fail_msg: >-
           Missing/invalid required vars: ipa_admin_password (vault),
           pilot_binary_path, pilot_session_store_binary_path,
           pilot_session_store_retention_days (int > 0, no implicit
           default per spec.md §28.5), pilot_session_store_key_id,
           pilot_session_store_master_key (vault, 64 hex chars = 32
-          raw bytes for AES-256), pilot_session_store_ingest_token (vault).
+          raw bytes for AES-256), pilot_session_store_ingest_signing_key
+          (vault, 64 hex chars; the same value every pilot-access-gateway
+          uses). The static pilot_session_store_ingest_token is no longer
+          used.
       tags: [always]
 
     - name: "Resolve local artifact paths (relative = repo-root relative)"
@@ -211,12 +221,22 @@
       ansible.builtin.stat:
         path: /etc/ipa/default.conf
       register: session_store_ipa_default_conf
-      tags: [SS_enrollment]
+      tags: [always]
+
+    # A --check preview of a host that the same run would enroll first
+    # (site.yml or a topology test on fresh VMs): freeipa-client's real
+    # enrollment is skipped in check mode, so enrollment, the forward DNS
+    # record and SSSD group resolution cannot exist yet. Only in that
+    # preview are the gates asserting them relaxed (AGENTS.md §4.0).
+    - name: "Detect a check-mode preview of a host that is not enrolled yet"
+      ansible.builtin.set_fact:
+        session_store_fresh_preview: "{{ ansible_check_mode and not session_store_ipa_default_conf.stat.exists }}"
+      tags: [always]
 
     - name: "Gate: this host must already be FreeIPA-enrolled"
       ansible.builtin.assert:
         that:
-          - session_store_ipa_default_conf.stat.exists
+          - session_store_ipa_default_conf.stat.exists or session_store_fresh_preview
         fail_msg: "{{ inventory_hostname }} is not FreeIPA-enrolled — run freeipa-client-apply.yml first."
       tags: [SS_enrollment]
 
@@ -231,7 +251,7 @@
     - name: "Gate: this host must have a forward DNS record before requesting a service certificate"
       ansible.builtin.assert:
         that:
-          - session_store_dns_check.rc == 0
+          - session_store_dns_check.rc == 0 or session_store_fresh_preview
         fail_msg: >-
           {{ session_store_effective_fqdn }} does not resolve. The
           ipa-getcert request below needs a forward DNS record. Re-run
@@ -285,7 +305,9 @@
     - name: "Gate: auditor group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - session_store_auditor_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - session_store_auditor_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ pilot_session_store_auditor_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally
@@ -381,15 +403,22 @@
       no_log: true
       tags: [SS_secrets]
 
-    - name: "Install the ingest bearer token file (spec.md §28.2)"
+    - name: "Install the ingest token signing key file (per-host recording spec §16/§27.2)"
       ansible.builtin.copy:
-        dest: "{{ pilot_session_store_ingest_token_file }}"
+        dest: "{{ pilot_session_store_ingest_signing_key_file }}"
         owner: "{{ pilot_session_store_user }}"
         group: "{{ pilot_session_store_user }}"
-        mode: "0600"
-        content: "{{ pilot_session_store_ingest_token }}"
+        mode: "0400"
+        content: "{{ pilot_session_store_ingest_signing_key | lower }}\n"
       no_log: true
-      tags: [SS_secrets]
+      register: session_store_signing_key_copy
+      tags: [SS_secrets, SS24]
+
+    - name: "Remove the former static ingest bearer token file (replaced by per-session tokens)"
+      ansible.builtin.file:
+        path: "{{ pilot_session_store_legacy_ingest_token_file }}"
+        state: absent
+      tags: [SS_secrets, SS24]
 
     # SS-storage (spec.md §28.3): index.db lives under a private,
     # 0700-owned state directory — even though session_events rows carry
@@ -406,6 +435,32 @@
         mode: "0700"
       tags: [SS_storage, SS17]
 
+    # Metrics (per-host recording spec §31): soft — enabled only when the
+    # node_exporter textfile directory exists, never a failure. Both tasks
+    # are tagged always because the config and the service unit read the
+    # result (AGENTS.md §4.4).
+    - name: "Metrics: check for the node_exporter textfile directory"
+      ansible.builtin.stat:
+        path: "{{ pilot_session_store_metrics_textfile_dir }}"
+      register: session_store_metrics_dir
+      tags: [always]
+
+    - name: "Metrics: decide the metrics textfile path"
+      ansible.builtin.set_fact:
+        session_store_metrics_textfile_path: >-
+          {{ session_store_metrics_dir.stat.get('isdir', false)
+             | ternary(pilot_session_store_metrics_textfile_dir ~ '/pilot_session_store.prom', '') }}
+      tags: [always]
+
+    - name: "Metrics: note that metrics stay disabled without node_exporter's textfile directory"
+      ansible.builtin.debug:
+        msg: >-
+          {{ pilot_session_store_metrics_textfile_dir }} does not exist, so
+          pilot-session-store writes no metrics textfile. Deploy host-monitoring
+          (node_exporter) and re-apply to enable them.
+      when: session_store_metrics_textfile_path | length == 0
+      tags: [SS26]
+
     - name: "Install /etc/pilot/session-store.yaml"
       ansible.builtin.copy:
         dest: /etc/pilot/session-store.yaml
@@ -417,7 +472,7 @@
             listen_addr: "0.0.0.0:{{ pilot_session_store_ingest_port }}"
             tls_cert_file: {{ pilot_session_store_cert_file }}
             tls_key_file: {{ pilot_session_store_key_file }}
-            token_file: {{ pilot_session_store_ingest_token_file }}
+            signing_key_file: {{ pilot_session_store_ingest_signing_key_file }}
           storage:
             index_db_path: {{ pilot_session_store_index_db_path }}
             master_key_file: {{ pilot_session_store_master_key_file }}
@@ -427,8 +482,12 @@
             auditor_group: {{ pilot_session_store_auditor_group }}
           retention:
             retention_days: {{ pilot_session_store_retention_days }}
+          {% if session_store_metrics_textfile_path | length > 0 %}
+          metrics:
+            textfile_path: {{ session_store_metrics_textfile_path }}
+          {% endif %}
       register: session_store_config_copy
-      tags: [SS_config]
+      tags: [SS_config, SS26]
 
     - name: "Ensure /usr/local/libexec exists (not all distros pre-create it)"
       ansible.builtin.file:
@@ -507,6 +566,9 @@
           ProtectControlGroups=true
 
           ReadWritePaths={{ pilot_session_store_state_dir }}
+          {% if session_store_metrics_textfile_path | length > 0 %}
+          ReadWritePaths={{ pilot_session_store_metrics_textfile_dir }}
+          {% endif %}
           ReadOnlyPaths=/etc/pilot
           ReadOnlyPaths=/etc/ipa
 
@@ -516,7 +578,7 @@
           [Install]
           WantedBy=multi-user.target
       register: session_store_service_unit
-      tags: [SS_service]
+      tags: [SS_service, SS26]
 
     # SS-retention (spec.md §28.5): a systemd timer runs `pilot-session-store
     # retention-sweep` once a day — retention_days itself is required
@@ -576,20 +638,27 @@
         session_store_retention_timer_unit.changed
       tags: [SS_service]
 
+    # On a fresh host previewed with --check --diff the unit file was never
+    # written (copy is skipped under check mode), so systemd cannot find the
+    # unit: skip enable/start then instead of failing the preview
+    # (AGENTS.md §4.0 fresh-host check mode).
     - name: "Enable + start pilot-session-store.service"
       ansible.builtin.systemd:
         name: pilot-session-store.service
         enabled: true
         state: started
+      when: not (ansible_check_mode and session_store_service_unit.changed)
       tags: [SS_service]
 
     - name: "Restart pilot-session-store.service if its unit/binary/config/secrets changed"
       ansible.builtin.systemd:
         name: pilot-session-store.service
         state: restarted
-      when: >-
-        session_store_service_unit.changed or session_store_binary_copy.changed or
-        session_store_config_copy.changed
+      when:
+        - not ansible_check_mode
+        - >-
+          session_store_service_unit.changed or session_store_binary_copy.changed or
+          session_store_config_copy.changed or session_store_signing_key_copy.changed
       tags: [SS_service]
 
     - name: "Enable + start pilot-session-store-retention.timer"
@@ -597,6 +666,9 @@
         name: pilot-session-store-retention.timer
         enabled: true
         state: started
+      when: >-
+        not (ansible_check_mode and
+        (session_store_retention_timer_unit.changed or session_store_retention_service_unit.changed))
       tags: [SS_retention]
 
     # SS02 (spec.md §28.1/§28.2): capability probe — a real TLS

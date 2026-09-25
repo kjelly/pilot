@@ -41,7 +41,7 @@ func (f *fakeProvider) GroupShow(ctx context.Context, name string) (freeipaacces
 	return freeipaaccess.Group{}, &freeipaaccess.RPCError{Name: "NotFound"}
 }
 func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 func (f *fakeProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
 	switch name {

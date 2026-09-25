@@ -118,7 +118,11 @@ func runPortalTransport(ctx context.Context, deps portalTransportDeps, target st
 	}
 	emit(sessionaudit.KindGatewayTransportRequested, "")
 
-	authz, err := deps.client.ConnectAuthorize(ctx, target)
+	// The transport's own session id: the gateway resolves this target's
+	// effective recording mode per host, and for a recorded host it needs a
+	// session id to answer at all; the recording allowlist below then
+	// refuses the transport (captive-transport spec D8).
+	authz, err := deps.client.ConnectAuthorize(ctx, target, sessionID)
 	if err != nil {
 		emit(sessionaudit.KindGatewayTransportDenied, "authorize_error")
 		return errors.New(transportMsgUnavailable)

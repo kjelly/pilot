@@ -49,6 +49,13 @@ func newTestStoreForReadAPI(t *testing.T) *sessionstore.Store {
 // http.Client dialing it.
 func testReadServer(t *testing.T, store *sessionstore.Store, auditorGroup string) *http.Client {
 	t.Helper()
+	return testReadServerWith(t, store, auditorGroup, nil)
+}
+
+// testReadServerWith is testReadServer with a hook to set the server's
+// emitter or metrics before it starts serving.
+func testReadServerWith(t *testing.T, store *sessionstore.Store, auditorGroup string, configure func(*readServer)) *http.Client {
+	t.Helper()
 	sockPath := filepath.Join(t.TempDir(), "read.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -57,6 +64,9 @@ func testReadServer(t *testing.T, store *sessionstore.Store, auditorGroup string
 	t.Cleanup(func() { _ = ln.Close() })
 
 	srv := newReadServer(store, auditorGroup, slog.New(slog.NewTextHandler(testWriter{t}, nil)))
+	if configure != nil {
+		configure(srv)
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
@@ -88,7 +98,7 @@ func TestReadAPIListGetReplay(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("IngestEvents: %v", err)
 	}
-	if err := store.FinishSession(ctx, "sess-1", time.Now().UTC(), true); err != nil {
+	if err := store.FinishSession(ctx, "sess-1", time.Now().UTC(), true, 1); err != nil {
 		t.Fatalf("FinishSession: %v", err)
 	}
 

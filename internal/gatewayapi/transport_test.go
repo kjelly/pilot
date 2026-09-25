@@ -43,7 +43,9 @@ func (p *transportFakeProvider) HostShow(ctx context.Context, fqdn string) (free
 	if p.hostShowErr != nil {
 		return freeipaaccess.Host{}, p.hostShowErr
 	}
-	return freeipaaccess.Host{FQDN: fqdn, SSHPublicKeys: p.hostKeys}, nil
+	h := freeipaaccess.NewHostWithoutPolicy(fqdn)
+	h.SSHPublicKeys = p.hostKeys
+	return h, nil
 }
 
 func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled bool) (*http.Client, string) {

@@ -43,7 +43,7 @@ func TestConnectToHostAllowed(t *testing.T) {
 		launched = cmd
 		return nil
 	})
-	if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
+	if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
 		t.Fatalf("connectToHost: %v", err)
 	}
 	if launched == nil {
@@ -77,7 +77,7 @@ func TestConnectToHostDenied(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Access changed", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "not-in-scope.example.com"); err != nil {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", "not-in-scope.example.com"); err != nil {
 			t.Fatalf("connectToHost: %v", err)
 		}
 	})
@@ -110,7 +110,7 @@ func TestConnectToHostRejectsAlternateUserAndIPTargets(t *testing.T) {
 		withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 			{Prompt: "Access changed", Confirm: boolPtr(true)},
 		}}, func() {
-			if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, target); err != nil {
+			if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", target); err != nil {
 				t.Fatalf("connectToHost(%q): %v", target, err)
 			}
 		})
@@ -141,7 +141,7 @@ func TestConnectToHostSSHFailureReturnsToPortal(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "SSH session ended with an error", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
 			t.Fatalf("connectToHost must return nil on an ssh launch failure, got: %v", err)
 		}
 	})
@@ -159,7 +159,7 @@ func TestConnectToHostCredentialFailureReturnsToPortal(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{answers: []promptAnswer{
 		{Prompt: "Kerberos authentication failed", Confirm: boolPtr(true)},
 	}}, func() {
-		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", username, "gpu-a.example.com"); err != nil {
+		if err := connectToHost(context.Background(), client, credentials, "/etc/pilot/ssh_config", "gpu-a.example.com"); err != nil {
 			t.Fatalf("connectToHost must return nil on credential failure, got: %v", err)
 		}
 	})

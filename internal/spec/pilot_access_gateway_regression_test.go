@@ -16,7 +16,7 @@ func TestRegression_PilotAccessGatewaySpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
-	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41", "AG42", "AG43", "AG44"}
+	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41", "AG42", "AG43", "AG44", "AG81", "AG82", "AG83", "AG84", "AG85", "AG86", "AG87", "AG88", "AG89", "AG90", "AG91", "AG92", "AG93", "AG94", "AG95", "AG96"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -89,6 +89,46 @@ func TestRegression_PilotAccessGatewayGSSAPIOnlyContract(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("playbook must not allow Portal SSH fallback %q", forbidden)
 		}
+	}
+}
+
+// AG01 checks the deployed gateway_id/gateway_scope, supplied as required
+// Spec v2 inputs, instead of a hardcoded example deployment.
+func TestRegression_PilotAccessGatewayAG01UsesInputs(t *testing.T) {
+	const specPath = "../../docs/verification/pilot-access-gateway.md"
+	s, err := Parse(specPath)
+	if err != nil {
+		t.Fatalf("parse %s: %v", specPath, err)
+	}
+	if s.SchemaVersion != 2 {
+		t.Fatalf("schemaVersion=%d want 2", s.SchemaVersion)
+	}
+	required := map[string]bool{}
+	for _, in := range s.Inputs {
+		required[in.Name] = in.Required
+	}
+	for _, name := range []string{"gateway_id", "gateway_scope"} {
+		if !required[name] {
+			t.Errorf("input %s must be declared and required", name)
+		}
+	}
+	var ag01 Row
+	for _, row := range s.Rows {
+		if row.ID == "AG01" {
+			ag01 = row
+		}
+	}
+	for _, want := range []string{
+		`"  id: $PILOT_VAR_GATEWAY_ID"`,
+		`"  scope: $PILOT_VAR_GATEWAY_SCOPE"`,
+		`"  target_hostgroup: pilot-target-$PILOT_VAR_GATEWAY_SCOPE"`,
+	} {
+		if !strings.Contains(ag01.Command, want) {
+			t.Errorf("AG01 probe must match the whole config line %s", want)
+		}
+	}
+	if strings.Contains(ag01.Command, "gpu") {
+		t.Errorf("AG01 must not hardcode an example deployment: %q", ag01.Command)
 	}
 }
 
