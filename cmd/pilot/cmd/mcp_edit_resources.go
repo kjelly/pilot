@@ -483,7 +483,7 @@ type inspectBreakglassStatus struct {
 // are deliberately separate stores.
 func buildInspectBreakglassStatus(dir string) []inspectBreakglassStatus {
 	grants := buildInspectGrants(dir)
-	dataDir := resolveDataDir()
+	dataDir := resolveStateDir()
 	var out []inspectBreakglassStatus
 	for _, g := range grants {
 		if g.Kind != "breakglass" {
@@ -568,7 +568,7 @@ func buildInspectExplain(dir, user, host, service string) []inspectExplainSource
 		if violations, err := inventory.ValidateRosterFile(fullPath); err != nil || len(violations) > 0 {
 			return nil
 		}
-		sources, err := accessgrants.Explain(fullPath, resolveDataDir(), user, host, service, time.Now())
+		sources, err := accessgrants.Explain(fullPath, resolveStateDir(), user, host, service, time.Now())
 		if err != nil {
 			return nil
 		}

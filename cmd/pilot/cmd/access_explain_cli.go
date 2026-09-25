@@ -67,7 +67,7 @@ func runAccessExplainCmd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%d roster issue(s) found; fix them before explaining access", len(violations))
 	}
 
-	sources, err := accessgrants.Explain(readPath, resolveDataDir(), accessExplainUser, accessExplainHost, accessExplainService, time.Now())
+	sources, err := accessgrants.Explain(readPath, resolveStateDir(), accessExplainUser, accessExplainHost, accessExplainService, time.Now())
 	if err != nil {
 		return err
 	}

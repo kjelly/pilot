@@ -51,7 +51,8 @@ Typical flow:
   pilot docker-target exec   --name infra-test -- ss -tulnH
   pilot docker-target down  --name infra-test
 
-State lives under cfg.DataDir/docker-targets.json. The container is
+State lives in docker-targets.json under pilot's data dir (--data-dir, then
+$PILOT_DATA_DIR, then the config file's data_dir, then ~/.local/share/pilot). The container is
 brought up with --network host --privileged by default so apt and
 systemd work; override via --network / --no-privileged.
 `,
@@ -85,23 +86,9 @@ var (
 	dtEngine       string
 )
 
-// resolveDataDir returns the active pilot data dir. Centralised so the
-// `docker-target` subcommands pick up the same --data-dir flag that
-// every other command does.
-func resolveDataDir() string {
-	if dataDir != "" {
-		return dataDir
-	}
-	// Fall back to the same logic as loadConfig: config default.
-	// We don't want to call loadConfig here (it also hits Ollama
-	// discovery indirectly via cfg). Replicate the default.
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "pilot")
-}
-
 // dtNewManager builds a Manager against the resolved data dir.
 func dtNewManager() (*dockertarget.Manager, error) {
-	return dockertarget.NewManager(resolveDataDir())
+	return dockertarget.NewManager(resolveStateDir())
 }
 
 // ---- up -------------------------------------------------------------------
@@ -583,11 +570,16 @@ func execAnsiblePlaybook(stdout io.Writer, args ...string) error {
 
 // execPilot re-invokes the same pilot binary we're running in. Used
 // by `pilot docker-target verify` so the user doesn't have to
-// duplicate the verify plumbing.
+// duplicate the verify plumbing. The child gets this process's data dir
+// as --data-dir, so a --data-dir given here reaches it too (args[0] is
+// the subcommand).
 func execPilot(stdout io.Writer, args ...string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate pilot binary: %w", err)
+	}
+	if len(args) > 0 {
+		args = append([]string{args[0], "--data-dir=" + resolvePilotDataDir()}, args[1:]...)
 	}
 	return execExternal(stdout, exe, args...)
 }

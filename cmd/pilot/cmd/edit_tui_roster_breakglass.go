@@ -76,7 +76,7 @@ func pushBreakglassMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
 
 func pushBreakglassDetail(r *editRouterModel, dir, path, name, banner string) tea.Cmd {
 	now := time.Now()
-	activations, err := accessgrants.Status(resolveDataDir(), name)
+	activations, err := accessgrants.Status(resolveStateDir(), name)
 	if err != nil {
 		r.err = err
 		return nil
@@ -164,7 +164,7 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 		activation, err := accessgrants.Activate(context.Background(), accessgrants.ActivateOptions{
 			RosterFile:  path,
 			Inventory:   accessGovernanceInventoryPath(dir),
-			StateDir:    resolveDataDir(),
+			StateDir:    resolveStateDir(),
 			Name:        name,
 			Duration:    parsed,
 			Reason:      reason,
@@ -193,7 +193,7 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 		if err := accessgrants.Deactivate(context.Background(), accessgrants.DeactivateOptions{
 			RosterFile: path,
 			Inventory:  accessGovernanceInventoryPath(dir),
-			StateDir:   resolveDataDir(),
+			StateDir:   resolveStateDir(),
 			Name:       name,
 			Now:        time.Now(),
 		}); err != nil {
@@ -206,7 +206,7 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 // pushBreakglassStatus shows activation history for one name, or every
 // breakglass grant's history when name is "".
 func pushBreakglassStatus(r *editRouterModel, dir, path, name, banner string) tea.Cmd {
-	activations, err := accessgrants.Status(resolveDataDir(), name)
+	activations, err := accessgrants.Status(resolveStateDir(), name)
 	if err != nil {
 		r.err = err
 		return nil
@@ -278,7 +278,7 @@ func pushExplainAccessService(r *editRouterModel, dir, path, user, host string) 
 }
 
 func pushExplainAccessResults(r *editRouterModel, dir, path, user, host, service string) tea.Cmd {
-	sources, err := accessgrants.Explain(path, resolveDataDir(), user, host, service, time.Now())
+	sources, err := accessgrants.Explain(path, resolveStateDir(), user, host, service, time.Now())
 	if err != nil {
 		r.err = err
 		return nil

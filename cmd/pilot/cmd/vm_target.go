@@ -49,7 +49,9 @@ Typical flow:
   pilot vm-target exec   --name infra-vm -- uname -a
   pilot vm-target down   --name infra-vm
 
-State (json) lives under cfg.DataDir/vm-targets.json; the qcow2 overlays
+State (json) lives in vm-targets.json under pilot's data dir (--data-dir,
+then $PILOT_DATA_DIR, then the config file's data_dir, then
+~/.local/share/pilot); the qcow2 overlays
 and seed ISOs live under --vm-dir (default /var/lib/libvirt/images/pilot,
 which the libvirt qemu process can access).
 `,
@@ -111,7 +113,7 @@ func resolveVMDir() string {
 }
 
 func vtNewManager() (*vmtarget.Manager, error) {
-	return vmtarget.NewManager(resolveDataDir(), resolveVMDir())
+	return vmtarget.NewManager(resolveStateDir(), resolveVMDir())
 }
 
 // ---- up -------------------------------------------------------------------
@@ -198,7 +200,6 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if ref == "" || ref == "none" {
 		return nil, nil
 	}
-	cfg := loadConfig()
 	profile, err := services.LoadProfile(ref)
 	if err != nil {
 		return nil, err
@@ -207,7 +208,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(), nil)
 	if err != nil {
 		return nil, err
 	}

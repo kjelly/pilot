@@ -150,7 +150,7 @@ func runAccessReviewMarkCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if stateDir := resolveDataDir(); stateDir != "" {
+	if stateDir := resolveStateDir(); stateDir != "" {
 		if auditErr := accessgrants.AppendAuditEvent(stateDir, accessgrants.AccessAuditEvent{
 			Action:     accessgrants.AuditActionAccessReviewMarked,
 			SourceKind: "temporary_grant,sudo_grant",

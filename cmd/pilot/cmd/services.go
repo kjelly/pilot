@@ -63,7 +63,6 @@ func init() {
 }
 
 func runServicesUp(cmd *cobra.Command, _ []string) error {
-	cfg := loadConfig()
 	profile, err := services.LoadProfile(svcProfile)
 	if err != nil {
 		return err
@@ -72,7 +71,7 @@ func runServicesUp(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(), nil)
 	if err != nil {
 		return err
 	}
@@ -87,8 +86,7 @@ func runServicesUp(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesStatus(cmd *cobra.Command, _ []string) error {
-	cfg := loadConfig()
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(), nil)
 	if err != nil {
 		return err
 	}
@@ -100,8 +98,7 @@ func runServicesStatus(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesDown(cmd *cobra.Command, _ []string) error {
-	cfg := loadConfig()
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(), nil)
 	if err != nil {
 		return err
 	}
@@ -113,8 +110,7 @@ func runServicesDown(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesPurge(cmd *cobra.Command, _ []string) error {
-	cfg := loadConfig()
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(), nil)
 	if err != nil {
 		return err
 	}
