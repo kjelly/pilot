@@ -99,7 +99,6 @@ after the E2E; it intentionally never changes the production role defaults.
 |---|---|---|
 | Portal asks for the target password | Stale `/etc/pilot/ssh_config` still permits fallback | Reapply the current role and confirm AG32 |
 | `No Kerberos credentials available` after SSH-key first hop | A key login cannot delegate a TGT | Use the Portal's masked session `kinit` prompt |
-| `vm-target test` child opens the wrong evidence DB | Global `--data-dir` is not forwarded to child `pilot verify` | Set `PILOT_DATA_DIR` for the whole test process |
 | Ansible hangs immediately after VM rollback | Stale local SSH ControlMaster references the pre-rollback connection | Close the stale mux before retrying |
 | A table-row probe prints literal `| grep` text | Markdown `\|` reached `sh -c` as an escaped pipe | Keep these checks pipe-free; current AG06/AG12/AG32 do so |
 

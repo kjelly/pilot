@@ -147,7 +147,7 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 	activation, activateErr := accessgrants.Activate(cmd.Context(), accessgrants.ActivateOptions{
 		RosterFile:        readPath,
 		Inventory:         accessBreakglassActivateInventory,
-		StateDir:          resolveDataDir(),
+		StateDir:          resolveStateDir(accessStateFiles...),
 		Name:              name,
 		Duration:          duration,
 		Reason:            accessBreakglassActivateReason,
@@ -211,7 +211,7 @@ func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
 	deactivateErr := accessgrants.Deactivate(cmd.Context(), accessgrants.DeactivateOptions{
 		RosterFile:        readPath,
 		Inventory:         accessBreakglassDeactivateInventory,
-		StateDir:          resolveDataDir(),
+		StateDir:          resolveStateDir(accessStateFiles...),
 		Name:              name,
 		Playbook:          accessBreakglassDeactivatePlaybook,
 		VaultPasswordFile: accessBreakglassDeactivateVaultPasswordFile,
@@ -230,7 +230,7 @@ func runAccessBreakglassStatusCmd(cmd *cobra.Command, args []string) error {
 	if len(args) == 1 {
 		name = args[0]
 	}
-	activations, err := accessgrants.Status(resolveDataDir(), name)
+	activations, err := accessgrants.Status(resolveStateDir(accessStateFiles...), name)
 	if err != nil {
 		return err
 	}

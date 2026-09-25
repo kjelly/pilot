@@ -147,7 +147,7 @@ func runIdentityReviewMarkCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if stateDir := resolveDataDir(); stateDir != "" {
+	if stateDir := resolveStateDir(accessStateFiles...); stateDir != "" {
 		if auditErr := accessgrants.AppendAuditEvent(stateDir, accessgrants.AccessAuditEvent{
 			Action:     accessgrants.AuditActionAccessReviewMarked,
 			SourceKind: "credential_policy",

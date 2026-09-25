@@ -149,6 +149,51 @@ func TestDownloadFile_BadStatusLeavesNoDest(t *testing.T) {
 	assertNoDownloadTmp(t, dir)
 }
 
+// TestWithNetworkLock_SharedAcrossDataDirs: the libvirt network is
+// host-wide, so managers with different state dirs (different pilot data
+// dirs) but the same VM dir must exclude each other.
+func TestWithNetworkLock_SharedAcrossDataDirs(t *testing.T) {
+	dir := t.TempDir()
+	vmDir := filepath.Join(dir, "vmdir")
+	a, err := NewManager(filepath.Join(dir, "data-a"), vmDir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	b, err := NewManager(filepath.Join(dir, "data-b"), vmDir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- a.withNetworkLock(func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	bIn := make(chan struct{})
+	go func() {
+		_ = b.withNetworkLock(func() error { close(bIn); return nil })
+	}()
+	select {
+	case <-bIn:
+		t.Fatal("a manager with another data dir entered the network lock while it was held")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-bIn:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second manager never got the network lock")
+	}
+}
+
 // TestWithNetworkLock_SerializesCriticalSection proves the cross-process
 // network lock actually provides mutual exclusion. Many goroutines each open
 // the same lock file (distinct fds) and do an un-synchronised

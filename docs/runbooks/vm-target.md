@@ -254,8 +254,17 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 
 ## 6. State 檔在哪
 
-- metadata（json）：`$DataDir/vm-targets.json`（versioned + atomic save，同 docker-target）
+- metadata（json）：pilot data dir 底下的 `vm-targets.json`（versioned + atomic save，同 docker-target）。
+  Data dir 依序取 `--data-dir`、`PILOT_DATA_DIR`、config 檔的 `data_dir`、`~/.local/share/pilot`，
+  所有命令一致，`vm-target run`/`verify` 的 `--data-dir` 也會傳給子行程 `pilot verify`（evidence 寫進同一個 data dir）。
 - 磁碟/seed/key：`--vm-dir/<name>/`（`overlay.qcow2` / `seed.iso` / `id_ed25519`）
+- libvirt network 的 DHCP 保留用 `--vm-dir/.network.lock` 序列化：network 是整台 host 共用的，
+  所以 lock 不放在 data dir，不同 data dir 的 pilot 仍互斥。
+- **2026-09-25 之前**，vm-target 不讀 `PILOT_DATA_DIR` 與 `data_dir`，state 一律在
+  `--data-dir` 或 `~/.local/share/pilot`。升級後若設了 `PILOT_DATA_DIR`/`data_dir`，而舊的
+  `vm-targets.json` 還在 `~/.local/share/pilot`，每次執行會印一次
+  `level=WARN msg="local state is in the data dir an older pilot used for it; …" file=vm-targets.json found_in=<舊目錄> data_dir=<現在的 data dir>`。
+  pilot 不會搬移或刪除它；要繼續管理那些 VM，把 `vm-targets.json` 搬到 `data_dir`，或該次執行加 `--data-dir <found_in>`。
 
 ---
 
@@ -290,4 +299,5 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 日期 | 版本 | 變更 |
 |------|------|------|
 | 2026-06-30 | v1.0 | 初版：QEMU/KVM vm-target（up/down/list/show-inventory/run/verify/exec/snapshot/rollback），cloud-init NoCloud + qcow2 overlay + 權威 IP；修 virtio-seed / undefine-snapshots-metadata / up-cleanup 三個坑 |
+| 2026-09-25 | v1.2 | §6：data dir 與其他命令一致（`--data-dir` → `PILOT_DATA_DIR` → `data_dir` → `~/.local/share/pilot`），`run`/`verify` 的 `--data-dir` 生效並傳給子行程；network lock 移到 `--vm-dir`；舊位置 state 的遷移提示。證據見 `docs/evidence/data-dir/2026-09-25-92e6063.md` |
 | 2026-07-23 | v1.1 | 補§2.2：文件化 `pilot services up/status/down/purge` + `vm-target --services local` / topology 根層 `services: local` 的 host-local 快取用法（apt-cacher-ng + Pulp RPM + Harbor，fail-closed，不會退回公網）；VM 端完整驗收仍待補（見 §7） |

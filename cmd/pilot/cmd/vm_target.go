@@ -49,7 +49,9 @@ Typical flow:
   pilot vm-target exec   --name infra-vm -- uname -a
   pilot vm-target down   --name infra-vm
 
-State (json) lives under cfg.DataDir/vm-targets.json; the qcow2 overlays
+State (json) lives in vm-targets.json under pilot's data dir (--data-dir,
+then $PILOT_DATA_DIR, then the config file's data_dir, then
+~/.local/share/pilot); the qcow2 overlays
 and seed ISOs live under --vm-dir (default /var/lib/libvirt/images/pilot,
 which the libvirt qemu process can access).
 `,
@@ -111,7 +113,7 @@ func resolveVMDir() string {
 }
 
 func vtNewManager() (*vmtarget.Manager, error) {
-	return vmtarget.NewManager(resolveDataDir(), resolveVMDir())
+	return vmtarget.NewManager(resolveStateDir(vmTargetStateFiles...), resolveVMDir())
 }
 
 // ---- up -------------------------------------------------------------------
@@ -198,7 +200,6 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if ref == "" || ref == "none" {
 		return nil, nil
 	}
-	cfg := loadConfig()
 	profile, err := services.LoadProfile(ref)
 	if err != nil {
 		return nil, err
@@ -207,7 +208,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	m, err := services.NewManager(cfg.DataDir, nil)
+	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -523,6 +524,7 @@ func runVtRun(cmd *cobra.Command, args []string) error {
 	// DisableFlagParsing is on so -e foo=bar flows through to the
 	// child ansible-playbook. But we still need to honour --name
 	// and --sandbox. Parse them ourselves and strip from `args`.
+	args = applyRootFlags(args)
 	if vtName == "" {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "--name" && i+1 < len(args) {
@@ -965,6 +967,7 @@ func runVtVerify(cmd *cobra.Command, args []string) error {
 	// it ourselves when the global is empty, AND strip it from
 	// `args` so we don't re-forward it to `pilot verify` (which
 	// doesn't know --name).
+	args = applyRootFlags(args)
 	if vtName == "" {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "--name" && i+1 < len(args) {

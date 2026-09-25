@@ -72,7 +72,7 @@ func runAccessHealthCmd(cmd *cobra.Command, args []string) error {
 			VaultPasswordFile: accessHealthVaultPasswordFile,
 			Now:               time.Now(),
 		},
-		StateDir: resolveDataDir(),
+		StateDir: resolveStateDir(accessStateFiles...),
 	})
 	if err != nil {
 		return err

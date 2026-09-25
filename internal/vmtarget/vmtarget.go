@@ -1524,10 +1524,16 @@ func (m *Manager) captureLeaseSet(ctx context.Context, network, mac string) map[
 // removeStaticIP each do a read-modify-write on the network XML through
 // `virsh net-update`; the Manager mutex only covers one process, so without
 // this lock two concurrent `pilot vm-target up` invocations could scan the
-// same free IP and reserve it for two different VMs. The lock file lives
-// next to the state json and is created on demand.
+// same free IP and reserve it for two different VMs.
+//
+// The network is shared by every pilot on the host whatever its data dir,
+// so the lock file lives in the VM directory, not next to the state json:
+// two processes with different data dirs must still serialize.
 func (m *Manager) withNetworkLock(fn func() error) error {
-	lockPath := filepath.Join(m.stateDir, "network.lock")
+	if err := os.MkdirAll(m.vmDir, 0o755); err != nil {
+		return fmt.Errorf("vmtarget: create VM dir for the network lock: %w", err)
+	}
+	lockPath := filepath.Join(m.vmDir, ".network.lock")
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("vmtarget: open network lock %s: %w", lockPath, err)
