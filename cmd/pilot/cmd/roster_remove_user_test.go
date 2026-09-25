@@ -342,8 +342,10 @@ func TestRosterRemoveUserCmd_EncryptedRosterWithoutVaultPasswordFileErrors(t *te
 	if err == nil {
 		t.Fatalf("expected an error, output: %s", out)
 	}
-	if !strings.Contains(out, "--vault-password-file") {
-		t.Fatalf("output = %q, want a --vault-password-file hint", out)
+	// The hint is part of the returned error, which cmd/pilot/main.go
+	// prints; cobra no longer echoes errors into the command output.
+	if !strings.Contains(err.Error(), "--vault-password-file") {
+		t.Fatalf("error = %q, want a --vault-password-file hint", err)
 	}
 }
 

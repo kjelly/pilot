@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // SNMPCatalogSchemaVersion is the only schemaVersion this package

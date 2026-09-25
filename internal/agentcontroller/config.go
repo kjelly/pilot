@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // DispatcherConfig configures how the controller talks to the external

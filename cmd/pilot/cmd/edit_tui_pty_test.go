@@ -60,6 +60,7 @@ func buildPilotBinary(t *testing.T) string {
 		repoRoot := repoRootForPTYTest(t)
 		cmd := exec.Command("go", "build", "-o", out, "./cmd/pilot")
 		cmd.Dir = repoRoot
+		cmd.Env = hostToolEnv()
 		combined, err := cmd.CombinedOutput()
 		if err != nil {
 			pilotBinaryErr = fmt.Errorf("build pilot binary: %w\n%s", err, combined)
@@ -419,7 +420,13 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 }
 
 func TestMain(m *testing.M) {
+	cleanup, err := isolatePilotUserDirs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate pilot data and config dirs:", err)
+		os.Exit(1)
+	}
 	code := m.Run()
+	cleanup()
 	if pilotBinaryDir != "" {
 		_ = os.RemoveAll(pilotBinaryDir)
 	}

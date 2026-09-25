@@ -98,7 +98,7 @@ func TestApplyEditScenario_RollsBackAfterAnEarlierStepAlreadySaved(t *testing.T)
 
 	scenario := editScenario{Version: 1, Steps: []editAction{
 		{Action: "create_host", Host: "web-01"},
-		{Action: "save_hosts"}, // a real write to hosts.yml happens here
+		{Action: "save_hosts"},                                                    // a real write to hosts.yml happens here
 		{Action: "set_group_var", File: "no-such-stem.yml", Key: "x", Value: "y"}, // fails: no such file/stem
 	}}
 
