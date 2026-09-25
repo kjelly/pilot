@@ -226,60 +226,60 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 	dir := t.TempDir()
 	proc := startEditPTY(t, dir, 40, 100)
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	proc.press(t, "\r") // top menu -> hosts.yml
-	waitForPTYOutput(t, proc.out, 5*time.Second, "hosts.yml 路徑")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "hosts.yml 路徑")
 	proc.press(t, "\r") // accept default path
-	waitForPTYOutput(t, proc.out, 5*time.Second, "不存在")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "不存在")
 	proc.press(t, "\r") // confirm start blank (default yes)
-	waitForPTYOutput(t, proc.out, 5*time.Second, "新增主機")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "新增主機")
 	proc.press(t, "\r") // host list -> "新增主機"
-	waitForPTYOutput(t, proc.out, 5*time.Second, "新主機名稱")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "新主機名稱")
 	proc.typeText(t, "web-1")
 	proc.press(t, "\r")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "ansible_host")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "ansible_host")
 	proc.press(t, "\r") // host menu -> ansible_host field
-	waitForPTYOutput(t, proc.out, 5*time.Second, "可路由的 IP")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "可路由的 IP")
 	proc.typeText(t, "10.0.0.9")
 	proc.press(t, "\r")
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "選要編輯的項目")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "選要編輯的項目")
 	for i := 0; i < 4; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // -> roles menu
-	waitForPTYOutput(t, proc.out, 5*time.Second, "逐項勾選角色")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "逐項勾選角色")
 	proc.press(t, "\r") // -> role checklist (the one Bubble Tea screen requiring CI=1)
-	waitForPTYOutput(t, proc.out, 5*time.Second, inventory.Roles()[0].Name)
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, inventory.Roles()[0].Name)
 	proc.press(t, " ")  // toggle first role on
 	proc.press(t, "\r") // confirm checklist -> back to roles menu
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "完成")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "完成")
 	for i := 0; i < 4; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "✅ 完成" -> back to host menu
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "選要編輯的項目")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "選要編輯的項目")
 	for i := 0; i < 9; i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "↩ 返回主機清單"
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "存檔並離開")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "存檔並離開")
 	proc.press(t, "j")
 	proc.press(t, "j")
 	proc.press(t, "j")  // past the new "⚙ 共用變數" item
 	proc.press(t, "\r") // save and return to top menu
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "✅ 已存檔")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "✅ 已存檔")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r") // "離開"
 
-	code := proc.waitExit(t, 10*time.Second)
+	code := proc.waitExit(t, ptyExitTimeout)
 	final := proc.out.String()
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0\noutput:\n%s", code, final)
@@ -313,8 +313,8 @@ func TestPilotEditPTY_AddHostToggleRoleSaveAndQuit(t *testing.T) {
 // variable set. Without the variable, no [pilot:menu] line may appear.
 func TestPilotEditPTY_DebugMenuDumpsLiveItemList(t *testing.T) {
 	proc := startEditPTYWithEnv(t, t.TempDir(), 40, 100, "PILOT_DEBUG_MENU=1")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
-	out := waitForPTYOutput(t, proc.out, 5*time.Second, ": 離開")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
+	out := waitForPTYOutput(t, proc.out, ptyOutputTimeout, ": 離開")
 
 	header := regexp.MustCompile(`\[pilot:menu\] 要編輯什麼？ \((\d+) 項，DOWN <n> 從 0 起算\)`).FindStringSubmatch(out)
 	if header == nil {
@@ -333,15 +333,15 @@ func TestPilotEditPTY_DebugMenuDumpsLiveItemList(t *testing.T) {
 	}
 	time.Sleep(escAfterTransitionSettle)
 	proc.press(t, "\x1b")
-	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+	if code := proc.waitExit(t, ptyExitTimeout); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
 	}
 
 	quiet := startEditPTY(t, t.TempDir(), 40, 100)
-	waitForPTYOutput(t, quiet.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, quiet.out, ptyOutputTimeout, "要編輯什麼")
 	time.Sleep(escAfterTransitionSettle)
 	quiet.press(t, "\x1b")
-	if code := quiet.waitExit(t, 5*time.Second); code != 0 {
+	if code := quiet.waitExit(t, ptyExitTimeout); code != 0 {
 		t.Fatalf("exit code without PILOT_DEBUG_MENU = %d, want 0", code)
 	}
 	if strings.Contains(quiet.out.String(), "[pilot:menu]") {
@@ -353,10 +353,10 @@ func TestPilotEditPTY_EscOnTopMenuQuitsCleanly(t *testing.T) {
 	dir := t.TempDir()
 	proc := startEditPTY(t, dir, 40, 100)
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	proc.press(t, "\x1b") // esc
 
-	code := proc.waitExit(t, 5*time.Second)
+	code := proc.waitExit(t, ptyExitTimeout)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (clean cancel), output:\n%s", code, proc.out.String())
 	}
@@ -369,7 +369,7 @@ func TestPilotEditPTY_FuzzySearchSelectsTopMenuResult(t *testing.T) {
 	dir := t.TempDir()
 	proc := startEditPTY(t, dir, 40, 100)
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	proc.press(t, "/")
 	proc.typeText(t, "vault")
 	// Bubble Tea v2's renderer diffs incrementally at the cell level, so a
@@ -383,13 +383,13 @@ func TestPilotEditPTY_FuzzySearchSelectsTopMenuResult(t *testing.T) {
 	// outcome-based check than matching the intermediate search box text.
 	proc.press(t, "\r") // finish editing the search
 	proc.press(t, "\r") // select the filtered .vault/ menu item
-	waitForPTYOutput(t, proc.out, 5*time.Second, "選一個")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "選一個")
 
 	proc.press(t, "\x1b") // vault picker -> top menu
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	time.Sleep(escAfterTransitionSettle)
 	proc.press(t, "\x1b") // top menu -> quit
-	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+	if code := proc.waitExit(t, ptyExitTimeout); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, proc.out.String())
 	}
 }
@@ -398,30 +398,59 @@ func TestPilotEditPTY_MinimalWorkspaceRequiresHostsThenReturnsCleanly(t *testing
 	dir := t.TempDir()
 	proc := startEditPTY(t, dir, 40, 100)
 
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	for i := 0; i < topMenuIndex(t, "top.minimal_workspace"); i++ {
 		proc.press(t, "j")
 	}
 	proc.press(t, "\r")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "快速建立最小 workspace")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "快速建立最小 workspace")
 	proc.press(t, "j") // 建立／更新最小設定骨架
 	proc.press(t, "\r")
-	waitForPTYOutput(t, proc.out, 5*time.Second, "先選「設定主機與角色」")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "先選「設定主機與角色」")
 
 	proc.press(t, "\x1b") // quick wizard -> top menu
-	waitForPTYOutput(t, proc.out, 5*time.Second, "要編輯什麼")
+	waitForPTYOutput(t, proc.out, ptyOutputTimeout, "要編輯什麼")
 	time.Sleep(escAfterTransitionSettle)
 	proc.press(t, "\x1b") // top menu -> exit
 
-	if code := proc.waitExit(t, 5*time.Second); code != 0 {
+	if code := proc.waitExit(t, ptyExitTimeout); code != 0 {
 		t.Fatalf("exit code = %d, want 0\noutput:\n%s", code, proc.out.String())
 	}
 }
 
 func TestMain(m *testing.M) {
+	// Point every test, and every pilot subprocess a test starts, at a
+	// throwaway data dir. A test that reaches prepareDeployAnsibleRuntime
+	// without its own dir (host decommission, `pilot mcp serve`) otherwise
+	// redacts and rotates the developer's real
+	// ~/.local/share/pilot/ansible/ansible.log. Against a 70 MB log that took
+	// one test 177s, and it rewrites a file the test has no business
+	// touching. Tests that need a specific dir still set dataDir or
+	// t.Setenv("PILOT_DATA_DIR", ...).
+	testDataDir, err := os.MkdirTemp("", "pilot-test-data-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create test data dir:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("PILOT_DATA_DIR", testDataDir); err != nil {
+		fmt.Fprintln(os.Stderr, "set PILOT_DATA_DIR:", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	if pilotBinaryDir != "" {
 		_ = os.RemoveAll(pilotBinaryDir)
 	}
+	_ = os.RemoveAll(testDataDir)
 	os.Exit(code)
+}
+
+// TestMainIsolatesPilotDataDir keeps TestMain's isolation in place: without
+// --data-dir, a test must resolve to the throwaway dir, never the real one.
+func TestMainIsolatesPilotDataDir(t *testing.T) {
+	prev := dataDir
+	dataDir = ""
+	t.Cleanup(func() { dataDir = prev })
+	if got := resolvePilotDataDir(); !strings.HasPrefix(filepath.Base(got), "pilot-test-data-") {
+		t.Fatalf("resolvePilotDataDir() = %q, want TestMain's throwaway pilot-test-data-* dir", got)
+	}
 }

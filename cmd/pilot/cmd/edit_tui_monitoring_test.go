@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -94,7 +93,7 @@ func TestEditRouter_Teatest_MonitoringFlow_AddProfileAddTargetAndSave(t *testing
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	tf, err := monitoring.LoadTargets(filepath.Join(dir, "monitoring", "targets.yml"))
 	if err != nil {
@@ -142,7 +141,7 @@ func TestEditRouter_Teatest_MonitoringFlow_EmptyWorkspaceHasNoMonitoringFiles(t 
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	if _, err := os.Stat(filepath.Join(dir, "monitoring")); !os.IsNotExist(err) {
 		t.Fatalf("expected no monitoring/ directory to be created, stat err=%v", err)
