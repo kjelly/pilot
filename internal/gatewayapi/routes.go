@@ -135,12 +135,19 @@ func (s *Server) authorizeConnect(ctx context.Context, peer Peer, rawTarget stri
 }
 
 // applyTransportGate sets TransportAllowed only when this gateway enables
-// transport AND the (already authorized) target is a member of
-// TransportReadyHostgroup, direct or nested. Any lookup failure fails
-// closed. Disabled gateways never touch FreeIPA for this.
+// transport, the connect's recording mode allows it (D8), AND the
+// (already authorized) target is a member of TransportReadyHostgroup,
+// direct or nested. Any lookup failure fails closed. Neither a disabled
+// gateway nor a recording-incompatible connect touches FreeIPA for this.
+// /v1/transport/host-keys reads the same result, so a target's keys are
+// served only while a transport to it is allowed.
 func (s *Server) applyTransportGate(ctx context.Context, resp *ConnectAuthorizeResponse) {
 	if !s.Transport.Enabled {
 		resp.TransportDenyReason = TransportDenyDisabled
+		return
+	}
+	if !TransportRecordingCompatible(resp.RecordingMode) {
+		resp.TransportDenyReason = TransportDenyRecordingIncompatible
 		return
 	}
 	hg, err := s.Provider.HostgroupShow(ctx, TransportReadyHostgroup)

@@ -108,10 +108,20 @@ type ConnectAuthorizeResponse struct {
 
 // Transport deny reasons carried in ConnectAuthorizeResponse.TransportDenyReason.
 const (
-	TransportDenyDisabled          = "disabled"
-	TransportDenyTargetNotReady    = "target_not_ready"
-	TransportDenyReadyLookupFailed = "ready_lookup_failed"
+	TransportDenyDisabled              = "disabled"
+	TransportDenyRecordingIncompatible = "recording_incompatible"
+	TransportDenyTargetNotReady        = "target_not_ready"
+	TransportDenyReadyLookupFailed     = "ready_lookup_failed"
 )
+
+// TransportRecordingCompatible reports whether a connect under this
+// recording mode may use an opaque pilot-transport-v1 byte stream
+// (captive-transport spec D8). It is an allowlist: only "" and "metadata"
+// qualify, because the inner SSH cannot be recorded; terminal_output,
+// terminal_io and any mode this build does not know refuse transport.
+func TransportRecordingCompatible(mode string) bool {
+	return mode == "" || mode == "metadata"
+}
 
 // TransportHostKeysRequest is POST /v1/transport/host-keys's body — like
 // ConnectAuthorizeRequest, only "target" is accepted.
