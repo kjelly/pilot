@@ -101,7 +101,9 @@
       # stage and runs this playbook over the whole server inventory, and
       # this play targets every host, so the check would otherwise fail on
       # every host in a staging or prod group and block the query.
-      when: ansible_run_tags != ['iep_decommission_verify']
+      # `| list`: ansible-core 2.19 passes ansible_run_tags as a tuple, and a
+      # tuple never equals a list, so a bare `!= [...]` is always true.
+      when: (ansible_run_tags | list) != ['iep_decommission_verify']
 
     - name: "Gate: prod requires recent staging attestation"
       tags: [always]
@@ -202,7 +204,9 @@
       # stage and runs this playbook over the whole server inventory, and
       # this play targets every host, so the check would otherwise fail on
       # every host in a staging or prod group and block the query.
-      when: ansible_run_tags != ['iep_decommission_verify']
+      # `| list`: ansible-core 2.19 passes ansible_run_tags as a tuple, and a
+      # tuple never equals a list, so a bare `!= [...]` is always true.
+      when: (ansible_run_tags | list) != ['iep_decommission_verify']
 
     - name: "Gate: prod requires recent staging attestation"
       tags: [always]

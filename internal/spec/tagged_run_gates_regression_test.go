@@ -336,6 +336,21 @@ func TestRegression_InternalEndpointGatesCoverTaggedMutations(t *testing.T) {
 		}
 	}
 
+	// The environment-group cross-check is skipped only for the
+	// host-decommission provider's read-only query. ansible_run_tags is a
+	// tuple on ansible-core 2.19, so the comparison needs `| list`; without
+	// it the condition is always true and the query failed on every host in
+	// a staging or prod group (found on a vm-target, 2026-09-25).
+	for i, play := range doc[:2] {
+		task, tags := find(play, "pre_tasks", "Gate: stage must match this host's inventory environment group")
+		if !slices.Contains(tags, "always") {
+			t.Errorf("play %d: cross-check must be tagged always, got %v", i, tags)
+		}
+		if when, _ := task["when"].(string); when != "(ansible_run_tags | list) != ['iep_decommission_verify']" {
+			t.Errorf("play %d: cross-check when = %q, want the decommission-query exemption with `| list`", i, when)
+		}
+	}
+
 	preflight, tags := find(doc[1], "tasks", "Preflight: TLS certificate owner host has live FreeIPA enrollment")
 	inc, _ := preflight["ansible.builtin.include_tasks"].(map[string]any)
 	apply, _ := inc["apply"].(map[string]any)
