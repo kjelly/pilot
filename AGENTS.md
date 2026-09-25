@@ -502,6 +502,15 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    一致套用,不要因為某支還沒接進 site.yml、或角色看起來次要,就假設它可以
    例外」。真的有理由不需要 gate 的 playbook(純唯讀、不 mutate 任何東西的
    inspect playbook),在檔頭註解寫清楚原因,不要沉默省略。
+5. prod attestation gate 一律寫成
+   `that: [(staging_attested_within_hours | int) <= 168]` + `when: stage == 'prod'`。
+   **不要**在 `that:` 裡再放 `stage != 'prod'`:`that:` 的每一項都要成立,
+   而 `when:` 已經限定只在 prod 執行,多這一項會讓 stage=prod 永遠失敗
+   (2026-09-24 修正 9 支 playbook 共 10 道 gate;最早的 core-infra-provider
+   `2c25c9d` 一開始就這樣寫,之後被照抄,包括 `pilot deploy` 選 prod 並填了
+   有效時數的情況也一樣失敗)。
+   `internal/spec/assert_negates_when_regression_test.go::TestRegression_AssertNeverNegatesItsOwnWhen`
+   對全部 `playbooks/**` 檢查「assert 的 `that:` 不准是自己 `when:` 的反面」。
 
 另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的
 `assert target_group is not defined`),擋下「全站入口誤帶 `-e target_group=`
@@ -1268,3 +1277,4 @@ git status --short
 | 2026-09-24 | v1.33 | §4.5 第 8、9 點：帶 tags 沒 `apply` 的 17 組 `include_tasks` 與 4 個繞過 apt framework 的套件安裝全部遷移，兩個 ratchet allowlist 清空；補上遷移時的規則（前置 fact 帶對應 tag、只讀 pre_tasks 標 `always`、mutation 安全 gate 標它保護的 row tag） | pilot |
 | 2026-09-24 | v1.34 | §4.5 第 8 點：安全 gate 的 tag 要涵蓋它保護的每一個 mutation。修正 PR #10 review 抓到的兩個 `--tags` 繞過（`freeipa-ca-trust` stage gate 改 `always`；`internal-endpoint` C7/C8 gate 補 C4–C6、C12 preflight 補 C13/C15，fleet-wide baseline play 補上 stage gate），新增全 repo lint `TestRegression_PreTaskGatesRunUnderApplyTags`（allowlist 列 4 支既有、留給後續 repo-wide stage gate 修正的 playbook） | pilot |
 | 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader`；新增第 10 點：free-form shell 字串（含註解）的引號要成對，否則 `split_args` 讓整支 task 檔載入失敗，新增 `TestRegression_FreeFormCommandsSplitInAnsible` | pilot |
+| 2026-09-24 | v1.36 | §4.3 新增第 5 點：prod attestation gate 的 `that:` 不准放 `stage != 'prod'`（搭配 `when: stage == 'prod'` 會讓 prod 永遠失敗）。修正 9 支 playbook 共 10 道 gate，新增全 repo lint `TestRegression_AssertNeverNegatesItsOwnWhen` | pilot |

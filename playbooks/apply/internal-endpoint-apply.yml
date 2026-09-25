@@ -90,7 +90,6 @@
       tags: [always]
       ansible.builtin.assert:
         that:
-          - stage != 'prod'
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
@@ -175,7 +174,6 @@
       tags: [always]
       ansible.builtin.assert:
         that:
-          - stage != 'prod'
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
