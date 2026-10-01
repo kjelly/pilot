@@ -345,11 +345,13 @@
 
       rescue:
         - name: "ROLLBACK — remove the objstore config file (contains S3 secret)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ thanos_config_dir }}/objstore.yml"
             state: absent
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               thanos-query apply FAILED (see task output above); the

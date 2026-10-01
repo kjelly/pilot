@@ -437,6 +437,7 @@
 
       rescue:
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               dashboard apply FAILED (see task output above). Containers (if

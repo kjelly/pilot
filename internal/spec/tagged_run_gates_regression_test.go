@@ -685,9 +685,8 @@ func loadYAML(t *testing.T, path string) any {
 // guards. An untagged check among untagged steps is consistent: both run
 // only in a full run (the decommission playbooks, whose only tagged tasks
 // are the read-only `inspect` ones, verify their untagged removal that
-// way). Rescue and block `always:` sections are not checked here: tagging
-// rollback needs its snapshot prerequisites to run too, and is a separate
-// change.
+// way). Rescue and block `always:` sections are checked by
+// TestRegression_RescueRunsWheneverItsBlockDoes.
 func TestRegression_NoUntaggedChecksInTaggedPlays(t *testing.T) {
 	plays := 0
 	for _, path := range playbookFiles(t) {
