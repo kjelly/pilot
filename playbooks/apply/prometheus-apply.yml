@@ -411,6 +411,7 @@
     # supply this — same "required only when actually used" shape as
     # alertmanager_target_host.
     - name: "Gate: node-exporter basic-auth credentials required when there are scrape targets"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (node_exporter_basic_auth_user | default('', true) | length > 0)
@@ -495,6 +496,7 @@
     # "required only when actually used" shape as the node-exporter gate
     # above.
     - name: "Gate: dcgm-exporter basic-auth credentials required when there are scrape targets"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (dcgm_exporter_basic_auth_user | default('', true) | length > 0)
@@ -513,6 +515,7 @@
     # default would silently collide across sites once a second one is
     # deployed instead of failing loudly).
     - name: "Gate: prometheus_site_label required"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - prometheus_site_label is defined and prometheus_site_label | length > 0
@@ -521,6 +524,7 @@
           — see docs/verification/prometheus.md §1.5 for why there is no default.
 
     - name: "Gate: required S3 secrets present (fail early, before any mutation)"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - thanos_aws_access_key_id is defined and thanos_aws_access_key_id | length > 0
@@ -532,6 +536,7 @@
 
     # Same "no reachable destination" trap as restic-backup.md's gate.
     - name: "Gate: S3 destination must be resolvable"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (thanos_s3_target_host | default('', true) | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)

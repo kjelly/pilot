@@ -85,6 +85,7 @@
       tags: [always]
   tasks:
     - name: "Step 0: Assert required variables"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - keycloak_server_url is match('^https?://')

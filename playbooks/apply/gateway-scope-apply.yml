@@ -107,6 +107,7 @@
       tags: [always]
   tasks:
     - name: Validate required vars (common)
+      tags: [always]
       ansible.builtin.assert:
         that:
           - gateway_scope is defined
@@ -122,6 +123,7 @@
     # hostgroup membership, so gateway_scope_hosts is neither required nor
     # read on that path (see the file header comment).
     - name: Validate required vars (host list; not needed for disable-auto)
+      tags: [always]
       ansible.builtin.assert:
         that:
           - gateway_scope_hosts is defined

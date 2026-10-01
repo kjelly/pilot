@@ -130,6 +130,7 @@
       tags: [always]
 
     - name: "Gate: grafana_admin_password required"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - grafana_admin_password is defined and grafana_admin_password | length > 0

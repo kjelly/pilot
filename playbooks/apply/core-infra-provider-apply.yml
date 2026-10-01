@@ -76,6 +76,7 @@
 
   pre_tasks:
     - name: "Gate: infra_role must be dns or ntp"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - infra_role in ['dns', 'ntp']

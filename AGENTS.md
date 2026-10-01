@@ -572,6 +572,17 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   的那條路徑。
 - 跑 `internal/spec` 裡名稱含 `AlwaysTagPrerequisite` 的 regression lint,
   確認新 task 沒有漏掛。
+- 檢查(assert/fail)本身也一樣:放在 `pre_tasks` 的輸入檢查,或跟帶 row tag
+  的步驟放在同一個 task 清單裡的檢查,沒有 tag 就會在任何 `--tags` run 被跳過,
+  而它要擋的步驟照跑。輸入檢查一律標 `always`(它讀的 fact 也要 `always`,
+  見上一點);流程中間驗證某一步結果的 assert 標那一步的 row tag。2026-10-01
+  修正 10 支 playbook 共 20 個沒有 tag 的檢查(必填變數、secrets、S3 位址、
+  alertmanager 設定、detection-engine feature profile,以及 detection-engine/
+  agent-controller 複製 binary 後的 SHA256 與 status 檢查),
+  `internal/spec/tagged_run_gates_regression_test.go::TestRegression_NoUntaggedChecksInTaggedPlays`
+  對全 repo 鎖住。跟沒有 tag 的步驟放在一起的檢查不受影響(decommission
+  playbook 的移除與驗證都只在完整 run 執行)。rescue/rollback 區塊同樣會被
+  `--tags` 跳過,另案處理。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -1320,3 +1331,4 @@ git status --short
 | 2026-09-25 | v1.37 | §4.3 新增第 6 點：stage gate 一律標 `always`，否則 `--tags`（包括 `pilot deploy` 單一元件精靈的 tags 欄位）會跳過 cross-check，讓 prod group 主機以 sandbox 規則被改。6 支 playbook 的 18 道 gate 改標 `always`，freeipa-ca-trust、internal-endpoint（兩個 play）、reverse-proxy 補上 cross-check；新增 lint `TestRegression_StageGatesAlwaysRunInTaggedPlays`、`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` | pilot |
 | 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |
 | 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
+| 2026-10-01 | v1.40 | §4.4 補一點：assert/fail 檢查本身也要能在 `--tags` run 執行——輸入檢查標 `always`，流程中間的驗證標所屬步驟的 row tag。修正 10 支 playbook 共 20 個沒有 tag 的檢查，新增全 repo lint `TestRegression_NoUntaggedChecksInTaggedPlays`；`preTaskGateNotAlwaysAllowlist` 清空 | pilot |
