@@ -154,10 +154,10 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 
 ## 7. 已知限制
 
-- 第一台 tier 整台失聯（封包被丟棄）時，consumer 每次查詢會等 resolver 逾時再換下一台：
-  實測 5～20 秒，Ubuntu 與 AlmaLinux 相同。只停掉 unbound、主機還在時，大多數查詢
-  幾毫秒內就換到下一台。縮短 resolver 逾時會改變所有 `freeipa-dns-client` 主機的
-  設定，尚未決定（`docs/verification/dns.md` §8）。
+- 第一台 tier 整台失聯（封包被丟棄）時，consumer 每次查詢要等 resolver 逾時才換下一台。
+  consumer 有 2 筆以上 nameserver 時 resolver baseline 用 `options timeout:1 attempts:2`
+  （`docs/verification/freeipa-dns-client.md` C7），每台只等 1 秒；改之前實測要等 5～20 秒。
+  只停掉 unbound、主機還在時，大多數查詢幾毫秒內就換到下一台。
 - 只支援 Ubuntu 22.04/24.04 的 tier 主機；tier 主機不可同時是 FreeIPA server/replica。
 
 ## 8. 變更紀錄
@@ -166,3 +166,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 |---|---|---|---|
 | 2026-10-01 | v1.0 | 初版：取代 `core-infra-provider-dns-zones.md`；candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS | sre |
 | 2026-10-01 | v1.1 | §0.5 改指向 candidate `cbe95b8` 的驗證；加上真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果 | sre |
+| 2026-10-01 | v1.2 | §7：consumer 有 2 筆以上 nameserver 時 resolver 逾時改成 1 秒（`freeipa-dns-client.md` C7） | sre |

@@ -656,15 +656,17 @@ DNSSEC 關閉加舊格式 `dns_zones` 的 `vm-target test` PASS（12 / 0 / 8、L
 - **A6** playbook 拆成 `dns-apply.yml`，並把 site 順序移到 FreeIPA server 之後。
 - **A7** dns role 不管理 tier 主機自己的 resolver（B9）。
 - **A8** `dns_zones` 維持手動編輯；需要用 `pilot edit` 管理的本地紀錄放到 FreeIPA。
+- **A9** resolver 逾時（2026-10-01 決定）：consumer 的 nameserver 有 2 筆以上時，
+  共用的 resolver baseline 改用 `options timeout:1 attempts:2`，只有 1 筆時維持 glibc
+  預設；由 `docs/verification/freeipa-dns-client.md` C7 驗收。起因是 E6b：第一台 tier
+  整台失聯（封包被丟棄）時，Ubuntu 與 AlmaLinux consumer 的查詢都要等 glibc 的 5 秒
+  逾時才換下一台，存在的內部名稱 15 秒、不存在的名稱 20 秒、外部名稱 5 秒（答案都
+  正確）；只停掉 unbound、主機還在時（E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。
+  第一台 FreeIPA DNS server 失聯時本來就有同樣的行為，所以這條規則不只套在有 tier 的
+  consumer。
 
 未知項：
 
-- resolver 逾時：2026-10-01 實測（E6b），第一台 tier 整台失聯（封包被丟棄）時，
-  Ubuntu 與 AlmaLinux consumer 的查詢都要等逾時才換下一台：存在的內部名稱 15 秒、
-  不存在的名稱 20 秒、外部名稱 5 秒，答案都正確。只停掉 unbound、主機還在時
-  （E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。第一台 FreeIPA DNS server 失聯時
-  今天就有同樣的行為。是否要在 resolver baseline 加 `options timeout:1 attempts:2`
-  之類的設定，會改變所有 `freeipa-dns-client` 主機的輸出，留待決定。
 - IPv6：ACL 與 upstream 允許填 IPv6，但 E1 只涵蓋 IPv4；G10 只接受 IPv4 服務位址。
 
 非目標：FreeIPA 的 forwarders 與 recursion 設定（B11）、reconciler 主動 flush tier
@@ -683,3 +685,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 | 2026-10-01 | DRAFT v0.2 | 納入 `pilot edit` 設定介面契約（§3.5）與三個既有 bug；新增 `dns_stub_zones`、G10；B9 改成「只綁 `127.0.0.1` 與服務位址、不管理 tier 主機自己的 resolver」（原 v0.1 要求 tier 主機優先指向自己，但 resolver 共用 task 需要 FreeIPA，且兩支 playbook 會搶同一份設定），C19 隨之改成驗證 tier 主機自己的解析沒有被破壞；G3 不再排除 `freeipa-dns-client` | sre |
 | 2026-10-01 | v1.0 | candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS（`docs/evidence/dns/2026-10-01-3f781fb.md`）；front matter 與 Checks 區塊與 candidate 相同，只更新狀態、§6 結果與 §8 的 resolver 逾時實測 | sre |
 | 2026-10-01 | v1.0 | Checks 不變。candidate `cbe95b8` 重跑全部驗證（`docs/evidence/dns/2026-10-01-cbe95b8.md`），新增真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果；只更新狀態與 §6 | sre |
+| 2026-10-01 | v1.0 | Checks 不變。§8 把 resolver 逾時從未知項移到決策 A9：consumer 有 2 筆以上 nameserver 時用 `timeout:1 attempts:2`，由 `freeipa-dns-client.md` C7 驗收 | sre |

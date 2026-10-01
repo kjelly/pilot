@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-dns-client（目標主機把 DNS resolver 指向 FreeIPA DNS）
 
-> 版本：v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
+> 版本：v1.1（2026-10-01 新增 C7 resolver 逾時，見 §8）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
 > `freeipa-dns-server`（FreeIPA server 自身，`--setup-dns`，自我指向案例，
 > NetworkManager 路徑）與 Ubuntu 24.04 `freeipa-dns-ubuntu`（一般未納管
 > client，systemd-resolved 路徑），C1-C6 兩台皆 6/6 PASS，含 idempotent
@@ -96,6 +96,15 @@ FreeIPA server/replica 自己用得到。
 > `tasks/dns-tier-endpoints.yml` 推導），不足 3 筆時再補 FreeIPA DNS 提供者當
 > fallback，總數最多 3 筆。DNS 提供者自己仍然 self-first；`freeipa_dns_client_servers`
 > 仍然優先於一切。本檔 C1–C6 的檢查內容不變（C6 經由 tier 一樣解析得到）。
+>
+> **resolver 逾時（C7）**：最後算出的 nameserver 有 2 筆以上時，resolver 改用
+> `options timeout:1 attempts:2`（Debian 寫進 `/etc/resolv.conf`；EL 設在該
+> connection 的 `ipv4.dns-options`，由 NetworkManager 寫進 `/etc/resolv.conf`）。
+> glibc 預設每台 nameserver 等 5 秒，第一台整台失聯（封包被丟棄）時每次查詢
+> 要等 5～20 秒才換下一台；縮短後只多等約 1 秒。只有 1 筆 nameserver 時沒有
+> 可以換的對象，維持 glibc 預設、不寫 `options`；之前寫過的值會被清掉。
+> 這不是可設定的變數，`freeipa_dns_client_servers` 也套用同一條規則；
+> `internal-endpoint-apply.yml` 的 resolver baseline 用同一支共用檔，也一樣。
 
 ## 2. Checklist
 
@@ -110,6 +119,7 @@ FreeIPA server/replica 自己用得到。
 | C4  | config   | `/etc/resolv.conf` 至少一行 `nameserver`                       | 0                        | sh -c 'grep -c "^nameserver " /etc/resolv.conf | grep -qv "^0$"' |
 | C5  | config   | search domain 含 FreeIPA domain（未限定名稱可補 domain 解析）  | 0                        | grep -qE "^search .*ipa.pilot.internal" /etc/resolv.conf |
 | C6  | dns      | FreeIPA server FQDN 真的透過 DNS 解析成功（非 `/etc/hosts` 短路）| 0                       | sh -c 'dig +short ipa1.ipa.pilot.internal | grep -qE "^[0-9]+\."' |
+| C7  | config   | 2 筆以上 nameserver 時 resolver 逾時是 `timeout:1 attempts:2`；只有 1 筆時沒有 timeout/attempts 選項 | ~resolver-timeout-ok | sh -c 'n=$(grep -c "^nameserver " /etc/resolv.conf); t=other; grep -Eq "^options( .*)? timeout:1( |$)" /etc/resolv.conf && grep -Eq "^options( .*)? attempts:2( |$)" /etc/resolv.conf && t=short; grep -Eq "^options.* (timeout|attempts):" /etc/resolv.conf || t=default; if [ "$n" -ge 2 ] && [ "$t" = short ]; then echo resolver-timeout-ok; elif [ "$n" -lt 2 ] && [ "$t" = default ]; then echo resolver-timeout-ok; else echo "resolver-timeout-wrong nameservers=$n options=$t"; fi' |
 
 > **C1/C2/C4/C6 = rc 型 expected（`0`）**：`command -v`（C1）找到即回 0；
 > `systemctl is-active`（C2）刻意用 rc 而非 `~active`——字串 `active` 也會命中
@@ -147,6 +157,11 @@ FreeIPA server/replica 自己用得到。
 > 正確回報 fail）。C2 的 `\|\|` 剛好因為 `systemctl is-active <多個名字>`
 > 本身就是「任一 active 即回 0」的邏輯，未造成誤判，但仍一併修正、統一遵守
 > 本 repo 慣例。v1.0 起 C2/C4/C6 一律用未跳脫的字面 `|`。
+> **C7 = `~substring`，讀的是 glibc 實際使用的 `/etc/resolv.conf`**：兩個 OS 最後都由
+> 這個檔案決定逾時（Debian 由本 playbook 直接寫入；EL 由 NetworkManager 依
+> `ipv4.dns-options` 產生），所以不看 NetworkManager profile。`timeout:1` 用
+> `( |$)` 收尾，`timeout:10` 不會被當成 `timeout:1`。失敗時印出 nameserver 筆數與
+> 判斷結果（`short`／`default`／`other`）。
 
 ## 3. 證據收集
 
@@ -154,7 +169,7 @@ FreeIPA server/replica 自己用得到。
   （真實主機：`pilot verify docs/verification/freeipa-dns-client.md -i inventory.yaml`）
 - 原始輸出：gitignored `.verification/freeipa-dns-client-<UTC>.{ndjson,md}`
 - Sanitized 摘要：`docs/evidence/freeipa-dns-client/<date>-<tested-revision>.md`
-- 預期 row 數：6
+- 預期 row 數：7
 
 **真實輸出摘要**（2026-07-31，兩台 vm-target：AlmaLinux 9 `freeipa-dns-server`
 與 Ubuntu 24.04 `freeipa-dns-ubuntu`；完整指令與逐行輸出見
@@ -171,7 +186,7 @@ FreeIPA server/replica 自己用得到。
 
 ## 4. PASS / FAIL 規則
 
-- C1–C6 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
+- C1–C7 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
   導向 FreeIPA DNS。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1 fail → 套件安裝失敗（Debian `bind9-dnsutils`／EL `bind-utils`）；重跑 apply。
@@ -183,6 +198,9 @@ FreeIPA server/replica 自己用得到。
   - C6 fail → resolver 設定寫了但實際查詢失敗：確認 nameserver IP 真的是
     FreeIPA server/replica 的可路由 IP（防火牆/路由問題），或 FreeIPA 自己的
     named 服務未起來（見 `freeipa-server.md` C 相關 row）。
+  - C7 fail → `options` 行不對：Debian 上確認 `/etc/resolv.conf` 是本 playbook 寫的
+    （有 pilot 標記）；EL 上看 `nmcli -g ipv4.dns-options connection show <conn>`，
+    重跑 apply。
 
 ## 5. 例外與已知偏差
 
@@ -230,6 +248,7 @@ FreeIPA server/replica 自己用得到。
   標記字串不再視為足夠證據（否則這個探測本身在有 bug 的舊版本上仍會
   vacuously PASS，跟 2026-08-14 那次修的問題是同一類）。 |
 | C6 | 驗證用途，無對應 mutate task（apply 完成後的功能性結果）|
+| C7 | 同一支共用檔：`compute effective resolver options for THIS host` 決定選項，Debian 由寫 `/etc/resolv.conf` 的 task 寫入 `options` 行，EL 由 `community.general.nmcli` 的 `dns4_options` 設定；`freeipa-dns-client-apply.yml` 的 include tag 加上 `C7`。EL 的套用前快照與 rescue 也包含 `ipv4.dns-options` |
 
 ## 7. 動態行為 SOP（fixture：確保有 DNS 提供者可偵測）
 
@@ -251,3 +270,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-01 | v1.0 | Checklist 不變。§1.5 補上 dns tier 存在時的 nameserver 順序（tier 在前、FreeIPA 補到最多 3 筆，見 `docs/verification/dns.md` §2 B10）；實作在共用檔 `tasks/freeipa-dns-client-resolver.yml`，tier 位址由 `tasks/dns-tier-endpoints.yml` 推導。2026-10-01 對一台同時是 tier 的 Ubuntu 24.04 vm-target 實跑：resolv.conf 依序是 tier、FreeIPA，`dns-apply` 與本 playbook 交替重跑皆 `changed=0` | sre |
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `3f781fb` 的 dns tier 拓樸驗證：Ubuntu 與 AlmaLinux consumer 加上一台 tier 主機，C1–C6 兩輪都是 18/18 PASS（一輪由本 playbook 設定，一輪由 internal-endpoint 的 baseline 設定），nameserver 依序是兩台 tier、最後 FreeIPA；見 `docs/evidence/dns/2026-10-01-3f781fb.md` | sre |
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `cbe95b8` 重跑：dns tier 拓樸 18/18 PASS；真實 `pilot reconcile` 套用到 3 台 consumer 後 18/18 PASS；見 `docs/evidence/dns/2026-10-01-cbe95b8.md` | sre |
+| 2026-10-01 | v1.1 | 新增 C7：2 筆以上 nameserver 時 resolver 用 `timeout:1 attempts:2`，只有 1 筆時維持 glibc 預設（起因：dns tier 第一台整台失聯時 consumer 每次查詢要等 5～20 秒，見 `docs/verification/dns.md` §8）。實跑證據見下一筆 evidence 摘要 | sre |
