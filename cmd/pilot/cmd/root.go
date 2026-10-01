@@ -89,6 +89,9 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+// loadConfig reads the config file and sets cfg.DataDir by the one
+// precedence every command uses: --data-dir, then $PILOT_DATA_DIR, then the
+// config file's data_dir, then ~/.local/share/pilot.
 func loadConfig() *config.Config {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -97,6 +100,8 @@ func loadConfig() *config.Config {
 	}
 	if dataDir != "" {
 		cfg.DataDir = dataDir
+	} else if dir := os.Getenv("PILOT_DATA_DIR"); dir != "" {
+		cfg.DataDir = dir
 	}
 	return cfg
 }
