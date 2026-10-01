@@ -1,0 +1,21 @@
+[
+    {
+        "jsonfile": [
+            {
+                "name": "_prefix",
+                "origin": "default",
+                "value": null
+            },
+            {
+                "name": "_timeout",
+                "origin": "/repo/ansible.cfg",
+                "value": 3600
+            },
+            {
+                "name": "_uri",
+                "origin": "/repo/ansible.cfg",
+                "value": "@CACHE_DIR@"
+            }
+        ]
+    }
+]
