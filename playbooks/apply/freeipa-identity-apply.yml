@@ -1740,7 +1740,7 @@
       register: ipa_hbacrule_show
       changed_when: false
       failed_when: false
-      tags: [identity, hbac]
+      tags: [identity, hbac, C14]
 
     # Scoped removal: only ever removes a host/hostgroup/service/user/group
     # that is BOTH currently attached to THIS rule AND absent from THIS
@@ -2214,7 +2214,7 @@
       register: ipa_sudorule_show
       changed_when: false
       failed_when: false
-      tags: [identity, sudo]
+      tags: [identity, sudo, C17]
 
     # Scoped removal: only ever removes a host/hostgroup/command/user/group
     # that is BOTH currently attached to THIS rule AND absent from THIS

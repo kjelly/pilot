@@ -571,9 +571,9 @@
       ansible.builtin.systemd:
         daemon_reload: true
       when: >-
-        session_store_service_unit.changed or
-        session_store_retention_service_unit.changed or
-        session_store_retention_timer_unit.changed
+        session_store_service_unit is changed or
+        (session_store_retention_service_unit | default({})) is changed or
+        (session_store_retention_timer_unit | default({})) is changed
       tags: [SS_service]
 
     - name: "Enable + start pilot-session-store.service"
@@ -588,8 +588,8 @@
         name: pilot-session-store.service
         state: restarted
       when: >-
-        session_store_service_unit.changed or session_store_binary_copy.changed or
-        session_store_config_copy.changed
+        session_store_service_unit is changed or session_store_binary_copy is changed or
+        (session_store_config_copy | default({})) is changed
       tags: [SS_service]
 
     - name: "Enable + start pilot-session-store-retention.timer"

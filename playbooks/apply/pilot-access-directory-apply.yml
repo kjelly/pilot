@@ -668,7 +668,7 @@
       ansible.builtin.systemd:
         name: pilot-access-directory.service
         state: restarted
-      when: directory_binary_copy.changed or directory_config_copy.changed
+      when: directory_binary_copy is changed or (directory_config_copy | default({})) is changed
       tags: [AD_service]
 
     # Step 17 (spec.md §31): capability probe — a real connection over
