@@ -36,7 +36,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — dns（FreeIPA 前的第一層快取 DNS，自動分流）
 
-> 版本：**v1.0（2026-10-01，candidate `cbe95b8` 對 5 台全新 vm-target 實跑 PASS）**
+> 版本：**v1.1（2026-10-01，ACL 依實際涵蓋的網段判斷；待 candidate 實跑）**
 > 對齊規範：pilot 通用基礎設施**服務端**規範；擴充既有 `dns` role
 > （目前由 `core-infra-provider-apply.yml -e infra_role=dns` 實作）
 > 維護者：sre
@@ -166,7 +166,11 @@ FreeIPA 紀錄新增、刪除、主機 decommission 之後，tier 最多 300 秒
 
 **B7 ACL。** `access-control` 只允許 `dns_access_control` 列出的 CIDR
 （預設 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`；localhost 是 unbound
-預設允許）。`0.0.0.0/0` 與 `::/0` 一律拒絕（§5 G4）。
+預設允許）。允許全部來源的 ACL 一律拒絕，判斷依據是實際涵蓋的網段，不是寫法：
+`0.0.0.0/0`、`::/0`、`1.2.3.4/0`、`::0/0`、`0.0.0.0/00`，以及合起來涵蓋整個位址空間
+的多筆（例如 `0.0.0.0/1` 加 `128.0.0.0/1`）都算（§5 G4、C5）。每筆 CIDR 必須寫成
+標準形式（網段位址、prefix 不補零、IPv6 小寫壓縮），C5 才能直接比對 unbound
+輸出的字串。
 
 **B8 Identity。** `hide-identity: no`、`identity: "pilot-dns:<inventory_hostname>"`、
 `hide-version: yes`。consumer 與 verify 用 `id.server CH TXT` 判斷回答的是不是 tier。
@@ -279,7 +283,7 @@ test 的「應該觸發」案例，能在 vm-target 製造的也要實際觸發�
 | G1 | stage gates（confirm 旗標、環境 group cross-check、prod attestation，AGENTS.md §4.3） | fail，所有 task 之前，標 `always` |
 | G2 | `dns_provider == 'unbound'` | fail |
 | G3 | 主機不可同時屬於 `freeipa-server`、`freeipa-server-replica` | fail |
-| G4 | 輸入形狀：`dns_upstream` 每筆是 IP 且不為空；`dns_access_control` 每筆是 CIDR，且不含 `0.0.0.0/0`、`::/0`；cache 上限是非負整數；`dns_stub_zones` 每筆是 `zone=ip[,ip]`；zone 名稱合法、小寫正規化後在 auto／`dns_freeipa_zones`／`dns_stub_zones`／`dns_zones` 之間不重複 | fail，寫任何檔案之前 |
+| G4 | 輸入形狀：`dns_upstream` 每筆是 IP 且不為空；`dns_access_control` 每筆是標準形式的 CIDR（B7），全部合起來不涵蓋整個 IPv4 或 IPv6 位址空間（controller 上用 Python `ipaddress` 解析並合併網段）；cache 上限是非負整數；`dns_stub_zones` 每筆是 `zone=ip[,ip]`；zone 名稱合法、小寫正規化後在 auto／`dns_freeipa_zones`／`dns_stub_zones`／`dns_zones` 之間不重複 | fail，寫任何檔案之前 |
 | G5 | split 模式：每個導向 FreeIPA 的 zone，對每個 FreeIPA DNS server 送 `+norec SOA` 都要拿到 NOERROR 且帶 `aa` | 真實 run：fail，不改設定。check mode 在 FreeIPA 尚未存在的全新 target 上：印出明確訊息後 `meta: end_host`（AGENTS.md §4.5 第 4 點） |
 | G6 | 每個 upstream 回應 `. NS`；DNSSEC 開啟時，`+dnssec . DNSKEY` 要有 RRSIG | fail，訊息提示可設 `dns_dnssec_validation: false` |
 | G7 | 新設定先跑 `unbound-checkconf`，通過才取代線上設定 | fail，線上設定與服務都不變 |
@@ -327,7 +331,12 @@ test 的「應該觸發」案例，能在 vm-target 製造的也要實際觸發�
   tags: [dns-C4]
 - id: C5
   category: acl
-  check: every dns_access_control CIDR is allowed and no allow-all entry exists
+  check: every dns_access_control CIDR is allowed and the allow entries, alone or together, never cover a whole address family
+  # unbound keeps the spelling it was given (get_option prints 1.2.3.4/0,
+  # not 0.0.0.0/0), so allow-all is judged by the networks: python3 parses
+  # every allow* entry and collapses each family; a /0 left over means
+  # every source of that family is allowed. An allow entry python3 cannot
+  # parse, or no python3 at all, fails the row.
   probe: |
     [ -n "$PILOT_VAR_DNS_ACCESS_CONTROL" ] || { echo missing-input; exit 0; }
     acl=$(unbound-control get_option access-control 2>/dev/null)
@@ -335,8 +344,23 @@ test 的「應該觸發」案例，能在 vm-target 製造的也要實際觸發�
     for c in $PILOT_VAR_DNS_ACCESS_CONTROL; do
       printf '%s\n' "$acl" | grep -qxF "$c allow" || missing="$missing $c"
     done
-    open=$(printf '%s\n' "$acl" | grep -cE '^(0\.0\.0\.0/0|::/0) allow')
-    if [ -z "$missing" ] && [ "$open" = 0 ]; then echo acl-ok; else echo "acl-bad missing=$missing open=$open"; fi
+    open=$(printf '%s\n' "$acl" | python3 -c '
+    import ipaddress, sys
+    nets, bad = {4: [], 6: []}, []
+    for line in sys.stdin:
+        f = line.split()
+        if len(f) != 2 or not f[1].startswith("allow"):
+            continue
+        try:
+            n = ipaddress.ip_network(f[0], strict=False)
+        except ValueError:
+            bad.append(f[0])
+            continue
+        nets[n.version].append(n)
+    bad += [str(n) for v in (4, 6) for n in ipaddress.collapse_addresses(nets[v]) if n.prefixlen == 0]
+    print(",".join(bad) or "none")
+    ') || open=unchecked
+    if [ -z "$missing" ] && [ "$open" = none ]; then echo acl-ok; else echo "acl-bad missing=$missing open=$open"; fi
   expect: {stdout: {equals: acl-ok}}
   tags: [dns-C5]
 - id: C6
@@ -683,3 +707,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 | 2026-10-01 | DRAFT v0.2 | 納入 `pilot edit` 設定介面契約（§3.5）與三個既有 bug；新增 `dns_stub_zones`、G10；B9 改成「只綁 `127.0.0.1` 與服務位址、不管理 tier 主機自己的 resolver」（原 v0.1 要求 tier 主機優先指向自己，但 resolver 共用 task 需要 FreeIPA，且兩支 playbook 會搶同一份設定），C19 隨之改成驗證 tier 主機自己的解析沒有被破壞；G3 不再排除 `freeipa-dns-client` | sre |
 | 2026-10-01 | v1.0 | candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS（`docs/evidence/dns/2026-10-01-3f781fb.md`）；front matter 與 Checks 區塊與 candidate 相同，只更新狀態、§6 結果與 §8 的 resolver 逾時實測 | sre |
 | 2026-10-01 | v1.0 | Checks 不變。candidate `cbe95b8` 重跑全部驗證（`docs/evidence/dns/2026-10-01-cbe95b8.md`），新增真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果；只更新狀態與 §6 | sre |
+| 2026-10-01 | v1.1 | PR #33 review：G4 只擋 `0.0.0.0/0`、`::/0` 兩個字串，`1.2.3.4/0`、`::0/0`、`0.0.0.0/1`+`128.0.0.0/1` 都能讓 tier 對所有來源開放（Ubuntu 24.04 的 unbound 1.19.2 實測接受這些寫法並照原樣輸出）。B7、G4 改成依實際涵蓋的網段判斷（controller 上用 Python `ipaddress` 合併網段）並要求標準形式的 CIDR；C5 的驗收方法同樣改成合併 `allow*` 網段，原本只 grep 兩個字串的寫法是錯的，這次收緊不是放寬。`TestRegression_DNSACLClassifier`、`TestRegression_DNSC5RejectsEquivalentAllowAll` 用實測擷取的 `get_option` 輸出鎖住 | sre |
