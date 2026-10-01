@@ -745,6 +745,14 @@
           target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
           且要跟這台機器所屬的環境 group 一致。
       tags: [always]
+      # Skipped only for the host-decommission provider's read-only query
+      # (`--tags freeipa_host_absent_inspect`, which changes nothing). It
+      # runs during `pilot host decommission plan` (service-principal
+      # discovery) and verify, which take no stage confirmation, so on a
+      # FreeIPA server in a staging or prod group the check would otherwise
+      # block planning. `| list`: ansible-core 2.19 passes ansible_run_tags
+      # as a tuple, which never equals a list.
+      when: (ansible_run_tags | list) != ['freeipa_host_absent_inspect']
 
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:

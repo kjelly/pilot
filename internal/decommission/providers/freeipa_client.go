@@ -104,6 +104,14 @@ type FreeIPAClientProviderConfig struct {
 	// password file flag) — non-secret plumbing only; never a caller-
 	// supplied shell/command field (spec.md §31).
 	ExtraArgs []string
+
+	// ClientStageArgs returns the stage -e arguments for the retiring host
+	// and ServerStageArgs those for the freeipa-server hosts that the
+	// freeipa-identity-apply.yml converge targets (decommission.StageScope).
+	// The read-only freeipa_host_absent_inspect query gets neither. Nil adds
+	// none.
+	ClientStageArgs func() ([]string, error)
+	ServerStageArgs func() ([]string, error)
 }
 
 // FreeIPAClientProvider implements providers.Provider for the FreeIPA
@@ -140,6 +148,10 @@ func (p *FreeIPAClientProvider) Inspect(ctx context.Context, in InspectInput) (I
 	}
 	args = append(args, "--tags", "inspect")
 	args = append(args, p.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, p.cfg.ClientStageArgs)
+	if stageErr != nil {
+		return Inspection{}, fmt.Errorf("freeipa-client inspect %s: %w", hostName, stageErr)
+	}
 
 	res, err := p.exec(ctx, args)
 	if err != nil {
@@ -270,6 +282,10 @@ func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
 		args = append(args, "--limit", e.hostName)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.ClientStageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("freeipa-client uninstall %s: %w", e.hostName, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("freeipa-client uninstall %s: %w", e.hostName, err)
@@ -346,6 +362,10 @@ func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
 		args = append(args, "-i", e.provider.cfg.ServerInventory)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.ServerStageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, err)
@@ -591,6 +611,9 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	args = append(args, "-e", "pilot_decommission_query="+kind)
 	args = append(args, "-e", "pilot_decommission_target_fqdn="+fqdn)
 	args = append(args, p.cfg.ExtraArgs...)
+	// No stage: this read-only query also runs during `plan`, which takes
+	// no stage confirmation, and freeipa-identity-apply.yml skips its group
+	// cross-check when freeipa_host_absent_inspect is the only tag.
 	res, err := p.exec(ctx, args)
 	if err != nil {
 		return nil, err

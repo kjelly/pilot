@@ -525,6 +525,21 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    `internal/spec/tagged_run_gates_regression_test.go` 的
    `TestRegression_StageGatesAlwaysRunInTaggedPlays` 與
    `TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 對全 repo 鎖住這兩件事。
+7. pilot 自己呼叫 playbook 的地方也要帶 stage:`-e stage=` 必須等於那次 run 的
+   目標主機在 inventory 裡的環境 group,staging/prod 還要帶操作者給的確認。
+   `pilot host decommission` 原本完全不帶,staging/prod 主機一律卡在
+   cross-check(2026-09-25 重現);現在由 `internal/decommission/stage.go` 的
+   `StageScope` 依「每次 run 的目標主機」決定 stage——退役主機用它自己的,
+   FreeIPA identity reconcile 用 freeipa-server 主機的,Wazuh deregistration
+   用 wazuh-manager 主機的——`apply`/`resume` 收 `--confirm-staging`、
+   `--confirm-prod`、`--staging-attested-within-hours`(TUI 問同樣的問題),
+   缺確認時在任何步驟前拒絕。一次 run 的目標主機跨不同 stage 時直接報錯。
+   唯讀查詢(`freeipa_host_absent_inspect`,`plan` 階段就會跑;
+   `iep_decommission_verify`)不帶 stage,對應 playbook 只在「這個 tag 是唯一
+   的 tag」時跳過 cross-check(`(ansible_run_tags | list) != [...]`——
+   ansible-core 2.19 的 `ansible_run_tags` 是 tuple,直接跟 list 比永遠不相等),
+   由 `TestRegression_DecommissionQueryCrossCheckExemptions` 鎖住。
+   新增會呼叫 playbook 的 pilot 功能時照這個模式做,不要只帶 sandbox。
 
 另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的
 `assert target_group is not defined`),擋下「全站入口誤帶 `-e target_group=`
@@ -1293,3 +1308,4 @@ git status --short
 | 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader`；新增第 10 點：free-form shell 字串（含註解）的引號要成對，否則 `split_args` 讓整支 task 檔載入失敗，新增 `TestRegression_FreeFormCommandsSplitInAnsible` | pilot |
 | 2026-09-24 | v1.36 | §4.3 新增第 5 點：prod attestation gate 的 `that:` 不准放 `stage != 'prod'`（搭配 `when: stage == 'prod'` 會讓 prod 永遠失敗）。修正 9 支 playbook 共 10 道 gate，新增全 repo lint `TestRegression_AssertNeverNegatesItsOwnWhen` | pilot |
 | 2026-09-25 | v1.37 | §4.3 新增第 6 點：stage gate 一律標 `always`，否則 `--tags`（包括 `pilot deploy` 單一元件精靈的 tags 欄位）會跳過 cross-check，讓 prod group 主機以 sandbox 規則被改。6 支 playbook 的 18 道 gate 改標 `always`，freeipa-ca-trust、internal-endpoint（兩個 play）、reverse-proxy 補上 cross-check；新增 lint `TestRegression_StageGatesAlwaysRunInTaggedPlays`、`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` | pilot |
+| 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |

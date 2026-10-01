@@ -131,3 +131,17 @@ type Verification struct {
 	Historical bool
 	Ownership  string
 }
+
+// withStage appends the stage arguments stage returns (stage=..., plus the
+// operator's confirmation for staging or prod) to args. A nil stage adds
+// nothing.
+func withStage(args []string, stage func() ([]string, error)) ([]string, error) {
+	if stage == nil {
+		return args, nil
+	}
+	extra, err := stage()
+	if err != nil {
+		return nil, err
+	}
+	return append(args, extra...), nil
+}
