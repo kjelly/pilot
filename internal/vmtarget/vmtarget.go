@@ -426,6 +426,12 @@ const CleanSnapshotTag = "clean"
 // user having to think about it.
 const DefaultDiskGB = 30
 
+// DefaultVCPUs is the vCPU count used when Options.VCPUs is 0.
+const DefaultVCPUs = 2
+
+// DefaultMemoryMB is the memory size used when Options.MemoryMB is 0.
+const DefaultMemoryMB = 2048
+
 func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if opt.Name == "" {
 		return nil, errors.New("vmtarget: name is required")
@@ -466,11 +472,11 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 	vcpus := opt.VCPUs
 	if vcpus == 0 {
-		vcpus = 2
+		vcpus = DefaultVCPUs
 	}
 	mem := opt.MemoryMB
 	if mem == 0 {
-		mem = 2048
+		mem = DefaultMemoryMB
 	}
 	disk := opt.DiskGB
 	if disk == 0 {

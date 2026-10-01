@@ -14,7 +14,10 @@ services: local
 nodes:
   - name: dt-ipa
     base_image: almalinux-9
-    memory: 4096
+    # The guest sees about 95% of this (4096 showed 3911 MiB), and pilot
+    # deploy needs 4096 MiB for freeipa-server
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
     vcpus: 2
     disk: 30
     ssh_user: root
