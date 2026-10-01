@@ -685,6 +685,16 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    字串裡(含註解)的引號與 Jinja `{{ }}`/`{% %}`/`{# #}` 都要成對;
    `internal/spec/freeform_args_regression_test.go::TestRegression_FreeFormCommandsSplitInAnsible`
    用與 `split_args` 相同的規則檢查全部 `playbooks/**`。
+11. **在 loop 裡累加的 fact,loop 沒有任何 item 時就不會被設定**:
+   `x: "{{ (x | default([])) + [item] }}"` 這種寫法,清單是空的時候 `x` 仍然
+   undefined,之後任何不帶 default 的讀取都會失敗。2026-09-25
+   `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized` 在
+   `endpoints: []` 時讓 decommission verify 查詢直接報
+   `'internal_endpoint_normalized' is undefined`。累加前先用 `set_fact` 設成
+   空值(`[]`/`{}`);或確保每個不帶 default 的讀取都被檢查過它的 `when:` 擋住,
+   或跟累加的 task 用同一個 loop。
+   `internal/spec/loop_accumulator_regression_test.go::TestRegression_LoopAccumulatorsAreInitializedOrGuarded`
+   對全部 `playbooks/**` 檢查。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1309,3 +1319,4 @@ git status --short
 | 2026-09-24 | v1.36 | §4.3 新增第 5 點：prod attestation gate 的 `that:` 不准放 `stage != 'prod'`（搭配 `when: stage == 'prod'` 會讓 prod 永遠失敗）。修正 9 支 playbook 共 10 道 gate，新增全 repo lint `TestRegression_AssertNeverNegatesItsOwnWhen` | pilot |
 | 2026-09-25 | v1.37 | §4.3 新增第 6 點：stage gate 一律標 `always`，否則 `--tags`（包括 `pilot deploy` 單一元件精靈的 tags 欄位）會跳過 cross-check，讓 prod group 主機以 sandbox 規則被改。6 支 playbook 的 18 道 gate 改標 `always`，freeipa-ca-trust、internal-endpoint（兩個 play）、reverse-proxy 補上 cross-check；新增 lint `TestRegression_StageGatesAlwaysRunInTaggedPlays`、`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` | pilot |
 | 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |
+| 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
