@@ -355,6 +355,7 @@
 
       rescue:
         - name: "ROLLBACK — remove the siem forward managed block"
+          tags: [always]
           ansible.builtin.blockinfile:
             path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
@@ -362,12 +363,14 @@
             state: absent
 
         - name: "ROLLBACK — remove the /etc/hosts pin"
+          tags: [always]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
             state: absent
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               wazuh-manager apply FAILED (see task output above); the

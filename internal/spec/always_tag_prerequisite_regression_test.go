@@ -248,7 +248,11 @@ type varSetter struct {
 // overwrite in its own set_fact (a self-accumulating pattern, e.g.
 // `x: "{{ x | default([]) + [...] }}"`) is checked against whatever set it
 // the previous time — exactly the hazard in question, not a false
-// positive.
+// positive. A task that checks `x is defined` (or `is not defined`) handles
+// the setter not having run, and is not flagged: rescue tasks do this to
+// restore only what the current run changed (audit-log-forwarding's
+// audit.rules restore). A bare `| default(...)` is still flagged, because
+// it silently stands in for data the task expected.
 func findAlwaysTagPrerequisiteViolations(tasks []playbookTask) []string {
 	lastSetter := map[string]varSetter{}
 	var violations []string
@@ -264,7 +268,7 @@ func findAlwaysTagPrerequisiteViolations(tasks []playbookTask) []string {
 				if setter.Always {
 					continue
 				}
-				if taskOwnBodyReferencesVar(task.Node, varName) {
+				if taskOwnBodyReferencesVar(task.Node, varName) && !taskChecksVarDefined(task.Node, varName) {
 					violations = append(violations, fmt.Sprintf(
 						"line %d: task %q is tagged always and references %q, but %q (its most recent setter) is not tagged always — a --tags selection that excludes %q's tags still runs this task with %q missing or stale",
 						task.Line, task.Name, varName, setter.TaskName, setter.TaskName, varName))
@@ -276,4 +280,82 @@ func findAlwaysTagPrerequisiteViolations(tasks []playbookTask) []string {
 		}
 	}
 	return violations
+}
+
+// taskChecksVarDefined reports whether the task's own body tests varName
+// with `is defined` or `is not defined`.
+func taskChecksVarDefined(item *yaml.Node, varName string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(varName) + `\s+is\s+(not\s+)?defined\b`)
+	var found bool
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if found || n == nil {
+			return
+		}
+		switch n.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				switch n.Content[i].Value {
+				case "block", "rescue", "always":
+					continue
+				}
+				walk(n.Content[i+1])
+			}
+		case yaml.ScalarNode:
+			found = re.MatchString(n.Value)
+		default:
+			for _, c := range n.Content {
+				walk(c)
+			}
+		}
+	}
+	walk(item)
+	return found
+}
+
+func TestFindAlwaysTagPrerequisiteViolations(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{"always task reads a row-tagged register", `
+- hosts: all
+  tasks:
+    - {name: render, tags: [C3], template: {src: a, dest: b, backup: true}, register: r}
+    - {name: restore, tags: [always], copy: {src: "{{ r.backup_file }}", dest: b}}
+`, 1},
+		{"a default does not count as handling it", `
+- hosts: all
+  tasks:
+    - {name: render, tags: [C3], template: {src: a, dest: b}, register: r}
+    - {name: use, tags: [always], debug: {msg: "{{ r | default({}) }}"}}
+`, 1},
+		{"an is defined check handles it (audit-log-forwarding's restore)", `
+- hosts: all
+  tasks:
+    - {name: render, tags: [C3], template: {src: a, dest: b, backup: true}, register: r}
+    - name: restore
+      tags: [always]
+      copy: {src: "{{ r.backup_file }}", dest: b}
+      when: [r is defined, r.backup_file is defined]
+`, 0},
+		{"always setter", `
+- hosts: all
+  tasks:
+    - {name: detect, tags: [always], stat: {path: a}, register: r}
+    - {name: use, tags: [always], debug: {msg: "{{ r.stat.exists }}"}}
+`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks, err := parsePlaybookTasks([]byte(tc.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := findAlwaysTagPrerequisiteViolations(tasks); len(got) != tc.want {
+				t.Fatalf("got %d violations %v, want %d", len(got), got, tc.want)
+			}
+		})
+	}
 }

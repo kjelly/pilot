@@ -475,10 +475,11 @@
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: siem_forward_conf_result is changed
+          when: (siem_forward_conf_result | default({})) is changed
 
       rescue:
         - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ audit_rules_result.backup_file }}"
             dest: "{{ audit_rules_dest }}"
@@ -489,6 +490,7 @@
             - audit_rules_result.backup_file is defined
 
         - name: "ROLLBACK — remove audit.rules.j2 if this was the first apply (no backup exists)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ audit_rules_dest }}"
             state: absent
@@ -497,21 +499,25 @@
             - audit_rules_result.backup_file is not defined
 
         - name: "ROLLBACK — reload kernel audit rules back to the restored state"
+          tags: [always]
           ansible.builtin.command: augenrules --load
           changed_when: false
           failed_when: false
 
         - name: "ROLLBACK — remove siem forward config"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ siem_forward_conf }}"
             state: absent
 
         - name: "ROLLBACK — restart rsyslog with the forward config removed"
+          tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               audit-log-forwarding apply failed (see task output above); the

@@ -189,7 +189,7 @@
       ansible.builtin.dnf:
         name: [wazuh-agent, audit]
         state: present
-        update_cache: "{{ wazuh_yum_repo is changed }}"
+        update_cache: "{{ (wazuh_yum_repo | default({})) is changed }}"
       register: dnf_wazuh_agent
       until: dnf_wazuh_agent is succeeded
       retries: 2
@@ -256,6 +256,7 @@
           register: wazuh_address_result
 
         - name: "Step 8: Check whether this agent is already enrolled (client.keys populated)"
+          tags: [C9]
           ansible.builtin.stat:
             path: "{{ wazuh_client_keys }}"
           register: wazuh_client_keys_stat
@@ -301,12 +302,13 @@
             name: wazuh-agent
             state: restarted
           when: >-
-            wazuh_fim_conf_result is changed
-            or wazuh_address_result is changed
+            (wazuh_fim_conf_result | default({})) is changed
+            or (wazuh_address_result | default({})) is changed
             or (wazuh_agent_auth_result is defined and wazuh_agent_auth_result is changed)
 
       rescue:
         - name: "ROLLBACK — remove the FIM whodata managed block"
+          tags: [always]
           ansible.builtin.blockinfile:
             path: "{{ wazuh_ossec_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-fim-apply.yml FIM whodata) -->"
@@ -314,17 +316,20 @@
             state: absent
 
         - name: "ROLLBACK — remove the /etc/hosts pin"
+          tags: [always]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ wazuh_manager_alias }}$'
             state: absent
 
         - name: "ROLLBACK — restart wazuh-agent with the FIM block removed"
+          tags: [always]
           ansible.builtin.systemd:
             name: wazuh-agent
             state: restarted
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               wazuh-fim apply FAILED (see task output above); the FIM whodata

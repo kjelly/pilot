@@ -17,21 +17,13 @@ import (
 // needs its reads fixed and a tag-scoped run on a target; an entry fails
 // the test once the playbook has no such read left.
 var taggedPrerequisiteAllowlist = map[string]string{
-	"audit-log-forwarding-apply.yml":   "follow-up",
-	"dcgm-exporter-apply.yml":          "follow-up",
 	"freeipa-client-apply.yml":         "follow-up",
 	"freeipa-identity-apply.yml":       "follow-up",
-	"freeipa-nfs-server-apply.yml":     "follow-up",
 	"gateway-scope-apply.yml":          "follow-up",
-	"host-monitoring-apply.yml":        "follow-up",
-	"log-server-apply.yml":             "follow-up",
-	"log-shipping-apply.yml":           "follow-up",
 	"pilot-access-directory-apply.yml": "follow-up",
 	"pilot-access-gateway-apply.yml":   "follow-up",
 	"pilot-session-store-apply.yml":    "follow-up",
 	"seaweedfs-s3-apply.yml":           "follow-up",
-	"snmp-exporter-apply.yml":          "follow-up",
-	"wazuh-fim-apply.yml":              "follow-up",
 }
 
 // TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet is a repo-wide lint

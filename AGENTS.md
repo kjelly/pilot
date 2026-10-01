@@ -588,12 +588,14 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   `fail` 卻沒有,rescue 會「成功」,整個 run 反而回報成功。規則:block 裡有帶
   tag 的 task,rescue 每個 task 都標 `always`;rescue 讀的 snapshot/fact(備份檔、
   `*_is_upgrade` 這類升級判斷、備份目錄)也要標 `always`(上面第一點,
-  `AlwaysTagPrerequisite` lint 會抓)。block 的 `always:` 區段同理。
+  `AlwaysTagPrerequisite` lint 會抓)。只還原「這次 run 改過的東西」的 rescue
+  可以改用 `x is defined` 檢查 setter 有沒有跑(audit-log-forwarding 的
+  audit.rules 還原),lint 接受這種寫法,但不接受單純的 `| default`。
+  block 的 `always:` 區段同理。
   `internal/spec/rescue_tags_regression_test.go::TestRegression_RescueRunsWheneverItsBlockDoes`
   對全 repo 鎖住;2026-10-01 修正 8 支(agent-controller、alertmanager、
   dashboard、detection-engine、pam-oidc-sshd、prometheus、restic-backup、
-  thanos-query),其餘 12 支列在 `rescueTagGapAllowlist`,每支要先補齊前置
-  並在 target 上做 tag-scoped 失敗測試,才能移出。
+  thanos-query),同日再修正其餘 12 支,`rescueTagGapAllowlist` 清空。
 - 不只 `always` task:帶 row tag 的 task 讀的 `register`/`set_fact`,setter 也
   要在同樣的 `--tags` 下執行(setter 標 `always`,或帶 reader 的每個 tag),
   不然就用 `| default(...)`/`is defined` 讀。最常見的是 container task 的
@@ -603,8 +605,9 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   `restart:` 這類「這次有沒有改」的判斷用 `(x_result | default({})) is changed`
   (render 沒跑就是沒改,不重啟)。
   `internal/spec/tagged_prerequisite_regression_test.go::TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`
-  對全部 `playbooks/apply/*.yml` 檢查;2026-10-01 修了上面 8 支裡的 6 支,其餘
-  15 支列在 `taggedPrerequisiteAllowlist`。
+  對全部 `playbooks/apply/*.yml` 檢查;2026-10-01 修了上面 8 支裡的 6 支,
+  同日再修 rescue 那 12 支裡的 8 支,其餘 7 支(沒有 rescue 會因此回滾)
+  列在 `taggedPrerequisiteAllowlist`。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -1355,3 +1358,4 @@ git status --short
 | 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
 | 2026-10-01 | v1.40 | §4.4 補一點：assert/fail 檢查本身也要能在 `--tags` run 執行——輸入檢查標 `always`，流程中間的驗證標所屬步驟的 row tag。修正 10 支 playbook 共 20 個沒有 tag 的檢查，新增全 repo lint `TestRegression_NoUntaggedChecksInTaggedPlays`；`preTaskGateNotAlwaysAllowlist` 清空 | pilot |
 | 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
+| 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查 | pilot |

@@ -163,6 +163,7 @@
     # deferred to the real apply) — deferred here too, same convention as
     # wazuh-manager-apply.yml.
     - name: "Detect a co-located wazuh-manager container (for real alerts-log path resolution)"
+      tags: [always]
       community.docker.docker_container_info:
         name: "{{ siem_wazuh_manager_container }}"
       register: siem_wazuh_container_info
@@ -175,10 +176,12 @@
     # non-empty, the config/volumes tasks below add it as a second,
     # independent scrape source instead of replacing the first.
     - name: "Resolve siem_log_root_effective (log-server's own receiver output — always scraped)"
+      tags: [always]
       ansible.builtin.set_fact:
         siem_log_root_effective: "{{ siem_log_root | default('', true) or siem_log_root_default }}"
 
     - name: "Resolve siem_log_root_wazuh_detected (additive: co-located wazuh-manager's real alerts-log volume, if any)"
+      tags: [always]
       ansible.builtin.set_fact:
         siem_log_root_wazuh_detected: >-
           {{ (siem_wazuh_logs_mount | map(attribute='Source') | first)
@@ -281,7 +284,7 @@
             image: "grafana/promtail:{{ promtail_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ promtail_config_result is changed }}"
+            restart: "{{ (promtail_config_result | default({})) is changed }}"
             command: "-config.file=/etc/promtail/config.yml"
             networks:
               - name: "{{ docker_network_name }}"
@@ -309,6 +312,7 @@
 
       rescue:
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               log-shipping apply FAILED (see task output above). Container
