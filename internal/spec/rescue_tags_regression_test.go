@@ -11,33 +11,19 @@ import (
 )
 
 // rescueTagGapAllowlist lists playbooks whose rescues a tag-scoped run can
-// still skip. Each needs its rollback's prerequisites made to run under
-// tags too, and its own tag-scoped failure test on a target, in a
-// follow-up to the 2026-10-01 change that fixed the first eight. An entry
-// fails the test once the playbook has no gaps left.
-var rescueTagGapAllowlist = map[string]string{
-	"playbooks/apply/audit-log-forwarding-apply.yml":       "follow-up: audit rules and SIEM forward rollback",
-	"playbooks/apply/dcgm-exporter-apply.yml":              "follow-up: container removal",
-	"playbooks/apply/freeipa-nfs-server-apply.yml":         "follow-up: exports fragment snapshot and restore",
-	"playbooks/apply/freeipa-realm-replacement-apply.yml":  "follow-up: pre-migration archive restore",
-	"playbooks/apply/freeipa-server-apply.yml":             "follow-up: rescue tagged freeipa/freeipa-verify, block has freeipa-dns-recursion",
-	"playbooks/apply/host-monitoring-apply.yml":            "follow-up: node_exporter stop",
-	"playbooks/apply/log-server-apply.yml":                 "follow-up: rsyslog drop-in removal",
-	"playbooks/apply/log-shipping-apply.yml":               "follow-up: failure message only",
-	"playbooks/apply/pilot-access-target-policy-apply.yml": "follow-up: sshd drop-in snapshot and restore",
-	"playbooks/apply/snmp-exporter-apply.yml":              "follow-up: auths.yml removal",
-	"playbooks/apply/wazuh-fim-apply.yml":                  "follow-up: FIM block and /etc/hosts pin removal",
-	"playbooks/apply/wazuh-manager-apply.yml":              "follow-up: SIEM forward block and /etc/hosts pin removal",
-}
+// still skip. It is empty: the first eight and then the other twelve were
+// fixed on 2026-10-01. An entry needs a reason, and fails the test
+// once the playbook has no gaps left.
+var rescueTagGapAllowlist = map[string]string{}
 
 // TestRegression_RescueRunsWheneverItsBlockDoes is a repo-wide lint over
 // playbooks/**. --tags filters a block's rescue like any other task list:
 // when a selected task in the block fails, only the rescue tasks that the
 // same --tags selects run (checked on ansible-core 2.19.2). Until
-// 2026-10-01, eight apply playbooks (agent-controller, alertmanager,
-// dashboard, detection-engine, pam-oidc-sshd, prometheus, restic-backup,
-// thanos-query) had untagged rescues around row-tagged steps, so a failed
-// `--tags <row>` run did not roll back. Tagging only the rollback is worse:
+// 2026-10-01, twenty apply playbooks had rescues that --tags skips: untagged
+// rescues around row-tagged steps, or (freeipa-server,
+// pilot-access-target-policy) rescues that carried only the block's own
+// tags. A failed `--tags <row>` run did not roll back. Tagging only the rollback is worse:
 // the untagged `fail` at the end of the rescue is skipped, the rescue
 // succeeds, and the run ends rc=0 with `rescued=1`. A rescue task must be tagged
 // `always`, or carry every tag of every task in its block (and be untagged

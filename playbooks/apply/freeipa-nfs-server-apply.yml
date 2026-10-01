@@ -188,13 +188,13 @@
         owner: root
         group: root
         mode: "0755"
-      tags: [C7]
+      tags: [always, C7]
 
     - name: "Inspect managed exports fragment before mutation"
       ansible.builtin.stat:
         path: "{{ nfs_exports_fragment }}"
       register: nfs_exports_before
-      tags: [C7]
+      tags: [always, C7]
 
     - name: "Inspect create-once managed exports rollback state"
       ansible.builtin.stat:
@@ -203,7 +203,7 @@
         - "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
         - "{{ nfs_exports_fragment }}.pre-freeipa-nfs.absent"
       register: nfs_exports_rollback_state
-      tags: [C7]
+      tags: [always, C7]
 
     - name: "Reconcile NFS identity, exports, and ACL with rollback"
       when: not ansible_check_mode
@@ -219,7 +219,7 @@
             - nfs_exports_before.stat.exists
             - not nfs_exports_rollback_state.results[0].stat.exists
             - not nfs_exports_rollback_state.results[1].stat.exists
-          tags: [C7]
+          tags: [always, C7]
 
         - name: "Record that the managed exports fragment was initially absent"
           ansible.builtin.copy:
@@ -232,7 +232,7 @@
           when:
             - not nfs_exports_before.stat.exists
             - not nfs_exports_rollback_state.results[0].stat.exists
-          tags: [C7]
+          tags: [always, C7]
 
         - name: "Acquire Kerberos admin ticket"
           ansible.builtin.command:
@@ -308,7 +308,7 @@
           register: nfs_share_group_resolvable
           changed_when: false
           failed_when: false
-          tags: [C5]
+          tags: [C5, C6]
 
         - name: "Warn and defer shares whose roster-managed group does not exist yet"
           ansible.builtin.debug:
@@ -322,12 +322,12 @@
           loop_control:
             label: "{{ item.item.name }}"
           when: item.rc != 0
-          tags: [C5]
+          tags: [C5, C6]
 
         - name: "Compute the shares whose ownership group already exists"
           ansible.builtin.set_fact:
             nfs_shares_ready: "{{ nfs_share_group_resolvable.results | default([]) | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
-          tags: [C5]
+          tags: [C5, C6]
 
         # A task-level `vars:` override of `nfs_selected_server` (as the
         # exports-template task used to do) is silently ignored: Ansible
@@ -427,16 +427,19 @@
           tags: [C3, C4]
       rescue:
         - name: "Inspect managed exports rollback snapshot"
+          tags: [always]
           ansible.builtin.stat:
             path: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
           register: nfs_exports_backup
 
         - name: "Inspect managed exports initially-absent marker"
+          tags: [always]
           ansible.builtin.stat:
             path: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.absent"
           register: nfs_exports_initially_absent
 
         - name: "Restore managed exports fragment"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ nfs_exports_fragment }}.pre-freeipa-nfs.bak"
             dest: "{{ nfs_exports_fragment }}"
@@ -444,6 +447,7 @@
             mode: "0644"
           when: nfs_exports_backup.stat.exists
         - name: "Remove a managed exports fragment that did not exist before this role"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ nfs_exports_fragment }}"
             state: absent
@@ -451,10 +455,12 @@
             - not nfs_exports_backup.stat.exists
             - nfs_exports_initially_absent.stat.exists
         - name: "Reload restored exports"
+          tags: [always]
           ansible.builtin.command: exportfs -ra
           changed_when: true
           failed_when: false
         - name: "Fail after NFS rollback"
+          tags: [always]
           ansible.builtin.fail:
             msg: "NFS reconciliation failed; the managed exports fragment was restored."
       always:

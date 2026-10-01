@@ -140,6 +140,7 @@
     # read-only probe used for the GPU-present gate.  Ordinary GPU hosts keep
     # the least-privilege container configuration below.
     - name: "Detect active NVIDIA MIG instances"
+      tags: [always]
       ansible.builtin.set_fact:
         dcgm_exporter_mig_enabled: >-
           {{ dcgm_exporter_gpu_present and
@@ -339,6 +340,7 @@
           when: not ansible_check_mode
 
         - name: "Step 4: Ensure {{ dcgm_exporter_webconfig_path | dirname }} exists"
+          tags: [C9]
           ansible.builtin.file:
             path: "{{ dcgm_exporter_webconfig_path | dirname }}"
             state: directory
@@ -352,11 +354,13 @@
         # itself) and only touch the hash/file when it actually changes —
         # same convention as host-monitoring-apply.yml Step 7.
         - name: "Step 5: Compute a change-detection fingerprint for the basic-auth credential"
+          tags: [C9]
           ansible.builtin.set_fact:
             dcgm_exporter_basic_auth_fingerprint: "{{ (dcgm_exporter_basic_auth_user ~ ':' ~ dcgm_exporter_basic_auth_password) | hash('sha256') }}"
           no_log: true
 
         - name: "Step 5: Read the previously stored fingerprint, if any"
+          tags: [C9]
           ansible.builtin.slurp:
             src: "{{ dcgm_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
           register: dcgm_exporter_stored_fingerprint_raw
@@ -364,6 +368,7 @@
           no_log: true
 
         - name: "Step 5: Determine whether the basic-auth credential changed"
+          tags: [C9]
           ansible.builtin.set_fact:
             dcgm_exporter_basic_auth_changed: >-
               {{ (dcgm_exporter_stored_fingerprint_raw.content is not defined) or
@@ -376,6 +381,7 @@
         # deferred to the real apply, same pattern as
         # host-monitoring-apply.yml's Step 8.
         - name: "Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)"
+          tags: [C9]
           ansible.builtin.command: "htpasswd -nbBC 10 {{ dcgm_exporter_basic_auth_user }} {{ dcgm_exporter_basic_auth_password }}"
           register: dcgm_exporter_htpasswd_result
           changed_when: false
@@ -397,6 +403,7 @@
           register: dcgm_exporter_webconfig_result
 
         - name: "Step 7: Persist the basic-auth fingerprint for future idempotency checks"
+          tags: [C9]
           ansible.builtin.copy:
             dest: "{{ dcgm_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
             content: "{{ dcgm_exporter_basic_auth_fingerprint }}"
@@ -414,7 +421,7 @@
             image: "nvidia/dcgm-exporter:{{ dcgm_exporter_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ dcgm_exporter_webconfig_result is changed }}"
+            restart: "{{ (dcgm_exporter_webconfig_result | default({})) is changed }}"
             runtime: nvidia
             capabilities: "{{ ['SYS_ADMIN'] if (dcgm_exporter_mig_enabled | bool) else omit }}"
             security_opts: "{{ ['seccomp=unconfined'] if (dcgm_exporter_mig_enabled | bool) else omit }}"
@@ -439,12 +446,14 @@
 
       rescue:
         - name: "ROLLBACK — remove the dcgm-exporter container"
+          tags: [always]
           community.docker.docker_container:
             name: "{{ dcgm_exporter_container_name }}"
             state: absent
           failed_when: false
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               dcgm-exporter apply FAILED (see task output above); the

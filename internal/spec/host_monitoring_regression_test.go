@@ -273,9 +273,11 @@ func TestRegression_HostMonitoringSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "state: restarted") {
 		t.Fatalf("host-monitoring-apply.yml must restart the service when the binary/unit/credential changes")
 	}
-	if !strings.Contains(applyRaw, "node_exporter_binary_result is changed") ||
-		!strings.Contains(applyRaw, "node_exporter_unit_result is changed") ||
-		!strings.Contains(applyRaw, "node_exporter_webconfig_result is changed") {
+	// Read with a default, so `--tags C7` does not fail when the steps that
+	// register these did not run (TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet).
+	if !strings.Contains(applyRaw, "(node_exporter_binary_result | default({})) is changed") ||
+		!strings.Contains(applyRaw, "(node_exporter_unit_result | default({})) is changed") ||
+		!strings.Contains(applyRaw, "(node_exporter_webconfig_result | default({})) is changed") {
 		t.Errorf("host-monitoring-apply.yml's restart task must be gated on the binary, unit, or web-config credential actually changing, not run unconditionally")
 	}
 
