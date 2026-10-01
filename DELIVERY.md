@@ -591,7 +591,8 @@ docker run --rm -it \
 | 管理 FreeIPA DNS zones／records（資料驅動 day-2 reconciler；支援 zone/record 完整 CRUD 與 authoritative prune，已對活體 FreeIPA server 實跑驗證，見 `docs/verification/freeipa-dns.md` v1.1） | `playbooks/apply/freeipa-dns-apply.yml` | `freeipa-server`（見下方「機密」，manifest 檔路徑另設於 host_vars） |
 | 把目標主機的 DNS resolver 指向 FreeIPA DNS（server/replica；day-2/opt-in，與「把機器納入 FreeIPA」互不相依，不需要 vault 機密，已對 Ubuntu/EL9 兩台 vm-target 實跑驗證，見 `docs/verification/freeipa-dns-client.md` v1.0） | `playbooks/apply/freeipa-dns-client-apply.yml` | `freeipa-dns-client` |
 | 把第二台（或後續台）FreeIPA server 加入既有 realm（multi-master HA） | `playbooks/apply/freeipa-server-replica-apply.yml` | `freeipa-server-replica`（**v0.1 草稿、未實跑**，見 `docs/verification/freeipa-server-replica.md` §0；限制與已知偏差見該檔 §5）|
-| DNS／NTP 等核心服務 | `playbooks/apply/core-infra-provider-apply.yml` | 依 `-e infra_role=dns\|ntp` |
+| NTP 核心服務 | `playbooks/apply/core-infra-provider-apply.yml` | `ntp`（`-e infra_role=ntp`） |
+| DNS 快取層：FreeIPA 前的第一層 unbound，inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA、其餘送到 `dns_upstream`；設定在 `group_vars/dns.yml`，`pilot edit` 可改（見 `docs/verification/dns.md`） | `playbooks/apply/dns-apply.yml` | `dns`（獨立主機，不可兼任 FreeIPA server/replica；prod 至少 2 台） |
 | Container 引擎(Docker) | `playbooks/apply/docker-apply.yml` | `docker`（keycloak-db/keycloak、seaweedfs-s3、wazuh-manager、prometheus/thanos-query/alertmanager 等角色的前置） |
 | Keycloak（IdP） | `playbooks/apply/keycloak-apply.yml` | `keycloak` |
 | Keycloak 資料庫 | `playbooks/apply/keycloak-db-apply.yml` | `keycloak-db` |

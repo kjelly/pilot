@@ -1,0 +1,69 @@
+# Declarative multi-VM scenario for docs/verification/dns.md §6 (the dns
+# role: unbound caching tier in front of FreeIPA DNS). Apply chain:
+# playbooks/test/dns-tier-chain.yml.
+#
+#   dt-ipa      FreeIPA server (--setup-dns), plus the dns fixtures
+#   dt-dns-1    dns tier
+#   dt-dns-2    dns tier that is also a freeipa-dns-client consumer (E3)
+#   dt-client   Ubuntu consumer (systemd-resolved path)
+#   dt-client-el AlmaLinux consumer (NetworkManager path)
+#
+# The dns settings (group_vars/dns.yml) are written with `pilot edit` into a
+# workspace next to the rendered inventory, so this file carries none.
+services: local
+nodes:
+  - name: dt-ipa
+    base_image: almalinux-9
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server
+
+  - name: dt-dns-1
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - dns
+
+  - name: dt-dns-2
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - dns
+      - freeipa-dns-client
+
+  - name: dt-client
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-dns-client
+
+  - name: dt-client-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-dns-client

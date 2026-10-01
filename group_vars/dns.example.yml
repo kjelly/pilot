@@ -1,21 +1,65 @@
 ---
 # ============================================================================
-#  group_vars/dns.example.yml —— DNS provider(core-infra-provider)設定
+#  group_vars/dns.example.yml —— dns role（unbound 快取 DNS）設定
 # ============================================================================
 #
 #  啟用:複製成『真實 inventory 旁邊』的 group_vars/dns.yml
 #    cp group_vars/dns.example.yml <inventory 目錄>/group_vars/dns.yml
-#  (.example.yml 不會被自動載入;檔名要等於 group 名 dns 才生效。)
+#  (pilot inventory generate / pilot edit 會自動建立;.example.yml 不會被
+#   自動載入,檔名要等於 group 名 dns 才生效。)
 #
-#  ⚠ 自訂 DNS 區域(dns_zones)不放這裡——它有獨立的 schema 範例,見
-#     group_vars/dns/zones.example.yaml。
+#  這個 role 的設定全部放在這一個檔案。不要另外建立 group_vars/dns/ 目錄:
+#  目錄存在時 Ansible 只載入目錄,整個忽略 dns.yml。
+#
+#  註解掉的行 = 使用 playbook 的內建預設值。用 pilot edit 修改時會自動取消
+#  註解;「還原成內建預設」會再把它註解掉。
+#
+#  inventory 裡有 FreeIPA DNS(freeipa-server,或 freeipa_setup_dns: true 的
+#  replica)時,freeipa_domain 會自動送到 FreeIPA,不需要在這裡設定。
+#  規格:docs/verification/dns.md
 # ============================================================================
 
-# DNS 服務對外監聽的位址(這台 DNS 機器的 IP)
-dns_listen_addr: 10.0.0.53
+# 外部網域往哪送:外部 upstream DNS 的 IP 清單,依序使用。
+# dns_upstream: [1.1.1.1]
 
-# 上游遞迴 DNS(解析不到本地區域時往哪送);預設 1.1.1.1
-dns_upstream: 1.1.1.1
+# 除了 freeipa_domain 以外,也要送到 FreeIPA 的 zone,
+# 例如反解 zone、用 freeipa-dns 建立的 zone:[0.0.10.in-addr.arpa, svc.pilot.internal]
+# dns_freeipa_zones: []
 
-# provider 預設 unbound,通常不用改;要改 provider 得用 -e dns_provider=...
-# (它寫死在 playbook 的 play vars,group_vars 蓋不過去——這是刻意的預設)。
+# 送到其他內部權威 DNS 的 zone,每一筆寫成 zone=ip 或 zone=ip1,ip2,
+# 例如:["corp.internal=10.0.1.2,10.0.1.3"]
+# dns_stub_zones: []
+
+# 允許查詢這台 DNS 的來源網段。不接受 0.0.0.0/0 或 ::/0。
+# dns_access_control: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+
+# 一般回應的快取上限(秒)。FreeIPA 的紀錄變更最多這麼久之後生效。
+# dns_cache_max_ttl: 300
+
+# 「查無此名稱」的快取上限(秒)。新建的 FreeIPA 紀錄最多這麼久之後查得到。
+# dns_cache_max_negative_ttl: 60
+
+# DNSSEC 驗證。只有 upstream 會剝掉 DNSSEC 紀錄時才改成 false。
+# dns_dnssec_validation: true
+
+# ----------------------------------------------------------------------------
+#  以下兩項不在 pilot edit 的編輯範圍
+# ----------------------------------------------------------------------------
+#
+#  dns_listen_addr — 對外服務的位址,預設就是這台主機的 ansible_host。
+#    只有要覆寫單一主機時,才寫在 host_vars/<主機>.yml;不要寫在這個檔案,
+#    多台 DNS 主機共用同一個位址會讓 apply 失敗。
+#
+#  dns_zones — 本地 zone(unbound 直接回答)或委派,巢狀結構,請直接編輯
+#    這個檔案。需要用 pilot edit 管理的內部紀錄,建議放到 FreeIPA
+#    (pilot edit 的 freeipa-dns 畫面)。下面是假資料的範例,取消註解並改成
+#    你自己的值才會生效:
+#
+# dns_zones:
+#   - name: pilot.lan
+#     mode: static            # static(預設)| transparent | redirect
+#     records:
+#       - { name: core, type: A, value: 10.0.0.53 }
+#       - { name: www, type: CNAME, value: git.pilot.lan. }
+#   - name: corp.internal
+#     stub_addr: 10.0.1.2

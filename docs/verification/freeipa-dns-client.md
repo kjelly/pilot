@@ -89,6 +89,13 @@ FreeIPA server/replica 自己用得到。
 > fallback，其餘情況維持 inventory 偵測到的原始順序（`freeipa-server` 排最前）。
 > 找不到任何 DNS 提供者、又沒給 `freeipa_dns_client_servers` → apply 直接
 > fail-closed（見 §6 gate）。
+>
+> inventory 的 `dns` group 有主機時（FreeIPA 前的快取 DNS 層，見
+> `docs/verification/dns.md` §2 B10），不是 DNS 提供者的主機改成先指向各 tier
+> 節點的服務位址（該主機的 `dns_listen_addr`，否則 `ansible_host`，由
+> `tasks/dns-tier-endpoints.yml` 推導），不足 3 筆時再補 FreeIPA DNS 提供者當
+> fallback，總數最多 3 筆。DNS 提供者自己仍然 self-first；`freeipa_dns_client_servers`
+> 仍然優先於一切。本檔 C1–C6 的檢查內容不變（C6 經由 tier 一樣解析得到）。
 
 ## 2. Checklist
 
@@ -241,3 +248,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-08-17 | v1.0 | 修 Debian 分支缺少 DHCP per-link DNS 覆寫的 gap(見 §6 C3 備註)。對活體 Ubuntu 24.04 vm-target 實測:修法前重現 bug——寫入 `resolved.conf.d` drop-in 後 `resolvectl status` 同時列出 `Global: 198.51.100.53`(pilot 設定)與 `Link 2 (enp1s0): 192.168.122.1`(DHCP),`resolvectl query`/`dig` 實際由 DHCP 那組回答(14ms 內完成,黑洞 IP 不可能這麼快);修法後(新增 `/etc/netplan/99-pilot-freeipa-dns-client.yaml` + `netplan apply`)`Link 2` 變成 `Current Scopes: none`,查詢正確改向黑洞 IP 逾時。跑完整 `freeipa-dns-client-apply.yml`(`-e freeipa_dns_client_servers=[...]` 黑洞 IP,C6 功能性驗證預期會 fail-closed 並觸發既有 rescue/rollback,此為預期行為,不是新 bug)驗證兩個新 task 首次套用 `changed`,reboot 後設定存活,第二次重跑 `ok`/`skipping`(無 `changed`),與既有的 idempotent 慣例一致。額外發現一個測試過程才踩到、與本次修法無關的既有陷阱:`-e freeipa_dns_client_servers=[198.51.100.53]`(裸 `[...]` 不加引號)不會被 ansible 解析成 list,而是整段當字串賦值,讓 Jinja 的 `{% for ip in ... %}` 逐字元跑過該字串、產生 15 行垃圾 `nameserver` (`[`/`1`/`9`/`8`/`.`/... 各自一行);必須用 `-e '{"freeipa_dns_client_servers": ["198.51.100.53"]}'` 這種 JSON 型 `-e` 才會正確解析成 list——本檔與呼叫端文件都還沒對這個踩坑留說明,先記錄在此,尚未修正(不在本次改動範圍內)。| sre |
 | 2026-08-17 | v1.0 | 修上一列記錄、當時尚未處理的 `freeipa_dns_client_servers` 裸 `[...]` 陷阱:在「normalize」set_fact 之後新增一個 `ansible.builtin.assert` gate,用 `freeipa_dns_client_servers \| type_debug == 'list'` 判斷這個值是不是真的 list——不是就 fail closed,錯誤訊息直接教怎麼改成 `-e '{"freeipa_dns_client_servers": [...]}'` 或改放進 group_vars/host_vars 的 YAML list,而不是放任 Jinja `for` 迴圈逐字元跑出一堆垃圾 `nameserver` 行。用最小的 localhost-only ansible-playbook(`connection: local`,不需要真的 VM,純粹在測 Ansible 自己的變數型別解析行為)驗證 4 種輸入:沒給值(預設 `[]`)PASS、裸 `-e servers=[ip]` 正確 FAIL 並印出上述訊息、JSON 型 `-e '{"servers": [...]}'` PASS、`-e @file.yml`(YAML list)PASS。`ansible-lint`/`go test ./...` 皆過,無 regression。| sre |
 | 2026-09-24 | v1.0 | Checklist 不變。實作面（§6）：`/etc/resolv.conf` 的寫入改為只在 Debian 做（EL 由 NetworkManager 依 profile 產生；否則一般 EL client 第二次 apply 永遠 `changed=1`）；rescue 改為套用前快照、失敗時還原全部 resolver 檔案與 EL connection 設定；`dig` 改由 apt framework 安裝 `bind9-dnsutils`；resolver include 補上 `apply` tags。Ubuntu 24.04 與 AlmaLinux 9 一般 client 各 6/6 PASS + `changed=0`，見 `docs/evidence/freeipa-dns-client/2026-09-24-62d8069.md` | pilot |
+| 2026-10-01 | v1.0 | Checklist 不變。§1.5 補上 dns tier 存在時的 nameserver 順序（tier 在前、FreeIPA 補到最多 3 筆，見 `docs/verification/dns.md` §2 B10）；實作在共用檔 `tasks/freeipa-dns-client-resolver.yml`，tier 位址由 `tasks/dns-tier-endpoints.yml` 推導。2026-10-01 對一台同時是 tier 的 Ubuntu 24.04 vm-target 實跑：resolv.conf 依序是 tier、FreeIPA，`dns-apply` 與本 playbook 交替重跑皆 `changed=0` | sre |

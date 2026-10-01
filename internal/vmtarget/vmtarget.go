@@ -1343,7 +1343,7 @@ func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error 
 //     inventory file.
 //
 // This is what lets `pilot vm-target run` + a role-gated apply
-// playbook (`-e infra_role=dns -e target_group=dns`) work end-to-end
+// playbook (`-e infra_role=ntp -e target_group=ntp`) work end-to-end
 // with no human-built inventory.
 func (t *Target) RenderInventory() (string, error) {
 	if t == nil {

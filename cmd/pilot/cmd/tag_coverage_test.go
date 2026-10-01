@@ -54,10 +54,7 @@ var specTagMap = []specTagMapping{
 			"C11": "functional probe (run sudo, assert audit.log recorded it) — verify-only outcome of the C1..C10 auditd config",
 		}},
 	{spec: "core-infra-provider.md", playbook: "core-infra-provider-apply.yml",
-		prefixes: []string{"dns", "ntp"},
-		exemptRows: map[string]string{
-			"C7": "optional DNS probe gated on $DNS_PROBE_NAME — verify-only",
-		}},
+		prefixes: []string{"ntp"}},
 	{spec: "core-infra-provider-db.md", playbook: "keycloak-db-apply.yml",
 		prefixes: []string{"db"},
 		exemptRows: map[string]string{
@@ -87,6 +84,18 @@ var specTagMap = []specTagMapping{
 		}},
 	{spec: "detection-engine-model-provider.md", playbook: "detection-engine-apply.yml",
 		noRowTags: "Stage B provider verification: M1 shares the same config-validate task as C3 (detection-engine-C3); M2-M5 are pure diagnostic CLI checks (provider probe/status field reads) with no dedicated mutating task to tag — spec §60"},
+	{spec: "dns.md", playbook: "dns-apply.yml", prefixes: []string{"dns"},
+		exemptRows: map[string]string{
+			"C7":  "external name resolves through the tier — end-to-end result of the forward-zone (dns-C6) and the running service (dns-C2)",
+			"C12": "internal A record equals FreeIPA's answer — end-to-end result of the FreeIPA stub zone (dns-C11) plus domain-insecure in the same config",
+			"C13": "FreeIPA SRV records resolve with capped TTL — result of the stub zone (dns-C11) and cache caps (dns-C10)",
+			"C14": "NXDOMAIN carries FreeIPA's SOA with capped TTL — result of the stub zone (dns-C11) and cache-max-negative-ttl (dns-C10)",
+			"C15": "dns_freeipa_zones record resolves — stub zones are written by the same config task as dns-C11",
+			"C16": "reverse PTR resolves — the transparent local-zone and stub zone are written by the same config task as dns-C11",
+			"C17": "dns_zones/dns_stub_zones name resolves — written by the same config task as dns-C11",
+			"C19": "the tier host's own resolution still works — the playbook deliberately leaves the host resolver alone (dns.md §2 B9)",
+			"C20": "consumers resolve through the tier — implemented by tasks/freeipa-dns-client-resolver.yml (freeipa-dns-client / internal-endpoint), not by dns-apply.yml",
+		}},
 	{spec: "docker.md", playbook: "docker-apply.yml", prefixes: []string{"docker"},
 		exemptRows: map[string]string{
 			"C3": "docker --version probe — side effect of the engine install (docker-C1)",

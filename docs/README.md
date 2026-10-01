@@ -26,7 +26,7 @@
 | **把目標主機的 DNS resolver 指向 FreeIPA DNS（server/replica）** | [`runbooks/freeipa-dns-client.md`](./runbooks/freeipa-dns-client.md)；與 `freeipa-client`（AAA 納管）互不相依，day-2/opt-in，已對 Ubuntu(systemd-resolved)與 EL9(NetworkManager，含 FreeIPA server 自我指向)兩台 vm-target 實跑驗證 |
 | **把 FreeIPA NFS clients 接到 NetApp、Synology 或 QNAP** | [`external-nfs-provider-integration.md`](./external-nfs-provider-integration.md)；未經硬體實跑的 provider readiness 與安全邊界指南 |
 | **開啟 FreeIPA 目錄服務（389-ds）稽核日誌** | [`runbooks/freeipa-389ds-audit-log.md`](./runbooks/freeipa-389ds-audit-log.md) |
-| **DNS 服務自訂內部網域（網域資料不進公開 git）** | [`runbooks/core-infra-provider-dns-zones.md`](./runbooks/core-infra-provider-dns-zones.md) |
+| **DNS 快取層：FreeIPA 前的第一層 unbound，內部網域自動導向 FreeIPA、外部導向自訂 upstream；設定用 `pilot edit`** | [`verification/dns.md`](./verification/dns.md) |
 | **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |
 | **主機 auditd 稽核規則 + 轉送日誌到 SIEM** | [`runbooks/audit-log-forwarding.md`](./runbooks/audit-log-forwarding.md) |
 | **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |

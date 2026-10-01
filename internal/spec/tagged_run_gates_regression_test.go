@@ -21,17 +21,13 @@ import (
 // cross-check where it is missing). Keys are "<playbook>|<task name>".
 // Entries may only be removed.
 var preTaskGateNotAlwaysAllowlist = map[string]bool{
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: infra_role must be dns or ntp":                            true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: staging or prod requires explicit confirm":                true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: stage must match this host's inventory environment group": true,
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: prod requires recent staging attestation":                 true,
-	"playbooks/apply/docker-apply.yml|Gate: staging or prod requires explicit confirm":                             true,
-	"playbooks/apply/docker-apply.yml|Gate: stage must match this host's inventory environment group":              true,
-	"playbooks/apply/docker-apply.yml|Gate: prod requires recent staging attestation":                              true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: required secrets present (fail early, before any mutation)":     true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: backup destination must be resolvable":                          true,
-	"playbooks/apply/reverse-proxy-apply.yml|Gate: staging or prod requires explicit confirm":                      true,
-	"playbooks/apply/reverse-proxy-apply.yml|Gate: prod requires recent staging attestation":                       true,
+	"playbooks/apply/docker-apply.yml|Gate: staging or prod requires explicit confirm":                         true,
+	"playbooks/apply/docker-apply.yml|Gate: stage must match this host's inventory environment group":          true,
+	"playbooks/apply/docker-apply.yml|Gate: prod requires recent staging attestation":                          true,
+	"playbooks/apply/restic-backup-apply.yml|Gate: required secrets present (fail early, before any mutation)": true,
+	"playbooks/apply/restic-backup-apply.yml|Gate: backup destination must be resolvable":                      true,
+	"playbooks/apply/reverse-proxy-apply.yml|Gate: staging or prod requires explicit confirm":                  true,
+	"playbooks/apply/reverse-proxy-apply.yml|Gate: prod requires recent staging attestation":                   true,
 }
 
 // TestRegression_PreTaskGatesRunUnderApplyTags is a repo-wide lint over

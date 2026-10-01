@@ -1,0 +1,38 @@
+---
+# Shared task: the client-facing service address of every host in the `dns`
+# tier (docs/verification/dns.md §2 B10 point 1). Included by
+# playbooks/apply/dns-apply.yml (the address each tier host listens on) and
+# by tasks/freeipa-dns-client-resolver.yml (the addresses consumers send
+# their queries to), so the two sides can never derive different addresses
+# (AGENTS.md §5.7).
+#
+# A tier host's service address is its own dns_listen_addr when one is set
+# (a per-host override, normally in host_vars/<host>.yml), otherwise its
+# ansible_host.
+#
+# Output facts:
+#   dns_tier_endpoints : [{host: <inventory_hostname>, addr: <address>}, ...]
+#                        in groups['dns'] order; [] when the group is empty.
+#   dns_tier_self_addr : the same rule applied to the current host, also when
+#                        it is targeted with -e target_group= and is not in
+#                        the dns group (single-host vm-target tests).
+#
+# Reset first: this file can be included more than once in one play, and a
+# set_fact from an earlier include would otherwise leak into this one
+# (AGENTS.md §4.5 point 2).
+- name: "DNS tier endpoints — reset"
+  ansible.builtin.set_fact:
+    dns_tier_endpoints: []
+    dns_tier_self_addr: >-
+      {{ dns_listen_addr | default(ansible_host | default(inventory_hostname), true) | string | trim }}
+
+- name: "DNS tier endpoints — collect each tier host's service address"
+  ansible.builtin.set_fact:
+    dns_tier_endpoints: >-
+      {{ dns_tier_endpoints + [{
+           'host': item,
+           'addr': (hostvars[item].dns_listen_addr
+                    | default(hostvars[item].ansible_host | default(item), true)
+                    | string | trim)
+         }] }}
+  loop: "{{ groups['dns'] | default([]) }}"

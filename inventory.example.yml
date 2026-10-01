@@ -104,10 +104,10 @@ all:
     reverse-proxy:
       hosts: {}                 # 例:專門一台 → hosts: { web-1: }
 
-    # -- 核心基礎服務(core-infra-provider-apply.yml,以 infra_role 選角色)--
-    dns:                       # 跑 -e infra_role=dns 時作用的機器
-      hosts: {}                # 例:讓 ipa-1 兼當 DNS → 改成  hosts: { ipa-1: }
-    ntp:                       # 跑 -e infra_role=ntp 時作用的機器
+    # -- 核心基礎服務 --
+    dns:                       # unbound 快取 DNS 層(dns-apply.yml):內部網域自動導向 FreeIPA。
+      hosts: {}                # 要用獨立主機,不能是 freeipa-server/replica;prod 至少 2 台 → hosts: { dns-1:, dns-2: }
+    ntp:                       # 跑 core-infra-provider-apply.yml -e infra_role=ntp 時作用的機器
       hosts: {}
     docker:                  # docker 引擎(standalone)；playbooks/apply/docker-apply.yml
       hosts: {}              # 例:讓 web-1 兼當 docker host → 改成  hosts: { web-1: }

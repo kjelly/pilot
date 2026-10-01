@@ -437,8 +437,8 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 39 支**都有 `stage`/`confirm_staging`/
-`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
+`playbooks/apply/*.yml` 現在**全部 40 支**都有 `stage`/`confirm_staging`/
+`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`dns`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
 `freeipa-nfs-client`、`freeipa-server-replica`、`freeipa-realm-replacement`、
@@ -1268,3 +1268,4 @@ git status --short
 | 2026-09-24 | v1.33 | §4.5 第 8、9 點：帶 tags 沒 `apply` 的 17 組 `include_tasks` 與 4 個繞過 apt framework 的套件安裝全部遷移，兩個 ratchet allowlist 清空；補上遷移時的規則（前置 fact 帶對應 tag、只讀 pre_tasks 標 `always`、mutation 安全 gate 標它保護的 row tag） | pilot |
 | 2026-09-24 | v1.34 | §4.5 第 8 點：安全 gate 的 tag 要涵蓋它保護的每一個 mutation。修正 PR #10 review 抓到的兩個 `--tags` 繞過（`freeipa-ca-trust` stage gate 改 `always`；`internal-endpoint` C7/C8 gate 補 C4–C6、C12 preflight 補 C13/C15，fleet-wide baseline play 補上 stage gate），新增全 repo lint `TestRegression_PreTaskGatesRunUnderApplyTags`（allowlist 列 4 支既有、留給後續 repo-wide stage gate 修正的 playbook） | pilot |
 | 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader`；新增第 10 點：free-form shell 字串（含註解）的引號要成對，否則 `split_args` 讓整支 task 檔載入失敗，新增 `TestRegression_FreeFormCommandsSplitInAnsible` | pilot |
+| 2026-10-01 | v1.36 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |

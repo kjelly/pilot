@@ -99,6 +99,19 @@
   loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
   when: hostvars[item].freeipa_setup_dns | default(false) | bool
 
+# The dns tier (docs/verification/dns.md §2 B10): when the inventory has
+# hosts in the `dns` group, a consumer sends its queries to the tier first
+# and keeps FreeIPA only as the last fallback, at most 3 nameservers in all
+# (glibc MAXNS). The tier addresses come from the same shared task the tier
+# itself uses to decide what it listens on.
+- name: "FreeIPA DNS client — dns tier service addresses"
+  ansible.builtin.include_tasks:
+    file: dns-tier-endpoints.yml
+    # Shared by two callers with different row tags (see the dig install
+    # below): `always` means "whenever this include runs".
+    apply:
+      tags: [always]
+
 - name: "FreeIPA DNS client — compute effective nameserver list for THIS host"
   ansible.builtin.set_fact:
     freeipa_dns_client_effective_servers: >-
@@ -108,6 +121,11 @@
         else (
           (['127.0.0.1'] + (freeipa_dns_providers | rejectattr('host', 'equalto', inventory_hostname) | map(attribute='ip') | list))
           if (inventory_hostname in (freeipa_dns_providers | map(attribute='host') | list))
+          else (
+            ((dns_tier_endpoints | map(attribute='addr') | list) + (freeipa_dns_providers | map(attribute='ip') | list))
+            | unique | list
+          )[:3]
+          if (dns_tier_endpoints | length > 0)
           else (freeipa_dns_providers | map(attribute='ip') | list)
         )
       }}

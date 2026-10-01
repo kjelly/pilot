@@ -1,39 +1,21 @@
 ---
-# Apply playbook for docs/verification/core-infra-provider.md
+# Apply playbook for docs/verification/core-infra-provider.md — the NTP
+# provider role (`-e infra_role=ntp`): install + configure chrony (or ntpd /
+# ntpsec) with a sane pool so this host itself becomes a stratum source.
 #
-# Two roles in one playbook, gated by `-e infra_role=...`:
+# The DNS role that used to live here (`-e infra_role=dns`) moved to its own
+# playbook, playbooks/apply/dns-apply.yml (docs/verification/dns.md), the same
+# way docker, keycloak, and keycloak-db were split out earlier:
 #
-#   dns      install + configure unbound (or bind9 / dnsmasq per host)
-#   ntp      install + configure chrony (or ntpd / ntpsec) with a sane
-#            pool so this host itself becomes a stratum source
-#
-# Docker, Keycloak (server), and Keycloak's PostgreSQL backing store
-# have all been moved to their own apply playbooks:
-#
+#   playbooks/apply/dns-apply.yml
 #   playbooks/apply/docker-apply.yml
-#       (container engine; prerequisite for keycloak-db, keycloak,
-#        seaweedfs-s3, wazuh-manager, and the observability stack)
 #   playbooks/apply/keycloak-apply.yml
-#       (-e infra_role equivalent: just run; pre-flight: docker +
-#        core-infra-provider-db PASS)
 #   playbooks/apply/keycloak-db-apply.yml
-#       (PostgreSQL container on pilot-infra docker network)
 #
-# Usage examples:
+# `infra_role` is kept so existing `-e infra_role=ntp` callers and the
+# site.yml import keep working; any other value fails the gate below.
 #
-#   ansible-playbook -i inventory.yaml \
-#       playbooks/apply/core-infra-provider-apply.yml \
-#       -e infra_role=dns \
-#       -e dns_provider=unbound \
-#       -e dns_listen_addr=10.0.0.53 \
-#       --check --diff
-#
-#   # Serving custom internal zones: keep `dns_zones` in group_vars adjacent
-#   # to an out-of-git inventory (auto-loaded, zero -e), so the (public) repo
-#   # never carries your hostnames. See docs/runbooks/core-infra-provider-dns-zones.md
-#   ansible-playbook -i ~/.infra/pilot/inventory-core-infra.yaml \
-#       playbooks/apply/core-infra-provider-apply.yml \
-#       -e infra_role=dns -e dns_listen_addr=10.0.0.53 --check --diff
+# Usage:
 #
 #   ansible-playbook -i inventory.yaml \
 #       playbooks/apply/core-infra-provider-apply.yml \
@@ -45,8 +27,8 @@
 #   sandbox  default; runs immediately
 #   staging  requires -e confirm_staging=true
 #   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168
-- name: Core infra provider apply (dns / ntp)
-  hosts: "{{ target_group | default(infra_role) | default('dns') }}"
+- name: Core infra provider apply (ntp)
+  hosts: "{{ target_group | default(infra_role) | default('ntp') }}"
   become: true
   gather_facts: true
   vars:
@@ -54,33 +36,18 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    dns_provider: unbound
     ntp_provider: chrony
-    backup_suffix: .pre-core-infra.bak
     target_group: "{{ infra_role }}"
 
-    # Custom internal DNS zones. DATA-DRIVEN: this playbook carries NO zone
-    # data of its own — supply `dns_zones` from group_vars adjacent to your
-    # (out-of-git) inventory, or with -e @<file>. Empty by default so a
-    # forward-only resolver is still valid. Schema + examples:
-    #   group_vars/dns/zones.example.yaml
-    # Each entry is either an authoritative local zone:
-    #   - name: pilot.lan
-    #     mode: static            # static (default) | transparent | redirect
-    #     records:
-    #       - { name: core, type: A, value: 10.0.0.53 }
-    # or a delegation to an upstream authoritative server (scale path):
-    #   - name: corp.internal
-    #     stub_addr: 10.0.1.2
-    dns_zones: []
-
   pre_tasks:
-    - name: "Gate: infra_role must be dns or ntp"
+    - name: "Gate: infra_role must be ntp"
       ansible.builtin.assert:
         that:
-          - infra_role in ['dns', 'ntp']
-        fail_msg: "infra_role={{ infra_role }} invalid. Pass -e infra_role=dns|ntp. (docker, keycloak, and db moved to their own playbooks.)"
-
+          - infra_role == 'ntp'
+        fail_msg: >-
+          infra_role={{ infra_role }} invalid. Pass -e infra_role=ntp.
+          (dns moved to playbooks/apply/dns-apply.yml; docker, keycloak, and db to their own playbooks.)
+      tags: [always]
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -88,7 +55,7 @@
             (stage == 'staging' and confirm_staging | bool) or
             (stage == 'prod' and confirm_prod | bool)
         fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
-
+      tags: [always]
     - name: "Gate: stage must match this host's inventory environment group"
       ansible.builtin.assert:
         that:
@@ -100,7 +67,7 @@
           (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
           target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
           且要跟這台機器所屬的環境 group 一致。
-
+      tags: [always]
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:
         that:
@@ -108,138 +75,16 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
 
   tasks:
-    ### DNS role
-    - name: "DNS — snapshot /etc/systemd/resolved.conf before mutation"
-      tags: [dns]
-      ansible.builtin.copy:
-        src: /etc/systemd/resolved.conf
-        dest: "/etc/systemd/resolved.conf{{ backup_suffix }}"
-        remote_src: true
-        force: false
-        mode: '0644'
-      when: infra_role == 'dns'
-      register: resolved_backup
-
-    - name: "DNS — install unbound"
-      tags: [dns, dns-C1]
-      ansible.builtin.include_tasks:
-        file: tasks/apt-package-install.yml
-        apply:
-          tags: [dns, dns-C1]
-      vars:
-        pilot_apt_packages: ["{{ dns_provider }}"]
-        pilot_apt_policy: tolerant
-        pilot_apt_component: core-infra-dns
-        pilot_apt_required_sources:
-          - id: ubuntu-os
-            class: os
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
-
-    - name: "DNS — write unbound config"
-      tags: [dns, dns-C2]
-      ansible.builtin.copy:
-        dest: /etc/unbound/unbound.conf.d/infra-pilot.conf
-        owner: root
-        group: root
-        mode: '0644'
-        content: |
-          server:
-              interface: {{ dns_listen_addr | default('0.0.0.0') }}
-              access-control: 10.0.0.0/8 allow
-              access-control: 192.168.0.0/16 allow
-              do-not-query-localhost: no
-          {% for z in dns_zones | default([]) if z.stub_addr is not defined %}
-              local-zone: "{{ z.name }}." {{ z.mode | default('static') }}
-          {% for r in z.records | default([]) %}
-              local-data: "{{ r.name }}.{{ z.name }}. IN {{ r.type | default('A') }} {{ r.value }}"
-          {% endfor %}
-          {% endfor %}
-
-          forward-zone:
-              name: "."
-              forward-addr: {{ dns_upstream | default('1.1.1.1') }}
-          {% for z in dns_zones | default([]) if z.stub_addr is defined %}
-
-          stub-zone:
-              name: "{{ z.name }}."
-              stub-addr: {{ z.stub_addr }}
-          {% endfor %}
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
-      notify: restart unbound
-
-    # DNSStubListener=no is critical: it frees port 53 so unbound
-    # can bind to 0.0.0.0:53. The marker file
-    # (/etc/pilot-infra-resolved.conf.applied) makes the write +
-    # restart idempotent: only on the first run do we change
-    # /etc/systemd/resolved.conf and bounce systemd-resolved.
-    - name: "DNS — write resolved config (stub disabled)"
-      tags: [dns, dns-C2, dns-C3]
-      ansible.builtin.copy:
-        dest: /etc/systemd/resolved.conf
-        owner: root
-        group: root
-        mode: '0644'
-        content: |
-          [Resolve]
-          DNS={{ dns_listen_addr | default('127.0.0.1') }}
-          FallbackDNS=1.1.1.1 9.9.9.9
-          DNSStubListener=no
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
-      notify: restart systemd-resolved
-
-    # /etc/resolv.conf is bind-mounted by docker on a docker-host
-    # run, so both `cp` and `sed -i` fail (atomic rename blocked).
-    # Use a here-doc + shell `cat` to write the new file in place.
-    - name: "DNS — swap nameserver in /etc/resolv.conf to local DNS"
-      tags: [dns, dns-C3]
-      ansible.builtin.shell: |
-        set -e
-        cp /etc/resolv.conf /etc/resolv.conf.pre-pilot-infra.bak
-        cat > /etc/resolv.conf <<EOF
-        nameserver {{ dns_listen_addr | default('127.0.0.1') }}
-        options edns0 trust-ad
-        EOF
-        cat /etc/resolv.conf
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
-      changed_when: true
-
-    - name: "DNS — enable + start unbound"
-      tags: [dns, dns-C2]
-      ansible.builtin.systemd:
-        name: unbound
-        state: started
-        enabled: true
-      when:
-        - infra_role == 'dns'
-        - not ansible_check_mode
-      notify: restart unbound
-
-    - name: "DNS — final check: unbound listening on port 53 (NOT stub)"
-      tags: [dns, dns-C2]
-      ansible.builtin.command: >-
-        sh -c 'ss -tulnH | grep ":53 " | grep -vE "127\.0\.0\.5[34]" | head -n1'
-      register: dns_post
-      failed_when: dns_post.stdout == ''
-      changed_when: false
-      when: infra_role == 'dns'
-
     ### NTP role
     - name: "NTP — install chrony"
-      tags: [ntp, ntp-C4]
+      tags: [ntp, ntp-C1]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
-          tags: [ntp, ntp-C4]
+          tags: [ntp, ntp-C1]
       vars:
         pilot_apt_packages: ["{{ ntp_provider }}"]
         pilot_apt_policy: tolerant
@@ -247,12 +92,10 @@
         pilot_apt_required_sources:
           - id: ubuntu-os
             class: os
-      when:
-        - infra_role == 'ntp'
-        - not ansible_check_mode
+      when: not ansible_check_mode
 
     - name: "NTP — write chrony.conf"
-      tags: [ntp, ntp-C6]
+      tags: [ntp, ntp-C3]
       ansible.builtin.copy:
         dest: /etc/chrony/chrony.conf
         owner: root
@@ -270,39 +113,26 @@
           allow 10.0.0.0/8
           allow 192.168.0.0/16
           local stratum 3
-      when:
-        - infra_role == 'ntp'
-        - not ansible_check_mode
+      when: not ansible_check_mode
       notify: restart chrony
 
     - name: "NTP — enable + start chronyd"
-      tags: [ntp, ntp-C5]
+      tags: [ntp, ntp-C2]
       ansible.builtin.systemd:
         name: "{{ ntp_provider }}"
         state: started
         enabled: true
-      when:
-        - infra_role == 'ntp'
-        - not ansible_check_mode
+      when: not ansible_check_mode
       notify: restart chrony
 
     - name: "NTP — final check: chronyd active"
-      tags: [ntp, ntp-C5]
+      tags: [ntp, ntp-C2]
       ansible.builtin.command: systemctl is-active chronyd
       register: ntp_post
       failed_when: ntp_post.stdout != 'active'
       changed_when: false
-      when: infra_role == 'ntp'
 
   handlers:
-    - name: restart systemd-resolved
-      ansible.builtin.systemd:
-        name: systemd-resolved
-        state: restarted
-    - name: restart unbound
-      ansible.builtin.systemd:
-        name: unbound
-        state: restarted
     - name: restart chrony
       ansible.builtin.systemd:
         name: chrony
