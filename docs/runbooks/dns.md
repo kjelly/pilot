@@ -11,15 +11,15 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-01，candidate `cbe95b8`（tree `b807a6af6a0e68a45e4b5ad0cb7e1138f617937e`），
-**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-cbe95b8.md`](../evidence/dns/2026-10-01-cbe95b8.md)。
+最新驗證：2026-10-01，candidate `c257bfc`（tree `ecf68316f5d00aabbd46325c6452d201e638c159`），
+**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
 | 目標環境 | `pilot vm-target topology`（`docs/topologies/dns-tier-topology.yaml`），5 台由 `topology up` 新建的 VM，測完已移除 |
 | inventory host 集合 | `dns`: dt-dns-1, dt-dns-2；`freeipa-server`: dt-ipa；`freeipa-dns-client`: dt-dns-2, dt-client, dt-client-el |
 | 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA server 安裝與測試 fixture 用）；dns 設定在 workspace 的 `group_vars/dns.yml`，由 `pilot edit` 寫入 |
-| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0`。真實 `pilot deploy` 全站部署 + `--limit dt-dns-2` + `pilot reconcile`（`freeipa-dns-client`）之後 `dns.md` 31 / 0 / 8、`freeipa-dns-client.md` 18 / 0 |
+| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0`。G4 擋下 `1.2.3.4/0`、`::0/0` 等允許全部來源的 ACL，C5 對手動加入的同類 ACL 判 FAIL。真實 `pilot deploy` 全站部署 + `--limit dt-dns-2` + `pilot reconcile`（`freeipa-dns-client`）之後 `dns.md` 31 / 0 / 8、`freeipa-dns-client.md` 18 / 0 |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
@@ -139,7 +139,7 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 共用的 `dns_listen_addr` | G10 擋下：「is not an IPv4 address of <host>」，設定不變 |
 | `dns_zones` 寫了無效的紀錄 | checkconf 失敗，rescue 還原：「Rollback: …/pilot-dns.conf restored; unbound restarted」 |
 | 重啟後 tier 連不到 FreeIPA | 自我檢查失敗，rescue 還原舊設定並重啟 |
-| ACL 設 `0.0.0.0/0`、dns_stub_zones 少了 `=`、zone 重複、cache 上限不是整數 | G4 擋下，任何檔案都還沒寫 |
+| ACL 允許全部來源（`0.0.0.0/0`、`1.2.3.4/0`、`::0/0`、`0.0.0.0/00`，或 `0.0.0.0/1` 加 `128.0.0.0/1`）、ACL 不是標準寫法（`10.0.0.0/08`，訊息會給出應寫的 `10.0.0.0/8`）、dns_stub_zones 少了 `=`、zone 重複、cache 上限不是整數 | G4 擋下，任何檔案都還沒寫 |
 
 ## 6. 從舊 core-infra-provider dns role 遷移（實測）
 
@@ -166,3 +166,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 |---|---|---|---|
 | 2026-10-01 | v1.0 | 初版：取代 `core-infra-provider-dns-zones.md`；candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS | sre |
 | 2026-10-01 | v1.1 | §0.5 改指向 candidate `cbe95b8` 的驗證；加上真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果 | sre |
+| 2026-10-01 | v1.2 | §0.5 改指向 candidate `c257bfc`；§5 的 G4 列加上依實際網段判斷的 ACL 案例（PR #33 review） | sre |

@@ -36,7 +36,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — dns（FreeIPA 前的第一層快取 DNS，自動分流）
 
-> 版本：**v1.1（2026-10-01，ACL 依實際涵蓋的網段判斷；待 candidate 實跑）**
+> 版本：**v1.1（2026-10-01，ACL 依實際涵蓋的網段判斷；candidate `c257bfc` 對 5 台全新 vm-target 實跑 PASS）**
 > 對齊規範：pilot 通用基礎設施**服務端**規範；擴充既有 `dns` role
 > （目前由 `core-infra-provider-apply.yml -e infra_role=dns` 實作）
 > 維護者：sre
@@ -46,12 +46,14 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 這是 AGENTS.md §3.0 的 spec-first 產物：先確定 acceptance，再寫 playbook。
 v1.0 已有 apply playbook、regression test 與實跑證據（§6）。
 
-**最新驗證**：2026-10-01，candidate `cbe95b8`（tree `b807a6af6a0e68a45e4b5ad0cb7e1138f617937e`），
+**最新驗證**：2026-10-01，candidate `c257bfc`（tree `ecf68316f5d00aabbd46325c6452d201e638c159`），
 5 台全新 vm-target（FreeIPA 4.13.4、2 台 Ubuntu 24.04 tier、Ubuntu 與 AlmaLinux
 consumer 各 1 台）：本檔 37 pass / 0 fail / 2 not_applicable，`freeipa-dns-client.md`
-18 pass，L6 `changed=0`；真實的 `pilot deploy` 全站部署、`--limit` 與 `pilot reconcile`
+18 pass，L6 `changed=0`；G4 在真機上擋下 `1.2.3.4/0`、`::0/0`、`0.0.0.0/00`、
+`0.0.0.0/1`+`128.0.0.0/1`、`10.0.0.0/08`，C5 對手動加入的同類 ACL 判 FAIL（`cbe95b8`
+的 C5 判 PASS）；真實的 `pilot deploy` 全站部署、`--limit` 與 `pilot reconcile`
 之後本檔 31 / 0 / 8。摘要見
-[`docs/evidence/dns/2026-10-01-cbe95b8.md`](../evidence/dns/2026-10-01-cbe95b8.md)。
+[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 完成後，本檔取代 `docs/verification/core-infra-provider.md` 的 DNS rows
 （C1–C3、C7）；`core-infra-provider.md` 只保留 NTP（見 §7 配套變更）。
@@ -620,9 +622,10 @@ runner error、timeout、matcher 不符都算 FAIL。
 - **E8 用 `pilot edit` 寫出的 workspace 實跑**：E1 的 `dns` 設定由 `pilot edit` 寫進
   workspace 的 `group_vars/dns.yml`，playbook 透過 inventory 旁的 group_vars 自動載入
   （不是用 `-e` 傳），證明 P1、P5 在真機上成立。
-2026-10-01 的結果（candidate `cbe95b8`）：E1–E8 都已執行。E1 PASS；E3 收斂；E4 的 G5、
-G6、G7、G8、G10 都實際觸發，設定都維持或還原到舊值；E5 新紀錄 58 秒後可查到、刪除後
-299 秒消失；E6 見 §8；E7 由 `cmd/pilot/cmd/dns_config_surface_test.go` 涵蓋；E8 的設定由
+2026-10-01 的結果（candidate `c257bfc`）：E1–E8 都已執行。E1 PASS；E3 收斂；E4 的 G4
+（6 種允許全部來源或非標準寫法的 ACL）、G5、G6、G7、G8、G10 都實際觸發，設定都維持或
+還原到舊值；C5 對手動加入的 `1.2.3.4/0`、`::0/0`、兩個 `/1` 判 FAIL；E5 新紀錄 60 秒後
+可查到、刪除後 298 秒消失；E6 見 §8；E7 由 `cmd/pilot/cmd/dns_config_surface_test.go` 涵蓋；E8 的設定由
 `pilot edit --actions` 寫入，經 workspace inventory 的 group_vars 載入。forward-only 加
 DNSSEC 關閉加舊格式 `dns_zones` 的 `vm-target test` PASS（12 / 0 / 8、L6 `changed=0`）。
 真實的 `pilot deploy`：全站部署（`dns.yml` 全部用內建預設）成功後只有 C20 fail
@@ -708,3 +711,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 | 2026-10-01 | v1.0 | candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS（`docs/evidence/dns/2026-10-01-3f781fb.md`）；front matter 與 Checks 區塊與 candidate 相同，只更新狀態、§6 結果與 §8 的 resolver 逾時實測 | sre |
 | 2026-10-01 | v1.0 | Checks 不變。candidate `cbe95b8` 重跑全部驗證（`docs/evidence/dns/2026-10-01-cbe95b8.md`），新增真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果；只更新狀態與 §6 | sre |
 | 2026-10-01 | v1.1 | PR #33 review：G4 只擋 `0.0.0.0/0`、`::/0` 兩個字串，`1.2.3.4/0`、`::0/0`、`0.0.0.0/1`+`128.0.0.0/1` 都能讓 tier 對所有來源開放（Ubuntu 24.04 的 unbound 1.19.2 實測接受這些寫法並照原樣輸出）。B7、G4 改成依實際涵蓋的網段判斷（controller 上用 Python `ipaddress` 合併網段）並要求標準形式的 CIDR；C5 的驗收方法同樣改成合併 `allow*` 網段，原本只 grep 兩個字串的寫法是錯的，這次收緊不是放寬。`TestRegression_DNSACLClassifier`、`TestRegression_DNSC5RejectsEquivalentAllowAll` 用實測擷取的 `get_option` 輸出鎖住 | sre |
+| 2026-10-01 | v1.1 | Checks 不變。candidate `c257bfc` 重跑全部驗證（`docs/evidence/dns/2026-10-01-c257bfc.md`），加上 G4、C5 對允許全部來源 ACL 的真機觸發；只更新狀態與 §6 | sre |
