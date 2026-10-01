@@ -105,9 +105,9 @@ func TestRunVtTopologyReset_MissingSpecFileErrors(t *testing.T) {
 
 func TestRunVtTopologyInventory_RequiresGroups(t *testing.T) {
 	dir := t.TempDir()
-	// The command opens a vm-target manager through resolveDataDir, which
-	// ignores PILOT_DATA_DIR: without this it reads the operator's real
-	// vm-targets.json.
+	// The command opens a vm-target manager through resolveStateDir. With
+	// --data-dir set it skips the legacy-location notice, which would
+	// otherwise look for the operator's real ~/.local/share/pilot/vm-targets.json.
 	savedDataDir := dataDir
 	dataDir = dir + "/data"
 	t.Cleanup(func() { dataDir = savedDataDir })

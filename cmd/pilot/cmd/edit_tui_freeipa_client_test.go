@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -69,7 +68,7 @@ func runAnsibleHostEdit(t *testing.T, hf *inventory.HostsFile, name, newValue st
 	if err := tm.Quit(); err != nil {
 		t.Fatalf("quit test model: %v", err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 func TestEditRouter_AnsibleHostFreeipaClientReplace_ConfirmYesWritesBothFields(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kjelly/pilot/internal/gatewayapi"
 	"github.com/kjelly/pilot/internal/sessionaudit"
 )
 
@@ -86,13 +87,6 @@ type transportStats struct {
 	TargetToClient int64
 }
 
-// transportRecordingCompatible is an allowlist, not a denylist (spec D8):
-// only "" (the unconditional default) and "metadata" may carry an opaque
-// transport; terminal_output, terminal_io, and any future mode deny.
-func transportRecordingCompatible(mode string) bool {
-	return mode == "" || mode == "metadata"
-}
-
 // runPortalTransport implements spec §9.1 steps 3-15 (parse and TTY
 // checks already happened in the dispatcher). Every return value's
 // Error() is one of the stable transport messages above.
@@ -133,6 +127,10 @@ func runPortalTransport(ctx context.Context, deps portalTransportDeps, target st
 	ev.GatewayID, ev.GatewayScope = authz.GatewayID, authz.GatewayScope
 	ev.RecordingMode = authz.RecordingMode
 	if !authz.TransportAllowed {
+		if authz.TransportDenyReason == gatewayapi.TransportDenyRecordingIncompatible {
+			emit(sessionaudit.KindGatewayTransportDenied, transportResultRecordingDeny)
+			return errors.New(transportMsgRecordingPolicy)
+		}
 		reason := transportDenyReasonUnknown
 		if authz.TransportDenyReason != "" {
 			reason = "transport_" + authz.TransportDenyReason
@@ -140,7 +138,9 @@ func runPortalTransport(ctx context.Context, deps portalTransportDeps, target st
 		emit(sessionaudit.KindGatewayTransportDenied, reason)
 		return errors.New(transportMsgNotEnabled)
 	}
-	if !transportRecordingCompatible(authz.RecordingMode) {
+	// The gateway already refuses this (D8); an older daemon did not, so
+	// the recording mode it returned is checked here as well.
+	if !gatewayapi.TransportRecordingCompatible(authz.RecordingMode) {
 		emit(sessionaudit.KindGatewayTransportDenied, transportResultRecordingDeny)
 		return errors.New(transportMsgRecordingPolicy)
 	}

@@ -51,7 +51,9 @@ and `pilot actions schema` for the current JSON contract. These commands are
 read-only and come from the same catalog used by scenario validation.
 
 Global options available across commands include `--config`, `--data-dir`, and
-`--log-level`. `PILOT_LOG_LEVEL` and `PILOT_LOG_FORMAT` configure diagnostics;
+`--log-level`. Every command resolves the data dir the same way: `--data-dir`,
+then `PILOT_DATA_DIR`, then `data_dir` in the config file, then
+`~/.local/share/pilot`. `PILOT_LOG_LEVEL` and `PILOT_LOG_FORMAT` configure diagnostics;
 target binary overrides are available through `PILOT_SSH_BIN`,
 `PILOT_VIRSH_BIN`, `PILOT_DOCKER_BIN`, and `PILOT_PODMAN_BIN`.
 
