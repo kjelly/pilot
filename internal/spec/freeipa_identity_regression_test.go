@@ -225,8 +225,11 @@ func TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes(t *testing
 	// restrict a run to just the read-only absent-host inspection query
 	// plus authentication — "identity, groups" must still both be
 	// present so a groups-only tagged reconciliation still authenticates.
-	if !strings.Contains(kinit, "tags: [identity, groups") {
-		t.Fatal("Kinit admin must run for a groups-only tagged reconciliation")
+	// Since 2026-10-01 it is also `always`: every C<n> row runs ipa
+	// commands, and the final kdestroy leaves no cached ticket
+	// (TestRegression_IpaCommandsHaveAKinitForTheirTags).
+	if !strings.Contains(kinit, "tags: [always, identity, groups") {
+		t.Fatal("Kinit admin must run under every --tags selection, including a groups-only tagged reconciliation")
 	}
 	if !strings.Contains(playbook, `identity_admin_password: "{{ ipa_admin_password | default((freeipa_roster.freeipa.admin | default({})).password | default(''), true) }}"`) {
 		t.Fatal("identity reconciliation must prefer ipa_admin_password from the workspace secret store while retaining the roster fallback")

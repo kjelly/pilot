@@ -13,18 +13,10 @@ import (
 )
 
 // taggedPrerequisiteAllowlist lists apply playbooks where a row-tagged task
-// still reads a register or set_fact that its own tags do not select. Each
-// needs its reads fixed and a tag-scoped run on a target; an entry fails
-// the test once the playbook has no such read left.
-var taggedPrerequisiteAllowlist = map[string]string{
-	"freeipa-client-apply.yml":         "follow-up",
-	"freeipa-identity-apply.yml":       "follow-up",
-	"gateway-scope-apply.yml":          "follow-up",
-	"pilot-access-directory-apply.yml": "follow-up",
-	"pilot-access-gateway-apply.yml":   "follow-up",
-	"pilot-session-store-apply.yml":    "follow-up",
-	"seaweedfs-s3-apply.yml":           "follow-up",
-}
+// still reads a register or set_fact that its own tags do not select. It
+// is empty since 2026-10-01. An entry needs a reason, and fails the test
+// once the playbook has no such read left.
+var taggedPrerequisiteAllowlist = map[string]string{}
 
 // TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet is a repo-wide lint
 // over playbooks/apply/*.yml. It extends
