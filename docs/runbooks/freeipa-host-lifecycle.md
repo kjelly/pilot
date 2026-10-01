@@ -26,6 +26,12 @@
   `STATUS completed`，並以 `ipa host-show`/`ipa dnsrecord-show`/
   `/etc/ipa/default.conf` 三項獨立核對確認零殘留。
 - Evidence：[2026-09-11 add/remove + 2 bugs found+fixed](../evidence/host-decommission/2026-09-11-add-remove-freeipa-host.md)。
+- staging/prod 主機的下架（2026-10-01，candidate `58e3d20`，AlmaLinux 9 FreeIPA
+  server 在 `prod`、Ubuntu 24.04 client 在 `staging`）：沒帶確認時 `apply` 在任何
+  步驟前拒絕；帶 `--confirm-staging --confirm-prod --staging-attested-within-hours 24`
+  後 `STATUS completed`，client 解除註冊、host object 與 DNS record 不存在。修正前
+  連 `plan` 都會被 prod server 的 cross-check 擋下。見
+  [evidence](../evidence/host-decommission/2026-10-01-58e3d20.md)。
 
 ## 1. 邊界與前置
 
