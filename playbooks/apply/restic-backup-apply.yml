@@ -196,7 +196,11 @@
         - not ansible_check_mode
 
     - name: "Step 1b: Resolve restic_s3_target_host for the /etc/hosts pin (spec C10)"
-      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      tags: [always]
+      ansible.builtin.include_tasks:
+        file: tasks/resolve-hosts-alias-target.yml
+        apply:
+          tags: [always]
       vars:
         hosts_alias_target_host: "{{ restic_s3_target_host | default('') }}"
       when: restic_s3_target_host | default('') | length > 0

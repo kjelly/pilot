@@ -41,7 +41,12 @@ var taggedPrerequisiteAllowlist = map[string]string{
 // agent-controller's C2/C4 config render read an untagged listen-address
 // resolve and rendered an empty address. Each failure is inside a block
 // whose rescue now rolls back under --tags too
-// (TestRegression_RescueRunsWheneverItsBlockDoes).
+// (TestRegression_RescueRunsWheneverItsBlockDoes). Facts set inside an
+// include_tasks/import_tasks file count too (expandIncludedSetters):
+// wazuh-manager's C10 and wazuh-fim's C7 /etc/hosts pins read
+// hosts_alias_resolved_ip from an untagged include of
+// tasks/resolve-hosts-alias-target.yml, so those rows always failed and,
+// once the rescues ran under --tags, removed the deployed configuration.
 func TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet(t *testing.T) {
 	files, err := filepath.Glob("../../playbooks/apply/*.yml")
 	if err != nil {
@@ -60,6 +65,7 @@ func TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", base, err)
 		}
+		tasks = expandIncludedSetters(tasks, filepath.Dir(path), filepath.Dir(path))
 		problems := findTaggedPrerequisiteViolations(tasks)
 		if _, allowed := taggedPrerequisiteAllowlist[base]; allowed {
 			if len(problems) == 0 {
@@ -251,4 +257,187 @@ func taskReadsVarUnguarded(item *yaml.Node, varName string) bool {
 		}
 	}
 	return unguarded
+}
+
+// expandIncludedSetters returns tasks with a synthetic setter entry after
+// each include_tasks/import_tasks of a static file, one per task in that
+// file that sets a variable, tagged the way Ansible selects it:
+//   - import_tasks: the include's tags plus the task's own;
+//   - include_tasks: the task runs when --tags selects both the include
+//     line and the included task, whose tags are `apply` tags plus its own.
+//
+// Synthetic entries have no Node, so they are never checked as readers.
+// Paths resolve against the including file's directory, then baseDir.
+func expandIncludedSetters(tasks []playbookTask, fileDir, baseDir string) []playbookTask {
+	return expandIncludedSettersDepth(tasks, fileDir, baseDir, 0)
+}
+
+func expandIncludedSettersDepth(tasks []playbookTask, fileDir, baseDir string, depth int) []playbookTask {
+	var out []playbookTask
+	for _, task := range tasks {
+		out = append(out, task)
+		file, apply, static := includedFile(task.Node)
+		if file == "" || depth > 4 {
+			continue
+		}
+		var raw []byte
+		var dir string
+		for _, d := range []string{fileDir, baseDir} {
+			if b, err := os.ReadFile(filepath.Join(d, file)); err == nil {
+				raw, dir = b, filepath.Dir(filepath.Join(d, file))
+				break
+			}
+		}
+		if raw == nil {
+			continue
+		}
+		var doc yaml.Node
+		if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.SequenceNode {
+			continue
+		}
+		var inner []playbookTask
+		walkTaskList(doc.Content[0], nil, &inner)
+		inner = expandIncludedSettersDepth(inner, dir, baseDir, depth+1)
+		for _, in := range inner {
+			if len(in.SetsVars) == 0 {
+				continue
+			}
+			out = append(out, playbookTask{
+				Name:     task.Name + " -> " + in.Name,
+				Tags:     includedTaskTags(task.Tags, apply, in.Tags, static),
+				SetsVars: in.SetsVars,
+				Line:     task.Line,
+			})
+		}
+	}
+	return out
+}
+
+// includedFile returns the static file an include_tasks/import_tasks task
+// loads, the tags its `apply` gives the included tasks, and whether it is
+// an import. It returns "" for any other task or a templated path.
+func includedFile(item *yaml.Node) (string, map[string]bool, bool) {
+	if item == nil || item.Kind != yaml.MappingNode {
+		return "", nil, false
+	}
+	for i := 0; i+1 < len(item.Content); i += 2 {
+		k, v := item.Content[i].Value, item.Content[i+1]
+		static := k == "import_tasks" || k == "ansible.builtin.import_tasks"
+		if !static && k != "include_tasks" && k != "ansible.builtin.include_tasks" {
+			continue
+		}
+		apply := map[string]bool{}
+		file := ""
+		switch v.Kind {
+		case yaml.ScalarNode:
+			file = v.Value
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				switch v.Content[j].Value {
+				case "file":
+					file = v.Content[j+1].Value
+				case "apply":
+					a := v.Content[j+1]
+					for x := 0; x+1 < len(a.Content); x += 2 {
+						if a.Content[x].Value == "tags" {
+							collectTagValues(a.Content[x+1], apply)
+						}
+					}
+				}
+			}
+		}
+		if strings.Contains(file, "{{") {
+			return "", nil, false
+		}
+		return file, apply, static
+	}
+	return "", nil, false
+}
+
+// includedTaskTags is the tag set under which a task inside an included
+// file runs, in the form findTaggedPrerequisiteViolations compares: a set
+// with `always`, or the row tags that select it (empty: full runs only).
+func includedTaskTags(line, apply, own map[string]bool, static bool) map[string]bool {
+	union := func(a, b map[string]bool) map[string]bool {
+		out := map[string]bool{}
+		for t := range a {
+			out[t] = true
+		}
+		for t := range b {
+			out[t] = true
+		}
+		return out
+	}
+	if static {
+		return union(line, own)
+	}
+	inner := union(apply, own)
+	switch {
+	case line["always"] && inner["always"]:
+		return map[string]bool{"always": true}
+	case line["always"]:
+		return inner
+	case inner["always"]:
+		return union(line, nil)
+	}
+	out := map[string]bool{}
+	for t := range line {
+		if inner[t] {
+			out[t] = true
+		}
+	}
+	return out
+}
+
+func TestExpandIncludedSetters(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolver := "- name: resolve\n  set_fact: {resolved_ip: 192.0.2.1}\n"
+	if err := os.WriteFile(filepath.Join(dir, "tasks", "resolve.yml"), []byte(resolver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		include string
+		want    int
+	}{
+		{"untagged include, tagged reader (the wazuh-manager C10 pin)", `
+    - name: resolve
+      include_tasks: tasks/resolve.yml`, 1},
+		{"include tagged always with apply always", `
+    - name: resolve
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: {tags: [always]}}`, 0},
+		{"include tagged with the reader's row but no apply", `
+    - name: resolve
+      tags: [C10]
+      include_tasks: tasks/resolve.yml`, 1},
+		{"include with the reader's row and apply", `
+    - name: resolve
+      tags: [C10]
+      include_tasks: {file: tasks/resolve.yml, apply: {tags: [C10]}}`, 0},
+		{"import tagged with the reader's row", `
+    - name: resolve
+      tags: [C10]
+      import_tasks: tasks/resolve.yml`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			play := "- hosts: all\n  tasks:" + tc.include + `
+    - name: pin
+      tags: [C10]
+      lineinfile: {path: /etc/hosts, line: "{{ resolved_ip }} alias"}
+`
+			tasks, err := parsePlaybookTasks([]byte(play))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks = expandIncludedSetters(tasks, dir, dir)
+			if got := findTaggedPrerequisiteViolations(tasks); len(got) != tc.want {
+				t.Fatalf("got %d problems %v, want %d", len(got), got, tc.want)
+			}
+		})
+	}
 }

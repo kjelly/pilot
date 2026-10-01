@@ -57,6 +57,7 @@ func TestRegression_AlwaysTaggedTasksHaveAllPrerequisitesAlways(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse tasks: %v", err)
 			}
+			tasks = expandIncludedSetters(tasks, filepath.Dir(path), filepath.Dir(path))
 			for _, violation := range findAlwaysTagPrerequisiteViolations(tasks) {
 				t.Error(violation)
 			}

@@ -304,7 +304,11 @@
             - siem_forward_effective_host == ansible_default_ipv4.address
 
         - name: "Step 6c: Resolve siem_forward_effective_host for the /etc/hosts pin (spec C15)"
-          ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/resolve-hosts-alias-target.yml
+            apply:
+              tags: [always]
           vars:
             hosts_alias_target_host: "{{ siem_forward_effective_host }}"
           when:

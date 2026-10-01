@@ -197,7 +197,11 @@
              else [] }}
 
     - name: "Resolve loki_effective_target_host for the /etc/hosts pin"
-      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
+      tags: [always]
+      ansible.builtin.include_tasks:
+        file: tasks/resolve-hosts-alias-target.yml
+        apply:
+          tags: [always]
       vars:
         hosts_alias_target_host: "{{ loki_effective_target_host }}"
       when: loki_effective_target_host | length > 0
