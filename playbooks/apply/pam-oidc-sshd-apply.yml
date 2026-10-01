@@ -139,6 +139,7 @@
 
         # ── Detect PAM lib directory ─────────────────────────────────────────
         - name: "Step 4: Detect PAM security library directory"
+          tags: [C2]
           ansible.builtin.shell:
             cmd: >-
               if [ -d /lib/x86_64-linux-gnu/security ]; then

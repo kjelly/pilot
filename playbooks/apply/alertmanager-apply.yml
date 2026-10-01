@@ -351,7 +351,7 @@
             image: "prom/alertmanager:{{ alertmanager_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ alertmanager_yml_result is changed }}"
+            restart: "{{ (alertmanager_yml_result | default({})) is changed }}"
             user: "65534:65534"
             networks:
               - name: "{{ docker_network_name }}"

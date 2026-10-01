@@ -1204,12 +1204,12 @@
             state: started
             restart_policy: unless-stopped
             restart: >-
-              {{ prometheus_yml_result is changed
-                 or alert_rules_result is changed
-                 or (snmp_alert_rules_result is defined and snmp_alert_rules_result is changed)
-                 or node_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_removed is changed
+              {{ (prometheus_yml_result | default({})) is changed
+                 or (alert_rules_result | default({})) is changed
+                 or (snmp_alert_rules_result | default({})) is changed
+                 or (node_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_removed | default({})) is changed
                  or monitoring_files_changed | default(false) }}
             networks:
               - name: "{{ docker_network_name }}"
@@ -1264,7 +1264,7 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ objstore_yml_result is changed }}"
+            restart: "{{ (objstore_yml_result | default({})) is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-

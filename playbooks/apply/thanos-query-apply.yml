@@ -263,7 +263,7 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ objstore_yml_result is changed }}"
+            restart: "{{ (objstore_yml_result | default({})) is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -290,7 +290,7 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ objstore_yml_result is changed }}"
+            restart: "{{ (objstore_yml_result | default({})) is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-

@@ -163,6 +163,7 @@
       tags: [always]
 
     - name: "Resolve agent_controller_listen_addr from this host's default route when not explicitly set"
+      tags: [always]
       ansible.builtin.set_fact:
         agent_controller_listen_addr: "{{ ansible_default_ipv4.address }}"
       when: agent_controller_listen_addr | default('') | length == 0
