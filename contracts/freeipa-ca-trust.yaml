@@ -21,6 +21,7 @@ playbooks:
   apply: playbooks/apply/freeipa-ca-trust-apply.yml
 regressionTests:
   - internal/spec/freeipa_ca_trust_regression_test.go
+  - internal/spec/freeipa_ca_trust_checkmode_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - component: freeipa-server
