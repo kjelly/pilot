@@ -119,7 +119,7 @@
       loop:
         - "{{ freeipa_realm_replacement_state_dir }}"
         - "{{ freeipa_realm_replacement_backup_dir }}"
-      tags: [C2]
+      tags: [always, C2]
 
     - name: "Realm replacement — snapshot old client trust before mutation"
       ansible.builtin.command:
@@ -137,7 +137,7 @@
           - /etc/hosts
       changed_when: true
       no_log: true
-      tags: [C2]
+      tags: [always, C2]
 
     - name: "Realm replacement — destructive switch with automatic local restore"
       block:
@@ -264,6 +264,7 @@
           tags: [C6]
       rescue:
         - name: "Realm replacement — restore local pre-migration archive"
+          tags: [always]
           ansible.builtin.command:
             argv: [tar, -xpf, "{{ freeipa_realm_replacement_backup_archive }}", -C, /]
           changed_when: true
@@ -271,12 +272,14 @@
           failed_when: false
 
         - name: "Realm replacement — restart restored SSSD when present"
+          tags: [always]
           ansible.builtin.systemd:
             name: sssd
             state: restarted
           failed_when: false
 
         - name: "Realm replacement — stop with the rollback boundary"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               New realm enrollment failed. The prior local client configuration

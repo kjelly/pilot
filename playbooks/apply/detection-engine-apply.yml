@@ -463,6 +463,7 @@
       until: detection_alertmanager_probe.status is defined and detection_alertmanager_probe.status == 200
 
     - name: "Gate: feature profile file exists on the controller and is non-empty"
+      tags: [always]
       ansible.builtin.stat:
         path: "{{ detection_engine_feature_profile_src }}"
       delegate_to: localhost
@@ -471,6 +472,7 @@
       register: detection_feature_profile_stat
 
     - name: "Gate: assert feature profile is present"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - detection_feature_profile_stat.stat.exists
@@ -503,11 +505,13 @@
             - { path: "{{ detection_engine_backup_dir }}", owner: root, group: root, mode: "0700" }
 
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
+          tags: [always]
           ansible.builtin.stat:
             path: "{{ detection_engine_db_path }}"
           register: detection_engine_existing_db
 
         - name: "Step 3b: check whether a previous binary exists and would actually change (spec §26 upgrade detection)"
+          tags: [always]
           ansible.builtin.stat:
             path: "{{ detection_engine_bin_dest }}"
             checksum_algorithm: sha256
@@ -518,12 +522,24 @@
         # "second apply: changed=0"), so this must not be true just
         # because a previous binary happens to exist.
         - name: "Step 3c: determine whether this apply is an upgrade"
+          tags: [always]
           ansible.builtin.set_fact:
             detection_engine_is_upgrade: >-
               {{ detection_engine_existing_binary_stat.stat.exists
                  and detection_engine_existing_binary_stat.stat.checksum != detection_engine_artifact_sha256 }}
 
+        - name: "Step 3d: ensure the backup directory exists before taking rollback material"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ detection_engine_backup_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+          when: detection_engine_is_upgrade
+
         - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO, spec §26/§40)"
+          tags: [always]
           ansible.builtin.command:
             argv:
               - "{{ detection_engine_bin_dest }}"
@@ -537,6 +553,7 @@
           changed_when: true
 
         - name: "Step 5: snapshot the previously installed binary (rollback material, spec §26)"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ detection_engine_bin_dest }}"
             dest: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
@@ -568,6 +585,7 @@
         # on it would crash the dry-run, not just fail it. Same "defer to
         # the real apply" convention as Steps 15-17 below.
         - name: "Step 7: assert target-side SHA256 matches"
+          tags: [detection-engine-C1]
           ansible.builtin.assert:
             that:
               - detection_engine_target_binary_stat.stat.get('checksum', '') == detection_engine_artifact_sha256
@@ -767,6 +785,7 @@
           when: not ansible_check_mode
 
         - name: "Step 16: assert status.json was reachable"
+          tags: [detection-engine-C9]
           ansible.builtin.assert:
             that:
               - detection_engine_status_check.rc == 0
@@ -795,6 +814,7 @@
 
       rescue:
         - name: "ROLLBACK — stop the newly (mis)configured service"
+          tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: stopped
@@ -802,6 +822,7 @@
           failed_when: false
 
         - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
             dest: "{{ detection_engine_bin_dest }}"
@@ -811,6 +832,7 @@
           failed_when: false
 
         - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ detection_engine_backup_dir }}/pre-upgrade.db"
             dest: "{{ detection_engine_db_path }}"
@@ -822,6 +844,7 @@
           failed_when: false
 
         - name: "ROLLBACK — restart with the restored previous binary, if any"
+          tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: restarted
@@ -830,6 +853,7 @@
           failed_when: false
 
         - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               detection-engine apply FAILED (see task output above). If a

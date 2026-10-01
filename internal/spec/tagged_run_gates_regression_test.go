@@ -14,19 +14,13 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// preTaskGateNotAlwaysAllowlist lists pre_tasks input checks that a
-// tag-scoped run can still skip in a play whose includes pass tags down
-// with `apply`: they read inputs (infra_role, secrets, a resolvable backup
-// destination), not the stage. The stage gates that used to be listed here
-// are `always` since 2026-09-25 (TestRegression_StageGatesAlwaysRunInTaggedPlays).
-// Making these `always` needs each checked for facts set by untagged tasks
-// (AGENTS.md §4.4); that is a separate follow-up. Keys are
-// "<playbook>|<task name>". Entries may only be removed.
-var preTaskGateNotAlwaysAllowlist = map[string]bool{
-	"playbooks/apply/core-infra-provider-apply.yml|Gate: infra_role must be dns or ntp":                        true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: required secrets present (fail early, before any mutation)": true,
-	"playbooks/apply/restic-backup-apply.yml|Gate: backup destination must be resolvable":                      true,
-}
+// preTaskGateNotAlwaysAllowlist lists pre_tasks checks that a tag-scoped
+// run may skip in a play whose includes pass tags down with `apply`. It is
+// empty: the stage gates became `always` on 2026-09-25 and the input checks
+// (core-infra-provider's infra_role, restic-backup's secrets and
+// destination) on 2026-10-01. An entry needs a reason. Keys are
+// "<playbook>|<task name>"; entries may only be removed.
+var preTaskGateNotAlwaysAllowlist = map[string]bool{}
 
 // TestRegression_PreTaskGatesRunUnderApplyTags is a repo-wide lint over
 // playbooks/**. In a play with an include_tasks that passes tags down with
@@ -465,6 +459,38 @@ func TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck(t *testing.T) {
 	}
 }
 
+// TestRegression_DecommissionQueryCrossCheckExemptions locks the two
+// read-only host-decommission queries that skip the environment-group
+// cross-check: they run without a stage (the freeipa-identity one already
+// during `plan`, which takes no confirmation), and the skip must apply to
+// that tag alone. `| list` because ansible_run_tags is a tuple on
+// ansible-core 2.19; a bare list comparison is always unequal.
+func TestRegression_DecommissionQueryCrossCheckExemptions(t *testing.T) {
+	for playbook, tag := range map[string]string{
+		"../../playbooks/apply/freeipa-identity-apply.yml":  "freeipa_host_absent_inspect",
+		"../../playbooks/apply/internal-endpoint-apply.yml": "iep_decommission_verify",
+	} {
+		want := "(ansible_run_tags | list) != ['" + tag + "']"
+		found := 0
+		plays, _ := loadYAML(t, playbook).([]any)
+		for _, p := range plays {
+			play, _ := p.(map[string]any)
+			walkTaskTree(play["pre_tasks"], nil, func(task map[string]any, _ []string) {
+				if name, _ := task["name"].(string); name != "Gate: stage must match this host's inventory environment group" {
+					return
+				}
+				found++
+				if when, _ := task["when"].(string); when != want {
+					t.Errorf("%s: cross-check when = %q, want %q", playbook, when, want)
+				}
+			})
+		}
+		if found == 0 {
+			t.Errorf("%s: no environment-group cross-check found", playbook)
+		}
+	}
+}
+
 func TestStageGateDetection(t *testing.T) {
 	const src = `
 - name: untagged gates in a tagged play
@@ -644,4 +670,157 @@ func loadYAML(t *testing.T, path string) any {
 		t.Fatalf("%s: parse: %v", path, err)
 	}
 	return doc
+}
+
+// TestRegression_NoUntaggedChecksInTaggedPlays is a repo-wide lint over
+// playbooks/**. In a play with tasks tagged other than `always`, an
+// assert or fail with no tag of its own or from an enclosing block is
+// skipped by every --tags run while the tagged tasks still run, so its
+// check silently stops applying. Until 2026-10-01, nine apply playbooks
+// had such input checks (required variables, secrets, a resolvable S3
+// destination, alertmanager's non-empty config, detection-engine's
+// feature profile) and detection-engine and agent-controller two mid-flow
+// asserts each. A check in pre_tasks, or next to tagged steps in the same
+// task list, must be `always` or carry the row tags of the steps it
+// guards. An untagged check among untagged steps is consistent: both run
+// only in a full run (the decommission playbooks, whose only tagged tasks
+// are the read-only `inspect` ones, verify their untagged removal that
+// way). Rescue and block `always:` sections are checked by
+// TestRegression_RescueRunsWheneverItsBlockDoes.
+func TestRegression_NoUntaggedChecksInTaggedPlays(t *testing.T) {
+	plays := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+		names, n := untaggedChecksInTaggedPlays(loadYAML(t, path))
+		plays += n
+		for _, name := range names {
+			t.Errorf("%s: check %q has no tag, so any --tags run skips it while the play's tagged tasks run", rel, name)
+		}
+	}
+	if plays < 50 {
+		t.Fatalf("only %d plays with tagged tasks found; the walker is broken", plays)
+	}
+}
+
+func TestUntaggedChecksInTaggedPlays(t *testing.T) {
+	const src = `
+- hosts: all
+  pre_tasks:
+    - name: untagged input check
+      ansible.builtin.assert: {that: [x is defined]}
+    - name: always input check
+      tags: [always]
+      assert: {that: [x is defined]}
+  tasks:
+    - name: row task
+      tags: [C1]
+      ansible.builtin.debug: {msg: x}
+    - tags: [C2]
+      block:
+        - name: inherits C2 from the block
+          ansible.builtin.fail: {msg: x}
+    - block:
+        - name: tagged step
+          tags: [C3]
+          ansible.builtin.command: step
+        - name: untagged mid-flow assert
+          ansible.builtin.assert: {that: [y]}
+      rescue:
+        - name: rescue fail is out of scope here
+          ansible.builtin.fail: {msg: rollback}
+- hosts: all
+  tasks:
+    - name: untagged play has nothing to skip
+      ansible.builtin.assert: {that: [z]}
+- hosts: all
+  pre_tasks:
+    - name: read-only inspect
+      tags: [inspect]
+      ansible.builtin.debug: {msg: x}
+  tasks:
+    - block:
+        - name: untagged removal
+          ansible.builtin.command: rm x
+        - name: verify removal (decommission shape, consistent)
+          ansible.builtin.assert: {that: [gone]}
+`
+	var doc any
+	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
+		t.Fatal(err)
+	}
+	names, plays := untaggedChecksInTaggedPlays(doc)
+	if strings.Join(names, ",") != "untagged input check,untagged mid-flow assert" || plays != 2 {
+		t.Fatalf("got %v over %d plays", names, plays)
+	}
+}
+
+// untaggedChecksInTaggedPlays returns the names of the assert/fail tasks
+// with no effective tag, outside rescue and block `always:` sections, that
+// sit in pre_tasks or in a task list where another task (or a task nested
+// under it) is tagged other than `always`, in every play of doc that has
+// such a tagged task; and the number of those plays.
+func untaggedChecksInTaggedPlays(doc any) ([]string, int) {
+	plays, _ := doc.([]any)
+	var out []string
+	checked := 0
+	for _, p := range plays {
+		play, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := play["hosts"]; !ok {
+			continue
+		}
+		playTags := yamlTags(play)
+		tagged := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], playTags, func(_ map[string]any, tags []string) {
+				if slices.ContainsFunc(tags, func(tag string) bool { return tag != "always" }) {
+					tagged = true
+				}
+			})
+		}
+		if !tagged {
+			continue
+		}
+		checked++
+		rowTagged := func(task map[string]any, inherited []string) bool {
+			found := false
+			walkTaskTree([]any{task}, inherited, func(_ map[string]any, tags []string) {
+				if slices.ContainsFunc(tags, func(tag string) bool { return tag != "always" }) {
+					found = true
+				}
+			})
+			return found
+		}
+		var walk func(list any, inherited []string, inPreTasks bool)
+		walk = func(list any, inherited []string, inPreTasks bool) {
+			tasks, _ := list.([]any)
+			for i, item := range tasks {
+				task, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				tags := append(slices.Clone(inherited), yamlTags(task)...)
+				if slices.ContainsFunc(gateModules, func(m string) bool { _, ok := task[m]; return ok }) && len(tags) == 0 {
+					amongTagged := false
+					for j, other := range tasks {
+						if o, ok := other.(map[string]any); ok && j != i && rowTagged(o, inherited) {
+							amongTagged = true
+							break
+						}
+					}
+					if inPreTasks || amongTagged {
+						name, _ := task["name"].(string)
+						out = append(out, name)
+					}
+				}
+				walk(task["block"], tags, false)
+			}
+		}
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walk(play[section], playTags, section == "pre_tasks")
+		}
+	}
+	return out, checked
 }

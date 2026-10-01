@@ -58,6 +58,10 @@ type FreeIPANFSServerProviderConfig struct {
 	// this provider does not resolve either itself, matching
 	// FreeIPAClientProvider's caller-resolves-input-paths convention).
 	ExtraArgs []string
+
+	// StageArgs returns the stage -e arguments for the retiring host
+	// (decommission.StageScope); nil adds none.
+	StageArgs func() ([]string, error)
 }
 
 // FreeIPANFSServerProvider implements providers.Provider for the
@@ -90,6 +94,10 @@ func (p *FreeIPANFSServerProvider) Inspect(ctx context.Context, in InspectInput)
 	}
 	args = append(args, "--tags", "inspect")
 	args = append(args, p.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, p.cfg.StageArgs)
+	if stageErr != nil {
+		return Inspection{}, fmt.Errorf("freeipa-nfs-server inspect %s: %w", hostName, stageErr)
+	}
 
 	res, err := p.exec(ctx, args)
 	if err != nil {
@@ -209,6 +217,10 @@ func (e *freeipaNFSDecommissionStep) Execute(ctx context.Context) error {
 		args = append(args, "--limit", e.fqdn)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.StageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("freeipa-nfs-server decommission %s: %w", e.fqdn, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("freeipa-nfs-server decommission %s: %w", e.fqdn, err)

@@ -277,6 +277,15 @@
     # used by `pilot edit` and this Ansible reconciler are two independent
     # implementations that must agree on the same invariants, not one
     # calling the other).
+    # Start from an empty list. With `endpoints: []` the loop below runs no
+    # iteration, so the fact was never set, and the decommission verify
+    # query, which reads it without a default, failed with
+    # "'internal_endpoint_normalized' is undefined" (2026-09-25).
+    - name: "Start the normalized endpoint list empty"
+      tags: [always]
+      ansible.builtin.set_fact:
+        internal_endpoint_normalized: []
+
     - name: "Compute normalized per-endpoint desired state"
       tags: [always]
       ansible.builtin.set_fact:

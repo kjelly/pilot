@@ -416,7 +416,7 @@
         executable: /bin/bash
       changed_when: false
       no_log: true
-      tags: [AG_enrollment, AG_keytab]
+      tags: [AG_enrollment, AG_keytab, AG_config, AG_service, AG12]
 
     # Step 3 (spec.md §55, spec.md §9.1): this gateway host joins
     # pilot-access-gateways — the hostgroup that controls who may SSH TO
@@ -766,11 +766,12 @@
     # invalidates the previous key material, so it must only ever run
     # once per host; a real rotation is a deliberate, separate lifecycle
     # operation (spec.md §47), not something an ordinary reapply does.
+    # Also AG03: the ownership/mode task below reads this result.
     - name: "Step 8: check whether the gateway keytab already exists"
       ansible.builtin.stat:
         path: /etc/pilot/pilot-access-gateway.keytab
       register: gateway_keytab_stat
-      tags: [AG_keytab]
+      tags: [AG_keytab, AG03]
 
     - name: "Step 8: create the gateway service principal (idempotent)"
       ansible.builtin.command:
@@ -1079,7 +1080,7 @@
       register: gateway_target_hostgroup_show
       changed_when: false
       failed_when: false
-      tags: [AG_config]
+      tags: [AG_config, AG_service, AG12]
 
     # Step 9/10 (spec.md §55): install both binaries.
     - name: "Step 9: install pilot CLI"
@@ -1256,9 +1257,10 @@
       when:
         - not ansible_check_mode
         - >-
-          gateway_service_unit.changed or gateway_binary_copy.changed or gateway_config_copy.changed
-          or (gateway_signing_key_copy.changed | default(false))
-          or (gateway_signing_key_remove.changed | default(false))
+          gateway_service_unit is changed or gateway_binary_copy is changed
+          or (gateway_config_copy | default({})) is changed
+          or (gateway_signing_key_copy | default({})) is changed
+          or (gateway_signing_key_remove | default({})) is changed
       tags: [AG_service]
 
     # Step 17 (spec.md §55): capability probe — a real connection over

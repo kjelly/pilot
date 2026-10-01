@@ -11,6 +11,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -134,7 +135,95 @@ func pushDecommissionConfirmHostName(r *editRouterModel, dir, path string, hf *i
 		if m.Canceled() || strings.TrimSpace(m.Value()) != name {
 			return pushDecommissionPlanSummary(r, dir, path, hf, name, plan)
 		}
-		return pushDecommissionExecute(r, dir, path, hf, name, plan)
+		return pushDecommissionStageConfirm(r, dir, path, hf, name, plan)
+	})
+}
+
+// pushDecommissionStageConfirm collects the stage confirmation the plan's
+// playbook runs need (host_decommission_stage.go), with the same prompts as
+// pilot deploy's stage choice: staging asks for a confirmation, prod for the
+// hours since staging was last verified and a typed "PROD". A plan whose
+// runs all target sandbox hosts goes straight to execution. Cancel returns
+// to the plan summary.
+func pushDecommissionStageConfirm(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan) tea.Cmd {
+	scope, err := loadHostDecommissionStageScope(dir, noStageAuthorization())
+	if err != nil {
+		return pushDecommissionError(r, dir, path, hf, name, err)
+	}
+	var staging, prod []string
+	for _, t := range hostDecommissionStageTargets(plan, scope) {
+		stage, err := scope.Stage(t.Hosts)
+		if err != nil {
+			return pushDecommissionError(r, dir, path, hf, name, fmt.Errorf("%s 無法執行：%w", t.Label, err))
+		}
+		switch stage {
+		case "staging":
+			staging = append(staging, t.Label)
+		case "prod":
+			prod = append(prod, t.Label)
+		}
+	}
+	auth := noStageAuthorization()
+	if len(staging) == 0 && len(prod) == 0 {
+		return pushDecommissionExecute(r, dir, path, hf, name, plan, auth)
+	}
+	back := func(r *editRouterModel) tea.Cmd { return pushDecommissionPlanSummary(r, dir, path, hf, name, plan) }
+
+	askProd := func(r *editRouterModel, auth decommission.StageAuthorization) tea.Cmd {
+		if len(prod) == 0 {
+			return pushDecommissionExecute(r, dir, path, hf, name, plan, auth)
+		}
+		hoursSpec := tui.InputSpec{
+			ScreenID: "hosts.decommission.stage.prod_hours",
+			Title:    "⚠️  即將變更 prod 主機：" + strings.Join(prod, "；") + "\n上次 staging 驗證距今幾小時？(0-168，即 7 天內)",
+			Default:  "24",
+			Validate: validateHoursWithinWeek,
+		}
+		return r.transitionTo(r.uiFactory().Input(hoursSpec), "", func(r *editRouterModel, s screen) tea.Cmd {
+			m := s.(tui.InputScreen)
+			if m.Canceled() {
+				return back(r)
+			}
+			hours, err := strconv.Atoi(strings.TrimSpace(m.Value()))
+			if err != nil || hours < 0 || hours > 168 {
+				return back(r)
+			}
+			typedSpec := tui.InputSpec{
+				ScreenID: "hosts.decommission.stage.prod_typed",
+				Title:    `為避免手滑，請輸入大寫 "PROD" 以確認要變更正式環境`,
+				Validate: func(v string) error {
+					if v != "PROD" {
+						return fmt.Errorf(`必須完全輸入 "PROD"`)
+					}
+					return nil
+				},
+			}
+			return r.transitionTo(r.uiFactory().Input(typedSpec), "", func(r *editRouterModel, s screen) tea.Cmd {
+				m := s.(tui.InputScreen)
+				if m.Canceled() || m.Value() != "PROD" {
+					return back(r)
+				}
+				auth.ConfirmProd = true
+				auth.StagingAttestedWithinHours = hours
+				return pushDecommissionExecute(r, dir, path, hf, name, plan, auth)
+			})
+		})
+	}
+
+	if len(staging) == 0 {
+		return askProd(r, auth)
+	}
+	stagingSpec := tui.ConfirmSpec{
+		ScreenID: "hosts.decommission.stage.staging",
+		Title:    "⚠️  即將變更 staging 主機：" + strings.Join(staging, "；") + "\n確定要繼續嗎？",
+	}
+	return r.transitionTo(r.uiFactory().Confirm(stagingSpec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		m := s.(tui.ConfirmScreen)
+		if m.Canceled() || !m.Value() {
+			return back(r)
+		}
+		auth.ConfirmStaging = true
+		return askProd(r, auth)
 	})
 }
 
@@ -145,7 +234,7 @@ func pushDecommissionConfirmHostName(r *editRouterModel, dir, path string, hf *i
 // removed on disk by Finalize at this point — this call is bookkeeping,
 // not the destructive action) and reports the outcome; on block/error it
 // shows spec.md §11.5's failure screen with the resumable plan ID.
-func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan) tea.Cmd {
+func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan, auth decommission.StageAuthorization) tea.Cmd {
 	st, err := openSpecStore()
 	if err != nil {
 		return pushDecommissionError(r, dir, path, hf, name, fmt.Errorf("開啟 pilot store 失敗：%w", err))
@@ -154,7 +243,7 @@ func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory
 	ds := decommission.NewStore(st)
 
 	catalog, _ := loadContractCatalogBestEffort()
-	result, err := runHostDecommissionApply(context.Background(), ds, plan, dir, catalog, "confirmed via pilot edit TUI (typed exact host name)")
+	result, err := runHostDecommissionApply(context.Background(), ds, plan, dir, catalog, "confirmed via pilot edit TUI (typed exact host name)", auth)
 	if err != nil {
 		return pushDecommissionError(r, dir, path, hf, name, err)
 	}

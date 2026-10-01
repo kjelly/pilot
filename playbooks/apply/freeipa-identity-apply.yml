@@ -745,6 +745,14 @@
           target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
           且要跟這台機器所屬的環境 group 一致。
       tags: [always]
+      # Skipped only for the host-decommission provider's read-only query
+      # (`--tags freeipa_host_absent_inspect`, which changes nothing). It
+      # runs during `pilot host decommission plan` (service-principal
+      # discovery) and verify, which take no stage confirmation, so on a
+      # FreeIPA server in a staging or prod group the check would otherwise
+      # block planning. `| list`: ansible-core 2.19 passes ansible_run_tags
+      # as a tuple, which never equals a list.
+      when: (ansible_run_tags | list) != ['freeipa_host_absent_inspect']
 
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:
@@ -770,7 +778,7 @@
       # not mutate managed service state, so it must not be skipped in
       # check-mode.
       check_mode: false
-      tags: [identity, groups, freeipa_host_absent_inspect]
+      tags: [always, identity, groups, freeipa_host_absent_inspect]
 
     # ── Groups ─────────────────────────────────────────────────────────
     - name: "Ensure IPA groups exist"
@@ -1732,7 +1740,7 @@
       register: ipa_hbacrule_show
       changed_when: false
       failed_when: false
-      tags: [identity, hbac]
+      tags: [identity, hbac, C14]
 
     # Scoped removal: only ever removes a host/hostgroup/service/user/group
     # that is BOTH currently attached to THIS rule AND absent from THIS
@@ -2206,7 +2214,7 @@
       register: ipa_sudorule_show
       changed_when: false
       failed_when: false
-      tags: [identity, sudo]
+      tags: [identity, sudo, C17]
 
     # Scoped removal: only ever removes a host/hostgroup/command/user/group
     # that is BOTH currently attached to THIS rule AND absent from THIS
@@ -3317,4 +3325,4 @@
       ansible.builtin.command: kdestroy
       changed_when: false
       failed_when: false
-      tags: [identity]
+      tags: [always, identity]

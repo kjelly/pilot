@@ -221,7 +221,7 @@
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: siem_receiver_conf_result is changed
+          when: (siem_receiver_conf_result | default({})) is changed
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
           when: ansible_os_family == "Debian"
@@ -255,21 +255,25 @@
 
       rescue:
         - name: "ROLLBACK — remove siem receiver drop-in config"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ siem_receiver_conf }}"
             state: absent
 
         - name: "ROLLBACK — remove siem logrotate config"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ siem_logrotate_conf }}"
             state: absent
 
         - name: "ROLLBACK — restart rsyslog with the drop-ins removed"
+          tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               log-server apply failed (see task output above); the siem

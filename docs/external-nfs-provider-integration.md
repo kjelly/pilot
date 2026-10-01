@@ -66,8 +66,26 @@ Ansible target:
 - Keep `freeipa-nfs-server` empty unless a Linux NFS server is actually managed by the repository's
   apply playbook.
 - Put Linux consumers in both `freeipa-client` and `freeipa-nfs-client`.
-- Reconcile the NAS service principal and automount records through the canonical FreeIPA roster.
+- Reconcile the NAS host object and automount records through the canonical FreeIPA roster.
+  `freeipa-identity-apply.yml` does this for an appliance as follows:
+  - A `hosts[]` entry (with `ip_address`) becomes the IPA host object and a forward A record
+    (tag `C13`). No PTR record is created; add reverse DNS separately.
+  - `nfs.servers[].shares[].automount` becomes the automount location, map, `auto.master` key and
+    share key (tag `C18`). C18 reads only the `automount` fields, so an appliance share needs no
+    `source_path`, `ownership`, `acl` or `export`.
+  - C18 does not filter on server or share `state` and never deletes automount objects. To retire a
+    share, set `automount.enabled: false` and remove its keys with `ipa automountkey-del`.
+- Create the NAS service principal and key material outside Pilot. No playbook does it for an
+  appliance: `freeipa-nfs-server-apply.yml` adds `nfs/<fqdn>` and writes the keytab only to the local
+  `/etc/krb5.keytab` of the Linux host it runs on. Run `ipa service-add nfs/<nas-fqdn>` after the
+  host object and A record exist, export the key once with `ipa-getkeytab`, and import it through
+  the provider's Kerberos workflow. Running `ipa-getkeytab` again rotates the key. The roster's
+  `service_principal.principal` records the name for the Linux server apply contract; it does not
+  provision an appliance keytab.
 - Set the roster's NFS server and automount server fields to the NAS data FQDN.
+- Configure the clients' NFSv4 ID-mapping domain separately. `freeipa-nfs-client-apply.yml`
+  configures autofs through `ipa-client-automount` and SSSD; it does not manage `/etc/idmapd.conf`
+  or `rpc-gssd`.
 - Keep appliance credentials, Kerberos keys and administrative API tokens outside inventory and Git.
 - Treat appliance-side provisioning as an explicit external precondition until a provider-specific,
   tested adapter exists.
@@ -120,35 +138,173 @@ The storage administrator must define and review all of these objects:
 
 ### 5.1 Suitability
 
-DSM documents NFS security flavors for Kerberos authentication, integrity, and privacy. It also
-supports LDAP client mode and custom RFC 2307 mappings. This makes direct FreeIPA integration
-plausible, but support varies by model and DSM release and Synology does not explicitly certify
-FreeIPA as the Kerberos provider in the cited documentation. Treat it as a compatibility target
-that requires a lab proof on the exact appliance and DSM build.
+The RS3621RPxs product specification lists NFS Kerberos authentication. DSM documents NFSv4,
+Kerberos authentication/integrity/privacy, LDAP client mode and configurable RFC 2307 mappings.
+This makes direct FreeIPA integration plausible, but the cited Synology Kerberos walkthrough uses
+Active Directory rather than FreeIPA. Treat FreeIPA compatibility as unverified until the exact
+RS3621RPxs and DSM build pass the identity-mapping and access tests below.
 
 Authoritative references:
 
+- [RS3621RPxs product specifications](https://www.synology.com/en-us/products/RS3621RPxs)
+- [DSM NFS service, NFSv4 domain and Kerberos ID mapping](https://kb.synology.com/en-us/DSM/help/DSM/AdminCenter/file_winmacnfs_nfs?version=7)
 - [Synology NFS permissions and Kerberos security flavors](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/file_share_privilege_nfs?version=7)
-- [Synology LDAP client configuration](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/file_directory_service_ldap)
-- [Synology guidance for encrypted NFS transfer](https://kb.synology.com/en-in/DSM/tutorial/what_can_i_do_to_encrypt_data_transmission_when_using_nfs)
+- [Synology LDAP client configuration](https://kb.synology.com/en-us/DSM/help/DSM/AdminCenter/file_directory_service_join?version=7)
+- [Synology Kerberos NFS walkthrough](https://kb.synology.com/en-us/DSM/tutorial/how_to_set_up_kerberized_NFS)
+- [Red Hat IdM NFS service principal and keytab procedure](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html-single/configuring_and_using_network_file_services/index)
 
-### 5.2 Provider-side configuration objects
+### 5.2 Current Pilot facts (read-only inspection, 2026-10-01)
 
-- Confirm that the exact model and DSM release expose NFSv4 plus Kerberos settings.
-- Join DSM to the FreeIPA LDAP directory with an RFC 2307-compatible custom profile.
-- Confirm that DSM preserves FreeIPA numeric UID/GID values rather than generating local hashes.
-- Configure the NAS FQDN, DNS and NTP before Kerberos settings.
-- Configure the Kerberos realm and `nfs/<nas-fqdn>` identity through DSM's supported interface.
-- Create the shared folder and NFS permission rule with the required Kerberos flavor.
-- Map root to guest unless a separately reviewed workload requires another squash policy.
-- Assign read/write and read-only access using directory users/groups, not duplicated local accounts.
+The requested `pilot-cli:latest` container was inspected with the existing `infra-config` mounts
+read-only. Its inventory contains FreeIPA servers, Linux NFS clients and one Linux NFS server; it
+contains no Synology target. The canonical roster has one Linux NFS server with zero shares and an
+NFS client selector covering managed clients. These are configuration facts, not evidence that a
+NAS export or Kerberos mount works. The NAS FQDN/IP, DSM build and export path are still unknown.
 
-### 5.3 Synology-specific acceptance
+### 5.3 DSM setup procedure (RS3621RPxs / DSM 7.x) — TODO: VERIFY on target hardware
+
+The end-to-end integration for the RS3621RPxs storage appliance is partitioned into four concrete steps:
+
+#### Step 1: Network, DNS and Time Synchronization
+1. Assign a static IP address to the RS3621RPxs data interface and configure a canonical FQDN (e.g. `nas.linker.internal`).
+2. Register both forward (A) and reverse (PTR) DNS records in FreeIPA DNS:
+   - Forward A: `nas.linker.internal` → `<NAS_IP>`
+   - Reverse PTR: `<NAS_IP>` → `nas.linker.internal`
+   > **Important**: Kerberos GSSAPI authentication strictly requires canonical reverse DNS resolution. If PTR resolution returns an unexpected alias or IP, client Kerberos ticket negotiation will fail closed.
+3. Configure the NAS NTP client to synchronize with the FreeIPA server or the authoritative realm time source (e.g. `ipa1.linker.internal`). Clock skew between NAS, FreeIPA, and clients must remain strictly under 5 minutes.
+
+#### Step 2: FreeIPA Service Principal & Keytab Generation
+Execute the following on the FreeIPA server (or via an administrative host with `admin` credentials):
+```bash
+# 1. Acquire admin Kerberos ticket
+kinit admin
+
+# 2. Register NAS host object in FreeIPA (if not already managed via Pilot roster)
+ipa host-add nas.linker.internal --ip-address=<NAS_IP>
+
+# 3. Create the NFS service principal
+ipa service-add nfs/nas.linker.internal
+
+# 4. Export the service keytab to a local file
+ipa-getkeytab -p nfs/nas.linker.internal -k /tmp/synology-nfs.keytab
+```
+Download `/tmp/synology-nfs.keytab` securely for upload into DSM, then remove the temporary file from the server.
+> **Keytab Rotation Warning**: Re-running `ipa-getkeytab` increments the Key Version Number (KVNO) in FreeIPA and invalidates previously exported keytabs. If re-issued, the new keytab must be re-imported into DSM immediately.
+
+#### Step 3: Synology DSM LDAP Client Configuration (Identity Synchronization)
+1. In DSM, navigate to **Control Panel → Domain/LDAP → LDAP** and check **Enable LDAP Client**.
+2. Configure connection parameters:
+   - **LDAP Server Address**: `ipa1.linker.internal` (or FreeIPA server IP)
+   - **Encryption**: `SSL/TLS` or `StartTLS` (import FreeIPA CA certificate under **Control Panel → Security → Certificate** first)
+   - **Base DN**: `dc=linker,dc=internal` (derived from realm domain)
+   - **Profile**: Select **Custom** and verify RFC 2307 attribute mappings:
+     - User ObjectClass: `posixAccount` (`uidNumber` → UID, `gidNumber` → primary GID, `uid` → username)
+     - Group ObjectClass: `posixGroup` (`gidNumber` → GID, `cn` → group name, `memberUid` → member)
+   - **Bind DN / Password**: Provide a dedicated directory bind account or admin credentials.
+3. **Numeric UID/GID Integrity**: Do **not** enable DSM UID/GID translation/shifting options. Numeric IDs must match FreeIPA Linux clients (`id <username>`) 1:1.
+4. Verify under **LDAP Users** and **LDAP Groups** tabs that FreeIPA identities appear with correct numeric IDs.
+
+#### Step 4: Synology DSM NFSv4.1 & Kerberos Service Configuration
+1. In DSM, navigate to **Control Panel → File Services → NFS**:
+   - Check **Enable NFS Service**.
+   - Set **Maximum NFS protocol** to **NFSv4.1** (or NFSv4).
+2. Click **Advanced Settings**:
+   - **NFSv4 domain**: Set to the client ID-mapping domain (e.g. `linker.internal`, matching `/etc/idmapd.conf`).
+   - Under **Kerberos Settings**, click **Add**:
+     - **Realm**: `LINKER.INTERNAL` (must be uppercase)
+     - **KDC Server**: `ipa1.linker.internal`
+     - **Keytab**: Upload `synology-nfs.keytab`
+   - Select the uploaded keytab as active for NFS service.
+
+#### Step 5: Shared Folder & NFS Export Permissions
+1. Navigate to **Control Panel → Shared Folder**, select the target share (e.g. `projects`), and click **Edit**.
+2. Switch to **NFS Permissions** tab and click **Create**:
+   - **Hostname or IP**: Allowed client CIDR (e.g. `10.1.0.0/16`, `10.20.40.0/24`) or specific host FQDNs.
+   - **Privilege**: Read/Write (or Read-Only).
+   - **Squash**: Select **Map root to guest** (`root_squash` requirement per Pilot security contract).
+   - **Security**: Select **Kerberos integrity (krb5i)** or **Kerberos privacy (krb5p)**. Uncheck `AUTH_SYS` / `sys` to prevent unauthenticated fallback.
+   - Check **Enable asynchronous** and **Allow connections from non-privileged ports** if required by client kernel configuration.
+3. Switch to **Permissions** tab:
+   - Select **LDAP Users** or **LDAP Groups** from the drop-down.
+   - Grant appropriate Read/Write permissions to target FreeIPA groups (e.g. `data-projects-rw`).
+
+---
+
+### 5.4 Pilot Integration: Canonical Roster & Automount Management
+
+Do **not** place the Synology appliance into the `freeipa-nfs-server` Ansible inventory group. `playbooks/apply/freeipa-nfs-server-apply.yml` expects a Linux host and will fail on DSM.
+
+Instead, model the appliance in the canonical identity roster (`.vault/ipa-identity.yaml`):
+
+```yaml
+nfs:
+  servers:
+    - host: nas.linker.internal
+      state: present
+      service_principal:
+        ensure: true
+        principal: nfs/nas.linker.internal
+      shares:
+        - name: nas-projects
+          state: present
+          automount:
+            enabled: true
+            location: default
+            mount_root: /mnt/nas
+            map: auto.nas
+            key: projects
+            server: nas.linker.internal
+            remote_path: /volume1/projects
+            options: [fstype=nfs4, sec=krb5i, hard, timeo=600, retrans=2]
+
+nfs_clients:
+  - hostgroup: nfs-clients-all
+    state: present
+    verification_mounts: [/mnt/nas/projects]
+```
+
+#### How Pilot reconciles this:
+1. `pilot roster lint <roster-path>` validates the roster structure against schema v3.
+2. `freeipa-identity-apply.yml` (tag `C18`) connects to the FreeIPA server and idempotently creates:
+   - Automount location: `default`
+   - Master map key: `auto.master` → key `/mnt/nas`, map `auto.nas`
+   - Share map key: `auto.nas` → key `projects`, info `-fstype=nfs4,sec=krb5i,hard,timeo=600,retrans=2 nas.linker.internal:/volume1/projects`
+3. `freeipa-nfs-client-apply.yml` runs on enrolled Linux clients (`freeipa-nfs-client` role), configuring `autofs` and the SSSD autofs responder. Clients mount the NAS volume dynamically upon path access without any static `/etc/fstab` entry.
+
+---
+
+### 5.5 Client Verification and Negative-Path Checks
+
+On an enrolled Linux client host (e.g. `ml-kusanagi`):
+
+1. **Authenticated Kerberos Mount Verification**:
+   ```bash
+   # Acquire user Kerberos ticket from FreeIPA
+   kinit <ipa-user>
+
+   # Trigger autofs access
+   ls -la /mnt/nas/projects
+
+   # Verify effective mount attributes
+   findmnt -t nfs4 /mnt/nas/projects
+   # Expected output contains: nfs4, sec=krb5i (or sec=krb5p)
+   ```
+2. **Read/Write & Ownership Verification**:
+   - An authorized user creates a file: verify permissions and group ownership match `posixAccount` / `posixGroup` IDs without numeric shifting.
+3. **Negative-Path Verification**:
+   - **No Kerberos Ticket**: Destroy ticket with `kdestroy`. Attempt access to `/mnt/nas/projects` — must fail with `Permission denied`.
+   - **Root Squash**: Attempt access as local client `root` — access must be mapped to guest/nobody and restricted according to the squash policy.
+   - **Unauthorized User**: Access as a user not in the authorized LDAP group — must fail with `Permission denied`.
+
+---
+
+### 5.6 Synology-specific acceptance — TODO: VERIFY on RS3621RPxs
 
 - DSM shows the expected LDAP users/groups with unchanged numeric IDs.
-- A Kerberos user is not mapped to `guest`; this detects missing DSM ID mapping or LDAP membership.
-- The NFS permission rule requires the selected Kerberos flavor.
+- An authenticated Kerberos principal maps to the intended LDAP identity, never `guest`; verify `GSSAuthName` or the selected DSM mapping path explicitly.
+- The NFS permission rule requires the selected Kerberos flavor (`krb5i` / `krb5p`).
 - Read/write, read-only and denied FreeIPA identities behave differently as designed.
+- The effective NFSv4 ID-mapping domain agrees between DSM and the Linux clients.
 - The same checks pass after a DSM reboot and after directory caches are refreshed.
 
 ## 6. QNAP QTS and QuTS hero

@@ -65,6 +65,10 @@ type GenericComponentProviderConfig struct {
 
 	// ExtraArgs is appended verbatim to every ansible-playbook invocation.
 	ExtraArgs []string
+
+	// StageArgs returns the stage -e arguments for the retiring host
+	// (decommission.StageScope); nil adds none.
+	StageArgs func() ([]string, error)
 }
 
 // GenericComponentProvider implements providers.Provider for any
@@ -97,6 +101,10 @@ func (p *GenericComponentProvider) Inspect(ctx context.Context, in InspectInput)
 	}
 	args = append(args, "--tags", "inspect")
 	args = append(args, p.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, p.cfg.StageArgs)
+	if stageErr != nil {
+		return Inspection{}, fmt.Errorf("%s inspect %s: %w", p.cfg.ComponentID, hostName, stageErr)
+	}
 
 	res, err := p.exec(ctx, args)
 	if err != nil {
@@ -157,6 +165,10 @@ func (e *genericComponentUninstallStep) Execute(ctx context.Context) error {
 		args = append(args, "--limit", e.hostName)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.StageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("%s uninstall %s: %w", e.provider.cfg.ComponentID, e.hostName, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("%s uninstall %s: %w", e.provider.cfg.ComponentID, e.hostName, err)

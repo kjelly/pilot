@@ -254,7 +254,7 @@
         executable: /bin/bash
       changed_when: false
       no_log: true
-      tags: [AD_enrollment, AD_keytab]
+      tags: [AD_enrollment, AD_keytab, AD_service]
 
     # Step 5 (spec.md §31/D4): this Directory host joins
     # pilot-access-directories — the hostgroup that controls who may SSH
@@ -455,7 +455,7 @@
       ansible.builtin.command:
         argv: [kdestroy]
       changed_when: false
-      tags: [AD_keytab]
+      tags: [AD_keytab, AD_service]
 
     # Step 10/11 (spec.md §31): install both binaries.
     - name: "Step 10: install pilot CLI"
@@ -691,7 +691,7 @@
         state: restarted
       when:
         - not ansible_check_mode
-        - directory_binary_copy.changed or directory_config_copy.changed
+        - directory_binary_copy is changed or (directory_config_copy | default({})) is changed
       tags: [AD_service]
 
     # Step 17 (spec.md §31): capability probe — a real connection over

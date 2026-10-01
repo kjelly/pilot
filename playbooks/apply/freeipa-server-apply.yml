@@ -673,18 +673,21 @@
 
       rescue:
         - name: "FreeIPA — rescue: dump ipactl status"
+          tags: [always]
           ansible.builtin.command: ipactl status
           register: ipa_rescue_status
           changed_when: false
           failed_when: false
 
         - name: "FreeIPA — rescue: tail install log"
+          tags: [always]
           ansible.builtin.command: tail -n 60 /var/log/ipaserver-install.log
           register: ipa_rescue_log
           changed_when: false
           failed_when: false
 
         - name: "FreeIPA — rescue: surface diagnostics + fail"
+          tags: [always]
           ansible.builtin.fail:
             msg: |
               FreeIPA bring-up FAILED. Diagnostics:

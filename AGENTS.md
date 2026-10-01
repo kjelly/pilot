@@ -525,6 +525,21 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    `internal/spec/tagged_run_gates_regression_test.go` 的
    `TestRegression_StageGatesAlwaysRunInTaggedPlays` 與
    `TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 對全 repo 鎖住這兩件事。
+7. pilot 自己呼叫 playbook 的地方也要帶 stage:`-e stage=` 必須等於那次 run 的
+   目標主機在 inventory 裡的環境 group,staging/prod 還要帶操作者給的確認。
+   `pilot host decommission` 原本完全不帶,staging/prod 主機一律卡在
+   cross-check(2026-09-25 重現);現在由 `internal/decommission/stage.go` 的
+   `StageScope` 依「每次 run 的目標主機」決定 stage——退役主機用它自己的,
+   FreeIPA identity reconcile 用 freeipa-server 主機的,Wazuh deregistration
+   用 wazuh-manager 主機的——`apply`/`resume` 收 `--confirm-staging`、
+   `--confirm-prod`、`--staging-attested-within-hours`(TUI 問同樣的問題),
+   缺確認時在任何步驟前拒絕。一次 run 的目標主機跨不同 stage 時直接報錯。
+   唯讀查詢(`freeipa_host_absent_inspect`,`plan` 階段就會跑;
+   `iep_decommission_verify`)不帶 stage,對應 playbook 只在「這個 tag 是唯一
+   的 tag」時跳過 cross-check(`(ansible_run_tags | list) != [...]`——
+   ansible-core 2.19 的 `ansible_run_tags` 是 tuple,直接跟 list 比永遠不相等),
+   由 `TestRegression_DecommissionQueryCrossCheckExemptions` 鎖住。
+   新增會呼叫 playbook 的 pilot 功能時照這個模式做,不要只帶 sandbox。
 
 另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的
 `assert target_group is not defined`),擋下「全站入口誤帶 `-e target_group=`
@@ -557,6 +572,56 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   的那條路徑。
 - 跑 `internal/spec` 裡名稱含 `AlwaysTagPrerequisite` 的 regression lint,
   確認新 task 沒有漏掛。
+- 檢查(assert/fail)本身也一樣:放在 `pre_tasks` 的輸入檢查,或跟帶 row tag
+  的步驟放在同一個 task 清單裡的檢查,沒有 tag 就會在任何 `--tags` run 被跳過,
+  而它要擋的步驟照跑。輸入檢查一律標 `always`(它讀的 fact 也要 `always`,
+  見上一點);流程中間驗證某一步結果的 assert 標那一步的 row tag。2026-10-01
+  修正 10 支 playbook 共 20 個沒有 tag 的檢查(必填變數、secrets、S3 位址、
+  alertmanager 設定、detection-engine feature profile,以及 detection-engine/
+  agent-controller 複製 binary 後的 SHA256 與 status 檢查),
+  `internal/spec/tagged_run_gates_regression_test.go::TestRegression_NoUntaggedChecksInTaggedPlays`
+  對全 repo 鎖住。跟沒有 tag 的步驟放在一起的檢查不受影響(decommission
+  playbook 的移除與驗證都只在完整 run 執行)。
+- rescue 也一樣會被 `--tags` 篩選:帶 tag 的 run 失敗時,只有 `--tags` 也選得到
+  的 rescue task 會執行(ansible-core 2.19.2 實測)。rescue task 沒有 tag,
+  `--tags <row>` 失敗就不會回滾;rescue 只剩一部分 task 有 `always`、最後的
+  `fail` 卻沒有,rescue 會「成功」,整個 run 反而回報成功。規則:block 裡有帶
+  tag 的 task,rescue 每個 task 都標 `always`;rescue 讀的 snapshot/fact(備份檔、
+  `*_is_upgrade` 這類升級判斷、備份目錄)也要標 `always`(上面第一點,
+  `AlwaysTagPrerequisite` lint 會抓)。只還原「這次 run 改過的東西」的 rescue
+  可以改用 `x is defined` 檢查 setter 有沒有跑(audit-log-forwarding 的
+  audit.rules 還原),lint 接受這種寫法,但不接受單純的 `| default`。
+  block 的 `always:` 區段同理。
+  `internal/spec/rescue_tags_regression_test.go::TestRegression_RescueRunsWheneverItsBlockDoes`
+  對全 repo 鎖住;2026-10-01 修正 8 支(agent-controller、alertmanager、
+  dashboard、detection-engine、pam-oidc-sshd、prometheus、restic-backup、
+  thanos-query),同日再修正其餘 12 支,`rescueTagGapAllowlist` 清空。
+- 不只 `always` task:帶 row tag 的 task 讀的 `register`/`set_fact`,setter 也
+  要在同樣的 `--tags` 下執行(setter 標 `always`,或帶 reader 的每個 tag),
+  不然就用 `| default(...)`/`is defined` 讀。最常見的是 container task 的
+  `restart: "{{ x_result is changed }}"`:render task 是別的 row tag,
+  `--tags <container row>` 每次都在 container task 報 undefined。rescue 會在
+  `--tags` 下回滾之後,這種必然失敗會連帶刪掉設定檔或停掉服務,所以要一起修。
+  `restart:` 這類「這次有沒有改」的判斷用 `(x_result | default({})) is changed`
+  (render 沒跑就是沒改,不重啟)。`include_tasks` 檔案裡設的 fact 也算:
+  wazuh-manager C10、wazuh-fim C7 的 `/etc/hosts` pin 讀
+  `tasks/resolve-hosts-alias-target.yml` 設的 `hosts_alias_resolved_ip`,但那個
+  include 沒有 tag,這兩列每次都失敗,rescue 會在 `--tags` 下跑之後就把部署好的
+  設定刪掉(2026-10-01 實跑抓到;audit-log-forwarding C15、log-shipping C5、
+  restic-backup C10 同樣)。只讀的共用 include 用
+  `tags: [always]` + `apply: {tags: [always]}`;lint 會展開 include 檔案檢查。
+  `internal/spec/tagged_prerequisite_regression_test.go::TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`
+  對全部 `playbooks/apply/*.yml` 檢查;2026-10-01 修了上面 8 支裡的 6 支,
+  同日再修 rescue 那 12 支裡的 8 支,最後修其餘 7 支(freeipa-client、
+  freeipa-identity、gateway-scope、pilot-access-directory、pilot-access-gateway、
+  pilot-session-store、seaweedfs-s3),`taggedPrerequisiteAllowlist` 清空。
+  Kerberos ticket 也是前置:跑 `ipa` 指令的 task,同一個 play 裡前面的 kinit
+  要標 `always` 或帶它的 row tag——playbook 在完整 run 結尾會 `kdestroy`,
+  沒有快取的 ticket 可以撐。freeipa-identity 的 admin kinit 原本只有群組 tag
+  (每個 C<n> row 都報 `did not receive Kerberos credentials`),
+  pilot-access-directory AD_service、pilot-session-store SS_service 也一樣;
+  `internal/spec/ipa_kinit_regression_test.go::TestRegression_IpaCommandsHaveAKinitForTheirTags`
+  對全部 `playbooks/apply/*.yml` 檢查(對應的 kdestroy 也要帶同樣的 tag)。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -670,6 +735,16 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    字串裡(含註解)的引號與 Jinja `{{ }}`/`{% %}`/`{# #}` 都要成對;
    `internal/spec/freeform_args_regression_test.go::TestRegression_FreeFormCommandsSplitInAnsible`
    用與 `split_args` 相同的規則檢查全部 `playbooks/**`。
+11. **在 loop 裡累加的 fact,loop 沒有任何 item 時就不會被設定**:
+   `x: "{{ (x | default([])) + [item] }}"` 這種寫法,清單是空的時候 `x` 仍然
+   undefined,之後任何不帶 default 的讀取都會失敗。2026-09-25
+   `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized` 在
+   `endpoints: []` 時讓 decommission verify 查詢直接報
+   `'internal_endpoint_normalized' is undefined`。累加前先用 `set_fact` 設成
+   空值(`[]`/`{}`);或確保每個不帶 default 的讀取都被檢查過它的 `when:` 擋住,
+   或跟累加的 task 用同一個 loop。
+   `internal/spec/loop_accumulator_regression_test.go::TestRegression_LoopAccumulatorsAreInitializedOrGuarded`
+   對全部 `playbooks/**` 檢查。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1293,3 +1368,9 @@ git status --short
 | 2026-09-24 | v1.35 | §4.5 第 7 點：`pipefail` 下不准 pipe 進 `head`/`grep -q` 這類提早結束的 reader（SIGPIPE → rc=141）。修正 `tasks/freeipa-dns-client-resolver.yml` snapshot 的 `nmcli … \| head -n1`（讓 main CI 偶發紅燈），新增全 repo lint `TestRegression_PipefailShellTasksHaveNoEarlyExitReader`；新增第 10 點：free-form shell 字串（含註解）的引號要成對，否則 `split_args` 讓整支 task 檔載入失敗，新增 `TestRegression_FreeFormCommandsSplitInAnsible` | pilot |
 | 2026-09-24 | v1.36 | §4.3 新增第 5 點：prod attestation gate 的 `that:` 不准放 `stage != 'prod'`（搭配 `when: stage == 'prod'` 會讓 prod 永遠失敗）。修正 9 支 playbook 共 10 道 gate，新增全 repo lint `TestRegression_AssertNeverNegatesItsOwnWhen` | pilot |
 | 2026-09-25 | v1.37 | §4.3 新增第 6 點：stage gate 一律標 `always`，否則 `--tags`（包括 `pilot deploy` 單一元件精靈的 tags 欄位）會跳過 cross-check，讓 prod group 主機以 sandbox 規則被改。6 支 playbook 的 18 道 gate 改標 `always`，freeipa-ca-trust、internal-endpoint（兩個 play）、reverse-proxy 補上 cross-check；新增 lint `TestRegression_StageGatesAlwaysRunInTaggedPlays`、`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` | pilot |
+| 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |
+| 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
+| 2026-10-01 | v1.40 | §4.4 補一點：assert/fail 檢查本身也要能在 `--tags` run 執行——輸入檢查標 `always`，流程中間的驗證標所屬步驟的 row tag。修正 10 支 playbook 共 20 個沒有 tag 的檢查，新增全 repo lint `TestRegression_NoUntaggedChecksInTaggedPlays`；`preTaskGateNotAlwaysAllowlist` 清空 | pilot |
+| 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
+| 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查；兩支前置 lint 都會展開 `include_tasks`/`import_tasks` 檔案裡設的 fact，抓到並修正 5 支 playbook 的 `/etc/hosts` pin 讀未標 tag 的 resolver include（wazuh-manager C10、wazuh-fim C7、audit-log-forwarding C15、log-shipping C5、restic-backup C10） | pilot |
+| 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |

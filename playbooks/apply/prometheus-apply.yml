@@ -411,6 +411,7 @@
     # supply this — same "required only when actually used" shape as
     # alertmanager_target_host.
     - name: "Gate: node-exporter basic-auth credentials required when there are scrape targets"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (node_exporter_basic_auth_user | default('', true) | length > 0)
@@ -495,6 +496,7 @@
     # "required only when actually used" shape as the node-exporter gate
     # above.
     - name: "Gate: dcgm-exporter basic-auth credentials required when there are scrape targets"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (dcgm_exporter_basic_auth_user | default('', true) | length > 0)
@@ -513,6 +515,7 @@
     # default would silently collide across sites once a second one is
     # deployed instead of failing loudly).
     - name: "Gate: prometheus_site_label required"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - prometheus_site_label is defined and prometheus_site_label | length > 0
@@ -521,6 +524,7 @@
           — see docs/verification/prometheus.md §1.5 for why there is no default.
 
     - name: "Gate: required S3 secrets present (fail early, before any mutation)"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - thanos_aws_access_key_id is defined and thanos_aws_access_key_id | length > 0
@@ -532,6 +536,7 @@
 
     # Same "no reachable destination" trap as restic-backup.md's gate.
     - name: "Gate: S3 destination must be resolvable"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (thanos_s3_target_host | default('', true) | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
@@ -1199,12 +1204,12 @@
             state: started
             restart_policy: unless-stopped
             restart: >-
-              {{ prometheus_yml_result is changed
-                 or alert_rules_result is changed
-                 or (snmp_alert_rules_result is defined and snmp_alert_rules_result is changed)
-                 or node_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_removed is changed
+              {{ (prometheus_yml_result | default({})) is changed
+                 or (alert_rules_result | default({})) is changed
+                 or (snmp_alert_rules_result | default({})) is changed
+                 or (node_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_removed | default({})) is changed
                  or monitoring_files_changed | default(false) }}
             networks:
               - name: "{{ docker_network_name }}"
@@ -1259,7 +1264,7 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ objstore_yml_result is changed }}"
+            restart: "{{ (objstore_yml_result | default({})) is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -1287,6 +1292,7 @@
 
       rescue:
         - name: "ROLLBACK — remove the objstore config file (contains S3 secret)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ thanos_config_dir }}/objstore.yml"
             state: absent
@@ -1297,11 +1303,13 @@
         # (neither does the existing rescue, for objstore.yml's own
         # config), only the credential material.
         - name: "ROLLBACK — remove monitoring basic-auth password files (contain secrets)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ monitoring_secrets_host_dir }}"
             state: absent
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               prometheus apply FAILED (see task output above); the objstore

@@ -411,8 +411,10 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 
 	// Restart must account for the password-file changing (credential
 	// rotation), on top of the existing prometheus.yml/alert-rules gates.
-	if !strings.Contains(applyRaw, "node_exporter_password_file_result is changed") {
-		t.Errorf("prometheus-apply.yml's container restart condition must include node_exporter_password_file_result is changed")
+	// The default keeps `--tags C1` from failing when the render did not
+	// run (TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet).
+	if !strings.Contains(applyRaw, "(node_exporter_password_file_result | default({})) is changed") {
+		t.Errorf("prometheus-apply.yml's container restart condition must include (node_exporter_password_file_result | default({})) is changed")
 	}
 
 	// Detection Engine spec §9: auto-discovery from host-monitoring must
@@ -490,11 +492,11 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 
 	// Restart must account for dcgm-exporter credential rotation AND
 	// removal, on top of every other existing restart trigger.
-	if !strings.Contains(applyRaw, "dcgm_exporter_password_file_result is changed") {
-		t.Errorf("prometheus-apply.yml's container restart condition must include dcgm_exporter_password_file_result is changed")
+	if !strings.Contains(applyRaw, "(dcgm_exporter_password_file_result | default({})) is changed") {
+		t.Errorf("prometheus-apply.yml's container restart condition must include (dcgm_exporter_password_file_result | default({})) is changed")
 	}
-	if !strings.Contains(applyRaw, "dcgm_exporter_password_file_removed is changed") {
-		t.Errorf("prometheus-apply.yml's container restart condition must include dcgm_exporter_password_file_removed is changed")
+	if !strings.Contains(applyRaw, "(dcgm_exporter_password_file_removed | default({})) is changed") {
+		t.Errorf("prometheus-apply.yml's container restart condition must include (dcgm_exporter_password_file_removed | default({})) is changed")
 	}
 
 	// "dcgm" must be a reserved external-monitoring jobName, alongside the

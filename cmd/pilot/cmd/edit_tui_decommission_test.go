@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/exp/teatest/v2"
 
+	"github.com/kjelly/pilot/internal/decommission"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -101,5 +104,94 @@ func TestEditTUI_HostDelete_EntersDecommissionFlow(t *testing.T) {
 	}
 	if strings.Contains(view, "確定要刪除主機") {
 		t.Fatal("the old direct-delete confirmation screen must no longer be reachable")
+	}
+}
+
+// decommissionStageRouter plans web1 (env: prod) through the real CLI and
+// returns a teatest model positioned on the TUI's stage confirmation, the
+// step right after the typed host name.
+func decommissionStageRouter(t *testing.T) (ws, ansibleLog string, tm *teatest.TestModel, waitFor func(string)) {
+	t.Helper()
+	origDataDir := dataDir
+	dataDir = ""
+	t.Cleanup(func() { dataDir = origDataDir })
+	ws, ansibleLog = writeHostDecommissionStageFixture(t)
+	t.Cleanup(func() { _, _ = runPilotForTest(t, "--help") })
+
+	out, err := runPilotForTest(t, "host", "decommission", "plan", "--dir", ws, "--host", "web1")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	st, err := openSpecStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := decommission.NewStore(st).LoadPlan(extractPlanID(t, out))
+	_ = st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostsPath := filepath.Join(ws, "hosts.yml")
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var router editRouterModel
+	pushDecommissionStageConfirm(&router, ws, hostsPath, hf, "web1", plan)
+	tm = teatest.NewTestModel(t, router, teatest.WithInitialTermSize(220, 40))
+	waitFor = func(want string) {
+		t.Helper()
+		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+			return strings.Contains(string(b), want)
+		}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+	}
+	return ws, ansibleLog, tm, waitFor
+}
+
+// TestEditTUI_Decommission_ProdHostAsksAttestationAndTypedPROD covers the
+// TUI side of the stage confirmation: a prod host's decommission asks for
+// the hours since staging was last verified and a typed "PROD", as pilot
+// deploy does, and then runs with the prod stage arguments.
+func TestEditTUI_Decommission_ProdHostAsksAttestationAndTypedPROD(t *testing.T) {
+	ws, ansibleLog, tm, waitFor := decommissionStageRouter(t)
+
+	waitFor("即將變更 prod 主機")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // accept the 24 h default
+	waitFor(`請輸入大寫 "PROD"`)
+	tm.Type("PROD")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	waitFor("已完成下架主機")
+
+	logged, err := os.ReadFile(ansibleLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "-e stage=prod -e confirm_prod=true -e staging_attested_within_hours=24") {
+		t.Errorf("TUI decommission ran ansible-playbook without the prod stage: %q", logged)
+	}
+	hosts, err := os.ReadFile(filepath.Join(ws, "hosts.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(hosts), "web1") {
+		t.Errorf("hosts.yml still lists web1:\n%s", hosts)
+	}
+}
+
+// TestEditTUI_Decommission_CancelAtStageRunsNothing: Esc on the prod
+// attestation screen goes back to the plan summary without running any
+// playbook.
+func TestEditTUI_Decommission_CancelAtStageRunsNothing(t *testing.T) {
+	_, ansibleLog, tm, waitFor := decommissionStageRouter(t)
+
+	waitFor("即將變更 prod 主機")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
+	waitFor("下一步需輸入主機名稱確認")
+	if _, err := os.Stat(ansibleLog); !os.IsNotExist(err) {
+		t.Fatal("cancelling the stage confirmation ran ansible-playbook")
 	}
 }
