@@ -810,8 +810,8 @@
         - >-
           ipa_sssd_services is changed or
           ipa_sssd_sudo_provider is changed or
-          ipa_sssd_cache_credentials is changed or
-          ipa_sssd_offline_credentials_expiration is changed or
+          (ipa_sssd_cache_credentials | default({})) is changed or
+          (ipa_sssd_offline_credentials_expiration | default({})) is changed or
           (ipa_sssd_explicit_responder_sockets.results | default([]) |
            selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
       tags: [freeipa-client, C8]

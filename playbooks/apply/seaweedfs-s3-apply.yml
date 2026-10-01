@@ -211,7 +211,7 @@
         name: pilot-seaweedfs
         image: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
         state: started
-        restart: "{{ seaweedfs_s3_json_result is changed }}"
+        restart: "{{ (seaweedfs_s3_json_result | default({})) is changed }}"
         restart_policy: unless-stopped
         hostname: seaweedfs
         command: >-

@@ -138,10 +138,12 @@
       when: gateway_scope_automember_action != 'disable'
 
     - name: Compute target hostgroup name
+      tags: [always]
       ansible.builtin.set_fact:
         gateway_target_hostgroup: "pilot-target-{{ gateway_scope }}"
 
     - name: Kinit admin
+      tags: [always]
       ansible.builtin.shell: |
         set -euo pipefail
         echo '{{ ipa_admin_password }}' | kinit admin
@@ -154,6 +156,7 @@
     # rc!=0 (hostgroup doesn't exist yet) is a valid, expected state, not
     # a failure. Skipped for disable-auto, which never touches membership.
     - name: Look up current hostgroup membership (may not exist yet)
+      tags: [always]
       ansible.builtin.command:
         argv: [ipa, hostgroup-show, "{{ gateway_target_hostgroup }}", --all]
       register: gateway_hostgroup_show
@@ -171,6 +174,7 @@
     # key crash is the same one freeipa-dns-apply.yml/internal-endpoint hit
     # before), so this must never evaluate .rc/.stdout on that path.
     - name: Compute add/remove/keep diff
+      tags: [always]
       ansible.builtin.set_fact:
         gateway_hostgroup_exists: "{{ gateway_hostgroup_show.rc == 0 }}"
         gateway_current_hosts_short: "{{ current_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
@@ -181,6 +185,7 @@
       when: gateway_scope_automember_action != 'disable'
 
     - name: Compute add/remove/keep (short-name diff)
+      tags: [always]
       ansible.builtin.set_fact:
         gateway_hosts_to_add: "{{ gateway_desired_hosts_short | difference(gateway_current_hosts_short) }}"
         gateway_hosts_to_remove: "{{ gateway_current_hosts_short | difference(gateway_desired_hosts_short) }}"
@@ -188,6 +193,7 @@
       when: gateway_scope_automember_action != 'disable'
 
     - name: "Plan: add / remove / keep"
+      tags: [always]
       ansible.builtin.debug:
         msg:
           scope: "{{ gateway_scope }}"
