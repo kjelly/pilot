@@ -31,11 +31,11 @@
 2026-09-24 再對 Ubuntu 24.04 與 AlmaLinux 9 一般 client 兩台 vm-target 實跑
 `vm-target test`（candidate `62d8069`），兩台皆 6/6 PASS + `changed=0`，
 並驗證 rescue rollback，見 `docs/evidence/freeipa-dns-client/2026-09-24-62d8069.md`。
-**最新驗證（C7）**：2026-10-01，candidate `a3b2b15`，dns tier 拓樸（Ubuntu 與 AlmaLinux
+**最新驗證（C7）**：2026-10-01，candidate `5478c5d`（含 dns tier 的 ACL 修正），dns tier 拓樸（Ubuntu 與 AlmaLinux
 consumer 加一台 tier 主機）C1–C7 21/21 PASS、L6 `changed=0`；第一台 tier 封包被丟棄時
 查詢由 15／20／5 秒（存在／不存在／外部名稱）降到 3／4／1 秒；EL 改成單一 nameserver
 時清掉 options、rescue 還原 options。見
-`docs/evidence/freeipa-dns-client/2026-10-01-a3b2b15.md`。
+`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -277,3 +277,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `3f781fb` 的 dns tier 拓樸驗證：Ubuntu 與 AlmaLinux consumer 加上一台 tier 主機，C1–C6 兩輪都是 18/18 PASS（一輪由本 playbook 設定，一輪由 internal-endpoint 的 baseline 設定），nameserver 依序是兩台 tier、最後 FreeIPA；見 `docs/evidence/dns/2026-10-01-3f781fb.md` | sre |
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `cbe95b8` 重跑：dns tier 拓樸 18/18 PASS；真實 `pilot reconcile` 套用到 3 台 consumer 後 18/18 PASS；見 `docs/evidence/dns/2026-10-01-cbe95b8.md` | sre |
 | 2026-10-01 | v1.1 | 新增 C7：2 筆以上 nameserver 時 resolver 用 `timeout:1 attempts:2`，只有 1 筆時維持 glibc 預設（起因：dns tier 第一台整台失聯時 consumer 每次查詢要等 5～20 秒，見 `docs/verification/dns.md` §8）。實跑證據見下一筆 evidence 摘要 | sre |
+| 2026-10-01 | v1.1 | Checklist 不變。candidate `5478c5d`（C7 加上 dns tier 的 ACL 修正與 main）重跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`，E6、EL 移除路徑與 rescue 結果相同（`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`） | sre |

@@ -46,11 +46,11 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   `vm-target topology test` L1→L6 PASS（verify 6/6、重跑 `changed=0`），rescue
   把 connection DNS 設定還原成上一次成功的值。Ubuntu 路徑未變動。見
   [evidence](../evidence/freeipa-dns-client/2026-09-24-f405753.md)。
-- 最新實跑（2026-10-01，candidate `a3b2b15`，`docs/topologies/dns-tier-topology.yaml`）：
+- 最新實跑（2026-10-01，candidate `5478c5d`，含 dns tier 的 ACL 修正，`docs/topologies/dns-tier-topology.yaml`）：
   新增的 C7（有 2 筆以上 nameserver 時 `options timeout:1 attempts:2`）在 Ubuntu 與
   AlmaLinux consumer 都 PASS，C1–C7 21/21、重跑 `changed=0`；第一台 nameserver 封包被丟棄時
   查詢從 5～20 秒降到 1～4 秒；EL 改成單一 nameserver 會清掉 options，rescue 會還原 options。見
-  [evidence](../evidence/freeipa-dns-client/2026-10-01-a3b2b15.md)。
+  [evidence](../evidence/freeipa-dns-client/2026-10-01-5478c5d.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
