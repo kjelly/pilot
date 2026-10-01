@@ -124,47 +124,22 @@ filter hosts by `targets.platforms` at runtime.
 
 ## Actual-run evidence
 
-2026-08-13, a disposable 3-VM `pilot vm-target` topology (`ca-trust-ipa`
-AlmaLinux 9 as the freeipa-server, `ca-trust-ubuntu` Ubuntu 24.04 and
-`ca-trust-el` AlmaLinux 9 as two managed hosts with no FreeIPA/AAA
-enrollment). Full transcripts, PLAY RECAPs, and the real bug this round
-found and fixed (a `--check`-mode assert crash caused by an
-`ansible.builtin.command` task missing `check_mode: false`) are recorded in
-`docs/evidence/freeipa-ca-trust/2026-08-13.md`.
+Latest: 2026-10-01, candidate `d175489` (tree `83a20d0996001915bea56aba393baef09da10db8`),
+**PASS**. Summary: [`docs/evidence/freeipa-ca-trust/2026-10-01-d175489.md`](../evidence/freeipa-ca-trust/2026-10-01-d175489.md).
 
-```
-$ pilot vm-target verify --name ca-trust-ubuntu docs/verification/freeipa-ca-trust.md \
-    --input expected_ca_sha256=bb5e337a84469a97a3bb5baa1759169b9f3d5a14653b545a652fe9716db589b3
-verdict: PASS  (pass=6 fail=0 skip=0)
+- Targets: 2 fresh disposable vm-targets, an AlmaLinux 9 FreeIPA server and an
+  Ubuntu 24.04 host without FreeIPA enrollment; chain `freeipa-server-apply.yml`
+  → `freeipa-ca-trust-apply.yml`.
+- `vm-target topology test`: L3 check mode on the fresh VMs `failed=0` (the CA
+  trust preview stops with a message, because check mode does not install
+  FreeIPA); L4 `failed=0`; L6 `changed=0`.
+- `pilot verify` of this spec on both hosts, `expected_ca_sha256` read from the
+  server after the install: pass=12 fail=0 skip=0.
+- A real run whose `freeipa-server` host has no `/etc/ipa/ca.crt` still fails
+  closed at the gate (§5.4 message).
 
-$ pilot vm-target verify --name ca-trust-el docs/verification/freeipa-ca-trust.md --input ...
-verdict: PASS  (pass=6 fail=0 skip=0)
-
-$ pilot vm-target verify --name ca-trust-ipa docs/verification/freeipa-ca-trust.md --input ...
-verdict: PASS  (pass=6 fail=0 skip=0)
-```
-
-C3/C4 confirmed to self-skip on the non-matching OS family and `trusted` on
-the matching one; C5 confirmed `trust-without-enrollment` on both unenrolled
-clients and `enrolled` on the freeipa-server itself; C6 confirmed via a
-second real `freeipa-ca-trust-apply.yml` run producing `changed=0 failed=0`
-on all three hosts.
-
-2026-08-14, Phase 10's fresh full-topology re-confirmation round (3 new
-disposable VMs: `p10-ipa` AlmaLinux 9 FreeIPA server, `p10-app` Ubuntu 24.04
-never FreeIPA-enrolled, `p10-proxy` Ubuntu 24.04 freeipa-client +
-reverse-proxy). One grouped-inventory `pilot verify` run against all three
-hosts at once (rather than three separate `vm-target verify` calls):
-
-```
-$ pilot verify docs/verification/freeipa-ca-trust.md -i <grouped-inventory> \
-    --input expected_ca_sha256=b99d559c307a74df1204736c87093cc2a25c7f73151de464c4634c2571aac95a
-verdict: PASS  (pass=18 fail=0 skip=0)
-```
-
-No regressions found. See `docs/evidence/internal-endpoint/2026-08-14-phase10.md`
-for the full round (this spec's own re-confirmation is one part of a larger
-combined internal-endpoint/reverse-proxy/freeipa-ca-trust topology round).
+Earlier records: `docs/evidence/freeipa-ca-trust/2026-08-13.md` (Phase 3) and
+`docs/evidence/internal-endpoint/2026-08-14-phase10.md` (Phase 10).
 
 ## Change record
 
@@ -173,3 +148,4 @@ combined internal-endpoint/reverse-proxy/freeipa-ca-trust topology round).
 | 2026-08-13 | DRAFT | Phase 1 (spec.md §63): initial Spec v2 authoring. No actual-run evidence yet — the apply playbook is a Phase-1 skeleton; Phase 3 supplies real installation logic and VM evidence. |
 | 2026-08-13 | v1.0 | Phase 3: real installation logic (`tasks/freeipa-ca-trust.yml`, spec.md §5.6) landed and confirmed against a real 3-VM topology — all 6 rows PASS on both Debian- and RedHat-family hosts, idempotent rerun confirmed (`changed=0`). Fixed a real `--check`-mode assert crash found by the first dry-run (see evidence doc). |
 | 2026-08-14 | v1.0 | Phase 10: re-confirmed clean (18/18) against a fresh, independent 3-VM topology built for the combined internal-endpoint/reverse-proxy/freeipa-ca-trust round — no regressions. |
+| 2026-10-01 | v1.0 | Check mode on a fresh chain no longer fails at the root-CA gate: the include prints why the preview stops and skips the rest, while a real run still fails closed. No row changes. Re-confirmed against 2 fresh VMs (`docs/evidence/freeipa-ca-trust/2026-10-01-d175489.md`); the evidence section now keeps only the latest summary. |
