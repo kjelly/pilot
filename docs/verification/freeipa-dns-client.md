@@ -31,6 +31,11 @@
 2026-09-24 再對 Ubuntu 24.04 與 AlmaLinux 9 一般 client 兩台 vm-target 實跑
 `vm-target test`（candidate `62d8069`），兩台皆 6/6 PASS + `changed=0`，
 並驗證 rescue rollback，見 `docs/evidence/freeipa-dns-client/2026-09-24-62d8069.md`。
+**最新驗證（C7）**：2026-10-01，candidate `a3b2b15`，dns tier 拓樸（Ubuntu 與 AlmaLinux
+consumer 加一台 tier 主機）C1–C7 21/21 PASS、L6 `changed=0`；第一台 tier 封包被丟棄時
+查詢由 15／20／5 秒（存在／不存在／外部名稱）降到 3／4／1 秒；EL 改成單一 nameserver
+時清掉 options、rescue 還原 options。見
+`docs/evidence/freeipa-dns-client/2026-10-01-a3b2b15.md`。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -101,7 +106,8 @@ FreeIPA server/replica 自己用得到。
 > `options timeout:1 attempts:2`（Debian 寫進 `/etc/resolv.conf`；EL 設在該
 > connection 的 `ipv4.dns-options`，由 NetworkManager 寫進 `/etc/resolv.conf`）。
 > glibc 預設每台 nameserver 等 5 秒，第一台整台失聯（封包被丟棄）時每次查詢
-> 要等 5～20 秒才換下一台；縮短後只多等約 1 秒。只有 1 筆 nameserver 時沒有
+> 要等 5～20 秒才換下一台；縮短後每台失聯的 nameserver 只等 1 秒，2026-10-01 實測
+> 一次查詢 1～4 秒（見 §0）。只有 1 筆 nameserver 時沒有
 > 可以換的對象，維持 glibc 預設、不寫 `options`；之前寫過的值會被清掉。
 > 這不是可設定的變數，`freeipa_dns_client_servers` 也套用同一條規則；
 > `internal-endpoint-apply.yml` 的 resolver baseline 用同一支共用檔，也一樣。

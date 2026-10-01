@@ -46,6 +46,11 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   `vm-target topology test` L1→L6 PASS（verify 6/6、重跑 `changed=0`），rescue
   把 connection DNS 設定還原成上一次成功的值。Ubuntu 路徑未變動。見
   [evidence](../evidence/freeipa-dns-client/2026-09-24-f405753.md)。
+- 最新實跑（2026-10-01，candidate `a3b2b15`，`docs/topologies/dns-tier-topology.yaml`）：
+  新增的 C7（有 2 筆以上 nameserver 時 `options timeout:1 attempts:2`）在 Ubuntu 與
+  AlmaLinux consumer 都 PASS，C1–C7 21/21、重跑 `changed=0`；第一台 nameserver 封包被丟棄時
+  查詢從 5～20 秒降到 1～4 秒；EL 改成單一 nameserver 會清掉 options，rescue 會還原 options。見
+  [evidence](../evidence/freeipa-dns-client/2026-10-01-a3b2b15.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
@@ -194,6 +199,11 @@ evidence；修正前（`583df40`）的 rescue 只還原 `/etc/resolv.conf`，Ubu
 
 ## 5. 踩過的雷
 
+- **`nmcli -g` 會跳脫冒號**（2026-10-01，NetworkManager 1.54.3）：`ipv4.dns-options` 設成
+  `timeout:1,attempts:2` 之後，`nmcli -g ipv4.dns-options connection show <conn>` 印的是
+  `timeout\:1,attempts\:2`。rescue 原本把這個值原封不動寫回去，結果存進了反斜線，
+  NetworkManager 不再寫出 `options` 行，訊息卻說已還原。快照改用 `nmcli --escape no -g`
+  讀取，寫回後與原值相同。
 - **spec 的 3 個 vacuous check（C3/C4/C6）**：`\|` 跳脫寫在已經被單引號包住
   的 `sh -c '...'` 裡完全多餘、而且有害——parser 不會把它還原掉，反斜線會
   原封不動送進真正執行的 remote shell，被解讀成「跳脫過的字面 pipe」，讓

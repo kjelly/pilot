@@ -156,7 +156,8 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 
 - 第一台 tier 整台失聯（封包被丟棄）時，consumer 每次查詢要等 resolver 逾時才換下一台。
   consumer 有 2 筆以上 nameserver 時 resolver baseline 用 `options timeout:1 attempts:2`
-  （`docs/verification/freeipa-dns-client.md` C7），每台只等 1 秒；改之前實測要等 5～20 秒。
+  （`docs/verification/freeipa-dns-client.md` C7），每台失聯的 nameserver 只等 1 秒：實測一次
+  查詢 1～4 秒，改之前是 5～20 秒（`docs/evidence/freeipa-dns-client/2026-10-01-a3b2b15.md`）。
   只停掉 unbound、主機還在時，大多數查詢幾毫秒內就換到下一台。
 - 只支援 Ubuntu 22.04/24.04 的 tier 主機；tier 主機不可同時是 FreeIPA server/replica。
 

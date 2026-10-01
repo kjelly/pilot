@@ -663,7 +663,8 @@ DNSSEC 關閉加舊格式 `dns_zones` 的 `vm-target test` PASS（12 / 0 / 8、L
   逾時才換下一台，存在的內部名稱 15 秒、不存在的名稱 20 秒、外部名稱 5 秒（答案都
   正確）；只停掉 unbound、主機還在時（E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。
   第一台 FreeIPA DNS server 失聯時本來就有同樣的行為，所以這條規則不只套在有 tier 的
-  consumer。
+  consumer。改完後同樣的 E6b 是 3 秒、4 秒、1 秒，E6a 不存在的名稱 1 秒
+  （`docs/evidence/freeipa-dns-client/2026-10-01-a3b2b15.md`）。
 
 未知項：
 
