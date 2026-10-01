@@ -36,16 +36,21 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — dns（FreeIPA 前的第一層快取 DNS，自動分流）
 
-> 版本：**DRAFT v0.2（2026-10-01，尚未對 vm-target 實跑）**
+> 版本：**v1.0（2026-10-01，candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS）**
 > 對齊規範：pilot 通用基礎設施**服務端**規範；擴充既有 `dns` role
 > （目前由 `core-infra-provider-apply.yml -e infra_role=dns` 實作）
 > 維護者：sre
 
 ## 0. 這份檔的狀態（先讀）
 
-這是 AGENTS.md §3.0 的 spec-first 產物：**先確定 acceptance，再寫 playbook**。
-apply playbook、regression test 與 actual-run evidence 都還不存在，下面每一個
-row 都是要達成的驗收條件，現在對任何主機跑都不會全綠。
+這是 AGENTS.md §3.0 的 spec-first 產物：先確定 acceptance，再寫 playbook。
+v1.0 已有 apply playbook、regression test 與實跑證據（§6）。
+
+**最新驗證**：2026-10-01，candidate `3f781fb`（tree `43de12faafbbe1f73da3288316b046b58e27a5f0`），
+5 台全新 vm-target（FreeIPA 4.13.4、2 台 Ubuntu 24.04 tier、Ubuntu 與 AlmaLinux
+consumer 各 1 台）：本檔 37 pass / 0 fail / 2 not_applicable，`freeipa-dns-client.md`
+18 pass，L6 `changed=0`。摘要見
+[`docs/evidence/dns/2026-10-01-3f781fb.md`](../evidence/dns/2026-10-01-3f781fb.md)。
 
 完成後，本檔取代 `docs/verification/core-infra-provider.md` 的 DNS rows
 （C1–C3、C7）；`core-infra-provider.md` 只保留 NTP（見 §7 配套變更）。
@@ -563,7 +568,7 @@ runner error、timeout、matcher 不符都算 FAIL。
   不屬於 `dns` 的 apply playbook，所以是 `verifyOnly`；consumer 端自己的 row 仍在
   `freeipa-dns-client.md`。
 
-## 6. 證據計畫（尚未執行）
+## 6. 證據計畫與目前結果
 
 完整輸出放 `.verification/` 或 pilot evidence store；提交的只有
 `docs/evidence/dns/<date>-<tested-revision>.md` 的 sanitized 摘要（AGENTS.md §1.2）。
@@ -590,6 +595,12 @@ runner error、timeout、matcher 不符都算 FAIL。
 - **E8 用 `pilot edit` 寫出的 workspace 實跑**：E1 的 `dns` 設定由 `pilot edit` 寫進
   workspace 的 `group_vars/dns.yml`，playbook 透過 inventory 旁的 group_vars 自動載入
   （不是用 `-e` 傳），證明 P1、P5 在真機上成立。
+2026-10-01 的結果（candidate `3f781fb`）：E1–E8 都已執行。E1 PASS；E3 收斂；E4 的 G5、
+G6、G7、G8、G10 都實際觸發，設定都維持或還原到舊值；E5 新紀錄 59 秒後可查到、刪除後
+300 秒消失；E6 見 §8 未知項；E7 由 `cmd/pilot/cmd/dns_config_surface_test.go` 涵蓋；
+E8 的設定由 `pilot edit --actions` 寫入，經 workspace inventory 的 group_vars 載入。
+細節與四次嘗試的經過見 evidence 摘要。
+
 - inputs 的傳法：`vm-target topology test` 沒有 `--input`，verify 子行程會繼承
   `PILOT_INPUT_<NAME>` 環境變數。C20 需要的 `pilot_inventory_path` 是測試中途才寫出
   的暫存 inventory，由 `topology test` 在 verify 期間自動填入（操作者自己設定時以
@@ -643,10 +654,12 @@ runner error、timeout、matcher 不符都算 FAIL。
 
 未知項：
 
-- glibc 預設 `timeout:5`，第一台 tier 掛掉時，走 glibc resolver 的 consumer
-  （主要是 EL）每次查詢會多等最多 5 秒。是否要在 resolver baseline 加
-  `options timeout:1 attempts:2`，會改變所有 `freeipa-dns-client` 主機的輸出，
-  留待決定。
+- resolver 逾時：2026-10-01 實測（E6b），第一台 tier 整台失聯（封包被丟棄）時，
+  Ubuntu 與 AlmaLinux consumer 的查詢都要等逾時才換下一台：存在的內部名稱 15 秒、
+  不存在的名稱 20 秒、外部名稱 5 秒，答案都正確。只停掉 unbound、主機還在時
+  （E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。第一台 FreeIPA DNS server 失聯時
+  今天就有同樣的行為。是否要在 resolver baseline 加 `options timeout:1 attempts:2`
+  之類的設定，會改變所有 `freeipa-dns-client` 主機的輸出，留待決定。
 - IPv6：ACL 與 upstream 允許填 IPv6，但 E1 只涵蓋 IPv4；G10 只接受 IPv4 服務位址。
 
 非目標：FreeIPA 的 forwarders 與 recursion 設定（B11）、reconciler 主動 flush tier
@@ -663,3 +676,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 |---|---|---|---|
 | 2026-10-01 | DRAFT v0.1 | 初版 spec-first 草稿：擴充既有 `dns` role 成 FreeIPA 前的第一層快取 DNS（自動分流、cache 上限、DNSSEC、ACL、identity、consumer 契約）；尚未有 apply playbook 與實跑證據 | sre |
 | 2026-10-01 | DRAFT v0.2 | 納入 `pilot edit` 設定介面契約（§3.5）與三個既有 bug；新增 `dns_stub_zones`、G10；B9 改成「只綁 `127.0.0.1` 與服務位址、不管理 tier 主機自己的 resolver」（原 v0.1 要求 tier 主機優先指向自己，但 resolver 共用 task 需要 FreeIPA，且兩支 playbook 會搶同一份設定），C19 隨之改成驗證 tier 主機自己的解析沒有被破壞；G3 不再排除 `freeipa-dns-client` | sre |
+| 2026-10-01 | v1.0 | candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS（`docs/evidence/dns/2026-10-01-3f781fb.md`）；front matter 與 Checks 區塊與 candidate 相同，只更新狀態、§6 結果與 §8 的 resolver 逾時實測 | sre |

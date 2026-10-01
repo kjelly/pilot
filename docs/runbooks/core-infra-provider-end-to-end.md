@@ -1,5 +1,7 @@
 # Runbook — `core-infra-provider` (DNS + NTP + DB + Keycloak) end-to-end on real KVM
 
+> **2026-10-01 起**：DNS 已從 `core-infra-provider-apply.yml` 拆到 `playbooks/apply/dns-apply.yml`，`-e infra_role=dns` 會被 gate 拒絕。本文中的 `infra_role=dns` 步驟與輸出是當時的紀錄，現行的 DNS 操作見 [`dns.md`](./dns.md)；NTP 仍是 `-e infra_role=ntp`。
+
 > Status: **end-to-end re-verified 2026-07-17 on VM `dockersplit` (192.168.122.2)**,
 > after `docker` was split out of `core-infra-provider-apply.yml` into its own
 > standalone playbook (`playbooks/apply/docker-apply.yml`, see
