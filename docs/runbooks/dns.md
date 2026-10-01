@@ -11,15 +11,15 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-01，candidate `3f781fb`（tree `43de12faafbbe1f73da3288316b046b58e27a5f0`），
-**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-3f781fb.md`](../evidence/dns/2026-10-01-3f781fb.md)。
+最新驗證：2026-10-01，candidate `cbe95b8`（tree `b807a6af6a0e68a45e4b5ad0cb7e1138f617937e`），
+**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-cbe95b8.md`](../evidence/dns/2026-10-01-cbe95b8.md)。
 
 | 項目 | 事實 |
 |---|---|
 | 目標環境 | `pilot vm-target topology`（`docs/topologies/dns-tier-topology.yaml`），5 台由 `topology up` 新建的 VM，測完已移除 |
 | inventory host 集合 | `dns`: dt-dns-1, dt-dns-2；`freeipa-server`: dt-ipa；`freeipa-dns-client`: dt-dns-2, dt-client, dt-client-el |
 | 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA server 安裝與測試 fixture 用）；dns 設定在 workspace 的 `group_vars/dns.yml`，由 `pilot edit` 寫入 |
-| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0` |
+| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0`。真實 `pilot deploy` 全站部署 + `--limit dt-dns-2` + `pilot reconcile`（`freeipa-dns-client`）之後 `dns.md` 31 / 0 / 8、`freeipa-dns-client.md` 18 / 0 |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
@@ -165,3 +165,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 日期 | 版本 | 變更 | 變更者 |
 |---|---|---|---|
 | 2026-10-01 | v1.0 | 初版：取代 `core-infra-provider-dns-zones.md`；candidate `3f781fb` 對 5 台全新 vm-target 實跑 PASS | sre |
+| 2026-10-01 | v1.1 | §0.5 改指向 candidate `cbe95b8` 的驗證；加上真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果 | sre |

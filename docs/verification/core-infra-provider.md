@@ -12,9 +12,10 @@
 > v2.0：Keycloak 拆到 `docs/verification/keycloak.md`；PostgreSQL 走
 > `core-infra-provider-db.md`。
 >
-> **最新驗證**：2026-10-01，candidate `3f781fb`，Ubuntu 24.04 vm-target，
-> `pilot vm-target test`（`-e infra_role=ntp -e target_group=ntp`）PASS：C1–C3 3/3、
-> L6 `changed=0`。摘要見 [`docs/evidence/dns/2026-10-01-3f781fb.md`](../evidence/dns/2026-10-01-3f781fb.md)。
+> **最新驗證**：2026-10-01，candidate `cbe95b8`，Ubuntu 24.04 vm-target，
+> `pilot vm-target test`（`-e infra_role=ntp -e target_group=ntp`）PASS：C1–C3 3/3（C3 為
+> v3.1 的 stratum 檢查），L6 `changed=0`；同一台 VM 停掉 chronyd 時 C3 FAIL。摘要見
+> [`docs/evidence/dns/2026-10-01-cbe95b8.md`](../evidence/dns/2026-10-01-cbe95b8.md)。
 
 ## 1. 目標系統
 

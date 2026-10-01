@@ -57,9 +57,9 @@ managed host as a side effect of this reconciler's own apply sequence
 inventory has a `dns` tier, the same baseline points hosts at the tier
 first and keeps FreeIPA as the fallback (`docs/verification/dns.md` §2
 B10); C9 still holds, because the FreeIPA server FQDN resolves through the
-tier. Verified 2026-10-01 on candidate `3f781fb` (day-2 run on a five-VM dns
+tier. Verified 2026-10-01 on candidate `cbe95b8` (day-2 run on a five-VM dns
 tier topology, C9's own logic 5/5, `changed=0` on rerun):
-`docs/evidence/dns/2026-10-01-3f781fb.md`.
+`docs/evidence/dns/2026-10-01-cbe95b8.md`.
 
 **Scope of this Phase-1 draft.** This spec was authored in Phase 1 of
 spec.md's implementation order (§63), before the Go manifest validator
