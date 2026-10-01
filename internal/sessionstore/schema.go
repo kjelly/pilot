@@ -202,7 +202,11 @@ type Migration struct {
 // existing older database is backed up (VACUUM INTO) before it is migrated;
 // the returned Migration is non-nil only then.
 func openDB(path string) (*sql.DB, *Migration, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	// _txlock=immediate: a write transaction takes the write lock at BEGIN,
+	// waiting under busy_timeout, instead of upgrading a read snapshot at its
+	// first write. Under WAL that upgrade fails with SQLITE_BUSY whenever
+	// another writer committed in between, and busy_timeout cannot help.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}

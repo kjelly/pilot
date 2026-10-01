@@ -15,7 +15,10 @@ import (
 // database. All methods are safe for concurrent use (database/sql pools
 // its own connections; SQLite's WAL mode + busy_timeout, set in
 // openDB, serialize writers rather than erroring under light
-// concurrency).
+// concurrency). Every write transaction starts with BEGIN IMMEDIATE
+// (openDB's _txlock), and each write method reads the session state it
+// depends on inside its own transaction, so a check and the write it
+// guards cannot interleave with another writer.
 type Store struct {
 	db        *sql.DB
 	enc       *Encryptor
@@ -96,7 +99,12 @@ func (s *Store) StartSession(ctx context.Context, in SessionStart) error {
 	if in.StartedAt.IsZero() {
 		in.StartedAt = time.Now().UTC()
 	}
-	existing, err := s.GetSession(ctx, in.SessionID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	existing, err := getSession(ctx, tx, in.SessionID)
 	switch {
 	case err == nil:
 		if existing.EndedAt != nil {
@@ -114,12 +122,14 @@ func (s *Store) StartSession(ctx context.Context, in SessionStart) error {
 	default:
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (session_id, user, directory_id, gateway_id, scope, target, recording_mode, started_at, key_id, recording_policy_source, ingest_jti)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		in.SessionID, in.User, in.DirectoryID, in.GatewayID, in.Scope, in.Target, in.RecordingMode,
-		in.StartedAt.UTC().Format(time.RFC3339Nano), s.enc.KeyID(), in.RecordingPolicySource, in.IngestJTI)
-	return err
+		in.StartedAt.UTC().Format(time.RFC3339Nano), s.enc.KeyID(), in.RecordingPolicySource, in.IngestJTI); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // IngestEvent is one TerminalEvent's already-decoded (from base64)
@@ -150,20 +160,24 @@ type IngestOutcome struct {
 // (Duplicate++); with a DIFFERENT payload it fails the whole batch with
 // ErrEventConflict — a diverging retry is exactly the kind of ambiguity
 // this store must never resolve by picking one side silently.
+//
+// The finished check runs inside the write transaction, so a concurrent
+// FinishSession either commits first (ErrSessionFinished here) or sees
+// these events (and rejects a last_seq below them).
 func (s *Store) IngestEvents(ctx context.Context, sessionID string, events []IngestEvent) (IngestOutcome, error) {
 	var out IngestOutcome
-	summary, err := s.GetSession(ctx, sessionID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
 	if err != nil {
 		return out, err
 	}
 	if summary.EndedAt != nil {
 		return out, ErrSessionFinished
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return out, err
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	var addedBytes int64
 	var addedCount int
@@ -251,7 +265,15 @@ func (s *Store) FinishSessionResult(ctx context.Context, sessionID string, ended
 	if endedAt.IsZero() {
 		return FinishResult{}, fmt.Errorf("sessionstore: ended_at is required")
 	}
-	summary, err := s.GetSession(ctx, sessionID)
+	// The session state, the stored seqs and the update are one write
+	// transaction: an IngestEvents racing this finish either commits
+	// before the seqs are read or sees the session finished.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return FinishResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
 	if err != nil {
 		return FinishResult{}, err
 	}
@@ -261,7 +283,7 @@ func (s *Store) FinishSessionResult(ctx context.Context, sessionID string, ended
 		}
 		return FinishResult{}, ErrSessionFinished
 	}
-	seqs, err := s.eventSeqs(ctx, sessionID)
+	seqs, err := eventSeqs(ctx, tx, sessionID)
 	if err != nil {
 		return FinishResult{}, err
 	}
@@ -274,17 +296,31 @@ func (s *Store) FinishSessionResult(ctx context.Context, sessionID string, ended
 	}
 	gaps := gapsUpTo(seqs, lastSeq)
 	complete = complete && maxSeq == lastSeq && len(gaps) == 0
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE sessions SET ended_at=?, complete=?, last_seq=? WHERE session_id=?`,
+	res, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET ended_at=?, complete=?, last_seq=? WHERE session_id=? AND ended_at=''`,
 		endedAt.UTC().Format(time.RFC3339Nano), boolToInt(complete), lastSeq, sessionID)
 	if err != nil {
+		return FinishResult{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return FinishResult{}, err
+	} else if n != 1 {
+		return FinishResult{}, ErrSessionFinished
+	}
+	if err := tx.Commit(); err != nil {
 		return FinishResult{}, err
 	}
 	return FinishResult{Complete: complete, GapRanges: len(gaps)}, nil
 }
 
-func (s *Store) eventSeqs(ctx context.Context, sessionID string) ([]uint64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT seq FROM session_events WHERE session_id=?`, sessionID)
+// querier is what the read helpers need from *sql.DB or *sql.Tx.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func eventSeqs(ctx context.Context, q querier, sessionID string) ([]uint64, error) {
+	rows, err := q.QueryContext(ctx, `SELECT seq FROM session_events WHERE session_id=?`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +362,11 @@ const summaryColumns = `session_id,user,directory_id,gateway_id,scope,target,rec
 
 // GetSession returns one session's index row.
 func (s *Store) GetSession(ctx context.Context, sessionID string) (SessionSummary, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+summaryColumns+` FROM sessions WHERE session_id=?`, sessionID)
+	return getSession(ctx, s.db, sessionID)
+}
+
+func getSession(ctx context.Context, q querier, sessionID string) (SessionSummary, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+summaryColumns+` FROM sessions WHERE session_id=?`, sessionID)
 	var out SessionSummary
 	var startedAt, endedAt string
 	var completeInt int
@@ -428,12 +468,19 @@ type ReplayResult struct {
 // verifies sequence continuity (spec.md §29). It never re-executes any
 // input — decryption and gap detection only.
 func (s *Store) Replay(ctx context.Context, sessionID string) (ReplayResult, error) {
-	summary, err := s.GetSession(ctx, sessionID)
+	// One read transaction, so the summary (last_seq, complete) and the
+	// events come from the same snapshot.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
 	if err != nil {
 		return ReplayResult{}, err
 	}
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`SELECT seq,stream,offset_nanos,rows,cols,redacted_bytes,nonce,ciphertext FROM session_events WHERE session_id=? ORDER BY seq ASC`,
 		sessionID)
 	if err != nil {
