@@ -291,7 +291,7 @@ func TestRegression_DNSApplyGatesPass(t *testing.T) {
 	gv := `dns_upstream: [1.1.1.1, "9.9.9.9@5353"]
 dns_freeipa_zones: [0.0.10.in-addr.arpa]
 dns_stub_zones: ["corp.internal=10.0.1.2,10.0.1.3"]
-dns_access_control: [10.0.0.0/8]
+dns_access_control: [10.0.0.0/8, "fd00::/8"]
 dns_cache_max_ttl: 120
 dns_dnssec_validation: false
 dns_zones:
@@ -328,6 +328,9 @@ dns_zones:
 	if got := fmt.Sprint(res.facts["dns_upstream_list"]); got != "[1.1.1.1 9.9.9.9@5353]" {
 		t.Errorf("dns_upstream_list=%s", got)
 	}
+	if got := fmt.Sprint(res.facts["dns_access_control_list"]); got != "[10.0.0.0/8 fd00::/8]" {
+		t.Errorf("dns_access_control_list=%s", got)
+	}
 	locals := res.facts["dns_local_zone_list"].([]any)
 	if len(locals) != 1 || locals[0].(map[string]any)["name"] != "pilot.lan" {
 		t.Errorf("dns_zones from group_vars must reach the play, normalized; got %v", locals)
@@ -363,6 +366,14 @@ func TestRegression_DNSApplyGatesTrigger(t *testing.T) {
 		{"G2 provider", dnsGateInventory, "", map[string]any{"dns_provider": "bind9"}, "Gate G2"},
 		{"G3 also a FreeIPA server", ipaToo, "", nil, "Gate G3"},
 		{"G4 allow-all ACL", dnsGateInventory, "dns_access_control: [0.0.0.0/0]\n", nil, "Gate G4"},
+		// Equivalent allow-all spellings that passed G4 until v1.1; the
+		// classifier itself is covered case by case in
+		// TestRegression_DNSACLClassifier.
+		{"G4 zero-padded allow-all ACL", dnsGateInventory, "dns_access_control: [0.0.0.0/00]\n", nil, "Gate G4"},
+		{"G4 allow-all ACL with host bits", dnsGateInventory, "dns_access_control: [1.2.3.4/0]\n", nil, "Gate G4"},
+		{"G4 IPv6 allow-all spelled ::0/0", dnsGateInventory, "dns_access_control: [\"::0/0\"]\n", nil, "Gate G4"},
+		{"G4 two halves cover IPv4", dnsGateInventory, "dns_access_control: [0.0.0.0/1, 128.0.0.0/1]\n", nil, "Gate G4"},
+		{"G4 zero-padded prefix", dnsGateInventory, "dns_access_control: [10.0.0.0/08]\n", nil, "write 10.0.0.0/8"},
 		{"G4 bracketed -e string", dnsGateInventory, "", map[string]any{"dns_upstream": "[1.1.1.1]"}, "Gate G4"},
 		{"G4 stub entry without =", dnsGateInventory, "dns_stub_zones: [corp.internal]\n", nil, "Gate G4"},
 		{"G4 duplicate zone", dnsGateInventory, "dns_stub_zones: [\"ipa.example.internal=10.0.0.1\"]\n", nil, "Gate G4"},

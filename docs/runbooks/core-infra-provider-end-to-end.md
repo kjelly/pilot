@@ -67,6 +67,10 @@ go run ./cmd/pilot vm-target show-inventory --name dockersplit | grep -E '^    [
 > （如 `-e target_group=core`），不要用 `all`——`all` 是給「inventory 裡真的
 > 有多台不同機器」的場景設計的。容器本身其實成功建立（見下方 §2 的乾淨重跑
 > 輸出），只是第一次的 PLAY RECAP 很吵，故此處不列入證據。
+>
+> 2026-10-01 更新（`198fb03`）：alias 改成只含這台 VM 的 group，inventory 只剩
+> 一個 host，`target_group=all` 只跑一次；上面的 409 是 alias 還是獨立 host 時的
+> 行為。見 [`docs/evidence/vm-target/2026-10-01-198fb03.md`](../evidence/vm-target/2026-10-01-198fb03.md)。
 
 ---
 

@@ -272,29 +272,42 @@ pilot docker-target up --image pilot-target:ubuntu-24.04 --name infra-test
 ### 8.2 Multi-host targets（`--hosts`）
 
 一台 docker container 可以有多個 ansible inventory alias，**全部指向同一台**。
-給「一個 role 一個 group 名」的 playbook 用：
+給「一個 role 一個 group 名」的 playbook 用。container 是 inventory 裡唯一的
+host（key 是 `--name`）；每個 alias 是只含這台 container 的 group，所以
+`-l <alias>`、`hosts: <alias>`、`groups['<alias>']` 都選到它，`hosts: all`
+也只跑一次（2026-10-01 實際執行過，見
+[`docs/evidence/vm-target/2026-10-01-198fb03.md`](../evidence/vm-target/2026-10-01-198fb03.md)）：
 
 ```bash
-pilot docker-target up --image-pilot ubuntu-24.04 \
-    --name core --hosts dns,ntp,keycloak
-# inventory 同時有 core: dns: ntp: keycloak: 四個 host entry，
-# 全部 ansible_host: core（同一台 container）
-```
-
-驗證：
-
-```bash
-pilot docker-target show-inventory --name core
+pilot docker-target up --image ubuntu:22.04 \
+    --name vb-core --hosts dns,ntp,keycloak
+pilot docker-target show-inventory --name vb-core
 # all:
 #   hosts:
-#     core:        { ansible_host: core, ... }
-#     dns:         { ansible_host: core, ... }
-#     ntp:         { ansible_host: core, ... }
-#     keycloak:    { ansible_host: core, ... }
+#     vb-core:
+#       ansible_connection: docker
+#       ansible_host: vb-core
+#       ansible_user: root
+#   children:
+#     dns:
+#       hosts:
+#         vb-core: {}
+#     ntp:
+#       hosts:
+#         vb-core: {}
+#     keycloak:
+#       hosts:
+#         vb-core: {}
 ```
 
 `--hosts` 接受 comma-separated 跟 repeated flag 兩種形式。Aliases 會被
-去重（同一個名稱給兩次只出現一次）；無效字元（空白、slash）會被拒絕。
+去重（同一個名稱給兩次只出現一次）；無效字元（空白、slash）會在啟動
+container 之前被拒絕。`all`、`ungrouped` 是 Ansible 內建 group，不會產生
+alias group。
+
+`up` 會先刪掉 Ansible fact cache 裡這個名稱與每個 alias 的舊紀錄（刪不掉就
+不啟動），`down` 也會刪；cache 位置用跟 playbook 執行時相同的 `ansible.cfg`
+與環境變數解析（`ansible-config dump`）。
 
 ### 8.3 Snapshot / Rollback（`snapshot` / `rollback`）
 
@@ -418,6 +431,7 @@ flag）,導致這兩個指令在乾淨的 CLI 呼叫下永遠因為空字串驗�
 
 | 日期 | 版本 | 變更 |
 |------|------|------|
+| 2026-10-01 | v1.5 | §8.2：`--hosts` alias 改成只含這台 container 的 group（不再是同位址的第二個 host）；alias 在啟動 container 前驗證；`up`/`down` 刪除 fact cache 舊紀錄（`docs/evidence/vm-target/2026-10-01-198fb03.md`） |
 | 2026-09-25 | v1.4 | §4：data dir 與其他命令一致，舊位置 state 的遷移提示（`docs/evidence/data-dir/2026-09-25-92e6063.md`） |
 | 2026-07-03 | v1.3 | ＋`--engine podman`（opt-in，docker 仍是預設）：rootless/daemonless，消掉 docker-group root-equivalence；`Target`/`Options` 加 `Engine` 欄位、per-engine binary override（`PILOT_PODMAN_BIN`）、inventory 依 engine 切 `containers.podman.podman` connection plugin；真機 rootless podman 4.9.3 跑過 up/show-inventory/ping/run/snapshot/rollback/down + `--systemd` 全套驗證；順手修 `run`/`show-inventory` 誤檢查 `dtSnapshotTag` 的既有 bug |
 | 2026-06-30 | v1.2 | ＋`--systemd`（以 /sbin/init 開機，systemctl/service/systemd-resolved 可用，rollback 保留設定）；image 補 systemd+systemd-sysv+STOPSIGNAL；`up` 對 `pilot-target:*` image 缺漏時自動 build（Dockerfile embed 進 binary，免先跑 build.sh）；修 `pilot run --target` 的 inventory tmpfile 外洩 |

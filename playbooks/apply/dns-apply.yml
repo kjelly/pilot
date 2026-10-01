@@ -255,6 +255,39 @@
       tags: [always]
 
     # ── G4 input shape ─────────────────────────────────────────────────────
+    # G4 judges the ACL by the networks it allows, not by its spelling.
+    # unbound masks the address, so 1.2.3.4/0 and ::0/0 each allow every
+    # source (unbound 1.19.2 on Ubuntu 24.04 accepts both), and
+    # 0.0.0.0/1 + 128.0.0.0/1 together do too. Python's ipaddress
+    # parses every entry on the controller; an entry must be written the way
+    # it parses back (network address, no zero-padded prefix, IPv6 lower-case
+    # and compressed), so C5 can compare unbound's output with the input as
+    # plain strings.
+    - name: "DNS — classify the dns_access_control networks"
+      ansible.builtin.command:
+        argv: "{{ [ansible_playbook_python, '-c', _acl_check_py] + dns_access_control_list }}"
+      vars:
+        _acl_check_py: |
+          import ipaddress, json, sys
+          noncanonical, nets = [], {4: [], 6: []}
+          for entry in sys.argv[1:]:
+              try:
+                  net = ipaddress.ip_network(entry, strict=False)
+              except ValueError:
+                  noncanonical.append(entry)
+                  continue
+              if str(net) != entry:
+                  noncanonical.append(entry + ' (write ' + str(net) + ')')
+              nets[net.version].append(net)
+          everything = [str(n) for v in (4, 6) for n in ipaddress.collapse_addresses(nets[v]) if n.prefixlen == 0]
+          print(json.dumps({'noncanonical': noncanonical, 'unrestricted': everything}))
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: dns_access_control_check
+      tags: [always]
+
     - name: "Gate G4: settings are well-formed"
       vars:
         _ip_re: '^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f:]+)(@[0-9]{1,5})?$'
@@ -263,14 +296,15 @@
         _zone_re: '^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*$'
         _all_zone_names: "{{ (dns_stub_zone_list + dns_local_zone_list) | map(attribute='name') | list }}"
         _stub_addrs: "{{ dns_stub_zone_list | map(attribute='addrs') | flatten }}"
+        _acl: "{{ dns_access_control_check.stdout | from_json }}"
       ansible.builtin.assert:
         that:
           - dns_upstream_list | length > 0
           - dns_upstream_list | reject('match', _ip_re) | list | length == 0
           - dns_access_control_list | length > 0
           - dns_access_control_list | reject('match', _cidr_re) | list | length == 0
-          - "'0.0.0.0/0' not in dns_access_control_list"
-          - "'::/0' not in dns_access_control_list"
+          - _acl.noncanonical | length == 0
+          - _acl.unrestricted | length == 0
           - (dns_cache_max_ttl_effective | string) is match('^[0-9]+$')
           - (dns_cache_max_negative_ttl_effective | string) is match('^[0-9]+$')
           - dns_stub_zone_parse_errors | length == 0
@@ -282,7 +316,8 @@
         fail_msg: >-
           group_vars/dns.yml has an invalid setting (docs/verification/dns.md §5 G4).
           dns_upstream={{ dns_upstream_list }} (each an IP, optional @port, at least one);
-          dns_access_control={{ dns_access_control_list }} (each a CIDR, never 0.0.0.0/0 or ::/0);
+          dns_access_control={{ dns_access_control_list }} (each a CIDR in canonical form, not {{ _acl.noncanonical }};
+          together never every source of an address family, not {{ _acl.unrestricted }});
           dns_cache_max_ttl={{ dns_cache_max_ttl_effective }}, dns_cache_max_negative_ttl={{ dns_cache_max_negative_ttl_effective }} (non-negative integers);
           dns_stub_zones entries without '='={{ dns_stub_zone_parse_errors }};
           zone names={{ _all_zone_names }} (valid, no duplicates across freeipa_domain, dns_freeipa_zones, dns_stub_zones, dns_zones);
