@@ -513,4 +513,37 @@ that decommission *reuses* those paths safely.
   expect: {stdout: {contains: "NOT_LISTED"}}
   scope: per-host
   verifyOnly: true
+
+# ── Stage confirmation (2026-10-01) ──
+#
+# Every decommission playbook and freeipa-identity-apply.yml gates on
+# `stage` with an `always` environment-group cross-check, and host
+# decommission used to pass no stage, so a host in a staging or prod group
+# (or a freeipa-server/wazuh-manager in one) could not be decommissioned at
+# all (reproduced 2026-09-25). apply/resume now take --confirm-staging,
+# --confirm-prod and --staging-attested-within-hours (the TUI asks the
+# same), refuse before any step when a needed confirmation is missing, and
+# give each playbook run the stage of the hosts it targets.
+- id: HD34
+  category: approval
+  check: a host in staging or prod is decommissioned only with that stage's confirmation; without it apply refuses before any step runs or any approval is recorded, and with it every playbook run carries stage, confirm and staging attestation for that host
+  probe: |
+    go test ./cmd/pilot/cmd/... -run TestHostDecommissionApply_ProdHostNeedsStageConfirmation -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: HD35
+  category: approval
+  check: runs on central hosts carry those hosts' stage — freeipa-identity-apply.yml the freeipa-server hosts', the Wazuh deregistration the wazuh-manager hosts' — while runs on the decommissioned host carry its own stage
+  probe: |
+    go test ./internal/decommission/... -run TestFreeIPAProvider_StageArgsPerTarget -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: HD34-LIVE
+  category: freeipa-client
+  check: a freeipa-client host in staging whose FreeIPA server is in prod is actually decommissioned by `pilot host decommission apply --confirm-staging --confirm-prod --staging-attested-within-hours <h>`, its local enrollment removed
+  probe: |
+    ssh -i <client-key> root@<client-ip> 'test -f /etc/ipa/default.conf && echo ENROLLED || echo UNINSTALLED'
+  expect: {stdout: {equals: "UNINSTALLED"}}
+  scope: per-host
+  verifyOnly: true
 ```

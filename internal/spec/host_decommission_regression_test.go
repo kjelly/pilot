@@ -39,6 +39,10 @@ func TestRegression_HostDecommissionSpec(t *testing.T) {
 	// docs/evidence/host-decommission/2026-09-13-ca619b9.md. Also
 	// additive, appended after HD12-LIVE in file order.
 	wantIDs = append(wantIDs, "HD14-LIVE", "HD29-LIVE", "HD30-LIVE", "HD31-LIVE", "HD32-LIVE", "HD33-LIVE")
+	// Stage confirmation (2026-10-01): HD34/HD35 are go-test rows, HD34-LIVE
+	// a staging client with a prod FreeIPA server decommissioned on real
+	// vm-targets. Appended in file order.
+	wantIDs = append(wantIDs, "HD34", "HD35", "HD34-LIVE")
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}

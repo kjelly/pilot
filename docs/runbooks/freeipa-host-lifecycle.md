@@ -139,6 +139,17 @@ pilot host decommission plan --dir . --host "<fqdn>"
 pilot host decommission show --id <plan-id>      # 需要時看完整 plan 內容
 
 pilot host decommission apply --dir . --id <plan-id> --confirm-host "<fqdn>"
+# 這台主機或它會動到的 FreeIPA server / Wazuh manager 在 hosts.yml 標了
+# env: staging 或 env: prod 時，還要加上對應的確認（plan 的輸出最後一段
+# 「stage confirmation for apply/resume」會列出需要哪些）：
+#   staging：--confirm-staging
+#   prod：--confirm-prod --staging-attested-within-hours <0-168>
+# 例：staging 的 client、prod 的 FreeIPA server：
+#   pilot host decommission apply --dir . --id <plan-id> --confirm-host "<fqdn>" \
+#     --confirm-staging --confirm-prod --staging-attested-within-hours 24
+# 缺確認時 apply 在任何步驟執行前就拒絕，不會留下做一半的下架。
+# （2026-10-01 之前沒有這些選項，staging/prod 主機一律卡在 playbook 的
+#   環境 group cross-check：stage=sandbox 與 inventory 環境 group 不一致。）
 # STATUS completed 且有 receipt 才算真正完成；
 # STATUS blocked 代表尚未收斂（見 §5 bug #2 — 若卡在
 # active_residue 且一直不動，先確認 workspace 裡「任何一台主機」
@@ -150,6 +161,8 @@ pilot host decommission apply --dir . --id <plan-id> --confirm-host "<fqdn>"
 
 ```bash
 pilot host decommission resume --dir . --id <plan-id>
+# staging/prod 的 stage 確認要再給一次（同 apply 的選項）：resume 不沿用
+# apply 當時給的 attestation 時數，因為它會隨時間過期。
 ```
 
 ### 3.3 獨立驗證（不要只信工具自己回報的 STATUS）

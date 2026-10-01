@@ -91,6 +91,13 @@ type InternalEndpointProviderConfig struct {
 	// internal_endpoint_manifest_file/freeipa_dns_manifest_file/
 	// ipa_admin_password extra-vars) — non-secret plumbing only.
 	ExtraArgs []string
+
+	// ApplyStageArgs returns the stage -e arguments for the apply-converge
+	// run, which reruns internal-endpoint-apply.yml without tags; its
+	// fleet-wide baseline play targets every host (decommission.StageScope).
+	// The read-only iep_decommission_verify query gets none: the playbook
+	// skips its group cross-check for that query alone. Nil adds none.
+	ApplyStageArgs func() ([]string, error)
 }
 
 // InternalEndpointProvider implements providers.Provider for the
@@ -296,6 +303,10 @@ func (e *internalEndpointApplyConvergeStep) Execute(ctx context.Context) error {
 		args = append(args, "-i", e.provider.cfg.ServerInventory)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.ApplyStageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("internal-endpoint apply-converge %s: %w", e.fqdn, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("internal-endpoint apply-converge %s: %w", e.fqdn, err)
