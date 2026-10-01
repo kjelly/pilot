@@ -1204,12 +1204,12 @@
             state: started
             restart_policy: unless-stopped
             restart: >-
-              {{ prometheus_yml_result is changed
-                 or alert_rules_result is changed
-                 or (snmp_alert_rules_result is defined and snmp_alert_rules_result is changed)
-                 or node_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_result is changed
-                 or dcgm_exporter_password_file_removed is changed
+              {{ (prometheus_yml_result | default({})) is changed
+                 or (alert_rules_result | default({})) is changed
+                 or (snmp_alert_rules_result | default({})) is changed
+                 or (node_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_result | default({})) is changed
+                 or (dcgm_exporter_password_file_removed | default({})) is changed
                  or monitoring_files_changed | default(false) }}
             networks:
               - name: "{{ docker_network_name }}"
@@ -1264,7 +1264,7 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ objstore_yml_result is changed }}"
+            restart: "{{ (objstore_yml_result | default({})) is changed }}"
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -1292,6 +1292,7 @@
 
       rescue:
         - name: "ROLLBACK — remove the objstore config file (contains S3 secret)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ thanos_config_dir }}/objstore.yml"
             state: absent
@@ -1302,11 +1303,13 @@
         # (neither does the existing rescue, for objstore.yml's own
         # config), only the credential material.
         - name: "ROLLBACK — remove monitoring basic-auth password files (contain secrets)"
+          tags: [always]
           ansible.builtin.file:
             path: "{{ monitoring_secrets_host_dir }}"
             state: absent
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               prometheus apply FAILED (see task output above); the objstore

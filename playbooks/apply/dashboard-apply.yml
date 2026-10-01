@@ -378,7 +378,7 @@
             image: "grafana/loki:{{ loki_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ loki_config_result is changed }}"
+            restart: "{{ (loki_config_result | default({})) is changed }}"
             command: "-config.file=/etc/loki/local-config.yaml"
             networks:
               - name: "{{ docker_network_name }}"
@@ -410,10 +410,10 @@
             state: started
             restart_policy: unless-stopped
             restart: >-
-              {{ datasources_yml_result is changed
-                 or dashboards_yml_result is changed
-                 or sites_overview_json_result is changed
-                 or logs_explorer_json_result is changed }}
+              {{ (datasources_yml_result | default({})) is changed
+                 or (dashboards_yml_result | default({})) is changed
+                 or (sites_overview_json_result | default({})) is changed
+                 or (logs_explorer_json_result | default({})) is changed }}
             env:
               GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
             networks:
@@ -437,6 +437,7 @@
 
       rescue:
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               dashboard apply FAILED (see task output above). Containers (if
