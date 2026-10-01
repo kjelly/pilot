@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	verification "github.com/kjelly/pilot/internal/spec"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // ValidateBundleReferences validates cross-file facts that cannot be checked

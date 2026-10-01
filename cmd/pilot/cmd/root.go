@@ -37,12 +37,20 @@ problems:
      component, stage, preview, and confirmation, and "pilot reconcile" applies
      contract-backed declarative service configuration.`,
 	Version: "0.2.0",
+	// cmd/pilot/main.go prints a returned error exactly once; cobra must
+	// not print it a second time as "Error: ...".
+	SilenceErrors: true,
 	// PersistentPreRun installs the diagnostic logger before any command
 	// runs, so every `slog.Warn/Debug/...` call is leveled and formatted
 	// consistently. User-facing UX output is unaffected (it never goes
 	// through slog). The default level is WARN, overridable via --log-level
 	// or $PILOT_LOG_LEVEL; $PILOT_LOG_FORMAT=json switches to JSON output.
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// Cobra has parsed the flags and validated the arguments by the
+		// time this hook runs, so a mistake on the command line still gets
+		// the usage text. An error the command itself returns (a failed
+		// preflight, a missing file) is not a usage problem.
+		cmd.SilenceUsage = true
 		lvl := logLevel
 		if lvl == "" {
 			lvl = os.Getenv("PILOT_LOG_LEVEL")
@@ -81,6 +89,9 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+// loadConfig reads the config file and sets cfg.DataDir by the one
+// precedence every command uses: --data-dir, then $PILOT_DATA_DIR, then the
+// config file's data_dir, then ~/.local/share/pilot.
 func loadConfig() *config.Config {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -89,6 +100,8 @@ func loadConfig() *config.Config {
 	}
 	if dataDir != "" {
 		cfg.DataDir = dataDir
+	} else if dir := os.Getenv("PILOT_DATA_DIR"); dir != "" {
+		cfg.DataDir = dir
 	}
 	return cfg
 }

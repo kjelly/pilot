@@ -12,7 +12,6 @@ package cmd
 
 import (
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -33,7 +32,7 @@ func TestStandaloneScreen_QuitsOnceFinished(t *testing.T) {
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 }
 
 func TestStandaloneScreen_UnfinishedScreenDoesNotQuit(t *testing.T) {
@@ -43,7 +42,7 @@ func TestStandaloneScreen_UnfinishedScreenDoesNotQuit(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // moves cursor, does not finish
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(2*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 	got := tm.FinalModel(t).(standaloneScreen).s.(tui.SelectScreen)
 	if got.Selected() != 1 {
 		t.Fatalf("Selected() = %d, want 1 (the down-then-enter choice, proving the down keypress wasn't lost to a premature quit)", got.Selected())

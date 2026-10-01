@@ -7,7 +7,6 @@ package cmd
 
 import (
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -95,7 +94,7 @@ func TestEditRouter_Teatest_SNMPCatalogFlow_AddModuleAndAuthProfile(t *testing.T
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	catalog, err := monitoring.LoadSNMPCatalog(monitoringSNMPCatalogPath(dir))
 	if err != nil {
@@ -162,7 +161,7 @@ func TestEditRouter_Teatest_SNMPCatalogFlow_DeleteModule(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	catalog, err := monitoring.LoadSNMPCatalog(monitoringSNMPCatalogPath(dir))
 	if err != nil {

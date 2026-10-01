@@ -78,7 +78,6 @@
     - name: "Gate: prod requires recent staging attestation"
       ansible.builtin.assert:
         that:
-          - patch_stage != 'prod'
           # Real gate calls a script or a db check; here we keep a
           # placeholder so --check works without orchestration.
           - (staging_attested_within_hours | int) <= 168

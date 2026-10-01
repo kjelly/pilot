@@ -55,7 +55,9 @@ Snapshot of the reference environment used for the latest verified run
   workstation".
 - Recording: an opaque transport carries only metadata. A gateway whose
   `pilot_access_gateway_recording_mode` is `terminal_output` or
-  `terminal_io` refuses transports. Users there keep using `pilot-connect`.
+  `terminal_io` refuses transports, and `pilot-known-hosts-v1` answers
+  `access denied` there too (transport spec rev 5). Users there keep using
+  `pilot-connect`.
 
 ## 2. Current procedure
 
@@ -207,6 +209,13 @@ Snapshot of the reference environment used for the latest verified run
 
 ## 6. Latest verified evidence
 
+- 2026-09-25 — [`docs/evidence/pilot-access-gateway/2026-09-25-c9a06c5.md`](../evidence/pilot-access-gateway/2026-09-25-c9a06c5.md).
+  Transport spec rev 5 (D8 also refuses host keys; adopted 2026-10-01), candidate
+  `c9a06c5` (tree `8e7dc330…`), on never-applied VMs: L1–L6 pass (verify 16/16
+  and 5/5, L6 `changed=0`); E2E strict 20/20, recording 3/3 (transport and
+  known-hosts refused, `pilot-connect` still records), strict again after the
+  downgrade 20/20, disabled 4/4. Remote-dev, not-ready and the lockout suite
+  were not rerun. **PASS**.
 - 2026-09-24 — [`docs/evidence/pilot-access-gateway/2026-09-24-fcd3c03.md`](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md).
   Candidate `fcd3c03` (tree `59aa59ee…`), after the merge with per-host SSH
   session recording. Topology test on never-applied VMs: L1–L6 pass (verify

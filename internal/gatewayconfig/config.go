@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/ingesttoken"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // DefaultPath is where the gateway playbook installs the config.

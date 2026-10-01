@@ -483,4 +483,6 @@ Evidence：`docs/evidence/pilot-access-gateway/2026-09-23-0e865d2.md`。
 
 **2026-09-24 與 per-host SSH session recording 合併後**：terminal recording 一律寫進 `pilot-session-store`（沒有本機錄影檔的 fallback），所以拓樸新增 `tx-store`，`recording` phase 以 `pilot_access_gateway_recording_mode` + `pilot_access_gateway_recording_session_store_url` 指向它；AG69 的第二部分從「pilot-connect 的本機 FileSink 檔」改成「pilot-connect 的 session 出現在 store 的 index，`recording_mode terminal_output`、`complete=1`、至少一個 event」（需要 `STORE_HOST`／`STORE_ADMIN_KEY`）。
 
+2026-09-25，transport spec rev 5（D8 也拒絕 `pilot-known-hosts-v1`；2026-10-01 採用），candidate `c9a06c5`，從未套用過的 VM：topology test L1–L6 全過（gateway 16/16、target 5/5，L6 `changed=0`）；E2E strict 20/20、recording 3/3（新增 `AG69-known-hosts-denied-by-recording`：`pilot-known-hosts: access denied`）、降級回 metadata 後 strict 20/20、disabled 4/4。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-25-c9a06c5.md`](../evidence/pilot-access-gateway/2026-09-25-c9a06c5.md)。
+
 AG60 首次於 Phase 1 驗證（`docs/evidence/pilot-access-gateway/2026-09-23-b0c12ee.md`）。AG61–AG73（擴充 lockout suite、transport 預設關閉、SSH／SFTP／SCP／rsync、FreeIPA host key、未 ready 被拒、recording 不相容、真實 sshd 的語法拒絕、journald audit、legacy 回歸、rollback）由 `scripts/pilot-access-gateway-transport-e2e.sh` 與 `scripts/pilot-access-gateway-lockout-test.sh` 在 `docs/topologies/pilot-access-transport-topology.yaml` 上驗證，結果記錄在對應 Phase 的 evidence。

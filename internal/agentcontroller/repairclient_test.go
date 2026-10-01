@@ -165,4 +165,12 @@ func TestRepairClient_Plan_UnknownComponentSurfacesAsError(t *testing.T) {
 func isolateRepairClientDataDir(t *testing.T) {
 	t.Helper()
 	t.Setenv("PILOT_DATA_DIR", t.TempDir())
+	// The subprocess also creates its SSH control directory under
+	// PILOT_SSH_CONTROL_BASE (default /tmp); keep that out of the real /tmp.
+	controlBase, err := os.MkdirTemp("/tmp", "pilot-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlBase) })
+	t.Setenv("PILOT_SSH_CONTROL_BASE", controlBase)
 }

@@ -48,8 +48,8 @@ vet:           	## Run go vet
 lint:          	## Run golangci-lint
 	golangci-lint run ./...
 
-test-race:     	## Run tests with the race detector
-	go test -race -count=1 ./...
+test-race:     	## Run tests with the race detector (same flags as CI)
+	go test -race -count=1 -timeout 15m ./...
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
