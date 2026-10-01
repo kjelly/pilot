@@ -204,7 +204,7 @@ Snapshot of the reference environment used for the latest verified run
 ## 6. Latest verified evidence
 
 - 2026-09-25 — [`docs/evidence/pilot-access-gateway/2026-09-25-c9a06c5.md`](../evidence/pilot-access-gateway/2026-09-25-c9a06c5.md).
-  Transport spec rev 5 proposal (D8 also refuses host keys), candidate
+  Transport spec rev 5 (D8 also refuses host keys; adopted 2026-10-01), candidate
   `c9a06c5` (tree `8e7dc330…`), on never-applied VMs: L1–L6 pass (verify 16/16
   and 5/5, L6 `changed=0`); E2E strict 20/20, recording 3/3 (transport and
   known-hosts refused, `pilot-connect` still records), strict again after the
