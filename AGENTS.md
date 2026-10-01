@@ -534,6 +534,11 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    用 wazuh-manager 主機的——`apply`/`resume` 收 `--confirm-staging`、
    `--confirm-prod`、`--staging-attested-within-hours`(TUI 問同樣的問題),
    缺確認時在任何步驟前拒絕。一次 run 的目標主機跨不同 stage 時直接報錯。
+   唯讀查詢(`freeipa_host_absent_inspect`,`plan` 階段就會跑;
+   `iep_decommission_verify`)不帶 stage,對應 playbook 只在「這個 tag 是唯一
+   的 tag」時跳過 cross-check(`(ansible_run_tags | list) != [...]`——
+   ansible-core 2.19 的 `ansible_run_tags` 是 tuple,直接跟 list 比永遠不相等),
+   由 `TestRegression_DecommissionQueryCrossCheckExemptions` 鎖住。
    新增會呼叫 playbook 的 pilot 功能時照這個模式做,不要只帶 sandbox。
 
 另外,`playbooks/site.yml` 開頭有一道獨立的安全閥(`hosts: localhost` 的

@@ -106,8 +106,9 @@ type FreeIPAClientProviderConfig struct {
 	ExtraArgs []string
 
 	// ClientStageArgs returns the stage -e arguments for the retiring host
-	// and ServerStageArgs those for the freeipa-server hosts that
-	// freeipa-identity-apply.yml targets (decommission.StageScope). Nil adds
+	// and ServerStageArgs those for the freeipa-server hosts that the
+	// freeipa-identity-apply.yml converge targets (decommission.StageScope).
+	// The read-only freeipa_host_absent_inspect query gets neither. Nil adds
 	// none.
 	ClientStageArgs func() ([]string, error)
 	ServerStageArgs func() ([]string, error)
@@ -610,13 +611,9 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	args = append(args, "-e", "pilot_decommission_query="+kind)
 	args = append(args, "-e", "pilot_decommission_target_fqdn="+fqdn)
 	args = append(args, p.cfg.ExtraArgs...)
-	// freeipa-identity-apply.yml's stage gates, the group cross-check
-	// included, are `always`, so even this read-only query needs the
-	// freeipa-server hosts' stage.
-	args, stageErr := withStage(args, p.cfg.ServerStageArgs)
-	if stageErr != nil {
-		return nil, fmt.Errorf("freeipa-client %s query for %s: %w", kind, fqdn, stageErr)
-	}
+	// No stage: this read-only query also runs during `plan`, which takes
+	// no stage confirmation, and freeipa-identity-apply.yml skips its group
+	// cross-check when freeipa_host_absent_inspect is the only tag.
 	res, err := p.exec(ctx, args)
 	if err != nil {
 		return nil, err

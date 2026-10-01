@@ -38,8 +38,9 @@ func hasAnyStage(call []string) bool {
 }
 
 // TestFreeIPAProvider_StageArgsPerTarget: runs on the retired host carry its
-// stage; freeipa-identity-apply.yml runs, the read-only query included,
-// carry the freeipa-server hosts' stage.
+// stage; the freeipa-identity-apply.yml converge carries the freeipa-server
+// hosts' stage; the read-only query, which also runs during `plan`, carries
+// none.
 func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
 		return &ansible.Result{Stdout: "IPA_CLIENT_ENROLLED=true"}, nil
@@ -70,10 +71,13 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	if len(exec.calls) != 4 {
 		t.Fatalf("got %d ansible-playbook calls, want 4", len(exec.calls))
 	}
-	for i, want := range [][]string{hostStageArgs, hostStageArgs, serverStageArgs, serverStageArgs} {
+	for i, want := range [][]string{hostStageArgs, hostStageArgs, serverStageArgs} {
 		if !hasArgs(exec.calls[i], want) {
 			t.Errorf("call %d = %v, want %v", i, exec.calls[i], want)
 		}
+	}
+	if hasAnyStage(exec.calls[3]) {
+		t.Errorf("read-only query call %v carries a stage", exec.calls[3])
 	}
 
 	// A stage error stops the run before ansible-playbook starts.

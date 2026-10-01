@@ -533,7 +533,7 @@ that decommission *reuses* those paths safely.
   verifyOnly: true
 - id: HD35
   category: approval
-  check: runs on central hosts carry those hosts' stage — freeipa-identity-apply.yml the freeipa-server hosts', the Wazuh deregistration the wazuh-manager hosts' — while runs on the decommissioned host carry its own stage
+  check: runs on central hosts carry those hosts' stage — the freeipa-identity-apply.yml converge the freeipa-server hosts', the Wazuh deregistration the wazuh-manager hosts' — while runs on the decommissioned host carry its own stage, and the read-only identity query, which also runs during plan, carries none
   probe: |
     go test ./internal/decommission/... -run TestFreeIPAProvider_StageArgsPerTarget -v
   expect: {stdout: {contains: "PASS"}}

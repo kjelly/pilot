@@ -465,6 +465,38 @@ func TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck(t *testing.T) {
 	}
 }
 
+// TestRegression_DecommissionQueryCrossCheckExemptions locks the two
+// read-only host-decommission queries that skip the environment-group
+// cross-check: they run without a stage (the freeipa-identity one already
+// during `plan`, which takes no confirmation), and the skip must apply to
+// that tag alone. `| list` because ansible_run_tags is a tuple on
+// ansible-core 2.19; a bare list comparison is always unequal.
+func TestRegression_DecommissionQueryCrossCheckExemptions(t *testing.T) {
+	for playbook, tag := range map[string]string{
+		"../../playbooks/apply/freeipa-identity-apply.yml":  "freeipa_host_absent_inspect",
+		"../../playbooks/apply/internal-endpoint-apply.yml": "iep_decommission_verify",
+	} {
+		want := "(ansible_run_tags | list) != ['" + tag + "']"
+		found := 0
+		plays, _ := loadYAML(t, playbook).([]any)
+		for _, p := range plays {
+			play, _ := p.(map[string]any)
+			walkTaskTree(play["pre_tasks"], nil, func(task map[string]any, _ []string) {
+				if name, _ := task["name"].(string); name != "Gate: stage must match this host's inventory environment group" {
+					return
+				}
+				found++
+				if when, _ := task["when"].(string); when != want {
+					t.Errorf("%s: cross-check when = %q, want %q", playbook, when, want)
+				}
+			})
+		}
+		if found == 0 {
+			t.Errorf("%s: no environment-group cross-check found", playbook)
+		}
+	}
+}
+
 func TestStageGateDetection(t *testing.T) {
 	const src = `
 - name: untagged gates in a tagged play
