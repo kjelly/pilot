@@ -55,12 +55,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/kjelly/pilot/internal/factcache"
+	"github.com/kjelly/pilot/internal/sshcontrol"
 	"github.com/kjelly/pilot/internal/statefile"
+	"github.com/kjelly/pilot/internal/targetalias"
 )
 
 // Status is the lifecycle state of a vm target.
@@ -171,12 +175,24 @@ type Manager struct {
 	// It is a field so unit tests can replace the host ACL operation deterministically.
 	grantLibvirtQEMUOverlayAccess func(ctx context.Context, path string) error
 
+	// dropFacts removes the Ansible fact-cache entries of the given
+	// inventory host names (factcache.Drop). Up calls it before creating
+	// anything and teardown after removing the VM, so a VM recreated
+	// under a name used within the cache timeout never gets the facts of
+	// the one it replaced. A field so tests can record the calls.
+	dropFacts func(ctx context.Context, hosts []string) error
+
 	// Tunables — real defaults in NewManager; tests shrink them so the
 	// boot/ssh polling loops return immediately against shims.
 	bootTimeout  time.Duration
 	sshTimeout   time.Duration
 	pollInterval time.Duration
 }
+
+// defaultDropFacts is what NewManager wires into Manager.dropFacts. The
+// package tests replace it in TestMain so no test reads or cleans the fact
+// cache of the machine running them.
+var defaultDropFacts = factcache.Drop
 
 // NewManager constructs a Manager. stateDir holds the json metadata
 // (docker-targets.json sibling: vm-targets.json). vmDir is where the
@@ -201,6 +217,7 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 		now:                           time.Now,
 		dialReachable:                 realDialReachable,
 		grantLibvirtQEMUOverlayAccess: grantLibvirtQEMUOverlayAccess,
+		dropFacts:                     defaultDropFacts,
 		bootTimeout:                   3 * time.Minute,
 		sshTimeout:                    2 * time.Minute,
 		pollInterval:                  2 * time.Second,
@@ -459,6 +476,14 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	if info, derr := m.virsh(ctx, "dominfo", opt.Name); derr == nil && info.ExitCode == 0 {
 		return nil, fmt.Errorf("vmtarget: a libvirt domain named %q already exists outside pilot state; pick a different --name or remove it first", opt.Name)
 	}
+	hosts := dedupeHosts(opt.Name, opt.Hosts)
+	// Facts cached for these names belong to whatever had them before.
+	// Fail before creating anything if they cannot be dropped: a new VM
+	// that Ansible believes has the old one's addresses and OS is worse
+	// than no VM.
+	if err := m.dropFacts(ctx, hosts); err != nil {
+		return nil, fmt.Errorf("vmtarget: drop cached Ansible facts for %v: %w", hosts, err)
+	}
 
 	user := opt.SSHUser
 	if user == "" {
@@ -498,7 +523,7 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		OverlayPath: filepath.Join(dir, "overlay.qcow2"),
 		SeedPath:    filepath.Join(dir, "seed.iso"),
 		KeyPath:     filepath.Join(dir, "id_ed25519"),
-		Hosts:       dedupeHosts(opt.Name, opt.Hosts),
+		Hosts:       hosts,
 		CreatedAt:   now,
 		StartedAt:   now,
 	}
@@ -1042,6 +1067,14 @@ func (m *Manager) teardown(ctx context.Context, t *Target) {
 	if t.Dir != "" {
 		_ = os.RemoveAll(t.Dir)
 	}
+	if err := sshcontrol.Remove(t.ControlDir()); err != nil {
+		slog.Warn("failed to remove SSH control directory", "target", t.Name, "err", err)
+	}
+	// Best effort here: if the cache cannot be cleaned now, the next Up of
+	// the same name refuses to start until it can.
+	if err := m.dropFacts(ctx, t.inventoryNames()); err != nil {
+		slog.Warn("failed to drop cached Ansible facts", "target", t.Name, "err", err)
+	}
 }
 
 // ---- Down -----------------------------------------------------------------
@@ -1333,18 +1366,20 @@ func (m *Manager) ResizeDisk(ctx context.Context, name string, newGB int) error 
 // ---- RenderInventory ------------------------------------------------------
 
 // RenderInventory renders a YAML inventory targeting this VM via
-// ansible_connection=ssh. The primary host key is the target Name;
-// every alias in t.Hosts (passed as `--hosts dns,ntp,keycloak` at
-// `up` time) appears twice:
-//   - as a top-level host in `all.hosts`, so `-l <alias>` works
-//   - as a single-host child group in `all.children`, so
-//     `hosts: "{{ target_group }}"` apply playbooks can pick
-//     a role-specific group without the user hand-writing an
-//     inventory file.
+// ansible_connection=ssh. The VM is exactly one inventory host, keyed by
+// the target Name. Every alias in t.Hosts (passed as
+// `--hosts dns,ntp,keycloak` at `up` time) is a single-host child group
+// in `all.children` whose only member is that host (see targetalias), so
+// `-l <alias>`, `hosts: "{{ target_group }}"` with an alias, and a spec
+// whose targets are alias groups all select this one VM.
 //
 // This is what lets `pilot vm-target run` + a role-gated apply
 // playbook (`-e infra_role=dns -e target_group=dns`) work end-to-end
 // with no human-built inventory.
+//
+// Rendering creates the target's SSH control directory (see ControlDir),
+// because ssh exits 255 instead of connecting when ControlMaster cannot
+// bind its socket.
 func (t *Target) RenderInventory() (string, error) {
 	if t == nil {
 		return "", errors.New("vmtarget: nil target")
@@ -1356,48 +1391,62 @@ func (t *Target) RenderInventory() (string, error) {
 	sb.WriteString("# Generated by pilot vm-target — do not edit by hand.\n")
 	sb.WriteString("all:\n")
 	sb.WriteString("  hosts:\n")
-	writeHost := func(key string) {
-		fmt.Fprintf(&sb, "    %s:\n", key)
-		fmt.Fprintf(&sb, "      ansible_connection: ssh\n")
-		fmt.Fprintf(&sb, "      ansible_host: %s\n", t.IP)
-		fmt.Fprintf(&sb, "      ansible_user: %s\n", t.SSHUser)
-		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
-		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
-		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%C -o ControlPersist=60s\n")
-		// Pipelining collapses each task to a single SSH round-trip
-		// (no per-task sftp of the module) — a large win on the many
-		// small tasks in a hardening playbook. Cloud images have no
-		// sudoers `requiretty`, so this is safe. Belt-and-suspenders
-		// with the repo ansible.cfg for when ansible is run from a
-		// different cwd (e.g. a staged temp inventory).
-		fmt.Fprintf(&sb, "      ansible_ssh_pipelining: true\n")
+	if err := writeSSHHost(&sb, t.Name, t); err != nil {
+		return "", err
 	}
-	writeHost(t.Name)
-	// Aliases that are NOT the primary name become both a host entry
-	// AND a child group. The primary is also a self-group (children:
-	// primary) so playbooks that pin to the primary by name also work.
-	for _, h := range t.Hosts {
-		if h == t.Name {
-			continue
-		}
-		writeHost(h)
-	}
-	// We used to emit alias-name child groups here, but they trigger
-	// ansible's `[WARNING]: Found both group and host with same name`
-	// because the alias host entries above are also present. The
-	// child groups are not actually needed: an alias host entry in
-	// all.hosts.<alias> already lets `hosts: <alias>` and
-	// `ansible -i inv <alias>` both match. The apply playbook's
-	// `hosts: "{{ target_group | default(infra_role) }}"` then
-	// resolves to the alias name, and ansible matches the host
-	// directly — no group required.
+	targetalias.WriteChildren(&sb, t.Name, t.Hosts)
 	return sb.String(), nil
+}
+
+// ControlDir is this target's private SSH ControlMaster directory:
+// <sshcontrol.Base()>/pilot-vmt-<uid>-<hash of name and creation time>.
+// Keying it on the creation time gives a VM recreated under the same
+// name a new directory, so it never reaches a master left over from the
+// VM it replaced; teardown removes the directory.
+func (t *Target) ControlDir() string {
+	return sshcontrol.Dir("vmt", t.Name+"\x00"+t.CreatedAt.UTC().Format(time.RFC3339Nano))
+}
+
+// inventoryNames returns every inventory host name this target has
+// owned: its Name and its aliases (targets saved before aliases existed
+// have an empty Hosts).
+func (t *Target) inventoryNames() []string {
+	return dedupeHosts(t.Name, t.Hosts)
+}
+
+// writeSSHHost writes t's `all.hosts` entry under key. The ControlPath goes in
+// ansible_ssh_args, not ansible_ssh_common_args: Ansible puts ssh_args
+// first on the ssh command line and OpenSSH keeps the first value of each
+// option, so a ControlPath in common args loses to the one in the repo
+// ansible.cfg's ssh_args (shared by every target and session). A host
+// variable also outranks ANSIBLE_SSH_ARGS and ansible.cfg.
+func writeSSHHost(sb *strings.Builder, key string, t *Target) error {
+	dir := t.ControlDir()
+	if err := sshcontrol.Ensure(dir); err != nil {
+		return fmt.Errorf("vmtarget: %w", err)
+	}
+	fmt.Fprintf(sb, "    %s:\n", key)
+	fmt.Fprintf(sb, "      ansible_connection: ssh\n")
+	fmt.Fprintf(sb, "      ansible_host: %s\n", t.IP)
+	fmt.Fprintf(sb, "      ansible_user: %s\n", t.SSHUser)
+	fmt.Fprintf(sb, "      ansible_port: %d\n", t.SSHPort)
+	fmt.Fprintf(sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
+	fmt.Fprintf(sb, "      ansible_ssh_args: -o ControlMaster=auto -o ControlPath=%s -o ControlPersist=60s\n", strconv.Quote(sshcontrol.ControlPath(dir)))
+	fmt.Fprintf(sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\n")
+	// Pipelining collapses each task to a single SSH round-trip
+	// (no per-task sftp of the module) — a large win on the many
+	// small tasks in a hardening playbook. Cloud images have no
+	// sudoers `requiretty`, so this is safe. Belt-and-suspenders
+	// with the repo ansible.cfg for when ansible is run from a
+	// different cwd (e.g. a staged temp inventory).
+	fmt.Fprintf(sb, "      ansible_ssh_pipelining: true\n")
+	return nil
 }
 
 // RenderGroupedInventory combines several already-running targets into a
 // single ansible inventory with real ansible groups. RenderInventory
-// (above) is single-target: its `Hosts` aliases are just extra names all
-// pointing at the SAME ip, which can't express a multi-node topology
+// (above) is single-target: its `Hosts` aliases are groups of that one
+// VM, which can't express a multi-node topology
 // (e.g. a FreeIPA primary + replica + client that must reach each other
 // as distinct hosts). This lets a playbook's own `hosts: ipa_masters` /
 // `hosts: ipa_replicas` pattern match real per-VM entries instead of
@@ -1429,14 +1478,9 @@ func RenderGroupedInventory(targets map[string]*Target, groupOrder []string, gro
 		if t.IP == "" {
 			return "", fmt.Errorf("vmtarget: target %q has no IP yet", n)
 		}
-		fmt.Fprintf(&sb, "    %s:\n", n)
-		fmt.Fprintf(&sb, "      ansible_connection: ssh\n")
-		fmt.Fprintf(&sb, "      ansible_host: %s\n", t.IP)
-		fmt.Fprintf(&sb, "      ansible_user: %s\n", t.SSHUser)
-		fmt.Fprintf(&sb, "      ansible_port: %d\n", t.SSHPort)
-		fmt.Fprintf(&sb, "      ansible_ssh_private_key_file: %s\n", t.KeyPath)
-		fmt.Fprintf(&sb, "      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=auto -o ControlPath=~/.ansible/cp/pilot-%%C -o ControlPersist=60s\n")
-		fmt.Fprintf(&sb, "      ansible_ssh_pipelining: true\n")
+		if err := writeSSHHost(&sb, n, t); err != nil {
+			return "", err
+		}
 	}
 	if len(groupOrder) > 0 {
 		sb.WriteString("  children:\n")

@@ -2,6 +2,7 @@ package dockertarget
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -489,8 +490,8 @@ esac`
 }
 
 // TestUp_AcceptsHostAliases is the multi-host happy path. The target
-// record gets a Hosts slice that RenderInventory expands to multiple
-// inventory entries pointing at the same container.
+// record gets a Hosts slice that RenderInventory renders as one host (the
+// container) plus one single-host group per alias.
 func TestUp_AcceptsHostAliases(t *testing.T) {
 	shim := `case "$1" in
   inspect) exit 1 ;;
@@ -513,16 +514,17 @@ esac`
 	if err != nil {
 		t.Fatalf("RenderInventory: %v", err)
 	}
-	// Each alias should appear as its own inventory host entry.
-	for _, want := range []string{"core:", "dns:", "ntp:", "keycloak:"} {
+	// Each alias is a group holding only the container's host entry.
+	for _, alias := range []string{"dns", "ntp", "keycloak"} {
+		want := "    " + alias + ":\n      hosts:\n        core: {}\n"
 		if !strings.Contains(inv, want) {
-			t.Errorf("inventory missing host %q\n%s", want, inv)
+			t.Errorf("inventory missing alias group %q\n%s", alias, inv)
 		}
 	}
-	// All should route to ansible_host: core (the container name).
+	// One host entry: ansible_host: core (the container name).
 	count := strings.Count(inv, "ansible_host: core")
-	if count != 4 {
-		t.Errorf("ansible_host: core appeared %d times, want 4", count)
+	if count != 1 {
+		t.Errorf("ansible_host: core appeared %d times, want 1", count)
 	}
 }
 
@@ -535,7 +537,10 @@ func TestUp_RejectsInvalidHostAlias(t *testing.T) {
   run)     echo "cid-bad" ;;
   *)       exit 0 ;;
 esac`
-	m, _ := newTestManager(t, shim)
+	m, dir := newTestManager(t, `echo "$1" >> "$PILOT_DOCKER_LOG"
+`+shim)
+	logFile := filepath.Join(dir, "docker.log")
+	t.Setenv("PILOT_DOCKER_LOG", logFile)
 	_, err := m.Up(context.Background(), Options{
 		Name:  "core",
 		Image: "pilot-target:ubuntu-24.04",
@@ -543,6 +548,10 @@ esac`
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid host alias") {
 		t.Fatalf("want invalid-alias error, got %v", err)
+	}
+	// Rejected before `docker run`: no container is left behind.
+	if data, _ := os.ReadFile(logFile); strings.Contains(string(data), "run") {
+		t.Fatalf("docker run was called for an invalid alias:\n%s", data)
 	}
 }
 
@@ -572,9 +581,106 @@ esac`
 	if err != nil {
 		t.Fatalf("RenderInventory: %v", err)
 	}
-	// "core:" should appear exactly once (no duplicate inventory host).
-	if c := strings.Count(inv, "    core:"); c != 1 {
+	// "core:" should appear exactly once as a host and dns once as a group.
+	if c := strings.Count(inv, "\n    core:\n"); c != 1 {
 		t.Errorf("core: appears %d times, want 1", c)
+	}
+	if c := strings.Count(inv, "\n    dns:\n"); c != 1 {
+		t.Errorf("dns: appears %d times, want 1", c)
+	}
+}
+
+// factRecorder records Manager.dropFacts calls, optionally failing them,
+// and how many docker calls the shim had logged at each call.
+type factRecorder struct {
+	calls         [][]string
+	dockerCallsAt []int
+	logFile       string
+	err           error
+}
+
+func (r *factRecorder) drop(_ context.Context, hosts []string) error {
+	r.calls = append(r.calls, append([]string(nil), hosts...))
+	data, _ := os.ReadFile(r.logFile)
+	r.dockerCallsAt = append(r.dockerCallsAt, strings.Count(string(data), "run"))
+	return r.err
+}
+
+const loggingShim = `echo "$1" >> "$PILOT_DOCKER_LOG"
+case "$1" in
+  inspect) exit 1 ;;
+  run)     echo "cid-facts" ;;
+  *)       exit 0 ;;
+esac`
+
+func recordFacts(t *testing.T, m *Manager, dir string) *factRecorder {
+	t.Helper()
+	r := &factRecorder{logFile: filepath.Join(dir, "docker.log")}
+	t.Setenv("PILOT_DOCKER_LOG", r.logFile)
+	m.dropFacts = r.drop
+	return r
+}
+
+// TestUp_DropsCachedFactsBeforeStartingTheContainer: a target recreated
+// under a name used within the fact cache timeout must not be handed the
+// facts of the one it replaces, for its name and every alias.
+func TestUp_DropsCachedFactsBeforeStartingTheContainer(t *testing.T) {
+	m, dir := newTestManager(t, loggingShim)
+	r := recordFacts(t, m, dir)
+	if _, err := m.Up(context.Background(), Options{Name: "vb-ntp", Image: "u", Hosts: []string{"core", "ntp"}}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(r.calls) != 1 || strings.Join(r.calls[0], ",") != "vb-ntp,core,ntp" {
+		t.Fatalf("dropFacts calls = %v, want one call for vb-ntp,core,ntp", r.calls)
+	}
+	if r.dockerCallsAt[0] != 0 {
+		t.Fatalf("facts were dropped after docker run")
+	}
+}
+
+// TestUp_RefusesWhenCachedFactsCannotBeDropped is the should-not side: no
+// container is started and no state is written.
+func TestUp_RefusesWhenCachedFactsCannotBeDropped(t *testing.T) {
+	m, dir := newTestManager(t, loggingShim)
+	r := recordFacts(t, m, dir)
+	r.err = errors.New("permission denied")
+	_, err := m.Up(context.Background(), Options{Name: "vb-x", Image: "u"})
+	if err == nil || !strings.Contains(err.Error(), "drop cached Ansible facts") {
+		t.Fatalf("Up error = %v, want the fact cache failure", err)
+	}
+	if data, _ := os.ReadFile(r.logFile); strings.Contains(string(data), "run") {
+		t.Fatalf("docker run was called although the facts could not be dropped:\n%s", data)
+	}
+	if all, _ := m.List(context.Background()); len(all) != 0 {
+		t.Fatalf("Up left state behind: %+v", all)
+	}
+}
+
+// TestDown_DropsCachedFacts: Down removes the cached facts of every name
+// the target owned; a cache that cannot be cleaned does not stop the
+// teardown (the next Up refuses instead). A name not in state touches
+// nothing.
+func TestDown_DropsCachedFacts(t *testing.T) {
+	m, dir := newTestManager(t, loggingShim)
+	r := recordFacts(t, m, dir)
+	if _, err := m.Up(context.Background(), Options{Name: "vb-down", Image: "u", Hosts: []string{"dns"}}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	r.err = errors.New("cache unavailable")
+	if err := m.Down(context.Background(), "vb-down"); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if len(r.calls) != 2 || strings.Join(r.calls[1], ",") != "vb-down,dns" {
+		t.Fatalf("dropFacts calls = %v, want Up then Down for vb-down,dns", r.calls)
+	}
+	if all, _ := m.List(context.Background()); len(all) != 0 {
+		t.Fatalf("state after Down: %+v", all)
+	}
+	if err := m.Down(context.Background(), "not-ours"); err == nil {
+		t.Fatal("Down of an unknown name should report it")
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("Down of an unknown name dropped facts: %v", r.calls)
 	}
 }
 

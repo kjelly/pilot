@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -28,7 +29,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kjelly/pilot/internal/factcache"
 	"github.com/kjelly/pilot/internal/statefile"
+	"github.com/kjelly/pilot/internal/targetalias"
 )
 
 // Status is the lifecycle state of a docker target.
@@ -173,7 +176,19 @@ type Manager struct {
 	stateDir string
 	store    *statefile.Store[Target]
 	now      func() time.Time // overridable in tests
+
+	// dropFacts removes the Ansible fact-cache entries of the given
+	// inventory host names (factcache.Drop). Up calls it before starting
+	// the container and Down after removing it, so a target recreated
+	// under a name used within the cache timeout never gets the facts of
+	// the one it replaced. A field so tests can record the calls.
+	dropFacts func(ctx context.Context, hosts []string) error
 }
+
+// defaultDropFacts is what NewManager wires into Manager.dropFacts. The
+// package tests replace it in TestMain so no test reads or cleans the fact
+// cache of the machine running them.
+var defaultDropFacts = factcache.Drop
 
 // NewManager constructs a Manager rooted at stateDir.
 // The state file is stateDir/docker-targets.json; stateDir is created
@@ -187,9 +202,10 @@ func NewManager(stateDir string) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		stateDir: stateDir,
-		store:    store,
-		now:      time.Now,
+		stateDir:  stateDir,
+		store:     store,
+		now:       time.Now,
+		dropFacts: defaultDropFacts,
 	}, nil
 }
 
@@ -294,6 +310,26 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		return nil, fmt.Errorf("dockertarget: a container named %q already exists outside pilot state; pick a different --name or remove it first", opt.Name)
 	}
 
+	// De-dup + validate the aliases before anything is started, so an
+	// invalid alias cannot leave a running container behind; opt.Name is
+	// always the primary.
+	hosts := []string{opt.Name}
+	seen := map[string]bool{opt.Name: true}
+	for _, h := range opt.Hosts {
+		if !seen[h] {
+			if !validName(h) {
+				return nil, fmt.Errorf("dockertarget: invalid host alias %q (want [a-zA-Z0-9_.-]+)", h)
+			}
+			hosts = append(hosts, h)
+			seen[h] = true
+		}
+	}
+	// Facts cached for these names belong to whatever had them before.
+	// Fail before starting anything if they cannot be dropped.
+	if err := m.dropFacts(ctx, hosts); err != nil {
+		return nil, fmt.Errorf("dockertarget: drop cached Ansible facts for %v: %w", hosts, err)
+	}
+
 	network := opt.Network
 	if network == "" {
 		network = "host"
@@ -360,21 +396,6 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 	}
 
 	now := m.now()
-	hosts := []string{opt.Name}
-	if len(opt.Hosts) > 0 {
-		// De-dup + validate; refuse to duplicate opt.Name (it is
-		// always the primary).
-		seen := map[string]bool{opt.Name: true}
-		for _, h := range opt.Hosts {
-			if !seen[h] {
-				if !validName(h) {
-					return nil, fmt.Errorf("dockertarget: invalid host alias %q (want [a-zA-Z0-9_.-]+)", h)
-				}
-				hosts = append(hosts, h)
-				seen[h] = true
-			}
-		}
-	}
 	t := Target{
 		Name:        opt.Name,
 		Image:       opt.Image,
@@ -456,6 +477,11 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 			}
 		}
 	}
+	// Best effort here: if the cache cannot be cleaned now, the next Up of
+	// the same name refuses to start until it can.
+	if err := m.dropFacts(ctx, t.inventoryNames()); err != nil {
+		slog.Warn("failed to drop cached Ansible facts", "target", name, "err", err)
+	}
 	// Drop the record under the cross-process lock (a racing Down's
 	// removal is a no-op) so concurrent writers' entries survive.
 	return m.store.Mutate(func(targets []Target) ([]Target, error) {
@@ -467,6 +493,19 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 		}
 		return out, nil
 	})
+}
+
+// inventoryNames returns every inventory host name this target has
+// owned: its Name and its aliases (targets saved before aliases existed
+// have an empty Hosts).
+func (t *Target) inventoryNames() []string {
+	names := []string{t.Name}
+	for _, h := range t.Hosts {
+		if h != t.Name {
+			names = append(names, h)
+		}
+	}
+	return names
 }
 
 // Get returns the target record + a live status refresh.
@@ -547,7 +586,9 @@ func connectionPlugin(engine Engine) string {
 
 // RenderInventory renders a YAML inventory targeting this single
 // container via the ansible connection plugin matching t.Engine.
-// Suitable for passing to ansible-playbook with -i.
+// Suitable for passing to ansible-playbook with -i. The container is one
+// inventory host keyed by t.Name; each alias in t.Hosts is a single-host
+// group containing it (see targetalias, shared with vm-target).
 //
 // If the user has a custom InventoryPath on the Target, we read that
 // file instead — this lets power users override connection params
@@ -577,16 +618,7 @@ func (t *Target) RenderInventory() (string, error) {
 	fmt.Fprintf(&sb, "      ansible_connection: %s\n", conn)
 	fmt.Fprintf(&sb, "      ansible_host: %s\n", t.Name)
 	fmt.Fprintf(&sb, "      ansible_user: root\n")
-	// Alias hosts: same container, different inventory key
-	for _, h := range t.Hosts {
-		if h == t.Name {
-			continue
-		}
-		fmt.Fprintf(&sb, "    %s:\n", h)
-		fmt.Fprintf(&sb, "      ansible_connection: %s\n", conn)
-		fmt.Fprintf(&sb, "      ansible_host: %s\n", t.Name)
-		fmt.Fprintf(&sb, "      ansible_user: root\n")
-	}
+	targetalias.WriteChildren(&sb, t.Name, t.Hosts)
 	return sb.String(), nil
 }
 
