@@ -11,6 +11,10 @@
 > NTP，row 重新編號為 C1–C3（舊 C4–C6，內容不變）。
 > v2.0：Keycloak 拆到 `docs/verification/keycloak.md`；PostgreSQL 走
 > `core-infra-provider-db.md`。
+>
+> **最新驗證**：2026-10-01，candidate `3f781fb`，Ubuntu 24.04 vm-target，
+> `pilot vm-target test`（`-e infra_role=ntp -e target_group=ntp`）PASS：C1–C3 3/3、
+> L6 `changed=0`。摘要見 [`docs/evidence/dns/2026-10-01-3f781fb.md`](../evidence/dns/2026-10-01-3f781fb.md)。
 
 ## 1. 目標系統
 

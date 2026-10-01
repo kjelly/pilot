@@ -599,7 +599,11 @@ runner error、timeout、matcher 不符都算 FAIL。
 G6、G7、G8、G10 都實際觸發，設定都維持或還原到舊值；E5 新紀錄 59 秒後可查到、刪除後
 300 秒消失；E6 見 §8 未知項；E7 由 `cmd/pilot/cmd/dns_config_surface_test.go` 涵蓋；
 E8 的設定由 `pilot edit --actions` 寫入，經 workspace inventory 的 group_vars 載入。
-細節與四次嘗試的經過見 evidence 摘要。
+細節與四次嘗試的經過見 evidence 摘要。同一個 candidate 的後續驗證：forward-only 加
+DNSSEC 關閉加舊格式 `dns_zones` 的 `vm-target test` PASS（12 pass / 0 fail / 8
+not_applicable、L6 `changed=0`）；day-2 的 `internal-endpoint-apply.yml` 把 resolver
+baseline 套到全部主機後，本檔 37 pass / 0 fail / 2 not_applicable（C20 涵蓋 FreeIPA 與兩台
+tier 主機）、L6 `changed=0`。
 
 - inputs 的傳法：`vm-target topology test` 沒有 `--input`，verify 子行程會繼承
   `PILOT_INPUT_<NAME>` 環境變數。C20 需要的 `pilot_inventory_path` 是測試中途才寫出
