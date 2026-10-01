@@ -262,7 +262,7 @@
         executable: /bin/bash
       changed_when: false
       no_log: true
-      tags: [SS_enrollment, SS_cert]
+      tags: [SS_enrollment, SS_cert, SS_service]
 
     - name: "Ensure role-pilot-session-auditor group exists"
       ansible.builtin.command:
@@ -315,7 +315,7 @@
       ansible.builtin.command:
         argv: [kdestroy]
       changed_when: false
-      tags: [SS_enrollment, SS_cert]
+      tags: [SS_enrollment, SS_cert, SS_service]
 
     - name: "Ensure /etc/pilot exists"
       ansible.builtin.file:

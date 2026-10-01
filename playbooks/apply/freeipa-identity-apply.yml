@@ -778,7 +778,7 @@
       # not mutate managed service state, so it must not be skipped in
       # check-mode.
       check_mode: false
-      tags: [identity, groups, freeipa_host_absent_inspect]
+      tags: [always, identity, groups, freeipa_host_absent_inspect]
 
     # ── Groups ─────────────────────────────────────────────────────────
     - name: "Ensure IPA groups exist"
@@ -3325,4 +3325,4 @@
       ansible.builtin.command: kdestroy
       changed_when: false
       failed_when: false
-      tags: [identity]
+      tags: [always, identity]
