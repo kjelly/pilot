@@ -107,6 +107,7 @@
       tags: [always]
 
     - name: "Gate: required secrets present (fail early, before any mutation)"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - restic_aws_access_key_id is defined and restic_aws_access_key_id | length > 0
@@ -127,6 +128,7 @@
     # overridden restic_repository has no SeaweedFS group to borrow from and
     # must set restic_s3_target_host itself if it needs the /etc/hosts pin.
     - name: "Auto-detect backup destination host from this inventory's seaweedfs-s3 group"
+      tags: [always]
       ansible.builtin.set_fact:
         restic_s3_target_host: >-
           {{ hostvars[(groups.get('seaweedfs-s3', []) | first)]['ansible_host']
@@ -144,6 +146,7 @@
     # S3 endpoint instead of the s3-backup-server alias), or this inventory's
     # seaweedfs-s3 group just auto-filled it above.
     - name: "Gate: backup destination must be resolvable"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (restic_s3_target_host | default('') | length > 0) or (restic_s3_alias not in restic_repository)

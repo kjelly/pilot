@@ -291,12 +291,14 @@
           register: agent_controller_binary_result
 
         - name: "Step 7: verify the target-side binary SHA256 (verify again after copy)"
+          tags: [agent-controller-C4]
           ansible.builtin.stat:
             path: "{{ agent_controller_bin_dest }}"
             checksum_algorithm: sha256
           register: agent_controller_target_binary_stat
 
         - name: "Step 7: assert target-side SHA256 matches"
+          tags: [agent-controller-C4]
           ansible.builtin.assert:
             that:
               - agent_controller_target_binary_stat.stat.get('checksum', '') == agent_controller_artifact_sha256
@@ -436,6 +438,7 @@
           when: not ansible_check_mode
 
         - name: "Step 16: assert status.json was reachable"
+          tags: [agent-controller-C6]
           ansible.builtin.assert:
             that:
               - agent_controller_status_check.rc == 0

@@ -463,6 +463,7 @@
       until: detection_alertmanager_probe.status is defined and detection_alertmanager_probe.status == 200
 
     - name: "Gate: feature profile file exists on the controller and is non-empty"
+      tags: [always]
       ansible.builtin.stat:
         path: "{{ detection_engine_feature_profile_src }}"
       delegate_to: localhost
@@ -471,6 +472,7 @@
       register: detection_feature_profile_stat
 
     - name: "Gate: assert feature profile is present"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - detection_feature_profile_stat.stat.exists
@@ -568,6 +570,7 @@
         # on it would crash the dry-run, not just fail it. Same "defer to
         # the real apply" convention as Steps 15-17 below.
         - name: "Step 7: assert target-side SHA256 matches"
+          tags: [detection-engine-C1]
           ansible.builtin.assert:
             that:
               - detection_engine_target_binary_stat.stat.get('checksum', '') == detection_engine_artifact_sha256
@@ -767,6 +770,7 @@
           when: not ansible_check_mode
 
         - name: "Step 16: assert status.json was reachable"
+          tags: [detection-engine-C9]
           ansible.builtin.assert:
             that:
               - detection_engine_status_check.rc == 0

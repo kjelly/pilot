@@ -238,6 +238,7 @@
       tags: [always]
 
     - name: "Gate: effective Alertmanager configuration is non-empty"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - alertmanager_effective_config | length > 0

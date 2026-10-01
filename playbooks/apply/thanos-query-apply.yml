@@ -108,6 +108,7 @@
       tags: [always]
 
     - name: "Gate: required S3 secrets present (fail early, before any mutation)"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - thanos_aws_access_key_id is defined and thanos_aws_access_key_id | length > 0
@@ -120,6 +121,7 @@
 
     # Same "no reachable destination" trap as restic-backup.md's gate.
     - name: "Gate: S3 destination must be resolvable"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (thanos_s3_target_host | default('', true) | length > 0) or (thanos_s3_alias not in thanos_s3_endpoint)
