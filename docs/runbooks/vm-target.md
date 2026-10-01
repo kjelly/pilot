@@ -301,5 +301,5 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 日期 | 版本 | 變更 |
 |------|------|------|
 | 2026-06-30 | v1.0 | 初版：QEMU/KVM vm-target（up/down/list/show-inventory/run/verify/exec/snapshot/rollback），cloud-init NoCloud + qcow2 overlay + 權威 IP；修 virtio-seed / undefine-snapshots-metadata / up-cleanup 三個坑 |
-| 2026-09-25 | v1.2 | §6：data dir 與其他命令一致（`--data-dir` → `PILOT_DATA_DIR` → `data_dir` → `~/.local/share/pilot`），`run`/`verify` 的 `--data-dir` 生效並傳給子行程；network lock 改成每個 libvirt network 一個、放在 `/tmp`（與 data dir、`--vm-dir` 無關）；舊位置 state 的遷移提示。證據見 `docs/evidence/data-dir/2026-09-25-92e6063.md` |
+| 2026-09-25 | v1.2 | §6：data dir 與其他命令一致（`--data-dir` → `PILOT_DATA_DIR` → `data_dir` → `~/.local/share/pilot`），`run`/`verify` 的 `--data-dir` 生效並傳給子行程；network lock 改成每個 libvirt network 一個、放在 `/tmp`（與 data dir、`--vm-dir` 無關）；舊位置 state 的遷移提示。證據見 `docs/evidence/data-dir/2026-10-01-077cf3c.md`（data dir 部分另見 `docs/evidence/data-dir/2026-09-25-92e6063.md`） |
 | 2026-07-23 | v1.1 | 補§2.2：文件化 `pilot services up/status/down/purge` + `vm-target --services local` / topology 根層 `services: local` 的 host-local 快取用法（apt-cacher-ng + Pulp RPM + Harbor，fail-closed，不會退回公網）；VM 端完整驗收仍待補（見 §7） |
