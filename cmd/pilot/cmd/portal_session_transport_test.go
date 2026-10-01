@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -270,10 +271,49 @@ func TestRunPortalTransport_DeniedPathsNeverResolveOrDial(t *testing.T) {
 		})
 	}
 	t.Run("recording metadata is compatible", func(t *testing.T) {
-		if !transportRecordingCompatible("") || !transportRecordingCompatible("metadata") {
+		if !gatewayapi.TransportRecordingCompatible("") || !gatewayapi.TransportRecordingCompatible("metadata") {
 			t.Fatal(`"" and "metadata" must be transport-compatible`)
 		}
 	})
+}
+
+// TestRunPortalTransport_OlderGatewayRecordingStillDenied: a gateway
+// daemon from before the server-side D8 gate answers transport_allowed=true
+// with a terminal recording mode. The client must still refuse the
+// transport, with the same message and audit result.
+func TestRunPortalTransport_OlderGatewayRecordingStillDenied(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "old-gw.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/identity", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gatewayapi.IdentityResponse{Username: currentOSUsername(t), Gateway: gatewayapi.GatewayInfo{ID: "gpu-01", Scope: "gpu"}})
+	})
+	mux.HandleFunc("/v1/connect/authorize", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gatewayapi.ConnectAuthorizeResponse{
+			Allowed: true, Target: "gpu-a.example.com", GatewayID: "gpu-01", GatewayScope: "gpu",
+			RecordingMode: "terminal_output", TransportAllowed: true,
+		})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { _ = srv.Close() })
+
+	h := newTransportHarness(t, readyGPUA, strings.NewReader("never sent"))
+	h.deps.client = newPortalClient(sockPath)
+	err = runPortalTransport(context.Background(), h.deps, "gpu-a.example.com")
+	if err == nil || err.Error() != transportMsgRecordingPolicy {
+		t.Fatalf("err = %v, want %q", err, transportMsgRecordingPolicy)
+	}
+	if got := h.dialer.dialed(); len(got) != 0 {
+		t.Fatalf("dialer called %v", got)
+	}
+	evs := h.audit.events(t)
+	if last := evs[len(evs)-1]; last.Kind != sessionaudit.KindGatewayTransportDenied || last.Result != transportResultRecordingDeny {
+		t.Fatalf("last audit event = %s/%s, want %s/%s", last.Kind, last.Result, sessionaudit.KindGatewayTransportDenied, transportResultRecordingDeny)
+	}
 }
 
 // TestRunPortalTransport_FreshAuthorizeEveryCall is AG50: a transport
