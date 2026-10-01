@@ -20,6 +20,7 @@
 > §16/§21/§27.2
 > 維護者：sre
 >
+> 2026-10-01：finish 與 events 同時送達時兩者不再可能都成功（SS21 的「finish 後的 events 一律 409」在並行下也成立）：start／events／finish 在各自的寫入 transaction 內讀 session 狀態（`BEGIN IMMEDIATE`），finish 只更新 `ended_at=''` 的列。`internal/sessionstore` 的 `TestStoreConcurrentFinishAndIngestStayConsistent`、`TestStoreConcurrentIdenticalStartsAreIdempotent`；活體 200 輪 HTTP 競態與修正前 binary 的對照見 [`docs/evidence/pilot-access-gateway/2026-10-01-d7da805.md`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md)。
 > 2026-09-24 per-host recording Phase 8：disk full（L18）已活體驗證、SS02 改成不含 `\|` 的指令，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)。
 > 2026-09-23 per-host recording Phase 7：新增 SS25（replay／export audit）與 SS26（metrics textfile）；candidate `31f5c23` 對 `phr-store` 實跑 SS24／SS26 probe PASS、第二次 apply `changed=0`，並以 root（非 auditor）觸發 replay 確認 `recording_replayed` denied audit event，見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md`](../evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md)。
 

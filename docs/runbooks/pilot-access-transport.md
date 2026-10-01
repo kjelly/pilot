@@ -20,17 +20,17 @@ on the gateway, and never accepts a caller-chosen port or address.
 ## 0.5 Current fact summary
 
 Snapshot of the reference environment used for the latest verified run
-(2026-10-01, candidate `aad66f4`). Full results are in the evidence record in
+(2026-10-01, candidate `d7da805`). Full results are in the evidence record in
 §6.
 
 | Item | Current fact |
 |---|---|
-| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `zx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `zx-ipa` 192.168.122.15 (AlmaLinux 9), `zx-gw` 192.168.122.16, `zx-target` 192.168.122.18, `zx-store` 192.168.122.14, `zx-ws` 192.168.122.17 (Ubuntu 24.04). Torn down with `topology down` after the run |
-| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `zx-ipa`; `freeipa-client`: `zx-gw`, `zx-target`, `zx-store`; `pilot-access-gateway`: `zx-gw`; `pilot-access-target-policy`: `zx-target`; `pilot-session-store`: `zx-store`; `pilot-transport-workstation`: `zx-ws` |
-| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `zx-target` published in `pilot-target-gpu` |
-| Component state after the last run | gateway transport **enabled**, no recording default (built-in `metadata`), session store URL `https://zx-store.ipa.pilot.internal:8443`; `zx-target` policy `strict`, a member of `pilot-transport-ready`, host recording policy `terminal_output` (the last L13 step) |
+| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `yx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `yx-ipa` 192.168.122.20 (AlmaLinux 9), `yx-gw` 192.168.122.19, `yx-target` 192.168.122.18, `yx-store` 192.168.122.17, `yx-ws` 192.168.122.21 (Ubuntu 24.04). Torn down with `topology down` after the run |
+| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `yx-ipa`; `freeipa-client`: `yx-gw`, `yx-target`, `yx-store`; `pilot-access-gateway`: `yx-gw`; `pilot-access-target-policy`: `yx-target`; `pilot-session-store`: `yx-store`; `pilot-transport-workstation`: `yx-ws` |
+| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `yx-target` published in `pilot-target-gpu` |
+| Component state after the last run | gateway transport **enabled**, recording default `terminal_output` (the recording phase), session store URL `https://yx-store.ipa.pilot.internal:8443`; `yx-target` policy `strict`, a member of `pilot-transport-ready`, no host recording policy |
 | External state | vault file with `ipa_admin_password`, `pilot_session_store_master_key`, `pilot_session_store_ingest_signing_key` and `transport_fixture_user_password` (names only); FreeIPA user `transportuser`; FreeIPA hostgroup `pilot-transport-ready` |
-| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `zx-ws` → `zx-target` tcp/22) |
+| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `yx-ws` → `yx-target` tcp/22) |
 | Alignment decision | **A (inventory matches the specs)**: the gateway spec runs on `pilot-access-gateway`, the target-policy spec on `pilot-access-target-policy` and the store spec on `pilot-session-store`, and all three groups exist in the topology inventory as listed above |
 
 ## 1. Scope and prerequisites
@@ -209,6 +209,16 @@ Snapshot of the reference environment used for the latest verified run
 
 ## 6. Latest verified evidence
 
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-d7da805.md`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md).
+  Candidate `d7da805` (tree `2d6712e5…`): the session store's finish/ingest
+  race fixed and `main` `56080a8` merged. Topology test on never-applied VMs:
+  L1–L6 pass (verify 32/32, 5/5 and store 27/27, L6 `changed=0`). E2E strict
+  20/20, recording 3/3; the merged gateway and store playbooks run alone
+  under `--tags AG03`, `AG_service` and `SS_service` with `changed=0`. 200
+  concurrent finish/events rounds over the live ingest API never accept both
+  (the pre-fix binary did in 23). The gateway binary is byte-identical to
+  `aad66f4`'s; remote-dev, not-ready, disabled, AG60 and the lockout suites
+  were not re-run (last PASS on `aad66f4`, below). **PASS**.
 - 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-aad66f4.md`](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md).
   Candidate `aad66f4` (tree `78105e6a…`): per-host SSH session recording
   merged with `main` `34aad5a` (transport spec rev 5 included). Topology test

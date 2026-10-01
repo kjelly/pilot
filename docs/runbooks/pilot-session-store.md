@@ -18,16 +18,16 @@ unrecorded.
 
 | Item | Current verified value |
 |---|---|
-| Fact timestamp | 2026-10-01T02:30Z |
-| Target type | Disposable KVM vm-target topology: a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with `tx-` renamed `zs-` and a Directory node `zs-dir` added; every host in the inventory's `staging` group for the upgrade rehearsal |
+| Fact timestamp | 2026-10-01T14:10Z |
+| Target type | Disposable KVM vm-target topology: a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with `tx-` renamed `ys-` and a Directory node `ys-dir` added; every host in the inventory's `staging` group for the upgrade rehearsal |
 | Inventory source | `pilot vm-target topology inventory` plus a `staging` group holding every host, read with `ansible-inventory --graph` before the upgrade |
-| Actual targets | Session store `zs-store`, gateway `zs-gw` (`gpu-01` / `gpu`), Directory `zs-dir`, target `zs-target`, workstation `zs-ws` (Ubuntu 24.04); FreeIPA `zs-ipa` (AlmaLinux 9) |
+| Actual targets | Session store `ys-store`, gateway `ys-gw` (`gpu-01` / `gpu`), Directory `ys-dir`, target `ys-target`, workstation `ys-ws` (Ubuntu 24.04); FreeIPA `ys-ipa` (AlmaLinux 9) |
 | Vault keys (names only) | `ipa_admin_password`, `transport_fixture_user_password`, `pilot_session_store_master_key`, `pilot_session_store_ingest_signing_key`; for the previous revision and the rollback, `pilot_session_store_ingest_token` (disposable vault) |
-| Previous revision used for rollback | `main` `34aad5a` (schema v1, static bearer token, gateway recording `terminal_output` through a static token file) |
+| Previous revision used for rollback | `main` `56080a8` (schema v1, static bearer token, gateway recording `terminal_output` through a static token file) |
 | Alignment | The store role group is the inventory's `pilot-session-store` group, as the spec's §1 target table expects |
 
 Full results, candidate/tree and scenario verdicts are in the
-[latest evidence record](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md).
+[latest evidence record](../evidence/pilot-access-gateway/2026-10-01-d7da805.md).
 
 ## 1. Scope and prerequisites
 
@@ -159,12 +159,13 @@ if they must be retained.
 
 | Field | Value |
 |---|---|
-| Verified at | 2026-10-01T02:30Z |
-| Tested revision | `aad66f4` |
-| Tested tree | `78105e6adb1cddc6d4c60f42cf4752498779647d` |
-| Target/inventory | `zs-store`, `zs-gw`, `zs-dir`, `zs-target`, `zs-ipa` (generated vm-target topology inventory with a `staging` group) |
-| Upgrade | from `main` `34aad5a` with `stage=staging`, `confirm_staging=true`: v1 DB with a session recorded through the static token → one `index database migrated` log line, `index.db.pre-v1.bak` 0600 (schema v1), the old session shown and replayed, legacy token file removed. The gateway apply without the mode stopped at the downgrade guard (`changed=0`); with `terminal_output` kept it changed config, signing key, static token file, binaries, restart. Marker and Directory applied; a recorded connect `policy_source host`, `complete: true` |
-| Rollback | backup restored; `34aad5a` store `changed=6`; marker removed, none left on any host; gateway token file put back, `34aad5a` gateway `changed=4`; `34aad5a` Directory; a connect recorded into the restored v1 store and the baseline replayed |
-| Re-upgrade and cleanup | migrated again, both earlier sessions replay; after deleting the backup and removing the old token from the vault, store and gateway re-apply `changed=0`. Without `-e stage`, or without `confirm_staging`, the apply stops at its gate |
-| Fresh topologies | store spec 27/27 on the per-host recording topology (`rec-store`) and on the transport topology (`zx-store`); `fail_closed` mid-session live (L13) |
-| Evidence record | [2026-10-01 `aad66f4`](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md) |
+| Verified at | 2026-10-01T14:10Z |
+| Tested revision | `d7da805` |
+| Tested tree | `2d6712e56a87422f822c9845738319d218bd38c7` |
+| Target/inventory | `ys-store`, `ys-gw`, `ys-dir`, `ys-target`, `ys-ipa` (generated vm-target topology inventory with a `staging` group) |
+| Upgrade | from `main` `56080a8` with `stage=staging`, `confirm_staging=true`: v1 DB with a session recorded through the static token → one `index database migrated` log line, `index.db.pre-v1.bak` 0600 (schema v1), the old session shown and replayed, legacy token file removed. The gateway apply without the mode stopped at the downgrade guard (`changed=0`); with `terminal_output` kept it changed config, signing key, binaries, restart. Marker and Directory applied; a recorded connect `policy_source host`, `complete: true` |
+| Rollback | backup restored; `56080a8` store `changed=6`; marker removed, none left on any host; gateway token file put back, `56080a8` gateway `changed=4`; `56080a8` Directory; a connect recorded into the restored v1 store and the baseline replayed |
+| Re-upgrade and cleanup | migrated again, both earlier sessions replay, the gateway's static token file removed (AG82); after deleting the backup and removing the old token from the vault, store and gateway re-apply `changed=0`. Without `-e stage`, or without `confirm_staging`, the apply stops at its gate |
+| Concurrent finish and events | 200 rounds over the live ingest API: the candidate never accepts both (finish 200 / events 409, or events 200 / finish 400); the pre-fix binary accepted both in 23 rounds and answered events with 500 in 59 |
+| Fresh topologies | store spec 27/27 on the per-host recording topology (`rec-store`), on the transport topology (`yx-store`) and at the end of the rehearsal |
+| Evidence record | [2026-10-01 `d7da805`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md) |
