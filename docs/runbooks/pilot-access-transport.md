@@ -20,12 +20,12 @@ on the gateway, and never accepts a caller-chosen port or address.
 ## 0.5 Current fact summary
 
 Snapshot of the reference environment used for the latest verified run
-(2026-10-01, candidate `d7da805`). Full results are in the evidence record in
+(2026-10-01, candidate `fe5f9e0`). Full results are in the evidence record in
 §6.
 
 | Item | Current fact |
 |---|---|
-| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `yx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `yx-ipa` 192.168.122.20 (AlmaLinux 9), `yx-gw` 192.168.122.19, `yx-target` 192.168.122.18, `yx-store` 192.168.122.17, `yx-ws` 192.168.122.21 (Ubuntu 24.04). Torn down with `topology down` after the run |
+| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `yx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `yx-ipa` 192.168.122.16 (AlmaLinux 9), `yx-gw` 192.168.122.15, `yx-target` 192.168.122.12, `yx-store` 192.168.122.14, `yx-ws` 192.168.122.13 (Ubuntu 24.04). Torn down with `topology down` after the run |
 | Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `yx-ipa`; `freeipa-client`: `yx-gw`, `yx-target`, `yx-store`; `pilot-access-gateway`: `yx-gw`; `pilot-access-target-policy`: `yx-target`; `pilot-session-store`: `yx-store`; `pilot-transport-workstation`: `yx-ws` |
 | Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `yx-target` published in `pilot-target-gpu` |
 | Component state after the last run | gateway transport **enabled**, recording default `terminal_output` (the recording phase), session store URL `https://yx-store.ipa.pilot.internal:8443`; `yx-target` policy `strict`, a member of `pilot-transport-ready`, no host recording policy |
@@ -209,6 +209,13 @@ Snapshot of the reference environment used for the latest verified run
 
 ## 6. Latest verified evidence
 
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md).
+  Candidate `fe5f9e0` (tree `18614acb…`): AG82 removes the gateway's former
+  static token at the path the old config named. Topology test on
+  never-applied VMs: L1–L6 pass (32/32, 5/5, 27/27, L6 `changed=0`) on the
+  second attempt; the first stopped at `ipa-server-install` on `yx-ipa` and
+  rolled back. E2E strict 20/20, recording 3/3; `--tags AG82`, `AG03`,
+  `AG_service` `changed=0`. **PASS**.
 - 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-d7da805.md`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md).
   Candidate `d7da805` (tree `2d6712e5…`): the session store's finish/ingest
   race fixed and `main` `56080a8` merged. Topology test on never-applied VMs:

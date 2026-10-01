@@ -18,7 +18,7 @@ unrecorded.
 
 | Item | Current verified value |
 |---|---|
-| Fact timestamp | 2026-10-01T14:10Z |
+| Fact timestamp | 2026-10-01T16:30Z |
 | Target type | Disposable KVM vm-target topology: a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with `tx-` renamed `ys-` and a Directory node `ys-dir` added; every host in the inventory's `staging` group for the upgrade rehearsal |
 | Inventory source | `pilot vm-target topology inventory` plus a `staging` group holding every host, read with `ansible-inventory --graph` before the upgrade |
 | Actual targets | Session store `ys-store`, gateway `ys-gw` (`gpu-01` / `gpu`), Directory `ys-dir`, target `ys-target`, workstation `ys-ws` (Ubuntu 24.04); FreeIPA `ys-ipa` (AlmaLinux 9) |
@@ -27,7 +27,7 @@ unrecorded.
 | Alignment | The store role group is the inventory's `pilot-session-store` group, as the spec's §1 target table expects |
 
 Full results, candidate/tree and scenario verdicts are in the
-[latest evidence record](../evidence/pilot-access-gateway/2026-10-01-d7da805.md).
+[latest evidence record](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md).
 
 ## 1. Scope and prerequisites
 
@@ -170,13 +170,13 @@ if they must be retained.
 
 | Field | Value |
 |---|---|
-| Verified at | 2026-10-01T14:10Z |
-| Tested revision | `d7da805` |
-| Tested tree | `2d6712e56a87422f822c9845738319d218bd38c7` |
+| Verified at | 2026-10-01T16:30Z |
+| Tested revision | `fe5f9e0` |
+| Tested tree | `18614acb1decf82e5fcc5d77695ce8a9d2254fcc` |
 | Target/inventory | `ys-store`, `ys-gw`, `ys-dir`, `ys-target`, `ys-ipa` (generated vm-target topology inventory with a `staging` group) |
-| Upgrade | from `main` `56080a8` with `stage=staging`, `confirm_staging=true`: v1 DB with a session recorded through the static token → one `index database migrated` log line, `index.db.pre-v1.bak` 0600 (schema v1), the old session shown and replayed, legacy token file removed. The gateway apply without the mode stopped at the downgrade guard (`changed=0`); with `terminal_output` kept it changed config, signing key, binaries, restart. Marker and Directory applied; a recorded connect `policy_source host`, `complete: true` |
-| Rollback | backup restored; `56080a8` store `changed=6`; marker removed, none left on any host; gateway token file put back, `56080a8` gateway `changed=4`; `56080a8` Directory; a connect recorded into the restored v1 store and the baseline replayed |
-| Re-upgrade and cleanup | migrated again, both earlier sessions replay, the gateway's static token file removed (AG82); after deleting the backup and removing the old token from the vault, store and gateway re-apply `changed=0`. Without `-e stage`, or without `confirm_staging`, the apply stops at its gate |
-| Concurrent finish and events | 200 rounds over the live ingest API: the candidate never accepts both (finish 200 / events 409, or events 200 / finish 400); the pre-fix binary accepted both in 23 rounds and answered events with 500 in 59 |
+| Upgrade | from `main` `56080a8` whose gateway recorded through a token file at a custom path (`/etc/pilot/custom-ingest-token`), with `stage=staging`, `confirm_staging=true`: one `index database migrated` log line, `index.db.pre-v1.bak` 0600 (schema 1), the old session shown and replayed, the store's legacy token removed. The gateway apply without the mode stopped at the downgrade guard (`changed=0`, token and config untouched); with `terminal_output` kept it changed config, signing key, AG82 (removed `/etc/pilot/custom-ingest-token`), binaries, restart; afterwards neither the custom nor the default token path exists. Marker and Directory applied; a recorded connect `policy_source host`, `complete: true` |
+| Rollback | backup restored; `56080a8` store `changed=6`; marker removed, none left on any host; gateway token put back at the custom path, `56080a8` gateway `changed=4`; `56080a8` Directory; a connect recorded into the restored v1 store and the baseline replayed |
+| Re-upgrade and cleanup | migrated again, both earlier sessions replay; AG82 alone (`--tags AG82`) removed the custom token; after deleting the backup and removing the old token from the vault, store and gateway re-apply `changed=0`; with the removed variable still in the inventory, `changed=0` and a message to drop it. Without `-e stage`, or without `confirm_staging`, the apply stops at its gate |
+| Concurrent finish and events | store binary unchanged since `d7da805`: 200 rounds over the live ingest API never accept both; the pre-fix binary accepted both in 23 |
 | Fresh topologies | store spec 27/27 on the per-host recording topology (`rec-store`), on the transport topology (`yx-store`) and at the end of the rehearsal |
-| Evidence record | [2026-10-01 `d7da805`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md) |
+| Evidence record | [2026-10-01 `fe5f9e0`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md) |
