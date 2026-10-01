@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/exp/teatest/v2"
@@ -78,7 +77,7 @@ func TestEditRouter_Teatest_SNMPCredentialsFlow_AddV3RefAndSave(t *testing.T) {
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
 
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	path := filepath.Join(dir, ".vault", "main.yaml")
 	if _, err := os.Stat(path); err != nil {
@@ -157,7 +156,7 @@ func TestEditRouter_Teatest_SNMPCredentialsFlow_PreservesOtherVaultKeys(t *testi
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
-	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
 	data, err := os.ReadFile(seedPath)
 	if err != nil {

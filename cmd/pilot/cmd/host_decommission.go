@@ -107,11 +107,13 @@ func init() {
 	hostDecommissionApplyCmd.Flags().StringVar(&hostDecommissionApplyDir, "dir", ".", "workspace directory containing hosts.yml (must match the plan's workspace)")
 	hostDecommissionApplyCmd.Flags().StringVar(&hostDecommissionApplyConfirmHost, "confirm-host", "", "exact host name being decommissioned — required, must match the plan's host exactly (spec.md §10.3 requirement 6; no generic --yes)")
 	hostDecommissionApplyCmd.Flags().BoolVar(&hostDecommissionApplyJSON, "json", false, "print the result as JSON")
+	addHostDecommissionStageFlags(hostDecommissionApplyCmd, &hostDecommissionApplyStage)
 	hostDecommissionCmd.AddCommand(hostDecommissionApplyCmd)
 
 	hostDecommissionResumeCmd.Flags().StringVar(&hostDecommissionResumeID, "id", "", "plan id to resume (required)")
 	hostDecommissionResumeCmd.Flags().StringVar(&hostDecommissionResumeDir, "dir", ".", "workspace directory containing hosts.yml (must match the plan's workspace)")
 	hostDecommissionResumeCmd.Flags().BoolVar(&hostDecommissionResumeJSON, "json", false, "print the result as JSON")
+	addHostDecommissionStageFlags(hostDecommissionResumeCmd, &hostDecommissionResumeStage)
 	hostDecommissionCmd.AddCommand(hostDecommissionResumeCmd)
 
 	hostCmd.AddCommand(hostDecommissionCmd)
@@ -139,7 +141,7 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	provs, err := buildHostDecommissionProviders(dir, hostDecommissionPlanHost, catalog, cmd.ErrOrStderr())
+	provs, err := buildHostDecommissionProviders(dir, hostDecommissionPlanHost, catalog, cmd.ErrOrStderr(), noStageAuthorization())
 	if err != nil {
 		return err
 	}
@@ -172,6 +174,9 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 	if err := printHostDecommissionPlan(out, plan, hostDecommissionPlanJSON); err != nil {
 		return err
+	}
+	if !hostDecommissionPlanJSON {
+		printHostDecommissionStageNeeds(out, dir, plan)
 	}
 
 	// Exit behavior per spec.md §10.1: a successful, unblocked plan is
@@ -337,6 +342,10 @@ func runHostDecommissionApplyCmd(cmd *cobra.Command, _ []string) error {
 	if strings.TrimSpace(hostDecommissionApplyConfirmHost) == "" {
 		return fmt.Errorf("--confirm-host is required (spec.md §10.3 requirement 6) — pilot does not support a generic --yes for host decommission")
 	}
+	auth, err := hostDecommissionApplyStage.authorization()
+	if err != nil {
+		return err
+	}
 	dir, err := filepath.Abs(hostDecommissionApplyDir)
 	if err != nil {
 		return fmt.Errorf("resolve --dir: %w", err)
@@ -363,7 +372,7 @@ func runHostDecommissionApplyCmd(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	result, err := runHostDecommissionApply(cmd.Context(), ds, plan, dir, catalog, "apply via `pilot host decommission apply --confirm-host`")
+	result, err := runHostDecommissionApply(cmd.Context(), ds, plan, dir, catalog, "apply via `pilot host decommission apply --confirm-host`", auth)
 	if err != nil {
 		return err
 	}
@@ -383,6 +392,10 @@ func runHostDecommissionApplyCmd(cmd *cobra.Command, _ []string) error {
 func runHostDecommissionResumeCmd(cmd *cobra.Command, _ []string) error {
 	if strings.TrimSpace(hostDecommissionResumeID) == "" {
 		return fmt.Errorf("--id is required")
+	}
+	auth, err := hostDecommissionResumeStage.authorization()
+	if err != nil {
+		return err
 	}
 	dir, err := filepath.Abs(hostDecommissionResumeDir)
 	if err != nil {
@@ -412,7 +425,7 @@ func runHostDecommissionResumeCmd(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	result, err := runHostDecommissionApply(cmd.Context(), ds, plan, dir, catalog, "resume via `pilot host decommission resume`")
+	result, err := runHostDecommissionApply(cmd.Context(), ds, plan, dir, catalog, "resume via `pilot host decommission resume`", auth)
 	if err != nil {
 		if decommission.ClassOf(err) == decommission.ErrPlanStale {
 			return fmt.Errorf("stale_resume: %w — external/workspace state changed since this plan was created; a new plan is required", err)
@@ -431,9 +444,14 @@ func runHostDecommissionResumeCmd(cmd *cobra.Command, _ []string) error {
 // domain logic. Already-completed plans record no new approval (nothing
 // left to confirm) and go straight to Finalize, which recognizes the
 // replay and returns already_completed without touching approval state.
-func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan *decommission.Plan, dir string, catalog contract.Catalog, reason string) (*decommission.FinalizeResult, error) {
+func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan *decommission.Plan, dir string, catalog contract.Catalog, reason string, auth decommission.StageAuthorization) (*decommission.FinalizeResult, error) {
 	now := time.Now().UTC()
 	if plan.Status != decommission.PlanStatusCompleted {
+		// Resume repeats the stage confirmation instead of reusing the one
+		// given to apply: the attestation age it carries goes stale.
+		if err := checkHostDecommissionStage(dir, plan, auth); err != nil {
+			return nil, err
+		}
 		if err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), "approve", reason, now); err != nil {
 			return nil, fmt.Errorf("record approval: %w", err)
 		}
@@ -447,7 +465,7 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 	// against it, and a plan that was executable because a provider WAS
 	// registered would otherwise stale-reject as soon as that provider
 	// vanished from freshness's view (spec.md §28/INV-3).
-	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr)
+	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +510,7 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 // opportunistically enrich the registry. PlanHost/CheckFreshness
 // themselves already produce the authoritative "workspace malformed"
 // error from the SAME hosts.yml read.
-func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catalog, out io.Writer) (map[string]providers.Provider, error) {
+func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catalog, out io.Writer, auth decommission.StageAuthorization) (map[string]providers.Provider, error) {
 	empty := map[string]providers.Provider{}
 
 	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
@@ -526,18 +544,18 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 
 	// Every other ansible.Runner caller (pilot deploy/reconcile/edit/mcp)
 	// goes through prepareDeployAnsibleRuntime first, which MkdirAlls a
-	// scratch ansible/{home,tmp,fact-cache,ssh-control} tree and points
-	// ANSIBLE_SSH_ARGS' ControlPath at it. Skipping that here left this
-	// runner relying on ansible.cfg's default `~/.ansible/cp/...`
-	// ControlPath, which silently doesn't exist in a fresh/ephemeral
-	// container (`docker run --rm ... pilot host decommission plan`) — the
-	// very first SSH connection then fails with "unix_listener: cannot
-	// bind to path ...: No such file or directory", which Ansible reports
-	// as UNREACHABLE on whatever task happens to run first, and no_log (as
-	// on freeipa-identity-apply.yml's "Kinit admin" task) censors that
-	// real reason into an opaque "censored" blob that looks like a
-	// Kerberos/credential failure. Found via a live decommission-plan
-	// repro against p6k-baremetal (2026-09-11).
+	// scratch ansible/{home,tmp,fact-cache} tree plus a private SSH control
+	// directory and points ANSIBLE_SSH_ARGS' ControlPath at the latter.
+	// Skipping that here left this runner relying on ansible.cfg's default
+	// `~/.ansible/cp/...` ControlPath, which silently doesn't exist in a
+	// fresh/ephemeral container (`docker run --rm ... pilot host
+	// decommission plan`) — the very first SSH connection then fails with
+	// "unix_listener: cannot bind to path ...: No such file or directory",
+	// which Ansible reports as UNREACHABLE on whatever task happens to run
+	// first, and no_log (as on freeipa-identity-apply.yml's "Kinit admin"
+	// task) censors that real reason into an opaque "censored" blob that
+	// looks like a Kerberos/credential failure. Found via a live
+	// decommission-plan repro against p6k-baremetal (2026-09-11).
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
 		return nil, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
@@ -550,6 +568,12 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 
 	extraArgs := hostDecommissionFreeIPAExtraArgs(invPath, rosterPath)
 
+	// Each playbook run carries the stage of the hosts it targets
+	// (internal/decommission/stage.go): the retired host for local steps,
+	// the freeipa-server or wazuh-manager hosts for central ones.
+	scope := decommission.NewStageScope(hf.Hosts, auth)
+	hostStage := scope.ArgsFunc([]string{hostName})
+
 	freeipaClient := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
 		Executor:              runner,
 		ClientInventory:       invPath,
@@ -557,6 +581,8 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		DecommissionPlaybook:  "playbooks/decommission/freeipa-client-decommission.yml",
 		IdentityApplyPlaybook: "playbooks/apply/freeipa-identity-apply.yml",
 		ExtraArgs:             extraArgs,
+		ClientStageArgs:       hostStage,
+		ServerStageArgs:       scope.ArgsFunc(scope.RoleHosts(stageRoleFreeIPAServer)),
 	})
 
 	// Wazuh agent (spec.md §37 Phase 4, HD14) — registered unconditionally,
@@ -571,6 +597,8 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		ServerInventory:           invPath,
 		AgentDecommissionPlaybook: "playbooks/decommission/wazuh-agent-decommission.yml",
 		ManagerDeregisterPlaybook: "playbooks/decommission/wazuh-manager-agent-deregister.yml",
+		AgentStageArgs:            hostStage,
+		ManagerStageArgs:          scope.ArgsFunc(scope.RoleHosts(stageRoleWazuhManager)),
 	})
 
 	// Internal-endpoint (spec.md §37 Phase 4, HD13) — reference-driven, not
@@ -588,6 +616,7 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 			"-e", "internal_endpoint_manifest_file=" + filepath.Join(dir, "internal-endpoints.yaml"),
 			"-e", "freeipa_dns_manifest_file=" + filepath.Join(dir, "freeipa-dns.yaml"),
 		},
+		ApplyStageArgs: scope.ArgsFunc(scope.AllHosts()),
 	})
 
 	// FreeIPA NFS server (spec.md §37 Phase 6, §20.2) — role-driven, single
@@ -601,6 +630,7 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		Inventory:            invPath,
 		DecommissionPlaybook: "playbooks/decommission/freeipa-nfs-server-decommission.yml",
 		ExtraArgs:            extraArgs,
+		StageArgs:            hostStage,
 	})
 
 	result := map[string]providers.Provider{
@@ -631,6 +661,7 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 			ComponentID:          comp.ID,
 			Inventory:            invPath,
 			DecommissionPlaybook: *comp.Playbooks.Decommission,
+			StageArgs:            hostStage,
 		})
 	}
 

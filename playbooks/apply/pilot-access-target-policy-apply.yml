@@ -214,14 +214,14 @@
           ansible.builtin.stat:
             path: "{{ pilot_access_target_dropin }}"
           register: pilot_access_target_dropin_stat
-          tags: [TP01]
+          tags: [always, TP01]
 
         - name: "Read the currently installed policy drop-in content"
           ansible.builtin.slurp:
             src: "{{ pilot_access_target_dropin }}"
           register: pilot_access_target_dropin_existing_raw
           when: pilot_access_target_dropin_stat.stat.exists
-          tags: [TP01]
+          tags: [always, TP01]
 
         - name: "Render the policy drop-in"
           ansible.builtin.set_fact:
@@ -240,7 +240,7 @@
                   AllowAgentForwarding no
                   X11Forwarding no
                   PermitTunnel no
-          tags: [TP01]
+          tags: [always, TP01]
 
         - name: "Install the policy (validated, reverted on any failure)"
           block:
@@ -349,6 +349,7 @@
               tags: [TP02]
           rescue:
             - name: "Rollback: restore the previous drop-in"
+              tags: [always]
               ansible.builtin.copy:
                 dest: "{{ pilot_access_target_dropin }}"
                 content: "{{ pilot_access_target_dropin_existing }}"
@@ -358,22 +359,26 @@
               when: pilot_access_target_dropin_stat.stat.exists
 
             - name: "Rollback: remove the new drop-in (there was none before)"
+              tags: [always]
               ansible.builtin.file:
                 path: "{{ pilot_access_target_dropin }}"
                 state: absent
               when: not pilot_access_target_dropin_stat.stat.exists
 
             - name: "Rollback: sshd configuration is valid again"
+              tags: [always]
               ansible.builtin.command:
                 argv: [sshd, -t]
               changed_when: false
 
             - name: "Rollback: reload sshd"
+              tags: [always]
               ansible.builtin.systemd:
                 name: "{{ pilot_access_target_sshd_service }}"
                 state: reloaded
 
             - name: "Rollback: fail the play"
+              tags: [always]
               ansible.builtin.fail:
                 msg: >-
                   pilot-access-target-policy was NOT applied to {{ inventory_hostname }}

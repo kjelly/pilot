@@ -85,6 +85,7 @@
       tags: [always]
   tasks:
     - name: "Step 0: Assert required variables"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - keycloak_server_url is match('^https?://')
@@ -97,7 +98,7 @@
             -e keycloak_client_id=ssh-pam-client
 
     - name: "Step 1: Snapshot /etc/pam.d/sshd before any modification"
-      tags: [C3]
+      tags: [always, C3]
       ansible.builtin.copy:
         src: "{{ pam_d_path }}"
         dest: "{{ pam_d_path }}{{ backup_suffix }}"
@@ -138,6 +139,7 @@
 
         # ── Detect PAM lib directory ─────────────────────────────────────────
         - name: "Step 4: Detect PAM security library directory"
+          tags: [C2]
           ansible.builtin.shell:
             cmd: >-
               if [ -d /lib/x86_64-linux-gnu/security ]; then
@@ -271,6 +273,7 @@
 
       rescue:
         - name: "ROLLBACK — restore /etc/pam.d/sshd from backup"
+          tags: [always]
           ansible.builtin.copy:
             src: "{{ pam_d_path }}{{ backup_suffix }}"
             dest: "{{ pam_d_path }}"
@@ -282,6 +285,7 @@
             - pam_backup is succeeded
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               pam-oidc-sshd apply failed and /etc/pam.d/sshd was restored

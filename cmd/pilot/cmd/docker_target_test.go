@@ -258,16 +258,16 @@ func TestShortCID_MatchesDockerFormat(t *testing.T) {
 	}
 }
 
-// TestResolveDataDir_RespectsFlag covers the precedence rule:
+// TestResolveStateDir_RespectsFlag covers the precedence rule:
 // --data-dir flag wins over the default $HOME/.local/share/pilot.
-func TestResolveDataDir_RespectsFlag(t *testing.T) {
+func TestResolveStateDir_RespectsFlag(t *testing.T) {
 	t.Setenv("HOME", "/tmp/fake-home")
 	old := dataDir
 	dataDir = "/tmp/explicit-data"
 	defer func() { dataDir = old }()
-	got := resolveDataDir()
+	got := resolveStateDir()
 	if got != "/tmp/explicit-data" {
-		t.Errorf("resolveDataDir = %q, want /tmp/explicit-data", got)
+		t.Errorf("resolveStateDir = %q, want /tmp/explicit-data", got)
 	}
 }
 

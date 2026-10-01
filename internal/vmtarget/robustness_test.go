@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -149,6 +150,126 @@ func TestDownloadFile_BadStatusLeavesNoDest(t *testing.T) {
 	assertNoDownloadTmp(t, dir)
 }
 
+// TestWithNetworkLock_OneLockPerNetwork: the libvirt network is host-wide,
+// so managers with different state dirs (pilot data dirs) AND different VM
+// dirs must exclude each other on the same network, while another network
+// stays free.
+func TestWithNetworkLock_OneLockPerNetwork(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewManager(filepath.Join(dir, "data-a"), filepath.Join(dir, "vm-a"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	b, err := NewManager(filepath.Join(dir, "data-b"), filepath.Join(dir, "vm-b"))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- a.withNetworkLock("default", func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	other := make(chan error, 1)
+	go func() { other <- b.withNetworkLock("pilot-lab", func() error { return nil }) }()
+	select {
+	case err := <-other:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a lock on another network waited for the default network's lock")
+	}
+
+	bIn := make(chan struct{})
+	go func() {
+		_ = b.withNetworkLock("", func() error { close(bIn); return nil }) // "" is "default"
+	}()
+	select {
+	case <-bIn:
+		t.Fatal("a manager with another data dir and VM dir entered the default network's lock while it was held")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-bIn:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second manager never got the network lock")
+	}
+}
+
+// TestNetworkLockPath keeps every network's lock file directly in
+// networkLockDir, whatever the network is called.
+func TestNetworkLockPath(t *testing.T) {
+	if got, want := networkLockPath("default"), filepath.Join(networkLockDir, "pilot-vmtarget-network-default.lock"); got != want {
+		t.Errorf("networkLockPath(default) = %q, want %q", got, want)
+	}
+	if networkLockPath("") != networkLockPath("default") {
+		t.Errorf(`networkLockPath("") = %q, want the default network's %q`, networkLockPath(""), networkLockPath("default"))
+	}
+	for _, name := range []string{"../../etc/x", "a/b", "net work"} {
+		p := networkLockPath(name)
+		if filepath.Dir(p) != networkLockDir || !strings.HasPrefix(filepath.Base(p), "pilot-vmtarget-network-sha256-") {
+			t.Errorf("networkLockPath(%q) = %q, want a hashed file name in %q", name, p, networkLockDir)
+		}
+	}
+	if p := networkLockPath(".."); filepath.Dir(p) != networkLockDir {
+		t.Errorf(`networkLockPath("..") = %q, want a file in %q`, p, networkLockDir)
+	}
+	if networkLockPath("a/b") == networkLockPath("a_b") {
+		t.Error("two different networks share a lock file")
+	}
+}
+
+// TestOpenNetworkLock_ExistingReadOnlyFileAndSymlink: an existing lock file
+// is opened without write access (another user may own it), a new one is
+// readable by everyone despite the umask, and a symlink planted at the path
+// is refused.
+func TestOpenNetworkLock_ExistingReadOnlyFileAndSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	created := filepath.Join(dir, "new.lock")
+	f, err := openNetworkLock(created)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_ = f.Close()
+	if st, err := os.Stat(created); err != nil || st.Mode().Perm() != 0o644 {
+		t.Fatalf("new lock file mode = %v (%v), want 0644", st.Mode().Perm(), err)
+	}
+
+	readOnly := filepath.Join(dir, "ro.lock")
+	if err := os.WriteFile(readOnly, nil, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	f, err = openNetworkLock(readOnly)
+	if err != nil {
+		t.Fatalf("open an existing read-only lock file: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("flock on a read-only descriptor: %v", err)
+	}
+	_ = f.Close()
+
+	link := filepath.Join(dir, "link.lock")
+	if err := os.Symlink(created, link); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openNetworkLock(link); err == nil {
+		_ = f.Close()
+		t.Fatal("openNetworkLock followed a symlink")
+	}
+}
+
 // TestWithNetworkLock_SerializesCriticalSection proves the cross-process
 // network lock actually provides mutual exclusion. Many goroutines each open
 // the same lock file (distinct fds) and do an un-synchronised
@@ -172,7 +293,7 @@ func TestWithNetworkLock_SerializesCriticalSection(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e := m.withNetworkLock(func() error {
+			e := m.withNetworkLock("default", func() error {
 				if atomic.AddInt32(&inside, 1) != 1 {
 					return fmt.Errorf("two goroutines inside the network lock at once")
 				}

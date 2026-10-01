@@ -105,6 +105,12 @@ func TestRunVtTopologyReset_MissingSpecFileErrors(t *testing.T) {
 
 func TestRunVtTopologyInventory_RequiresGroups(t *testing.T) {
 	dir := t.TempDir()
+	// The command opens a vm-target manager through resolveStateDir. With
+	// --data-dir set it skips the legacy-location notice, which would
+	// otherwise look for the operator's real ~/.local/share/pilot/vm-targets.json.
+	savedDataDir := dataDir
+	dataDir = dir + "/data"
+	t.Cleanup(func() { dataDir = savedDataDir })
 	path := dir + "/no-groups.yaml"
 	if err := os.WriteFile(path, []byte("nodes:\n  - name: a\n"), 0o644); err != nil {
 		t.Fatalf("write spec: %v", err)

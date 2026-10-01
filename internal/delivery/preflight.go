@@ -312,6 +312,7 @@ func uniqueHosts(hosts []string) []string {
 	sort.Strings(out)
 	return out
 }
+
 // hostsSubset reports whether every host in sub also appears in super — the
 // sameHosts relation only requires the dependent's hosts to carry the
 // dependency, not that the dependency is confined to exactly those hosts

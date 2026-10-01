@@ -38,7 +38,11 @@ jobs:
         run: go build ./...
 
       - name: go test
-        run: go test -race -count=1 ./...
+        # -timeout: go test's default is 10m per package, and cmd/pilot/cmd
+        # already takes ~5m here under -race. 15m keeps a 3x margin and still
+        # fires before the job's 20-minute limit, so a hung test ends in a Go
+        # stack dump that names it, not a silent job cancellation.
+        run: go test -race -count=1 -timeout 15m ./...
 
       - name: Install PyYAML
         run: python3 -m pip install pyyaml

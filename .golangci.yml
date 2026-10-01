@@ -30,3 +30,10 @@ linters:
         # Test-only environment setup.
         - os.Setenv
         - os.Unsetenv
+
+# gofmt as a CI gate: nine unformatted files had reached main because only
+# linters ran. golangci-lint lists at most three files per run by default;
+# `gofmt -l $(git ls-files '*.go')` shows them all.
+formatters:
+  enable:
+    - gofmt

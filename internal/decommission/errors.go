@@ -45,6 +45,13 @@ const (
 	// third `plan` exit case — "malformed workspace: error" (spec.md
 	// §10.1) — e.g. hosts.yml missing or unparsable.
 	ErrWorkspaceMalformed ErrorClass = "workspace_malformed"
+	// ErrStageConfirmationRequired: a playbook run would target hosts in
+	// staging or prod and the operator did not give that stage's
+	// confirmation (stage.go).
+	ErrStageConfirmationRequired ErrorClass = "stage_confirmation_required"
+	// ErrStageMixed: one playbook run would target hosts in different
+	// stages, which no single stage value can satisfy (stage.go).
+	ErrStageMixed ErrorClass = "stage_mixed"
 )
 
 // Error is decommission's typed error. Class is machine-readable; Message

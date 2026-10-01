@@ -266,13 +266,9 @@ func openSpecStore() (*store.Store, error) {
 	return st, nil
 }
 
+// resolvePilotDataDir is pilot's data dir, by loadConfig's precedence.
+// Commands that keep local state use resolveStateDir instead.
 func resolvePilotDataDir() string {
-	if dataDir != "" {
-		return dataDir
-	}
-	if dir := os.Getenv("PILOT_DATA_DIR"); dir != "" {
-		return dir
-	}
 	return loadConfig().DataDir
 }
 

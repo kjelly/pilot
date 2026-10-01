@@ -135,12 +135,14 @@
     # /usr/local/bin/node_exporter behind after another operator replaces it
     # with a DaemonSet or another node_exporter.
     - name: "Check currently installed node_exporter version"
+      tags: [always]
       ansible.builtin.command: /usr/local/bin/node_exporter --version
       register: node_exporter_current_version
       changed_when: false
       failed_when: false
 
     - name: "Determine whether the pinned version is already installed"
+      tags: [always]
       ansible.builtin.set_fact:
         node_exporter_version_ok: >-
           {{ (node_exporter_current_version.rc | default(1)) == 0 and
@@ -284,6 +286,7 @@
       tags: [always]
 
     - name: "Determine target architecture for this host"
+      tags: [always]
       ansible.builtin.set_fact:
         node_exporter_arch: "{{ node_exporter_arch_map[ansible_architecture] }}"
       when: not node_exporter_port_occupied_by_other
@@ -362,6 +365,7 @@
           when: ansible_os_family == 'RedHat'
 
         - name: "Step 6: Ensure {{ node_exporter_webconfig_path | dirname }} exists"
+          tags: [C10]
           ansible.builtin.file:
             path: "{{ node_exporter_webconfig_path | dirname }}"
             state: directory
@@ -376,11 +380,13 @@
         # plaintext instead (not reversible, not the password itself) and
         # only touch the hash/file when that fingerprint actually changes.
         - name: "Step 7: Compute a change-detection fingerprint for the basic-auth credential"
+          tags: [C10]
           ansible.builtin.set_fact:
             node_exporter_basic_auth_fingerprint: "{{ (node_exporter_basic_auth_user ~ ':' ~ node_exporter_basic_auth_password) | hash('sha256') }}"
           no_log: true
 
         - name: "Step 7: Read the previously stored fingerprint, if any"
+          tags: [C10]
           ansible.builtin.slurp:
             src: "{{ node_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
           register: node_exporter_stored_fingerprint_raw
@@ -388,6 +394,7 @@
           no_log: true
 
         - name: "Step 7: Determine whether the basic-auth credential changed"
+          tags: [C10]
           ansible.builtin.set_fact:
             node_exporter_basic_auth_changed: >-
               {{ (node_exporter_stored_fingerprint_raw.content is not defined) or
@@ -426,6 +433,7 @@
           register: node_exporter_webconfig_result
 
         - name: "Step 9: Persist the basic-auth fingerprint for future idempotency checks"
+          tags: [C10]
           ansible.builtin.copy:
             dest: "{{ node_exporter_webconfig_path | dirname }}/.basic_auth.fingerprint"
             content: "{{ node_exporter_basic_auth_fingerprint }}"
@@ -504,12 +512,13 @@
           when:
             - not ansible_check_mode
             - >-
-                node_exporter_binary_result is changed
-                or node_exporter_unit_result is changed
-                or node_exporter_webconfig_result is changed
+                (node_exporter_binary_result | default({})) is changed
+                or (node_exporter_unit_result | default({})) is changed
+                or (node_exporter_webconfig_result | default({})) is changed
 
       rescue:
         - name: "ROLLBACK — stop and disable node_exporter"
+          tags: [always]
           ansible.builtin.systemd:
             name: node_exporter.service
             state: stopped
@@ -517,6 +526,7 @@
           failed_when: false
 
         - name: "ROLLBACK — surface the original failure"
+          tags: [always]
           ansible.builtin.fail:
             msg: >-
               host-monitoring apply FAILED (see task output above); the

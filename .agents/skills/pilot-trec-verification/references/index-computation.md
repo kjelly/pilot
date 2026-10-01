@@ -6,29 +6,36 @@ these scripts most often: miscounting the total item list.
 
 ## 1. `pilot deploy`'s single-component menu
 
-> **Stale `[live 2026-09-24]`:** the menu is now contract-driven and no longer
-> follows `deploy_catalog.go`'s order (`../SKILL.md` §2). Select it by label
-> with `ACTIVATE` (`deploy-wizard.md`). The walkthrough below is kept for the
-> counting technique only.
+> Prefer selecting by label with `ACTIVATE` (`deploy-wizard.md`). If you do
+> count, the menu keeps `deploy_catalog.go`'s order but leaves out
+> `Reconcile: true` entries and experimental components (`../SKILL.md` §2).
 
 ```bash
 grep -n 'Key:' cmd/pilot/cmd/deploy_catalog.go
 ```
 
-Each `Key:` line is one menu row, in file order, 0-indexed. Example
-output shape (illustrative — re-run this yourself, don't trust these
+Each `Key:` line of an entry the menu shows is one row, in file order,
+0-indexed. Before counting, drop every entry with `Reconcile: true` and every
+entry whose contract (`contracts/<component>.yaml`) has `experimental: true`.
+Example output shape (illustrative — re-run this yourself, don't trust these
 numbers):
 
 ```
-41:  Key: "core-infra-provider", ...   # index 0
-47:  Key: "freeipa-server", ...        # index 1
-52:  Key: "freeipa-client", ...        # index 2
-56:  Key: "freeipa-identity", ...      # index 3
+49:  Key: "core-infra-provider", ...   # index 0
+55:  Key: "docker", ...                # index 1
+60:  Key: "freeipa-server", ...        # index 2
+65:  Key: "freeipa-client", ...        # index 3
+69:  Key: "freeipa-identity", ...      # Reconcile: true — not in the menu
+76:  Key: "freeipa-dns", ...           # Reconcile: true — not in the menu
+83:  Key: "freeipa-dns-client", ...    # Reconcile: true — not in the menu
+89:  Key: "freeipa-ca-trust", ...      # Reconcile: true — not in the menu
+95:  Key: "freeipa-nfs-server", ...    # index 4
 ...
 ```
 
-To select `freeipa-identity` from the top of the menu (cursor starts at
-0): `DOWN 3` then `ENTER`.
+To select `freeipa-nfs-server` from the top of the menu (cursor starts at
+0): `DOWN 4` then `ENTER`, not `DOWN 8`. The four skipped entries are the
+off-by-N trap.
 
 ## 2. `pilot edit`'s role checklist
 

@@ -61,6 +61,14 @@ type WazuhAgentProviderConfig struct {
 	// ExtraArgs is appended verbatim to every ansible-playbook invocation
 	// this provider issues — non-secret plumbing only.
 	ExtraArgs []string
+
+	// AgentStageArgs returns the stage -e arguments for the retiring host
+	// and ManagerStageArgs those for the wazuh-manager hosts that the
+	// deregistration runs on (decommission.StageScope). The read-only
+	// agent_query run gets neither: that playbook's stage gates are tagged
+	// agent_deregister only. Nil adds none.
+	AgentStageArgs   func() ([]string, error)
+	ManagerStageArgs func() ([]string, error)
 }
 
 // WazuhAgentProvider implements providers.Provider for the wazuh-fim
@@ -96,6 +104,10 @@ func (p *WazuhAgentProvider) Inspect(ctx context.Context, in InspectInput) (Insp
 	}
 	args = append(args, "--tags", "inspect")
 	args = append(args, p.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, p.cfg.AgentStageArgs)
+	if stageErr != nil {
+		return Inspection{}, fmt.Errorf("wazuh-fim inspect %s: %w", hostName, stageErr)
+	}
 
 	res, err := p.exec(ctx, args)
 	if err != nil {
@@ -169,6 +181,10 @@ func (e *wazuhAgentUninstallStep) Execute(ctx context.Context) error {
 		args = append(args, "--limit", e.hostName)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.AgentStageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("wazuh-fim uninstall %s: %w", e.hostName, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("wazuh-fim uninstall %s: %w", e.hostName, err)
@@ -217,6 +233,10 @@ func (e *wazuhAgentDeregisterStep) Execute(ctx context.Context) error {
 	args = append(args, "-e", "pilot_decommission_action=deregister")
 	args = append(args, "-e", "pilot_decommission_target_agent_id="+id)
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	args, stageErr := withStage(args, e.provider.cfg.ManagerStageArgs)
+	if stageErr != nil {
+		return fmt.Errorf("wazuh-fim deregister %s: %w", e.hostName, stageErr)
+	}
 	res, err := e.provider.exec(ctx, args)
 	if err != nil {
 		return fmt.Errorf("wazuh-fim deregister %s: %w", e.hostName, err)

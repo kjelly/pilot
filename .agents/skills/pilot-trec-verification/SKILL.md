@@ -111,12 +111,16 @@ grep -n 'Key:' cmd/pilot/cmd/deploy_catalog.go       # pilot deploy's single-com
 grep -n 'Name:' internal/inventory/contracts.go       # pilot edit's role checklist (order roleContracts is defined in)
 ```
 
-- **`deploy_catalog.go`'s `Key:` order no longer matches `pilot deploy`'s
-  "單一元件" menu `[live 2026-09-24]`.** The menu is contract-driven
-  (`挑一個要佈署的元件 (contract 驅動)`). It listed 29 rows in a different
-  order and without day-2 entries such as `freeipa-identity`, so a
-  `DOWN <n>` computed from that file lands on the wrong component. Select
-  by label (`ACTIVATE <row text> WITH ENTER`), or count on the live screen.
+- **`pilot deploy`'s "單一元件" menu (`挑一個要佈署的元件 (contract 驅動)`)
+  keeps `deploy_catalog.go`'s order but leaves entries out**, so the Nth
+  `Key:` line is usually not row N. The loop in `runCatalogPlaybookDeploy`
+  skips every `Reconcile: true` entry (day-2 reconcilers such as
+  `freeipa-identity` and `prometheus` run under `pilot reconcile` instead)
+  and every component whose contract says `experimental: true` (such as
+  `agent-controller`), unless you pass `--show-experimental`. On
+  2026-09-24 that was 39 entries in, 29 rows out, with `host-monitoring`
+  at row 23 (index 22). Select by label (`ACTIVATE <row text> WITH ENTER`).
+  If you must count, count only the entries that pass both filters.
 - `contracts.go`'s `roleContracts` order is exactly the role checklist
   order in `pilot edit`'s role editor (re-checked live 2026-09-24: 32
   rows, same order).
@@ -376,7 +380,7 @@ because you have not read its reference.**
 | # | Rule | Detail |
 |---|---|---|
 | 12 | `SELECT` is the default for `pilot edit`'s menus. Run with `--pointer '^\s*┃?\s*>\s'`, because Huh v2 rows start with `┃ ` and the default pointer regex never matches them. `SELECT` only moves the pointer — **every `SELECT` still needs its own `ENTER`** (or use `ACTIVATE <label> WITH ENTER`). | `references/select-labels.md` |
-| 13 | Select `pilot deploy`'s menus by label (`ACTIVATE <row text> WITH ENTER`) after the rule-18 settle. It worked on every menu from scope select to preflight on 2026-09-24. The catalog order no longer follows `deploy_catalog.go`, so a `DOWN <n>` computed from source is wrong. | `references/deploy-wizard.md` |
+| 13 | Select `pilot deploy`'s menus by label (`ACTIVATE <row text> WITH ENTER`) after the rule-18 settle. It worked on every menu from scope select to preflight on 2026-09-24. The catalog leaves out `Reconcile: true` and experimental entries, so a `DOWN <n>` taken from `deploy_catalog.go`'s line count lands on the wrong component (§2). | `references/deploy-wizard.md` |
 | 14 | On the role checklist use `TOGGLE <text unique to that row>`. The Huh checklist renders every row (32 on 2026-09-24), not the old 15-row window, so a content scan reaches them all. Role names recur in other rows' descriptions (`host-monitoring` appears in `prometheus`'s), so match on row-unique text. `CHECKLIST_DOWN <n>` + `SPACE` is the lint-accepted positional fallback. | `references/role-checklist.md` |
 | 15 | Never write `DOWN 0`; for index 0 omit the `DOWN` line entirely. | `references/role-checklist.md` |
 | 16 | Pick a `SELECT`/`TOGGLE` label substring unique to one row. Collisions come from three easy-to-miss sources: another row's hint text, another row's *description* prose, and `runEdit`/`runDeploy`'s own static startup banner (never cleared — no alt-screen). | `references/select-labels.md`, `references/known-gotchas.md` |
