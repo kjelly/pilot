@@ -20,17 +20,17 @@ on the gateway, and never accepts a caller-chosen port or address.
 ## 0.5 Current fact summary
 
 Snapshot of the reference environment used for the latest verified run
-(2026-09-24, candidate `fcd3c03`). Full results are in the evidence record in
+(2026-10-01, candidate `aad66f4`). Full results are in the evidence record in
 §6.
 
 | Item | Current fact |
 |---|---|
-| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `mx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `mx-ipa` 192.168.122.12 (AlmaLinux 9), `mx-gw` 192.168.122.13, `mx-target` 192.168.122.9, `mx-store` 192.168.122.10, `mx-ws` 192.168.122.5, all Ubuntu 24.04.4 LTS with OpenSSH 9.6p1. Torn down with `topology down` after the run |
-| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `mx-ipa`; `freeipa-client`: `mx-gw`, `mx-target`, `mx-store`; `pilot-access-gateway`: `mx-gw`; `pilot-access-target-policy`: `mx-target`; `pilot-session-store`: `mx-store`; `pilot-transport-workstation`: `mx-ws` |
-| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `mx-target` published in `pilot-target-gpu` |
-| Component state after the last run | gateway transport **enabled**, no recording default (built-in `metadata`), session store URL `https://mx-store.ipa.pilot.internal:8443`; `mx-target` policy `strict`, a member of `pilot-transport-ready`, host recording policy `inherit` |
+| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `zx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `zx-ipa` 192.168.122.15 (AlmaLinux 9), `zx-gw` 192.168.122.16, `zx-target` 192.168.122.18, `zx-store` 192.168.122.14, `zx-ws` 192.168.122.17 (Ubuntu 24.04). Torn down with `topology down` after the run |
+| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `zx-ipa`; `freeipa-client`: `zx-gw`, `zx-target`, `zx-store`; `pilot-access-gateway`: `zx-gw`; `pilot-access-target-policy`: `zx-target`; `pilot-session-store`: `zx-store`; `pilot-transport-workstation`: `zx-ws` |
+| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `zx-target` published in `pilot-target-gpu` |
+| Component state after the last run | gateway transport **enabled**, no recording default (built-in `metadata`), session store URL `https://zx-store.ipa.pilot.internal:8443`; `zx-target` policy `strict`, a member of `pilot-transport-ready`, host recording policy `terminal_output` (the last L13 step) |
 | External state | vault file with `ipa_admin_password`, `pilot_session_store_master_key`, `pilot_session_store_ingest_signing_key` and `transport_fixture_user_password` (names only); FreeIPA user `transportuser`; FreeIPA hostgroup `pilot-transport-ready` |
-| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `mx-ws` → `mx-target` tcp/22) |
+| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `zx-ws` → `zx-target` tcp/22) |
 | Alignment decision | **A (inventory matches the specs)**: the gateway spec runs on `pilot-access-gateway`, the target-policy spec on `pilot-access-target-policy` and the store spec on `pilot-session-store`, and all three groups exist in the topology inventory as listed above |
 
 ## 1. Scope and prerequisites
@@ -209,23 +209,18 @@ Snapshot of the reference environment used for the latest verified run
 
 ## 6. Latest verified evidence
 
-- 2026-09-25 — [`docs/evidence/pilot-access-gateway/2026-09-25-c9a06c5.md`](../evidence/pilot-access-gateway/2026-09-25-c9a06c5.md).
-  Transport spec rev 5 (D8 also refuses host keys; adopted 2026-10-01), candidate
-  `c9a06c5` (tree `8e7dc330…`), on never-applied VMs: L1–L6 pass (verify 16/16
-  and 5/5, L6 `changed=0`); E2E strict 20/20, recording 3/3 (transport and
-  known-hosts refused, `pilot-connect` still records), strict again after the
-  downgrade 20/20, disabled 4/4. Remote-dev, not-ready and the lockout suite
-  were not rerun. **PASS**.
-- 2026-09-24 — [`docs/evidence/pilot-access-gateway/2026-09-24-fcd3c03.md`](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md).
-  Candidate `fcd3c03` (tree `59aa59ee…`), after the merge with per-host SSH
-  session recording. Topology test on never-applied VMs: L1–L6 pass (verify
-  32/32, 5/5 and store 27/27, L6 `changed=0`); there, a host recording policy
-  of `terminal_output` refuses the transport and records `pilot-connect`, and
-  an invalid one refuses connect, transport and known-hosts. On an earlier
-  topology re-applied at `fcd3c03`: E2E strict 20/20, remote-dev 5/5,
-  recording 2/2 (recorded into the session store), not-ready 4/4, disabled
-  4/4 (both explicit `false` and unset); lockout 29/29 (transport on) and
-  28/28 (off); AG60 refuse/allow. TP12 was not re-run. **PASS**.
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-aad66f4.md`](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md).
+  Candidate `aad66f4` (tree `78105e6a…`): per-host SSH session recording
+  merged with `main` `34aad5a` (transport spec rev 5 included). Topology test
+  on never-applied VMs: L1–L6 pass (verify 32/32, 5/5 and store 27/27, L6
+  `changed=0`). E2E strict 20/20, remote-dev 5/5, recording 3/3 (transport
+  and known-hosts refused, the recorded `pilot-connect` in the store),
+  not-ready 4/4, disabled 4/4 (explicit `false` and unset); AG60 refuse and
+  `allow_downgrade`; lockout 29/29 (transport on) and 28/28 (off). Host
+  recording policy: `terminal_output` refuses the transport and records
+  `pilot-connect` with source `host`; an invalid value refuses connect,
+  transport and known-hosts; `fail_closed` ends a session whose store
+  stops answering. TP12 was not re-run. **PASS**.
 - 2026-09-23 — [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md).
   The topology test used candidate `875066d` (tree `a8990ef5…`), and the E2E,
   lockout, and TP12 runs used `0f1a5c1` (tree `13dfd3af…`). The VMs had never
