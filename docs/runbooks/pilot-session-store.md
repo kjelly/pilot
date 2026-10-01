@@ -83,8 +83,17 @@ Full results, candidate/tree and scenario verdicts are in the
    - `pilot_access_gateway_recording_failure_policy` now defaults to
      `fail_closed` (it was `best_effort`). Set `best_effort` explicitly to
      keep the old behaviour.
-   - The playbook installs the signing key and removes the gateway's former
-     static token file (AG81, AG82).
+   - The playbook installs the signing key (AG81) and removes the gateway's
+     former static token file (AG82): the file the installed gateway config
+     names in `recording.session_store_ingest_token_file` (the path the
+     previous revision's `pilot_access_gateway_recording_session_store_ingest_token_file`
+     set), the documented default `/etc/pilot/session-store-ingest-token`,
+     and a path the inventory still sets in that variable. Before removing,
+     it reads the installed config, so run the upgrade with the previous
+     config still in place. It refuses a relative path, a path with `..`, or
+     a directory, and removes nothing then. The variable itself is no longer
+     used; when it is still set, the apply says so — drop it from the
+     inventory.
 5. After the upgrade is confirmed, delete `index.db.pre-v1.bak` by hand and
    remove the old token from the vault.
 
@@ -130,7 +139,9 @@ that before starting.
    (`ipa host-show <fqdn> --all --raw`).
 4. Only then re-apply the gateway playbook from the previous revision. If
    that revision recorded through a static token file, put the file back
-   first (owner `pilot-gateway`, mode 0600): the upgrade removed it, and the
+   first, at the path the previous revision's
+   `pilot_access_gateway_recording_session_store_ingest_token_file` names
+   (owner `pilot-gateway`, mode 0600): the upgrade removed it, and the
    previous playbook stops when it is missing. The current signing key file
    stays on the gateway; the previous binary ignores it. The previous
    revision's `pilot session` may need

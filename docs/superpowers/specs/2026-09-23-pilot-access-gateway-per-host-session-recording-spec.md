@@ -77,7 +77,7 @@ effective mode       host override > gateway recording.mode > built-in metadata
 - 分支 N 的 canary 只能偵測全站性的 ACI 設定錯誤；只針對個別 host 隱藏 userclass 的 ACI 偵測不到。
 
 **Destructive boundary（這版會刪除或覆寫的東西）**
-- Gateway：刪除手動佈署殘留的 `/etc/pilot/session-store-ingest-token`（Phase 8 evidence 手動串接時留下的舊 bearer token）。
+- Gateway：刪除舊的靜態 bearer token 檔——舊 gateway config 的 `recording.session_store_ingest_token_file` 指向的檔案（舊版由 `pilot_access_gateway_recording_session_store_ingest_token_file` 決定路徑）、文件預設路徑 `/etc/pilot/session-store-ingest-token`，以及 inventory 仍設定的該變數路徑（2026-10-01 補上，見 §27.1）。
 - Session Store：刪除 `/etc/pilot/session-store-ingest.token`；`ingest.token_file` 設定欄位移除（config loader 為 `KnownFields(true)`，舊 config 會被拒，必須由 playbook 重新產生）。
 - Session Store index DB：schema v1 → v2 migration（只 `ALTER TABLE ADD COLUMN`，不刪資料）。
 - FreeIPA host `userClass`：只新增／刪除符合 `pilot.policy.ssh-recording=` 的值；其他值一律不動。
@@ -905,7 +905,7 @@ DELIVERY.md 在 §1.6（`deployment_availability`）之後新增一節，說明 
   - mode 非 metadata 時 `pilot_session_store_url` 非空；
   - url 非空時必須是 `https://`，且 signing key 已定義、為 64 個 hex 字元。
 - Step 11 的 config 內容加入 `recording:`（依上述 vars）與 `metrics:`（§31）。url 為空時不輸出 store 相關三欄。
-- 新增 task：url 非空時寫入 signing key 檔（`pilot-gateway:pilot-gateway 0400`，`no_log: true`）；url 為空時 `state: absent`。另一個 task 刪除舊的 `/etc/pilot/session-store-ingest-token`。
+- 新增 task：url 非空時寫入 signing key 檔（`pilot-gateway:pilot-gateway 0400`，`no_log: true`）；url 為空時 `state: absent`。另一組 task 刪除舊的靜態 bearer token 檔（AG82）：Step 11 改寫 config 之前先讀已安裝的 config，取 `recording.session_store_ingest_token_file`（舊版依 `pilot_access_gateway_recording_session_store_ingest_token_file` 寫入，操作者可自訂路徑），加上文件預設 `/etc/pilot/session-store-ingest-token` 與 inventory 仍設定的該變數；相對路徑、含 `..` 的路徑或目錄一律拒絕且不刪任何檔案；本 playbook 目前管理的 config、signing key、keytab 不會被列入。2026-10-01 之前只刪預設路徑，自訂路徑的 token 會留在主機上（AGENTS.md §5.9、§5.14）。
 - 設定或 key 檔變更時重啟 gateway service（沿用 `gateway_config_copy` 的 restart 條件，把 key 檔的 register 也納入）。
 - metrics 啟用時，gateway service unit 加 `ReadWritePaths=` textfile 目錄（F24）。
 - 檢查 textfile 目錄的 `stat` task 與決定 metrics 路徑的 `set_fact` 都必須標 `tags: [always]`，因為 Step 11 與 unit file 會讀它們（AGENTS.md §4.4）。

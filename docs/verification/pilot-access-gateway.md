@@ -64,6 +64,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 | `pilot_access_gateway_recording_session_store_url` | `pilot-session-store` 的 ingest URL，必須是 `https://`；未設定時 gateway 不簽發任何 ingest token，effective mode 為 terminal 的連線一律 deny `recording_backend_unavailable` | 否 |
 | `pilot_access_gateway_recording_session_store_ca_file` | 驗證 store TLS 憑證用的 CA | 否，預設 `/etc/ipa/ca.crt` |
 | `pilot_access_gateway_recording_allow_downgrade` | `true` 才允許把已安裝的錄影等級或 session store 設定調低（captive-transport spec §12.2 的降級守門） | 否，預設 `false` |
+| `pilot_access_gateway_recording_session_store_ingest_token_file` | **已不再使用**（舊版靜態 bearer token 檔的路徑）。仍設定時，AG82 把這個路徑也一併刪除並印出提示，請從 inventory 移除 | 否 |
 | `pilot_session_store_ingest_signing_key` | PIT1 ingest token 的 HMAC signing key（64 個 hex 字元），必須與 `pilot-session-store` 的同名變數相同；只能來自 vault，安裝成 `/etc/pilot/session-store-ingest-signing.key`（0400） | 設定 `pilot_access_gateway_recording_session_store_url` 時必填 |
 | `pilot_access_gateway_transport_enabled` | captive opaque SSH transport（`pilot-transport-v1`）；見 captive-transport spec §12.3 | 否，預設 `false` |
 
@@ -204,7 +205,7 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
   expect: {exitCode: 0}
 - id: AG82
   category: "recording"
-  check: "舊版靜態 bearer token 檔 `/etc/pilot/session-store-ingest-token` 已移除"
+  check: "舊版靜態 bearer token 檔的文件預設路徑 `/etc/pilot/session-store-ingest-token` 已移除（舊 config 指定的自訂路徑在升級後無從事後查詢，由 apply 刪除，見 §5 的說明）"
   probe: |
     test ! -e /etc/pilot/session-store-ingest-token
     
@@ -379,7 +380,7 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
 - **2026-09-23：per-host SSH session recording（Phase 5）**——三件操作者需要知道的事：
   (1) **每次 authorize 都即時讀 FreeIPA**，沒有跨 request 的 policy cache：`hosts.yml` 改了 `ssh_recording` 但 `freeipa-client` 尚未 reconcile 到 FreeIPA 時，gateway 依 FreeIPA 現況決定（AG88）。
   (2) **Phase 0 分支 R**：gateway principal 以 `host_show` + `rights: true` 讀 `attributelevelrights.userclass`，沒有 `r` 權限就把該 host 視為 policy 不可讀，deny `recording_policy_unavailable`（AG95）；FreeIPA 不會因為沒有讀取權限就靜默回傳空 `userclass` 被誤判成「沒有設定」。
-  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token（`/etc/pilot/session-store-ingest-token`）由本 playbook 刪除（AG82）。
+  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token 由本 playbook 刪除（AG82）：Step 11 改寫 config 之前先讀已安裝的 config，刪除 `recording.session_store_ingest_token_file` 指向的檔案（舊版由 `pilot_access_gateway_recording_session_store_ingest_token_file` 決定，可以不是預設路徑）、預設的 `/etc/pilot/session-store-ingest-token` 與 inventory 仍設定的該變數路徑；相對路徑、含 `..` 或目錄一律拒絕。AG82 的 probe 只能事後檢查預設路徑（升級後 config 已不記錄自訂路徑），自訂路徑的刪除由 `internal/spec/pilot_access_gateway_ag82_regression_test.go` 與 staging 升級演練（自訂路徑）涵蓋。
 
 ## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
 

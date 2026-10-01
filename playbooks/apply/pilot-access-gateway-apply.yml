@@ -173,9 +173,12 @@
     pilot_access_gateway_effective_recording_session_store_url: "{{ pilot_access_gateway_recording_session_store_url | default('', true) }}"
     pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('/etc/ipa/ca.crt', true) }}"
     pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
+    gateway_config_file: /etc/pilot/access-gateway.yaml
     gateway_session_store_signing_key_file: /etc/pilot/session-store-ingest-signing.key
     # Left behind by an earlier static-bearer-token session-store wiring;
-    # per-session tokens replace it, so it is removed.
+    # per-session tokens replace it, so it is removed (AG82). This is the
+    # documented default; the token file the previous config actually named
+    # is removed too (see the AG82 tasks).
     gateway_legacy_session_store_token_file: /etc/pilot/session-store-ingest-token
     # Metrics (per-host recording spec §31) are written only when
     # node_exporter's textfile collector directory already exists.
@@ -841,25 +844,27 @@
           local recording fallback.
       tags: [AG_config, AG01, AG41, AG42]
 
+    # Also AG82: the former token file's path is read from this config
+    # before Step 11 rewrites it.
     - name: "Recording policy: stat the currently installed gateway config"
       ansible.builtin.stat:
-        path: /etc/pilot/access-gateway.yaml
+        path: "{{ gateway_config_file }}"
       register: gateway_existing_config_stat
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG82]
 
     - name: "Recording policy: read the currently installed gateway config"
       ansible.builtin.slurp:
-        src: /etc/pilot/access-gateway.yaml
+        src: "{{ gateway_config_file }}"
       register: gateway_existing_config_raw
       when: gateway_existing_config_stat.stat.exists
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG82]
 
     - name: "Recording policy: extract the installed recording policy"
       ansible.builtin.set_fact:
         gateway_existing_recording: >-
           {{ (((gateway_existing_config_raw.content | b64decode | from_yaml) or {}).get('gateway') or {}).get('recording') or {}
              if gateway_existing_config_stat.stat.exists else {} }}
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG82]
 
     - name: "Recording policy: refuse to silently lower the installed policy"
       ansible.builtin.assert:
@@ -923,7 +928,7 @@
     # were (accessportal.LoadUserAccess always hits FreeIPA fresh).
     - name: "Step 11: install access-gateway.yaml"
       ansible.builtin.copy:
-        dest: /etc/pilot/access-gateway.yaml
+        dest: "{{ gateway_config_file }}"
         owner: root
         group: root
         mode: "0644"
@@ -991,10 +996,77 @@
       when: pilot_access_gateway_effective_recording_session_store_url | length == 0
       tags: [AG_config, AG81]
 
-    - name: "Remove the former static session-store bearer token file (AG82)"
+    # AG82: remove the former static bearer token wherever it is. Before
+    # per-session tokens, the operator chose its path
+    # (pilot_access_gateway_recording_session_store_ingest_token_file) and
+    # the playbook wrote it into the config as
+    # recording.session_store_ingest_token_file; the installed config read
+    # above, before Step 11 replaced it, is the record of that path
+    # (AGENTS.md §5.9, §5.14). The documented default and a value the
+    # inventory still sets are removed too. Files this playbook manages now
+    # are never on the list.
+    - name: "AG82: list the former static session-store bearer token files"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files: >-
+          {{ ([gateway_legacy_session_store_token_file,
+               gateway_existing_recording.get('session_store_ingest_token_file') or '',
+               pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
+              | map('string') | map('trim') | reject('equalto', '') | unique | list)
+             | difference([gateway_config_file, gateway_session_store_signing_key_file,
+                           '/etc/pilot/pilot-access-gateway.keytab']) }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: the inventory still sets the removed token-file variable"
+      ansible.builtin.debug:
+        msg: >-
+          pilot_access_gateway_recording_session_store_ingest_token_file is no longer
+          used: recorded sessions carry per-session tokens signed with
+          pilot_session_store_ingest_signing_key. The file it names
+          ({{ pilot_access_gateway_recording_session_store_ingest_token_file }}) is
+          removed; drop the variable from the inventory.
+      when: (pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) | string | trim) | length > 0
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token file paths are absolute"
+      ansible.builtin.assert:
+        that:
+          - gateway_legacy_token_files | reject('match', '^/') | list | length == 0
+          - gateway_legacy_token_files | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
+        fail_msg: >-
+          Refusing to remove the former session-store token file(s)
+          {{ gateway_legacy_token_files | reject('match', '^/') | list
+             + (gateway_legacy_token_files | select('search', '(^|/)\\.\\.(/|$)') | list) }}:
+          not an absolute path without "..". Fix
+          recording.session_store_ingest_token_file in {{ gateway_config_file }} or
+          pilot_access_gateway_recording_session_store_ingest_token_file, then re-apply.
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the former token files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_legacy_token_files }}"
+      register: gateway_legacy_token_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token files are plain files"
+      ansible.builtin.assert:
+        that:
+          - >-
+            gateway_legacy_token_stat.results | map(attribute='stat')
+            | selectattr('exists') | rejectattr('isreg') | rejectattr('islnk') | list | length == 0
+        fail_msg: >-
+          Refusing to remove
+          {{ gateway_legacy_token_stat.results | selectattr('stat.exists')
+             | rejectattr('stat.isreg') | rejectattr('stat.islnk') | map(attribute='item') | list }}:
+          a former session-store token path that is not a regular file or symlink.
+      tags: [AG_config, AG82]
+
+    - name: "Remove the former static session-store bearer token files (AG82)"
       ansible.builtin.file:
-        path: "{{ gateway_legacy_session_store_token_file }}"
+        path: "{{ item }}"
         state: absent
+      loop: "{{ gateway_legacy_token_files }}"
       tags: [AG_config, AG82]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
@@ -1196,7 +1268,7 @@
           User={{ pilot_gateway_user }}
           Group={{ pilot_gateway_user }}
 
-          ExecStart=/usr/local/libexec/pilot-access-gateway serve --config /etc/pilot/access-gateway.yaml --systemd-socket
+          ExecStart=/usr/local/libexec/pilot-access-gateway serve --config {{ gateway_config_file }} --systemd-socket
 
           NoNewPrivileges=true
           PrivateTmp=true
