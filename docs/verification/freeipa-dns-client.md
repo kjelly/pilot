@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-dns-client（目標主機把 DNS resolver 指向 FreeIPA DNS）
 
-> 版本：v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
+> 版本：v1.3（2026-10-02 C7 的數值照 glibc 的 `strtol` 解析，見 §8）；v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
 > `freeipa-dns-server`（FreeIPA server 自身，`--setup-dns`，自我指向案例，
 > NetworkManager 路徑）與 Ubuntu 24.04 `freeipa-dns-ubuntu`（一般未納管
 > client，systemd-resolved 路徑），C1-C6 兩台皆 6/6 PASS，含 idempotent
@@ -31,6 +31,18 @@
 2026-09-24 再對 Ubuntu 24.04 與 AlmaLinux 9 一般 client 兩台 vm-target 實跑
 `vm-target test`（candidate `62d8069`），兩台皆 6/6 PASS + `changed=0`，
 並驗證 rescue rollback，見 `docs/evidence/freeipa-dns-client/2026-09-24-62d8069.md`。
+**最新驗證（C7）**：2026-10-01，candidate `5478c5d`（含 dns tier 的 ACL 修正），dns tier 拓樸（Ubuntu 與 AlmaLinux
+consumer 加一台 tier 主機）C1–C7 21/21 PASS、L6 `changed=0`；第一台 tier 封包被丟棄時
+查詢由 15／20／5 秒（存在／不存在／外部名稱）降到 3／4／1 秒；EL 改成單一 nameserver
+時清掉 options、rescue 還原 options。見
+`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`。
+**C7 比對生效值（v1.2）**：2026-10-02，candidate `6224982`，5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、
+L6 `changed=0`；Ubuntu 與 AlmaLinux 上同一行覆寫、後面另一行覆寫時 glibc 實際用 10 秒，新的 C7
+判 FAIL，舊的 C7 判 PASS。見 `docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`。
+**C7 數值照 `strtol` 解析（v1.3）**：2026-10-02，candidate `065a1c6`，5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、
+L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`（glibc 用 10 秒）與 `attempts:20e-1`（glibc 用 5 次）
+新的 C7 判 FAIL、v1.2 判 PASS，`timeout: 1`（glibc 用 1 秒）新的 C7 判 PASS。見
+`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -96,6 +108,16 @@ FreeIPA server/replica 自己用得到。
 > `tasks/dns-tier-endpoints.yml` 推導），不足 3 筆時再補 FreeIPA DNS 提供者當
 > fallback，總數最多 3 筆。DNS 提供者自己仍然 self-first；`freeipa_dns_client_servers`
 > 仍然優先於一切。本檔 C1–C6 的檢查內容不變（C6 經由 tier 一樣解析得到）。
+>
+> **resolver 逾時（C7）**：最後算出的 nameserver 有 2 筆以上時，resolver 改用
+> `options timeout:1 attempts:2`（Debian 寫進 `/etc/resolv.conf`；EL 設在該
+> connection 的 `ipv4.dns-options`，由 NetworkManager 寫進 `/etc/resolv.conf`）。
+> glibc 預設每台 nameserver 等 5 秒，第一台整台失聯（封包被丟棄）時每次查詢
+> 要等 5～20 秒才換下一台；縮短後每台失聯的 nameserver 只等 1 秒，2026-10-01 實測
+> 一次查詢 1～4 秒（見 §0）。只有 1 筆 nameserver 時沒有
+> 可以換的對象，維持 glibc 預設、不寫 `options`；之前寫過的值會被清掉。
+> 這不是可設定的變數，`freeipa_dns_client_servers` 也套用同一條規則；
+> `internal-endpoint-apply.yml` 的 resolver baseline 用同一支共用檔，也一樣。
 
 ## 2. Checklist
 
@@ -110,6 +132,7 @@ FreeIPA server/replica 自己用得到。
 | C4  | config   | `/etc/resolv.conf` 至少一行 `nameserver`                       | 0                        | sh -c 'grep -c "^nameserver " /etc/resolv.conf | grep -qv "^0$"' |
 | C5  | config   | search domain 含 FreeIPA domain（未限定名稱可補 domain 解析）  | 0                        | grep -qE "^search .*ipa.pilot.internal" /etc/resolv.conf |
 | C6  | dns      | FreeIPA server FQDN 真的透過 DNS 解析成功（非 `/etc/hosts` 短路）| 0                       | sh -c 'dig +short ipa1.ipa.pilot.internal | grep -qE "^[0-9]+\."' |
+| C7  | config   | 2 筆以上 nameserver 時 glibc 實際生效的逾時是 timeout 1、attempts 2；只有 1 筆時沒有 timeout/attempts 選項 | ~resolver-timeout-ok | awk 'function num(v, d) { if (!match(v, /^[+-]?[0-9]+/)) return 0; v = substr(v, 1, RLENGTH); d = v; sub(/^[+-]?0*/, "", d); if (length(d) > 9) return "invalid"; return v + 0 } BEGIN { n = 0; t = 5; a = 2; set = 0 } /^nameserver[ \t]/ { n++ } /^options[ \t]/ { for (i = 2; i <= NF; i++) { k = ""; if ($i ~ /^timeout:/) { k = "t"; v = substr($i, 9) } else if ($i ~ /^attempts:/) { k = "a"; v = substr($i, 10) } if (k == "") continue; if (v == "" && i < NF) v = $(i + 1); v = num(v); set = 1; if (k == "t") t = (v != "invalid" && v > 30) ? 30 : v; else a = (v != "invalid" && v > 5) ? 5 : v } } END { ok = n >= 2 ? t == 1 && a == 2 : !set; if (ok) print "resolver-timeout-ok"; else print "resolver-timeout-wrong nameservers=" n " timeout=" t " attempts=" a " options=" (set ? "set" : "none") }' /etc/resolv.conf |
 
 > **C1/C2/C4/C6 = rc 型 expected（`0`）**：`command -v`（C1）找到即回 0；
 > `systemctl is-active`（C2）刻意用 rc 而非 `~active`——字串 `active` 也會命中
@@ -147,6 +170,27 @@ FreeIPA server/replica 自己用得到。
 > 正確回報 fail）。C2 的 `\|\|` 剛好因為 `systemctl is-active <多個名字>`
 > 本身就是「任一 active 即回 0」的邏輯，未造成誤判，但仍一併修正、統一遵守
 > 本 repo 慣例。v1.0 起 C2/C4/C6 一律用未跳脫的字面 `|`。
+> **C7 = `~substring`，讀的是 glibc 實際使用的 `/etc/resolv.conf`**：兩個 OS 最後都由
+> 這個檔案決定逾時（Debian 由本 playbook 直接寫入；EL 由 NetworkManager 依
+> `ipv4.dns-options` 產生），所以不看 NetworkManager profile。
+> **C7 比對的是生效值，不是有沒有出現 `timeout:1`**：glibc（`resolv/res_init.c`
+> 的 `res_setoptions`）依檔案順序逐一處理每個 `options` 行的每個 token，同一個
+> 選項以最後一次為準。所以 `options timeout:1 attempts:2 timeout:10 attempts:5`，
+> 或後面再多一行 `options timeout:10`，生效的是 10 秒。C7 用同樣的規則解析：只認行首的
+> `nameserver`／`options`（後面接空白或 tab），從 glibc 預設 timeout 5、attempts 2
+> 開始，依序以每個 `timeout:`／`attempts:` 覆寫。2 筆以上 nameserver 時，生效值必須是 1 和 2；
+> 只有 1 筆時，不准出現任何 timeout/attempts token。失敗時印出 nameserver 筆數、
+> 生效的 timeout／attempts，以及檔案裡有沒有這兩個選項（`set`／`none`）。
+> **數值照 glibc 2.39 的 `strtol(…, 10)` 解析**（v1.3，PR #37 review）：
+> - 只取開頭的十進位整數：可以有 `+`／`-`，`timeout:01` 是 1，`timeout:1.9` 是 1，
+>   `timeout:0x1` 是 0，`timeout:` 是 0。awk 的 `int()` 會把 `10e-1` 當成浮點數 1，
+>   glibc 卻讀成 10，所以 v1.2 會讓 `timeout:10e-1`、`attempts:20e-1` 通過。
+> - `strtol` 先跳過空白：`timeout: 1` 讀的是下一個欄位，生效 1。
+> - 上限：timeout 超過 30 視為 30，attempts 超過 5 視為 5（`20e-1` 是 20，生效 5）。
+> - 有效位數超過 9 位時 glibc 會溢位截斷（`timeout:4294967297` 生效 1、
+>   `timeout:2147483648` 是負數），C7 一律印 `invalid` 並判 FAIL，不嘗試重現截斷。
+> `TestRegression_FreeipaDNSClientC7MatchesGlibc` 在本機 glibc 上逐一比對這些例子；
+> mawk（Ubuntu）、gawk（AlmaLinux）、busybox awk 的結果相同。
 
 ## 3. 證據收集
 
@@ -154,7 +198,7 @@ FreeIPA server/replica 自己用得到。
   （真實主機：`pilot verify docs/verification/freeipa-dns-client.md -i inventory.yaml`）
 - 原始輸出：gitignored `.verification/freeipa-dns-client-<UTC>.{ndjson,md}`
 - Sanitized 摘要：`docs/evidence/freeipa-dns-client/<date>-<tested-revision>.md`
-- 預期 row 數：6
+- 預期 row 數：7
 
 **真實輸出摘要**（2026-07-31，兩台 vm-target：AlmaLinux 9 `freeipa-dns-server`
 與 Ubuntu 24.04 `freeipa-dns-ubuntu`；完整指令與逐行輸出見
@@ -171,7 +215,7 @@ FreeIPA server/replica 自己用得到。
 
 ## 4. PASS / FAIL 規則
 
-- C1–C6 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
+- C1–C7 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
   導向 FreeIPA DNS。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1 fail → 套件安裝失敗（Debian `bind9-dnsutils`／EL `bind-utils`）；重跑 apply。
@@ -183,6 +227,11 @@ FreeIPA server/replica 自己用得到。
   - C6 fail → resolver 設定寫了但實際查詢失敗：確認 nameserver IP 真的是
     FreeIPA server/replica 的可路由 IP（防火牆/路由問題），或 FreeIPA 自己的
     named 服務未起來（見 `freeipa-server.md` C 相關 row）。
+  - C7 fail → `options` 行不對：Debian 上確認 `/etc/resolv.conf` 是本 playbook 寫的
+    （有 pilot 標記）；EL 上看 `nmcli -g ipv4.dns-options connection show <conn>`，
+    重跑 apply。EL 上 profile 是對的、但 `/etc/resolv.conf` 被手動改過時，重跑 apply
+    是 `changed=0`，NetworkManager 不會重寫（`nmcli device reapply` 也不會）；
+    `nmcli general reload dns-rc` 會依 profile 重新產生（2026-10-02 實測）。
 
 ## 5. 例外與已知偏差
 
@@ -230,6 +279,7 @@ FreeIPA server/replica 自己用得到。
   標記字串不再視為足夠證據（否則這個探測本身在有 bug 的舊版本上仍會
   vacuously PASS，跟 2026-08-14 那次修的問題是同一類）。 |
 | C6 | 驗證用途，無對應 mutate task（apply 完成後的功能性結果）|
+| C7 | 同一支共用檔：`compute effective resolver options for THIS host` 決定選項，Debian 由寫 `/etc/resolv.conf` 的 task 寫入 `options` 行，EL 由 `community.general.nmcli` 的 `dns4_options` 設定；`freeipa-dns-client-apply.yml` 的 include tag 加上 `C7`。EL 的套用前快照與 rescue 也包含 `ipv4.dns-options` |
 
 ## 7. 動態行為 SOP（fixture：確保有 DNS 提供者可偵測）
 
@@ -251,3 +301,9 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-01 | v1.0 | Checklist 不變。§1.5 補上 dns tier 存在時的 nameserver 順序（tier 在前、FreeIPA 補到最多 3 筆，見 `docs/verification/dns.md` §2 B10）；實作在共用檔 `tasks/freeipa-dns-client-resolver.yml`，tier 位址由 `tasks/dns-tier-endpoints.yml` 推導。2026-10-01 對一台同時是 tier 的 Ubuntu 24.04 vm-target 實跑：resolv.conf 依序是 tier、FreeIPA，`dns-apply` 與本 playbook 交替重跑皆 `changed=0` | sre |
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `3f781fb` 的 dns tier 拓樸驗證：Ubuntu 與 AlmaLinux consumer 加上一台 tier 主機，C1–C6 兩輪都是 18/18 PASS（一輪由本 playbook 設定，一輪由 internal-endpoint 的 baseline 設定），nameserver 依序是兩台 tier、最後 FreeIPA；見 `docs/evidence/dns/2026-10-01-3f781fb.md` | sre |
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `cbe95b8` 重跑：dns tier 拓樸 18/18 PASS；真實 `pilot reconcile` 套用到 3 台 consumer 後 18/18 PASS；見 `docs/evidence/dns/2026-10-01-cbe95b8.md` | sre |
+| 2026-10-01 | v1.1 | 新增 C7：2 筆以上 nameserver 時 resolver 用 `timeout:1 attempts:2`，只有 1 筆時維持 glibc 預設（起因：dns tier 第一台整台失聯時 consumer 每次查詢要等 5～20 秒，見 `docs/verification/dns.md` §8）。實跑證據見下一筆 evidence 摘要 | sre |
+| 2026-10-01 | v1.1 | Checklist 不變。candidate `5478c5d`（C7 加上 dns tier 的 ACL 修正與 main）重跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`，E6、EL 移除路徑與 rescue 結果相同（`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`） | sre |
+| 2026-10-02 | v1.2 | 修正 C7（PR #37 review）：舊寫法只看 `options` 行有沒有出現 `timeout:1`、`attempts:2`，`options timeout:1 attempts:2 timeout:10 attempts:5` 或後面再多一行 `options timeout:10` 都會 PASS，但 glibc 依序套用、最後一次為準，實際是 10 秒。改用 awk 依 glibc 的規則依序解析，比對生效值；只有 1 筆 nameserver 時仍不准出現 timeout/attempts。regression test 加上同一行覆寫、後面另一行覆寫、tab 分隔與被後面覆寫回正確值的案例，並新增 `TestRegression_FreeipaDNSClientC7MatchesGlibc`，用本機 glibc 的 `res_init()` 驗證 C7 的判斷與印出的值。playbook 不變 | sre |
+| 2026-10-02 | v1.2 | Checklist 不變。candidate `6224982` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 的漂移案例（同一行覆寫、後面另一行覆寫、EL profile 重複值）中，glibc 實際值與新 C7 印出的值一致，舊 C7 對其中三個案例判 PASS；EL 單一 nameserver 路徑 C7 PASS、重跑 `changed=0`。§4 補上 EL 手動改過 `/etc/resolv.conf` 時的修法（`docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`） | sre |
+| 2026-10-02 | v1.3 | 修正 C7 的數值解析（PR #37 review）：v1.2 用 awk 的 `int()`，`10e-1` 被當成浮點數 1，所以 `timeout:10e-1`（glibc 生效 10）與 `attempts:20e-1`（glibc 生效 5）都會 PASS。改成照 glibc 2.39 `res_setoptions` 的 `strtol(…, 10)`：只取開頭的十進位整數（可帶正負號），值是空的時讀下一個欄位，timeout 上限 30、attempts 上限 5；有效位數超過 9 位（glibc 會溢位截斷）一律 `invalid` 判 FAIL。`TestRegression_FreeipaDNSClientC7MatchesGlibc` 加上這兩個例子與正負號、空白、小數、十六進位、上限、溢位等案例 | sre |
+| 2026-10-02 | v1.3 | Checklist 不變。candidate `065a1c6` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`、`attempts:20e-1` 新的 C7 判 FAIL（v1.2 判 PASS），`timeout: 1` 判 PASS（v1.2 誤判 FAIL），溢位值判 `invalid`；與 VM 上 glibc 的 `res_init()` 一致（`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`） | sre |

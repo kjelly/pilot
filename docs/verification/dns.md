@@ -683,15 +683,18 @@ DNSSEC 關閉加舊格式 `dns_zones` 的 `vm-target test` PASS（12 / 0 / 8、L
 - **A6** playbook 拆成 `dns-apply.yml`，並把 site 順序移到 FreeIPA server 之後。
 - **A7** dns role 不管理 tier 主機自己的 resolver（B9）。
 - **A8** `dns_zones` 維持手動編輯；需要用 `pilot edit` 管理的本地紀錄放到 FreeIPA。
+- **A9** resolver 逾時（2026-10-01 決定）：consumer 的 nameserver 有 2 筆以上時，
+  共用的 resolver baseline 改用 `options timeout:1 attempts:2`，只有 1 筆時維持 glibc
+  預設；由 `docs/verification/freeipa-dns-client.md` C7 驗收。起因是 E6b：第一台 tier
+  整台失聯（封包被丟棄）時，Ubuntu 與 AlmaLinux consumer 的查詢都要等 glibc 的 5 秒
+  逾時才換下一台，存在的內部名稱 15 秒、不存在的名稱 20 秒、外部名稱 5 秒（答案都
+  正確）；只停掉 unbound、主機還在時（E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。
+  第一台 FreeIPA DNS server 失聯時本來就有同樣的行為，所以這條規則不只套在有 tier 的
+  consumer。改完後同樣的 E6b 是 3 秒、4 秒、1 秒，E6a 不存在的名稱 1 秒
+  （`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`）。
 
 未知項：
 
-- resolver 逾時：2026-10-01 實測（E6b），第一台 tier 整台失聯（封包被丟棄）時，
-  Ubuntu 與 AlmaLinux consumer 的查詢都要等逾時才換下一台：存在的內部名稱 15 秒、
-  不存在的名稱 20 秒、外部名稱 5 秒，答案都正確。只停掉 unbound、主機還在時
-  （E6a），存在的名稱約 3 毫秒、不存在的名稱 5 秒。第一台 FreeIPA DNS server 失聯時
-  今天就有同樣的行為。是否要在 resolver baseline 加 `options timeout:1 attempts:2`
-  之類的設定，會改變所有 `freeipa-dns-client` 主機的輸出，留待決定。
 - IPv6：ACL 與 upstream 允許填 IPv6，但 E1 只涵蓋 IPv4；G10 只接受 IPv4 服務位址。
 
 非目標：FreeIPA 的 forwarders 與 recursion 設定（B11）、reconciler 主動 flush tier
@@ -712,3 +715,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 | 2026-10-01 | v1.0 | Checks 不變。candidate `cbe95b8` 重跑全部驗證（`docs/evidence/dns/2026-10-01-cbe95b8.md`），新增真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果；只更新狀態與 §6 | sre |
 | 2026-10-01 | v1.1 | PR #33 review：G4 只擋 `0.0.0.0/0`、`::/0` 兩個字串，`1.2.3.4/0`、`::0/0`、`0.0.0.0/1`+`128.0.0.0/1` 都能讓 tier 對所有來源開放（Ubuntu 24.04 的 unbound 1.19.2 實測接受這些寫法並照原樣輸出）。B7、G4 改成依實際涵蓋的網段判斷（controller 上用 Python `ipaddress` 合併網段）並要求標準形式的 CIDR；C5 的驗收方法同樣改成合併 `allow*` 網段，原本只 grep 兩個字串的寫法是錯的，這次收緊不是放寬。`TestRegression_DNSACLClassifier`、`TestRegression_DNSC5RejectsEquivalentAllowAll` 用實測擷取的 `get_option` 輸出鎖住 | sre |
 | 2026-10-01 | v1.1 | Checks 不變。candidate `c257bfc` 重跑全部驗證（`docs/evidence/dns/2026-10-01-c257bfc.md`），加上 G4、C5 對允許全部來源 ACL 的真機觸發；只更新狀態與 §6 | sre |
+| 2026-10-01 | v1.1 | Checks 不變。§8 把 resolver 逾時從未知項移到決策 A9：consumer 有 2 筆以上 nameserver 時用 `timeout:1 attempts:2`，由 `freeipa-dns-client.md` C7 驗收 | sre |
