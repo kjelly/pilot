@@ -20,8 +20,9 @@ import (
 // gateway.recording.session_store_ingest_token_file. AG82 used to remove only
 // the documented default path, so an upgrade from a gateway whose config
 // named another path left the secret on disk while AG82 still passed. These
-// tests run the playbook's own config-read and AG82 tasks, extracted by name,
-// on localhost against a temporary config and token files.
+// tests run the playbook's own tasks from the config read to AG82's removal
+// (gatewayActivationTasks), extracted by name in playbook order, on localhost
+// against a temporary config and token files.
 
 const gatewayApplyPath = "../../playbooks/apply/pilot-access-gateway-apply.yml"
 
@@ -40,11 +41,16 @@ func gatewayPlay(t *testing.T) (map[string]any, []any) {
 	return vars, plays[0]["tasks"].([]any)
 }
 
+// gatewayAG82HealthTask asks the running gateway for /v1/health before
+// AG82 removes anything; gatewayTasks runs ag82_test_health_cmd instead.
+const gatewayAG82HealthTask = "AG82: the gateway answers its health check"
+
 // gatewayTasks returns the playbook's tasks whose name keep accepts, in
 // playbook order, made runnable by an unprivileged user on localhost: copy
-// and file tasks lose owner/group, and a systemd task becomes a debug task
+// and file tasks lose owner/group, a systemd task becomes a debug task
 // printing "SYSTEMD <unit> <state>" under the same when:, so a test sees
-// whether the playbook would have restarted the service.
+// whether the playbook would have restarted the service, and AG82's health
+// probe runs ag82_test_health_cmd.
 func gatewayTasks(t *testing.T, keep func(name string) bool) []any {
 	t.Helper()
 	_, all := gatewayPlay(t)
@@ -74,24 +80,10 @@ func gatewayTasks(t *testing.T, keep func(name string) bool) []any {
 			delete(c, "ansible.builtin.systemd")
 			c["ansible.builtin.debug"] = map[string]any{"msg": fmt.Sprintf("SYSTEMD %v %v", args["name"], args["state"])}
 		}
+		if name == gatewayAG82HealthTask {
+			c["ansible.builtin.command"] = map[string]any{"argv": "{{ ag82_test_health_cmd }}"}
+		}
 		out = append(out, c)
-	}
-	return out
-}
-
-func isGatewayConfigRead(name string) bool {
-	return strings.HasPrefix(name, "Recording policy: stat the currently installed") ||
-		strings.HasPrefix(name, "Recording policy: read the currently installed") ||
-		strings.HasPrefix(name, "Recording policy: extract the installed")
-}
-
-// gatewayAG82Tasks returns the tasks that read the installed config and the
-// AG82 tasks, in playbook order.
-func gatewayAG82Tasks(t *testing.T) []any {
-	t.Helper()
-	out := gatewayTasks(t, func(name string) bool { return isGatewayConfigRead(name) || strings.Contains(name, "AG82") })
-	if len(out) < 4 {
-		t.Fatalf("found %d config-read/AG82 tasks in %s, want at least 4", len(out), gatewayApplyPath)
 	}
 	return out
 }
@@ -102,13 +94,23 @@ type ag82Run struct {
 	messages []string
 	// items lists, per task name, the loop items that were not skipped.
 	items map[string][]string
-	raw   string
+	// changed lists the tasks that reported a change.
+	changed map[string]bool
+	raw     string
 }
+
+// gatewayHealthy and gatewayUnhealthy are ag82_test_health_cmd values: a
+// gateway answering /v1/health, and curl failing to connect.
+var (
+	gatewayHealthy   = []any{"printf", "%s", `{"status":"ok"}`}
+	gatewayUnhealthy = []any{"sh", "-c", "echo 'curl: (7) Failed to connect' >&2; exit 7"}
+)
 
 // gatewayTestPaths points the playbook's files into dir, the test's
 // /etc/pilot (and /run for the activation marker).
 func gatewayTestPaths(dir string) map[string]any {
 	return map[string]any{
+		"ag82_test_health_cmd":                    gatewayHealthy,
 		"gateway_config_file":                     filepath.Join(dir, "access-gateway.yaml"),
 		"gateway_legacy_session_store_token_file": filepath.Join(dir, "session-store-ingest-token"),
 		"gateway_session_store_signing_key_file":  filepath.Join(dir, "session-store-ingest-signing.key"),
@@ -118,10 +120,11 @@ func gatewayTestPaths(dir string) map[string]any {
 	}
 }
 
-// runGatewayAG82 runs the extracted tasks with dir as the gateway's /etc/pilot.
+// runGatewayAG82 runs gatewayActivationTasks with dir as the gateway's
+// /etc/pilot.
 func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...string) ag82Run {
 	t.Helper()
-	return runGatewayTasks(t, dir, gatewayAG82Tasks(t), gatewayTestPaths(dir), extra, args...)
+	return runGatewayTasks(t, dir, gatewayActivationTasks(t, false), gatewayActivationVars(t, dir), extra, args...)
 }
 
 // runGatewayTasks runs tasks on localhost with vars, then extra, as play
@@ -155,7 +158,7 @@ func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[stri
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1",
 		"ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False")
 	out, runErr := cmd.Output()
-	res := ag82Run{raw: string(out), items: map[string][]string{}}
+	res := ag82Run{raw: string(out), items: map[string][]string{}, changed: map[string]bool{}}
 	if ee, ok := runErr.(*exec.ExitError); ok {
 		res.rc = ee.ExitCode()
 	} else if runErr != nil {
@@ -167,6 +170,7 @@ func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[stri
 				Task  struct{ Name string } `json:"task"`
 				Hosts map[string]struct {
 					Failed  bool `json:"failed"`
+					Changed bool `json:"changed"`
 					Msg     any  `json:"msg"`
 					Results []struct {
 						Skipped bool `json:"skipped"`
@@ -184,6 +188,9 @@ func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[stri
 		for _, task := range p.Tasks {
 			for _, h := range task.Hosts {
 				msg, _ := json.Marshal(h.Msg)
+				if h.Changed {
+					res.changed[task.Task.Name] = true
+				}
 				if h.Failed {
 					res.failures = append(res.failures, task.Task.Name+": "+string(msg))
 				} else if h.Msg != nil {
@@ -247,7 +254,9 @@ func exists(path string) bool {
 }
 
 func TestRegression_GatewayAG82RemovesTheConfiguredTokenFile(t *testing.T) {
-	for _, tags := range []string{"", "AG82"} {
+	// --tags AG82 alone does not replace the old config, so it keeps the
+	// token (TestRegression_GatewayAG82OnlyRunWaitsForTheGateway).
+	for _, tags := range []string{"", "AG_config,AG_service"} {
 		t.Run("tags="+tags, func(t *testing.T) {
 			dir := t.TempDir()
 			custom := filepath.Join(dir, "custom-ingest-token")
@@ -290,8 +299,10 @@ func TestRegression_GatewayAG82FreshHostIsANoOp(t *testing.T) {
 	if !exists(unrelated) {
 		t.Errorf("unrelated file removed on a host with no installed gateway config")
 	}
-	if strings.Contains(res.raw, `"changed": true`) {
-		t.Errorf("a fresh host must report no change:\n%s", res.raw)
+	for name := range res.changed {
+		if strings.Contains(name, "AG82") {
+			t.Errorf("%s reported a change on a host with nothing to remove", name)
+		}
 	}
 }
 
@@ -517,20 +528,26 @@ func TestRegression_GatewayAG82NormalizesPathsBeforeComparing(t *testing.T) {
 	})
 }
 
-// gatewayActivationTasks are the tasks between reading the installed config
-// and AG82's removal that decide what a run writes and whether the gateway
-// is restarted: the config read, AG82, the activation marker, Step 11,
-// AG81 and the service restart (a debug observer, see gatewayTasks). fail
-// is inserted after AG81 when injectFailure is set.
+// gatewayActivationTasks are the tasks from reading the installed config to
+// AG82's removal that decide what a run writes, whether the gateway is
+// restarted and what is removed: the config read and the recording policy
+// guard, AG82, the activation marker, Step 11, AG81, the socket and service
+// restarts (debug observers, see gatewayTasks) and AG82's health probe (a
+// stub). Left out are the tasks that need the real host (ssh_config, ipa,
+// binaries, unit files, Step 17's curl). fail is inserted after AG81 when
+// injectFailure is set.
 func gatewayActivationTasks(t *testing.T, injectFailure bool) []any {
 	t.Helper()
 	tasks := gatewayTasks(t, func(name string) bool {
-		return isGatewayConfigRead(name) || strings.Contains(name, "AG82") ||
+		return strings.HasPrefix(name, "Recording policy: ") || strings.Contains(name, "AG82") ||
 			strings.HasPrefix(name, "Activation: ") ||
 			name == "Step 11: install access-gateway.yaml" ||
-			name == "Install the session-store ingest signing key (AG81)" ||
-			strings.HasPrefix(name, "Restart pilot-access-gateway.service")
+			strings.HasSuffix(name, "(AG81)") ||
+			strings.HasPrefix(name, "Restart pilot-access-gateway.")
 	})
+	if len(tasks) < 25 {
+		t.Fatalf("found %d tasks in %s, want at least 25", len(tasks), gatewayApplyPath)
+	}
 	if !injectFailure {
 		return tasks
 	}
@@ -691,5 +708,250 @@ func TestRegression_GatewayAG82FailedRunIsFinishedByTheRetry(t *testing.T) {
 	again := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
 	if again.rc != 0 || restarted(again) || strings.Contains(again.raw, `"changed": true`) {
 		t.Errorf("run after the retry: rc=%d restarted=%v, want rc 0, no restart, no change", again.rc, restarted(again))
+	}
+}
+
+// gatewayTaskTags returns the tags of the playbook task named name.
+func gatewayTaskTags(t *testing.T, name string) []string {
+	t.Helper()
+	_, tasks := gatewayPlay(t)
+	for _, raw := range tasks {
+		task := raw.(map[string]any)
+		if task["name"] != name {
+			continue
+		}
+		var tags []string
+		for _, tag := range task["tags"].([]any) {
+			tags = append(tags, tag.(string))
+		}
+		return tags
+	}
+	t.Fatalf("no task %q in %s", name, gatewayApplyPath)
+	return nil
+}
+
+const gatewayStep11 = "Step 11: install access-gateway.yaml"
+
+// gatewayConfigWriteTags are the tags that select Step 11.
+func gatewayConfigWriteTags(t *testing.T) []string {
+	t.Helper()
+	tags := gatewayTaskTags(t, gatewayStep11)
+	if len(tags) < 5 {
+		t.Fatalf("Step 11 tags = %v, want at least AG_config, AG01, AG41, AG42, AG94", tags)
+	}
+	return tags
+}
+
+func missingTags(have, want []string) []string {
+	set := map[string]bool{}
+	for _, tag := range have {
+		set[tag] = true
+	}
+	var missing []string
+	for _, tag := range want {
+		if !set[tag] {
+			missing = append(missing, tag)
+			set[tag] = true
+		}
+	}
+	return missing
+}
+
+// TestRegression_GatewayWritesFollowTheirChecks: every tag that selects a
+// write must also select what has to run before it. Step 11 had AG94 and
+// AG81's key tasks had AG81 while the recording policy guard had neither,
+// so `--tags AG94` rewrote and `--tags AG81` removed the key without the
+// downgrade refusal. AG82's cleanup source had only AG82, so `--tags AG01`
+// replaced the config that named a custom token without recording the path
+// (PR #19 review of 25c423e).
+func TestRegression_GatewayWritesFollowTheirChecks(t *testing.T) {
+	config := gatewayConfigWriteTags(t)
+	key := append(gatewayTaskTags(t, "Install the session-store ingest signing key (AG81)"),
+		gatewayTaskTags(t, "Remove the session-store ingest signing key when no store is configured (AG81)")...)
+	var units []string
+	for _, name := range []string{"Step 10: install pilot-access-gateway binary", "Step 15: install pilot-access-gateway.socket", "Step 15: install pilot-access-gateway.service"} {
+		units = append(units, gatewayTaskTags(t, name)...)
+	}
+	_, tasks := gatewayPlay(t)
+	beforeStep11 := true
+	checked := 0
+	for _, raw := range tasks {
+		name, _ := raw.(map[string]any)["name"].(string)
+		if name == gatewayStep11 {
+			beforeStep11 = false
+		}
+		var want []string
+		switch {
+		case strings.HasPrefix(name, "Recording policy: "):
+			want = append(append([]string{}, config...), key...)
+		case beforeStep11 && strings.HasPrefix(name, "AG82: "):
+			want = config
+		case strings.HasPrefix(name, "Activation: ") && !strings.HasPrefix(name, "Activation: the gateway runs") && !strings.HasPrefix(name, "Activation: no restart"):
+			want = append(append(append([]string{}, config...), key...), units...)
+		default:
+			continue
+		}
+		checked++
+		if missing := missingTags(gatewayTaskTags(t, name), want); len(missing) > 0 {
+			t.Errorf("%q lacks %v: those tags select a write that must follow it", name, missing)
+		}
+	}
+	if checked < 16 {
+		t.Errorf("checked %d tasks, want at least 16 (5 recording policy, 9 AG82, 3 activation)", checked)
+	}
+}
+
+// TestRegression_GatewayAG82TagScopedConfigWriteKeepsTheToken: a run with a
+// tag that selects Step 11 replaces the old config that named a custom
+// token, without restarting the gateway. It must record the path and keep
+// the token; the next full apply restarts the gateway and removes it. On
+// 25c423e, `--tags AG01` recorded nothing, so the full apply left the token
+// for good, and `--tags AG_config` removed it while the old gateway still
+// ran (PR #19 review).
+func TestRegression_GatewayAG82TagScopedConfigWriteKeepsTheToken(t *testing.T) {
+	for _, tag := range gatewayConfigWriteTags(t) {
+		t.Run(tag, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			config := filepath.Join(dir, "access-gateway.yaml")
+			custom := filepath.Join(dir, "custom-token")
+			writeFiles(t, map[string]string{config: oldGatewayConfig(custom), custom: "secret\n",
+				filepath.Join(dir, "session-store-ingest-signing.key"): "old-key\n"})
+			vars := gatewayActivationVars(t, dir)
+			pending := vars["gateway_legacy_token_pending_file"].(string)
+			marker := vars["gateway_activation_pending_marker"].(string)
+
+			first := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil, "--tags", tag)
+			if first.rc != 0 {
+				t.Fatalf("--tags %s: rc=%d failures=%v", tag, first.rc, first.failures)
+			}
+			if strings.Contains(readString(t, config), "session_store_ingest_token_file") {
+				t.Fatalf("--tags %s did not replace the config", tag)
+			}
+			listed := exists(pending) && strings.Contains(readString(t, pending), custom)
+			if !exists(custom) || !listed || !exists(marker) || restarted(first) {
+				t.Fatalf("after --tags %s: token kept=%v pending list names it=%v marker=%v restarted=%v; want kept, listed, marker, no restart",
+					tag, exists(custom), listed, exists(marker), restarted(first))
+			}
+			if tag == "AG_config" && !strings.Contains(strings.Join(first.messages, "\n"), "restart of pilot-access-gateway is pending") {
+				t.Errorf("--tags AG_config kept the token without saying why:\n%v", first.messages)
+			}
+
+			full := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+			if full.rc != 0 {
+				t.Fatalf("full apply: rc=%d failures=%v", full.rc, full.failures)
+			}
+			if !restarted(full) || exists(custom) || exists(pending) || exists(marker) {
+				t.Errorf("full apply after --tags %s: restarted=%v token left=%v pending left=%v marker left=%v",
+					tag, restarted(full), exists(custom), exists(pending), exists(marker))
+			}
+
+			again := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+			if again.rc != 0 || restarted(again) || len(again.changed) > 0 {
+				t.Errorf("run after the full apply: rc=%d restarted=%v changed=%v", again.rc, restarted(again), again.changed)
+			}
+		})
+	}
+}
+
+// TestRegression_GatewayAG82OnlyRunWaitsForTheGateway: `--tags AG82` writes
+// neither the config nor restarts the gateway, so it removes former token
+// files only when the gateway runs a config that names none and answers
+// its health check. Before, it removed them right after recording them,
+// whatever the gateway still ran.
+func TestRegression_GatewayAG82OnlyRunWaitsForTheGateway(t *testing.T) {
+	t.Run("old config still installed", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		custom := filepath.Join(dir, "custom-token")
+		def := filepath.Join(dir, "session-store-ingest-token")
+		writeFiles(t, map[string]string{filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(custom),
+			custom: "secret\n", def: "secret\n"})
+		res := runGatewayAG82(t, dir, nil, "--tags", "AG82")
+		if res.rc != 0 {
+			t.Fatalf("rc=%d failures=%v", res.rc, res.failures)
+		}
+		if !exists(custom) || !exists(def) {
+			t.Errorf("--tags AG82 removed a token while the installed config still names %s: custom=%v default=%v", custom, exists(custom), exists(def))
+		}
+		if msgs := strings.Join(res.messages, "\n"); !strings.Contains(msgs, "still names "+custom) {
+			t.Errorf("no message says why the files were kept:\n%s", msgs)
+		}
+		full := runGatewayAG82(t, dir, nil)
+		if full.rc != 0 || exists(custom) || exists(def) {
+			t.Errorf("full apply: rc=%d custom left=%v default left=%v", full.rc, exists(custom), exists(def))
+		}
+	})
+
+	t.Run("restart pending", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		custom := filepath.Join(dir, "custom-token")
+		writeFiles(t, map[string]string{filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(custom), custom: "secret\n"})
+		if res := runGatewayAG82(t, dir, nil, "--tags", "AG01"); res.rc != 0 {
+			t.Fatalf("--tags AG01: rc=%d failures=%v", res.rc, res.failures)
+		}
+		res := runGatewayAG82(t, dir, nil, "--tags", "AG82")
+		if res.rc != 0 {
+			t.Fatalf("--tags AG82: rc=%d failures=%v", res.rc, res.failures)
+		}
+		if !exists(custom) {
+			t.Errorf("--tags AG82 removed %s before the pending restart", custom)
+		}
+		if msgs := strings.Join(res.messages, "\n"); !strings.Contains(msgs, "restart of pilot-access-gateway is pending") {
+			t.Errorf("no message says why the token was kept:\n%s", msgs)
+		}
+	})
+
+	t.Run("health check fails", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeFiles(t, map[string]string{filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(filepath.Join(dir, "none"))})
+		if res := runGatewayAG82(t, dir, nil); res.rc != 0 {
+			t.Fatalf("install: rc=%d failures=%v", res.rc, res.failures)
+		}
+		def := filepath.Join(dir, "session-store-ingest-token")
+		pending := filepath.Join(dir, "session-store-legacy-token-files.pending")
+		writeFiles(t, map[string]string{def: "secret\n"})
+		down := runGatewayAG82(t, dir, map[string]any{"ag82_test_health_cmd": gatewayUnhealthy}, "--tags", "AG82")
+		if down.rc != 0 {
+			t.Fatalf("--tags AG82 with the gateway down: rc=%d failures=%v", down.rc, down.failures)
+		}
+		if !exists(def) || !exists(pending) {
+			t.Errorf("with the gateway down: token kept=%v pending list kept=%v, want both", exists(def), exists(pending))
+		}
+		if msgs := strings.Join(down.messages, "\n"); !strings.Contains(msgs, "did not pass its health check") || !strings.Contains(msgs, "Failed to connect") {
+			t.Errorf("no message says the health check failed:\n%s", msgs)
+		}
+		up := runGatewayAG82(t, dir, nil, "--tags", "AG82")
+		if up.rc != 0 || exists(def) || exists(pending) {
+			t.Errorf("--tags AG82 with the gateway up: rc=%d token left=%v pending left=%v", up.rc, exists(def), exists(pending))
+		}
+	})
+}
+
+// TestRegression_GatewayRecordingGuardRunsForEveryWriteTag: lowering the
+// recording policy is refused under every tag that writes the config or the
+// signing key, and nothing is changed. On 25c423e, `--tags AG94` installed
+// the lowered config and `--tags AG81` removed the signing key.
+func TestRegression_GatewayRecordingGuardRunsForEveryWriteTag(t *testing.T) {
+	tags := append(gatewayConfigWriteTags(t), "AG81")
+	for _, tag := range tags {
+		t.Run(tag, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			config := filepath.Join(dir, "access-gateway.yaml")
+			key := filepath.Join(dir, "session-store-ingest-signing.key")
+			old := oldGatewayConfig(filepath.Join(dir, "none"))
+			writeFiles(t, map[string]string{config: old, key: "old-key\n"})
+			lowered := map[string]any{"pilot_access_gateway_recording_mode": "metadata", "pilot_access_gateway_recording_session_store_url": ""}
+			res := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), gatewayActivationVars(t, dir), lowered, "--tags", tag)
+			if res.rc == 0 || !strings.Contains(strings.Join(res.failures, "\n"), "Refusing to lower") {
+				t.Errorf("--tags %s with a lowered policy: rc=%d failures=%v, want the downgrade refusal", tag, res.rc, res.failures)
+			}
+			if readString(t, config) != old || !exists(key) || readString(t, key) != "old-key\n" {
+				t.Errorf("--tags %s changed the config or the key while lowering the policy", tag)
+			}
+		})
 	}
 }

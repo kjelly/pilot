@@ -622,6 +622,18 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   pilot-access-directory AD_service、pilot-session-store SS_service 也一樣;
   `internal/spec/ipa_kinit_regression_test.go::TestRegression_IpaCommandsHaveAKinitForTheirTags`
   對全部 `playbooks/apply/*.yml` 檢查(對應的 kdestroy 也要帶同樣的 tag)。
+- 反方向也一樣:mutation **之前**必須先跑的 task,即使 mutation 不讀它的結果,
+  也要帶齊 mutation 的每一個 tag——例如把 mutation 會毀掉的資訊先記下來的
+  task、擋降級的 assert。反過來,只該在 restart/health 之後才做的清理,在
+  `--tags` run 裡要自己確認前提成立(沒有待生效的重啟、health 此刻通過),不能
+  假設完整 run 裡排在前面的步驟這次也跑過。2026-10-02 PR #19 review:
+  pilot-access-gateway 的 Step 11 帶 AG01/AG41/AG42/AG94,記下舊 token 路徑的
+  AG82 task 只帶 `AG_config`/`AG82`,`--tags AG01` 換掉唯一記錄自訂 token 路徑的
+  config,之後的完整 apply 再也找不到那個 token;`--tags AG_config`/`AG82` 則在
+  舊 gateway 還在跑時就刪掉它;錄影政策的降級檢查也少了 AG94、AG81。這種前後
+  關係無法從 YAML 推導,逐一用測試鎖住
+  (`internal/spec/pilot_access_gateway_ag82_regression_test.go::TestRegression_GatewayWritesFollowTheirChecks`,
+  另有對每個 tag 實際跑一次的行為測試)。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -1388,3 +1400,4 @@ git status --short
 | 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
+| 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |

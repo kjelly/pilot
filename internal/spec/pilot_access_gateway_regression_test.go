@@ -152,7 +152,7 @@ func TestRegression_PilotAccessGatewayTransportContract(t *testing.T) {
 		"              AllowStreamLocalForwarding no\n",
 		"tags: [AG_forcecommand, AG43]",
 		"tags: [AG_service, AG34, AG44]",
-		"tags: [AG_config, AG01, AG41, AG42]",
+		"tags: [AG_config, AG01, AG41, AG42, AG94]",
 	} {
 		if !strings.Contains(playbook, required) {
 			t.Errorf("playbook missing %q", required)
