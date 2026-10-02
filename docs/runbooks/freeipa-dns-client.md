@@ -57,6 +57,10 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   VM 上 glibc 的 `res_init()` 都回報 10 秒，新的 C7 都判 FAIL；舊的 C7 對這三種寫法仍判 PASS。
   EL 上手動改過 `/etc/resolv.conf` 時重跑 apply 是 `changed=0`、改不回來，`nmcli general reload dns-rc`
   才會重新產生。見 [evidence](../evidence/freeipa-dns-client/2026-10-02-6224982.md)。
+- 最新實跑（2026-10-02，candidate `065a1c6`，C7 的數值照 glibc 的 `strtol` 解析，playbook 未變）：
+  5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、重跑 `changed=0`。Ubuntu 與 AlmaLinux 上
+  `timeout:10e-1`（glibc 用 10 秒）與 `attempts:20e-1`（glibc 用 5 次）新的 C7 都判 FAIL，
+  先前的 C7 判 PASS。見 [evidence](../evidence/freeipa-dns-client/2026-10-02-065a1c6.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。

@@ -39,6 +39,10 @@ consumer 加一台 tier 主機）C1–C7 21/21 PASS、L6 `changed=0`；第一台
 **C7 比對生效值（v1.2）**：2026-10-02，candidate `6224982`，5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、
 L6 `changed=0`；Ubuntu 與 AlmaLinux 上同一行覆寫、後面另一行覆寫時 glibc 實際用 10 秒，新的 C7
 判 FAIL，舊的 C7 判 PASS。見 `docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`。
+**C7 數值照 `strtol` 解析（v1.3）**：2026-10-02，candidate `065a1c6`，5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、
+L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`（glibc 用 10 秒）與 `attempts:20e-1`（glibc 用 5 次）
+新的 C7 判 FAIL、v1.2 判 PASS，`timeout: 1`（glibc 用 1 秒）新的 C7 判 PASS。見
+`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -302,3 +306,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-02 | v1.2 | 修正 C7（PR #37 review）：舊寫法只看 `options` 行有沒有出現 `timeout:1`、`attempts:2`，`options timeout:1 attempts:2 timeout:10 attempts:5` 或後面再多一行 `options timeout:10` 都會 PASS，但 glibc 依序套用、最後一次為準，實際是 10 秒。改用 awk 依 glibc 的規則依序解析，比對生效值；只有 1 筆 nameserver 時仍不准出現 timeout/attempts。regression test 加上同一行覆寫、後面另一行覆寫、tab 分隔與被後面覆寫回正確值的案例，並新增 `TestRegression_FreeipaDNSClientC7MatchesGlibc`，用本機 glibc 的 `res_init()` 驗證 C7 的判斷與印出的值。playbook 不變 | sre |
 | 2026-10-02 | v1.2 | Checklist 不變。candidate `6224982` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 的漂移案例（同一行覆寫、後面另一行覆寫、EL profile 重複值）中，glibc 實際值與新 C7 印出的值一致，舊 C7 對其中三個案例判 PASS；EL 單一 nameserver 路徑 C7 PASS、重跑 `changed=0`。§4 補上 EL 手動改過 `/etc/resolv.conf` 時的修法（`docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`） | sre |
 | 2026-10-02 | v1.3 | 修正 C7 的數值解析（PR #37 review）：v1.2 用 awk 的 `int()`，`10e-1` 被當成浮點數 1，所以 `timeout:10e-1`（glibc 生效 10）與 `attempts:20e-1`（glibc 生效 5）都會 PASS。改成照 glibc 2.39 `res_setoptions` 的 `strtol(…, 10)`：只取開頭的十進位整數（可帶正負號），值是空的時讀下一個欄位，timeout 上限 30、attempts 上限 5；有效位數超過 9 位（glibc 會溢位截斷）一律 `invalid` 判 FAIL。`TestRegression_FreeipaDNSClientC7MatchesGlibc` 加上這兩個例子與正負號、空白、小數、十六進位、上限、溢位等案例 | sre |
+| 2026-10-02 | v1.3 | Checklist 不變。candidate `065a1c6` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`、`attempts:20e-1` 新的 C7 判 FAIL（v1.2 判 PASS），`timeout: 1` 判 PASS（v1.2 誤判 FAIL），溢位值判 `invalid`；與 VM 上 glibc 的 `res_init()` 一致（`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`） | sre |
