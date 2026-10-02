@@ -27,7 +27,7 @@
 #     的 target_group 安全閥)永遠不受這個過濾影響。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
-#     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client → NFS server → NFS client
+#     核心服務(ntp)→ FreeIPA server → dns 快取層 → FreeIPA client → NFS server → NFS client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
@@ -115,12 +115,8 @@
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
 - import_playbook: preflight.yml
 
-# ── 1. 核心基礎服務(core-infra-provider-apply.yml 以 infra_role 分別套
-#      dns / ntp;docker 是獨立 playbook,見下)────────────────────────────
-- import_playbook: apply/core-infra-provider-apply.yml
-  vars:
-    infra_role: dns
-  tags: [infra, dns]
+# ── 1. 核心基礎服務(core-infra-provider-apply.yml 套 ntp;docker 是獨立
+#      playbook;dns 快取層要等 FreeIPA DNS 在服務,放在 freeipa-server 之後)──
 - import_playbook: apply/core-infra-provider-apply.yml
   vars:
     infra_role: ntp
@@ -131,6 +127,10 @@
 # ── 2. 身份 / AAA(FreeIPA)server → enrolled clients → NFS roles ───────
 - import_playbook: apply/freeipa-server-apply.yml
   tags: [freeipa, freeipa-server]
+# dns 快取層(docs/verification/dns.md):內部網域自動導向 FreeIPA,它的
+# FreeIPA authority gate(§5 G5)需要 FreeIPA DNS 已經在服務。
+- import_playbook: apply/dns-apply.yml
+  tags: [infra, dns]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
 # docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client

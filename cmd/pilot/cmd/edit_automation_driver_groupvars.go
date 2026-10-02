@@ -106,3 +106,83 @@ func (d *automationDriver) discardGroupVars(r *editRouterModel, file string) err
 	}
 	return nil
 }
+
+// setGroupVarList replaces a flow-list ("key: [a, b]") group_vars entry's
+// items with values through the same list screens a human uses: every
+// existing item is removed, then each value is added in order. Each
+// remove/add returns the router to the file's editor screen
+// (pushGroupVarsEditorScreen re-renders after every SetList), so the list
+// screens are re-entered for each step. An empty values on an entry with
+// no items is a no-op: the entry stays at its built-in default.
+func (d *automationDriver) setGroupVarList(r *editRouterModel, file, key string, values []string) error {
+	openItems := func() ([]string, error) {
+		if err := d.openGroupVarsFile(r, file); err != nil {
+			return nil, err
+		}
+		if err := d.choose(r, key+" = ["); err != nil {
+			return nil, err
+		}
+		if err := d.choose(r, "編輯清單項目"); err != nil {
+			return nil, err
+		}
+		if got := automationScreenID(r); got != "group_vars.list_items" {
+			return nil, fmt.Errorf("expected group_vars.list_items screen for %s, got %s", key, got)
+		}
+		var items []string
+		for _, it := range automationState(r).Items {
+			if it.ID != "group_vars.list_items.add" && it.ID != "group_vars.list_items.back" {
+				items = append(items, it.ID)
+			}
+		}
+		return items, nil
+	}
+	backToEditor := func() error { return d.chooseByID(r, "group_vars.list_items", "group_vars.list_items.back") }
+
+	for {
+		items, err := openItems()
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			if err := backToEditor(); err != nil {
+				return err
+			}
+			if err := d.choose(r, "返回"); err != nil {
+				return err
+			}
+			break
+		}
+		if err := d.chooseByID(r, "group_vars.list_items", items[0]); err != nil {
+			return err
+		}
+		if err := d.choose(r, "移除"); err != nil {
+			return err
+		}
+	}
+	for _, v := range values {
+		if _, err := openItems(); err != nil {
+			return err
+		}
+		if err := d.chooseByID(r, "group_vars.list_items", "group_vars.list_items.add"); err != nil {
+			return err
+		}
+		if err := d.typeText(r, v, true); err != nil {
+			return err
+		}
+		if err := d.enter(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillGroupVars applies the editor's "從範例補上缺少的設定" item for file
+// (docs/verification/dns.md §3.5 P3); it fails when the file already
+// mentions every key its example offers, so a scenario never silently
+// assumes a backfill happened.
+func (d *automationDriver) backfillGroupVars(r *editRouterModel, file string) error {
+	if err := d.openGroupVarsFile(r, file); err != nil {
+		return err
+	}
+	return d.chooseByID(r, "group_vars.entries", "group_vars.entries.backfill")
+}

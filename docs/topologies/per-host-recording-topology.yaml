@@ -13,7 +13,10 @@ services: local
 nodes:
   - name: rec-ipa
     base_image: almalinux-9
-    memory: 3072
+    # The guest sees about 95% of this (4096 showed 3911 MiB), and pilot
+    # deploy needs 4096 MiB for freeipa-server
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
     vcpus: 2
     ssh_timeout: 8m
     boot_timeout: 8m

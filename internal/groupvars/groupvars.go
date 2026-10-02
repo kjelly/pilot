@@ -13,6 +13,7 @@ package groupvars
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -424,4 +425,116 @@ func looksLikePlainScalar(v string) bool {
 		}
 	}
 	return true
+}
+
+// mentionedKeys returns every top-level key d mentions in any form: an
+// active or commented "key: value" line (the same top-level rule Entries
+// uses, so an indented illustration inside a comment does not count) or an
+// active block-collection head ("key:" followed by indented lines). A key
+// mentioned here must never be appended again by AppendMissingFrom.
+func (d *Doc) mentionedKeys() map[string]bool {
+	keys := map[string]bool{}
+	for _, line := range d.lines {
+		if m := keyLineRe.FindStringSubmatch(line); m != nil && m[1] == "" && len(m[2]) <= 2 {
+			keys[m[3]] = true
+		}
+		if m := blockMapHeadRe.FindStringSubmatch(line); m != nil {
+			keys[m[1]] = true
+		}
+	}
+	return keys
+}
+
+// exampleOffer is one key example offers through Entries or ListEntries.
+type exampleOffer struct {
+	key  string
+	line int
+}
+
+func (d *Doc) offeredKeys() []exampleOffer {
+	var out []exampleOffer
+	for _, e := range d.Entries() {
+		out = append(out, exampleOffer{key: e.Key, line: e.Line})
+	}
+	for _, e := range d.ListEntries() {
+		out = append(out, exampleOffer{key: e.Key, line: e.Line})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].line < out[j].line })
+	return out
+}
+
+// MissingKeysFrom returns, in example's file order, the top-level keys
+// example offers as editable settings (Entries or ListEntries, active or
+// commented) that d does not mention at all. It is how an older workspace
+// copy of a group_vars file learns about settings its .example.yml gained
+// later — the editor can only edit lines that already exist.
+func (d *Doc) MissingKeysFrom(example *Doc) []string {
+	have := d.mentionedKeys()
+	var out []string
+	for _, o := range example.offeredKeys() {
+		if !have[o.key] {
+			out = append(out, o.key)
+		}
+	}
+	return out
+}
+
+// AppendMissingFrom appends every key MissingKeysFrom reports to the end of
+// d, each preceded by a blank line and the comment paragraph directly above
+// it in example, and always commented out — so the appended key falls back
+// to the playbook's built-in default exactly as before, and only becomes
+// active once the user edits it. Existing lines are never changed. It
+// returns the appended keys.
+func (d *Doc) AppendMissingFrom(example *Doc) []string {
+	have := d.mentionedKeys()
+	var appended []string
+	for _, o := range example.offeredKeys() {
+		if have[o.key] {
+			continue
+		}
+		block := append(rawPrecedingComment(example.lines, o.line), commentedLine(example.lines[o.line]))
+		// Keep the file's trailing-newline shape: insert before a final
+		// empty element (the "\n" at EOF) rather than after it.
+		insertAt := len(d.lines)
+		if insertAt > 0 && d.lines[insertAt-1] == "" {
+			insertAt--
+		}
+		add := append([]string{""}, block...)
+		d.lines = append(d.lines[:insertAt], append(add, d.lines[insertAt:]...)...)
+		have[o.key] = true
+		appended = append(appended, o.key)
+	}
+	return appended
+}
+
+// rawPrecedingComment is precedingComment's raw-line counterpart: the
+// contiguous comment lines directly above lines[idx], verbatim, minus any
+// decorative "====" banner line.
+func rawPrecedingComment(lines []string, idx int) []string {
+	start := idx
+	for i := idx - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || !strings.HasPrefix(trimmed, "#") || keyLineRe.MatchString(lines[i]) {
+			break
+		}
+		start = i
+	}
+	var out []string
+	for _, line := range lines[start:idx] {
+		if isBannerLine(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// commentedLine returns line as a commented-out "# key: value" line,
+// unchanged if it already is one.
+func commentedLine(line string) string {
+	m := keyLineRe.FindStringSubmatch(line)
+	if m == nil || m[2] != "" {
+		return line
+	}
+	return fmt.Sprintf("%s# %s: %s", m[1], m[3], m[4])
 }

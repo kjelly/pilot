@@ -25,7 +25,10 @@ services: local
 nodes:
   - name: tx-ipa
     base_image: almalinux-9
-    memory: 4096
+    # The guest sees about 95% of this (4096 showed 3911 MiB), and pilot
+    # deploy needs 4096 MiB for freeipa-server
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
     vcpus: 2
     disk: 30
     ssh_user: root
@@ -74,7 +77,9 @@ nodes:
     base_image: ubuntu-24.04
     memory: 2048
     vcpus: 2
-    disk: 20
+    # pilot-session-store needs 20 GiB free on /; a node keeps about 90% of
+    # its disk there (cmd/pilot/cmd/topology_resources_test.go).
+    disk: 25
     ssh_user: root
     ssh_timeout: 5m
     boot_timeout: 8m

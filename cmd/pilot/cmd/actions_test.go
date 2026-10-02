@@ -14,7 +14,7 @@ func TestSemanticActionCatalogIsStable(t *testing.T) {
 		"add_annotation", "edit_annotation", "delete_annotation", "discard_hosts",
 		"apply_role_preset", "copy_roles_from_host", "create_role_preset", "rename_role_preset",
 		"delete_role_preset", "restore_role_presets",
-		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
+		"set_group_var", "set_group_var_list", "restore_group_var_default", "backfill_group_vars", "save_group_vars", "discard_group_vars",
 		"configure_alertmanager_receiver",
 		"set_prometheus_annotation_label", "delete_prometheus_annotation_label",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",
@@ -100,8 +100,9 @@ func TestWriteActionsSchemaIsMachineReadable(t *testing.T) {
 	if schema.PilotVersion == "" {
 		t.Error("pilot_version is empty")
 	}
-	if schema.SchemaVersion != 1 || len(schema.Actions) != 111 {
-		t.Fatalf("schema metadata = schema_version %d, actions %d", schema.SchemaVersion, len(schema.Actions))
+	// Count derived from the registry, not hard-coded (AGENTS.md §5.7 rule 3).
+	if want := len(semanticActionSpecs()); schema.SchemaVersion != 1 || len(schema.Actions) != want {
+		t.Fatalf("schema metadata = schema_version %d, actions %d, want %d", schema.SchemaVersion, len(schema.Actions), want)
 	}
 	if !strings.Contains(out.String(), `"name": "deploy"`) || !strings.Contains(out.String(), `"answers"`) {
 		t.Fatalf("schema omitted deploy answer contract:\n%s", out.String())
@@ -197,7 +198,7 @@ func TestActionsListIncludesEverySemanticAction(t *testing.T) {
 		"add_annotation", "edit_annotation", "delete_annotation", "discard_hosts",
 		"apply_role_preset", "copy_roles_from_host", "create_role_preset", "rename_role_preset",
 		"delete_role_preset", "restore_role_presets",
-		"set_group_var", "restore_group_var_default", "save_group_vars", "discard_group_vars",
+		"set_group_var", "set_group_var_list", "restore_group_var_default", "backfill_group_vars", "save_group_vars", "discard_group_vars",
 		"configure_alertmanager_receiver",
 		"set_prometheus_annotation_label", "delete_prometheus_annotation_label",
 		"add_vault_key", "set_vault_value", "delete_vault_key", "save_vault", "discard_vault",

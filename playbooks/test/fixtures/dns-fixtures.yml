@@ -1,0 +1,79 @@
+---
+# Cross-host fixtures for docs/verification/dns.md (AGENTS.md §4.1). Runs on
+# the FreeIPA server before dns-apply.yml, so the tier has real FreeIPA data
+# behind every optional row. Creates, idempotently:
+#
+#   <server /24 reverse zone>  PTR <last octet> -> ipa1.<domain>.   (C16)
+#   svc.pilot.internal         A probe -> server IP                 (C15, via dns_freeipa_zones)
+#   stub.pilot.internal        A probe -> server IP                 (C17, via dns_stub_zones)
+#
+# The freeipa-dns manifest forbids in-addr.arpa zones in this version, hence
+# a fixture instead of a manifest. Test data only; never run in production.
+#
+# Usage (normally through playbooks/test/dns-tier-chain.yml):
+#   ansible-playbook -i <inventory> playbooks/test/fixtures/dns-fixtures.yml -e @~/.vault/main.yaml
+- name: DNS tier verification fixtures (run on the FreeIPA server)
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+
+  pre_tasks:
+    - name: "Gate: admin password present (fail before touching the directory)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: "Missing ipa_admin_password. Pass a vault file, e.g. -e @~/.vault/main.yaml"
+      tags: [always]
+
+    - name: "Fixtures — names derived from this server"
+      ansible.builtin.set_fact:
+        dns_fixture_domain: "{{ freeipa_domain | default('ipa.pilot.internal', true) | lower }}"
+        dns_fixture_ip: "{{ ansible_host }}"
+        dns_fixture_reverse_zone: "{{ (ansible_host.split('.')[:3] | reverse | join('.')) ~ '.in-addr.arpa.' }}"
+        dns_fixture_ptr_name: "{{ ansible_host.split('.')[3] }}"
+      tags: [always]
+
+  tasks:
+    - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
+      ansible.builtin.shell:
+        cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ dns_fixture_domain | upper }}'
+        executable: /bin/bash
+      changed_when: false
+      no_log: true
+      when: not ansible_check_mode
+      tags: [fixtures]
+
+    # Real `ipa dnszone-add` success output has no marker line to key off
+    # (freeipa-dns-apply.yml, confirmed live); rc 0 is a genuine creation and
+    # an existing zone fails with "already exists".
+    - name: "Fixtures — ensure the fixture zones exist"
+      ansible.builtin.command:
+        argv: [ipa, dnszone-add, "{{ item }}", --skip-overlap-check]
+      loop:
+        - "{{ dns_fixture_reverse_zone }}"
+        - svc.pilot.internal.
+        - stub.pilot.internal.
+      register: dns_fixture_zones
+      changed_when: dns_fixture_zones.rc == 0
+      failed_when:
+        - dns_fixture_zones.rc != 0
+        - "'already exists' not in (dns_fixture_zones.stdout | default('') + dns_fixture_zones.stderr | default(''))"
+      when: not ansible_check_mode
+      tags: [fixtures]
+
+    - name: "Fixtures — ensure the fixture records exist"
+      ansible.builtin.command:
+        argv: "{{ ['ipa', 'dnsrecord-add'] + item }}"
+      loop:
+        - ["{{ dns_fixture_reverse_zone }}", "{{ dns_fixture_ptr_name }}", "--ptr-rec=ipa1.{{ dns_fixture_domain }}."]
+        - [svc.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
+        - [stub.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
+      loop_control:
+        label: "{{ item[0] }} {{ item[1] }}"
+      register: dns_fixture_records
+      changed_when: dns_fixture_records.rc == 0
+      failed_when:
+        - dns_fixture_records.rc != 0
+        - "'no modifications to be performed' not in (dns_fixture_records.stdout | default('') + dns_fixture_records.stderr | default(''))"
+      when: not ansible_check_mode
+      tags: [fixtures]

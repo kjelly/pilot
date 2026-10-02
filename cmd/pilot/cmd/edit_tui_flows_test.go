@@ -1104,27 +1104,31 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 	}
 }
 
-// TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable
-// proves the nested group_vars/dns/zones.example.yaml (previously invisible
-// to both `pilot inventory generate` and `pilot edit`) is now discoverable
-// and scaffoldable through the wizard's file picker, while still pointing
-// at hand-editing rather than opening a confusingly empty structured editor
-// (dns_zones is a 2-level nested list-of-maps with no top-level "key:
-// value" line groupvars.Doc can represent).
-func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *testing.T) {
+// TestEditRouter_Teatest_GroupVarsFlow_ShadowedFileWarned drives the real
+// TUI into the group_vars file picker of a workspace that still has the
+// group_vars/dns/ directory older pilot versions scaffolded next to
+// group_vars/dns.yml, and checks the rendered screen warns that Ansible
+// ignores dns.yml (docs/verification/dns.md §3.5 P4) — and that the old
+// nested "dns/zones.yaml" example is no longer offered at all (P1).
+func TestEditRouter_Teatest_GroupVarsFlow_ShadowedFileWarned(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(
 		"hosts:\n  ns-1:\n    ansible_host: \"10.0.0.53\"\n    roles: [dns]\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	exampleDir := filepath.Join(dir, "group_vars")
-	if err := os.MkdirAll(filepath.Join(exampleDir, "dns"), 0o755); err != nil {
+	gvDir := filepath.Join(dir, "group_vars")
+	if err := os.MkdirAll(filepath.Join(gvDir, "dns"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(exampleDir, "dns", "zones.example.yaml"), []byte("dns_zones:\n  - name: pilot.lan\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{
+		"dns.example.yml": "# dns_upstream: [1.1.1.1]\n",
+		"dns.yml":         "dns_upstream: [9.9.9.9]\n",
+		"dns/zones.yaml":  "dns_zones: []\n",
+	} {
+		if err := os.WriteFile(filepath.Join(gvDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	oldWd, err := os.Getwd()
@@ -1137,31 +1141,19 @@ func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
 	router := newEditRouterModel(".")
-	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
-	waitFor := func(want string) {
-		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
-	}
-
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(160, 40))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-	waitFor("➕ 從範例建立 dns/zones.yaml")
-	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // create it (only entry, cursor 0)
-	waitFor("巢狀清單設定")
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "不會生效") && strings.Contains(string(b), "📝 dns.yml")
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
-
-	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "dns", "zones.yaml"))
-	if err != nil {
-		t.Fatalf("expected group_vars/dns/zones.yaml to be created: %v", err)
-	}
-	if !strings.Contains(string(data), "pilot.lan") {
-		t.Fatalf("created file = %q, want the copied example content", data)
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(teatestFinalTimeout)).(editRouterModel)
+	if strings.Contains(final.View().Content, "zones.yaml") {
+		t.Fatalf("picker still offers the old nested zones file:\n%s", final.View().Content)
 	}
 }
 

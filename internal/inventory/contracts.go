@@ -25,7 +25,7 @@ var roleContracts = []roleContract{
 	{Name: "freeipa-nfs-client", Description: "IPA automount client (freeipa-nfs-client-apply.yml)"},
 	{Name: "freeipa-dns-client", Description: "DNS resolver 指向 FreeIPA DNS，與 freeipa-client 互不相依 (freeipa-dns-client-apply.yml)"},
 	{Name: "reverse-proxy", Description: "Nginx reverse proxy 基礎安裝 (reverse-proxy-apply.yml)"},
-	{Name: "dns", Description: "core-infra-provider-apply.yml -e infra_role=dns", GroupVarsStem: "dns"},
+	{Name: "dns", Description: "unbound 快取 DNS 層，內部網域自動導向 FreeIPA，需獨立主機 (dns-apply.yml)", GroupVarsStem: "dns"},
 	{Name: "ntp", Description: "core-infra-provider-apply.yml -e infra_role=ntp", GroupVarsStem: "ntp"},
 	{Name: "docker", Description: "Container 引擎 (docker-apply.yml)"},
 	{Name: "keycloak", Description: "IdP (keycloak-apply.yml)", VaultSections: []string{"keycloak-admin", "keycloak-db"}},
