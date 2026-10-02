@@ -124,6 +124,7 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # bearer token 檔)已不再使用。升級時 apply 會刪除舊 gateway config 指向的那個
 # token 檔(不論路徑)與預設的 /etc/pilot/session-store-ingest-token(AG82);
 # inventory 若還設定這個變數,該路徑也會被刪除並印出提示,之後請移除這個變數。
+# gateway 目前使用的 config、signing key、keytab 不論以哪種寫法出現都不會被刪。
 
 # PIT1 ingest token 的 HMAC signing key,必須跟 pilot-session-store 用同一個
 # vault 值。一律走 Vault,64 個 hex 字元(openssl rand -hex 32):

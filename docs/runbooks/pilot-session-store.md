@@ -91,7 +91,12 @@ Full results, candidate/tree and scenario verdicts are in the
      and a path the inventory still sets in that variable. Before removing,
      it reads the installed config, so run the upgrade with the previous
      config still in place. It refuses a relative path, a path with `..`, or
-     a directory, and removes nothing then. The variable itself is no longer
+     a directory, and removes nothing then. It never removes the gateway
+     config, signing key or keytab, whatever spelling the old config used
+     for them (`//`, `/./`, a symlinked directory): paths are normalized
+     before they are compared, and a path that is the same file (device and
+     inode) as one of them is kept, with a "Not removing" message. The
+     variable itself is no longer
      used; when it is still set, the apply says so — drop it from the
      inventory.
 5. After the upgrade is confirmed, delete `index.db.pre-v1.bak` by hand and

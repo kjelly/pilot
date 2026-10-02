@@ -175,6 +175,7 @@
     pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
     gateway_config_file: /etc/pilot/access-gateway.yaml
     gateway_session_store_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    gateway_keytab_file: /etc/pilot/pilot-access-gateway.keytab
     # Left behind by an earlier static-bearer-token session-store wiring;
     # per-session tokens replace it, so it is removed (AG82). This is the
     # documented default; the token file the previous config actually named
@@ -772,7 +773,7 @@
     # Also AG03: the ownership/mode task below reads this result.
     - name: "Step 8: check whether the gateway keytab already exists"
       ansible.builtin.stat:
-        path: /etc/pilot/pilot-access-gateway.keytab
+        path: "{{ gateway_keytab_file }}"
       register: gateway_keytab_stat
       tags: [AG_keytab, AG03]
 
@@ -795,7 +796,7 @@
           - -p
           - "pilot-access-gateway/{{ gateway_effective_fqdn }}"
           - -k
-          - /etc/pilot/pilot-access-gateway.keytab
+          - "{{ gateway_keytab_file }}"
       when: not gateway_keytab_stat.stat.exists
       changed_when: true
       tags: [AG_keytab]
@@ -804,7 +805,7 @@
     # is skipped, so there is no file to fix up (AGENTS.md §4.0).
     - name: "Step 8: keytab ownership/mode (spec.md §10.3, AG03)"
       ansible.builtin.file:
-        path: /etc/pilot/pilot-access-gateway.keytab
+        path: "{{ gateway_keytab_file }}"
         owner: "{{ pilot_gateway_user }}"
         group: "{{ pilot_gateway_user }}"
         mode: "0400"
@@ -947,7 +948,7 @@
           {% endfor %}
               ca_file: {{ ipa_ca_file }}
               service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ gateway_effective_ipa_realm }}
-              keytab: /etc/pilot/pilot-access-gateway.keytab
+              keytab: {{ gateway_keytab_file }}
               request_timeout: 5s
             recording:
           {% if pilot_access_gateway_effective_recording_mode | length > 0 %}
@@ -1004,16 +1005,21 @@
     # above, before Step 11 replaced it, is the record of that path
     # (AGENTS.md §5.9, §5.14). The documented default and a value the
     # inventory still sets are removed too. Files this playbook manages now
-    # are never on the list.
+    # are never removed, whatever spelling names them (AGENTS.md §5.11):
+    # paths are normalized ("//", "/./", a trailing "/") before they are
+    # compared, and a path whose file is one of them (same device and inode,
+    # e.g. through a symlinked directory) is kept.
     - name: "AG82: list the former static session-store bearer token files"
       ansible.builtin.set_fact:
-        gateway_legacy_token_files: >-
-          {{ ([gateway_legacy_session_store_token_file,
-               gateway_existing_recording.get('session_store_ingest_token_file') or '',
-               pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
-              | map('string') | map('trim') | reject('equalto', '') | unique | list)
-             | difference([gateway_config_file, gateway_session_store_signing_key_file,
-                           '/etc/pilot/pilot-access-gateway.keytab']) }}
+        gateway_legacy_token_files_raw: >-
+          {{ [gateway_legacy_session_store_token_file,
+              gateway_existing_recording.get('session_store_ingest_token_file') or '',
+              pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
+             | map('string') | map('trim') | reject('equalto', '') | unique | list }}
+        gateway_ag82_managed_files:
+          - "{{ gateway_config_file }}"
+          - "{{ gateway_session_store_signing_key_file }}"
+          - "{{ gateway_keytab_file }}"
       tags: [AG_config, AG82]
 
     - name: "AG82: the inventory still sets the removed token-file variable"
@@ -1030,15 +1036,41 @@
     - name: "AG82: former token file paths are absolute"
       ansible.builtin.assert:
         that:
-          - gateway_legacy_token_files | reject('match', '^/') | list | length == 0
-          - gateway_legacy_token_files | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
+          - gateway_legacy_token_files_raw | reject('match', '^/') | list | length == 0
+          - gateway_legacy_token_files_raw | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
         fail_msg: >-
           Refusing to remove the former session-store token file(s)
-          {{ gateway_legacy_token_files | reject('match', '^/') | list
-             + (gateway_legacy_token_files | select('search', '(^|/)\\.\\.(/|$)') | list) }}:
+          {{ gateway_legacy_token_files_raw | reject('match', '^/') | list
+             + (gateway_legacy_token_files_raw | select('search', '(^|/)\\.\\.(/|$)') | list) }}:
           not an absolute path without "..". Fix
           recording.session_store_ingest_token_file in {{ gateway_config_file }} or
           pilot_access_gateway_recording_session_store_ingest_token_file, then re-apply.
+      tags: [AG_config, AG82]
+
+    # Lexical only: "//" and "/./" collapse, a trailing "/" goes. ".." was
+    # refused above, so no segment depends on what a symlink points at.
+    - name: "AG82: normalize the former token file paths"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files: >-
+          {{ gateway_legacy_token_files_raw
+             | map('regex_replace', '/+', '/')
+             | map('regex_replace', '/\\.(?=/|$)', '')
+             | map('regex_replace', '(.)/$', '\\1')
+             | map('regex_replace', '^$', '/')
+             | unique
+             | difference(gateway_ag82_managed_files
+                          | map('regex_replace', '/+', '/')
+                          | map('regex_replace', '/\\.(?=/|$)', '')
+                          | list)
+             | list }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the files this playbook manages"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_ag82_managed_files }}"
+      register: gateway_ag82_managed_stat
       tags: [AG_config, AG82]
 
     - name: "AG82: stat the former token files"
@@ -1062,11 +1094,42 @@
           a former session-store token path that is not a regular file or symlink.
       tags: [AG_config, AG82]
 
+    # stat does not follow the last component, so a former token path that
+    # is a symlink to a managed file is the link (removed); a path that
+    # reaches a managed file through a symlinked directory is that file.
+    - name: "AG82: drop former token paths that are a file this playbook manages"
+      ansible.builtin.set_fact:
+        gateway_ag82_managed_ids: >-
+          {{ (gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+              | map(attribute='dev') | map('string') | list)
+             | zip(gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+                   | map(attribute='inode') | map('string') | list)
+             | map('join', ':') | list }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token paths kept because they name a managed file"
+      ansible.builtin.debug:
+        msg: >-
+          Not removing {{ item.item }}: it is the same file as one this playbook
+          manages ({{ gateway_ag82_managed_files | join(', ') }}).
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists
+        - (item.stat.dev | string) ~ ':' ~ (item.stat.inode | string) in gateway_ag82_managed_ids
+      tags: [AG_config, AG82]
+
     - name: "Remove the former static session-store bearer token files (AG82)"
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ item.item }}"
         state: absent
-      loop: "{{ gateway_legacy_token_files }}"
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: >-
+        not item.stat.exists
+        or ((item.stat.dev | string) ~ ':' ~ (item.stat.inode | string)) not in gateway_ag82_managed_ids
       tags: [AG_config, AG82]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay

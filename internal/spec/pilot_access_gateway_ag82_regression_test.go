@@ -68,6 +68,7 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 		"gateway_config_file":                     filepath.Join(dir, "access-gateway.yaml"),
 		"gateway_legacy_session_store_token_file": filepath.Join(dir, "session-store-ingest-token"),
 		"gateway_session_store_signing_key_file":  filepath.Join(dir, "session-store-ingest-signing.key"),
+		"gateway_keytab_file":                     filepath.Join(dir, "pilot-access-gateway.keytab"),
 	}
 	for k, v := range extra {
 		vars[k] = v
@@ -100,8 +101,12 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 			Tasks []struct {
 				Task  struct{ Name string } `json:"task"`
 				Hosts map[string]struct {
-					Failed bool `json:"failed"`
-					Msg    any  `json:"msg"`
+					Failed  bool `json:"failed"`
+					Msg     any  `json:"msg"`
+					Results []struct {
+						Skipped bool `json:"skipped"`
+						Msg     any  `json:"msg"`
+					} `json:"results"`
 				} `json:"hosts"`
 			} `json:"tasks"`
 		} `json:"plays"`
@@ -117,6 +122,12 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 					res.failures = append(res.failures, task.Task.Name+": "+string(msg))
 				} else if h.Msg != nil {
 					res.messages = append(res.messages, task.Task.Name+": "+string(msg))
+				}
+				for _, r := range h.Results {
+					if !r.Skipped && r.Msg != nil {
+						itemMsg, _ := json.Marshal(r.Msg)
+						res.messages = append(res.messages, task.Task.Name+": "+string(itemMsg))
+					}
 				}
 			}
 		}
@@ -295,5 +306,91 @@ func TestRegression_GatewayAG82KeepsFilesThePlaybookManages(t *testing.T) {
 	}
 	if !exists(signing) {
 		t.Errorf("AG82 removed the current signing key because the old config named the same path")
+	}
+}
+
+// TestRegression_GatewayAG82KeepsAliasesOfFilesThePlaybookManages: the old
+// config may name a file the playbook manages now under another spelling
+// (an extra slash, a "." segment, a symlinked directory). AG82 used to
+// compare raw strings, so such a path was not excluded and the cleanup
+// deleted the signing key AG81 had just installed (PR #19 review). Each
+// managed file must survive, while the distinct default legacy token in
+// the same run is removed.
+func TestRegression_GatewayAG82KeepsAliasesOfFilesThePlaybookManages(t *testing.T) {
+	managed := map[string]string{
+		"config":      "access-gateway.yaml",
+		"signing key": "session-store-ingest-signing.key",
+		"keytab":      "pilot-access-gateway.keytab",
+	}
+	aliases := map[string]func(dir, name string) string{
+		"double slash":         func(dir, name string) string { return dir + "//" + name },
+		"dot segment":          func(dir, name string) string { return dir + "/./" + name },
+		"leading double slash": func(dir, name string) string { return "/" + dir + "/" + name },
+		"symlinked directory":  func(dir, name string) string { return dir + "/link/" + name },
+	}
+	for what, name := range managed {
+		for form, alias := range aliases {
+			t.Run(what+"/"+form, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.Symlink(".", filepath.Join(dir, "link")); err != nil {
+					t.Fatal(err)
+				}
+				config := filepath.Join(dir, "access-gateway.yaml")
+				def := filepath.Join(dir, "session-store-ingest-token")
+				files := map[string]string{
+					config: oldGatewayConfig(alias(dir, name)),
+					def:    "secret\n",
+					filepath.Join(dir, "session-store-ingest-signing.key"): "key\n",
+					filepath.Join(dir, "pilot-access-gateway.keytab"):      "keytab\n",
+				}
+				writeFiles(t, files)
+				res := runGatewayAG82(t, dir, nil)
+				if res.rc != 0 {
+					t.Fatalf("rc=%d failures=%v", res.rc, res.failures)
+				}
+				for path := range files {
+					if path == def {
+						continue
+					}
+					if !exists(path) {
+						t.Errorf("AG82 removed %s: the old config named it as %s", path, alias(dir, name))
+					}
+				}
+				if exists(def) {
+					t.Errorf("the default legacy token file is still there")
+				}
+				// Only a symlinked directory needs the file identity check;
+				// the other spellings are normalized away before it.
+				if form == "symlinked directory" && !strings.Contains(strings.Join(res.messages, "\n"), "Not removing") {
+					t.Errorf("no message says why %s was kept:\n%v", alias(dir, name), res.messages)
+				}
+			})
+		}
+	}
+}
+
+// TestRegression_GatewayAG82RemovesASymlinkToAManagedFile: a former token
+// path that is itself a symlink to a managed file names the link, not the
+// file; removing it leaves the managed file in place.
+func TestRegression_GatewayAG82RemovesASymlinkToAManagedFile(t *testing.T) {
+	dir := t.TempDir()
+	signing := filepath.Join(dir, "session-store-ingest-signing.key")
+	link := filepath.Join(dir, "old-token-link")
+	writeFiles(t, map[string]string{
+		filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(link),
+		signing: "key\n",
+	})
+	if err := os.Symlink(signing, link); err != nil {
+		t.Fatal(err)
+	}
+	res := runGatewayAG82(t, dir, nil)
+	if res.rc != 0 {
+		t.Fatalf("rc=%d failures=%v", res.rc, res.failures)
+	}
+	if exists(link) {
+		t.Errorf("the former token symlink %s is still there", link)
+	}
+	if !exists(signing) {
+		t.Errorf("AG82 removed the signing key the former token symlink pointed at")
 	}
 }
