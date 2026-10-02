@@ -139,6 +139,19 @@
       explicitly, or make sure this inventory has a freeipa-server (or
       freeipa-server-replica with freeipa_setup_dns=true) host.
 
+# docs/verification/freeipa-dns-client.md C7. glibc waits 5 seconds per
+# nameserver by default, so with a dns tier node down (packets dropped)
+# every lookup on a consumer took 5 to 20 seconds before the next server
+# answered (2026-10-01, docs/evidence/dns/2026-10-01-3f781fb.md E6). With a
+# second nameserver to fail over to, wait 1 second instead. A host with
+# only one nameserver keeps the glibc default: there is nothing to fail over
+# to, and the longer wait gives a slow answer more time. An empty list is
+# written too: on EL it clears options an earlier run set.
+- name: "FreeIPA DNS client — compute effective resolver options for THIS host"
+  ansible.builtin.set_fact:
+    freeipa_dns_client_effective_resolver_options: >-
+      {{ ['timeout:1', 'attempts:2'] if (freeipa_dns_client_effective_servers | length > 1) else [] }}
+
 # bind9-dnsutils is the package that ships /usr/bin/dig (Ubuntu 20.10+,
 # Debian 11+); `dnsutils` is only a transitional package that depends on
 # it, so asking for it made a host that already had dig download
@@ -214,8 +227,12 @@
       if [ -n "$active" ]; then
         printf '%s' "${active%%:*}" > "$snap/nm.conn"
         printf '%s' "${active#*:}" > "$snap/nm.device"
-        for field in ipv4.dns ipv4.dns-search ipv4.ignore-auto-dns; do
-          nmcli -g "$field" connection show "${active%%:*}" > "$snap/nm.$field"
+        # --escape no: plain -g prints ipv4.dns-options as timeout\:1,attempts\:2,
+        # and writing that back stored the backslashes, so NetworkManager
+        # dropped the options line while the rescue said restored
+        # (2026-10-01, NetworkManager 1.54.3).
+        for field in ipv4.dns ipv4.dns-search ipv4.dns-options ipv4.ignore-auto-dns; do
+          nmcli --escape no -g "$field" connection show "${active%%:*}" > "$snap/nm.$field"
         done
       fi
     fi
@@ -282,6 +299,9 @@
           {% for ip in freeipa_dns_client_effective_servers %}
           nameserver {{ ip }}
           {% endfor %}
+          {% if freeipa_dns_client_effective_resolver_options | length > 0 %}
+          options {{ freeipa_dns_client_effective_resolver_options | join(' ') }}
+          {% endif %}
 
     # Empirically confirmed on a real vm-target (2026-08-17, Ubuntu 24.04):
     # writing the resolved.conf.d drop-in above only sets systemd-resolved's
@@ -421,11 +441,12 @@
           returned nothing) — cannot set dns4 on a non-existent profile.
       when: ansible_os_family == 'RedHat'
 
-    - name: "EL — set dns4/dns4_search on the active connection"
+    - name: "EL — set dns4/dns4_search/dns4_options on the active connection"
       community.general.nmcli:
         conn_name: "{{ freeipa_dns_client_nm_conn }}"
         dns4: "{{ freeipa_dns_client_effective_servers }}"
         dns4_search: ["{{ freeipa_domain }}"]
+        dns4_options: "{{ freeipa_dns_client_effective_resolver_options }}"
         dns4_ignore_auto: true
         state: present
       when: ansible_os_family == 'RedHat'
@@ -512,6 +533,7 @@
         if nmcli connection modify "$conn" \
             ipv4.dns "$(cat "$snap/nm.ipv4.dns")" \
             ipv4.dns-search "$(cat "$snap/nm.ipv4.dns-search")" \
+            ipv4.dns-options "$(cat "$snap/nm.ipv4.dns-options")" \
             ipv4.ignore-auto-dns "$(cat "$snap/nm.ipv4.ignore-auto-dns")"; then
           echo "connection '$conn' DNS settings restored"
         else
