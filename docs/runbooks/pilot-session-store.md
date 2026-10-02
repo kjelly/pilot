@@ -185,3 +185,4 @@ if they must be retained.
 | Concurrent finish and events | store binary unchanged since `d7da805`: 200 rounds over the live ingest API never accept both; the pre-fix binary accepted both in 23 |
 | Fresh topologies | store spec 27/27 on the per-host recording topology (`rec-store`), on the transport topology (`yx-store`) and at the end of the rehearsal |
 | Evidence record | [2026-10-01 `fe5f9e0`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md) |
+| Later candidate | `fee817e` (tree `4ae534cb…`, 2026-10-02): the store playbook and binary are unchanged; on a fresh per-host recording topology store 27/27 and L6 `changed=0`; AG82 kept the signing key, config and keytab when the old gateway config named them as `//`, `/./` or through a symlinked directory. The rehearsal above was not re-run ([record](../evidence/pilot-access-gateway/2026-10-02-fee817e.md)) |
