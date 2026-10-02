@@ -89,8 +89,9 @@ traceability:
     "docs/verification/pilot-access-gateway.md#AG43": {tags: [AG43], reason: "Step 19 sshd ForceCommand drop-in now states AllowStreamLocalForwarding no explicitly and keeps PermitUserEnvironment out of the Match block"}
     "docs/verification/pilot-access-gateway.md#AG44": {tags: [AG44], reason: "Step 14 wrapper no longer carries the shell TTY check; pilot portal-session enforces the per-state TTY policy in Go"}
     "docs/verification/pilot-access-gateway.md#AG81": {tags: [AG81], reason: "signing key install (store configured) / removal (no store) tasks"}
-    "docs/verification/pilot-access-gateway.md#AG82": {tags: [AG82], reason: "task removing the former static session-store bearer token file"}
+    "docs/verification/pilot-access-gateway.md#AG82": {tags: [AG82], reason: "pre-Step-11 checks and pending list of former static session-store bearer token files, removed after the health check"}
     "docs/verification/pilot-access-gateway.md#AG94": {tags: [AG94], reason: "textfile directory stat/set_fact, Step 11 metrics block and the unit's ReadWritePaths"}
+    "docs/verification/pilot-access-gateway.md#AG97": {tags: [AG97], reason: "activation marker before Step 11 and the socket/service restarts that clear it"}
   exemptions:
     "docs/verification/pilot-access-gateway.md#AG19": {kind: structural-absence, tags: [], reason: "no task in this playbook ever writes under /var/lib/pilot — absence is structural, not produced by a specific task"}
     "docs/verification/pilot-access-gateway.md#AG30": {kind: idempotency-evidence, tags: [], reason: "second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task"}

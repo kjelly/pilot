@@ -181,6 +181,13 @@
     # documented default; the token file the previous config actually named
     # is removed too (see the AG82 tasks).
     gateway_legacy_session_store_token_file: /etc/pilot/session-store-ingest-token
+    # Former token files AG82 still has to remove, kept across failed runs:
+    # Step 11 replaces the config that named them (AG82, PR #19 review).
+    gateway_legacy_token_pending_file: /etc/pilot/session-store-legacy-token-files.pending
+    # Present while the running gateway may not have loaded what this
+    # playbook wrote (AG97). /run on purpose: a reboot starts the service
+    # from the files on disk, which is exactly when the marker can go.
+    gateway_activation_pending_marker: /run/pilot-access-gateway.apply-pending
     # Metrics (per-host recording spec §31) are written only when
     # node_exporter's textfile collector directory already exists.
     gateway_metrics_textfile_dir: /var/lib/node_exporter/textfile
@@ -917,6 +924,167 @@
       when: gateway_metrics_textfile_path | length == 0
       tags: [AG94]
 
+    # AG82: remove the former static bearer token wherever it is. Before
+    # per-session tokens, the operator chose its path
+    # (pilot_access_gateway_recording_session_store_ingest_token_file) and
+    # the playbook wrote it into the config as
+    # recording.session_store_ingest_token_file; the installed config read
+    # above, before Step 11 replaces it, is the record of that path
+    # (AGENTS.md §5.9, §5.14). The documented default, a value the
+    # inventory still sets, and paths an earlier run recorded but did not
+    # get to remove are removed too.
+    #
+    # Everything that can refuse runs here, before Step 11 and AG81 change
+    # anything: a refusal leaves the old config (the only record of a
+    # custom path) and the old key in place (PR #19 review). The paths that
+    # exist are then written to gateway_legacy_token_pending_file, so a run
+    # that fails later still knows them. The files are removed only after
+    # the new gateway passed its health check (after Step 17), where the
+    # old gateway no longer needs its token.
+    #
+    # Files this playbook manages are never removed, whatever spelling
+    # names them (AGENTS.md §5.11): paths are normalized ("//", "/./", a
+    # trailing "/") before they are compared, and at removal time a path
+    # whose file is one of them (same device and inode, e.g. through a
+    # symlinked directory) is kept.
+    - name: "AG82: stat the former token files an earlier run left to remove"
+      ansible.builtin.stat:
+        path: "{{ gateway_legacy_token_pending_file }}"
+        get_checksum: false
+      register: gateway_legacy_token_pending_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: read the former token files an earlier run left to remove"
+      ansible.builtin.slurp:
+        src: "{{ gateway_legacy_token_pending_file }}"
+      register: gateway_legacy_token_pending_raw
+      when: gateway_legacy_token_pending_stat.stat.exists
+      tags: [AG_config, AG82]
+
+    - name: "AG82: list the former static session-store bearer token files"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files_raw: >-
+          {{ ([gateway_legacy_session_store_token_file,
+               gateway_existing_recording.get('session_store_ingest_token_file') or '',
+               pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
+              + ((gateway_legacy_token_pending_raw.content | b64decode).splitlines()
+                 if gateway_legacy_token_pending_stat.stat.exists else []))
+             | map('string') | map('trim') | reject('equalto', '') | unique | list }}
+        gateway_ag82_managed_files:
+          - "{{ gateway_config_file }}"
+          - "{{ gateway_session_store_signing_key_file }}"
+          - "{{ gateway_keytab_file }}"
+          - "{{ gateway_legacy_token_pending_file }}"
+      tags: [AG_config, AG82]
+
+    - name: "AG82: the inventory still sets the removed token-file variable"
+      ansible.builtin.debug:
+        msg: >-
+          pilot_access_gateway_recording_session_store_ingest_token_file is no longer
+          used: recorded sessions carry per-session tokens signed with
+          pilot_session_store_ingest_signing_key. The file it names
+          ({{ pilot_access_gateway_recording_session_store_ingest_token_file }}) is
+          removed; drop the variable from the inventory.
+      when: (pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) | string | trim) | length > 0
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token file paths are absolute"
+      ansible.builtin.assert:
+        that:
+          - gateway_legacy_token_files_raw | reject('match', '^/') | list | length == 0
+          - gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+        fail_msg: >-
+          Refusing to remove the former session-store token file(s)
+          {{ gateway_legacy_token_files_raw | reject('match', '^/') | list
+             + (gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list) }}:
+          not an absolute path without "..". Nothing was changed. Fix
+          recording.session_store_ingest_token_file in {{ gateway_config_file }},
+          pilot_access_gateway_recording_session_store_ingest_token_file or
+          {{ gateway_legacy_token_pending_file }}, then re-apply.
+      tags: [AG_config, AG82]
+
+    # Lexical only: "//" and "/./" collapse, a trailing "/" goes. ".." was
+    # refused above, so no segment depends on what a symlink points at.
+    # One backslash in these regexes: ansible-core 2.19 does not unescape
+    # "\\" inside a {{ }} template, so '\\.' would be a literal backslash
+    # (TestRegression_JinjaTemplatesUseSingleBackslashes).
+    - name: "AG82: normalize the former token file paths"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files: >-
+          {{ gateway_legacy_token_files_raw
+             | map('regex_replace', '/+', '/')
+             | map('regex_replace', '/\.(?=/|$)', '')
+             | map('regex_replace', '(.)/$', '\1')
+             | map('regex_replace', '^$', '/')
+             | unique
+             | difference(gateway_ag82_managed_files
+                          | map('regex_replace', '/+', '/')
+                          | map('regex_replace', '/\.(?=/|$)', '')
+                          | list)
+             | list }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the former token files before anything changes"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_legacy_token_files }}"
+      register: gateway_legacy_token_precheck
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token files are plain files"
+      ansible.builtin.assert:
+        that:
+          - >-
+            gateway_legacy_token_precheck.results | map(attribute='stat')
+            | selectattr('exists') | rejectattr('isreg') | rejectattr('islnk') | list | length == 0
+        fail_msg: >-
+          Refusing to remove
+          {{ gateway_legacy_token_precheck.results | selectattr('stat.exists')
+             | rejectattr('stat.isreg') | rejectattr('stat.islnk') | map(attribute='item') | list }}:
+          a former session-store token path that is not a regular file or symlink.
+          Nothing was changed.
+      tags: [AG_config, AG82]
+
+    - name: "AG82: record the former token files still to remove"
+      ansible.builtin.copy:
+        dest: "{{ gateway_legacy_token_pending_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {% for r in gateway_legacy_token_precheck.results if r.stat.exists %}
+          {{ r.item }}
+          {% endfor %}
+      when: gateway_legacy_token_precheck.results | selectattr('stat.exists') | list | length > 0
+      tags: [AG_config, AG82]
+
+    # The restart decision below compares only what this run changed, so a
+    # run that wrote the config or key and then failed left the old gateway
+    # running and a retry, finding nothing to change, never restarted it
+    # (PR #19 review). The marker records "may not run what is on disk"
+    # before anything is written and goes away once the service was
+    # restarted or nothing needed it; a marker from an earlier run forces
+    # the restart. It is bookkeeping, not a change of the host's
+    # configuration, hence changed_when: false.
+    - name: "Activation: stat the marker an earlier, unfinished run left"
+      ansible.builtin.stat:
+        path: "{{ gateway_activation_pending_marker }}"
+        get_checksum: false
+      register: gateway_activation_marker
+      tags: [AG_config, AG_service, AG01, AG09, AG41, AG42, AG81, AG94, AG97]
+
+    - name: "Activation: mark the gateway as possibly running older settings"
+      ansible.builtin.copy:
+        dest: "{{ gateway_activation_pending_marker }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "pilot-access-gateway-apply.yml run in progress\n"
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [AG_config, AG_service, AG01, AG09, AG41, AG42, AG81, AG94, AG97]
+
     # Step 11 (spec.md §55): access-gateway.yaml — matches
     # internal/gatewayconfig/config.go's Config struct exactly (kept in
     # sync manually; see docs/evidence for the cross-check test).
@@ -996,144 +1164,6 @@
       register: gateway_signing_key_remove
       when: pilot_access_gateway_effective_recording_session_store_url | length == 0
       tags: [AG_config, AG81]
-
-    # AG82: remove the former static bearer token wherever it is. Before
-    # per-session tokens, the operator chose its path
-    # (pilot_access_gateway_recording_session_store_ingest_token_file) and
-    # the playbook wrote it into the config as
-    # recording.session_store_ingest_token_file; the installed config read
-    # above, before Step 11 replaced it, is the record of that path
-    # (AGENTS.md §5.9, §5.14). The documented default and a value the
-    # inventory still sets are removed too. Files this playbook manages now
-    # are never removed, whatever spelling names them (AGENTS.md §5.11):
-    # paths are normalized ("//", "/./", a trailing "/") before they are
-    # compared, and a path whose file is one of them (same device and inode,
-    # e.g. through a symlinked directory) is kept.
-    - name: "AG82: list the former static session-store bearer token files"
-      ansible.builtin.set_fact:
-        gateway_legacy_token_files_raw: >-
-          {{ [gateway_legacy_session_store_token_file,
-              gateway_existing_recording.get('session_store_ingest_token_file') or '',
-              pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
-             | map('string') | map('trim') | reject('equalto', '') | unique | list }}
-        gateway_ag82_managed_files:
-          - "{{ gateway_config_file }}"
-          - "{{ gateway_session_store_signing_key_file }}"
-          - "{{ gateway_keytab_file }}"
-      tags: [AG_config, AG82]
-
-    - name: "AG82: the inventory still sets the removed token-file variable"
-      ansible.builtin.debug:
-        msg: >-
-          pilot_access_gateway_recording_session_store_ingest_token_file is no longer
-          used: recorded sessions carry per-session tokens signed with
-          pilot_session_store_ingest_signing_key. The file it names
-          ({{ pilot_access_gateway_recording_session_store_ingest_token_file }}) is
-          removed; drop the variable from the inventory.
-      when: (pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) | string | trim) | length > 0
-      tags: [AG_config, AG82]
-
-    - name: "AG82: former token file paths are absolute"
-      ansible.builtin.assert:
-        that:
-          - gateway_legacy_token_files_raw | reject('match', '^/') | list | length == 0
-          - gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list | length == 0
-        fail_msg: >-
-          Refusing to remove the former session-store token file(s)
-          {{ gateway_legacy_token_files_raw | reject('match', '^/') | list
-             + (gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list) }}:
-          not an absolute path without "..". Fix
-          recording.session_store_ingest_token_file in {{ gateway_config_file }} or
-          pilot_access_gateway_recording_session_store_ingest_token_file, then re-apply.
-      tags: [AG_config, AG82]
-
-    # Lexical only: "//" and "/./" collapse, a trailing "/" goes. ".." was
-    # refused above, so no segment depends on what a symlink points at.
-    # One backslash in these regexes: ansible-core 2.19 does not unescape
-    # "\\" inside a {{ }} template, so '\\.' would be a literal backslash
-    # (TestRegression_JinjaTemplatesUseSingleBackslashes).
-    - name: "AG82: normalize the former token file paths"
-      ansible.builtin.set_fact:
-        gateway_legacy_token_files: >-
-          {{ gateway_legacy_token_files_raw
-             | map('regex_replace', '/+', '/')
-             | map('regex_replace', '/\.(?=/|$)', '')
-             | map('regex_replace', '(.)/$', '\1')
-             | map('regex_replace', '^$', '/')
-             | unique
-             | difference(gateway_ag82_managed_files
-                          | map('regex_replace', '/+', '/')
-                          | map('regex_replace', '/\.(?=/|$)', '')
-                          | list)
-             | list }}
-      tags: [AG_config, AG82]
-
-    - name: "AG82: stat the files this playbook manages"
-      ansible.builtin.stat:
-        path: "{{ item }}"
-        get_checksum: false
-      loop: "{{ gateway_ag82_managed_files }}"
-      register: gateway_ag82_managed_stat
-      tags: [AG_config, AG82]
-
-    - name: "AG82: stat the former token files"
-      ansible.builtin.stat:
-        path: "{{ item }}"
-        get_checksum: false
-      loop: "{{ gateway_legacy_token_files }}"
-      register: gateway_legacy_token_stat
-      tags: [AG_config, AG82]
-
-    - name: "AG82: former token files are plain files"
-      ansible.builtin.assert:
-        that:
-          - >-
-            gateway_legacy_token_stat.results | map(attribute='stat')
-            | selectattr('exists') | rejectattr('isreg') | rejectattr('islnk') | list | length == 0
-        fail_msg: >-
-          Refusing to remove
-          {{ gateway_legacy_token_stat.results | selectattr('stat.exists')
-             | rejectattr('stat.isreg') | rejectattr('stat.islnk') | map(attribute='item') | list }}:
-          a former session-store token path that is not a regular file or symlink.
-      tags: [AG_config, AG82]
-
-    # stat does not follow the last component, so a former token path that
-    # is a symlink to a managed file is the link (removed); a path that
-    # reaches a managed file through a symlinked directory is that file.
-    - name: "AG82: drop former token paths that are a file this playbook manages"
-      ansible.builtin.set_fact:
-        gateway_ag82_managed_ids: >-
-          {{ (gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
-              | map(attribute='dev') | map('string') | list)
-             | zip(gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
-                   | map(attribute='inode') | map('string') | list)
-             | map('join', ':') | list }}
-      tags: [AG_config, AG82]
-
-    - name: "AG82: former token paths kept because they name a managed file"
-      ansible.builtin.debug:
-        msg: >-
-          Not removing {{ item.item }}: it is the same file as one this playbook
-          manages ({{ gateway_ag82_managed_files | join(', ') }}).
-      loop: "{{ gateway_legacy_token_stat.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when:
-        - item.stat.exists
-        - (item.stat.dev | string) ~ ':' ~ (item.stat.inode | string) in gateway_ag82_managed_ids
-      tags: [AG_config, AG82]
-
-    - name: "Remove the former static session-store bearer token files (AG82)"
-      ansible.builtin.file:
-        path: "{{ item.item }}"
-        state: absent
-      loop: "{{ gateway_legacy_token_stat.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when: >-
-        not item.stat.exists
-        or ((item.stat.dev | string) ~ ':' ~ (item.stat.inode | string)) not in gateway_ag82_managed_ids
-      tags: [AG_config, AG82]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
@@ -1376,30 +1406,44 @@
     # `state: started` above is a no-op if the socket unit was already
     # running under an OLDER version of its own unit file — an in-place
     # unit-file edit needs an explicit restart to actually take effect.
-    - name: "Restart pilot-access-gateway.socket if its unit file changed"
+    - name: "Restart pilot-access-gateway.socket if its unit file changed or a restart is pending"
       ansible.builtin.systemd:
         name: pilot-access-gateway.socket
         state: restarted
-      when: gateway_socket_unit.changed and not ansible_check_mode
-      tags: [AG_service]
+      when:
+        - not ansible_check_mode
+        - >-
+          (gateway_socket_unit | default({})) is changed
+          or (gateway_activation_marker.stat.exists | default(false))
+      tags: [AG_service, AG97]
 
     # A changed binary or config must actually take effect — restart the
     # (stateless — spec.md §46) service so it re-execs with the new
     # binary/config instead of continuing to run the old in-memory one.
     # The socket itself is untouched (RemoveOnStop=true would drop
     # in-flight connections pointlessly here).
-    - name: "Restart pilot-access-gateway.service if its unit, binary, config or signing key changed"
+    - name: "Restart pilot-access-gateway.service if its unit, binary, config or signing key changed, or a restart is pending"
       ansible.builtin.systemd:
         name: pilot-access-gateway.service
         state: restarted
       when:
         - not ansible_check_mode
         - >-
-          gateway_service_unit is changed or gateway_binary_copy is changed
+          (gateway_service_unit | default({})) is changed
+          or (gateway_binary_copy | default({})) is changed
           or (gateway_config_copy | default({})) is changed
           or (gateway_signing_key_copy | default({})) is changed
           or (gateway_signing_key_remove | default({})) is changed
-      tags: [AG_service]
+          or (gateway_activation_marker.stat.exists | default(false))
+      tags: [AG_service, AG97]
+
+    - name: "Activation: the gateway runs the settings on disk"
+      ansible.builtin.file:
+        path: "{{ gateway_activation_pending_marker }}"
+        state: absent
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [AG_service, AG97]
 
     # Step 17 (spec.md §55): capability probe — a real connection over
     # the real socket, triggering socket activation, checked via the
@@ -1430,6 +1474,78 @@
         fail_msg: "health probe did not report status=ok: {{ gateway_health_probe.stdout }}"
       when: not ansible_check_mode
       tags: [AG_service]
+
+    # AG82, after the new gateway passed its health check: remove the former
+    # token files recorded before Step 11. stat runs again here because
+    # Step 11 and AG81 replaced the managed files (copy writes a new
+    # inode); it does not follow the last component, so a former token path
+    # that is a symlink to a managed file is the link (removed), and a path
+    # that reaches a managed file through a symlinked directory is that file
+    # (kept).
+    - name: "AG82: stat the files this playbook manages"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_ag82_managed_files }}"
+      register: gateway_ag82_managed_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the former token files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_legacy_token_files }}"
+      register: gateway_legacy_token_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: drop former token paths that are a file this playbook manages"
+      ansible.builtin.set_fact:
+        gateway_ag82_managed_ids: >-
+          {{ (gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+              | map(attribute='dev') | map('string') | list)
+             | zip(gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+                   | map(attribute='inode') | map('string') | list)
+             | map('join', ':') | list }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token paths kept because they name a managed file"
+      ansible.builtin.debug:
+        msg: >-
+          Not removing {{ item.item }}: it is the same file as one this playbook
+          manages ({{ gateway_ag82_managed_files | join(', ') }}).
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists
+        - (item.stat.dev | string) ~ ':' ~ (item.stat.inode | string) in gateway_ag82_managed_ids
+      tags: [AG_config, AG82]
+
+    # Only a regular file or a symlink is removed: the check before Step 11
+    # refused anything else, and a path that changed type since is left.
+    - name: "Remove the former static session-store bearer token files (AG82)"
+      ansible.builtin.file:
+        path: "{{ item.item }}"
+        state: absent
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists
+        - item.stat.isreg or item.stat.islnk
+        - ((item.stat.dev | string) ~ ':' ~ (item.stat.inode | string)) not in gateway_ag82_managed_ids
+      tags: [AG_config, AG82]
+
+    # A path that is no longer a regular file or symlink keeps the record;
+    # the next run's check refuses it with its name.
+    - name: "AG82: the former token files are removed"
+      ansible.builtin.file:
+        path: "{{ gateway_legacy_token_pending_file }}"
+        state: absent
+      when: >-
+        gateway_legacy_token_stat.results | selectattr('stat.exists')
+        | rejectattr('stat.isreg') | rejectattr('stat.islnk') | list | length == 0
+      tags: [AG_config, AG82]
 
     # Step 18 (spec.md §55): configured pilot-target-<scope> must
     # actually exist before ForceCommand is ever installed — fail closed

@@ -16,7 +16,7 @@ func TestRegression_PilotAccessGatewaySpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
-	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41", "AG42", "AG43", "AG44", "AG81", "AG82", "AG83", "AG84", "AG85", "AG86", "AG87", "AG88", "AG89", "AG90", "AG91", "AG92", "AG93", "AG94", "AG95", "AG96"}
+	wantIDs := []string{"AG01", "AG02", "AG03", "AG04", "AG06", "AG09", "AG12", "AG19", "AG30", "AG32", "AG33", "AG34", "AG41", "AG42", "AG43", "AG44", "AG81", "AG82", "AG83", "AG84", "AG85", "AG86", "AG87", "AG88", "AG89", "AG90", "AG91", "AG92", "AG93", "AG94", "AG95", "AG96", "AG97"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}

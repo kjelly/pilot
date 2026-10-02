@@ -88,10 +88,15 @@ Full results, candidate/tree and scenario verdicts are in the
      names in `recording.session_store_ingest_token_file` (the path the
      previous revision's `pilot_access_gateway_recording_session_store_ingest_token_file`
      set), the documented default `/etc/pilot/session-store-ingest-token`,
-     and a path the inventory still sets in that variable. Before removing,
-     it reads the installed config, so run the upgrade with the previous
-     config still in place. It refuses a relative path, a path with `..`, or
-     a directory, and removes nothing then. It never removes the gateway
+     and a path the inventory still sets in that variable. It reads the
+     installed config before it writes anything, so run the upgrade with the
+     previous config still in place. A relative path, a path with `..`, or a
+     directory is refused before the config or key is touched ("Nothing was
+     changed"); fix the path in the installed config and re-apply. The paths
+     it found are recorded in `/etc/pilot/session-store-legacy-token-files.pending`
+     and removed only after the new gateway passed its health check, so a run
+     that fails later still removes them on the next apply, and a pending
+     restart is still done then (AG97). It never removes the gateway
      config, signing key or keytab, whatever spelling the old config used
      for them (`//`, `/./`, a symlinked directory): paths are normalized
      before they are compared, and a path that is the same file (device and

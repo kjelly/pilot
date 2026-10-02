@@ -205,9 +205,9 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
   expect: {exitCode: 0}
 - id: AG82
   category: "recording"
-  check: "舊版靜態 bearer token 檔的文件預設路徑 `/etc/pilot/session-store-ingest-token` 已移除（舊 config 指定的自訂路徑在升級後無從事後查詢，由 apply 刪除，見 §5 的說明）"
+  check: "舊版靜態 bearer token 檔的文件預設路徑 `/etc/pilot/session-store-ingest-token` 已移除，且沒有尚待清除的舊 token 清單 `/etc/pilot/session-store-legacy-token-files.pending`（舊 config 指定的自訂路徑在升級後無從事後查詢，由 apply 先記進這份清單、新 gateway 通過 health 後刪除，見 §5 的說明）"
   probe: |
-    test ! -e /etc/pilot/session-store-ingest-token
+    test ! -e /etc/pilot/session-store-ingest-token && test ! -e /etc/pilot/session-store-legacy-token-files.pending
     
   expect: {exitCode: 0}
 - id: AG83
@@ -308,6 +308,26 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
     true
     
   expect: {exitCode: 0}
+- id: AG97
+  category: "service"
+  check: "gateway service 正在跑時，它的啟動時間不早於 config、signing key、gateway binary 與 service unit 最後一次寫入；socket 啟用時不早於 socket unit 最後一次寫入。apply 中途失敗後，重試一定要讓磁碟上的新設定生效（PR #19 review）"
+  # systemd's own unix timestamps (--timestamp=unix, systemd >= 247): the
+  # default text form carries a zone abbreviation that GNU date reads by
+  # its own table (CST is US Central), and `date -d ""` is midnight.
+  probe: |
+    chk() {
+      u=$1; p=$2; shift 2
+      [ "$(systemctl show -p ActiveState --value "$u")" = active ] || return 0
+      v=$(systemctl show -p "$p" --value --timestamp=unix "$u")
+      case "$v" in @[0-9]*) t=${v#@} ;; *) echo "no $p for $u: [$v]"; exit 1 ;; esac
+      for f in "$@"; do
+        [ -e "$f" ] || continue
+        [ "$(stat -c %Y "$f")" -le "$t" ] || { echo "$u is older than $f"; exit 1; }
+      done
+    }
+    chk pilot-access-gateway.service ExecMainStartTimestamp /etc/pilot/access-gateway.yaml /etc/pilot/session-store-ingest-signing.key /usr/local/libexec/pilot-access-gateway /etc/systemd/system/pilot-access-gateway.service
+    chk pilot-access-gateway.socket ActiveEnterTimestamp /etc/systemd/system/pilot-access-gateway.socket
+  expect: {exitCode: 0}
 ```
 ## 3. 不在這份 checklist 逐行覆蓋、但已用其他方式驗證過的項目
 
@@ -380,7 +400,7 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
 - **2026-09-23：per-host SSH session recording（Phase 5）**——三件操作者需要知道的事：
   (1) **每次 authorize 都即時讀 FreeIPA**，沒有跨 request 的 policy cache：`hosts.yml` 改了 `ssh_recording` 但 `freeipa-client` 尚未 reconcile 到 FreeIPA 時，gateway 依 FreeIPA 現況決定（AG88）。
   (2) **Phase 0 分支 R**：gateway principal 以 `host_show` + `rights: true` 讀 `attributelevelrights.userclass`，沒有 `r` 權限就把該 host 視為 policy 不可讀，deny `recording_policy_unavailable`（AG95）；FreeIPA 不會因為沒有讀取權限就靜默回傳空 `userclass` 被誤判成「沒有設定」。
-  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token 由本 playbook 刪除（AG82）：Step 11 改寫 config 之前先讀已安裝的 config，刪除 `recording.session_store_ingest_token_file` 指向的檔案（舊版由 `pilot_access_gateway_recording_session_store_ingest_token_file` 決定，可以不是預設路徑）、預設的 `/etc/pilot/session-store-ingest-token` 與 inventory 仍設定的該變數路徑；相對路徑、含 `..` 或目錄一律拒絕；本 playbook 管理的 config、signing key、keytab 不論舊 config 用哪種寫法（`//`、`/./`、經過 symlink 的目錄）都不會被刪：先把路徑正規化再比對，再以 device 與 inode 判斷是不是同一個檔案（2026-10-02 PR #19 review：之前只比對字串，`/etc/pilot//session-store-ingest-signing.key` 會讓 AG82 刪掉 AG81 剛裝好的 signing key）。AG82 的 probe 只能事後檢查預設路徑（升級後 config 已不記錄自訂路徑），自訂路徑的刪除由 `internal/spec/pilot_access_gateway_ag82_regression_test.go` 與 staging 升級演練（自訂路徑，見 [`docs/evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md)）涵蓋。
+  (3) **`site.yml` 的順序已改成 `pilot-session-store` 在 `pilot-access-gateway` 之前**（contract `site.order` 51），讓全站部署時 gateway 第一次指向 store 前，store 已經在跑且 signing key 已就位；兩邊的 `pilot_session_store_ingest_signing_key` 必須是同一個 vault 值，否則每個錄影 session 的 start 都會被 store 以 401 拒絕，fail_closed 下使用者連不上 target。舊版靜態 bearer token 由本 playbook 刪除（AG82）：Step 11 改寫 config 之前先讀已安裝的 config，刪除 `recording.session_store_ingest_token_file` 指向的檔案（舊版由 `pilot_access_gateway_recording_session_store_ingest_token_file` 決定，可以不是預設路徑）、預設的 `/etc/pilot/session-store-ingest-token`、inventory 仍設定的該變數路徑，以及先前 run 記下但還沒刪掉的路徑；相對路徑、含 `..` 或目錄一律拒絕，而且這些檢查都在 Step 11 與 AG81 之前，被拒絕時舊 config（自訂路徑唯一的紀錄）與舊 key 都沒有被動過（2026-10-02 PR #19 review：之前檢查在 Step 11 之後，被拒絕的 run 已經換掉 config，修正後重試就找不到自訂 token，也不會重啟）。找到的路徑先寫進 `/etc/pilot/session-store-legacy-token-files.pending`，新 gateway 通過 Step 17 health 之後才刪除並清掉這份清單，中途失敗的 run 留下的清單由下一次 apply 接著處理；重啟條件另外看 `/run/pilot-access-gateway.apply-pending`（Step 11 之前建立、service 重啟後移除），所以中途失敗後的重試一定會重啟（AG97 驗證 service 與 socket 的啟動時間不早於設定檔寫入時間）；本 playbook 管理的 config、signing key、keytab 不論舊 config 用哪種寫法（`//`、`/./`、經過 symlink 的目錄）都不會被刪：先把路徑正規化再比對，再以 device 與 inode 判斷是不是同一個檔案（2026-10-02 PR #19 review：之前只比對字串，`/etc/pilot//session-store-ingest-signing.key` 會讓 AG82 刪掉 AG81 剛裝好的 signing key）。AG82 的 probe 只能事後檢查預設路徑（升級後 config 已不記錄自訂路徑），自訂路徑的刪除由 `internal/spec/pilot_access_gateway_ag82_regression_test.go` 與 staging 升級演練（自訂路徑，見 [`docs/evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md)）涵蓋。
 
 ## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
 

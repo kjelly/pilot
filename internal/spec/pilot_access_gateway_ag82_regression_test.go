@@ -25,9 +25,8 @@ import (
 
 const gatewayApplyPath = "../../playbooks/apply/pilot-access-gateway-apply.yml"
 
-// gatewayAG82Tasks returns the tasks that read the installed config and the
-// AG82 tasks, in playbook order.
-func gatewayAG82Tasks(t *testing.T) []any {
+// gatewayPlay returns the gateway playbook's play vars and tasks.
+func gatewayPlay(t *testing.T) (map[string]any, []any) {
 	t.Helper()
 	raw, err := os.ReadFile(gatewayApplyPath)
 	if err != nil {
@@ -37,16 +36,60 @@ func gatewayAG82Tasks(t *testing.T) []any {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
+	vars, _ := plays[0]["vars"].(map[string]any)
+	return vars, plays[0]["tasks"].([]any)
+}
+
+// gatewayTasks returns the playbook's tasks whose name keep accepts, in
+// playbook order, made runnable by an unprivileged user on localhost: copy
+// and file tasks lose owner/group, and a systemd task becomes a debug task
+// printing "SYSTEMD <unit> <state>" under the same when:, so a test sees
+// whether the playbook would have restarted the service.
+func gatewayTasks(t *testing.T, keep func(name string) bool) []any {
+	t.Helper()
+	_, all := gatewayPlay(t)
 	var out []any
-	for _, task := range plays[0]["tasks"].([]any) {
-		name, _ := task.(map[string]any)["name"].(string)
-		if strings.HasPrefix(name, "Recording policy: stat the currently installed") ||
-			strings.HasPrefix(name, "Recording policy: read the currently installed") ||
-			strings.HasPrefix(name, "Recording policy: extract the installed") ||
-			strings.Contains(name, "AG82") {
-			out = append(out, task)
+	for _, raw := range all {
+		task := raw.(map[string]any)
+		name, _ := task["name"].(string)
+		if !keep(name) {
+			continue
 		}
+		c := map[string]any{}
+		for k, v := range task {
+			c[k] = v
+		}
+		for _, mod := range []string{"ansible.builtin.copy", "ansible.builtin.file"} {
+			if args, ok := c[mod].(map[string]any); ok {
+				a := map[string]any{}
+				for k, v := range args {
+					if k != "owner" && k != "group" {
+						a[k] = v
+					}
+				}
+				c[mod] = a
+			}
+		}
+		if args, ok := c["ansible.builtin.systemd"].(map[string]any); ok {
+			delete(c, "ansible.builtin.systemd")
+			c["ansible.builtin.debug"] = map[string]any{"msg": fmt.Sprintf("SYSTEMD %v %v", args["name"], args["state"])}
+		}
+		out = append(out, c)
 	}
+	return out
+}
+
+func isGatewayConfigRead(name string) bool {
+	return strings.HasPrefix(name, "Recording policy: stat the currently installed") ||
+		strings.HasPrefix(name, "Recording policy: read the currently installed") ||
+		strings.HasPrefix(name, "Recording policy: extract the installed")
+}
+
+// gatewayAG82Tasks returns the tasks that read the installed config and the
+// AG82 tasks, in playbook order.
+func gatewayAG82Tasks(t *testing.T) []any {
+	t.Helper()
+	out := gatewayTasks(t, func(name string) bool { return isGatewayConfigRead(name) || strings.Contains(name, "AG82") })
 	if len(out) < 4 {
 		t.Fatalf("found %d config-read/AG82 tasks in %s, want at least 4", len(out), gatewayApplyPath)
 	}
@@ -62,24 +105,42 @@ type ag82Run struct {
 	raw   string
 }
 
-// runGatewayAG82 runs the extracted tasks with dir as the gateway's /etc/pilot.
-func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...string) ag82Run {
-	t.Helper()
-	if _, err := exec.LookPath("ansible-playbook"); err != nil {
-		t.Skipf("ansible-playbook not installed: %v", err)
-	}
-	vars := map[string]any{
+// gatewayTestPaths points the playbook's files into dir, the test's
+// /etc/pilot (and /run for the activation marker).
+func gatewayTestPaths(dir string) map[string]any {
+	return map[string]any{
 		"gateway_config_file":                     filepath.Join(dir, "access-gateway.yaml"),
 		"gateway_legacy_session_store_token_file": filepath.Join(dir, "session-store-ingest-token"),
 		"gateway_session_store_signing_key_file":  filepath.Join(dir, "session-store-ingest-signing.key"),
 		"gateway_keytab_file":                     filepath.Join(dir, "pilot-access-gateway.keytab"),
+		"gateway_legacy_token_pending_file":       filepath.Join(dir, "session-store-legacy-token-files.pending"),
+		"gateway_activation_pending_marker":       filepath.Join(dir, "apply-pending"),
+	}
+}
+
+// runGatewayAG82 runs the extracted tasks with dir as the gateway's /etc/pilot.
+func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...string) ag82Run {
+	t.Helper()
+	return runGatewayTasks(t, dir, gatewayAG82Tasks(t), gatewayTestPaths(dir), extra, args...)
+}
+
+// runGatewayTasks runs tasks on localhost with vars, then extra, as play
+// vars.
+func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[string]any, args ...string) ag82Run {
+	t.Helper()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	merged := map[string]any{}
+	for k, v := range vars {
+		merged[k] = v
 	}
 	for k, v := range extra {
-		vars[k] = v
+		merged[k] = v
 	}
 	play := []map[string]any{{
-		"name": "AG82 tasks", "hosts": "localhost", "connection": "local",
-		"gather_facts": false, "become": false, "vars": vars, "tasks": gatewayAG82Tasks(t),
+		"name": "gateway tasks", "hosts": "localhost", "connection": "local",
+		"gather_facts": false, "become": false, "vars": merged, "tasks": tasks,
 	}}
 	body, err := yaml.Marshal(play)
 	if err != nil {
@@ -454,4 +515,181 @@ func TestRegression_GatewayAG82NormalizesPathsBeforeComparing(t *testing.T) {
 			t.Errorf("%s items = %q, want %q", stat, got, want)
 		}
 	})
+}
+
+// gatewayActivationTasks are the tasks between reading the installed config
+// and AG82's removal that decide what a run writes and whether the gateway
+// is restarted: the config read, AG82, the activation marker, Step 11,
+// AG81 and the service restart (a debug observer, see gatewayTasks). fail
+// is inserted after AG81 when injectFailure is set.
+func gatewayActivationTasks(t *testing.T, injectFailure bool) []any {
+	t.Helper()
+	tasks := gatewayTasks(t, func(name string) bool {
+		return isGatewayConfigRead(name) || strings.Contains(name, "AG82") ||
+			strings.HasPrefix(name, "Activation: ") ||
+			name == "Step 11: install access-gateway.yaml" ||
+			name == "Install the session-store ingest signing key (AG81)" ||
+			strings.HasPrefix(name, "Restart pilot-access-gateway.service")
+	})
+	if !injectFailure {
+		return tasks
+	}
+	var out []any
+	for _, task := range tasks {
+		out = append(out, task)
+		if task.(map[string]any)["name"] == "Install the session-store ingest signing key (AG81)" {
+			out = append(out, map[string]any{"name": "injected failure after AG81", "ansible.builtin.fail": map[string]any{"msg": "injected"}})
+		}
+	}
+	return out
+}
+
+// gatewayActivationVars are the playbook's own play vars with the paths
+// moved into dir and the facts the pre_tasks would set.
+func gatewayActivationVars(t *testing.T, dir string) map[string]any {
+	t.Helper()
+	playVars, _ := gatewayPlay(t)
+	vars := map[string]any{}
+	for k, v := range playVars {
+		vars[k] = v
+	}
+	for k, v := range gatewayTestPaths(dir) {
+		vars[k] = v
+	}
+	for k, v := range map[string]any{
+		"gateway_id": "gpu-01", "gateway_scope": "gpu",
+		"gateway_effective_fqdn":                           "gw.ipa.pilot.internal",
+		"gateway_effective_portal_user_group":              "pilot-portal-users",
+		"gateway_effective_freeipa_servers":                []any{"ipa1.ipa.pilot.internal"},
+		"gateway_effective_ipa_realm":                      "IPA.PILOT.INTERNAL",
+		"gateway_metrics_textfile_path":                    "",
+		"pilot_access_gateway_recording_mode":              "terminal_output",
+		"pilot_access_gateway_recording_session_store_url": "https://store.ipa.pilot.internal:8443",
+		"pilot_session_store_ingest_signing_key":           strings.Repeat("ab", 32),
+	} {
+		vars[k] = v
+	}
+	return vars
+}
+
+func readString(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func restarted(res ag82Run) bool {
+	return strings.Contains(strings.Join(res.messages, "\n"), "SYSTEMD pilot-access-gateway.service restarted")
+}
+
+// TestRegression_GatewayAG82RefusalChangesNothingAndTheRetryActivates: AG82
+// used to refuse a bad former token path only after Step 11 and AG81 had
+// replaced the config and the key. The replaced config no longer named the
+// custom token, so a retry succeeded without removing it, and with the
+// config and key unchanged it did not restart the gateway either (PR #19
+// review). Now the refusal comes first: nothing changes, and the corrected
+// retry removes the token and restarts the gateway.
+func TestRegression_GatewayAG82RefusalChangesNothingAndTheRetryActivates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(dir, "access-gateway.yaml")
+	key := filepath.Join(dir, "session-store-ingest-signing.key")
+	custom := filepath.Join(dir, "custom-token")
+	oldConfig := oldGatewayConfig(dir + "/sub/../custom-token")
+	writeFiles(t, map[string]string{config: oldConfig, key: "old-key\n", custom: "secret\n"})
+	vars := gatewayActivationVars(t, dir)
+
+	first := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+	if first.rc == 0 || !strings.Contains(strings.Join(first.failures, "\n"), "Refusing to remove") {
+		t.Fatalf("first run: rc=%d failures=%v, want the \"..\" refusal", first.rc, first.failures)
+	}
+	if got := readString(t, config); got != oldConfig {
+		t.Errorf("the refused run replaced the config:\n%s", got)
+	}
+	if got := readString(t, key); got != "old-key\n" {
+		t.Errorf("the refused run replaced the signing key")
+	}
+	if !exists(custom) || restarted(first) {
+		t.Errorf("the refused run removed the token (%v) or restarted the gateway (%v)", !exists(custom), restarted(first))
+	}
+
+	// The operator fixes the path in the installed config.
+	writeFiles(t, map[string]string{config: oldGatewayConfig(custom)})
+	second := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+	if second.rc != 0 {
+		t.Fatalf("corrected retry: rc=%d failures=%v", second.rc, second.failures)
+	}
+	if strings.Contains(readString(t, config), "session_store_ingest_token_file") {
+		t.Errorf("the retry did not install the new config")
+	}
+	if got := readString(t, key); got != strings.Repeat("ab", 32)+"\n" {
+		t.Errorf("the retry did not install the signing key")
+	}
+	if exists(custom) {
+		t.Errorf("the retry left the custom token %s", custom)
+	}
+	if !restarted(second) {
+		t.Errorf("the retry changed the config and key but did not restart the gateway:\n%v", second.messages)
+	}
+
+	third := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+	if third.rc != 0 || restarted(third) || strings.Contains(third.raw, `"changed": true`) {
+		t.Errorf("third run: rc=%d restarted=%v, want rc 0, no restart, no change", third.rc, restarted(third))
+	}
+	for _, f := range []string{vars["gateway_legacy_token_pending_file"].(string), vars["gateway_activation_pending_marker"].(string)} {
+		if exists(f) {
+			t.Errorf("%s is left after a successful run", f)
+		}
+	}
+}
+
+// TestRegression_GatewayAG82FailedRunIsFinishedByTheRetry: a run that fails
+// after Step 11 and AG81 wrote the new config and key must not lose either
+// the former token path the old config named or the pending restart.
+func TestRegression_GatewayAG82FailedRunIsFinishedByTheRetry(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "access-gateway.yaml")
+	key := filepath.Join(dir, "session-store-ingest-signing.key")
+	custom := filepath.Join(dir, "custom-token")
+	writeFiles(t, map[string]string{config: oldGatewayConfig(custom), key: "old-key\n", custom: "secret\n"})
+	vars := gatewayActivationVars(t, dir)
+	pending := vars["gateway_legacy_token_pending_file"].(string)
+	marker := vars["gateway_activation_pending_marker"].(string)
+
+	failed := runGatewayTasks(t, dir, gatewayActivationTasks(t, true), vars, nil)
+	if failed.rc == 0 {
+		t.Fatal("the injected failure did not fail the run")
+	}
+	if strings.Contains(readString(t, config), "session_store_ingest_token_file") {
+		t.Fatalf("Step 11 did not run before the injected failure")
+	}
+	listed := exists(pending) && strings.Contains(readString(t, pending), custom)
+	if !exists(custom) || !listed || !exists(marker) {
+		t.Fatalf("after the failed run: token kept=%v pending list names it=%v marker=%v, want all three",
+			exists(custom), listed, exists(marker))
+	}
+
+	retry := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+	if retry.rc != 0 {
+		t.Fatalf("retry: rc=%d failures=%v", retry.rc, retry.failures)
+	}
+	if !restarted(retry) {
+		t.Errorf("the retry found the config and key already written and did not restart the gateway")
+	}
+	if exists(custom) {
+		t.Errorf("the retry did not remove %s, which only the pending list still named", custom)
+	}
+	if exists(pending) || exists(marker) {
+		t.Errorf("records left after the retry: pending=%v marker=%v", exists(pending), exists(marker))
+	}
+
+	again := runGatewayTasks(t, dir, gatewayActivationTasks(t, false), vars, nil)
+	if again.rc != 0 || restarted(again) || strings.Contains(again.raw, `"changed": true`) {
+		t.Errorf("run after the retry: rc=%d restarted=%v, want rc 0, no restart, no change", again.rc, restarted(again))
+	}
 }
