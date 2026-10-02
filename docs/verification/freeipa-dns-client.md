@@ -36,6 +36,9 @@ consumer 加一台 tier 主機）C1–C7 21/21 PASS、L6 `changed=0`；第一台
 查詢由 15／20／5 秒（存在／不存在／外部名稱）降到 3／4／1 秒；EL 改成單一 nameserver
 時清掉 options、rescue 還原 options。見
 `docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`。
+**C7 比對生效值（v1.2）**：2026-10-02，candidate `6224982`，5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、
+L6 `changed=0`；Ubuntu 與 AlmaLinux 上同一行覆寫、後面另一行覆寫時 glibc 實際用 10 秒，新的 C7
+判 FAIL，舊的 C7 判 PASS。見 `docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -217,7 +220,9 @@ FreeIPA server/replica 自己用得到。
     named 服務未起來（見 `freeipa-server.md` C 相關 row）。
   - C7 fail → `options` 行不對：Debian 上確認 `/etc/resolv.conf` 是本 playbook 寫的
     （有 pilot 標記）；EL 上看 `nmcli -g ipv4.dns-options connection show <conn>`，
-    重跑 apply。
+    重跑 apply。EL 上 profile 是對的、但 `/etc/resolv.conf` 被手動改過時，重跑 apply
+    是 `changed=0`，NetworkManager 不會重寫（`nmcli device reapply` 也不會）；
+    `nmcli general reload dns-rc` 會依 profile 重新產生（2026-10-02 實測）。
 
 ## 5. 例外與已知偏差
 
@@ -290,3 +295,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-01 | v1.1 | 新增 C7：2 筆以上 nameserver 時 resolver 用 `timeout:1 attempts:2`，只有 1 筆時維持 glibc 預設（起因：dns tier 第一台整台失聯時 consumer 每次查詢要等 5～20 秒，見 `docs/verification/dns.md` §8）。實跑證據見下一筆 evidence 摘要 | sre |
 | 2026-10-01 | v1.1 | Checklist 不變。candidate `5478c5d`（C7 加上 dns tier 的 ACL 修正與 main）重跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`，E6、EL 移除路徑與 rescue 結果相同（`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`） | sre |
 | 2026-10-02 | v1.2 | 修正 C7（PR #37 review）：舊寫法只看 `options` 行有沒有出現 `timeout:1`、`attempts:2`，`options timeout:1 attempts:2 timeout:10 attempts:5` 或後面再多一行 `options timeout:10` 都會 PASS，但 glibc 依序套用、最後一次為準，實際是 10 秒。改用 awk 依 glibc 的規則依序解析，比對生效值；只有 1 筆 nameserver 時仍不准出現 timeout/attempts。regression test 加上同一行覆寫、後面另一行覆寫、tab 分隔與被後面覆寫回正確值的案例，並新增 `TestRegression_FreeipaDNSClientC7MatchesGlibc`，用本機 glibc 的 `res_init()` 驗證 C7 的判斷與印出的值。playbook 不變 | sre |
+| 2026-10-02 | v1.2 | Checklist 不變。candidate `6224982` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 的漂移案例（同一行覆寫、後面另一行覆寫、EL profile 重複值）中，glibc 實際值與新 C7 印出的值一致，舊 C7 對其中三個案例判 PASS；EL 單一 nameserver 路徑 C7 PASS、重跑 `changed=0`。§4 補上 EL 手動改過 `/etc/resolv.conf` 時的修法（`docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`） | sre |
