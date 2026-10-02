@@ -248,6 +248,22 @@ func TestRegression_FreeipaDNSClientC7MatchesGlibc(t *testing.T) {
 		{"options timeout:1"},
 		{"options edns0 timeout:2 rotate attempts:2"},
 		{"options\ttimeout:1\tattempts:3"},
+		// glibc reads the number with strtol(..., 10) and caps it
+		// (timeout 30, attempts 5). awk's int() read "10e-1" as the
+		// float 1, so these two passed (PR #37 review).
+		{"options timeout:10e-1 attempts:2"},
+		{"options timeout:1 attempts:20e-1"},
+		{"options timeout: 1 attempts:2"},
+		{"options timeout:\t1 attempts:2"},
+		{"options timeout:+1 attempts:+2"},
+		{"options timeout:-1"},
+		{"options timeout:0x1 attempts:2"},
+		{"options timeout:99 attempts:9"},
+		{"options timeout:1.9 attempts:2.5"},
+		{"options timeout:00000000001 attempts:002"},
+		{"options timeout:999999999"},
+		{"options timeout:1x attempts:2y"},
+		{"options timeout: attempts:3"},
 	}
 	for _, lines := range cases {
 		var tokens []string
@@ -262,6 +278,18 @@ func TestRegression_FreeipaDNSClientC7MatchesGlibc(t *testing.T) {
 		content := "nameserver 192.0.2.11\nnameserver 192.0.2.1\n" + strings.Join(lines, "\n") + "\n"
 		if got := runC7(t, content); got != want {
 			t.Errorf("C7 on %q = %q; glibc uses timeout %d attempts %d, want %q", lines, got, timeout, attempts, want)
+		}
+	}
+
+	// Ten or more significant digits overflow glibc's int and wrap
+	// ("timeout:4294967297" runs with 1 second). C7 does not reproduce
+	// the wrap; it fails closed.
+	for _, line := range []string{"options timeout:4294967297 attempts:2", "options timeout:1 attempts:2147483650"} {
+		timeout, attempts := glibcResolverOptions(t, strings.Fields(line)[1:])
+		content := "nameserver 192.0.2.11\nnameserver 192.0.2.1\n" + line + "\n"
+		got := runC7(t, content)
+		if !strings.HasPrefix(got, "resolver-timeout-wrong ") || !strings.Contains(got, "=invalid") {
+			t.Errorf("C7 on %q = %q (glibc: timeout %d attempts %d), want resolver-timeout-wrong with an invalid value", line, got, timeout, attempts)
 		}
 	}
 }
