@@ -2,9 +2,11 @@ package spec
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -55,7 +57,9 @@ type ag82Run struct {
 	rc       int
 	failures []string
 	messages []string
-	raw      string
+	// items lists, per task name, the loop items that were not skipped.
+	items map[string][]string
+	raw   string
 }
 
 // runGatewayAG82 runs the extracted tasks with dir as the gateway's /etc/pilot.
@@ -90,7 +94,7 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1",
 		"ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False")
 	out, runErr := cmd.Output()
-	res := ag82Run{raw: string(out)}
+	res := ag82Run{raw: string(out), items: map[string][]string{}}
 	if ee, ok := runErr.(*exec.ExitError); ok {
 		res.rc = ee.ExitCode()
 	} else if runErr != nil {
@@ -106,6 +110,7 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 					Results []struct {
 						Skipped bool `json:"skipped"`
 						Msg     any  `json:"msg"`
+						Item    any  `json:"item"`
 					} `json:"results"`
 				} `json:"hosts"`
 			} `json:"tasks"`
@@ -124,6 +129,9 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 					res.messages = append(res.messages, task.Task.Name+": "+string(msg))
 				}
 				for _, r := range h.Results {
+					if item, ok := r.Item.(string); ok && !r.Skipped {
+						res.items[task.Task.Name] = append(res.items[task.Task.Name], item)
+					}
 					if !r.Skipped && r.Msg != nil {
 						itemMsg, _ := json.Marshal(r.Msg)
 						res.messages = append(res.messages, task.Task.Name+": "+string(itemMsg))
@@ -286,6 +294,11 @@ func TestRegression_GatewayAG82RefusesUnsafePaths(t *testing.T) {
 			if !strings.Contains(strings.Join(res.failures, "\n"), "Refusing to remove") {
 				t.Errorf("failure does not say why:\n%v", res.failures)
 			}
+			// The message names the refused path (a '\\.' regex inside the
+			// fail_msg template listed none, PR #19).
+			if tc.name != "directory" && !strings.Contains(strings.Join(res.failures, "\n"), configured) {
+				t.Errorf("failure does not name %q:\n%v", configured, res.failures)
+			}
 			if !exists(survivor) {
 				t.Errorf("%s was removed", survivor)
 			}
@@ -393,4 +406,52 @@ func TestRegression_GatewayAG82RemovesASymlinkToAManagedFile(t *testing.T) {
 	if !exists(signing) {
 		t.Errorf("AG82 removed the signing key the former token symlink pointed at")
 	}
+}
+
+// TestRegression_GatewayAG82NormalizesPathsBeforeComparing: "//", "/./"
+// and a trailing "/" are removed before the managed files are subtracted,
+// so such a path never reaches stat or the removal loop, even when the
+// managed file does not exist yet (the identity check needs it on disk).
+// The normalization once used '\\.' in a template, which ansible-core 2.19
+// keeps as two backslashes: "/./" was never collapsed and only the
+// identity check caught it (PR #19).
+func TestRegression_GatewayAG82NormalizesPathsBeforeComparing(t *testing.T) {
+	for _, form := range []string{"%s//%s", "%s/./%s", "%s/././%s", "/%s/%s"} {
+		t.Run(form, func(t *testing.T) {
+			dir := t.TempDir()
+			alias := fmt.Sprintf(form, dir, "session-store-ingest-signing.key")
+			def := filepath.Join(dir, "session-store-ingest-token")
+			writeFiles(t, map[string]string{
+				filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(alias),
+				def: "secret\n",
+			})
+			res := runGatewayAG82(t, dir, nil)
+			if res.rc != 0 {
+				t.Fatalf("rc=%d failures=%v", res.rc, res.failures)
+			}
+			const stat = "AG82: stat the former token files"
+			if got := res.items[stat]; len(got) != 1 || got[0] != def {
+				t.Errorf("%s items = %q, want only %s (%s is the signing key)", stat, got, def, alias)
+			}
+		})
+	}
+	t.Run("trailing slash", func(t *testing.T) {
+		dir := t.TempDir()
+		custom := filepath.Join(dir, "custom-ingest-token")
+		writeFiles(t, map[string]string{
+			filepath.Join(dir, "access-gateway.yaml"): oldGatewayConfig(custom + "/"),
+		})
+		res := runGatewayAG82(t, dir, nil)
+		if res.rc != 0 {
+			t.Fatalf("rc=%d failures=%v", res.rc, res.failures)
+		}
+		const stat = "AG82: stat the former token files"
+		want := []string{filepath.Join(dir, "session-store-ingest-token"), custom}
+		got := append([]string(nil), res.items[stat]...)
+		sort.Strings(got)
+		sort.Strings(want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s items = %q, want %q", stat, got, want)
+		}
+	})
 }

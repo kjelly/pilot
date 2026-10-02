@@ -1037,11 +1037,11 @@
       ansible.builtin.assert:
         that:
           - gateway_legacy_token_files_raw | reject('match', '^/') | list | length == 0
-          - gateway_legacy_token_files_raw | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
+          - gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list | length == 0
         fail_msg: >-
           Refusing to remove the former session-store token file(s)
           {{ gateway_legacy_token_files_raw | reject('match', '^/') | list
-             + (gateway_legacy_token_files_raw | select('search', '(^|/)\\.\\.(/|$)') | list) }}:
+             + (gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list) }}:
           not an absolute path without "..". Fix
           recording.session_store_ingest_token_file in {{ gateway_config_file }} or
           pilot_access_gateway_recording_session_store_ingest_token_file, then re-apply.
@@ -1049,18 +1049,21 @@
 
     # Lexical only: "//" and "/./" collapse, a trailing "/" goes. ".." was
     # refused above, so no segment depends on what a symlink points at.
+    # One backslash in these regexes: ansible-core 2.19 does not unescape
+    # "\\" inside a {{ }} template, so '\\.' would be a literal backslash
+    # (TestRegression_JinjaTemplatesUseSingleBackslashes).
     - name: "AG82: normalize the former token file paths"
       ansible.builtin.set_fact:
         gateway_legacy_token_files: >-
           {{ gateway_legacy_token_files_raw
              | map('regex_replace', '/+', '/')
-             | map('regex_replace', '/\\.(?=/|$)', '')
-             | map('regex_replace', '(.)/$', '\\1')
+             | map('regex_replace', '/\.(?=/|$)', '')
+             | map('regex_replace', '(.)/$', '\1')
              | map('regex_replace', '^$', '/')
              | unique
              | difference(gateway_ag82_managed_files
                           | map('regex_replace', '/+', '/')
-                          | map('regex_replace', '/\\.(?=/|$)', '')
+                          | map('regex_replace', '/\.(?=/|$)', '')
                           | list)
              | list }}
       tags: [AG_config, AG82]
