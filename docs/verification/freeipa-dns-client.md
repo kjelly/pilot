@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-dns-client（目標主機把 DNS resolver 指向 FreeIPA DNS）
 
-> 版本：v1.1（2026-10-01 新增 C7 resolver 逾時，見 §8）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
+> 版本：v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts，見 §8）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
 > `freeipa-dns-server`（FreeIPA server 自身，`--setup-dns`，自我指向案例，
 > NetworkManager 路徑）與 Ubuntu 24.04 `freeipa-dns-ubuntu`（一般未納管
 > client，systemd-resolved 路徑），C1-C6 兩台皆 6/6 PASS，含 idempotent
@@ -125,7 +125,7 @@ FreeIPA server/replica 自己用得到。
 | C4  | config   | `/etc/resolv.conf` 至少一行 `nameserver`                       | 0                        | sh -c 'grep -c "^nameserver " /etc/resolv.conf | grep -qv "^0$"' |
 | C5  | config   | search domain 含 FreeIPA domain（未限定名稱可補 domain 解析）  | 0                        | grep -qE "^search .*ipa.pilot.internal" /etc/resolv.conf |
 | C6  | dns      | FreeIPA server FQDN 真的透過 DNS 解析成功（非 `/etc/hosts` 短路）| 0                       | sh -c 'dig +short ipa1.ipa.pilot.internal | grep -qE "^[0-9]+\."' |
-| C7  | config   | 2 筆以上 nameserver 時 resolver 逾時是 `timeout:1 attempts:2`；只有 1 筆時沒有 timeout/attempts 選項 | ~resolver-timeout-ok | sh -c 'n=$(grep -c "^nameserver " /etc/resolv.conf); t=other; grep -Eq "^options( .*)? timeout:1( |$)" /etc/resolv.conf && grep -Eq "^options( .*)? attempts:2( |$)" /etc/resolv.conf && t=short; grep -Eq "^options.* (timeout|attempts):" /etc/resolv.conf || t=default; if [ "$n" -ge 2 ] && [ "$t" = short ]; then echo resolver-timeout-ok; elif [ "$n" -lt 2 ] && [ "$t" = default ]; then echo resolver-timeout-ok; else echo "resolver-timeout-wrong nameservers=$n options=$t"; fi' |
+| C7  | config   | 2 筆以上 nameserver 時 glibc 實際生效的逾時是 timeout 1、attempts 2；只有 1 筆時沒有 timeout/attempts 選項 | ~resolver-timeout-ok | awk 'BEGIN { n = 0; t = 5; a = 2; set = 0 } /^nameserver[ \t]/ { n++ } /^options[ \t]/ { for (i = 2; i <= NF; i++) { if ($i ~ /^timeout:/) { t = int(substr($i, 9)); set = 1 } else if ($i ~ /^attempts:/) { a = int(substr($i, 10)); set = 1 } } } END { ok = n >= 2 ? t == 1 && a == 2 : !set; if (ok) print "resolver-timeout-ok"; else print "resolver-timeout-wrong nameservers=" n " timeout=" t " attempts=" a " options=" (set ? "set" : "none") }' /etc/resolv.conf |
 
 > **C1/C2/C4/C6 = rc 型 expected（`0`）**：`command -v`（C1）找到即回 0；
 > `systemctl is-active`（C2）刻意用 rc 而非 `~active`——字串 `active` 也會命中
@@ -165,9 +165,20 @@ FreeIPA server/replica 自己用得到。
 > 本 repo 慣例。v1.0 起 C2/C4/C6 一律用未跳脫的字面 `|`。
 > **C7 = `~substring`，讀的是 glibc 實際使用的 `/etc/resolv.conf`**：兩個 OS 最後都由
 > 這個檔案決定逾時（Debian 由本 playbook 直接寫入；EL 由 NetworkManager 依
-> `ipv4.dns-options` 產生），所以不看 NetworkManager profile。`timeout:1` 用
-> `( |$)` 收尾，`timeout:10` 不會被當成 `timeout:1`。失敗時印出 nameserver 筆數與
-> 判斷結果（`short`／`default`／`other`）。
+> `ipv4.dns-options` 產生），所以不看 NetworkManager profile。
+> **C7 比對的是生效值，不是有沒有出現 `timeout:1`**：glibc（`resolv/res_init.c`
+> 的 `res_setoptions`）依檔案順序逐一處理每個 `options` 行的每個 token，同一個
+> 選項以最後一次為準，數值用 `atoi` 解析。所以
+> `options timeout:1 attempts:2 timeout:10 attempts:5`，或後面再多一行
+> `options timeout:10`，生效的是 10 秒。C7 用同樣的規則解析：只認行首的
+> `nameserver`／`options`（後面接空白或 tab），從 glibc 預設 timeout 5、attempts 2
+> 開始，依序以每個 `timeout:`／`attempts:` 覆寫，數值用 awk 的 `int()`（`timeout:01`
+> 是 1，`timeout:` 是 0，與 `atoi` 相同）。2 筆以上 nameserver 時，生效值必須是 1 和 2；
+> 只有 1 筆時，不准出現任何 timeout/attempts token。2026-10-02 用 glibc 2.39 的
+> `res_init()`（`RES_OPTIONS` 與 `/etc/resolv.conf` 共用同一個 parser）確認過
+> 這些例子。失敗時印出 nameserver 筆數、
+> 生效的 timeout／attempts，以及檔案裡有沒有這兩個選項（`set`／`none`）。
+> mawk（Ubuntu）、gawk（AlmaLinux）、busybox awk 的結果相同。
 
 ## 3. 證據收集
 
@@ -278,3 +289,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-01 | v1.0 | Checklist 不變。candidate `cbe95b8` 重跑：dns tier 拓樸 18/18 PASS；真實 `pilot reconcile` 套用到 3 台 consumer 後 18/18 PASS；見 `docs/evidence/dns/2026-10-01-cbe95b8.md` | sre |
 | 2026-10-01 | v1.1 | 新增 C7：2 筆以上 nameserver 時 resolver 用 `timeout:1 attempts:2`，只有 1 筆時維持 glibc 預設（起因：dns tier 第一台整台失聯時 consumer 每次查詢要等 5～20 秒，見 `docs/verification/dns.md` §8）。實跑證據見下一筆 evidence 摘要 | sre |
 | 2026-10-01 | v1.1 | Checklist 不變。candidate `5478c5d`（C7 加上 dns tier 的 ACL 修正與 main）重跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`，E6、EL 移除路徑與 rescue 結果相同（`docs/evidence/freeipa-dns-client/2026-10-01-5478c5d.md`） | sre |
+| 2026-10-02 | v1.2 | 修正 C7（PR #37 review）：舊寫法只看 `options` 行有沒有出現 `timeout:1`、`attempts:2`，`options timeout:1 attempts:2 timeout:10 attempts:5` 或後面再多一行 `options timeout:10` 都會 PASS，但 glibc 依序套用、最後一次為準，實際是 10 秒。改用 awk 依 glibc 的規則依序解析，比對生效值；只有 1 筆 nameserver 時仍不准出現 timeout/attempts。regression test 加上同一行覆寫、後面另一行覆寫、tab 分隔與被後面覆寫回正確值的案例，並新增 `TestRegression_FreeipaDNSClientC7MatchesGlibc`，用本機 glibc 的 `res_init()` 驗證 C7 的判斷與印出的值。playbook 不變 | sre |

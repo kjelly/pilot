@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -175,9 +176,92 @@ func TestRegression_FreeipaDNSClientResolverTimeout(t *testing.T) {
 		"two nameservers, no options":   strings.Replace(multi, "options timeout:1 attempts:2\n", "", 1),
 		"two nameservers, timeout:10":   strings.Replace(multi, "timeout:1 ", "timeout:10 ", 1),
 		"one nameserver, short timeout": single + "options timeout:1 attempts:2\n",
+		// glibc applies options in order, so a later value overrides
+		// timeout:1 attempts:2 although both tokens are still there.
+		"two nameservers, overridden on the same line":         strings.Replace(multi, "options timeout:1 attempts:2\n", "options timeout:1 attempts:2 timeout:10 attempts:5\n", 1),
+		"two nameservers, timeout overridden by a later line":  multi + "options timeout:10\n",
+		"two nameservers, attempts overridden by a later line": multi + "options rotate attempts:5\n",
+		"two nameservers, tab-separated later line":            multi + "options\ttimeout:3\n",
 	} {
 		if out := runC7(t, content); !strings.HasPrefix(out, "resolver-timeout-wrong ") {
 			t.Errorf("C7 on %s = %q, want resolver-timeout-wrong:\n%s", name, out, content)
+		}
+	}
+
+	// Should pass: what counts is the value glibc ends up with.
+	for name, content := range map[string]string{
+		"two nameservers, an earlier line overridden":                   strings.Replace(multi, "options timeout:1 attempts:2\n", "options timeout:10 attempts:5\noptions timeout:1 attempts:2\n", 1),
+		"two nameservers, indented and commented lines are not options": multi + " options timeout:10\n# options timeout:10\n",
+		"one nameserver, options without a timeout":                     single + "options edns0 trust-ad\n",
+	} {
+		if out := runC7(t, content); out != "resolver-timeout-ok" {
+			t.Errorf("C7 on %s = %q, want resolver-timeout-ok:\n%s", name, out, content)
+		}
+	}
+}
+
+// glibcResolverOptions returns the timeout and attempts glibc's res_init()
+// ends up with after it applies tokens, starting from its defaults
+// (timeout 5, attempts 2) whatever the test host's /etc/resolv.conf says.
+// RES_OPTIONS goes through the same res_setoptions() as the options lines
+// of /etc/resolv.conf, after them.
+func glibcResolverOptions(t *testing.T, tokens []string) (timeout, attempts int) {
+	t.Helper()
+	const probe = `import ctypes
+libc = ctypes.CDLL("libc.so.6")
+if libc.__res_init() != 0:
+    raise SystemExit("res_init failed")
+libc.__res_state.restype = ctypes.POINTER(ctypes.c_int * 2)
+s = libc.__res_state().contents
+print(s[0], s[1])
+`
+	cmd := exec.Command("python3", "-c", probe)
+	cmd.Env = append(os.Environ(), "RES_OPTIONS=timeout:5 attempts:2 "+strings.Join(tokens, " "))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Skipf("cannot read glibc's resolver state: %v\n%s", err, out)
+	}
+	if _, err := fmt.Sscan(string(out), &timeout, &attempts); err != nil {
+		t.Fatalf("glibc probe printed %q: %v", out, err)
+	}
+	return timeout, attempts
+}
+
+// TestRegression_FreeipaDNSClientC7MatchesGlibc checks C7's parser against
+// glibc itself: for each set of options lines on a host with two
+// nameservers, C7 passes exactly when glibc's effective values are
+// timeout 1 and attempts 2, and otherwise prints glibc's values. A
+// presence check accepted "timeout:1 attempts:2 timeout:10 attempts:5",
+// which glibc runs with 10 seconds and 5 attempts.
+func TestRegression_FreeipaDNSClientC7MatchesGlibc(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not installed: %v", err)
+	}
+	cases := [][]string{
+		{"options timeout:1 attempts:2"},
+		{"options timeout:1 attempts:2 timeout:10 attempts:5"},
+		{"options timeout:1 attempts:2", "options timeout:10"},
+		{"options timeout:1 attempts:2", "options attempts:5"},
+		{"options timeout:10 attempts:5", "options timeout:1 attempts:2"},
+		{"options timeout:01 attempts:2x"},
+		{"options timeout: attempts:2"},
+		{"options timeout:1"},
+		{"options edns0 timeout:2 rotate attempts:2"},
+		{"options\ttimeout:1\tattempts:3"},
+	}
+	for _, lines := range cases {
+		var tokens []string
+		for _, l := range lines {
+			tokens = append(tokens, strings.Fields(l)[1:]...)
+		}
+		timeout, attempts := glibcResolverOptions(t, tokens)
+		want := "resolver-timeout-ok"
+		if timeout != 1 || attempts != 2 {
+			want = fmt.Sprintf("resolver-timeout-wrong nameservers=2 timeout=%d attempts=%d options=set", timeout, attempts)
+		}
+		content := "nameserver 192.0.2.11\nnameserver 192.0.2.1\n" + strings.Join(lines, "\n") + "\n"
+		if got := runC7(t, content); got != want {
+			t.Errorf("C7 on %q = %q; glibc uses timeout %d attempts %d, want %q", lines, got, timeout, attempts, want)
 		}
 	}
 }
