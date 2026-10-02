@@ -3,27 +3,31 @@ schemaVersion: 1
 id: dns
 role: dns
 specs:
-  - path: docs/verification/core-infra-provider.md
-    rows: {categories: [dns]}
+  - path: docs/verification/dns.md
+    rows: {all: true}
 playbooks:
-  apply: playbooks/apply/core-infra-provider-apply.yml
+  apply: playbooks/apply/dns-apply.yml
   rollback: null
   upgrade: null
   decommission: null
 regressionTests:
-  - internal/spec/core_infra_provider_regression_test.go
+  - internal/spec/dns_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies: []
-conflicts: []
+conflicts: [freeipa-server, freeipa-server-replica]
 bindings: []
 os:
   - {distro: ubuntu, versions: ["22.04", "24.04"]}
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: dns_listen_addr, type: string, required: true, secret: false}
-  - {name: dns_upstream, type: string, required: false, default: 1.1.1.1, secret: false}
-  - {name: dns_zones, type: stringList, required: false, default: [], secret: false}
+  - {name: dns_upstream, type: stringList, required: false, default: [1.1.1.1], secret: false}
+  - {name: dns_freeipa_zones, type: stringList, required: false, default: [], secret: false}
+  - {name: dns_stub_zones, type: stringList, required: false, default: [], secret: false}
+  - {name: dns_access_control, type: stringList, required: false, default: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16], secret: false}
+  - {name: dns_cache_max_ttl, type: integer, required: false, default: 300, secret: false}
+  - {name: dns_cache_max_negative_ttl, type: integer, required: false, default: 60, secret: false}
+  - {name: dns_dnssec_validation, type: boolean, required: false, default: true, secret: false}
 inputRules: []
 endpoints:
   - {name: dnsTcp, scheme: tcp, port: 53}
@@ -36,12 +40,20 @@ traceability:
   mode: rowTags
   tag: {kind: rolePrefixed, prefix: dns}
   exemptions:
-    "docs/verification/core-infra-provider.md#C7": {kind: verifyOnly, reason: optional DNS functional probe}
+    "docs/verification/dns.md#C7": {kind: derived, tags: [dns-C6], reason: external resolution through the forward-zone}
+    "docs/verification/dns.md#C12": {kind: derived, tags: [dns-C11], reason: internal A record through the FreeIPA stub zone}
+    "docs/verification/dns.md#C13": {kind: derived, tags: [dns-C10, dns-C11], reason: FreeIPA SRV through the stub zone with capped TTL}
+    "docs/verification/dns.md#C14": {kind: derived, tags: [dns-C10, dns-C11], reason: NXDOMAIN carries the FreeIPA SOA with capped negative TTL}
+    "docs/verification/dns.md#C15": {kind: derived, tags: [dns-C11], reason: dns_freeipa_zones stub zones come from the same config task}
+    "docs/verification/dns.md#C16": {kind: derived, tags: [dns-C11], reason: reverse-zone stub plus transparent local-zone from the same config task}
+    "docs/verification/dns.md#C17": {kind: derived, tags: [dns-C11], reason: dns_zones and dns_stub_zones come from the same config task}
+    "docs/verification/dns.md#C19": {kind: verifyOnly, reason: the playbook deliberately leaves the host resolver alone}
+    "docs/verification/dns.md#C20": {kind: verifyOnly, reason: consumers are configured by tasks/freeipa-dns-client-resolver.yml}
 verification: {autoDeploy: false}
 site:
   include: true
-  order: 10
-  vars: {infra_role: dns}
+  order: 45
+  vars: {}
   tags: [infra, dns]
   optIn: false
   targetGroupExpression: null

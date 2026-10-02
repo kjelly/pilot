@@ -65,12 +65,12 @@ inventories/*
 /group_vars/*.yml
 !/group_vars/*.example.yml
 
-# DNS zone data is infra topology for a PUBLIC repo — real data lives OUTSIDE
-# the repo tree (in group_vars/ next to an out-of-git inventory). If anyone
-# ever creates group_vars/dns/ in-repo, ignore every zone file EXCEPT the
-# committed schema example. See docs/runbooks/core-infra-provider-dns-zones.md
-/group_vars/dns/*.yaml
-!/group_vars/dns/zones.example.yaml
+# Never a group_vars/<group>/ directory in-repo: it would make Ansible ignore
+# the flat group_vars/<group>.yml next to it, and when pilot runs from the
+# repo root, ansible-inventory/ad-hoc ansible load the repo's own group_vars/
+# as real vars. Role settings (including dns_zones) live in the flat
+# group_vars/<role>.yml of an out-of-git workspace (docs/verification/dns.md §3.5).
+/group_vars/*/
 workspace
 # tmp/ as a bare directory pattern would make a later `!` re-inclusion
 # impossible (git cannot look inside an excluded directory) — tmp/*

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -711,6 +712,31 @@ func printEphemeralDebugHints(errOut io.Writer, topologyPath string) {
 	fmt.Fprintf(errOut, "  teardown  : pilot vm-target topology down --topology %s\n", topologyPath)
 }
 
+// topologyInventoryInputEnv supplies the Spec v2 input pilot_inventory_path,
+// which aggregate rows (internal-endpoint.md C9/C10, dns.md C20) use to fan
+// out over the inventory under test. The topology test writes that
+// inventory to a temporary file during the run, so an operator cannot pass
+// its path in advance.
+const topologyInventoryInputEnv = "PILOT_INPUT_PILOT_INVENTORY_PATH"
+
+// withTopologyInventoryInput runs fn with topologyInventoryInputEnv set to the
+// absolute path of invPath, unless the operator already set it. Specs that do
+// not declare pilot_inventory_path ignore the variable.
+func withTopologyInventoryInput(invPath string, fn func() error) error {
+	if _, set := os.LookupEnv(topologyInventoryInputEnv); set {
+		return fn()
+	}
+	abs, err := filepath.Abs(invPath)
+	if err != nil {
+		return fmt.Errorf("resolve topology inventory path: %w", err)
+	}
+	if err := os.Setenv(topologyInventoryInputEnv, abs); err != nil {
+		return fmt.Errorf("set %s: %w", topologyInventoryInputEnv, err)
+	}
+	defer os.Unsetenv(topologyInventoryInputEnv)
+	return fn()
+}
+
 func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool) error {
 	out := cmd.OutOrStdout()
 
@@ -775,20 +801,22 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		},
 		Verify: func(context.Context) error {
 			fmt.Fprintf(out, "=== [Step 5/6] L5 Verification Specs (%d) ===\n", len(verifies))
-			for _, v := range verifies {
-				pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
-				if v.limit != "" {
-					pilotArgs = append(pilotArgs, "-l", v.limit)
+			return withTopologyInventoryInput(invPath, func() error {
+				for _, v := range verifies {
+					pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
+					if v.limit != "" {
+						pilotArgs = append(pilotArgs, "-l", v.limit)
+					}
+					if vtTopoTestVerifyTimeout > 0 {
+						pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
+					}
+					if err := execPilot(out, pilotArgs...); err != nil {
+						return fmt.Errorf("verification failed (%s): %w", v.spec, err)
+					}
 				}
-				if vtTopoTestVerifyTimeout > 0 {
-					pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
-				}
-				if err := execPilot(out, pilotArgs...); err != nil {
-					return fmt.Errorf("verification failed (%s): %w", v.spec, err)
-				}
-			}
-			fmt.Fprintln(out, "✓ Verification checks passed")
-			return nil
+				fmt.Fprintln(out, "✓ Verification checks passed")
+				return nil
+			})
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")

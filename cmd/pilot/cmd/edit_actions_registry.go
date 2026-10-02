@@ -410,6 +410,26 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "set_group_var_list",
+				Description:              "replace a flow-list group_vars key's items (\"key: [a, b]\", e.g. dns_upstream, dns_freeipa_zones) through the list screens: existing items are removed, then values are added in order; an empty values leaves a never-set key at its built-in default",
+				Required:                 []string{"file", "key"},
+				Optional:                 []string{"values"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "group_vars",
+					Assertion: "key: [values...] in group_vars file; value/value_env rejected",
+				},
+			},
+			Validate: validateSetGroupVarList,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGroupVarList(r, step.File, step.Key, step.Values)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "restore_group_var_default",
 				Description:              "comment a group_vars key back out, reverting to the playbook's built-in default",
 				Required:                 []string{"file", "key"},
@@ -425,6 +445,25 @@ func editActionRegistry() []editActionDef {
 			Validate: validateGroupVarsFileKeyAction("restore_group_var_default"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
 				return d.restoreGroupVarDefault(r, step.File, step.Key)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "backfill_group_vars",
+				Description:              "append the settings a group_vars file's .example.yml offers but the file never mentions, commented out (built-in default) — fails when nothing is missing",
+				Required:                 []string{"file"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "group_vars",
+					Assertion: "missing example keys appended as commented lines after save_group_vars; existing lines unchanged",
+				},
+			},
+			Validate: validateFileOnlyAction("backfill_group_vars"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.backfillGroupVars(r, step.File)
 			},
 		},
 		{
@@ -3119,6 +3158,24 @@ func validateSetGroupVar(step editAction) error {
 	}
 	if step.ValueEnv != "" {
 		return fmt.Errorf("set_group_var does not accept value_env: group_vars hold non-secret role settings, not secrets")
+	}
+	return nil
+}
+
+func validateSetGroupVarList(step editAction) error {
+	if strings.TrimSpace(step.File) == "" {
+		return fmt.Errorf("set_group_var_list requires file")
+	}
+	if strings.TrimSpace(step.Key) == "" {
+		return fmt.Errorf("set_group_var_list requires key")
+	}
+	if step.Value != "" || step.ValueEnv != "" {
+		return fmt.Errorf("set_group_var_list takes values (a list), not value/value_env")
+	}
+	for _, v := range step.Values {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("set_group_var_list values must not contain an empty item")
+		}
 	}
 	return nil
 }

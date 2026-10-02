@@ -1,0 +1,58 @@
+# pilot-dns: managed by playbooks/apply/dns-apply.yml — DO NOT EDIT BY HAND
+# Spec: docs/verification/dns.md (mode: {{ dns_mode }})
+server:
+    # 127.0.0.1 plus this host's service address only (dns.md §2 B9): never
+    # 0.0.0.0, so the systemd-resolved stub on 127.0.0.53 keeps working.
+    interface: 127.0.0.1
+    interface: {{ dns_service_addr }}
+    port: 53
+
+    access-control: 127.0.0.0/8 allow
+{% for cidr in dns_access_control_list %}
+    access-control: {{ cidr }} allow
+{% endfor %}
+
+    hide-identity: no
+    identity: "pilot-dns:{{ inventory_hostname }}"
+    hide-version: yes
+
+    cache-max-ttl: {{ dns_cache_max_ttl_effective }}
+    cache-max-negative-ttl: {{ dns_cache_max_negative_ttl_effective }}
+    serve-expired: no
+{% if not dns_dnssec_validation_effective %}
+
+    # DNSSEC validation disabled (dns_dnssec_validation: false).
+    module-config: "iterator"
+{% endif %}
+{% for zone in dns_stub_zone_list %}
+
+    # {{ zone.name }}: sent to {{ zone.addrs | join(', ') }} ({{ zone.source }}).
+    # transparent overrides any built-in local zone above it (RFC1918
+    # reverse zones, test., home.arpa., ...); domain-insecure because the
+    # public DNSSEC chain cannot vouch for a private zone (dns.md §2 B3).
+    local-zone: "{{ zone.name }}." transparent
+{% if dns_dnssec_validation_effective %}
+    domain-insecure: "{{ zone.name }}."
+{% endif %}
+{% endfor %}
+{% for zone in dns_local_zone_list %}
+
+    local-zone: "{{ zone.name }}." {{ zone.mode | default('static') }}
+{% for record in zone.records | default([]) %}
+    local-data: "{{ record.name }}.{{ zone.name }}. IN {{ record.type | default('A') }} {{ record.value }}"
+{% endfor %}
+{% endfor %}
+
+forward-zone:
+    name: "."
+{% for upstream in dns_upstream_list %}
+    forward-addr: {{ upstream }}
+{% endfor %}
+{% for zone in dns_stub_zone_list %}
+
+stub-zone:
+    name: "{{ zone.name }}."
+{% for addr in zone.addrs %}
+    stub-addr: {{ addr }}
+{% endfor %}
+{% endfor %}

@@ -119,7 +119,7 @@ func TestScanGroupVars_SplitsExistingFromMissingExamples(t *testing.T) {
 	mustWriteFile(t, "group_vars/dns.yml", "dns_listen_addr: 10.0.0.1\n")
 	mustWriteFile(t, "group_vars/dns.example.yml", "dns_listen_addr: 10.0.0.1\n")
 	mustWriteFile(t, "group_vars/freeipa.example.yml", "freeipa_domain: ipa.pilot.internal\n")
-	mustWriteFile(t, "group_vars/dns/zones.example.yaml", "zones: []\n") // nested dir, must be ignored
+	mustWriteFile(t, "group_vars/dns/zones.yaml", "zones: []\n") // a subdirectory is never offered as a file
 
 	existing, missing, err := scanGroupVars("group_vars", "group_vars")
 	if err != nil {

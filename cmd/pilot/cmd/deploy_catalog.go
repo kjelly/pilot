@@ -46,10 +46,15 @@ type autoHostVar struct {
 // through two different question flows.
 var deployCatalog = []deployPlaybook{
 	{
-		Key: "core-infra-provider", Label: "核心基礎服務 — DNS / NTP",
+		Key: "core-infra-provider", Label: "核心基礎服務 — NTP",
 		Playbook: "playbooks/apply/core-infra-provider-apply.yml", StageVar: "stage",
-		InfraRoles: []string{"dns", "ntp"},
-		Note:       "同一支 playbook 用 -e infra_role= 選角色。",
+		InfraRoles: []string{"ntp"},
+		Note:       "DNS 已拆成獨立的 dns 項目(dns-apply.yml)。",
+	},
+	{
+		Key: "dns", Label: "DNS 快取層(unbound,FreeIPA 前的第一層,自動分流)",
+		Playbook: "playbooks/apply/dns-apply.yml", DefaultGroup: "dns", StageVar: "stage",
+		Note: "設定在 group_vars/dns.yml(pilot edit 可改)。inventory 有 FreeIPA DNS 時,內部網域自動導向 FreeIPA,需先套用 freeipa-server;prod 至少 2 台。",
 	},
 	{
 		Key: "docker", Label: "Container 引擎(Docker)",

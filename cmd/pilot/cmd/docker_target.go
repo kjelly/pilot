@@ -307,10 +307,10 @@ Everything after the playbook is forwarded verbatim to ansible-playbook.
 
 Examples:
   pilot docker-target run --name infra-test \
-      playbooks/apply/core-infra-provider-apply.yml -e infra_role=dns
+      playbooks/apply/core-infra-provider-apply.yml -e infra_role=ntp
   pilot docker-target run --name infra-test \
       playbooks/apply/core-infra-provider-apply.yml \
-      -e infra_role=dns --check --diff
+      -e infra_role=ntp --check --diff
 `,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runDtRun,

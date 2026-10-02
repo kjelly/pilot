@@ -1,0 +1,605 @@
+---
+# Apply playbook for docs/verification/dns.md — the `dns` role: an unbound
+# caching resolver tier in front of FreeIPA DNS.
+#
+# Split forwarding is automatic (dns.md §2 B1): when the inventory has a
+# FreeIPA DNS provider (tasks/freeipa-server-pool.yml), freeipa_domain and
+# every zone in dns_freeipa_zones go to all FreeIPA DNS servers as stub
+# zones; everything else goes to dns_upstream. Without FreeIPA DNS the tier
+# is a plain forwarder (mode forward-only).
+#
+# Every setting lives in group_vars/dns.yml (see group_vars/dns.example.yml)
+# and is editable with `pilot edit`; nothing an inventory supplies is
+# declared in this play's `vars:` (AGENTS.md §4.5 point 3 — the old
+# core-infra-provider `dns_zones: []` play var silently beat group_vars).
+#
+# unbound binds 127.0.0.1 and this host's service address only, never
+# 0.0.0.0, so the systemd-resolved stub keeps working and this playbook does
+# not touch the host's own resolver (dns.md §2 B9).
+#
+# Usage:
+#
+#   ansible-playbook -i inventory.yml playbooks/apply/dns-apply.yml --check --diff
+#   ansible-playbook -i inventory.yml playbooks/apply/dns-apply.yml
+#
+#   # one tier host on a vm-target (point it at a tx-style FreeIPA via inventory):
+#   pilot vm-target test --name <vm> --playbook playbooks/apply/dns-apply.yml \
+#       --spec docs/verification/dns.md -- -e target_group=all
+#
+# Stage gating:
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND -e staging_attested_within_hours<=168,
+#            and at least two hosts in the dns group (dns.md §5 G9)
+- name: DNS — caching resolver tier with automatic FreeIPA split forwarding
+  hosts: "{{ target_group | default('dns') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    dns_unbound_conf_path: /etc/unbound/unbound.conf.d/pilot-dns.conf
+    # Written by the old core-infra-provider dns role; it also defines
+    # forward-zone "." and must go (dns.md §2 B9).
+    dns_legacy_unbound_conf_path: /etc/unbound/unbound.conf.d/infra-pilot.conf
+    dns_snapshot_dir: /var/lib/pilot/dns/pre-apply
+
+  pre_tasks:
+    # ── G1 stage gates (AGENTS.md §4.3) ─────────────────────────────────────
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # ── Normalize every inventory-supplied setting once ─────────────────────
+    # Defaults live here (`| default`), never in play vars, so group_vars wins.
+    - name: "DNS — normalize settings from group_vars/dns.yml"
+      ansible.builtin.set_fact:
+        dns_provider_effective: "{{ dns_provider | default('unbound', true) }}"
+        dns_upstream_raw: "{{ dns_upstream | default(['1.1.1.1'], true) }}"
+        dns_access_control_raw: "{{ dns_access_control | default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'], true) }}"
+        dns_freeipa_zones_raw: "{{ dns_freeipa_zones | default([], true) }}"
+        dns_stub_zones_raw: "{{ dns_stub_zones | default([], true) }}"
+        dns_zones_raw: "{{ dns_zones | default([], true) }}"
+        dns_cache_max_ttl_effective: "{{ dns_cache_max_ttl | default(300) | string | trim }}"
+        dns_cache_max_negative_ttl_effective: "{{ dns_cache_max_negative_ttl | default(60) | string | trim }}"
+        dns_dnssec_validation_effective: "{{ dns_dnssec_validation | default(true) | bool }}"
+      tags: [always]
+
+    # A string is accepted for backward compatibility (`dns_upstream: 1.1.1.1`
+    # from the old example, or "1.1.1.1 9.9.9.9") and split on spaces/commas.
+    # A bare `-e dns_upstream=[1.1.1.1]` also arrives as a string; its
+    # brackets then fail the address check below instead of being written.
+    - name: "DNS — normalize list-shaped settings"
+      ansible.builtin.set_fact:
+        dns_upstream_list: >-
+          {{ (dns_upstream_raw if (dns_upstream_raw is sequence and dns_upstream_raw is not string)
+              else (dns_upstream_raw | string | regex_replace('[,\s]+', ' ') | trim).split(' '))
+             | map('string') | map('trim') | reject('equalto', '') | list }}
+        dns_access_control_list: >-
+          {{ (dns_access_control_raw if (dns_access_control_raw is sequence and dns_access_control_raw is not string)
+              else (dns_access_control_raw | string | regex_replace('[,\s]+', ' ') | trim).split(' '))
+             | map('string') | map('trim') | reject('equalto', '') | list }}
+        dns_freeipa_zones_list: >-
+          {{ (dns_freeipa_zones_raw if (dns_freeipa_zones_raw is sequence and dns_freeipa_zones_raw is not string)
+              else [dns_freeipa_zones_raw])
+             | map('string') | map('trim') | map('lower') | map('regex_replace', '\.$', '')
+             | reject('equalto', '') | list }}
+        dns_stub_zones_items: >-
+          {{ (dns_stub_zones_raw if (dns_stub_zones_raw is sequence and dns_stub_zones_raw is not string)
+              else [dns_stub_zones_raw])
+             | map('string') | map('trim') | reject('equalto', '') | list }}
+      tags: [always]
+
+    # ── G2 / G3 / G9 ───────────────────────────────────────────────────────
+    - name: "Gate G2: dns_provider must be unbound"
+      ansible.builtin.assert:
+        that:
+          - dns_provider_effective == 'unbound'
+        fail_msg: "dns_provider={{ dns_provider_effective }} is not supported; the dns role only implements unbound (docs/verification/dns.md §1)."
+      tags: [always]
+
+    - name: "Gate G3: a dns tier host is not also a FreeIPA server or replica (both need port 53)"
+      ansible.builtin.assert:
+        that:
+          - "'freeipa-server' not in group_names"
+          - "'freeipa-server-replica' not in group_names"
+        fail_msg: >-
+          {{ inventory_hostname }} is in the dns group and also in {{ group_names | select('match', '^freeipa-server') | list }}.
+          FreeIPA's named binds port 53 on the same host; put the dns tier on its own hosts (docs/verification/dns.md §5 G3).
+      tags: [always]
+
+    - name: "Gate G9: prod needs at least two dns tier hosts"
+      ansible.builtin.assert:
+        that:
+          - (groups['dns'] | default([]) | length) >= 2
+        fail_msg: >-
+          stage=prod requires at least 2 hosts in the dns group (found {{ groups['dns'] | default([]) | length }});
+          the tier is the fleet's first DNS hop (docs/verification/dns.md §5 G9).
+      when: stage == 'prod'
+      tags: [always]
+
+    # ── Service address (shared with the consumer side) + G10 ──────────────
+    - name: "DNS — compute tier service addresses"
+      ansible.builtin.include_tasks:
+        file: tasks/dns-tier-endpoints.yml
+        apply:
+          tags: [always]
+      tags: [always]
+
+    - name: "DNS — this host's service address"
+      ansible.builtin.set_fact:
+        dns_service_addr: "{{ dns_tier_self_addr }}"
+      tags: [always]
+
+    - name: "Gate G10: the service address is an IPv4 address on this host"
+      ansible.builtin.assert:
+        that:
+          - dns_service_addr is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+          - dns_service_addr != '0.0.0.0'
+          - dns_service_addr in (ansible_all_ipv4_addresses | default([]))
+        fail_msg: >-
+          dns service address {{ dns_service_addr }} is not an IPv4 address of {{ inventory_hostname }}
+          (host addresses: {{ ansible_all_ipv4_addresses | default([]) }}). The address comes from this
+          host's dns_listen_addr, else its ansible_host. A dns_listen_addr shared through
+          group_vars/dns.yml is wrong for every host but one: remove it there, and set it only in
+          host_vars/<host>.yml when this host really needs a different address (docs/verification/dns.md §5 G10).
+      tags: [always]
+
+    # ── FreeIPA DNS providers (dns.md §2 B1) ───────────────────────────────
+    # freeipa_domain comes from the freeipa-server host: group_vars/freeipa.yml
+    # applies to the freeipa-* groups, which a dns tier host is not in.
+    - name: "DNS — detect FreeIPA in the inventory"
+      ansible.builtin.set_fact:
+        dns_freeipa_present: "{{ (groups['freeipa-server'] | default([]) | length) > 0 }}"
+        dns_freeipa_domain_input: >-
+          {{ (hostvars[groups['freeipa-server'][0]].freeipa_domain | default('ipa.pilot.internal', true))
+             if (groups['freeipa-server'] | default([]) | length) > 0 else '' }}
+      tags: [always]
+
+    - name: "DNS — compute the FreeIPA server pool"
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-server-pool.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_domain: "{{ dns_freeipa_domain_input }}"
+      when: dns_freeipa_present | bool
+      tags: [always]
+
+    # Every DNS-providing member of the full pool, independent of
+    # freeipa_client_topology_mode: the same providers the consumer-side
+    # resolver task detects (dns.md §2 B1).
+    - name: "DNS — FreeIPA DNS servers and mode"
+      ansible.builtin.set_fact:
+        dns_freeipa_servers: >-
+          {{ (freeipa_server_pool | default([]) | selectattr('dns_provider') | map(attribute='ip')
+              | map('string') | reject('equalto', '') | list) if (dns_freeipa_present | bool) else [] }}
+      tags: [always]
+
+    - name: "DNS — mode"
+      ansible.builtin.set_fact:
+        dns_mode: "{{ 'freeipa-split' if (dns_freeipa_servers | length) > 0 else 'forward-only' }}"
+        dns_freeipa_domain: "{{ dns_freeipa_domain_input | lower | regex_replace('\\.$', '') }}"
+      tags: [always]
+
+    # ── Zone lists ─────────────────────────────────────────────────────────
+    - name: "DNS — FreeIPA-bound zones"
+      ansible.builtin.set_fact:
+        dns_freeipa_zone_names: >-
+          {{ ([dns_freeipa_domain] + dns_freeipa_zones_list) if dns_mode == 'freeipa-split' else [] }}
+      tags: [always]
+
+    - name: "DNS — reset parsed zone lists"
+      ansible.builtin.set_fact:
+        dns_stub_zone_list: []
+        dns_local_zone_list: []
+        dns_stub_zone_parse_errors: []
+      tags: [always]
+
+    - name: "DNS — stub zones for FreeIPA"
+      ansible.builtin.set_fact:
+        dns_stub_zone_list: "{{ dns_stub_zone_list + [{'name': item, 'addrs': dns_freeipa_servers, 'source': 'FreeIPA'}] }}"
+      loop: "{{ dns_freeipa_zone_names }}"
+      tags: [always]
+
+    - name: "DNS — stub zones from dns_stub_zones (zone=ip[,ip])"
+      ansible.builtin.set_fact:
+        dns_stub_zone_list: >-
+          {{ dns_stub_zone_list + [{
+               'name': (item.split('=', 1)[0] | trim | lower | regex_replace('\.$', '')),
+               'addrs': (item.split('=', 1)[1] | default('')).split(',') | map('trim') | reject('equalto', '') | list,
+               'source': 'dns_stub_zones'}] }}
+        dns_stub_zone_parse_errors: "{{ dns_stub_zone_parse_errors + ([item] if ('=' not in item) else []) }}"
+      loop: "{{ dns_stub_zones_items }}"
+      tags: [always]
+
+    - name: "DNS — zones from dns_zones (stub_addr = delegation, otherwise local data)"
+      ansible.builtin.set_fact:
+        dns_stub_zone_list: >-
+          {{ dns_stub_zone_list + ([{
+               'name': (item.name | string | trim | lower | regex_replace('\.$', '')),
+               'addrs': ([item.stub_addr] if (item.stub_addr is string) else item.stub_addr) | map('string') | map('trim') | list,
+               'source': 'dns_zones'}] if item.stub_addr is defined else []) }}
+        dns_local_zone_list: >-
+          {{ dns_local_zone_list + ([item | combine({'name': (item.name | string | trim | lower | regex_replace('\.$', ''))})]
+             if item.stub_addr is not defined else []) }}
+      loop: "{{ dns_zones_raw }}"
+      tags: [always]
+
+    # ── G4 input shape ─────────────────────────────────────────────────────
+    # G4 judges the ACL by the networks it allows, not by its spelling.
+    # unbound masks the address, so 1.2.3.4/0 and ::0/0 each allow every
+    # source (unbound 1.19.2 on Ubuntu 24.04 accepts both), and
+    # 0.0.0.0/1 + 128.0.0.0/1 together do too. Python's ipaddress
+    # parses every entry on the controller; an entry must be written the way
+    # it parses back (network address, no zero-padded prefix, IPv6 lower-case
+    # and compressed), so C5 can compare unbound's output with the input as
+    # plain strings.
+    - name: "DNS — classify the dns_access_control networks"
+      ansible.builtin.command:
+        argv: "{{ [ansible_playbook_python, '-c', _acl_check_py] + dns_access_control_list }}"
+      vars:
+        _acl_check_py: |
+          import ipaddress, json, sys
+          noncanonical, nets = [], {4: [], 6: []}
+          for entry in sys.argv[1:]:
+              try:
+                  net = ipaddress.ip_network(entry, strict=False)
+              except ValueError:
+                  noncanonical.append(entry)
+                  continue
+              if str(net) != entry:
+                  noncanonical.append(entry + ' (write ' + str(net) + ')')
+              nets[net.version].append(net)
+          everything = [str(n) for v in (4, 6) for n in ipaddress.collapse_addresses(nets[v]) if n.prefixlen == 0]
+          print(json.dumps({'noncanonical': noncanonical, 'unrestricted': everything}))
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: dns_access_control_check
+      tags: [always]
+
+    - name: "Gate G4: settings are well-formed"
+      vars:
+        _ip_re: '^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f:]+)(@[0-9]{1,5})?$'
+        _addr_re: '^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f:]+)$'
+        _cidr_re: '^(([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9A-Fa-f]*:[0-9A-Fa-f:]+)/[0-9]{1,3}$'
+        _zone_re: '^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)*$'
+        _all_zone_names: "{{ (dns_stub_zone_list + dns_local_zone_list) | map(attribute='name') | list }}"
+        _stub_addrs: "{{ dns_stub_zone_list | map(attribute='addrs') | flatten }}"
+        _acl: "{{ dns_access_control_check.stdout | from_json }}"
+      ansible.builtin.assert:
+        that:
+          - dns_upstream_list | length > 0
+          - dns_upstream_list | reject('match', _ip_re) | list | length == 0
+          - dns_access_control_list | length > 0
+          - dns_access_control_list | reject('match', _cidr_re) | list | length == 0
+          - _acl.noncanonical | length == 0
+          - _acl.unrestricted | length == 0
+          - (dns_cache_max_ttl_effective | string) is match('^[0-9]+$')
+          - (dns_cache_max_negative_ttl_effective | string) is match('^[0-9]+$')
+          - dns_stub_zone_parse_errors | length == 0
+          - _all_zone_names | reject('match', _zone_re) | list | length == 0
+          - (_all_zone_names | unique | length) == (_all_zone_names | length)
+          - dns_stub_zone_list | rejectattr('addrs') | list | length == 0
+          - _stub_addrs | reject('match', _addr_re) | list | length == 0
+          - not (dns_mode == 'forward-only' and dns_freeipa_zones_list | length > 0)
+        fail_msg: >-
+          group_vars/dns.yml has an invalid setting (docs/verification/dns.md §5 G4).
+          dns_upstream={{ dns_upstream_list }} (each an IP, optional @port, at least one);
+          dns_access_control={{ dns_access_control_list }} (each a CIDR in canonical form, not {{ _acl.noncanonical }};
+          together never every source of an address family, not {{ _acl.unrestricted }});
+          dns_cache_max_ttl={{ dns_cache_max_ttl_effective }}, dns_cache_max_negative_ttl={{ dns_cache_max_negative_ttl_effective }} (non-negative integers);
+          dns_stub_zones entries without '='={{ dns_stub_zone_parse_errors }};
+          zone names={{ _all_zone_names }} (valid, no duplicates across freeipa_domain, dns_freeipa_zones, dns_stub_zones, dns_zones);
+          stub addresses={{ _stub_addrs }} (each an IP);
+          dns_freeipa_zones={{ dns_freeipa_zones_list }} (only valid when the inventory has FreeIPA DNS, mode={{ dns_mode }}).
+      tags: [always]
+
+    - name: "DNS — summary"
+      ansible.builtin.debug:
+        msg:
+          mode: "{{ dns_mode }}"
+          service_addr: "{{ dns_service_addr }}"
+          freeipa_servers: "{{ dns_freeipa_servers }}"
+          stub_zones: "{{ dns_stub_zone_list | map(attribute='name') | list }}"
+          local_zones: "{{ dns_local_zone_list | map(attribute='name') | list }}"
+          upstream: "{{ dns_upstream_list }}"
+      tags: [always]
+
+  tasks:
+    - name: "DNS — install unbound and dig"
+      tags: [dns, dns-C1]
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [dns, dns-C1]
+      vars:
+        pilot_apt_packages: [unbound, bind9-dnsutils]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: dns
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when: not ansible_check_mode
+
+    # ── G5: FreeIPA must be authoritative for every zone sent to it ────────
+    # A zone FreeIPA does not serve gets an upward referral to the root for
+    # an RD=0 query, which unbound turns into SERVFAIL (dns.md §0.2).
+    - name: "Gate G5: probe FreeIPA authority (SOA, +norec) for each FreeIPA-bound zone"
+      ansible.builtin.command:
+        argv: [dig, +norec, +time=2, +tries=2, +noall, +comments, "@{{ item.1 }}", "{{ item.0 }}.", SOA]
+      loop: "{{ dns_freeipa_zone_names | product(dns_freeipa_servers) | list }}"
+      loop_control:
+        label: "{{ item.0 }} @{{ item.1 }}"
+      register: dns_g5_probe
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      when: dns_mode == 'freeipa-split'
+      tags: &dns_config_tags [dns, dns-C2, dns-C3, dns-C4, dns-C5, dns-C6, dns-C8, dns-C9, dns-C10, dns-C11, dns-C18]
+
+    - name: "Gate G5: collect zones FreeIPA does not answer authoritatively"
+      ansible.builtin.set_fact:
+        dns_g5_failures: >-
+          {{ dns_g5_probe.results | default([])
+             | rejectattr('skipped', 'defined')
+             | rejectattr('stdout', 'search', 'status: NOERROR')
+             | map(attribute='item') | map('join', ' @') | list
+             + (dns_g5_probe.results | default([])
+                | rejectattr('skipped', 'defined')
+                | selectattr('stdout', 'search', 'status: NOERROR')
+                | rejectattr('stdout', 'search', 'flags:[^;]* aa[ ;]')
+                | map(attribute='item') | map('join', ' @') | list) }}
+      tags: *dns_config_tags
+
+    - name: "Gate G5: check mode before FreeIPA is serving — stop the preview here"
+      ansible.builtin.debug:
+        msg: >-
+          Check mode: FreeIPA does not answer authoritatively for {{ dns_g5_failures }} yet
+          (expected on a fresh topology before freeipa-server-apply has really run). The
+          dns config preview stops here; a real run fails at this gate instead.
+      when:
+        - ansible_check_mode
+        - dns_g5_failures | length > 0
+      tags: *dns_config_tags
+
+    - name: "Gate G5: end this host's check-mode preview"
+      ansible.builtin.meta: end_host
+      when:
+        - ansible_check_mode
+        - dns_g5_failures | length > 0
+      tags: *dns_config_tags
+
+    - name: "Gate G5: FreeIPA is authoritative for every FreeIPA-bound zone"
+      ansible.builtin.assert:
+        that:
+          - dns_g5_failures | length == 0
+        fail_msg: >-
+          FreeIPA did not answer SOA authoritatively (NOERROR + aa) for: {{ dns_g5_failures }}.
+          Remove the zone from dns_freeipa_zones, or create it in FreeIPA first; a stub zone FreeIPA
+          does not serve would SERVFAIL every lookup under it (docs/verification/dns.md §5 G5).
+      tags: *dns_config_tags
+
+    # ── G6: upstreams answer (and keep DNSSEC records when validating) ─────
+    - name: "Gate G6: probe each upstream for . NS"
+      ansible.builtin.command:
+        argv: "{{ ['dig', '+time=2', '+tries=2', '+noall', '+comments', '@' ~ item.split('@')[0]]
+                  + (['-p', item.split('@')[1]] if '@' in item else []) + ['.', 'NS'] }}"
+      loop: "{{ dns_upstream_list }}"
+      register: dns_g6_ns
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      tags: *dns_config_tags
+
+    - name: "Gate G6: probe each upstream for signed . DNSKEY (DNSSEC on)"
+      ansible.builtin.command:
+        argv: "{{ ['dig', '+dnssec', '+time=2', '+tries=2', '+noall', '+answer', '@' ~ item.split('@')[0]]
+                  + (['-p', item.split('@')[1]] if '@' in item else []) + ['.', 'DNSKEY'] }}"
+      loop: "{{ dns_upstream_list }}"
+      register: dns_g6_dnskey
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      when: dns_dnssec_validation_effective | bool
+      tags: *dns_config_tags
+
+    - name: "Gate G6: every upstream answers (and returns RRSIG when DNSSEC is on)"
+      vars:
+        _no_answer: "{{ dns_g6_ns.results | rejectattr('stdout', 'search', 'status: NOERROR') | map(attribute='item') | list }}"
+        _no_rrsig: >-
+          {{ (dns_g6_dnskey.results | default([]) | rejectattr('skipped', 'defined')
+              | rejectattr('stdout', 'search', '\sRRSIG\s') | map(attribute='item') | list)
+             if (dns_dnssec_validation_effective | bool) else [] }}
+      ansible.builtin.assert:
+        that:
+          - _no_answer | length == 0
+          - _no_rrsig | length == 0
+        fail_msg: >-
+          Upstream check failed (docs/verification/dns.md §5 G6). No NOERROR answer for . NS from:
+          {{ _no_answer }}. No RRSIG on . DNSKEY from: {{ _no_rrsig }} — if that upstream strips
+          DNSSEC records, set dns_dnssec_validation: false, otherwise every signed domain SERVFAILs.
+      tags: *dns_config_tags
+
+    # ── Configure, validate, restart, prove (G7 / G8) ──────────────────────
+    - name: "DNS — check mode on a host without unbound: stop the preview here"
+      ansible.builtin.stat:
+        path: "{{ dns_unbound_conf_path | dirname }}"
+      register: dns_conf_dir
+      check_mode: false
+      tags: *dns_config_tags
+
+    - name: "DNS — end this host's check-mode preview (unbound not installed yet)"
+      ansible.builtin.meta: end_host
+      when:
+        - ansible_check_mode
+        - not dns_conf_dir.stat.exists
+      tags: *dns_config_tags
+
+    # Snapshot outside the block: if it fails nothing has changed yet. Same
+    # cp -a --no-dereference pattern as tasks/freeipa-dns-client-resolver.yml.
+    - name: "DNS — snapshot unbound config before changing it"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        snap={{ dns_snapshot_dir | quote }}
+        rm -rf "$snap"
+        mkdir -p "$snap"
+        chmod 0700 "$snap"
+        for f in {{ dns_unbound_conf_path | quote }} {{ dns_legacy_unbound_conf_path | quote }}; do
+          if [ -e "$f" ] || [ -L "$f" ]; then
+            cp -a --no-dereference "$f" "$snap/$(printf '%s' "$f" | tr / _)"
+          fi
+        done
+        ls -A "$snap"
+      args:
+        executable: /bin/bash
+      register: dns_snapshot
+      changed_when: false
+      when: not ansible_check_mode
+      tags: *dns_config_tags
+
+    - name: "DNS — configure unbound and prove it answers"
+      tags: *dns_config_tags
+      block:
+        - name: "DNS — remove the old core-infra-provider unbound fragment"
+          ansible.builtin.file:
+            path: "{{ dns_legacy_unbound_conf_path }}"
+            state: absent
+          register: dns_legacy_removed
+
+        - name: "DNS — write the unbound config"
+          ansible.builtin.template:
+            src: templates/dns-unbound.conf.j2
+            dest: "{{ dns_unbound_conf_path }}"
+            owner: root
+            group: root
+            mode: '0644'
+          register: dns_conf_written
+
+        # G7: validate the full effective config before the restart.
+        - name: "Gate G7: unbound-checkconf accepts the effective config"
+          ansible.builtin.command: unbound-checkconf
+          register: dns_checkconf
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "DNS — restart unbound (config changed)"
+          ansible.builtin.systemd:
+            name: unbound
+            state: restarted
+          register: dns_restarted
+          when: dns_conf_written is changed or dns_legacy_removed is changed
+
+        - name: "DNS — enable and start unbound"
+          ansible.builtin.systemd:
+            name: unbound
+            state: started
+            enabled: true
+
+        # G8: prove the running unbound answers before declaring success.
+        - name: "Gate G8: the tier resolves . NS through its own unbound"
+          ansible.builtin.command:
+            argv: [dig, +time=2, +tries=2, +noall, +comments, "@127.0.0.1", ., NS]
+          register: dns_selfcheck_root
+          changed_when: false
+          failed_when: "'status: NOERROR' not in dns_selfcheck_root.stdout"
+          retries: 5
+          delay: 2
+          until: "'status: NOERROR' in dns_selfcheck_root.stdout"
+          when: not ansible_check_mode
+
+        - name: "Gate G8: the tier resolves the FreeIPA domain SOA through its own unbound"
+          ansible.builtin.command:
+            argv: [dig, +time=2, +tries=2, +noall, +comments, +answer, "@127.0.0.1", "{{ dns_freeipa_domain }}.", SOA]
+          register: dns_selfcheck_freeipa
+          changed_when: false
+          failed_when: >-
+            'status: NOERROR' not in dns_selfcheck_freeipa.stdout
+            or (dns_selfcheck_freeipa.stdout is not search('\sIN\s+SOA\s'))
+          retries: 5
+          delay: 2
+          until: >-
+            'status: NOERROR' in dns_selfcheck_freeipa.stdout
+            and (dns_selfcheck_freeipa.stdout is search('\sIN\s+SOA\s'))
+          when:
+            - not ansible_check_mode
+            - dns_mode == 'freeipa-split'
+
+      rescue:
+        - name: "ROLLBACK — restore the unbound config from the pre-apply snapshot"
+          ansible.builtin.shell: |
+            set -uo pipefail
+            snap={{ dns_snapshot_dir | quote }}
+            if [ ! -d "$snap" ]; then echo "no pre-apply snapshot at $snap, files left unchanged"; exit 1; fi
+            rc=0
+            for f in {{ dns_unbound_conf_path | quote }} {{ dns_legacy_unbound_conf_path | quote }}; do
+              saved="$snap/$(printf '%s' "$f" | tr / _)"
+              if [ -e "$saved" ] || [ -L "$saved" ]; then
+                if cp -a --no-dereference --remove-destination "$saved" "$f"; then echo "$f restored"; else echo "$f restore failed"; rc=1; fi
+              elif [ -e "$f" ] || [ -L "$f" ]; then
+                if rm -f "$f"; then echo "$f removed (did not exist before)"; else echo "$f removal failed"; rc=1; fi
+              fi
+            done
+            exit "$rc"
+          args:
+            executable: /bin/bash
+          register: dns_rollback_files
+          changed_when: true
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: "ROLLBACK — restart unbound on the restored config"
+          ansible.builtin.shell: |
+            set -uo pipefail
+            if systemctl restart unbound; then echo "unbound restarted"; else echo "unbound restart failed"; exit 1; fi
+          args:
+            executable: /bin/bash
+          register: dns_rollback_restart
+          changed_when: true
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: "ROLLBACK — surface the original failure"
+          vars:
+            dns_rollback_results: >-
+              {{ [dns_rollback_files | default({}), dns_rollback_restart | default({})]
+                 | select | rejectattr('skipped', 'defined') | list }}
+          ansible.builtin.fail:
+            msg: >-
+              dns apply failed on {{ inventory_hostname }} at: {{ ansible_failed_task.name | default('unknown task') }}.
+              {% if ansible_check_mode %}Check mode: nothing was changed, so nothing was rolled back.
+              {% else %}Rollback: {{ dns_rollback_results | map(attribute='stdout_lines', default=[])
+              | flatten | join('; ') or 'no rollback step ran' }}.
+              {% if dns_rollback_results | map(attribute='rc', default=0) | select('ne', 0) | list %}Rollback
+              incomplete: check the ROLLBACK tasks above before re-running.
+              {% endif %}{% endif %}Fix the failing task and re-run.

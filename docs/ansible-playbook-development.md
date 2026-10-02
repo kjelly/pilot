@@ -402,13 +402,13 @@ pilot verify --probe 'systemctl is-active docker' --probe-expected '~active' \
 對齊 spec ID 的 tag。tag 命名慣例（手動補時遵循）：
 
 - **單一 spec 的 playbook**（如 `pam-oidc-sshd-apply.yml`）：直接用裸 `tags: [C3]`。
-- **多 spec / 多 role 的 playbook**（如 `core-infra-provider-apply.yml`，一個檔涵蓋
-  docker / db / dns / ntp / keycloak 各自的 spec）：裸 `Cx` 會跨 spec 撞號
-  （docker 的 C1 ≠ db 的 C1），所以用 **role 粗標籤 + `<role>-Cx` 命名空間細標籤**：
+- **多 spec / 多 role 的 playbook**（例如早期的 `core-infra-provider-apply.yml`，一個檔
+  涵蓋 docker / db / dns / ntp / keycloak 各自的 spec）：裸 `Cx` 會跨 spec 撞號
+  （docker 的 C1 ≠ db 的 C1），所以用 **role 粗標籤 + `<role>-Cx` 命名空間細標籤**。
+  拆成獨立 playbook 之後也沿用同一個命名，例如 `dns-apply.yml` 的 `dns-C10`：
   ```bash
-  pilot vm-target run --name core playbooks/apply/core-infra-provider-apply.yml \
-      -e infra_role=dns --tags dns-C2          # 只重跑 DNS 的 C2 那條
-  ansible-playbook --list-tags playbooks/apply/core-infra-provider-apply.yml  # 列出所有 tag
+  ansible-playbook -i <inventory> playbooks/apply/dns-apply.yml --tags dns-C10   # 只重跑 cache 上限那條
+  ansible-playbook --list-tags playbooks/apply/dns-apply.yml                      # 列出所有 tag
   ```
   （`--tags` 只縮小 role 內範圍；`-e infra_role=` 的 `when:` gate 仍要帶。`--tags` 適合
   在「已 apply 過的 box」上重調單一 task，不適合 reset 後從零套用——prerequisite task
