@@ -120,7 +120,7 @@
   基準設定（`ag-gw01`=gpu、`ag-gw02`=dmz），沒有在這兩台共用 vm-target 上留下
   殘留 drift。第二次 apply 這幾個新 task 全部 `ok`（無 `changed`）。
 
-- **ForceCommand 的前置檢查跟著 Step 19 的 tag 走**（2026-10-03）：Step 19 安裝 drop-in 之前，先確認三件事：`/usr/local/libexec/pilot-session` 與它 exec 的 `/usr/bin/pilot` 是 root 擁有、group 與 others 不可寫的執行檔；gateway 的 `/v1/health` 回 `status: ok`，這同時代表 `pilot-target-<scope>` 解析得到（Step 18 的檢查，經由 gateway 自己的憑證）；portal-user group 用 `getent` 解析得到，否則 `Match Group` 對誰都不成立。這些檢查與 Step 20/21 的 `sshd -t`、reload 都帶 `AG_forcecommand` 與 `AG43`。之前 Step 13–18 只帶 `AG_service`/`AG12`，Step 20/21 只帶 `AG_forcecommand`，所以 `--tags AG43` 不經任何檢查就寫入 drop-in，也不驗證、不 reload。檢查只在安裝時執行：`pilot_access_gateway_install_forcecommand=false` 移除 drop-in 時不受 gateway 狀態影響。由 `internal/spec/forcecommand_gate_regression_test.go` 鎖住。
+- **ForceCommand 的前置檢查跟著 Step 19 的 tag 走**（2026-10-03）：Step 19 安裝 drop-in 之前，先確認三件事：`/usr/local/libexec/pilot-session` 與它 exec 的 `/usr/bin/pilot` 是 root 擁有、group 與 others 不可寫的執行檔；gateway 的 `/v1/health` 回 `status: ok`，這同時代表 `pilot-target-<scope>` 解析得到（Step 18 的檢查，經由 gateway 自己的憑證）；portal-user group 用 `getent` 解析得到，否則 `Match Group` 對誰都不成立。這些檢查與 Step 20/21 的 `sshd -t`、reload 都帶 `AG_forcecommand` 與 `AG43`。之前 Step 13–18 只帶 `AG_service`/`AG12`，Step 20/21 只帶 `AG_forcecommand`，所以 `--tags AG43` 不經任何檢查就寫入 drop-in，也不驗證、不 reload。檢查只在安裝時執行：`pilot_access_gateway_install_forcecommand=false` 移除 drop-in 時不受 gateway 狀態影響。由 `internal/spec/forcecommand_gate_regression_test.go` 鎖住；在 disposable vm-target 上啟用 ForceCommand 實跑的結果見 [`docs/evidence/pilot-access-gateway/2026-10-03-458f123.md`](../evidence/pilot-access-gateway/2026-10-03-458f123.md)。
 
 ## 6. Phase 5 — Directory → Gateway handoff dispatcher（2026-09-18，unit-test + vm-target 活體皆已驗證）
 
