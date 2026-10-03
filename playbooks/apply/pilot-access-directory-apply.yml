@@ -719,6 +719,104 @@
       when: not ansible_check_mode
       tags: [AD_service]
 
+    # ForceCommand preflight: Step 18 sends every portal user into
+    # /usr/local/libexec/pilot-directory-session, so before it is installed the wrapper and
+    # the pilot CLI it execs must be root-owned executables nobody else can
+    # write, pilot-access-directory must answer /v1/health, which also proves the scope catalog
+    # loads,
+    # and the portal-user group must resolve, or Match Group never
+    # matches. These carry Step 18's own tags: Step 17 carries only AD_service, so `--tags AD18`
+    # used to install the drop-in without any of these checks. They run
+    # only when installing, so removing the drop-in (the rollback below)
+    # is never blocked by an unhealthy service, and they are skipped under
+    # --check like the health probe above (on a fresh host nothing runs
+    # yet).
+    - name: "ForceCommand gate: stat the session wrapper and the pilot CLI"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: [/usr/local/libexec/pilot-directory-session, /usr/bin/pilot]
+      register: directory_forcecommand_files
+      when: pilot_access_directory_effective_install_forcecommand | bool
+      tags: [AD_forcecommand, AD18]
+
+    - name: "ForceCommand gate: the session wrapper and the pilot CLI are root-owned executables"
+      ansible.builtin.assert:
+        that:
+          - directory_forcecommand_files_bad | length == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: every portal user would be
+          sent to /usr/local/libexec/pilot-directory-session, which execs /usr/bin/pilot.
+          Missing: {{ directory_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list }};
+          not a root-owned executable, or writable by group or others:
+          {{ directory_forcecommand_files_bad | difference(directory_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list) }}.
+          Nothing was changed. Run the playbook without --tags (or with AD_service) first.
+      vars:
+        directory_forcecommand_files_bad: >-
+          {{ directory_forcecommand_files.results | map(attribute='item')
+             | difference(directory_forcecommand_files.results
+                          | selectattr('stat.exists') | selectattr('stat.isreg') | selectattr('stat.executable')
+                          | selectattr('stat.pw_name', 'equalto', 'root')
+                          | rejectattr('stat.wgrp') | rejectattr('stat.woth')
+                          | map(attribute='item') | list) }}
+      when:
+        - pilot_access_directory_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AD_forcecommand, AD18]
+
+    - name: "ForceCommand gate: pilot-access-directory answers its health check"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail-with-body, --unix-socket, "{{ directory_socket_path }}", "http://localhost/v1/health"]
+      register: directory_forcecommand_health
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 2
+      until: directory_forcecommand_health.rc == 0
+      when:
+        - pilot_access_directory_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AD_forcecommand, AD18]
+
+    - name: "ForceCommand gate: pilot-access-directory is healthy"
+      ansible.builtin.assert:
+        that:
+          - directory_forcecommand_health.rc == 0
+          - (directory_forcecommand_health.stdout | from_json).status == 'ok'
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: pilot-access-directory did not pass
+          its health check (rc={{ directory_forcecommand_health.rc }}:
+          {{ (directory_forcecommand_health.stdout ~ ' ' ~ directory_forcecommand_health.stderr) | trim }}).
+          Nothing was changed.
+      when:
+        - pilot_access_directory_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AD_forcecommand, AD18]
+
+    - name: "ForceCommand gate: look up the portal-user group via SSSD"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ directory_effective_portal_user_group }}"]
+      register: directory_forcecommand_group
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_access_directory_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AD_forcecommand, AD18]
+
+    - name: "ForceCommand gate: the portal-user group resolves"
+      ansible.builtin.assert:
+        that:
+          - directory_forcecommand_group.rc == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: its Match Group
+          {{ directory_effective_portal_user_group }} does not resolve via getent, so it would
+          match no portal user. Nothing was changed.
+      when:
+        - pilot_access_directory_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AD_forcecommand, AD18]
+
     # Step 18-20 (spec.md §31/§14): sshd ForceCommand. GATED — same
     # opt-out-by-flag pattern pilot-access-gateway-apply.yml's own Step
     # 19-21 uses; do not enable against a non-disposable host without an
@@ -744,19 +842,21 @@
       register: directory_forcecommand_dropin
       tags: [AD_forcecommand, AD18]
 
+    # Steps 19/20 carry AD18 like Step 18: under `--tags AD18` they did not
+    # run, so the drop-in was written but neither validated nor loaded.
     - name: "Step 19: sshd -t"
       ansible.builtin.command:
         argv: [sshd, -t]
       when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
       changed_when: false
-      tags: [AD_forcecommand]
+      tags: [AD_forcecommand, AD18]
 
     - name: "Step 20: reload sshd"
       ansible.builtin.systemd:
         name: ssh
         state: reloaded
       when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
-      tags: [AD_forcecommand]
+      tags: [AD_forcecommand, AD18]
 
     # Rollback path — same declarative-undo pattern
     # pilot-access-gateway-apply.yml's own rollback tasks provide.

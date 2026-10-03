@@ -1670,6 +1670,105 @@
       when: not ansible_check_mode
       tags: [AG_service, AG12]
 
+    # ForceCommand preflight: Step 19 sends every portal user into
+    # /usr/local/libexec/pilot-session, so before it is installed the wrapper and
+    # the pilot CLI it execs must be root-owned executables nobody else can
+    # write, pilot-access-gateway must answer /v1/health, which also proves the pilot-target-<scope>
+    # hostgroup resolves through the gateway's own credential (Step 18's
+    # check),
+    # and the portal-user group must resolve, or Match Group never
+    # matches. These carry Step 19's own tags: Steps 13-18 carry AG_service/AG12, so `--tags AG43`
+    # used to install the drop-in without any of these checks. They run
+    # only when installing, so removing the drop-in (the rollback below)
+    # is never blocked by an unhealthy service, and they are skipped under
+    # --check like the health probe above (on a fresh host nothing runs
+    # yet).
+    - name: "ForceCommand gate: stat the session wrapper and the pilot CLI"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: [/usr/local/libexec/pilot-session, /usr/bin/pilot]
+      register: gateway_forcecommand_files
+      when: pilot_access_gateway_effective_install_forcecommand | bool
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: the session wrapper and the pilot CLI are root-owned executables"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_files_bad | length == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: every portal user would be
+          sent to /usr/local/libexec/pilot-session, which execs /usr/bin/pilot.
+          Missing: {{ gateway_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list }};
+          not a root-owned executable, or writable by group or others:
+          {{ gateway_forcecommand_files_bad | difference(gateway_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list) }}.
+          Nothing was changed. Run the playbook without --tags (or with AG_service) first.
+      vars:
+        gateway_forcecommand_files_bad: >-
+          {{ gateway_forcecommand_files.results | map(attribute='item')
+             | difference(gateway_forcecommand_files.results
+                          | selectattr('stat.exists') | selectattr('stat.isreg') | selectattr('stat.executable')
+                          | selectattr('stat.pw_name', 'equalto', 'root')
+                          | rejectattr('stat.wgrp') | rejectattr('stat.woth')
+                          | map(attribute='item') | list) }}
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: pilot-access-gateway answers its health check"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail-with-body, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
+      register: gateway_forcecommand_health
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 2
+      until: gateway_forcecommand_health.rc == 0
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: pilot-access-gateway is healthy"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_health.rc == 0
+          - (gateway_forcecommand_health.stdout | from_json).status == 'ok'
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: pilot-access-gateway did not pass
+          its health check (rc={{ gateway_forcecommand_health.rc }}:
+          {{ (gateway_forcecommand_health.stdout ~ ' ' ~ gateway_forcecommand_health.stderr) | trim }}).
+          Nothing was changed.
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: look up the portal-user group via SSSD"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ gateway_effective_portal_user_group }}"]
+      register: gateway_forcecommand_group
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: the portal-user group resolves"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_group.rc == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: its Match Group
+          {{ gateway_effective_portal_user_group }} does not resolve via getent, so it would
+          match no portal user. Nothing was changed.
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
     # Step 19-21 (spec.md §55): sshd ForceCommand. GATED — see the file
     # header comment and spec.md §0 G4/§55.1. Deliberately NOT exercised
     # by Phase 7's own vm-target run; Phase 8 owns turning this on for
@@ -1703,19 +1802,21 @@
       register: gateway_forcecommand_dropin
       tags: [AG_forcecommand, AG43]
 
+    # Steps 20/21 carry AG43 like Step 19: under `--tags AG43` they did not
+    # run, so the drop-in was written but neither validated nor loaded.
     - name: "Step 20: sshd -t"
       ansible.builtin.command:
         argv: [sshd, -t]
       when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
       changed_when: false
-      tags: [AG_forcecommand]
+      tags: [AG_forcecommand, AG43]
 
     - name: "Step 21: reload sshd"
       ansible.builtin.systemd:
         name: ssh
         state: reloaded
       when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
-      tags: [AG_forcecommand]
+      tags: [AG_forcecommand, AG43]
 
     # Rollback path (spec.md §55.1 step 3): flipping the flag back to
     # false and re-applying must actually remove the drop-in, not just
