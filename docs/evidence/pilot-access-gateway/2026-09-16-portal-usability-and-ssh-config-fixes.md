@@ -49,7 +49,7 @@ just navigating within the same still-open session.
 
 ## 2. Dead `cache_ttl`/`connect_max_age` config fields
 
-`cmd/pilot-access-gateway/config.go`'s `FreeIPASection` parsed
+the gateway config loader (then `cmd/pilot-access-gateway`'s `config.go`; moved to `internal/gatewayconfig/config.go` on 2026-09-23)'s `FreeIPASection` parsed
 `cache_ttl`/`connect_max_age` (from spec.md §26's original example
 config), and every `pilot-access-gateway-apply.yml` run wrote them into
 `/etc/pilot/access-gateway.yaml` unconditionally — but no resolver,

@@ -28,7 +28,7 @@ func TestResolveScopeAccess_SharesHostShowAcrossScopes(t *testing.T) {
 			{Name: "allow-all-test", Enabled: true, UserCategoryAll: true, HostCategoryAll: true, ServiceCategoryAll: true},
 		},
 		hosts: map[string]freeipaaccess.Host{
-			"shared.ipa.pilot.internal": {FQDN: "shared.ipa.pilot.internal", Annotations: map[string]string{"owner": "platform"}},
+			"shared.ipa.pilot.internal": {FQDN: "shared.ipa.pilot.internal", Annotations: map[string]string{"owner": "platform"}, SSHRecording: freeipaaccess.HostRecordingPolicy{Valid: true}},
 		},
 	}
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

@@ -115,7 +115,11 @@ poc-checkmode-test: ## Full ephemeral fresh-host topology test of minimal-poc (L
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make poc-checkmode-test VAULT=~/.vault/minimal-poc-sandbox.yaml" && exit 2)
 	TOPOLOGY="$(TOPOLOGY)" PLAYBOOK="$(PLAYBOOK)" STAGE="$(STAGE)" VAULT="$(VAULT)" ROSTER="$(ROSTER)" ./scripts/topology-checkmode-test.sh
 
-.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test
+recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH session recording (FreeIPA, gateway, store, Directory, two targets). Requires VAULT=<path>; KEEP_ON_FAILURE=1 keeps a failed run's VMs. See scripts/per-host-recording-topology-test.sh.
+	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
+	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
+
+.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

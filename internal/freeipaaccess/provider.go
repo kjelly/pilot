@@ -95,9 +95,16 @@ type Group struct {
 // §18: pilot-access-gateway has no roster/inventory dependency), so the
 // prefix and parsing are duplicated locally in normalize.go rather than
 // shared with internal/inventory.SerializeAnnotation's counterpart.
+//
+// SSHRecording is the host's parsed `pilot.policy.ssh-recording=` userClass
+// marker (per-host recording spec §7/§10) — a runtime policy input, kept
+// strictly apart from the descriptive Annotations. Its zero value is NOT
+// "absent": Valid is false, so a code path that forgets to parse the policy
+// fails closed instead of silently meaning "do not record".
 type Host struct {
-	FQDN        string
-	Annotations map[string]string
+	FQDN         string
+	Annotations  map[string]string
+	SSHRecording HostRecordingPolicy
 	// SSHPublicKeys is the host's FreeIPA-published SSH host public keys
 	// (ipaSshPubKey, "<type> <base64>[ <comment>]" per entry) — the same
 	// authoritative source sss_ssh_knownhostsproxy verifies against.
@@ -105,6 +112,31 @@ type Host struct {
 	// transport (docs/superpowers/specs/2026-09-23-pilot-access-gateway-
 	// captive-ssh-transport-spec.md §8.4). Public data, never a secret.
 	SSHPublicKeys []string
+}
+
+// HostRecordingPolicy is the parsed pilot.policy.ssh-recording marker state
+// of one FreeIPA host (per-host recording spec §10).
+type HostRecordingPolicy struct {
+	// Present reports whether at least one managed value exists.
+	Present bool
+	// Mode is "off" or "terminal_output" when Valid && Present.
+	Mode string
+	// Valid is true for "absent" or exactly one well-formed known value.
+	Valid bool
+	// Unreadable is set when attributelevelrights shows the reading
+	// principal cannot read userclass (spec §9 branch R): the absence of a
+	// marker then proves nothing.
+	Unreadable bool
+	// Reason is one of the fixed codes "duplicate", "malformed",
+	// "unknown_value", "userclass_unreadable" — never raw LDAP data.
+	Reason string
+}
+
+// NewHostWithoutPolicy returns a Host whose recording policy is explicitly
+// absent-and-valid (inherit), for fakes and tests that model a host with no
+// pilot.policy.ssh-recording marker.
+func NewHostWithoutPolicy(fqdn string) Host {
+	return Host{FQDN: fqdn, SSHRecording: HostRecordingPolicy{Valid: true}}
 }
 
 // Hostgroup is a normalized hostgroup_show(all=true) result.

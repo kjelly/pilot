@@ -39,7 +39,7 @@ func (f *fakeDirectoryProvider) GroupShow(ctx context.Context, name string) (fre
 	return freeipaaccess.Group{}, &freeipaaccess.RPCError{Name: "NotFound"}
 }
 func (f *fakeDirectoryProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
-	return freeipaaccess.Host{FQDN: fqdn}, nil
+	return freeipaaccess.NewHostWithoutPolicy(fqdn), nil
 }
 func (f *fakeDirectoryProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
 	switch name {

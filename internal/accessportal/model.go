@@ -46,10 +46,57 @@ type UserAccess struct {
 
 // HostAccess is one host's SSH/sudo access summary within this gateway's scope.
 type HostAccess struct {
-	FQDN        string
-	SSH         SSHAccess
-	Sudo        SudoAccess
-	Annotations map[string]string
+	FQDN         string
+	SSH          SSHAccess
+	Sudo         SudoAccess
+	Annotations  map[string]string
+	SSHRecording SSHRecordingAccessPolicy
+}
+
+// SSHRecordingAccessPolicy is one host's recording-policy facts as seen by a
+// single fresh policy snapshot (per-host recording spec §11.2). The zero
+// value (Known=false) fails closed: a connect decision based on it denies.
+type SSHRecordingAccessPolicy struct {
+	// Override is "" (inherit), "off" or "terminal_output"; only meaningful
+	// when Known && Valid.
+	Override string
+	// Known is false when host_show failed or userclass was unreadable.
+	Known bool
+	// Valid is false for a malformed/duplicate/unknown marker (only
+	// meaningful when Known).
+	Valid bool
+	// Reason is a fixed code: host_show_failed | userclass_unreadable |
+	// duplicate | malformed | unknown_value; empty when Known && Valid.
+	Reason string
+}
+
+// Recording policy status values reported to listing callers (per-host
+// recording spec §17/§24).
+const (
+	RecordingStatusInherit        = "inherit"
+	RecordingStatusOff            = "off"
+	RecordingStatusTerminalOutput = "terminal_output"
+	RecordingStatusUnknown        = "unknown"
+	RecordingStatusInvalid        = "invalid"
+)
+
+// Status summarizes p for display: inherit | off | terminal_output |
+// unknown | invalid.
+func (p SSHRecordingAccessPolicy) Status() string {
+	switch {
+	case !p.Known:
+		return RecordingStatusUnknown
+	case !p.Valid:
+		return RecordingStatusInvalid
+	case p.Override == "":
+		return RecordingStatusInherit
+	case p.Override == "off":
+		return RecordingStatusOff
+	case p.Override == "terminal_output":
+		return RecordingStatusTerminalOutput
+	default:
+		return RecordingStatusInvalid
+	}
 }
 
 // SSHAccess reports HBAC(sshd)-derived access to one host.

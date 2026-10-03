@@ -20,17 +20,18 @@ on the gateway, and never accepts a caller-chosen port or address.
 ## 0.5 Current fact summary
 
 Snapshot of the reference environment used for the latest verified run
-(2026-09-23). Full output is in the evidence record in §6.
+(2026-10-01, candidate `fe5f9e0`). Full results are in the evidence record in
+§6.
 
 | Item | Current fact |
 |---|---|
-| Target environment | `pilot vm-target topology status --topology docs/topologies/pilot-access-transport-topology.yaml`: `tx-ipa` 192.168.122.2, `tx-gw` 192.168.122.6, `tx-target` 192.168.122.7, `tx-ws` 192.168.122.4, all `running`, Ubuntu 24.04.4 LTS, OpenSSH 9.6p1 |
-| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `tx-ipa`; `freeipa-client`: `tx-gw`, `tx-target`; `pilot-access-gateway`: `tx-gw`; `pilot-access-target-policy`: `tx-target`; `pilot-transport-workstation`: `tx-ws` |
-| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `tx-target` published in `pilot-target-gpu` |
-| Component state after the last run | gateway transport **enabled**, recording `metadata`; `tx-target` policy `strict` and a member of `pilot-transport-ready` |
-| External state | vault file with `ipa_admin_password` (other keys unused here); a gitignored vars file with `transport_fixture_user_password` for the E2E user; FreeIPA users `transportuser`, `transportuser2`; FreeIPA hostgroup `pilot-transport-ready` |
-| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `tx-ws` → `tx-target` tcp/22) |
-| Alignment decision | **A (inventory matches the specs)**: the gateway spec runs on `pilot-access-gateway` and the target-policy spec on `pilot-access-target-policy`, and both groups exist in the topology inventory as listed above |
+| Target environment | a per-run copy of `docs/topologies/pilot-access-transport-topology.yaml` with the node names changed from `tx-` to `yx-` (VMs named `tx-*` belonged to another run), brought up with `pilot vm-target topology up`: `yx-ipa` 192.168.122.16 (AlmaLinux 9), `yx-gw` 192.168.122.15, `yx-target` 192.168.122.12, `yx-store` 192.168.122.14, `yx-ws` 192.168.122.13 (Ubuntu 24.04). Torn down with `topology down` after the run |
+| Inventory groups (`ansible-inventory --graph`) | `freeipa-server`: `yx-ipa`; `freeipa-client`: `yx-gw`, `yx-target`, `yx-store`; `pilot-access-gateway`: `yx-gw`; `pilot-access-target-policy`: `yx-target`; `pilot-session-store`: `yx-store`; `pilot-transport-workstation`: `yx-ws` |
+| Gateway identity | `gateway_id=gpu-01`, `gateway_scope=gpu`; `yx-target` published in `pilot-target-gpu` |
+| Component state after the last run | gateway transport **enabled**, recording default `terminal_output` (the recording phase), session store URL `https://yx-store.ipa.pilot.internal:8443`; `yx-target` policy `strict`, a member of `pilot-transport-ready`, no host recording policy |
+| External state | vault file with `ipa_admin_password`, `pilot_session_store_master_key`, `pilot_session_store_ingest_signing_key` and `transport_fixture_user_password` (names only); FreeIPA user `transportuser`; FreeIPA hostgroup `pilot-transport-ready` |
+| Site isolation | simulated by `playbooks/test/fixtures/pilot-access-transport-isolation-fixtures.yml` (nftables drops `yx-ws` → `yx-target` tcp/22) |
+| Alignment decision | **A (inventory matches the specs)**: the gateway spec runs on `pilot-access-gateway`, the target-policy spec on `pilot-access-target-policy` and the store spec on `pilot-session-store`, and all three groups exist in the topology inventory as listed above |
 
 ## 1. Scope and prerequisites
 
@@ -132,13 +133,18 @@ Snapshot of the reference environment used for the latest verified run
 ## 3. Verification
 
 - `pilot verify docs/verification/pilot-access-gateway.md -i <inventory> -l
-  <gateway>` (includes AG41–AG44) and `pilot verify
+  <gateway> --input gateway_id=<id> --input gateway_scope=<scope>` (includes
+  AG41–AG44; AG01 compares the deployed id/scope with those inputs) and `pilot verify
   docs/verification/pilot-access-target-policy.md -i <inventory> -l <target>`
   (TP01–TP05).
 - On a disposable copy of the topology only:
   `scripts/pilot-access-gateway-lockout-test.sh` (with `TRANSPORT_TARGET=`) and
   `scripts/pilot-access-gateway-transport-e2e.sh --phase <state>`. Both
   require `CONFIRM_DISPOSABLE=yes` and must never be pointed at a real host.
+  The `recording` phase records into the topology's session store (`tx-store`):
+  set `pilot_access_gateway_recording_mode=terminal_output` and
+  `pilot_access_gateway_recording_session_store_url=https://tx-store.ipa.pilot.internal:8443`
+  on the gateway, and give the script `STORE_HOST`/`STORE_ADMIN_KEY`.
 - Audit: `journalctl -t pilot-access-gateway -o cat` on the gateway shows one
   JSON line per event. Each session produces
   `gateway_transport_requested` → `connected` → `closed` (target IP, bytes,
@@ -203,13 +209,35 @@ Snapshot of the reference environment used for the latest verified run
 
 ## 6. Latest verified evidence
 
-- 2026-09-25 — [`docs/evidence/pilot-access-gateway/2026-09-25-c9a06c5.md`](../evidence/pilot-access-gateway/2026-09-25-c9a06c5.md).
-  Transport spec rev 5 (D8 also refuses host keys; adopted 2026-10-01), candidate
-  `c9a06c5` (tree `8e7dc330…`), on never-applied VMs: L1–L6 pass (verify 16/16
-  and 5/5, L6 `changed=0`); E2E strict 20/20, recording 3/3 (transport and
-  known-hosts refused, `pilot-connect` still records), strict again after the
-  downgrade 20/20, disabled 4/4. Remote-dev, not-ready and the lockout suite
-  were not rerun. **PASS**.
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md).
+  Candidate `fe5f9e0` (tree `18614acb…`): AG82 removes the gateway's former
+  static token at the path the old config named. Topology test on
+  never-applied VMs: L1–L6 pass (32/32, 5/5, 27/27, L6 `changed=0`) on the
+  second attempt; the first stopped at `ipa-server-install` on `yx-ipa` and
+  rolled back. E2E strict 20/20, recording 3/3; `--tags AG82`, `AG03`,
+  `AG_service` `changed=0`. **PASS**.
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-d7da805.md`](../evidence/pilot-access-gateway/2026-10-01-d7da805.md).
+  Candidate `d7da805` (tree `2d6712e5…`): the session store's finish/ingest
+  race fixed and `main` `56080a8` merged. Topology test on never-applied VMs:
+  L1–L6 pass (verify 32/32, 5/5 and store 27/27, L6 `changed=0`). E2E strict
+  20/20, recording 3/3; the merged gateway and store playbooks run alone
+  under `--tags AG03`, `AG_service` and `SS_service` with `changed=0`. 200
+  concurrent finish/events rounds over the live ingest API never accept both
+  (the pre-fix binary did in 23). The gateway binary is byte-identical to
+  `aad66f4`'s; remote-dev, not-ready, disabled, AG60 and the lockout suites
+  were not re-run (last PASS on `aad66f4`, below). **PASS**.
+- 2026-10-01 — [`docs/evidence/pilot-access-gateway/2026-10-01-aad66f4.md`](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md).
+  Candidate `aad66f4` (tree `78105e6a…`): per-host SSH session recording
+  merged with `main` `34aad5a` (transport spec rev 5 included). Topology test
+  on never-applied VMs: L1–L6 pass (verify 32/32, 5/5 and store 27/27, L6
+  `changed=0`). E2E strict 20/20, remote-dev 5/5, recording 3/3 (transport
+  and known-hosts refused, the recorded `pilot-connect` in the store),
+  not-ready 4/4, disabled 4/4 (explicit `false` and unset); AG60 refuse and
+  `allow_downgrade`; lockout 29/29 (transport on) and 28/28 (off). Host
+  recording policy: `terminal_output` refuses the transport and records
+  `pilot-connect` with source `host`; an invalid value refuses connect,
+  transport and known-hosts; `fail_closed` ends a session whose store
+  stops answering. TP12 was not re-run. **PASS**.
 - 2026-09-23 — [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md).
   The topology test used candidate `875066d` (tree `a8990ef5…`), and the E2E,
   lockout, and TP12 runs used `0f1a5c1` (tree `13dfd3af…`). The VMs had never

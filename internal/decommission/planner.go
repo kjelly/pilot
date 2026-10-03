@@ -396,6 +396,10 @@ func canonicalInventoryHash(hf *inventory.HostsFile) string {
 		Env                    string
 		DeploymentAvailability string
 		Extra                  map[string]string
+		// SSHRecording is omitempty so hosts without a policy hash exactly
+		// as before the field existed — pending plans stay valid across the
+		// upgrade (per-host recording spec §5).
+		SSHRecording string `json:",omitempty"`
 	}
 	hosts := make([]hostCanon, 0, len(hf.Hosts))
 	for _, h := range hf.Hosts {
@@ -405,6 +409,7 @@ func canonicalInventoryHash(hf *inventory.HostsFile) string {
 			Name: h.Name, AnsibleHost: h.AnsibleHost, AnsibleUser: h.AnsibleUser,
 			SSHKeyFile: h.SSHKeyFile, Roles: roles, Env: h.Env,
 			DeploymentAvailability: string(h.DeploymentAvailability), Extra: h.Extra,
+			SSHRecording: string(h.SSHRecording),
 		})
 	}
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Name < hosts[j].Name })

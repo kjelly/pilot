@@ -22,3 +22,41 @@ groups:
           severity: critical
         annotations:
           summary: "Target {{ $labels.instance }} (job {{ $labels.job }}) down"
+  # SSH session recording (per-host recording spec §31). The series come
+  # from node_exporter's textfile collector on the gateway and store hosts;
+  # both processes start every alerted series at 0 so increase() sees the
+  # first event after a restart. See docs/runbooks/pilot-session-store.md §5.
+  - name: pilot-session-recording
+    rules:
+      - alert: PilotRecordingIncomplete
+        expr: increase(pilot_session_store_sessions_finished_total{complete="false"}[15m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Session store {{ $labels.instance }} stored an incomplete {{ $labels.mode }} recording"
+          description: "A recorded SSH session finished with gaps or without its finish (pilot session list shows complete=false)."
+      - alert: PilotSessionStoreIngestErrors
+        expr: increase(pilot_session_store_ingest_requests_total{code="5xx"}[5m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Session store {{ $labels.instance }} answered {{ $labels.endpoint }} ingest requests with 5xx"
+          description: "Recorders with failure_policy fail_closed end the SSH session on these. The store journal logs 'ingest request failed' with the cause, for example a full disk."
+      - alert: PilotRecordingDeniedConnects
+        expr: increase(pilot_gateway_connect_authorize_total{result="denied",reason=~"recording_.*"}[15m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway {{ $labels.instance }} refused connects: {{ $labels.reason }}"
+          description: "A host's recording policy could not be read or applied, or the session store is not configured. Check pilot access recording show <host> on the gateway."
+      - alert: PilotSessionStoreMetricsStale
+        expr: time() - pilot_session_store_metrics_last_write_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Session store {{ $labels.instance }} stopped writing its metrics"
+          description: "pilot-session-store rewrites its textfile every 15s; it is down or its metrics writer is failing."

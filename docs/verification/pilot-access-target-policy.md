@@ -39,7 +39,7 @@
 
 依 F16 慣例列在 checklist 之外，由 `docs/topologies/pilot-access-transport-topology.yaml` 上的實跑證明，結果寫入對應 Phase 的 evidence。
 
-目前有效摘要（2026-09-23，candidate `0f1a5c1`）：TP06–TP12 全部 PASS。strict 與 remote-dev 的 forwarding 探測經真實 transport 執行；`absent` 先移出 hostgroup、再刪 drop-in；每個 profile 的第二次 apply 都是 `changed=0`；7 種不合法輸入全部 rc=2，`*.conf` checksum 不變。Evidence：[`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)（Phase 5）；首次的 profile／absent／TP12 實跑見 [`docs/evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md`](../evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md)（Phase 4）。
+目前有效摘要（2026-10-01，candidate `fe5f9e0`，per-host SSH session recording 與 `main` `56080a8` 合併後）：TP01–TP05 在從未套用過的 VM 上 5/5，L6 再次套用 `changed=0`；transport E2E strict 20/20（含 TP06 member、TP07、TP09）。Evidence：[`docs/evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md`](../evidence/pilot-access-gateway/2026-10-01-fe5f9e0.md)。TP08、TP10、TP11（remote-dev 與 `absent` 的 profile 循環）這輪未重跑：本 playbook 與 `aad66f4` 的差別只有 `main` 在 drop-in 讀取／render 與 rescue 加上的 `always` tag（已在 `main` 的 `6f69cce` 驗證）；最後一次在 `aad66f4` 全部 PASS，見 [`docs/evidence/pilot-access-gateway/2026-10-01-aad66f4.md`](../evidence/pilot-access-gateway/2026-10-01-aad66f4.md)。TP12（7 種不合法輸入全部 rc=2，`*.conf` checksum 不變）最後一次在 `0f1a5c1`，見 [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)（Phase 5）；首次的 profile／absent／TP12 實跑見 [`docs/evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md`](../evidence/pilot-access-target-policy/2026-09-23-c9ea6d9.md)（Phase 4）。
 
 | ID | 驗證內容 |
 |----|----------|

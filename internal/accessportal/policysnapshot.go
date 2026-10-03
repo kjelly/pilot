@@ -32,42 +32,80 @@ type PolicySnapshot struct {
 	CommandGroups  map[string]map[string]struct{}
 	GeneratedAt    time.Time
 
-	// hostAnnotations is an unexported, shared-by-reference cache: copying
-	// a PolicySnapshot by value (as ResolveScopeAccess's signature does)
-	// still shares the same cache, so a host appearing in more than one
-	// scope's target hostgroup is HostShow'd at most once for the whole
-	// snapshot's lifetime, no matter how many times ResolveScopeAccess is
-	// called against it (docs/tmp/now/spec.md §9.3).
-	hostAnnotations *hostAnnotationCache
+	// hostMetadata is an unexported, shared-by-reference cache: copying a
+	// PolicySnapshot by value (as ResolveScopeAccess's signature does) still
+	// shares the same cache, so a host appearing in more than one scope's
+	// target hostgroup is HostShow'd at most once for the whole snapshot's
+	// lifetime, no matter how many times ResolveScopeAccess is called
+	// against it (docs/tmp/now/spec.md §9.3).
+	hostMetadata *hostMetadataCache
 }
 
-// hostAnnotationCache memoizes HostShow-derived annotations by canonical
-// FQDN. A failed lookup is cached too (as "no annotations"), matching
-// LoadUserAccess's existing per-host failure isolation — annotations are
-// display-only asset metadata, never an authorization input, so a
-// transient host_show failure must not retry indefinitely within one
-// snapshot's short lifetime, and must never fail the whole listing.
-type hostAnnotationCache struct {
+// hostMetadataResult is one cached HostShow outcome — success or failure.
+type hostMetadataResult struct {
+	Host freeipaaccess.Host
+	Err  error
+}
+
+// hostMetadataCache memoizes HostShow results by canonical FQDN for one
+// snapshot (per-host recording spec §11.1/§51). Failures are cached too:
+// annotations stay best-effort display data, but the recording policy is a
+// runtime input, so the error is kept rather than collapsed into "no
+// annotations" — a connect decision must be able to tell "absent" from
+// "could not read". The map is guarded by mu; each entry's RPC runs under
+// its own sync.Once, outside mu, so distinct hosts are fetched concurrently
+// and one host is fetched exactly once.
+type hostMetadataCache struct {
 	mu      sync.Mutex
-	fetched map[string]bool
-	byFQDN  map[string]map[string]string
+	entries map[string]*hostMetadataEntry
 }
 
-func newHostAnnotationCache() *hostAnnotationCache {
-	return &hostAnnotationCache{fetched: map[string]bool{}, byFQDN: map[string]map[string]string{}}
+type hostMetadataEntry struct {
+	once   sync.Once
+	result hostMetadataResult
 }
 
-func (c *hostAnnotationCache) get(ctx context.Context, provider freeipaaccess.Provider, fqdn string) map[string]string {
+func newHostMetadataCache() *hostMetadataCache {
+	return &hostMetadataCache{entries: map[string]*hostMetadataEntry{}}
+}
+
+func (c *hostMetadataCache) get(ctx context.Context, provider freeipaaccess.Provider, fqdn string) hostMetadataResult {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.fetched[fqdn] {
-		return c.byFQDN[fqdn]
+	e, ok := c.entries[fqdn]
+	if !ok {
+		e = &hostMetadataEntry{}
+		c.entries[fqdn] = e
 	}
-	c.fetched[fqdn] = true
-	if host, err := provider.HostShow(ctx, fqdn); err == nil {
-		c.byFQDN[fqdn] = host.Annotations
+	c.mu.Unlock()
+	e.once.Do(func() {
+		host, err := provider.HostShow(ctx, fqdn)
+		e.result = hostMetadataResult{Host: host, Err: err}
+	})
+	return e.result
+}
+
+// recordingAccessPolicy maps one cached HostShow outcome to the
+// recording-policy facts a connect decision needs (per-host recording spec
+// §11.2).
+func recordingAccessPolicy(res hostMetadataResult) SSHRecordingAccessPolicy {
+	return HostRecordingAccessPolicy(res.Host, res.Err)
+}
+
+// HostRecordingAccessPolicy converts one host_show result (host, err) to the
+// recording policy the gateway resolves against (per-host recording spec
+// §11): a failed host_show or an unreadable userclass is unknown, a
+// malformed marker is invalid.
+func HostRecordingAccessPolicy(host freeipaaccess.Host, err error) SSHRecordingAccessPolicy {
+	switch p := host.SSHRecording; {
+	case err != nil:
+		return SSHRecordingAccessPolicy{Reason: "host_show_failed"}
+	case p.Unreadable:
+		return SSHRecordingAccessPolicy{Reason: "userclass_unreadable"}
+	case !p.Valid:
+		return SSHRecordingAccessPolicy{Known: true, Reason: p.Reason}
+	default:
+		return SSHRecordingAccessPolicy{Known: true, Valid: true, Override: p.Mode}
 	}
-	return c.byFQDN[fqdn]
 }
 
 // LoadPolicySnapshot loads the query plan spec.md §9.3/§21 describes for
@@ -105,14 +143,14 @@ func LoadPolicySnapshot(ctx context.Context, provider freeipaaccess.Provider, us
 	}
 
 	return PolicySnapshot{
-		User:            userCtx,
-		HBACRules:       hbacRules,
-		SudoRules:       sudoRules,
-		HostgroupHosts:  hostgroupHosts,
-		ServiceGroups:   serviceGroups,
-		CommandGroups:   commandGroups,
-		GeneratedAt:     now,
-		hostAnnotations: newHostAnnotationCache(),
+		User:           userCtx,
+		HBACRules:      hbacRules,
+		SudoRules:      sudoRules,
+		HostgroupHosts: hostgroupHosts,
+		ServiceGroups:  serviceGroups,
+		CommandGroups:  commandGroups,
+		GeneratedAt:    now,
+		hostMetadata:   newHostMetadataCache(),
 	}, nil
 }
 
@@ -133,9 +171,9 @@ func ResolveScopeAccess(ctx context.Context, provider freeipaaccess.Provider, sn
 		effectiveGroups[g] = struct{}{}
 	}
 
-	cache := snapshot.hostAnnotations
+	cache := snapshot.hostMetadata
 	if cache == nil {
-		cache = newHostAnnotationCache()
+		cache = newHostMetadataCache()
 	}
 
 	result := UserAccess{User: snapshot.User.Username, GeneratedAt: snapshot.GeneratedAt}
@@ -146,8 +184,15 @@ func ResolveScopeAccess(ctx context.Context, provider freeipaaccess.Provider, sn
 			continue
 		}
 		sudo := resolveSudoAccess(snapshot.SudoRules, snapshot.GeneratedAt, snapshot.User.Username, effectiveGroups, fqdn, snapshot.HostgroupHosts, snapshot.CommandGroups)
-		annotations := cache.get(ctx, provider, fqdn)
-		result.Hosts = append(result.Hosts, HostAccess{FQDN: fqdn, SSH: ssh, Sudo: sudo, Annotations: annotations})
+		meta := cache.get(ctx, provider, fqdn)
+		var annotations map[string]string
+		if meta.Err == nil {
+			annotations = meta.Host.Annotations
+		}
+		result.Hosts = append(result.Hosts, HostAccess{
+			FQDN: fqdn, SSH: ssh, Sudo: sudo, Annotations: annotations,
+			SSHRecording: recordingAccessPolicy(meta),
+		})
 	}
 	return result, nil
 }

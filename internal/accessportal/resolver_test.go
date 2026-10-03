@@ -171,8 +171,9 @@ func TestLoadUserAccess_Annotations(t *testing.T) {
 	p := gpuScenarioProvider()
 	p.hosts = map[string]freeipaaccess.Host{
 		"gpu-a.ipa.pilot.internal": {
-			FQDN:        "gpu-a.ipa.pilot.internal",
-			Annotations: map[string]string{"owner": "ai-platform-team", "project": "alpha"},
+			FQDN:         "gpu-a.ipa.pilot.internal",
+			Annotations:  map[string]string{"owner": "ai-platform-team", "project": "alpha"},
+			SSHRecording: freeipaaccess.HostRecordingPolicy{Valid: true},
 		},
 	}
 	r := &Resolver{

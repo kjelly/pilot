@@ -298,6 +298,51 @@ hosts:
 `ansible-playbook`（不經過 pilot）不會自動套用這個過濾，除非你自己在指令上加對等的
 `--limit`。
 
+### 1.7 （需要時）指定哪些機器要錄下 SSH 終端 → `ssh_recording`
+
+`ssh_recording` 決定使用者經 `pilot-access-gateway` 連到這台機器時，是否錄下終端。
+它只影響錄影，**不會**改變誰能不能登入（HBAC/sudo 不受影響）。
+
+```yaml
+hosts:
+  web-01:
+    ansible_host: 10.10.0.21
+    roles: [freeipa-client, linux-servers]
+    # 沒寫 ssh_recording = 沿用 gateway 預設（內建預設 metadata = 不錄終端）
+
+  db-prod-01:
+    ansible_host: 10.10.0.31
+    roles: [freeipa-client, linux-servers]
+    ssh_recording: terminal_output      # 錄下終端輸出
+
+  no-record-01:
+    ansible_host: 10.10.0.51
+    roles: [freeipa-client, linux-servers]
+    ssh_recording: off                  # 明確不錄，即使 gateway 預設會錄
+```
+
+規則：
+
+- 只接受 `off`、`terminal_output`，或省略。`terminal_io` 保留給未來版本，其他值
+  （含 `true`／`false`）都會讓 `pilot inventory lint` 報錯，`pilot inventory generate`
+  也會拒絕輸出。
+- 省略與 `off` 不同：省略代表沿用 gateway 的預設；`off` 會覆蓋 gateway 的預設。
+- 要錄影的機器，gateway 必須已設定 `pilot-session-store`；否則連到這台機器的
+  SSH 會被拒絕，不會退回成不錄影。
+
+啟用或停用一台機器的流程：
+
+1. 修改 `hosts.yml` 的 `ssh_recording`。
+2. `pilot inventory lint`，再 `pilot inventory generate`。
+3. 部署該機器的 `freeipa-client`（例如 `pilot deploy` 選 freeipa-client，或全站部署）。
+   Pilot 會把設定寫到 FreeIPA 上該主機的 `userClass`
+   （`pilot.policy.ssh-recording=<值>`）；改成省略時會移除這個值。
+4. 確認：在 FreeIPA 上執行 `ipa host-show <fqdn> --all --raw`，看得到
+   `pilot.policy.ssh-recording=terminal_output`（或 `=off`；省略時則完全沒有這一行）。
+
+Gateway 每次連線都會即時讀取 FreeIPA 的設定。改了 `hosts.yml` 但還沒部署時，
+實際生效的仍是 FreeIPA 上的舊值。
+
 ## 2. 跑前置檢查（會告訴你哪裡填錯、連不連得到）
 
 ```bash
@@ -431,6 +476,12 @@ docker run --rm -it \
   `pilot verify --dir docs/verification -i inventory.yml` 一次驗完並印
   rollup 總表（注意：`--dir` 會跑目錄下**每一份** spec，只部署部分元件時
   沒部署的 spec 會 FAIL，這種情況請逐份指定）。
+- 有 Spec v2 必填 inputs 的 spec 要先給值，否則該份 spec 直接報錯、不跑任何
+  row。例如 `pilot-access-gateway.md` 需要這台 gateway 部署時的
+  `gateway_id`/`gateway_scope`：單份驗收用
+  `--input gateway_id=<id> --input gateway_scope=<scope>`；`--dir` 或多台不同
+  scope 的 gateway 時，在 inventory 該主機加
+  `pilot_inputs: {gateway_id: <id>, gateway_scope: <scope>}`。
 
 ### 定期重驗（交付後的持續正確）
 

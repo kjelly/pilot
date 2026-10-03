@@ -7,9 +7,10 @@ import (
 )
 
 var sessionShowCmd = &cobra.Command{
-	Use:   "show <session-id>",
-	Short: "Show one recorded session's index metadata",
-	Args:  cobra.ExactArgs(1),
+	Use:          "show <session-id>",
+	Short:        "Show one recorded session's index metadata",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := newSessionStoreClient(sessionSocketFlag)
 		s, err := client.GetSession(cmd.Context(), args[0])
@@ -30,6 +31,8 @@ var sessionShowCmd = &cobra.Command{
 		fmt.Fprintf(out, "bytes:           %d\n", s.Bytes)
 		fmt.Fprintf(out, "event_count:     %d\n", s.EventCount)
 		fmt.Fprintf(out, "key_id:          %s\n", s.KeyID)
+		fmt.Fprintf(out, "policy_source:   %s\n", s.RecordingPolicySource)
+		fmt.Fprintf(out, "last_seq:        %d\n", s.LastSeq)
 		return nil
 	},
 }

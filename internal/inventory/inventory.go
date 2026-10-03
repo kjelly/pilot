@@ -34,7 +34,10 @@ type Host struct {
 	Roles                  []string
 	Env                    string
 	DeploymentAvailability DeploymentAvailability
-	Extra                  map[string]string // preserved as strings for stable, quoted YAML output
+	// SSHRecording is the host's SSH terminal recording policy; "" means
+	// inherit the gateway default (per-host recording spec §3/§5).
+	SSHRecording SSHRecording
+	Extra        map[string]string // preserved as strings for stable, quoted YAML output
 	// Annotations is descriptive, non-secret host metadata (location,
 	// project, owner, ...) — a completely separate namespace from Extra.
 	// It carries no deployment semantics and MUST NOT influence role
@@ -121,6 +124,12 @@ func Parse(data []byte) (*HostsFile, error) {
 				h.Env = fmt.Sprint(v)
 			case "deployment_availability":
 				h.DeploymentAvailability = DeploymentAvailability(fmt.Sprint(v))
+			case "ssh_recording":
+				// Reserved policy field (per-host recording spec §5): never
+				// part of Extra. A non-string YAML value (bool/int/null) is
+				// kept as its printed form so Lint rejects it with a clear
+				// message instead of Parse aborting `pilot edit`.
+				h.SSHRecording = SSHRecording(fmt.Sprint(v))
 			case "roles":
 				list, ok := v.([]interface{})
 				if !ok {
@@ -237,6 +246,8 @@ func Lint(hf *HostsFile) []Issue {
 		for _, err := range ValidateAnnotations(h.Annotations) {
 			issues = append(issues, Issue{h.Name, "error", err.Error()})
 		}
+
+		issues = append(issues, lintSSHRecording(h)...)
 	}
 	return issues
 }
@@ -373,6 +384,11 @@ func Generate(hf *HostsFile) (string, error) {
 		}
 		if h.DeploymentAvailability != "" {
 			fmt.Fprintf(&sb, "      deployment_availability: %s\n", quoteScalar(string(h.DeploymentAvailability)))
+		}
+		// Always quoted: Ansible parses inventory as YAML 1.1, where a bare
+		// `off` would become boolean false (per-host recording spec §5).
+		if h.SSHRecording != "" {
+			fmt.Fprintf(&sb, "      pilot_ssh_recording: %s\n", quoteScalar(string(h.SSHRecording)))
 		}
 		extraKeys := make([]string, 0, len(h.Extra))
 		for k := range h.Extra {

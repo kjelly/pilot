@@ -272,6 +272,9 @@ func TestExecPilotForwardsTheDataDir(t *testing.T) {
 // TestDataDirIsResolvedInOnePlace keeps the precedence in loadConfig: no
 // other non-test file in this package reads $PILOT_DATA_DIR, builds the
 // ~/.local/share/pilot default, or loads the config file for its data dir.
+// The config rules match pilot's own internal/config package only (\b):
+// gatewayconfig.Load reads /etc/pilot/access-gateway.yaml, which has no
+// data dir.
 func TestDataDirIsResolvedInOnePlace(t *testing.T) {
 	rules := []struct {
 		re      *regexp.Regexp
@@ -279,8 +282,8 @@ func TestDataDirIsResolvedInOnePlace(t *testing.T) {
 	}{
 		{regexp.MustCompile(`Getenv\("PILOT_DATA_DIR"\)`), map[string]bool{"root.go": true}},
 		{regexp.MustCompile(`"\.local",\s*"share"`), map[string]bool{}},
-		{regexp.MustCompile(`config\.Default\(\)\.DataDir`), map[string]bool{"data_dir_state.go": true}},
-		{regexp.MustCompile(`config\.Load\(`), map[string]bool{"root.go": true, "data_dir_state.go": true}},
+		{regexp.MustCompile(`\bconfig\.Default\(\)\.DataDir`), map[string]bool{"data_dir_state.go": true}},
+		{regexp.MustCompile(`\bconfig\.Load\(`), map[string]bool{"root.go": true, "data_dir_state.go": true}},
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

@@ -34,10 +34,19 @@ type AccessResponse struct {
 // Route it is reachable through (spec.md §10.3: one merged entry per
 // FQDN, never duplicated per scope).
 type TargetJSON struct {
-	FQDN   string      `json:"fqdn"`
-	SSH    SSHJSON     `json:"ssh"`
-	Sudo   SudoJSON    `json:"sudo"`
-	Routes []RouteJSON `json:"routes"`
+	FQDN      string                 `json:"fqdn"`
+	SSH       SSHJSON                `json:"ssh"`
+	Sudo      SudoJSON               `json:"sudo"`
+	Routes    []RouteJSON            `json:"routes"`
+	Recording DirectoryRecordingJSON `json:"recording"`
+}
+
+// DirectoryRecordingJSON is a target's recording-policy override status as
+// the Directory sees it (per-host recording spec §12): inherit | off |
+// terminal_output | unknown | invalid. It deliberately has no effective
+// mode — only the target gateway knows its own default.
+type DirectoryRecordingJSON struct {
+	Status string `json:"status"`
 }
 
 type SSHJSON struct {

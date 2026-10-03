@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 
 	"github.com/creack/pty"
+
+	"github.com/kjelly/pilot/internal/sessionrecording"
 )
 
 // recordedConnectSession owns one recorded session's private ControlMaster
@@ -112,9 +114,13 @@ func (s *recordedConnectSession) authenticate(sshConfigPath, target, credentialC
 // connection (-S <path>, no fresh authentication attempted or possible
 // here). Returns the child's pty master — what the Recorder wraps — and
 // the *exec.Cmd for lifecycle/exit-code handling by the caller.
-func (s *recordedConnectSession) startRecorded(sshConfigPath, target string) (*os.File, *exec.Cmd, error) {
+//
+// The pty starts at size (per-host recording spec §18.3 step 6), so ssh's
+// first window-size report matches the resize event the recorder writes
+// as seq 1 instead of racing a later resize.
+func (s *recordedConnectSession) startRecorded(sshConfigPath, target string, size sessionrecording.Winsize) (*os.File, *exec.Cmd, error) {
 	cmd := exec.Command(sshBinaryPath, "-F", sshConfigPath, "-S", s.controlPath, "-tt", target)
-	ptmx, err := pty.Start(cmd)
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(size.Rows), Cols: uint16(size.Cols)})
 	if err != nil {
 		return nil, nil, fmt.Errorf("start recorded session: %w", err)
 	}

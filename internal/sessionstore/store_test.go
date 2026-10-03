@@ -65,7 +65,7 @@ func TestStoreRealSQLiteAESRoundTrip(t *testing.T) {
 		t.Fatalf("IngestEvents outcome = %+v, want Accepted=1 Duplicate=0", out)
 	}
 
-	if err := store.FinishSession(ctx, "sess-roundtrip", time.Now().UTC(), true); err != nil {
+	if err := store.FinishSession(ctx, "sess-roundtrip", time.Now().UTC(), true, 1); err != nil {
 		t.Fatalf("FinishSession: %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestStoreReplayDetectsGap(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("IngestEvents: %v", err)
 	}
-	if err := store.FinishSession(ctx, "sess-gap", time.Now().UTC(), true); err != nil {
+	if err := store.FinishSession(ctx, "sess-gap", time.Now().UTC(), true, 5); err != nil {
 		t.Fatalf("FinishSession: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestStoreUnknownSessionFailsClosed(t *testing.T) {
 	if _, err := store.IngestEvents(ctx, "never-started", []IngestEvent{{Seq: 1, Data: []byte("x")}}); !errors.Is(err, ErrUnknownSession) {
 		t.Fatalf("IngestEvents on unknown session = %v, want ErrUnknownSession", err)
 	}
-	if err := store.FinishSession(ctx, "never-started", time.Now(), true); !errors.Is(err, ErrUnknownSession) {
+	if err := store.FinishSession(ctx, "never-started", time.Now(), true, 0); !errors.Is(err, ErrUnknownSession) {
 		t.Fatalf("FinishSession on unknown session = %v, want ErrUnknownSession", err)
 	}
 	if _, err := store.Replay(ctx, "never-started"); !errors.Is(err, ErrUnknownSession) {
