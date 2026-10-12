@@ -22,7 +22,9 @@ import (
 // Every docker_container task that bind-mounts a single file must be
 // preceded by tasks/container-file-mount-drift.yml for the same container
 // (with no other such check in between, since they share one result fact),
-// tagged `always` so --tags runs keep it, and must restart on
+// tagged `always` so --tags runs keep it, with the same `when:` as the
+// container (a check skipped while its container runs would leave the
+// previous container's result in place), and must restart on
 // container_mount_drift_stale.
 func TestRegression_FileMountedContainersRestartOnStaleMounts(t *testing.T) {
 	containers := 0
@@ -37,6 +39,36 @@ func TestRegression_FileMountedContainersRestartOnStaleMounts(t *testing.T) {
 	// none found means the detection broke.
 	if containers < 5 {
 		t.Fatalf("found only %d containers with single-file bind mounts; the detection is broken", containers)
+	}
+}
+
+// TestRegression_ContainerFileMountDriftHidesWhatItReads: the inspect
+// result holds the container's Config.Env (the Teams proxy's webhook URL)
+// and a mounted password file hashes to the unsalted SHA-256 of the
+// password, while the callers' container and render tasks are no_log for
+// those values. Every task in the check that registers or loops over what
+// docker or the files returned must be no_log too; -v and the JSON
+// callback print registered results and loop items in full. Its own error
+// is reported by a separate task that prints only the module's msg.
+func TestRegression_ContainerFileMountDriftHidesWhatItReads(t *testing.T) {
+	path := "../../playbooks/apply/tasks/" + staleMountCheckFile
+	tasks, _ := loadYAML(t, path).([]any)
+	checked := 0
+	for _, item := range tasks {
+		task, _ := item.(map[string]any)
+		_, registers := task["register"]
+		_, loops := task["loop"]
+		if !registers && !loops {
+			continue
+		}
+		checked++
+		if noLog, _ := task["no_log"].(bool); !noLog {
+			t.Errorf("%s: task %q registers or loops over inspect/file results but is not no_log", staleMountCheckFile, task["name"])
+		}
+	}
+	// Inspect, stat, hash and record; fewer means the file changed shape.
+	if checked < 4 {
+		t.Fatalf("%s: found %d tasks that register or loop, want at least 4", staleMountCheckFile, checked)
 	}
 }
 
@@ -89,6 +121,37 @@ func TestStaleFileMountGaps(t *testing.T) {
         restart: "{{ (app_yml | default({})) is changed }}"
         volumes: ["/etc/x/app.yml:/etc/app/app.yml:ro"]
 `, 1, 1},
+		{"check skipped while its container runs", `
+- hosts: all
+  tasks:
+    - name: check
+      tags: [always]
+      ansible.builtin.include_tasks:
+        file: tasks/container-file-mount-drift.yml
+        apply: {tags: [always]}
+      vars: {container_mount_drift_name: app}
+      when: app_mode == 'a'
+    - community.docker.docker_container:
+        name: app
+        restart: "{{ container_mount_drift_stale | default(false) | bool }}"
+        volumes: ["/etc/x/app.yml:/etc/app/app.yml:ro"]
+`, 1, 1},
+		{"check and container under the same when", `
+- hosts: all
+  tasks:
+    - name: check
+      tags: [always]
+      ansible.builtin.include_tasks:
+        file: tasks/container-file-mount-drift.yml
+        apply: {tags: [always]}
+      vars: {container_mount_drift_name: app}
+      when: app_mode == 'a'
+    - community.docker.docker_container:
+        name: app
+        restart: "{{ container_mount_drift_stale | default(false) | bool }}"
+        volumes: ["/etc/x/app.yml:/etc/app/app.yml:ro"]
+      when: app_mode == 'a'
+`, 0, 1},
 		{"check not tagged always", `
 - hosts: all
   tasks:
@@ -209,6 +272,8 @@ func staleFileMountGaps(doc any) ([]string, int) {
 			out = append(out, fmt.Sprintf("container %s: the %s check right before it is for %q", name, staleMountCheckFile, staleMountCheckName(lastCheck.task)))
 		case !hasTag(lastCheck.tags, "always"):
 			out = append(out, fmt.Sprintf("container %s: its %s check must be tagged always, or --tags runs skip it", name, staleMountCheckFile))
+		case fmt.Sprint(lastCheck.task["when"]) != fmt.Sprint(e.task["when"]):
+			out = append(out, fmt.Sprintf("container %s: its %s check has when: %v, the container has when: %v; give them the same condition", name, staleMountCheckFile, lastCheck.task["when"], e.task["when"]))
 		}
 		if !strings.Contains(fmt.Sprint(args["restart"]), "container_mount_drift_stale") {
 			out = append(out, fmt.Sprintf("container %s bind-mounts a single file but its restart: does not read container_mount_drift_stale", name))

@@ -32,6 +32,13 @@
 #   A container that does not exist or is not running is never stale:
 #   creating or starting it mounts the current files.
 #
+# no_log on every task that holds what docker or the files returned: the
+# inspect result carries the container's Config.Env (the Teams proxy's
+# TEAMS_WEBHOOK_URL), and a password file mounted on its own (Prometheus's
+# basic-auth password files) hashes to the unsalted SHA-256 of the password.
+# The caller's container task is no_log for the same values. The report at
+# the end lists only container paths.
+#
 # Included once per container, several times per play: reset the result
 # first so one container's answer never carries over to the next
 # (AGENTS.md §4.5 item 2).
@@ -44,6 +51,19 @@
   community.docker.docker_container_info:
     name: "{{ container_mount_drift_name }}"
   register: container_mount_drift_info
+  failed_when: false
+  no_log: true
+
+# The inspect above is no_log, which would also hide why it failed (docker
+# down, no permission on the socket). Its msg carries only the error.
+# failed_when: false resets `failed`, so test for `exists`, which every
+# successful inspect returns.
+- name: "Fail if {{ container_mount_drift_name }} could not be inspected"
+  ansible.builtin.fail:
+    msg: >-
+      docker could not inspect {{ container_mount_drift_name }}:
+      {{ container_mount_drift_info.msg | default('no error message') }}
+  when: container_mount_drift_info.exists is not defined
 
 - name: "Stat the host side of {{ container_mount_drift_name }}'s bind mounts"
   vars:
@@ -62,6 +82,7 @@
   loop_control:
     label: "{{ item.Source }}"
   register: container_mount_drift_host
+  no_log: true
 
 # A path the container cannot read (rc != 0, e.g. "No such file or
 # directory") counts as stale below: restarting is harmless, serving an
@@ -79,6 +100,7 @@
   changed_when: false
   failed_when: false
   check_mode: false
+  no_log: true
 
 - name: "Record the file mounts whose content {{ container_mount_drift_name }} no longer sees"
   ansible.builtin.set_fact:
@@ -90,6 +112,7 @@
   when: >-
     item.rc != 0
     or (item.stdout.split() | first | default('')) != item.item.stat.checksum
+  no_log: true
 
 - name: "Decide whether {{ container_mount_drift_name }} needs a restart to see its files"
   ansible.builtin.set_fact:
