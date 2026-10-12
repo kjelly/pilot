@@ -14,19 +14,11 @@ import (
 
 // sshdConfigWriteAllowlist lists sshd configuration writes that do not
 // follow TestRegression_SshdConfigWritesAreValidatedAndReverted yet, keyed
-// "<playbook>: <path>". Each needs its own vm-target run to fix; an entry
-// fails the test once the write follows the rule.
-var sshdConfigWriteAllowlist = map[string]string{
-	// Restarts sshd (not a reload): with another file in sshd_config.d
-	// broken, the restart fails and sshd stays down.
-	"playbooks/apply/freeipa-client-apply.yml: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf":               "written without validate, outside a block with a rescue, sshd restarted without sshd -t; needs a freeipa-client run on Ubuntu and AlmaLinux",
-	"playbooks/decommission/freeipa-client-decommission.yml: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf": "removed and sshd restarted without sshd -t; needs a host decommission run",
-	// The absent path: a failed sshd -t leaves the drop-in removed but
-	// loaded, and the reload is gated on the removal, so a later run never
-	// reloads. The policy left loaded is the restrictive one, and the host
-	// has already left pilot-transport-ready.
-	"playbooks/apply/pilot-access-target-policy-apply.yml: /etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf": "the absent path's removal is not in a block with a rescue; needs a transport-topology run",
-}
+// "<playbook>: <path>". It is empty: freeipa-client's password-auth drop-in
+// (apply and decommission) and pilot-access-target-policy's absent path were
+// the last three, fixed on 2026-10-12. An entry needs a reason, and fails
+// the test once the write follows the rule.
+var sshdConfigWriteAllowlist = map[string]string{}
 
 // TestRegression_SshdConfigWritesAreValidatedAndReverted is a lint over the
 // real playbooks (playbooks/apply and playbooks/decommission; test

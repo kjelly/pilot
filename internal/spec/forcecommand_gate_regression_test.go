@@ -198,6 +198,18 @@ func runFCTasks(t *testing.T, pb fcPlaybook, dir string, extra map[string]any, a
 	if len(keep) < 6 {
 		t.Fatalf("found %d ForceCommand tasks in %s, want at least 6", len(keep), pb.path)
 	}
+	return runLocalTasks(t, playVars, keep, dir, extra, args...)
+}
+
+// runLocalTasks runs tasks (already passed through fcRewrite) on localhost
+// with the given play vars, dir standing in for /etc/ssh, /usr/local/libexec
+// and /usr/bin, and the default stand-in commands of runFCTasks unless
+// extra overrides them.
+func runLocalTasks(t *testing.T, playVars map[string]any, keep []map[string]any, dir string, extra map[string]any, args ...string) fcRun {
+	t.Helper()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
 	me, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +230,7 @@ func runFCTasks(t *testing.T, pb fcPlaybook, dir string, extra map[string]any, a
 		vars[k] = v
 	}
 	play := []map[string]any{{
-		"name": "forcecommand tasks", "hosts": "localhost", "connection": "local",
+		"name": "extracted tasks", "hosts": "localhost", "connection": "local",
 		"gather_facts": false, "become": false, "vars": vars, "tasks": keep,
 	}}
 	body, err := yaml.Marshal(play)

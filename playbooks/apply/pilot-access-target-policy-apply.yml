@@ -453,25 +453,66 @@
           failed_when: false
           when: not ansible_check_mode
 
-        - name: "Remove the policy drop-in"
-          ansible.builtin.file:
+        # Remove, `sshd -t`, reload as one block. If `sshd -t` or the reload
+        # fails, the rescue puts the drop-in back, so the file on disk is
+        # again what sshd runs, and fails the run; the next run retries.
+        # The pre-change snapshot goes last, so a failed run keeps it.
+        # Before, a failed `sshd -t` left the drop-in removed but loaded,
+        # and the reload only ran when the removal changed something, so a
+        # later run never reloaded and sshd kept the policy while the
+        # files said it was gone. The host has already left
+        # pilot-transport-ready above either way.
+        - name: "Snapshot the policy drop-in before removing it"
+          ansible.builtin.stat:
             path: "{{ pilot_access_target_dropin }}"
-            state: absent
-          register: pilot_access_target_dropin_removed
+            get_checksum: false
+          register: pilot_access_target_absent_dropin_stat
 
-        - name: "Remove the pre-change snapshot"
-          ansible.builtin.file:
-            path: "{{ pilot_access_target_dropin_backup }}"
-            state: absent
+        - name: "Read the policy drop-in before removing it"
+          ansible.builtin.slurp:
+            src: "{{ pilot_access_target_dropin }}"
+          register: pilot_access_target_absent_dropin_before
+          when: pilot_access_target_absent_dropin_stat.stat.exists
 
-        - name: "sshd configuration is valid without the policy"
-          ansible.builtin.command:
-            argv: [sshd, -t]
-          changed_when: false
-          when: not ansible_check_mode
+        - name: "Remove the policy (put back on failure)"
+          block:
+            - name: "Remove the policy drop-in"
+              ansible.builtin.file:
+                path: "{{ pilot_access_target_dropin }}"
+                state: absent
+              register: pilot_access_target_dropin_removed
 
-        - name: "Reload sshd after removing the policy"
-          ansible.builtin.systemd:
-            name: "{{ pilot_access_target_sshd_service }}"
-            state: reloaded
-          when: pilot_access_target_dropin_removed is changed and not ansible_check_mode
+            - name: "sshd configuration is valid without the policy"
+              ansible.builtin.command:
+                argv: [sshd, -t]
+              changed_when: false
+              when: not ansible_check_mode
+
+            - name: "Reload sshd after removing the policy"
+              ansible.builtin.systemd:
+                name: "{{ pilot_access_target_sshd_service }}"
+                state: reloaded
+              when: pilot_access_target_dropin_removed is changed and not ansible_check_mode
+
+            - name: "Remove the pre-change snapshot"
+              ansible.builtin.file:
+                path: "{{ pilot_access_target_dropin_backup }}"
+                state: absent
+          rescue:
+            - name: "Rollback: put the policy drop-in back"
+              ansible.builtin.copy:
+                dest: "{{ pilot_access_target_dropin }}"
+                content: "{{ pilot_access_target_absent_dropin_before.content | b64decode }}"
+                owner: root
+                group: root
+                mode: "0644"
+              when: pilot_access_target_absent_dropin_stat.stat.exists
+
+            - name: "Rollback: fail the play"
+              ansible.builtin.fail:
+                msg: >-
+                  pilot-access-target-policy was NOT removed from {{ inventory_hostname }}:
+                  "{{ ansible_failed_task.name | default('?') }}" failed
+                  ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+                  The policy drop-in is back in place and sshd was not reloaded; the host has
+                  already left {{ pilot_access_target_ready_hostgroup }}.
