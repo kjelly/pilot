@@ -821,66 +821,133 @@
     # opt-out-by-flag pattern pilot-access-gateway-apply.yml's own Step
     # 19-21 uses; do not enable against a non-disposable host without an
     # equivalent lockout regression test having actually passed there.
-    - name: "Step 18: install sshd ForceCommand drop-in (GATED)"
-      ansible.builtin.copy:
-        dest: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          Match Group {{ directory_effective_portal_user_group }}
-              ForceCommand /usr/local/libexec/pilot-directory-session
-              PermitTTY yes
+    #
+    # Installing and removing the drop-in both run as a block, like the
+    # gateway's: write (or remove) the file, `sshd -t` the whole
+    # configuration, reload. If a step fails, sshd was not reloaded, so the
+    # rescue puts the drop-in back the way this run found it and fails the
+    # run: the file on disk is again what sshd runs, and the next run
+    # retries. Before, a failed `sshd -t` left the new file in place and the
+    # next run skipped `sshd -t` and the reload because nothing changed.
+    - name: "Step 18 snapshot: stat the drop-in this run may replace or remove"
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+        get_checksum: false
+      register: directory_forcecommand_dropin_stat
+      tags: [AD_forcecommand, AD18]
 
-              DisableForwarding yes
-              AllowAgentForwarding no
-              AllowTcpForwarding no
-              X11Forwarding no
-              PermitTunnel no
-              PermitUserRC no
+    - name: "Step 18 snapshot: read the drop-in this run may replace or remove"
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+      register: directory_forcecommand_dropin_before
+      when: directory_forcecommand_dropin_stat.stat.exists
+      tags: [AD_forcecommand, AD18]
+
+    - name: "Steps 18-20: install, validate and load the ForceCommand drop-in"
       when: pilot_access_directory_effective_install_forcecommand | bool
-      register: directory_forcecommand_dropin
       tags: [AD_forcecommand, AD18]
+      block:
+        # `validate` checks the file on its own before it replaces anything;
+        # Step 19 checks it together with the rest.
+        - name: "Step 18: install sshd ForceCommand drop-in (GATED)"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+            owner: root
+            group: root
+            mode: "0644"
+            validate: /usr/sbin/sshd -t -f %s
+            content: |
+              Match Group {{ directory_effective_portal_user_group }}
+                  ForceCommand /usr/local/libexec/pilot-directory-session
+                  PermitTTY yes
 
-    # Steps 19/20 carry AD18 like Step 18: under `--tags AD18` they did not
-    # run, so the drop-in was written but neither validated nor loaded.
-    - name: "Step 19: sshd -t"
-      ansible.builtin.command:
-        argv: [sshd, -t]
-      when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
-      changed_when: false
-      tags: [AD_forcecommand, AD18]
+                  DisableForwarding yes
+                  AllowAgentForwarding no
+                  AllowTcpForwarding no
+                  X11Forwarding no
+                  PermitTunnel no
+                  PermitUserRC no
+          register: directory_forcecommand_dropin
 
-    - name: "Step 20: reload sshd"
-      ansible.builtin.systemd:
-        name: ssh
-        state: reloaded
-      when: pilot_access_directory_effective_install_forcecommand | bool and directory_forcecommand_dropin.changed
-      tags: [AD_forcecommand, AD18]
+        - name: "Step 19: sshd -t"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          when: directory_forcecommand_dropin.changed
+          changed_when: false
+
+        - name: "Step 20: reload sshd"
+          ansible.builtin.systemd:
+            name: ssh
+            state: reloaded
+          when: directory_forcecommand_dropin.changed
+      rescue:
+        - name: "Step 18 revert: put back the drop-in this run replaced"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: "{{ directory_forcecommand_dropin_before.content | b64decode }}"
+          when: directory_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 18 revert: remove the drop-in this run wrote"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+            state: absent
+          when: not directory_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 18 revert: the ForceCommand drop-in was not installed"
+          ansible.builtin.fail:
+            msg: >-
+              The ForceCommand drop-in was not installed: "{{ ansible_failed_task.name }}" failed
+              ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+              {{ '/etc/ssh/sshd_config.d/91-pilot-access-directory.conf is back to what this run found'
+                 if directory_forcecommand_dropin_stat.stat.exists
+                 else 'This run left no /etc/ssh/sshd_config.d/91-pilot-access-directory.conf' }},
+              and sshd was not reloaded.
 
     # Rollback path — same declarative-undo pattern
-    # pilot-access-gateway-apply.yml's own rollback tasks provide.
-    - name: "Step 18 rollback: remove sshd ForceCommand drop-in when disabled"
-      ansible.builtin.file:
-        path: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
-        state: absent
+    # pilot-access-gateway-apply.yml's own rollback tasks provide. It
+    # carries AD18 like the install: before, `--tags AD18` with the flag
+    # false did nothing at all.
+    - name: "Steps 18-20 rollback: remove the ForceCommand drop-in when disabled"
       when: not (pilot_access_directory_effective_install_forcecommand | bool)
-      register: directory_forcecommand_dropin_removed
-      tags: [AD_forcecommand]
+      tags: [AD_forcecommand, AD18]
+      block:
+        - name: "Step 18 rollback: remove sshd ForceCommand drop-in when disabled"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+            state: absent
+          register: directory_forcecommand_dropin_removed
 
-    - name: "Step 19 rollback: sshd -t after removing the drop-in"
-      ansible.builtin.command:
-        argv: [sshd, -t]
-      when: not (pilot_access_directory_effective_install_forcecommand | bool) and directory_forcecommand_dropin_removed.changed
-      changed_when: false
-      tags: [AD_forcecommand]
+        - name: "Step 19 rollback: sshd -t after removing the drop-in"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          when: directory_forcecommand_dropin_removed.changed
+          changed_when: false
 
-    - name: "Step 20 rollback: reload sshd after removing the drop-in"
-      ansible.builtin.systemd:
-        name: ssh
-        state: reloaded
-      when: not (pilot_access_directory_effective_install_forcecommand | bool) and directory_forcecommand_dropin_removed.changed
-      tags: [AD_forcecommand]
+        - name: "Step 20 rollback: reload sshd after removing the drop-in"
+          ansible.builtin.systemd:
+            name: ssh
+            state: reloaded
+          when: directory_forcecommand_dropin_removed.changed
+      rescue:
+        - name: "Step 18 rollback revert: put the drop-in back"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/91-pilot-access-directory.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: "{{ directory_forcecommand_dropin_before.content | b64decode }}"
+          when: directory_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 18 rollback revert: the ForceCommand drop-in was not removed"
+          ansible.builtin.fail:
+            msg: >-
+              The ForceCommand drop-in was not removed: "{{ ansible_failed_task.name }}" failed
+              ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+              /etc/ssh/sshd_config.d/91-pilot-access-directory.conf is back in place and sshd was not reloaded,
+              so sshd still sends portal users to the wrapper.
 
     # Step 21 (spec.md §31): post-apply identity probe — a real,
     # unauthenticated-by-username connection over the socket must at
