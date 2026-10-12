@@ -96,7 +96,11 @@
     # still resolves to an empty string/list (never an undefined-variable
     # error).
     prometheus_scrape_interval: "15s"
-    prometheus_retention_time: "6h"
+    # prometheus_retention_time is DELIBERATELY NOT declared here, same
+    # reason as the four vars above: group_vars/prometheus.example.yml
+    # documents it as an inventory override, and a play-level default
+    # would silently shadow that value (AGENTS.md §4.5 item 3). The
+    # Prometheus container task reads it with `| default('24h', true)`.
     prometheus_scrape_configs: |
       - job_name: prometheus
         static_configs:
@@ -847,9 +851,10 @@
         # prom/prometheus's official image runs as the "nobody" user
         # (uid/gid 65534), not root — the bind-mounted data dir must be
         # owned by that uid or Prometheus fails to write its TSDB at
-        # startup (permission denied). Thanos Sidecar only needs read
-        # access to this same directory (mounted :ro below), so it doesn't
-        # need matching ownership.
+        # startup (permission denied). Thanos Sidecar writes to this same
+        # directory too (thanos/upload/<ulid> before each upload, then
+        # thanos.shipper.json), so it runs as 65534:65534 as well — see
+        # the Sidecar task below.
         - name: "Ensure Prometheus host data dir (owned by container's nobody uid)"
           ansible.builtin.file:
             path: "{{ prometheus_host_data_dir }}"
@@ -1233,7 +1238,7 @@
             command: >-
               --config.file=/etc/prometheus/prometheus.yml
               --storage.tsdb.path=/prometheus
-              --storage.tsdb.retention.time={{ prometheus_retention_time }}
+              --storage.tsdb.retention.time={{ prometheus_retention_time | default('24h', true) }}
               --storage.tsdb.min-block-duration=2h
               --storage.tsdb.max-block-duration=2h
               --web.enable-lifecycle
@@ -1284,12 +1289,22 @@
           vars:
             container_mount_drift_name: pilot-thanos-sidecar
 
-        # Spec: docs/verification/prometheus.md C2, C5, C6, C9
+        # Spec: docs/verification/prometheus.md C2, C5, C6, C9, C21, C22
+        # The Sidecar creates thanos/upload/<ulid> inside the TSDB dir
+        # before every upload and records shipped blocks in
+        # thanos.shipper.json there, so /prometheus must be writable by
+        # the Sidecar's user. thanosio/thanos runs as uid 1001 by default
+        # and the data dir is 65534:65534 0755, so the Sidecar runs as the
+        # Prometheus uid. With `:ro` every upload failed with
+        # "mkdir /prometheus/thanos: read-only file system"; dropping `:ro`
+        # alone fails with "permission denied" instead (both reproduced
+        # with these image versions, see prometheus.md §1.5).
         - name: "Thanos Sidecar — run pilot-thanos-sidecar container"
-          tags: [C2, C5, C6, C9]
+          tags: [C2, C5, C6, C9, C21, C22]
           community.docker.docker_container:
             name: pilot-thanos-sidecar
             image: "thanosio/thanos:{{ thanos_version }}"
+            user: "65534:65534"
             state: started
             restart_policy: unless-stopped
             restart: >-
@@ -1305,7 +1320,7 @@
               --http-address=0.0.0.0:10902
               --grpc-address=0.0.0.0:10901
             volumes:
-              - "{{ prometheus_host_data_dir }}:/prometheus:ro"
+              - "{{ prometheus_host_data_dir }}:/prometheus"
               - "{{ thanos_config_dir }}/objstore.yml:/etc/thanos/objstore.yml:ro"
             ports:
               - "10901:10901"
