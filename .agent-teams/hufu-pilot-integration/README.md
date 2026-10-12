@@ -35,3 +35,35 @@ The adapter returns a typed `environment` failure; this does not satisfy
 execution or acceptance. No automatic replay, phase bypass, or relaxed
 verification is enabled. Resource fixtures exercise stop and unknown-state paths
 without provisioning or contacting VMs.
+
+## Progress and evidence contract
+
+Before the Execute child starts, `facts/source-snapshot.json` pins the actual
+Pilot executable, Go sources and dependency files, transitive playbooks and
+templates, reference documents, team JSON/Python/shell sources, launcher and
+helper scripts. The snapshot records SHA-256 digests, modes and the repository
+revision. Added, removed or changed files fail the stage boundary and final
+verification. The executable hash identifies the binary actually invoked;
+it does not assert that an existing binary was built from the captured source.
+
+`logs/stages.jsonl` records stage starts and actual exits with timestamps,
+private raw-log references, byte lengths and hashes. Bounded stderr frames
+report stages and resource heartbeats to Hufu. These observations never satisfy
+acceptance or reset verified progress. The read-only verifier requires the full
+pipeline, component coverage and sealed proofs independently.
+
+Ordinary failures, handled cancellation and resource stops create a separate
+`receipts/failed-evidence.json` pointer to an immutable failure manifest and
+copies of available logs/facts. Resume can append working logs without changing
+previous failure evidence. The seal records the last stage and failing command
+when available; it excludes argv, stdin and exception text from metadata.
+Timeouts and signals terminate owned child groups before recording their exit.
+A hard kill can interrupt sealing; durable stage records remain partial evidence
+and cannot pass verification.
+
+A success manifest remains `pipeline_complete: false` until all fixed Execute
+stages exit successfully and source inventory is rechecked. The supervisor then
+seals the final stage ledger, resource samples, source snapshot, execution
+receipt, raw logs and component reports. The verifier detects proof tampering
+and source drift, including added transitive tasks and binary changes. These
+regression fixtures do not provision or contact VMs.

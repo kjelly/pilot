@@ -142,7 +142,7 @@ if [[ $mode == check ]]; then
     --workspace "$hufu_workspace" --allow-path "$hufu_workspace" \
     --execution-profile strict-verification --goal-mode outcome --route team --unattended \
     --dry-run -- '依照 docs/runbooks/minimal-poc-architecture.md，使用 Pilot structured actions 從零重建並驗證 Minimal PoC。遵循 team 定義的完整 pipeline。'
-  echo 'Preflight passed; no VM rebuild or Pilot deployment was executed.' 
+  echo 'Preflight passed; no VM rebuild or Pilot deployment was executed.'
   exit 0
 fi
 for tool in virsh qemu-img cloud-localds ansible ansible-playbook sshpass script; do

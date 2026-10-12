@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 import workflow_contract as c
 import section4
+import campaign_evidence as evidence
 
 
 def load(name):
@@ -90,12 +91,18 @@ class WorkflowTests(unittest.TestCase):
             root = Path(directory)
             team = root / '.agent-teams/hufu-pilot-integration'
             team.mkdir(parents=True)
-            for name in ('resource_guard.py', 'resource-policy.json'):
+            for name in ('resource_guard.py', 'resource-policy.json', 'campaign_evidence.py'):
                 (team / name).write_bytes((c.TEAM / name).read_bytes())
             workflow = team / 'execute-structured-workflow.sh'
-            workflow.write_text("echo progress-banner\n")
+            workflow.write_text("python3 - <<'PY'\nimport sys\nsys.path.insert(0, '.agent-teams/hufu-pilot-integration')\nimport campaign_evidence as e\nimport os\nfrom pathlib import Path\nfor stage in e.PIPELINE_STAGES: e.record_stage(Path(os.environ['HUFU_CHECKPOINT_WORKSPACE']), stage, 'completed')\nPY\n")
+            for name in evidence.SOURCE_FILES:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n")
+            evidence.pin_sources(checkpoint := root / 'checkpoint', root)
+            c.write_json(checkpoint / 'receipts/evidence-manifest.json', {'version': 1, 'sources': evidence.sources(root), 'proofs': {}})
             checkpoint = root / 'checkpoint'
-            (checkpoint / 'receipts').mkdir(parents=True)
+            (checkpoint / 'receipts').mkdir(parents=True, exist_ok=True)
             c.write_json(checkpoint / 'receipts/execution.json', {'version': 1, 'status': 'passed'})
             action = {'capability': 'pilot-structured-actions', 'type': 'execute_bundle',
                       'payload': '{"operation":"minimal-poc-structured-run","version":1}'}
@@ -106,12 +113,14 @@ class WorkflowTests(unittest.TestCase):
             response = json.loads(result.stdout)
             self.assertEqual(set(response), {'outputs'})
             self.assertEqual(response['outputs']['status'], 'passed')
-            self.assertIn('progress-banner', result.stderr)
+            self.assertIn('HUFU_ACTION_PROGRESS', result.stderr)
+            (checkpoint / 'facts/source-snapshot.json').unlink()
             workflow.write_text('exit 19\n')
             result = subprocess.run(['bash', str(adapter)], cwd=root, input=json.dumps(action),
                 text=True, capture_output=True, env=dict(os.environ, HUFU_CHECKPOINT_WORKSPACE=str(checkpoint)))
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, '')
+            self.assertEqual(json.loads(result.stdout)['error']['failure_class'], 'execution')
+            self.assertTrue((checkpoint / 'receipts/failed-evidence.json').is_file())
 
     def test_authoritative_dns_must_cover_both_reconciler_records(self):
         checks = section4.Checks.__new__(section4.Checks)
@@ -152,7 +161,23 @@ class WorkflowTests(unittest.TestCase):
             c.write_json(root / 'receipts/evidence-manifest.json', {'version': 1, 'bundle_sha256': c.bundle_hash(root),
                 'proofs': {'logs/section4.jsonl': hashlib.sha256(proof.read_bytes()).hexdigest()},
                 'sources': {name: hashlib.sha256((c.PROJECT / name).read_bytes()).hexdigest() for name in ['docs/runbooks/minimal-poc-architecture.md', 'docs/topologies/minimal-poc-topology.yaml']}})
-            with patch.object(verifier, 'checkpoint', return_value=root), patch.object(verifier, 'COMPONENTS', {}):
+            project = root / 'project'
+            for name in evidence.SOURCE_FILES:
+                target = project / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                original = c.PROJECT / name
+                target.write_bytes(original.read_bytes() if name.endswith(('.md', '.yaml')) else b'fixture')
+            evidence.pin_sources(root, project)
+            evidence.record_stage(root, 'campaign', 'started')
+            for stage in evidence.PIPELINE_STAGES:
+                evidence.record_stage(root, stage, 'completed')
+            evidence.record_stage(root, 'campaign', 'completed')
+            manifest = json.loads((root / 'receipts/evidence-manifest.json').read_text())
+            manifest.update(pipeline_complete=True, sources=evidence.sources(project))
+            manifest['proofs'].update({name: evidence.digest(root / name) for name in
+                ('facts/source-snapshot.json', 'logs/stages.jsonl', 'receipts/execution.json')})
+            c.write_json(root / 'receipts/evidence-manifest.json', manifest)
+            with patch.object(verifier, 'checkpoint', return_value=root), patch.object(verifier, 'PROJECT', project), patch.object(verifier, 'COMPONENTS', {}):
                 self.assertEqual(verifier.verify(), len(section4.REQUIRED))
                 for replacement in (values[:-1], values + [values[0]],
                                     [dict(v, status='fail') if i == 0 else v for i, v in enumerate(values)]):

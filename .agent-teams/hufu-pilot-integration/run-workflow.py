@@ -3,16 +3,14 @@
 import hashlib
 import json
 import os
+from campaign_evidence import verify_sources, install_signal_handlers
 from workflow_contract import (checkpoint, PROJECT, TEAM, HOSTS, COMPONENTS, SECTIONS,
                                run, remote, scenario, recap, write_json, bundle_hash)
 from section4 import Checks, REQUIRED, require
 
 root = checkpoint()
-source_files = [PROJECT / "docs/runbooks/minimal-poc-architecture.md", PROJECT / "docs/topologies/minimal-poc-topology.yaml"]
-source_files += [PROJECT / "docs/verification" / (c + ".md") for c in COMPONENTS]
-source_files += [p for p in TEAM.iterdir() if p.suffix in ('.py', '.sh', '.md', '.yaml')]
-source_files.append(PROJECT / 'run.sh')
-source_hashes = {str(p.relative_to(PROJECT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_files}
+install_signal_handlers()
+source_hashes = verify_sources(root, PROJECT)
 audit = json.loads((root / "receipts/scenario-audit.json").read_text())
 require(audit["status"] == "passed" and audit["bundle_sha256"] == bundle_hash(root), "bundle changed after audit")
 
@@ -86,8 +84,7 @@ for component, group in COMPONENTS.items():
 observed = [json.loads(line) for line in checks.output.read_text().splitlines()]
 require({r["id"] for r in observed} == REQUIRED and len(observed) == len(REQUIRED) and
         all(r["status"] == "pass" for r in observed), "incomplete §4 coverage")
-require(all(hashlib.sha256((PROJECT / name).read_bytes()).hexdigest() == digest for name, digest in source_hashes.items()),
-        'execution-affecting reference or team source changed during the campaign')
+verify_sources(root, PROJECT)
 write_json(root / "receipts/execution.json", {
     "version": 1, "status": "passed", "bundle_sha256": bundle_hash(root),
     "topology_rebuilt": True, "edit_passed": True, "inventory_passed": True,
@@ -101,7 +98,7 @@ write_json(root / "receipts/execution.json", {
 proofs = list((root / "logs").glob("*.log")) + list((root / "reports").rglob("*.ndjson"))
 proofs.append(checks.output)
 write_json(root / "receipts/evidence-manifest.json", {
-    "version": 1, "bundle_sha256": bundle_hash(root),
+    "version": 1, "pipeline_complete": False, "bundle_sha256": bundle_hash(root),
     "proofs": {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in proofs},
     "sources": source_hashes,
 })

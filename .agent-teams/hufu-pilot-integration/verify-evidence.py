@@ -6,6 +6,7 @@ import re
 import yaml
 from workflow_contract import checkpoint, PROJECT, COMPONENTS, SECTIONS, bundle_hash
 from section4 import REQUIRED, require
+from campaign_evidence import verify_sources, verify_pipeline
 
 
 def verify():
@@ -16,6 +17,11 @@ def verify():
     require(set(execution["component_specs"]) == set(COMPONENTS), "incomplete component scope")
     require(manifest["version"] == 1 and manifest["bundle_sha256"] == execution["bundle_sha256"] == bundle_hash(root),
             "bundle drift between audit, execution and verification")
+    require(manifest.get("pipeline_complete") is True, "pipeline has not completed")
+    verify_pipeline(root)
+    require(manifest["sources"] == verify_sources(root, PROJECT), "manifest does not bind pinned sources")
+    require("facts/source-snapshot.json" in manifest["proofs"] and "logs/stages.jsonl" in manifest["proofs"] and
+            "receipts/execution.json" in manifest["proofs"], "campaign metadata is unsealed")
     require(manifest["proofs"] and manifest["sources"], "missing evidence/source manifest")
     required_sources = {'docs/runbooks/minimal-poc-architecture.md', 'docs/topologies/minimal-poc-topology.yaml'}
     required_sources.update('docs/verification/' + c + '.md' for c in COMPONENTS)

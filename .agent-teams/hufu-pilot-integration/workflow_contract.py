@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+from campaign_evidence import record_stage, kill_group, CampaignCancelled
 
 TEAM = Path(__file__).resolve().parent
 PROJECT = TEAM.parent.parent
@@ -55,27 +56,48 @@ def bundle_hash(root):
 
 
 def run(name, argv, *, input_text=None, timeout=7200):
-    """Store complete diagnostics; secrets supplied on stdin never enter argv/logs."""
-    logs = checkpoint() / "logs"
+    """Preserve diagnostics and stage exits; never put stdin secrets in metadata."""
+    root = checkpoint()
+    logs = root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     path = logs / (name + ".log")
-    with path.open("a+", encoding="utf-8") as stream:
-        start = stream.tell()
-        try:
-            result = subprocess.run(argv, input=input_text, text=True, stdout=stream,
-                                    stderr=subprocess.STDOUT, cwd=PROJECT,
-                                    timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
+    record_stage(root, name, "started")
+    process = None
+    try:
+        with path.open("a+", encoding="utf-8") as stream:
+            path.chmod(0o600)
+            start = stream.tell()
+            process = subprocess.Popen(argv, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                text=True, stdout=stream, stderr=subprocess.STDOUT, cwd=PROJECT, start_new_session=True)
+            try:
+                process.communicate(input=input_text, timeout=timeout)
+            finally:
+                kill_group(process)
+            stream.flush()
+            stream.seek(start)
+            output = stream.read()
+            stream.seek(0, os.SEEK_END)
+            stream.write(f"\n[local exit={process.returncode}]\n")
+        record_stage(root, name, "completed" if process.returncode == 0 else "failed", path, process.returncode)
+        if process.returncode:
+            raise RuntimeError(f"{name} failed ({process.returncode}); see {path}")
+        return output
+    except CampaignCancelled as error:
+        record_stage(root, name, "cancelled", path, 128 + error.number)
+        raise
+    except KeyboardInterrupt:
+        record_stage(root, name, "cancelled", path, 130)
+        raise
+    except subprocess.TimeoutExpired:
+        with path.open("a") as stream:
             stream.write(f"\n[local timeout={timeout}]\n")
-            raise
-        stream.flush()
-        stream.seek(start)
-        output = stream.read()
-        stream.seek(0, os.SEEK_END)
-        stream.write(f"\n[local exit={result.returncode}]\n")
-    if result.returncode:
-        raise RuntimeError(f"{name} failed ({result.returncode}); see {path}")
-    return output
+        record_stage(root, name, "timeout", path)
+        raise
+    except Exception:
+        # Nonzero exits were already recorded with their actual return code.
+        if process is None or process.returncode == 0:
+            record_stage(root, name, "failed", path)
+        raise
 
 
 def remote(name, host, command, *, input_text=None, timeout=180):

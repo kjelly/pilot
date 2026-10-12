@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+from campaign_evidence import pin_sources, seal_failure, seal_success, record_stage
 
 TEAM = Path(__file__).resolve().parent
 PROJECT = TEAM.parent.parent
@@ -73,7 +74,7 @@ def terminate(process):
     except ProcessLookupError:
         pass
     try:
-        process.wait(timeout=0.5)
+        process.wait(timeout=0.03)
     except subprocess.TimeoutExpired:
         pass
     try:
@@ -278,6 +279,7 @@ def main():
     parser.add_argument("--check", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    checkpoint = None
     try:
         policy = load_policy()
         if args.check:
@@ -292,13 +294,35 @@ def main():
             raise StopSignal(number)
         for number in (signal.SIGINT, signal.SIGTERM):
             signal.signal(number, on_signal)
+        pin_sources(checkpoint, PROJECT)
+        old_manifest = checkpoint / "receipts/evidence-manifest.json"
+        if old_manifest.exists():
+            previous = json.loads(old_manifest.read_text())
+            previous["pipeline_complete"] = False
+            write_json(old_manifest, previous)
+        record_stage(checkpoint, "campaign", "started")
         code, stopped = supervise(command, policy, checkpoint)
+        code = code if code >= 0 else 128 - code
         if stopped is not None:
+            record_stage(checkpoint, "campaign", "resource_stop", exit_code=code)
+            seal_failure(checkpoint, "stopped", code, "resource_policy")
             print(json.dumps({"error": {"failure_class": "environment", "message": "resource policy stopped workflow; see " + str(checkpoint / "receipts/resource-stop.json")}}))
+        elif code:
+            record_stage(checkpoint, "campaign", "cancelled" if code in (130, 143) else "failed", exit_code=code)
+            seal_failure(checkpoint, "cancelled" if code in (130, 143) else "failed", code, "workflow_exit")
+            print(json.dumps({"error": {"failure_class": "execution", "message": "workflow failed; see " + str(checkpoint / "receipts/failed-evidence.json")}}))
+        else:
+            seal_success(checkpoint, PROJECT)
         return code
     except StopSignal as stopped:
+        if checkpoint is not None:
+            record_stage(checkpoint, "campaign", "cancelled", exit_code=128 + stopped.number)
+            seal_failure(checkpoint, "cancelled", 128 + stopped.number, "operator_signal")
         return 128 + stopped.number
-    except (ValueError, KeyError, OSError) as error:
+    except (ValueError, KeyError, OSError, RuntimeError) as error:
+        if checkpoint is not None:
+            record_stage(checkpoint, "campaign", "failed", exit_code=75)
+            seal_failure(checkpoint, "failed", 75, "supervisor_contract")
         print(json.dumps({"error": {"failure_class": "environment", "message": "resource guard could not establish its contract: " + type(error).__name__}}))
         return 75
 
