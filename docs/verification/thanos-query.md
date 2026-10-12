@@ -117,11 +117,14 @@
 - 工具：`pilot verify docs/verification/thanos-query.md -i <inventory> -l thanos-query`
 - 輸出格式：`.verification/thanos-query-<UTC>.{ndjson,md}`
 - 預期 row 數：13
-- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`
-  （真實 vm-target：修正前 C1–C10 PASS、C11–C13 FAIL，即舊版 spec 在從未上傳過
-  block 的部署上全部 PASS；修正後 `pass=13 fail=0`，經 Store Gateway 查到不在
-  Query endpoint 清單上的站台資料。保留期限與降採樣需要數十天資料，VM 上未觀察，
-  由同版本 image 的本機實驗涵蓋，見該檔 §2）
+- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
+  （2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級，tree 見該檔；真實
+  vm-target，raw/5m/1h 都 90d：兩個 candidate 都 `pass=13 fail=0`，冪等重跑
+  `changed=0`。保留期限與降採樣需要數十天資料，VM 上未觀察，由
+  `make thanos-retention-test` 以同版本 image 實跑 Compactor 涵蓋：raw 30d 時短命、
+  停用、改 label 的站台資料都被刪掉，90d 時全部保留，見該檔 §1）。修正前
+  C1–C10 PASS、C11–C13 FAIL 的重現，以及經 Store Gateway 查到不在 Query endpoint
+  清單上的站台資料，見 `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`
 
 ## 4. PASS / FAIL 規則
 

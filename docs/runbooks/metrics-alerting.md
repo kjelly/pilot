@@ -992,22 +992,25 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
 - Instant query（`/api/v1/query`、alert rule）只讀 raw，查不到 raw 刪除後的時間點。
 - 從來沒被降採樣的 block（上面說的短命站台、停用站台最後一段）會直接消失。
 
-### 事實快照（2026-10-12，candidate `0c2a8e2`）
+### 事實快照（2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級）
 
-- 目標：三台 disposable vm-target。`mt-central`：docker + seaweedfs-s3 +
-  thanos-query；`mt-site`：全新安裝的站台 `site-a`；`mt-siteb`：先套修正前版本、
-  再升級的站台 `site-b`。測完已 teardown。
-- 修正前（`d541aef`）：`prometheus.md` C21/C22 FAIL；`thanos-query.md` C1–C10
-  PASS、C11–C13 FAIL。
-- 全新安裝（`vm-target topology test`）：apply 後冪等重跑 `changed=0`。Prometheus
-  啟動約 3 小時後，site-a 的第一個 block 上傳成功，`prometheus.md` C22 PASS
-  （pass=14 fail=8，C11/C13–C19 是拓樸例外）。
-- 升級：修正前卡在本機的 block 在升級後立刻上傳，C21/C22 PASS，重跑 `changed=0`。
-- 中央：`thanos-query.md` PASS 13/13，並經由 Store Gateway 查到不在 Query endpoint
-  清單上的 site-b 資料。
-- 30/90 天保留與降採樣需要數十天的資料，在 VM 上沒有觀察到；同版本 image 的
-  本機實驗見 evidence §2。
-- 完整摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
+- 目標：兩台 disposable vm-target。`rv-central`：docker + seaweedfs-s3 +
+  thanos-query；`rv-site`：站台 `review-site`，設了一個 `kind: snmp` profile
+  （snmp-exporter scrape job 也帶 `site` label，PR #39 review 的 C22 觸發條件）。
+  測完已 teardown。
+- 全新安裝（`vm-target topology test`，`f4d4db9`）：apply 後冪等重跑 `changed=0`。
+  Prometheus 啟動約 3 小時後第一個 block 上傳，`prometheus.md` pass=14 fail=8
+  （C8/C21/C22 PASS，C11/C13–C19 是拓樸例外）；同一狀態下 `c52884e` 的 C22 被
+  Thanos 以 `unquote label value` 拒絕。中央 `thanos-query.md` PASS 13/13。
+- 升級到 PR head（`1660889`，含 dashboard 的 Query network alias）：只有
+  `pilot-thanos-query` 重建，兩份 spec 結果相同，重跑 `changed=0`。
+- 保留期限：`make thanos-retention-test` 用同版本 image 實跑 Compactor，raw 30d 時
+  短命、停用、改 label 的站台資料都被刪掉，90d 時全部保留。數十天的保留與降採樣
+  沒有在 VM 上觀察。
+- 完整摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`；
+  修正前（`d541aef`）的 Sidecar 上傳失敗重現、升級時卡住的 block 補上傳、經
+  Store Gateway 查到不在 Query endpoint 清單上的站台資料，見
+  `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
 
 ### 正式環境上線
 
@@ -1041,6 +1044,8 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
 | `prometheus`（+ host annotations → target labels，§7e） | meta-prom + meta-node | `prometheus-host-metadata.md` PASS pass=10 fail=0 skip=0；移除 mapping 後 `prometheus.md` pass=15 fail=4（C9/C11/C17/C19 拓樸例外） | changed=0 |
 | `prometheus`（+ Sidecar 上傳、24h 本機保留，§7f） | mt-site（全新）、mt-siteb（升級） | 兩台皆 pass=14 fail=8（C21/C22 PASS；C11/C13–C19 拓樸例外） | changed=0 |
 | `thanos-query`（+ 分層保留、auto-downsampling，§7f） | mt-central | PASS pass=13 fail=0 skip=0 | changed=0 |
+| `prometheus`（+ SNMP profile，C8/C22 只讀 `external_labels.site`，§7f） | rv-site（`f4d4db9` 全新、`1660889` 升級） | 兩次皆 pass=14 fail=8（C8/C21/C22 PASS；C11/C13–C19 拓樸例外） | changed=0 |
+| `thanos-query`（+ raw/5m/1h 皆 90d，§7f） | rv-central（`f4d4db9` 全新、`1660889` 升級） | 兩次皆 PASS pass=13 fail=0 skip=0 | changed=0 |
 
 三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
 的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
@@ -1104,3 +1109,4 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-09-23 | v2.5 | 新增 §7e：`prometheus_host_annotation_labels`（hosts.yml annotations → node/DCGM target labels，opt-in），兩台 vm-target 實測（generated inventory 路徑、fail-closed、L9 churn、rollback）；順手修好 `delegate_to` 對「存在但為空」的 `seaweedfs-s3` group 直接崩潰的既有 bug（prometheus/restic-backup/thanos-query） | pilot |
 | 2026-09-23 | v2.6 | §7e 啟用步驟改用 `pilot edit`「Prometheus 主機註解 labels」選單與 `set_/delete_prometheus_annotation_label` actions（不再需要手改 group_vars） | pilot |
 | 2026-10-12 | v2.7 | 新增 §7f：Sidecar `/prometheus:ro` 讓站台 block 從未上傳，改以 uid 65534 讀寫掛載；Prometheus 本機保留預設 24h；Compactor raw 30d / 5m 90d / 1h 90d；Query 啟用 auto-downsampling。三台 vm-target 實測修正前、全新安裝與升級三條路徑（candidate `0c2a8e2`） | pilot |
+| 2026-10-12 | v2.8 | §7f（PR #39 review）：Compactor raw 保留改為 90d（raw 30d 會把從未降採樣的短命、停用、改 label 站台資料整段刪掉，`make thanos-retention-test` 在 CI 實跑 Compactor 鎖住）；`external_labels.site` 改用 JSON 字串渲染，`prometheus.md` C8/C22 只讀它（設了 `kind: snmp` profile 時舊 C22 的 selector 被 Thanos 拒絕）；查詢限制與上線步驟改寫；新增兩列 §9 坑。兩台 vm-target 實測（candidate `f4d4db9` 全新安裝、`1660889` 升級） | pilot |

@@ -19,6 +19,10 @@
 > 已在真實 vm-target 上驗證：先用修正前的程式重現 `/prometheus:ro` 讓每次上傳
 > 都失敗，再確認全新安裝與升級兩條路徑都上傳成功、冪等重跑 `changed=0`，證據見
 > `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
+> 2026-10-12 PR #39 review 後的 C8/C22（只讀 `global.external_labels.site`）
+> 在有 `kind: snmp` profile 的真實 vm-target 上重驗：同一個狀態下舊 C22 被
+> Thanos 以 `unquote label value` 拒絕、新 C22 PASS，證據見
+> `docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`。
 
 > 跟 `thanos-query.md` 是一對「站台 / 中央」關係——本檔是**每個機房/站台**
 > 各自跑一份的角色（`prometheus` group，類比 `wazuh-fim`），`thanos-query.md`
@@ -241,10 +245,13 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：22
-- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`
-  （真實 vm-target，有 seaweedfs-s3 與中央 thanos-query；修正前 C21/C22 FAIL，
-  全新安裝與升級後都 `pass=14 fail=8`，C21/C22 PASS，C11/C13–C19 因該次
-  topology 沒有 Alertmanager/host-monitoring/dcgm-exporter 而預期 fail）。
+- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
+  （2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級，tree 見該檔；真實
+  vm-target，站台設了 `kind: snmp` profile，有 seaweedfs-s3 與中央 thanos-query；
+  兩個 candidate 都 `pass=14 fail=8`，C8/C21/C22 PASS，C11/C13–C19 因該次
+  topology 沒有 Alertmanager/host-monitoring/dcgm-exporter 而預期 fail；同一狀態下
+  `c52884e` 的 C22 FAIL）。C21/C22 修正前的重現與升級路徑見
+  `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
   C20 的證據見 `docs/evidence/prometheus/2026-10-12-1c24223.md`（舊 inode 自癒、
   設定變更與 `--tags C8` 重啟、`-vvv` 不印掛載檔 hash；修正前的重現見
   `docs/evidence/prometheus/2026-10-12-c12c4a8.md` §2），C16–C19 的 GPU scrape
