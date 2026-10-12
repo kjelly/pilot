@@ -6,12 +6,12 @@ Grafana 透過 Thanos Query 的 Prometheus-compatible API 查 metrics，透過�
 
 ## 0.5 目前有效的事實快照
 
-- 驗證日期：2026-10-12 UTC；candidate `9bcc4fa95552f99553ba126bb2963fcdf445aa60`，tree `d42b0dd91cb9838e94e8633038f8985ed9a9f4a5`。
-- 目標：由 `docs/topologies/dashboard-dns-topology.yaml` 建立的全新 Ubuntu 24.04 KVM VM，實際 inventory 的 `docker`、`seaweedfs-s3`、`prometheus`、`thanos-query`、`dashboard` 都指向同一個測試 host。
-- 外部 state：重用既有 local cache services；測試變數檔包含 Grafana 密碼、Thanos S3 access/secret key、S3 endpoint、site label 與測試 bucket 清單，秘密值不放入文件。
+- 驗證日期：2026-10-12 UTC；candidate `9e6d684966e91cefbfe04fdadaeb0a7fc318c914`，tree `df67c2cf11380961bc025b955f6551b086c326f3`。
+- 目標：由 `docs/topologies/dashboard-delivery-topology.yaml` 建立的全新 Ubuntu 24.04 KVM VM，實際 inventory 的 `docker`、`seaweedfs-s3`、`thanos-query`、`dashboard` 都指向同一個測試 host；本輪沒有 Prometheus sites。
+- 外部 state：重用既有 local cache services；測試變數檔包含 Grafana 密碼、Thanos S3 access/secret key、S3 endpoint 與測試 bucket 清單，秘密值不放入文件。
 - 對齊決定：A，建立具備上述 role groups 的拋棄式 inventory；沒有以 spec 推測實際 host。完整測試後 VM 已清除。
-- 結果：fresh check mode `failed=0`，apply `changed=31 failed=0`，dashboard v1.3 **14/14 PASS**，第二次 apply **changed=0 failed=0**。
-- [目前有效的驗證證據](../evidence/dashboard/2026-10-12-9bcc4fa.md)。本輪涵蓋 Grafana/Loki 與同機 Thanos datasource；沒有重驗跨主機 log-shipping 或修改正式環境。
+- 結果：fresh check mode `failed=0`，apply `changed=26 failed=0`，dashboard v1.3 **14/14 PASS**，第二次 apply **changed=0 failed=0**。真實 deploy/reconcile 只選 dashboard 也成功；reconcile 修復被移除的 Query alias，再跑各元件 apply 都是 changed=0，Grafana datasource API 查詢成功。
+- [目前有效的驗證證據](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)。本輪涵蓋 Grafana/Loki、同機 Thanos datasource 與兩個交付入口；沒有重驗跨主機 log-shipping 或修改正式環境。
 
 ## 1. 服務連線契約
 
@@ -27,16 +27,18 @@ Grafana 透過 Thanos Query 的 Prometheus-compatible API 查 metrics，透過�
 ## 2. 套用與升級
 
 1. 先確認實際 inventory 的 `dashboard` 與 `thanos-query` provider 是否共置，以及環境 group / stage 是否一致。
-2. 先套用 `thanos-query`，讓 provider 宣告 network alias；再套用 `dashboard`，讓 Grafana 更新 datasource URL。同機預設不需要提供 IP。
+2. 執行 `pilot deploy` 的單一元件模式，或 `pilot reconcile`，只選 `dashboard`。確認畫面會列出實際 host 與 Docker → Thanos Query → dashboard 的套用計畫；確認後自動宣告 provider network alias 並更新 Grafana datasource。同機預設不需要提供 IP，也不需要另跑 Thanos 的部署。
 3. 跨主機提供容器能解析的服務 FQDN；完整 URL 可由 `thanos_query_url` 覆寫。URL 必須是 HTTP(S) 根路徑位址，不含帳密、query 或 fragment。TLS 憑證必須受 Grafana 容器信任。
 4. dashboard 升級會備份 hosts 至 `/etc/hosts.pre-dashboard.bak`，並移除它管理的舊 Thanos hosts alias；移除失敗時還原並停止。其他 hosts entries 不受影響。
 5. 依 [dashboard verification spec](../verification/dashboard.md) 驗收。C8 從 Grafana 容器讀取實際 datasource URL 後連線，不能用主機 curl 成功代替。
 
-上游尚未部署時允許 Grafana/Loki 先上線，但 C8 fail 表示 datasource 尚未就緒，不能宣告完整交付成功。
+SeaweedFS S3 是既有前置服務，這個計畫不會自動部署它；先備妥 S3、必要 credentials 與實際 inventory 的 provider group。缺少或無法唯一選定 Thanos provider 時，計畫在 apply 前停止。依賴套用失敗時不執行 dashboard，已完成的依賴保留於 delivery evidence；不是整條鏈的原子 rollback。
+
+`reconcile` 會修復 provider alias 與 datasource 設定；狀態已符合時，實際 apply 可收斂到 changed=0。完整設定更新請讓 tags 留空；consumer row tags 不會傳給依賴。跨主機仍需使用容器可解析的服務名稱。C8 fail 表示 datasource 尚未就緒，不能宣告完整交付成功。
 
 ## 3. 可重跑的隔離驗證
 
-本次正式測試使用 `docs/topologies/dashboard-dns-topology.yaml` 與 `playbooks/test/dashboard-dns-chain.yml`。安裝順序為 Docker → SeaweedFS S3 → Prometheus/Sidecar → Thanos Query → Grafana/Loki。
+本次正式測試使用 `docs/topologies/dashboard-delivery-topology.yaml` 與 `playbooks/test/dashboard-delivery-chain.yml`。安裝順序為 Docker → SeaweedFS S3 → Thanos Query → Grafana/Loki。另從真實 deploy/reconcile 入口只選 dashboard，驗證 provider 自動套用、移除 alias 後的修復與再次套用收斂。
 
 透過 `vm-target topology test` 的 ephemeral 模式跑 syntax → fresh check mode → cluster snapshot → apply → dashboard verify → 第二次 apply（changed=0），成功或失敗後清除本次建立的 VM。完整命令、revision/tree、檔案 hashes 與結果存於上述 evidence record；測試秘密由 private extra-vars 檔提供。
 
