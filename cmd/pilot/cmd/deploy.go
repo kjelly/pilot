@@ -1518,7 +1518,7 @@ func requiredApplyDependencyChain(catalog contract.Catalog, componentIDs []strin
 		visiting[c.ID] = true
 		defer delete(visiting, c.ID)
 		for _, dep := range c.Dependencies {
-			if !dep.Required || !(dep.Relation == "sameHosts" || includeManagedProviders && dep.Relation == "providerEndpoint" && dep.ApplyBeforeConsumer) {
+			if !appliedBeforeConsumer(dep, includeManagedProviders) {
 				continue
 			}
 			if visiting[dep.Component] {

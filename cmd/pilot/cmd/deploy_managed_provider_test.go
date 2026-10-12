@@ -316,3 +316,24 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestAppliedBeforeConsumer(t *testing.T) {
+	for _, tc := range []struct {
+		dep              contract.Dependency
+		managedProviders bool
+		want             bool
+	}{
+		{contract.Dependency{Required: true, Relation: "sameHosts"}, false, true},
+		{contract.Dependency{Required: true, Relation: "sameHosts"}, true, true},
+		{contract.Dependency{Required: false, Relation: "sameHosts"}, true, false},
+		{contract.Dependency{Required: true, Relation: "providerEndpoint", ApplyBeforeConsumer: true}, true, true},
+		{contract.Dependency{Required: true, Relation: "providerEndpoint", ApplyBeforeConsumer: true}, false, false},
+		{contract.Dependency{Required: true, Relation: "providerEndpoint"}, true, false},
+		{contract.Dependency{Required: false, Relation: "providerEndpoint", ApplyBeforeConsumer: true}, true, false},
+		{contract.Dependency{Required: true, Relation: "other", ApplyBeforeConsumer: true}, true, false},
+	} {
+		if got := appliedBeforeConsumer(tc.dep, tc.managedProviders); got != tc.want {
+			t.Errorf("appliedBeforeConsumer(%+v, %v) = %v, want %v", tc.dep, tc.managedProviders, got, tc.want)
+		}
+	}
+}

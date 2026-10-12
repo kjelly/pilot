@@ -38,6 +38,23 @@ func dependencyTargetVars(extraVars []string, role string) []string {
 	return append(vars, "target_group="+role)
 }
 
+// appliedBeforeConsumer reports whether a deploy applies dep's provider
+// before its consumer: required sameHosts dependencies always, and required
+// providerEndpoint dependencies marked applyBeforeConsumer when
+// managedProviders is set.
+func appliedBeforeConsumer(dep contract.Dependency, managedProviders bool) bool {
+	if !dep.Required {
+		return false
+	}
+	switch dep.Relation {
+	case "sameHosts":
+		return true
+	case "providerEndpoint":
+		return managedProviders && dep.ApplyBeforeConsumer
+	}
+	return false
+}
+
 // Inventory support scope includes bound services that are never mutated.
 // Follow only actual apply edges to avoid deploying Docker on an S3 support
 // host, or on every Docker host in the inventory.
@@ -52,7 +69,7 @@ func deploymentDependencyLimits(catalog contract.Catalog, components []string, s
 		visiting[c.ID] = true
 		defer delete(visiting, c.ID)
 		for _, dep := range c.Dependencies {
-			if !dep.Required || !(dep.Relation == "sameHosts" || dep.Relation == "providerEndpoint" && dep.ApplyBeforeConsumer) {
+			if !appliedBeforeConsumer(dep, true) {
 				continue
 			}
 			provider, ok := catalog.Component(dep.Component)
