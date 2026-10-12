@@ -80,7 +80,8 @@ func isFCApply(name string) bool {
 // TestRegression_ForceCommandInstallFollowsItsChecks: every tag of the
 // drop-in install selects the checks before it and the sshd -t and reload
 // after it; the checks run only when installing, so they never block the
-// rollback.
+// rollback, and every check but the read-only stat skips check mode, where
+// a fresh host has neither the files nor the service yet.
 func TestRegression_ForceCommandInstallFollowsItsChecks(t *testing.T) {
 	for _, pb := range fcPlaybooks {
 		t.Run(pb.name, func(t *testing.T) {
@@ -111,6 +112,9 @@ func TestRegression_ForceCommandInstallFollowsItsChecks(t *testing.T) {
 					when, _ := yaml.Marshal(task["when"])
 					if !strings.Contains(string(when), pb.installVar) {
 						t.Errorf("%q does not depend on %s, so it would block the rollback", name, pb.installVar)
+					}
+					if _, isStat := task["ansible.builtin.stat"]; !isStat && !strings.Contains(string(when), "not ansible_check_mode") {
+						t.Errorf("%q runs in check mode, where a fresh host has no wrapper, CLI or service to check", name)
 					}
 				case isFCApply(name):
 					applied++
@@ -375,6 +379,39 @@ func TestRegression_ForceCommandInstallIsCheckedUnderItsRowTag(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// TestRegression_ForceCommandGatesPreviewAFreshHost: `--check` on a host
+// the playbook never ran on (no wrapper, no CLI, no service, no portal
+// group yet) previews the install instead of failing in the gates, with no
+// tags, the row tag or the group tag (AGENTS.md §4.0, §4.5 point 4).
+func TestRegression_ForceCommandGatesPreviewAFreshHost(t *testing.T) {
+	for _, pb := range fcPlaybooks {
+		for _, tags := range []string{"", pb.rowTag, pb.groupTag} {
+			t.Run(pb.name+"/"+tags, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(dir, "sshd_config.d"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				dropin := filepath.Join(dir, "sshd_config.d", filepath.Base(pb.dropin))
+				args := []string{"--check", "--diff"}
+				if tags != "" {
+					args = append(args, "--tags", tags)
+				}
+				res := runFCTasks(t, pb, dir, map[string]any{
+					"fc_health_cmd": []any{"sh", "-c", "echo 'curl: (7) Failed to connect' >&2; exit 7"},
+					"fc_getent_cmd": []any{"sh", "-c", "exit 2"},
+				}, args...)
+				if res.rc != 0 || len(res.failures) > 0 {
+					t.Errorf("--check on a fresh host: rc=%d failures=%v; want the install previewed", res.rc, res.failures)
+				}
+				if fcExists(dropin) {
+					t.Errorf("--check wrote the drop-in")
+				}
+			})
 		}
 	}
 }
