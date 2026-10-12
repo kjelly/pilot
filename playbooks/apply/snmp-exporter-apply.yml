@@ -376,6 +376,18 @@
             name: "{{ docker_network_name }}"
             state: present
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 12).
+        - name: "Check whether {{ snmp_exporter_container_name }} still sees its current snmp.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: "{{ snmp_exporter_container_name }}"
+
         - name: "Run pilot-snmp-exporter container"
           tags: [C1, C2, C3, C4, C5, C6, C10]
           community.docker.docker_container:
@@ -383,7 +395,10 @@
             image: "{{ snmp_exporter_image }}:{{ snmp_exporter_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (snmp_auths_render | default({})) is changed or (snmp_env_render | default({})) is changed }}"
+            restart: >-
+              {{ (snmp_auths_render | default({})) is changed
+                 or (snmp_env_render | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             read_only: true
             security_opts:
               - "no-new-privileges:true"

@@ -255,6 +255,18 @@
             name: "{{ docker_network_name }}"
             state: present
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 12).
+        - name: "Check whether pilot-thanos-store still sees its current objstore.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-thanos-store
+
         # Spec: docs/verification/thanos-query.md C2, C6, C8
         - name: "Thanos Store Gateway — run pilot-thanos-store container"
           tags: [C2, C6, C8]
@@ -263,7 +275,9 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (objstore_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (objstore_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -279,6 +293,16 @@
               - "10903:10903"
               - "10904:10904"
 
+        # Same objstore.yml mount as pilot-thanos-store above.
+        - name: "Check whether pilot-thanos-compact still sees its current objstore.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-thanos-compact
+
         # Spec: docs/verification/thanos-query.md C3, C7
         # --wait makes this run continuously (not a one-shot batch job).
         # Only ONE compactor may ever run against a given bucket at a time
@@ -290,7 +314,9 @@
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (objstore_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (objstore_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-

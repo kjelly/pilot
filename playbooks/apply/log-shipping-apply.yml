@@ -277,6 +277,18 @@
             name: "{{ docker_network_name }}"
             state: present
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 12).
+        - name: "Check whether pilot-promtail still sees its current config files"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-promtail
+
         # Spec: docs/verification/log-shipping.md C1, C2, C6, C7
         # grafana/promtail's official image runs as root, so it doesn't
         # need chowned host dirs to read log-server's rsyslog-owned files
@@ -288,7 +300,9 @@
             image: "grafana/promtail:{{ promtail_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (promtail_config_result | default({})) is changed }}"
+            restart: >-
+              {{ (promtail_config_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             command: "-config.file=/etc/promtail/config.yml"
             networks:
               - name: "{{ docker_network_name }}"
