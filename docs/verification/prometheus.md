@@ -8,6 +8,10 @@
 > 完整驗證（fresh apply、認證後成功 scrape、真實 GPU 指標、冪等重跑），
 > 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`；過程中發現並修好
 > 兩個真實 bug（見該檔 §5）。
+> 2026-10-12 C20（container 讀到的 `prometheus.yml` 與主機檔案相同）已在
+> 真實 vm-target 上驗證：先用修正前的程式重現「設定變更後 container 沒重啟、
+> 仍讀舊 inode、`/-/reload` 無效」，再確認修正後重跑 apply 會重啟並載入新設定、
+> 冪等重跑 `changed=0`，證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`。
 
 > 跟 `thanos-query.md` 是一對「站台 / 中央」關係——本檔是**每個機房/站台**
 > 各自跑一份的角色（`prometheus` group，類比 `wazuh-fim`），`thanos-query.md`
@@ -204,10 +208,11 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：20
-- Sanitized 摘要：`docs/evidence/prometheus/2026-09-21-79172c6.md`（真實 vm-target
-  跑過 dcgm-exporter auto-discovery 的 fresh apply/認證 scrape/GPU 指標/冪等
-  重跑；C9/C11/C13/C14/C15 因該次測試 topology 沒有 seaweedfs-s3/alertmanager/
-  host-monitoring 而預期 fail，C16–C19 全 PASS）
+- Sanitized 摘要：`docs/evidence/prometheus/2026-10-12-c12c4a8.md`（真實 vm-target，
+  有 Alertmanager 的設定；修正前重現 container 讀舊設定，修正後自癒、設定變更
+  重啟、冪等重跑；fresh host `pass=12 fail=8`，C20 PASS，C9/C13–C19 因該次
+  topology 沒有 seaweedfs-s3/host-monitoring/dcgm-exporter 而預期 fail）。
+  C16–C19 的 GPU scrape 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
 
 ## 4. PASS / FAIL 規則
 
