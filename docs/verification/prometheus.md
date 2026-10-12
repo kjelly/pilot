@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.4
+> 版本：v1.5
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -135,6 +135,7 @@
 | C17 | metrics       | 至少一個 dcgm-exporter target 被成功（認證通過）scrape（`up{job="dcgm"}==1`；僅在有 dcgm-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22dcgm%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
 | C18 | config        | `prometheus.yml` 的 dcgm-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `dcgm_exporter_targets` override 時沒有此 label，見 §5） | 0 | awk '/^- /{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; sec=$0 ORS; next} {sec=sec $0 ORS} END{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; print (f?0:1)}' /etc/pilot/prometheus/prometheus.yml |
 | C19 | metrics       | 收到真正的 GPU 硬體指標，不只是 exporter 自身存活（`DCGM_FI_DEV_GPU_UTIL{job="dcgm"}` 至少一筆 sample；僅在有 dcgm-exporter target 時適用） | present | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL%7Bjob%3D%22dcgm%22%7D' | grep -o '"metric"' |
+| C20 | config        | 執行中的 `pilot-prometheus` 讀到的 `prometheus.yml` 與主機上的檔案內容相同（不是 bind mount 留下的舊檔） | 0 | sh -c 'h=$(sha256sum < /etc/pilot/prometheus/prometheus.yml) && c=$(docker exec pilot-prometheus cat /etc/prometheus/prometheus.yml | sha256sum) && [ "$h" = "$c" ]' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -190,12 +191,19 @@
 > 才會有非零 series，`dcgm-exporter` group 混編非 GPU 候選主機時，那些主機
 > 的 target 只會停在 `up=0`、抓不到任何 series，不影響本行判定（本行只要求
 > group 裡「至少一筆」）。
+> C20 驗證的是 container 實際讀到的設定，不是主機上的檔案：`prometheus.yml`
+> 是單檔 bind mount，`copy` 用 rename 換掉檔案後主機路徑指向新的 inode，
+> 沒有重啟的 container 仍然讀舊的那份，`/-/reload` 也只會重讀舊檔。C8/C11/
+> C13/C16 都只 grep 主機上的檔案，container 讀舊檔時它們照樣 PASS。
+> 2026-10-12 正式環境就是這個狀態：新的 dcgm-exporter target 已寫進主機的
+> `prometheus.yml`，container 仍在用幾週前的版本。本行在 container 不存在或
+> `docker exec` 失敗時也會 fail（空輸出的 hash 跟主機檔案對不上）。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：19
+- 預期 row 數：20
 - Sanitized 摘要：`docs/evidence/prometheus/2026-09-21-79172c6.md`（真實 vm-target
   跑過 dcgm-exporter auto-discovery 的 fresh apply/認證 scrape/GPU 指標/冪等
   重跑；C9/C11/C13/C14/C15 因該次測試 topology 沒有 seaweedfs-s3/alertmanager/
@@ -203,7 +211,7 @@
 
 ## 4. PASS / FAIL 規則
 
-- C1–C19 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
+- C1–C20 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -226,6 +234,7 @@
     ——`docker logs pilot-prometheus | grep -i dcgm` 看 scrape 錯誤訊息
   - C18 fail → 預期 fail 見 §5（inventory 沒有 `dcgm-exporter` 主機，或本次套用帶了 `dcgm_exporter_targets` override）；若非預期，檢查 auto-discovery 迴圈是否真的走到（`groups['dcgm-exporter']` 非空且未 override）
   - C19 fail（但 C17 pass）→ 該 target 是真的容器活著但沒有真實 GPU 裝置傳進去；檢查 `dcgm-exporter.md` C6（GPU 裝置真的傳進容器）是否 pass
+  - C20 fail → container 還在讀舊的 `prometheus.yml`（`stat -c %i` 主機檔案跟 `docker exec pilot-prometheus stat -c %i /etc/prometheus/prometheus.yml` 不同）；重跑 apply 會偵測到並重啟 container，`/-/reload` 無效
 
 ## 5. 例外與已知偏差
 
@@ -248,3 +257,4 @@
 | 2026-08-10 | v1.2 | 新增 C13–C14：自動從 inventory 的 `host-monitoring` group 展開 node-exporter scrape target（`node_exporter_targets`，escape hatch 跟 `alertmanager_target_host` 同一種模式），並對認證後成功 scrape 做端到端驗證（node_exporter 強制 Basic Auth，見 `host-monitoring.md` v1.1） | sre |
 | 2026-08-28 | v1.3 | 新增 C15：Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9）需要 canonical `pilot_host` producer——auto-discovery 從 `host-monitoring` group 展開時，每個 host 改成各自一個 `static_configs` 項目並帶 `labels.pilot_host = inventory_hostname`；`node_exporter_targets` explicit override 行為不變（無 label） | sre |
 | 2026-09-21 | v1.4 | 新增 C16–C19：自動從 inventory 的 `dcgm-exporter` group 展開 GPU metrics scrape target（`dcgm_exporter_targets`，跟 `node_exporter_targets`/C13–C15 同一套 auto-discovery/escape-hatch/`pilot_host` label 模式，固定 job 名稱 `dcgm`、port 9400），並對認證後成功 scrape 到真實 GPU 硬體指標（`DCGM_FI_DEV_GPU_UTIL`，不只是 exporter 存活）做端到端驗證；補上 `dcgm-exporter.md` §5 原先列為已知留白的 Prometheus 整合。對 disposable vm-target（假 dcgm-exporter fixture）實跑 apply + `pilot verify` 全通過（C9/C11/C13/C14 因該次測試環境沒有 seaweedfs-s3/alertmanager/host-monitoring 而預期 fail，C1–C8/C10/C12/C15–C19 全 PASS）；同時修正 C15 的 Command——舊版對整份 `prometheus.yml` 做無範圍 `grep pilot_host:`，實測發現 dcgm job 有 target、node job 沒有 target時會被 dcgm 那行 label 誤判成 PASS，已改成 `awk` 範圍限定到各自 `job_name:` 區塊，C18 新增時直接採用限定版寫法 | pilot |
+| 2026-10-12 | v1.5 | 新增 C20：執行中的 container 讀到的 `prometheus.yml` 必須與主機檔案相同。正式環境的 dcgm-exporter target 已寫進主機檔案卻一直沒被 scrape：apply playbook 用 `combine()` 合併兩個互斥的 prometheus.yml render 結果，有 Alertmanager 時被跳過的那個帶著 `changed: false` 蓋掉另一個的 `changed: true`，container 從未因設定變更重啟，單檔 bind mount 一直指向舊 inode。playbook 改成分別檢查兩個結果，並在 container task 前比對 container 實際看到的單檔 bind mount（`tasks/container-file-mount-drift.yml`），內容不同就重啟，已經卡住的部署重跑 apply 即可恢復 | pilot |

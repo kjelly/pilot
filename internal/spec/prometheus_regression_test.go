@@ -47,6 +47,9 @@ import (
 //	C19    at least one real GPU hardware metric (DCGM_FI_DEV_GPU_UTIL) was
 //	       actually scraped — proves C17's up==1 reflects a host with a real
 //	       GPU device, not just a live-but-GPU-less exporter process
+//	C20    the running pilot-prometheus reads the same prometheus.yml as
+//	       the host — a single-file bind mount keeps the inode the
+//	       container started with, so the host file alone proves nothing
 //
 // Cross-row invariants locked below:
 //
@@ -91,7 +94,7 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -324,6 +327,22 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		}
 	}
 
+	// C20 must compare what the container reads with the host file. C8,
+	// C11, C13 and C16 only read the host file, which kept passing while
+	// production's container served a weeks-old copy (2026-10-12).
+	for _, r := range s.Rows {
+		if r.ID != "C20" {
+			continue
+		}
+		if !strings.Contains(r.Command, "/etc/pilot/prometheus/prometheus.yml") ||
+			!strings.Contains(r.Command, "docker exec pilot-prometheus cat /etc/prometheus/prometheus.yml") {
+			t.Errorf("C20 must compare the host prometheus.yml with the one pilot-prometheus reads; got %q", r.Command)
+		}
+		if r.Expected != "0" {
+			t.Errorf("C20 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
 	// No credentials belong in a spec (AGENTS.md).
 	for _, r := range s.Rows {
 		lower := strings.ToLower(r.Command)
@@ -503,5 +522,56 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 	// existing "prometheus"/"node" reservations, to avoid a series collision.
 	if !strings.Contains(applyRaw, "select('in', ['prometheus', 'node', 'dcgm'])") {
 		t.Errorf("prometheus-apply.yml must reserve the 'dcgm' external-target jobName, alongside 'prometheus'/'node'")
+	}
+}
+
+// TestRegression_PrometheusRestartsOnStaleConfigMount locks the fix for a
+// running pilot-prometheus that never saw its new prometheus.yml
+// (2026-10-12). The two prometheus.yml renders are mutually exclusive, and
+// merging their results with combine() let the skipped one's
+// `changed: false` win whenever an Alertmanager was configured, so no
+// config change ever restarted the container; its single-file bind mount
+// kept the old inode, and /-/reload re-read the old file. The restart
+// condition must check each render on its own, and both containers must
+// first run the shared bind-mount check, so a container left on an old
+// file by an earlier run is restarted even when nothing renders this time.
+func TestRegression_PrometheusRestartsOnStaleConfigMount(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/prometheus-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply := string(raw)
+
+	for _, want := range []string{
+		"(prometheus_yml_with_am | default({})) is changed",
+		"(prometheus_yml_no_am | default({})) is changed",
+	} {
+		if !strings.Contains(apply, want) {
+			t.Errorf("pilot-prometheus's restart condition must check %q on its own", want)
+		}
+	}
+
+	for _, c := range []struct{ check, container string }{
+		{"container_mount_drift_name: pilot-prometheus", `- name: "Prometheus — run pilot-prometheus container"`},
+		{"container_mount_drift_name: pilot-thanos-sidecar", `- name: "Thanos Sidecar — run pilot-thanos-sidecar container"`},
+	} {
+		check := strings.Index(apply, c.check)
+		run := strings.Index(apply, c.container)
+		if check < 0 || run < 0 || check > run {
+			t.Errorf("%q must come before %q", c.check, c.container)
+			continue
+		}
+		// The check's result is consumed by the very next container
+		// task; another include in between would overwrite it.
+		if strings.Contains(apply[check+len(c.check):run], "container-file-mount-drift.yml") {
+			t.Errorf("another bind-mount check runs between %q and its container task", c.check)
+		}
+		next := apply[run:]
+		if end := strings.Index(next[1:], "\n        - name:"); end > 0 {
+			next = next[:end+1]
+		}
+		if !strings.Contains(next, "container_mount_drift_stale | default(false) | bool") {
+			t.Errorf("%q must restart when container_mount_drift_stale is true", c.container)
+		}
 	}
 }

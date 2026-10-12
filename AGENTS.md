@@ -745,6 +745,25 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    或跟累加的 task 用同一個 loop。
    `internal/spec/loop_accumulator_regression_test.go::TestRegression_LoopAccumulatorsAreInitializedOrGuarded`
    對全部 `playbooks/**` 檢查。
+12. **被 `when:` 跳過的 task 仍然會 register,值是 `{changed: false, skipped: true}`**:
+   用 `combine()` 合併兩個互斥 task 的 register 結果,最後合併的那個決定
+   `changed`。`prometheus-apply.yml` 這樣合併兩個 prometheus.yml render,
+   有 Alertmanager 時被跳過的「無 alerting」版本蓋掉 `changed: true`,設定
+   變更從未重啟 container(2026-10-12 正式環境:新的 dcgm-exporter target
+   寫進主機檔案好幾週,Prometheus 都沒 scrape)。**規則**:每個 register
+   結果各自用 `(x | default({})) is changed` 檢查再 `or`,不准合併;
+   `internal/spec/registered_result_combine_regression_test.go::TestRegression_RegisteredResultsAreNeverCombined`
+   對全部 `playbooks/**` 檢查。
+   同一次事故的另一半:**單檔 bind mount 在 `copy` 換掉檔案後仍指向舊 inode**。
+   `copy` 用 rename 寫檔,主機路徑換成新 inode,沒重啟的 container 繼續讀
+   舊檔,reload(Prometheus `/-/reload`、SIGHUP)也只重讀舊檔。只靠「這次
+   render 有沒有 changed」決定重啟,一旦某次 run render 了檔案卻沒走到重啟
+   (失敗、`--tags`、條件寫錯),之後每次 run 都看到檔案沒變,container 永遠
+   讀舊檔。container task 前 include `tasks/container-file-mount-drift.yml`
+   (比對 container 實際看到的檔案與主機檔案,不同就重啟,範例:
+   `prometheus-apply.yml`)。其他單檔 bind mount 的 apply playbook
+   (alertmanager、dashboard、dcgm-exporter、log-shipping、seaweedfs-s3、
+   snmp-exporter、thanos-query)還沒接上,失敗後會卡在舊檔。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1374,3 +1393,4 @@ git status --short
 | 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
 | 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查；兩支前置 lint 都會展開 `include_tasks`/`import_tasks` 檔案裡設的 fact，抓到並修正 5 支 playbook 的 `/etc/hosts` pin 讀未標 tag 的 resolver include（wazuh-manager C10、wazuh-fim C7、audit-log-forwarding C15、log-shipping C5、restic-backup C10） | pilot |
 | 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |
+| 2026-10-12 | v1.44 | §4.5 新增第 12 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20 | pilot |
