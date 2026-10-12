@@ -12,6 +12,10 @@
 > 真實 vm-target 上驗證：先用修正前的程式重現「設定變更後 container 沒重啟、
 > 仍讀舊 inode、`/-/reload` 無效」，再確認修正後重跑 apply 會重啟並載入新設定、
 > 冪等重跑 `changed=0`，證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`。
+> 2026-10-12 C21/C22（Sidecar 能寫 TSDB 目錄、這一站的 block 真的進了 bucket）
+> 已在真實 vm-target 上驗證：先用修正前的程式重現 `/prometheus:ro` 讓每次上傳
+> 都失敗，再確認全新安裝與升級兩條路徑都上傳成功、冪等重跑 `changed=0`，證據見
+> `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
 
 > 跟 `thanos-query.md` 是一對「站台 / 中央」關係——本檔是**每個機房/站台**
 > 各自跑一份的角色（`prometheus` group，類比 `wazuh-fim`），`thanos-query.md`
@@ -223,11 +227,12 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：22
-- Sanitized 摘要：`docs/evidence/prometheus/2026-10-12-c12c4a8.md`（真實 vm-target，
-  有 Alertmanager 的設定；修正前重現 container 讀舊設定，修正後自癒、設定變更
-  重啟、冪等重跑；fresh host `pass=12 fail=8`，C20 PASS，C9/C13–C19 因該次
-  topology 沒有 seaweedfs-s3/host-monitoring/dcgm-exporter 而預期 fail）。
-  C16–C19 的 GPU scrape 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
+- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`
+  （真實 vm-target，有 seaweedfs-s3 與中央 thanos-query；修正前 C21/C22 FAIL，
+  全新安裝與升級後都 `pass=14 fail=8`，C21/C22 PASS，C11/C13–C19 因該次
+  topology 沒有 Alertmanager/host-monitoring/dcgm-exporter 而預期 fail）。
+  C20 的證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`，C16–C19 的
+  GPU scrape 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
 
 ## 4. PASS / FAIL 規則
 

@@ -108,6 +108,11 @@
 - 工具：`pilot verify docs/verification/thanos-query.md -i <inventory> -l thanos-query`
 - 輸出格式：`.verification/thanos-query-<UTC>.{ndjson,md}`
 - 預期 row 數：13
+- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`
+  （真實 vm-target：修正前 C1–C10 PASS、C11–C13 FAIL，即舊版 spec 在從未上傳過
+  block 的部署上全部 PASS；修正後 `pass=13 fail=0`，經 Store Gateway 查到不在
+  Query endpoint 清單上的站台資料。保留期限與降採樣需要數十天資料，VM 上未觀察，
+  由同版本 image 的本機實驗涵蓋，見該檔 §2）
 
 ## 4. PASS / FAIL 規則
 

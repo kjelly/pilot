@@ -947,6 +947,71 @@ avg by (pilot_project) (rate(node_cpu_seconds_total{job="node", mode!="idle"}[5m
 
 ---
 
+## 7f. 長期保存：Sidecar 上傳 + 90 天分層保留（2026-10-12）
+
+### 背景
+
+正式環境發現站台的 Thanos Sidecar 以 `/prometheus:ro` 掛載 TSDB，每次上傳都在
+建立 `thanos/upload/<ulid>` 時失敗，Store Gateway 載入 0 個 block。再加上
+Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時。這段期間
+`thanos_shipper_upload_failures_total` 一直是 0，舊版 `thanos-query.md` 的 C1–C10
+也全部 PASS，所以沒有任何檢查發現問題。
+
+修正內容：
+
+- Sidecar 改以 Prometheus 的 uid `65534:65534` 執行，TSDB 改成讀寫掛載。只拿掉
+  `:ro` 還不夠：image 預設的 uid 是 1001，寫入 `65534:65534 0755` 的資料目錄
+  一樣會 permission denied。
+- Prometheus 本機保留 `prometheus_retention_time`，預設改為 `24h`，作為上傳前的
+  緩衝。原本 play vars 寫死 6h，現在可以由 group_vars 覆寫。
+- Compactor 分層保留：`thanos_compact_retention_raw` 30d、`thanos_compact_retention_5m`
+  90d、`thanos_compact_retention_1h` 90d。
+- Thanos Query 加上 `--query.auto-downsampling`。
+
+新增的 spec rows：`prometheus.md` C21（Sidecar 能寫 TSDB 目錄）與 C22（這一站
+6 小時內有 block 進 bucket）；`thanos-query.md` C11（三個保留旗標）、C12
+（auto-downsampling）與 C13（Store Gateway 已載入 block）。
+
+### 查詢限制
+
+- 30–90 天前的資料只剩 5m/1h 解析度。auto-downsampling 以 step/5 當作
+  `max_source_resolution`，所以 range query 的 step 至少要 25m 才查得到這段資料；
+  放大到小 step 時，這段時間是空白的。
+- 在降採樣資料上，`rate(x[5m])` 這種 range 太短的查詢會是空的。實測
+  `rate(x[3h])` 可以。
+- Instant query（`/api/v1/query`、alert rule）只讀 raw，查不到 30 天前的時間點。
+
+### 事實快照（2026-10-12，candidate `0c2a8e2`）
+
+- 目標：三台 disposable vm-target。`mt-central`：docker + seaweedfs-s3 +
+  thanos-query；`mt-site`：全新安裝的站台 `site-a`；`mt-siteb`：先套修正前版本、
+  再升級的站台 `site-b`。測完已 teardown。
+- 修正前（`d541aef`）：`prometheus.md` C21/C22 FAIL；`thanos-query.md` C1–C10
+  PASS、C11–C13 FAIL。
+- 全新安裝（`vm-target topology test`）：apply 後冪等重跑 `changed=0`。Prometheus
+  啟動約 3 小時後，site-a 的第一個 block 上傳成功，`prometheus.md` C22 PASS
+  （pass=14 fail=8，C11/C13–C19 是拓樸例外）。
+- 升級：修正前卡在本機的 block 在升級後立刻上傳，C21/C22 PASS，重跑 `changed=0`。
+- 中央：`thanos-query.md` PASS 13/13，並經由 Store Gateway 查到不在 Query endpoint
+  清單上的 site-b 資料。
+- 30/90 天保留與降採樣需要數十天的資料，在 VM 上沒有觀察到；同版本 image 的
+  本機實驗見 evidence §2。
+- 完整摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
+
+### 正式環境上線
+
+1. 先確認 group_vars 有沒有設 `prometheus_retention_time`。以前那個值會被 play
+   vars 的 6h 蓋掉；re-apply 之後，它會取代新的 24h 預設值。
+2. 每一個 `prometheus` 站台與 `thanos-query` 主機都要重新 apply。Prometheus 本機
+   會多保留 18 小時的 block，S3 bucket 則會開始累積最多 90 天的資料，上線前先確認
+   兩邊的磁碟容量。
+3. 站台 apply 後跑 `prometheus.md`：C21 會立刻 PASS；本機已經有 block 的站台，
+   C22 也會立刻 PASS，全新站台要等大約 3 小時。中央跑 `thanos-query.md`：C13
+   最多要等 Store Gateway 的 15 分鐘同步週期。
+4. 已經被 6h 本機保留刪掉的資料無法找回，歷史資料從 re-apply 當下開始累積。
+
+---
+
 ## 8. 各角色 Verify / Idempotency 總表
 
 | 角色 | target | verify | 冪等重跑 |
@@ -962,6 +1027,8 @@ avg by (pilot_project) (rate(node_cpu_seconds_total{job="node", mode!="idle"}[5m
 | `alertmanager`（null 模式 + teams proxy 不存在，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
 | `alertmanager`（teams 模式 + proxy running，§7c） | am-teams-proxy | PASS pass=9 fail=0 skip=0 | changed=0 |
 | `prometheus`（+ host annotations → target labels，§7e） | meta-prom + meta-node | `prometheus-host-metadata.md` PASS pass=10 fail=0 skip=0；移除 mapping 後 `prometheus.md` pass=15 fail=4（C9/C11/C17/C19 拓樸例外） | changed=0 |
+| `prometheus`（+ Sidecar 上傳、24h 本機保留，§7f） | mt-site（全新）、mt-siteb（升級） | 兩台皆 pass=14 fail=8（C21/C22 PASS；C11/C13–C19 拓樸例外） | changed=0 |
+| `thanos-query`（+ 分層保留、auto-downsampling，§7f） | mt-central | PASS pass=13 fail=0 skip=0 | changed=0 |
 
 三份原始 spec 全數 PASS；`host-monitoring` 兩種 distro 皆 PASS；`prometheus`
 的 node-exporter 整合相關 rows（C13/C14）皆 PASS。所有 apply 的第二次
@@ -988,6 +1055,7 @@ avg by (pilot_project) (rate(node_cpu_seconds_total{job="node", mode!="idle"}[5m
 | （2026-08-10，§7a）改用 `to_nice_yaml` 後，spec C13 原本錨定 `^-\s*job_name:\s*node$`（假設 `job_name` 是這個 list item 的第一個 key），實測在真的 `prom-test` vm-target 上失敗 | `to_nice_yaml` 預設把 dict key 依字母序排列，真實輸出是 `- basic_auth:` 打頭，`job_name: node` 變成第二行 | C13 改成只錨 `^\s*job_name:\s*node$`（不管前面有沒有 `-`），對 key 順序無感 |
 | （2026-09-08，§7c）Alertmanager `webhook_configs` 直接指向要求 Adaptive Card 的 Power Automate flowbot URL，Teams 端必現 `AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'` | `webhook_configs` 只會送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card；原生 `msteams_configs` 送的是舊版 `MessageCard`，同樣不是 `AdaptiveCard`——沒有任何 stock 設定能直接滿足這個 flowbot 觸發器 | 新增 `pilot-alertmanager-teams-proxy`（stdlib-only Python，同一個 `pilot-metrics` network）做格式轉換，`webhook_configs.url` 改指向 proxy，真正的 URL 移到 proxy 的 `TEAMS_WEBHOOK_URL` 環境變數 |
 | （2026-09-08，§7c）「Default Alertmanager receiver mode to null」`set_fact` 成 YAML `null`（Python `None`），下游 gate/resolve 兩處都比對字串 `"null"` | 全新主機不帶 `alertmanager_receiver_mode`（預設路徑）必掛在 `Gate: Alertmanager receiver mode is supported`——這個 receiver-mode 三態切換本身此前從未在乾淨主機上跑過 | `set_fact` 改成字串 `"null"` |
+| （2026-10-12，§7f）Sidecar 以 `/prometheus:ro` 掛載 TSDB，沒有任何 block 上傳過，Store Gateway 載入 0 個 block，全局查詢只有本機的 6h | `create upload dir: mkdir /prometheus/thanos: read-only file system`；同時 `thanos_shipper_upload_failures_total` 仍是 0，舊版 `thanos-query.md` C1–C10 也全部 PASS | Sidecar 改 `user: 65534:65534` + 讀寫掛載；C21/C22/C13 直接檢查寫入權限、bucket 裡的 block 與 Store Gateway 載入數，不看 failure counter |
 | （2026-09-08，§7d）`alertmanager_forward_to_agent_controller` mirror 把 secret/URL 直接手寫內插進 YAML/Jinja 字串，沒有跳脫 | secret 含 `"`/換行/反斜線時 `alertmanager.yml` 變成無效 YAML，容器 crash-loop：`yaml: line 19: did not find expected key`（本機 Ansible 引擎與真 vm-target 皆重現） | 兩個內插值改用 `\| to_json`（JSON 字串必為合法 YAML flow scalar），vm-target 重跑確認可正確解析且逐字元還原 |
 
 ---
@@ -1021,3 +1089,4 @@ go run ./cmd/pilot vm-target list   # 確認為空
 | 2026-09-08 | v2.4 | 新增 §7d：commit 前 review 抓到 `alertmanager_forward_to_agent_controller` mirror（§7c 從未實測過的路徑）把 secret/URL 手寫內插進 YAML 字串、沒有跳脫；本機 Ansible 引擎重現＋新建 1 台 vm-target（`am-mirror-test`，事後已 teardown）端到端重現：secret 含特殊字元時容器真的 crash-loop（`yaml: ... did not find expected key`），改用 `\| to_json` 修好後重跑 `PLAY RECAP failed=0`、容器健康、渲染內容逐字元正確。同批也修正 `cmd/pilot/cmd` 因新增 Alertmanager 頂層選單項而位移、被新增前 top-menu 索引悄悄弄壞的 14 個既有 teatest/PTY 測試（`git stash` 驗證：這些測試在 main 上全綠，在本次工作樹上因索引位移而逾時失敗），以及兩個過期的 action 數量 golden test（105→106） | sre |
 | 2026-09-23 | v2.5 | 新增 §7e：`prometheus_host_annotation_labels`（hosts.yml annotations → node/DCGM target labels，opt-in），兩台 vm-target 實測（generated inventory 路徑、fail-closed、L9 churn、rollback）；順手修好 `delegate_to` 對「存在但為空」的 `seaweedfs-s3` group 直接崩潰的既有 bug（prometheus/restic-backup/thanos-query） | pilot |
 | 2026-09-23 | v2.6 | §7e 啟用步驟改用 `pilot edit`「Prometheus 主機註解 labels」選單與 `set_/delete_prometheus_annotation_label` actions（不再需要手改 group_vars） | pilot |
+| 2026-10-12 | v2.7 | 新增 §7f：Sidecar `/prometheus:ro` 讓站台 block 從未上傳，改以 uid 65534 讀寫掛載；Prometheus 本機保留預設 24h；Compactor raw 30d / 5m 90d / 1h 90d；Query 啟用 auto-downsampling。三台 vm-target 實測修正前、全新安裝與升級三條路徑（candidate `0c2a8e2`） | pilot |
