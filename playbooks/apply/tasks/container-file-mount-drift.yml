@@ -36,8 +36,9 @@
 # inspect result carries the container's Config.Env (the Teams proxy's
 # TEAMS_WEBHOOK_URL), and a password file mounted on its own (Prometheus's
 # basic-auth password files) hashes to the unsalted SHA-256 of the password.
-# The caller's container task is no_log for the same values. The report at
-# the end lists only container paths.
+# The callers hide those values where they set them (the Teams proxy's
+# container task, the password files' render tasks). The report at the end
+# lists only container paths.
 #
 # Included once per container, several times per play: reset the result
 # first so one container's answer never carries over to the next
