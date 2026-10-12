@@ -45,7 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**（部分驗證）。2026-10-12，candidate `4f2087a`（修正三個 regex 的雙反斜線）：AlmaLinux 9 client 完整 migration，C1–C6 **6/6 PASS**；Ubuntu 24.04 client 仍在 C5 失敗——舊 realm 留在 `/etc/hosts` 的 server pin （與新 pin 共用短名稱 `ipa1`）讓 SSSD 把新 realm 的 AS_REQ 送到舊 KDC，尚未修正；`--check --diff` 會在 archive link 失敗。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md`](../evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md)。Ubuntu 也通過、且有 rollback／negative-path evidence 之前，不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 雙平台通過，仍有已知缺口）。2026-10-12，candidate `9a189be`（enroll 前移除舊 realm 留在 `/etc/hosts` 的 server pin）：Ubuntu 24.04 與 AlmaLinux 9 client 完整 migration，C1–C6 各 **6/6 PASS**；對照組 `dcd6725` 的 Ubuntu client 仍在 C5 失敗。Negative path（錯誤的 admin 密碼）：rescue 還原了舊 realm 的本機檔案與 pin，但 uninstall 已在舊 server 上 `host_disable`，還原後舊 realm 仍無法登入（對照組相同）。尚未修正：rescue 訊息對此的描述有誤、`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-9a189be.md`](../evidence/freeipa-realm-replacement/2026-10-12-9a189be.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則
