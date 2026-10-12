@@ -356,16 +356,11 @@ func TestRegression_SshdConfigWriteAllowlistPathsExist(t *testing.T) {
 }
 
 // ipaInstallerAllowlist lists FreeIPA installer runs that do not check sshd's
-// configuration first yet, keyed "<playbook>: <task name>". Each belongs to
-// a component with its own vm-target run; an entry fails the test once it
-// is fixed.
-var ipaInstallerAllowlist = map[string]string{
-	"playbooks/apply/freeipa-server-apply.yml: FreeIPA — run ipa-server-install (native; first run is 8–12 min)":                      "needs a fresh freeipa-server run",
-	"playbooks/apply/freeipa-server-replica-apply.yml: FreeIPA replica — step 1/2: ipa-client-install (enroll into {{ ipa_realm }})":  "needs a replica topology run",
-	"playbooks/apply/freeipa-server-replica-apply.yml: FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)": "needs a replica topology run",
-	"playbooks/apply/freeipa-realm-replacement-apply.yml: Realm replacement — remove old client enrollment":                           "needs a realm-replacement run",
-	"playbooks/apply/freeipa-realm-replacement-apply.yml: Realm replacement — enroll client in the new realm":                         "needs a realm-replacement run",
-}
+// configuration first yet, keyed "<playbook>: <task name>". It is empty: the
+// freeipa-server, freeipa-server-replica and freeipa-realm-replacement runs
+// were the last five, fixed on 2026-10-12. An entry needs a reason, and fails
+// the test once it is fixed.
+var ipaInstallerAllowlist = map[string]string{}
 
 var ipaInstallers = []string{"ipa-client-install", "ipa-server-install", "ipa-replica-install"}
 
@@ -393,12 +388,13 @@ func runsIpaInstaller(task map[string]any) bool {
 }
 
 // ipaInstallersWithoutSshdCheck returns the names of installer tasks with no
-// whole-configuration `sshd -t` before them in their task list.
+// whole-configuration `sshd -t` before them in the play: earlier in their
+// task list, in an enclosing list before their block, or in the play's
+// pre_tasks before its tasks.
 func ipaInstallersWithoutSshdCheck(doc any) []string {
 	var out []string
-	var walk func(list []any)
-	walk = func(list []any) {
-		checked := false
+	var walk func(list []any, checked bool) bool
+	walk = func(list []any, checked bool) bool {
 		for _, item := range list {
 			task, ok := item.(map[string]any)
 			if !ok {
@@ -410,11 +406,15 @@ func ipaInstallersWithoutSshdCheck(doc any) []string {
 			if runsIpaInstaller(task) && !checked {
 				out = append(out, fmt.Sprint(task["name"]))
 			}
-			for _, key := range []string{"block", "rescue", "always"} {
+			block, _ := task["block"].([]any)
+			afterBlock := walk(block, checked)
+			for _, key := range []string{"rescue", "always"} {
 				sub, _ := task[key].([]any)
-				walk(sub)
+				walk(sub, checked)
 			}
+			checked = afterBlock
 		}
+		return checked
 	}
 	items, _ := doc.([]any)
 	for _, item := range items {
@@ -422,10 +422,13 @@ func ipaInstallersWithoutSshdCheck(doc any) []string {
 		if !ok {
 			continue
 		}
-		for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+		checked := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
 			list, _ := play[section].([]any)
-			walk(list)
+			checked = walk(list, checked)
 		}
+		handlers, _ := play["handlers"].([]any)
+		walk(handlers, false)
 	}
 	return out
 }
@@ -477,5 +480,81 @@ func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
 	// realm replacement (2).
 	if installers < 7 {
 		t.Fatalf("found only %d FreeIPA installer runs; the detection is broken", installers)
+	}
+}
+
+func TestIpaInstallersWithoutSshdCheck(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{"no check", `
+- hosts: all
+  tasks:
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+`, []string{"install"}},
+		{"check earlier in the list", `
+- hosts: all
+  tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+`, nil},
+		{"check after the installer does not count", `
+- hosts: all
+  tasks:
+    - name: install
+      command: {argv: [ipa-client-install, --uninstall, -U]}
+    - name: check
+      command: {argv: [sshd, -t]}
+`, []string{"install"}},
+		{"check in pre_tasks covers a block in tasks", `
+- hosts: all
+  pre_tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+  tasks:
+    - block:
+        - name: install
+          command: {argv: [ipa-client-install, -U]}
+      rescue:
+        - name: restore
+          command: {argv: [tar, -xpf, a]}
+`, nil},
+		{"installer named in task vars; a check in another play does not count", `
+- hosts: a
+  tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+- hosts: b
+  tasks:
+    - name: install
+      command: {argv: "{{ args }}"}
+      vars:
+        base: [ipa-server-install, -U]
+`, []string{"install"}},
+		{"sshd -t -f checks one file only", `
+- hosts: all
+  tasks:
+    - name: check one file
+      command: {argv: [sshd, -t, -f, /tmp/x]}
+    - name: install
+      command: {argv: [ipa-replica-install, -U]}
+`, []string{"install"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc any
+			if err := yaml.Unmarshal([]byte(tc.yaml), &doc); err != nil {
+				t.Fatal(err)
+			}
+			got := ipaInstallersWithoutSshdCheck(doc)
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -271,30 +271,58 @@ func TestSshdSitesExist(t *testing.T) {
 	}
 }
 
-// ipaGateSite is a FreeIPA installer run and the sshd -t gate before it.
+// ipaGateSite is a FreeIPA installer run and the sshd -t gate before it:
+// tasks first through last in one task list, plus the installer named
+// installer when it sits elsewhere in the play (the realm replacement's gate
+// is in pre_tasks, its installer in a block in tasks).
 type ipaGateSite struct {
-	name, path, first, last string
-	// enrolled returns the vars that make the host enrolled or not.
-	enrolled func(dir string, yes bool) map[string]any
+	name, path, first, last, installer, refusal string
+	// enrolled returns the vars that make the installer due or not; nil
+	// when the gate always runs.
+	enrolled func(dir string, due bool) map[string]any
+}
+
+// markerVar is an enrolled func for a gate and installer sharing
+// `creates: {{ name }}`.
+func markerVar(name string) func(dir string, due bool) map[string]any {
+	return func(dir string, due bool) map[string]any {
+		marker := filepath.Join(dir, name)
+		if !due {
+			_ = os.WriteFile(marker, []byte("done\n"), 0o644)
+		}
+		return map[string]any{name: marker, "ipa_realm": "IPA.TEST"}
+	}
 }
 
 var ipaGateSites = []ipaGateSite{
 	{name: "freeipa-client enroll", path: "../../playbooks/apply/freeipa-client-apply.yml",
-		first: "FreeIPA client — sshd -t before ipa-client-install restarts sshd",
-		last:  "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})",
-		enrolled: func(dir string, yes bool) map[string]any {
-			marker := filepath.Join(dir, "default.conf")
-			if yes {
-				_ = os.WriteFile(marker, []byte("[global]\n"), 0o644)
-			}
-			return map[string]any{"ipa_config_marker": marker, "ipa_realm": "IPA.TEST"}
-		}},
+		first:   "FreeIPA client — sshd -t before ipa-client-install restarts sshd",
+		last:    "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})",
+		refusal: "Refusing to run ipa-client-install", enrolled: markerVar("ipa_config_marker")},
 	{name: "freeipa-client decommission uninstall", path: "../../playbooks/decommission/freeipa-client-decommission.yml",
-		first: "FreeIPA client decommission — sshd -t before the uninstall restarts sshd",
-		last:  "FreeIPA client decommission — remove FreeIPA client enrollment",
-		enrolled: func(dir string, yes bool) map[string]any {
-			return map[string]any{"freeipa_decom_cfg": map[string]any{"stat": map[string]any{"exists": yes}}}
+		first:   "FreeIPA client decommission — sshd -t before the uninstall restarts sshd",
+		last:    "FreeIPA client decommission — remove FreeIPA client enrollment",
+		refusal: "Refusing to run ipa-client-install --uninstall",
+		enrolled: func(dir string, due bool) map[string]any {
+			return map[string]any{"freeipa_decom_cfg": map[string]any{"stat": map[string]any{"exists": due}}}
 		}},
+	{name: "freeipa-server install", path: "../../playbooks/apply/freeipa-server-apply.yml",
+		first:   "FreeIPA — sshd -t before ipa-server-install restarts sshd",
+		last:    "FreeIPA — run ipa-server-install (native; first run is 8–12 min)",
+		refusal: "Refusing to run ipa-server-install", enrolled: markerVar("ipa_config_marker")},
+	{name: "freeipa-server-replica enroll", path: "../../playbooks/apply/freeipa-server-replica-apply.yml",
+		first:   "FreeIPA replica — sshd -t before ipa-client-install restarts sshd",
+		last:    "FreeIPA replica — step 1/2: ipa-client-install (enroll into {{ ipa_realm }})",
+		refusal: "Refusing to run ipa-client-install", enrolled: markerVar("ipa_client_log_marker")},
+	{name: "freeipa-server-replica promote", path: "../../playbooks/apply/freeipa-server-replica-apply.yml",
+		first:   "FreeIPA replica — sshd -t before ipa-replica-install restarts sshd",
+		last:    "FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)",
+		refusal: "Refusing to run ipa-replica-install", enrolled: markerVar("ipa_replica_config_marker")},
+	{name: "freeipa-realm-replacement", path: "../../playbooks/apply/freeipa-realm-replacement-apply.yml",
+		first:     "Realm replacement — sshd -t before ipa-client-install restarts sshd",
+		last:      "Gate: the sshd configuration is valid before replacing the realm",
+		installer: "Realm replacement — remove old client enrollment",
+		refusal:   "Refusing to replace the realm"},
 }
 
 // TestRegression_IpaInstallersCheckSshdFirst: the installer, which restarts
@@ -304,32 +332,37 @@ var ipaGateSites = []ipaGateSite{
 func TestRegression_IpaInstallersCheckSshdFirst(t *testing.T) {
 	cases := []struct {
 		name      string
-		enrolled  bool
+		due       bool
 		sshdFails bool
 		wantRan   bool
 		wantFail  bool
 	}{
-		{name: "sshd -t passes", enrolled: false, wantRan: true},
-		{name: "sshd -t fails", enrolled: false, sshdFails: true, wantFail: true},
-		{name: "installer would skip, sshd -t fails", enrolled: true, sshdFails: true},
+		{name: "sshd -t passes", due: true, wantRan: true},
+		{name: "sshd -t fails", due: true, sshdFails: true, wantFail: true},
+		{name: "installer would skip, sshd -t fails", due: false, sshdFails: true},
 	}
 	for _, site := range ipaGateSites {
 		for _, c := range cases {
+			if site.enrolled == nil && !c.due {
+				continue
+			}
 			t.Run(site.name+"/"+c.name, func(t *testing.T) {
 				t.Parallel()
 				dir := t.TempDir()
-				enrolled := c.enrolled
-				if site.name == "freeipa-client decommission uninstall" {
-					// The uninstall runs on an enrolled host.
-					enrolled = !c.enrolled
+				vars := map[string]any{}
+				if site.enrolled != nil {
+					vars = site.enrolled(dir, c.due)
 				}
-				vars := site.enrolled(dir, enrolled)
 				ran := filepath.Join(dir, "installer-ran")
 				vars["fc_installer_ran"] = ran
 				if c.sshdFails {
 					vars["fc_sshd_cmd"] = fcSshdFails
 				}
 				playVars, tasks := sshdSiteTasks(t, sshdSite{name: site.name, path: site.path, first: site.first, last: site.last})
+				if site.installer != "" {
+					_, more := sshdSiteTasks(t, sshdSite{name: site.name, path: site.path, first: site.installer, last: site.installer})
+					tasks = append(tasks, more...)
+				}
 				var keep []map[string]any
 				for _, task := range tasks {
 					keep = append(keep, ipaRewrite(task))
@@ -340,8 +373,8 @@ func TestRegression_IpaInstallersCheckSshdFirst(t *testing.T) {
 				if (res.rc != 0) != c.wantFail || (err == nil) != c.wantRan {
 					t.Fatalf("rc=%d installer ran=%v failures=%v; want failed=%v, installer ran=%v", res.rc, err == nil, res.failures, c.wantFail, c.wantRan)
 				}
-				if c.wantFail && (!strings.Contains(failures, "Refusing to run ipa-client-install") || !strings.Contains(failures, "Bad configuration option")) {
-					t.Errorf("failures=%v; want the refusal with sshd's own message", res.failures)
+				if c.wantFail && (!strings.Contains(failures, site.refusal) || !strings.Contains(failures, "Bad configuration option")) {
+					t.Errorf("failures=%v; want %q with sshd's own message", res.failures, site.refusal)
 				}
 			})
 		}

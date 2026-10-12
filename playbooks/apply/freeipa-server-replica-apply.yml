@@ -404,6 +404,31 @@
     # Step 1/2 — enroll as an ORDINARY client of the existing realm. Gated on
     # its OWN log marker (not /etc/ipa/default.conf, which a later replica
     # promotion also creates/keeps — see ipa_client_log_marker comment above).
+    # ipa-client-install configures sshd and restarts it. With a broken file in
+    # sshd_config.d that restart fails and sshd stays down, as
+    # ipa-client-install does (seen 2026-10-12, freeipa-client). Check first,
+    # under the installer's own `creates:`, so a host it skips is not blocked.
+    - name: "FreeIPA replica — sshd -t before ipa-client-install restarts sshd"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+        creates: "{{ ipa_client_log_marker }}"
+      register: ipa_replica_enroll_sshd_check
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R1]
+
+    - name: "Gate: the sshd configuration is valid before ipa-client-install"
+      ansible.builtin.assert:
+        that:
+          - (ipa_replica_enroll_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to run ipa-client-install: it restarts sshd, and sshd -t fails
+          ({{ ((ipa_replica_enroll_sshd_check.stderr | default('')) or (ipa_replica_enroll_sshd_check.stdout | default(''))) | trim }}).
+          ipa-client-install has not run. Fix the sshd configuration, then run again.
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R1]
+
     - name: "FreeIPA replica — step 1/2: ipa-client-install (enroll into {{ ipa_realm }})"
       ansible.builtin.command:
         argv:
@@ -439,6 +464,31 @@
     # `--no-ntp` above; promotion mode has no separate NTP knob. Confirmed by
     # an actual failed run against a live primary+replica pair — see
     # docs/verification/freeipa-server-replica.md §0 for the real log.
+    # ipa-replica-install configures sshd and restarts it. With a broken file in
+    # sshd_config.d that restart fails and sshd stays down, as
+    # ipa-client-install does (seen 2026-10-12, freeipa-client). Check first,
+    # under the installer's own `creates:`, so a host it skips is not blocked.
+    - name: "FreeIPA replica — sshd -t before ipa-replica-install restarts sshd"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+        creates: "{{ ipa_replica_config_marker }}"
+      register: ipa_replica_install_sshd_check
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R2, C16]
+
+    - name: "Gate: the sshd configuration is valid before ipa-replica-install"
+      ansible.builtin.assert:
+        that:
+          - (ipa_replica_install_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to run ipa-replica-install: it restarts sshd, and sshd -t fails
+          ({{ ((ipa_replica_install_sshd_check.stderr | default('')) or (ipa_replica_install_sshd_check.stdout | default(''))) | trim }}).
+          ipa-replica-install has not run. Fix the sshd configuration, then run again.
+      when: not ansible_check_mode
+      tags: [freeipa-replica, R2, C16]
+
     - name: "FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)"
       ansible.builtin.command:
         argv: "{{ ipa_replica_install_args }}"
