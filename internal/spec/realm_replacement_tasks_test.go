@@ -44,6 +44,13 @@ func rewritePaths(v any, paths map[string]string) any {
 // and, per task, whether it changed anything and its failure message.
 func runRealmTasks(t *testing.T, names []string, paths map[string]string, vars map[string]any) (int, map[string]bool, []string) {
 	t.Helper()
+	return runRealmTasksEnv(t, names, paths, vars, nil)
+}
+
+// runRealmTasksEnv is runRealmTasks with env added to ansible-playbook's
+// environment, which the tasks' commands inherit.
+func runRealmTasksEnv(t *testing.T, names []string, paths map[string]string, vars map[string]any, env []string) (int, map[string]bool, []string) {
+	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -101,6 +108,7 @@ func runRealmTasks(t *testing.T, names []string, paths map[string]string, vars m
 	cmd := exec.Command("ansible-playbook", "-i", "localhost,", path)
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1",
 		"ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False")
+	cmd.Env = append(cmd.Env, env...)
 	out, runErr := cmd.Output()
 	rc := 0
 	if ee, ok := runErr.(*exec.ExitError); ok {

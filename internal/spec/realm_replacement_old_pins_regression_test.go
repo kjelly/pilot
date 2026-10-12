@@ -17,12 +17,13 @@ import (
 
 var realmOldPinTasks = []string{
 	"Realm replacement — read the old realm's client configuration",
+	"Realm replacement — record the old enrollment",
 	"Realm replacement — list the old realm's servers",
 	"Realm replacement — remove the old realm's server pool block from /etc/hosts",
 	"Realm replacement — remove other /etc/hosts pins of the old realm's servers",
 }
 
-// TestRegression_RealmReplacementRemovesOldServerPins runs the four tasks on
+// TestRegression_RealmReplacementRemovesOldServerPins runs the five tasks on
 // localhost against a temporary default.conf, sssd.conf and hosts.
 func TestRegression_RealmReplacementRemovesOldServerPins(t *testing.T) {
 	const defaultConf = "[global]\nbasedn = dc=ipa,dc=pilot,dc=internal\nrealm = IPA.PILOT.INTERNAL\ndomain = ipa.pilot.internal\nserver = ipa1.ipa.pilot.internal\n"
@@ -120,12 +121,12 @@ func TestRegression_RealmReplacementRemovesOldPinsBetweenUninstallAndEnroll(t *t
 		}
 		return i
 	}
-	read, list := at(realmOldPinTasks[0]), at(realmOldPinTasks[1])
-	pool, pins := at(realmOldPinTasks[2]), at(realmOldPinTasks[3])
+	read, record, list := at(realmOldPinTasks[0]), at(realmOldPinTasks[1]), at(realmOldPinTasks[2])
+	pool, pins := at(realmOldPinTasks[3]), at(realmOldPinTasks[4])
 	uninstall := at("Realm replacement — remove old client enrollment")
 	enroll := at("Realm replacement — enroll client in the new realm")
-	if read >= list || list >= uninstall || uninstall >= pool || pool >= pins || pins >= enroll {
-		t.Errorf("order read=%d list=%d uninstall=%d pool=%d pins=%d enroll=%d; want read, list, uninstall, pool, pins, enroll",
-			read, list, uninstall, pool, pins, enroll)
+	if read >= record || record >= list || list >= uninstall || uninstall >= pool || pool >= pins || pins >= enroll {
+		t.Errorf("order read=%d record=%d list=%d uninstall=%d pool=%d pins=%d enroll=%d; want read, record, list, uninstall, pool, pins, enroll",
+			read, record, list, uninstall, pool, pins, enroll)
 	}
 }
