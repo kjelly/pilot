@@ -113,6 +113,8 @@ func parseDirectorySSHOriginalCommand(raw string) (fqdn string, interactive bool
 var directorySessionCmd = &cobra.Command{
 	Use:    "directory-session",
 	Hidden: true,
+	// The user's whole SSH session: a runtime failure must not print usage.
+	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDirectorySession(cmd, os.Getenv("SSH_ORIGINAL_COMMAND"))
 	},

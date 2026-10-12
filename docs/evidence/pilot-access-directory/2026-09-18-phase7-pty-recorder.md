@@ -25,7 +25,7 @@ Spec: `docs/tmp/now/spec.md` §23-§27, §35, Phase 7 landing gate (§44).
   response as the allow/deny decision — the Gateway daemon's own config
   is the single source of truth, never a Directory- or client-supplied
   parameter.
-- Config: `cmd/pilot-access-gateway/config.go` gained `gateway.recording.*`
+- Config: the gateway config loader (then `cmd/pilot-access-gateway`'s `config.go`; moved to `internal/gatewayconfig/config.go` on 2026-09-23) gained `gateway.recording.*`
   (mode/failure_policy/queue_events/flush_interval), all optional,
   `metadata`/`best_effort` unconditional defaults (D8). Deliberately no
   session-store URL/token field (Phase 8's contract to define).

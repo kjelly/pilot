@@ -58,7 +58,7 @@ type RoutingSection struct {
 }
 
 // duration unmarshals a Go duration string ("5s") from YAML — same
-// helper as cmd/pilot-access-gateway/config.go's, duplicated rather than
+// helper as internal/gatewayconfig/config.go's, duplicated rather than
 // shared because these are two independent binaries with no shared
 // internal config package (matching the rest of this repo's per-command
 // config.go convention).

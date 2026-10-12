@@ -47,7 +47,7 @@
 | `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
 | `alertmanager_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；`prometheus.yml` 的 `alerting.alertmanagers` 指向這個固定別名 | 否 | `alertmanager-backend` |
 | `alertmanager_port` | Alertmanager API port | 否 | `9093` |
-| `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown） |
+| `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown；另有 SSH session recording 的 `PilotRecordingIncomplete`、`PilotSessionStoreIngestErrors`、`PilotRecordingDeniedConnects`、`PilotSessionStoreMetricsStale`，只在 gateway/store 主機的 node_exporter textfile 有對應 series 時才可能觸發） |
 | `node_exporter_targets` | 要 scrape 的 node_exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `host-monitoring` group（見 `docs/verification/host-monitoring.md`）所有主機的 9100 port | 否 | 空陣列（自動偵測） |
 | `node_exporter_basic_auth_user` | 抓 node_exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
 | `node_exporter_basic_auth_password` | 抓 node_exporter 用的 HTTP Basic Auth 密碼；**必須跟 `host-monitoring.md` 的 `node_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="node"}` 永遠是 0（見下方 escape hatch） | 僅在有 node-exporter target 時必填 | 無 |

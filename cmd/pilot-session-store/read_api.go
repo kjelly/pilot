@@ -20,6 +20,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/identity"
 	"github.com/kjelly/pilot/internal/peercred"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 	"github.com/kjelly/pilot/internal/sessionstore"
 )
 
@@ -66,6 +67,11 @@ type readServer struct {
 	auditorGroup string
 	logger       *slog.Logger
 	httpServer   *http.Server
+	// emitter, when non-nil, receives a recording_replayed or
+	// recording_exported event for every replay request (§21.5).
+	emitter *sessionaudit.Emitter
+	// metrics, when non-nil, counts read requests for the textfile (§31).
+	metrics *storeMetrics
 }
 
 func newReadServer(store *sessionstore.Store, auditorGroup string, logger *slog.Logger) *readServer {
@@ -125,6 +131,11 @@ type sessionSummaryJSON struct {
 	Bytes         int64  `json:"bytes"`
 	EventCount    int    `json:"event_count"`
 	KeyID         string `json:"key_id"`
+	// RecordingPolicySource and LastSeq come from the signed ingest token
+	// and the finish request (per-host recording spec §21.4). ingest_jti
+	// is deliberately never exposed.
+	RecordingPolicySource string `json:"recording_policy_source"`
+	LastSeq               uint64 `json:"last_seq"`
 }
 
 func toSummaryJSON(sum sessionstore.SessionSummary) sessionSummaryJSON {
@@ -133,6 +144,7 @@ func toSummaryJSON(sum sessionstore.SessionSummary) sessionSummaryJSON {
 		Scope: sum.Scope, Target: sum.Target, RecordingMode: sum.RecordingMode,
 		StartedAt: sum.StartedAt.UTC().Format(time.RFC3339Nano), Complete: sum.Complete,
 		Bytes: sum.Bytes, EventCount: sum.EventCount, KeyID: sum.KeyID,
+		RecordingPolicySource: sum.RecordingPolicySource, LastSeq: sum.LastSeq,
 	}
 	if sum.EndedAt != nil {
 		out.EndedAt = sum.EndedAt.UTC().Format(time.RFC3339Nano)
@@ -142,15 +154,18 @@ func toSummaryJSON(sum sessionstore.SessionSummary) sessionSummaryJSON {
 
 func (s *readServer) handleList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorizedPeer(r); !ok {
+		s.metrics.readRequest("list", readResultDenied)
 		writeReadError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	filter := sessionstore.ListFilter{User: r.URL.Query().Get("user")}
 	sessions, err := s.store.ListSessions(r.Context(), filter)
 	if err != nil {
+		s.metrics.readRequest("list", readResultError)
 		writeReadError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.metrics.readRequest("list", readResultOK)
 	out := make([]sessionSummaryJSON, 0, len(sessions))
 	for _, sum := range sessions {
 		out = append(out, toSummaryJSON(sum))
@@ -160,18 +175,22 @@ func (s *readServer) handleList(w http.ResponseWriter, r *http.Request) {
 
 func (s *readServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorizedPeer(r); !ok {
+		s.metrics.readRequest("show", readResultDenied)
 		writeReadError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	sum, err := s.store.GetSession(r.Context(), r.PathValue("id"))
 	if errors.Is(err, sessionstore.ErrUnknownSession) {
+		s.metrics.readRequest("show", readResultNotFound)
 		writeReadError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if err != nil {
+		s.metrics.readRequest("show", readResultError)
 		writeReadError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.metrics.readRequest("show", readResultOK)
 	writeReadJSON(w, http.StatusOK, toSummaryJSON(sum))
 }
 
@@ -201,21 +220,76 @@ type replayResponse struct {
 	Events    []replayEventJSON `json:"events"`
 }
 
+// Read request results (the read_requests_total label and the Result of
+// replay/export audit events).
+const (
+	readResultOK       = "ok"
+	readResultDenied   = "denied"
+	readResultNotFound = "not_found"
+	readResultError    = "error"
+)
+
+// replayAction is the caller-declared purpose of a replay request
+// (per-host recording spec §21.5): "replay" unless ?purpose=export. It only
+// selects the audit kind; permissions and the response are identical.
+func replayAction(r *http.Request) (string, bool) {
+	switch r.URL.Query().Get("purpose") {
+	case "", "replay":
+		return "replay", true
+	case "export":
+		return "export", true
+	default:
+		return "replay", false
+	}
+}
+
+// auditReplay counts one replay/export request and emits its audit event:
+// the auditor, the recorded session's identity and the result, never any
+// terminal payload.
+func (s *readServer) auditReplay(r *http.Request, action, sessionID, result string) {
+	s.metrics.readRequest(action, result)
+	if s.emitter == nil {
+		return
+	}
+	ev := sessionaudit.SessionAuditEvent{SessionID: sessionID, Kind: sessionaudit.KindRecordingReplayed, Result: result}
+	if action == "export" {
+		ev.Kind = sessionaudit.KindRecordingExported
+	}
+	if peer, ok := readPeerFromContext(r.Context()); ok {
+		ev.Auditor = peer.Username
+	}
+	if sum, err := s.store.GetSession(r.Context(), sessionID); err == nil {
+		ev.User, ev.TargetFQDN, ev.GatewayID, ev.GatewayScope = sum.User, sum.Target, sum.GatewayID, sum.Scope
+		ev.RecordingMode, ev.RecordingPolicySource = sum.RecordingMode, sum.RecordingPolicySource
+	}
+	s.emitter.Emit(ev)
+}
+
 func (s *readServer) handleReplay(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	action, validPurpose := replayAction(r)
 	if _, ok := s.authorizedPeer(r); !ok {
+		s.auditReplay(r, action, sessionID, readResultDenied)
 		writeReadError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	sessionID := r.PathValue("id")
+	if !validPurpose {
+		s.auditReplay(r, action, sessionID, readResultError)
+		writeReadError(w, http.StatusBadRequest, "purpose must be replay or export")
+		return
+	}
 	result, err := s.store.Replay(r.Context(), sessionID)
 	if errors.Is(err, sessionstore.ErrUnknownSession) {
+		s.auditReplay(r, action, sessionID, readResultNotFound)
 		writeReadError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if err != nil {
+		s.auditReplay(r, action, sessionID, readResultError)
 		writeReadError(w, http.StatusInternalServerError, fmt.Sprintf("replay failed: %v", err))
 		return
 	}
+	s.auditReplay(r, action, sessionID, readResultOK)
 	resp := replayResponse{SessionID: sessionID, Complete: result.Complete, Gaps: []gapJSON{}, Events: []replayEventJSON{}}
 	for _, g := range result.Gaps {
 		resp.Gaps = append(resp.Gaps, gapJSON{FromSeq: g.FromSeq, ToSeq: g.ToSeq})

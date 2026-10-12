@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kjelly/pilot/internal/ingesttoken"
+	"github.com/kjelly/pilot/internal/sessionaudit"
 	"github.com/kjelly/pilot/internal/sessionstore"
 	"github.com/spf13/cobra"
 )
@@ -82,7 +84,7 @@ func newRetentionSweepCmd() *cobra.Command {
 // openStore loads the master key and opens the index database — shared
 // by both "serve" and "retention-sweep" so they never diverge on how the
 // database is opened or encrypted.
-func openStore(cfg Config) (*sessionstore.Store, error) {
+func openStore(cfg Config, logger *slog.Logger) (*sessionstore.Store, error) {
 	key, err := sessionstore.LoadMasterKeyFile(cfg.Storage.MasterKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load master key: %w", err)
@@ -95,6 +97,10 @@ func openStore(cfg Config) (*sessionstore.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index database: %w", err)
 	}
+	if m := store.Migration(); m != nil {
+		logger.Info("index database migrated", "path", cfg.Storage.IndexDBPath,
+			"from_schema", m.FromVersion, "to_schema", m.ToVersion, "backup", m.BackupPath)
+	}
 	return store, nil
 }
 
@@ -104,7 +110,7 @@ func runRetentionSweepCmd(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	store, err := openStore(cfg)
+	store, err := openStore(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -125,18 +131,34 @@ func runServe(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	store, err := openStore(cfg)
+	store, err := openStore(cfg, logger)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
 
-	token, err := loadIngestToken(cfg.Ingest.TokenFile)
+	signingKey, err := ingesttoken.LoadKeyFile(cfg.Ingest.SigningKeyFile)
 	if err != nil {
-		return fmt.Errorf("load ingest token: %w", err)
+		return fmt.Errorf("load ingest signing key: %w", err)
+	}
+	verifier, err := ingesttoken.NewVerifier(signingKey, nil)
+	if err != nil {
+		return fmt.Errorf("ingest signing key: %w", err)
+	}
+	logger.Info("ingest token verifier ready", "kid", verifier.KeyID())
+
+	var metrics *storeMetrics
+	if path := cfg.Metrics.TextfilePath; path != "" {
+		metrics = newStoreMetrics()
+		stopMetrics := metrics.registry.StartWriter(path, metricsWriteInterval, metrics.lastWrite, func(err error) {
+			logger.Warn("write metrics textfile", "path", path, "error", err)
+		})
+		defer stopMetrics() // after both servers shut down: one final write
 	}
 
-	ingestSrv := &http.Server{Handler: newIngestServer(store, token).routes()}
+	ingest := newIngestServer(store, verifier, logger)
+	ingest.metrics = metrics
+	ingestSrv := &http.Server{Handler: ingest.routes()}
 	cert, err := tls.LoadX509KeyPair(cfg.Ingest.TLSCertFile, cfg.Ingest.TLSKeyFile)
 	if err != nil {
 		return fmt.Errorf("load ingest TLS certificate: %w", err)
@@ -153,6 +175,10 @@ func runServe(ctx context.Context, configPath string) error {
 	defer func() { _ = tlsListener.Close() }()
 
 	readSrv := newReadServer(store, cfg.Read.AuditorGroup, logger)
+	readSrv.metrics = metrics
+	// Audit is best-effort by design: an unreachable syslog falls back to
+	// the default logger inside NewEmitter.
+	readSrv.emitter, _ = sessionaudit.NewEmitter("pilot-session-store")
 	readLn, err := readListener(cfg.readSocketPath())
 	if err != nil {
 		return fmt.Errorf("bind read socket %s: %w", cfg.readSocketPath(), err)
@@ -185,6 +211,10 @@ func runServe(ctx context.Context, configPath string) error {
 // file left behind by an unclean previous shutdown first — matching
 // cmd/pilot-access-directory and cmd/pilot-access-gateway's own
 // listener() functions exactly.
+// metricsWriteInterval is how often the metrics textfile is rewritten
+// (per-host recording spec §31).
+const metricsWriteInterval = 15 * time.Second
+
 func readListener(path string) (net.Listener, error) {
 	if _, err := os.Stat(path); err == nil {
 		if err := os.Remove(path); err != nil {

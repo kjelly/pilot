@@ -91,6 +91,9 @@ type sessionSummary struct {
 	Bytes         int64  `json:"bytes"`
 	EventCount    int    `json:"event_count"`
 	KeyID         string `json:"key_id"`
+
+	RecordingPolicySource string `json:"recording_policy_source"`
+	LastSeq               uint64 `json:"last_seq"`
 }
 
 // listSessionsResponse is GET /v1/sessions's body.
@@ -143,9 +146,11 @@ func (c *sessionStoreClient) GetSession(ctx context.Context, sessionID string) (
 	return resp, err
 }
 
-// Replay is GET /v1/sessions/{id}/replay.
-func (c *sessionStoreClient) Replay(ctx context.Context, sessionID string) (replayResult, error) {
+// Replay fetches a recorded session's events. purpose ("replay" or
+// "export") only selects which audit event the store records (per-host
+// recording spec §21.5); permissions and the response are the same.
+func (c *sessionStoreClient) Replay(ctx context.Context, sessionID, purpose string) (replayResult, error) {
 	var resp replayResult
-	err := c.get(ctx, "/v1/sessions/"+url.PathEscape(sessionID)+"/replay", &resp)
+	err := c.get(ctx, "/v1/sessions/"+url.PathEscape(sessionID)+"/replay?purpose="+url.QueryEscape(purpose), &resp)
 	return resp, err
 }

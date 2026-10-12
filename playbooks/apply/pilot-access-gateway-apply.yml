@@ -153,12 +153,44 @@
     # policy" guard tasks below refuse — before anything is written — to
     # lower an installed policy unless
     # pilot_access_gateway_recording_allow_downgrade=true says so explicitly.
-    pilot_access_gateway_effective_recording_mode: "{{ pilot_access_gateway_recording_mode | default('metadata', true) }}"
-    pilot_access_gateway_effective_recording_failure_policy: "{{ pilot_access_gateway_recording_failure_policy | default('best_effort', true) }}"
+    #
+    # The mode has NO default on purpose (per-host recording spec §14): when
+    # unset the rendered config omits `mode:`, so a host that inherits reports
+    # its source as built_in_default (metadata); per-host FreeIPA markers
+    # (pilot.policy.ssh-recording) override it. The downgrade guard reads an
+    # unset mode as metadata. failure_policy defaults to fail_closed (spec
+    # §14, G9): a recorded session is never silently left unrecorded.
+    # Recorded sessions carry per-session PIT1 ingest tokens that the
+    # gateway mints with pilot_session_store_ingest_signing_key (vault, the
+    # same value pilot-session-store verifies with); there is no static
+    # bearer token file.
+    pilot_access_gateway_effective_recording_mode: "{{ pilot_access_gateway_recording_mode | default('', true) }}"
+    pilot_access_gateway_effective_recording_failure_policy: "{{ pilot_access_gateway_recording_failure_policy | default('fail_closed', true) }}"
+    pilot_access_gateway_effective_recording_queue_events: "{{ pilot_access_gateway_recording_queue_events | default(1024, true) }}"
+    pilot_access_gateway_effective_recording_flush_interval: "{{ pilot_access_gateway_recording_flush_interval | default('500ms', true) }}"
+    pilot_access_gateway_effective_recording_failure_grace: "{{ pilot_access_gateway_recording_failure_grace | default('10s', true) }}"
+    pilot_access_gateway_effective_recording_max_session_duration: "{{ pilot_access_gateway_recording_max_session_duration | default('24h', true) }}"
     pilot_access_gateway_effective_recording_session_store_url: "{{ pilot_access_gateway_recording_session_store_url | default('', true) }}"
-    pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('', true) }}"
-    pilot_access_gateway_effective_recording_session_store_ingest_token_file: "{{ pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) }}"
+    pilot_access_gateway_effective_recording_session_store_ca_file: "{{ pilot_access_gateway_recording_session_store_ca_file | default('/etc/ipa/ca.crt', true) }}"
     pilot_access_gateway_effective_recording_allow_downgrade: "{{ pilot_access_gateway_recording_allow_downgrade | default(false) }}"
+    gateway_config_file: /etc/pilot/access-gateway.yaml
+    gateway_session_store_signing_key_file: /etc/pilot/session-store-ingest-signing.key
+    gateway_keytab_file: /etc/pilot/pilot-access-gateway.keytab
+    # Left behind by an earlier static-bearer-token session-store wiring;
+    # per-session tokens replace it, so it is removed (AG82). This is the
+    # documented default; the token file the previous config actually named
+    # is removed too (see the AG82 tasks).
+    gateway_legacy_session_store_token_file: /etc/pilot/session-store-ingest-token
+    # Former token files AG82 still has to remove, kept across failed runs:
+    # Step 11 replaces the config that named them (AG82, PR #19 review).
+    gateway_legacy_token_pending_file: /etc/pilot/session-store-legacy-token-files.pending
+    # Present while the running gateway may not have loaded what this
+    # playbook wrote (AG97). /run on purpose: a reboot starts the service
+    # from the files on disk, which is exactly when the marker can go.
+    gateway_activation_pending_marker: /run/pilot-access-gateway.apply-pending
+    # Metrics (per-host recording spec §31) are written only when
+    # node_exporter's textfile collector directory already exists.
+    gateway_metrics_textfile_dir: /var/lib/node_exporter/textfile
     # Captive opaque SSH transport (`pilot-transport-v1`, captive-transport
     # spec §12.3). Default FALSE and this spec must not flip it: turning it
     # on opens a new data plane, and a target is only reachable once
@@ -650,7 +682,9 @@
     - name: "Gate: portal-user group must resolve via SSSD"
       ansible.builtin.assert:
         that:
-          - gateway_portal_group_check.rc == 0
+          # In check mode the group-add above is skipped, so a group this
+          # run would create cannot resolve yet.
+          - gateway_portal_group_check.rc == 0 or ansible_check_mode
         fail_msg: >-
           Group {{ gateway_effective_portal_user_group }} was just
           created/confirmed in FreeIPA above but does not resolve locally
@@ -743,11 +777,12 @@
     # invalidates the previous key material, so it must only ever run
     # once per host; a real rotation is a deliberate, separate lifecycle
     # operation (spec.md §47), not something an ordinary reapply does.
+    # Also AG03: the ownership/mode task below reads this result.
     - name: "Step 8: check whether the gateway keytab already exists"
       ansible.builtin.stat:
-        path: /etc/pilot/pilot-access-gateway.keytab
+        path: "{{ gateway_keytab_file }}"
       register: gateway_keytab_stat
-      tags: [AG_keytab]
+      tags: [AG_keytab, AG03]
 
     - name: "Step 8: create the gateway service principal (idempotent)"
       ansible.builtin.command:
@@ -768,81 +803,79 @@
           - -p
           - "pilot-access-gateway/{{ gateway_effective_fqdn }}"
           - -k
-          - /etc/pilot/pilot-access-gateway.keytab
+          - "{{ gateway_keytab_file }}"
       when: not gateway_keytab_stat.stat.exists
       changed_when: true
       tags: [AG_keytab]
 
+    # Under --check on a host without the keytab yet, its retrieval above
+    # is skipped, so there is no file to fix up (AGENTS.md §4.0).
     - name: "Step 8: keytab ownership/mode (spec.md §10.3, AG03)"
       ansible.builtin.file:
-        path: /etc/pilot/pilot-access-gateway.keytab
+        path: "{{ gateway_keytab_file }}"
         owner: "{{ pilot_gateway_user }}"
         group: "{{ pilot_gateway_user }}"
         mode: "0400"
+      when: not (ansible_check_mode and not gateway_keytab_stat.stat.exists)
       tags: [AG_keytab, AG03]
 
     # Recording policy guard (captive-transport spec §12.2). Every task here
-    # carries Step 11's exact tag set, so any tag selection that rewrites
-    # the config also re-checks it first. All of them are check-mode safe
+    # carries the tags of Step 11 and of AG81's key tasks, so any tag
+    # selection that rewrites the config or installs/removes the key also
+    # re-checks it first (TestRegression_GatewayWritesFollowTheirChecks:
+    # AG94 and AG81 select those writes but not these checks before PR #19
+    # review of 25c423e). All of them are check-mode safe
     # (stat/slurp/assert only), so `--check --diff` catches a would-be
     # downgrade before a real run ever gets that far.
     - name: "Recording policy: rendered values are valid"
       ansible.builtin.assert:
         that:
-          - pilot_access_gateway_effective_recording_mode in gateway_recording_mode_rank
+          - >-
+            pilot_access_gateway_effective_recording_mode | length == 0
+            or pilot_access_gateway_effective_recording_mode in gateway_recording_mode_rank
           - pilot_access_gateway_effective_recording_failure_policy in ['best_effort', 'fail_closed']
           - >-
+            (pilot_access_gateway_effective_recording_mode or 'metadata') == 'metadata'
+            or pilot_access_gateway_effective_recording_session_store_url | length > 0
+          - >-
             pilot_access_gateway_effective_recording_session_store_url | length == 0
-            or pilot_access_gateway_effective_recording_session_store_ingest_token_file | length > 0
+            or pilot_access_gateway_effective_recording_session_store_url is match('^https://')
+          - >-
+            pilot_access_gateway_effective_recording_session_store_url | length == 0
+            or (pilot_session_store_ingest_signing_key is defined
+                and pilot_session_store_ingest_signing_key is match('^[0-9a-fA-F]{64}$'))
         fail_msg: >-
           pilot_access_gateway_recording_mode must be metadata|terminal_output|terminal_io
-          (got {{ pilot_access_gateway_effective_recording_mode }}),
+          or unset (got {{ pilot_access_gateway_effective_recording_mode }}),
           pilot_access_gateway_recording_failure_policy must be best_effort|fail_closed
-          (got {{ pilot_access_gateway_effective_recording_failure_policy }}), and a
-          session_store_url requires pilot_access_gateway_recording_session_store_ingest_token_file.
-      tags: [AG_config, AG01, AG41, AG42]
+          (got {{ pilot_access_gateway_effective_recording_failure_policy }}); a terminal
+          recording mode requires pilot_access_gateway_recording_session_store_url, which
+          must be https:// and requires pilot_session_store_ingest_signing_key (vault,
+          64 hex characters, the same value pilot-session-store uses). There is no
+          local recording fallback.
+      tags: [AG_config, AG01, AG41, AG42, AG81, AG94]
 
-    - name: "Recording policy: stat the session-store ingest token file"
-      ansible.builtin.stat:
-        path: "{{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}"
-      register: gateway_recording_token_stat
-      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
-      tags: [AG_config, AG01, AG41, AG42]
-
-    # Same rule cmd/pilot-access-gateway/config.go's loadSessionStoreIngestToken
-    # enforces at startup — failing here keeps a bad token file from
-    # turning into a service that cannot start after Step 11 is written.
-    - name: "Recording policy: the ingest token file exists and is not group/world accessible"
-      ansible.builtin.assert:
-        that:
-          - gateway_recording_token_stat.stat.exists | default(false)
-          - (gateway_recording_token_stat.stat.mode | default('0777'))[-2:] == '00'
-        fail_msg: >-
-          {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file }}
-          must exist on this host with no group/world permission bits (e.g. 0600)
-          before a session store can be configured.
-      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
-      tags: [AG_config, AG01, AG41, AG42]
-
+    # Also AG82: the former token file's path is read from this config
+    # before Step 11 rewrites it.
     - name: "Recording policy: stat the currently installed gateway config"
       ansible.builtin.stat:
-        path: /etc/pilot/access-gateway.yaml
+        path: "{{ gateway_config_file }}"
       register: gateway_existing_config_stat
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG81, AG82, AG94]
 
     - name: "Recording policy: read the currently installed gateway config"
       ansible.builtin.slurp:
-        src: /etc/pilot/access-gateway.yaml
+        src: "{{ gateway_config_file }}"
       register: gateway_existing_config_raw
       when: gateway_existing_config_stat.stat.exists
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG81, AG82, AG94]
 
     - name: "Recording policy: extract the installed recording policy"
       ansible.builtin.set_fact:
         gateway_existing_recording: >-
           {{ (((gateway_existing_config_raw.content | b64decode | from_yaml) or {}).get('gateway') or {}).get('recording') or {}
              if gateway_existing_config_stat.stat.exists else {} }}
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG81, AG82, AG94]
 
     - name: "Recording policy: refuse to silently lower the installed policy"
       ansible.builtin.assert:
@@ -850,7 +883,7 @@
           - >-
             (pilot_access_gateway_effective_recording_allow_downgrade | bool)
             or (
-              (gateway_recording_mode_rank[pilot_access_gateway_effective_recording_mode]
+              (gateway_recording_mode_rank[pilot_access_gateway_effective_recording_mode or 'metadata']
                 >= gateway_recording_mode_rank.get(gateway_existing_recording.get('mode') or 'metadata', 0))
               and not (
                 (gateway_existing_recording.get('session_store_url') or '') | length > 0
@@ -861,15 +894,217 @@
           Refusing to lower this gateway's session-recording policy: installed
           mode={{ gateway_existing_recording.get('mode') or 'metadata' }}
           session_store_url={{ gateway_existing_recording.get('session_store_url') or '(none)' }},
-          requested mode={{ pilot_access_gateway_effective_recording_mode }}
+          requested mode={{ pilot_access_gateway_effective_recording_mode or 'metadata' }}
           session_store_url={{ pilot_access_gateway_effective_recording_session_store_url or '(none)' }}.
           Set pilot_access_gateway_recording_mode / _session_store_* to keep the
           current policy, or pass -e pilot_access_gateway_recording_allow_downgrade=true
           to lower it on purpose.
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG81, AG94]
+
+    # Metrics (per-host recording spec §31): soft — enabled only when the
+    # node_exporter textfile directory exists, never a failure. Both tasks
+    # are tagged always because Step 11 and the service unit read the
+    # result (AGENTS.md §4.4).
+    - name: "Metrics: check for the node_exporter textfile directory"
+      ansible.builtin.stat:
+        path: "{{ gateway_metrics_textfile_dir }}"
+      register: gateway_metrics_dir
+      tags: [always]
+
+    - name: "Metrics: decide the metrics textfile path"
+      ansible.builtin.set_fact:
+        gateway_metrics_textfile_path: >-
+          {{ gateway_metrics_dir.stat.get('isdir', false)
+             | ternary(gateway_metrics_textfile_dir ~ '/pilot_access_gateway.prom', '') }}
+      tags: [always]
+
+    - name: "Metrics: note that metrics stay disabled without node_exporter's textfile directory"
+      ansible.builtin.debug:
+        msg: >-
+          {{ gateway_metrics_textfile_dir }} does not exist, so pilot-access-gateway
+          writes no metrics textfile. Deploy host-monitoring (node_exporter) and
+          re-apply to enable them.
+      when: gateway_metrics_textfile_path | length == 0
+      tags: [AG94]
+
+    # AG82: remove the former static bearer token wherever it is. Before
+    # per-session tokens, the operator chose its path
+    # (pilot_access_gateway_recording_session_store_ingest_token_file) and
+    # the playbook wrote it into the config as
+    # recording.session_store_ingest_token_file; the installed config read
+    # above, before Step 11 replaces it, is the record of that path
+    # (AGENTS.md §5.9, §5.14). The documented default, a value the
+    # inventory still sets, and paths an earlier run recorded but did not
+    # get to remove are removed too.
+    #
+    # Everything that can refuse runs here, before Step 11 and AG81 change
+    # anything: a refusal leaves the old config (the only record of a
+    # custom path) and the old key in place (PR #19 review). The paths that
+    # exist are then written to gateway_legacy_token_pending_file, so a run
+    # that fails later still knows them. The files are removed only after
+    # the new gateway passed its health check (after Step 17), where the
+    # old gateway no longer needs its token.
+    #
+    # These tasks carry every tag that selects Step 11 (AG01, AG41, AG42,
+    # AG94), not only AG82: `--tags AG01` rewrites the config too, and
+    # without them it dropped the custom path while recording nothing, so
+    # a later full apply left the token on disk (PR #19 review of 25c423e;
+    # TestRegression_GatewayWritesFollowTheirChecks).
+    #
+    # Files this playbook manages are never removed, whatever spelling
+    # names them (AGENTS.md §5.11): paths are normalized ("//", "/./", a
+    # trailing "/") before they are compared, and at removal time a path
+    # whose file is one of them (same device and inode, e.g. through a
+    # symlinked directory) is kept.
+    - name: "AG82: stat the former token files an earlier run left to remove"
+      ansible.builtin.stat:
+        path: "{{ gateway_legacy_token_pending_file }}"
+        get_checksum: false
+      register: gateway_legacy_token_pending_stat
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: read the former token files an earlier run left to remove"
+      ansible.builtin.slurp:
+        src: "{{ gateway_legacy_token_pending_file }}"
+      register: gateway_legacy_token_pending_raw
+      when: gateway_legacy_token_pending_stat.stat.exists
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: list the former static session-store bearer token files"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files_raw: >-
+          {{ ([gateway_legacy_session_store_token_file,
+               gateway_existing_recording.get('session_store_ingest_token_file') or '',
+               pilot_access_gateway_recording_session_store_ingest_token_file | default('', true)]
+              + ((gateway_legacy_token_pending_raw.content | b64decode).splitlines()
+                 if gateway_legacy_token_pending_stat.stat.exists else []))
+             | map('string') | map('trim') | reject('equalto', '') | unique | list }}
+        gateway_ag82_managed_files:
+          - "{{ gateway_config_file }}"
+          - "{{ gateway_session_store_signing_key_file }}"
+          - "{{ gateway_keytab_file }}"
+          - "{{ gateway_legacy_token_pending_file }}"
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: the inventory still sets the removed token-file variable"
+      ansible.builtin.debug:
+        msg: >-
+          pilot_access_gateway_recording_session_store_ingest_token_file is no longer
+          used: recorded sessions carry per-session tokens signed with
+          pilot_session_store_ingest_signing_key. The file it names
+          ({{ pilot_access_gateway_recording_session_store_ingest_token_file }}) is
+          removed; drop the variable from the inventory.
+      when: (pilot_access_gateway_recording_session_store_ingest_token_file | default('', true) | string | trim) | length > 0
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: former token file paths are absolute"
+      ansible.builtin.assert:
+        that:
+          - gateway_legacy_token_files_raw | reject('match', '^/') | list | length == 0
+          - gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list | length == 0
+        fail_msg: >-
+          Refusing to remove the former session-store token file(s)
+          {{ gateway_legacy_token_files_raw | reject('match', '^/') | list
+             + (gateway_legacy_token_files_raw | select('search', '(^|/)\.\.(/|$)') | list) }}:
+          not an absolute path without "..". Nothing was changed. Fix
+          recording.session_store_ingest_token_file in {{ gateway_config_file }},
+          pilot_access_gateway_recording_session_store_ingest_token_file or
+          {{ gateway_legacy_token_pending_file }}, then re-apply.
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    # Lexical only: "//" and "/./" collapse, a trailing "/" goes. ".." was
+    # refused above, so no segment depends on what a symlink points at.
+    # One backslash in these regexes: ansible-core 2.19 does not unescape
+    # "\\" inside a {{ }} template, so '\\.' would be a literal backslash
+    # (TestRegression_JinjaTemplatesUseSingleBackslashes).
+    - name: "AG82: normalize the former token file paths"
+      ansible.builtin.set_fact:
+        gateway_legacy_token_files: >-
+          {{ gateway_legacy_token_files_raw
+             | map('regex_replace', '/+', '/')
+             | map('regex_replace', '/\.(?=/|$)', '')
+             | map('regex_replace', '(.)/$', '\1')
+             | map('regex_replace', '^$', '/')
+             | unique
+             | difference(gateway_ag82_managed_files
+                          | map('regex_replace', '/+', '/')
+                          | map('regex_replace', '/\.(?=/|$)', '')
+                          | list)
+             | list }}
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: stat the former token files before anything changes"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_legacy_token_files }}"
+      register: gateway_legacy_token_precheck
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: former token files are plain files"
+      ansible.builtin.assert:
+        that:
+          - >-
+            gateway_legacy_token_precheck.results | map(attribute='stat')
+            | selectattr('exists') | rejectattr('isreg') | rejectattr('islnk') | list | length == 0
+        fail_msg: >-
+          Refusing to remove
+          {{ gateway_legacy_token_precheck.results | selectattr('stat.exists')
+             | rejectattr('stat.isreg') | rejectattr('stat.islnk') | map(attribute='item') | list }}:
+          a former session-store token path that is not a regular file or symlink.
+          Nothing was changed.
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    - name: "AG82: record the former token files still to remove"
+      ansible.builtin.copy:
+        dest: "{{ gateway_legacy_token_pending_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          {% for r in gateway_legacy_token_precheck.results if r.stat.exists %}
+          {{ r.item }}
+          {% endfor %}
+      when: gateway_legacy_token_precheck.results | selectattr('stat.exists') | list | length > 0
+      tags: [AG_config, AG01, AG41, AG42, AG82, AG94]
+
+    # The restart decision below compares only what this run changed, so a
+    # run that wrote the config or key and then failed left the old gateway
+    # running and a retry, finding nothing to change, never restarted it
+    # (PR #19 review). The marker records "may not run what is on disk"
+    # before anything is written and goes away once the service was
+    # restarted or nothing needed it; a marker from an earlier run forces
+    # the restart. It is bookkeeping, not a change of the host's
+    # configuration, hence changed_when: false.
+    - name: "Activation: stat the marker an earlier, unfinished run left"
+      ansible.builtin.stat:
+        path: "{{ gateway_activation_pending_marker }}"
+        get_checksum: false
+      register: gateway_activation_marker
+      tags: [AG_config, AG_service, AG01, AG09, AG41, AG42, AG81, AG94, AG97]
+
+    - name: "Activation: mark the gateway as possibly running older settings"
+      ansible.builtin.copy:
+        dest: "{{ gateway_activation_pending_marker }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "pilot-access-gateway-apply.yml run in progress\n"
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [AG_config, AG_service, AG01, AG09, AG41, AG42, AG81, AG94, AG97]
+
+    # The same as the marker for the rest of this run, also under --check,
+    # where the marker is not written: AG82 removes nothing while it is
+    # true, e.g. after `--tags AG01`, which writes the config but does not
+    # restart the gateway.
+    - name: "Activation: a restart is pending until the gateway runs the settings on disk"
+      ansible.builtin.set_fact:
+        gateway_activation_pending: true
+      tags: [AG_config, AG_service, AG01, AG09, AG41, AG42, AG81, AG94, AG97]
 
     # Step 11 (spec.md §55): access-gateway.yaml — matches
-    # cmd/pilot-access-gateway/config.go's Config struct exactly (kept in
+    # internal/gatewayconfig/config.go's Config struct exactly (kept in
     # sync manually; see docs/evidence for the cross-check test).
     #
     # 2026-09-16: cache_ttl/connect_max_age removed — spec.md §26's
@@ -880,7 +1115,7 @@
     # were (accessportal.LoadUserAccess always hits FreeIPA fresh).
     - name: "Step 11: install access-gateway.yaml"
       ansible.builtin.copy:
-        dest: /etc/pilot/access-gateway.yaml
+        dest: "{{ gateway_config_file }}"
         owner: root
         group: root
         mode: "0644"
@@ -899,22 +1134,54 @@
           {% endfor %}
               ca_file: {{ ipa_ca_file }}
               service_principal: pilot-access-gateway/{{ gateway_effective_fqdn }}@{{ gateway_effective_ipa_realm }}
-              keytab: /etc/pilot/pilot-access-gateway.keytab
+              keytab: {{ gateway_keytab_file }}
               request_timeout: 5s
             recording:
+          {% if pilot_access_gateway_effective_recording_mode | length > 0 %}
               mode: {{ pilot_access_gateway_effective_recording_mode | to_json }}
+          {% endif %}
               failure_policy: {{ pilot_access_gateway_effective_recording_failure_policy | to_json }}
+              queue_events: {{ pilot_access_gateway_effective_recording_queue_events | int }}
+              flush_interval: {{ pilot_access_gateway_effective_recording_flush_interval | to_json }}
+              failure_grace: {{ pilot_access_gateway_effective_recording_failure_grace | to_json }}
+              max_session_duration: {{ pilot_access_gateway_effective_recording_max_session_duration | to_json }}
           {% if pilot_access_gateway_effective_recording_session_store_url | length > 0 %}
               session_store_url: {{ pilot_access_gateway_effective_recording_session_store_url | to_json }}
-              session_store_ingest_token_file: {{ pilot_access_gateway_effective_recording_session_store_ingest_token_file | to_json }}
-          {% if pilot_access_gateway_effective_recording_session_store_ca_file | length > 0 %}
               session_store_ca_file: {{ pilot_access_gateway_effective_recording_session_store_ca_file | to_json }}
+              session_store_ingest_signing_key_file: {{ gateway_session_store_signing_key_file | to_json }}
           {% endif %}
+          {% if gateway_metrics_textfile_path | length > 0 %}
+            metrics:
+              textfile_path: {{ gateway_metrics_textfile_path | to_json }}
           {% endif %}
             transport:
               enabled: {{ pilot_access_gateway_effective_transport_enabled | bool | to_json }}
       register: gateway_config_copy
-      tags: [AG_config, AG01, AG41, AG42]
+      tags: [AG_config, AG01, AG41, AG42, AG94]
+
+    # Per-session ingest token signing key (per-host recording spec §16):
+    # present only when a session store is configured, owned by the service
+    # user like the keytab. The gateway mints one short-lived token per
+    # recorded session with it; the key itself never leaves this host.
+    - name: "Install the session-store ingest signing key (AG81)"
+      ansible.builtin.copy:
+        dest: "{{ gateway_session_store_signing_key_file }}"
+        owner: "{{ pilot_gateway_user }}"
+        group: "{{ pilot_gateway_user }}"
+        mode: "0400"
+        content: "{{ pilot_session_store_ingest_signing_key | lower }}\n"
+      no_log: true
+      register: gateway_signing_key_copy
+      when: pilot_access_gateway_effective_recording_session_store_url | length > 0
+      tags: [AG_config, AG81]
+
+    - name: "Remove the session-store ingest signing key when no store is configured (AG81)"
+      ansible.builtin.file:
+        path: "{{ gateway_session_store_signing_key_file }}"
+        state: absent
+      register: gateway_signing_key_remove
+      when: pilot_access_gateway_effective_recording_session_store_url | length == 0
+      tags: [AG_config, AG81]
 
     # Step 12 (spec.md §55/§32): root-owned SSH client config — MUST stay
     # byte-identical to cmd/pilot/cmd/portal_ssh.go's pilotSSHConfig
@@ -1115,7 +1382,7 @@
           User={{ pilot_gateway_user }}
           Group={{ pilot_gateway_user }}
 
-          ExecStart=/usr/local/libexec/pilot-access-gateway serve --config /etc/pilot/access-gateway.yaml --systemd-socket
+          ExecStart=/usr/local/libexec/pilot-access-gateway serve --config {{ gateway_config_file }} --systemd-socket
 
           NoNewPrivileges=true
           PrivateTmp=true
@@ -1127,11 +1394,14 @@
 
           ReadOnlyPaths=/etc/pilot
           ReadOnlyPaths=/etc/ipa
+          {% if gateway_metrics_textfile_path | length > 0 %}
+          ReadWritePaths={{ gateway_metrics_textfile_dir }}
+          {% endif %}
 
           [Install]
           WantedBy=multi-user.target
       register: gateway_service_unit
-      tags: [AG_service]
+      tags: [AG_service, AG94]
 
     - name: "Step 15: daemon-reload"
       ansible.builtin.systemd:
@@ -1141,34 +1411,62 @@
 
     # Step 16 (spec.md §55): start the socket (not the service directly
     # — socket activation starts the service on first connection).
+    # A host previewed with --check --diff before its unit file was ever
+    # written has nothing systemd can find: skip rather than fail the preview.
     - name: "Step 16: enable + start pilot-access-gateway.socket"
       ansible.builtin.systemd:
         name: pilot-access-gateway.socket
         enabled: true
         state: started
+      when: not (ansible_check_mode and gateway_socket_unit.changed)
       tags: [AG_service]
 
     # `state: started` above is a no-op if the socket unit was already
     # running under an OLDER version of its own unit file — an in-place
     # unit-file edit needs an explicit restart to actually take effect.
-    - name: "Restart pilot-access-gateway.socket if its unit file changed"
+    - name: "Restart pilot-access-gateway.socket if its unit file changed or a restart is pending"
       ansible.builtin.systemd:
         name: pilot-access-gateway.socket
         state: restarted
-      when: gateway_socket_unit.changed
-      tags: [AG_service]
+      when:
+        - not ansible_check_mode
+        - >-
+          (gateway_socket_unit | default({})) is changed
+          or (gateway_activation_marker.stat.exists | default(false))
+      tags: [AG_service, AG97]
 
     # A changed binary or config must actually take effect — restart the
     # (stateless — spec.md §46) service so it re-execs with the new
     # binary/config instead of continuing to run the old in-memory one.
     # The socket itself is untouched (RemoveOnStop=true would drop
     # in-flight connections pointlessly here).
-    - name: "Restart pilot-access-gateway.service if the binary or config changed"
+    - name: "Restart pilot-access-gateway.service if its unit, binary, config or signing key changed, or a restart is pending"
       ansible.builtin.systemd:
         name: pilot-access-gateway.service
         state: restarted
-      when: gateway_binary_copy is changed or (gateway_config_copy | default({})) is changed
-      tags: [AG_service]
+      when:
+        - not ansible_check_mode
+        - >-
+          (gateway_service_unit | default({})) is changed
+          or (gateway_binary_copy | default({})) is changed
+          or (gateway_config_copy | default({})) is changed
+          or (gateway_signing_key_copy | default({})) is changed
+          or (gateway_signing_key_remove | default({})) is changed
+          or (gateway_activation_marker.stat.exists | default(false))
+      tags: [AG_service, AG97]
+
+    - name: "Activation: the gateway runs the settings on disk"
+      ansible.builtin.file:
+        path: "{{ gateway_activation_pending_marker }}"
+        state: absent
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [AG_service, AG97]
+
+    - name: "Activation: no restart is pending"
+      ansible.builtin.set_fact:
+        gateway_activation_pending: false
+      tags: [AG_service, AG97]
 
     # Step 17 (spec.md §55): capability probe — a real connection over
     # the real socket, triggering socket activation, checked via the
@@ -1199,6 +1497,159 @@
         fail_msg: "health probe did not report status=ok: {{ gateway_health_probe.stdout }}"
       when: not ansible_check_mode
       tags: [AG_service]
+
+    # AG82, after the new gateway passed its health check: remove the former
+    # token files recorded before Step 11. stat runs again here because
+    # Step 11 and AG81 replaced the managed files (copy writes a new
+    # inode); it does not follow the last component, so a former token path
+    # that is a symlink to a managed file is the link (removed), and a path
+    # that reaches a managed file through a symlinked directory is that file
+    # (kept).
+    #
+    # A run with --tags can get here without restarting the gateway onto
+    # what is on disk (`--tags AG_config`), or without writing the config
+    # at all (`--tags AG82` on a gateway still running the old one), so the
+    # files are removed only when no restart is pending, the installed
+    # config names no token file, and the gateway answers its health check
+    # now. Otherwise they stay in the pending list for a later run (PR #19
+    # review of 25c423e).
+    - name: "AG82: stat the files this playbook manages"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_ag82_managed_files }}"
+      register: gateway_ag82_managed_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the former token files"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: "{{ gateway_legacy_token_files }}"
+      register: gateway_legacy_token_stat
+      tags: [AG_config, AG82]
+
+    - name: "AG82: drop former token paths that are a file this playbook manages"
+      ansible.builtin.set_fact:
+        gateway_ag82_managed_ids: >-
+          {{ (gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+              | map(attribute='dev') | map('string') | list)
+             | zip(gateway_ag82_managed_stat.results | map(attribute='stat') | selectattr('exists')
+                   | map(attribute='inode') | map('string') | list)
+             | map('join', ':') | list }}
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token paths kept because they name a managed file"
+      ansible.builtin.debug:
+        msg: >-
+          Not removing {{ item.item }}: it is the same file as one this playbook
+          manages ({{ gateway_ag82_managed_files | join(', ') }}).
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists
+        - (item.stat.dev | string) ~ ':' ~ (item.stat.inode | string) in gateway_ag82_managed_ids
+      tags: [AG_config, AG82]
+
+    - name: "AG82: start with no former token file to remove"
+      ansible.builtin.set_fact:
+        gateway_ag82_removable: []
+      tags: [AG_config, AG82]
+
+    # Only a regular file or a symlink is removed: the check before Step 11
+    # refused anything else, and a path that changed type since is left.
+    - name: "AG82: the former token files to remove"
+      ansible.builtin.set_fact:
+        gateway_ag82_removable: "{{ gateway_ag82_removable + [item.item] }}"
+      loop: "{{ gateway_legacy_token_stat.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - item.stat.exists
+        - item.stat.isreg or item.stat.islnk
+        - ((item.stat.dev | string) ~ ':' ~ (item.stat.inode | string)) not in gateway_ag82_managed_ids
+      tags: [AG_config, AG82]
+
+    - name: "AG82: stat the restart marker"
+      ansible.builtin.stat:
+        path: "{{ gateway_activation_pending_marker }}"
+        get_checksum: false
+      register: gateway_ag82_marker
+      tags: [AG_config, AG82]
+
+    # Step 11 renders no token file into the config, so only a run that did
+    # not write it can find one there, and then the config read before
+    # Step 11 is the installed one.
+    - name: "AG82: wait while the gateway may still use a former token file"
+      ansible.builtin.set_fact:
+        gateway_ag82_wait: >-
+          {{ ('a restart of pilot-access-gateway is pending (' ~ gateway_activation_pending_marker ~ ')')
+             if (gateway_activation_pending | default(gateway_ag82_marker.stat.exists))
+             else (('the installed ' ~ gateway_config_file ~ ' still names '
+                    ~ gateway_existing_recording.get('session_store_ingest_token_file'))
+                   if ((gateway_config_copy | default({'skipped': true})) is skipped
+                       and (gateway_existing_recording.get('session_store_ingest_token_file') or '') | length > 0)
+                   else '') }}
+      tags: [AG_config, AG82]
+
+    # Read-only, and not a gate: a gateway that does not answer keeps its
+    # former token files until a later run, it does not fail this one
+    # (Step 17 already fails a run that restarted it).
+    - name: "AG82: the gateway answers its health check"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
+      register: gateway_ag82_health
+      changed_when: false
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - gateway_ag82_removable | length > 0
+        - gateway_ag82_wait | length == 0
+      tags: [AG_config, AG82]
+
+    - name: "AG82: wait while the gateway does not answer its health check"
+      ansible.builtin.set_fact:
+        gateway_ag82_wait: >-
+          pilot-access-gateway did not pass its health check (rc={{ gateway_ag82_health.rc }}:
+          {{ (gateway_ag82_health.stdout ~ ' ' ~ gateway_ag82_health.stderr) | trim }})
+      when:
+        - gateway_ag82_health is not skipped
+        - gateway_ag82_health.rc != 0 or (gateway_ag82_health.stdout | from_json).get('status') != 'ok'
+      tags: [AG_config, AG82]
+
+    - name: "Remove the former static session-store bearer token files (AG82)"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ gateway_ag82_removable }}"
+      when: gateway_ag82_wait | length == 0
+      tags: [AG_config, AG82]
+
+    - name: "AG82: former token files kept for a later run"
+      ansible.builtin.debug:
+        msg: >-
+          Keeping {{ gateway_ag82_removable | join(', ') }} for now: {{ gateway_ag82_wait }}.
+          They stay listed in {{ gateway_legacy_token_pending_file }}; an apply without
+          --tags replaces the config, restarts the gateway and then removes them.
+      when:
+        - gateway_ag82_removable | length > 0
+        - gateway_ag82_wait | length > 0
+      tags: [AG_config, AG82]
+
+    # A path that is no longer a regular file or symlink keeps the record;
+    # the next run's check refuses it with its name. So does a file kept
+    # above for a later run.
+    - name: "AG82: the former token files are removed"
+      ansible.builtin.file:
+        path: "{{ gateway_legacy_token_pending_file }}"
+        state: absent
+      when:
+        - gateway_ag82_removable | length == 0 or gateway_ag82_wait | length == 0
+        - >-
+          gateway_legacy_token_stat.results | selectattr('stat.exists')
+          | rejectattr('stat.isreg') | rejectattr('stat.islnk') | list | length == 0
+      tags: [AG_config, AG82]
 
     # Step 18 (spec.md §55): configured pilot-target-<scope> must
     # actually exist before ForceCommand is ever installed — fail closed
