@@ -39,6 +39,7 @@
 | `thanos_aws_secret_access_key` | S3 secret key | 是 | 無 |
 | `thanos_query_store_group` | 要自動探索的 Ansible inventory group 名稱（每個 host 視為一個站台，套用時讀 `hostvars[h].ansible_host` 組出 `--store=<ip>:10901`） | 否 | `prometheus` |
 | `thanos_query_sidecar_grpc_port` | 各站 Thanos Sidecar 的 gRPC（StoreAPI）port | 否 | `10901` |
+| `thanos_query_alias` | Query 容器在 Docker network 中宣告的服務別名；同機 Grafana 以此名稱連到容器 port 10902，重建時由 Docker DNS 更新 IP；自訂時 dashboard 必須使用相同 alias | 否 | `thanos-query-backend` |
 | `thanos_compact_retention_raw` | Compactor 保留 raw（原始 scrape 解析度）資料的期限（`--retention.resolution-raw`）；必須大於 40h，否則 Compactor 拒絕啟動；不要短於 5m/1h（見下方說明） | 否 | `90d` |
 | `thanos_compact_retention_5m` | Compactor 保留 5 分鐘降採樣資料的期限（`--retention.resolution-5m`）；必須大於 10d | 否 | `90d` |
 | `thanos_compact_retention_1h` | Compactor 保留 1 小時降採樣資料的期限（`--retention.resolution-1h`） | 否 | `90d` |

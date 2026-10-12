@@ -1,0 +1,17 @@
+# Disposable co-located Docker DNS regression target.
+services: local
+nodes:
+  - name: gdns-proof
+    base_image: ubuntu-24.04
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - docker
+      - seaweedfs-s3
+      - prometheus
+      - thanos-query
+      - dashboard

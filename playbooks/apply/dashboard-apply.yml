@@ -5,8 +5,8 @@
 # or docs/verification/log-server.md, it only reads from them:
 #   - Grafana's "Thanos" datasource (fixed uid pilot-thanos-query) points at
 #     the docs/verification/thanos-query.md host's Prometheus-compatible API
-#     (10902), pinned into /etc/hosts as `thanos-query-backend` (same idiom
-#     as thanos_s3_alias in prometheus-apply.yml).
+#     via Docker DNS alias thanos-query-backend:10902 when co-located.
+#     Remote providers use their DNS name and host-published port (10912).
 #   - Grafana's "Loki" datasource (fixed uid pilot-loki) points at the Loki
 #     container co-located on THIS host, which docs/verification/log-shipping.md
 #     hosts push logs into over the network.
@@ -38,7 +38,6 @@
 #   go run ./cmd/pilot vm-target run --name dashboard \
 #       playbooks/apply/dashboard-apply.yml \
 #       -e target_group=dashboard \
-#       -e thanos_query_target_host=<thanos-query central IP> \
 #       -e grafana_admin_password=<password>
 #
 # Variables: see docs/verification/dashboard.md §1.5.
@@ -70,12 +69,8 @@
     # task below that references it uses `| default('', true)` at the
     # point of use instead, so an unset value still resolves to "" rather
     # than an undefined-variable error.
-    thanos_query_alias: thanos-query-backend
-    # Must match thanos-query-apply.yml's thanos_query_http_port default
-    # (10912, not the container-internal 10902) — see that playbook's
-    # comment for why the central Thanos Query defaults its host-published
-    # HTTP port off of 10902 in the first place.
-    thanos_query_port: 10912
+    # Alias, port and URL defaults are applied at point of use so inventory
+    # overrides remain effective. Docker DNS tracks the provider's current IP.
     grafana_admin_password: ""
 
   pre_tasks:
@@ -138,20 +133,64 @@
           grafana_admin_password is required (e.g. -e grafana_admin_password=...;
           vault file recommended over -e in real inventories).
 
-  tasks:
-    - name: "Resolve thanos_query_target_host for the /etc/hosts pin"
-      ansible.builtin.include_tasks: tasks/resolve-hosts-alias-target.yml
-      vars:
-        hosts_alias_target_host: "{{ thanos_query_target_host | default('', true) }}"
-      when: thanos_query_target_host | default('', true) | length > 0
+    - name: "Determine whether Grafana uses the local Docker DNS provider"
+      tags: [always]
+      ansible.builtin.set_fact:
+        dashboard_thanos_local: >-
+          {{ (thanos_query_target_host | default('', true) | length == 0)
+             or (thanos_query_target_host in
+                 [inventory_hostname, ansible_host | default(inventory_hostname),
+                  ansible_fqdn | default(inventory_hostname)]) }}
 
-    - name: "Pin {{ thanos_query_alias }} -> {{ thanos_query_target_host | default('', true) }} in /etc/hosts"
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        regexp: '\s{{ thanos_query_alias }}$'
-        line: "{{ hosts_alias_resolved_ip }}\t{{ thanos_query_alias }}"
-        state: present
-      when: thanos_query_target_host | default('', true) | length > 0
+    - name: "Select the Thanos datasource URL without freezing DNS to an IP"
+      tags: [always]
+      ansible.builtin.set_fact:
+        dashboard_thanos_url: >-
+          {{ thanos_query_url | default(
+               'http://' ~
+               ((thanos_query_alias | default('thanos-query-backend', true))
+                if dashboard_thanos_local | bool
+                else ('[' ~ thanos_query_target_host ~ ']'
+                      if ':' in thanos_query_target_host else thanos_query_target_host))
+               ~ ':' ~ (thanos_query_port | default(
+                    10902 if dashboard_thanos_local | bool else 10912) | string),
+               true) }}
+
+    - name: "Gate: datasource URL must be HTTP(S) without embedded credentials"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - dashboard_thanos_url is match('^https?://[^/@?# ]+/?$')
+        fail_msg: "thanos_query_url must be an HTTP(S) base URL without credentials, query, fragment or path."
+
+  tasks:
+    - name: "Remove the legacy dashboard hosts pin"
+      tags: [C5, C6, C8]
+      block:
+        - name: "Snapshot hosts before removing the managed legacy alias"
+          ansible.builtin.copy:
+            remote_src: true
+            src: /etc/hosts
+            dest: /etc/hosts.pre-dashboard.bak
+            mode: preserve
+            force: false
+        - name: "Remove the legacy Thanos alias from the host"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '\s{{ thanos_query_alias | default("thanos-query-backend", true) | regex_escape }}$'
+            state: absent
+      rescue:
+        - name: "Restore hosts if legacy alias removal fails"
+          tags: [always]
+          ansible.builtin.copy:
+            remote_src: true
+            src: /etc/hosts.pre-dashboard.bak
+            dest: /etc/hosts
+            mode: preserve
+        - name: "Fail after restoring hosts"
+          tags: [always]
+          ansible.builtin.fail:
+            msg: "Failed to remove the legacy dashboard hosts pin; hosts restored."
 
     # docker_container needs a live daemon to compute its diff even under
     # --check; deferred entirely to the real apply on a from-scratch host,
@@ -238,7 +277,7 @@
                   type: prometheus
                   uid: pilot-thanos-query
                   access: proxy
-                  url: "http://{{ thanos_query_alias }}:{{ thanos_query_port }}"
+                  url: "{{ dashboard_thanos_url | regex_replace('/$', '') }}"
                   isDefault: true
                   editable: false
           register: datasources_yml_result

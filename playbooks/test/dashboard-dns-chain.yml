@@ -1,0 +1,13 @@
+---
+# Disposable integration chain: co-located Grafana / Thanos / Prometheus.
+# Supply test secrets from a private extra-vars file. No operational accounts.
+- name: Docker
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+- name: Object storage
+  ansible.builtin.import_playbook: ../apply/seaweedfs-s3-apply.yml
+- name: Prometheus and sidecar
+  ansible.builtin.import_playbook: ../apply/prometheus-apply.yml
+- name: Thanos Query
+  ansible.builtin.import_playbook: ../apply/thanos-query-apply.yml
+- name: Grafana and Loki
+  ansible.builtin.import_playbook: ../apply/dashboard-apply.yml
