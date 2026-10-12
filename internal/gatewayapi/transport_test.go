@@ -43,7 +43,9 @@ func (p *transportFakeProvider) HostShow(ctx context.Context, fqdn string) (free
 	if p.hostShowErr != nil {
 		return freeipaaccess.Host{}, p.hostShowErr
 	}
-	return freeipaaccess.Host{FQDN: fqdn, SSHPublicKeys: p.hostKeys}, nil
+	h := freeipaaccess.NewHostWithoutPolicy(fqdn)
+	h.SSHPublicKeys = p.hostKeys
+	return h, nil
 }
 
 func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled bool, recordingMode ...string) (*http.Client, string) {
@@ -58,7 +60,11 @@ func transportTestServer(t *testing.T, provider *transportFakeProvider, enabled 
 	srv := NewServer(gw, provider, accessportal.NewResolver(provider, gw), nil)
 	srv.Transport = TransportPolicy{Enabled: enabled}
 	if len(recordingMode) > 0 {
-		srv.RecordingPolicy = RecordingPolicy{Mode: recordingMode[0]}
+		// A gateway with a terminal default always has a session store:
+		// without one, connect/authorize denies before the transport gate.
+		pol := storePolicy(t)
+		pol.DefaultMode = recordingMode[0]
+		srv.RecordingPolicy = pol
 	}
 	go srv.Serve(ln)                                         //nolint:errcheck
 	t.Cleanup(func() { srv.Shutdown(context.Background()) }) //nolint:errcheck
@@ -118,7 +124,7 @@ func TestConnectAuthorize_TransportGate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.provider.username = user
 			client, base := transportTestServer(t, tc.provider, tc.enabled, tc.recording)
-			got, status := postJSON[ConnectAuthorizeResponse](t, client, base+"/v1/connect/authorize", ConnectAuthorizeRequest{Target: tc.target})
+			got, status := postJSON[ConnectAuthorizeResponse](t, client, base+"/v1/connect/authorize", ConnectAuthorizeRequest{Target: tc.target, SessionID: testSID})
 			if status != http.StatusOK {
 				t.Fatalf("status = %d", status)
 			}

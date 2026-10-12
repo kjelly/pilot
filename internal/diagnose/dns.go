@@ -8,8 +8,8 @@ import (
 // DNSSteps returns the fixed, read-only ad-hoc commands used to diagnose
 // DNS resolution problems: the always-run facts mirror
 // docs/verification/core-infra.md §2 (resolv.conf, systemd-resolved) and
-// docs/verification/core-infra-provider.md §2 (daemon installed/listening
-// on :53), and are deliberately reported as facts rather than a hard-coded
+// docs/verification/dns.md (daemon installed/listening on :53), and are
+// deliberately reported as facts rather than a hard-coded
 // pass/fail — the two docs expect *opposite* resolv.conf values depending
 // on whether the host is a DNS client or a DNS provider, so this check
 // must not assume either role. When name is non-empty (already validated

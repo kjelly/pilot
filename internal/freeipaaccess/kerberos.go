@@ -310,7 +310,10 @@ func (c *Client) GroupShow(ctx context.Context, name string) (Group, error) {
 }
 
 func (c *Client) HostShow(ctx context.Context, fqdn string) (Host, error) {
-	env, err := c.call(ctx, "host_show", []any{fqdn}, map[string]any{"all": true})
+	// rights=true: per-host recording spec §9 branch R — attributelevelrights
+	// proves this principal can actually read userclass, so a missing
+	// pilot.policy.ssh-recording marker really means "absent".
+	env, err := c.call(ctx, "host_show", []any{fqdn}, map[string]any{"all": true, "rights": true})
 	if err != nil {
 		return Host{}, err
 	}

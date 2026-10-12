@@ -9,7 +9,7 @@ import (
 )
 
 // TestRegression_FreeipaDNSClientSpec locks the structural contract of
-// docs/verification/freeipa-dns-client.md: 6 rows C1..C6, lint-clean, and a
+// docs/verification/freeipa-dns-client.md: 7 rows C1..C7, lint-clean, and a
 // generated diagnostic playbook that covers every row.
 func TestRegression_FreeipaDNSClientSpec(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-dns-client.md"
@@ -18,7 +18,7 @@ func TestRegression_FreeipaDNSClientSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}

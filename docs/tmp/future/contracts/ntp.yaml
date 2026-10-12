@@ -12,6 +12,7 @@ playbooks:
   decommission: null
 regressionTests:
   - internal/spec/core_infra_provider_regression_test.go
+  - internal/spec/core_infra_provider_stratum_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies: []
 conflicts: []

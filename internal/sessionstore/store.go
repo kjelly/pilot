@@ -15,10 +15,14 @@ import (
 // database. All methods are safe for concurrent use (database/sql pools
 // its own connections; SQLite's WAL mode + busy_timeout, set in
 // openDB, serialize writers rather than erroring under light
-// concurrency).
+// concurrency). Every write transaction starts with BEGIN IMMEDIATE
+// (openDB's _txlock), and each write method reads the session state it
+// depends on inside its own transaction, so a check and the write it
+// guards cannot interleave with another writer.
 type Store struct {
-	db  *sql.DB
-	enc *Encryptor
+	db        *sql.DB
+	enc       *Encryptor
+	migration *Migration
 }
 
 // Open opens (or creates) the index database at path, using enc to seal
@@ -29,12 +33,16 @@ func Open(path string, enc *Encryptor) (*Store, error) {
 	if enc == nil {
 		return nil, fmt.Errorf("sessionstore: encryptor is required")
 	}
-	db, err := openDB(path)
+	db, migration, err := openDB(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, enc: enc}, nil
+	return &Store{db: db, enc: enc, migration: migration}, nil
 }
+
+// Migration reports the schema upgrade Open performed, or nil when the
+// database was new or already current.
+func (s *Store) Migration() *Migration { return s.migration }
 
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -51,6 +59,13 @@ var (
 	// ingested twice with a different payload (spec.md §28.1: "重送同
 	// sequence: different payload → conflict / audit error").
 	ErrEventConflict = errors.New("sessionstore: event payload conflict for existing sequence")
+	// ErrSessionFinished rejects any write to a session that has already
+	// been finished (per-host recording spec §21.2): events after finish, a
+	// start that would reopen it, or a finish with a different outcome.
+	ErrSessionFinished = errors.New("sessionstore: session already finished")
+	// ErrLastSeqTooLow rejects a finish whose last_seq is below an already
+	// stored event's seq.
+	ErrLastSeqTooLow = errors.New("sessionstore: finish last_seq below a stored event seq")
 )
 
 // SessionStart is the metadata POST /v1/sessions/start carries — one row
@@ -64,6 +79,12 @@ type SessionStart struct {
 	Target        string
 	RecordingMode string
 	StartedAt     time.Time
+	// RecordingPolicySource is where the gateway resolved the recording
+	// mode from (host | gateway_default), taken from the signed token.
+	RecordingPolicySource string
+	// IngestJTI is the signed token's jti; every later events/finish call
+	// must present a token with the same jti.
+	IngestJTI string
 }
 
 // StartSession records a new session, or — if session_id was already
@@ -78,11 +99,21 @@ func (s *Store) StartSession(ctx context.Context, in SessionStart) error {
 	if in.StartedAt.IsZero() {
 		in.StartedAt = time.Now().UTC()
 	}
-	existing, err := s.GetSession(ctx, in.SessionID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	existing, err := getSession(ctx, tx, in.SessionID)
 	switch {
 	case err == nil:
+		if existing.EndedAt != nil {
+			return ErrSessionFinished
+		}
 		if existing.User == in.User && existing.Target == in.Target && existing.Scope == in.Scope &&
-			existing.GatewayID == in.GatewayID && existing.DirectoryID == in.DirectoryID {
+			existing.GatewayID == in.GatewayID && existing.DirectoryID == in.DirectoryID &&
+			existing.RecordingMode == in.RecordingMode && existing.RecordingPolicySource == in.RecordingPolicySource &&
+			existing.IngestJTI == in.IngestJTI {
 			return nil
 		}
 		return ErrSessionConflict
@@ -91,12 +122,14 @@ func (s *Store) StartSession(ctx context.Context, in SessionStart) error {
 	default:
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (session_id, user, directory_id, gateway_id, scope, target, recording_mode, started_at, key_id)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions (session_id, user, directory_id, gateway_id, scope, target, recording_mode, started_at, key_id, recording_policy_source, ingest_jti)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		in.SessionID, in.User, in.DirectoryID, in.GatewayID, in.Scope, in.Target, in.RecordingMode,
-		in.StartedAt.UTC().Format(time.RFC3339Nano), s.enc.KeyID())
-	return err
+		in.StartedAt.UTC().Format(time.RFC3339Nano), s.enc.KeyID(), in.RecordingPolicySource, in.IngestJTI); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // IngestEvent is one TerminalEvent's already-decoded (from base64)
@@ -127,16 +160,24 @@ type IngestOutcome struct {
 // (Duplicate++); with a DIFFERENT payload it fails the whole batch with
 // ErrEventConflict — a diverging retry is exactly the kind of ambiguity
 // this store must never resolve by picking one side silently.
+//
+// The finished check runs inside the write transaction, so a concurrent
+// FinishSession either commits first (ErrSessionFinished here) or sees
+// these events (and rejects a last_seq below them).
 func (s *Store) IngestEvents(ctx context.Context, sessionID string, events []IngestEvent) (IngestOutcome, error) {
 	var out IngestOutcome
-	if _, err := s.GetSession(ctx, sessionID); err != nil {
-		return out, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
+	if err != nil {
+		return out, err
+	}
+	if summary.EndedAt != nil {
+		return out, ErrSessionFinished
+	}
 
 	var addedBytes int64
 	var addedCount int
@@ -194,30 +235,105 @@ func payloadHash(ev IngestEvent) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// FinishSession marks a session ended. complete should be true only when
-// the caller (the Recorder) reached a clean end-of-session with no
-// backpressure gap it already knows about — Replay independently
-// recomputes gaps from what actually landed in storage regardless of
-// this flag, so a caller lying here cannot hide a real gap from `pilot
-// session replay`.
-func (s *Store) FinishSession(ctx context.Context, sessionID string, endedAt time.Time, complete bool) error {
+// FinishSession records the end of a session (per-host recording spec
+// §21.4). lastSeq is the recorder's last assigned seq, including events it
+// dropped; the stored completeness is the client's own claim AND no gap in
+// [1, lastSeq] AND the highest stored seq equal to lastSeq, so events lost
+// at the tail are detected too. Repeating an identical finish (same
+// endedAt instant and lastSeq) is a no-op; any other finish of an already
+// finished session is ErrSessionFinished.
+func (s *Store) FinishSession(ctx context.Context, sessionID string, endedAt time.Time, complete bool, lastSeq uint64) error {
+	_, err := s.FinishSessionResult(ctx, sessionID, endedAt, complete, lastSeq)
+	return err
+}
+
+// FinishResult reports what one FinishSessionResult call did.
+type FinishResult struct {
+	// Repeated is true for an idempotent retry of an earlier identical
+	// finish; nothing changed.
+	Repeated bool
+	// Complete is the stored completeness.
+	Complete bool
+	// GapRanges is how many missing seq ranges (including a trailing gap
+	// up to last_seq) the finish found.
+	GapRanges int
+}
+
+// FinishSessionResult is FinishSession, also reporting whether this call
+// finished the session and what it found (for the store's metrics).
+func (s *Store) FinishSessionResult(ctx context.Context, sessionID string, endedAt time.Time, complete bool, lastSeq uint64) (FinishResult, error) {
 	if endedAt.IsZero() {
-		endedAt = time.Now().UTC()
+		return FinishResult{}, fmt.Errorf("sessionstore: ended_at is required")
 	}
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET ended_at=?, complete=? WHERE session_id=?`,
-		endedAt.UTC().Format(time.RFC3339Nano), boolToInt(complete), sessionID)
+	// The session state, the stored seqs and the update are one write
+	// transaction: an IngestEvents racing this finish either commits
+	// before the seqs are read or sees the session finished.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return FinishResult{}, err
 	}
-	n, err := res.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
 	if err != nil {
-		return err
+		return FinishResult{}, err
 	}
-	if n == 0 {
-		return ErrUnknownSession
+	if summary.EndedAt != nil {
+		if summary.EndedAt.Equal(endedAt) && summary.LastSeq == lastSeq {
+			return FinishResult{Repeated: true, Complete: summary.Complete}, nil
+		}
+		return FinishResult{}, ErrSessionFinished
 	}
-	return nil
+	seqs, err := eventSeqs(ctx, tx, sessionID)
+	if err != nil {
+		return FinishResult{}, err
+	}
+	var maxSeq uint64
+	for _, seq := range seqs {
+		maxSeq = max(maxSeq, seq)
+	}
+	if lastSeq < maxSeq {
+		return FinishResult{}, fmt.Errorf("%w: last_seq=%d, stored max seq=%d", ErrLastSeqTooLow, lastSeq, maxSeq)
+	}
+	gaps := gapsUpTo(seqs, lastSeq)
+	complete = complete && maxSeq == lastSeq && len(gaps) == 0
+	res, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET ended_at=?, complete=?, last_seq=? WHERE session_id=? AND ended_at=''`,
+		endedAt.UTC().Format(time.RFC3339Nano), boolToInt(complete), lastSeq, sessionID)
+	if err != nil {
+		return FinishResult{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return FinishResult{}, err
+	} else if n != 1 {
+		return FinishResult{}, ErrSessionFinished
+	}
+	if err := tx.Commit(); err != nil {
+		return FinishResult{}, err
+	}
+	return FinishResult{Complete: complete, GapRanges: len(gaps)}, nil
+}
+
+// querier is what the read helpers need from *sql.DB or *sql.Tx.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func eventSeqs(ctx context.Context, q querier, sessionID string) ([]uint64, error) {
+	rows, err := q.QueryContext(ctx, `SELECT seq FROM session_events WHERE session_id=?`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var seqs []uint64
+	for rows.Next() {
+		var seq uint64
+		if err := rows.Scan(&seq); err != nil {
+			return nil, err
+		}
+		seqs = append(seqs, seq)
+	}
+	return seqs, rows.Err()
 }
 
 // SessionSummary is one spec.md §28.3 index row.
@@ -235,18 +351,28 @@ type SessionSummary struct {
 	Bytes         int64
 	EventCount    int
 	KeyID         string
+	// RecordingPolicySource and LastSeq are exposed by the read API;
+	// IngestJTI is internal to ingest authorization and never exposed.
+	RecordingPolicySource string
+	LastSeq               uint64
+	IngestJTI             string
 }
 
-const summaryColumns = `session_id,user,directory_id,gateway_id,scope,target,recording_mode,started_at,ended_at,complete,bytes,event_count,key_id`
+const summaryColumns = `session_id,user,directory_id,gateway_id,scope,target,recording_mode,started_at,ended_at,complete,bytes,event_count,key_id,recording_policy_source,last_seq,ingest_jti`
 
 // GetSession returns one session's index row.
 func (s *Store) GetSession(ctx context.Context, sessionID string) (SessionSummary, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+summaryColumns+` FROM sessions WHERE session_id=?`, sessionID)
+	return getSession(ctx, s.db, sessionID)
+}
+
+func getSession(ctx context.Context, q querier, sessionID string) (SessionSummary, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+summaryColumns+` FROM sessions WHERE session_id=?`, sessionID)
 	var out SessionSummary
 	var startedAt, endedAt string
 	var completeInt int
 	err := row.Scan(&out.SessionID, &out.User, &out.DirectoryID, &out.GatewayID, &out.Scope, &out.Target,
-		&out.RecordingMode, &startedAt, &endedAt, &completeInt, &out.Bytes, &out.EventCount, &out.KeyID)
+		&out.RecordingMode, &startedAt, &endedAt, &completeInt, &out.Bytes, &out.EventCount, &out.KeyID,
+		&out.RecordingPolicySource, &out.LastSeq, &out.IngestJTI)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionSummary{}, ErrUnknownSession
 	}
@@ -296,7 +422,8 @@ func (s *Store) ListSessions(ctx context.Context, filter ListFilter) ([]SessionS
 		var completeInt int
 		if err := rows.Scan(&summary.SessionID, &summary.User, &summary.DirectoryID, &summary.GatewayID,
 			&summary.Scope, &summary.Target, &summary.RecordingMode, &startedAt, &endedAt, &completeInt,
-			&summary.Bytes, &summary.EventCount, &summary.KeyID); err != nil {
+			&summary.Bytes, &summary.EventCount, &summary.KeyID,
+			&summary.RecordingPolicySource, &summary.LastSeq, &summary.IngestJTI); err != nil {
 			return nil, err
 		}
 		summary.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
@@ -341,12 +468,19 @@ type ReplayResult struct {
 // verifies sequence continuity (spec.md §29). It never re-executes any
 // input — decryption and gap detection only.
 func (s *Store) Replay(ctx context.Context, sessionID string) (ReplayResult, error) {
-	summary, err := s.GetSession(ctx, sessionID)
+	// One read transaction, so the summary (last_seq, complete) and the
+	// events come from the same snapshot.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ReplayResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	summary, err := getSession(ctx, tx, sessionID)
 	if err != nil {
 		return ReplayResult{}, err
 	}
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`SELECT seq,stream,offset_nanos,rows,cols,redacted_bytes,nonce,ciphertext FROM session_events WHERE session_id=? ORDER BY seq ASC`,
 		sessionID)
 	if err != nil {
@@ -376,7 +510,7 @@ func (s *Store) Replay(ctx context.Context, sessionID string) (ReplayResult, err
 		return ReplayResult{}, err
 	}
 
-	gaps := detectGaps(seqs)
+	gaps := gapsUpTo(seqs, summary.LastSeq)
 	return ReplayResult{Events: events, Gaps: gaps, Complete: summary.Complete && len(gaps) == 0}, nil
 }
 
@@ -384,6 +518,21 @@ func (s *Store) Replay(ctx context.Context, sessionID string) (ReplayResult, err
 // event (internal/sessionrecording.Recorder's own discipline —
 // r.seq.Add(1) on a zero-valued atomic.Uint64). Any missing number in
 // [1, max(seqs)] is a gap.
+// gapsUpTo is detectGaps plus the trailing range (max stored seq, lastSeq]
+// that a finish with a known lastSeq reveals; lastSeq 0 (not yet finished,
+// or no events) adds nothing.
+func gapsUpTo(seqs []uint64, lastSeq uint64) []GapRange {
+	gaps := detectGaps(seqs)
+	var maxSeq uint64
+	for _, seq := range seqs {
+		maxSeq = max(maxSeq, seq)
+	}
+	if lastSeq > maxSeq {
+		gaps = append(gaps, GapRange{FromSeq: maxSeq + 1, ToSeq: lastSeq})
+	}
+	return gaps
+}
+
 func detectGaps(seqs []uint64) []GapRange {
 	if len(seqs) == 0 {
 		return nil

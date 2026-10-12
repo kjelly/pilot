@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Access Directory
 
-> 版本：DRAFT v0.2（2026-09-18：Phase 4 的 4 項 landing gate——真人 SSH Directory
+> 版本：DRAFT v0.3（2026-09-23：per-host SSH session recording Phase 6 新增 AD31——Directory 列表依 host override 顯示 `[REC]`／`[REC ?]`，見 `docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md` §24.2；以下為 v0.2 的紀錄：2026-09-18：Phase 4 的 4 項 landing gate——真人 SSH Directory
 > TUI、arbitrary remote command 無 shell、idempotent apply、site-wide deployment
 > 實際執行 component——已對新建的 `ag-directory01` vm-target 全部真實跑過，見
 > [`docs/evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md`](../evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md)。
@@ -50,6 +50,7 @@ host 上的一條指令驗證的，Command 欄就是那條真指令；不能的�
 | AD27 | staging/prod gate | stage gate 符合 repo policy — apply playbook 的 `pre_tasks` assert，非單一 shell 指令 | 0 | true |
 | AD28 | idempotency | 第二次 apply changed=0（多次重跑的性質，由 evidence doc 記錄，非單一 shell 指令可驗證） | 0 | true |
 | AD30 | topology | fresh vm-target topology E2E PASS — 見 §4，本 checklist 尚未執行過 | 0 | true |
+| AD31 | recording | Directory 列表依 host override 顯示 `[REC]`（`terminal_output`）／`[REC ?]`（policy 不可讀或 invalid），inherit／off 不顯示；Directory 不知道各 gateway 的 default，實際是否錄影以 gateway 在 SSH 前印出的提示為準 — 由 `internal/accessdirectory` 的 `TestDirectoryResolve_CarriesRecordingOverride` 與 `cmd/pilot/cmd` 的 `TestDirectoryHostLabel_RecordingBadge` 涵蓋，非單一 shell 指令 | 0 | true |
 
 其餘 AD 編號（AD03-AD05、AD06-AD16、AD20-AD26、AD29）不是單一 host 的靜態設定 checklist
 row——是跨 scope 聚合、跨 host 路由、race 條件、結構性（no import）或 TUI 互動性質，逐一列
@@ -79,6 +80,7 @@ row——是跨 scope 聚合、跨 host 路由、race 條件、結構性（no im
 
 ## 4. 尚未執行的多主機/topology 性質項目
 
+- **2026-09-24 AD31 活體觀察**：`phruser` 經 Directory 看到 `phr-tb.ipa.pilot.internal  [phr]  [REC]`、`phr-ta` 無標記，並經 handoff 連到兩台主機（見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md) 的 L1／L3）；全新 VM 上本 spec 的 verify 為 9/9。
 - **AD30 fresh vm-target topology E2E**：需要至少 `ipa1`/`directory-01`/`gw-gpu-01`/`gw-gpu-02`/`gw-dmz-01`/`gpu-target-01`/`dmz-target-01`（spec.md §45 的最小拓樸子集）全部從零 up 一次，跑 `pilot vm-target topology test`，記錄結果到新的 evidence doc。這一步仍未執行——2026-09-18 的驗收重用了既有的 `ag-spike-ipa`/`ag-gw01`/`ag-gw02`/`ag-target01` 加新建的 `ag-directory01`，不是從零 up 的完整 topology spec 跑法。
 - Phase 4 landing gate（spec.md §44）本身的四項——「真人 SSH Directory TUI」「arbitrary remote command無 shell」「idempotent apply」「site-wide deployment實際執行 component」——**已於 2026-09-18 對 `ag-directory01` 全部真實驗證通過**，見
   [`docs/evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md`](../evidence/pilot-access-directory/2026-09-18-phase4-directory-tui-deploy-integration.md)。

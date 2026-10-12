@@ -109,3 +109,30 @@ func containsWarning(s string) bool {
 	}
 	return false
 }
+
+// TestDirectoryHostLabel_RecordingBadge locks AD31 (per-host recording spec
+// §24.2): the Directory marks only the host override — [REC] for
+// terminal_output, [REC ?] for an unreadable or invalid policy — and never
+// guesses a gateway default.
+func TestDirectoryHostLabel_RecordingBadge(t *testing.T) {
+	target := func(status string) directoryapi.TargetJSON {
+		return directoryapi.TargetJSON{
+			FQDN:      "db-prod-01.ipa.pilot.internal",
+			Routes:    []directoryapi.RouteJSON{{Scope: "gpu", RouteStatus: directoryRouteStatusReady}},
+			Recording: directoryapi.DirectoryRecordingJSON{Status: status},
+		}
+	}
+	cases := map[string]string{
+		"terminal_output": "db-prod-01.ipa.pilot.internal  [gpu]  [REC]",
+		"unknown":         "db-prod-01.ipa.pilot.internal  [gpu]  [REC ?]",
+		"invalid":         "db-prod-01.ipa.pilot.internal  [gpu]  [REC ?]",
+		"inherit":         "db-prod-01.ipa.pilot.internal  [gpu]",
+		"off":             "db-prod-01.ipa.pilot.internal  [gpu]",
+		"":                "db-prod-01.ipa.pilot.internal  [gpu]",
+	}
+	for status, want := range cases {
+		if got := directoryTargetListLabel(target(status)); got != want {
+			t.Errorf("status %q: label = %q, want %q", status, got, want)
+		}
+	}
+}

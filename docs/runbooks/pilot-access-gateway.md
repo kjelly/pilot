@@ -101,6 +101,7 @@ after the E2E; it intentionally never changes the production role defaults.
 | `No Kerberos credentials available` after SSH-key first hop | A key login cannot delegate a TGT | Use the Portal's masked session `kinit` prompt |
 | Ansible hangs immediately after VM rollback | Stale local SSH ControlMaster references the pre-rollback connection | Close the stale mux before retrying |
 | A table-row probe prints literal `| grep` text | Markdown `\|` reached `sh -c` as an escaped pipe | Keep these checks pipe-free; current AG06/AG12/AG32 do so |
+| `terminal_io` recordings show no typed command text | Typed input is recorded only as redacted byte counts on the Gateway SSH relay path; terminal_io does not capture command text today (per-host recording spec §23) | Rely on the recorded terminal output; do not treat input redaction as a guarantee that secrets never reach the recording |
 
 ## 6. Latest verified evidence
 

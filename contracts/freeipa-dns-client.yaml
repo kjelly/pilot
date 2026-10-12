@@ -13,6 +13,8 @@ lifecycle:
   decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 regressionTests:
   - internal/spec/freeipa_dns_client_regression_test.go
+  - internal/spec/freeipa_dns_client_rollback_regression_test.go
+  - internal/spec/freeipa_dns_client_resolver_timeout_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: providerEndpoint}

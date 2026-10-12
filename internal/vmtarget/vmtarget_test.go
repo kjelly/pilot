@@ -2,6 +2,7 @@ package vmtarget
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -333,13 +334,132 @@ func TestUp_AcceptsHostAliases(t *testing.T) {
 		t.Fatalf("Hosts = %v (want core,dns,ntp)", tgt.Hosts)
 	}
 	inv, _ := tgt.RenderInventory()
-	for _, want := range []string{"core:", "dns:", "ntp:"} {
+	for _, want := range []string{"    core:\n      ansible_connection: ssh", "    dns:\n      hosts:\n        core: {}", "    ntp:\n      hosts:\n        core: {}"} {
 		if !strings.Contains(inv, want) {
-			t.Errorf("inventory missing alias %q\n%s", want, inv)
+			t.Errorf("inventory missing %q\n%s", want, inv)
 		}
 	}
-	if c := strings.Count(inv, "ansible_host: 192.168.122.42"); c != 3 {
-		t.Errorf("all aliases should route to the same IP, got %d", c)
+	if c := strings.Count(inv, "ansible_host: 192.168.122.42"); c != 1 {
+		t.Errorf("the VM should be one inventory host with its aliases as groups, got %d host entries", c)
+	}
+}
+
+// factRecorder records Manager.dropFacts calls, optionally failing them.
+type factRecorder struct {
+	calls [][]string
+	// virshCallsAtDrop is how many virsh calls the shim had logged when
+	// dropFacts ran (to prove ordering against domain creation).
+	virshCallsAtDrop []int
+	logFile          string
+	err              error
+}
+
+func (r *factRecorder) drop(_ context.Context, hosts []string) error {
+	r.calls = append(r.calls, append([]string(nil), hosts...))
+	data, _ := os.ReadFile(r.logFile)
+	r.virshCallsAtDrop = append(r.virshCallsAtDrop, strings.Count(string(data), "\n"))
+	return r.err
+}
+
+func recordFacts(t *testing.T, m *Manager) *factRecorder {
+	t.Helper()
+	r := &factRecorder{logFile: filepath.Join(t.TempDir(), "virsh.log")}
+	t.Setenv("PILOT_VIRSH_LOG", r.logFile)
+	m.dropFacts = r.drop
+	return r
+}
+
+// TestUp_DropsCachedFactsBeforeCreatingTheVM: a VM recreated under a name
+// used within the fact cache timeout must not be handed the facts of the
+// one it replaces, for its name and every alias.
+func TestUp_DropsCachedFactsBeforeCreatingTheVM(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	r := recordFacts(t, m)
+	if _, err := m.Up(context.Background(), Options{Name: "vb-ntp", BaseImage: base, Hosts: []string{"core", "ntp"}}); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(r.calls) != 1 || strings.Join(r.calls[0], ",") != "vb-ntp,core,ntp" {
+		t.Fatalf("dropFacts calls = %v, want one call for vb-ntp,core,ntp", r.calls)
+	}
+	data, _ := os.ReadFile(r.logFile)
+	var defineAt int
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "define ") {
+			defineAt = i
+			break
+		}
+	}
+	if r.virshCallsAtDrop[0] > defineAt {
+		t.Fatalf("facts were dropped after the domain was defined (virsh log):\n%s", data)
+	}
+}
+
+// TestUp_RefusesWhenCachedFactsCannotBeDropped is the should-not side: if
+// the cache cannot be cleaned, Up must stop before reserving the name or
+// creating anything.
+func TestUp_RefusesWhenCachedFactsCannotBeDropped(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	r := recordFacts(t, m)
+	r.err = errors.New("permission denied")
+	_, err := m.Up(context.Background(), Options{Name: "vb-x", BaseImage: base})
+	if err == nil || !strings.Contains(err.Error(), "drop cached Ansible facts") {
+		t.Fatalf("Up error = %v, want the fact cache failure", err)
+	}
+	all, _ := m.List(context.Background())
+	if len(all) != 0 {
+		t.Fatalf("Up left a state record behind: %+v", all)
+	}
+	data, _ := os.ReadFile(r.logFile)
+	if strings.Contains(string(data), "define ") {
+		t.Fatalf("Up defined a domain although the facts could not be dropped:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(m.vmDir, "vb-x")); !os.IsNotExist(err) {
+		t.Fatalf("Up created the target dir: %v", err)
+	}
+}
+
+// TestDown_DropsCachedFactsAndControlDir: Down removes the cached facts of
+// every name the VM owned and its SSH control directory; a cache that
+// cannot be cleaned does not stop the teardown (the next Up refuses
+// instead).
+func TestDown_DropsCachedFactsAndControlDir(t *testing.T) {
+	m, base := newTestManager(t, happyVirsh)
+	r := recordFacts(t, m)
+	tgt, err := m.Up(context.Background(), Options{Name: "vb-down", BaseImage: base, Hosts: []string{"dns"}})
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if _, err := tgt.RenderInventory(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tgt.ControlDir()); err != nil {
+		t.Fatalf("control directory missing before Down: %v", err)
+	}
+	r.err = errors.New("cache unavailable")
+	if err := m.Down(context.Background(), "vb-down"); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if len(r.calls) != 2 || strings.Join(r.calls[1], ",") != "vb-down,dns" {
+		t.Fatalf("dropFacts calls = %v, want Up then Down for vb-down,dns", r.calls)
+	}
+	if _, err := os.Stat(tgt.ControlDir()); !os.IsNotExist(err) {
+		t.Fatalf("control directory survived Down: %v", err)
+	}
+	if all, _ := m.List(context.Background()); len(all) != 0 {
+		t.Fatalf("state after Down: %+v", all)
+	}
+}
+
+// TestDown_UnknownNameDropsNothing: an idempotent Down of a name pilot does
+// not own must not touch the fact cache.
+func TestDown_UnknownNameDropsNothing(t *testing.T) {
+	m, _ := newTestManager(t, happyVirsh)
+	r := recordFacts(t, m)
+	if err := m.Down(context.Background(), "not-ours"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("dropFacts calls = %v, want none", r.calls)
 	}
 }
 

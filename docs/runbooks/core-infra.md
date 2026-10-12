@@ -10,6 +10,8 @@
 > 對齊規範：見 `docs/verification/core-infra.md` 與 `core-infra-provider.md`
 > 維護者：sre
 
+> **2026-10-01 起**：DNS 已從 `core-infra-provider-apply.yml` 拆到 `playbooks/apply/dns-apply.yml`，`-e infra_role=dns` 會被 gate 拒絕。本文中的 `infra_role=dns` 步驟與輸出是當時的紀錄，現行的 DNS 操作見 [`dns.md`](./dns.md)；NTP 仍是 `-e infra_role=ntp`。
+
 ---
 
 ## 0. 環境快照

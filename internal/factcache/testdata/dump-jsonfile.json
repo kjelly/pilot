@@ -1,0 +1,35 @@
+[
+    {
+        "name": "ACTION_WARNINGS",
+        "origin": "default",
+        "value": true
+    },
+    {
+        "name": "CACHE_PLUGIN",
+        "origin": "/repo/ansible.cfg",
+        "value": "jsonfile"
+    },
+    {
+        "name": "CACHE_PLUGIN_CONNECTION",
+        "origin": "/repo/ansible.cfg",
+        "value": "~/.ansible/pilot-factcache"
+    },
+    {
+        "name": "CACHE_PLUGIN_PREFIX",
+        "origin": "default",
+        "value": "ansible_facts"
+    },
+    {
+        "name": "CACHE_PLUGIN_TIMEOUT",
+        "origin": "/repo/ansible.cfg",
+        "value": 3600
+    },
+    {
+        "name": "DEFAULT_GATHERING",
+        "origin": "/repo/ansible.cfg",
+        "value": "smart"
+    },
+    {
+        "GALAXY_SERVERS": {}
+    }
+]

@@ -1,0 +1,30 @@
+---
+# Apply chain for docs/verification/dns.md §6 against
+# docs/topologies/dns-tier-topology.yaml.
+#
+# Order matters:
+#   freeipa-server -> dns fixtures (reverse/svc/stub zones on FreeIPA)
+#   -> dns tier (its G5 gate needs those zones served authoritatively)
+#   -> freeipa-dns-client consumers (point at the tier first, B10)
+#
+# The dns settings come from group_vars/dns.yml next to a workspace
+# inventory written with `pilot edit`; pass that inventory as a second -i so
+# Ansible loads its group_vars (dns.md §6 E8). Secrets only from the vault:
+#
+#   pilot vm-target topology test \
+#       --topology docs/topologies/dns-tier-topology.yaml \
+#       --playbook playbooks/test/dns-tier-chain.yml \
+#       --verify docs/verification/dns.md=dns \
+#       --verify docs/verification/freeipa-dns-client.md=freeipa-dns-client \
+#       -- -i <workspace>/inventory.yml -e @~/.vault/<sandbox>.yaml
+- name: FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+
+- name: DNS tier fixtures on the FreeIPA server
+  ansible.builtin.import_playbook: fixtures/dns-fixtures.yml
+
+- name: DNS tier
+  ansible.builtin.import_playbook: ../apply/dns-apply.yml
+
+- name: FreeIPA DNS clients (consumers of the tier)
+  ansible.builtin.import_playbook: ../apply/freeipa-dns-client-apply.yml

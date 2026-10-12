@@ -103,7 +103,8 @@ func TestRegression_FreeipaDNSClientRollback_Structure(t *testing.T) {
 		"/etc/resolv.conf",
 		"freeipa_dns_client_resolved_dropin_path",
 		"freeipa_dns_client_netplan_dropin_path",
-		"ipv4.dns ipv4.dns-search ipv4.ignore-auto-dns",
+		"ipv4.dns ipv4.dns-search ipv4.dns-options ipv4.ignore-auto-dns",
+		`nmcli --escape no -g "$field"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("snapshot script must contain %q", want)
@@ -428,13 +429,18 @@ func TestFreeipaDNSClientRollback_FailedRestoreIsReported(t *testing.T) {
 // prints "no"; with static DNS the lists are comma-separated
 // ("192.0.2.1,192.0.2.2", "a.example,b.example") and "yes". Feeding those
 // strings back to `nmcli connection modify` restored the same values, and
-// "" cleared them, on the same host.
+// "" cleared them, on the same host. ipv4.dns-options (2026-10-01): unset
+// prints an empty line; set, plain -g escapes the colons
+// ("timeout\:1,attempts\:2") and writing that back stored the backslashes,
+// so NetworkManager dropped the options line; `--escape no -g` prints
+// "timeout:1,attempts:2" and the round trip restores it. The fake answers
+// only the --escape no reads, and the plain read with the escaped value.
 func TestFreeipaDNSClientRollback_ELRestoresNetworkManagerSettings(t *testing.T) {
 	cases := []struct {
-		name, dns, search, ignore string
+		name, dns, search, options, ignore string
 	}{
-		{"dhcp dns", "", "", "no"},
-		{"static dns", "192.0.2.1,192.0.2.2", "a.example,b.example", "yes"},
+		{"dhcp dns", "", "", "", "no"},
+		{"static dns", "192.0.2.1,192.0.2.2", "a.example,b.example", "timeout:1,attempts:2", "yes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -445,9 +451,11 @@ func TestFreeipaDNSClientRollback_ELRestoresNetworkManagerSettings(t *testing.T)
 { printf '%s|' "$@"; echo; } >> ` + log + `
 case "$*" in
   "-t -f NAME,DEVICE connection show --active") printf 'System eth0:eth0\nlo:lo\n' ;;
-  "-g ipv4.dns connection show System eth0") printf '%s\n' '` + tc.dns + `' ;;
-  "-g ipv4.dns-search connection show System eth0") printf '%s\n' '` + tc.search + `' ;;
-  "-g ipv4.ignore-auto-dns connection show System eth0") printf '%s\n' '` + tc.ignore + `' ;;
+  "--escape no -g ipv4.dns connection show System eth0") printf '%s\n' '` + tc.dns + `' ;;
+  "--escape no -g ipv4.dns-search connection show System eth0") printf '%s\n' '` + tc.search + `' ;;
+  "--escape no -g ipv4.dns-options connection show System eth0") printf '%s\n' '` + tc.options + `' ;;
+  "-g ipv4.dns-options connection show System eth0") printf '%s\n' '` + strings.ReplaceAll(tc.options, ":", `\:`) + `' ;;
+  "--escape no -g ipv4.ignore-auto-dns connection show System eth0") printf '%s\n' '` + tc.ignore + `' ;;
 esac
 `
 			if err := os.WriteFile(filepath.Join(sb.bin, "nmcli"), []byte(fake), 0o755); err != nil {
@@ -466,7 +474,7 @@ esac
 			}
 			calls := strings.Split(strings.TrimSpace(readFile(t, log)), "\n")
 			want := []string{
-				"connection|modify|System eth0|ipv4.dns|" + tc.dns + "|ipv4.dns-search|" + tc.search + "|ipv4.ignore-auto-dns|" + tc.ignore + "|",
+				"connection|modify|System eth0|ipv4.dns|" + tc.dns + "|ipv4.dns-search|" + tc.search + "|ipv4.dns-options|" + tc.options + "|ipv4.ignore-auto-dns|" + tc.ignore + "|",
 				"device|reapply|eth0|",
 			}
 			if !reflect.DeepEqual(calls, want) {

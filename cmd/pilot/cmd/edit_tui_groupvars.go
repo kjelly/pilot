@@ -32,12 +32,11 @@ import (
 // editable regardless of current role usage, since it may predate a roster
 // change and a human already chose to create it.
 //
-// Nested examples (nestedGroupVarsExamples, inventory.go — currently just
-// dns_zones) are listed too, so they're at least discoverable/scaffoldable
-// instead of invisible, but selecting one never opens the normal editor:
-// dns_zones is a 2-level nested list-of-maps with no top-level "key: value"
-// line at all, so groupvars.Doc would show a confusingly empty screen
-// (harmless, just useless) — point at hand-editing instead.
+// Every role keeps all of its settings in the one flat group_vars/<stem>.yml
+// file (docs/verification/dns.md §3.5 P1): a group_vars/<stem>/ directory
+// next to it makes Ansible ignore the file entirely, so the picker warns
+// about any such pair (inventory.ShadowedVarsFiles) instead of offering to
+// edit a file whose values would never take effect unnoticed.
 func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 	targetDir := filepath.Join(dir, "group_vars")
 	exampleDir := "group_vars"
@@ -53,21 +52,17 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 		missingExamples = filterStemsToUsedRoles(missingExamples, hf)
 	}
 
-	usedRoles := map[string]bool{}
-	if hf != nil {
-		for _, role := range inventory.UsedRoles(hf) {
-			usedRoles[role] = true
-		}
+	shadows, err := inventory.ShadowedVarsFiles(dir)
+	if err != nil {
+		r.err = err
+		return nil
 	}
-	var nestedExisting, nestedMissing []nestedGroupVarsExample
-	for _, ex := range nestedGroupVarsExamples {
-		if !usedRoles[ex.Role] {
-			continue
-		}
-		if _, statErr := os.Stat(filepath.Join(targetDir, ex.DestRel)); statErr == nil {
-			nestedExisting = append(nestedExisting, ex)
+	for _, sh := range shadows {
+		note := fmt.Sprintf("⚠️  %s 不會生效：同名目錄 %s/ 存在時，Ansible 只載入目錄。請把檔案內容併入目錄，或移除目錄。", sh.File, sh.Dir)
+		if banner == "" {
+			banner = note
 		} else {
-			nestedMissing = append(nestedMissing, ex)
+			banner += "\n" + note
 		}
 	}
 
@@ -76,23 +71,14 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 	// row's Choice.ID. The "create from example" rows describe an action on a
 	// file that does not exist yet, so they are namespaced under this screen to
 	// keep them distinct from the openable rows.
-	choices := make([]tui.Choice, 0, len(existing)+len(nestedExisting)+len(missingExamples)+len(nestedMissing)+1)
+	choices := make([]tui.Choice, 0, len(existing)+len(missingExamples)+1)
 	for _, f := range existing {
 		choices = append(choices, tui.Choice{ID: f, Label: "📝 " + f})
-	}
-	for _, ex := range nestedExisting {
-		choices = append(choices, tui.Choice{ID: ex.DestRel, Label: "📝 " + ex.DestRel})
 	}
 	for _, stem := range missingExamples {
 		choices = append(choices, tui.Choice{
 			ID:    "group_vars.files.create:" + stem,
 			Label: fmt.Sprintf("➕ 從範例建立 %s.yml", stem),
-		})
-	}
-	for _, ex := range nestedMissing {
-		choices = append(choices, tui.Choice{
-			ID:    "group_vars.files.create:" + ex.DestRel,
-			Label: fmt.Sprintf("➕ 從範例建立 %s", ex.DestRel),
 		})
 	}
 	choices = append(choices, tui.Choice{ID: "group_vars.files.back", Label: "↩  返回"})
@@ -111,13 +97,8 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 			return pushTopMenu(r, dir, "")
 		case idx < len(existing):
 			return pushGroupVarsEditor(r, dir, filepath.Join(targetDir, existing[idx]), "")
-		case idx < len(existing)+len(nestedExisting):
-			ex := nestedExisting[idx-len(existing)]
-			dst := filepath.Join(targetDir, ex.DestRel)
-			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf(
-				"ℹ️  %s 是巢狀清單設定，pilot edit 目前不支援結構化編輯，請直接用文字編輯器修改。", dst))
-		case idx < len(existing)+len(nestedExisting)+len(missingExamples):
-			stem := missingExamples[idx-len(existing)-len(nestedExisting)]
+		default:
+			stem := missingExamples[idx-len(existing)]
 			src := filepath.Join(exampleDir, stem+".example.yml")
 			dst := filepath.Join(targetDir, stem+".yml")
 			data, rerr := os.ReadFile(src)
@@ -135,25 +116,6 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 				return nil
 			}
 			return pushGroupVarsEditor(r, dir, dst, fmt.Sprintf("已從 %s 建立 %s", src, dst))
-		default:
-			ex := nestedMissing[idx-len(existing)-len(nestedExisting)-len(missingExamples)]
-			src := filepath.Join(exampleDir, ex.ExampleRel)
-			dst := filepath.Join(targetDir, ex.DestRel)
-			data, rerr := os.ReadFile(src)
-			if rerr != nil {
-				r.err = fmt.Errorf("read %s: %w", src, rerr)
-				return nil
-			}
-			if merr := os.MkdirAll(filepath.Dir(dst), 0o755); merr != nil {
-				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), merr)
-				return nil
-			}
-			if werr := os.WriteFile(dst, data, 0o644); werr != nil {
-				r.err = fmt.Errorf("write %s: %w", dst, werr)
-				return nil
-			}
-			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf(
-				"已從 %s 建立 %s — 這是巢狀清單設定，pilot edit 目前不支援結構化編輯，請直接用文字編輯器修改。", src, dst))
 		}
 	})
 }
@@ -453,6 +415,22 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 			Label: fmt.Sprintf("%s = [%s]  [%s]", e.Key, strings.Join(e.Values, ", "), state),
 		})
 	}
+	// An older workspace copy of this file has no line at all for a setting
+	// its .example.yml gained later, and the editor can only edit lines that
+	// exist — offer to append those (commented out, so nothing changes until
+	// the user edits one; docs/verification/dns.md §3.5 P3). Never applied
+	// unless chosen, and like every other edit it is only written on save.
+	example, exampleSrc := loadGroupVarsExample(path)
+	var missing []string
+	if example != nil {
+		missing = doc.MissingKeysFrom(example)
+	}
+	if len(missing) > 0 {
+		choices = append(choices, tui.Choice{
+			ID:    "group_vars.entries.backfill",
+			Label: fmt.Sprintf("➕ 從範例補上缺少的設定（%d 項）", len(missing)),
+		})
+	}
 	choices = append(choices,
 		tui.Choice{ID: "group_vars.entries.save", Label: "💾 存檔並離開"},
 		tui.Choice{ID: "group_vars.entries.discard", Label: "🚪 不存檔離開"},
@@ -506,24 +484,50 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 			return pushConfirmDiscardGroupVars(r, dir, path, doc)
 		}
 		idx := m.Selected()
-		switch {
-		case idx == len(choices)-2:
+		switch choices[idx].ID {
+		case "group_vars.entries.save":
 			if err := os.WriteFile(path, doc.Bytes(), 0o644); err != nil {
 				r.err = fmt.Errorf("write %s: %w", path, err)
 				return nil
 			}
 			return pushGroupVarsFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
-		case idx == len(choices)-1:
+		case "group_vars.entries.discard":
 			if !dirty {
 				return pushGroupVarsFilePicker(r, dir, "")
 			}
 			return pushConfirmDiscardGroupVars(r, dir, path, doc)
-		case idx < len(entries):
-			return pushGroupVarsEntryMenu(r, dir, path, doc, entries[idx], dirty)
-		default:
-			return pushGroupVarsListEntryMenu(r, dir, path, doc, listEntries[idx-len(entries)], dirty)
+		case "group_vars.entries.backfill":
+			appended := doc.AppendMissingFrom(example)
+			return pushGroupVarsEditorScreen(r, dir, path, doc, true, fmt.Sprintf(
+				"已從 %s 補上 %s（以註解形式加入，仍使用內建預設；存檔後生效）", exampleSrc, strings.Join(appended, "、")))
 		}
+		if idx < len(entries) {
+			return pushGroupVarsEntryMenu(r, dir, path, doc, entries[idx], dirty)
+		}
+		return pushGroupVarsListEntryMenu(r, dir, path, doc, listEntries[idx-len(entries)], dirty)
 	})
+}
+
+// loadGroupVarsExample loads the shipped group_vars/<stem>.example.yml for
+// the workspace file at path (same fixed, CWD-relative example directory as
+// pushGroupVarsFilePicker), or nil when the stem has no example or path is
+// itself that example file.
+func loadGroupVarsExample(path string) (*groupvars.Doc, string) {
+	stem, ok := strings.CutSuffix(filepath.Base(path), ".yml")
+	if !ok || strings.HasSuffix(stem, ".example") {
+		return nil, ""
+	}
+	src := filepath.Join("group_vars", stem+".example.yml")
+	if absSrc, err := filepath.Abs(src); err == nil {
+		if absPath, err := filepath.Abs(path); err == nil && absSrc == absPath {
+			return nil, ""
+		}
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return nil, ""
+	}
+	return groupvars.Parse(data), src
 }
 
 func pushConfirmDiscardGroupVars(r *editRouterModel, dir, path string, doc *groupvars.Doc) tea.Cmd {

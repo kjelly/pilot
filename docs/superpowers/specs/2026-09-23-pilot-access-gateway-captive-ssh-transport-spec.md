@@ -474,6 +474,12 @@ Playbook 要求：
 4. Step 11 模板新增 `recording:` 區塊（mode、failure_policy；url 非空時才輸出 session_store_*），以及 `transport:` 區塊（§12.3）。
 5. 同步更新：`group_vars/pilot-access-gateway.example.yml`、`group_vars/pilot-session-store.example.yml`（「手動對應設定」段落改寫成新 group vars）、`cmd/pilot/cmd/deploy_catalog.go` 的 pilot-session-store Note、`contracts/pilot-access-gateway.yaml` 的 `groupVars`。
 
+> **2026-09-24 與 per-host SSH session recording 合併後**（`docs/superpowers/specs/2026-09-23-pilot-access-gateway-per-host-session-recording-spec.md`）：
+> `_mode` 沒有預設值（未設定＝built-in metadata，config 不寫 `mode:`）；`_failure_policy` 預設 `fail_closed`；`_session_store_ca_file`
+> 預設 `/etc/ipa/ca.crt`；另有 `_queue_events`、`_flush_interval`、`_failure_grace`、`_max_session_duration`。`_session_store_ingest_token_file`
+> 已移除：recorded session 改用 gateway 以 vault `pilot_session_store_ingest_signing_key` 簽發的 per-session PIT1 token。降級守門不變，
+> 未設定的 mode 視為 metadata 比較。D8 的 transport recording allowlist 讀的是 gateway 依每台主機的 FreeIPA policy 解析出的 effective mode。
+
 ### 12.3 Transport 旗標
 
 - Group var `pilot_access_gateway_transport_enabled`（boolean，預設 `false`）→ 模板輸出 `transport:\n    enabled: true|false`（縮排依既有模板）。
@@ -643,7 +649,7 @@ Remote-dev（只列差異）：
 | AG66 | rsync：小型目錄樹 + ≥64 MiB 大檔，`sha256sum` 一致 |
 | AG67 | Host key：§6.1 設定、空的 known_hosts、`StrictHostKeyChecking yes` → 成功，且 workstation 上沒有任何 known_hosts 被寫入；把 KnownHostsCommand 換成輸出錯誤 key 的命令 → inner OpenSSH 回報 host key verification failed |
 | AG68 | Target 不在 `pilot-transport-ready`（target policy `absent` 之後）→ transport 與 known-hosts 都被拒 |
-| AG69 | Gateway `recording_mode=terminal_output` → transport 被拒（`recording policy`），`pilot-known-hosts-v1` 也被拒（`access denied`，rev 5）；同一時間 `pilot-connect` 仍然產生 recording（local FileSink 檔案存在） |
+| AG69 | Gateway `recording_mode=terminal_output` → transport 被拒（`recording policy`），`pilot-known-hosts-v1` 也被拒（`access denied`，rev 5）；同一時間 `pilot-connect` 仍然產生 recording（per-host recording 合併後沒有本機 FileSink：session 出現在 `pilot-session-store` 的 index，`recording_mode terminal_output`、`complete=1`） |
 | AG70 | 經真實 sshd：AG46 的代表性子集（IP literal、`host:22`、`user@host`、shell metacharacter、wrong-scope target）全數被拒，target 端 sshd 在該時段沒有來自 Gateway 的連線紀錄 |
 | AG71 | Gateway journald 對一次成功 session 有 requested → connected → closed（含 target_ip、bytes、duration_ms）；對一次被拒的 session 有 denied；全部不含 §11.3 的禁止內容 |
 | AG72 | Legacy 回歸：互動 Portal（`ssh -tt`）正常；`pilot-connect` one-shot 對 target 正常；既有 AG35–AG40 unit tests 通過；Directory handoff 以既有 unit tests + `pilot-connect` grammar 未變證明未退化 |

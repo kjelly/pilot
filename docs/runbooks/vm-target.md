@@ -252,6 +252,30 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 
 ---
 
+### 5.4 `--hosts` alias、SSH ControlPath、fact cache
+
+2026-10-01 對 disposable VM 實跑過（`vb-facts`、`vb-ntp-cand`），摘要見
+[`docs/evidence/vm-target/2026-10-01-198fb03.md`](../evidence/vm-target/2026-10-01-198fb03.md)。
+
+- **alias 是 group，不是第二個 host**：`show-inventory` 只有一個 host（`--name`），
+  每個 alias 在 `all.children` 下是只含這台 VM 的 group。`-l <alias>`、
+  `-e target_group=<alias>`、`groups['<alias>']` 都選到這台；`hosts: all` 只跑
+  一次。v1 spec 的目標 group 是 alias 時（例如 `core-infra-provider.md` 的
+  `ntp`），VM 不必取同名：`vb-ntp-cand --hosts core,ntp` 的 `vm-target test`
+  PASS。之前 alias 是同位址的 host，verify 會報
+  `execution scope contains hosts outside spec targets: <VM 名稱>`。
+- **每台 VM 自己的 ControlPath**：inventory 用 `ansible_ssh_args` 指到
+  `/tmp/pilot-vmt-<uid>-<8 hex>/%C`（`$PILOT_SSH_CONTROL_BASE` 可換掉 `/tmp`），
+  `show-inventory` 時建立目錄、`down` 時刪除；同名重建的 VM 拿到新目錄。放在
+  `ansible_ssh_common_args` 沒有用：Ansible 先放 `ssh_args`，OpenSSH 取第一個
+  值，所以以前實際用的一直是 `ansible.cfg` 的共用 `~/.ansible/cp/pilot-%C`。
+  host 變數也蓋過 `ANSIBLE_SSH_ARGS`。
+- **fact cache**：`ansible.cfg` 是 `gathering = smart` + 3600 秒 jsonfile cache。
+  `up` 先刪掉這個名稱與每個 alias 的舊 facts（刪不掉就不建 VM），`down` 再刪一次；
+  `topology up/down` 走同一條路。位置用 `ansible-config dump` 依當下目錄與
+  環境變數解析。`rollback`/`reset` 不會刪：還原後的 VM 仍可能拿到還原前收集的
+  facts，需要時刪掉 cache 目錄下的 `s1_<名稱>`。
+
 ## 6. State 檔在哪
 
 - metadata（json）：pilot data dir 底下的 `vm-targets.json`（versioned + atomic save，同 docker-target）。
@@ -278,7 +302,7 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 | 開機 ~30–60s | 比 docker exec 慢很多 | 對需要 kernel 保真才用；batch 注意資源 |
 | base image 要自備 + qcow2 | minimal image 的 cloud-init 行為有雷 | 建議用 **standard** server cloudimg（非 minimal） |
 | 沒有 pre-bake/golden image 流程 | 每次靠 cloud-init 裝東西，重複起停很浪費頻寬 | `pilot services up` + `--services local`（見 §2.2）快取 apt/RPM/image，不必等 pre-bake image 流程也能省下大部分重跑成本；golden image 本身仍待後續加 `vm-target build`（packer / virt-customize），對齊 docker 的 `--image-pilot` |
-| 單 host | 一個 target = 一台 VM | `--hosts` alias 已支援（多 inventory key 指同一台）；真多機拓樸走 `vm-target topology`（宣告式 spec，up/inventory/snapshot/rollback/reset/test 全套，實跑範例見 `docs/runbooks/freeipa-server-replica-ha-drill.md`） |
+| 單 host | 一個 target = 一台 VM | `--hosts` alias 已支援（每個 alias 是只含這台 VM 的 group，見 §5.4）；真多機拓樸走 `vm-target topology`（宣告式 spec，up/inventory/snapshot/rollback/reset/test 全套，實跑範例見 `docs/runbooks/freeipa-server-replica-ha-drill.md`） |
 | `--services local` 的 disposable-VM 端驗收仍待跑 | 目前只驗過 host-side lifecycle + fail-closed 串接，VM 內實際吃快取裝套件/拉 image 尚無實測 evidence | 見 `docs/superpowers/specs/2026-07-23-host-local-services-design.md` Task 8；補完前別把 `--services local` 寫進任何 spec 的 Expected 驗收行為 |
 
 ---
@@ -300,6 +324,7 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
 
 | 日期 | 版本 | 變更 |
 |------|------|------|
+| 2026-10-01 | v1.3 | §5.4：`--hosts` alias 改成 group、每台 VM 自己的 SSH ControlPath、`up`/`down` 刪除 fact cache 舊紀錄（`docs/evidence/vm-target/2026-10-01-198fb03.md`） |
 | 2026-06-30 | v1.0 | 初版：QEMU/KVM vm-target（up/down/list/show-inventory/run/verify/exec/snapshot/rollback），cloud-init NoCloud + qcow2 overlay + 權威 IP；修 virtio-seed / undefine-snapshots-metadata / up-cleanup 三個坑 |
 | 2026-09-25 | v1.2 | §6：data dir 與其他命令一致（`--data-dir` → `PILOT_DATA_DIR` → `data_dir` → `~/.local/share/pilot`），`run`/`verify` 的 `--data-dir` 生效並傳給子行程；network lock 改成每個 libvirt network 一個、放在 `/tmp`（與 data dir、`--vm-dir` 無關）；舊位置 state 的遷移提示。證據見 `docs/evidence/data-dir/2026-10-01-077cf3c.md`（data dir 部分另見 `docs/evidence/data-dir/2026-09-25-92e6063.md`） |
 | 2026-07-23 | v1.1 | 補§2.2：文件化 `pilot services up/status/down/purge` + `vm-target --services local` / topology 根層 `services: local` 的 host-local 快取用法（apt-cacher-ng + Pulp RPM + Harbor，fail-closed，不會退回公網）；VM 端完整驗收仍待補（見 §7） |

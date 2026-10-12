@@ -124,6 +124,13 @@ a play-level `connection: local`. And/or clear the specific
 `~/.ansible/<cache-dir>/s1_<hostname>` files for hostnames being reused before a
 fresh preflight.
 
+`pilot vm-target`/`docker-target` `up` and `down` (and `topology up/down`) now
+drop the cache entries of the target's name and aliases themselves, so a
+recreated target never inherits the previous one's facts
+(`docs/evidence/vm-target/2026-10-01-198fb03.md`). Clearing by hand is still
+needed after `vm-target rollback`/`reset`, for hosts outside those commands,
+and for `pilot deploy`'s own cache under `<data-dir>/ansible`.
+
 ### `known_hosts` churn
 
 VM rebuilds at the same IP get a new host key; a stale entry breaks any direct
@@ -144,7 +151,9 @@ directory]`
 `/tmp/pilot-ssh-<uid>-<hash of the data dir>/%C`, at most about 75 bytes
 however deep the data dir or long the host name.
 `$PILOT_SSH_CONTROL_BASE` replaces `/tmp` if you need to, and must stay
-short. `ansible.cfg` and the vm-target inventory use `%C` as well, and
+short. `ansible.cfg` uses `%C` as well, each vm-target VM has its own
+`/tmp/pilot-vmt-<uid>-<hash>/%C` (set through `ansible_ssh_args`, which wins
+over `ansible.cfg` and `ANSIBLE_SSH_ARGS`), and
 `internal/spec/ssh_controlpath_regression_test.go` rejects any ControlPath
 template that embeds the host. On an older binary, use a short `--data-dir`.
 

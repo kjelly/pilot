@@ -752,17 +752,22 @@ func runVtPlaybookJSON(cmd *cobra.Command, playbook string, ansibleArgs []string
 // containerFixPermsScript builds the /bin/sh script run inside the sandbox
 // container before ansible: for each bind-mounted key path in
 // cntKeyPaths, it copies to an indexed path it can chmod 600 (the mount
-// may carry a foreign uid/perms), and pre-creates the two directories
-// the generated inventory relies on — ~/.ssh (for known_hosts) and
-// ~/.ansible/cp (the SSH ControlPath parent). Without the latter, ssh's
-// ControlMaster socket creation fails inside the container because its
-// parent dir does not exist, breaking every task.
+// may carry a foreign uid/perms), and pre-creates the directories the
+// generated inventory relies on — ~/.ssh (for known_hosts), ~/.ansible/cp
+// (the container's own default ControlPath parent) and each target's
+// SSH control directory in controlDirs (the ControlPath the vm-target
+// inventory sets). Without them, ssh's ControlMaster socket creation
+// fails inside the container because its parent dir does not exist,
+// breaking every task.
 //
 // Multiple key paths are supported because a --group multi-host
 // inventory spans several vm-target VMs, each with its own generated
 // SSH keypair — every one needs its own mount and fixed-permission copy.
-func containerFixPermsScript(cntKeyPaths ...string) string {
+func containerFixPermsScript(controlDirs []string, cntKeyPaths ...string) string {
 	parts := []string{"mkdir -p ~/.ssh ~/.ansible/cp", "touch ~/.ssh/known_hosts"}
+	for _, dir := range controlDirs {
+		parts = append(parts, "mkdir -p -m 700 '"+strings.ReplaceAll(dir, "'", `'\''`)+"'")
+	}
 	for i, cntKeyPath := range cntKeyPaths {
 		fixed := containerFixedKeyPath(i)
 		parts = append(parts, fmt.Sprintf("cp %s %s", cntKeyPath, fixed), fmt.Sprintf("chmod 600 %s", fixed))
@@ -857,8 +862,12 @@ func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbo
 	// 6. Fix SSH key permissions inside the container (bind mounts may
 	//    carry a foreign uid). Also create ~/.ssh/known_hosts and the
 	//    ControlPath parent dir the generated inventory expects.
+	controlDirs := make([]string, len(keyTargets))
+	for i, kt := range keyTargets {
+		controlDirs[i] = kt.ControlDir()
+	}
 	fixPerms := newCmd(ctx, "docker", "exec", containerID,
-		"/bin/sh", "-c", containerFixPermsScript(mountPaths...))
+		"/bin/sh", "-c", containerFixPermsScript(controlDirs, mountPaths...))
 	if out, err := fixPerms.CombinedOutput(); err != nil {
 		return fmt.Errorf("fix SSH key permissions: %w\n%s", err, string(out))
 	}
@@ -992,8 +1001,8 @@ func runVtVerify(cmd *cobra.Command, args []string) error {
 	extra := args[1:]
 	pilotArgs := []string{"verify", spec, "-i", invPath}
 	// A v2 spec's contract role can be an alias of the disposable VM rather
-	// than its generated target name. Honour an explicit child --limit so the
-	// expected-host resolver sees the contract role, not a duplicate VM alias.
+	// than its generated target name. Honour an explicit child --limit (an
+	// alias is a group holding the VM, so it selects the same one host).
 	if !verifyExtraHasLimit(extra) {
 		pilotArgs = append(pilotArgs, "-l", t.Name)
 	}
@@ -1737,9 +1746,10 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 }
 
 // vmTargetVerificationLimit keeps legacy specs on the generated target name,
-// but uses a v2 contract's declared roles. A disposable VM inventory contains
-// both names as sibling aliases; using the generated name for v2 would violate
-// expected-host scope before a single probe can run.
+// but uses a v2 contract's declared roles. The VM is a single inventory host
+// and each alias a group holding it, so both select the same host when the
+// VM carries the role; limiting by the roles makes a VM that carries none of
+// them fail on scope before a single probe runs.
 func vmTargetVerificationLimit(specPath, targetName string) (string, error) {
 	parsed, err := spec.Parse(specPath)
 	if err != nil {

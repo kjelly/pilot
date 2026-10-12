@@ -437,8 +437,8 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 39 支**都有 `stage`/`confirm_staging`/
-`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`docker`、
+`playbooks/apply/*.yml` 現在**全部 40 支**都有 `stage`/`confirm_staging`/
+`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`dns`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
 `freeipa-nfs-client`、`freeipa-server-replica`、`freeipa-realm-replacement`、
@@ -622,6 +622,18 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   pilot-access-directory AD_service、pilot-session-store SS_service 也一樣;
   `internal/spec/ipa_kinit_regression_test.go::TestRegression_IpaCommandsHaveAKinitForTheirTags`
   對全部 `playbooks/apply/*.yml` 檢查(對應的 kdestroy 也要帶同樣的 tag)。
+- 反方向也一樣:mutation **之前**必須先跑的 task,即使 mutation 不讀它的結果,
+  也要帶齊 mutation 的每一個 tag——例如把 mutation 會毀掉的資訊先記下來的
+  task、擋降級的 assert。反過來,只該在 restart/health 之後才做的清理,在
+  `--tags` run 裡要自己確認前提成立(沒有待生效的重啟、health 此刻通過),不能
+  假設完整 run 裡排在前面的步驟這次也跑過。2026-10-02 PR #19 review:
+  pilot-access-gateway 的 Step 11 帶 AG01/AG41/AG42/AG94,記下舊 token 路徑的
+  AG82 task 只帶 `AG_config`/`AG82`,`--tags AG01` 換掉唯一記錄自訂 token 路徑的
+  config,之後的完整 apply 再也找不到那個 token;`--tags AG_config`/`AG82` 則在
+  舊 gateway 還在跑時就刪掉它;錄影政策的降級檢查也少了 AG94、AG81。這種前後
+  關係無法從 YAML 推導,逐一用測試鎖住
+  (`internal/spec/pilot_access_gateway_ag82_regression_test.go::TestRegression_GatewayWritesFollowTheirChecks`,
+  另有對每個 tag 實際跑一次的行為測試)。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -745,7 +757,19 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    或跟累加的 task 用同一個 loop。
    `internal/spec/loop_accumulator_regression_test.go::TestRegression_LoopAccumulatorsAreInitializedOrGuarded`
    對全部 `playbooks/**` 檢查。
-12. **被 `when:` 跳過的 task 仍然會 register,值是 `{changed: false, skipped: true}`**:
+12. **`{{ }}` 模板裡字串字面值的 `\\` 不會被還原成 `\`**(ansible-core 2.19.2,
+   2026-10-02 實測):YAML 不是雙引號字串時,`regex_replace('/\\.', '')` 找的是
+   「反斜線 + 任意字元」,永遠比對不到,也不報錯。裸的 `when:`/`that:` 運算式
+   兩種寫法都會還原,所以同一個 regex 在 `that:` 裡有效、在同一個 task 的
+   `fail_msg` 裡卻失效:AG82 的 `..` 檢查會擋下路徑,訊息卻列出空清單;路徑
+   正規化的 `/./` 也從來沒有生效,測試只是靠另一道 inode 比對過關(PR #19)。
+   模板裡一律寫單一個反斜線(`'/\.(?=/|$)'`、`'\1'`),兩種情境都正確;或改用
+   雙引號 YAML 字串,讓 YAML 先吃掉一層。
+   `internal/spec/template_backslash_regression_test.go::TestRegression_JinjaTemplatesUseSingleBackslashes`
+   對全部 `playbooks/**` 檢查(`freeipa-dns-apply.yml` 的 `[ \\t]` 列在 allowlist:
+   `ipa` 輸出只用空白縮排,結果正確,修正要另外對 freeipa-dns 實跑),
+   `TestJinjaTemplateBackslashSemantics` 對本機 ansible-core 鎖住這個前提。
+13. **被 `when:` 跳過的 task 仍然會 register,值是 `{changed: false, skipped: true}`**:
    用 `combine()` 合併兩個互斥 task 的 register 結果,最後合併的那個決定
    `changed`。`prometheus-apply.yml` 這樣合併兩個 prometheus.yml render,
    有 Alertmanager 時被跳過的「無 alerting」版本蓋掉 `changed: true`,設定
@@ -1398,4 +1422,7 @@ git status --short
 | 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
 | 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查；兩支前置 lint 都會展開 `include_tasks`/`import_tasks` 檔案裡設的 fact，抓到並修正 5 支 playbook 的 `/etc/hosts` pin 讀未標 tag 的 resolver include（wazuh-manager C10、wazuh-fim C7、audit-log-forwarding C15、log-shipping C5、restic-backup C10） | pilot |
 | 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |
-| 2026-10-12 | v1.44 | §4.5 新增第 12 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts` | pilot |
+| 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
+| 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
+| 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
+| 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts` | pilot |
