@@ -222,7 +222,7 @@ func TestPrometheusSiteRows_C22FailsWithoutARecentBlockOfThisSite(t *testing.T) 
 // The site line rendered by ansible-core 2.19 `to_json` for the label
 // `a "b" \ c é` (captured from a real playbook run; to_json escapes
 // non-ASCII as \uXXXX).
-const trickySiteLine = `    site: "a \"b\" \\ c é"`
+const trickySiteLine = `    site: "a \"b\" \\ c \u00e9"`
 
 func TestPrometheusSiteRows_QuotedLabelReachesThanosUnchanged(t *testing.T) {
 	yml := strings.Replace(snmpPrometheusYML(t), `    site: "review-site"`, trickySiteLine, 1)
