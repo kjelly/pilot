@@ -433,14 +433,19 @@ func ipaInstallersWithoutSshdCheck(doc any) []string {
 	return out
 }
 
-// TestRegression_IpaInstallersRunAfterAnSshdCheck: ipa-client-install,
-// ipa-server-install and ipa-replica-install configure sshd and restart it.
-// With a broken file in sshd_config.d that restart fails and sshd stays
-// down; ipa-client-install --uninstall then stopped half done (SSSD's
+// TestRegression_IpaInstallersRunAfterAnSshdCheck: ipa-client-install
+// (enrollment and --uninstall) and ipa-server-install restart sshd. With a
+// broken file in sshd_config.d that restart fails and sshd stays down;
+// ipa-client-install --uninstall then stopped half done (SSSD's
 // configuration removed, /etc/ipa/default.conf still there) on AlmaLinux 9
-// (2026-10-12). Every installer run in playbooks/apply and
+// (2026-10-12). ipa-replica-install did not restart sshd when promoting an
+// enrolled client, but it is listed too: on a host that is not a client
+// yet it sets one up first. Every installer run in playbooks/apply and
 // playbooks/decommission needs a whole-configuration `sshd -t` earlier in
-// its task list.
+// the play, and before the play's first package install: on a fresh
+// AlmaLinux 9 host the `dnf install` of the FreeIPA packages restarted sshd
+// itself (systemd "Queuing reload/restart jobs for marked units"), before
+// any check placed next to the installer could run.
 func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
 	found := map[string]bool{}
 	installers := 0
@@ -467,7 +472,14 @@ func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
 			key := rel + ": " + name
 			found[key] = true
 			if _, ok := ipaInstallerAllowlist[key]; !ok {
-				t.Errorf("%s: runs a FreeIPA installer, which restarts sshd, with no `sshd -t` before it in its task list", key)
+				t.Errorf("%s: runs a FreeIPA installer, which restarts sshd, with no `sshd -t` before it in the play", key)
+			}
+		}
+		for _, name := range packageInstallsBeforeSshdCheck(doc) {
+			key := rel + ": " + name
+			found[key] = true
+			if _, ok := ipaInstallerAllowlist[key]; !ok {
+				t.Errorf("%s; the package transaction can restart sshd, so check sshd -t first", key)
 			}
 		}
 	}
@@ -480,6 +492,87 @@ func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
 	// realm replacement (2).
 	if installers < 7 {
 		t.Fatalf("found only %d FreeIPA installer runs; the detection is broken", installers)
+	}
+}
+
+// installsPackages reports whether a task installs packages: dnf, yum, apt,
+// package, or an include of the shared apt framework.
+func installsPackages(task map[string]any) bool {
+	if _, _, ok := taskModule(task, []string{"dnf", "yum", "apt", "package"}); ok {
+		return true
+	}
+	_, inc, ok := taskModule(task, []string{"include_tasks", "import_tasks"})
+	return ok && strings.Contains(fmt.Sprint(inc), "apt-package-install.yml")
+}
+
+// packageInstallsBeforeSshdCheck returns, for each play that runs a FreeIPA
+// installer, the package installs that come before its first
+// whole-configuration `sshd -t`, as "<task> installs packages before the
+// sshd -t".
+func packageInstallsBeforeSshdCheck(doc any) []string {
+	var out []string
+	items, _ := doc.([]any)
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		runs := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				if runsIpaInstaller(task) {
+					runs = true
+				}
+			})
+		}
+		if !runs {
+			continue
+		}
+		checked := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				if runsSshdCheck(task) {
+					checked = true
+				}
+				if !checked && installsPackages(task) {
+					out = append(out, fmt.Sprintf("%v installs packages before the sshd -t", task["name"]))
+				}
+			})
+		}
+	}
+	return out
+}
+
+func TestPackageInstallsBeforeSshdCheck(t *testing.T) {
+	var doc any
+	if err := yaml.Unmarshal([]byte(`
+- hosts: fresh
+  tasks:
+    - name: packages
+      dnf: {name: ipa-server}
+    - name: check
+      command: {argv: [sshd, -t]}
+    - name: install
+      command: {argv: [ipa-server-install, -U]}
+- hosts: checked-first
+  pre_tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+  tasks:
+    - name: packages
+      include_tasks: {file: tasks/apt-package-install.yml}
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+- hosts: no-installer
+  tasks:
+    - name: packages
+      apt: {name: curl}
+`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	got := packageInstallsBeforeSshdCheck(doc)
+	if fmt.Sprint(got) != "[packages installs packages before the sshd -t]" {
+		t.Errorf("got %q", got)
 	}
 }
 
