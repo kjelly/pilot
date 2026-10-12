@@ -305,7 +305,7 @@
           when: alertmanager_receiver_mode_effective == 'teams'
 
         # teams-proxy.py is read once at start; same single-file bind mount
-        # rule as alertmanager.yml below (AGENTS.md §4.5 item 12).
+        # rule as alertmanager.yml below (AGENTS.md §4.5 item 13).
         - name: "Check whether pilot-alertmanager-teams-proxy still sees its current relay script"
           tags: [always]
           ansible.builtin.include_tasks:
@@ -359,7 +359,7 @@
 
         # A single-file bind mount keeps the inode the container started with;
         # restart when the container no longer sees the host file, not only when
-        # this run rendered it (AGENTS.md §4.5 item 12).
+        # this run rendered it (AGENTS.md §4.5 item 13).
         - name: "Check whether pilot-alertmanager still sees its current config files"
           tags: [always]
           ansible.builtin.include_tasks:

@@ -195,7 +195,7 @@
     # published ports are reachable from the host.
     # Restart also when the running container still reads an older s3.json
     # than the host has: a run that rendered it and never reached the restart
-    # below leaves it stale forever otherwise (AGENTS.md §4.5 item 12).
+    # below leaves it stale forever otherwise (AGENTS.md §4.5 item 13).
     - name: "Check whether pilot-seaweedfs still sees its current s3.json"
       tags: [always]
       ansible.builtin.include_tasks:
