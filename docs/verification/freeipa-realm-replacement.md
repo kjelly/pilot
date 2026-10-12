@@ -45,7 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 雙平台通過，仍有已知缺口）。2026-10-12，candidate `9a189be`（enroll 前移除舊 realm 留在 `/etc/hosts` 的 server pin）：Ubuntu 24.04 與 AlmaLinux 9 client 完整 migration，C1–C6 各 **6/6 PASS**；對照組 `dcd6725` 的 Ubuntu client 仍在 C5 失敗。Negative path（錯誤的 admin 密碼）：rescue 還原了舊 realm 的本機檔案與 pin，但 uninstall 已在舊 server 上 `host_disable`，還原後舊 realm 仍無法登入（對照組相同）。尚未修正：rescue 訊息對此的描述有誤、`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-9a189be.md`](../evidence/freeipa-realm-replacement/2026-10-12-9a189be.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 與 rollback 雙平台通過，仍有已知缺口）。2026-10-12，candidate `b9d82d9`（uninstall 前從 keytab 移除舊 realm 的 key，讓舊 host 在舊 server 上保持有效；rescue 以保留的 keytab 重新 enroll 回舊 realm）：Ubuntu 24.04 與 AlmaLinux 9 client 在兩種失敗點（新 realm enrollment 失敗、enrollment 後 C5 失敗）rollback 後，舊 realm 的 `admin` 都能以密碼 SSH 登入，`freeipa-client.md` 12/12；rollback 後再 migration，C1–C6 各 **6/6 PASS**。對照組 `aa74524` rollback 後登入失敗、`freeipa-client.md` 10/12。尚未修正：`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-b9d82d9.md`](../evidence/freeipa-realm-replacement/2026-10-12-b9d82d9.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則
@@ -58,7 +58,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|----------|----------|------|
 | C5 | 若新 realm 禁止 `admin` 經 NSS 查詢，必須提供一個已建立、可解析的 `freeipa_realm_replacement_verify_user`；不得跳過有效 SSSD 查詢 | 有嚴格 admin policy 的站台 | 依站台 |
-| C6 | archive 只可回復 client 的舊本機設定；若舊 FreeIPA server 已重裝或退役，它不能恢復舊 realm 的信任關係 | 所有 server replacement | 永久 |
+| C6 | rollback 以 archive 裡的 host keytab 重新 enroll 回舊 realm，需要舊 FreeIPA server 仍在運作、且舊 host entry 仍有效（migration 刻意不在舊 server 上 disable 它，見 runbook §3/§4）；若舊 server 已重裝或退役，archive 不能恢復舊 realm 的信任關係 | 所有 server replacement | 永久 |
 | — | identity roster、HBAC/sudo、NFS automount 與其他 FreeIPA overlays 必須在 client wave 前於新 server 建好／wave 後另行驗收 | 所有站台 | 永久 |
 
 ## 6. 變更紀錄
