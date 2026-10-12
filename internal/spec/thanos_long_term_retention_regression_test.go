@@ -21,7 +21,12 @@ import (
 //
 //   - the Sidecar runs as the Prometheus uid with /prometheus writable
 //     (dropping :ro alone still fails, the image's own uid is 1001);
-//   - the Compactor keeps raw 30d, 5m 90d, 1h 90d;
+//   - the Compactor keeps raw, 5m and 1h for 90d. Raw is never shorter
+//     than the downsampled resolutions: only raw blocks spanning 40h or
+//     more are downsampled, so a short-lived site and the last blocks of a
+//     stopped or relabelled site exist only as raw (review of PR #39;
+//     scripts/thanos-retention-behavior-test.sh runs the Compactor on
+//     such blocks in CI);
 //   - Thanos Query runs with --query.auto-downsampling, without which a
 //     range query reads raw blocks only and the 30-90 day range is empty;
 //   - Prometheus keeps 24h locally as the upload buffer.
@@ -64,7 +69,7 @@ func TestRegression_ThanosLongTermRetention(t *testing.T) {
 		}
 		retention[res] = m[1]
 	}
-	want := map[string]string{"raw": "30d", "5m": "90d", "1h": "90d"}
+	want := map[string]string{"raw": "90d", "5m": "90d", "1h": "90d"}
 	for res, w := range want {
 		if retention[res] != w {
 			t.Errorf("thanos_compact_retention_%s default = %q, want %q", res, retention[res], w)
@@ -76,6 +81,11 @@ func TestRegression_ThanosLongTermRetention(t *testing.T) {
 	}
 	if d := thanosDuration(t, retention["5m"]); d <= 10*24*time.Hour {
 		t.Errorf("5m retention %s must exceed 10d", retention["5m"])
+	}
+	for _, res := range []string{"5m", "1h"} {
+		if thanosDuration(t, retention["raw"]) < thanosDuration(t, retention[res]) {
+			t.Errorf("raw retention %s is shorter than %s retention %s: raw-only blocks (under 40h) would be deleted with no downsampled copy", retention["raw"], res, retention[res])
+		}
 	}
 
 	queryCmd := fmt.Sprint(thanos.container(t, "pilot-thanos-query")["command"])
@@ -93,7 +103,7 @@ func TestRegression_ThanosLongTermRetention(t *testing.T) {
 
 	defaults := map[string]struct{ spec, groupVars, specCell, example string }{
 		"prometheus_retention_time":    {"prometheus.md", "prometheus.example.yml", "`24h`", `# prometheus_retention_time: "24h"`},
-		"thanos_compact_retention_raw": {"thanos-query.md", "thanos-query.example.yml", "`30d`", "# thanos_compact_retention_raw: 30d"},
+		"thanos_compact_retention_raw": {"thanos-query.md", "thanos-query.example.yml", "`90d`", "# thanos_compact_retention_raw: 90d"},
 		"thanos_compact_retention_5m":  {"thanos-query.md", "thanos-query.example.yml", "`90d`", "# thanos_compact_retention_5m: 90d"},
 		"thanos_compact_retention_1h":  {"thanos-query.md", "thanos-query.example.yml", "`90d`", "# thanos_compact_retention_1h: 90d"},
 	}
@@ -111,6 +121,29 @@ func TestRegression_ThanosLongTermRetention(t *testing.T) {
 		if !strings.Contains(readText(t, "../../group_vars/"+d.groupVars), d.example) {
 			t.Errorf("group_vars/%s must show %q", d.groupVars, d.example)
 		}
+	}
+}
+
+// TestRegression_ThanosRetentionBehaviorRunsInCI keeps the behavioural
+// retention check wired up: the script must read the defaults from the
+// playbook (so it tests what is deployed), and CI must run it.
+func TestRegression_ThanosRetentionBehaviorRunsInCI(t *testing.T) {
+	script := readText(t, "../../scripts/thanos-retention-behavior-test.sh")
+	for _, w := range []string{
+		`--retention\.resolution-$1={{ thanos_compact_retention_$1 | default('`,
+		"playbooks/apply/thanos-query-apply.yml",
+		"play_var thanos_version",
+		"play_var prometheus_version",
+	} {
+		if !strings.Contains(script, w) {
+			t.Errorf("scripts/thanos-retention-behavior-test.sh must contain %q", w)
+		}
+	}
+	if !strings.Contains(readText(t, "../../Makefile"), "thanos-retention-test:") {
+		t.Error("Makefile must define thanos-retention-test")
+	}
+	if !strings.Contains(readText(t, "../../.github/workflows/ci.yml"), "run: make thanos-retention-test") {
+		t.Error(".github/workflows/ci.yml must run make thanos-retention-test")
 	}
 }
 

@@ -947,7 +947,7 @@ avg by (pilot_project) (rate(node_cpu_seconds_total{job="node", mode!="idle"}[5m
 
 ---
 
-## 7f. 長期保存：Sidecar 上傳 + 90 天分層保留（2026-10-12）
+## 7f. 長期保存：Sidecar 上傳 + 保留 90 天（2026-10-12）
 
 ### 背景
 
@@ -964,9 +964,16 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
   一樣會 permission denied。
 - Prometheus 本機保留 `prometheus_retention_time`，預設改為 `24h`，作為上傳前的
   緩衝。原本 play vars 寫死 6h，現在可以由 group_vars 覆寫。
-- Compactor 分層保留：`thanos_compact_retention_raw` 30d、`thanos_compact_retention_5m`
-  90d、`thanos_compact_retention_1h` 90d。
-- Thanos Query 加上 `--query.auto-downsampling`。
+- Compactor 保留期限：`thanos_compact_retention_raw`、`_5m`、`_1h` 都是 90d。raw 不能
+  比降採樣資料短：Compactor 只把時間跨度至少 40 小時的 raw block 降採樣，只跑了幾
+  小時的站台、停用或改 site label 的站台最後一段資料永遠只有 raw，raw 到期就整段
+  刪除。PR #39 第一版用 raw 30d，review 時在同版本 image 重現了這個資料遺失；
+  `make thanos-retention-test`（CI 每次都跑）用合成 block 實際跑 Compactor 檢查。
+- Thanos Query 加上 `--query.auto-downsampling`，大時間範圍的查詢改讀 5m/1h block。
+- `prometheus.yml` 的 `external_labels.site` 改用 JSON 字串（雙引號）渲染。
+  `prometheus.md` C8/C22 只讀 `global.external_labels.site`：設了 `kind: snmp`
+  profile 時，snmp-exporter 的 scrape job 也有 `site` label，舊的寫法會把兩個值
+  串在一起，C22 的 `--selector` 被 Thanos 拒絕（PR #39 review）。
 
 新增的 spec rows：`prometheus.md` C21（Sidecar 能寫 TSDB 目錄）與 C22（這一站
 6 小時內有 block 進 bucket）；`thanos-query.md` C11（三個保留旗標）、C12
@@ -974,12 +981,16 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
 
 ### 查詢限制
 
-- 30–90 天前的資料只剩 5m/1h 解析度。auto-downsampling 以 step/5 當作
+90 天內的資料都有 raw，任何 step 的 range query 與 instant query 都查得到。下列
+限制只在把 `thanos_compact_retention_raw` 調得比 90d 短之後出現：
+
+- raw 刪除後的時段只剩 5m/1h 解析度。auto-downsampling 以 step/5 當作
   `max_source_resolution`，所以 range query 的 step 至少要 25m 才查得到這段資料；
   放大到小 step 時，這段時間是空白的。
 - 在降採樣資料上，`rate(x[5m])` 這種 range 太短的查詢會是空的。實測
   `rate(x[3h])` 可以。
-- Instant query（`/api/v1/query`、alert rule）只讀 raw，查不到 30 天前的時間點。
+- Instant query（`/api/v1/query`、alert rule）只讀 raw，查不到 raw 刪除後的時間點。
+- 從來沒被降採樣的 block（上面說的短命站台、停用站台最後一段）會直接消失。
 
 ### 事實快照（2026-10-12，candidate `0c2a8e2`）
 
@@ -1003,8 +1014,9 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
 1. 先確認 group_vars 有沒有設 `prometheus_retention_time`。以前那個值會被 play
    vars 的 6h 蓋掉；re-apply 之後，它會取代新的 24h 預設值。
 2. 每一個 `prometheus` 站台與 `thanos-query` 主機都要重新 apply。Prometheus 本機
-   會多保留 18 小時的 block，S3 bucket 則會開始累積最多 90 天的資料，上線前先確認
-   兩邊的磁碟容量。
+   會多保留 18 小時的 block，S3 bucket 則會開始累積最多 90 天的 raw 資料（加上
+   5m/1h 降採樣副本），上線前先確認兩邊的磁碟容量。站台的 `prometheus.yml` 會因為
+   `site` 改成雙引號而變動，Prometheus 會重啟一次。
 3. 站台 apply 後跑 `prometheus.md`：C21 會立刻 PASS；本機已經有 block 的站台，
    C22 也會立刻 PASS，全新站台要等大約 3 小時。中央跑 `thanos-query.md`：C13
    最多要等 Store Gateway 的 15 分鐘同步週期。
@@ -1056,6 +1068,8 @@ Prometheus 本機只保留 6h，全局查詢實際上只查得到最近 6 小時
 | （2026-09-08，§7c）Alertmanager `webhook_configs` 直接指向要求 Adaptive Card 的 Power Automate flowbot URL，Teams 端必現 `AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'` | `webhook_configs` 只會送 Alertmanager 自己固定的 JSON envelope，從來不是 Adaptive Card；原生 `msteams_configs` 送的是舊版 `MessageCard`，同樣不是 `AdaptiveCard`——沒有任何 stock 設定能直接滿足這個 flowbot 觸發器 | 新增 `pilot-alertmanager-teams-proxy`（stdlib-only Python，同一個 `pilot-metrics` network）做格式轉換，`webhook_configs.url` 改指向 proxy，真正的 URL 移到 proxy 的 `TEAMS_WEBHOOK_URL` 環境變數 |
 | （2026-09-08，§7c）「Default Alertmanager receiver mode to null」`set_fact` 成 YAML `null`（Python `None`），下游 gate/resolve 兩處都比對字串 `"null"` | 全新主機不帶 `alertmanager_receiver_mode`（預設路徑）必掛在 `Gate: Alertmanager receiver mode is supported`——這個 receiver-mode 三態切換本身此前從未在乾淨主機上跑過 | `set_fact` 改成字串 `"null"` |
 | （2026-10-12，§7f）Sidecar 以 `/prometheus:ro` 掛載 TSDB，沒有任何 block 上傳過，Store Gateway 載入 0 個 block，全局查詢只有本機的 6h | `create upload dir: mkdir /prometheus/thanos: read-only file system`；同時 `thanos_shipper_upload_failures_total` 仍是 0，舊版 `thanos-query.md` C1–C10 也全部 PASS | Sidecar 改 `user: 65534:65534` + 讀寫掛載；C21/C22/C13 直接檢查寫入權限、bucket 裡的 block 與 Store Gateway 載入數，不看 failure counter |
+| （2026-10-12，§7f，PR #39 review）Compactor raw 保留 30d、5m/1h 90d，短命站台與停用／改 site label 的站台最後一段資料在 30 天後整段消失 | 45 天前只有 2 小時資料的 block 被標記刪除，bucket 裡沒有 5m/1h 副本；`make thanos-retention-test` 在 raw=30d 時 FAIL | Compactor 只降採樣跨度 ≥40h 的 raw block；raw 預設改為 90d，不要比 5m/1h 短 |
+| （2026-10-12，§7f，PR #39 review）設了 `kind: snmp` profile 的站台，`prometheus.md` C22 永遠 FAIL | `pilot verify --probe` 的 C22 失敗；直接跑 bucket inspect 看到 `error parsing selector flag`、`unquote label value: invalid syntax` | snmp-exporter job 的 `site` label 也被抓進 selector；C8/C22 改為只讀 `global.external_labels.site`，該值以 JSON 字串渲染後原樣傳給 `--selector` |
 | （2026-09-08，§7d）`alertmanager_forward_to_agent_controller` mirror 把 secret/URL 直接手寫內插進 YAML/Jinja 字串，沒有跳脫 | secret 含 `"`/換行/反斜線時 `alertmanager.yml` 變成無效 YAML，容器 crash-loop：`yaml: line 19: did not find expected key`（本機 Ansible 引擎與真 vm-target 皆重現） | 兩個內插值改用 `\| to_json`（JSON 字串必為合法 YAML flow scalar），vm-target 重跑確認可正確解析且逐字元還原 |
 
 ---

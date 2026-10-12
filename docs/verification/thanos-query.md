@@ -1,6 +1,6 @@
 # Verification Spec — thanos-query (central Thanos Query + Store Gateway + Compactor)
 
-> 版本：v1.3（2026-10-12：Compactor 分層保留 raw 30d / 5m 90d / 1h 90d，Query 啟用 auto-downsampling，見 §1.5、§6）
+> 版本：v1.4（2026-10-12：Compactor raw、5m、1h 都保留 90d，Query 啟用 auto-downsampling，見 §1.5、§6）
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -39,7 +39,7 @@
 | `thanos_aws_secret_access_key` | S3 secret key | 是 | 無 |
 | `thanos_query_store_group` | 要自動探索的 Ansible inventory group 名稱（每個 host 視為一個站台，套用時讀 `hostvars[h].ansible_host` 組出 `--store=<ip>:10901`） | 否 | `prometheus` |
 | `thanos_query_sidecar_grpc_port` | 各站 Thanos Sidecar 的 gRPC（StoreAPI）port | 否 | `10901` |
-| `thanos_compact_retention_raw` | Compactor 保留 raw（原始 scrape 解析度）資料的期限（`--retention.resolution-raw`）；必須大於 40h，否則 Compactor 拒絕啟動 | 否 | `30d` |
+| `thanos_compact_retention_raw` | Compactor 保留 raw（原始 scrape 解析度）資料的期限（`--retention.resolution-raw`）；必須大於 40h，否則 Compactor 拒絕啟動；不要短於 5m/1h（見下方說明） | 否 | `90d` |
 | `thanos_compact_retention_5m` | Compactor 保留 5 分鐘降採樣資料的期限（`--retention.resolution-5m`）；必須大於 10d | 否 | `90d` |
 | `thanos_compact_retention_1h` | Compactor 保留 1 小時降採樣資料的期限（`--retention.resolution-1h`） | 否 | `90d` |
 
@@ -49,27 +49,35 @@
 > 各自發明一套命名，避免「central 填的 bucket 名跟站台不一致」這種只有跑到
 > 全局查詢那一刻才會發現的隱性錯誤——見 §5 已知偏差。
 >
-> **分層保留與 `--query.auto-downsampling` 必須一起用**：Compactor 把超過
-> 40 小時的 raw block 降採樣成 5m、超過 10 天的 5m block 降採樣成 1h，再依
-> 三個 `thanos_compact_retention_*` 各自刪除過期的 block。預設 raw 30 天、
-> 5m 與 1h 90 天：最近 30 天保留原始解析度，30–90 天只剩低解析度。
-> 但 Store Gateway 只挑「解析度不粗於查詢的 `max_source_resolution`」的
-> block，空缺只往**更細**的解析度補，不會退回更粗的；查詢沒帶這個參數時
-> 只讀 raw（Thanos v0.36.1 `pkg/store/bucket.go` `getFor`、
-> `pkg/api/query/v1.go` `parseDownsamplingParamMillis`）。所以 Thanos Query
-> 一律帶 `--query.auto-downsampling`：range query 沒帶參數時以 `step / 5`
-> 當作 `max_source_resolution`，Grafana 這類不帶參數的用戶端才查得到 raw
-> 刪除後的資料。2026-10-12 在本機用 45 天的合成資料、同一版 image 實測：
-> - 不帶參數時，raw 刪除後的時段（25 天前、40 天前）查詢結果是 0 點；
-> - 開啟 auto-downsampling 後，25 天前、step 2h 的查詢由 5m block 回應；
-> - instant query 不受影響，仍只讀 raw（`/api/v1/query` 看不到 30 天前的資料）。
+> **raw 不能比降採樣資料先刪，`--query.auto-downsampling` 也要開**：Compactor
+> 只把時間跨度至少 40 小時的 raw block 降採樣成 5m、跨度至少 10 天的 5m block
+> 降採樣成 1h，看的是 block 涵蓋的時間長度，不是資料多舊。只跑了幾小時的站台、
+> 停用或改了 site label 的站台最後一段不滿 40 小時的 block，永遠只有 raw；raw
+> 一到期就整段刪除，沒有低解析度的副本。所以三個 `thanos_compact_retention_*`
+> 預設都是 90 天，90 天內的資料都查得到原始解析度。降採樣仍然有用：大時間範圍
+> 的查詢改讀 5m/1h block，讀的資料量少很多。
+> `scripts/thanos-retention-behavior-test.sh` 用同一版 image 實際跑 Compactor
+> 檢查這件事（`make thanos-retention-test`，CI 每次都跑）：45 天前只有 2 小時
+> 資料的站台、停用站台最後一段的 block 都要留著，95 天前的 block 要被刪掉；
+> raw 改回 30d 時這個測試會失敗。
 >
-> 限制：30–90 天前的資料只在 step 夠大（`step / 5 ≥ 5m`，即 step ≥ 25 分鐘；
-> Grafana 約 1000 點寬的圖表對應時間範圍約 17 天以上）時查得到，把這段時間
-> 放大到幾小時會是空白；`rate(x[5m])` 這種視窗小於兩個降採樣間隔的運算在
-> 降採樣資料上也會是空的。需要放大檢視更舊的資料時，把
-> `thanos_compact_retention_raw` 調長（三者相等就沒有這個限制，代價是
-> object storage 用量增加）。
+> Store Gateway 只挑「解析度不粗於查詢的 `max_source_resolution`」的 block，
+> 空缺只往**更細**的解析度補，不會退回更粗的；查詢沒帶這個參數時只讀 raw
+> （Thanos v0.36.1 `pkg/store/bucket.go` `getFor`、`pkg/api/query/v1.go`
+> `parseDownsamplingParamMillis`）。Thanos Query 帶
+> `--query.auto-downsampling`：range query 沒帶參數時以 `step / 5` 當作
+> `max_source_resolution`，大時間範圍的圖表才會用到降採樣資料；操作者把 raw
+> 調短時，raw 刪除後的時段也只有這樣才查得到。2026-10-12 在本機用 45 天的合成
+> 資料、同一版 image 實測：
+> - 不帶參數時，只剩降採樣資料的時段（raw 已刪）查詢結果是 0 點；
+> - 開啟 auto-downsampling 後，同一時段 step 2h 的查詢由 5m block 回應；
+> - instant query 不受影響，仍只讀 raw。
+>
+> 如果把 `thanos_compact_retention_raw` 調短（例如省 object storage 用量）：
+> raw 刪除後的時段只在 step 夠大（`step / 5 ≥ 5m`，即 step ≥ 25 分鐘）時查得到，
+> 放大到幾小時會是空白，instant query 與 alert rule 查不到，`rate(x[5m])` 這種
+> 視窗小於兩個降採樣間隔的運算也是空的；上面說的短命站台與停用站台最後一段
+> 資料會直接消失。
 >
 > **`thanos_query_store_group` 預設抓 `prometheus` group、不是寫死的 IP
 > 清單**：套用時如果這個 group 是空的（`prometheus` 角色都還沒部署），
@@ -145,3 +153,4 @@
 | 2026-07-17 | v1.1 | 修正 C4/C5/C9/C10：`thanos-query-apply.yml` 的 `thanos_query_http_port` 早已預設改成 `10912`（避開跟站台 Thanos Sidecar 的 10902 collide），本規格的 checklist command 沒跟著更新，導致這 4 條在真實環境上必定 fail（`curl` 打 10902 拿到 000/connection refused）。`docs/runbooks/metrics-alerting.md` 整併重測時發現。若套用時有覆寫 `-e thanos_query_http_port=<其他值>`，這 4 條也要跟著改 | sre |
 | 2026-08-28 | v1.2 | Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9/§57）：`contracts/thanos-query.yaml` 的 `query` endpoint 一直沒跟著 v1.1 這次修正同步，仍宣告 port `10902`（跟本檔實際驗證的 `10912` 不一致，一個下游 consumer contract 若照著 `contracts/thanos-query.yaml` 綁定會連錯 port）；已修正成 `10912` 並補上 `internal/spec/thanos_query_regression_test.go` 的 `TestRegression_ThanosQueryContractQueryEndpointIs10912` 鎖住。本檔 checklist 本身不變 | sre |
 | 2026-10-12 | v1.3 | 新增 C11–C13 與 `thanos_compact_retention_raw`/`_5m`/`_1h`（預設 30d/90d/90d），Query 啟用 `--query.auto-downsampling`。需求是保存 90 天的資料、越舊的解析度可以越低。原本 Compactor 沒有保留期限（永久保存），而且各站 Sidecar 從未上傳成功（見 `prometheus.md` v1.6），Store Gateway 載入 0 個 block，C8 只檢查讀得到 bucket 所以沒抓到；C13 改為檢查 Store 真的載入了 block。分層保留只靠 Compactor 不夠：查詢沒帶 `max_source_resolution` 時只讀 raw，raw 刪除後的時段會是空的（本機實測，見 §1.5），所以 Query 必須開 auto-downsampling | pilot |
+| 2026-10-12 | v1.4 | `thanos_compact_retention_raw` 預設由 `30d` 改為 `90d`，與 5m/1h 相同。PR #39 review 用同版本 image 重現：Compactor 只降採樣跨度至少 40h 的 raw block，45 天前只有 2 小時資料的 block 在 raw 30d 下被標記刪除，沒有 5m/1h 副本；停用或改 site label 的站台最後一段也一樣。新增 `scripts/thanos-retention-behavior-test.sh`（`make thanos-retention-test`，CI 每次都跑）實際跑 Compactor 檢查短命站台與停用／改名站台最後一段的 block 都留著、95 天前的 block 被刪除；regression test 鎖住 raw 不短於 5m/1h | pilot |

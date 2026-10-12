@@ -79,6 +79,21 @@ jobs:
       - name: make playbook-lint
         run: make playbook-lint
 
+  thanos-retention:
+    # Runs the Thanos Compactor (the image version the playbooks deploy)
+    # with thanos-query-apply.yml's retention defaults against synthetic
+    # blocks: a short-lived site and the last blocks of a stopped or
+    # relabelled site are never downsampled, so they must survive raw
+    # retention (docs/verification/thanos-query.md §1.5).
+    name: Thanos retention behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: make thanos-retention-test
+        run: make thanos-retention-test
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

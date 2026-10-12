@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.6
+> 版本：v1.7
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -44,7 +44,7 @@
 
 | 變數名稱 | 說明/用途 | 是否必填 | 預設值 |
 |---------|----------|---------|--------|
-| `prometheus_site_label` | 這個站台的識別名稱，寫進 Prometheus `external_labels.site`；`thanos-query.md` 的全局查詢靠這個欄位分辨資料來源站台 | 是 | 無（空字串會被 gate 擋下） |
+| `prometheus_site_label` | 這個站台的識別名稱，以 JSON 字串（雙引號）寫進 Prometheus `global.external_labels.site`；`thanos-query.md` 的全局查詢靠這個欄位分辨資料來源站台 | 是 | 無（空字串會被 gate 擋下） |
 | `thanos_s3_target_host` | 備份目的地 SeaweedFS S3 gateway（或其他 S3 endpoint）的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `thanos_s3_alias` 別名 | 否（見下方 escape hatch） | 空字串 |
 | `thanos_s3_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名，Thanos objstore 設定一律指向這個別名 | 否 | `thanos-s3-backend` |
 | `thanos_s3_port` | S3 gateway port | 否 | `8333` |
@@ -147,7 +147,7 @@
 | C5  | http          | Thanos Sidecar `/-/healthy`（10902）回 200                   | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/healthy |
 | C6  | http          | Thanos Sidecar `/-/ready`（10902）回 200                     | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/ready |
 | C7  | metrics       | Prometheus 自我 scrape 成功（`up{job="prometheus"}==1`）       | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up' | grep -o '"value":\[[0-9.]*,"1"\]' |
-| C8  | config        | `prometheus.yml` 已設定 `external_labels.site`               | 0 | sh -c 'grep -qE "^\s*site:" /etc/pilot/prometheus/prometheus.yml' |
+| C8  | config        | `prometheus.yml` 的 `global.external_labels.site` 是非空、加了雙引號的字串（不是 scrape job 裡的 `site` label） | 0 | sh -c 'site=$(awk "/^global:/{g=1;next} /^[^[:space:]]/{g=0} g&&/^  external_labels:/{e=1;next} g&&/^  [^[:space:]]/{e=0} g&&e&&/^    site:/{sub(/^    site:[[:space:]]*/,\"\");print;exit}" /etc/pilot/prometheus/prometheus.yml); case $site in \"?*\") ;; *) exit 1;; esac' |
 | C9  | object-storage | Thanos Sidecar 可讀取 object storage bucket（`thanos tools bucket ls`） | 0 | sh -c 'docker exec pilot-thanos-sidecar thanos tools bucket ls --objstore.config-file=/etc/thanos/objstore.yml >/dev/null 2>&1' |
 | C10 | config        | `alert-rules.yml` 存在且語法有效（`promtool check rules`）       | 0 | sh -c 'docker exec pilot-prometheus promtool check rules /etc/prometheus/alert-rules.yml >/dev/null 2>&1' |
 | C11 | config        | `prometheus.yml` 含 `alerting.alertmanagers` 區塊（僅在 `alertmanager_target_host` 有設時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*alerting:" /etc/pilot/prometheus/prometheus.yml' |
@@ -161,7 +161,7 @@
 | C19 | metrics       | 收到真正的 GPU 硬體指標，不只是 exporter 自身存活（`DCGM_FI_DEV_GPU_UTIL{job="dcgm"}` 至少一筆 sample；僅在有 dcgm-exporter target 時適用） | present | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL%7Bjob%3D%22dcgm%22%7D' | grep -o '"metric"' |
 | C20 | config        | 執行中的 `pilot-prometheus` 讀到的 `prometheus.yml` 與主機上的檔案內容相同（不是 bind mount 留下的舊檔） | 0 | sh -c 'h=$(sha256sum < /etc/pilot/prometheus/prometheus.yml) && c=$(docker exec pilot-prometheus cat /etc/prometheus/prometheus.yml | sha256sum) && [ "$h" = "$c" ]' |
 | C21 | object-storage | Thanos Sidecar 以自己的執行身分能在 `/prometheus` 建立目錄（上傳前要建 `thanos/upload/<ulid>`） | 0 | docker exec pilot-thanos-sidecar sh -c 'd=/prometheus/.pilot-write-probe.$$ && mkdir "$d" && rmdir "$d"' |
-| C22 | object-storage | object storage 裡有這一站（`external_labels.site`）6 小時內的 block（Sidecar 真的在上傳，不只是讀得到 bucket） | 0 | sh -c 'site=$(sed -n "s/^[[:space:]]*site:[[:space:]]*//p" /etc/pilot/prometheus/prometheus.yml); since=$(date -u -d "-6 hours" +%Y-%m-%dT%H:%M:%SZ); [ -n "$site" ] && docker exec pilot-thanos-sidecar thanos tools bucket inspect --objstore.config-file=/etc/thanos/objstore.yml --output=tsv --selector="site=\"$site\"" 2>/dev/null | awk -F "\t" -v since="$since" "NR>1 && \$3 >= since {f=1} END {exit !f}"' |
+| C22 | object-storage | object storage 裡有這一站（`global.external_labels.site`）6 小時內的 block（Sidecar 真的在上傳，不只是讀得到 bucket） | 0 | sh -c 'site=$(awk "/^global:/{g=1;next} /^[^[:space:]]/{g=0} g&&/^  external_labels:/{e=1;next} g&&/^  [^[:space:]]/{e=0} g&&e&&/^    site:/{sub(/^    site:[[:space:]]*/,\"\");print;exit}" /etc/pilot/prometheus/prometheus.yml); case $site in \"?*\") ;; *) exit 1;; esac; since=$(date -u -d "-6 hours" +%Y-%m-%dT%H:%M:%SZ); docker exec pilot-thanos-sidecar thanos tools bucket inspect --objstore.config-file=/etc/thanos/objstore.yml --output=tsv --selector="site=$site" 2>/dev/null | awk -F "\t" -v since="$since" "NR>1 && \$3 >= since {f=1} END {exit !f}"' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -225,6 +225,17 @@
 > `prometheus.yml`，container 仍在用幾週前的版本。本行在 container 不存在或
 > `docker exec` 失敗時也會 fail（空輸出的 hash 跟主機檔案對不上）。
 
+> C8 與 C22 只讀 `global:` → `external_labels:` → `site:` 這一行（`awk` 依縮排
+> 限定範圍），不是整份檔案裡的 `site:`：設了 `kind: snmp` profile 時，
+> snmp-exporter 的 scrape job 也有 `labels.site`，2026-10-12 PR #39 review 在
+> vm-target 上重現舊版 C22 把兩個值串成 `review-site\nreview-site`，
+> `thanos tools bucket inspect --selector` 解析失敗，C22 永遠 FAIL；舊版 C8 在
+> 沒有 external_labels 時也會被這一行騙成 PASS。playbook 以 `to_json` 渲染
+> site，這個雙引號字串就是 Thanos `--selector` 要的格式（Thanos 用 Go
+> `strconv.Unquote` 解析），C22 原樣傳入，不再自己加引號。
+> `internal/spec/prometheus_site_selector_behavior_test.go` 用 vm-target 上 SNMP
+> profile 渲染出的 `prometheus.yml` 實際跑這兩行。
+
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
@@ -247,7 +258,7 @@
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
   - C5/C6 fail → Sidecar 連不到 Prometheus（`--prometheus.url` 錯）或連不到 object storage；`docker logs pilot-thanos-sidecar`
   - C7 fail → scrape 設定有誤或 target 打不到；檢查 `prometheus_scrape_configs`
-  - C8 fail → `prometheus_site_label` 沒有正確渲染進設定檔
+  - C8 fail → `prometheus_site_label` 沒有渲染進 `global.external_labels.site`，或不是加了雙引號的字串（舊版 playbook 渲染的設定檔，重跑 apply）
   - C9 fail → S3 憑證/bucket 有誤，或 bucket 尚未預先建立（見 §5）
   - C10 fail → `prometheus_alert_rules` 語法有誤；`docker exec pilot-prometheus cat /etc/prometheus/alert-rules.yml` 看內容
   - C11 fail → 預期 fail 見 §5（Alertmanager 尚未部署）；若非預期則檢查 `alertmanager_target_host` 是否帶入
@@ -292,3 +303,4 @@
 | 2026-09-21 | v1.4 | 新增 C16–C19：自動從 inventory 的 `dcgm-exporter` group 展開 GPU metrics scrape target（`dcgm_exporter_targets`，跟 `node_exporter_targets`/C13–C15 同一套 auto-discovery/escape-hatch/`pilot_host` label 模式，固定 job 名稱 `dcgm`、port 9400），並對認證後成功 scrape 到真實 GPU 硬體指標（`DCGM_FI_DEV_GPU_UTIL`，不只是 exporter 存活）做端到端驗證；補上 `dcgm-exporter.md` §5 原先列為已知留白的 Prometheus 整合。對 disposable vm-target（假 dcgm-exporter fixture）實跑 apply + `pilot verify` 全通過（C9/C11/C13/C14 因該次測試環境沒有 seaweedfs-s3/alertmanager/host-monitoring 而預期 fail，C1–C8/C10/C12/C15–C19 全 PASS）；同時修正 C15 的 Command——舊版對整份 `prometheus.yml` 做無範圍 `grep pilot_host:`，實測發現 dcgm job 有 target、node job 沒有 target時會被 dcgm 那行 label 誤判成 PASS，已改成 `awk` 範圍限定到各自 `job_name:` 區塊，C18 新增時直接採用限定版寫法 | pilot |
 | 2026-10-12 | v1.5 | 新增 C20：執行中的 container 讀到的 `prometheus.yml` 必須與主機檔案相同。正式環境的 dcgm-exporter target 已寫進主機檔案卻一直沒被 scrape：apply playbook 用 `combine()` 合併兩個互斥的 prometheus.yml render 結果，有 Alertmanager 時被跳過的那個帶著 `changed: false` 蓋掉另一個的 `changed: true`，container 從未因設定變更重啟，單檔 bind mount 一直指向舊 inode。playbook 改成分別檢查兩個結果，並在 container task 前比對 container 實際看到的單檔 bind mount（`tasks/container-file-mount-drift.yml`），內容不同就重啟，已經卡住的部署重跑 apply 即可恢復 | pilot |
 | 2026-10-12 | v1.6 | 新增 C21/C22，`prometheus_retention_time` 預設由 `6h` 改為 `24h`。正式環境的 Thanos Sidecar 從來沒有上傳成功：`/prometheus` 以 `:ro` 掛載，上傳前建立 `thanos/upload` 目錄失敗，Store Gateway 載入 0 個 block，歷史資料只剩本機 6 小時。只拿掉 `:ro` 仍會因 uid 不同被拒（本機實測），所以 Sidecar 改以 `65534:65534` 執行並可寫入。C9 只檢查讀得到 bucket，抓不到這個問題；C21 檢查 Sidecar 的實際寫入權限，C22 檢查 bucket 裡有這一站 6 小時內的 block。本地緩衝改為 24 小時，S3 中斷不超過一天不會掉資料；長期保留期限見 `thanos-query.md` v1.3 | pilot |
+| 2026-10-12 | v1.7 | C8/C22 只讀 `global.external_labels.site`，`prometheus.yml` 的 site 改以 JSON 字串渲染。PR #39 review 在 vm-target 上發現：設了 `kind: snmp` profile 時 snmp-exporter job 的 `site` label 也被抓進 C22 的 selector，Thanos 拒絕解析，C22 永遠 FAIL；同一個寫法讓 C8 在沒有 external_labels 時仍然 PASS。新增 `prometheus_site_selector_behavior_test.go` 用 SNMP 渲染結果實際跑這兩行 | pilot |

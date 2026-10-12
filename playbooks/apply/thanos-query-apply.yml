@@ -308,12 +308,16 @@
         # Only ONE compactor may ever run against a given bucket at a time
         # — this role is deliberately single-instance (thanos-query.md §1).
         #
-        # Retention per resolution (thanos-query.md §1.5, C11): raw data is
-        # downsampled to 5m after 40h and 5m to 1h after 10 days, then each
+        # Retention per resolution (thanos-query.md §1.5, C11): each
         # resolution is deleted after its own period. Thanos refuses to
-        # start with raw <= 40h or 5m <= 10d. These vars are read with
-        # `| default(...)` rather than declared in play vars so group_vars
-        # can override them (AGENTS.md §4.5 item 3).
+        # start with raw <= 40h or 5m <= 10d. Raw defaults to the same 90d
+        # as the downsampled copies, never shorter: the Compactor only
+        # downsamples a raw block that spans at least 40h (its span, not
+        # its age), so a short-lived site's blocks and the last blocks of a
+        # site that stopped or changed labels exist only as raw and would
+        # be deleted with nothing left (scripts/thanos-retention-behavior-test.sh).
+        # These vars are read with `| default(...)` rather than declared in
+        # play vars so group_vars can override them (AGENTS.md §4.5 item 3).
         - name: "Thanos Compactor — run pilot-thanos-compact container"
           tags: [C3, C7, C11]
           community.docker.docker_container:
@@ -333,7 +337,7 @@
               --http-address=0.0.0.0:10905
               --wait
               --wait-interval=5m
-              --retention.resolution-raw={{ thanos_compact_retention_raw | default('30d', true) }}
+              --retention.resolution-raw={{ thanos_compact_retention_raw | default('90d', true) }}
               --retention.resolution-5m={{ thanos_compact_retention_5m | default('90d', true) }}
               --retention.resolution-1h={{ thanos_compact_retention_1h | default('90d', true) }}
             volumes:

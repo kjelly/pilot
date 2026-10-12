@@ -892,6 +892,11 @@
         # hard requirement for the Sidecar to be able to ship 2h blocks to
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
+        #
+        # external_labels.site is rendered with to_json: a double-quoted
+        # string keeps labels such as `123`, `null` or `a: b` from being
+        # read as other YAML types, and spec C8/C22 pass the quoted value
+        # to `thanos tools bucket inspect --selector` as is.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
           tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
@@ -901,7 +906,7 @@
               global:
                 scrape_interval: {{ prometheus_scrape_interval }}
                 external_labels:
-                  site: {{ prometheus_site_label }}
+                  site: {{ prometheus_site_label | to_json }}
               rule_files:
               {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               alerting:
@@ -926,7 +931,7 @@
               global:
                 scrape_interval: {{ prometheus_scrape_interval }}
                 external_labels:
-                  site: {{ prometheus_site_label }}
+                  site: {{ prometheus_site_label | to_json }}
               rule_files:
               {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               scrape_configs:
