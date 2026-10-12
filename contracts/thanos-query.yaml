@@ -1,6 +1,7 @@
 schemaVersion: 1
 id: thanos-query
 role: thanos-query
+effects: [network.endpoints]
 specs:
   - path: docs/verification/thanos-query.md
     rows: {all: true}
@@ -8,6 +9,7 @@ playbooks:
   apply: playbooks/apply/thanos-query-apply.yml
 regressionTests:
   - internal/spec/thanos_query_regression_test.go
+  - cmd/pilot/cmd/deploy_managed_provider_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: docker, required: true, relation: sameHosts}

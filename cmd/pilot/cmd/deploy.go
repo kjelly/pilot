@@ -1301,15 +1301,14 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	return nil
 }
 
-// executeRecordedDeployment applies playbook's required sameHosts
-// dependency chain first (see applySameHostsDependencyChain), then
+// executeRecordedDeployment applies required sameHosts and explicitly managed
+// endpoint dependencies first (see applyDeploymentDependencyChain), then
 // applies playbook itself via executeRecordedDeploymentCore. Splitting
 // the cascade from the core apply keeps the cascade a single,
 // non-recursive walk of the contract graph: each dependency is applied
 // through executeRecordedDeploymentCore directly, which never cascades
 // again, so there is no risk of runaway recursion even if the contract
-// catalog ever grows a sameHosts cycle (defensively rejected by
-// sameHostsDependencyChain instead).
+// catalog ever grows an apply cycle (rejected by deploymentDependencyChain).
 func executeRecordedDeployment(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string) error {
 	_, err := executeRecordedDeploymentResult(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints)
 	return err
@@ -1325,12 +1324,16 @@ func executeRecordedDeploymentResult(ctx context.Context, runner *ansible.Runner
 }
 
 type reconcileExecutionPlan struct {
-	Components       []string
-	Chain            []contract.Contract
-	DependencyLimits map[string]string
+	Components          []string
+	Chain               []contract.Contract
+	DependencyLimits    map[string]string
+	DependencyExtraVars map[string][]string
+	ExtraVars           []string
+	Playbook            string
+	PrimaryHosts        []string
 }
 
-func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, tags string, extraVars []string, componentHints []string) (reconcileExecutionPlan, error) {
+func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, componentHints []string) (reconcileExecutionPlan, error) {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return reconcileExecutionPlan{}, err
@@ -1347,31 +1350,59 @@ func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, ta
 	if err != nil {
 		return reconcileExecutionPlan{}, err
 	}
-	_, _, scope, _, _, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
+	_, selected, scope, _, _, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
 	if err != nil {
 		return reconcileExecutionPlan{}, err
 	}
-	chain, err := sameHostsDependencyChain(catalog, components)
+	chain, err := deploymentDependencyChain(catalog, components)
 	if err != nil {
 		return reconcileExecutionPlan{}, err
 	}
-	dependencyLimits := make(map[string]string, len(chain))
+	dependencyLimits, err := deploymentDependencyLimits(catalog, components, scope)
+	if err != nil {
+		return reconcileExecutionPlan{}, err
+	}
+	plan := reconcileExecutionPlan{Components: components, Chain: chain, DependencyLimits: dependencyLimits,
+		ExtraVars: append([]string(nil), extraVars...), DependencyExtraVars: make(map[string][]string, len(chain)), Playbook: playbook}
+	for _, id := range components {
+		c, _ := catalog.Component(id)
+		plan.PrimaryHosts = uniqueSortedHosts(append(plan.PrimaryHosts, scope.HostsByRole[c.Role]...))
+	}
 	for _, dependency := range chain {
-		hosts := scope.HostsByRole[dependency.Role]
-		if len(hosts) == 0 {
-			return reconcileExecutionPlan{}, fmt.Errorf("reconcile dependency %q has no resolved sameHosts scope", dependency.ID)
-		}
-		dependencyLimits[dependency.ID] = strings.Join(hosts, ",")
+		plan.DependencyExtraVars[dependency.ID] = dependencyTargetVars(extraVars, dependency.Role)
 	}
-	return reconcileExecutionPlan{Components: components, Chain: chain, DependencyLimits: dependencyLimits}, nil
+	// Only opted-in managed providers need additional automatic endpoint
+	// bindings. Preserve the input behavior of existing sameHosts-only plans.
+	if hasManagedProviderDependency(catalog, components) {
+		hostVars, err := resolveInventoryVariables(ctx, inv, extraVars, vault)
+		if err != nil {
+			return reconcileExecutionPlan{}, err
+		}
+		// The consumer's contract preflight also validates its bound support
+		// graph. Carry defaults for that graph without adding mutation edges.
+		for _, component := range selected {
+			plan.ExtraVars, err = completeDependencyBindingVars(catalog, component, scope, hostVars, plan.ExtraVars)
+			if err != nil {
+				return reconcileExecutionPlan{}, err
+			}
+		}
+		for _, dependency := range chain {
+			vars, err := completeDependencyBindingVars(catalog, dependency, scope, hostVars, dependencyTargetVars(plan.ExtraVars, dependency.Role))
+			if err != nil {
+				return reconcileExecutionPlan{}, err
+			}
+			plan.DependencyExtraVars[dependency.ID] = vars
+		}
+	}
+	return plan, nil
 }
 
 func renderReconcileExecutionPlan(out io.Writer, plan reconcileExecutionPlan) {
-	fmt.Fprintln(out, "═══ Reconcile execution plan ═══")
+	fmt.Fprintln(out, "═══ Deployment execution plan ═══")
 	for i, dependency := range plan.Chain {
 		fmt.Fprintf(out, "  %d. %s — %s — hosts: %s\n", i+1, dependency.ID, dependency.Playbooks.Apply, plan.DependencyLimits[dependency.ID])
 	}
-	fmt.Fprintf(out, "  %d. %s\n", len(plan.Chain)+1, strings.Join(plan.Components, ", "))
+	fmt.Fprintf(out, "  %d. %s — %s — hosts: %s\n", len(plan.Chain)+1, strings.Join(plan.Components, ", "), plan.Playbook, strings.Join(plan.PrimaryHosts, ","))
 }
 
 func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAuthorization, error) {
@@ -1388,13 +1419,13 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 }
 
 // executeRecordedDeploymentWithAuthorizationResult (design spec §28.3's
-// pattern) aggregates the sameHosts dependency chain's
+// pattern) aggregates the approved apply dependency chain's
 // ComponentDeliveryResults with the
 // requested component's own, in execution order, for the outbound
 // webhook's terminal-publication step. On error it still returns
 // whatever DeploymentExecutionResult was accumulated so far — a partial
 // failure's completed dependencies remain visible to the caller.
-func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, dependencyLimits map[string]string) (DeploymentExecutionResult, error) {
+func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, preparedPlan *reconcileExecutionPlan) (DeploymentExecutionResult, error) {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return DeploymentExecutionResult{}, err
@@ -1417,19 +1448,32 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 	// applying docker and stop before the actual alertmanager playbook.  Treat
 	// the resolved chain as one operator-approved deployment plan, matching
 	// reconcile's established execution model.
-	if authorization == nil {
-		chain, chainErr := sameHostsDependencyChain(catalog, components)
+	var plan reconcileExecutionPlan
+	if preparedPlan != nil {
+		plan = *preparedPlan
+	} else if isComponentApply(catalog, components, playbook) {
+		chain, chainErr := deploymentDependencyChain(catalog, components)
 		if chainErr != nil {
 			return DeploymentExecutionResult{}, chainErr
 		}
 		if len(chain) > 0 {
-			authorization, err = promptReconcileExecutionAuthorization(len(chain) + 1)
+			plan, err = prepareReconcileExecutionPlan(ctx, playbook, inv, limit, tags, extraVars, vault, componentHints)
 			if err != nil {
 				return DeploymentExecutionResult{}, err
 			}
+			renderReconcileExecutionPlan(out, plan)
+			if authorization == nil {
+				authorization, err = promptReconcileExecutionAuthorization(len(chain) + 1)
+				if err != nil {
+					return DeploymentExecutionResult{}, err
+				}
+			}
 		}
 	}
-	dependencyResults, err := applySameHostsDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, dependencyLimits)
+	if plan.ExtraVars != nil {
+		extraVars = plan.ExtraVars
+	}
+	dependencyResults, err := applyDeploymentDependencyChain(ctx, runner, out, catalog, components, playbook, inv, limit, extraVars, vault, stage, authorization, plan.DependencyLimits, plan.DependencyExtraVars)
 	agg := DeploymentExecutionResult{Results: dependencyResults}
 	if err != nil {
 		return agg, err
@@ -1455,6 +1499,14 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 // itself, never real topology) and reports it as an error instead of
 // recursing forever.
 func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) ([]contract.Contract, error) {
+	return requiredApplyDependencyChain(catalog, componentIDs, false)
+}
+
+func deploymentDependencyChain(catalog contract.Catalog, componentIDs []string) ([]contract.Contract, error) {
+	return requiredApplyDependencyChain(catalog, componentIDs, true)
+}
+
+func requiredApplyDependencyChain(catalog contract.Catalog, componentIDs []string, includeManagedProviders bool) ([]contract.Contract, error) {
 	done := make(map[string]bool, len(componentIDs))
 	for _, id := range componentIDs {
 		done[id] = true
@@ -1466,14 +1518,14 @@ func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) (
 		visiting[c.ID] = true
 		defer delete(visiting, c.ID)
 		for _, dep := range c.Dependencies {
-			if !dep.Required || dep.Relation != "sameHosts" {
-				continue
-			}
-			if done[dep.Component] {
+			if !dep.Required || !(dep.Relation == "sameHosts" || includeManagedProviders && dep.Relation == "providerEndpoint" && dep.ApplyBeforeConsumer) {
 				continue
 			}
 			if visiting[dep.Component] {
-				return fmt.Errorf("sameHosts dependency cycle detected at component %q", dep.Component)
+				return fmt.Errorf("apply dependency cycle detected at component %q", dep.Component)
+			}
+			if done[dep.Component] {
+				continue
 			}
 			provider, ok := catalog.Component(dep.Component)
 			if !ok {
@@ -1499,7 +1551,8 @@ func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) (
 	return chain, nil
 }
 
-// applySameHostsDependencyChain makes sure every required sameHosts
+// applyDeploymentDependencyChain makes sure required sameHosts and opted-in
+// managed providerEndpoint
 // dependency of components has actually been applied to inv/limit
 // before the caller's own playbook runs — resolveDeploymentScope only
 // ever checked that the dependency's inventory group was non-empty, not
@@ -1516,12 +1569,12 @@ func sameHostsDependencyChain(catalog contract.Catalog, componentIDs []string) (
 // satisfied dependency is expected to be a safe no-op. A no-op when
 // playbook isn't actually an apply playbook for any of components (e.g.
 // a decommission or rollback run must never re-provision a dependency).
-// applySameHostsDependencyChain returns one ComponentDeliveryResult per
+// applyDeploymentDependencyChain returns one ComponentDeliveryResult per
 // dependency it actually applied, in dependency-first order — even on
 // error, whatever prefix of the chain completed is returned alongside
 // it (design spec §28: a partial-failure workflow's completed
 // dependencies still need to enter the aggregate).
-func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string, authorization *deploymentAuthorization, dependencyLimits map[string]string) ([]ComponentDeliveryResult, error) {
+func applyDeploymentDependencyChain(ctx context.Context, runner *ansible.Runner, out io.Writer, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput, stage string, authorization *deploymentAuthorization, dependencyLimits map[string]string, dependencyExtraVars map[string][]string) ([]ComponentDeliveryResult, error) {
 	isApply := false
 	for _, id := range components {
 		if c, ok := catalog.Component(id); ok && c.Playbooks.Apply == playbook {
@@ -1532,24 +1585,28 @@ func applySameHostsDependencyChain(ctx context.Context, runner *ansible.Runner, 
 	if !isApply {
 		return nil, nil
 	}
-	chain, err := sameHostsDependencyChain(catalog, components)
+	chain, err := deploymentDependencyChain(catalog, components)
 	if err != nil {
 		return nil, err
 	}
 	results := make([]ComponentDeliveryResult, 0, len(chain))
 	for _, dep := range chain {
-		fmt.Fprintf(out, "\n── 依賴串接：先套用 %s（%s 的必要 sameHosts 依賴）──\n", dep.ID, strings.Join(components, ", "))
+		fmt.Fprintf(out, "\n── 依賴串接：先套用 %s（%s 的必要自動套用依賴）──\n", dep.ID, strings.Join(components, ", "))
 		dependencyLimit := limit
 		if resolved, ok := dependencyLimits[dep.ID]; ok {
 			dependencyLimit = resolved
 		}
 		var depResult ComponentDeliveryResult
-		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", extraVars, vault, stage, []string{dep.ID}, authorization, &depResult)
+		vars := dependencyTargetVars(extraVars, dep.Role)
+		if resolved, ok := dependencyExtraVars[dep.ID]; ok {
+			vars = resolved
+		}
+		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", vars, vault, stage, []string{dep.ID}, authorization, &depResult)
 		if len(depResult.ComponentIDs) > 0 {
 			results = append(results, depResult)
 		}
 		if err != nil {
-			return results, fmt.Errorf("apply required sameHosts dependency %q: %w", dep.ID, err)
+			return results, fmt.Errorf("apply required dependency %q: %w", dep.ID, err)
 		}
 	}
 	return results, nil
@@ -3119,17 +3176,10 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	entries := make([]deployPlaybook, 0, len(deployCatalog))
 	labels := make([]string, 0, len(deployCatalog))
 	for _, p := range deployCatalog {
-		if reconcileOnly && !p.Reconcile {
-			continue
-		}
-		// Day-2 reconcilers only ever show up under `pilot reconcile` (or
-		// their own dedicated CLI, e.g. `pilot gateway-scope`) — never under
-		// `pilot deploy`'s single-component menu. Surfacing the same entry
-		// under both wizards is what let an operator run
-		// pilot-gateway-scope's free-form -e prompt instead of the
-		// dedicated CLI's list-safe flag handling; see DELIVERY.md's
-		// "day-2 宣告式設定...改用 pilot reconcile" guidance.
-		if !reconcileOnly && p.Reconcile {
+		// Day-2-only reconcilers retain their dedicated workflow. Components
+		// supporting both install and configuration explicitly opt into Deploy;
+		// menu policy is shared with the automation schema.
+		if !catalogEntryInWorkflow(p, reconcileOnly) {
 			continue
 		}
 		if !deployShowExperimental && deployEntryExperimental(p, catalog) {
@@ -3494,7 +3544,7 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 	plans := make([]reconcileExecutionPlan, len(requests))
 	plannedPlaybooks := 0
 	for i, request := range requests {
-		plan, err := prepareReconcileExecutionPlan(ctx, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.componentHints)
+		plan, err := prepareReconcileExecutionPlan(ctx, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.componentHints)
 		if err != nil {
 			return err
 		}
@@ -3524,7 +3574,7 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		if len(requests) > 1 {
 			fmt.Fprintf(out, "\n── 執行已授權項目 %d/%d ──\n", i+1, len(requests))
 		}
-		requestResult, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, plans[i].DependencyLimits)
+		requestResult, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, &plans[i])
 		agg = agg.merge(requestResult)
 		if err != nil {
 			execErr = err

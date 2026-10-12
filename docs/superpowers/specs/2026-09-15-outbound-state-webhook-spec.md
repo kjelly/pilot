@@ -661,6 +661,8 @@ Effect 宣告規則：
 | `pilot-gateway-scope` | `identity.hostgroups`, `access.hbac` |
 | `internal-endpoint` | `network.endpoints`, `dns.records`, `tls.certificates`, `reverse_proxy.routes` |
 | `prometheus` | `monitoring.scrape_targets` |
+| `thanos-query` | `network.endpoints`（2026-10-12：Query 服務 alias / upstream 連線設定，見 dashboard delivery spec） |
+| `dashboard` | `network.endpoints`（2026-10-12：Grafana datasource endpoint 設定，見 dashboard delivery spec） |
 
 這張表與設計基準 commit 的 `Reconcile: true` entries MUST 完全相等。若 implementation 時 `deployCatalog` 又新增其他 reconciler，實作 PR MUST 先擴充 known registry、在本表記錄設計決定，再補 contract effects；不得由實作者臨場猜一個字串只為讓 test PASS。
 

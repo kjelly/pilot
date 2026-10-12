@@ -1,0 +1,17 @@
+# Managed provider delivery/reconcile proof. S3 is a pre-existing bound
+# prerequisite; selecting dashboard must automatically apply Query, then Grafana.
+services: local
+nodes:
+  - name: gdns-flow
+    base_image: ubuntu-24.04
+    memory: 8192
+    vcpus: 2
+    disk: 40
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - docker
+      - seaweedfs-s3
+      - thanos-query
+      - dashboard

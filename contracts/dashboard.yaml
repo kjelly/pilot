@@ -1,6 +1,7 @@
 schemaVersion: 1
 id: dashboard
 role: dashboard
+effects: [network.endpoints]
 specs:
   - path: docs/verification/dashboard.md
     rows: {all: true}
@@ -9,10 +10,11 @@ playbooks:
 regressionTests:
   - internal/spec/dashboard_regression_test.go
   - internal/spec/dashboard_dns_selection_test.go
+  - cmd/pilot/cmd/deploy_managed_provider_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: docker, required: true, relation: sameHosts}
-  - {component: thanos-query, required: true, relation: providerEndpoint}
+  - {component: thanos-query, required: true, relation: providerEndpoint, applyBeforeConsumer: true}
 bindings:
   - input: thanos_query_target_host
     requiredWhenDependencySelected: true

@@ -1,0 +1,10 @@
+---
+# Fresh-host check mode and integrated acceptance for the delivery workflow.
+# The real CLI proof installs the first two prerequisites separately, then
+# selects dashboard to prove automatic provider ordering.
+- name: Bound prerequisites
+  ansible.builtin.import_playbook: dashboard-delivery-prerequisites.yml
+- name: Thanos Query
+  ansible.builtin.import_playbook: ../apply/thanos-query-apply.yml
+- name: Grafana and Loki
+  ansible.builtin.import_playbook: ../apply/dashboard-apply.yml
