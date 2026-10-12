@@ -39,7 +39,7 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 
 	// host menu items: 0 ansible_host, 1 ansible_user, 2 ssh key, 3 env,
 	// 4 roles, 5 extra vars, 6 annotations, 7 deployment availability,
-	// 8 delete, 9 back-to-list
+	// 8 ssh recording, 9 delete, 10 back-to-list
 	for i := 0; i < 4; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -55,8 +55,8 @@ func TestEditRouter_Teatest_HostsFlow_AddHostSetFieldToggleRoleAndSave(t *testin
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✅ 完成" -> back to host menu
 
-	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 9)
-	for i := 0; i < 9; i++ {
+	// host menu again (cursor reset to 0); navigate to "↩ 返回主機清單" (index 10)
+	for i := 0; i < 10; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // back to host list
@@ -118,7 +118,7 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // optional -> host menu
 
-	for i := 0; i < 9; i++ {
+	for i := 0; i < 10; i++ {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // return to host list
@@ -142,6 +142,53 @@ func TestEditRouter_Teatest_HostDeploymentAvailabilityOptionalAndSave(t *testing
 	}
 	if got := hf.Hosts[0].DeploymentAvailability; got != inventory.DeploymentAvailabilityOptional {
 		t.Fatalf("deployment_availability = %q, want optional\n%s", got, data)
+	}
+}
+
+func TestEditRouter_Teatest_HostSSHRecordingTerminalOutputAndSave(t *testing.T) {
+	dir := t.TempDir()
+	router := newEditRouterModel(dir)
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
+
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // top menu: hosts.yml
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // default path
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // start blank
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // add host
+	tm.Type("db-1")
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // host name -> host menu
+
+	for i := 0; i < 8; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // ssh recording (initial = inherit)
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // terminal_output -> host menu
+
+	for i := 0; i < 10; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // return to host list
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // save
+	for i := 0; i < topMenuIndex(t, "top.quit"); i++ {
+		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // quit
+	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
+
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read hosts.yml: %v", err)
+	}
+	hf, err := inventory.Parse(data)
+	if err != nil {
+		t.Fatalf("parse hosts.yml: %v\n%s", err, data)
+	}
+	if got := hf.Hosts[0].SSHRecording; got != inventory.SSHRecordingTerminalOutput {
+		t.Fatalf("ssh_recording = %q, want terminal_output\n%s", got, data)
 	}
 }
 
@@ -171,6 +218,7 @@ func TestHostMenuItems_MetadataHasStableUniqueIDs(t *testing.T) {
 		"hosts.item.annotations",
 		"hosts.item.host_vars",
 		"hosts.item.deployment_availability",
+		"hosts.item.ssh_recording",
 		"hosts.item.delete",
 		"hosts.item.back",
 	} {
@@ -1056,27 +1104,31 @@ func TestEditRouter_Teatest_GroupVarsFlow_FiltersToUsedRolesAndAutofillsHostVar(
 	}
 }
 
-// TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable
-// proves the nested group_vars/dns/zones.example.yaml (previously invisible
-// to both `pilot inventory generate` and `pilot edit`) is now discoverable
-// and scaffoldable through the wizard's file picker, while still pointing
-// at hand-editing rather than opening a confusingly empty structured editor
-// (dns_zones is a 2-level nested list-of-maps with no top-level "key:
-// value" line groupvars.Doc can represent).
-func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *testing.T) {
+// TestEditRouter_Teatest_GroupVarsFlow_ShadowedFileWarned drives the real
+// TUI into the group_vars file picker of a workspace that still has the
+// group_vars/dns/ directory older pilot versions scaffolded next to
+// group_vars/dns.yml, and checks the rendered screen warns that Ansible
+// ignores dns.yml (docs/verification/dns.md §3.5 P4) — and that the old
+// nested "dns/zones.yaml" example is no longer offered at all (P1).
+func TestEditRouter_Teatest_GroupVarsFlow_ShadowedFileWarned(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(
 		"hosts:\n  ns-1:\n    ansible_host: \"10.0.0.53\"\n    roles: [dns]\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	exampleDir := filepath.Join(dir, "group_vars")
-	if err := os.MkdirAll(filepath.Join(exampleDir, "dns"), 0o755); err != nil {
+	gvDir := filepath.Join(dir, "group_vars")
+	if err := os.MkdirAll(filepath.Join(gvDir, "dns"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(exampleDir, "dns", "zones.example.yaml"), []byte("dns_zones:\n  - name: pilot.lan\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{
+		"dns.example.yml": "# dns_upstream: [1.1.1.1]\n",
+		"dns.yml":         "dns_upstream: [9.9.9.9]\n",
+		"dns/zones.yaml":  "dns_zones: []\n",
+	} {
+		if err := os.WriteFile(filepath.Join(gvDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	oldWd, err := os.Getwd()
@@ -1089,31 +1141,19 @@ func TestEditRouter_Teatest_GroupVarsFlow_DnsZonesDiscoverableButNotEditable(t *
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
 	router := newEditRouterModel(".")
-	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 40))
-	waitFor := func(want string) {
-		t.Helper()
-		teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-			return strings.Contains(string(b), want)
-		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
-	}
-
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(160, 40))
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyDown}) // top menu -> group_vars/ (index 1)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-	waitFor("➕ 從範例建立 dns/zones.yaml")
-	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // create it (only entry, cursor 0)
-	waitFor("巢狀清單設定")
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "不會生效") && strings.Contains(string(b), "📝 dns.yml")
+	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
-	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
-
-	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "dns", "zones.yaml"))
-	if err != nil {
-		t.Fatalf("expected group_vars/dns/zones.yaml to be created: %v", err)
-	}
-	if !strings.Contains(string(data), "pilot.lan") {
-		t.Fatalf("created file = %q, want the copied example content", data)
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(teatestFinalTimeout)).(editRouterModel)
+	if strings.Contains(final.View().Content, "zones.yaml") {
+		t.Fatalf("picker still offers the old nested zones file:\n%s", final.View().Content)
 	}
 }
 

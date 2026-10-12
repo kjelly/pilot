@@ -13,8 +13,7 @@ inventory*.yaml
 inventories/
 group_vars/*.yml
 !group_vars/*.example.yml
-group_vars/dns/*.yaml
-!group_vars/dns/zones.example.yaml
+group_vars/*/
 *.db
 *.db-shm
 *.db-wal

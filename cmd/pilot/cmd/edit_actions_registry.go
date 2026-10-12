@@ -59,7 +59,7 @@ func editActionRegistry() []editActionDef {
 				Description:              "set one supported non-secret host field; ansible_host on a freeipa-client host, changing between two IP literals, requires confirm (spec.md §11.7 — the Day-2 DNS-replacement acknowledgement)",
 				Required:                 []string{"host", "field", "value"},
 				Optional:                 []string{"confirm"},
-				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability"}},
+				Values:                   map[string][]string{"field": {"ansible_host", "ansible_user", "ssh_key_file", "env", "deployment_availability", "ssh_recording"}},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,
 				SecretHandling:           SecretHandlingNone,
@@ -410,6 +410,26 @@ func editActionRegistry() []editActionDef {
 		},
 		{
 			Spec: semanticActionSpec{
+				Name:                     "set_group_var_list",
+				Description:              "replace a flow-list group_vars key's items (\"key: [a, b]\", e.g. dns_upstream, dns_freeipa_zones) through the list screens: existing items are removed, then values are added in order; an empty values leaves a never-set key at its built-in default",
+				Required:                 []string{"file", "key"},
+				Optional:                 []string{"values"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "group_vars",
+					Assertion: "key: [values...] in group_vars file; value/value_env rejected",
+				},
+			},
+			Validate: validateSetGroupVarList,
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.setGroupVarList(r, step.File, step.Key, step.Values)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
 				Name:                     "restore_group_var_default",
 				Description:              "comment a group_vars key back out, reverting to the playbook's built-in default",
 				Required:                 []string{"file", "key"},
@@ -425,6 +445,25 @@ func editActionRegistry() []editActionDef {
 			Validate: validateGroupVarsFileKeyAction("restore_group_var_default"),
 			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
 				return d.restoreGroupVarDefault(r, step.File, step.Key)
+			},
+		},
+		{
+			Spec: semanticActionSpec{
+				Name:                     "backfill_group_vars",
+				Description:              "append the settings a group_vars file's .example.yml offers but the file never mentions, commented out (built-in default) — fails when nothing is missing",
+				Required:                 []string{"file"},
+				ExecutionMode:            ExecutionModeStructured,
+				SideEffectClassification: SideEffectWrite,
+				SecretHandling:           SecretHandlingNone,
+				Verification: &verificationSpec{
+					Method:    verificationMethodFileContent,
+					Path:      "group_vars",
+					Assertion: "missing example keys appended as commented lines after save_group_vars; existing lines unchanged",
+				},
+			},
+			Validate: validateFileOnlyAction("backfill_group_vars"),
+			Run: func(d *automationDriver, r *editRouterModel, step editAction) error {
+				return d.backfillGroupVars(r, step.File)
 			},
 		},
 		{
@@ -2251,6 +2290,13 @@ func validateSetHostField(step editAction) error {
 			return fmt.Errorf("unsupported deployment_availability value %q", step.Value)
 		}
 	}
+	if step.Field == "ssh_recording" {
+		switch step.Value {
+		case sshRecordingInherit, string(inventory.SSHRecordingOff), string(inventory.SSHRecordingTerminalOutput):
+		default:
+			return fmt.Errorf("unsupported ssh_recording value %q (must be inherit|off|terminal_output)", step.Value)
+		}
+	}
 	if step.Confirm != "" && step.Confirm != "yes" && step.Confirm != "no" {
 		return fmt.Errorf("set_host_field confirm must be %q or %q", "yes", "no")
 	}
@@ -3119,6 +3165,24 @@ func validateSetGroupVar(step editAction) error {
 	}
 	if step.ValueEnv != "" {
 		return fmt.Errorf("set_group_var does not accept value_env: group_vars hold non-secret role settings, not secrets")
+	}
+	return nil
+}
+
+func validateSetGroupVarList(step editAction) error {
+	if strings.TrimSpace(step.File) == "" {
+		return fmt.Errorf("set_group_var_list requires file")
+	}
+	if strings.TrimSpace(step.Key) == "" {
+		return fmt.Errorf("set_group_var_list requires key")
+	}
+	if step.Value != "" || step.ValueEnv != "" {
+		return fmt.Errorf("set_group_var_list takes values (a list), not value/value_env")
+	}
+	for _, v := range step.Values {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("set_group_var_list values must not contain an empty item")
+		}
 	}
 	return nil
 }

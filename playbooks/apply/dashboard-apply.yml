@@ -372,7 +372,7 @@
 
         # A single-file bind mount keeps the inode the container started with;
         # restart when the container no longer sees the host file, not only when
-        # this run rendered it (AGENTS.md §4.5 item 12).
+        # this run rendered it (AGENTS.md §4.5 item 13).
         - name: "Check whether pilot-loki still sees its current config files"
           tags: [always]
           ansible.builtin.include_tasks:

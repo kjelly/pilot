@@ -27,7 +27,7 @@
 #     的 target_group 安全閥)永遠不受這個過濾影響。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
-#     核心服務(dns/ntp)→ FreeIPA server → FreeIPA client → NFS server → NFS client
+#     核心服務(ntp)→ FreeIPA server → dns 快取層 → FreeIPA client → NFS server → NFS client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
@@ -115,12 +115,8 @@
 # ── 0. 前置檢查(一律先跑)───────────────────────────────────────────────
 - import_playbook: preflight.yml
 
-# ── 1. 核心基礎服務(core-infra-provider-apply.yml 以 infra_role 分別套
-#      dns / ntp;docker 是獨立 playbook,見下)────────────────────────────
-- import_playbook: apply/core-infra-provider-apply.yml
-  vars:
-    infra_role: dns
-  tags: [infra, dns]
+# ── 1. 核心基礎服務(core-infra-provider-apply.yml 套 ntp;docker 是獨立
+#      playbook;dns 快取層要等 FreeIPA DNS 在服務,放在 freeipa-server 之後)──
 - import_playbook: apply/core-infra-provider-apply.yml
   vars:
     infra_role: ntp
@@ -131,8 +127,21 @@
 # ── 2. 身份 / AAA(FreeIPA)server → enrolled clients → NFS roles ───────
 - import_playbook: apply/freeipa-server-apply.yml
   tags: [freeipa, freeipa-server]
+# dns 快取層(docs/verification/dns.md):內部網域自動導向 FreeIPA,它的
+# FreeIPA authority gate(§5 G5)需要 FreeIPA DNS 已經在服務。
+- import_playbook: apply/dns-apply.yml
+  tags: [infra, dns]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
+# docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client
+# (sameHosts，跟 Gateway/Directory 各自獨立、不是同一批主機)。2026-09-23 起
+# 排在 pilot-access-gateway 之前(per-host recording spec §0.2/§27.1a)：
+# store 驗證 gateway 簽發的 per-session ingest token，升級時必須先讓 store
+# 認得新 token，再讓 gateway 開始簽發。跟其他角色一樣不是
+# single-component-only:把這個 role 加進 hosts.yml 的清單本身就是操作者的
+# 核准動作。
+- import_playbook: apply/pilot-session-store-apply.yml
+  tags: [freeipa, pilot-session-store]
 # 2026-09-15 起不再是 single-component-only:「把 pilot-access-gateway 加進
 # hosts.yml 的 roles 清單」本身就是操作者的核准動作(使用者明確決定),之後
 # 每次全站部署都會照常套用,跟其他角色的語意一致——不需要每次額外打
@@ -147,13 +156,6 @@
 #操作者的核准動作。
 - import_playbook: apply/pilot-access-directory-apply.yml
   tags: [freeipa, pilot-access-directory]
-# docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client
-# (sameHosts，跟 Gateway/Directory 各自獨立、不是同一批主機)。排序放在
-# pilot-access-directory 之後純粹是「這個 delivery 裡新元件放最後」的慣
-# 例，不是硬性相依。跟其他角色一樣不是 single-component-only:把這個 role
-# 加進 hosts.yml 的清單本身就是操作者的核准動作。
-- import_playbook: apply/pilot-session-store-apply.yml
-  tags: [freeipa, pilot-session-store]
 - import_playbook: apply/freeipa-nfs-server-apply.yml
   tags: [freeipa, freeipa-nfs-server]
 - import_playbook: apply/freeipa-nfs-client-apply.yml

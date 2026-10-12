@@ -120,10 +120,29 @@ func directoryRouteScopesSummary(t directoryapi.TargetJSON) string {
 // §13.1) when nothing is currently ready.
 func directoryTargetListLabel(t directoryapi.TargetJSON) string {
 	label := fmt.Sprintf("%s  [%s]", t.FQDN, directoryRouteScopesSummary(t))
+	if badge := directoryRecordingBadge(t.Recording); badge != "" {
+		label += "  " + badge
+	}
 	if !directoryTargetIsReady(t) {
 		label += "  ⚠ no gateway available"
 	}
 	return label
+}
+
+// directoryRecordingBadge marks a target whose host policy records (per-host
+// recording spec §24.2). The Directory only knows the host override, not
+// each gateway's default, so [REC] means "this host asks for recording" and
+// [REC ?] means its policy could not be read or is invalid. The notice the
+// gateway prints before SSH is the authoritative answer.
+func directoryRecordingBadge(r directoryapi.DirectoryRecordingJSON) string {
+	switch r.Status {
+	case "terminal_output":
+		return "[REC]"
+	case "unknown", "invalid":
+		return "[REC ?]"
+	default:
+		return ""
+	}
 }
 
 // runDirectoryMyHosts lists exactly the targets spec.md §10.3 says My

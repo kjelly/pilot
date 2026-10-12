@@ -159,6 +159,9 @@ func resolvePortalHostEntries(ctx context.Context, hosts []gatewayapi.HostJSON) 
 
 func portalHostListLabel(e portalHostEntry) string {
 	label := e.host.FQDN
+	if badge := portalRecordingBadge(e.host.Recording); badge != "" {
+		label += "  " + badge
+	}
 	switch {
 	case e.resolvable && len(e.addresses) > 0:
 		label += fmt.Sprintf("  [IP: %s]", strings.Join(e.addresses, ", "))
@@ -214,7 +217,7 @@ func runPortalMyHosts(ctx context.Context, client *portalClient, credentials por
 	if err != nil || choice == len(entries) {
 		return nil
 	}
-	return runPortalHostDetail(ctx, client, credentials, sshConfigPath, access.User, entries[choice].host)
+	return runPortalHostDetail(ctx, client, credentials, sshConfigPath, entries[choice].host)
 }
 
 const (
@@ -226,7 +229,7 @@ const (
 // confirmation first — defaulting to "no" when the host's sudo scope is
 // broad (root-equivalent) — since a single wrong row picked from My Hosts
 // used to drop straight into a live session with no chance to back out.
-func runPortalHostDetail(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath, username string, h gatewayapi.HostJSON) error {
+func runPortalHostDetail(ctx context.Context, client *portalClient, credentials portalCredentialSession, sshConfigPath string, h gatewayapi.HostJSON) error {
 	choice, err := runSelectPrompt("", portalHostDetail(h), []string{portalActionConnect, portalBackChoice})
 	if err != nil || choice == 1 {
 		return nil
@@ -234,7 +237,7 @@ func runPortalHostDetail(ctx context.Context, client *portalClient, credentials 
 	if !runConfirmPrompt("", portalConnectConfirmQuestion(h), !portalSudoScopeIsBroad(h.Sudo.Scope)) {
 		return nil
 	}
-	return connectToHost(ctx, client, credentials, sshConfigPath, username, h.FQDN)
+	return connectToHost(ctx, client, credentials, sshConfigPath, h.FQDN)
 }
 
 // portalSudoScopeIsBroad reports whether scope grants root-equivalent
@@ -253,7 +256,56 @@ func portalConnectConfirmQuestion(h gatewayapi.HostJSON) string {
 	if len(h.Sudo.DenyCommands) > 0 {
 		fmt.Fprintf(&b, "\nDeny commands: %s", strings.Join(h.Sudo.DenyCommands, ", "))
 	}
+	if portalRecordingIsTerminal(h.Recording) {
+		b.WriteString("\nThis session will be recorded.")
+	}
 	return b.String()
+}
+
+// portalRecordingIsTerminal reports whether a Connect to this host would
+// record the terminal right now.
+func portalRecordingIsTerminal(r gatewayapi.RecordingJSON) bool {
+	return r.Effective == "terminal_output" || r.Effective == "terminal_io"
+}
+
+// portalRecordingBadge is the My Hosts marker for a host's recording policy
+// (per-host recording spec §24.1); "" when Connect would not record.
+func portalRecordingBadge(r gatewayapi.RecordingJSON) string {
+	switch {
+	case r.Status == "unknown":
+		return "[REC policy unavailable]"
+	case r.Status == "invalid":
+		return "[REC policy invalid]"
+	case r.Effective == "terminal_output":
+		return "[REC output]"
+	case r.Effective == "terminal_io":
+		return "[REC input+output]"
+	default:
+		return ""
+	}
+}
+
+// portalRecordingDetail is the Host Detail recording line (per-host
+// recording spec §24.1); "" when the gateway reported no recording status.
+func portalRecordingDetail(r gatewayapi.RecordingJSON) string {
+	source := "gateway default"
+	if r.Status == "terminal_output" {
+		source = "host policy"
+	}
+	switch {
+	case r.Status == "unknown":
+		return "SSH recording: policy unavailable — Connect will be refused"
+	case r.Status == "invalid":
+		return "SSH recording: policy misconfigured — Connect will be refused"
+	case r.Effective == "terminal_output":
+		return "SSH recording: terminal output (" + source + ")"
+	case r.Effective == "terminal_io":
+		return "SSH recording: input + output (" + source + "; input stored as redacted byte counts)"
+	case r.Effective == "metadata":
+		return "SSH recording: off"
+	default:
+		return ""
+	}
 }
 
 func portalHostDetail(h gatewayapi.HostJSON) string {
@@ -263,6 +315,9 @@ func portalHostDetail(h gatewayapi.HostJSON) string {
 	fmt.Fprintf(&b, "SSH allowed: %v\n", h.SSH.Allowed)
 	if len(h.SSH.Rules) > 0 {
 		fmt.Fprintf(&b, "SSH rules: %s\n", strings.Join(h.SSH.Rules, ", "))
+	}
+	if line := portalRecordingDetail(h.Recording); line != "" {
+		b.WriteString(line + "\n")
 	}
 	fmt.Fprintf(&b, "\nSudo scope: %s\n", h.Sudo.Scope)
 	if portalSudoScopeIsBroad(h.Sudo.Scope) {

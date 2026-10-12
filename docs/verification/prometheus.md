@@ -11,7 +11,10 @@
 > 2026-10-12 C20（container 讀到的 `prometheus.yml` 與主機檔案相同）已在
 > 真實 vm-target 上驗證：先用修正前的程式重現「設定變更後 container 沒重啟、
 > 仍讀舊 inode、`/-/reload` 無效」，再確認修正後重跑 apply 會重啟並載入新設定、
-> 冪等重跑 `changed=0`，證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`。
+> 冪等重跑 `changed=0`，證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`；
+> 檢查改成 `no_log` 後在 `1c24223` 重跑（fresh host、舊 inode 自癒、設定變更
+> 重啟，`-vvv` 不再印出掛載檔的 hash），證據見
+> `docs/evidence/prometheus/2026-10-12-1c24223.md`。
 > 2026-10-12 C21/C22（Sidecar 能寫 TSDB 目錄、這一站的 block 真的進了 bucket）
 > 已在真實 vm-target 上驗證：先用修正前的程式重現 `/prometheus:ro` 讓每次上傳
 > 都失敗，再確認全新安裝與升級兩條路徑都上傳成功、冪等重跑 `changed=0`，證據見
@@ -55,7 +58,7 @@
 | `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
 | `alertmanager_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；`prometheus.yml` 的 `alerting.alertmanagers` 指向這個固定別名 | 否 | `alertmanager-backend` |
 | `alertmanager_port` | Alertmanager API port | 否 | `9093` |
-| `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown） |
+| `prometheus_alert_rules_file` | 站台 alert rules YAML 檔案路徑（相對於 `playbooks/apply/`）；檔案內容**不會**經過 Jinja 處理，所以 Prometheus 的 `{{ $labels.X }}` template 語法會原封不動保留。覆寫方式：`-e prometheus_alert_rules_file=host_vars/mysite-alerts.yml` | 否 | `files/pilot-alert-rules-seed.yml`（Watchdog canary + PrometheusDown + HostDown；另有 SSH session recording 的 `PilotRecordingIncomplete`、`PilotSessionStoreIngestErrors`、`PilotRecordingDeniedConnects`、`PilotSessionStoreMetricsStale`，只在 gateway/store 主機的 node_exporter textfile 有對應 series 時才可能觸發） |
 | `node_exporter_targets` | 要 scrape 的 node_exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `host-monitoring` group（見 `docs/verification/host-monitoring.md`）所有主機的 9100 port | 否 | 空陣列（自動偵測） |
 | `node_exporter_basic_auth_user` | 抓 node_exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
 | `node_exporter_basic_auth_password` | 抓 node_exporter 用的 HTTP Basic Auth 密碼；**必須跟 `host-monitoring.md` 的 `node_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="node"}` 永遠是 0（見下方 escape hatch） | 僅在有 node-exporter target 時必填 | 無 |
@@ -231,8 +234,10 @@
   （真實 vm-target，有 seaweedfs-s3 與中央 thanos-query；修正前 C21/C22 FAIL，
   全新安裝與升級後都 `pass=14 fail=8`，C21/C22 PASS，C11/C13–C19 因該次
   topology 沒有 Alertmanager/host-monitoring/dcgm-exporter 而預期 fail）。
-  C20 的證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`，C16–C19 的
-  GPU scrape 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
+  C20 的證據見 `docs/evidence/prometheus/2026-10-12-1c24223.md`（舊 inode 自癒、
+  設定變更與 `--tags C8` 重啟、`-vvv` 不印掛載檔 hash；修正前的重現見
+  `docs/evidence/prometheus/2026-10-12-c12c4a8.md` §2），C16–C19 的 GPU scrape
+  證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
 
 ## 4. PASS / FAIL 規則
 

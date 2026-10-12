@@ -99,7 +99,6 @@ var inventoryGenerateCmd = &cobra.Command{
 			// also means a group_vars write failure surfaces before we've
 			// claimed success on the inventory itself.
 			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf), hf)
-			copyMissingNestedGroupVarsExamples(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.UsedRoles(hf))
 		}
 		if !invGenNoVault {
 			writeMissingVaultSkeleton(cmd.ErrOrStderr(), vaultOut, hf)
@@ -110,6 +109,7 @@ var inventoryGenerateCmd = &cobra.Command{
 		if !invGenNoNFSRoster {
 			writeMissingNFSRosterEntries(cmd.ErrOrStderr(), groupVarsBaseDir(out), hf)
 		}
+		warnShadowedVarsFiles(cmd.ErrOrStderr(), groupVarsBaseDir(out))
 		if out == "" || out == "-" {
 			fmt.Print(rendered)
 			return nil
@@ -232,69 +232,19 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inven
 	}
 }
 
-// nestedGroupVarsExample is a group_vars example that lives outside the
-// flat "<stem>.example.yml" convention copyMissingGroupVars/scanGroupVars
-// handle. Currently just dns_zones (group_vars/dns/zones.example.yaml) —
-// the repo's own .gitignore (`/group_vars/dns/*.yaml`, tracking only the
-// .example.yaml) treats real dns zone files as deliberately separate from
-// the templated per-role scaffold, so this only makes the example
-// discoverable/copyable through `pilot inventory generate` and `pilot
-// edit`'s file picker (see pushGroupVarsFilePicker) — editing its contents
-// is still hand-edit-only: dns_zones is a 2-level nested list-of-maps
-// (zones, each optionally containing a nested records list), a shape no
-// generic small editor in this wizard fits.
-type nestedGroupVarsExample struct {
-	Role       string // role that implies this example is relevant
-	ExampleRel string // relative to the fixed group_vars/ example dir
-	DestRel    string // relative to <workspace>/group_vars
-}
-
-var nestedGroupVarsExamples = []nestedGroupVarsExample{
-	{Role: "dns", ExampleRel: filepath.Join("dns", "zones.example.yaml"), DestRel: filepath.Join("dns", "zones.yaml")},
-}
-
-// copyMissingNestedGroupVarsExamples backfills each nestedGroupVarsExample
-// whose Role is actually used, mirroring copyMissingGroupVars' stat-then-
-// skip idempotency exactly — only ever writes when the destination is
-// missing, never overwrites.
-func copyMissingNestedGroupVarsExamples(w io.Writer, baseDir string, roles []string) {
-	used := make(map[string]bool, len(roles))
-	for _, r := range roles {
-		used[r] = true
+// warnShadowedVarsFiles prints one warning per group_vars/host_vars file
+// under baseDir that Ansible ignores because a same-named directory exists
+// (inventory.ShadowedVarsFiles). Older pilot versions scaffolded both
+// group_vars/dns.yml and group_vars/dns/ for every dns host, which made
+// every value in dns.yml — the file pilot edit edits — silently ineffective.
+func warnShadowedVarsFiles(w io.Writer, baseDir string) {
+	shadows, err := inventory.ShadowedVarsFiles(baseDir)
+	if err != nil {
+		fmt.Fprintf(w, "group_vars: cannot check for shadowed files (%v)\n", err)
+		return
 	}
-	for _, ex := range nestedGroupVarsExamples {
-		if !used[ex.Role] {
-			continue
-		}
-		src := filepath.Join("group_vars", ex.ExampleRel)
-		dst := filepath.Join(baseDir, "group_vars", ex.DestRel)
-
-		data, err := os.ReadFile(src)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
-			continue
-		}
-
-		if _, err := os.Stat(dst); err == nil {
-			fmt.Fprintf(w, "group_vars: %s already exists, left untouched\n", dst)
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
-			continue
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
-			continue
-		}
-		fmt.Fprintf(w, "group_vars: copied %s -> %s\n", src, dst)
+	for _, sh := range shadows {
+		fmt.Fprintf(w, "⚠️  %s\n", sh)
 	}
 }
 
@@ -512,10 +462,10 @@ func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regener
 		return false, err
 	}
 	copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf), hf)
-	copyMissingNestedGroupVarsExamples(stderr, groupVarsBaseDir(invPath), inventory.UsedRoles(hf))
 	writeMissingVaultSkeleton(stderr, resolveGenVaultPath(invPath, "", false), hf)
 	writeMissingHostVarsSkeleton(stderr, groupVarsBaseDir(invPath), hf)
 	writeMissingNFSRosterEntries(stderr, groupVarsBaseDir(invPath), hf)
+	warnShadowedVarsFiles(stderr, groupVarsBaseDir(invPath))
 	if err := os.WriteFile(invPath, []byte(rendered), 0o644); err != nil {
 		return false, err
 	}
@@ -535,15 +485,24 @@ var inventoryLintCmd = &cobra.Command{
 			return err
 		}
 		issues := inventory.Lint(hf)
-		if len(issues) == 0 {
-			fmt.Println("ok: no issues found")
+		// group_vars/host_vars sit next to hosts.yml (the same workspace
+		// directory pilot inventory generate and pilot edit write to).
+		shadows, err := inventory.ShadowedVarsFiles(filepath.Dir(invLintIn))
+		if err != nil {
+			return err
+		}
+		if len(issues) == 0 && len(shadows) == 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "ok: no issues found")
 			return nil
 		}
 		for _, i := range issues {
-			fmt.Println(i.String())
+			fmt.Fprintln(cmd.OutOrStdout(), i.String())
 		}
-		if inventory.HasErrors(issues) {
-			return fmt.Errorf("%d issue(s) found", len(issues))
+		for _, sh := range shadows {
+			fmt.Fprintf(cmd.OutOrStdout(), "error: %s\n", sh)
+		}
+		if inventory.HasErrors(issues) || len(shadows) > 0 {
+			return fmt.Errorf("%d issue(s) found", len(issues)+len(shadows))
 		}
 		return nil
 	},

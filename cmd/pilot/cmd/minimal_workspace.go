@@ -25,7 +25,6 @@ func prepareMinimalWorkspace(dir string) error {
 	}
 
 	copyMissingGroupVars(io.Discard, dir, inventory.GroupVarsStems(hf), hf)
-	copyMissingNestedGroupVarsExamples(io.Discard, dir, inventory.UsedRoles(hf))
 	writeMissingVaultSkeleton(io.Discard, filepath.Join(dir, ".vault", "main.yaml"), hf)
 	writeMissingHostVarsSkeleton(io.Discard, dir, hf)
 	writeMissingNFSRosterEntries(io.Discard, dir, hf)

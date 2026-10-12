@@ -200,15 +200,17 @@ func TestBuildVtSSHArgv_NoRemoteArgv(t *testing.T) {
 }
 
 // TestContainerFixPermsScript_CreatesControlPathDir guards the sandbox fix:
-// the generated inventory pins ssh ControlPath under ~/.ansible/cp, so the
-// in-container prep MUST create that directory (and ~/.ssh) or ControlMaster
-// socket creation fails and every ansible task errors.
+// the generated inventory pins the ssh ControlPath in the target's own
+// control directory, so the in-container prep MUST create that directory
+// (and ~/.ssh) or ControlMaster socket creation fails and every ansible
+// task errors.
 func TestContainerFixPermsScript_CreatesControlPathDir(t *testing.T) {
-	s := containerFixPermsScript("/tmp/pilot-ssh/id_ed25519")
+	s := containerFixPermsScript([]string{"/tmp/pilot-vmt-1000-0011aabb"}, "/tmp/pilot-ssh/id_ed25519")
 	for _, want := range []string{
 		"cp /tmp/pilot-ssh/id_ed25519 /tmp/pilot-ssh-key-0",
 		"chmod 600 /tmp/pilot-ssh-key-0",
-		"~/.ansible/cp", // the ControlPath parent dir the inventory requires
+		"mkdir -p -m 700 '/tmp/pilot-vmt-1000-0011aabb'", // the ControlPath parent dir the inventory requires
+		"~/.ansible/cp",
 		"~/.ssh",
 		"touch ~/.ssh/known_hosts",
 	} {
@@ -223,8 +225,10 @@ func TestContainerFixPermsScript_CreatesControlPathDir(t *testing.T) {
 // SSH keypair, so the in-container prep must copy+chmod each mount
 // individually rather than assuming a single key.
 func TestContainerFixPermsScript_MultipleKeys(t *testing.T) {
-	s := containerFixPermsScript("/tmp/pilot-ssh/0/id_ed25519", "/tmp/pilot-ssh/1/id_ed25519")
+	s := containerFixPermsScript([]string{"/tmp/pilot-vmt-1000-0000000a", "/tmp/pilot-vmt-1000-0000000b"}, "/tmp/pilot-ssh/0/id_ed25519", "/tmp/pilot-ssh/1/id_ed25519")
 	for _, want := range []string{
+		"mkdir -p -m 700 '/tmp/pilot-vmt-1000-0000000a'",
+		"mkdir -p -m 700 '/tmp/pilot-vmt-1000-0000000b'",
 		"cp /tmp/pilot-ssh/0/id_ed25519 /tmp/pilot-ssh-key-0",
 		"chmod 600 /tmp/pilot-ssh-key-0",
 		"cp /tmp/pilot-ssh/1/id_ed25519 /tmp/pilot-ssh-key-1",
