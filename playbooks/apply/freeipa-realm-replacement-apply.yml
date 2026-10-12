@@ -160,11 +160,58 @@
           changed_when: false
           tags: [C1]
 
+        # The old realm's servers, from the client's own configuration, before
+        # the uninstall removes it: /etc/ipa/default.conf `server`, and SSSD's
+        # ipa_server/ipa_backup_server failover lists.
+        - name: "Realm replacement — read the old realm's client configuration"
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop: [/etc/ipa/default.conf, /etc/sssd/sssd.conf]
+          register: freeipa_realm_replacement_old_config
+          failed_when: false
+          tags: [C3]
+
+        - name: "Realm replacement — list the old realm's servers"
+          ansible.builtin.set_fact:
+            freeipa_realm_replacement_old_servers: >-
+              {{ (freeipa_realm_replacement_old_config.results
+                  | selectattr('content', 'defined') | map(attribute='content')
+                  | map('b64decode')
+                  | map('regex_findall', '(?m)^\s*(?:server|ipa_server|ipa_backup_server)\s*=\s*(.*)$') | flatten
+                  | map('split', ',') | flatten | map('trim') | map('lower')
+                  | reject('equalto', '_srv_') | reject('equalto', '')
+                  | unique | list)
+                 | difference([freeipa_realm_replacement_new_server_fqdn | lower]) }}
+          tags: [C3]
+
         - name: "Realm replacement — remove old client enrollment"
           ansible.builtin.command:
             argv: [ipa-client-install, --uninstall, -U]
           changed_when: true
           no_log: true
+          tags: [C3]
+
+        # freeipa-client-apply.yml pins the old realm's servers in /etc/hosts,
+        # and the uninstall leaves them. With the old pin still there (its short
+        # name, e.g. `ipa1`, the same as the new server's), SSSD on Ubuntu 24.04
+        # sent the new host principal's AS requests to the old KDC, got "Client
+        # ... not found in Kerberos database" and stayed offline, so the
+        # identity wait failed (2026-07-29, root-caused 2026-10-12). Remove
+        # them after the uninstall, which still talks to the old server, and
+        # before the new enrollment. The rescue's archive restores them.
+        - name: "Realm replacement — remove the old realm's server pool block from /etc/hosts"
+          ansible.builtin.blockinfile:
+            path: /etc/hosts
+            marker: "# {mark} PILOT FREEIPA SERVER POOL"
+            state: absent
+          tags: [C3]
+
+        - name: "Realm replacement — remove other /etc/hosts pins of the old realm's servers"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '(?i)\s{{ item | regex_escape }}(\s|$)'
+            state: absent
+          loop: "{{ freeipa_realm_replacement_old_servers }}"
           tags: [C3]
 
         - name: "Realm replacement — enroll client in the new realm"
