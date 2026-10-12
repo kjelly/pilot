@@ -328,16 +328,23 @@ func fcRewrite(task map[string]any) map[string]any {
 	if args, ok := c["ansible.builtin.command"].(map[string]any); ok {
 		argv, _ := args["argv"].([]any)
 		if len(argv) > 0 {
+			// Only argv changes; creates/removes stay, so a skipped
+			// command stays skipped.
+			a := map[string]any{}
+			for k, v := range args {
+				a[k] = v
+			}
 			switch argv[0] {
 			case "curl":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_health_cmd }}"}
+				a["argv"] = "{{ fc_health_cmd }}"
 				delete(c, "retries")
 				delete(c, "delay")
 			case "getent":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_getent_cmd }}"}
+				a["argv"] = "{{ fc_getent_cmd }}"
 			case "sshd":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_sshd_cmd }}"}
+				a["argv"] = "{{ fc_sshd_cmd }}"
 			}
+			c["ansible.builtin.command"] = a
 		}
 	}
 	return c

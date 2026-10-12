@@ -354,3 +354,128 @@ func TestRegression_SshdConfigWriteAllowlistPathsExist(t *testing.T) {
 		}
 	}
 }
+
+// ipaInstallerAllowlist lists FreeIPA installer runs that do not check sshd's
+// configuration first yet, keyed "<playbook>: <task name>". Each belongs to
+// a component with its own vm-target run; an entry fails the test once it
+// is fixed.
+var ipaInstallerAllowlist = map[string]string{
+	"playbooks/apply/freeipa-server-apply.yml: FreeIPA — run ipa-server-install (native; first run is 8–12 min)":                      "needs a fresh freeipa-server run",
+	"playbooks/apply/freeipa-server-replica-apply.yml: FreeIPA replica — step 1/2: ipa-client-install (enroll into {{ ipa_realm }})":  "needs a replica topology run",
+	"playbooks/apply/freeipa-server-replica-apply.yml: FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)": "needs a replica topology run",
+	"playbooks/apply/freeipa-realm-replacement-apply.yml: Realm replacement — remove old client enrollment":                           "needs a realm-replacement run",
+	"playbooks/apply/freeipa-realm-replacement-apply.yml: Realm replacement — enroll client in the new realm":                         "needs a realm-replacement run",
+}
+
+var ipaInstallers = []string{"ipa-client-install", "ipa-server-install", "ipa-replica-install"}
+
+// runsIpaInstaller reports whether a task runs one of the FreeIPA installers,
+// named in its command or in the task vars its argv is built from.
+func runsIpaInstaller(task map[string]any) bool {
+	_, args, ok := taskModule(task, sshdCommandModules)
+	if !ok {
+		return false
+	}
+	var text string
+	switch a := args.(type) {
+	case string:
+		text = a
+	case map[string]any:
+		text = fmt.Sprint(a["argv"], " ", a["cmd"])
+	}
+	text += " " + fmt.Sprint(task["vars"])
+	for _, name := range ipaInstallers {
+		if strings.Contains(text, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ipaInstallersWithoutSshdCheck returns the names of installer tasks with no
+// whole-configuration `sshd -t` before them in their task list.
+func ipaInstallersWithoutSshdCheck(doc any) []string {
+	var out []string
+	var walk func(list []any)
+	walk = func(list []any) {
+		checked := false
+		for _, item := range list {
+			task, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if runsSshdCheck(task) {
+				checked = true
+			}
+			if runsIpaInstaller(task) && !checked {
+				out = append(out, fmt.Sprint(task["name"]))
+			}
+			for _, key := range []string{"block", "rescue", "always"} {
+				sub, _ := task[key].([]any)
+				walk(sub)
+			}
+		}
+	}
+	items, _ := doc.([]any)
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+			list, _ := play[section].([]any)
+			walk(list)
+		}
+	}
+	return out
+}
+
+// TestRegression_IpaInstallersRunAfterAnSshdCheck: ipa-client-install,
+// ipa-server-install and ipa-replica-install configure sshd and restart it.
+// With a broken file in sshd_config.d that restart fails and sshd stays
+// down; ipa-client-install --uninstall then stopped half done (SSSD's
+// configuration removed, /etc/ipa/default.conf still there) on AlmaLinux 9
+// (2026-10-12). Every installer run in playbooks/apply and
+// playbooks/decommission needs a whole-configuration `sshd -t` earlier in
+// its task list.
+func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
+	found := map[string]bool{}
+	installers := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(path, "../../")
+		if !strings.HasPrefix(rel, "playbooks/apply/") && !strings.HasPrefix(rel, "playbooks/decommission/") {
+			continue
+		}
+		doc := loadYAML(t, path)
+		var all []string
+		items, _ := doc.([]any)
+		for _, item := range items {
+			play, _ := item.(map[string]any)
+			for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+				walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+					if runsIpaInstaller(task) {
+						all = append(all, fmt.Sprint(task["name"]))
+					}
+				})
+			}
+		}
+		installers += len(all)
+		for _, name := range ipaInstallersWithoutSshdCheck(doc) {
+			key := rel + ": " + name
+			found[key] = true
+			if _, ok := ipaInstallerAllowlist[key]; !ok {
+				t.Errorf("%s: runs a FreeIPA installer, which restarts sshd, with no `sshd -t` before it in its task list", key)
+			}
+		}
+	}
+	for key := range ipaInstallerAllowlist {
+		if !found[key] {
+			t.Errorf("ipaInstallerAllowlist: %s checks sshd first now (or no longer exists); remove it", key)
+		}
+	}
+	// freeipa-client, its decommission, the server, the replica (2) and the
+	// realm replacement (2).
+	if installers < 7 {
+		t.Fatalf("found only %d FreeIPA installer runs; the detection is broken", installers)
+	}
+}

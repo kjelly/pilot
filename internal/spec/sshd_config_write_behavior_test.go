@@ -270,3 +270,102 @@ func TestSshdSitesExist(t *testing.T) {
 		}
 	}
 }
+
+// ipaGateSite is a FreeIPA installer run and the sshd -t gate before it.
+type ipaGateSite struct {
+	name, path, first, last string
+	// enrolled returns the vars that make the host enrolled or not.
+	enrolled func(dir string, yes bool) map[string]any
+}
+
+var ipaGateSites = []ipaGateSite{
+	{name: "freeipa-client enroll", path: "../../playbooks/apply/freeipa-client-apply.yml",
+		first: "FreeIPA client — sshd -t before ipa-client-install restarts sshd",
+		last:  "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})",
+		enrolled: func(dir string, yes bool) map[string]any {
+			marker := filepath.Join(dir, "default.conf")
+			if yes {
+				_ = os.WriteFile(marker, []byte("[global]\n"), 0o644)
+			}
+			return map[string]any{"ipa_config_marker": marker, "ipa_realm": "IPA.TEST"}
+		}},
+	{name: "freeipa-client decommission uninstall", path: "../../playbooks/decommission/freeipa-client-decommission.yml",
+		first: "FreeIPA client decommission — sshd -t before the uninstall restarts sshd",
+		last:  "FreeIPA client decommission — remove FreeIPA client enrollment",
+		enrolled: func(dir string, yes bool) map[string]any {
+			return map[string]any{"freeipa_decom_cfg": map[string]any{"stat": map[string]any{"exists": yes}}}
+		}},
+}
+
+// TestRegression_IpaInstallersCheckSshdFirst: the installer, which restarts
+// sshd, runs only after sshd -t passes; with sshd -t failing the run stops
+// before it. A host the installer would skip (already enrolled, or no longer
+// enrolled) is not blocked.
+func TestRegression_IpaInstallersCheckSshdFirst(t *testing.T) {
+	cases := []struct {
+		name      string
+		enrolled  bool
+		sshdFails bool
+		wantRan   bool
+		wantFail  bool
+	}{
+		{name: "sshd -t passes", enrolled: false, wantRan: true},
+		{name: "sshd -t fails", enrolled: false, sshdFails: true, wantFail: true},
+		{name: "installer would skip, sshd -t fails", enrolled: true, sshdFails: true},
+	}
+	for _, site := range ipaGateSites {
+		for _, c := range cases {
+			t.Run(site.name+"/"+c.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				enrolled := c.enrolled
+				if site.name == "freeipa-client decommission uninstall" {
+					// The uninstall runs on an enrolled host.
+					enrolled = !c.enrolled
+				}
+				vars := site.enrolled(dir, enrolled)
+				ran := filepath.Join(dir, "installer-ran")
+				vars["fc_installer_ran"] = ran
+				if c.sshdFails {
+					vars["fc_sshd_cmd"] = fcSshdFails
+				}
+				playVars, tasks := sshdSiteTasks(t, sshdSite{name: site.name, path: site.path, first: site.first, last: site.last})
+				var keep []map[string]any
+				for _, task := range tasks {
+					keep = append(keep, ipaRewrite(task))
+				}
+				res := runLocalTasks(t, playVars, keep, dir, vars)
+				_, err := os.Stat(ran)
+				failures := strings.Join(res.failures, "\n")
+				if (res.rc != 0) != c.wantFail || (err == nil) != c.wantRan {
+					t.Fatalf("rc=%d installer ran=%v failures=%v; want failed=%v, installer ran=%v", res.rc, err == nil, res.failures, c.wantFail, c.wantRan)
+				}
+				if c.wantFail && (!strings.Contains(failures, "Refusing to run ipa-client-install") || !strings.Contains(failures, "Bad configuration option")) {
+					t.Errorf("failures=%v; want the refusal with sshd's own message", res.failures)
+				}
+			})
+		}
+	}
+}
+
+// ipaRewrite is fcRewrite plus: an installer run becomes `touch
+// {{ fc_installer_ran }}`, keeping its `creates:`.
+func ipaRewrite(task map[string]any) map[string]any {
+	c := fcRewrite(task)
+	if !runsIpaInstaller(task) {
+		return c
+	}
+	for _, key := range []string{"ansible.builtin.command", "command"} {
+		args, ok := c[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		a := map[string]any{"argv": []any{"touch", "{{ fc_installer_ran }}"}}
+		if creates, ok := args["creates"]; ok {
+			a["creates"] = creates
+		}
+		c[key] = a
+		delete(c, "vars")
+	}
+	return c
+}

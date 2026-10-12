@@ -135,6 +135,33 @@
         # configured"), so guard it exactly the way freeipa-client-
         # apply.yml's enrollment task guards the opposite direction
         # (`creates:` there, `when: ...exists` here).
+        # ipa-client-install --uninstall restores sshd's configuration and
+        # restarts sshd. With a broken file in sshd_config.d that restart
+        # fails: sshd stays down, and the uninstall stops half done (SSSD's
+        # configuration gone, /etc/ipa/default.conf still there; seen on
+        # AlmaLinux 9, 2026-10-12). Check before touching anything.
+        - name: "FreeIPA client decommission — sshd -t before the uninstall restarts sshd"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          register: freeipa_decom_sshd_precheck
+          changed_when: false
+          failed_when: false
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_cfg.stat.exists
+
+        - name: "Gate: the sshd configuration is valid before uninstalling"
+          ansible.builtin.assert:
+            that:
+              - freeipa_decom_sshd_precheck.rc == 0
+            fail_msg: >-
+              Refusing to run ipa-client-install --uninstall: it restarts sshd, and sshd -t fails
+              ({{ ((freeipa_decom_sshd_precheck.stderr | default('')) or (freeipa_decom_sshd_precheck.stdout | default(''))) | trim }}).
+              Nothing was changed. Fix the sshd configuration, then resume.
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_cfg.stat.exists
+
         - name: "FreeIPA client decommission — remove FreeIPA client enrollment"
           ansible.builtin.command:
             argv: [ipa-client-install, --uninstall, -U]
