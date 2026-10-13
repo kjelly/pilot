@@ -1670,52 +1670,202 @@
       when: not ansible_check_mode
       tags: [AG_service, AG12]
 
+    # ForceCommand preflight: Step 19 sends every portal user into
+    # /usr/local/libexec/pilot-session, so before it is installed the wrapper and
+    # the pilot CLI it execs must be root-owned executables nobody else can
+    # write, pilot-access-gateway must answer /v1/health, which also proves the pilot-target-<scope>
+    # hostgroup resolves through the gateway's own credential (Step 18's
+    # check),
+    # and the portal-user group must resolve, or Match Group never
+    # matches. These carry Step 19's own tags: Steps 13-18 carry AG_service/AG12, so `--tags AG43`
+    # used to install the drop-in without any of these checks. They run
+    # only when installing, so removing the drop-in (the rollback below)
+    # is never blocked by an unhealthy service, and they are skipped under
+    # --check like the health probe above (on a fresh host nothing runs
+    # yet).
+    - name: "ForceCommand gate: stat the session wrapper and the pilot CLI"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        get_checksum: false
+      loop: [/usr/local/libexec/pilot-session, /usr/bin/pilot]
+      register: gateway_forcecommand_files
+      when: pilot_access_gateway_effective_install_forcecommand | bool
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: the session wrapper and the pilot CLI are root-owned executables"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_files_bad | length == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: every portal user would be
+          sent to /usr/local/libexec/pilot-session, which execs /usr/bin/pilot.
+          Missing: {{ gateway_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list }};
+          not a root-owned executable, or writable by group or others:
+          {{ gateway_forcecommand_files_bad | difference(gateway_forcecommand_files.results | rejectattr('stat.exists') | map(attribute='item') | list) }}.
+          Nothing was changed. Run the playbook without --tags (or with AG_service) first.
+      vars:
+        gateway_forcecommand_files_bad: >-
+          {{ gateway_forcecommand_files.results | map(attribute='item')
+             | difference(gateway_forcecommand_files.results
+                          | selectattr('stat.exists') | selectattr('stat.isreg') | selectattr('stat.executable')
+                          | selectattr('stat.pw_name', 'equalto', 'root')
+                          | rejectattr('stat.wgrp') | rejectattr('stat.woth')
+                          | map(attribute='item') | list) }}
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: pilot-access-gateway answers its health check"
+      ansible.builtin.command:
+        argv: [curl, --silent, --show-error, --fail-with-body, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
+      register: gateway_forcecommand_health
+      changed_when: false
+      failed_when: false
+      retries: 3
+      delay: 2
+      until: gateway_forcecommand_health.rc == 0
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: pilot-access-gateway is healthy"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_health.rc == 0
+          - (gateway_forcecommand_health.stdout | from_json).status == 'ok'
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: pilot-access-gateway did not pass
+          its health check (rc={{ gateway_forcecommand_health.rc }}:
+          {{ (gateway_forcecommand_health.stdout ~ ' ' ~ gateway_forcecommand_health.stderr) | trim }}).
+          Nothing was changed.
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: look up the portal-user group via SSSD"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ gateway_effective_portal_user_group }}"]
+      register: gateway_forcecommand_group
+      changed_when: false
+      failed_when: false
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
+    - name: "ForceCommand gate: the portal-user group resolves"
+      ansible.builtin.assert:
+        that:
+          - gateway_forcecommand_group.rc == 0
+        fail_msg: >-
+          Refusing to install the ForceCommand drop-in: its Match Group
+          {{ gateway_effective_portal_user_group }} does not resolve via getent, so it would
+          match no portal user. Nothing was changed.
+      when:
+        - pilot_access_gateway_effective_install_forcecommand | bool
+        - not ansible_check_mode
+      tags: [AG_forcecommand, AG43]
+
     # Step 19-21 (spec.md §55): sshd ForceCommand. GATED — see the file
     # header comment and spec.md §0 G4/§55.1. Deliberately NOT exercised
     # by Phase 7's own vm-target run; Phase 8 owns turning this on for
     # real, only after the §55.1 lockout regression test has passed.
     #
-    # AllowStreamLocalForwarding no is explicit (captive-transport spec
-    # §12.4) so `sshd -T -C` reports it directly, not only via
-    # DisableForwarding. PermitUserEnvironment is deliberately NOT here:
-    # sshd rejects it inside a Match block (verified live, Phase 0 evidence
-    # §6); its global default is already `no`, which the lockout script
-    # checks.
-    - name: "Step 19: install sshd ForceCommand drop-in (GATED — see spec.md §55.1)"
-      ansible.builtin.copy:
-        dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          Match Group {{ gateway_effective_portal_user_group }}
-              ForceCommand /usr/local/libexec/pilot-session
-              PermitTTY yes
-
-              DisableForwarding yes
-              AllowAgentForwarding no
-              AllowTcpForwarding no
-              AllowStreamLocalForwarding no
-              X11Forwarding no
-              PermitTunnel no
-              PermitUserRC no
-      when: pilot_access_gateway_effective_install_forcecommand | bool
-      register: gateway_forcecommand_dropin
+    # Installing and removing the drop-in both run as a block: write (or
+    # remove) the file, `sshd -t` the whole configuration, reload. If a
+    # step fails, sshd was not reloaded, so the rescue puts the drop-in
+    # back the way this run found it and fails the run: the file on disk is
+    # again what sshd runs, and the next run retries the change. Before,
+    # a failed `sshd -t` left the new file in place; the next run found it
+    # unchanged, skipped `sshd -t` and the reload and reported success,
+    # while sshd still ran without it and its next restart would load a
+    # configuration nothing had validated. The snapshot below is what the
+    # rescue puts back.
+    - name: "Step 19 snapshot: stat the drop-in this run may replace or remove"
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+        get_checksum: false
+      register: gateway_forcecommand_dropin_stat
       tags: [AG_forcecommand, AG43]
 
-    - name: "Step 20: sshd -t"
-      ansible.builtin.command:
-        argv: [sshd, -t]
-      when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
-      changed_when: false
-      tags: [AG_forcecommand]
+    - name: "Step 19 snapshot: read the drop-in this run may replace or remove"
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+      register: gateway_forcecommand_dropin_before
+      when: gateway_forcecommand_dropin_stat.stat.exists
+      tags: [AG_forcecommand, AG43]
 
-    - name: "Step 21: reload sshd"
-      ansible.builtin.systemd:
-        name: ssh
-        state: reloaded
-      when: pilot_access_gateway_effective_install_forcecommand | bool and gateway_forcecommand_dropin.changed
-      tags: [AG_forcecommand]
+    - name: "Steps 19-21: install, validate and load the ForceCommand drop-in"
+      when: pilot_access_gateway_effective_install_forcecommand | bool
+      tags: [AG_forcecommand, AG43]
+      block:
+        # AllowStreamLocalForwarding no is explicit (captive-transport spec
+        # §12.4) so `sshd -T -C` reports it directly, not only via
+        # DisableForwarding. PermitUserEnvironment is deliberately NOT here:
+        # sshd rejects it inside a Match block (verified live, Phase 0 evidence
+        # §6); its global default is already `no`, which the lockout script
+        # checks. `validate` checks the file on its own before it replaces
+        # anything; Step 20 checks it together with the rest.
+        - name: "Step 19: install sshd ForceCommand drop-in (GATED — see spec.md §55.1)"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+            owner: root
+            group: root
+            mode: "0644"
+            validate: /usr/sbin/sshd -t -f %s
+            content: |
+              Match Group {{ gateway_effective_portal_user_group }}
+                  ForceCommand /usr/local/libexec/pilot-session
+                  PermitTTY yes
+
+                  DisableForwarding yes
+                  AllowAgentForwarding no
+                  AllowTcpForwarding no
+                  AllowStreamLocalForwarding no
+                  X11Forwarding no
+                  PermitTunnel no
+                  PermitUserRC no
+          register: gateway_forcecommand_dropin
+
+        - name: "Step 20: sshd -t"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          when: gateway_forcecommand_dropin.changed
+          changed_when: false
+
+        - name: "Step 21: reload sshd"
+          ansible.builtin.systemd:
+            name: ssh
+            state: reloaded
+          when: gateway_forcecommand_dropin.changed
+      rescue:
+        - name: "Step 19 revert: put back the drop-in this run replaced"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: "{{ gateway_forcecommand_dropin_before.content | b64decode }}"
+          when: gateway_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 19 revert: remove the drop-in this run wrote"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+            state: absent
+          when: not gateway_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 19 revert: the ForceCommand drop-in was not installed"
+          ansible.builtin.fail:
+            msg: >-
+              The ForceCommand drop-in was not installed: "{{ ansible_failed_task.name }}" failed
+              ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+              {{ '/etc/ssh/sshd_config.d/90-pilot-access-gateway.conf is back to what this run found'
+                 if gateway_forcecommand_dropin_stat.stat.exists
+                 else 'This run left no /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf' }},
+              and sshd was not reloaded.
 
     # Rollback path (spec.md §55.1 step 3): flipping the flag back to
     # false and re-applying must actually remove the drop-in, not just
@@ -1723,24 +1873,43 @@
     # way to undo step 19 short of hand-editing the host, which defeats
     # the point of gating this behind a variable at all. Verified live
     # as part of the §55.1 lockout regression test (Phase 8 evidence).
-    - name: "Step 19 rollback: remove sshd ForceCommand drop-in when disabled"
-      ansible.builtin.file:
-        path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
-        state: absent
+    # It carries AG43 like the install: before, `--tags AG43` with the
+    # flag false did nothing at all.
+    - name: "Steps 19-21 rollback: remove the ForceCommand drop-in when disabled"
       when: not (pilot_access_gateway_effective_install_forcecommand | bool)
-      register: gateway_forcecommand_dropin_removed
-      tags: [AG_forcecommand]
+      tags: [AG_forcecommand, AG43]
+      block:
+        - name: "Step 19 rollback: remove sshd ForceCommand drop-in when disabled"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+            state: absent
+          register: gateway_forcecommand_dropin_removed
 
-    - name: "Step 20 rollback: sshd -t after removing the drop-in"
-      ansible.builtin.command:
-        argv: [sshd, -t]
-      when: not (pilot_access_gateway_effective_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
-      changed_when: false
-      tags: [AG_forcecommand]
+        - name: "Step 20 rollback: sshd -t after removing the drop-in"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          when: gateway_forcecommand_dropin_removed.changed
+          changed_when: false
 
-    - name: "Step 21 rollback: reload sshd after removing the drop-in"
-      ansible.builtin.systemd:
-        name: ssh
-        state: reloaded
-      when: not (pilot_access_gateway_effective_install_forcecommand | bool) and gateway_forcecommand_dropin_removed.changed
-      tags: [AG_forcecommand]
+        - name: "Step 21 rollback: reload sshd after removing the drop-in"
+          ansible.builtin.systemd:
+            name: ssh
+            state: reloaded
+          when: gateway_forcecommand_dropin_removed.changed
+      rescue:
+        - name: "Step 19 rollback revert: put the drop-in back"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: "{{ gateway_forcecommand_dropin_before.content | b64decode }}"
+          when: gateway_forcecommand_dropin_stat.stat.exists
+
+        - name: "Step 19 rollback revert: the ForceCommand drop-in was not removed"
+          ansible.builtin.fail:
+            msg: >-
+              The ForceCommand drop-in was not removed: "{{ ansible_failed_task.name }}" failed
+              ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+              /etc/ssh/sshd_config.d/90-pilot-access-gateway.conf is back in place and sshd was not reloaded,
+              so sshd still sends portal users to the wrapper.
