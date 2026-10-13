@@ -1,0 +1,51 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch unbound begin
+active
+@@pilot-dnsarch unbound end rc=0
+@@pilot-dnsarch forwards begin
+. IN forward 1.1.1.1
+@@pilot-dnsarch forwards end rc=0
+@@pilot-dnsarch stubs begin
+. IN stub prime M.ROOT-SERVERS.NET. L.ROOT-SERVERS.NET. K.ROOT-SERVERS.NET. J.ROOT-SERVERS.NET. I.ROOT-SERVERS.NET. H.ROOT-SERVERS.NET. G.ROOT-SERVERS.NET. F.ROOT-SERVERS.NET. E.ROOT-SERVERS.NET. D.ROOT-SERVERS.NET. C.ROOT-SERVERS.NET. B.ROOT-SERVERS.NET. A.ROOT-SERVERS.NET. 2001:dc3::35 2001:500:9f::42 2001:7fd::1 2001:503:c27::2:30 2001:7fe::53 2001:500:1::53 2001:500:12::d0d 2001:500:2f::f 2001:500:a8::e 2001:500:2d::d 2001:500:2::c 2001:500:200::b 2001:503:ba3e::2:30 202.12.27.33 199.7.83.42 193.0.14.129 192.58.128.30 192.36.148.17 198.97.190.53 192.112.36.4 192.5.5.241 192.203.230.10 199.7.91.13 192.33.4.12 199.9.14.201 198.41.0.4
+ipa.pilot.internal. IN stub noprime +i 192.168.122.5
+@@pilot-dnsarch stubs end rc=0
+@@pilot-dnsarch identity begin
+"pilot-dns:dd-dns"
+@@pilot-dnsarch identity end rc=0
+@@pilot-dnsarch internal begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 53954
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+@@pilot-dnsarch internal end rc=0
+@@pilot-dnsarch external begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 46873
+;; flags: qr rd ra ad; QUERY: 1, ANSWER: 13, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; ANSWER SECTION:
+.			193	IN	NS	b.root-servers.net.
+.			193	IN	NS	c.root-servers.net.
+.			193	IN	NS	d.root-servers.net.
+.			193	IN	NS	e.root-servers.net.
+.			193	IN	NS	f.root-servers.net.
+.			193	IN	NS	g.root-servers.net.
+.			193	IN	NS	h.root-servers.net.
+.			193	IN	NS	i.root-servers.net.
+.			193	IN	NS	j.root-servers.net.
+.			193	IN	NS	k.root-servers.net.
+.			193	IN	NS	l.root-servers.net.
+.			193	IN	NS	m.root-servers.net.
+.			193	IN	NS	a.root-servers.net.
+
+@@pilot-dnsarch external end rc=0
+@@pilot-dnsarch authority@192.0.2.1 begin
+;; communications error to 192.0.2.1#53: timed out
+;; no servers could be reached
+@@pilot-dnsarch authority@192.0.2.1 end rc=9

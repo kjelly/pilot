@@ -224,6 +224,24 @@ inventory host:
     audit/correlation against the returned signals list's own `pilot_host`
     fields. See
     `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §46.
+  - `pilot_diagnose_dns_architecture` — one read-only call for "how is DNS
+    wired here": the `dns` caching tier, the FreeIPA DNS providers
+    (primary/replica, canonical FQDN, zones), FreeIPA forwarding (global
+    forwarders, forward policy, per-server forwarders, forward zones) and
+    each managed host's resolver path. It keeps four layers apart —
+    supported (component contracts), declared (inventory variables),
+    effective (what the playbooks' own rules compute; a regression test
+    runs those playbook tasks and fails if the tool's copy drifts) and
+    observed (bounded live probes) — and lists every declared/live
+    difference with evidence references, with `unknown` and `absent` kept
+    separate. External resolution through the tier is never reported as
+    proof that a particular forwarder answered. FreeIPA's DNS
+    configuration is read only with a read-only principal the operator
+    approves when starting the server (`--diagnose-freeipa-principal`,
+    `--diagnose-freeipa-keytab`; `admin` is refused), in a private
+    credential cache; without one the call returns `auth_required` and
+    still reports everything else. Setup:
+    `docs/runbooks/dns-architecture-diagnose.md`.
   - Both `pilot_diagnose_logs` and `pilot_diagnose_security_logs`
     **exclude pilot's own ansible-generated log noise by default** —
     ansible's `BECOME-SUCCESS-` become/sudo marker, and any line

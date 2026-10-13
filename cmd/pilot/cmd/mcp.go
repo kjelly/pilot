@@ -31,6 +31,9 @@ var (
 	mcpDiagnoseInventory    string
 	mcpDiagnoseStepTimeout  time.Duration
 
+	mcpDiagnoseFreeIPAPrincipal string
+	mcpDiagnoseFreeIPAKeytab    string
+
 	mcpEnableRepair bool
 )
 
@@ -61,6 +64,8 @@ func init() {
 	mcpServeCmd.Flags().BoolVar(&mcpEnableDiagnoseRaw, "enable-diagnose-raw", false, "register pilot_diagnose_run, which runs a caller-supplied command (ansible's command module, no shell) against --diagnose-inventory — NOT a fixed allow-list; independent of --enable-diagnose")
 	mcpServeCmd.Flags().StringVar(&mcpDiagnoseInventory, "diagnose-inventory", "", "ansible inventory path pilot_diagnose_* tools may target; defaults to <dir>/inventory.yml when --enable-diagnose or --enable-diagnose-raw is set and this is left empty")
 	mcpServeCmd.Flags().DurationVar(&mcpDiagnoseStepTimeout, "diagnose-step-timeout", 20*time.Second, "per ad-hoc step timeout for pilot_diagnose_* tools")
+	mcpServeCmd.Flags().StringVar(&mcpDiagnoseFreeIPAPrincipal, "diagnose-freeipa-principal", "", "read-only FreeIPA principal (name[/host]@REALM, never admin) pilot_diagnose_dns_architecture uses to read FreeIPA's DNS configuration; requires --diagnose-freeipa-keytab. Without it that tool reports auth_required for those facts")
+	mcpServeCmd.Flags().StringVar(&mcpDiagnoseFreeIPAKeytab, "diagnose-freeipa-keytab", "", "absolute path, on the FreeIPA servers, of the keytab for --diagnose-freeipa-principal; it must be readable by the inventory's ansible_user there")
 	mcpServeCmd.Flags().BoolVar(&mcpEnableRepair, "enable-repair", false, "register the repair tool family (pilot_repair_capabilities/pilot_repair_plan/pilot_repair_apply) — a distinct, R1-only, human-approved-by-the-caller live remediation capability against --diagnose-inventory; independent of --enable-diagnose/--enable-diagnose-raw/--allow-write. The Agent Runtime must never receive a session with this flag set — only the Agent Controller or a trusted operator should")
 
 	mcpCmd.AddCommand(mcpServeCmd)
@@ -94,6 +99,11 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 		WriteEnabled: mcpAllowWrite,
 	})
 
+	freeIPAReader := diagnoseFreeIPAReader{Principal: mcpDiagnoseFreeIPAPrincipal, Keytab: mcpDiagnoseFreeIPAKeytab}
+	if err := validateFreeIPAReader(freeIPAReader); err != nil {
+		return err
+	}
+
 	if mcpEnableDiagnose || mcpEnableDiagnoseRaw || mcpEnableRepair || mcpEnableDiagnoseActive {
 		// Same directory as --dir in every real deployment (hosts.yml and
 		// inventory.yml are sibling files there) — default to it so a
@@ -118,6 +128,7 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 			AuditDir:       canonicalAuditDir,
 			StepTimeout:    mcpDiagnoseStepTimeout,
 			AnsibleRuntime: runtime,
+			FreeIPAReader:  freeIPAReader,
 		}
 		if mcpEnableDiagnose {
 			registerDiagnoseTools(server, diagnoseOpts)
