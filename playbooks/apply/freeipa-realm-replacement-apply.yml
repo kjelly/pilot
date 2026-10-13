@@ -144,7 +144,7 @@
         - name: "Realm replacement — pin new server FQDN before enrollment"
           ansible.builtin.lineinfile:
             path: /etc/hosts
-            regexp: '\\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\\s|$)'
+            regexp: '\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\s|$)'
             line: >-
               {{ freeipa_realm_replacement_new_server_ip }}
               {{ freeipa_realm_replacement_new_server_fqdn }}
@@ -196,9 +196,9 @@
         - name: "Realm replacement — pin SSSD to the new server"
           ansible.builtin.lineinfile:
             path: /etc/sssd/sssd.conf
-            regexp: '^ipa_server\\s*='
+            regexp: '^ipa_server\s*='
             line: "ipa_server = {{ freeipa_realm_replacement_new_server_fqdn }}"
-            insertafter: '^\\[domain/'
+            insertafter: '^\[domain/'
             owner: root
             group: root
             mode: "0600"
