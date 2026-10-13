@@ -234,7 +234,8 @@ snmp_insecure_auth_profile_exceptions:
 ```
 
 - `expiry`：加不加引號都可以，以控制端時鐘的 UTC 日期判斷。缺少、格式不對（例如沒補零的
-  `2026-9-30`）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
+  `2026-9-30`）、不存在的日期（例如加了引號的 `"2099-02-29"`、`"2099-13-01"`，含閏年規則；沒加引號時
+  Ansible 載入 vars 檔就會報錯）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
   本地日期，而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
 - `networkEvidence`：去掉空白後不能是空的。
 - 這筆設定目前要放在用 `-e @<file>` 帶入的檔案（例如 vault 檔）。playbook 的 play `vars:`
@@ -242,7 +243,7 @@ snmp_insecure_auth_profile_exceptions:
   group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點，另案處理）。
 
 目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
-鎖住（expiry 8 個案例、其他欄位 9 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
+鎖住（expiry 17 個案例、其他欄位 9 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 
 ## 9. `pilot verify` 正式驗收

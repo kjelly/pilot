@@ -240,7 +240,12 @@
     # the target's local date, from a fact cache up to an hour old. A bare
     # YAML date (`expiry: 2026-12-31`) loads as a date, so it is turned into
     # a string first; the format check stops an unpadded date such as
-    # 2026-9-30 from comparing as later than 2026-10-13.
+    # 2026-9-30 from comparing as later than 2026-10-13. The month and day
+    # are then checked against the calendar (leap years included), so a
+    # quoted "2099-02-29" or "2099-13-01" is rejected; unquoted, such a date
+    # already fails when Ansible loads the vars file. The check uses integer
+    # arithmetic and a dict lookup: no filter here can raise, so any input
+    # ends in this gate's own message.
     # Spec §13.2 also requires "confirm insecure SNMP" and "restricted
     # management network evidence": `confirmed` must be the boolean true
     # (not the string "true"), and `networkEvidence` a non-blank string.
@@ -253,10 +258,8 @@
              and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
              and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('owner', '') | length > 0)
              and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('networkEvidence', '') | string | trim) | length > 0)
-             and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
-                  is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
-             and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
-                  >= now(utc=true, fmt='%Y-%m-%d')))
+             and (_snmp_exception_expiry_is_date | bool)
+             and _snmp_exception_expiry >= now(utc=true, fmt='%Y-%m-%d'))
         fail_msg: >-
           authProfile "{{ item.key }}" is version {{ item.value.version }}
           / {{ item.value.securityLevel }}, which prod rejects unless
@@ -267,6 +270,22 @@
           date, valid through that date in UTC (today, UTC:
           {{ now(utc=true, fmt='%Y-%m-%d') }}); networkEvidence names the
           evidence that the device's management network is restricted.
+      vars:
+        _snmp_exception_expiry: >-
+          {{ snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string }}
+        _snmp_exception_year: "{{ _snmp_exception_expiry[0:4] | int }}"
+        _snmp_exception_month: "{{ _snmp_exception_expiry[5:7] | int }}"
+        _snmp_exception_day: "{{ _snmp_exception_expiry[8:10] | int }}"
+        _snmp_exception_month_days: >-
+          {{ {1: 31, 2: (29 if ((_snmp_exception_year % 4 == 0 and _snmp_exception_year % 100 != 0)
+                                or _snmp_exception_year % 400 == 0) else 28),
+              3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
+             .get(_snmp_exception_month, 0) }}
+        _snmp_exception_expiry_is_date: >-
+          {{ (_snmp_exception_expiry is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
+             and _snmp_exception_year >= 1
+             and _snmp_exception_day >= 1
+             and _snmp_exception_day <= _snmp_exception_month_days }}
       loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
       when: stage == 'prod'

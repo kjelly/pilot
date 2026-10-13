@@ -126,6 +126,9 @@ func snmpTestDays(t *testing.T) func(int) string {
 //   - the bare YAML date fails with a type error instead of passing;
 //   - the unpadded past date 2026-9-30 passes;
 //   - the stale fact accepts an exception that expired yesterday (UTC).
+//
+// Against the first version of the new gate, which checked only the
+// YYYY-MM-DD shape, the six quoted impossible dates pass (PR #64 review).
 func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 	day := snmpTestDays(t)
 	runSnmpExceptionCases(t, []snmpExceptionCase{
@@ -137,6 +140,17 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 		{"expired yesterday, with a stale cached fact", snmpValidException + `expiry: "` + day(-1) + `"`, day(-1), false},
 		{"unpadded past date", snmpValidException + `expiry: "2026-9-30"`, "2026-10-13", false},
 		{"missing expiry", `reason: lab, owner: ops, confirmed: true, networkEvidence: "CHG-1"`, day(0), false},
+		// Quoted, so they reach the gate as strings; unquoted, Ansible
+		// already refuses to load them ("month must be in 1..12").
+		{"month 13", snmpValidException + `expiry: "2099-13-01"`, day(0), false},
+		{"February 29 in a common year", snmpValidException + `expiry: "2099-02-29"`, day(0), false},
+		{"February 29 in a century common year", snmpValidException + `expiry: "2100-02-29"`, day(0), false},
+		{"April 31", snmpValidException + `expiry: "2099-04-31"`, day(0), false},
+		{"month and day zero", snmpValidException + `expiry: "2099-00-00"`, day(0), false},
+		{"9999-99-99", snmpValidException + `expiry: "9999-99-99"`, day(0), false},
+		{"February 29 in a leap year", snmpValidException + `expiry: "2096-02-29"`, day(0), true},
+		{"February 29 in a 400-year leap year", snmpValidException + `expiry: "2400-02-29"`, day(0), true},
+		{"bare leap day", snmpValidException + `expiry: 2096-02-29`, day(0), true},
 	})
 }
 
