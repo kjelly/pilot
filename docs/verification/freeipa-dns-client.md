@@ -92,10 +92,10 @@ FreeIPA server/replica 自己用得到。
 |---------|----------|---------|
 | `freeipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal`（**必須**與 `freeipa-server.md` §1.5 一致）| 否（有預設）|
 | `freeipa_dns_client_servers` | 明確指定 nameserver IP 清單（list），**設了就完全略過 inventory 自動偵測** | 否（未設時走自動偵測）|
-| `freeipa_setup_dns` | 沿用 `freeipa-server.md`/`freeipa-server-replica.md` 同名 hostvar，決定 inventory 裡哪些主機被視為「有在提供 DNS」；本 playbook 只讀取，不寫入 | 否（各自角色已有預設：`freeipa-server` group 預設 `true`，`freeipa-server-replica` group 預設 `false`）|
+| `freeipa_setup_dns` | 沿用 `freeipa-server.md`/`freeipa-server-replica.md` 同名 hostvar，決定 inventory 裡哪些主機被視為「有在提供 DNS」；本 playbook 只讀取，不寫入 | 否（各自角色已有預設：兩個 group 都是 `true`，跟安裝 playbook 一致；replica 自 issue #67 起） |
 
 > 自動偵測邏輯：走訪 `groups['freeipa-server']`（`freeipa_setup_dns \| default(true)`）
-> 與 `groups['freeipa-server-replica']`（`freeipa_setup_dns \| default(false)`），
+> 與 `groups['freeipa-server-replica']`（同樣 `freeipa_setup_dns \| default(true)`），
 > 用各主機自己的 `ansible_host` 組成 nameserver 清單；若本機自己也在清單內
 > （本機就是 DNS 提供者），把 `127.0.0.1` 排到最前面、其餘提供者接在後面當
 > fallback，其餘情況維持 inventory 偵測到的原始順序（`freeipa-server` 排最前）。
