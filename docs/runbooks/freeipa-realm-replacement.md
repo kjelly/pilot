@@ -55,6 +55,8 @@ playbook 會依序：確認 client 仍在宣告的 old realm → 建立 root-onl
 server → 以新座標重新 enroll → 等待 SSSD 解析新 realm 帳號 → 寫入不含密碼的 completion marker
 （含 `old_host_still_enabled`）。
 
+archive 的名稱在每次 run 開始時以 controller 的 UTC 時鐘決定一次：`/var/backups/pilot/freeipa-realm-replacement/<inventory_hostname>-<YYYYmmddTHHMMSSZ>.tar.gz`，snapshot、rescue、completion marker 與 `/etc/pilot/freeipa-realm-replacement.backup` link 都用同一個名稱。同名檔案已存在時，playbook 在 snapshot 之前拒絕，不覆寫。`--check --diff` 不建立 archive，也不建立 link，只預覽變更。
+
 新 server 沿用舊 server 的 FQDN 時：
 - 該 FQDN 原本在 `PILOT FREEIPA SERVER POOL` block 裡；新 pin 必須在 block 移除之後才寫入，否則
   會跟著 block 一起被刪掉。
