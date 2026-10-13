@@ -1135,6 +1135,14 @@ type deploymentTransactionOptions struct {
 	// collected every operator decision. A non-nil value prevents each
 	// dependency transaction from reopening preflight/preview/apply prompts.
 	Authorization *deploymentAuthorization
+	// AppliedHosts lists the hosts this run exists to change. A preview or
+	// apply whose PLAY RECAP names none of them matched no hosts and fails
+	// instead of reporting success (checkAppliedHosts).
+	AppliedHosts []string
+	// RequireEveryAppliedHost requires every AppliedHosts entry in the
+	// PLAY RECAP. Set for dependency runs: Pilot chose their hosts and
+	// target_group, and the consumer relies on each provider host.
+	RequireEveryAppliedHost bool
 }
 
 // deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
@@ -1164,10 +1172,7 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	if tags != "" {
 		baseArgs = append(baseArgs, "--tags", tags)
 	}
-	for _, v := range extraVars {
-		baseArgs = append(baseArgs, "-e", v)
-	}
-	baseArgs = append(baseArgs, vault.args()...)
+	baseArgs = append(baseArgs, ansibleExtraVarArgs(extraVars, vault)...)
 	baseArgs = append(baseArgs, vault.becomeArgs()...)
 
 	if vault.AskVaultPass || vault.AskBecomePass {
@@ -1216,6 +1221,9 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			if res.ExitCode != 0 {
 				return fmt.Errorf("❌ 預覽失敗(結束碼 %d)，請看上面的輸出修正後再重新執行 pilot deploy", res.ExitCode)
 			}
+			if err := checkAppliedHosts(res.Stdout, options.AppliedHosts, options.RequireEveryAppliedHost); err != nil {
+				return fmt.Errorf("❌ 預覽失敗：%w", err)
+			}
 			fmt.Fprintln(out, "✅ 預覽完成，沒有錯誤。")
 			return nil
 		}
@@ -1246,6 +1254,9 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			if options.RuntimeRace.ResultPath != "" {
 				outcome := ansible.ClassifyDeploymentOutcome(res.ExitCode, options.RuntimeRace.ResultPath, options.RuntimeRace.OptionalHosts)
 				if outcome.Success {
+					if err := checkAppliedHosts(res.Stdout, options.AppliedHosts, options.RequireEveryAppliedHost); err != nil {
+						return fmt.Errorf("❌ 套用失敗：%w", err)
+					}
 					if len(outcome.DeferredHosts) > 0 {
 						fmt.Fprintf(out, "⚠️  套用途中以下 optional 主機變成無法連線，視為 deferred（非錯誤，spec.md §17）：%s\n", strings.Join(outcome.DeferredHosts, ", "))
 					}
@@ -1254,6 +1265,9 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 				}
 			}
 			return fmt.Errorf("❌ 套用失敗(結束碼 %d)，請看上面的輸出", res.ExitCode)
+		}
+		if err := checkAppliedHosts(res.Stdout, options.AppliedHosts, options.RequireEveryAppliedHost); err != nil {
+			return fmt.Errorf("❌ 套用失敗：%w", err)
 		}
 		fmt.Fprintln(out, "✅ 套用完成。")
 		return nil
@@ -1479,7 +1493,7 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 		return agg, err
 	}
 	var mainResult ComponentDeliveryResult
-	err = executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, &mainResult)
+	err = executeRecordedDeploymentCore(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, stage, componentHints, authorization, false, &mainResult)
 	if len(mainResult.ComponentIDs) > 0 {
 		agg.Results = append(agg.Results, mainResult)
 	}
@@ -1601,7 +1615,7 @@ func applyDeploymentDependencyChain(ctx context.Context, runner *ansible.Runner,
 		if resolved, ok := dependencyExtraVars[dep.ID]; ok {
 			vars = resolved
 		}
-		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", vars, vault, stage, []string{dep.ID}, authorization, &depResult)
+		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", vars, vault, stage, []string{dep.ID}, authorization, true, &depResult)
 		if len(depResult.ComponentIDs) > 0 {
 			results = append(results, depResult)
 		}
@@ -1625,7 +1639,11 @@ func applyDeploymentDependencyChain(ctx context.Context, runner *ansible.Runner,
 // pre-transaction failure (contract load, preflight rejection, ...)
 // never populates it — the caller treats a nil-populated resultOut
 // alongside a non-nil error as "this component never started".
-func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, resultOut *ComponentDeliveryResult) error {
+//
+// requireEveryHost makes the preview and apply fail unless every host the
+// run changes appears in the PLAY RECAP (dependency runs); otherwise one is
+// enough (see checkAppliedHosts).
+func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, requireEveryHost bool, resultOut *ComponentDeliveryResult) error {
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
@@ -1794,6 +1812,8 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
 		RuntimeRace: runtimeRace, Authorization: authorization, ResultOut: &txnResult,
+		AppliedHosts:            deploymentAppliedHosts(applied, scope, execScope.Included),
+		RequireEveryAppliedHost: requireEveryHost,
 	})
 	if resultOut != nil {
 		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}
@@ -2706,10 +2726,7 @@ func resolveDeploymentInputs(ctx context.Context, selected []contract.Contract, 
 
 func resolveInventoryVariables(ctx context.Context, inventory string, extraVars []string, vault vaultInput) (map[string]map[string]any, error) {
 	args := []string{"-i", inventory, "--list"}
-	for _, value := range extraVars {
-		args = append(args, "-e", value)
-	}
-	args = append(args, vault.args()...)
+	args = append(args, ansibleExtraVarArgs(extraVars, vault)...)
 	command := deployAnsibleCommand(ctx, "ansible-inventory", args...)
 	command.Stdin = os.Stdin
 	var stdout, stderr strings.Builder
@@ -2748,10 +2765,7 @@ func deploymentRollbackStep(runner *ansible.Runner, out io.Writer, selected []co
 			if limit != "" {
 				args = append(args, "--limit", limit)
 			}
-			for _, value := range extraVars {
-				args = append(args, "-e", value)
-			}
-			args = append(args, vault.args()...)
+			args = append(args, ansibleExtraVarArgs(extraVars, vault)...)
 			args = append(args, vault.becomeArgs()...)
 			fmt.Fprintf(out, "▶ 回滾：ansible-playbook %s\n", strings.Join(args, " "))
 			result, err := runner.Run(ctx, args...)

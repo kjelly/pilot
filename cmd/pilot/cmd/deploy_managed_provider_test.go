@@ -161,9 +161,16 @@ func TestManagedProviderActualDashboardPlan(t *testing.T) {
 	}
 }
 
+// TestManagedProviderWorkflowExecutionAndFailures drives both entry points
+// for dashboard with --limit on the consumer only: Docker on the consumer and
+// the provider, then Thanos Query on the provider (two hops outside the
+// limit), then dashboard. The operator's vars file sets target_group to the
+// dashboard group, as in the PR #39 review; every dependency run must still
+// end with its own target_group after that file. A provider run whose PLAY
+// RECAP names no host fails the plan instead of being recorded as applied.
 func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 	for _, workflow := range []string{"deploy", "reconcile"} {
-		for _, mode := range []string{"success", "provider-fails", "cancel"} {
+		for _, mode := range []string{"success", "provider-fails", "provider-matches-no-host", "cancel"} {
 			t.Run(workflow+"/"+mode, func(t *testing.T) {
 				root := repoRootForTest(t)
 				fixtureRoot := t.TempDir()
@@ -235,6 +242,20 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if mode == "provider-matches-no-host" {
+					// ansible-playbook's output when the play's hosts and
+					// --limit do not intersect: an empty recap, exit 0.
+					fixture, _ := os.ReadFile(runner.Binary)
+					noMatch := "case \"$*\" in *thanos-query-apply.yml*) printf 'PLAY RECAP ****\\n'; exit 0 ;; esac\n"
+					fixture = []byte(strings.Replace(string(fixture), fakePlayRecapScript, noMatch+fakePlayRecapScript, 1))
+					if err := os.WriteFile(runner.Binary, fixture, 0755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				varsFile := filepath.Join(t.TempDir(), "vars.yml")
+				if err := os.WriteFile(varsFile, []byte("target_group: dashboard\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
 				confirm := mode != "cancel"
 				no := false
 				old := activePromptAutomation
@@ -245,7 +266,7 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 				}}
 				t.Cleanup(func() { activePromptAutomation = old })
 				stubDeploymentAvailabilityAllReachable(t)
-				request := catalogDeploymentRequest{playbook: "playbooks/apply/dashboard-apply.yml", inv: inv, limit: "consumer-a", tags: "C8", extraVars: []string{"target_group=consumer-a", "stage=sandbox"}, stage: "sandbox", componentHints: []string{"dashboard"}}
+				request := catalogDeploymentRequest{playbook: "playbooks/apply/dashboard-apply.yml", inv: inv, limit: "consumer-a", tags: "C8", extraVars: []string{"target_group=consumer-a", "stage=sandbox"}, vault: vaultInput{ExtraVarsFile: varsFile}, stage: "sandbox", componentHints: []string{"dashboard"}}
 				var out bytes.Buffer
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
@@ -259,6 +280,9 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 				}
 				if mode != "success" && err == nil {
 					t.Fatal("failure/cancellation ignored")
+				}
+				if mode == "provider-matches-no-host" && !strings.Contains(err.Error(), "沒有比對到任何預定主機") {
+					t.Fatalf("provider run that matched no host: err = %v", err)
 				}
 				if len(activePromptAutomation.answers) != 0 || activePromptAutomation.err != nil {
 					t.Fatalf("unexpected prompts: %+v", activePromptAutomation)
@@ -274,8 +298,9 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 					t.Fatal(readErr)
 				}
 				lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+				providerFails := mode == "provider-fails" || mode == "provider-matches-no-host"
 				wantRuns := 3
-				if mode == "provider-fails" {
+				if providerFails {
 					wantRuns = 2
 				}
 				if len(lines) != wantRuns {
@@ -292,10 +317,22 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 						t.Fatalf("dependency inherited unsafe scope/tags: %s", line)
 					}
 				}
+				// Ansible gives the last -e precedence: each run's own
+				// target_group must come after the operator's vars file.
+				for i, group := range []string{"docker", "thanos-query", "consumer-a"} {
+					if i >= len(lines) {
+						break
+					}
+					varsAt := strings.Index(lines[i], "-e @"+varsFile)
+					lastAt := strings.LastIndex(lines[i], "-e target_group=")
+					if varsAt < 0 || lastAt < varsAt || strings.Fields(lines[i][lastAt:])[1] != "target_group="+group {
+						t.Fatalf("run %d: the vars file can override target_group=%s: %s", i, group, lines[i])
+					}
+				}
 				if mode == "success" && (!strings.Contains(lines[2], "dashboard-apply.yml") || !strings.Contains(lines[2], "--tags C8")) {
 					t.Fatalf("consumer=%s", lines[2])
 				}
-				if mode == "provider-fails" {
+				if providerFails {
 					st, err := store.Open(filepath.Join(dataDir, "history.db"))
 					if err != nil {
 						t.Fatal(err)

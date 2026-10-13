@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -34,8 +35,101 @@ func dependencyTargetVars(extraVars []string, role string) []string {
 			vars = append(vars, raw)
 		}
 	}
-	// Last extra-var wins, including overrides inside JSON or vars files.
+	// Last extra-var wins over JSON and @file values earlier in extraVars;
+	// ansibleExtraVarArgs repeats it after the operator's vars/vault file.
 	return append(vars, "target_group="+role)
+}
+
+// ansibleExtraVarArgs renders extraVars as -e arguments, then the operator's
+// vars/vault file, then the target_group Pilot resolved the deployment scope
+// from. Ansible gives the last -e precedence. The vars file used to come
+// last, so a target_group inside it retargeted the playbook away from the
+// scope Pilot had resolved: a managed provider's dependency run matched no
+// hosts and was reported as applied (PR #39 review). resolveDeploymentScope
+// reads target_group only from extraVars, so that is the value Ansible must
+// see.
+func ansibleExtraVarArgs(extraVars []string, vault vaultInput) []string {
+	args := make([]string, 0, 2*len(extraVars)+6)
+	for _, value := range extraVars {
+		args = append(args, "-e", value)
+	}
+	args = append(args, vault.args()...)
+	if group := extraVarValue(extraVars, "target_group"); group != "" {
+		args = append(args, "-e", "target_group="+group)
+	}
+	return args
+}
+
+var (
+	ansiEscapeRe    = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	recapHostLineRe = regexp.MustCompile(`(?m)^\s*(\S+)\s*:\s+ok=\d+\s+changed=\d+`)
+)
+
+// playRecapHosts returns the hosts named in ansible-playbook's PLAY RECAP,
+// and whether the output had a PLAY RECAP at all. A playbook whose plays
+// matched no hosts prints the header with no host lines.
+func playRecapHosts(output string) (map[string]bool, bool) {
+	output = ansiEscapeRe.ReplaceAllString(output, "")
+	idx := strings.LastIndex(output, "PLAY RECAP")
+	if idx < 0 {
+		return nil, false
+	}
+	hosts := map[string]bool{}
+	for _, m := range recapHostLineRe.FindAllStringSubmatch(output[idx:], -1) {
+		hosts[m[1]] = true
+	}
+	return hosts, true
+}
+
+// checkAppliedHosts rejects an ansible-playbook run that exited 0 without
+// applying anything to the hosts it was run for (AGENTS.md §5.8). With
+// requireEvery false, one of hosts in the PLAY RECAP is enough, and output
+// without a recap (a non-default stdout callback) is left to the exit code.
+// With requireEvery true, every host must be in the recap, and output without
+// a recap fails: nothing confirms the run reached them.
+func checkAppliedHosts(output string, hosts []string, requireEvery bool) error {
+	if len(hosts) == 0 {
+		return nil
+	}
+	recap, ok := playRecapHosts(output)
+	if !ok {
+		if requireEvery {
+			return fmt.Errorf("輸出沒有 PLAY RECAP，無法確認已套用到 %s", strings.Join(hosts, ", "))
+		}
+		return nil
+	}
+	var missing []string
+	for _, host := range hosts {
+		if !recap[host] {
+			missing = append(missing, host)
+		}
+	}
+	if len(missing) == len(hosts) {
+		return fmt.Errorf("playbook 沒有比對到任何預定主機（PLAY RECAP 沒有 %s），沒有套用任何變更", strings.Join(hosts, ", "))
+	}
+	if requireEvery && len(missing) > 0 {
+		return fmt.Errorf("playbook 沒有套用到預定主機 %s（PLAY RECAP 沒有這些主機）", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// deploymentAppliedHosts lists the hosts a deployment run changes: the
+// included hosts of the applied components' roles. Bound providers,
+// delegated-only hosts and the site-wide localhost play are not in it.
+func deploymentAppliedHosts(applied []contract.Contract, scope delivery.Scope, included []string) []string {
+	includedSet := make(map[string]bool, len(included))
+	for _, host := range included {
+		includedSet[host] = true
+	}
+	var hosts []string
+	for _, component := range applied {
+		for _, host := range scope.HostsByRole[component.Role] {
+			if host != "localhost" && includedSet[host] {
+				hosts = append(hosts, host)
+			}
+		}
+	}
+	return uniqueSortedHosts(hosts)
 }
 
 // appliedBeforeConsumer reports whether a deploy applies dep's provider

@@ -330,10 +330,31 @@ site: {include: false, order: 1, vars: {}, tags: [], optIn: true}
 	return root
 }
 
+// fakePlayRecapScript makes a fake ansible-playbook print a PLAY RECAP that
+// names each --limit host, as ansible-playbook does once it applied them;
+// without --limit it prints no recap. Deployment transactions read the recap
+// (checkAppliedHosts).
+const fakePlayRecapScript = `limit=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--limit" ]; then limit="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$limit" ]; then
+  printf 'PLAY RECAP *********************************************************************\n'
+  old_ifs=$IFS
+  IFS=,
+  for host in $limit; do
+    printf '%s : ok=1    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0\n' "$host"
+  done
+  IFS=$old_ifs
+fi
+`
+
 func writeArgsFixture(t *testing.T, argsPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ansible-playbook")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\n" + fakePlayRecapScript
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
