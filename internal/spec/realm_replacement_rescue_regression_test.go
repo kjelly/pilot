@@ -74,6 +74,7 @@ func TestRegression_RealmReplacementRescueReenrollsTheOldRealm(t *testing.T) {
 		name           string
 		uninstalled    bool   // the switch got as far as the uninstall
 		afterUninstall string // default.conf the failed enrollment left; "" for none
+		newServer      string // the new server's FQDN, if not the default
 		reenrollRC     string
 		want           []string // log lines, as regexes; ARCHIVE is the archive path
 		wantMsg        string
@@ -87,6 +88,24 @@ func TestRegression_RealmReplacementRescueReenrollsTheOldRealm(t *testing.T) {
 			name:           "the new realm's enrollment is in place: remove it, then re-enroll",
 			uninstalled:    true,
 			afterUninstall: newConf,
+			want: []string{
+				`ipa-rmkeytab -k /etc/krb5\.keytab -r IPA\.PILOT\.INTERNAL`,
+				`ipa-client-install --uninstall -U`,
+				`ipa-client-install --uninstall -U`,
+				`tar -xpf ARCHIVE -C / etc/hosts`,
+				`tar -xpf ARCHIVE -C (\S+) etc/krb5\.keytab`,
+				reenroll,
+				`tar --exclude=etc/krb5\.keytab -xpf ARCHIVE -C /`,
+			},
+			wantMsg: "re-enrolled in IPA.PILOT.INTERNAL as c53-cl.ipa.pilot.internal",
+		},
+		{
+			// The new realm's uninstall still resolves the shared name to the
+			// new server: it runs before the archived hosts come back.
+			name:           "the new server keeps the old server's FQDN: the re-enrollment still names it",
+			uninstalled:    true,
+			afterUninstall: strings.ReplaceAll(newConf, "ipa1.new.example.test", "ipa1.ipa.pilot.internal"),
+			newServer:      "ipa1.ipa.pilot.internal",
 			want: []string{
 				`ipa-rmkeytab -k /etc/krb5\.keytab -r IPA\.PILOT\.INTERNAL`,
 				`ipa-client-install --uninstall -U`,
@@ -159,6 +178,9 @@ func TestRegression_RealmReplacementRescueReenrollsTheOldRealm(t *testing.T) {
 			vars := map[string]any{
 				"freeipa_realm_replacement_old_realm":      "IPA.PILOT.INTERNAL",
 				"freeipa_realm_replacement_backup_archive": archive,
+			}
+			if tc.newServer != "" {
+				vars["freeipa_realm_replacement_new_server_fqdn"] = tc.newServer
 			}
 			env := []string{
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
