@@ -142,17 +142,6 @@
 
     - name: "Realm replacement — destructive switch with automatic local restore"
       block:
-        - name: "Realm replacement — pin new server FQDN before enrollment"
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\s|$)'
-            line: >-
-              {{ freeipa_realm_replacement_new_server_ip }}
-              {{ freeipa_realm_replacement_new_server_fqdn }}
-              {{ freeipa_realm_replacement_new_server_fqdn.split('.')[0] }}
-            state: present
-          tags: [C3]
-
         - name: "Realm replacement — preflight new server HTTPS reachability"
           ansible.builtin.wait_for:
             host: "{{ freeipa_realm_replacement_new_server_ip }}"
@@ -259,6 +248,24 @@
             regexp: '(?i)\s{{ item | regex_escape }}(\s|$)'
             state: absent
           loop: "{{ freeipa_realm_replacement_old_servers }}"
+          tags: [C3]
+
+        # After the old pins are gone. When the new server keeps the old
+        # server's FQDN, that name's line is inside the pool block removed
+        # above: a pin written before the removal went with the block, and the
+        # enrollment had to resolve the name through DNS, which may still
+        # point at the old server (review of #53, 2026-10-13). Pinning here
+        # also leaves the uninstall talking to the old server. Any case: the
+        # resolver matches names case-insensitively.
+        - name: "Realm replacement — pin new server FQDN before enrollment"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '(?i)\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\s|$)'
+            line: >-
+              {{ freeipa_realm_replacement_new_server_ip }}
+              {{ freeipa_realm_replacement_new_server_fqdn }}
+              {{ freeipa_realm_replacement_new_server_fqdn.split('.')[0] }}
+            state: present
           tags: [C3]
 
         - name: "Realm replacement — enroll client in the new realm"

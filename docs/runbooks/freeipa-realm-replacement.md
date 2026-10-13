@@ -47,11 +47,13 @@ wave 是三個獨立變更，不得合併成一次不可觀察的操作。
 
 ## 2. 執行模型
 
-playbook 會依序：確認 client 仍在宣告的 old realm → 建立 root-only archive → pin 新 server
-→ 確認新 server 的 443 可達 → 記錄舊 enrollment 的 domain、host 與 server（缺任何一項就停止）
-→ 用 `ipa-rmkeytab` 從 keytab 移除舊 realm 的 key（archive 仍保留）→
-`ipa-client-install --uninstall` → 移除舊 realm 的 server pin → 以新座標重新 enroll →
-等待 SSSD 解析新 realm 帳號 → 寫入不含密碼的 completion marker（含 `old_host_still_enabled`）。
+playbook 會依序：確認 client 仍在宣告的 old realm → 建立 root-only archive → 確認新 server
+的 443 可達 → 記錄舊 enrollment 的 domain、host 與 server（缺任何一項就停止）→ 用 `ipa-rmkeytab`
+從 keytab 移除舊 realm 的 key（archive 仍保留）→ `ipa-client-install --uninstall`（仍連舊 server）
+→ 移除 `/etc/hosts` 裡舊 realm 的 server pin → pin 新 server → 以新座標重新 enroll → 等待 SSSD
+解析新 realm 帳號 → 寫入不含密碼的 completion marker（含 `old_host_still_enabled`）。新 server 沿用
+舊 server 的 FQDN 時，該 FQDN 原本在 `PILOT FREEIPA SERVER POOL` block 裡；新 pin 必須在 block
+移除之後才寫入，否則會跟著 block 一起被刪掉。
 
 uninstall 會用 keytab 裡的 host key 對舊 server 執行 `ipa-join --unenroll`（`host_disable`）。
 先移除舊 realm 的 key，這一步就無法認證：uninstall 記下
