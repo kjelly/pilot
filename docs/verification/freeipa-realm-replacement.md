@@ -45,7 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 雙平台通過，仍有已知缺口）。2026-10-12，candidate `9a189be`（enroll 前移除舊 realm 留在 `/etc/hosts` 的 server pin）：Ubuntu 24.04 與 AlmaLinux 9 client 完整 migration，C1–C6 各 **6/6 PASS**；對照組 `dcd6725` 的 Ubuntu client 仍在 C5 失敗。Negative path（錯誤的 admin 密碼）：rescue 還原了舊 realm 的本機檔案與 pin，但 uninstall 已在舊 server 上 `host_disable`，還原後舊 realm 仍無法登入（對照組相同）。尚未修正：rescue 訊息對此的描述有誤、`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-9a189be.md`](../evidence/freeipa-realm-replacement/2026-10-12-9a189be.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 通過，仍有已知缺口）。2026-10-13，candidate `dd69a2d`（新 server 的 pin 改在移除舊 pin 之後寫入；uninstall 之後移除 SSSD 為舊 domain 留下的 Kerberos realm mapping）：Ubuntu 24.04 client，新 server 沿用舊 server 的 FQDN 與使用自己的 FQDN 兩種情境，C1–C6 各 **6/6 PASS**；對照組 `aa74524` 在沿用 FQDN 的情境連不到新 server。AlmaLinux 9 client 最近一次通過是 `9a189be`（[evidence](../evidence/freeipa-realm-replacement/2026-10-12-9a189be.md)）。Negative path（錯誤的 admin 密碼）：rescue 還原了舊 realm 的本機檔案與 pin，但 uninstall 已在舊 server 上 `host_disable`，還原後舊 realm 仍無法登入。尚未修正：rescue 訊息對此的描述有誤、`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-13-dd69a2d.md`](../evidence/freeipa-realm-replacement/2026-10-13-dd69a2d.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則
