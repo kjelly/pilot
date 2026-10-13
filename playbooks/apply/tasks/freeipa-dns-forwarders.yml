@@ -1,0 +1,25 @@
+---
+# Shared task: the forwarder list a FreeIPA DNS server is installed with
+# (one --forwarder per item, or --no-forwarders when empty) and that
+# freeipa-server-apply.yml sets as the global list (ipa dnsconfig-mod).
+# Included by freeipa-server-apply.yml and freeipa-server-replica-apply.yml
+# so one freeipa_dns_forwarders value means the same forwarders on both
+# (issue #68): before, the replica mapped over the raw value, and the string
+# form group_vars/freeipa.example.yml shows (`freeipa_dns_forwarders:
+# 8.8.8.8`) became one --forwarder per character.
+#
+# Accepted forms: a YAML list; a string starting with "[" (parsed as YAML,
+# e.g. "[8.8.4.4, 1.0.0.1]"); any other string, split on whitespace
+# ("8.8.8.8" or "8.8.8.8 1.1.1.1"); an empty or null value (no forwarders).
+#
+# Input:  freeipa_dns_forwarders_input
+# Output: ipa_dns_forwarders_normalized (list)
+- name: "FreeIPA DNS — normalize forwarders to a list"
+  ansible.builtin.set_fact:
+    ipa_dns_forwarders_normalized: >-
+      {{ [] if freeipa_dns_forwarders_input is none
+         else ((freeipa_dns_forwarders_input | from_yaml)
+               if (freeipa_dns_forwarders_input is string and (freeipa_dns_forwarders_input | trim).startswith('['))
+               else (freeipa_dns_forwarders_input.split()
+                     if freeipa_dns_forwarders_input is string
+                     else freeipa_dns_forwarders_input)) }}

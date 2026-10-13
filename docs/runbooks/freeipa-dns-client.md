@@ -67,8 +67,8 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 
 ## 1. 邊界與前置
 
-- 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa-server-replica`
-  且 `freeipa_setup_dns: true`）已完成 `freeipa-server-apply.yml` 並健康。
+- 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa_setup_dns` 不是
+  `false` 的 `freeipa-server-replica`）已完成安裝並健康。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，

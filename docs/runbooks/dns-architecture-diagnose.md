@@ -111,7 +111,7 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 欄位 | 內容 |
 |---|---|
 | `status` | `complete`、`partial`（有看不到的 live 事實或比對）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報） |
-| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_replica_dns_unused`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven` |
+| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven` |
 | `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
 | `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
@@ -131,15 +131,10 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 - **各 server 的 forwarders**：每台 DNS server 安裝時的 `--forwarder` 會留成那台
   server 自己的設定（`ipa dnsserver-*`），之後改 `freeipa_dns_forwarders` 只會更新
   全域清單。兩者不一致時，`differences` 會列出那台 server 的項目。
-- **replica 的 DNS 預設不一致**（現有 playbook 的行為，這個工具只回報、不修改）：
-  `freeipa-server-replica-apply.yml` 在 `freeipa_setup_dns` 未設定時預設安裝 DNS，
-  但 server pool 與 resolver task 只有在明確設成 true 時才把 replica 當成 DNS
-  provider。這種 replica 跑著 named，卻沒有 tier stub 或 client 會問它；finding
-  `freeipa_replica_dns_unused`。
-- **replica 的 forwarders 寫成字串**：`freeipa_dns_forwarders: 8.8.8.8`（範例檔的
-  寫法）在 primary 會被拆成清單，但 replica playbook 會對字串的每個字元產生一個
-  `--forwarder`（ansible-core 2.19.2 實測），finding `freeipa_forwarders_invalid`。
-  replica 一律用清單。
+- replica 是否算 DNS 提供者、replica 的 forwarders 怎麼解讀，跟安裝 playbook 一致：
+  `freeipa_setup_dns` 預設 `true`（issue #67），`freeipa_dns_forwarders` 用與 primary
+  相同的 `tasks/freeipa-dns-forwarders.yml` 正規化（issue #68）。`freeipa_dns_forwarders`
+  不是清單也不是字串時，finding `freeipa_forwarders_invalid`。
 - probe 不用 become：`unbound-control` 需要讀 unbound 的 control key，`ansible_user`
   不是 root 時 tier 的 forward/stub zone 會是 `unknown`。
 - 有上限：最多 probe 5 台 FreeIPA DNS provider、5 台 tier 主機；resolver 清單最多
@@ -151,3 +146,4 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 日期 | 變更 | 變更者 |
 |---|---|---|
 | 2026-10-13 | 初版（issue #62）；§0.5 填入 candidate `f63d490` 的實跑結果 | pilot |
+| 2026-10-13 | replica 的 DNS 預設與 forwarders 改成跟安裝 playbook 一致（issue #67、#68），移除 `freeipa_replica_dns_unused` | pilot |

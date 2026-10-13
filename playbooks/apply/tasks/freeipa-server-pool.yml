@@ -86,6 +86,15 @@
   when: (groups['freeipa-server-replica'] | default([]) | length) > 1
   tags: [always]
 
+# dns_provider follows the replica install default: freeipa-server-replica-apply.yml
+# installs FreeIPA DNS unless freeipa_setup_dns is false (freeipa-client-ha-spec §10,
+# 2026-09-17), so a replica that leaves it unset runs named and is a DNS provider.
+# Until issue #67 this said default(false) here and in
+# tasks/freeipa-dns-client-resolver.yml, so such a replica ran named but no dns tier
+# stub or client resolver ever sent it a query.
+# internal/diagnose/dns_architecture_playbook_test.go runs this file, the resolver
+# task and the replica playbook's ipa_setup_dns on the same inventory and fails if
+# they disagree.
 - name: "FreeIPA server pool — build replica pool members"
   ansible.builtin.set_fact:
     freeipa_server_pool_replicas: >-
@@ -98,7 +107,7 @@
                    else ('ipa2.' ~ freeipa_domain)),
           'ip': hostvars[item].ansible_host | default(''),
           'kind': 'replica',
-          'dns_provider': (hostvars[item].freeipa_setup_dns | default(false) | bool)
+          'dns_provider': (hostvars[item].freeipa_setup_dns | default(true) | bool)
         }]
       }}
   loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
