@@ -225,6 +225,12 @@
       no_log: true
       tags: [always]
 
+    # expiry is a YYYY-MM-DD date, valid through that date in UTC by the
+    # controller's clock. It used to be compared with ansible_date_time.date:
+    # the target's local date, from a fact cache up to an hour old. A bare
+    # YAML date (`expiry: 2026-12-31`) loads as a date, so it is turned into
+    # a string first; the format check stops an unpadded date such as
+    # 2026-9-30 from comparing as later than 2026-10-13.
     - name: "Gate: prod stage rejects insecure SNMP auth profiles unless an explicit reviewed exception exists"
       ansible.builtin.assert:
         that:
@@ -232,13 +238,18 @@
             or
             ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
              and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('owner', '') | length > 0)
-             and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '0000-00-00') >= ansible_date_time.date))
+             and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
+                  is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
+             and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
+                  >= now(utc=true, fmt='%Y-%m-%d')))
         fail_msg: >-
           authProfile "{{ item.key }}" is version {{ item.value.version }}
           / {{ item.value.securityLevel }}, which prod rejects unless
           snmp_insecure_auth_profile_exceptions["{{ item.key }}"] has a
           non-expired reason/owner/expiry (spec §13.2). This is not a
           permanent global allow flag — set it per profile, with an expiry.
+          expiry is a YYYY-MM-DD date, valid through that date in UTC
+          (today, UTC: {{ now(utc=true, fmt='%Y-%m-%d') }}).
       loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
       when: stage == 'prod'
