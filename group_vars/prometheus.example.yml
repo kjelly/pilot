@@ -124,8 +124,11 @@ thanos_s3_target_host: ""
 # dcgm_exporter_basic_auth_user: prometheus
 # dcgm_exporter_basic_auth_password: ""
 
-# 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設:
-# prometheus_retention_time: "6h"
+# 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設。
+# 長期資料存在 S3(保留期限見 thanos-query.example.yml 的
+# thanos_compact_retention_*),本機保留時間只是 Thanos Sidecar 的上傳緩衝:
+# S3 中斷超過這個時間,中斷期間的資料就會遺失。
+# prometheus_retention_time: "24h"
 # prometheus_scrape_interval: "15s"
 
 # 中央 Alertmanager 的 IP 或 FQDN(對應 docs/verification/alertmanager.md

@@ -197,7 +197,7 @@ func stubDeploymentSkipPreflight(t *testing.T) func() {
 func writeExitFixture(t *testing.T, exitCode int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ansible-playbook")
-	script := []byte("#!/bin/sh\nexit " + strconv.Itoa(exitCode) + "\n")
+	script := []byte("#!/bin/sh\n" + fakePlayRecapScript + "exit " + strconv.Itoa(exitCode) + "\n")
 	if err := os.WriteFile(path, script, 0o755); err != nil {
 		t.Fatalf("write ansible fixture: %v", err)
 	}

@@ -285,6 +285,9 @@ type Dependency struct {
 	Relation  string   `yaml:"relation"`
 	Reason    string   `yaml:"reason"`
 	Endpoints []string `yaml:"endpoints"`
+	// Explicitly include this managed provider in the consumer's approved
+	// apply plan. Ordinary endpoint bindings retain their existing behavior.
+	ApplyBeforeConsumer bool `yaml:"applyBeforeConsumer"`
 }
 
 // Binding maps a provider endpoint to one component input.
@@ -857,6 +860,9 @@ func validateDependenciesAndBindings(dependencies []Dependency, bindings []Bindi
 	for _, dependency := range dependencies {
 		if dependency.Component == "" {
 			return fmt.Errorf("dependency component is required")
+		}
+		if dependency.ApplyBeforeConsumer && (!dependency.Required || dependency.Relation != "providerEndpoint") {
+			return fmt.Errorf("dependency %q applyBeforeConsumer requires a required providerEndpoint relation", dependency.Component)
 		}
 		if _, exists := knownDependencies[dependency.Component]; exists {
 			return fmt.Errorf("duplicate dependency %q", dependency.Component)
