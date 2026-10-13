@@ -22,6 +22,7 @@ import (
 
 var realmOldPinTasks = []string{
 	"Realm replacement — read the old realm's client configuration",
+	"Realm replacement — record the old enrollment",
 	"Realm replacement — list the old realm's servers",
 	"Realm replacement — remove the old realm's server pool block from /etc/hosts",
 	"Realm replacement — remove other /etc/hosts pins of the old realm's servers",
@@ -43,7 +44,7 @@ func hostsLookup(hosts, name string) string {
 	return ""
 }
 
-// TestRegression_RealmReplacementRemovesOldServerPins runs the five tasks on
+// TestRegression_RealmReplacementRemovesOldServerPins runs the six tasks on
 // localhost against a temporary default.conf, sssd.conf and hosts.
 func TestRegression_RealmReplacementRemovesOldServerPins(t *testing.T) {
 	const defaultConf = "[global]\nbasedn = dc=ipa,dc=pilot,dc=internal\nrealm = IPA.PILOT.INTERNAL\ndomain = ipa.pilot.internal\nserver = ipa1.ipa.pilot.internal\n"
@@ -163,12 +164,12 @@ func TestRegression_RealmReplacementRemovesOldPinsBetweenUninstallAndEnroll(t *t
 		}
 		return i
 	}
-	read, list := at(realmOldPinTasks[0]), at(realmOldPinTasks[1])
-	pool, pins, newPin := at(realmOldPinTasks[2]), at(realmOldPinTasks[3]), at(realmOldPinTasks[4])
+	read, record, list := at(realmOldPinTasks[0]), at(realmOldPinTasks[1]), at(realmOldPinTasks[2])
+	pool, pins, newPin := at(realmOldPinTasks[3]), at(realmOldPinTasks[4]), at(realmOldPinTasks[5])
 	uninstall := at("Realm replacement — remove old client enrollment")
 	enroll := at("Realm replacement — enroll client in the new realm")
-	if read >= list || list >= uninstall || uninstall >= pool || pool >= pins || pins >= newPin || newPin >= enroll {
-		t.Errorf("order read=%d list=%d uninstall=%d pool=%d pins=%d new pin=%d enroll=%d; want read, list, uninstall, pool, pins, new pin, enroll",
-			read, list, uninstall, pool, pins, newPin, enroll)
+	if read >= record || record >= list || list >= uninstall || uninstall >= pool || pool >= pins || pins >= newPin || newPin >= enroll {
+		t.Errorf("order read=%d record=%d list=%d uninstall=%d pool=%d pins=%d new pin=%d enroll=%d; want read, record, list, uninstall, pool, pins, new pin, enroll",
+			read, record, list, uninstall, pool, pins, newPin, enroll)
 	}
 }
