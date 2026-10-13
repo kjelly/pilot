@@ -349,9 +349,12 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 	// actually changing, never run unconditionally on every apply. The
 	// default keeps `--tags C3` from failing when the C9 render did not run
 	// (TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet).
-	restartIdx := strings.Index(applyRaw, `restart: "{{ (dcgm_exporter_webconfig_result | default({})) is changed }}"`)
+	// container_mount_drift_stale restarts it when the running container
+	// still reads an older web-config.yml than the host has
+	// (TestRegression_FileMountedContainersRestartOnStaleMounts).
+	restartIdx := strings.Index(applyRaw, "restart: >-\n              {{ (dcgm_exporter_webconfig_result | default({})) is changed\n                 or container_mount_drift_stale | default(false) | bool }}")
 	if restartIdx < 0 {
-		t.Errorf("dcgm-exporter-apply.yml container restart must be gated on (dcgm_exporter_webconfig_result | default({})) is changed, not run unconditionally")
+		t.Errorf("dcgm-exporter-apply.yml container restart must be gated on (dcgm_exporter_webconfig_result | default({})) is changed or a stale web-config.yml mount, not run unconditionally")
 	}
 
 	// DCGM's CacheManager needs these two privileges for active MIG instances,

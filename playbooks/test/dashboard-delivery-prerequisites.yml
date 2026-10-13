@@ -1,0 +1,7 @@
+---
+# Only prerequisites not auto-applied by dashboard's managed-provider edge.
+# Query and Grafana must be installed by the actual deploy/reconcile CLI.
+- name: Docker
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+- name: Bound object storage
+  ansible.builtin.import_playbook: ../apply/seaweedfs-s3-apply.yml

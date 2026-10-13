@@ -667,9 +667,15 @@ func TestConnectToHost_RecordedSessionPTY(t *testing.T) {
 	}
 	portalStdin = pts
 
+	// The poller reads pts.Fd(), which is not synchronized with Close: wait
+	// for it to return before the pty cleanup above closes pts, including
+	// when the test fails early.
 	var sawRaw atomic.Bool
-	stop := make(chan struct{})
+	stop, polled := make(chan struct{}), make(chan struct{})
+	stopPolling := sync.OnceFunc(func() { close(stop); <-polled })
+	t.Cleanup(stopPolling)
 	go func() {
+		defer close(polled)
 		for {
 			select {
 			case <-stop:
@@ -685,7 +691,7 @@ func TestConnectToHost_RecordedSessionPTY(t *testing.T) {
 	withPromptAutomation(t, &promptAutomation{}, func() {
 		_ = connectToHost(context.Background(), client, &fakePortalCredentialSession{cache: "FILE:/tmp/cc"}, "/etc/pilot/ssh_config", "gpu-a.example.com")
 	})
-	close(stop)
+	stopPolling()
 	if !sawRaw.Load() {
 		t.Fatal("the outer terminal was never in raw mode during the recorded session")
 	}

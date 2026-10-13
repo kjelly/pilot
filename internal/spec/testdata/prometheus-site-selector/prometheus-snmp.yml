@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 15s
+  external_labels:
+    site: "review-site"
+rule_files:
+- /etc/prometheus/alert-rules.yml
+- /etc/prometheus/snmp-alert-rules.yml
+
+scrape_configs:
+- job_name: prometheus
+  static_configs:
+    - targets: ["localhost:9090"]
+
+
+
+- file_sd_configs:
+  - files:
+    - /etc/prometheus/targets/snmp-core-switch.json
+  job_name: snmp-core-switch
+  metrics_path: /snmp
+  params:
+    auth:
+    - core-switch-v3
+    module:
+    - if_mib
+  relabel_configs:
+  - source_labels:
+    - __address__
+    target_label: __param_target
+  - source_labels:
+    - __param_target
+    target_label: instance
+  - replacement: pilot-snmp-exporter:9116
+    target_label: __address__
+  scrape_interval: 30s
+  scrape_timeout: 20s
+- job_name: snmp-exporter
+  static_configs:
+  - labels:
+      component: snmp-exporter
+      site: review-site
+    targets:
+    - pilot-snmp-exporter:9116

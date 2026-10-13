@@ -129,6 +129,8 @@ var outboundWebhookEffectMapping = map[string][]string{
 	"pilot-gateway-scope":       {"identity.hostgroups", "access.hbac"},
 	"internal-endpoint":         {"network.endpoints", "dns.records", "tls.certificates", "reverse_proxy.routes"},
 	"prometheus":                {"monitoring.scrape_targets"},
+	"thanos-query":              {"network.endpoints"},
+	"dashboard":                 {"network.endpoints"},
 }
 
 func TestRegression_OutboundWebhookKnownEffectRegistry(t *testing.T) {
@@ -152,6 +154,7 @@ func TestRegression_OutboundWebhookEffectMapping(t *testing.T) {
 		"freeipa-identity", "freeipa-dns", "freeipa-dns-client", "freeipa-ca-trust",
 		"freeipa-server-replica", "freeipa-realm-replacement", "pilot-gateway-scope",
 		"internal-endpoint", "prometheus",
+		"thanos-query", "dashboard",
 	}
 	if len(outboundWebhookEffectMapping) != len(wantComponents) {
 		t.Fatalf("effect mapping has %d components, want %d", len(outboundWebhookEffectMapping), len(wantComponents))

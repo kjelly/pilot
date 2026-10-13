@@ -275,6 +275,34 @@
       when: "'active' not in (ipa_ntp_check.stdout | default(''))"
       tags: [always]
 
+    # Installing the FreeIPA client packages can restart sshd (the package
+    # transaction did on a fresh AlmaLinux 9 host: systemd "Queuing
+    # reload/restart jobs for marked units" during `dnf install`,
+    # 2026-10-12), and ipa-client-install restarts it itself. With a broken
+    # file in sshd_config.d that restart fails and sshd stays down. So check
+    # before anything changes, while the enrollment is still to run (its own
+    # `creates:`); read-only, so --check shows it too.
+    - name: "FreeIPA client — sshd -t before installing packages and running ipa-client-install"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+        creates: "{{ ipa_config_marker }}"
+      register: ipa_enroll_sshd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the sshd configuration is valid before ipa-client-install"
+      ansible.builtin.assert:
+        that:
+          - (ipa_enroll_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to install packages or run ipa-client-install: either can restart sshd,
+          and sshd -t fails
+          ({{ ((ipa_enroll_sshd_check.stderr | default('')) or (ipa_enroll_sshd_check.stdout | default(''))) | trim }}).
+          Nothing was changed. Fix the sshd configuration, then run again.
+      tags: [always]
+
     # Enrollment + keytab probe, moved here (ahead of both the DNS plan
     # include below and the /etc/hosts pin) per docs/superpowers/specs/
     # 2026-09-02-freeipa-client-host-dns-ip-replacement-spec.md §6.2: the
@@ -849,31 +877,87 @@
     # effect. Without this, a FreeIPA account with no SSH key yet (the
     # common case for a brand-new user) can never log in with a password at
     # all, regardless of HBAC.
-    - name: "FreeIPA client — allow password/keyboard-interactive SSH (FreeIPA users may have no key yet)"
-      ansible.builtin.copy:
-        dest: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
-        content: |
-          # Managed by freeipa-client-apply.yml — do not edit by hand.
-          # Cloud-image defaults (50-cloud-init.conf / 60-cloudimg-settings.conf)
-          # and the base sshd_config both disable password/keyboard-interactive
-          # auth; FreeIPA accounts with no SSH key need it to log in at all.
-          PasswordAuthentication yes
-          KbdInteractiveAuthentication yes
-        owner: root
-        group: root
-        mode: "0644"
-      register: ipa_sshd_password_auth
+    # Write, `sshd -t`, reload as one block, like the gateway's ForceCommand
+    # drop-in: `validate` checks the file on its own, `sshd -t` checks it
+    # with everything else in sshd_config.d. If either fails, the rescue
+    # puts back what the run found and fails the run; sshd was not
+    # reloaded, so the next run retries. Before, the file was written with
+    # no check and sshd restarted: with another file in sshd_config.d
+    # broken, the restart failed and sshd stayed down, and the next run,
+    # finding the drop-in unchanged, did not even try again. A reload, not
+    # a restart: sshd rereads its configuration on SIGHUP, and a reload
+    # that fails leaves the running sshd as it was.
+    - name: "FreeIPA client — snapshot the password-auth drop-in this run may replace"
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+        get_checksum: false
+      register: ipa_sshd_password_auth_stat
       when: not ansible_check_mode
       tags: [freeipa-client, C8]
 
-    - name: "FreeIPA client — restart sshd after enabling password auth"
-      ansible.builtin.systemd:
-        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
-        state: restarted
+    - name: "FreeIPA client — read the password-auth drop-in this run may replace"
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+      register: ipa_sshd_password_auth_before
       when:
         - not ansible_check_mode
-        - ipa_sshd_password_auth is changed
+        - ipa_sshd_password_auth_stat.stat.exists
       tags: [freeipa-client, C8]
+
+    - name: "FreeIPA client — allow password/keyboard-interactive SSH, validated and reloaded"
+      when: not ansible_check_mode
+      tags: [freeipa-client, C8]
+      block:
+        - name: "FreeIPA client — allow password/keyboard-interactive SSH (FreeIPA users may have no key yet)"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+            content: |
+              # Managed by freeipa-client-apply.yml — do not edit by hand.
+              # Cloud-image defaults (50-cloud-init.conf / 60-cloudimg-settings.conf)
+              # and the base sshd_config both disable password/keyboard-interactive
+              # auth; FreeIPA accounts with no SSH key need it to log in at all.
+              PasswordAuthentication yes
+              KbdInteractiveAuthentication yes
+            owner: root
+            group: root
+            mode: "0644"
+            validate: /usr/sbin/sshd -t -f %s
+          register: ipa_sshd_password_auth
+
+        - name: "FreeIPA client — sshd -t with the password-auth drop-in"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          when: ipa_sshd_password_auth is changed
+          changed_when: false
+
+        - name: "FreeIPA client — reload sshd after enabling password auth"
+          ansible.builtin.systemd:
+            name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+            state: reloaded
+          when: ipa_sshd_password_auth is changed
+      rescue:
+        - name: "FreeIPA client — put back the password-auth drop-in this run replaced"
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+            content: "{{ ipa_sshd_password_auth_before.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0644"
+          when: ipa_sshd_password_auth_stat.stat.exists
+
+        - name: "FreeIPA client — remove the password-auth drop-in this run wrote"
+          ansible.builtin.file:
+            path: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+            state: absent
+          when: not ipa_sshd_password_auth_stat.stat.exists
+
+        - name: "FreeIPA client — the password-auth drop-in was not installed"
+          ansible.builtin.fail:
+            msg: >-
+              The password-auth sshd drop-in was not installed: "{{ ansible_failed_task.name }}" failed
+              ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+              /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf is back to what this run found
+              and sshd was not reloaded.
 
     # ipa-client-install's own ssh_config drop-in (04-ipa.conf) sets
     # PubkeyAuthentication + a known-hosts proxy, but never touches

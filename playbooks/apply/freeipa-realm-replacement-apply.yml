@@ -109,6 +109,31 @@
           reviewed recovery procedure instead of re-running destructive cleanup.
       tags: [always]
 
+    # ipa-client-install --uninstall and ipa-client-install both restart
+    # sshd. With a broken file in sshd_config.d the uninstall's restart
+    # fails, sshd stays down and the uninstall stops half done (seen
+    # 2026-10-12 on a freeipa-client decommission). Check before the
+    # snapshot and the switch; read-only, so --check previews it too.
+    - name: "Realm replacement — sshd -t before ipa-client-install restarts sshd"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      register: freeipa_realm_replacement_sshd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the sshd configuration is valid before replacing the realm"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_realm_replacement_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to replace the realm: ipa-client-install --uninstall and the new
+          enrollment restart sshd, and sshd -t fails
+          ({{ ((freeipa_realm_replacement_sshd_check.stderr | default('')) or (freeipa_realm_replacement_sshd_check.stdout | default(''))) | trim }}).
+          Nothing was changed. Fix the sshd configuration, then run again.
+      tags: [always]
+
   tasks:
     - name: "Realm replacement — create local state and backup directories"
       ansible.builtin.file:

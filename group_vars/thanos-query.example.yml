@@ -32,6 +32,15 @@ thanos_s3_target_host: ""
 # thanos_query_store_group: prometheus
 # thanos_query_sidecar_grpc_port: 10901
 
+# Compactor 依解析度分別保留,預設三種都是 90 天。Thanos 要求 raw > 40h、
+# 5m > 10d,否則 Compactor 拒絕啟動。不要把 raw 調得比 5m/1h 短:Compactor
+# 只把時間跨度至少 40 小時的 raw block 降採樣,只跑了幾小時的站台、停用或
+# 改 site label 的站台最後一段資料只有 raw,raw 到期就整段刪掉,沒有低解析度
+# 的副本(見 docs/verification/thanos-query.md §1.5):
+# thanos_compact_retention_raw: 90d
+# thanos_compact_retention_5m: 90d
+# thanos_compact_retention_1h: 90d
+
 # 沒有任何站台套用完成時(prometheus group 是空的)一樣可以套用本
 # playbook,只是 docs/verification/thanos-query.md 的 C9/C10 會 fail——
 # 這是「站台還沒接上」的正常狀態,不是 bug,等至少一站 apply 完再重新套用

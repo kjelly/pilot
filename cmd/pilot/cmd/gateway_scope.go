@@ -160,13 +160,16 @@ func buildGatewayScopeArgs(scope string, hosts []string, inventory, targetGroup,
 	if err != nil {
 		return nil, fmt.Errorf("encode gateway_scope_hosts: %w", err)
 	}
+	// The vault file comes first: Ansible gives the last -e precedence, and
+	// the scope, its host list and target_group are Pilot's validated
+	// decisions, which a key in the vault file must not replace.
 	args := []string{
 		gatewayScopeApplyPlaybook,
 		"-i", inventory,
+		"-e", "@" + vaultFile,
 		"-e", "target_group=" + targetGroup,
 		"-e", "gateway_scope=" + scope,
 		"-e", string(hostsJSON),
-		"-e", "@" + vaultFile,
 	}
 	if planOnly {
 		args = append(args, "-e", "gateway_scope_plan_only=true")
@@ -405,9 +408,11 @@ func buildGatewayScopeAutomemberArgs(scope string, hosts []string, action, inven
 	if action == gatewayScopeAutomemberDisable && len(hosts) != 0 {
 		return nil, fmt.Errorf("disable-auto must not be given hosts (it never touches hostgroup membership)")
 	}
+	// Vault file first, as in buildGatewayScopeArgs.
 	args := []string{
 		gatewayScopeApplyPlaybook,
 		"-i", inventory,
+		"-e", "@" + vaultFile,
 		"-e", "target_group=" + targetGroup,
 		"-e", "gateway_scope=" + scope,
 		"-e", "gateway_scope_automember_action=" + action,
@@ -423,7 +428,6 @@ func buildGatewayScopeAutomemberArgs(scope string, hosts []string, action, inven
 		}
 		args = append(args, "-e", string(hostsJSON))
 	}
-	args = append(args, "-e", "@"+vaultFile)
 	return args, nil
 }
 

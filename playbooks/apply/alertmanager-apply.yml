@@ -304,6 +304,18 @@
           register: alertmanager_teams_proxy_script_result
           when: alertmanager_receiver_mode_effective == 'teams'
 
+        # teams-proxy.py is read once at start; same single-file bind mount
+        # rule as alertmanager.yml below (AGENTS.md §4.5 item 13).
+        - name: "Check whether pilot-alertmanager-teams-proxy still sees its current relay script"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-alertmanager-teams-proxy
+          when: alertmanager_receiver_mode_effective == 'teams'
+
         - name: "Teams proxy: run pilot-alertmanager-teams-proxy container"
           tags: [C8, C9]
           community.docker.docker_container:
@@ -311,7 +323,9 @@
             image: "{{ alertmanager_teams_proxy_image }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ alertmanager_teams_proxy_script_result is changed }}"
+            restart: >-
+              {{ (alertmanager_teams_proxy_script_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             command: ["python3", "/opt/teams-proxy.py"]
             env:
               TEAMS_WEBHOOK_URL: "{{ alertmanager_teams_webhook_url | default('') }}"
@@ -343,6 +357,18 @@
           delay: 2
           when: alertmanager_receiver_mode_effective == 'teams'
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 13).
+        - name: "Check whether pilot-alertmanager still sees its current config files"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-alertmanager
+
         # Spec: docs/verification/alertmanager.md C1, C2, C3, C6, C7
         - name: "Alertmanager — run pilot-alertmanager container"
           tags: [C1, C2, C3, C6, C7]
@@ -351,7 +377,9 @@
             image: "prom/alertmanager:{{ alertmanager_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (alertmanager_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (alertmanager_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             user: "65534:65534"
             networks:
               - name: "{{ docker_network_name }}"

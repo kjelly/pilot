@@ -66,3 +66,4 @@
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-07-29 | DRAFT v0.1 | 初版：明確切分 server readiness、client re-enrollment、local rollback archive 與 evidence boundary | sre |
+| 2026-10-12 | DRAFT v0.2 | 仍是 DRAFT。pre_tasks 新增 gate：`ipa-client-install --uninstall` 與新 realm 的 enrollment 都會 restart sshd，`sshd -t` 失敗時在建立 archive 與任何變更之前就拒絕（之前 uninstall 的 restart 失敗會讓 sshd 停在 down、uninstall 做到一半，2026-10-12 在 freeipa-client decommission 實測）；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |

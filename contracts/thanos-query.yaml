@@ -1,6 +1,7 @@
 schemaVersion: 1
 id: thanos-query
 role: thanos-query
+effects: [network.endpoints]
 specs:
   - path: docs/verification/thanos-query.md
     rows: {all: true}
@@ -8,6 +9,7 @@ playbooks:
   apply: playbooks/apply/thanos-query-apply.yml
 regressionTests:
   - internal/spec/thanos_query_regression_test.go
+  - cmd/pilot/cmd/deploy_managed_provider_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: docker, required: true, relation: sameHosts}
@@ -21,6 +23,7 @@ hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
+  - {name: thanos_query_alias, type: string, required: false, secret: false}
 endpoints:
   # 10902 is the Thanos Sidecar's container-internal http-address (collides
   # with every site's own Sidecar on the shared host network); the real

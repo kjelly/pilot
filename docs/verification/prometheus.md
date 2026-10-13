@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.4
+> 版本：v1.7
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -8,6 +8,21 @@
 > 完整驗證（fresh apply、認證後成功 scrape、真實 GPU 指標、冪等重跑），
 > 證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`；過程中發現並修好
 > 兩個真實 bug（見該檔 §5）。
+> 2026-10-12 C20（container 讀到的 `prometheus.yml` 與主機檔案相同）已在
+> 真實 vm-target 上驗證：先用修正前的程式重現「設定變更後 container 沒重啟、
+> 仍讀舊 inode、`/-/reload` 無效」，再確認修正後重跑 apply 會重啟並載入新設定、
+> 冪等重跑 `changed=0`，證據見 `docs/evidence/prometheus/2026-10-12-c12c4a8.md`；
+> 檢查改成 `no_log` 後在 `1c24223` 重跑（fresh host、舊 inode 自癒、設定變更
+> 重啟，`-vvv` 不再印出掛載檔的 hash），證據見
+> `docs/evidence/prometheus/2026-10-12-1c24223.md`。
+> 2026-10-12 C21/C22（Sidecar 能寫 TSDB 目錄、這一站的 block 真的進了 bucket）
+> 已在真實 vm-target 上驗證：先用修正前的程式重現 `/prometheus:ro` 讓每次上傳
+> 都失敗，再確認全新安裝與升級兩條路徑都上傳成功、冪等重跑 `changed=0`，證據見
+> `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
+> 2026-10-12 PR #39 review 後的 C8/C22（只讀 `global.external_labels.site`）
+> 在有 `kind: snmp` profile 的真實 vm-target 上重驗：同一個狀態下舊 C22 被
+> Thanos 以 `unquote label value` 拒絕、新 C22 PASS，證據見
+> `docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`。
 
 > 跟 `thanos-query.md` 是一對「站台 / 中央」關係——本檔是**每個機房/站台**
 > 各自跑一份的角色（`prometheus` group，類比 `wazuh-fim`），`thanos-query.md`
@@ -33,7 +48,7 @@
 
 | 變數名稱 | 說明/用途 | 是否必填 | 預設值 |
 |---------|----------|---------|--------|
-| `prometheus_site_label` | 這個站台的識別名稱，寫進 Prometheus `external_labels.site`；`thanos-query.md` 的全局查詢靠這個欄位分辨資料來源站台 | 是 | 無（空字串會被 gate 擋下） |
+| `prometheus_site_label` | 這個站台的識別名稱，以 JSON 字串（雙引號）寫進 Prometheus `global.external_labels.site`；`thanos-query.md` 的全局查詢靠這個欄位分辨資料來源站台 | 是 | 無（空字串會被 gate 擋下） |
 | `thanos_s3_target_host` | 備份目的地 SeaweedFS S3 gateway（或其他 S3 endpoint）的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `thanos_s3_alias` 別名 | 否（見下方 escape hatch） | 空字串 |
 | `thanos_s3_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名，Thanos objstore 設定一律指向這個別名 | 否 | `thanos-s3-backend` |
 | `thanos_s3_port` | S3 gateway port | 否 | `8333` |
@@ -42,7 +57,7 @@
 | `thanos_aws_access_key_id` | S3 access key；一律用 vault 帶入，不進版控（拋棄式沙盒測試除外） | 是 | 無 |
 | `thanos_aws_secret_access_key` | S3 secret key | 是 | 無 |
 | `prometheus_scrape_interval` | 全域 scrape 間隔 | 否 | `15s` |
-| `prometheus_retention_time` | 本機 TSDB 保留時間（上傳到 S3 之後，本機這份可以被裁掉；保留時間只是給 Thanos Sidecar 上傳留緩衝） | 否 | `6h` |
+| `prometheus_retention_time` | 本機 TSDB 保留時間。長期保存在 S3（保留期限由 `thanos-query.md` 的 Compactor 決定），本機這份只是 Thanos Sidecar 的上傳緩衝：S3 中斷超過這個時間，中斷期間的資料就會遺失 | 否 | `24h` |
 | `prometheus_scrape_configs` | 完整覆寫 `scrape_configs:` 區塊內容（多行字串，可依主機覆寫成不同的 scrape job） | 否 | 只 scrape 自己（`localhost:9090`） |
 | `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
 | `alertmanager_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；`prometheus.yml` 的 `alerting.alertmanagers` 指向這個固定別名 | 否 | `alertmanager-backend` |
@@ -80,6 +95,19 @@
 > 跟 C12 仍然 pass），但告警推不出去——C11 會如預期 fail，記在 §5
 > 例外。這跟「先上 Prometheus、後上 Alertmanager」逐步部署的順序相容，
 > 不會因為「Alertmanager 還沒準備好」就把站台 Prometheus 套用 block 起來。
+>
+> **Thanos Sidecar 以 Prometheus 的 uid（65534）執行、`/prometheus` 可寫**：
+> Sidecar 上傳 block 前，會先在 TSDB 目錄裡建立 `thanos/upload/<ulid>`
+> 暫存目錄，上傳成功後寫入 `thanos.shipper.json`，所以它需要對
+> `/prometheus` 的**寫入**權限，不是唯讀。資料目錄屬於 Prometheus 的
+> `65534:65534`、權限 `0755`，而 `thanosio/thanos` image 預設以 uid 1001
+> 執行，所以 Sidecar 必須用 `user: 65534:65534` 跑。只拿掉 `:ro` 不夠：
+> 2026-10-12 在本機用同一組 image 實測，`:ro` 時上傳失敗並記錄
+> `create upload dir: mkdir /prometheus/thanos: read-only file system`，
+> 只拿掉 `:ro` 時改成 Permission denied，兩者都是 `thanos_shipper_uploads_total 0`；
+> 加上 `user: 65534:65534` 後才真的上傳。上傳失敗時
+> `thanos_shipper_upload_failures_total` 仍然是 0（那個錯誤走的是另一條路徑），
+> 所以 C21/C22 直接檢查寫入權限與 bucket 裡的 block，不看這個 counter。
 >
 > **`node_exporter_targets` 自動偵測、`node_exporter_basic_auth_*` 有條件必填**：
 > 跟 `alertmanager_target_host` 同一種「留空退化、不 block 套用」精神，但
@@ -123,7 +151,7 @@
 | C5  | http          | Thanos Sidecar `/-/healthy`（10902）回 200                   | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/healthy |
 | C6  | http          | Thanos Sidecar `/-/ready`（10902）回 200                     | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:10902/-/ready |
 | C7  | metrics       | Prometheus 自我 scrape 成功（`up{job="prometheus"}==1`）       | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up' | grep -o '"value":\[[0-9.]*,"1"\]' |
-| C8  | config        | `prometheus.yml` 已設定 `external_labels.site`               | 0 | sh -c 'grep -qE "^\s*site:" /etc/pilot/prometheus/prometheus.yml' |
+| C8  | config        | `prometheus.yml` 的 `global.external_labels.site` 是非空、加了雙引號的字串（不是 scrape job 裡的 `site` label） | 0 | sh -c 'site=$(awk "/^global:/{g=1;next} /^[^[:space:]]/{g=0} g&&/^  external_labels:/{e=1;next} g&&/^  [^[:space:]]/{e=0} g&&e&&/^    site:/{sub(/^    site:[[:space:]]*/,\"\");print;exit}" /etc/pilot/prometheus/prometheus.yml); case $site in \"?*\") ;; *) exit 1;; esac' |
 | C9  | object-storage | Thanos Sidecar 可讀取 object storage bucket（`thanos tools bucket ls`） | 0 | sh -c 'docker exec pilot-thanos-sidecar thanos tools bucket ls --objstore.config-file=/etc/thanos/objstore.yml >/dev/null 2>&1' |
 | C10 | config        | `alert-rules.yml` 存在且語法有效（`promtool check rules`）       | 0 | sh -c 'docker exec pilot-prometheus promtool check rules /etc/prometheus/alert-rules.yml >/dev/null 2>&1' |
 | C11 | config        | `prometheus.yml` 含 `alerting.alertmanagers` 區塊（僅在 `alertmanager_target_host` 有設時 render） | 0 | sh -c 'grep -qE "^[[:space:]]*alerting:" /etc/pilot/prometheus/prometheus.yml' |
@@ -135,6 +163,9 @@
 | C17 | metrics       | 至少一個 dcgm-exporter target 被成功（認證通過）scrape（`up{job="dcgm"}==1`；僅在有 dcgm-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22dcgm%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
 | C18 | config        | `prometheus.yml` 的 dcgm-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `dcgm_exporter_targets` override 時沒有此 label，見 §5） | 0 | awk '/^- /{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; sec=$0 ORS; next} {sec=sec $0 ORS} END{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; print (f?0:1)}' /etc/pilot/prometheus/prometheus.yml |
 | C19 | metrics       | 收到真正的 GPU 硬體指標，不只是 exporter 自身存活（`DCGM_FI_DEV_GPU_UTIL{job="dcgm"}` 至少一筆 sample；僅在有 dcgm-exporter target 時適用） | present | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL%7Bjob%3D%22dcgm%22%7D' | grep -o '"metric"' |
+| C20 | config        | 執行中的 `pilot-prometheus` 讀到的 `prometheus.yml` 與主機上的檔案內容相同（不是 bind mount 留下的舊檔） | 0 | sh -c 'h=$(sha256sum < /etc/pilot/prometheus/prometheus.yml) && c=$(docker exec pilot-prometheus cat /etc/prometheus/prometheus.yml | sha256sum) && [ "$h" = "$c" ]' |
+| C21 | object-storage | Thanos Sidecar 以自己的執行身分能在 `/prometheus` 建立目錄（上傳前要建 `thanos/upload/<ulid>`） | 0 | docker exec pilot-thanos-sidecar sh -c 'd=/prometheus/.pilot-write-probe.$$ && mkdir "$d" && rmdir "$d"' |
+| C22 | object-storage | object storage 裡有這一站（`global.external_labels.site`）6 小時內的 block（Sidecar 真的在上傳，不只是讀得到 bucket） | 0 | sh -c 'site=$(awk "/^global:/{g=1;next} /^[^[:space:]]/{g=0} g&&/^  external_labels:/{e=1;next} g&&/^  [^[:space:]]/{e=0} g&&e&&/^    site:/{sub(/^    site:[[:space:]]*/,\"\");print;exit}" /etc/pilot/prometheus/prometheus.yml); case $site in \"?*\") ;; *) exit 1;; esac; since=$(date -u -d "-6 hours" +%Y-%m-%dT%H:%M:%SZ); docker exec pilot-thanos-sidecar thanos tools bucket inspect --objstore.config-file=/etc/thanos/objstore.yml --output=tsv --selector="site=$site" 2>/dev/null | awk -F "\t" -v since="$since" "NR>1 && \$3 >= since {f=1} END {exit !f}"' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -190,26 +221,51 @@
 > 才會有非零 series，`dcgm-exporter` group 混編非 GPU 候選主機時，那些主機
 > 的 target 只會停在 `up=0`、抓不到任何 series，不影響本行判定（本行只要求
 > group 裡「至少一筆」）。
+> C20 驗證的是 container 實際讀到的設定，不是主機上的檔案：`prometheus.yml`
+> 是單檔 bind mount，`copy` 用 rename 換掉檔案後主機路徑指向新的 inode，
+> 沒有重啟的 container 仍然讀舊的那份，`/-/reload` 也只會重讀舊檔。C8/C11/
+> C13/C16 都只 grep 主機上的檔案，container 讀舊檔時它們照樣 PASS。
+> 2026-10-12 正式環境就是這個狀態：新的 dcgm-exporter target 已寫進主機的
+> `prometheus.yml`，container 仍在用幾週前的版本。本行在 container 不存在或
+> `docker exec` 失敗時也會 fail（空輸出的 hash 跟主機檔案對不上）。
+
+> C8 與 C22 只讀 `global:` → `external_labels:` → `site:` 這一行（`awk` 依縮排
+> 限定範圍），不是整份檔案裡的 `site:`：設了 `kind: snmp` profile 時，
+> snmp-exporter 的 scrape job 也有 `labels.site`，2026-10-12 PR #39 review 在
+> vm-target 上重現舊版 C22 把兩個值串成 `review-site\nreview-site`，
+> `thanos tools bucket inspect --selector` 解析失敗，C22 永遠 FAIL；舊版 C8 在
+> 沒有 external_labels 時也會被這一行騙成 PASS。playbook 以 `to_json` 渲染
+> site，這個雙引號字串就是 Thanos `--selector` 要的格式（Thanos 用 Go
+> `strconv.Unquote` 解析），C22 原樣傳入，不再自己加引號。
+> `internal/spec/prometheus_site_selector_behavior_test.go` 用 vm-target 上 SNMP
+> profile 渲染出的 `prometheus.yml` 實際跑這兩行。
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：19
-- Sanitized 摘要：`docs/evidence/prometheus/2026-09-21-79172c6.md`（真實 vm-target
-  跑過 dcgm-exporter auto-discovery 的 fresh apply/認證 scrape/GPU 指標/冪等
-  重跑；C9/C11/C13/C14/C15 因該次測試 topology 沒有 seaweedfs-s3/alertmanager/
-  host-monitoring 而預期 fail，C16–C19 全 PASS）
+- 預期 row 數：22
+- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
+  （2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級，tree 見該檔；真實
+  vm-target，站台設了 `kind: snmp` profile，有 seaweedfs-s3 與中央 thanos-query；
+  兩個 candidate 都 `pass=14 fail=8`，C8/C21/C22 PASS，C11/C13–C19 因該次
+  topology 沒有 Alertmanager/host-monitoring/dcgm-exporter 而預期 fail；同一狀態下
+  `c52884e` 的 C22 FAIL）。C21/C22 修正前的重現與升級路徑見
+  `docs/evidence/thanos-long-term-retention/2026-10-12-0c2a8e2.md`。
+  C20 的證據見 `docs/evidence/prometheus/2026-10-12-1c24223.md`（舊 inode 自癒、
+  設定變更與 `--tags C8` 重啟、`-vvv` 不印掛載檔 hash；修正前的重現見
+  `docs/evidence/prometheus/2026-10-12-c12c4a8.md` §2），C16–C19 的 GPU scrape
+  證據見 `docs/evidence/prometheus/2026-09-21-79172c6.md`
 
 ## 4. PASS / FAIL 規則
 
-- C1–C19 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
+- C1–C22 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路（C21/C22 證明 block 真的進了 object storage）、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
   - C5/C6 fail → Sidecar 連不到 Prometheus（`--prometheus.url` 錯）或連不到 object storage；`docker logs pilot-thanos-sidecar`
   - C7 fail → scrape 設定有誤或 target 打不到；檢查 `prometheus_scrape_configs`
-  - C8 fail → `prometheus_site_label` 沒有正確渲染進設定檔
+  - C8 fail → `prometheus_site_label` 沒有渲染進 `global.external_labels.site`，或不是加了雙引號的字串（舊版 playbook 渲染的設定檔，重跑 apply）
   - C9 fail → S3 憑證/bucket 有誤，或 bucket 尚未預先建立（見 §5）
   - C10 fail → `prometheus_alert_rules` 語法有誤；`docker exec pilot-prometheus cat /etc/prometheus/alert-rules.yml` 看內容
   - C11 fail → 預期 fail 見 §5（Alertmanager 尚未部署）；若非預期則檢查 `alertmanager_target_host` 是否帶入
@@ -226,12 +282,16 @@
     ——`docker logs pilot-prometheus | grep -i dcgm` 看 scrape 錯誤訊息
   - C18 fail → 預期 fail 見 §5（inventory 沒有 `dcgm-exporter` 主機，或本次套用帶了 `dcgm_exporter_targets` override）；若非預期，檢查 auto-discovery 迴圈是否真的走到（`groups['dcgm-exporter']` 非空且未 override）
   - C19 fail（但 C17 pass）→ 該 target 是真的容器活著但沒有真實 GPU 裝置傳進去；檢查 `dcgm-exporter.md` C6（GPU 裝置真的傳進容器）是否 pass
+  - C21 fail → Sidecar 不能寫 `/prometheus`：`docker inspect pilot-thanos-sidecar` 看 volume 是否還是 `:ro`、`User` 是否為 `65534:65534`；`docker logs pilot-thanos-sidecar | grep upload` 會看到 `mkdir /prometheus/thanos` 失敗
+  - C22 fail（C21 pass）→ 全新主機第一個 block 要等大約 3 小時才會產生（見 §5）；超過這個時間仍 fail，`docker logs pilot-thanos-sidecar | grep -i upload` 看上傳錯誤，並檢查 C9（S3 憑證/bucket）
+  - C20 fail → container 還在讀舊的 `prometheus.yml`（`stat -c %i` 主機檔案跟 `docker exec pilot-prometheus stat -c %i /etc/prometheus/prometheus.yml` 不同）；重跑 apply 會偵測到並重啟 container，`/-/reload` 無效
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C9 | SeaweedFS 不會自動生出不存在的 bucket，套用前需手動 `weed shell` 建好 `thanos_s3_bucket`（跟 `restic-backup.md` §5 Bug 5 同一個坑），否則本行 fail 且 sidecar log 會顯示 retry | SeaweedFS 目的地 | 無（預建 bucket 是常態操作） |
+| C22 | Prometheus 要等 head 涵蓋約 3 小時才會切出第一個 2h block，Sidecar 才有東西上傳；全新主機套用後大約 3 小時內本行預期 fail。沒有 S3 目的地（C9 fail）時本行也會 fail | 剛套用的全新主機、沒有 S3 的環境 | 套用後約 3 小時 |
 | C11 | `alertmanager_target_host` 未填或中央 Alertmanager 尚未套用完成時，本行預期 fail（apply playbook 不會 render `alerting.alertmanagers` 區塊） | Alertmanager 尚未部署的環境 | 直到 `alertmanager.md` PASS 為止 |
 | C13, C14 | inventory 沒有 `host-monitoring` group 主機、且未明確帶 `node_exporter_targets` 時，這兩行預期 fail（apply playbook 不會 render node-exporter scrape job） | 尚未部署 `host-monitoring` 的環境 | 直到至少一台 `host-monitoring.md` PASS 為止 |
 | C15 | 同上，或本次套用明確帶了 `node_exporter_targets` override（該情況下 C13/C14 仍可能 PASS，但 C15 預期 fail——explicit override 沒有 inventory hostname 映射，見 §9.3） | 尚未部署 `host-monitoring` 的環境，或使用 `node_exporter_targets` override 的環境 | 直到 auto-discovery 情境下至少一台 `host-monitoring.md` PASS 為止 |
@@ -248,3 +308,6 @@
 | 2026-08-10 | v1.2 | 新增 C13–C14：自動從 inventory 的 `host-monitoring` group 展開 node-exporter scrape target（`node_exporter_targets`，escape hatch 跟 `alertmanager_target_host` 同一種模式），並對認證後成功 scrape 做端到端驗證（node_exporter 強制 Basic Auth，見 `host-monitoring.md` v1.1） | sre |
 | 2026-08-28 | v1.3 | 新增 C15：Detection Engine Stage A-0（見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md` §9）需要 canonical `pilot_host` producer——auto-discovery 從 `host-monitoring` group 展開時，每個 host 改成各自一個 `static_configs` 項目並帶 `labels.pilot_host = inventory_hostname`；`node_exporter_targets` explicit override 行為不變（無 label） | sre |
 | 2026-09-21 | v1.4 | 新增 C16–C19：自動從 inventory 的 `dcgm-exporter` group 展開 GPU metrics scrape target（`dcgm_exporter_targets`，跟 `node_exporter_targets`/C13–C15 同一套 auto-discovery/escape-hatch/`pilot_host` label 模式，固定 job 名稱 `dcgm`、port 9400），並對認證後成功 scrape 到真實 GPU 硬體指標（`DCGM_FI_DEV_GPU_UTIL`，不只是 exporter 存活）做端到端驗證；補上 `dcgm-exporter.md` §5 原先列為已知留白的 Prometheus 整合。對 disposable vm-target（假 dcgm-exporter fixture）實跑 apply + `pilot verify` 全通過（C9/C11/C13/C14 因該次測試環境沒有 seaweedfs-s3/alertmanager/host-monitoring 而預期 fail，C1–C8/C10/C12/C15–C19 全 PASS）；同時修正 C15 的 Command——舊版對整份 `prometheus.yml` 做無範圍 `grep pilot_host:`，實測發現 dcgm job 有 target、node job 沒有 target時會被 dcgm 那行 label 誤判成 PASS，已改成 `awk` 範圍限定到各自 `job_name:` 區塊，C18 新增時直接採用限定版寫法 | pilot |
+| 2026-10-12 | v1.5 | 新增 C20：執行中的 container 讀到的 `prometheus.yml` 必須與主機檔案相同。正式環境的 dcgm-exporter target 已寫進主機檔案卻一直沒被 scrape：apply playbook 用 `combine()` 合併兩個互斥的 prometheus.yml render 結果，有 Alertmanager 時被跳過的那個帶著 `changed: false` 蓋掉另一個的 `changed: true`，container 從未因設定變更重啟，單檔 bind mount 一直指向舊 inode。playbook 改成分別檢查兩個結果，並在 container task 前比對 container 實際看到的單檔 bind mount（`tasks/container-file-mount-drift.yml`），內容不同就重啟，已經卡住的部署重跑 apply 即可恢復 | pilot |
+| 2026-10-12 | v1.6 | 新增 C21/C22，`prometheus_retention_time` 預設由 `6h` 改為 `24h`。正式環境的 Thanos Sidecar 從來沒有上傳成功：`/prometheus` 以 `:ro` 掛載，上傳前建立 `thanos/upload` 目錄失敗，Store Gateway 載入 0 個 block，歷史資料只剩本機 6 小時。只拿掉 `:ro` 仍會因 uid 不同被拒（本機實測），所以 Sidecar 改以 `65534:65534` 執行並可寫入。C9 只檢查讀得到 bucket，抓不到這個問題；C21 檢查 Sidecar 的實際寫入權限，C22 檢查 bucket 裡有這一站 6 小時內的 block。本地緩衝改為 24 小時，S3 中斷不超過一天不會掉資料；長期保留期限見 `thanos-query.md` v1.3 | pilot |
+| 2026-10-12 | v1.7 | C8/C22 只讀 `global.external_labels.site`，`prometheus.yml` 的 site 改以 JSON 字串渲染。PR #39 review 在 vm-target 上發現：設了 `kind: snmp` profile 時 snmp-exporter job 的 `site` label 也被抓進 C22 的 selector，Thanos 拒絕解析，C22 永遠 FAIL；同一個寫法讓 C8 在沒有 external_labels 時仍然 PASS。新增 `prometheus_site_selector_behavior_test.go` 用 SNMP 渲染結果實際跑這兩行 | pilot |
