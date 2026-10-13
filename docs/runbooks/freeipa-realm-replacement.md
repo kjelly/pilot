@@ -13,23 +13,25 @@ wave 是三個獨立變更，不得合併成一次不可觀察的操作。
 
 ## 0.5 目前有效的事實快照
 
-**2026-07-29 disposable evidence snapshot（仍未通過）**：
+**2026-10-12 disposable evidence snapshot（部分通過）**，candidate `4f2087a`，詳見
+[`docs/evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md`](../evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md)：
 
-- targets：`realm-replace-old`（old server，`192.168.122.3`）、
-  `realm-replace-new`（new server，`192.168.122.2`）、`realm-replace-client`
- （client，`192.168.122.6`）。三者由 `pilot vm-target` 建立，非 production inventory。
-- realms：`OLD.EXAMPLE.TEST`／`old.example.test` →
-  `NEW.EXAMPLE.TEST`／`new.example.test`；server FQDN：
-  `ipa1.old.example.test` → `ipa1.new.example.test`。
-- old/new server `ipa` 服務均可啟動；client migration 已實際寫入 new
-  `/etc/ipa/default.conf` 且 host keytab `kinit -k` 成功。
-- acceptance 尚未 PASS：client 的 SSSD backend 仍為 Offline，`getent passwd
-  admin@new.example.test` rc=2；backend log 顯示 `Cannot get a TGT`／`Bad address`
-  與 LDAP connection failure。此結果保存在 vm-target transcript（例如
-  `/var/lib/libvirt/images/pilot/realm-replace-client/runs/20260729T065052Z-freeipa-client-apply.log`）及
-  `.verification/freeipa-realm-replacement-*`；因此不能把本輪當成成功 migration evidence。
-- alignment decision：A（為 evidence 建立三台 disposable targets）；vault 只使用
-  `ipa_admin_password`，不在文件或 transcript 摘要中記錄值。
+- targets：四台由 `pilot vm-target` 建立的 disposable VM（舊 realm server、新 realm server、
+  Ubuntu 24.04 client、AlmaLinux 9 client），非 production inventory。
+- realms：`IPA.PILOT.INTERNAL`／`ipa.pilot.internal` → `NEW.EXAMPLE.TEST`／`new.example.test`；
+  server FQDN：`ipa1.ipa.pilot.internal` → `ipa1.new.example.test`。
+- AlmaLinux 9 client：migration rc=0，`pilot verify` C1–C6 **6/6 PASS**；重跑被 completion marker
+  gate 擋下（設計如此）。
+- Ubuntu 24.04 client：**仍未通過**。C5 的 identity wait 失敗後 rescue 還原舊 realm。原因：
+  `freeipa-client-apply.yml` 寫入的舊 server pin（`<old-ip> ipa1.ipa.pilot.internal ipa1`）在
+  `ipa-client-install --uninstall` 之後仍留在 `/etc/hosts`，與新 pin 共用短名稱 `ipa1`，SSSD 把新
+  realm 的 AS_REQ 送到舊 KDC 而一直 Offline（舊 KDC 的 log 有這些請求；手動移除舊 pin 並重啟
+  SSSD 後立即 Online）。修正前，Ubuntu client 的 wave 需先手動移除舊 realm 的 server pin。
+- 2026-07-29 的三 VM 實跑在同一個 C5 失敗；當時的 SSSD `Cannot get a TGT`／`Bad address` 即為上述原因。
+- `--check --diff` 目前必定在「expose archive through a stable root-only link」失敗（check mode 不會建立
+  archive），rescue 訊息並不代表真的還原過。
+- alignment decision：A（為 evidence 建立 disposable targets）；vault 只使用
+  `ipa_admin_password`，不在文件或摘要中記錄值。
 
 ## 1. 變更前不可省略的條件
 

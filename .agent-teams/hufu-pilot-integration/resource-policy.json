@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "sample_interval_seconds": 15,
+  "probe_timeout_seconds": 5,
+  "stale_after_seconds": 30,
+  "consecutive_samples": 3,
+  "max_unknown_guest_samples": 8,
+  "host_min_available_mib": 512,
+  "guest_min_available_mib": 128,
+  "pressure_full_avg60_percent": 30,
+  "stop_vms_on_resource_failure": true
+}
