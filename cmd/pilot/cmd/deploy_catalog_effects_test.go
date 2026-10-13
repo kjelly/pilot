@@ -42,7 +42,9 @@ var wantReconcileEffects = map[string][]contract.Effect{
 		contract.EffectNetworkEndpoints, contract.EffectDNSRecords,
 		contract.EffectTLSCertificates, contract.EffectReverseProxyRoutes,
 	},
-	"prometheus": {contract.EffectMonitoringScrapeTargets},
+	"prometheus":   {contract.EffectMonitoringScrapeTargets},
+	"thanos-query": {contract.EffectNetworkEndpoints},
+	"dashboard":    {contract.EffectNetworkEndpoints},
 }
 
 func sortedEffects(in []contract.Effect) []contract.Effect {

@@ -13,16 +13,19 @@
 #              Promtail agent,把日誌轉送進這台的 Loki)
 # ============================================================================
 
-# thanos-query 中央主機的 IP 或 FQDN(Grafana 的 Prometheus datasource 指向
-# 這裡)。留空也能套用成功——Grafana/Loki 照樣起來,只是 Prometheus
-# datasource 連不到上游(spec C8 預期 fail),等 thanos-query 上線後補填、
-# 重新套用即可(見 spec §1.5)。
+# 同機部署預設用 Docker DNS: http://thanos-query-backend:10902。
+# 不需要固定 IP；inventory 有單一 thanos-query host 時會自動判斷是否共置。
+# 上游尚未部署時允許 Grafana/Loki 先起來，但 spec C8 會 fail。
+# 既有 target_host 仍相容，跨主機建議用容器可解析的 FQDN。
 thanos_query_target_host: ""
+
+# 跨主機可覆寫完整 URL；保留 DNS 名稱，不把查到的 IP 寫入 hosts。
+# thanos_query_url: "http://metrics.example.internal:10912"
 
 # Grafana admin 密碼。**必填、沒有預設值**,一律用 ansible-vault 加密檔帶
 # 入,不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
 # grafana_admin_password: ""
 
-# 通常不用改,會沿用 playbook 內建預設:
+# 通常不用改；自訂 alias 要在 thanos-query provider 使用相同值:
 # thanos_query_alias: thanos-query-backend
-# thanos_query_port: 10912
+# thanos_query_port: 10902  # 同機；跨主機預設 10912

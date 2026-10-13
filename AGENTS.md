@@ -769,6 +769,33 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    對全部 `playbooks/**` 檢查(`freeipa-dns-apply.yml` 的 `[ \\t]` 列在 allowlist:
    `ipa` 輸出只用空白縮排,結果正確,修正要另外對 freeipa-dns 實跑),
    `TestJinjaTemplateBackslashSemantics` 對本機 ansible-core 鎖住這個前提。
+13. **被 `when:` 跳過的 task 仍然會 register,值是 `{changed: false, skipped: true}`**:
+   用 `combine()` 合併兩個互斥 task 的 register 結果,最後合併的那個決定
+   `changed`。`prometheus-apply.yml` 這樣合併兩個 prometheus.yml render,
+   有 Alertmanager 時被跳過的「無 alerting」版本蓋掉 `changed: true`,設定
+   變更從未重啟 container(2026-10-12 正式環境:新的 dcgm-exporter target
+   寫進主機檔案好幾週,Prometheus 都沒 scrape)。**規則**:每個 register
+   結果各自用 `(x | default({})) is changed` 檢查再 `or`,不准合併;
+   `internal/spec/registered_result_combine_regression_test.go::TestRegression_RegisteredResultsAreNeverCombined`
+   對全部 `playbooks/**` 檢查。
+   同一次事故的另一半:**單檔 bind mount 在 `copy` 換掉檔案後仍指向舊 inode**。
+   `copy` 用 rename 寫檔,主機路徑換成新 inode,沒重啟的 container 繼續讀
+   舊檔,reload(Prometheus `/-/reload`、SIGHUP)也只重讀舊檔。只靠「這次
+   render 有沒有 changed」決定重啟,一旦某次 run render 了檔案卻沒走到重啟
+   (失敗、`--tags`、條件寫錯),之後每次 run 都看到檔案沒變,container 永遠
+   讀舊檔。container task 前 include `tasks/container-file-mount-drift.yml`
+   (比對 container 實際看到的檔案與主機檔案,不同就重啟),include 標
+   `always`、`when:` 跟 container task 相同,`restart:` 加上
+   `or container_mount_drift_stale | default(false) | bool`。目前 8 支
+   playbook 的 11 個 container 都已接上(prometheus、thanos-sidecar、
+   alertmanager、teams-proxy、loki、dcgm-exporter、promtail、seaweedfs、
+   snmp-exporter、thanos-store、thanos-compact);
+   `internal/spec/container_file_mount_regression_test.go::TestRegression_FileMountedContainersRestartOnStaleMounts`
+   對全部 `playbooks/**` 檢查:掛單一檔案的 docker_container 前面必須有
+   同一個 container 的檢查,`when:` 要相同,且 `restart:` 要讀它的結果。
+   這個檢查讀的 inspect 結果含 container 的 `Config.Env`,單獨掛載的密碼檔
+   hash 出來就是密碼的 SHA-256,所以它的 task 都是 `no_log`
+   (`TestRegression_ContainerFileMountDriftHidesWhatItReads`)。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1401,3 +1428,4 @@ git status --short
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
+| 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |

@@ -1,8 +1,11 @@
 package spec
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_DashboardSpec locks the structure of
@@ -34,11 +37,9 @@ import (
 //     stay static text (see verification-spec-template.md's "Command/
 //     Expected are static text authored once" rule, and thanos-query.md's
 //     C10 for the precedent).
-//   - C8 must hit the fixed `thanos-query-backend` alias, NOT an
-//     interpolated {{ var }} — Command/Expected columns cannot be
-//     templated per deployment; the destination is pinned into /etc/hosts
-//     by the apply playbook instead (same idiom as thanos_s3_alias in
-//     prometheus-apply.yml).
+//   - C8 must run inside pilot-grafana and use its actual provisioned
+//     datasource URL. Host-only DNS/connectivity can pass while Grafana
+//     cannot resolve its provider (the original hosts-pin regression).
 //   - No row may leak the Grafana admin password or S3-style credentials
 //     into the spec text (AGENTS.md).
 func TestRegression_DashboardSpec(t *testing.T) {
@@ -133,13 +134,18 @@ func TestRegression_DashboardSpec(t *testing.T) {
 		}
 	}
 
-	// C8 must hit the fixed alias, not an interpolated deployment var.
+	// C8 must exercise the consumer's namespace and actual datasource URL.
 	for _, r := range s.Rows {
 		if r.ID != "C8" {
 			continue
 		}
-		if !strings.Contains(r.Command, "thanos-query-backend") {
-			t.Errorf("C8 must hit the fixed thanos-query-backend alias; got %q", r.Command)
+		for _, required := range []string{"docker exec pilot-grafana", "uid: pilot-thanos-query", "/etc/grafana/provisioning/datasources/datasources.yml", "test -n", "wget", "-T 5", "$url/-/healthy", "sh -ec"} {
+			if !strings.Contains(r.Command, required) {
+				t.Errorf("C8 must contain %q; got %q", required, r.Command)
+			}
+		}
+		if r.Expected != "0" {
+			t.Errorf("C8 must require a successful connection (rc=0), got %q", r.Expected)
 		}
 	}
 
@@ -246,6 +252,69 @@ func TestRegression_DashboardSpec(t *testing.T) {
 	for _, id := range wantIDs {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
+		}
+	}
+}
+
+// Provider and consumer must share their Docker network and service alias.
+// Do not pin either container's changing IP in a host or extra_hosts mapping.
+func TestRegression_DashboardDockerDNS(t *testing.T) {
+	read := func(path string) []map[string]any {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plays []map[string]any
+		if err := yaml.Unmarshal(raw, &plays); err != nil {
+			t.Fatal(err)
+		}
+		return plays
+	}
+	var walk func([]any, func(map[string]any))
+	walk = func(tasks []any, visit func(map[string]any)) {
+		for _, raw := range tasks {
+			task := raw.(map[string]any)
+			visit(task)
+			for _, key := range []string{"block", "rescue", "always"} {
+				if nested, ok := task[key].([]any); ok {
+					walk(nested, visit)
+				}
+			}
+		}
+	}
+	containers := map[string]map[string]any{}
+	for _, path := range []string{"../../playbooks/apply/dashboard-apply.yml", "../../playbooks/apply/thanos-query-apply.yml"} {
+		for _, play := range read(path) {
+			walk(play["tasks"].([]any), func(task map[string]any) {
+				if config, ok := task["community.docker.docker_container"].(map[string]any); ok {
+					containers[config["name"].(string)] = config
+				}
+				if strings.Contains(path, "dashboard-apply") {
+					if config, ok := task["ansible.builtin.lineinfile"].(map[string]any); ok && config["path"] == "/etc/hosts" && config["state"] != "absent" {
+						t.Error("dashboard must only remove its legacy hosts pin")
+					}
+				}
+			})
+		}
+	}
+	for _, name := range []string{"pilot-grafana", "pilot-thanos-query"} {
+		config, ok := containers[name]
+		if !ok {
+			t.Fatalf("missing container %s", name)
+		}
+		if _, pinned := config["etc_hosts"]; pinned {
+			t.Errorf("%s must use DNS instead of etc_hosts", name)
+		}
+		network := config["networks"].([]any)[0].(map[string]any)
+		if network["name"] != "{{ docker_network_name }}" {
+			t.Errorf("%s must join the shared metrics network", name)
+		}
+		if name == "pilot-thanos-query" {
+			aliases, ok := network["aliases"].([]any)
+			if !ok || len(aliases) != 1 || aliases[0] != "{{ thanos_query_alias | default('thanos-query-backend', true) }}" {
+				t.Errorf("provider must declare the consumer's DNS alias, got %v", network["aliases"])
+			}
 		}
 	}
 }

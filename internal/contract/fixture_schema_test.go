@@ -69,11 +69,12 @@ type fixturePlaybooks struct {
 }
 
 type fixtureDependency struct {
-	Component string   `yaml:"component"`
-	Required  bool     `yaml:"required"`
-	Relation  string   `yaml:"relation"`
-	Reason    string   `yaml:"reason"`
-	Endpoints []string `yaml:"endpoints"`
+	Component           string   `yaml:"component"`
+	Required            bool     `yaml:"required"`
+	Relation            string   `yaml:"relation"`
+	Reason              string   `yaml:"reason"`
+	Endpoints           []string `yaml:"endpoints"`
+	ApplyBeforeConsumer bool     `yaml:"applyBeforeConsumer"`
 }
 
 type fixtureBinding struct {
@@ -599,6 +600,9 @@ func validateFixtureFields(root string, contract fixtureContract) error {
 
 	dependencies := make(map[string]fixtureDependency, len(contract.Dependencies))
 	for _, dependency := range contract.Dependencies {
+		if dependency.ApplyBeforeConsumer && (!dependency.Required || dependency.Relation != "providerEndpoint") {
+			return fmt.Errorf("dependency %q applyBeforeConsumer requires a required providerEndpoint relation", dependency.Component)
+		}
 		if dependency.Component == "" {
 			return fmt.Errorf("dependency component is required")
 		}

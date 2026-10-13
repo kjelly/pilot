@@ -33,6 +33,12 @@
 > reconciler；可在清單中用 Space 複選多個 day-2 元件，按 Enter 後依序執行。未來
 > Nginx config 也必須先具備這些交付物才會出現在清單中。
 
+> **Grafana／Thanos 設定**可使用 deploy 的單一元件流程或 reconcile；兩邊都只需
+> 選擇 dashboard。精靈會顯示實際 host/playbook 計畫，依序套用 Docker 前置、
+> Thanos Query、dashboard，並自動從 inventory 補齊缺少的 endpoint binding。
+> 同機 datasource 使用 Docker DNS；S3 是既有綁定服務，這條計畫不會自動部署它。
+> tags 留空即可套用完整設定。其他 day-2-only 元件仍保留原本入口限制。
+
 ---
 
 ## 0. 準備 pilot-cli image
