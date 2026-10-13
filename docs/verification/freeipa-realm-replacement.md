@@ -45,11 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**。2026-07-29 三 VM 實跑已證明 new
-  `/etc/ipa/default.conf`、host keytab 與 `sssd` service 可被切換，但 C5
-  `getent` 失敗（SSSD backend Offline；raw transcript/evidence 保留於
-  `.verification/freeipa-realm-replacement-*`）。尚未有 immutable candidate 的全 PASS、rollback 或
-  negative-path evidence；不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（部分驗證）。2026-10-12，candidate `4f2087a`（修正三個 regex 的雙反斜線）：AlmaLinux 9 client 完整 migration，C1–C6 **6/6 PASS**；Ubuntu 24.04 client 仍在 C5 失敗——舊 realm 留在 `/etc/hosts` 的 server pin （與新 pin 共用短名稱 `ipa1`）讓 SSSD 把新 realm 的 AS_REQ 送到舊 KDC，尚未修正；`--check --diff` 會在 archive link 失敗。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md`](../evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md)。Ubuntu 也通過、且有 rollback／negative-path evidence 之前，不得宣稱此 spec 已驗證。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則

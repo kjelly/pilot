@@ -1,0 +1,134 @@
+---
+name: hufu-pilot-integration
+description: Rebuild and verify the Minimal PoC through a runtime-enforced Prepare → Audit → Execute → Verify workflow.
+coordinator-model: ollama/minimax-m2.7:cloud
+worker-model: ollama/minimax-m2.7:cloud
+sidecar-model: ollama/minimax-m2.7:cloud
+guard-model: ollama/minimax-m2.7:cloud
+max-rounds: 12
+max-coordinator-turns: 12
+max-steps: 12
+max-retries: 0
+max-concurrent: 1
+max-duration: 32400
+# One Execute action owns the long end-to-end rebuild; keep it alive within its 8h provider timeout.
+stall-threshold: 6h
+verify-timeout: 1800
+timeout: 28800
+workspace: workspace
+# strict-verification retains Hufu's session, shared, and persistent memory
+# while preserving the fail-closed verification guarantees required here.
+# fresh-verification disables historical memory and is intentionally forbidden.
+execution-profile: strict-verification
+goal-mode: outcome
+unattended: true
+auto-approve: true
+auto-skills: false
+skills-exclude: minimal-poc-revalidation,pilot-trec-verification,trec-tui-drive,trec-mcp,minimal-poc-update
+allowed-paths:
+  - /home/ubuntu/nfs/github/pilot
+  - /home/ubuntu/bin
+requires:
+  environment: [HUFU_CHECKPOINT_WORKSPACE, PILOT_ALICE_PASSWORD, PILOT_BOB_PASSWORD, PILOT_ALICE_INITIAL_PASSWORD, PILOT_BOB_INITIAL_PASSWORD, PILOT_IPA_ADMIN_PASSWORD, PILOT_INTERNAL_ENDPOINT_MANIFEST_FILE]
+  paths: [/home/ubuntu/nfs/github/pilot]
+  network: true
+tools:
+  # Keep every non-RAG memory mechanism available. In particular, do not deny
+  # stm_write, ltm_update, memory_save, or memory_query: Hufu's runtime and
+  # agent tool policy own their availability. RAG vector search is the sole
+  # exception and remains opt-in through Hufu's explicit --memory flag.
+  denied: [sudo, ssh, download, fetch, agentic_fetch, ask_user, request_agent, terminal, terminal_start, terminal_write, terminal_read, terminal_wait, terminal_close, terminal_list, load_skill, save_skill, team_info]
+delegation:
+  allowed-workers: [topology-preparer, structured-action-auditor, structured-action-runner, acceptance-verifier]
+  no-redispatch-after-success: [topology-preparer, structured-action-auditor, structured-action-runner, acceptance-verifier]
+  # Bind the auditor's single validator invocation as a generic closed
+  # checkpoint. The worker cannot spend the bounded failure path on diagnostics
+  # or retries; after bash it must submit the result.
+  bind-task-goal-contracts: true
+workflow:
+  phases: [prepare, audit, execute, verify]
+policies:
+  require_phase_success: true
+  allow_phase_skip: false
+  max_retries: 0
+  fail_fast: true
+capabilities:
+  required: [pilot-structured-actions]
+verification:
+  required: true
+retry:
+  transient:
+    max_attempts: 0
+  repair:
+    max_attempts_per_failure_signature: 0
+action-providers:
+  pilot-structured-actions:
+    command: [bash, .agent-teams/hufu-pilot-integration/pilot-structured-action-adapter.sh]
+    dir: /home/ubuntu/nfs/github/pilot
+    timeout: 28800
+acceptance:
+  mode: blocking
+  require-no-unresolved-tasks: true
+  commands:
+    - bash .agent-teams/hufu-pilot-integration/acceptance.sh
+reliability:
+  max-systemic-failure-tasks: 1
+  hard-enforcement: true
+tasks:
+  - id: topology-preparer-boundary-v2
+    agent: topology-preparer
+    phase: prepare
+    execution:
+      kind: process
+      requires-result: true
+      requires-verification: false
+      allows-replay: false
+      forbid-artifacts: true
+      # PREPARE is an attestation-only boundary. Hufu deliberately removes
+      # execution-capable worker tools outside EXECUTE, so topology mutation
+      # and scenario authoring are owned by the EXECUTE action provider.
+      tool-sequence: [submit_result]
+      tool-input-sequence:
+        - {}
+      tool-input-canonical-sequence: [false]
+  - id: structured-action-auditor-boundary-v2
+    agent: structured-action-auditor
+    phase: audit
+    execution:
+      kind: process
+      requires-result: true
+      requires-verification: false
+      allows-replay: false
+      forbid-artifacts: true
+      # The worker has no shell and submits one artifact-free attestation in
+      # AUDIT. The runtime, not the worker, invokes this static read-only
+      # verifier and creates the capability-discovery evidence afterward.
+      tool-sequence: [submit_result]
+      tool-input-sequence:
+        - {}
+      tool-input-canonical-sequence: [false]
+    verify: bash .agent-teams/hufu-pilot-integration/audit-execute-contract.sh
+  - id: structured-action-runner-execute-v2
+    agent: structured-action-runner
+    phase: execute
+    action:
+      capability: pilot-structured-actions
+      type: execute_bundle
+      payload: '{"operation":"minimal-poc-structured-run","version":1}'
+    verify: bash .agent-teams/hufu-pilot-integration/check-receipt.sh execution
+  - id: acceptance-verifier-objective-v2
+    agent: acceptance-verifier
+    phase: verify
+    execution:
+      kind: process
+      requires-result: true
+      requires-verification: false
+      allows-replay: false
+      forbid-artifacts: true
+      # VERIFY remains read-only and is run by Hufu's objective verifier, not
+      # by a worker shell that the phase gate correctly withholds.
+      tool-sequence: [submit_result]
+      tool-input-sequence:
+        - {}
+      tool-input-canonical-sequence: [false]
+    verify: bash .agent-teams/hufu-pilot-integration/verify-structured-run.sh
