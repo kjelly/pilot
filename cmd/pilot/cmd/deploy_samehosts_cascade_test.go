@@ -272,7 +272,7 @@ func TestApplySameHostsDependencyChain_NoOpForNonApplyPlaybook(t *testing.T) {
 	// A rollback/decommission playbook path never equals any component's
 	// Playbooks.Apply, so this must return immediately without touching
 	// runner/out/inv/limit/vault at all.
-	results, err := applySameHostsDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox", nil, nil)
+	results, err := applyDeploymentDependencyChain(context.Background(), nil, nil, catalog, []string{"consumer"}, "consumer-decommission.yml", "unused-inv.yml", "", nil, vaultInput{}, "sandbox", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("applySameHostsDependencyChain() error = %v, want nil (no-op)", err)
 	}
@@ -330,10 +330,31 @@ site: {include: false, order: 1, vars: {}, tags: [], optIn: true}
 	return root
 }
 
+// fakePlayRecapScript makes a fake ansible-playbook print a PLAY RECAP that
+// names each --limit host, as ansible-playbook does once it applied them;
+// without --limit it prints no recap. Deployment transactions read the recap
+// (checkAppliedHosts).
+const fakePlayRecapScript = `limit=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--limit" ]; then limit="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$limit" ]; then
+  printf 'PLAY RECAP *********************************************************************\n'
+  old_ifs=$IFS
+  IFS=,
+  for host in $limit; do
+    printf '%s : ok=1    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0\n' "$host"
+  done
+  IFS=$old_ifs
+fi
+`
+
 func writeArgsFixture(t *testing.T, argsPath string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ansible-playbook")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\n" + fakePlayRecapScript
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

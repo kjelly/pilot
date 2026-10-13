@@ -193,6 +193,19 @@
     # gateway (8333) in a single process. -ip.bind=0.0.0.0 makes each
     # sub-service listen on all interfaces inside the container so the
     # published ports are reachable from the host.
+    # Restart also when the running container still reads an older s3.json
+    # than the host has: a run that rendered it and never reached the restart
+    # below leaves it stale forever otherwise (AGENTS.md §4.5 item 13).
+    - name: "Check whether pilot-seaweedfs still sees its current s3.json"
+      tags: [always]
+      ansible.builtin.include_tasks:
+        file: tasks/container-file-mount-drift.yml
+        apply:
+          tags: [always]
+      vars:
+        container_mount_drift_name: pilot-seaweedfs
+      when: not ansible_check_mode
+
     # `restart` is set explicitly whenever the s3.json render task above
     # actually changed the file: `state: started` alone only diffs this
     # task's own container spec (image/ports/volumes list, etc.) — it has
@@ -211,7 +224,9 @@
         name: pilot-seaweedfs
         image: "chrislusf/seaweedfs:{{ seaweedfs_version }}"
         state: started
-        restart: "{{ (seaweedfs_s3_json_result | default({})) is changed }}"
+        restart: >-
+          {{ (seaweedfs_s3_json_result | default({})) is changed
+             or container_mount_drift_stale | default(false) | bool }}
         restart_policy: unless-stopped
         hostname: seaweedfs
         command: >-

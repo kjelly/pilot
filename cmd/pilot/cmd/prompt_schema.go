@@ -90,10 +90,7 @@ func promptSchemaFor(action string) promptWorkflowSchema {
 func deployComponentIDs(action string) []string {
 	ids := make([]string, 0, len(deployCatalog))
 	for _, entry := range deployCatalog {
-		if action == "reconcile" && !entry.Reconcile {
-			continue
-		}
-		if action == "deploy" && entry.Reconcile {
+		if !catalogEntryInWorkflow(entry, action == "reconcile") {
 			continue
 		}
 		ids = append(ids, entry.Key)
