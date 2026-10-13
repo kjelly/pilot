@@ -39,46 +39,32 @@ func snmpExceptionGate(t *testing.T) map[string]any {
 	return nil
 }
 
-// TestRegression_SnmpInsecureProfileExceptionExpiry runs the prod gate from
-// snmp-exporter-apply.yml through Ansible on localhost (docs/verification/
-// snmp-exporter.md C12 v1.1). The exceptions are written to a vars file the
-// way an operator writes them, so `expiry: 2099-12-31` loads as a YAML date.
-// Each case also sets ansible_date_time.date, the cached fact the gate used
-// to read: today's date, except in the stale-cache case.
-//
-// Against the old gate (expiry >= ansible_date_time.date):
-//   - the bare YAML date fails with a type error instead of passing;
-//   - the unpadded past date 2026-9-30 passes;
-//   - the stale fact accepts an exception that expired yesterday (UTC).
-func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
-	now := time.Now().UTC()
-	if next := now.Truncate(24 * time.Hour).Add(24 * time.Hour); next.Sub(now) < 2*time.Minute {
-		t.Skip("too close to UTC midnight: the gate's today could differ from the test's")
-	}
-	day := func(offset int) string { return now.AddDate(0, 0, offset).Format("2006-01-02") }
+// snmpExceptionCase is one run of the prod gate: the exception for lab-v2c
+// as an operator writes it in a vars file (empty: none), the cached
+// ansible_date_time.date the gate used to read, and whether it is accepted.
+type snmpExceptionCase struct {
+	name       string
+	exceptions string
+	factDate   string
+	accept     bool
+}
+
+// snmpValidException is a complete prod exception for lab-v2c apart from
+// its expiry, which each expiry case appends.
+const snmpValidException = `reason: lab, owner: ops, confirmed: true, networkEvidence: "CHG-1 mgmt VLAN ACL", `
+
+// runSnmpExceptionCases runs the prod gate from snmp-exporter-apply.yml
+// through Ansible on localhost once per case, with a v3 authPriv profile
+// (never rejected) and the v2c profile lab-v2c.
+func runSnmpExceptionCases(t *testing.T, cases []snmpExceptionCase) {
+	t.Helper()
 	gate := snmpExceptionGate(t)
-	cases := []struct {
-		name       string
-		exceptions string // YAML mapping for lab-v2c, as an operator writes it
-		factDate   string // ansible_date_time.date
-		accept     bool
-	}{
-		{"no exception", ``, day(0), false},
-		{"quoted future expiry", `{reason: lab, owner: ops, expiry: "2099-12-31"}`, day(0), true},
-		{"bare YAML date in the future", `{reason: lab, owner: ops, expiry: 2099-12-31}`, day(0), true},
-		{"expires today (UTC), still valid", `{reason: lab, owner: ops, expiry: "` + day(0) + `"}`, day(0), true},
-		{"expired yesterday (UTC)", `{reason: lab, owner: ops, expiry: "` + day(-1) + `"}`, day(0), false},
-		{"expired yesterday, with a stale cached fact", `{reason: lab, owner: ops, expiry: "` + day(-1) + `"}`, day(-1), false},
-		{"unpadded past date", `{reason: lab, owner: ops, expiry: "2026-9-30"}`, "2026-10-13", false},
-		{"missing expiry", `{reason: lab, owner: ops}`, day(0), false},
-		{"missing owner", `{reason: lab, expiry: "2099-12-31"}`, day(0), false},
-	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			exceptions := "snmp_insecure_auth_profile_exceptions: {}\n"
 			if tc.exceptions != "" {
-				exceptions = "snmp_insecure_auth_profile_exceptions:\n  lab-v2c: " + tc.exceptions + "\n"
+				exceptions = "snmp_insecure_auth_profile_exceptions:\n  lab-v2c: {" + tc.exceptions + "}\n"
 			}
 			varsFile := filepath.Join(dir, "exceptions.yml")
 			body := exceptions + "ansible_date_time: {date: \"" + tc.factDate + "\"}\n"
@@ -115,6 +101,65 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// snmpTestDays returns a formatter for today's UTC date plus an offset, and
+// skips the test near UTC midnight, where the gate's today could differ
+// from the test's.
+func snmpTestDays(t *testing.T) func(int) string {
+	t.Helper()
+	now := time.Now().UTC()
+	if next := now.Truncate(24 * time.Hour).Add(24 * time.Hour); next.Sub(now) < 2*time.Minute {
+		t.Skip("too close to UTC midnight: the gate's today could differ from the test's")
+	}
+	return func(offset int) string { return now.AddDate(0, 0, offset).Format("2006-01-02") }
+}
+
+// TestRegression_SnmpInsecureProfileExceptionExpiry runs the prod gate
+// (docs/verification/snmp-exporter.md C12 v1.1) with exceptions that are
+// complete except for their expiry. They are written to a vars file the way
+// an operator writes them, so `expiry: 2099-12-31` loads as a YAML date.
+// Each case also sets ansible_date_time.date, the cached fact the gate used
+// to read: today's date, except in the stale-cache case.
+//
+// Against the old gate (expiry >= ansible_date_time.date):
+//   - the bare YAML date fails with a type error instead of passing;
+//   - the unpadded past date 2026-9-30 passes;
+//   - the stale fact accepts an exception that expired yesterday (UTC).
+func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
+	day := snmpTestDays(t)
+	runSnmpExceptionCases(t, []snmpExceptionCase{
+		{"no exception", ``, day(0), false},
+		{"quoted future expiry", snmpValidException + `expiry: "2099-12-31"`, day(0), true},
+		{"bare YAML date in the future", snmpValidException + `expiry: 2099-12-31`, day(0), true},
+		{"expires today (UTC), still valid", snmpValidException + `expiry: "` + day(0) + `"`, day(0), true},
+		{"expired yesterday (UTC)", snmpValidException + `expiry: "` + day(-1) + `"`, day(0), false},
+		{"expired yesterday, with a stale cached fact", snmpValidException + `expiry: "` + day(-1) + `"`, day(-1), false},
+		{"unpadded past date", snmpValidException + `expiry: "2026-9-30"`, "2026-10-13", false},
+		{"missing expiry", `reason: lab, owner: ops, confirmed: true, networkEvidence: "CHG-1"`, day(0), false},
+	})
+}
+
+// TestRegression_SnmpInsecureProfileExceptionFields runs the prod gate
+// (C12 v1.2) with a valid expiry and one of the other fields wrong. Spec
+// §13.2 requires all five: confirm insecure SNMP (`confirmed`, the boolean
+// true), reason, expiry, owner and restricted management network evidence
+// (`networkEvidence`). Against the v1.1 gate, which checked only reason,
+// owner and expiry, every confirmed/networkEvidence rejection here passes.
+func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
+	day := snmpTestDays(t)
+	const expiry = `expiry: "2099-12-31"`
+	runSnmpExceptionCases(t, []snmpExceptionCase{
+		{"all five fields", snmpValidException + expiry, day(0), true},
+		{"a ticket number as networkEvidence", `reason: lab, owner: ops, confirmed: true, networkEvidence: 1234, ` + expiry, day(0), true},
+		{"confirmed missing", `reason: lab, owner: ops, networkEvidence: "CHG-1", ` + expiry, day(0), false},
+		{"confirmed false", `reason: lab, owner: ops, confirmed: false, networkEvidence: "CHG-1", ` + expiry, day(0), false},
+		{"confirmed is the string true", `reason: lab, owner: ops, confirmed: "true", networkEvidence: "CHG-1", ` + expiry, day(0), false},
+		{"networkEvidence missing", `reason: lab, owner: ops, confirmed: true, ` + expiry, day(0), false},
+		{"networkEvidence blank", `reason: lab, owner: ops, confirmed: true, networkEvidence: "   ", ` + expiry, day(0), false},
+		{"reason missing", `owner: ops, confirmed: true, networkEvidence: "CHG-1", ` + expiry, day(0), false},
+		{"owner missing", `reason: lab, confirmed: true, networkEvidence: "CHG-1", ` + expiry, day(0), false},
+	})
 }
 
 // TestRegression_NoDecisionsOnCachedDateFacts is a repo-wide lint over

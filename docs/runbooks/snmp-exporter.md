@@ -221,12 +221,28 @@ local` 對照組驗證，語意等同對 VM 驗證）：
 | 同上 + 一筆有效（未過期）`snmp_insecure_auth_profile_exceptions` | `assert` PASS |
 | 同上但 `expiry` 設在過去 | `assert` FAILED（斷言重新失敗，確認過期判斷真的有效） |
 
-`expiry` 的規則（spec C12 v1.1，2026-10-13）：`YYYY-MM-DD`，加不加引號都可以，
-有效到當天結束（UTC，控制端時鐘）。缺少、格式不對（例如沒補零的 `2026-9-30`）
-或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的本地日期，
-而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
-目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機
-實際跑這道 gate 鎖住（9 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
+prod 例外的規則（spec C12 v1.2，2026-10-13）：每個 auth profile 一筆，五個欄位都要有：
+
+```yaml
+snmp_insecure_auth_profile_exceptions:
+  lab-v2c:
+    confirmed: true                         # 布林 true，不是字串 "true"
+    reason: legacy UPS, no SNMPv3 firmware
+    owner: netops
+    networkEvidence: CHG-1234 mgmt VLAN ACL # 管理網路受限的證據（變更單號、ACL 說明）
+    expiry: 2026-12-31                      # YYYY-MM-DD，有效到當天結束（UTC）
+```
+
+- `expiry`：加不加引號都可以，以控制端時鐘的 UTC 日期判斷。缺少、格式不對（例如沒補零的
+  `2026-9-30`）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
+  本地日期，而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
+- `networkEvidence`：去掉空白後不能是空的。
+- 這筆設定目前要放在用 `-e @<file>` 帶入的檔案（例如 vault 檔）。playbook 的 play `vars:`
+  宣告了 `snmp_insecure_auth_profile_exceptions: {}`，優先順序高於 inventory 的
+  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點，另案處理）。
+
+目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
+鎖住（expiry 8 個案例、其他欄位 9 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 
 ## 9. `pilot verify` 正式驗收

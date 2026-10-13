@@ -23,6 +23,16 @@
 #       authPassword: "..."
 #       privPassword: "..."
 #
+# prod rejects an auth profile below v3 authPriv unless the same -e file
+# carries an exception for it with all five fields (spec C12, §13.2):
+#   snmp_insecure_auth_profile_exceptions:
+#     lab-v2c:
+#       confirmed: true
+#       reason: "..."
+#       owner: "..."
+#       networkEvidence: "..."   # restricted management network evidence
+#       expiry: 2026-12-31       # YYYY-MM-DD, valid through that day (UTC)
+#
 # Variables: see contracts/snmp-exporter.yaml groupVars.
 #
 # Stage gating (same convention as alertmanager-apply.yml):
@@ -231,13 +241,18 @@
     # YAML date (`expiry: 2026-12-31`) loads as a date, so it is turned into
     # a string first; the format check stops an unpadded date such as
     # 2026-9-30 from comparing as later than 2026-10-13.
+    # Spec §13.2 also requires "confirm insecure SNMP" and "restricted
+    # management network evidence": `confirmed` must be the boolean true
+    # (not the string "true"), and `networkEvidence` a non-blank string.
     - name: "Gate: prod stage rejects insecure SNMP auth profiles unless an explicit reviewed exception exists"
       ansible.builtin.assert:
         that:
           - (item.value.version | int == 3 and item.value.securityLevel == 'authPriv')
             or
-            ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
+            ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('confirmed', false) is sameas true)
+             and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
              and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('owner', '') | length > 0)
+             and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('networkEvidence', '') | string | trim) | length > 0)
              and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
                   is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
              and ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string)
@@ -246,10 +261,12 @@
           authProfile "{{ item.key }}" is version {{ item.value.version }}
           / {{ item.value.securityLevel }}, which prod rejects unless
           snmp_insecure_auth_profile_exceptions["{{ item.key }}"] has a
-          non-expired reason/owner/expiry (spec §13.2). This is not a
-          permanent global allow flag — set it per profile, with an expiry.
-          expiry is a YYYY-MM-DD date, valid through that date in UTC
-          (today, UTC: {{ now(utc=true, fmt='%Y-%m-%d') }}).
+          non-expired reason/owner/expiry, confirmed: true and a
+          networkEvidence (spec §13.2). This is not a permanent global allow
+          flag — set it per profile, with an expiry. expiry is a YYYY-MM-DD
+          date, valid through that date in UTC (today, UTC:
+          {{ now(utc=true, fmt='%Y-%m-%d') }}); networkEvidence names the
+          evidence that the device's management network is restricted.
       loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
       when: stage == 'prod'
