@@ -1,0 +1,188 @@
+# promtool unit tests for playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2
+# rendered with the contract defaults (contracts/prometheus.yaml). Every
+# rule has a host that must fire and a host that must stay quiet
+# (AGENTS.md §5.12). Run by internal/spec/host_health_alert_rules_regression_test.go
+# against an annotation-stripped copy (promtool compares expanded
+# annotations verbatim; `promtool check rules` validates them on the full file).
+rule_files:
+  - host-health-alert-rules.yml
+evaluation_interval: 1m
+tests:
+  - name: I/O stall, latency, queue depth and PSI availability
+    interval: 1m
+    input_series:
+      # PSI full stall: 30s stalled per minute = 0.5 > 0.25 (fires); 6s = 0.1 (quiet)
+      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy"}'
+        values: '0+30x40'
+      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm"}'
+        values: '0+6x40'
+      # Latency: 0.5s of read time per second over 2 reads/s = 250ms (fires).
+      - series: 'node_disk_read_time_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
+        values: '0+30x40'
+      - series: 'node_disk_write_time_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
+        values: '0+0x40'
+      - series: 'node_disk_reads_completed_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
+        values: '0+120x40'
+      - series: 'node_disk_writes_completed_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
+        values: '0+0x40'
+      # Same per-op latency on a device doing 0.5 op/s: below the min-ops guard (quiet).
+      - series: 'node_disk_read_time_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="vda"}'
+        values: '0+30x40'
+      - series: 'node_disk_write_time_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="vda"}'
+        values: '0+0x40'
+      - series: 'node_disk_reads_completed_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="vda"}'
+        values: '0+30x40'
+      - series: 'node_disk_writes_completed_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="vda"}'
+        values: '0+0x40'
+      # A loop device with terrible latency must be ignored entirely.
+      - series: 'node_disk_read_time_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="loop3"}'
+        values: '0+600x40'
+      - series: 'node_disk_write_time_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="loop3"}'
+        values: '0+0x40'
+      - series: 'node_disk_reads_completed_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="loop3"}'
+        values: '0+600x40'
+      - series: 'node_disk_writes_completed_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="loop3"}'
+        values: '0+0x40'
+      # Queue depth: 900s weighted per minute = 15 in flight (fires); 60s = 1 (quiet).
+      - series: 'node_disk_io_time_weighted_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
+        values: '0+900x40'
+      - series: 'node_disk_io_time_weighted_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",device="vda"}'
+        values: '0+60x40'
+      # Scraped hosts: el9-host has no PSI series at all (HostPSIUnavailable).
+      - series: 'up{job="node",instance="io-busy:9100",pilot_host="io-busy"}'
+        values: '1x40'
+      - series: 'up{job="node",instance="io-calm:9100",pilot_host="io-calm"}'
+        values: '1x40'
+      - series: 'up{job="node",instance="el9-host:9100",pilot_host="el9-host"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HostIOStall
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostIOStall
+        exp_alerts:
+          - exp_labels: {pilot_host: io-busy, severity: warning, pilot_alert_source: host-health}
+      - eval_time: 20m
+        alertname: HostDiskLatencyHigh
+        exp_alerts:
+          - exp_labels: {pilot_host: io-busy, severity: warning, pilot_alert_source: host-health}
+      - eval_time: 20m
+        alertname: HostDiskQueueDeep
+        exp_alerts:
+          - exp_labels: {pilot_host: io-busy, severity: warning, pilot_alert_source: host-health}
+      - eval_time: 20m
+        alertname: HostPSIUnavailable
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HostPSIUnavailable
+        exp_alerts:
+          - exp_labels: {pilot_host: el9-host, severity: info, pilot_alert_source: host-health}
+
+  - name: Monitoring data gap is distinct from a host outage
+    interval: 1m
+    input_series:
+      # gap-host: node_exporter scrape fails, but the probe still logs in.
+      - series: 'up{job="node",instance="gap-host:9100",pilot_host="gap-host"}'
+        values: '0x15'
+      # down-host: scrape fails AND the probe fails — HostDown's case, not this one.
+      - series: 'up{job="node",instance="down-host:9100",pilot_host="down-host"}'
+        values: '0x15'
+      # Probe series are scraped from the probe host (pilot_host=mon).
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="gap-host"}'
+        values: '1x15'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="down-host"}'
+        values: '0x15'
+      - series: 'up{job="node",instance="mon:9100",pilot_host="mon"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: gap-host, severity: warning, pilot_alert_source: host-health}
+
+  - name: Login probe stages, keep_firing_for and staleness
+    interval: 1m
+    input_series:
+      # t-account: account-denied for 10 minutes, then recovers to ok.
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-account",stage="account"}'
+        values: '1x10 0x20'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-account",stage="ok"}'
+        values: '0x10 1x20'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-auth",stage="auth"}'
+        values: '1x30'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-stall",stage="timeout"}'
+        values: '1x30'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-key",stage="hostkey"}'
+        values: '1x30'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-session",stage="session"}'
+        values: '1x30'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-net",stage="transport"}'
+        values: '1x30'
+      # t-ok: always succeeds; its zero-valued failure stages must never alert.
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-ok",stage="ok"}'
+        values: '1x30'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="t-ok",stage="account"}'
+        values: '0x30'
+      # Probe "mon" writes its textfile (timestamp tracks time()); probe
+      # "mon-dead" stopped at t=0.
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon"}'
+        values: '0+60x30'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-dead:9100",pilot_host="mon-dead"}'
+        values: '0x30'
+      - series: 'pilot_login_probe_targets{job="node",instance="mon:9100",pilot_host="mon"}'
+        values: '6x30'
+      - series: 'pilot_login_probe_targets{job="node",instance="mon-dead:9100",pilot_host="mon-dead"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts:
+          - exp_labels: {pilot_host: t-account, severity: critical, pilot_alert_source: login-probe}
+      # Recovered at 11m, still firing within keep_firing_for (5m) ...
+      - eval_time: 14m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts:
+          - exp_labels: {pilot_host: t-account, severity: critical, pilot_alert_source: login-probe}
+      # ... and resolved after it.
+      - eval_time: 18m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PilotLoginProbeAuthFailed
+        exp_alerts:
+          - exp_labels: {pilot_host: t-auth, severity: critical, pilot_alert_source: login-probe}
+      - eval_time: 5m
+        alertname: PilotLoginProbeLoginStalled
+        exp_alerts:
+          - exp_labels: {pilot_host: t-stall, severity: critical, pilot_alert_source: login-probe}
+      - eval_time: 5m
+        alertname: PilotLoginProbeHostKeyMismatch
+        exp_alerts:
+          - exp_labels: {pilot_host: t-key, severity: warning, pilot_alert_source: login-probe}
+      - eval_time: 5m
+        alertname: PilotLoginProbeSessionFailed
+        exp_alerts:
+          - exp_labels: {pilot_host: t-session, severity: warning, pilot_alert_source: login-probe}
+      # Transport waits longer (5m) than the other stages (3m).
+      - eval_time: 4m
+        alertname: PilotLoginProbeTransportFailed
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PilotLoginProbeTransportFailed
+        exp_alerts:
+          - exp_labels: {pilot_host: t-net, severity: warning, pilot_alert_source: login-probe}
+      - eval_time: 12m
+        alertname: PilotLoginProbeStale
+        exp_alerts:
+          - exp_labels: {pilot_host: mon-dead, severity: warning, pilot_alert_source: login-probe}
+      - eval_time: 20m
+        alertname: PilotLoginProbeNoTargets
+        exp_alerts:
+          - exp_labels: {pilot_host: mon-dead, severity: info, pilot_alert_source: login-probe}

@@ -1,0 +1,38 @@
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+
+PLAY [Login probe — report whether a retiring host is still a probe target (read-only)] ***
+
+TASK [Gate: the names to look for are supplied as a list] **********************
+ok: [probe-b] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [probe-a] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Check whether the probe host has a rendered configuration (read-only)] ***
+ok: [probe-b]
+ok: [probe-a]
+
+TASK [Read the rendered probe configuration (read-only)] ***********************
+ok: [probe-a]
+ok: [probe-b]
+
+TASK [Compute whether the retiring host is still listed (read-only)] ***********
+ok: [probe-b]
+ok: [probe-a]
+
+TASK [Report for the decommission provider (read-only)] ************************
+ok: [probe-a] => {
+    "msg": "LOGIN_PROBE_TARGET_PRESENT[probe-a]=false"
+}
+ok: [probe-b] => {
+    "msg": "LOGIN_PROBE_TARGET_PRESENT[probe-b]=false"
+}
+
+PLAY RECAP *********************************************************************
+probe-a                    : ok=5    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+probe-b                    : ok=5    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+

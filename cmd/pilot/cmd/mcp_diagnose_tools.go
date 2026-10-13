@@ -891,6 +891,9 @@ type diagnoseLoginUserOutput struct {
 	AccountResolvesViaSSSD      bool     `json:"account_resolves_via_sssd"`
 	PasswdEntry                 string   `json:"passwd_entry,omitempty"`
 	CentralSudoRuleGrantsAccess bool     `json:"central_sudo_rule_grants_access"`
+	PamAccountChecked           bool     `json:"pam_account_checked"`
+	PamAccountAllowed           bool     `json:"pam_account_allowed"`
+	PamAccountResult            string   `json:"pam_account_result,omitempty"`
 	Verdict                     string   `json:"verdict"`
 }
 
@@ -1066,7 +1069,9 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 				User: u.User, RosterHBACAuthorized: u.RosterHBACAuthorized, RosterHBACRules: u.RosterHBACRules,
 				RosterSudoAuthorized: u.RosterSudoAuthorized, RosterSudoRules: u.RosterSudoRules,
 				AccountResolvesViaSSSD: u.AccountResolvesViaSSSD, PasswdEntry: u.PasswdEntry,
-				CentralSudoRuleGrantsAccess: u.CentralSudoRuleGrantsAccess, Verdict: u.Verdict,
+				CentralSudoRuleGrantsAccess: u.CentralSudoRuleGrantsAccess,
+				PamAccountChecked:           u.PamAccountChecked, PamAccountAllowed: u.PamAccountAllowed, PamAccountResult: u.PamAccountResult,
+				Verdict: u.Verdict,
 			}
 		}
 

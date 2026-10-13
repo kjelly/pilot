@@ -437,7 +437,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 40 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 41 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`dns`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
@@ -446,7 +446,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
-`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`)。
+`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`、`login-probe`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
 `freeipa-dns`、`freeipa-dns-client`、`freeipa-ca-trust`、`internal-endpoint`、`agent-controller` 與後五支可觀測性堆疊一樣是**還沒接進
@@ -1401,3 +1401,4 @@ git status --short
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
+| 2026-10-13 | v1.47 | 新增第 41 支 apply playbook `login-probe-apply.yml`(GitHub issue #11:每站外部 SSH/PAM 登入探測，Go daemon `pilot-login-probe` 以最小權限 FreeIPA canary 帳號每 60 秒 spawn 系統 OpenSSH 真實登入、host-key 信任沿用 `sss_ssh_knownhostsproxy`、結果寫 node_exporter textfile;依賴 freeipa-client/host-monitoring sameHosts，opt-in、`site.include: false` 但 import 進 `site.yml`，比照 detection-engine);`prometheus-apply.yml` 新增第三份 Jinja 渲染的 rule file(I/O stall、磁碟延遲、監控資料缺口、login probe 各 stage 告警)，`alertmanager-apply.yml` 的 null/teams 設定加兩條 inhibit 規則;§4.3 清點更新為 41 支;§4.2 不需新增 restic 範例(只寫 `/etc` 與 textfile);Phase 0 真實擷取見 `docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md` | pilot |

@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.5
+> 版本：v1.6
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -34,6 +34,28 @@
 顯示 reason、recommended action、runbook 與持續時間，讓收到通知的人能直接判斷
 下一步。
 
+## 1.7 Inhibit contract（GitHub issue #11）
+
+`null` 與 `teams` 模式內建下面兩條 inhibit 規則（`playbooks/apply/alertmanager-apply.yml`
+的 `alertmanager_default_config`/`alertmanager_teams_config`）。它們讓「主機整台掛掉」
+只產生 `HostDown`，而不是同時再噴 login probe 的 transport 失敗與 metrics 缺口；
+login probe 自己停擺（`PilotLoginProbeStale`）時，它凍結的舊 series 也不會繼續觸發
+其他 `PilotLoginProbe*`。`custom` 模式由 operator 自帶整份 `alertmanager_config`，
+**必須自行加入同樣的兩條**（C10 會檢查）：
+
+```yaml
+inhibit_rules:
+  - source_matchers: ['alertname="HostDown"']
+    target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+    equal: ['pilot_host']
+  - source_matchers: ['alertname="PilotLoginProbeStale"']
+    target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
+    equal: ['site']
+```
+
+`group_by` 仍是 `alertname + pilot_subject + signal_id`：login probe 告警沒有後兩者，
+所以同一個 alertname 的所有主機會併成一則通知（整站 HBAC 失效時不會每台主機各一則）。
+
 ## 2. Checklist
 
 | ID | Category | Check | Expected | Command |
@@ -47,12 +69,13 @@
 | C7 | functional | 推一筆測試告警至 Alertmanager，`/api/v2/alerts` 可查得 | 0 | sh -c 'curl -fsS -X POST http://127.0.0.1:9093/api/v2/alerts -H "Content-Type: application/json" -d "[{\"labels\":{\"alertname\":\"pilot-alertmanager-selftest\",\"severity\":\"info\"},\"annotations\":{\"msg\":\"PILOT-ALERTMANAGER-SELFTEST\"}}]" >/dev/null 2>&1; sleep 1; curl -fsS http://127.0.0.1:9093/api/v2/alerts | grep -q pilot-alertmanager-selftest' |
 | C8 | docker | `pilot-alertmanager-teams-proxy`（teams 模式才存在）若存在則必須為 running 且 `/healthz` 回 200；non-teams 模式下容器不存在也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then docker ps --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy && curl -fsS -o /dev/null -w "%{http_code}" http://127.0.0.1:8095/healthz 2>/dev/null | grep -q "^200$"; else true; fi' |
 | C9 | functional | proxy 的 Alertmanager→Adaptive Card 轉換正確（`/render` 自我測試，不真的送 Teams）；容器不存在（non-teams 模式）也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then curl -fsS -X POST http://127.0.0.1:8095/render -H "Content-Type: application/json" -d "{\"status\":\"firing\",\"groupLabels\":{\"alertname\":\"pilot-teams-proxy-selftest\"},\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"pilot-teams-proxy-selftest\",\"severity\":\"info\"},\"annotations\":{}}]}" 2>/dev/null | grep -q "\"type\": \"AdaptiveCard\""; else true; fi' |
+| C10 | config | `alertmanager.yml` 帶 GitHub issue #11 的兩條 inhibit 規則：`HostDown` 抑制同 `pilot_host` 的 `PilotLoginProbeTransportFailed`/`HostMetricsMissing`，`PilotLoginProbeStale` 抑制同 `site` 的其他 `PilotLoginProbe*`；`amtool check-config` 回報至少 2 條 inhibit rule（`custom` 模式的設定也必須帶，見 §1.7） | 0 | sh -c 'f=/etc/pilot/alertmanager/alertmanager.yml; grep -q HostDown "$f" && grep -q PilotLoginProbeStale "$f" && grep -q HostMetricsMissing "$f" || exit 1; n=$(docker exec pilot-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>/dev/null | sed -n "s/^ - \([0-9][0-9]*\) inhibit rules$/\1/p"); [ "${n:-0}" -ge 2 ]' |
 
 ## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/alertmanager.md -i <inventory> -l alertmanager`
 - 輸出格式：`.verification/alertmanager-<UTC>.{ndjson,md}`
-- 預期 row 數：9
+- 預期 row 數：10
 - 最新 actual-run evidence：`docs/evidence/alertmanager/2026-09-17-30d6b92.md`
   （Teams mode L1-L6 PASS、9/9 PASS、idempotent `changed=0`、live `/render`
   actionability PASS）。
@@ -73,6 +96,7 @@
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-13 | v1.6 | GitHub issue #11：`null`/`teams` 模式內建 HostDown 與 PilotLoginProbeStale 兩條 inhibit 規則（§1.7），新增 C10；`custom` 模式需自行加入 | sre |
 | 2026-09-17 | v1.5 | Teams 僅接收 critical／明確 actionable warning；以 subject + signal 分組、12h repeat，卡片顯示行動資訊；candidate `30d6b92` L1-L6 target evidence PASS | sre |
 | 2026-09-08 | v1.4 | 新增 `pilot-alertmanager-teams-proxy`：Alertmanager 原生 webhook_configs 無法直接餵給要求 Adaptive Card 的 Teams flowbot（Power Automate「當收到 Teams webhook 要求」觸發器），改成 webhook 先打內部 proxy 做格式轉換再轉發；新增 C8/C9 | sre |
 | 2026-09-08 | v1.3 | 新增 null/custom/teams receiver mode 與單一 Teams webhook vault 契約 | sre |

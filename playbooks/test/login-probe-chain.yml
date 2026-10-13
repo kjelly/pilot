@@ -1,0 +1,62 @@
+---
+# Apply chain for docs/verification/login-probe.md against
+# docs/topologies/login-probe-topology.yaml (GitHub issue kjelly/pilot#11).
+#
+# Order matters:
+#   freeipa-server -> freeipa-client (lp-mon, lp-target, lp-target-el)
+#   -> host-monitoring (node_exporter + textfile collector on the probe host
+#      and on every probe target)
+#   -> login-probe (generates the probe host's key pair, starts the daemon;
+#      every target reports stage=auth until the next step)
+#   -> login-probe canary fixtures (IPA user without sudo, the probe host's
+#      public key published on that user, HBAC rule for sshd to the targets)
+#   -> docker + seaweedfs-s3 (Thanos object storage) -> alertmanager ->
+#      prometheus (host-health + login-probe alert rules)
+#
+# The canary must not be looked up on a target before the fixtures publish
+# its key: SSSD serves authorized keys from its user cache, so a key that
+# changes after the first lookup only reaches a target when SSSD refreshes
+# that entry (observed 2026-10-13: up to half of entry_cache_timeout, i.e.
+# about 45 minutes with the default 90).
+#
+# Every value below is only a DEFAULT: -e extra vars always win. Secrets come
+# only from the vault file (ipa_admin_password,
+# node_exporter_basic_auth_password, restic_aws_access_key_id/
+# restic_aws_secret_access_key for SeaweedFS and the same pair as
+# thanos_aws_access_key_id/thanos_aws_secret_access_key for Prometheus):
+#
+#   pilot vm-target topology test \
+#       --topology docs/topologies/login-probe-topology.yaml \
+#       --playbook playbooks/test/login-probe-chain.yml \
+#       --verify docs/verification/login-probe.md=login-probe \
+#       -- -e @~/.vault/<sandbox>.yaml
+- name: FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+
+- name: FreeIPA clients (probe host + probe targets)
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
+
+- name: Host monitoring (node_exporter + textfile collector)
+  ansible.builtin.import_playbook: ../apply/host-monitoring-apply.yml
+
+- name: Login probe (key pair, daemon)
+  ansible.builtin.import_playbook: ../apply/login-probe-apply.yml
+
+- name: Login probe canary fixtures (IPA user + key + HBAC rule)
+  ansible.builtin.import_playbook: fixtures/login-probe-fixtures.yml
+
+- name: Docker Engine (SeaweedFS, Alertmanager, Prometheus)
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+
+- name: SeaweedFS S3 (Thanos object storage for the site Prometheus)
+  ansible.builtin.import_playbook: ../apply/seaweedfs-s3-apply.yml
+
+- name: Alertmanager (inhibit rules for HostDown / PilotLoginProbeStale)
+  ansible.builtin.import_playbook: ../apply/alertmanager-apply.yml
+
+- name: Prometheus (host-health + login-probe alert rules)
+  ansible.builtin.import_playbook: ../apply/prometheus-apply.yml
+  vars:
+    prometheus_site_label: "{{ login_probe_chain_site | default('lp-site') }}"
+    thanos_s3_target_host: "{{ hostvars[groups['seaweedfs-s3'][0]].ansible_host }}"
+    alertmanager_target_host: "{{ hostvars[groups['alertmanager'][0]].ansible_host }}"

@@ -633,11 +633,26 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		StageArgs:            hostStage,
 	})
 
+	// login-probe targets (spec.md §19, GitHub issue #11) — reference-driven
+	// like internal-endpoint: every login-probe host renders the retiring
+	// host into its probe target list, so the step re-renders those hosts
+	// (with their own stage) without it. The probe hosts are resolved here,
+	// server-side, from hosts.yml — never from caller input.
+	loginProbeTargets := providers.NewLoginProbeTargetsProvider(providers.LoginProbeTargetsProviderConfig{
+		Executor:       runner,
+		Inventory:      invPath,
+		QueryPlaybook:  "playbooks/decommission/login-probe-target-query.yml",
+		ApplyPlaybook:  "playbooks/apply/login-probe-apply.yml",
+		ProbeHosts:     scope.RoleHosts(stageRoleLoginProbe),
+		ApplyStageArgs: scope.ArgsFunc(scope.RoleHosts(stageRoleLoginProbe)),
+	})
+
 	result := map[string]providers.Provider{
-		providers.FreeIPAClientProviderID:    freeipaClient,
-		providers.WazuhAgentProviderID:       wazuhAgent,
-		providers.InternalEndpointProviderID: internalEndpoint,
-		providers.FreeIPANFSServerProviderID: freeipaNFSServer,
+		providers.FreeIPAClientProviderID:     freeipaClient,
+		providers.WazuhAgentProviderID:        wazuhAgent,
+		providers.InternalEndpointProviderID:  internalEndpoint,
+		providers.FreeIPANFSServerProviderID:  freeipaNFSServer,
+		providers.LoginProbeTargetsProviderID: loginProbeTargets,
 	}
 
 	// Generic contract-driven components (spec.md §37 Phase 5, §15): every

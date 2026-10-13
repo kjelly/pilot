@@ -91,7 +91,7 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -196,6 +196,31 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		}
 		if r.Expected != "0" {
 			t.Errorf("C12 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C20/C21 (issue #11): the host-health rule file is syntax-checked with
+	// promtool and its alerts are actually loaded — by name, not just "some
+	// rule exists" (C12 already covers that).
+	for _, r := range s.Rows {
+		switch r.ID {
+		case "C20":
+			for _, want := range []string{"promtool check rules", "/etc/prometheus/host-health-alert-rules.yml"} {
+				if !strings.Contains(r.Command, want) {
+					t.Errorf("C20 must contain %q; got %q", want, r.Command)
+				}
+			}
+		case "C21":
+			for _, want := range []string{"/api/v1/rules", "HostIOStall", "HostDiskLatencyHigh", "HostMetricsMissing", "PilotLoginProbeAccountDenied", "PilotLoginProbeStale"} {
+				if !strings.Contains(r.Command, want) {
+					t.Errorf("C21 must contain %q; got %q", want, r.Command)
+				}
+			}
+		default:
+			continue
+		}
+		if r.Expected != "0" {
+			t.Errorf("%s expected must be rc-based \"0\"; got %q", r.ID, r.Expected)
 		}
 	}
 

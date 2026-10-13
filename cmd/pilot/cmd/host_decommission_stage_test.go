@@ -39,6 +39,24 @@ func TestHostDecommissionStageTargets(t *testing.T) {
 		}
 	}
 
+	// The login-probe target re-render runs on the login-probe hosts, so
+	// their stage is what apply must have confirmation for.
+	probeScope := decommission.NewStageScope([]inventory.Host{
+		{Name: "c1", Roles: []string{"freeipa-client"}},
+		{Name: "mon1", Env: "prod", Roles: []string{"freeipa-client", "host-monitoring", "login-probe"}},
+	}, noStageAuthorization())
+	probePlan := &decommission.Plan{
+		Host:       decommission.HostSnapshot{Name: "c1"},
+		Components: []decommission.ComponentPlan{{ComponentID: providers.LoginProbeTargetsProviderID}},
+	}
+	probeTargets := hostDecommissionStageTargets(probePlan, probeScope)
+	if len(probeTargets) != 2 || !slices.Equal(probeTargets[1].Hosts, []string{"mon1"}) {
+		t.Fatalf("login-probe targets: %+v, want the retired host then the login-probe hosts", probeTargets)
+	}
+	if _, err := probeScope.Args(probeTargets[1].Hosts); err == nil {
+		t.Error("a prod login-probe host without --confirm-prod must refuse the re-render up front")
+	}
+
 	// Without an apply-converge step, internal-endpoint only queries, and
 	// that read-only query carries no stage.
 	plan.Components = []decommission.ComponentPlan{{ComponentID: providers.InternalEndpointProviderID, Steps: []providers.Step{{Action: providers.ActionInternalEndpointManifestAbsent}}}}

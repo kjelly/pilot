@@ -62,6 +62,17 @@
         group_wait: 30s
         group_interval: 5m
         repeat_interval: 12h
+      # Issue #11 (docs/verification/alertmanager.md C10): a host that is
+      # down explains its failed SSH transport and its missing metrics, and
+      # a stale login probe's frozen series must not keep paging. A custom
+      # alertmanager_config must carry the same two rules.
+      inhibit_rules:
+        - source_matchers: ['alertname="HostDown"']
+          target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+          equal: ['pilot_host']
+        - source_matchers: ['alertname="PilotLoginProbeStale"']
+          target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
+          equal: ['site']
       receivers:
         - name: 'null'
     # Alertmanager's webhook_configs always POSTs its own fixed JSON
@@ -88,6 +99,17 @@
           - receiver: teams
             matchers:
               - 'action_required="true"'
+      # Issue #11 (docs/verification/alertmanager.md C10): a host that is
+      # down explains its failed SSH transport and its missing metrics, and
+      # a stale login probe's frozen series must not keep paging. A custom
+      # alertmanager_config must carry the same two rules.
+      inhibit_rules:
+        - source_matchers: ['alertname="HostDown"']
+          target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+          equal: ['pilot_host']
+        - source_matchers: ['alertname="PilotLoginProbeStale"']
+          target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
+          equal: ['site']
       receivers:
         - name: 'null'
         - name: teams
@@ -283,7 +305,7 @@
           when: alertmanager_yml_stat.stat.exists and alertmanager_yml_stat.stat.isdir
 
         - name: "Render alertmanager.yml"
-          tags: [C4, C5]
+          tags: [C4, C5, C10]
           ansible.builtin.copy:
             dest: "{{ alertmanager_config_dir }}/alertmanager.yml"
             mode: "0644"

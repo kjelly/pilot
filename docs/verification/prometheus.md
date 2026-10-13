@@ -54,6 +54,18 @@
 | `dcgm_exporter_targets` | 要 scrape 的 dcgm-exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `dcgm-exporter` group（見 `docs/verification/dcgm-exporter.md`）所有主機的 9400 port | 否 | 空陣列（自動偵測） |
 | `dcgm_exporter_basic_auth_user` | 抓 dcgm-exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
 | `dcgm_exporter_basic_auth_password` | 抓 dcgm-exporter 用的 HTTP Basic Auth 密碼；**必須跟 `dcgm-exporter.md` 的 `dcgm_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="dcgm"}` 永遠是 0（見下方 escape hatch）；跟 `node_exporter_basic_auth_password` 是獨立的一組，不需要相同 | 僅在有 dcgm-exporter target 時必填 | 無 |
+| `prometheus_host_health_alert_rules_enabled` | 是否渲染並載入 `host-health-alert-rules.yml`（GitHub issue #11 的確定性主機 I/O / 監控缺口 / login probe 告警，`playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2`）；`false` 時檔案被移除、`rule_files` 不再引用 | 否 | `true` |
+| `host_io_stall_ratio_threshold` | `HostIOStall`：PSI `io full` stall 比例（5 分鐘 rate，0–1）超過此值 | 否 | `0.25` |
+| `host_io_stall_for` | `HostIOStall` 的 `for:` | 否 | `10m` |
+| `host_disk_latency_seconds_threshold` | `HostDiskLatencyHigh`：每次 block I/O 平均完成時間（秒，與 detection-engine `linux-host-v1` 的 `disk_io_latency_seconds` 同一段 PromQL / device filter）超過此值 | 否 | `0.1` |
+| `host_disk_latency_min_ops_per_second` | `HostDiskLatencyHigh` 只看每秒完成 I/O 數高於此值的裝置（避免極少量 I/O 的單次慢操作誤報） | 否 | `1` |
+| `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
+| `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
+| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0` 但同一台主機的 login probe 仍登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:` | 否 | `3m` |
+| `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
+| `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（`HostDown` 同時觸發時由 Alertmanager 抑制） | 否 | `5m` |
+| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警的 `keep_firing_for:`，避免單輪恢復造成 resolve/re-fire 抖動 | 否 | `5m` |
+| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe 的 textfile 超過此秒數沒有重寫（daemon 每 15 秒寫一次） | 否 | `180` |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -135,6 +147,8 @@
 | C17 | metrics       | 至少一個 dcgm-exporter target 被成功（認證通過）scrape（`up{job="dcgm"}==1`；僅在有 dcgm-exporter target 時適用） | ~"1"] | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=up%7Bjob%3D%22dcgm%22%7D' | grep -o '"value":\[[0-9.]*,"1"\]' |
 | C18 | config        | `prometheus.yml` 的 dcgm-exporter scrape job 帶 `pilot_host` label（僅在 auto-discovery 情境下 render；明確帶 `dcgm_exporter_targets` override 時沒有此 label，見 §5） | 0 | awk '/^- /{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; sec=$0 ORS; next} {sec=sec $0 ORS} END{if (sec ~ /job_name: dcgm/ && sec ~ /pilot_host:/) f=1; print (f?0:1)}' /etc/pilot/prometheus/prometheus.yml |
 | C19 | metrics       | 收到真正的 GPU 硬體指標，不只是 exporter 自身存活（`DCGM_FI_DEV_GPU_UTIL{job="dcgm"}` 至少一筆 sample；僅在有 dcgm-exporter target 時適用） | present | curl -fsS 'http://127.0.0.1:9090/api/v1/query?query=DCGM_FI_DEV_GPU_UTIL%7Bjob%3D%22dcgm%22%7D' | grep -o '"metric"' |
+| C20 | config        | `host-health-alert-rules.yml`（issue #11：I/O stall、磁碟延遲、監控資料缺口、login probe 告警，門檻由 §1.5 變數渲染）存在且語法有效（`promtool check rules`）；`prometheus_host_health_alert_rules_enabled=false` 時檔案不存在且 `prometheus.yml` 不引用它也算通過 | 0 | sh -c 'if [ -f /etc/pilot/prometheus/host-health-alert-rules.yml ]; then docker exec pilot-prometheus promtool check rules /etc/prometheus/host-health-alert-rules.yml >/dev/null 2>&1; elif grep -q host-health-alert-rules /etc/pilot/prometheus/prometheus.yml; then exit 1; fi' |
+| C21 | http          | Prometheus 已載入 host-health 與 login probe 規則（`/api/v1/rules` 含 `HostIOStall`、`HostDiskLatencyHigh`、`HostMetricsMissing`、`PilotLoginProbeAccountDenied`、`PilotLoginProbeStale`）；停用時同 C20 判斷 | 0 | sh -c 'if [ ! -f /etc/pilot/prometheus/host-health-alert-rules.yml ]; then exit 0; fi; r=$(curl -fsS http://127.0.0.1:9090/api/v1/rules) || exit 1; for n in HostIOStall HostDiskLatencyHigh HostMetricsMissing PilotLoginProbeAccountDenied PilotLoginProbeStale; do case "$r" in *"\"name\":\"$n\""*) ;; *) exit 1;; esac; done' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為

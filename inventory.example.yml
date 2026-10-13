@@ -200,6 +200,14 @@ all:
     detection-engine:
       hosts: {}                 # 例:跟 thanos-query 同台 → hosts: { metrics-central-1: }
 
+    # -- 外部登入探測:login-probe(login-probe-apply.yml，GitHub issue #11)
+    #    每站一台、opt-in;必須同時是 freeipa-client 與 host-monitoring
+    #    主機(sameHosts 依賴)，通常就是該站的 prometheus 主機。每 60 秒以
+    #    最小權限 FreeIPA canary 帳號真實 SSH 登入 freeipa-client group 的
+    #    每台主機，結果寫 node_exporter textfile -----------------------------
+    login-probe:
+      hosts: {}                 # 例:跟站台 prometheus 同台 → hosts: { metrics-site-a-1: }
+
     # -- 觀測畫面:Grafana + Loki(dashboard-apply.yml),只需一台 -----------
     dashboard:
       hosts: {}                 # 例:專門一台 → hosts: { dashboard-1: }

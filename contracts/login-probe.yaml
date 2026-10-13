@@ -1,0 +1,81 @@
+schemaVersion: 1
+id: login-probe
+role: login-probe
+specs:
+  - path: docs/verification/login-probe.md
+    rows: {all: true} # C1-C14
+playbooks:
+  apply: playbooks/apply/login-probe-apply.yml
+regressionTests:
+  - internal/spec/login_probe_regression_test.go
+  - internal/loginprobe/classify_test.go
+  - internal/loginprobe/config_test.go
+  - internal/loginprobe/metrics_test.go
+  - internal/loginprobe/runner_test.go
+  - cmd/pilot/cmd/tag_coverage_test.go
+conflicts: []
+# Both dependencies are structural, not optional: the probe's host-key
+# trust IS this host's SSSD (sss_ssh_knownhostsproxy reads the host keys
+# FreeIPA recorded at enrollment), and its only output path IS this host's
+# node_exporter textfile collector — issue #11's evaluation report §3.1.2.
+dependencies:
+  - {component: freeipa-client, required: true, relation: sameHosts,
+     reason: "the probe host must be FreeIPA-enrolled: sss_ssh_knownhostsproxy (host-key trust) and the canary account lookup both come from this host's SSSD"}
+  - {component: host-monitoring, required: true, relation: sameHosts,
+     reason: "the probe publishes every metric through this host's node_exporter textfile collector; it opens no listener of its own"}
+bindings: []
+os:
+  - {distro: ubuntu, versions: ["24.04"]}
+hostCardinality: zero-or-more
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
+groupVars:
+  - {name: login_probe_artifact_path, type: string, required: true, secret: false}
+  - {name: login_probe_artifact_sha256, type: string, required: false, default: "", secret: false, validation: "^$|^[a-f0-9]{64}$"}
+  - {name: login_probe_interval, type: duration, required: false, default: "60s", secret: false}
+  - {name: login_probe_connect_timeout, type: duration, required: false, default: "10s", secret: false}
+  - {name: login_probe_total_timeout, type: duration, required: false, default: "30s", secret: false}
+  - {name: login_probe_concurrency, type: integer, required: false, default: 4, secret: false}
+  - {name: login_probe_user, type: string, required: false, default: "pilot-login-canary", secret: false, validation: "^[a-z_][a-z0-9._-]*$"}
+  - {name: login_probe_command, type: string, required: false, default: "/bin/true", secret: false}
+  # Targets auto-expand from this inventory group (lower-case inventory
+  # name = probe_target label, <name>.<freeipa_domain> = SSH HostName);
+  # login_probe_targets overrides the expansion with explicit
+  # "name=host[:port]" entries.
+  - {name: login_probe_target_group, type: string, required: false, default: "freeipa-client", secret: false}
+  - {name: login_probe_targets, type: stringList, required: false, default: [], secret: false}
+  - {name: login_probe_ssh_port, type: integer, required: false, default: 22, secret: false}
+  # Optional vault-supplied private key (PEM); empty = the probe host
+  # generates and keeps its own key pair (see group_vars/login-probe.example.yml).
+  - {name: login_probe_ssh_private_key, type: string, required: false, secret: true}
+endpoints: []
+diagnostics:
+  runtime: {kind: systemd, name: pilot-login-probe.service}
+  logs: {source: systemd, lookback: 30m}
+  artifacts:
+    - {path: /etc/pilot/login-probe/config.yml, kind: file, sensitivity: non_secret}
+    - {path: /etc/pilot/login-probe/ssh_config, kind: file, sensitivity: non_secret}
+    - {path: /var/lib/node_exporter/textfile/pilot_login_probe.prom, kind: file, sensitivity: non_secret}
+  verifySpec: docs/verification/login-probe.md
+remediation:
+  actions:
+    - id: restart
+      risk: R1
+      executor: {kind: systemd_restart, target: pilot-login-probe.service}
+      maxTargets: 1
+      requiresApproval: true
+      verification: {spec: docs/verification/login-probe.md}
+stagePolicy: {variable: stage, default: sandbox}
+experimental: false
+evidenceRequirement: {targetTest: topology, idempotency: required}
+traceability:
+  mode: rowTags
+  tag: {kind: bare}
+  exemptions:
+    "docs/verification/login-probe.md#C13": {kind: verifyOnly, reason: "failure-stage scenario evidence (HBAC denial while sssd.service is active, frozen SSSD backend, dropped port, probe daemon stopped) comes from the login-probe topology drills in docs/evidence/login-probe/, not a single already-applied host; the host-side probe only confirms every stage series is published"}
+    "docs/verification/login-probe.md#C14": {kind: verifyOnly, reason: "idempotent-reapply is a multi-run property recorded in the evidence doc, not a single tagged task"}
+verification: {autoDeploy: false}
+# First delivery is opt-in (evaluation report §3.1.2 / U4): adding the
+# role to a host's hosts.yml is the operator's approval; flipping
+# site.include later requires a real site-wide deploy run (AGENTS.md §5.7
+# point 5).
+site: {include: false, order: 0, vars: {}, tags: [], optIn: true}

@@ -1,0 +1,54 @@
+---
+# ============================================================================
+#  group_vars/login-probe.example.yml —— 外部 SSH/PAM 登入探測（login-probe）設定範本
+# ============================================================================
+#
+#  啟用:複製成『真實 inventory 旁邊』的 group_vars/login-probe.yml
+#    cp group_vars/login-probe.example.yml <inventory 目錄>/group_vars/login-probe.yml
+#  (.example.yml 不會被自動載入;檔名要等於 group 名才生效。)
+#
+#  對應 spec:docs/verification/login-probe.md
+#  評估報告:docs/superpowers/plans/2026-10-13-issue-11-login-probe-io-pressure-evaluation.md
+#  （GitHub issue kjelly/pilot#11）
+#
+#  探測主機（login-probe group）必須同時是 freeipa-client（提供
+#  sss_ssh_knownhostsproxy 的 host-key 信任鏈）與 host-monitoring（提供
+#  node_exporter textfile collector）；contract 以 sameHosts 依賴鎖住。
+#  探測器每 login_probe_interval 以 canary 帳號用 OpenSSH 真實登入每個
+#  target 並執行 login_probe_command；canary 帳號、公鑰與只允許 sshd 的
+#  HBAC 規則由 freeipa-identity roster 管理（見 spec §canary）。
+# ============================================================================
+
+# pilot-cli image 已內建的 pilot-login-probe 二進位檔路徑（相對於 image
+# 的 /pilot repo root）。一般不需要改；只有使用外部 artifact 時才覆寫成
+# 絕對路徑。
+login_probe_artifact_path: "dist/pilot-login-probe-linux-amd64"
+
+# image builder 會把 checksum 放在 binary 旁的 .sha256 sidecar；留空時
+# login-probe-apply.yml 自動讀取該 sidecar。使用外部 artifact 時可在這裡
+# 填入明確的 64 位 SHA256 pin。
+login_probe_artifact_sha256: ""
+
+# 探測目標：預設展開 inventory 的 freeipa-client group 全部主機（含探測
+# 主機自己），每台的 probe_target label = 小寫 inventory 名稱，SSH 連線
+# 用 <小寫 inventory 名稱>.<freeipa_domain> 這個 FreeIPA FQDN（host-key
+# 由 SSSD 向 IPA 查詢，所以一定要用 FQDN，不能用 IP）。
+# login_probe_target_group: freeipa-client
+#
+# 要明確指定（覆寫自動展開）時：
+# login_probe_targets:
+#   - {name: web01, host: web01.ipa.pilot.internal, port: 22}
+#   - {name: web02, host: web02.ipa.pilot.internal}
+
+# 通常不用改，會沿用 playbook 內建預設：
+# login_probe_interval: 60s          # 每輪間隔（issue #11 R1：60 秒）
+# login_probe_connect_timeout: 10s   # OpenSSH ConnectTimeout
+# login_probe_total_timeout: 30s     # 單一 target 含 proxy/認證/指令的總上限
+# login_probe_concurrency: 4         # 同時探測的 target 數
+# login_probe_ssh_port: 22           # 自動展開 target 時的 sshd port
+# login_probe_user: pilot-login-canary
+# login_probe_command: /bin/true     # 非互動指令；canary 沒有 sudo
+
+# 私鑰：預設留空 → apply 時在探測主機產生 ed25519 金鑰對，私鑰永不離開該
+# 主機；要集中管理/輪替時走 vault 的 login-probe section
+# （login_probe_ssh_private_key），不要寫在這個檔案裡。

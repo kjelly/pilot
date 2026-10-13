@@ -264,6 +264,11 @@ var deployCatalog = []deployPlaybook{
 		},
 	},
 	{
+		Key: "login-probe", Label: "每站外部 SSH/PAM 登入探測(FreeIPA canary 帳號，60 秒一次真實登入)",
+		Playbook: "playbooks/apply/login-probe-apply.yml", DefaultGroup: "login-probe", StageVar: "stage",
+		Note: "探測主機必須同時是 freeipa-client 與 host-monitoring(sameHosts 依賴)；預設探測 inventory 的 freeipa-client group 全部主機,canary 帳號與公鑰由 freeipa-identity roster 管理。",
+	},
+	{
 		Key: "agent-controller", Label: "Agent Monitoring Phase 1(observe-only incident controller)",
 		Playbook: "playbooks/apply/agent-controller-apply.yml", DefaultGroup: "agent-controller", StageVar: "stage",
 		Note: "接收 Alertmanager webhook、正規化成 incident,派送唯讀診斷請求給外部 Agent Runtime;零 mutation 權限,不吃 SSH 憑證。experimental,預設不進 site.yml。",

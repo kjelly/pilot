@@ -1,0 +1,81 @@
+# Login probe — is a retiring host still one of the probe's targets?
+#
+# Read-only central query for host decommission (spec
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §19: an
+# active alert-target mapping that keeps contacting a retired host is
+# active residue). The login probe renders its target list at apply time
+# from the inventory, so a host being decommissioned stays a probe target
+# — and keeps raising PilotLoginProbe* alerts — until the probe hosts are
+# re-rendered without it. internal/decommission/providers.LoginProbeTargetsProvider
+# uses this playbook to find out whether that re-render is still needed and
+# to verify it afterwards; the re-render itself is
+# playbooks/apply/login-probe-apply.yml with -e login_probe_exclude_targets.
+#
+# Invoked ONLY by that provider — never directly by an operator:
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/login-probe-target-query.yml \
+#       --limit <probe hosts> --tags target_query \
+#       -e '{"pilot_decommission_target_names": ["<inventory name>", "<fqdn>"]}'
+#
+# Output contract (parsed by the provider), one line per probe host:
+#   LOGIN_PROBE_TARGET_PRESENT[<probe host>]=true|false
+#
+# No stage gate: this playbook only reads one file and prints a line — it
+# never mutates anything (AGENTS.md §4.3 point 4's read-only exception,
+# same posture as wazuh-manager-agent-deregister.yml's agent_query mode).
+---
+- name: Login probe — report whether a retiring host is still a probe target (read-only)
+  hosts: "{{ target_group | default('login-probe') }}"
+  become: true
+  gather_facts: false
+  # The config path is resolved with default() at use, not in play vars:
+  # play vars would override an inventory host var (AGENTS.md §4.5 point 3).
+  tasks:
+    - name: "Gate: the names to look for are supplied as a list"
+      ansible.builtin.assert:
+        that:
+          - pilot_decommission_target_names is defined
+          - pilot_decommission_target_names is not string
+          - pilot_decommission_target_names | length > 0
+        fail_msg: >-
+          pilot_decommission_target_names must be a non-empty list of the
+          retiring host's names (inventory name and FQDN), passed as JSON.
+      tags: [target_query]
+
+    # Only a config that does not exist counts as "not a target" (a probe
+    # host never applied, or already cleaned up, probes nothing). Any other
+    # read failure must fail the query: reporting "absent" for a file that
+    # could not be read would let the decommission skip a re-render it
+    # still needs (AGENTS.md §5.12).
+    - name: "Check whether the probe host has a rendered configuration (read-only)"
+      ansible.builtin.stat:
+        path: "{{ login_probe_query_config_path | default('/etc/pilot/login-probe/config.yml') }}"
+      register: login_probe_query_config_stat
+      tags: [target_query]
+
+    - name: "Read the rendered probe configuration (read-only)"
+      ansible.builtin.slurp:
+        src: "{{ login_probe_query_config_path | default('/etc/pilot/login-probe/config.yml') }}"
+      register: login_probe_query_config
+      when: login_probe_query_config_stat.stat.exists
+      tags: [target_query]
+
+    - name: "Compute whether the retiring host is still listed (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_present: >-
+          {%- set wanted = pilot_decommission_target_names | map('lower') | list -%}
+          {%- set found = [] -%}
+          {%- if login_probe_query_config_stat.stat.exists -%}
+            {%- for t in ((login_probe_query_config.content | b64decode | from_yaml).targets | default([], true)) -%}
+              {%- if (t.name | default('') | lower) in wanted or (t.host | default('') | lower) in wanted -%}
+                {%- set _ = found.append(t.name) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {{ found | length > 0 }}
+      tags: [target_query]
+
+    - name: "Report for the decommission provider (read-only)"
+      ansible.builtin.debug:
+        msg: "LOGIN_PROBE_TARGET_PRESENT[{{ inventory_hostname }}]={{ login_probe_query_present | bool | lower }}"
+      tags: [target_query]

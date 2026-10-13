@@ -55,6 +55,7 @@ WORKDIR /src
 
 ARG PILOT_GIT_SHA=unknown
 ARG DETECTION_ENGINE_VERSION=0.0.0-dev
+ARG LOGIN_PROBE_VERSION=0.0.0-dev
 ARG AGENT_CONTROLLER_VERSION=0.0.0-dev
 ARG PILOT_ACCESS_GATEWAY_VERSION=0.0.0-dev
 ARG PILOT_ACCESS_DIRECTORY_VERSION=0.0.0-dev
@@ -139,6 +140,17 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
  && sha256sum pilot-detection-engine-linux-amd64 \
       > pilot-detection-engine-linux-amd64.sha256
 
+# Same delivery shape for the per-site login probe (GitHub issue #11):
+# login-probe-apply.yml verifies this checksum before and after the copy.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${LOGIN_PROBE_VERSION} -X main.commit=${PILOT_GIT_SHA}" \
+      -o /out/pilot-login-probe-linux-amd64 \
+      ./cmd/pilot-login-probe \
+ && cd /out \
+ && sha256sum pilot-login-probe-linux-amd64 \
+      > pilot-login-probe-linux-amd64.sha256
+
 # The Phase-1 incident controller is deployed by the same control image. Its
 # apply playbook verifies this exact controller-side SHA256 before copying, so
 # ship the binary and sidecar together rather than requiring each operator to
@@ -220,6 +232,8 @@ RUN uv pip install --system --no-cache \
 COPY --from=builder /out/pilot /usr/local/bin/pilot
 COPY --from=builder /out/pilot-detection-engine-linux-amd64 /pilot/dist/pilot-detection-engine-linux-amd64
 COPY --from=builder /out/pilot-detection-engine-linux-amd64.sha256 /pilot/dist/pilot-detection-engine-linux-amd64.sha256
+COPY --from=builder /out/pilot-login-probe-linux-amd64 /pilot/dist/pilot-login-probe-linux-amd64
+COPY --from=builder /out/pilot-login-probe-linux-amd64.sha256 /pilot/dist/pilot-login-probe-linux-amd64.sha256
 COPY --from=builder /out/pilot-agent-controller-linux-amd64 /pilot/dist/pilot-agent-controller-linux-amd64
 COPY --from=builder /out/pilot-agent-controller-linux-amd64.sha256 /pilot/dist/pilot-agent-controller-linux-amd64.sha256
 COPY --from=builder /out/pilot-linux-amd64 /pilot/dist/pilot-linux-amd64
