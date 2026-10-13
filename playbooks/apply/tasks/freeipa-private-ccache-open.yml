@@ -1,0 +1,63 @@
+---
+# Shared task: a private Kerberos credential cache for the tickets one play
+# obtains with kinit (issue #69). Before this existed, playbooks ran
+# `kinit admin` into the host's default cache and never destroyed it, so a
+# FreeIPA admin TGT stayed on the host after the run, and any later program
+# using the default cache acted as admin without knowing it.
+#
+# Use: wrap every task that needs the ticket in one block, include this
+# file as the block's first task and tasks/freeipa-private-ccache-close.yml
+# in the block's `always:`, and give the block
+#
+#   environment:
+#     KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+#
+# Every kinit/ipa/klist/kdestroy in the block, including those in task files
+# it includes, then uses the private cache. Before this file has run the
+# default names a path that cannot exist, so a kinit there fails instead of
+# falling back to the default cache. Tag both includes `always` (with
+# `apply: {tags: [always]}`): the cache must exist and be removed whatever
+# --tags selects.
+#
+# Output facts:
+#   pilot_krb5ccname      : FILE:<path> of the new cache
+#   pilot_krb5ccname_file : the tempfile result (its .path is removed on close)
+#
+# The file is created by the tempfile module (mkstemp: unique name, 0600,
+# owned by the remote user, root under become). check_mode: false so the
+# cache also exists in --check, where some kinit/ipa reads still run.
+
+- name: "Private Kerberos cache — create the cache file"
+  ansible.builtin.tempfile:
+    state: file
+    prefix: pilot-krb5cc-
+    suffix: .ccache
+  register: pilot_krb5ccname_file
+  changed_when: false
+  check_mode: false
+
+- name: "Private Kerberos cache — point KRB5CCNAME at it"
+  ansible.builtin.set_fact:
+    pilot_krb5ccname: "FILE:{{ pilot_krb5ccname_file.path }}"
+
+# A run that was killed (SIGKILL, lost connection) never reached its
+# `always:`; its cache is recognisable by name and removed by the next run
+# once it is a day old, past the default ticket lifetime. Younger ones may
+# belong to a run that is still going.
+- name: "Private Kerberos cache — find caches a killed run left behind"
+  ansible.builtin.find:
+    paths: "{{ pilot_krb5ccname_file.path | dirname }}"
+    patterns: "pilot-krb5cc-*.ccache"
+    age: 1d
+  register: pilot_krb5ccname_stale
+  check_mode: false
+
+- name: "Private Kerberos cache — remove them"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ pilot_krb5ccname_stale.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.path != pilot_krb5ccname_file.path
+  check_mode: false

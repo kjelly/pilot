@@ -81,81 +81,99 @@
       run_once: true
       tags: [always]
 
-    - name: "Kinit admin for read-only identity probe"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ identity_admin_password }}" |
-            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      run_once: true
-      tags: [identity, probe]
-
   tasks:
-    - name: "Probe active or preserved FreeIPA user"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-show
-          - "{{ pilot_identity_name }}"
-          - --all
-          - --raw
-      register: pilot_identity_user_show
-      changed_when: false
-      failed_when: false
+    - name: "Read-only FreeIPA queries with a private Kerberos cache for the admin ticket"
       environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, probe]
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Classify FreeIPA probe"
-      ansible.builtin.set_fact:
-        pilot_identity_probe_class: >-
-          {% if pilot_identity_user_show.rc == 0 %}
-          active_or_preserved
-          {% elif 'not found' in
-                  (pilot_identity_user_show.stderr | default('') | lower) %}
-          not_found
-          {% else %}
-          unknown
-          {% endif %}
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Kinit admin for read-only identity probe"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ identity_admin_password }}" |
+                kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Fail closed when FreeIPA history cannot be determined"
-      ansible.builtin.assert:
-        that:
-          - pilot_identity_probe_class | trim != 'unknown'
-        fail_msg: >-
-          Unable to determine whether user {{ pilot_identity_name }} has
-          ever entered the FreeIPA lifecycle. The probe failed with rc
-          {{ pilot_identity_user_show.rc }}. Refusing to classify this
-          user as never-applied.
-      run_once: true
-      tags: [identity, probe]
+        - name: "Probe active or preserved FreeIPA user"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - user-show
+              - "{{ pilot_identity_name }}"
+              - --all
+              - --raw
+          register: pilot_identity_user_show
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Build machine-readable probe result"
-      ansible.builtin.set_fact:
-        pilot_identity_probe_result:
-          schema_version: 1
-          kind: user
-          name: "{{ pilot_identity_name }}"
-          ever_applied: >-
-            {{ (pilot_identity_probe_class | trim) == 'active_or_preserved' }}
-          freeipa_state: "{{ pilot_identity_probe_class | trim }}"
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Classify FreeIPA probe"
+          ansible.builtin.set_fact:
+            pilot_identity_probe_class: >-
+              {% if pilot_identity_user_show.rc == 0 %}
+              active_or_preserved
+              {% elif 'not found' in
+                      (pilot_identity_user_show.stderr | default('') | lower) %}
+              not_found
+              {% else %}
+              unknown
+              {% endif %}
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Write probe result on the Ansible controller"
-      ansible.builtin.copy:
-        dest: "{{ pilot_identity_probe_output }}"
-        mode: "0600"
-        content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Fail closed when FreeIPA history cannot be determined"
+          ansible.builtin.assert:
+            that:
+              - pilot_identity_probe_class | trim != 'unknown'
+            fail_msg: >-
+              Unable to determine whether user {{ pilot_identity_name }} has
+              ever entered the FreeIPA lifecycle. The probe failed with rc
+              {{ pilot_identity_user_show.rc }}. Refusing to classify this
+              user as never-applied.
+          run_once: true
+          tags: [identity, probe]
+
+        - name: "Build machine-readable probe result"
+          ansible.builtin.set_fact:
+            pilot_identity_probe_result:
+              schema_version: 1
+              kind: user
+              name: "{{ pilot_identity_name }}"
+              ever_applied: >-
+                {{ (pilot_identity_probe_class | trim) == 'active_or_preserved' }}
+              freeipa_state: "{{ pilot_identity_probe_class | trim }}"
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
+
+        - name: "Write probe result on the Ansible controller"
+          ansible.builtin.copy:
+            dest: "{{ pilot_identity_probe_output }}"
+            mode: "0600"
+            content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
+          delegate_to: localhost
+          become: false
+          run_once: true
+          tags: [identity, probe]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

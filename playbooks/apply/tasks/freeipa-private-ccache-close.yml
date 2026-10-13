@@ -1,0 +1,26 @@
+---
+# Shared task: destroy the private Kerberos cache that
+# tasks/freeipa-private-ccache-open.yml created (issue #69). Include it in
+# the `always:` of the block that opened the cache, tagged `always`, so it
+# runs after success, after a failure and under any --tags.
+#
+# `pilot_krb5ccname_file.path is defined`, not just `is defined`: when the
+# open task was skipped its registered result has no path.
+
+- name: "Private Kerberos cache — destroy the tickets in it"
+  ansible.builtin.command:
+    argv: [kdestroy, -q, -c, "{{ pilot_krb5ccname }}"]
+  when:
+    - pilot_krb5ccname_file.path is defined
+    - pilot_krb5ccname is defined
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Private Kerberos cache — remove the cache file"
+  ansible.builtin.file:
+    path: "{{ pilot_krb5ccname_file.path }}"
+    state: absent
+  when: pilot_krb5ccname_file.path is defined
+  changed_when: false
+  check_mode: false
