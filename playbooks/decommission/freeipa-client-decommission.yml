@@ -135,6 +135,33 @@
         # configured"), so guard it exactly the way freeipa-client-
         # apply.yml's enrollment task guards the opposite direction
         # (`creates:` there, `when: ...exists` here).
+        # ipa-client-install --uninstall restores sshd's configuration and
+        # restarts sshd. With a broken file in sshd_config.d that restart
+        # fails: sshd stays down, and the uninstall stops half done (SSSD's
+        # configuration gone, /etc/ipa/default.conf still there; seen on
+        # AlmaLinux 9, 2026-10-12). Check before touching anything.
+        - name: "FreeIPA client decommission — sshd -t before the uninstall restarts sshd"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          register: freeipa_decom_sshd_precheck
+          changed_when: false
+          failed_when: false
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_cfg.stat.exists
+
+        - name: "Gate: the sshd configuration is valid before uninstalling"
+          ansible.builtin.assert:
+            that:
+              - freeipa_decom_sshd_precheck.rc == 0
+            fail_msg: >-
+              Refusing to run ipa-client-install --uninstall: it restarts sshd, and sshd -t fails
+              ({{ ((freeipa_decom_sshd_precheck.stderr | default('')) or (freeipa_decom_sshd_precheck.stdout | default(''))) | trim }}).
+              Nothing was changed. Fix the sshd configuration, then resume.
+          when:
+            - not ansible_check_mode
+            - freeipa_decom_cfg.stat.exists
+
         - name: "FreeIPA client decommission — remove FreeIPA client enrollment"
           ansible.builtin.command:
             argv: [ipa-client-install, --uninstall, -U]
@@ -184,20 +211,66 @@
         # itself writes ("FreeIPA client — allow password/keyboard-
         # interactive SSH"). Nothing else under sshd_config.d/ is Pilot's
         # to remove.
-        - name: "FreeIPA client decommission — remove the Pilot-managed sshd password-auth drop-in"
-          ansible.builtin.file:
+        #
+        # Remove, `sshd -t`, reload as one block. If `sshd -t` fails (some
+        # other file in sshd_config.d is broken), the rescue puts the
+        # drop-in back, so the file on disk is again what sshd runs, and
+        # fails into the diagnostics rescue below; a resume retries. Before,
+        # sshd was restarted without `sshd -t`: with a broken file the
+        # restart failed and sshd stayed down, and a resume, finding the
+        # drop-in already gone, never restarted it. A reload, not a
+        # restart: a reload that fails leaves the running sshd as it was.
+        - name: "FreeIPA client decommission — snapshot the password-auth drop-in"
+          ansible.builtin.stat:
             path: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
-            state: absent
-          register: freeipa_decom_sshd_dropin
+            get_checksum: false
+          register: freeipa_decom_sshd_dropin_stat
           when: not ansible_check_mode
 
-        - name: "FreeIPA client decommission — restart sshd after removing the password-auth drop-in"
-          ansible.builtin.systemd:
-            name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
-            state: restarted
+        - name: "FreeIPA client decommission — read the password-auth drop-in"
+          ansible.builtin.slurp:
+            src: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+          register: freeipa_decom_sshd_dropin_before
           when:
             - not ansible_check_mode
-            - freeipa_decom_sshd_dropin.changed | default(false)
+            - freeipa_decom_sshd_dropin_stat.stat.exists
+
+        - name: "FreeIPA client decommission — remove the password-auth drop-in, validated and reloaded"
+          when: not ansible_check_mode
+          block:
+            - name: "FreeIPA client decommission — remove the Pilot-managed sshd password-auth drop-in"
+              ansible.builtin.file:
+                path: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+                state: absent
+              register: freeipa_decom_sshd_dropin
+
+            - name: "FreeIPA client decommission — sshd -t without the password-auth drop-in"
+              ansible.builtin.command:
+                argv: [sshd, -t]
+              when: freeipa_decom_sshd_dropin is changed
+              changed_when: false
+
+            - name: "FreeIPA client decommission — reload sshd after removing the password-auth drop-in"
+              ansible.builtin.systemd:
+                name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+                state: reloaded
+              when: freeipa_decom_sshd_dropin is changed
+          rescue:
+            - name: "FreeIPA client decommission — put the password-auth drop-in back"
+              ansible.builtin.copy:
+                dest: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf
+                content: "{{ freeipa_decom_sshd_dropin_before.content | b64decode }}"
+                owner: root
+                group: root
+                mode: "0644"
+              when: freeipa_decom_sshd_dropin_stat.stat.exists
+
+            - name: "FreeIPA client decommission — the password-auth drop-in was not removed"
+              ansible.builtin.fail:
+                msg: >-
+                  The password-auth sshd drop-in was not removed: "{{ ansible_failed_task.name }}" failed
+                  ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+                  It is back in place and sshd was not reloaded. Fix the sshd configuration, then resume.
 
       rescue:
         - name: "FreeIPA client decommission — rescue: dump SSSD status"
@@ -215,7 +288,9 @@
         - name: "FreeIPA client decommission — rescue: surface diagnostics and fail"
           ansible.builtin.fail:
             msg: |
-              FreeIPA client local decommission FAILED. Diagnostics:
+              FreeIPA client local decommission FAILED at "{{ ansible_failed_task.name | default('?') }}":
+              {{ ansible_failed_result.msg | default('') }}
+              Diagnostics:
               --- sssctl domain-status {{ ipa_domain }} ---
               {{ freeipa_decom_rescue_sssd.stdout | default('(unavailable)') }}
               {{ freeipa_decom_rescue_sssd.stderr | default('') }}

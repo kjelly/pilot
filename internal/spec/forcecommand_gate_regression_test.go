@@ -198,6 +198,18 @@ func runFCTasks(t *testing.T, pb fcPlaybook, dir string, extra map[string]any, a
 	if len(keep) < 6 {
 		t.Fatalf("found %d ForceCommand tasks in %s, want at least 6", len(keep), pb.path)
 	}
+	return runLocalTasks(t, playVars, keep, dir, extra, args...)
+}
+
+// runLocalTasks runs tasks (already passed through fcRewrite) on localhost
+// with the given play vars, dir standing in for /etc/ssh, /usr/local/libexec
+// and /usr/bin, and the default stand-in commands of runFCTasks unless
+// extra overrides them.
+func runLocalTasks(t *testing.T, playVars map[string]any, keep []map[string]any, dir string, extra map[string]any, args ...string) fcRun {
+	t.Helper()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
 	me, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +230,7 @@ func runFCTasks(t *testing.T, pb fcPlaybook, dir string, extra map[string]any, a
 		vars[k] = v
 	}
 	play := []map[string]any{{
-		"name": "forcecommand tasks", "hosts": "localhost", "connection": "local",
+		"name": "extracted tasks", "hosts": "localhost", "connection": "local",
 		"gather_facts": false, "become": false, "vars": vars, "tasks": keep,
 	}}
 	body, err := yaml.Marshal(play)
@@ -316,16 +328,23 @@ func fcRewrite(task map[string]any) map[string]any {
 	if args, ok := c["ansible.builtin.command"].(map[string]any); ok {
 		argv, _ := args["argv"].([]any)
 		if len(argv) > 0 {
+			// Only argv changes; creates/removes stay, so a skipped
+			// command stays skipped.
+			a := map[string]any{}
+			for k, v := range args {
+				a[k] = v
+			}
 			switch argv[0] {
 			case "curl":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_health_cmd }}"}
+				a["argv"] = "{{ fc_health_cmd }}"
 				delete(c, "retries")
 				delete(c, "delay")
 			case "getent":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_getent_cmd }}"}
+				a["argv"] = "{{ fc_getent_cmd }}"
 			case "sshd":
-				c["ansible.builtin.command"] = map[string]any{"argv": "{{ fc_sshd_cmd }}"}
+				a["argv"] = "{{ fc_sshd_cmd }}"
 			}
+			c["ansible.builtin.command"] = a
 		}
 	}
 	return c
