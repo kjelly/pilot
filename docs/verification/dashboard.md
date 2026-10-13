@@ -1,10 +1,12 @@
 # Verification Spec — dashboard (Grafana + Loki，跨機房 Metrics/Log 觀測入口)
 
 > 版本：v1.3（2026-10-12：Docker DNS 與 Grafana 容器內的 datasource 連通性驗收）
-> 目前驗證：2026-10-12 UTC，candidate `9e6d684966e91cefbfe04fdadaeb0a7fc318c914`，
-> tree `df67c2cf11380961bc025b955f6551b086c326f3`；全新 Ubuntu 24.04
-> 同機 topology 與真實 deploy/reconcile：14 PASS / 0 FAIL / 0 SKIP，第二次 apply changed=0。
-> [Actual-run evidence](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)。
+> 目前驗證：2026-10-13 UTC，candidate `0966cedadaa0ee0c5bdcf8c10e577e2b4a2bc8c1`，
+> tree `39cd8232f42c2f9940d487d1027f64d038885245`；兩台全新 Ubuntu 24.04、只 `--limit`
+> consumer 的真實 deploy/reconcile（變數檔另含 `target_group`）：14 PASS / 0 FAIL / 0 SKIP，
+> 再跑 reconcile changed=0。[Actual-run evidence](../evidence/dashboard/2026-10-13-0966ced-delivery.md)。
+> 同機全新 topology chain：2026-10-12 `9e6d684`，14 PASS，第二次 apply changed=0
+> （[evidence](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)）。
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `thanos-query.md`/
 > `seaweedfs-s3.md` 的 docker container 模式）
 > 維護者：sre

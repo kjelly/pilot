@@ -6,12 +6,13 @@ Grafana 透過 Thanos Query 的 Prometheus-compatible API 查 metrics，透過�
 
 ## 0.5 目前有效的事實快照
 
-- 驗證日期：2026-10-12 UTC；candidate `9e6d684966e91cefbfe04fdadaeb0a7fc318c914`，tree `df67c2cf11380961bc025b955f6551b086c326f3`。
-- 目標：由 `docs/topologies/dashboard-delivery-topology.yaml` 建立的全新 Ubuntu 24.04 KVM VM，實際 inventory 的 `docker`、`seaweedfs-s3`、`thanos-query`、`dashboard` 都指向同一個測試 host；本輪沒有 Prometheus sites。
-- 外部 state：重用既有 local cache services；測試變數檔包含 Grafana 密碼、Thanos S3 access/secret key、S3 endpoint 與測試 bucket 清單，秘密值不放入文件。
-- 對齊決定：A，建立具備上述 role groups 的拋棄式 inventory；沒有以 spec 推測實際 host。完整測試後 VM 已清除。
-- 結果：fresh check mode `failed=0`，apply `changed=26 failed=0`，dashboard v1.3 **14/14 PASS**，第二次 apply **changed=0 failed=0**。真實 deploy/reconcile 只選 dashboard 也成功；reconcile 修復被移除的 Query alias，再跑各元件 apply 都是 changed=0，Grafana datasource API 查詢成功。
-- [目前有效的驗證證據](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)。本輪涵蓋 Grafana/Loki、同機 Thanos datasource 與兩個交付入口；沒有重驗跨主機 log-shipping 或修改正式環境。
+- 交付入口（deploy/reconcile）驗證日期：2026-10-13 UTC；candidate `0966cedadaa0ee0c5bdcf8c10e577e2b4a2bc8c1`，tree `39cd8232f42c2f9940d487d1027f64d038885245`。
+- 目標：兩台全新 Ubuntu 24.04 KVM VM。實際 inventory：provider 在 `docker`、`seaweedfs-s3`、`thanos-query`；consumer 在 `docker`、`dashboard`。`--limit` 只框 consumer；本輪沒有 Prometheus sites。
+- 外部 state：先只在 provider 套用 Docker 與 SeaweedFS S3。測試變數檔包含 Grafana 密碼、Thanos S3 access/secret key 與測試 bucket，另含 `target_group: dashboard`（PR #39 review 的衝突情境）；秘密值不放入文件。
+- 對齊決定：A，建立具備上述 role groups 的拋棄式 inventory，以 `ansible-inventory --graph` 確認。完整測試後 VM 已清除。
+- 結果：計畫為 Docker（兩台）→ Thanos Query（provider）→ dashboard（consumer），每個依賴的 `target_group` 都排在變數檔之後。deploy 全部 `failed=0`，dashboard **14/14 PASS**；reconcile 後 dashboard **14/14 PASS**，thanos-query 10/13（C9/C10/C13 需要 Prometheus site）；再跑 reconcile 每個 apply 都是 `changed=0`。修正前的 control 同樣流程回報成功，但 Thanos Query 的 apply 是 `skipping: no hosts matched`，dashboard C8 FAIL。
+- 全新 topology chain（同機、check mode → apply → verify → 第二次 apply）最後一次在 2026-10-12 的 `9e6d684` 驗證：dashboard 14/14 PASS，第二次 apply changed=0；之後 playbook、contract 與 dashboard 驗收 row 沒有變更。
+- [目前有效的交付入口證據](../evidence/dashboard/2026-10-13-0966ced-delivery.md)；[topology chain 證據](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)。沒有重驗跨主機 DNS/TLS、log-shipping，也沒有修改正式環境。
 
 ## 1. 服務連線契約
 
