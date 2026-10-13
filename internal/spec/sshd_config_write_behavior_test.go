@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -22,13 +23,19 @@ import (
 //   - pilot-access-target-policy-apply.yml's absent path removed its drop-in,
 //     and reloaded only when the removal changed something: after a failed
 //     sshd -t no later run reloaded, and sshd kept the policy.
+//
+// The PR #50 review then found target-policy removing its pre-change
+// snapshot after the reload, inside the block whose rescue puts the drop-in
+// back: see TestRegression_SshdSnapshotCleanupFailsAfterTheReload.
 
 // sshdSite is one sshd configuration write and the task range around it.
 type sshdSite struct {
 	name, path  string
 	first, last string // the snapshot task and the block, in one task list
+	after       string // a task after the block the range runs to, or ""
 	dropin      string
 	backup      string // a file the site removes only after a reload, or ""
+	backupVar   string // the play var naming backup
 	write       bool   // writes content; otherwise removes the drop-in
 	content     string // a line the written drop-in contains
 	vars        map[string]any
@@ -47,9 +54,11 @@ var sshdSites = []sshdSite{
 		vars:   map[string]any{"ansible_os_family": "RedHat"}},
 	{name: "pilot-access-target-policy absent", path: "../../playbooks/apply/pilot-access-target-policy-apply.yml",
 		first: "Snapshot the policy drop-in before removing it", last: "Remove the policy (put back on failure)",
-		dropin: "/etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf",
-		backup: "/etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf.pre-pilot-access-target-policy.bak",
-		vars:   map[string]any{"ansible_os_family": "Debian"}},
+		after:     "Remove the pre-change snapshot (the policy is already removed)",
+		dropin:    "/etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf",
+		backup:    "/etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf.pre-pilot-access-target-policy.bak",
+		backupVar: "pilot_access_target_dropin_backup",
+		vars:      map[string]any{"ansible_os_family": "Debian"}},
 }
 
 // sshdSiteTasks returns the site's play vars and its task range, wherever
@@ -57,6 +66,10 @@ var sshdSites = []sshdSite{
 func sshdSiteTasks(t *testing.T, site sshdSite) (map[string]any, []map[string]any) {
 	t.Helper()
 	doc, _ := loadYAML(t, site.path).([]any)
+	last := site.last
+	if site.after != "" {
+		last = site.after
+	}
 	for _, item := range doc {
 		play, ok := item.(map[string]any)
 		if !ok {
@@ -64,12 +77,12 @@ func sshdSiteTasks(t *testing.T, site sshdSite) (map[string]any, []map[string]an
 		}
 		vars, _ := play["vars"].(map[string]any)
 		for _, section := range []string{"pre_tasks", "tasks"} {
-			if tasks := taskRange(play[section], site.first, site.last); tasks != nil {
+			if tasks := taskRange(play[section], site.first, last); tasks != nil {
 				return vars, tasks
 			}
 		}
 	}
-	t.Fatalf("%s: no task list holds %q through %q", site.path, site.first, site.last)
+	t.Fatalf("%s: no task list holds %q through %q", site.path, site.first, last)
 	return nil, nil
 }
 
@@ -259,14 +272,96 @@ func TestRegression_SshdConfigWritesRetryAfterAFailure(t *testing.T) {
 	}
 }
 
+// TestRegression_SshdSnapshotCleanupFailsAfterTheReload: target-policy's
+// absent path removes its pre-change snapshot once sshd has reloaded
+// without the policy. When that removal fails, the drop-in stays removed,
+// matching what sshd runs, and the message says so; the next run removes
+// the snapshot. Before (PR #50 review), the removal was the last step of
+// the block, so its failure ran the rescue: the drop-in went back on disk
+// without a reload, sshd's next restart would load the policy again, and
+// the message said "sshd was not reloaded".
+func TestRegression_SshdSnapshotCleanupFailsAfterTheReload(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory that makes the snapshot removal fail")
+	}
+	for _, site := range sshdSites {
+		if site.backup == "" {
+			continue
+		}
+		t.Run(site.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "sshd_config.d"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dropin := sshdSitePath(dir, site.dropin)
+			if err := os.WriteFile(dropin, []byte("# the policy\nAllowTcpForwarding no\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// The snapshot sits in a directory the run cannot write, so
+			// the file module's unlink fails as it would on a real host.
+			locked := filepath.Join(dir, "locked")
+			backup := filepath.Join(locked, filepath.Base(site.backup))
+			if err := os.MkdirAll(locked, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(backup, []byte("snapshot\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(locked, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+			extra := map[string]any{site.backupVar: backup}
+
+			res := runSshdSite(t, site, dir, extra)
+			failures := strings.Join(res.failures, "\n")
+			if res.rc == 0 || !res.reloaded() {
+				t.Fatalf("rc=%d reloaded=%v failures=%v; want the run to fail after the reload", res.rc, res.reloaded(), res.failures)
+			}
+			if got, err := os.ReadFile(dropin); err == nil {
+				t.Errorf("sshd reloaded without the policy, but the drop-in is back on disk:\n%s", got)
+			}
+			for _, wrong := range []string{"back in place", "not reloaded", "NOT removed"} {
+				if strings.Contains(failures, wrong) {
+					t.Errorf("failures=%v; the message says %q, but the policy is removed and sshd reloaded", res.failures, wrong)
+				}
+			}
+			for _, want := range []string{"reloaded without it", backup, "Unlinking failed"} {
+				if !strings.Contains(failures, want) {
+					t.Errorf("failures=%v; want the message to mention %q", res.failures, want)
+				}
+			}
+			if _, err := os.Stat(backup); err != nil {
+				t.Errorf("the snapshot is gone after its removal failed: %v", err)
+			}
+
+			if err := os.Chmod(locked, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			again := runSshdSite(t, site, dir, extra)
+			if again.rc != 0 {
+				t.Fatalf("rerun: rc=%d failures=%v; want it to pass", again.rc, again.failures)
+			}
+			if _, err := os.Stat(backup); err == nil {
+				t.Errorf("rerun left the snapshot")
+			}
+			if _, err := os.Stat(dropin); err == nil {
+				t.Errorf("rerun: the drop-in is back")
+			}
+		})
+	}
+}
+
 func TestSshdSitesExist(t *testing.T) {
 	for _, site := range sshdSites {
 		_, tasks := sshdSiteTasks(t, site)
 		if len(tasks) < 3 {
-			t.Errorf("%s: %d tasks from %q to %q, want the snapshot, the read and the block", site.name, len(tasks), site.first, site.last)
+			t.Errorf("%s: %d tasks from %q, want the snapshot, the read and the block", site.name, len(tasks), site.first)
 		}
-		if got := fmt.Sprint(tasks[len(tasks)-1]["rescue"]); got == "<nil>" {
-			t.Errorf("%s: %q has no rescue", site.name, site.last)
+		i := slices.IndexFunc(tasks, func(task map[string]any) bool { return fcName(task) == site.last })
+		if i < 0 || fmt.Sprint(tasks[i]["rescue"]) == "<nil>" {
+			t.Errorf("%s: %q is not a block with a rescue in the range", site.name, site.last)
 		}
 	}
 }

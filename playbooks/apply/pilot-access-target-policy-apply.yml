@@ -340,13 +340,6 @@
                 state: reloaded
               when: pilot_access_target_dropin_write is changed and not ansible_check_mode
               tags: [TP01]
-
-            - name: "TP02: sshd configuration is still valid after the reload"
-              ansible.builtin.command:
-                argv: [sshd, -t]
-              changed_when: false
-              when: not ansible_check_mode
-              tags: [TP02]
           rescue:
             - name: "Rollback: restore the previous drop-in"
               tags: [always]
@@ -384,6 +377,16 @@
                   pilot-access-target-policy was NOT applied to {{ inventory_hostname }}
                   and the previous sshd drop-in state was restored. See the failed
                   task above ({{ ansible_failed_task.name | default('?') }}).
+
+        # After the block, not in it: sshd already runs with the policy, so
+        # a failure here must not put the old drop-in back on disk. It fails
+        # the run before the host becomes transport-ready.
+        - name: "TP02: sshd configuration is still valid after the reload"
+          ansible.builtin.command:
+            argv: [sshd, -t]
+          changed_when: false
+          when: not ansible_check_mode
+          tags: [TP02]
 
         # Only after the policy is verified: make the host transport-ready.
         - name: "Kinit admin (FreeIPA hostgroup membership only)"
@@ -453,10 +456,11 @@
           failed_when: false
           when: not ansible_check_mode
 
-        # Remove, `sshd -t`, reload as one block. If `sshd -t` or the reload
-        # fails, the rescue puts the drop-in back, so the file on disk is
-        # again what sshd runs, and fails the run; the next run retries.
-        # The pre-change snapshot goes last, so a failed run keeps it.
+        # Remove, `sshd -t`, reload as one block, the reload last. If
+        # `sshd -t` or the reload fails, the rescue puts the drop-in back,
+        # so the file on disk is again what sshd runs, and fails the run;
+        # the next run retries. The pre-change snapshot goes after the
+        # block, so a failed run keeps it.
         # Before, a failed `sshd -t` left the drop-in removed but loaded,
         # and the reload only ran when the removal changed something, so a
         # later run never reloaded and sshd kept the policy while the
@@ -493,11 +497,6 @@
                 name: "{{ pilot_access_target_sshd_service }}"
                 state: reloaded
               when: pilot_access_target_dropin_removed is changed and not ansible_check_mode
-
-            - name: "Remove the pre-change snapshot"
-              ansible.builtin.file:
-                path: "{{ pilot_access_target_dropin_backup }}"
-                state: absent
           rescue:
             - name: "Rollback: put the policy drop-in back"
               ansible.builtin.copy:
@@ -516,3 +515,24 @@
                   ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
                   The policy drop-in is back in place and sshd was not reloaded; the host has
                   already left {{ pilot_access_target_ready_hostgroup }}.
+
+        # After the block, not in it: once sshd has reloaded without the
+        # policy, putting the drop-in back would leave the file on disk
+        # saying the policy is there while sshd runs without it (PR #50
+        # review). A failure here leaves both saying it is gone, keeps the
+        # snapshot, and the next run removes it.
+        - name: "Remove the pre-change snapshot (the policy is already removed)"
+          block:
+            - name: "Remove the pre-change snapshot"
+              ansible.builtin.file:
+                path: "{{ pilot_access_target_dropin_backup }}"
+                state: absent
+          rescue:
+            - name: "The pre-change snapshot was not removed"
+              ansible.builtin.fail:
+                msg: >-
+                  pilot-access-target-policy was removed from {{ inventory_hostname }}
+                  {{- ' and sshd reloaded without it' if pilot_access_target_dropin_removed is changed else '' }},
+                  but its pre-change snapshot {{ pilot_access_target_dropin_backup }} could not be
+                  removed ({{ ((ansible_failed_result.stderr | default('')) or (ansible_failed_result.msg | default(''))) | trim }}).
+                  The next run removes it.

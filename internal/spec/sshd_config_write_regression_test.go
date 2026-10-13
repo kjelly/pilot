@@ -173,6 +173,28 @@ func sshdConfigWrites(doc any) []sshdConfigWrite {
 	return out
 }
 
+// sshdConfigWriteOf returns the module, the sshd configuration file and the
+// module args of a task that writes or removes that file, with a path that
+// is a single play var resolved; path is "" for any other task.
+func sshdConfigWriteOf(task map[string]any, vars map[string]any) (mod, path string, args map[string]any) {
+	mod, raw, ok := taskModule(task, sshdWriteModules)
+	if !ok {
+		return "", "", nil
+	}
+	args, _ = raw.(map[string]any)
+	path, _ = args["dest"].(string)
+	if path == "" {
+		path, _ = args["path"].(string)
+	}
+	if m := singleVarRE.FindStringSubmatch(path); m != nil {
+		path, _ = vars[m[1]].(string)
+	}
+	if !isSshdConfigPath(path) || (mod == "file" && args["state"] != "absent") {
+		return "", "", nil
+	}
+	return mod, path, args
+}
+
 func walkSshdWrites(list []any, vars map[string]any, inRescue, rescued bool, out *[]sshdConfigWrite) {
 	for i, item := range list {
 		task, ok := item.(map[string]any)
@@ -187,22 +209,8 @@ func walkSshdWrites(list []any, vars map[string]any, inRescue, rescued bool, out
 			walkSshdWrites(always, vars, inRescue, rescued, out)
 			continue
 		}
-		mod, raw, ok := taskModule(task, sshdWriteModules)
-		if !ok || inRescue {
-			continue
-		}
-		args, _ := raw.(map[string]any)
-		path, _ := args["dest"].(string)
-		if path == "" {
-			path, _ = args["path"].(string)
-		}
-		if m := singleVarRE.FindStringSubmatch(path); m != nil {
-			path, _ = vars[m[1]].(string)
-		}
-		if !isSshdConfigPath(path) {
-			continue
-		}
-		if mod == "file" && args["state"] != "absent" {
+		mod, path, args := sshdConfigWriteOf(task, vars)
+		if path == "" || inRescue {
 			continue
 		}
 		w := sshdConfigWrite{name: fmt.Sprint(task["name"]), path: path}
@@ -352,6 +360,233 @@ func TestRegression_SshdConfigWriteAllowlistPathsExist(t *testing.T) {
 		if _, err := os.Stat("../../" + rel); err != nil {
 			t.Errorf("sshdConfigWriteAllowlist: %s: %v", rel, err)
 		}
+	}
+}
+
+// containsTask reports whether item, or a task in its block, rescue or
+// always sections at any depth, satisfies pred.
+func containsTask(item any, pred func(map[string]any) bool) bool {
+	task, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	if pred(task) {
+		return true
+	}
+	for _, key := range []string{"block", "rescue", "always"} {
+		list, _ := task[key].([]any)
+		if slices.ContainsFunc(list, func(sub any) bool { return containsTask(sub, pred) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// sshdStepsAfterReload finds, in each block whose rescue puts sshd
+// configuration back, the tasks that run after the one that reloads or
+// restarts a service. It returns them and the number of such blocks.
+func sshdStepsAfterReload(doc any) (problems []string, blocks int) {
+	var walk func(list []any, vars map[string]any)
+	walk = func(list []any, vars map[string]any) {
+		for _, item := range list {
+			task, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			block, _ := task["block"].([]any)
+			rescue, _ := task["rescue"].([]any)
+			putsBack := slices.ContainsFunc(rescue, func(sub any) bool {
+				return containsTask(sub, func(t map[string]any) bool {
+					_, path, _ := sshdConfigWriteOf(t, vars)
+					return path != ""
+				})
+			})
+			if putsBack {
+				blocks++
+				reload := slices.IndexFunc(block, func(sub any) bool {
+					return containsTask(sub, func(t map[string]any) bool {
+						_, _, ok := taskModule(t, sshdServiceModules)
+						return ok
+					})
+				})
+				if reload >= 0 {
+					for _, after := range block[reload+1:] {
+						a, _ := after.(map[string]any)
+						r, _ := block[reload].(map[string]any)
+						problems = append(problems, fmt.Sprintf("%q runs after %q in %q, whose rescue puts sshd's configuration back although sshd has already loaded the new one",
+							fcName(a), fcName(r), fmt.Sprint(task["name"])))
+					}
+				}
+			}
+			for _, key := range []string{"block", "rescue", "always"} {
+				sub, _ := task[key].([]any)
+				walk(sub, vars)
+			}
+		}
+	}
+	items, _ := doc.([]any)
+	isPlaybook := slices.ContainsFunc(items, func(item any) bool {
+		m, _ := item.(map[string]any)
+		_, ok := m["hosts"]
+		return ok
+	})
+	if !isPlaybook {
+		walk(items, nil)
+		return problems, blocks
+	}
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		vars, _ := play["vars"].(map[string]any)
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+			list, _ := play[section].([]any)
+			walk(list, vars)
+		}
+	}
+	return problems, blocks
+}
+
+// TestRegression_SshdReloadEndsItsRollbackBlock: pilot-access-target-policy's
+// absent path removed its pre-change snapshot after the reload, in the block
+// whose rescue puts the drop-in back. When that removal failed, sshd already
+// ran without the policy, the rescue put the drop-in back on disk without a
+// reload, and the run said "sshd was not reloaded"; sshd's next restart
+// would load the policy again (PR #50 review). The present path's
+// post-reload `sshd -t` sat in its block the same way. In a block whose
+// rescue puts sshd configuration back, the reload must be the last step.
+func TestRegression_SshdReloadEndsItsRollbackBlock(t *testing.T) {
+	blocks := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(path, "../../")
+		if !strings.HasPrefix(rel, "playbooks/apply/") && !strings.HasPrefix(rel, "playbooks/decommission/") {
+			continue
+		}
+		problems, n := sshdStepsAfterReload(loadYAML(t, path))
+		blocks += n
+		for _, p := range problems {
+			t.Errorf("%s: %s", rel, p)
+		}
+	}
+	// Install and removal for the gateway, the Directory and target-policy,
+	// and the two freeipa-client ones.
+	if blocks < 8 {
+		t.Fatalf("found only %d blocks that put sshd configuration back; the detection is broken", blocks)
+	}
+}
+
+func TestSshdStepsAfterReload(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string // substrings, one per expected problem
+	}{
+		{"the PR #50 review: snapshot removal after the reload", `
+- hosts: all
+  vars:
+    dropin: /etc/ssh/sshd_config.d/06-x.conf
+  tasks:
+    - name: remove the policy
+      block:
+        - name: remove
+          file: {path: "{{ dropin }}", state: absent}
+        - name: check
+          command: {argv: [sshd, -t]}
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+        - name: remove the snapshot
+          file: {path: /etc/ssh/sshd_config.d/06-x.conf.bak, state: absent}
+      rescue:
+        - name: put back
+          copy: {dest: "{{ dropin }}", content: x}
+`, []string{`"remove the snapshot" runs after "reload"`}},
+		{"a check after the reload, even when the rescue reloads", `
+- hosts: all
+  tasks:
+    - name: install
+      block:
+        - name: write
+          ansible.builtin.copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: check
+          ansible.builtin.command: {argv: [sshd, -t]}
+        - name: reload
+          ansible.builtin.systemd: {name: ssh, state: reloaded}
+        - name: check again
+          ansible.builtin.command: {argv: [sshd, -t]}
+      rescue:
+        - name: put back
+          ansible.builtin.file: {path: /etc/ssh/sshd_config.d/06-x.conf, state: absent}
+        - name: reload
+          ansible.builtin.systemd: {name: ssh, state: reloaded}
+`, []string{`"check again" runs after "reload"`}},
+		{"the reload in a nested block, then a step", `
+- hosts: all
+  tasks:
+    - name: outer
+      block:
+        - name: write
+          copy: {dest: /etc/ssh/sshd_config, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: inner
+          block:
+            - name: check
+              command: {argv: [sshd, -t]}
+            - name: restart
+              service: {name: sshd, state: restarted}
+        - name: later
+          debug: {msg: x}
+      rescue:
+        - block:
+            - name: put back
+              copy: {dest: /etc/ssh/sshd_config, content: y}
+`, []string{`"later" runs after "inner"`}},
+		{"the reload last; later steps outside the block", `
+- hosts: all
+  tasks:
+    - name: install
+      block:
+        - name: write
+          copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: check
+          command: {argv: [sshd, -t]}
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+      rescue:
+        - name: put back
+          copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: y}
+    - name: remove the snapshot
+      file: {path: /etc/ssh/sshd_config.d/06-x.conf.bak, state: absent}
+`, nil},
+		{"a rescue that does not touch sshd configuration", `
+- hosts: all
+  tasks:
+    - name: decommission
+      block:
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+        - name: later
+          debug: {msg: x}
+      rescue:
+        - name: diagnostics
+          fail: {msg: x}
+`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc any
+			if err := yaml.Unmarshal([]byte(tc.yaml), &doc); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := sshdStepsAfterReload(doc)
+			if len(got) != len(tc.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(tc.want), tc.want)
+			}
+			for i, want := range tc.want {
+				if !strings.Contains(got[i], want) {
+					t.Errorf("problem %d = %q, want it to mention %q", i, got[i], want)
+				}
+			}
+		})
 	}
 }
 
