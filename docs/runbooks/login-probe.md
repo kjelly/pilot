@@ -17,15 +17,16 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-13，working tree on `db10268`（未凍結 candidate，見 §6） |
+| 最新驗證 | 2026-10-13，candidate `6bcfb8a`（tree `ff483eb9b4ef`），從乾淨的 detached worktree 執行 |
 | 目標環境 | `docs/topologies/login-probe-topology.yaml`：`lp-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`lp-mon`（Ubuntu 24.04：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`lp-target`（Ubuntu 24.04）、`lp-target-el`（AlmaLinux 9.8）；以 `pilot vm-target topology up` 建立 |
 | inventory host 集合 | `pilot vm-target topology inventory --topology docs/topologies/login-probe-topology.yaml`：`freeipa-server`={lp-ipa}；`freeipa-client`/`host-monitoring`={lp-mon, lp-target, lp-target-el}；`docker`/`seaweedfs-s3`/`prometheus`/`alertmanager`/`login-probe`={lp-mon} |
 | vault 依賴（只列 key） | `ipa_admin_password`、`node_exporter_basic_auth_password`、`restic_aws_access_key_id`、`restic_aws_secret_access_key`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`；login-probe 本身不需要 secret（`login_probe_ssh_private_key` 選填） |
 | 對齊決定 | A（改 inventory）：topology 檔就是 spec §1 宣告的 group 集合 |
-| 全新 VM 測試 | `pilot vm-target topology test --ephemeral`（topology 的 per-run 改名副本，`playbooks/test/login-probe-chain.yml`）：L3 `--check --diff` 四台 `failed=0`、L4 apply `failed=0`、L5 `login-probe.md` 14/14 + `alertmanager.md` 10/10 PASS、L6 四台 `changed=0` |
+| candidate topology test | 對剛 `topology up` 的全新 VM 跑 `pilot vm-target topology test`（`playbooks/test/login-probe-chain.yml`）：L3 `--check --diff` 四台 `failed=0`、L4 apply `failed=0`、L5 `login-probe.md` 14/14 + `alertmanager.md` 10/10 PASS、L6 四台 `changed=0` |
+| 演練 | 整台主機停擺時 `PilotLoginProbeTransportFailed` 被 `HostDown` inhibit；`pilot host decommission` 退役被探測主機後 probe 設定不再列它（HD36-LIVE） |
 | verify（演練 topology） | `login-probe.md` 14/14 PASS；`alertmanager.md` 10/10 PASS；`prometheus.md` 17/21（C16–C19 是 GPU/dcgm-exporter row，此 topology 沒有 GPU 主機，不適用；C20/C21 PASS） |
 | 冪等 | `login-probe-apply.yml` 第二次 apply `changed=0`；整條 chain 在全新 VM 上 L6 `changed=0` |
-| evidence | Phase 0 擷取：`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`；演練：`docs/evidence/login-probe/2026-10-13-drills.md` |
+| evidence | candidate：`docs/evidence/login-probe/2026-10-13-6bcfb8a.md`；Phase 0 擷取：`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`；其餘演練（working tree）：`docs/evidence/login-probe/2026-10-13-drills.md` |
 
 ## 1. 為什麼
 
@@ -152,8 +153,11 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 - 目標名稱必須是小寫 inventory 名稱（`probe_target` 要等於 Prometheus 的
   `pilot_host`，否則 login 告警永遠對不上主機）；playbook 會 fail closed。
 - `prometheus.md` 的 C16–C19（GPU）在沒有 dcgm-exporter 主機的站台一定 FAIL，跟本功能無關。
-- 本 runbook 的驗證是 working tree 開發 run，不是凍結的 candidate commit（AGENTS.md §1.5）；
-  正式 candidate run 要在 commit 後以 `pilot vm-target topology test --ephemeral` 重跑。
+- I/O、SSSD 卡住、metrics 缺口、probe 停擺、全站 HBAC 拒絕這幾個演練跑在 candidate 之前的
+  working tree（`2026-10-13-drills.md`）；candidate `6bcfb8a` 重跑的是 L1–L6、整台主機停擺與退役。
+- `pilot host decommission` 不會移除 Prometheus 的 scrape target（host-decommission spec §19 尚未
+  實作的部分，與本元件無關）；`prometheus-apply.yml` 只改 `prometheus.yml` 時不會重啟 Prometheus
+  （既有 bug，見 candidate evidence §4）。
 
 ## 7. 變更紀錄
 
