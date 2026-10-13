@@ -15,7 +15,10 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-13，candidate `f63d490`（tree `42d4b6531cedec0467a0243fc3e714b2fa5f39ef`），
+最新驗證：2026-10-13，candidate `ed4cdcf`（replica 規則對齊後，issue #67/#68）在兩台 FreeIPA DNS
+server 的 topology 上 `complete`、10 項比對全部 `match`，見
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-13-ed4cdcf.md`](../evidence/freeipa-replica-dns-provider/2026-10-13-ed4cdcf.md)。
+下表是工具本身的完整情境驗證：candidate `f63d490`（tree `42d4b6531cedec0467a0243fc3e714b2fa5f39ef`），
 **PASS**。完整摘要：[`docs/evidence/dns-architecture-diagnose/2026-10-13-f63d490.md`](../evidence/dns-architecture-diagnose/2026-10-13-f63d490.md)。
 
 | 項目 | 事實 |
@@ -23,7 +26,7 @@
 | 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建、以 `playbooks/test/dns-tier-chain.yml` 部署的 VM（FreeIPA 4.13.4 / AlmaLinux 9.8、unbound 1.19.2 / Ubuntu 24.04.4），測完已移除 |
 | inventory host 集合 | `freeipa-server`: dd-ipa；`dns`: dd-dns；`freeipa-dns-client`: dd-client。S7–S10 另用 inventory 副本加入連不到的 replica、拿掉 `dns` group、設定 client override |
 | 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與 §2 的唯讀 principal 設定用）；`dd-ipa` 的 `/etc/pilot/dns-reader.keytab` |
-| 結果 | 11 個情境全部符合預期：有核准 principal 時 `complete`、8 項比對全部 `match`；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`（不是「沒有 forwarder」）；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止、replica 連不到時 `partial`；沒有 tier、client override、replica 未設 `freeipa_setup_dns` 都有對應 finding；`admin` principal 在啟動時被拒絕 |
+| 結果 | 11 個情境全部符合預期：有核准 principal 時 `complete`、8 項比對全部 `match`；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`（不是「沒有 forwarder」）；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止、replica 連不到時 `partial`；沒有 tier、client override、replica 未設 `freeipa_setup_dns` 都有對應 finding（最後一項在 `ed4cdcf` 隨 issue #67 移除：這種 replica 現在就是 DNS 提供者）；`admin` principal 在啟動時被拒絕 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼

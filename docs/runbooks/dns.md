@@ -11,8 +11,12 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-01，candidate `c257bfc`（tree `ecf68316f5d00aabbd46325c6452d201e638c159`），
-**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
+最新驗證：2026-10-13，candidate `ed4cdcf`（tree `d19a4e1868807939680519dfd27f4effd9c03982`），
+**PASS**：兩台 FreeIPA DNS server（primary + 未設 `freeipa_setup_dns` 的 replica，issue #67）
+在 tier 前面，`dns.md` v1.2 連跑 3 次皆 16 pass / 0 fail / 4 not_applicable。摘要：
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-13-ed4cdcf.md`](../evidence/freeipa-replica-dns-provider/2026-10-13-ed4cdcf.md)。
+這次沒有重跑 check mode 與冪等；最近一次完整驗證（下表）是 2026-10-01 candidate `c257bfc`，
+摘要：[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
