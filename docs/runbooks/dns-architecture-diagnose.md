@@ -15,14 +15,15 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：尚未在 candidate 上實跑（evidence-only commit 會更新本節）。
+最新驗證：2026-10-13，candidate `f63d490`（tree `42d4b6531cedec0467a0243fc3e714b2fa5f39ef`），
+**PASS**。完整摘要：[`docs/evidence/dns-architecture-diagnose/2026-10-13-f63d490.md`](../evidence/dns-architecture-diagnose/2026-10-13-f63d490.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | — |
-| inventory host 集合 | — |
-| 外部 state | — |
-| 結果 | — |
+| 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建、以 `playbooks/test/dns-tier-chain.yml` 部署的 VM（FreeIPA 4.13.4 / AlmaLinux 9.8、unbound 1.19.2 / Ubuntu 24.04.4），測完已移除 |
+| inventory host 集合 | `freeipa-server`: dd-ipa；`dns`: dd-dns；`freeipa-dns-client`: dd-client。S7–S10 另用 inventory 副本加入連不到的 replica、拿掉 `dns` group、設定 client override |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與 §2 的唯讀 principal 設定用）；`dd-ipa` 的 `/etc/pilot/dns-reader.keytab` |
+| 結果 | 11 個情境全部符合預期：有核准 principal 時 `complete`、8 項比對全部 `match`；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`（不是「沒有 forwarder」）；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止、replica 連不到時 `partial`；沒有 tier、client override、replica 未設 `freeipa_setup_dns` 都有對應 finding；`admin` principal 在啟動時被拒絕 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼
@@ -149,4 +150,4 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 
 | 日期 | 變更 | 變更者 |
 |---|---|---|
-| 2026-10-13 | 初版（issue #62） | pilot |
+| 2026-10-13 | 初版（issue #62）；§0.5 填入 candidate `f63d490` 的實跑結果 | pilot |
