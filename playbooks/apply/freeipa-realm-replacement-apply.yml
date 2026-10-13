@@ -180,6 +180,26 @@
           no_log: true
           tags: [C3]
 
+        # The uninstall stops SSSD but leaves the Kerberos snippet SSSD wrote
+        # for the old domain, /var/lib/sss/pubconf/krb5.include.d/
+        # domain_realm_<domain>, which krb5.conf includes through
+        # /etc/krb5.conf.d/enable_sssd_conf_dir. It maps the old DNS domain to
+        # the old realm. When the new server keeps a name in that domain, the
+        # new enrollment asked the new KDC for a cross-realm ticket to the old
+        # realm ("Server krbtgt/IPA.PILOT.INTERNAL@NEW.EXAMPLE.TEST not found
+        # in Kerberos database") and failed (2026-10-13). SSSD writes the
+        # snippet again for the domain it serves when it starts.
+        - name: "Realm replacement — remove the old domain's SSSD Kerberos realm mapping"
+          ansible.builtin.file:
+            path: "/var/lib/sss/pubconf/krb5.include.d/domain_realm_{{ freeipa_realm_replacement_old_domain | replace('.', '_') }}"
+            state: absent
+          vars:
+            freeipa_realm_replacement_old_domain: >-
+              {{ (freeipa_realm_replacement_old_config.results[0].content | default('') | b64decode
+                  | regex_findall('(?m)^\s*domain\s*=\s*(\S+)') + ['']) | first | lower }}
+          when: freeipa_realm_replacement_old_domain | length > 0
+          tags: [C3]
+
         # freeipa-client-apply.yml pins the old realm's servers in /etc/hosts,
         # and the uninstall leaves them. With the old pin still there (its short
         # name, e.g. `ipa1`, the same as the new server's), SSSD on Ubuntu 24.04

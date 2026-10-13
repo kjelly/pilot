@@ -49,10 +49,16 @@ wave 是三個獨立變更，不得合併成一次不可觀察的操作。
 
 playbook 會依序：確認 client 仍在宣告的 old realm → 建立 root-only archive → 確認新 server
 的 443 可達 → 讀取舊 realm 的 server 清單 → `ipa-client-install --uninstall`（仍連舊 server）→
-移除 `/etc/hosts` 裡舊 realm 的 server pin → pin 新 server → 以新座標重新 enroll → 等待 SSSD
-解析新 realm 帳號 → 寫入不含密碼的 completion marker。新 server 沿用舊 server 的 FQDN 時，
-該 FQDN 原本在 `PILOT FREEIPA SERVER POOL` block 裡；新 pin 必須在 block 移除之後才寫入，否則
-會跟著 block 一起被刪掉。
+移除舊 domain 的 SSSD Kerberos realm mapping 與 `/etc/hosts` 裡舊 realm 的 server pin → pin 新
+server → 以新座標重新 enroll → 等待 SSSD 解析新 realm 帳號 → 寫入不含密碼的 completion marker。
+
+新 server 沿用舊 server 的 FQDN 時：
+- 該 FQDN 原本在 `PILOT FREEIPA SERVER POOL` block 裡；新 pin 必須在 block 移除之後才寫入，否則
+  會跟著 block 一起被刪掉。
+- uninstall 會停掉 SSSD，但留下 SSSD 為舊 domain 寫的
+  `/var/lib/sss/pubconf/krb5.include.d/domain_realm_<domain>`（krb5.conf 經
+  `/etc/krb5.conf.d/enable_sssd_conf_dir` 引入），它把舊 DNS domain 對到舊 realm；不移除時，新
+  enrollment 會向新 KDC 要舊 realm 的 cross-realm ticket 而失敗。
 
 每個正式命令都仍是 **TODO: VERIFY**；在 candidate 實跑完成前，請從 spec 的變數契約將
 已驗證的精確命令、實際 PLAY RECAP 與 evidence link 取代進來。不得以本草稿推測參數或
