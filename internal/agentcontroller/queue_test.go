@@ -166,10 +166,14 @@ func TestScheduler_TransportFailureRetriesThenGivesUp(t *testing.T) {
 	}}
 	sched := newTestScheduler(store, fake)
 	sched.MaxDispatchAttempts = 2
-	sched.BaseBackoff = 0 // no real wait needed in this test
+	// A fixed clock: next_dispatch_at is stored at one-second resolution,
+	// so with the real clock a backoff that crossed a second boundary left
+	// the incident ineligible for the second pass (about 1 run in 100).
+	clock := now
+	sched.Now = func() time.Time { return clock }
 
 	// First pass: attempt 1 fails, incident goes back to OPEN with
-	// next_dispatch_at cleared (backoff=0) so it's immediately eligible.
+	// next_dispatch_at one backoff away.
 	if _, err := sched.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce (1st): %v", err)
 	}
@@ -178,7 +182,9 @@ func TestScheduler_TransportFailureRetriesThenGivesUp(t *testing.T) {
 		t.Fatalf("status after 1st failure = %q, want OPEN (still has a retry budget)", inc1.Status)
 	}
 
-	// Second pass: attempt 2 fails, budget exhausted.
+	// Second pass, once the backoff has passed: attempt 2 fails, budget
+	// exhausted.
+	clock = clock.Add(sched.backoffFor(1))
 	if _, err := sched.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce (2nd): %v", err)
 	}
