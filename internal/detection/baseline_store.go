@@ -83,9 +83,9 @@ func (s *Store) SaveBaselineSamples(records []BaselineSampleRecord, evaluationTi
 	return nil
 }
 
-// LoadBaselineHistory reads every baseline sample newer than
-// now-baselineWindowSeconds (24h) for the given subjectKind into a fresh
-// HostBaselineStore — the startup warm-start path (spec §14.1/§14.2).
+// LoadBaselineHistory restores recent normal history and the frozen normal
+// reference windows of firing/recovering subjects of the given subjectKind
+// into a fresh HostBaselineStore (spec §14.1/§14.2).
 // Without it, robust-baseline-v1's 120-bucket history requirement
 // cold-starts on every process restart regardless of how long this
 // subject has actually been observed; an empty/absent table (fresh
@@ -96,7 +96,28 @@ func (s *Store) SaveBaselineSamples(records []BaselineSampleRecord, evaluationTi
 // an ID and feature name could load each other's history.
 func (s *Store) LoadBaselineHistory(now time.Time, subjectKind string) (*HostBaselineStore, error) {
 	cutoff := now.Unix() - baselineWindowSeconds
-	rows, err := s.db.Query(`SELECT subject_id, feature, bucket_ts, value FROM baseline_samples WHERE bucket_ts >= ? AND subject_kind = ?`, cutoff, subjectKind)
+	// Active episodes cannot learn replacement samples (§16), so applying
+	// the wall-clock cutoff to their reference makes a long-running episode
+	// permanently unscoreable after restart. Restore its bounded window
+	// relative to the last accepted normal bucket instead. Resolved episodes
+	// never extend the cutoff, and another subject kind cannot claim it.
+	rows, err := s.db.Query(`
+		WITH active_subjects AS (
+			SELECT DISTINCT subject_id FROM signal_episodes
+			WHERE subject_kind = ? AND state IN ('firing', 'recovering')
+		), active_baselines AS (
+			SELECT b.subject_id, b.feature, MAX(b.bucket_ts) - ? AS cutoff
+			FROM active_subjects a
+			JOIN baseline_samples b ON b.subject_id = a.subject_id
+			WHERE b.subject_kind = ? AND b.bucket_ts <= ?
+			GROUP BY b.subject_id, b.feature
+		)
+		SELECT b.subject_id, b.feature, b.bucket_ts, b.value
+		FROM baseline_samples b
+		LEFT JOIN active_baselines a ON a.subject_id = b.subject_id AND a.feature = b.feature
+		WHERE b.subject_kind = ? AND b.bucket_ts <= ?
+		AND b.bucket_ts >= COALESCE(a.cutoff, ?)
+	`, subjectKind, baselineWindowSeconds, subjectKind, now.Unix(), subjectKind, now.Unix(), cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query baseline_samples: %w", err)
 	}

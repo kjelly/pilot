@@ -529,6 +529,14 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 			continue // spec §20.7: invalid cycle advances nothing
 		}
 
+		// Only an active/candidate lifecycle may use a frozen reference.
+		// Prune normal history before scoring too, including a reference
+		// loaded for an episode that startup reconciliation has resolved.
+		if e.lifecycleFor(snap.Host).State == StateNormal {
+			for name := range snap.Current {
+				e.Baselines.Evict(snap.Host, name, evaluationTime)
+			}
+		}
 		history := map[string][]float64{}
 		for name := range snap.Current {
 			history[name] = e.Baselines.History(snap.Host, name)
@@ -565,8 +573,10 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 					baselineSamples = append(baselineSamples, e.baselineSampleRecord(snap.Host, siteByHost[snap.Host], name, bucketTS, value))
 				}
 			}
-			for name := range snap.Current {
-				e.Baselines.Evict(snap.Host, name, evaluationTime)
+			if lc.State == StateNormal {
+				for name := range snap.Current {
+					e.Baselines.Evict(snap.Host, name, evaluationTime)
+				}
 			}
 
 			outcomes = append(outcomes, outcome)
@@ -628,8 +638,13 @@ func (e *Engine) RunCycle(ctx context.Context, evaluationTime int64) ([]HostCycl
 				baselineSamples = append(baselineSamples, e.baselineSampleRecord(ph.snap.Host, ph.site, name, bucketTS, value))
 			}
 		}
-		for name := range ph.snap.Current {
-			e.Baselines.Evict(ph.snap.Host, name, evaluationTime)
+		// Freeze eviction together with learning while an anomaly is active.
+		// Otherwise its normal reference disappears after 24h and the invalid
+		// detector can neither keep evaluating nor reach recovery (§14.2/§16).
+		if lc.State == StateNormal {
+			for name := range ph.snap.Current {
+				e.Baselines.Evict(ph.snap.Host, name, evaluationTime)
+			}
 		}
 	}
 	if len(baselineSamples) > 0 {

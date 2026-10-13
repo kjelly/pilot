@@ -112,3 +112,51 @@ func TestStore_SaveBaselineSamples_EmptyBatchIsANoop(t *testing.T) {
 		t.Fatalf("SaveBaselineSamples(nil): %v", err)
 	}
 }
+
+func TestStore_LoadBaselineHistory_FrozenWindowOnlyForActiveSubjectKind(t *testing.T) {
+	for _, state := range []string{"normal", "firing", "recovering", "resolved", "other-kind"} {
+		t.Run(state, func(t *testing.T) {
+			s := openTestStore(t)
+			lastNormal := BucketOf(1_700_000_000)
+			now := lastNormal + 10*24*60*60
+			if state != "normal" {
+				kind, episodeState := SubjectKindManagedHost, state
+				if state == "other-kind" {
+					kind, episodeState = "network_device", "firing"
+				}
+				if err := s.ApplyTransition(EpisodeRecord{
+					SignalID: "sig-1", Fingerprint: "fp-1", SubjectID: "web-1", SubjectKind: kind,
+					ProfileID: "test-v1", ProfileVersion: 1, State: episodeState, Severity: "warning",
+					CreatedAt: time.Unix(lastNormal, 0), UpdatedAt: time.Unix(lastNormal, 0), Revision: 1,
+				}, HistoryRecord{SignalID: "sig-1", Revision: 1, EventType: "create", PayloadJSON: "{}", CreatedAt: time.Unix(lastNormal, 0)}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.SaveBaselineSamples([]BaselineSampleRecord{
+				{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: lastNormal - 25*60*60, Value: 0.1},
+				{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: lastNormal - 60*60, Value: 0.2},
+				{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: lastNormal, Value: 0.3},
+				{SubjectID: "web-1", SubjectKind: SubjectKindManagedHost, Feature: "cpu_utilization", BucketTS: now + 60, Value: 0.9},
+			}, lastNormal-25*60*60); err != nil {
+				t.Fatal(err)
+			}
+			warm, err := s.LoadBaselineHistory(time.Unix(now, 0), SubjectKindManagedHost)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := warm.History("web-1", "cpu_utilization")
+			if state == "firing" || state == "recovering" {
+				if len(got) != 2 {
+					t.Fatalf("frozen baseline = %v, want the two samples in the last normal 24h window", got)
+				}
+				for _, value := range got {
+					if value != 0.2 && value != 0.3 {
+						t.Fatalf("out-of-window or future sample restored: %v", got)
+					}
+				}
+			} else if len(got) != 0 {
+				t.Fatalf("inactive or different-kind subject loaded stale samples: %v", got)
+			}
+		})
+	}
+}
