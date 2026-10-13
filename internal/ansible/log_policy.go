@@ -2,6 +2,7 @@ package ansible
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -87,7 +88,7 @@ func MaintainLogWithPolicy(path string, policy LogPolicy) error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("restrict Ansible log permissions: %w", err)
 	}
-	if err := redactFile(path); err != nil {
+	if err := redactNewLines(path); err != nil {
 		return fmt.Errorf("redact Ansible log: %w", err)
 	}
 
@@ -102,6 +103,13 @@ func MaintainLogWithPolicy(path string, policy LogPolicy) error {
 		if err := redactIfPresent(fmt.Sprintf("%s.%d", path, n)); err != nil {
 			return fmt.Errorf("redact rotated Ansible log: %w", err)
 		}
+	}
+
+	// Rotation, trimming and truncation below all start a new active log,
+	// sometimes in the same inode (truncateLog); drop the record so the next
+	// run redacts it from the start.
+	if err := os.Remove(redactionStatePath(path)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reset Ansible log redaction state: %w", err)
 	}
 
 	// Keep the newest part of an unexpectedly oversized existing file before
@@ -145,6 +153,12 @@ func RedactSecrets(line string) string {
 		separator := strings.IndexAny(match, ":=")
 		if separator < 0 {
 			return "[REDACTED]"
+		}
+		// An already-masked value: the value pattern stops before "]", so
+		// replacing it again turned "[REDACTED]" into "[REDACTED]]", one
+		// more bracket on every pass over the log (issue #70).
+		if strings.HasPrefix(strings.TrimSpace(match[separator+1:]), "[REDACTED") {
+			return match
 		}
 		return match[:separator+1] + " [REDACTED]"
 	})
@@ -223,6 +237,183 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// redactionState records how much of the active log is already redacted.
+// Maintenance runs after every Pilot Ansible invocation, including every
+// pilot_diagnose_* step, and rescanning the whole log each time cost about
+// 11 s of CPU per call on a 74 MB log (issue #70). With this record each
+// run only scans what was appended since the previous one. Device and
+// inode tie the offset to one file: after rotation, trimming or any other
+// replacement the record no longer matches and the next run redacts the
+// whole file again.
+type redactionState struct {
+	Device       uint64 `json:"device"`
+	Inode        uint64 `json:"inode"`
+	Offset       int64  `json:"offset"`
+	InPrivateKey bool   `json:"in_private_key"`
+}
+
+func redactionStatePath(path string) string {
+	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".redaction-state")
+}
+
+func fileIdentity(info os.FileInfo) (device, inode uint64, ok bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, false
+	}
+	return uint64(st.Dev), uint64(st.Ino), true // Dev is int32 on darwin
+}
+
+// loadRedactionState returns the saved record, or a zero record (redact
+// from the start) when there is none or it cannot be read.
+func loadRedactionState(path string) redactionState {
+	var state redactionState
+	data, err := os.ReadFile(redactionStatePath(path))
+	if err != nil || json.Unmarshal(data, &state) != nil {
+		return redactionState{}
+	}
+	return state
+}
+
+func saveRedactionState(path string, state redactionState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	statePath := redactionStatePath(path)
+	tmpPath := fmt.Sprintf("%s-%d", statePath, os.Getpid())
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, statePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// redactRange redacts the complete lines of input between from and to,
+// writing them to w when w is not nil. It returns the offset just after
+// the last complete line, the private-key state there, and whether any
+// line changed. A trailing line without a newline is left for the next
+// run, so a secret split across two writes is never judged by its first
+// half alone.
+func redactRange(input io.ReaderAt, from, to int64, inPrivateKey bool, w io.Writer) (int64, bool, bool, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(input, from, to-from), 128*1024)
+	redactor := streamRedactor{inPrivateKey: inPrivateKey}
+	pos, changed := from, false
+	for {
+		line, err := reader.ReadString('\n')
+		if err == io.EOF {
+			return pos, redactor.inPrivateKey, changed, nil
+		}
+		if err != nil {
+			return pos, redactor.inPrivateKey, changed, err
+		}
+		redacted := redactor.redact(line)
+		if redacted != line {
+			changed = true
+		}
+		if w != nil {
+			if _, err := io.WriteString(w, redacted); err != nil {
+				return pos, redactor.inPrivateKey, changed, err
+			}
+		}
+		pos += int64(len(line))
+	}
+}
+
+// redactNewLines redacts what was appended to path since the previous
+// maintenance. When none of it needs masking the file is left untouched;
+// otherwise the file is rewritten through a temp file and a rename, as
+// redactFile does, but the already-redacted prefix is only copied, not
+// scanned again.
+func redactNewLines(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	device, inode, known := fileIdentity(info)
+	state := loadRedactionState(path)
+	if !known || state.Device != device || state.Inode != inode || state.Offset < 0 || state.Offset > info.Size() {
+		state = redactionState{Device: device, Inode: inode}
+	}
+	size := info.Size()
+	if state.Offset == size {
+		return nil
+	}
+
+	input, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	end, inPrivateKey, changed, err := redactRange(input, state.Offset, size, state.InPrivateKey, nil)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		state.Offset, state.InPrivateKey = end, inPrivateKey
+		if !known {
+			return nil
+		}
+		return saveRedactionState(path, state)
+	}
+
+	dir := filepath.Dir(path)
+	sweepStaleLogTemp(dir, logRedactedTempPrefix)
+	tmpPath := filepath.Join(dir, fmt.Sprintf("%s-%d", logRedactedTempPrefix, os.Getpid()))
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	writer := bufio.NewWriterSize(tmp, 128*1024)
+	if _, err := io.Copy(writer, io.NewSectionReader(input, 0, state.Offset)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, _, _, err := redactRange(input, state.Offset, size, state.InPrivateKey, writer); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// The trailing partial line, if any, as is.
+	if _, err := io.Copy(writer, io.NewSectionReader(input, end, size-end)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := writer.Flush(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	rewritten, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	device, inode, known = fileIdentity(rewritten)
+	if !known {
+		return nil
+	}
+	return saveRedactionState(path, redactionState{
+		Device: device, Inode: inode,
+		Offset:       rewritten.Size() - (size - end),
+		InPrivateKey: inPrivateKey,
+	})
 }
 
 func redactFile(path string) error {
