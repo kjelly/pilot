@@ -248,7 +248,9 @@ func TestRegression_FreeipaClientApplyPlaybook_HostDNSSafety(t *testing.T) {
 	}
 
 	planIdx := strings.Index(playbook, "freeipa_client_dns_phase: plan")
-	installIdx := strings.Index(playbook, "run ipa-client-install")
+	// The enrollment task itself: an sshd -t gate in pre_tasks also names
+	// ipa-client-install in its message.
+	installIdx := strings.Index(playbook, `- name: "FreeIPA client — run ipa-client-install`)
 	applyIdx := strings.Index(playbook, "freeipa_client_dns_phase: apply")
 	if planIdx < 0 || installIdx < 0 || applyIdx < 0 {
 		t.Fatalf("playbook must include tasks/freeipa-client-host-dns.yml in both plan and apply phases, around ipa-client-install")

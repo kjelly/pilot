@@ -275,6 +275,34 @@
       when: "'active' not in (ipa_ntp_check.stdout | default(''))"
       tags: [always]
 
+    # Installing the FreeIPA client packages can restart sshd (the package
+    # transaction did on a fresh AlmaLinux 9 host: systemd "Queuing
+    # reload/restart jobs for marked units" during `dnf install`,
+    # 2026-10-12), and ipa-client-install restarts it itself. With a broken
+    # file in sshd_config.d that restart fails and sshd stays down. So check
+    # before anything changes, while the enrollment is still to run (its own
+    # `creates:`); read-only, so --check shows it too.
+    - name: "FreeIPA client — sshd -t before installing packages and running ipa-client-install"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+        creates: "{{ ipa_config_marker }}"
+      register: ipa_enroll_sshd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the sshd configuration is valid before ipa-client-install"
+      ansible.builtin.assert:
+        that:
+          - (ipa_enroll_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to install packages or run ipa-client-install: either can restart sshd,
+          and sshd -t fails
+          ({{ ((ipa_enroll_sshd_check.stderr | default('')) or (ipa_enroll_sshd_check.stdout | default(''))) | trim }}).
+          Nothing was changed. Fix the sshd configuration, then run again.
+      tags: [always]
+
     # Enrollment + keytab probe, moved here (ahead of both the DNS plan
     # include below and the /etc/hosts pin) per docs/superpowers/specs/
     # 2026-09-02-freeipa-client-host-dns-ip-replacement-spec.md §6.2: the
@@ -620,32 +648,6 @@
     # phase) for BOTH a fresh enroll and an already-enrolled host — there is
     # no functional difference between "new" and "existing" once enrollment
     # itself has completed, so both converge on one registration mechanism.
-    # ipa-client-install configures sshd and restarts it. With a broken
-    # file in sshd_config.d that restart fails: sshd stays down and the
-    # enrollment stops half done (seen 2026-10-12 with --uninstall, which
-    # restarts it the same way). Check first, under the enrollment's own
-    # `creates:`, so an enrolled host skips it like the enrollment.
-    - name: "FreeIPA client — sshd -t before ipa-client-install restarts sshd"
-      ansible.builtin.command:
-        argv: [sshd, -t]
-        creates: "{{ ipa_config_marker }}"
-      register: ipa_enroll_sshd_check
-      changed_when: false
-      failed_when: false
-      when: not ansible_check_mode
-      tags: [freeipa-client, C2]
-
-    - name: "Gate: the sshd configuration is valid before enrolling"
-      ansible.builtin.assert:
-        that:
-          - (ipa_enroll_sshd_check.rc | default(0)) == 0
-        fail_msg: >-
-          Refusing to run ipa-client-install: it restarts sshd, and sshd -t fails
-          ({{ ((ipa_enroll_sshd_check.stderr | default('')) or (ipa_enroll_sshd_check.stdout | default(''))) | trim }}).
-          Nothing was changed. Fix the sshd configuration, then run again.
-      when: not ansible_check_mode
-      tags: [freeipa-client, C2]
-
     - name: "FreeIPA client — run ipa-client-install (enroll into {{ ipa_realm }})"
       ansible.builtin.command:
         argv: >-
