@@ -50,6 +50,9 @@ func snmpExceptionGate(t *testing.T) map[string]any {
 //   - the bare YAML date fails with a type error instead of passing;
 //   - the unpadded past date 2026-9-30 passes;
 //   - the stale fact accepts an exception that expired yesterday (UTC).
+//
+// Against the first version of the new gate, which checked only the
+// YYYY-MM-DD shape, the six quoted impossible dates pass (PR #64 review).
 func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 	now := time.Now().UTC()
 	if next := now.Truncate(24 * time.Hour).Add(24 * time.Hour); next.Sub(now) < 2*time.Minute {
@@ -72,6 +75,17 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 		{"unpadded past date", `{reason: lab, owner: ops, expiry: "2026-9-30"}`, "2026-10-13", false},
 		{"missing expiry", `{reason: lab, owner: ops}`, day(0), false},
 		{"missing owner", `{reason: lab, expiry: "2099-12-31"}`, day(0), false},
+		// Quoted, so they reach the gate as strings; unquoted, Ansible
+		// already refuses to load them ("month must be in 1..12").
+		{"month 13", `{reason: lab, owner: ops, expiry: "2099-13-01"}`, day(0), false},
+		{"February 29 in a common year", `{reason: lab, owner: ops, expiry: "2099-02-29"}`, day(0), false},
+		{"February 29 in a century common year", `{reason: lab, owner: ops, expiry: "2100-02-29"}`, day(0), false},
+		{"April 31", `{reason: lab, owner: ops, expiry: "2099-04-31"}`, day(0), false},
+		{"month and day zero", `{reason: lab, owner: ops, expiry: "2099-00-00"}`, day(0), false},
+		{"9999-99-99", `{reason: lab, owner: ops, expiry: "9999-99-99"}`, day(0), false},
+		{"February 29 in a leap year", `{reason: lab, owner: ops, expiry: "2096-02-29"}`, day(0), true},
+		{"February 29 in a 400-year leap year", `{reason: lab, owner: ops, expiry: "2400-02-29"}`, day(0), true},
+		{"bare leap day", `{reason: lab, owner: ops, expiry: 2096-02-29}`, day(0), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
