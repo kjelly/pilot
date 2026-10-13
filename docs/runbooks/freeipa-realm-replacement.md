@@ -1,8 +1,7 @@
 # Runbook — FreeIPA realm/server replacement（client wave）
 
-> 狀態：**DRAFT — TODO: VERIFY**。client wave 與 rollback 已在 disposable topology 對 immutable
-> candidate 實跑（§0.5），但 `--check --diff` 必定失敗、archive 名稱可能重複等缺口仍未處理；
-> 它不是可直接照做的正式 SOP。
+> 狀態：**DRAFT — TODO: VERIFY**。client wave、rollback 與 `--check --diff` 已在 disposable topology
+> 對 immutable candidate 實跑（§0.5）；它仍不是可直接照做的正式 SOP（§2 的正式命令尚未定稿）。
 > 對齊：[verification spec](../verification/freeipa-realm-replacement.md)、
 > [migration playbook](../../playbooks/apply/freeipa-realm-replacement-apply.yml)。
 
@@ -14,24 +13,25 @@ wave 是三個獨立變更，不得合併成一次不可觀察的操作。
 
 ## 0.5 目前有效的事實快照
 
-**2026-10-13 disposable evidence snapshot**，candidate `5c99075`，詳見
-[`docs/evidence/freeipa-realm-replacement/2026-10-13-5c99075.md`](../evidence/freeipa-realm-replacement/2026-10-13-5c99075.md)
-（migration 的 pin 修正見 [`2026-10-13-dd69a2d.md`](../evidence/freeipa-realm-replacement/2026-10-13-dd69a2d.md)）：
+**2026-10-13 disposable evidence snapshot**，candidate `56d3aa6`，詳見
+[`docs/evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md`](../evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md)
+（rollback 的重新 enroll 見 [`2026-10-13-5c99075.md`](../evidence/freeipa-realm-replacement/2026-10-13-5c99075.md)，
+migration 的 pin 修正見 [`2026-10-13-dd69a2d.md`](../evidence/freeipa-realm-replacement/2026-10-13-dd69a2d.md)）：
 
 - targets：由 `pilot vm-target` 建立的 disposable VM（舊 realm server、兩台新 realm server、
-  Ubuntu 24.04 client），非 production inventory。
+  Ubuntu 24.04 與 AlmaLinux 9 client），非 production inventory。
 - realms：`IPA.PILOT.INTERNAL`／`ipa.pilot.internal` → `NEW.EXAMPLE.TEST`／`new.example.test`。
   新 server 兩種情境：沿用舊 server 的 FQDN `ipa1.ipa.pilot.internal`，以及自己的 `ipa1.new.example.test`。
-- rollback（新 server 沿用舊 FQDN）：兩種失敗點（新 realm enrollment 失敗；enrollment 完成後 C5
-  失敗）都由 rescue 重新 enroll 回舊 realm；之後舊 realm 的 `admin` 能以密碼 SSH 登入，
-  `freeipa-client.md` 12/12，舊 server 上 `Keytab: True`。AlmaLinux 9 client 的 rollback 最近一次
-  通過是 candidate `b9d82d9`，見
-  [`docs/evidence/freeipa-realm-replacement/2026-10-12-b9d82d9.md`](../evidence/freeipa-realm-replacement/2026-10-12-b9d82d9.md)。
-- migration：兩種情境都 rc=0，`pilot verify` C1–C6 **6/6 PASS**（含 rollback 之後再 migration）；
+- `--check --diff`：兩台 client 都 rc=0、不進 rescue，不建立 archive、`/etc/pilot` 或 link；宣告錯的 old
+  realm 時在「client must still be enrolled in the declared old realm」gate 拒絕。
+- archive：每次 run 各自一個 `<host>-<UTC 時間>Z.tar.gz`，之前的 archive 內容不變；link 與 completion
+  marker 指向該次 run 的 archive。
+- rollback：新 realm enrollment 失敗、或 enrollment 完成後 C5 失敗，兩台 client（兩種 FQDN 情境）都由
+  rescue 重新 enroll 回舊 realm；之後舊 realm 的 `admin` 能以密碼 SSH 登入，`freeipa-client.md` 12/12，
+  舊 server 上 `Keytab: True`。
+- migration：兩台 client 都 rc=0，`pilot verify` C1–C6 **6/6 PASS**（含 rollback 之後再 migration）；
   completion marker 記錄 `old_host_still_enabled`，舊 server 上的 host entry 仍啟用（§4）。
-- `--check --diff` 目前必定在「expose archive through a stable root-only link」失敗（check mode 不會建立
-  archive）。
-- archive 檔名取自 fact cache 的 `ansible_date_time`（一小時），一小時內重跑會沿用同一個檔名。
+- enrollment 完成後才 rollback 時，新 server 留下這台 client 的 host entry（§3）。
 - alignment decision：A（為 evidence 建立 disposable targets）；vault 只使用
   `ipa_admin_password`，不在文件或摘要中記錄值。
 
@@ -96,6 +96,14 @@ migration block 裡任何一步失敗，rescue 會看 `/etc/ipa/default.conf` �
   新 server 沿用舊 server 的 FQDN 時，同一個名稱在第 1 步仍 pin 到新 server（移除的是新 realm 的
   enrollment），第 2 步放回 archive 的 `/etc/hosts` 之後才指回舊 server 並重新 enroll。2026-10-13 在
   Ubuntu 24.04 實跑，兩種失敗點的結果同上。
+
+enrollment 完成之後才 rollback 時，新 server 會留下這台 client 新名稱的 host entry（2026-10-13 實跑，
+兩種 FQDN 情境、兩種平台）。rescue 的 `--uninstall` 通常會 unenroll 它（`Keytab: False`），跟事先
+`ipa host-add` 建好、還沒 enroll 的 entry 相同；但曾有一次 unenroll 失敗、uninstall 照常完成，entry
+維持啟用並帶著已經沒有任何機器持有的 key。兩種狀態都不妨礙之後再 migration（`--force-join` 會重新
+產生 key）。rescue 不刪除它：§1 要求事先在新 server 建好 host record，rescue 分不出哪些是操作者建的。
+放棄這個 wave 時，在新 realm 以 admin 對這些 client 執行 `ipa host-disable <client-new-fqdn>`；確定
+entry 是這次 enrollment 建立、而不是事先建好的，才 `ipa host-del`。
 
 重新 enroll 需要舊 server 仍在運作、舊 host entry 仍有效。重新 enroll 失敗時（例如舊 server 已停止），
 rescue 會解壓整個 archive（含 keytab），並在失敗訊息寫明舊 realm 的登入路徑無法使用、需人工重新

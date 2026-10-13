@@ -45,7 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**（C1–C6 與 rollback 通過，仍有已知缺口）。2026-10-13，candidate `5c99075`（合併 #53 的修正：新 server 的 pin 在移除舊 pin 之後寫入，uninstall 之後移除 SSSD 為舊 domain 留下的 Kerberos realm mapping）：Ubuntu 24.04 client，新 server 沿用舊 server 的 FQDN 時，兩種失敗點（新 realm enrollment 失敗、enrollment 後 C5 失敗）rollback 後，舊 realm 的 `admin` 能以密碼 SSH 登入，`freeipa-client.md` 12/12；migration（含 rollback 之後）與新 server 使用自己 FQDN 的 migration，C1–C6 各 **6/6 PASS**。AlmaLinux 9 client 的 rollback 與 migration 最近一次通過是 `b9d82d9`（[evidence](../evidence/freeipa-realm-replacement/2026-10-12-b9d82d9.md)）。尚未修正：`--check --diff` 必定在 archive link 失敗、archive 名稱取自 fact cache 而可能重複。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-13-5c99075.md`](../evidence/freeipa-realm-replacement/2026-10-13-5c99075.md)。上述缺口處理前，不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（C1–C6、rollback 與 `--check --diff` 通過；runbook §2 的正式命令尚未定稿）。2026-10-13，candidate `56d3aa6`（每次 run 各自命名 archive、不覆寫既有 archive；`--check --diff` 不再在 archive link 失敗，old-realm gate 在 check mode 也執行）：Ubuntu 24.04 與 AlmaLinux 9 client，`--check --diff` 都 rc=0 且不寫入任何檔案；兩次 rollback 寫出兩個 archive，前一個內容不變；rollback 之後舊 realm 的 `admin` 能以密碼 SSH 登入，`freeipa-client.md` 12/12；migration C1–C6 各 **6/6 PASS**。enrollment 完成之後才 rollback 時，新 server 會留下 client 的 host entry（見 runbook §3）。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md`](../evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md)。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則
