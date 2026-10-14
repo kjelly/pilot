@@ -99,7 +99,7 @@ pilot vm-target test --name ipa-replica \
 | `ipa_replica_fqdn` | **這台自己**的 FQDN，預設 `ipa2.{{ ipa_domain }}`（**不可**與 `ipa_server_fqdn` 或既有其它 replica 相同）| 否（有預設）|
 | `ipa_replica_setup_ca` | 這台是否同時擔任 CA replica，預設 `true`（HA 建議至少 2 台有 CA；但 CA **renewal master** 角色不會跟著轉移，見 §5）| 否（有預設）|
 | `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`）。預設 `true`，跟 primary 的預設值一致（docs/tmp/now/freeipa-client-ha-spec.md §10：replica 繼承 realm 的 effective DNS policy，避免只有一台 DNS provider 的 SPOF）；讀的是同一個 `freeipa_setup_dns` 來源變數，不是「即時讀 primary 的活體狀態」，兩邊各自覆寫仍會分歧 | 否（有預設）|
-| `freeipa_dns_forwarders`（`ipa_dns_forwarders` 有給時優先） | 當啟用 DNS 時，這台 replica 自己的上游 DNS 轉發器（install 的 `--forwarder`）。清單、單一位址或空白分隔字串皆可，與 primary 共用 `tasks/freeipa-dns-forwarders.yml` 的解讀方式（issue #68）；預設 `[]`（`--no-forwarders`，沿用 primary 設定的全域 forwarders） | 否（有預設）|
+| `freeipa_dns_forwarders`（`ipa_dns_forwarders` 有定義時優先，空值也算） | 當啟用 DNS 時，這台 replica 自己的上游 DNS 轉發器（install 的 `--forwarder`）。清單、單一位址或空白分隔字串皆可，每一項都要是 IPv4/IPv6 位址；null、`""`、`[]` 是不帶 forwarder。與 primary 共用 `tasks/freeipa-dns-forwarders.yml`，優先順序與寫法完全相同（issue #68），只有兩者都沒設時的預設不同：replica 是 `[]`（`--no-forwarders`，沿用 primary 設定的全域 forwarders），primary 是 8.8.8.8 | 否（有預設）|
 | `ipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步（語意同 `freeipa-server.md`），預設 `false` | 否（有預設）|
 
 > Realm 後綴 DN 與 389-ds instance 名的推導規則與 `freeipa-server.md` §1.5 相同（同一個 realm）。

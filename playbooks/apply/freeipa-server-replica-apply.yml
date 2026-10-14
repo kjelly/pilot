@@ -243,19 +243,19 @@
       when: stage == 'prod'
       tags: [always]
 
-    # The same normalization as freeipa-server-apply.yml (issue #68); read
-    # by ipa_dns_forwarder_argv above. ipa_dns_forwarders, when given (it
-    # used to be this play's own var, so -e ipa_dns_forwarders=... overrode
-    # it), still wins, as on the primary. Neither set means no
-    # server-specific forwarders: the replica's named still uses the global
-    # list the primary sets with ipa dnsconfig-mod.
+    # The same inputs, precedence and normalization as
+    # freeipa-server-apply.yml (issue #68); read by ipa_dns_forwarder_argv
+    # above. ipa_dns_forwarders (from -e or the inventory) wins over
+    # freeipa_dns_forwarders. Neither set means no server-specific
+    # forwarders: the replica's named then uses the global list the primary
+    # sets with ipa dnsconfig-mod.
     - name: "Normalize DNS forwarders to a list"
       ansible.builtin.include_tasks:
         file: tasks/freeipa-dns-forwarders.yml
         apply:
           tags: [always]
       vars:
-        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default([])) }}"
+        freeipa_dns_forwarders_default: []
       tags: [always]
 
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"

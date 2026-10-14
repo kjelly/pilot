@@ -150,7 +150,7 @@ func dnsModelPlaybook(t *testing.T) []map[string]any {
 	return []map[string]any{
 		base("dns tier model", "dns", nil, tierTasks),
 		base("resolver model", "freeipa-dns-client", nil, resolverTasks),
-		base("primary forwarders", "freeipa-server", pickVars(t, freeipaServerPlaybook, server["vars"].(map[string]any), "ipa_dns_forwarders_raw", "ipa_setup_dns"), serverTasks),
+		base("primary forwarders", "freeipa-server", pickVars(t, freeipaServerPlaybook, server["vars"].(map[string]any), "ipa_setup_dns"), serverTasks),
 		base("replica install", "freeipa-server-replica", pickVars(t, freeipaReplicaPlaybook, replica["vars"].(map[string]any), "ipa_setup_dns", "ipa_dns_forwarder_argv"),
 			append(pickTasks(t, freeipaReplicaPlaybook, replica["pre_tasks"].([]any), []string{"Normalize DNS forwarders to a list"}),
 				emitTask("replica", "{'setup_dns': ipa_setup_dns | bool, 'argv': ipa_dns_forwarder_argv}"))),
@@ -489,5 +489,205 @@ func compareDNSModel(t *testing.T, m DNSArchModel, inv networkcheck.ResolvedInve
 		if !known[name] {
 			t.Errorf("playbook emitted %s, which the model has no entry for", name)
 		}
+	}
+}
+
+// forwarderCases are inputs for tasks/freeipa-dns-forwarders.yml: each is a
+// host's vars (a missing key is unset) and the forwarder list the primary
+// installs with, or nil when the task must fail.
+var forwarderCases = []struct {
+	name string
+	vars map[string]any
+	want []string
+}{
+	{"one address", map[string]any{"freeipa_dns_forwarders": "8.8.8.8"}, []string{"8.8.8.8"}},
+	{"space separated", map[string]any{"freeipa_dns_forwarders": "8.8.8.8 1.1.1.1"}, []string{"8.8.8.8", "1.1.1.1"}},
+	{"YAML list string", map[string]any{"freeipa_dns_forwarders": "[8.8.4.4, 1.0.0.1]"}, []string{"8.8.4.4", "1.0.0.1"}},
+	{"list", map[string]any{"freeipa_dns_forwarders": []any{"9.9.9.9"}}, []string{"9.9.9.9"}},
+	{"IPv6", map[string]any{"freeipa_dns_forwarders": "2001:db8::53"}, []string{"2001:db8::53"}},
+	{"empty string is none", map[string]any{"freeipa_dns_forwarders": ""}, []string{}},
+	{"empty list is none", map[string]any{"freeipa_dns_forwarders": []any{}}, []string{}},
+	{"null is none", map[string]any{"freeipa_dns_forwarders": nil}, []string{}},
+	{"whitespace is none", map[string]any{"freeipa_dns_forwarders": "   "}, []string{}},
+	{"unset is the default", map[string]any{}, []string{"8.8.8.8"}},
+	{"empty ipa_dns_forwarders wins", map[string]any{"ipa_dns_forwarders": "", "freeipa_dns_forwarders": "9.9.9.9"}, []string{}},
+	{"ipa_dns_forwarders wins", map[string]any{"ipa_dns_forwarders": "1.0.0.1", "freeipa_dns_forwarders": "9.9.9.9"}, []string{"1.0.0.1"}},
+	{"comma separated", map[string]any{"freeipa_dns_forwarders": "8.8.8.8,1.1.1.1"}, nil},
+	{"semicolon separated", map[string]any{"freeipa_dns_forwarders": "8.8.8.8;1.1.1.1"}, nil},
+	{"port", map[string]any{"freeipa_dns_forwarders": "1.1.1.1 port 53"}, nil},
+	{"empty mapping", map[string]any{"freeipa_dns_forwarders": map[string]any{}}, nil},
+	{"mapping", map[string]any{"freeipa_dns_forwarders": map[string]any{"a": 1}}, nil},
+	{"number", map[string]any{"freeipa_dns_forwarders": 53}, nil},
+	{"unclosed list", map[string]any{"freeipa_dns_forwarders": "[8.8.8.8"}, nil},
+	{"list with a name", map[string]any{"freeipa_dns_forwarders": []any{"8.8.8.8", "dns.example"}}, nil},
+	{"octet out of range", map[string]any{"freeipa_dns_forwarders": "999.1.1.1"}, nil},
+}
+
+// The forwarder gate and normalization run as Ansible runs them, and the
+// Go model must agree on every input: what passes, what fails, and the
+// resulting list.
+func TestNormalizeForwardersMatchesPlaybookGate(t *testing.T) {
+	for _, bin := range []string{"ansible-playbook"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not installed: %v", bin, err)
+		}
+	}
+	tasksDir, err := filepath.Abs(applyTasksDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hosts := map[string]any{}
+	for i, c := range forwarderCases {
+		vars := map[string]any{"ansible_connection": "local", "ansible_python_interpreter": "{{ ansible_playbook_python }}"}
+		for k, v := range c.vars {
+			vars[k] = v
+		}
+		hosts[fmt.Sprintf("case%02d", i)] = vars
+	}
+	inventory, err := yaml.Marshal(map[string]any{"all": map[string]any{"hosts": hosts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	play := []map[string]any{{
+		"name": "forwarders", "hosts": "all", "gather_facts": false,
+		"tasks": []any{
+			map[string]any{"name": "normalize", "ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-dns-forwarders.yml")}, "vars": map[string]any{"freeipa_dns_forwarders_default": []any{"8.8.8.8"}}},
+			map[string]any{"name": "emit", "ansible.builtin.copy": map[string]any{"dest": out + "/{{ inventory_hostname }}.json", "content": "{{ ipa_dns_forwarders_normalized | to_json }}", "mode": "0600"}},
+		},
+	}}
+	playYAML, err := yaml.Marshal(play)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"inventory.yml": inventory, "play.yml": playYAML} {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_HOME="+filepath.Join(dir, ".ansible"))
+	output, runErr := runAnsible(t, dir, env, true, "ansible-playbook", "-i", "inventory.yml", "play.yml")
+	for i, c := range forwarderCases {
+		host := fmt.Sprintf("case%02d", i)
+		var ansibleList []string
+		data, readErr := os.ReadFile(filepath.Join(out, host+".json"))
+		ansiblePassed := readErr == nil
+		if ansiblePassed {
+			if err := json.Unmarshal(data, &ansibleList); err != nil {
+				t.Fatalf("%s: %v (%s)", c.name, err, data)
+			}
+		}
+		raw, _ := forwarderInput(newVarReader(networkcheck.ResolvedInventory{HostVars: map[string]map[string]any{host: c.vars}}), host, []any{"8.8.8.8"}, "default")
+		goList, goErr := normalizeForwarders(raw)
+		switch {
+		case c.want == nil && (ansiblePassed || goErr == nil):
+			t.Errorf("%s: want a failure; ansible passed=%v (%v), go err=%v", c.name, ansiblePassed, ansibleList, goErr)
+		case c.want != nil && (!ansiblePassed || goErr != nil):
+			t.Errorf("%s: want %v; ansible passed=%v, go err=%v", c.name, c.want, ansiblePassed, goErr)
+		case c.want != nil && (!reflect.DeepEqual(ansibleList, c.want) || !reflect.DeepEqual(nonNilStrings(goList), c.want)):
+			t.Errorf("%s: ansible %v, go %v, want %v", c.name, ansibleList, goList, c.want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("ansible-playbook (err %v):\n%s", runErr, output)
+	}
+}
+
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// tasks/freeipa-dns-providers-live.yml run by Ansible against a fake dig
+// that prints real answers: the primary's NS section of
+// provider_two_dns_servers.txt (ipa1 and ipa2, NOERROR with aa) for
+// 192.0.2.1, and dig's real timeout output for every other address.
+func TestRegression_LiveProviderFilterFollowsFreeIPAsNSRecords(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	tasksDir, err := filepath.Abs(applyTasksDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := ParseDNSArchSections(fixture(t, "provider_two_dns_servers.txt"))["ns"].Output
+	timeout := ParseDNSArchSections(fixture(t, "tier_failures.txt"))["authority@192.0.2.1"].Output
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"ns.txt": ns + "\n", "timeout.txt": timeout + "\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fakeDig := "#!/bin/sh\ncase \" $* \" in\n  *\" @192.0.2.1 \"*) cat " + filepath.Join(dir, "ns.txt") + " ;;\n  *) cat " + filepath.Join(dir, "timeout.txt") + "; exit 9 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "dig"), []byte(fakeDig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	member := func(host, fqdn, ip, kind string, explicit bool) map[string]any {
+		return map[string]any{"inventory_host": host, "fqdn": fqdn, "ip": ip, "kind": kind, "dns_provider": true, "dns_provider_explicit": explicit}
+	}
+	cases := map[string]struct {
+		candidates []any
+		want       []string
+	}{
+		"unregistered unset replica left out": {[]any{
+			member("ipa", "ipa1.ipa.pilot.internal", "192.0.2.1", "primary", false),
+			member("r2", "IPA2.ipa.pilot.internal.", "192.0.2.2", "replica", false),
+			member("r3", "ipa3.ipa.pilot.internal", "192.0.2.3", "replica", false),
+			member("r4", "ipa4.ipa.pilot.internal", "192.0.2.4", "replica", true),
+		}, []string{"r3"}},
+		"nobody answers, nothing left out": {[]any{
+			member("ipa", "ipa1.ipa.pilot.internal", "192.0.2.9", "primary", false),
+			member("r3", "ipa3.ipa.pilot.internal", "192.0.2.3", "replica", false),
+		}, []string{}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "excluded.json")
+			play := []map[string]any{{
+				"name": "live", "hosts": "localhost", "connection": "local", "gather_facts": false,
+				"vars": map[string]any{"ansible_python_interpreter": "{{ ansible_playbook_python }}"},
+				"tasks": []any{
+					map[string]any{"name": "filter", "ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-dns-providers-live.yml")},
+						"vars": map[string]any{"freeipa_dns_live_candidates": c.candidates, "freeipa_dns_live_domain": "ipa.pilot.internal", "freeipa_dns_live_purpose": "the test"}},
+					map[string]any{"name": "emit", "ansible.builtin.copy": map[string]any{"dest": out, "content": "{{ freeipa_dns_live_excluded | map(attribute='inventory_host') | list | to_json }}", "mode": "0600"}},
+				},
+			}}
+			playYAML, err := yaml.Marshal(play)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "play.yml"), playYAML, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_HOME="+filepath.Join(dir, ".ansible"))
+			output, err := runAnsible(t, dir, env, true, "ansible-playbook", "-i", "localhost,", "play.yml")
+			if err != nil {
+				t.Fatalf("ansible-playbook: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(nonNilStrings(got), c.want) {
+				t.Fatalf("excluded %v, want %v\n%s", got, c.want, output)
+			}
+			if len(c.want) > 0 && !strings.Contains(string(output), "WARNING: r3 (ipa3.ipa.pilot.internal) is in freeipa-server-replica") {
+				t.Fatalf("no warning naming the replica:\n%s", output)
+			}
+		})
 	}
 }

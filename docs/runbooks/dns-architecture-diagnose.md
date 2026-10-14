@@ -117,7 +117,7 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 欄位 | 內容 |
 |---|---|
 | `status` | `complete`、`partial`（有看不到的 live 事實或比對；連得到的主機上任何一項 probe 結果是 `unknown`，都會列在 finding `live_fact_unknown`）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
-| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`live_fact_unknown` |
+| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`live_fact_unknown`、`freeipa_replica_not_dns_server` |
 | `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；每台 FreeIPA DNS 的 live SOA（`authoritative`，或實際的 status 與 `aa`）；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
 | `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
@@ -127,6 +127,12 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 `unreachable`、`not_applicable`、`error`。
 
 ## 5. 已知限制與注意事項
+
+- **還沒 promote 的 replica**：未設 `freeipa_setup_dns` 的 replica 只有在 FreeIPA 的 NS 紀錄
+  列出它之後，`dns-apply.yml` 與 resolver task 才會用它（`tasks/freeipa-dns-providers-live.yml`）。
+  工具從 provider 的 NS probe 得到同一份清單：沒列出的 replica 會有 finding
+  `freeipa_replica_not_dns_server`，effective 的 tier stub 與 resolver 清單也跟 playbook 一樣
+  不含它，它自己 probe 失敗不算 `partial`。
 
 - **FreeIPA 不會說「沒權限」**：principal 缺少上面的 permission 時，`ipa
   dnsconfig-show` 回「Global DNS configuration is empty」、各 `-find` 回「Number of

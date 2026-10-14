@@ -89,13 +89,6 @@
     # externally-managed DNS/NTP and should not run its own named/chronyd
     # at all).
     ipa_setup_dns: "{{ freeipa_setup_dns | default(true) }}"
-    # Forwarders for the native named FreeIPA installs (--forwarder=...),
-    # so the FreeIPA host's own DNS can still resolve the public internet
-    # for its own package installs. Defaults to a public resolver rather
-    # than --no-forwarders — an unconfigured deploy should still get
-    # working DNS, not silently lose internet resolution on its identity
-    # server.
-    ipa_dns_forwarders_raw: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default(['8.8.8.8'], true), true) }}"
     # `allow-recursion`/`allow-query-cache` gate every RECURSIVE lookup on
     # this host's named — i.e. every query the forwarders above are meant to
     # answer for. Confirmed on a live install (docs/verification/
@@ -224,14 +217,21 @@
       register: ipa_precheck_cfg
       tags: [always]
 
-    # Shared with freeipa-server-replica-apply.yml (issue #68).
+    # Forwarders for the native named FreeIPA installs (--forwarder=...),
+    # also set as the realm's global forwarders, so the FreeIPA host's own
+    # DNS can still resolve the public internet for its own package
+    # installs. When neither ipa_dns_forwarders nor freeipa_dns_forwarders
+    # is set this defaults to a public resolver rather than
+    # --no-forwarders: an unconfigured deploy should still get working DNS.
+    # An explicit empty value means no forwarders, as on a replica. Shared
+    # with freeipa-server-replica-apply.yml (issue #68).
     - name: "Normalize DNS forwarders to a list"
       ansible.builtin.include_tasks:
         file: tasks/freeipa-dns-forwarders.yml
         apply:
           tags: [always]
       vars:
-        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders_raw }}"
+        freeipa_dns_forwarders_default: ['8.8.8.8']
       tags: [always]
 
     # Only meaningful before the first install: once ipa-server-install has

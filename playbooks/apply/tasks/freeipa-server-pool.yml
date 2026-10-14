@@ -71,6 +71,7 @@
         ip: "{{ hostvars[groups['freeipa-server'][0]].ansible_host | default('') }}"
         kind: primary
         dns_provider: "{{ hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool }}"
+        dns_provider_explicit: "{{ hostvars[groups['freeipa-server'][0]].freeipa_setup_dns is defined }}"
   tags: [always]
 
 - name: "FreeIPA server pool — gate: multiple replicas each need an explicit freeipa_replica_fqdn host var"
@@ -107,7 +108,8 @@
                    else ('ipa2.' ~ freeipa_domain)),
           'ip': hostvars[item].ansible_host | default(''),
           'kind': 'replica',
-          'dns_provider': (hostvars[item].freeipa_setup_dns | default(true) | bool)
+          'dns_provider': (hostvars[item].freeipa_setup_dns | default(true) | bool),
+          'dns_provider_explicit': (hostvars[item].freeipa_setup_dns is defined)
         }]
       }}
   loop: "{{ groups['freeipa-server-replica'] | default([]) }}"

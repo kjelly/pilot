@@ -252,6 +252,23 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 			observed.Providers = append(observed.Providers, op)
 		}
 
+		// A replica FreeIPA does not list as a DNS server is left out by
+		// dns-apply.yml and the resolver task
+		// (tasks/freeipa-dns-providers-live.yml); the model follows, from
+		// the same live NS records.
+		leftOut, registered := diagnose.DNSArchUnregisteredReplicas(model, observed.Providers)
+		var leftOutIPs []string
+		if len(leftOut) > 0 {
+			model = diagnose.BuildDNSArchitectureModelLeavingOut(resolved, leftOut, in.ClientHost)
+			for i, op := range observed.Providers {
+				p, _ := model.Provider(op.Host)
+				if p.LeftOut {
+					observed.Providers[i].LeftOut = fmt.Sprintf("%s (%s) leaves freeipa_setup_dns unset, but FreeIPA's NS records for %s list only %s: it is not a FreeIPA DNS server yet, and dns-apply.yml and the resolver task leave it out; promote it with freeipa-server-replica-apply.yml (then re-run them), or set freeipa_setup_dns: false", op.Host, p.FQDN, model.FreeIPADomain, strings.Join(registered, ", "))
+					leftOutIPs = append(leftOutIPs, p.IP)
+				}
+			}
+		}
+
 		// FreeIPA's own DNS configuration, only through the approved reader,
 		// on the first provider that answered.
 		observed.FreeIPA, observed.Kerberos = freeIPAConfigObservation(ctx, opts, runner, model, authHost, &allResults)
@@ -264,6 +281,16 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		for _, probe := range tierProbes {
 			allResults = append(allResults, probe.result)
 			ot := diagnose.BuildDNSArchObservedTier(probe.tier, internalName, externalName, validProviderIPs, tierDomain, probe.result)
+			// The tier's G5-style authority probe of a left-out replica is
+			// expected to fail; dns-apply.yml no longer sends it queries.
+			var kept []diagnose.DNSArchFact
+			for i, a := range ot.ProviderAuthority {
+				if i < len(validProviderIPs) && stringInList(leftOutIPs, validProviderIPs[i]) {
+					continue
+				}
+				kept = append(kept, a)
+			}
+			ot.ProviderAuthority = kept
 			if ot.RemoteUser != "" {
 				remoteUsers[probe.host] = ot.RemoteUser
 			}
@@ -357,6 +384,15 @@ func runDNSArchProbes(ctx context.Context, runner diagnose.AdHocRunner, opts dia
 // IP address or a plain DNS name (ansible_host may be either).
 func dnsArchProbeAddr(addr string) bool {
 	return net.ParseIP(addr) != nil || inventory.ValidDNSRecordName(strings.ToLower(addr))
+}
+
+func stringInList(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func unprobedProvider(p diagnose.DNSArchProvider, detail string) diagnose.DNSArchObservedProvider {

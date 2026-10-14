@@ -132,7 +132,7 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
   --input dns_mode=freeipa-split --input dns_upstream_servers=1.1.1.1 \
   --input "dns_access_control=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" \
   --input dns_cache_max_ttl=300 --input dns_cache_max_negative_ttl=60 --input dns_dnssec_validation=true \
-  --input external_probe_name=isc.org --input freeipa_domain=ipa.pilot.internal --input freeipa_dns_server_ips=<FreeIPA IP> \
+  --input external_probe_name=isc.org --input freeipa_domain=ipa.pilot.internal --input "freeipa_dns_server_ips=<primary IP> <每台已 promote 的 DNS replica IP>" \
   --input freeipa_probe_fqdn=ipa1.ipa.pilot.internal --input freeipa_extra_zone_probe_fqdn=none --input freeipa_reverse_probe_ip=none \
   --input dns_zone_probe_fqdn=none --input pilot_inventory_path=<inventory 絕對路徑> --input dns_consumer_pattern=freeipa-dns-client
 ```
@@ -142,6 +142,9 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 情況 | 結果 |
 |---|---|
 | `dns_freeipa_zones` 有 FreeIPA 沒有的 zone | G5 擋下：「FreeIPA did not answer SOA authoritatively」，設定不變 |
+| inventory 列了 replica、未設 `freeipa_setup_dns`，但還沒 promote（FreeIPA 的 NS 紀錄沒有它） | 不擋：印出 `WARNING: <host> … is not a FreeIPA DNS server yet and is left out of this dns tier's stub zones`，stub 只指向 NS 紀錄列出的 server；promote 之後（`freeipa-server-replica-apply.yml` 預設會裝 DNS）重跑 `dns-apply.yml` 才會加入。全站部署（`site.yml` 不含 replica playbook）因此不會被尚未 promote 的 replica 擋下 |
+| replica 明確設 `freeipa_setup_dns: true` 但沒有在跑 DNS | G5 擋下，訊息說明兩個做法：先用 `freeipa-server-replica-apply.yml` promote（含 DNS），或改設 `freeipa_setup_dns: false`；設定不變 |
+| consumer（`freeipa-dns-client`）要寫入的 nameserver 有任何一台不回答 | 寫入前就擋下，列出不回答的 nameserver 與做法，`resolv.conf` 不變；未 promote、未設 `freeipa_setup_dns` 的 replica 會先被略過並警告，不會變成寫進去的死 nameserver |
 | upstream 不可達 | G6 擋下：「Upstream check failed」，設定不變；upstream 會剝掉 DNSSEC 時改設 `dns_dnssec_validation: false` |
 | 共用的 `dns_listen_addr` | G10 擋下：「is not an IPv4 address of <host>」，設定不變 |
 | `dns_zones` 寫了無效的紀錄 | checkconf 失敗，rescue 還原：「Rollback: …/pilot-dns.conf restored; unbound restarted」 |

@@ -47,7 +47,10 @@ type DNSArchKerberos struct {
 
 // DNSArchObservedProvider is one FreeIPA DNS provider's live state.
 type DNSArchObservedProvider struct {
-	Host        string      `json:"host"`
+	Host string `json:"host"`
+	// LeftOut says why the playbooks leave this replica out (FreeIPA does
+	// not list it as a DNS server yet); its failing probes are expected.
+	LeftOut     string      `json:"left_out,omitempty"`
 	IP          string      `json:"ip"`
 	Reachable   DNSArchFact `json:"reachable"`
 	RemoteUser  string      `json:"remote_user,omitempty"`
@@ -507,6 +510,34 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 	return out
 }
 
+// DNSArchUnregisteredReplicas mirrors tasks/freeipa-dns-providers-live.yml:
+// the NS set FreeIPA answers authoritatively (from any provider's NS
+// probe), and the replicas that leave freeipa_setup_dns unset and are not
+// in it. Nothing is left out when no provider answered.
+func DNSArchUnregisteredReplicas(m DNSArchModel, observed []DNSArchObservedProvider) (leftOut, registered []string) {
+	seen := map[string]bool{}
+	for _, op := range observed {
+		if q, ok := dnsAnswered(op.NS); ok && q.Authoritative {
+			for _, a := range q.Answers {
+				n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(a)), ".")
+				if !seen[n] {
+					seen[n] = true
+					registered = append(registered, n)
+				}
+			}
+		}
+	}
+	if len(registered) == 0 {
+		return nil, nil
+	}
+	for _, p := range m.Providers {
+		if p.Kind == "replica" && p.DNSProvider && !p.DNSProviderExplicit && !seen[strings.TrimSuffix(strings.ToLower(p.FQDN), ".")] {
+			leftOut = append(leftOut, p.InventoryHost)
+		}
+	}
+	return leftOut, registered
+}
+
 // ---- differences -----------------------------------------------------------------
 
 func sortedCopy(in []string) []string {
@@ -642,7 +673,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		d := DNSArchDifference{Subject: "FreeIPA " + op.Host + " authoritative for " + m.FreeIPADomain, Expected: true, Evidence: append([]string{dnsArchVarRef(op.Host, "freeipa_setup_dns")}, op.SOA.Evidence...)}
 		q, isQuery := op.SOA.Value.(DNSQueryResult)
 		switch {
-		case !p.DNSProvider:
+		case !p.DNSProvider || p.LeftOut:
 			continue
 		case op.SOA.State == FactObserved && isQuery:
 			d.Observed = q.Authoritative
@@ -677,10 +708,10 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		// only reaches the global list.
 		servers, _ := o.FreeIPA.ServerForwarders.Value.([]DNSArchServerForwarders)
 		for _, sf := range m.Forwarding.ServerInstallForwarders {
-			if sf.Error != "" {
+			p, _ := m.Provider(sf.Host)
+			if sf.Error != "" || p.LeftOut {
 				continue
 			}
-			p, _ := m.Provider(sf.Host)
 			f := o.FreeIPA.ServerForwarders
 			var ev []string
 			if strings.HasPrefix(sf.Source, "inventory:") {
@@ -830,6 +861,12 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 		findings = append(findings, "live_fact_unknown: "+host+": "+strings.Join(names, "; "))
 	}
 	for _, p := range o.Providers {
+		if p.LeftOut != "" {
+			// Its failing probes are expected: FreeIPA does not list it
+			// as a DNS server, and the playbooks leave it out.
+			findings = append(findings, "freeipa_replica_not_dns_server: "+p.LeftOut)
+			continue
+		}
 		if p.Reachable.State != FactObserved {
 			partial = true
 			findings = append(findings, "freeipa_dns_provider_unreachable: "+p.Host+" ("+p.Reachable.Detail+")")

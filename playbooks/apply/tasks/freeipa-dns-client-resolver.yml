@@ -80,6 +80,45 @@
       -e '{"freeipa_dns_client_servers": ["10.0.0.10", "10.0.0.11"]}',
       or set it as a real YAML list in a group_vars/host_vars file.
 
+# bind9-dnsutils is the package that ships /usr/bin/dig (Ubuntu 20.10+,
+# Debian 11+); `dnsutils` is only a transitional package that depends on
+# it, so asking for it made a host that already had dig download
+# something. It goes through the apt framework rather than plain
+# ansible.builtin.apt: on the vm-target golden image, whose apt index was
+# stale, the plain task hit a 404 and failed the apply before the block
+# below ran (2026-09-24, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
+# The framework does nothing when the package is already installed and
+# recovers from stale metadata when it is not. It runs before the provider
+# list is built: the live checks below need dig.
+- name: "FreeIPA DNS client — install dig (Debian, apt framework)"
+  ansible.builtin.include_tasks:
+    file: apt-package-install.yml
+    # This file is included by two playbooks with different row tags, so
+    # it cannot name the caller's tags. `always` on the pulled-in tasks
+    # means "whenever this include runs": the include itself carries the
+    # caller's `apply` tags, so a --tags run that deselects the caller
+    # skips it too.
+    apply:
+      tags: [always]
+  vars:
+    pilot_apt_packages: [bind9-dnsutils]
+    pilot_apt_policy: tolerant
+    pilot_apt_component: freeipa-dns-client-dig
+    pilot_apt_required_sources:
+      - id: distro-os
+        class: os
+  when:
+    - ansible_os_family == 'Debian'
+    - not ansible_check_mode
+
+- name: "FreeIPA DNS client — install dig (RedHat)"
+  ansible.builtin.dnf:
+    name: bind-utils
+    state: present
+  when:
+    - ansible_os_family == 'RedHat'
+    - not ansible_check_mode
+
 # ── Auto-detect FreeIPA DNS-providing hosts from inventory ──────────────────
 - name: "FreeIPA DNS client — init DNS-provider list"
   ansible.builtin.set_fact:
@@ -88,16 +127,45 @@
 - name: "FreeIPA DNS client — add primary freeipa-server if it provides DNS"
   ansible.builtin.set_fact:
     freeipa_dns_providers: >-
-      {{ freeipa_dns_providers + [{'host': item, 'ip': hostvars[item].ansible_host | default(item, true)}] }}
+      {{ freeipa_dns_providers + [{'host': item, 'inventory_host': item, 'ip': hostvars[item].ansible_host | default(item, true),
+           'kind': 'primary', 'fqdn': hostvars[item].freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain),
+           'dns_provider_explicit': hostvars[item].freeipa_setup_dns is defined}] }}
   loop: "{{ groups['freeipa-server'] | default([]) }}"
   when: hostvars[item].freeipa_setup_dns | default(true) | bool
 
 - name: "FreeIPA DNS client — add freeipa-server-replica hosts that provide their own DNS"
   ansible.builtin.set_fact:
     freeipa_dns_providers: >-
-      {{ freeipa_dns_providers + [{'host': item, 'ip': hostvars[item].ansible_host | default(item, true)}] }}
+      {{ freeipa_dns_providers + [{'host': item, 'inventory_host': item, 'ip': hostvars[item].ansible_host | default(item, true),
+           'kind': 'replica', 'fqdn': hostvars[item].freeipa_replica_fqdn | default('ipa2.' ~ freeipa_domain),
+           'dns_provider_explicit': hostvars[item].freeipa_setup_dns is defined}] }}
   loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
   when: hostvars[item].freeipa_setup_dns | default(true) | bool
+
+# A replica that leaves freeipa_setup_dns unset but that FreeIPA does not
+# list as a DNS server yet (not promoted, or promoted without DNS) is left
+# out with a warning instead of becoming a dead nameserver; see
+# tasks/freeipa-dns-providers-live.yml. Not with explicit
+# freeipa_dns_client_servers: the operator's list is checked below as it is.
+- name: "FreeIPA DNS client — FreeIPA DNS servers FreeIPA itself lists"
+  ansible.builtin.include_tasks:
+    file: freeipa-dns-providers-live.yml
+    apply:
+      tags: [always]
+  vars:
+    freeipa_dns_live_candidates: "{{ freeipa_dns_providers }}"
+    freeipa_dns_live_domain: "{{ freeipa_domain | lower | regex_replace('[.]$', '') }}"
+    freeipa_dns_live_purpose: "{{ inventory_hostname }}'s nameservers"
+  when:
+    - freeipa_dns_client_servers | length == 0
+    - freeipa_dns_providers | length > 0
+
+- name: "FreeIPA DNS client — leave those replicas out"
+  ansible.builtin.set_fact:
+    freeipa_dns_providers: "{{ freeipa_dns_live_providers }}"
+  when:
+    - freeipa_dns_client_servers | length == 0
+    - freeipa_dns_live_excluded | default([]) | length > 0
 
 # The dns tier (docs/verification/dns.md §2 B10): when the inventory has
 # hosts in the `dns` group, a consumer sends its queries to the tier first
@@ -152,43 +220,47 @@
     freeipa_dns_client_effective_resolver_options: >-
       {{ ['timeout:1', 'attempts:2'] if (freeipa_dns_client_effective_servers | length > 1) else [] }}
 
-# bind9-dnsutils is the package that ships /usr/bin/dig (Ubuntu 20.10+,
-# Debian 11+); `dnsutils` is only a transitional package that depends on
-# it, so asking for it made a host that already had dig download
-# something. It goes through the apt framework rather than plain
-# ansible.builtin.apt: on the vm-target golden image, whose apt index was
-# stale, the plain task hit a 404 and failed the apply before the block
-# below ran (2026-09-24, docs/evidence/freeipa-dns-client/2026-09-24-583df40.md).
-# The framework does nothing when the package is already installed and
-# recovers from stale metadata when it is not.
-- name: "FreeIPA DNS client — install dig (Debian, apt framework)"
-  ansible.builtin.include_tasks:
-    file: apt-package-install.yml
-    # This file is included by two playbooks with different row tags, so
-    # it cannot name the caller's tags. `always` on the pulled-in tasks
-    # means "whenever this include runs": the include itself carries the
-    # caller's `apply` tags, so a --tags run that deselects the caller
-    # skips it too.
-    apply:
-      tags: [always]
-  vars:
-    pilot_apt_packages: [bind9-dnsutils]
-    pilot_apt_policy: tolerant
-    pilot_apt_component: freeipa-dns-client-dig
-    pilot_apt_required_sources:
-      - id: distro-os
-        class: os
-  when:
-    - ansible_os_family == 'Debian'
-    - not ansible_check_mode
+# Every nameserver this run writes must answer, before anything is
+# written: a FreeIPA DNS server authoritatively (+norec), a dns tier host
+# or an explicit freeipa_dns_client_servers entry recursively, each for the
+# FreeIPA server's FQDN with an address. Without this a server that does
+# not answer was written silently: the post-write check below resolves
+# through the system resolver, which falls through to the next nameserver.
+- name: "FreeIPA DNS client — ask every nameserver to be written for the FreeIPA server FQDN"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['dig', '+time=2', '+tries=1', '+noall', '+comments', '+answer']
+         + (['+norec'] if (item == '127.0.0.1' or item in (freeipa_dns_providers | map(attribute='ip') | map('string') | list)) else [])
+         + ['@' ~ item, (freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain)) ~ '.', 'A'] }}
+  loop: "{{ freeipa_dns_client_effective_servers }}"
+  register: freeipa_dns_client_ns_check
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
 
-- name: "FreeIPA DNS client — install dig (RedHat)"
-  ansible.builtin.dnf:
-    name: bind-utils
-    state: present
-  when:
-    - ansible_os_family == 'RedHat'
-    - not ansible_check_mode
+- name: "FreeIPA DNS client — Gate: every nameserver to be written answers"
+  vars:
+    _ns_dead: >-
+      {{ freeipa_dns_client_ns_check.results | default([])
+         | rejectattr('skipped', 'defined')
+         | rejectattr('stdout', 'search', 'status: NOERROR')
+         | map(attribute='item') | list
+         + (freeipa_dns_client_ns_check.results | default([])
+            | rejectattr('skipped', 'defined')
+            | selectattr('stdout', 'search', 'status: NOERROR')
+            | rejectattr('stdout', 'search', '\sIN\s+A\s+[0-9]')
+            | map(attribute='item') | list) }}
+  ansible.builtin.assert:
+    that:
+      - _ns_dead | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: nameserver(s) {{ _ns_dead }} did not answer
+      {{ freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain) }} A with an address, so nothing
+      was changed. For a freeipa-server-replica host: promote it with DNS
+      (freeipa-server-replica-apply.yml), or set freeipa_setup_dns: false on it. For a dns tier
+      host: apply playbooks/apply/dns-apply.yml first. For an explicit freeipa_dns_client_servers
+      entry: fix or remove it. Planned list: {{ freeipa_dns_client_effective_servers }}.
+  when: not ansible_check_mode
 
 # ── Pre-apply snapshot for the rescue below ────────────────────────────────
 # The rescue puts the host back the way this run found it. Before

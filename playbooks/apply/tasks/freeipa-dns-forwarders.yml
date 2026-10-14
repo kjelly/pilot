@@ -3,17 +3,53 @@
 # (one --forwarder per item, or --no-forwarders when empty) and that
 # freeipa-server-apply.yml sets as the global list (ipa dnsconfig-mod).
 # Included by freeipa-server-apply.yml and freeipa-server-replica-apply.yml
-# so one freeipa_dns_forwarders value means the same forwarders on both
-# (issue #68): before, the replica mapped over the raw value, and the string
-# form group_vars/freeipa.example.yml shows (`freeipa_dns_forwarders:
-# 8.8.8.8`) became one --forwarder per character.
+# so the primary and a replica read the same inputs the same way (issue
+# #68): before, the replica mapped over the raw value, and the string form
+# group_vars/freeipa.example.yml shows (`freeipa_dns_forwarders: 8.8.8.8`)
+# became one --forwarder per character; and the primary turned an empty
+# value into 8.8.8.8 while the replica turned it into --no-forwarders.
+#
+# Which value: ipa_dns_forwarders if it is defined (any value, empty
+# included), else freeipa_dns_forwarders if it is defined, else
+# freeipa_dns_forwarders_default (the caller's: ['8.8.8.8'] on the primary,
+# whose list also becomes the realm's global forwarders; [] on a replica,
+# whose named then uses those global forwarders).
 #
 # Accepted forms: a YAML list; a string starting with "[" (parsed as YAML,
 # e.g. "[8.8.4.4, 1.0.0.1]"); any other string, split on whitespace
-# ("8.8.8.8" or "8.8.8.8 1.1.1.1"); an empty or null value (no forwarders).
+# ("8.8.8.8" or "8.8.8.8 1.1.1.1"); null, "", [] or a whitespace-only
+# string (no forwarders). Every forwarder must be an IPv4 or IPv6 address:
+# anything else (a comma- or semicolon-separated string, "1.1.1.1 port 53",
+# a mapping, a number) fails here, before any install.
 #
-# Input:  freeipa_dns_forwarders_input
+# internal/diagnose's normalizeForwarders mirrors these rules
+# (TestNormalizeForwardersMatchesPlaybookGate runs this file on the same
+# inputs).
+#
+# Input:  freeipa_dns_forwarders_default (list)
 # Output: ipa_dns_forwarders_normalized (list)
+- name: "FreeIPA DNS — forwarder input (ipa_dns_forwarders, else freeipa_dns_forwarders, else the default)"
+  ansible.builtin.set_fact:
+    freeipa_dns_forwarders_input: >-
+      {{ ipa_dns_forwarders if ipa_dns_forwarders is defined
+         else (freeipa_dns_forwarders if freeipa_dns_forwarders is defined
+               else freeipa_dns_forwarders_default) }}
+
+- name: "FreeIPA DNS — Gate: forwarders are a list, a string or empty"
+  ansible.builtin.assert:
+    that:
+      - >-
+        freeipa_dns_forwarders_input is none
+        or freeipa_dns_forwarders_input is string
+        or (freeipa_dns_forwarders_input is sequence and freeipa_dns_forwarders_input is not mapping)
+      - >-
+        not (freeipa_dns_forwarders_input is string and (freeipa_dns_forwarders_input | trim).startswith('['))
+        or (freeipa_dns_forwarders_input | trim).endswith(']')
+    fail_msg: >-
+      DNS forwarders must be a list of IP addresses, a string of addresses separated by
+      spaces, or empty for none (got {{ freeipa_dns_forwarders_input | to_json }}, from
+      ipa_dns_forwarders or freeipa_dns_forwarders).
+
 - name: "FreeIPA DNS — normalize forwarders to a list"
   ansible.builtin.set_fact:
     ipa_dns_forwarders_normalized: >-
@@ -23,3 +59,21 @@
                else (freeipa_dns_forwarders_input.split()
                      if freeipa_dns_forwarders_input is string
                      else freeipa_dns_forwarders_input)) }}
+
+- name: "FreeIPA DNS — Gate: every forwarder is an IPv4 or IPv6 address"
+  vars:
+    _forwarders_bad: >-
+      {{ (ipa_dns_forwarders_normalized | map('string')
+          | reject('match', '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$')
+          | reject('match', '^([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$')
+          | list)
+         if (ipa_dns_forwarders_normalized is sequence and ipa_dns_forwarders_normalized is not string
+             and ipa_dns_forwarders_normalized is not mapping)
+         else [ipa_dns_forwarders_normalized | string] }}
+  ansible.builtin.assert:
+    that:
+      - _forwarders_bad | length == 0
+    fail_msg: >-
+      Every DNS forwarder must be an IPv4 or IPv6 address; not addresses: {{ _forwarders_bad | to_json }}
+      (input {{ freeipa_dns_forwarders_input | to_json }}). Separate several with spaces or write a
+      YAML list; a port is not supported.
