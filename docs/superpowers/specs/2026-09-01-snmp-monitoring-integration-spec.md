@@ -1535,7 +1535,7 @@ restricted management network evidence
 
 不得提供永久、無到期的 global allow flag。
 
-實作（欄位 2026-10-13，型別與內容規則 2026-10-14，C12 v1.4）：每個 auth profile 一筆 `snmp_insecure_auth_profile_exceptions.<profile>`，只能有五個欄位：`confirmed: true`（confirm insecure SNMP，布林）、`reason`（文字）、`expiry`（`YYYY-MM-DD`，UTC 當天結束前有效）、`owner`（文字）、`networkEvidence`（restricted management network evidence，例如變更單號或 ACL 說明；文字或正整數單號）。文字是去掉空白與不顯示字元後至少兩個不同字母或數字、不是佔位詞（`None`、`n/a`、`TBD` 等）也不是寫成字串的數字；`null`/布林/list/mapping/小數/0/負數不算。`playbooks/apply/snmp-exporter-apply.yml` 的 prod gate 檢查全部五項；驗收見 `docs/verification/snmp-exporter.md` C12。
+實作（欄位 2026-10-13，型別與內容規則 2026-10-14，C12 v1.4）：每個 auth profile 一筆 `snmp_insecure_auth_profile_exceptions.<profile>`，只能有五個欄位：`confirmed: true`（confirm insecure SNMP，布林）、`reason`（文字）、`expiry`（`YYYY-MM-DD`，UTC 當天結束前有效）、`owner`（文字）、`networkEvidence`（restricted management network evidence，例如變更單號或 ACL 說明；文字或正整數單號）。文字是 NFKC 正規化並去掉空白與不顯示字元後至少兩個不同字母或數字、不是佔位詞（`None`、`n/a`、`TBD`、`沒有` 等）也不是寫成字串的數字；`null`/布林/list/mapping/小數/0/負數不算。`playbooks/apply/snmp-exporter-apply.yml` 的 prod gate 檢查全部五項；驗收見 `docs/verification/snmp-exporter.md` C12。
 
 ### 13.3 Exporter Endpoint Protection
 

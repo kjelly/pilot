@@ -240,10 +240,13 @@ snmp_insecure_auth_profile_exceptions:
 - `confirmed`：布林 `true`。YAML 1.1 的 `yes`、`on`、`True` 載入後就是這個布林，可以用；字串 `"true"`、
   數字 `1` 不行。
 - `reason`、`owner`：文字。`networkEvidence`：文字，或正整數的變更單號（不加引號，或寫成一串數字的字串）。
-- 「文字」是去掉空白與不顯示的字元（零寬字元、格式字元、Hangul filler、空白點字 U+2800、組合附加符號、
-  spacing modifier）之後，至少有兩個不同字母或數字的字串；不能是佔位詞（不分大小寫、忽略標點比對：
-  `None`、`null`、`nil`、`true`、`false`、`yes`、`no`、`nan`、`inf`、`n/a`、`TBD`、`TODO`、`unknown`、`待定`
-  等），也不能是寫成字串的數字（`"0"`、`"-5"`、`"1.5"`）。`null`（包括只寫 `networkEvidence:` 沒有值）、
+- 「文字」是先做 NFKC 正規化（全形 `ＴＢＤ`、`１２３` 視同 `TBD`、`123`；用
+  `community.general.unicode_normalize`，pilot-cli image 已安裝 `community.general`），再去掉空白與不顯示
+  的字元（零寬字元、格式字元、Hangul filler、空白點字 U+2800、組合附加符號、spacing modifier）之後，至少
+  有兩個不同字母或數字的字串；不能是佔位詞（不分大小寫、忽略標點比對：`None`、`null`、`nil`、`true`、
+  `false`、`yes`、`no`、`nan`、`inf`、`n/a`、`TBD`、`TODO`、`unknown`、`沒有`、`不適用`、`待定` 等），也不能
+  是寫成字串的數字（`"0"`、`"-5"`、`"1.5"`）。這是擋下手誤與忘了填的佔位值，不是擋刻意偽裝的值；例外
+  是否合理仍由 `owner` 與審查負責。`null`（包括只寫 `networkEvidence:` 沒有值）、
   布林、list、mapping、小數（含 `.nan`、`.inf`）、0 與負數都會被拒絕。C12 v1.2 的 gate 先把值轉成字串再量
   長度，`null`、`[]`、`{}` 因此被當成有內容；v1.3 仍接受 `None`（不加引號時 YAML 讀成字串 `"None"`）、
   `n/a`、`TBD`、`"0"`、單一字元與 Hangul filler（PR #65 review）。
@@ -257,7 +260,7 @@ snmp_insecure_auth_profile_exceptions:
   pre_tasks 的 `set_fact` 補上，由 `TestRegression_InventoryInputsReachThePlay` 鎖住。
 
 目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
-鎖住（expiry 17 個案例、其他欄位 85 個案例，每個拒絕都檢查訊息指出的問題；另有 14 個案例把例外寫在
+鎖住（expiry 17 個案例、其他欄位 91 個案例，每個拒絕都檢查訊息指出的問題；另有 14 個案例把例外寫在
   group_vars/host_vars 或 `-e` 檔，1 個案例用 `-e key=value`），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 

@@ -266,7 +266,11 @@
     #   rejected; unquoted, such a date already fails when Ansible loads the
     #   vars file.
     # "Text" is a string with at least two different letters or digits once
-    # the characters in _snmp_exception_blank are removed (whitespace,
+    # it is NFKC-normalized (community.general.unicode_normalize; the
+    # pilot-cli image installs community.general), so that fullwidth "ＴＢＤ"
+    # or "１２３", as a CJK input method in fullwidth mode types them, count
+    # as "TBD" and "123", and once the characters in _snmp_exception_blank
+    # are removed (whitespace,
     # Unicode included; zero-width and format characters; Hangul fillers, the
     # blank Braille pattern and other characters that render as nothing;
     # combining and spacing modifier marks), that is not a placeholder word
@@ -317,7 +321,7 @@
           none null nil nul undefined undef true false yes no on off nan inf
           infinity na nd tbd tba tbc todo fixme xxx unknown unk placeholder
           changeme dummy empty blank missing notapplicable nothing test
-          example 待定 未定 不適用 暫無 待補
+          example 沒有 没有 不適用 不适用 待定 未定 待補 待补 暫無 暂无 未知 無 无 空
         _snmp_exceptions: "{{ snmp_insecure_auth_profile_exceptions | default({}) }}"
         _snmp_exception: >-
           {{ _snmp_exceptions[item.key]
@@ -352,7 +356,7 @@
               renders as None in ansible-core 2.19, so "ok" stands for none). -#}
           {%- macro text_problem(name, v, ticket) -%}
             {%- if v is string -%}
-              {%- set visible = v | regex_replace(_snmp_exception_blank, '') -%}
+              {%- set visible = v | community.general.unicode_normalize('NFKC') | regex_replace(_snmp_exception_blank, '') -%}
               {%- set key = visible | regex_replace('[\W_]+', '') | lower -%}
               {%- if ticket and visible is match('^0*[1-9][0-9]*$') -%}
                 ok

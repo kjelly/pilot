@@ -96,10 +96,28 @@ func checkSnmpGateResult(t *testing.T, res fcRun, reject []string) {
 		t.Fatalf("want the gate's own rejection of lab-v2c only, got rc=%d %v\n%s", res.rc, res.failures, res.raw)
 	}
 	for _, want := range reject {
-		if !strings.Contains(res.raw, want) {
+		if !strings.Contains(res.raw, want) && !strings.Contains(res.raw, jsonASCII(want)) {
 			t.Fatalf("the rejection does not say %q:\n%s", want, res.raw)
 		}
 	}
+}
+
+// jsonASCII returns s as Ansible's JSON callback writes it: every non-ASCII
+// character as a \uXXXX escape (a UTF-16 pair beyond the BMP).
+func jsonASCII(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < 0x80:
+			b.WriteRune(r)
+		case r > 0xffff:
+			r -= 0x10000
+			fmt.Fprintf(&b, "\\u%04x\\u%04x", 0xd800+(r>>10), 0xdc00+(r&0x3ff))
+		default:
+			fmt.Fprintf(&b, "\\u%04x", r)
+		}
+	}
+	return b.String()
 }
 
 // runSnmpExceptionCases runs the prod gate from snmp-exporter-apply.yml
@@ -205,9 +223,9 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 // reason or owner; a null or non-mapping exception raised a templating
 // error. The first v1.3 gate still took any number (0, -5, .nan) and
 // zero-width or punctuation-only strings; the second took placeholder words
-// (`None`, "null", n/a, TBD), numeric strings ("0", "-5"), one-character
-// values and blank-rendering letters (Hangul fillers, U+2800), and ignored
-// misspelled keys without a word.
+// (`None`, "null", n/a, TBD, also in fullwidth letters), numeric strings
+// ("0", "-5"), one-character values and blank-rendering letters (Hangul
+// fillers, U+2800), and ignored misspelled keys without a word.
 func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 	day := snmpTestDays(t)
 	const expiry = `expiry: "2099-12-31"`
@@ -239,6 +257,7 @@ func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 		{"networkEvidence in another script", with("networkEvidence", `"管理網段 ACL 變更 7"`), day(0), nil},
 		{"networkEvidence with a combining accent", with("networkEvidence", `"Cafe\u0301 VLAN"`), day(0), nil},
 		{"a two-letter owner", with("owner", "IT"), day(0), nil},
+		{"a fullwidth ticket number string", with("networkEvidence", `"１２３"`), day(0), nil},
 		// YAML 1.1 loads these as the boolean true.
 		{"confirmed: yes", with("confirmed", "yes"), day(0), nil},
 		{"confirmed: on", with("confirmed", "on"), day(0), nil},
@@ -293,6 +312,9 @@ func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 		{"networkEvidence To-Do", with("networkEvidence", "To-Do"), day(0), placeholder("networkEvidence", "todo")},
 		{"networkEvidence the string false", with("networkEvidence", `"false"`), day(0), placeholder("networkEvidence", "false")},
 		{"networkEvidence the string .nan", with("networkEvidence", `".nan"`), day(0), placeholder("networkEvidence", "nan")},
+		{"networkEvidence fullwidth TBD", with("networkEvidence", `"ＴＢＤ"`), day(0), placeholder("networkEvidence", "tbd")},
+		{"networkEvidence fullwidth N/A", with("networkEvidence", `"Ｎ／Ａ"`), day(0), placeholder("networkEvidence", "na")},
+		{"networkEvidence 沒有", with("networkEvidence", `"沒有"`), day(0), placeholder("networkEvidence", "沒有")},
 		{"networkEvidence the string 0", with("networkEvidence", `"0"`), day(0), rejects(notTicket)},
 		{"networkEvidence the string -5", with("networkEvidence", `"-5"`), day(0), rejects(notTicket)},
 		{"networkEvidence the string 1.5", with("networkEvidence", `"1.5"`), day(0), rejects(notTicket)},
@@ -309,6 +331,8 @@ func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 		{"reason punctuation only", with("reason", `"---"`), day(0), tooLittle("reason")},
 		{"reason unquoted None", with("reason", "None"), day(0), placeholder("reason", "none")},
 		{"reason TBD", with("reason", "TBD"), day(0), placeholder("reason", "tbd")},
+		{"reason 不適用", with("reason", `"不適用"`), day(0), placeholder("reason", "不適用")},
+		{"reason a fullwidth number", with("reason", `"１２３"`), day(0), rejects("reason is a number written as a string")},
 		{"owner missing", with("owner", ""), day(0), rejects("owner is missing")},
 		{"owner blank", with("owner", `"   "`), day(0), tooLittle("owner")},
 		{"owner null", with("owner", "null"), day(0), rejects("owner is null, not text")},
