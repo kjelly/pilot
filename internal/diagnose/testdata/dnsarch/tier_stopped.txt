@@ -1,0 +1,33 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch unbound begin
+inactive
+@@pilot-dnsarch unbound end rc=3
+@@pilot-dnsarch forwards begin
+[1791878370] unbound-control[3152:0] error: connect: Connection refused for /run/unbound.ctl
+@@pilot-dnsarch forwards end rc=1
+@@pilot-dnsarch stubs begin
+[1791878370] unbound-control[3153:0] error: connect: Connection refused for /run/unbound.ctl
+@@pilot-dnsarch stubs end rc=1
+@@pilot-dnsarch identity begin
+;; communications error to 127.0.0.1#53: connection refused
+;; no servers could be reached
+@@pilot-dnsarch identity end rc=9
+@@pilot-dnsarch internal begin
+;; communications error to 127.0.0.1#53: connection refused
+;; no servers could be reached
+@@pilot-dnsarch internal end rc=9
+@@pilot-dnsarch external begin
+;; communications error to 127.0.0.1#53: connection refused
+;; no servers could be reached
+@@pilot-dnsarch external end rc=9
+@@pilot-dnsarch authority@192.168.122.5 begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 8000
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 1, ADDITIONAL: 2
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 495cc138e83fac42010000006acde4e2d9e5feaaba2d5b16 (good)
+@@pilot-dnsarch authority@192.168.122.5 end rc=0

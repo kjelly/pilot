@@ -1,6 +1,9 @@
 package networkcheck
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseInventoryList_ExpandsChildGroupsAndHostVars(t *testing.T) {
 	raw := []byte(`{
@@ -48,5 +51,33 @@ func TestParseInventoryList_RejectsGroupCycle(t *testing.T) {
 func TestParseInventoryList_RejectsInvalidJSON(t *testing.T) {
 	if _, err := ParseInventoryList([]byte("not json")); err == nil {
 		t.Fatal("invalid JSON accepted")
+	}
+}
+
+// GroupOrder keeps Ansible's groups[...] order (own hosts in inventory
+// order, then child groups' hosts) while GroupHosts stays sorted, so a
+// caller mirroring "the first N tier hosts" sees the order a playbook does.
+// The JSON shape is ansible-inventory 2.19.2's --list output for a dns
+// group listing zeta, alpha, mid and a child group with beta.
+func TestParseInventoryList_GroupOrderFollowsAnsible(t *testing.T) {
+	raw := []byte(`{
+		"_meta": {"hostvars": {}},
+		"all": {"children": ["ungrouped", "dns"]},
+		"dns": {"children": ["dnsextra"], "hosts": ["zeta", "alpha", "mid"]},
+		"dnsextra": {"hosts": ["beta", "alpha"]}
+	}`)
+	inv, err := ParseInventoryList(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(inv.OrderedGroupHosts("dns"), ","); got != "zeta,alpha,mid,beta" {
+		t.Fatalf("OrderedGroupHosts(dns) = %s, want zeta,alpha,mid,beta", got)
+	}
+	if got := strings.Join(inv.GroupHosts["dns"], ","); got != "alpha,beta,mid,zeta" {
+		t.Fatalf("GroupHosts[dns] = %s, want the sorted list", got)
+	}
+	legacy := ResolvedInventory{GroupHosts: map[string][]string{"dns": {"a", "b"}}}
+	if got := strings.Join(legacy.OrderedGroupHosts("dns"), ","); got != "a,b" {
+		t.Fatalf("OrderedGroupHosts without GroupOrder = %s, want the GroupHosts fallback", got)
 	}
 }

@@ -18,6 +18,23 @@ import (
 type ResolvedInventory struct {
 	GroupHosts map[string][]string
 	HostVars   map[string]map[string]any
+	// GroupOrder holds the same membership in the order Ansible's
+	// groups['<name>'] lists it: the group's own hosts in inventory order,
+	// then each child group's hosts, without duplicates. GroupHosts is
+	// sorted; logic that mirrors a playbook's groups[...] order (for
+	// example the first three dns tier addresses a resolver gets) reads
+	// this instead. Nil when the inventory was built without
+	// ParseInventoryList.
+	GroupOrder map[string][]string
+}
+
+// OrderedGroupHosts returns group's hosts in Ansible's groups[...] order,
+// falling back to the sorted GroupHosts when GroupOrder was not filled.
+func (ri ResolvedInventory) OrderedGroupHosts(group string) []string {
+	if hosts, ok := ri.GroupOrder[group]; ok {
+		return hosts
+	}
+	return ri.GroupHosts[group]
 }
 
 // HostAddr returns the host's ansible_host if set, otherwise the inventory
@@ -67,20 +84,28 @@ func ParseInventoryList(listJSON []byte) (ResolvedInventory, error) {
 	}
 
 	resolved := make(map[string][]string, len(groups))
+	ordered := make(map[string][]string, len(groups))
 	visiting := make(map[string]bool, len(groups))
 	var expand func(string) ([]string, error)
 	expand = func(group string) ([]string, error) {
-		if hosts, ok := resolved[group]; ok {
+		if hosts, ok := ordered[group]; ok {
 			return hosts, nil
 		}
 		if visiting[group] {
 			return nil, fmt.Errorf("inventory group cycle at %q", group)
 		}
 		visiting[group] = true
-		set := make(map[string]struct{})
+		seen := make(map[string]struct{})
+		inOrder := make([]string, 0)
+		add := func(host string) {
+			if _, dup := seen[host]; !dup {
+				seen[host] = struct{}{}
+				inOrder = append(inOrder, host)
+			}
+		}
 		entry := groups[group]
 		for _, host := range entry.Hosts {
-			set[host] = struct{}{}
+			add(host)
 		}
 		for _, child := range entry.Children {
 			hosts, err := expand(child)
@@ -88,17 +113,15 @@ func ParseInventoryList(listJSON []byte) (ResolvedInventory, error) {
 				return nil, err
 			}
 			for _, host := range hosts {
-				set[host] = struct{}{}
+				add(host)
 			}
 		}
 		delete(visiting, group)
-		hosts := make([]string, 0, len(set))
-		for host := range set {
-			hosts = append(hosts, host)
-		}
-		sort.Strings(hosts)
-		resolved[group] = hosts
-		return hosts, nil
+		sorted := append([]string(nil), inOrder...)
+		sort.Strings(sorted)
+		resolved[group] = sorted
+		ordered[group] = inOrder
+		return inOrder, nil
 	}
 	for group := range groups {
 		if group == "_meta" {
@@ -118,5 +141,5 @@ func ParseInventoryList(listJSON []byte) (ResolvedInventory, error) {
 		}
 	}
 
-	return ResolvedInventory{GroupHosts: resolved, HostVars: meta.HostVars}, nil
+	return ResolvedInventory{GroupHosts: resolved, HostVars: meta.HostVars, GroupOrder: ordered}, nil
 }

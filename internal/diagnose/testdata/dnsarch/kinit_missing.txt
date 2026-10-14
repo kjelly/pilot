@@ -1,0 +1,6 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch kinit begin
+kinit: Pre-authentication failed: Invalid argument while getting initial credentials
+@@pilot-dnsarch kinit end rc=1

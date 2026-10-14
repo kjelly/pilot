@@ -55,6 +55,9 @@ type diagnoseMCPToolsOptions struct {
 	StepTimeout    time.Duration
 	AnsibleRuntime deployAnsibleRuntime
 	AdHocRunner    diagnose.AdHocRunner
+	// FreeIPAReader is the read-only principal the operator approved for
+	// pilot_diagnose_dns_architecture's authenticated FreeIPA reads.
+	FreeIPAReader diagnoseFreeIPAReader
 }
 
 func diagnoseWorkspaceRoot(opts diagnoseMCPToolsOptions) string {
