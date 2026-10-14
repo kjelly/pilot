@@ -154,8 +154,9 @@ func dnsModelPlaybook(t *testing.T) []map[string]any {
 		base("dns tier model", "dns", nil, tierTasks),
 		base("resolver model", "freeipa-dns-client", nil, resolverTasks),
 		base("primary forwarders", "freeipa-server", pickVars(t, freeipaServerPlaybook, server["vars"].(map[string]any), "ipa_dns_forwarders_raw", "ipa_setup_dns"), serverTasks),
-		base("replica install", "freeipa-server-replica", pickVars(t, freeipaReplicaPlaybook, replica["vars"].(map[string]any), "ipa_setup_dns", "ipa_dns_forwarders", "ipa_dns_forwarder_argv"),
-			[]any{emitTask("replica", "{'setup_dns': ipa_setup_dns | bool, 'argv': ipa_dns_forwarder_argv}")}),
+		base("replica install", "freeipa-server-replica", pickVars(t, freeipaReplicaPlaybook, replica["vars"].(map[string]any), "ipa_setup_dns", "ipa_dns_forwarder_argv"),
+			append(pickTasks(t, freeipaReplicaPlaybook, replica["pre_tasks"].([]any), []string{"Normalize DNS forwarders to a list"}),
+				emitTask("replica", "{'setup_dns': ipa_setup_dns | bool, 'argv': ipa_dns_forwarder_argv}"))),
 	}
 }
 
@@ -179,7 +180,10 @@ all:
         c1: {ansible_host: 10.0.0.21}
         c2: {ansible_host: 10.0.0.22, freeipa_dns_client_servers: [10.9.9.9, 10.9.9.8]}
 `},
-	{name: "split tier with DNS-enabled and DNS-less replicas", inventory: `
+	// r2 leaves freeipa_setup_dns unset (a DNS provider, issue #67) and
+	// writes its forwarders as a string (one forwarder, issue #68); r1's
+	// ipa_dns_forwarders wins over its freeipa_dns_forwarders.
+	{name: "split tier with two DNS-providing replicas", inventory: `
 all:
   children:
     freeipa-server:
@@ -187,7 +191,7 @@ all:
         ipa: {ansible_host: 10.0.0.5, freeipa_domain: example.test, freeipa_dns_forwarders: "1.1.1.1 9.9.9.9"}
     freeipa-server-replica:
       hosts:
-        r1: {ansible_host: 10.0.0.6, freeipa_setup_dns: true, freeipa_replica_fqdn: ipa2.example.test, freeipa_dns_forwarders: [9.9.9.9]}
+        r1: {ansible_host: 10.0.0.6, freeipa_setup_dns: true, freeipa_replica_fqdn: ipa2.example.test, freeipa_dns_forwarders: [9.9.9.9], ipa_dns_forwarders: "1.0.0.1 1.1.1.1"}
         r2: {ansible_host: 10.0.0.7, freeipa_replica_fqdn: ipa3.example.test, freeipa_dns_forwarders: 8.8.8.8}
     dns:
       hosts:
@@ -476,7 +480,7 @@ func compareDNSModel(t *testing.T, m DNSArchModel, inv networkcheck.ResolvedInve
 			if !readEmitted(t, out, "primary", p.InventoryHost, &e) {
 				t.Fatalf("playbook emitted nothing for primary %s", p.InventoryHost)
 			}
-			want(p.InventoryHost+" installs DNS", p.InstallsDNS, e.SetupDNS)
+			want(p.InventoryHost+" installs DNS", p.DNSProvider, e.SetupDNS)
 			if e.SetupDNS {
 				install := m.Forwarding.ServerInstallForwarders[0]
 				want(p.InventoryHost+" install forwarders", nonNil(install.Forwarders), nonNil(e.Forwarders))
@@ -490,16 +494,13 @@ func compareDNSModel(t *testing.T, m DNSArchModel, inv networkcheck.ResolvedInve
 			if !readEmitted(t, out, "replica", p.InventoryHost, &e) {
 				t.Fatalf("playbook emitted nothing for replica %s", p.InventoryHost)
 			}
-			want(p.InventoryHost+" installs DNS", p.InstallsDNS, e.SetupDNS)
+			want(p.InventoryHost+" installs DNS", p.DNSProvider, e.SetupDNS)
 			for _, install := range m.Forwarding.ServerInstallForwarders {
 				if install.Host != p.InventoryHost {
 					continue
 				}
 				if install.Error != "" {
-					// The playbook really splits the string per character.
-					if raw, _ := inv.HostVars[p.InventoryHost]["freeipa_dns_forwarders"].(string); len(e.Argv) != len(raw) {
-						t.Errorf("%s: model says the forwarder string is split per character, playbook argv %v", p.InventoryHost, e.Argv)
-					}
+					t.Errorf("%s: model rejects the forwarders (%s), playbook argv %v", p.InventoryHost, install.Error, e.Argv)
 					continue
 				}
 				wantArgv := []string{"--no-forwarders"}

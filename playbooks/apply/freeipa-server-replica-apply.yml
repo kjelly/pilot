@@ -138,17 +138,19 @@
     # roles identically, since they read the exact same source variable.
     ipa_replica_setup_ca: "{{ freeipa_replica_setup_ca | default(true) }}"
     ipa_setup_dns: "{{ freeipa_setup_dns | default(true) }}"
-    ipa_dns_forwarders: "{{ freeipa_dns_forwarders | default([]) }}"
     ipa_setup_ntp: "{{ freeipa_setup_ntp | default(false) }}"
     # Shared forwarder-argv computation — used identically by BOTH the
     # fresh-promotion `--setup-dns`/`--forwarder=`/`--no-forwarders` args
     # below AND the standalone `ipa-dns-install` Day-2 reconciliation task
     # (spec §10.1), so the two paths can never drift into different
-    # forwarder policies for the same ipa_dns_forwarders input.
+    # forwarder policies for the same freeipa_dns_forwarders input.
+    # ipa_dns_forwarders_normalized comes from tasks/freeipa-dns-forwarders.yml
+    # (pre_tasks), the normalization freeipa-server-apply.yml uses too: a
+    # string like `8.8.8.8` is one forwarder, not one per character (issue #68).
     ipa_dns_forwarder_argv: >-
       {{
-        ['--no-forwarders'] if (ipa_dns_forwarders | length == 0)
-        else (ipa_dns_forwarders | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+        ['--no-forwarders'] if (ipa_dns_forwarders_normalized | length == 0)
+        else (ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
       }}
 
     # Native install — same package as the primary; ipa-server already
@@ -239,6 +241,21 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # The same normalization as freeipa-server-apply.yml (issue #68); read
+    # by ipa_dns_forwarder_argv above. ipa_dns_forwarders, when given (it
+    # used to be this play's own var, so -e ipa_dns_forwarders=... overrode
+    # it), still wins, as on the primary. Neither set means no
+    # server-specific forwarders: the replica's named still uses the global
+    # list the primary sets with ipa dnsconfig-mod.
+    - name: "Normalize DNS forwarders to a list"
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-forwarders.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default([])) }}"
       tags: [always]
 
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"

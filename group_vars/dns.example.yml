@@ -14,8 +14,8 @@
 #  註解掉的行 = 使用 playbook 的內建預設值。用 pilot edit 修改時會自動取消
 #  註解;「還原成內建預設」會再把它註解掉。
 #
-#  inventory 裡有 FreeIPA DNS(freeipa-server,或 freeipa_setup_dns: true 的
-#  replica)時,freeipa_domain 會自動送到 FreeIPA,不需要在這裡設定。
+#  inventory 裡有 FreeIPA DNS(freeipa_setup_dns 不是 false 的 freeipa-server
+#  或 replica)時,freeipa_domain 會自動送到所有這些主機,不需要在這裡設定。
 #  規格:docs/verification/dns.md
 # ============================================================================
 

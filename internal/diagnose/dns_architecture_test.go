@@ -362,31 +362,25 @@ func TestBuildDNSArchitectureModel_Scenarios(t *testing.T) {
 					t.Fatalf("tier addr = %q, want the inventory name when ansible_host is unset", m.Tier[0].Addr)
 				}
 			}},
-		{"DNS-enabled replica joins the stubs and the resolver fallback", inv(
+		// r2 leaves freeipa_setup_dns unset: the replica playbook installs
+		// DNS on it, so it is a DNS provider like r1 (issue #67).
+		{"DNS-enabled replicas join the stubs and the resolver fallback", inv(
 			map[string][]string{"freeipa-server": {"ipa"}, "freeipa-server-replica": {"r1", "r2"}, "dns": {"t1"}, "freeipa-dns-client": {"c1"}},
 			map[string]map[string]any{"ipa": ipa, "r1": {"ansible_host": "10.0.0.6", "freeipa_setup_dns": "yes", "freeipa_replica_fqdn": "ipa2.example.test", "freeipa_dns_forwarders": []any{"9.9.9.9"}}, "r2": {"ansible_host": "10.0.0.7", "freeipa_replica_fqdn": "ipa3.example.test"}, "t1": {"ansible_host": "10.0.0.11"}, "c1": {}}),
 			func(t *testing.T, m DNSArchModel) {
-				if !reflect.DeepEqual(m.DNSProviderIPs(), []string{"10.0.0.5", "10.0.0.6"}) || len(m.ProviderErrors) != 0 {
+				if !reflect.DeepEqual(m.DNSProviderIPs(), []string{"10.0.0.5", "10.0.0.6", "10.0.0.7"}) || len(m.ProviderErrors) != 0 {
 					t.Fatalf("providers = %+v errors %v", m.Providers, m.ProviderErrors)
 				}
-				if !reflect.DeepEqual(m.Tier[0].StubZones[0].Addrs, []string{"10.0.0.5", "10.0.0.6"}) {
+				if !reflect.DeepEqual(m.Tier[0].StubZones[0].Addrs, []string{"10.0.0.5", "10.0.0.6", "10.0.0.7"}) {
 					t.Fatalf("stub = %+v", m.Tier[0].StubZones)
 				}
+				// At most 3 nameservers: the tier, then the first two providers.
 				if r := m.Resolvers[0]; !reflect.DeepEqual(r.Servers, []string{"10.0.0.11", "10.0.0.5", "10.0.0.6"}) {
 					t.Fatalf("resolver = %+v", r)
 				}
-				// r2 leaves freeipa_setup_dns unset: the replica playbook
-				// installs DNS on it with --no-forwarders, but the pool does
-				// not use it.
+				// r2's install-time forwarders: none (freeipa_dns_forwarders unset).
 				if f := m.Forwarding.ServerInstallForwarders; len(f) != 3 || f[1].Host != "r1" || f[1].Forwarders[0] != "9.9.9.9" || f[2].Host != "r2" || len(f[2].Forwarders) != 0 {
 					t.Fatalf("install forwarders = %+v", f)
-				}
-				if r2, _ := m.Provider("r2"); !r2.InstallsDNS || r2.DNSProvider {
-					t.Fatalf("r2 = %+v, want installs DNS but not a pool DNS provider", r2)
-				}
-				_, findings := BuildDNSArchStatus(m, DNSArchObserved{Kerberos: DNSArchKerberos{State: "available"}}, nil)
-				if !strings.Contains(strings.Join(findings, "\n"), "freeipa_replica_dns_unused: r2") {
-					t.Fatalf("findings = %v", findings)
 				}
 			}},
 		{"explicit client override wins; provider resolves through itself", inv(
@@ -402,7 +396,7 @@ func TestBuildDNSArchitectureModel_Scenarios(t *testing.T) {
 			}},
 		{"invalid inputs fail closed the way the playbooks do", inv(
 			map[string][]string{"freeipa-server": {"ipa"}, "freeipa-server-replica": {"r1", "r2"}, "freeipa-dns-client": {"c1"}},
-			map[string]map[string]any{"ipa": ipa, "r1": {"ansible_host": "10.0.0.5", "freeipa_dns_forwarders": "8.8.8.8"}, "r2": {}, "c1": {"freeipa_dns_client_servers": "[10.0.0.10]"}}),
+			map[string]map[string]any{"ipa": ipa, "r1": {"ansible_host": "10.0.0.5", "freeipa_dns_forwarders": float64(5)}, "r2": {}, "c1": {"freeipa_dns_client_servers": "[10.0.0.10]"}}),
 			func(t *testing.T, m DNSArchModel) {
 				// Both replicas also default to ipa2.<domain>, so the pool
 				// has a duplicate FQDN as well.
@@ -412,7 +406,7 @@ func TestBuildDNSArchitectureModel_Scenarios(t *testing.T) {
 				if r := m.Resolvers[0]; r.Error == "" {
 					t.Fatalf("c1 = %+v, want the list-type gate error", r)
 				}
-				if f := m.Forwarding.ServerInstallForwarders[1]; f.Host != "r1" || !strings.Contains(f.Error, "one --forwarder per character") {
+				if f := m.Forwarding.ServerInstallForwarders[1]; f.Host != "r1" || !strings.Contains(f.Error, "neither a list nor a string") {
 					t.Fatalf("r1 install forwarders = %+v", f)
 				}
 			}},

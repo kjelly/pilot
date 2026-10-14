@@ -218,10 +218,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		var clientProbe *dnsArchProbe
 		var overflow []string
 		for _, p := range model.Providers {
-			// A replica that installs DNS without being a pool DNS provider
-			// is probed too: its live named is the evidence for the
-			// freeipa_replica_dns_unused finding.
-			if !p.DNSProvider && !p.InstallsDNS {
+			if !p.DNSProvider {
 				continue
 			}
 			if len(providerProbes) >= maxDNSArchProbeHosts {
