@@ -1,0 +1,33 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch kinit begin
+@@pilot-dnsarch kinit end rc=0
+@@pilot-dnsarch dnsconfig begin
+---------------------------------
+Global DNS configuration is empty
+---------------------------------
+  dn: cn=dns,dc=ipa,dc=pilot,dc=internal
+  IPA DNS servers: ipa1.ipa.pilot.internal
+  attributelevelrights: {'idnsforwardpolicy': '', 'idnsforwarders': '', 'idnsallowsyncptr': '', 'idnszonerefresh': '', 'idnspersistentsearch': '', 'aci': '', 'cn': 'rsc', 'objectclass': 'rsc', 'ipaconfigstring': '', 'ipadnsversion': '', 'nsaccountlock': ''}
+  cn: dns
+  objectclass: idnsConfigObject, nsContainer, ipaConfigObject, ipaDNSContainer, top
+@@pilot-dnsarch dnsconfig end rc=0
+@@pilot-dnsarch dnsserver begin
+---------------------
+0 DNS servers matched
+---------------------
+----------------------------
+Number of entries returned 0
+----------------------------
+@@pilot-dnsarch dnsserver end rc=1
+@@pilot-dnsarch forwardzones begin
+----------------------------
+Number of entries returned 0
+----------------------------
+@@pilot-dnsarch forwardzones end rc=1
+@@pilot-dnsarch zones begin
+----------------------------
+Number of entries returned 0
+----------------------------
+@@pilot-dnsarch zones end rc=1

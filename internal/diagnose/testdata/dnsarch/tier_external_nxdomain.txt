@@ -1,0 +1,23 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch unbound begin
+active
+@@pilot-dnsarch unbound end rc=0
+@@pilot-dnsarch forwards begin
+. IN forward 1.1.1.1
+@@pilot-dnsarch forwards end rc=0
+@@pilot-dnsarch stubs begin
+. IN stub prime M.ROOT-SERVERS.NET. L.ROOT-SERVERS.NET. K.ROOT-SERVERS.NET. J.ROOT-SERVERS.NET. I.ROOT-SERVERS.NET. H.ROOT-SERVERS.NET. G.ROOT-SERVERS.NET. F.ROOT-SERVERS.NET. E.ROOT-SERVERS.NET. D.ROOT-SERVERS.NET. C.ROOT-SERVERS.NET. B.ROOT-SERVERS.NET. A.ROOT-SERVERS.NET. 2001:dc3::35 2001:500:9f::42 2001:7fd::1 2001:503:c27::2:30 2001:7fe::53 2001:500:1::53 2001:500:12::d0d 2001:500:2f::f 2001:500:a8::e 2001:500:2d::d 2001:500:2::c 2001:500:200::b 2001:503:ba3e::2:30 202.12.27.33 199.7.83.42 193.0.14.129 192.58.128.30 192.36.148.17 198.97.190.53 192.112.36.4 192.5.5.241 192.203.230.10 199.7.91.13 192.33.4.12 199.9.14.201 198.41.0.4
+@@pilot-dnsarch stubs end rc=0
+@@pilot-dnsarch identity begin
+"pilot-dns:pr73-cap"
+@@pilot-dnsarch identity end rc=0
+@@pilot-dnsarch external begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 3954
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+@@pilot-dnsarch external end rc=0

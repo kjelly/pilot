@@ -224,9 +224,14 @@
       register: ipa_precheck_cfg
       tags: [always]
 
+    # Shared with freeipa-server-replica-apply.yml (issue #68).
     - name: "Normalize DNS forwarders to a list"
-      ansible.builtin.set_fact:
-        ipa_dns_forwarders_normalized: "{{ (ipa_dns_forwarders_raw | from_yaml) if (ipa_dns_forwarders_raw is string and (ipa_dns_forwarders_raw | trim).startswith('[')) else (ipa_dns_forwarders_raw.split() if ipa_dns_forwarders_raw is string else ipa_dns_forwarders_raw) }}"  # noqa yaml[line-length]
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-forwarders.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders_raw }}"
       tags: [always]
 
     # Only meaningful before the first install: once ipa-server-install has
@@ -646,9 +651,21 @@
         # ipa-server-install itself has no forwarders flag to change after
         # the fact, so this is applied post-install via the same `ipa`
         # CLI freeipa-identity-apply.yml already uses for HBAC/sudo data.
+        # The admin ticket lives in a private cache, destroyed in `always:`
+        # (tasks/freeipa-private-ccache-open.yml, issue #69); before, it
+        # stayed in root's default cache after every apply.
         - name: "FreeIPA DNS — configure upstream forwarders (external resolution)"
           when: ipa_setup_dns | bool and (ipa_dns_forwarders_normalized | length > 0)
+          environment:
+            KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
           block:
+            - name: "FreeIPA DNS — private Kerberos cache for the admin ticket"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-open.yml
+                apply:
+                  tags: [always]
+              tags: [always]
+
             - name: "Kinit admin (for dnsconfig-mod)"  # noqa risky-shell-pipe
               ansible.builtin.shell:
                 cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
@@ -667,6 +684,13 @@
               failed_when: >-
                 ipa_dnsconfig.rc != 0 and
                 'no modifications to be performed' not in (ipa_dnsconfig.stderr | default('') ~ ipa_dnsconfig.stdout | default(''))
+          always:
+            - name: "FreeIPA DNS — destroy the private Kerberos cache"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-close.yml
+                apply:
+                  tags: [always]
+              tags: [always]
 
         # `ipa dnsconfig-mod` above only controls the LDAP-backed global
         # forwarder list; allow-recursion/allow-query-cache are plain BIND

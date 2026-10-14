@@ -125,101 +125,119 @@
       no_log: true
       tags: [always]
 
-    - name: "Kinit as IPA admin"
-      ansible.builtin.command:
-        argv: [kinit, "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"]
-        stdin: "{{ nfs_decom_admin_password }}"
-        stdin_add_newline: true
-      no_log: true
-      changed_when: false
-      when: not ansible_check_mode
-      tags: [always]
-
-    # Read-only detection: does a service principal for this host's own
-    # nfs/<fqdn> identity still exist centrally?
-    - name: "Check whether the nfs/<fqdn> service principal still exists (read-only)"
-      ansible.builtin.command: ipa service-show "nfs/{{ nfs_decom_server_fqdn }}"
-      register: nfs_decom_service_show
-      changed_when: false
-      failed_when: false
-      check_mode: false
-      tags: [inspect]
-
-    - name: "Check whether the local managed exports fragment still exists (read-only)"
-      ansible.builtin.stat:
-        path: "{{ nfs_exports_fragment }}"
-      register: nfs_decom_exports_stat
-      tags: [inspect]
-
-    - name: "Report decommission state for external tooling"
-      ansible.builtin.debug:
-        msg: >-
-          NFS_SERVER_DECOMMISSIONED={{
-            ((nfs_decom_service_show.rc | default(1) != 0) and (not nfs_decom_exports_stat.stat.exists))
-            | ternary('true', 'false') }}
-      tags: [inspect]
-
   tasks:
-    - name: "FreeIPA NFS server decommission — removal, with diagnostics on failure"
+    - name: "NFS server decommission with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
       block:
-        - name: "Remove the nfs/<fqdn> service principal, if it exists (idempotent)"
-          ansible.builtin.command: ipa service-del "nfs/{{ nfs_decom_server_fqdn }}"
-          register: nfs_decom_service_del
-          when:
-            - not ansible_check_mode
-            - nfs_decom_service_show.rc | default(1) == 0
-          changed_when: nfs_decom_service_del.rc == 0
-          failed_when:
-            - nfs_decom_service_del.rc | default(0) != 0
-            - "'not found' not in (nfs_decom_service_del.stderr | default(''))"
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-        - name: "Remove this host's own managed exports fragment"
-          ansible.builtin.file:
-            path: "{{ nfs_exports_fragment }}"
-            state: absent
-          register: nfs_decom_exports_removed
+        - name: "Kinit as IPA admin"
+          ansible.builtin.command:
+            argv: [kinit, "{{ freeipa_roster.freeipa.admin.principal | default('admin') }}"]
+            stdin: "{{ nfs_decom_admin_password }}"
+            stdin_add_newline: true
+          no_log: true
+          changed_when: false
           when: not ansible_check_mode
+          tags: [always]
 
-        - name: "Reload nfs exports after removing the managed fragment"
-          ansible.builtin.command: exportfs -ra
-          when:
-            - not ansible_check_mode
-            - nfs_decom_exports_removed.changed | default(false)
-          changed_when: true
-
-        - name: "Verify the service principal is really gone"
+        # Read-only detection: does a service principal for this host's own
+        # nfs/<fqdn> identity still exist centrally?
+        - name: "Check whether the nfs/<fqdn> service principal still exists (read-only)"
           ansible.builtin.command: ipa service-show "nfs/{{ nfs_decom_server_fqdn }}"
-          register: nfs_decom_service_show_after
+          register: nfs_decom_service_show
           changed_when: false
           failed_when: false
           check_mode: false
-          when: not ansible_check_mode
+          tags: [inspect]
 
-        - name: "Gate: nfs/<fqdn> service principal must no longer exist"
-          ansible.builtin.assert:
-            that:
-              - nfs_decom_service_show_after.rc | default(1) != 0
-            fail_msg: >-
-              nfs/{{ nfs_decom_server_fqdn }} still exists after ipa
-              service-del — refusing to report central cleanup as
-              complete.
-          when: not ansible_check_mode
+        - name: "Check whether the local managed exports fragment still exists (read-only)"
+          ansible.builtin.stat:
+            path: "{{ nfs_exports_fragment }}"
+          register: nfs_decom_exports_stat
+          tags: [inspect]
 
-      rescue:
-        - name: "Rescue: dump exportfs state"
-          ansible.builtin.command: exportfs -v
-          register: nfs_decom_rescue_exportfs
-          changed_when: false
-          failed_when: false
+        - name: "Report decommission state for external tooling"
+          ansible.builtin.debug:
+            msg: >-
+              NFS_SERVER_DECOMMISSIONED={{
+                ((nfs_decom_service_show.rc | default(1) != 0) and (not nfs_decom_exports_stat.stat.exists))
+                | ternary('true', 'false') }}
+          tags: [inspect]
 
-        - name: "Rescue: surface diagnostics and fail"
-          ansible.builtin.fail:
-            msg: |
-              FreeIPA NFS server decommission FAILED. Diagnostics:
-              --- exportfs -v ---
-              {{ nfs_decom_rescue_exportfs.stdout | default('(unavailable)') }}
-              {{ nfs_decom_rescue_exportfs.stderr | default('') }}
-              No NFS share/export DATA was touched by this playbook
-              (spec.md §20.2/§20.3 — that is explicitly out of scope).
-              Resume via `pilot host decommission resume` once the
-              underlying issue is fixed.
+        - name: "FreeIPA NFS server decommission — removal, with diagnostics on failure"
+          block:
+            - name: "Remove the nfs/<fqdn> service principal, if it exists (idempotent)"
+              ansible.builtin.command: ipa service-del "nfs/{{ nfs_decom_server_fqdn }}"
+              register: nfs_decom_service_del
+              when:
+                - not ansible_check_mode
+                - nfs_decom_service_show.rc | default(1) == 0
+              changed_when: nfs_decom_service_del.rc == 0
+              failed_when:
+                - nfs_decom_service_del.rc | default(0) != 0
+                - "'not found' not in (nfs_decom_service_del.stderr | default(''))"
+
+            - name: "Remove this host's own managed exports fragment"
+              ansible.builtin.file:
+                path: "{{ nfs_exports_fragment }}"
+                state: absent
+              register: nfs_decom_exports_removed
+              when: not ansible_check_mode
+
+            - name: "Reload nfs exports after removing the managed fragment"
+              ansible.builtin.command: exportfs -ra
+              when:
+                - not ansible_check_mode
+                - nfs_decom_exports_removed.changed | default(false)
+              changed_when: true
+
+            - name: "Verify the service principal is really gone"
+              ansible.builtin.command: ipa service-show "nfs/{{ nfs_decom_server_fqdn }}"
+              register: nfs_decom_service_show_after
+              changed_when: false
+              failed_when: false
+              check_mode: false
+              when: not ansible_check_mode
+
+            - name: "Gate: nfs/<fqdn> service principal must no longer exist"
+              ansible.builtin.assert:
+                that:
+                  - nfs_decom_service_show_after.rc | default(1) != 0
+                fail_msg: >-
+                  nfs/{{ nfs_decom_server_fqdn }} still exists after ipa
+                  service-del — refusing to report central cleanup as
+                  complete.
+              when: not ansible_check_mode
+
+          rescue:
+            - name: "Rescue: dump exportfs state"
+              ansible.builtin.command: exportfs -v
+              register: nfs_decom_rescue_exportfs
+              changed_when: false
+              failed_when: false
+
+            - name: "Rescue: surface diagnostics and fail"
+              ansible.builtin.fail:
+                msg: |
+                  FreeIPA NFS server decommission FAILED. Diagnostics:
+                  --- exportfs -v ---
+                  {{ nfs_decom_rescue_exportfs.stdout | default('(unavailable)') }}
+                  {{ nfs_decom_rescue_exportfs.stderr | default('') }}
+                  No NFS share/export DATA was touched by this playbook
+                  (spec.md §20.2/§20.3 — that is explicitly out of scope).
+                  Resume via `pilot host decommission resume` once the
+                  underlying issue is fixed.
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

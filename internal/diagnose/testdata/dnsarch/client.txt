@@ -1,0 +1,23 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch nameservers begin
+192.168.122.15
+192.168.122.5
+@@pilot-dnsarch nameservers end rc=0
+@@pilot-dnsarch options begin
+options timeout:1 attempts:2
+@@pilot-dnsarch options end rc=0
+@@pilot-dnsarch resolved begin
+active
+@@pilot-dnsarch resolved end rc=0
+@@pilot-dnsarch resolvectl begin
+Global: 192.168.122.15 192.168.122.5
+Link 2 (enp1s0):
+@@pilot-dnsarch resolvectl end rc=0
+@@pilot-dnsarch first_hop begin
+"pilot-dns:dd-dns"
+@@pilot-dnsarch first_hop end rc=0
+@@pilot-dnsarch lookup begin
+192.168.122.5   ipa1.ipa.pilot.internal
+@@pilot-dnsarch lookup end rc=0

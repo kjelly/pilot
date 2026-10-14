@@ -41,6 +41,7 @@ func registerDiagnoseCompositeTools(server *mcp.Server, opts diagnoseMCPToolsOpt
 		Name:        "pilot_diagnose_recent_changes",
 		Description: "answers \"what changed shortly before this incident?\" by querying pilot's own durable mutation records — MCP edit-apply audit sessions and pilot deploy run history — in [start, end], never [now-lookback, now] once time has already passed while an Agent was investigating. Returns compact records (kind, actor/workspace revision, hosts, components, result, audit reference), not full transcripts. Never labels a Detection Engine signal revision as a deployment change — this tool has no Detection Engine source at all.",
 	}, diagnoseRecentChangesHandler(opts))
+	registerDiagnoseDNSArchitectureTool(server, opts)
 }
 
 // ---- pilot_diagnose_host_health -----------------------------------------

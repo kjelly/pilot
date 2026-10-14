@@ -1,0 +1,51 @@
+{
+    "custom_stats": {},
+    "global_custom_stats": {},
+    "plays": [
+        {
+            "play": {
+                "duration": {
+                    "end": "2026-10-13T07:52:31.519475Z",
+                    "start": "2026-10-13T07:52:26.413208Z"
+                },
+                "id": "d843aed6-143c-e68d-adb0-000000000006",
+                "name": "Ansible Ad-Hoc",
+                "path": ""
+            },
+            "tasks": [
+                {
+                    "hosts": {
+                        "dd-gone": {
+                            "_ansible_no_log": false,
+                            "action": "command",
+                            "changed": false,
+                            "exception": "(traceback unavailable)",
+                            "msg": "Task failed: Failed to connect to the host via ssh: ssh: connect to host 192.0.2.1 port 22: Connection timed out",
+                            "unreachable": true
+                        }
+                    },
+                    "task": {
+                        "duration": {
+                            "end": "2026-10-13T07:52:31.519475Z",
+                            "start": "2026-10-13T07:52:26.418025Z"
+                        },
+                        "id": "d843aed6-143c-e68d-adb0-000000000008",
+                        "name": "command",
+                        "path": ""
+                    }
+                }
+            ]
+        }
+    ],
+    "stats": {
+        "dd-gone": {
+            "changed": 0,
+            "failures": 0,
+            "ignored": 0,
+            "ok": 0,
+            "rescued": 0,
+            "skipped": 0,
+            "unreachable": 1
+        }
+    }
+}

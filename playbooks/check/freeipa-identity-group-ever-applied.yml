@@ -93,146 +93,164 @@
       run_once: true
       tags: [always]
 
-    - name: "Kinit admin for read-only identity probe"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ identity_admin_password }}" |
-            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      run_once: true
-      tags: [identity, probe]
-
   tasks:
-    - name: "Probe actual FreeIPA group"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - group-show
-          - "{{ pilot_identity_name }}"
-          - --all
-          - --raw
-          - --no-members
-      register: pilot_actual_group_show
-      changed_when: false
-      failed_when: false
+    - name: "Read-only FreeIPA queries with a private Kerberos cache for the admin ticket"
       environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, probe]
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Probe durable Pilot group history marker"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - group-show
-          - "{{ pilot_group_history_marker }}"
-          - --all
-          - --raw
-          - --no-members
-      register: pilot_group_marker_show
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, probe]
+        - name: "Kinit admin for read-only identity probe"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ identity_admin_password }}" |
+                kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Classify actual-group probe"
-      ansible.builtin.set_fact:
-        pilot_actual_group_class: >-
-          {% if pilot_actual_group_show.rc == 0 %}
-          found
-          {% elif 'not found' in
-                  (pilot_actual_group_show.stderr | default('') | lower) %}
-          not_found
-          {% else %}
-          unknown
-          {% endif %}
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Probe actual FreeIPA group"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - group-show
+              - "{{ pilot_identity_name }}"
+              - --all
+              - --raw
+              - --no-members
+          register: pilot_actual_group_show
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Classify group history marker probe"
-      ansible.builtin.set_fact:
-        pilot_group_marker_class: >-
-          {% if pilot_group_marker_show.rc == 0 %}
-          found
-          {% elif 'not found' in
-                  (pilot_group_marker_show.stderr | default('') | lower) %}
-          not_found
-          {% else %}
-          unknown
-          {% endif %}
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Probe durable Pilot group history marker"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - group-show
+              - "{{ pilot_group_history_marker }}"
+              - --all
+              - --raw
+              - --no-members
+          register: pilot_group_marker_show
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Fail closed when either probe result is unknown"
-      ansible.builtin.assert:
-        that:
-          - pilot_actual_group_class | trim != 'unknown'
-          - pilot_group_marker_class | trim != 'unknown'
-        fail_msg: >-
-          Unable to determine whether group {{ pilot_identity_name }} has
-          ever entered the FreeIPA lifecycle. actual-group probe rc=
-          {{ pilot_actual_group_show.rc }}, marker probe rc=
-          {{ pilot_group_marker_show.rc }}. Refusing to classify this
-          group as never-applied.
-      run_once: true
-      tags: [identity, probe]
+        - name: "Classify actual-group probe"
+          ansible.builtin.set_fact:
+            pilot_actual_group_class: >-
+              {% if pilot_actual_group_show.rc == 0 %}
+              found
+              {% elif 'not found' in
+                      (pilot_actual_group_show.stderr | default('') | lower) %}
+              not_found
+              {% else %}
+              unknown
+              {% endif %}
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Fail closed on a marker-name collision or corrupted marker"
-      ansible.builtin.assert:
-        that:
-          - "pilot_group_marker_class | trim != 'found' or pilot_group_history_description in (pilot_group_marker_show.stdout | default(''))"
-        fail_msg: >-
-          Pilot group history marker {{ pilot_group_history_marker }}
-          exists but does not match the requested canonical group
-          (expected description "{{ pilot_group_history_description }}").
-          This is a deterministic marker-name collision, a manually
-          repurposed object, or a corrupted marker — refusing to
-          determine history.
-      run_once: true
-      tags: [identity, probe]
+        - name: "Classify group history marker probe"
+          ansible.builtin.set_fact:
+            pilot_group_marker_class: >-
+              {% if pilot_group_marker_show.rc == 0 %}
+              found
+              {% elif 'not found' in
+                      (pilot_group_marker_show.stderr | default('') | lower) %}
+              not_found
+              {% else %}
+              unknown
+              {% endif %}
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Combine actual-group and marker classifications"
-      ansible.builtin.set_fact:
-        pilot_group_history_state: >-
-          {% if pilot_actual_group_class | trim == 'found' and pilot_group_marker_class | trim == 'found' %}
-          active_with_marker
-          {% elif pilot_actual_group_class | trim == 'found' %}
-          active_without_marker
-          {% elif pilot_group_marker_class | trim == 'found' %}
-          historical_marker
-          {% else %}
-          not_found
-          {% endif %}
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Fail closed when either probe result is unknown"
+          ansible.builtin.assert:
+            that:
+              - pilot_actual_group_class | trim != 'unknown'
+              - pilot_group_marker_class | trim != 'unknown'
+            fail_msg: >-
+              Unable to determine whether group {{ pilot_identity_name }} has
+              ever entered the FreeIPA lifecycle. actual-group probe rc=
+              {{ pilot_actual_group_show.rc }}, marker probe rc=
+              {{ pilot_group_marker_show.rc }}. Refusing to classify this
+              group as never-applied.
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Build machine-readable group history result"
-      ansible.builtin.set_fact:
-        pilot_identity_probe_result:
-          schema_version: 1
-          kind: group
-          name: "{{ pilot_identity_name }}"
-          ever_applied: "{{ (pilot_group_history_state | trim) != 'not_found' }}"
-          freeipa_state: "{{ pilot_group_history_state | trim }}"
-          history_marker: "{{ pilot_group_history_marker }}"
-      changed_when: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Fail closed on a marker-name collision or corrupted marker"
+          ansible.builtin.assert:
+            that:
+              - "pilot_group_marker_class | trim != 'found' or pilot_group_history_description in (pilot_group_marker_show.stdout | default(''))"
+            fail_msg: >-
+              Pilot group history marker {{ pilot_group_history_marker }}
+              exists but does not match the requested canonical group
+              (expected description "{{ pilot_group_history_description }}").
+              This is a deterministic marker-name collision, a manually
+              repurposed object, or a corrupted marker — refusing to
+              determine history.
+          run_once: true
+          tags: [identity, probe]
 
-    - name: "Write machine-readable group history result"
-      ansible.builtin.copy:
-        dest: "{{ pilot_identity_probe_output }}"
-        mode: "0600"
-        content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      tags: [identity, probe]
+        - name: "Combine actual-group and marker classifications"
+          ansible.builtin.set_fact:
+            pilot_group_history_state: >-
+              {% if pilot_actual_group_class | trim == 'found' and pilot_group_marker_class | trim == 'found' %}
+              active_with_marker
+              {% elif pilot_actual_group_class | trim == 'found' %}
+              active_without_marker
+              {% elif pilot_group_marker_class | trim == 'found' %}
+              historical_marker
+              {% else %}
+              not_found
+              {% endif %}
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
+
+        - name: "Build machine-readable group history result"
+          ansible.builtin.set_fact:
+            pilot_identity_probe_result:
+              schema_version: 1
+              kind: group
+              name: "{{ pilot_identity_name }}"
+              ever_applied: "{{ (pilot_group_history_state | trim) != 'not_found' }}"
+              freeipa_state: "{{ pilot_group_history_state | trim }}"
+              history_marker: "{{ pilot_group_history_marker }}"
+          changed_when: false
+          run_once: true
+          tags: [identity, probe]
+
+        - name: "Write machine-readable group history result"
+          ansible.builtin.copy:
+            dest: "{{ pilot_identity_probe_output }}"
+            mode: "0600"
+            content: "{{ pilot_identity_probe_result | to_nice_json }}\n"
+          delegate_to: localhost
+          become: false
+          run_once: true
+          tags: [identity, probe]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

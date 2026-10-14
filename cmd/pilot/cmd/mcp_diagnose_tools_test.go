@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,11 +40,16 @@ func writeDiagnoseFixtureInventory(t *testing.T) string {
 type diagnoseFakeRunner struct {
 	byCommand map[string]func() (string, int, error)
 	calls     []string
+	// mu guards calls: pilot_diagnose_dns_architecture runs probes on
+	// different hosts concurrently.
+	mu sync.Mutex
 }
 
 func (f *diagnoseFakeRunner) run(_ context.Context, args []string, _ int) (string, int, error) {
 	command := args[len(args)-1]
+	f.mu.Lock()
 	f.calls = append(f.calls, command)
+	f.mu.Unlock()
 	fn, ok := f.byCommand[command]
 	if !ok {
 		return "", 0, fmt.Errorf("no fake response configured for command %q", command)

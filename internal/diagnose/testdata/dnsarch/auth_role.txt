@@ -1,0 +1,51 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch kinit begin
+@@pilot-dnsarch kinit end rc=0
+@@pilot-dnsarch dnsconfig begin
+  dn: cn=dns,dc=ipa,dc=pilot,dc=internal
+  Global forwarders: 8.8.8.8
+  IPA DNS version: 2
+  IPA DNS servers: ipa1.ipa.pilot.internal
+  attributelevelrights: {'idnsforwardpolicy': 'r', 'idnsforwarders': 'r', 'idnsallowsyncptr': 'r', 'idnszonerefresh': 'r', 'idnspersistentsearch': 'r', 'aci': '', 'cn': 'rsc', 'objectclass': 'rsc', 'ipaconfigstring': '', 'ipadnsversion': 'r', 'nsaccountlock': ''}
+  cn: dns
+  objectclass: idnsConfigObject, nsContainer, ipaConfigObject, ipaDNSContainer, top
+@@pilot-dnsarch dnsconfig end rc=0
+@@pilot-dnsarch dnsserver begin
+--------------------
+1 DNS server matched
+--------------------
+  dn: idnsserverid=ipa1.ipa.pilot.internal,cn=servers,cn=dns,dc=ipa,dc=pilot,dc=internal
+  Server name: ipa1.ipa.pilot.internal
+  SOA mname override: ipa1.ipa.pilot.internal.
+  Forwarders: 8.8.8.8
+  Forward policy: only
+  objectclass: top, idnsServerConfigObject
+----------------------------
+Number of entries returned 1
+----------------------------
+@@pilot-dnsarch dnsserver end rc=0
+@@pilot-dnsarch forwardzones begin
+  dn: idnsname=fwtest.example.,cn=dns,dc=ipa,dc=pilot,dc=internal
+  Zone name: fwtest.example.
+  Active zone: True
+  Zone forwarders: 192.0.2.53
+  Forward policy: only
+  objectclass: top, idnsforwardzone
+----------------------------
+Number of entries returned 1
+----------------------------
+@@pilot-dnsarch forwardzones end rc=0
+@@pilot-dnsarch zones begin
+  Zone name: 122.168.192.in-addr.arpa.
+
+  Zone name: ipa.pilot.internal.
+
+  Zone name: stub.pilot.internal.
+
+  Zone name: svc.pilot.internal.
+----------------------------
+Number of entries returned 4
+----------------------------
+@@pilot-dnsarch zones end rc=0

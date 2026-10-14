@@ -213,21 +213,72 @@ snmp-exp   : ok=24   changed=0    unreachable=0    failed=0    skipped=3    resc
 pre_tasks gate 驗證（Jinja 邏輯與目標主機無關，故用 `ansible_connection:
 local` 對照組驗證，語意等同對 VM 驗證）：
 
-| 場景 | 結果 |
+| 場景（2026-09-01） | 結果 |
 |---|---|
 | `snmp_exporter_credentials` 缺 `lab-switch-v3` 條目 | `assert` FAILED："credentialRef ... is missing or incomplete"（spec §12） |
 | catalog 內混入 `community:` key | `assert` FAILED："must not contain community/username/password/privPassword"（spec §6.4 rule 3） |
-| `stage=prod` + v2c auth profile、無 exception | `assert` FAILED："which prod rejects unless ... has a non-expired reason/owner/expiry"（spec §13.2） |
-| 同上 + 一筆有效（未過期）`snmp_insecure_auth_profile_exceptions` | `assert` PASS |
-| 同上但 `expiry` 設在過去 | `assert` FAILED（斷言重新失敗，確認過期判斷真的有效） |
 
-`expiry` 的規則（spec C12 v1.1，2026-10-13）：`YYYY-MM-DD`，加不加引號都可以，
-有效到當天結束（UTC，控制端時鐘）。缺少、格式不對（例如沒補零的 `2026-9-30`）、
-不存在的日期（例如加了引號的 `"2099-02-29"`、`"2099-13-01"`，含閏年規則；沒加引號時 Ansible
-載入 vars 檔就會報錯）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的本地日期，
-而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
-目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機
-實際跑這道 gate 鎖住（18 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
+prod 例外 gate 目前有效的實跑摘要（2026-10-14，candidate `b347fb5`，tree `8723db4a`；完整紀錄見
+[`docs/evidence/snmp-exporter/2026-10-14-b347fb5.md`](../evidence/snmp-exporter/2026-10-14-b347fb5.md)）：
+真實 playbook 對 controller 本機跑 `--check --diff`，localhost 屬於 `snmp-exporter` 與 `prod` group，
+catalog 是 repo 的 `monitoring/snmp/` 加一個 v2c profile `lab-v2c`，例外寫在 group_vars。
+
+| 場景 | 結果 |
+|---|---|
+| 五個欄位都正確（`--tags zzz`、`C3`、`C9`） | rc=0，gate 對兩個 profile 都 `ok` |
+| `networkEvidence: null`（`--tags zzz`、`C3`、`C9`、不帶 tags） | rc=2：`Rejected because: networkEvidence is null, not text or a ticket number`，gate 之後的 task 都沒有執行 |
+| `networkEvidence: TBD`、全形 `ＴＢＤ` | rc=2：`networkEvidence is the placeholder 'tbd'` |
+| 拼錯的 `networkevidence`、`Confirmed` | rc=2：`unknown key(s) Confirmed, networkevidence (...); networkEvidence is missing` |
+| `networkEvidence` 只有 Hangul filler | rc=2：`networkEvidence has too little text` |
+| 只有 reason/owner/expiry（2026-09-01 lane 用的寫法） | rc=2：`confirmed is missing; networkEvidence is missing` |
+| 沒有例外 | rc=2：`there is no exception for this profile` |
+| group_vars 為 null、`-e @file` 為正確的例外 | rc=0（`-e` 優先於 `set_fact` 的預設值） |
+
+對照 `main` `c560425`：`null`、`TBD`、只有三個欄位的例外都被接受（rc=0）。2026-09-01 的三個例外
+lane（無例外、有效例外、過期例外）用的是只有 reason/owner/expiry 的例外，已被上表取代：那個寫法在目前的
+gate 會被拒絕。
+
+prod 例外的規則（spec C12 v1.4，2026-10-14）：每個 auth profile 一筆，五個欄位都要有，不能有其他 key：
+
+```yaml
+snmp_insecure_auth_profile_exceptions:
+  lab-v2c:
+    confirmed: true                         # 布林 true，不是字串 "true"
+    reason: legacy UPS, no SNMPv3 firmware
+    owner: netops
+    networkEvidence: CHG-1234 mgmt VLAN ACL # 管理網路受限的證據（變更單號、ACL 說明）
+    expiry: 2026-12-31                      # YYYY-MM-DD，有效到當天結束（UTC）
+```
+
+- `expiry`：加不加引號都可以，以控制端時鐘的 UTC 日期判斷。缺少、格式不對（例如沒補零的
+  `2026-9-30`）、不存在的日期（例如加了引號的 `"2099-02-29"`、`"2099-13-01"`，含閏年規則；沒加引號時
+  Ansible 載入 vars 檔就會報錯）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
+  本地日期，而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
+- `confirmed`：布林 `true`。YAML 1.1 的 `yes`、`on`、`True` 載入後就是這個布林，可以用；字串 `"true"`、
+  數字 `1` 不行。
+- `reason`、`owner`：文字。`networkEvidence`：文字，或正整數的變更單號（不加引號，或寫成一串數字的字串）。
+- 「文字」是先做 NFKC 正規化（全形 `ＴＢＤ`、`１２３` 視同 `TBD`、`123`；用
+  `community.general.unicode_normalize`，pilot-cli image 已安裝 `community.general`），再去掉空白與不顯示
+  的字元（零寬字元、格式字元、Hangul filler、空白點字 U+2800、組合附加符號、spacing modifier）之後，至少
+  有兩個不同字母或數字的字串；不能是佔位詞（不分大小寫、忽略標點比對：`None`、`null`、`nil`、`true`、
+  `false`、`yes`、`no`、`nan`、`inf`、`n/a`、`TBD`、`TODO`、`unknown`、`沒有`、`不適用`、`待定` 等），也不能
+  是寫成字串的數字（`"0"`、`"-5"`、`"1.5"`）。這是擋下手誤與忘了填的佔位值，不是擋刻意偽裝的值；例外
+  是否合理仍由 `owner` 與審查負責。`null`（包括只寫 `networkEvidence:` 沒有值）、
+  布林、list、mapping、小數（含 `.nan`、`.inf`）、0 與負數都會被拒絕。C12 v1.2 的 gate 先把值轉成字串再量
+  長度，`null`、`[]`、`{}` 因此被當成有內容；v1.3 仍接受 `None`（不加引號時 YAML 讀成字串 `"None"`）、
+  `n/a`、`TBD`、`"0"`、單一字元與 Hangul filler（PR #65 review）。
+- 不認得的 key（例如拼錯的 `networkevidence`、`network_evidence`、`Confirmed`）會被拒絕，不會被默默忽略。
+- 例外本身（`lab-v2c:`）不是 mapping，或整個 `snmp_insecure_auth_profile_exceptions` 不是 mapping（例如
+  `null`，或用 `-e key=value` 傳入、一定是字串的值）時，視為沒有例外。
+- 拒絕訊息的 `Rejected because:` 會列出這個 profile 每一個有問題的欄位。
+- 這筆設定可以寫在 group_vars/host_vars，或用 `-e @<file>` 帶入的檔案（例如 vault 檔）。
+  PR #74 之前 play `vars:` 宣告了 `snmp_insecure_auth_profile_exceptions: {}`，優先順序高於
+  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點）；現在預設值改在
+  pre_tasks 的 `set_fact` 補上，由 `TestRegression_InventoryInputsReachThePlay` 鎖住。
+
+目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
+鎖住（expiry 17 個案例、其他欄位 91 個案例，每個拒絕都檢查訊息指出的問題；另有 14 個案例把例外寫在
+  group_vars/host_vars 或 `-e` 檔，1 個案例用 `-e key=value`），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 
 ## 9. `pilot verify` 正式驗收
