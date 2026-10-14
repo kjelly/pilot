@@ -139,9 +139,10 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 情況 | 結果 |
 |---|---|
 | `dns_freeipa_zones` 有 FreeIPA 沒有的 zone | G5 擋下：「FreeIPA did not answer SOA authoritatively」，設定不變 |
-| inventory 列了 replica、未設 `freeipa_setup_dns`，但還沒 promote（FreeIPA 的 NS 紀錄沒有它） | 不擋：印出 `WARNING: <host> … is not a FreeIPA DNS server yet and is left out of this dns tier's stub zones`，stub 只指向 NS 紀錄列出的 server；promote 之後（`freeipa-server-replica-apply.yml` 預設會裝 DNS）重跑 `dns-apply.yml` 才會加入。全站部署（`site.yml` 不含 replica playbook）因此不會被尚未 promote 的 replica 擋下 |
+| inventory 列了 replica、未設 `freeipa_setup_dns`，但還沒 promote（它自己不權威回答 zone，FreeIPA 的 NS 紀錄也沒有它） | 不擋：印出 `WARNING: <host> … did not answer <domain> authoritatively and FreeIPA's NS records list only …`，並列出 promote、改 `freeipa_replica_fqdn`、啟動 named、改設 `freeipa_setup_dns: false` 四個做法；stub 只指向其他 server，`DNS — summary: FreeIPA servers the stubs use` 列出實際使用與被略過的主機。promote 之後重跑 `dns-apply.yml` 才會加入。全站部署（`site.yml` 不含 replica playbook）因此不會被尚未 promote 的 replica 擋下。replica 自己權威回答 zone 時（例如用 `-e ipa_replica_fqdn=` 以另一個名稱安裝）一律保留；沒有任何 FreeIPA server 回答時不略過任何主機，並印出說明 |
+| FreeIPA 列為 DNS server 的 replica（或 primary）此刻 named 沒在跑 | dns tier 的 G5 擋下（「FreeIPA did not answer SOA authoritatively」，訊息說明檢查該主機的 named），設定不變：stub zone 會把查詢送給它，tier 不寫入一台不回答的 FreeIPA server。consumer 端（`freeipa-dns-client`）只印 WARNING，見下一列 |
 | replica 明確設 `freeipa_setup_dns: true` 但沒有在跑 DNS | G5 擋下，訊息說明兩個做法：先用 `freeipa-server-replica-apply.yml` promote（含 DNS），或改設 `freeipa_setup_dns: false`；設定不變 |
-| consumer（`freeipa-dns-client`）要寫入的 nameserver 有任何一台不回答 | 寫入前就擋下，列出不回答的 nameserver 與做法，`resolv.conf` 不變；未 promote、未設 `freeipa_setup_dns` 的 replica 會先被略過並警告，不會變成寫進去的死 nameserver |
+| consumer（`freeipa-dns-client`）要寫入的 nameserver | 寫入前逐台問 FreeIPA server 的 FQDN（A 與 AAAA）：有回答但沒有位址、FreeIPA 不承認也不回答的 FreeIPA server、或沒有任何一台可用時擋下，`resolv.conf` 不變；只是暫時沒回答（已登記的 FreeIPA server 維護停機、dns tier 停機、明確指定的 server）印出 WARNING 並照樣寫入（`freeipa-dns-client.md` §1.5）。未 promote、未設 `freeipa_setup_dns` 的 replica 會先被略過並警告 |
 | upstream 不可達 | G6 擋下：「Upstream check failed」，設定不變；upstream 會剝掉 DNSSEC 時改設 `dns_dnssec_validation: false` |
 | 共用的 `dns_listen_addr` | G10 擋下：「is not an IPv4 address of <host>」，設定不變 |
 | `dns_zones` 寫了無效的紀錄 | checkconf 失敗，rescue 還原：「Rollback: …/pilot-dns.conf restored; unbound restarted」 |

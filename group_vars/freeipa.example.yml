@@ -53,10 +53,23 @@ freeipa_domain: ipa.pilot.internal
 #     forwarders);replica 是不帶 server 自己的 forwarders(--no-forwarders),
 #     沿用全域清單。
 #   - 寫法:單一位址、空白分隔的字串、"[a, b]" 字串或 YAML 清單。null、""、
-#     [] 或只有空白都代表「這台不帶 forwarder」(--no-forwarders;primary 的
-#     全域 forwarders 不會被清掉)。
-#   - 每一項都要是 IPv4/IPv6 位址:逗號或分號分隔、"1.1.1.1 port 53"、
-#     mapping、數字等寫法在安裝前就被擋下。
+#     [] 或只有空白都代表「這台不帶 forwarder」(安裝時 --no-forwarders)。
+#   - **破壞性變更(2026-10-15)**:每次 apply 都讓 realm 的全域 forwarders
+#     (`ipa dnsconfig-mod`)與每台 FreeIPA DNS server 自己的 forwarders
+#     (`ipa dnsserver-mod <fqdn>`,named 優先用這個)等於設定值。primary
+#     明確給空值時兩者都清掉,既有 realm 也會收斂成「沒有 forwarder」;之前
+#     空值會跳過這一步,改了清單也只更新全域 forwarders,安裝時寫進 server
+#     的值(例如 8.8.8.8)一直留著。replica 沒設時清掉它自己的 forwarders,
+#     沿用全域的。清空後 FreeIPA 的 named
+#     只回答自己的 zone,其他名稱都查不到;要保留對外解析就填位址,或不要
+#     設這個變數(預設 8.8.8.8)。
+#   - 每一項都要是 IPv4/IPv6 位址(不可是 0.0.0.0、::、multicast 或帶 %zone),
+#     可以接 FreeIPA 的 " port N"(例如 "1.1.1.1 port 5353";空白分隔的字串裡
+#     "1.1.1.1 port 53" 算一項)。逗號或分號分隔、mapping、數字等寫法在安裝前
+#     就被擋下。
+#   - ipa-server-install、ipa-replica-install、ipa-dns-install 的 --forwarder
+#     只接受純位址,所以全新安裝時清單裡不能有 " port N"(會在安裝前擋下);
+#     既有 realm 的全域 forwarders 用 ipa dnsconfig-mod 套用,可以帶 port。
 # freeipa_dns_forwarders: 8.8.8.8
 
 # 是否讓任意 client(不限本機子網路)都能把這台 FreeIPA 當一般 DNS resolver

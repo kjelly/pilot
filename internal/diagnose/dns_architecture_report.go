@@ -512,11 +512,19 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 
 // DNSArchUnregisteredReplicas mirrors tasks/freeipa-dns-providers-live.yml:
 // the NS set FreeIPA answers authoritatively (from any provider's NS
-// probe), and the replicas that leave freeipa_setup_dns unset and are not
-// in it. Nothing is left out when no provider answered.
+// probe), and the replicas that leave freeipa_setup_dns unset, did not
+// answer for the zone authoritatively themselves (their own SOA or NS
+// probe, both +norec) and are not in that set. Nothing is left out when
+// no provider answered.
 func DNSArchUnregisteredReplicas(m DNSArchModel, observed []DNSArchObservedProvider) (leftOut, registered []string) {
 	seen := map[string]bool{}
+	selfAnswered := map[string]bool{}
 	for _, op := range observed {
+		for _, f := range []DNSArchFact{op.SOA, op.NS} {
+			if q, ok := dnsAnswered(f); ok && q.Status == "NOERROR" && q.Authoritative {
+				selfAnswered[op.Host] = true
+			}
+		}
 		if q, ok := dnsAnswered(op.NS); ok && q.Authoritative {
 			for _, a := range q.Answers {
 				n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(a)), ".")
@@ -531,7 +539,7 @@ func DNSArchUnregisteredReplicas(m DNSArchModel, observed []DNSArchObservedProvi
 		return nil, nil
 	}
 	for _, p := range m.Providers {
-		if p.Kind == "replica" && p.DNSProvider && !p.DNSProviderExplicit && !seen[strings.TrimSuffix(strings.ToLower(p.FQDN), ".")] {
+		if p.Kind == "replica" && p.DNSProvider && !p.DNSProviderExplicit && !selfAnswered[p.InventoryHost] && !seen[strings.TrimSuffix(strings.ToLower(p.FQDN), ".")] {
 			leftOut = append(leftOut, p.InventoryHost)
 		}
 	}

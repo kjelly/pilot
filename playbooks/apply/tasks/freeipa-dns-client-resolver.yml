@@ -220,46 +220,73 @@
     freeipa_dns_client_effective_resolver_options: >-
       {{ ['timeout:1', 'attempts:2'] if (freeipa_dns_client_effective_servers | length > 1) else [] }}
 
-# Every nameserver this run writes must answer, before anything is
-# written: a FreeIPA DNS server authoritatively (+norec), a dns tier host
-# or an explicit freeipa_dns_client_servers entry recursively, each for the
-# FreeIPA server's FQDN with an address. Without this a server that does
-# not answer was written silently: the post-write check below resolves
-# through the system resolver, which falls through to the next nameserver.
+# Every nameserver this run writes is asked before anything is written,
+# for the FreeIPA server's FQDN (A and AAAA): a FreeIPA DNS server (this
+# host's own BIND at 127.0.0.1 included) authoritatively (+norec), a dns
+# tier host or an explicit freeipa_dns_client_servers entry recursively.
+# tasks/freeipa-dns-client-nameserver-check.yml fails only for a server
+# that answers without an address, a FreeIPA server that does not answer
+# and that FreeIPA does not list, or no working server at all; a server
+# that is merely not answering now gets a WARNING and stays in the list
+# (docs/verification/freeipa-dns-client.md §1). Without this check a server
+# that does not serve the zone was written silently: the post-write check
+# below resolves through the system resolver, which falls through to the
+# next nameserver.
+- name: "FreeIPA DNS client — what each nameserver to be written is: reset"
+  ansible.builtin.set_fact:
+    freeipa_dns_client_ns_roles: []
+
+- name: "FreeIPA DNS client — what each nameserver to be written is"
+  vars:
+    _explicit: "{{ freeipa_dns_client_servers | length > 0 }}"
+    _providers: "{{ freeipa_dns_providers | default([]) }}"
+    _self: "{{ _providers | selectattr('host', 'equalto', inventory_hostname) | list }}"
+    _provider: "{{ _providers | selectattr('ip', 'equalto', item) | list }}"
+    _member: >-
+      {{ (_self[0] if (item == '127.0.0.1' and _self | length > 0) else (_provider[0] if _provider | length > 0 else {}))
+         if not _explicit else {} }}
+    _role: >-
+      {{ 'explicit' if _explicit
+         else ('freeipa-self' if (item == '127.0.0.1' and _self | length > 0)
+         else ('freeipa' if _provider | length > 0 else 'tier')) }}
+  ansible.builtin.set_fact:
+    freeipa_dns_client_ns_roles: >-
+      {{ freeipa_dns_client_ns_roles + [{
+           'addr': item | string,
+           'role': _role,
+           'host': (_member.inventory_host | default('')) if _member else ((dns_tier_endpoints | default([])
+                    | selectattr('addr', 'equalto', item) | map(attribute='host') | first) | default('', true)),
+           'registered': (_member.inventory_host | default('') in (freeipa_dns_live_authoritative | default([])))
+                         or ((_member.fqdn | default('') | lower | regex_replace('[.]$', ''))
+                             in (freeipa_dns_live_registered | default([]))),
+         }] }}
+  loop: "{{ freeipa_dns_client_effective_servers }}"
+
 - name: "FreeIPA DNS client — ask every nameserver to be written for the FreeIPA server FQDN"
   ansible.builtin.command:
     argv: >-
-      {{ ['dig', '+time=2', '+tries=1', '+noall', '+comments', '+answer']
-         + (['+norec'] if (item == '127.0.0.1' or item in (freeipa_dns_providers | map(attribute='ip') | map('string') | list)) else [])
-         + ['@' ~ item, (freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain)) ~ '.', 'A'] }}
-  loop: "{{ freeipa_dns_client_effective_servers }}"
+      {{ ['dig', '+time=2', '+tries=2', '+noall', '+comments', '+answer']
+         + (['+norec'] if item.0.role in ['freeipa', 'freeipa-self'] else [])
+         + ['@' ~ item.0.addr, (freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain)) ~ '.', item.1] }}
+  loop: "{{ freeipa_dns_client_ns_roles | product(['A', 'AAAA']) | list }}"
+  loop_control:
+    label: "{{ item.0.addr }} {{ item.1 }}"
   register: freeipa_dns_client_ns_check
   changed_when: false
   failed_when: false
   when: not ansible_check_mode
 
-- name: "FreeIPA DNS client — Gate: every nameserver to be written answers"
+- name: "FreeIPA DNS client — judge the nameservers to be written"
+  ansible.builtin.include_tasks:
+    file: freeipa-dns-client-nameserver-check.yml
+    apply:
+      tags: [always]
   vars:
-    _ns_dead: >-
-      {{ freeipa_dns_client_ns_check.results | default([])
-         | rejectattr('skipped', 'defined')
-         | rejectattr('stdout', 'search', 'status: NOERROR')
-         | map(attribute='item') | list
-         + (freeipa_dns_client_ns_check.results | default([])
-            | rejectattr('skipped', 'defined')
-            | selectattr('stdout', 'search', 'status: NOERROR')
-            | rejectattr('stdout', 'search', '\sIN\s+A\s+[0-9]')
-            | map(attribute='item') | list) }}
-  ansible.builtin.assert:
-    that:
-      - _ns_dead | length == 0
-    fail_msg: >-
-      {{ inventory_hostname }}: nameserver(s) {{ _ns_dead }} did not answer
-      {{ freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain) }} A with an address, so nothing
-      was changed. For a freeipa-server-replica host: promote it with DNS
-      (freeipa-server-replica-apply.yml), or set freeipa_setup_dns: false on it. For a dns tier
-      host: apply playbooks/apply/dns-apply.yml first. For an explicit freeipa_dns_client_servers
-      entry: fix or remove it. Planned list: {{ freeipa_dns_client_effective_servers }}.
+    freeipa_dns_ns_roles: "{{ freeipa_dns_client_ns_roles }}"
+    freeipa_dns_ns_results: "{{ freeipa_dns_client_ns_check }}"
+    freeipa_dns_ns_name: "{{ freeipa_server_fqdn | default('ipa1.' ~ freeipa_domain) }}"
+    freeipa_dns_ns_freeipa_answered: >-
+      {{ (freeipa_dns_live_answered | default(false) | bool) and freeipa_dns_client_servers | length == 0 }}
   when: not ansible_check_mode
 
 # ── Pre-apply snapshot for the rescue below ────────────────────────────────

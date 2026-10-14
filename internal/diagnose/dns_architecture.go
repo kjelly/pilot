@@ -2,11 +2,11 @@ package diagnose
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
-
-	"go.yaml.in/yaml/v3"
 
 	"github.com/kjelly/pilot/internal/networkcheck"
 )
@@ -507,57 +507,88 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 	return pool, errs
 }
 
-// The address patterns tasks/freeipa-dns-forwarders.yml checks every
-// forwarder against (the same regular expressions, so a value passes or
-// fails both).
-var (
-	forwarderIPv4Re = regexp.MustCompile(`^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$`)
-	forwarderIPv6Re = regexp.MustCompile(`^([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}$`)
-)
+// forwarderItemRe is one forwarder in FreeIPA's syntax: an address,
+// optionally followed by " port N".
+var forwarderItemRe = regexp.MustCompile(`^(\S+)(?: port ([0-9]{1,5}))?$`)
 
 // normalizeForwarders mirrors tasks/freeipa-dns-forwarders.yml, which both
-// install playbooks use: null is no forwarders, a string starting with '['
-// is a YAML list, any other string is split on whitespace, a list is
-// kept, and every item must be an IPv4 or IPv6 address. Anything else is
-// the error the playbook's gates fail with.
+// install playbooks use (it runs the same rules in Python on the
+// controller): null is no forwarders; a string starting with '[' must end
+// with ']' and its items are the comma-separated parts between the
+// brackets, trimmed and unquoted (not YAML, whose 1.1 rules read
+// "1:2:3:4:5:6:7:8" as a base-60 integer); any other string is split on
+// whitespace, with "<addr> port <n>" kept as one forwarder; a list is kept.
+// Every item must be an IPv4 or IPv6 address that is neither unspecified
+// nor multicast and has no zone, optionally with " port 1..65535".
+// Anything else is the error the playbook's gate fails with.
 func normalizeForwarders(raw any) ([]string, error) {
-	var items []string
+	var items []any
 	switch v := raw.(type) {
 	case nil:
 		return nil, nil
 	case string:
 		t := strings.TrimSpace(v)
-		if !strings.HasPrefix(t, "[") {
-			items = strings.Fields(t)
+		if strings.HasPrefix(t, "[") {
+			if !strings.HasSuffix(t, "]") {
+				return nil, fmt.Errorf("forwarders %q: a string that starts with [ must end with ]", v)
+			}
+			for _, p := range strings.Split(t[1:len(t)-1], ",") {
+				p = strings.TrimSpace(p)
+				if len(p) >= 2 && p[0] == p[len(p)-1] && (p[0] == '\'' || p[0] == '"') {
+					p = p[1 : len(p)-1]
+				}
+				if p != "" {
+					items = append(items, p)
+				}
+			}
 			break
 		}
-		if !strings.HasSuffix(t, "]") {
-			return nil, fmt.Errorf("forwarders %q start with [ but are not a YAML list", v)
-		}
-		var list []any
-		if err := yaml.Unmarshal([]byte(t), &list); err != nil {
-			return nil, fmt.Errorf("forwarders %q are not a YAML list: %v", v, err)
-		}
-		for _, e := range list {
-			items = append(items, fmt.Sprint(e))
+		toks := strings.Fields(t)
+		for i := 0; i < len(toks); i++ {
+			if toks[i] == "port" && len(items) > 0 && i+1 < len(toks) {
+				items[len(items)-1] = items[len(items)-1].(string) + " port " + toks[i+1]
+				i++
+				continue
+			}
+			items = append(items, toks[i])
 		}
 	case []any:
-		for _, e := range v {
-			items = append(items, fmt.Sprint(e))
-		}
+		items = v
 	default:
 		return nil, fmt.Errorf("forwarders value %v is neither a list nor a string", raw)
 	}
+	out := make([]string, 0, len(items))
 	var bad []string
 	for _, item := range items {
-		if !forwarderIPv4Re.MatchString(item) && !forwarderIPv6Re.MatchString(item) {
-			bad = append(bad, item)
+		s, ok := item.(string)
+		if !ok || !validForwarder(s) {
+			bad = append(bad, fmt.Sprint(item))
+			continue
 		}
+		out = append(out, s)
 	}
 	if len(bad) > 0 {
-		return nil, fmt.Errorf("forwarders %q are not IPv4 or IPv6 addresses (separate several with spaces or write a YAML list; a port is not supported)", bad)
+		return nil, fmt.Errorf("forwarders %q are not IPv4 or IPv6 addresses, optionally with \" port N\" (separate several with spaces or write a YAML list)", bad)
 	}
-	return items, nil
+	return out, nil
+}
+
+// validForwarder is the playbook's per-item check: an address that
+// netip parses, without a zone, neither unspecified nor multicast, and an
+// optional port 1..65535.
+func validForwarder(s string) bool {
+	m := forwarderItemRe.FindStringSubmatch(s)
+	if m == nil || strings.Contains(m[1], "%") {
+		return false
+	}
+	if m[2] != "" {
+		n, err := strconv.Atoi(m[2])
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	addr, err := netip.ParseAddr(m[1])
+	return err == nil && !addr.IsUnspecified() && !addr.IsMulticast()
 }
 
 // forwarderInput mirrors the shared task's choice: ipa_dns_forwarders if

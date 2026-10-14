@@ -245,6 +245,24 @@
       when: ipa_setup_dns | bool and not ipa_precheck_cfg.stat.exists
       tags: [always]
 
+    # ipa-server-install's --forwarder takes plain addresses only
+    # (ipaserver/install/dns.py: List[CheckedIPAddressLoopback]); FreeIPA's
+    # "<address> port <n>" form is valid for ipa dnsconfig-mod, which sets
+    # the global list on every run. So a fresh install with a port in the
+    # list stops here, before any change, instead of failing inside the
+    # installer; an existing realm (install skipped) applies it as given.
+    - name: "Gate: install-time forwarders are plain addresses"
+      ansible.builtin.assert:
+        that:
+          - ipa_dns_forwarders_normalized | select('search', ' port ') | list | length == 0
+        fail_msg: >-
+          ipa-server-install accepts only plain addresses as --forwarder, not
+          {{ ipa_dns_forwarders_normalized | select('search', ' port ') | list }}. Nothing was
+          changed. Install with plain addresses first (or with an empty list), then set the
+          "<address> port <n>" forwarders on the existing realm by re-running this playbook.
+      when: ipa_setup_dns | bool and not ipa_precheck_cfg.stat.exists
+      tags: [always]
+
     # Installing the FreeIPA server packages can restart sshd (the package
     # transaction did on a fresh AlmaLinux 9 host: systemd "Queuing
     # reload/restart jobs for marked units" during `dnf install`,
@@ -643,19 +661,25 @@
             group: root
             mode: "0644"
 
-        # --setup-dns with no forwarders (the default when
-        # freeipa_dns_forwarders is unset) installs named with
-        # --no-forwarders: it only ever answers queries for ipa_domain, so
-        # every other lookup — including this host's own dnf/apt package
-        # installs — NXDOMAINs once /etc/resolv.conf points at 127.0.0.1.
-        # ipa-server-install itself has no forwarders flag to change after
-        # the fact, so this is applied post-install via the same `ipa`
-        # CLI freeipa-identity-apply.yml already uses for HBAC/sudo data.
+        # The realm's global forwarders follow the normalized list
+        # (tasks/freeipa-dns-forwarders.yml; 8.8.8.8 when nothing is set).
+        # ipa-server-install only takes forwarders at install time, so the
+        # list is applied post-install via the same `ipa` CLI
+        # freeipa-identity-apply.yml already uses for HBAC/sudo data, on
+        # every run, so an existing realm converges. An explicitly empty
+        # list ("", [], null) clears the global forwarders with
+        # `ipa dnsconfig-mod --forwarder=`, and this server's own forwarders
+        # with `ipa dnsserver-mod <fqdn> --forwarder=` (since 2026-10-15;
+        # before, an empty list skipped this step, a changed list only
+        # reached the global forwarders, and the server's own install-time
+        # forwarders, which its named prefers, stayed): named then answers
+        # only for ipa_domain and its own zones, and every other lookup
+        # through it fails.
         # The admin ticket lives in a private cache, destroyed in `always:`
         # (tasks/freeipa-private-ccache-open.yml, issue #69); before, it
         # stayed in root's default cache after every apply.
         - name: "FreeIPA DNS — configure upstream forwarders (external resolution)"
-          when: ipa_setup_dns | bool and (ipa_dns_forwarders_normalized | length > 0)
+          when: ipa_setup_dns | bool
           environment:
             KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
           block:
@@ -675,7 +699,10 @@
 
             - name: "FreeIPA DNS — set global forwarders"
               ansible.builtin.command:
-                argv: "{{ ['ipa', 'dnsconfig-mod'] + (ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\\1') | list) }}"
+                argv: >-
+                  {{ ['ipa', 'dnsconfig-mod']
+                     + ((ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+                        if (ipa_dns_forwarders_normalized | length > 0) else ['--forwarder=']) }}
               register: ipa_dnsconfig
               changed_when: >-
                 ipa_dnsconfig.rc == 0 and
@@ -684,6 +711,29 @@
               failed_when: >-
                 ipa_dnsconfig.rc != 0 and
                 'no modifications to be performed' not in (ipa_dnsconfig.stderr | default('') ~ ipa_dnsconfig.stdout | default(''))
+
+            # ipa-server-install --forwarder also stores the list as this
+            # server's own forwarders (ipa dnsserver-show), which take
+            # precedence over the global ones for its named. Set them to the
+            # same list, so a changed or emptied list reaches this server's
+            # named on an existing realm too (checked on FreeIPA 4.13.4:
+            # `--forwarder=` clears, an unchanged list is rc=1 "no
+            # modifications to be performed").
+            - name: "FreeIPA DNS — set this server's own forwarders"
+              ansible.builtin.command:
+                argv: >-
+                  {{ ['ipa', 'dnsserver-mod', ipa_server_fqdn]
+                     + ((ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+                        if (ipa_dns_forwarders_normalized | length > 0) else ['--forwarder=']) }}
+              register: ipa_dnsserver_forwarders
+              changed_when: >-
+                ipa_dnsserver_forwarders.rc == 0 and
+                'no modifications to be performed' not in
+                (ipa_dnsserver_forwarders.stderr | default('') ~ ipa_dnsserver_forwarders.stdout | default(''))
+              failed_when: >-
+                ipa_dnsserver_forwarders.rc != 0 and
+                'no modifications to be performed' not in
+                (ipa_dnsserver_forwarders.stderr | default('') ~ ipa_dnsserver_forwarders.stdout | default(''))
           always:
             - name: "FreeIPA DNS — destroy the private Kerberos cache"
               ansible.builtin.include_tasks:

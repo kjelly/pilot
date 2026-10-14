@@ -1,0 +1,104 @@
+---
+# Shared task: judge the answers of every nameserver a resolver run is about
+# to write (tasks/freeipa-dns-client-resolver.yml), and fail only for what
+# would break name resolution:
+#   - a nameserver that answers, but without an address for the FreeIPA
+#     server's FQDN (NXDOMAIN, SERVFAIL, REFUSED, or NOERROR with neither A
+#     nor AAAA): it does not serve the FreeIPA zone, and writing it would
+#     make lookups fail whenever it is asked;
+#   - a FreeIPA server (this host's own 127.0.0.1 included) that does not
+#     answer and that FreeIPA itself does not list (an explicit
+#     freeipa_setup_dns: true replica that is not promoted), when some
+#     FreeIPA server did answer;
+#   - no nameserver that answers with an address at all.
+# A nameserver that does not answer now (timeout, connection refused) but
+# is otherwise in place, such as a registered FreeIPA server under
+# maintenance, a dns tier host that is down, or an explicit entry, gets a
+# WARNING and stays in the list: resolv.conf fails over to the next one.
+# Kept out of the resolver task so that tests can feed it captured dig
+# output (internal/spec/freeipa_dns_client_nameserver_check_regression_test.go).
+#
+# Input:
+#   freeipa_dns_ns_roles: one item per nameserver, in order: {addr, role
+#     ('freeipa', 'freeipa-self', 'tier' or 'explicit'), host (inventory
+#     host or ''), registered (FreeIPA answers for it or lists it)}
+#   freeipa_dns_ns_results: the registered results of asking each of them
+#     for the FQDN's A and AAAA records; item is [role item, qtype]
+#   freeipa_dns_ns_name: the FQDN asked for
+#   freeipa_dns_ns_freeipa_answered: some FreeIPA server answered the zone
+#     authoritatively (tasks/freeipa-dns-providers-live.yml)
+- name: "FreeIPA DNS client — nameserver check: reset"
+  ansible.builtin.set_fact:
+    freeipa_dns_ns_classified: []
+
+- name: "FreeIPA DNS client — nameserver check: what each nameserver answered"
+  vars:
+    _results: >-
+      {{ freeipa_dns_ns_results.results | default([])
+         | rejectattr('skipped', 'defined')
+         | selectattr('item.0.addr', 'equalto', item.addr) | list }}
+    _with_address: >-
+      {{ _results | selectattr('stdout', 'search', 'status: NOERROR')
+         | selectattr('stdout', 'search', '\sIN\s+(A|AAAA)\s+\S') | list | length > 0 }}
+    _answered: "{{ _results | selectattr('stdout', 'search', ';; Got answer:') | list | length > 0 }}"
+  ansible.builtin.set_fact:
+    freeipa_dns_ns_classified: >-
+      {{ freeipa_dns_ns_classified + [item | combine({'state': ('address' if _with_address
+           else ('no_address' if _answered else 'no_answer'))})] }}
+  loop: "{{ freeipa_dns_ns_roles }}"
+  loop_control:
+    label: "{{ item.addr }} ({{ item.role }})"
+
+- name: "FreeIPA DNS client — nameserver check: decide"
+  ansible.builtin.set_fact:
+    freeipa_dns_ns_no_address: "{{ freeipa_dns_ns_classified | selectattr('state', 'equalto', 'no_address') | list }}"
+    freeipa_dns_ns_working: "{{ freeipa_dns_ns_classified | selectattr('state', 'equalto', 'address') | list }}"
+    freeipa_dns_ns_unregistered: >-
+      {{ (freeipa_dns_ns_classified | selectattr('state', 'equalto', 'no_answer')
+          | selectattr('role', 'in', ['freeipa', 'freeipa-self']) | rejectattr('registered') | list)
+         if (freeipa_dns_ns_freeipa_answered | bool) else [] }}
+
+- name: "FreeIPA DNS client — nameserver check: not answering now, but in place"
+  ansible.builtin.set_fact:
+    freeipa_dns_ns_down: >-
+      {{ freeipa_dns_ns_classified | selectattr('state', 'equalto', 'no_answer')
+         | rejectattr('addr', 'in', freeipa_dns_ns_unregistered | map(attribute='addr') | list) | list }}
+
+- name: "FreeIPA DNS client — nameserver check: WARNING, not answering now"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ inventory_hostname }}: nameserver {{ item.addr }}
+      ({{ item.role }}{{ (' ' ~ item.host) if item.host else '' }}) did not answer
+      {{ freeipa_dns_ns_name }} now; it stays in the list and resolv.conf fails over to the next
+      one.
+      {%- if item.role in ['freeipa', 'freeipa-self'] %} It is a FreeIPA DNS server FreeIPA
+      answers for: check named on {{ item.host }} (systemctl status named).
+      {%- elif item.role == 'tier' %} It is a dns tier host: check unbound on {{ item.host }}, or
+      apply playbooks/apply/dns-apply.yml to it.
+      {%- else %} It is an explicit freeipa_dns_client_servers entry: check it, or remove it.
+      {%- endif %}
+  loop: "{{ freeipa_dns_ns_down }}"
+  loop_control:
+    label: "{{ item.addr }}"
+
+- name: "FreeIPA DNS client — nameserver check: Gate"
+  ansible.builtin.assert:
+    that:
+      - freeipa_dns_ns_no_address | length == 0
+      - freeipa_dns_ns_unregistered | length == 0
+      - freeipa_dns_ns_working | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }}: the resolver was not changed.
+      {%- for n in freeipa_dns_ns_no_address %} {{ n.addr }} ({{ n.role }}{{ (' ' ~ n.host) if n.host else '' }})
+      answers, but with no A or AAAA record for {{ freeipa_dns_ns_name }}, so it does not serve the
+      FreeIPA zone{{ ': apply playbooks/apply/dns-apply.yml to this dns tier host' if n.role == 'tier'
+      else (': fix or remove this freeipa_dns_client_servers entry' if n.role == 'explicit'
+      else ': check the FreeIPA DNS zone on this server') }}.
+      {%- endfor %}
+      {%- for n in freeipa_dns_ns_unregistered %} {{ n.addr }} ({{ n.host }}) does not answer and
+      FreeIPA does not list it as a DNS server: promote it with DNS
+      (playbooks/apply/freeipa-server-replica-apply.yml), or set freeipa_setup_dns: false on it.
+      {%- endfor %}
+      {%- if freeipa_dns_ns_working | length == 0 %} None of {{ freeipa_dns_ns_classified | map(attribute='addr') | list }}
+      answered {{ freeipa_dns_ns_name }} with an address.
+      {%- endif %}

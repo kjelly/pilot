@@ -73,12 +73,19 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 
 - 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa_setup_dns` 不是
   `false` 的 `freeipa-server-replica`）已完成安裝並健康。
-- 未設 `freeipa_setup_dns`、FreeIPA 的 NS 紀錄還沒列出的 replica（還沒 promote）會被略過，
-  並印出 `WARNING: <host> … is not a FreeIPA DNS server yet`；promote 之後重跑本 playbook 才會
-  加入。明確設 `freeipa_setup_dns: true` 的 replica 不會被略過。
+- 未設 `freeipa_setup_dns` 的 replica，自己沒有權威回答 FreeIPA 的 zone、FreeIPA 的 NS 紀錄也
+  沒列出它（通常是還沒 promote）時會被略過，並印出 `WARNING: <host> … did not answer <domain>
+  authoritatively and FreeIPA's NS records list only …`，列出 promote、改 `freeipa_replica_fqdn`、
+  啟動 named、改設 `freeipa_setup_dns: false` 四個做法。自己權威回答 zone 的 replica（例如用
+  另一個名稱安裝的）一律保留。明確設 `freeipa_setup_dns: true` 的 replica 不會被略過。
 - 寫入前會逐一問每個要寫入的 nameserver（FreeIPA server 用 `+norec`，dns tier 與
-  `freeipa_dns_client_servers` 用遞迴查詢）FreeIPA server 的 FQDN；任何一台沒有回答位址，
-  playbook 在改任何檔案前就失敗，訊息列出那幾台與做法。
+  `freeipa_dns_client_servers` 用遞迴查詢）FreeIPA server 的 FQDN 的 A 與 AAAA
+  （`+time=2 +tries=2`，`tasks/freeipa-dns-client-nameserver-check.yml`）。只有三種情況會在改
+  任何檔案前失敗：有一台回答了卻沒有位址（NXDOMAIN、SERVFAIL、REFUSED，或 A/AAAA 都沒有，
+  代表它不服務 FreeIPA 的 zone）；明確設 `freeipa_setup_dns: true`、FreeIPA 卻沒列為 DNS
+  server 的 replica 沒有回答；沒有任何一台回答位址。此刻沒有回答（timeout、connection
+  refused）但本來就該在清單裡的（FreeIPA 列出的 DNS server、dns tier、明確寫的項目）只印
+  `WARNING`，依角色列出要檢查的地方，仍寫進 resolv.conf，由 resolver 換下一台。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，

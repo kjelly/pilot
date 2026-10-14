@@ -128,9 +128,10 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 
 ## 5. 已知限制與注意事項
 
-- **還沒 promote 的 replica**：未設 `freeipa_setup_dns` 的 replica 只有在 FreeIPA 的 NS 紀錄
-  列出它之後，`dns-apply.yml` 與 resolver task 才會用它（`tasks/freeipa-dns-providers-live.yml`）。
-  工具從 provider 的 NS probe 得到同一份清單：沒列出的 replica 會有 finding
+- **還沒 promote 的 replica**：未設 `freeipa_setup_dns` 的 replica 要自己權威回答 FreeIPA 的
+  zone，或 FreeIPA 的 NS 紀錄列出它，`dns-apply.yml` 與 resolver task 才會用它
+  （`tasks/freeipa-dns-providers-live.yml`）。工具從各 provider 自己的 SOA／NS probe（`+norec`）
+  與 NS 紀錄做同樣的判斷：沒列出的 replica 會有 finding
   `freeipa_replica_not_dns_server`，effective 的 tier stub 與 resolver 清單也跟 playbook 一樣
   不含它，它自己 probe 失敗不算 `partial`。
 

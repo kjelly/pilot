@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-server-replica (native EL9, HA 第二/後續台)
 
-> 版本：v1.0（**已實跑**——三台 vm-target 全鏈路 apply + verify + HA failover 實測，見 §0/§3/§9）
+> 版本：v1.2（2026-10-15 這台 server 自己的 DNS forwarders 每次 apply 都收斂，見 §8）；v1.0（**已實跑**——三台 vm-target 全鏈路 apply + verify + HA failover 實測，見 §0/§3/§9）
 > 對齊規範：pilot 通用基礎設施**服務端**規範；本 host 是加入既有 FreeIPA realm 的
 > 第二台（或後續台）multi-master replica，不是全新 realm 的第一台
 > 維護者：sre
@@ -99,7 +99,7 @@ pilot vm-target test --name ipa-replica \
 | `ipa_replica_fqdn` | **這台自己**的 FQDN，預設 `ipa2.{{ ipa_domain }}`（**不可**與 `ipa_server_fqdn` 或既有其它 replica 相同）| 否（有預設）|
 | `ipa_replica_setup_ca` | 這台是否同時擔任 CA replica，預設 `true`（HA 建議至少 2 台有 CA；但 CA **renewal master** 角色不會跟著轉移，見 §5）| 否（有預設）|
 | `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`）。預設 `true`，跟 primary 的預設值一致（docs/tmp/now/freeipa-client-ha-spec.md §10：replica 繼承 realm 的 effective DNS policy，避免只有一台 DNS provider 的 SPOF）；讀的是同一個 `freeipa_setup_dns` 來源變數，不是「即時讀 primary 的活體狀態」，兩邊各自覆寫仍會分歧 | 否（有預設）|
-| `freeipa_dns_forwarders`（`ipa_dns_forwarders` 有定義時優先，空值也算） | 當啟用 DNS 時，這台 replica 自己的上游 DNS 轉發器（install 的 `--forwarder`）。清單、單一位址或空白分隔字串皆可，每一項都要是 IPv4/IPv6 位址；null、`""`、`[]` 是不帶 forwarder。與 primary 共用 `tasks/freeipa-dns-forwarders.yml`，優先順序與寫法完全相同（issue #68），只有兩者都沒設時的預設不同：replica 是 `[]`（`--no-forwarders`，沿用 primary 設定的全域 forwarders），primary 是 8.8.8.8 | 否（有預設）|
+| `freeipa_dns_forwarders`（`ipa_dns_forwarders` 有定義時優先，空值也算） | 當啟用 DNS 時，這台 replica 自己的上游 DNS 轉發器（install 的 `--forwarder`）。清單、單一位址或空白分隔字串皆可，每一項都要是 IPv4/IPv6 位址；FreeIPA 的 `<位址> port <N>` 寫法 `ipa-replica-install`／`ipa-dns-install` 不接受，安裝前就擋下（裝好之後再帶 port 重跑即可）；null、`""`、`[]` 是不帶 forwarder。DNS 裝好之後，每次 apply 都用 `ipa dnsserver-mod <ipa_replica_fqdn>` 讓這台 server 自己的 forwarders 等於設定值（空值就清掉，沿用全域 forwarders；2026-10-15 起，之前只有安裝時會設）。與 primary 共用 `tasks/freeipa-dns-forwarders.yml`，優先順序與寫法完全相同（issue #68），只有兩者都沒設時的預設不同：replica 是 `[]`（`--no-forwarders`，沿用 primary 設定的全域 forwarders），primary 是 8.8.8.8 | 否（有預設）|
 | `ipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步（語意同 `freeipa-server.md`），預設 `false` | 否（有預設）|
 
 > Realm 後綴 DN 與 389-ds instance 名的推導規則與 `freeipa-server.md` §1.5 相同（同一個 realm）。
@@ -375,3 +375,4 @@ Online status: Offline
 | 2026-07-09 | v0.1 | 初版草稿:multi-master replica 加入既有 realm(client-then-promote 流程)。checklist C1–C13 對稱既有 `freeipa-server.md`,新增 C14/C15 驗證雙向拓樸複寫。**未實跑**(見 §0)——lint/生成/syntax-check 已過,尚未在真實兩台 vm-target 上跑過 apply + verify | pilot |
 | 2026-07-09 | v1.0 | **已實跑**:三台 vm-target(primary/replica/client)跑完整鏈路,`pilot vm-target verify` 15/15 PASS(§3)。修正 apply playbook 兩個實跑撞出的 bug——(1) `ipa-replica-install` promotion 模式不接受 NTP 旗標,(2) `freeipa-client-apply.yml` 的 `services=` 塞 `sudo` 跟 SSSD socket-activated sudo responder 衝突(既有 bug,順手修掉)。C14/C15 的查詢方式改為 root+ldapi(`-Y EXTERNAL`),因為 `cn=masters,cn=ipa,cn=etc` 匿名讀不到(實跑才發現)。新增 §9 完整記錄 client 端 HA failover 實測(kinit 作為「兩台都掛 = 無法登入」的權威證明,並誠實記錄 SSSD offline cache 的補充說明);§5 新增「primary 需手動 pin 新 replica /etc/hosts」的例外 | pilot |
 | 2026-10-12 | v1.1 | Checklist 不變。step 1 的 `ipa-client-install` 會 restart sshd，`dnf install` FreeIPA 套件本身也會讓 sshd 被 restart（2026-10-12 在全新 AlmaLinux 9 主機實測：systemd「Queuing reload/restart jobs for marked units」）：pre_tasks 在任何變更與套件安裝之前先跑 `sshd -t`（沿用 step 1 的 `creates:`），失敗就拒絕、什麼都不改。step 2 的 `ipa-replica-install`（promote 已 enroll 的 client）實測不會 restart sshd（MainPID 不變），不另加檢查；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |
+| 2026-10-15 | v1.2 | Checklist 不變。DNS 裝好之後，每次 apply 都用 `ipa dnsserver-mod <ipa_replica_fqdn> --forwarder=…` 讓這台 server 自己的 forwarders 等於 `ipa_dns_forwarders`／`freeipa_dns_forwarders`（兩者都沒設時清掉，沿用全域 forwarders）。之前只有安裝時的 `--forwarder` 會設，之後改設定不會生效。`<位址> port <N>` 寫法在這次 run 會呼叫 `ipa-replica-install`／`ipa-dns-install` 時，於 pre_tasks、任何變更之前擋下（PR #73 follow-up 第二輪） | pilot |

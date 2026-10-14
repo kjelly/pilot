@@ -810,3 +810,46 @@ func TestDNSArchUnregisteredReplicas_FollowFreeIPAsNSRecords(t *testing.T) {
 		t.Fatalf("findings:\n%s", joined)
 	}
 }
+
+// provider_replica_other_name.txt is a replica that answers the zone
+// authoritatively itself (+norec SOA and NS, aa) but was installed as
+// ipa-2.ipa.pilot.internal while the inventory names it ipa2;
+// provider_ns_other_name.txt is the primary of that topology, whose NS
+// records list ipa1 and ipa-2. The NS names alone left the working replica
+// out (PR #92 review); its own answer keeps it in. A replica that answers
+// nothing and is not listed is still left out. Both captured on the
+// disposable pr92 topology, FreeIPA 4.13.4 on AlmaLinux 9.8.
+func TestDNSArchUnregisteredReplicas_KeepAReplicaThatAnswersItself(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr92-ipa"}, "freeipa-server-replica": {"pr92-r1", "pr92-r3"}, "dns": {"pr92-dns"}},
+		map[string]map[string]any{
+			"pr92-ipa": {"ansible_host": "192.168.122.4"},
+			"pr92-r1":  {"ansible_host": "192.168.122.7", "freeipa_replica_fqdn": "ipa2.ipa.pilot.internal"},
+			"pr92-r3":  {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa4.ipa.pilot.internal"},
+			"pr92-dns": {"ansible_host": "192.168.122.2"},
+		})
+	m := BuildDNSArchitectureModel(invInput)
+	files := map[string]string{"pr92-ipa": "provider_ns_other_name.txt", "pr92-r1": "provider_replica_other_name.txt"}
+	var observed []DNSArchObservedProvider
+	for _, p := range m.Providers {
+		r := StepResult{Step: Step{ID: "provider-" + p.InventoryHost}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host " + p.IP + " port 22: Connection timed out"}}
+		if f, ok := files[p.InventoryHost]; ok {
+			r = fixtureResult(t, "provider-"+p.InventoryHost, f)
+		}
+		observed = append(observed, BuildDNSArchObservedProvider(p, m.FreeIPADomain, "ipa1.ipa.pilot.internal", r))
+	}
+	leftOut, registered := DNSArchUnregisteredReplicas(m, observed)
+	if !reflect.DeepEqual(leftOut, []string{"pr92-r3"}) || !reflect.DeepEqual(registered, []string{"ipa-2.ipa.pilot.internal", "ipa1.ipa.pilot.internal"}) {
+		t.Fatalf("left out %v, registered %v; want only pr92-r3 left out", leftOut, registered)
+	}
+	// Its NS answer without aa is no longer its own authoritative answer.
+	noAA := strings.ReplaceAll(fixture(t, "provider_replica_other_name.txt"), ";; flags: qr aa ra;", ";; flags: qr ra;")
+	for i, p := range m.Providers {
+		if p.InventoryHost == "pr92-r1" {
+			observed[i] = BuildDNSArchObservedProvider(p, m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr92-r1"}, Result: AdHocResult{Stdout: noAA}})
+		}
+	}
+	if leftOut, _ := DNSArchUnregisteredReplicas(m, observed); !reflect.DeepEqual(leftOut, []string{"pr92-r1", "pr92-r3"}) {
+		t.Fatalf("without aa: left out %v, want pr92-r1 and pr92-r3", leftOut)
+	}
+}

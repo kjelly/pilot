@@ -330,7 +330,7 @@
         msg:
           mode: "{{ dns_mode }}"
           service_addr: "{{ dns_service_addr }}"
-          freeipa_servers: "{{ dns_freeipa_servers }}"
+          freeipa_servers_from_inventory: "{{ dns_freeipa_servers }}"
           stub_zones: "{{ dns_stub_zone_list | map(attribute='name') | list }}"
           local_zones: "{{ dns_local_zone_list | map(attribute='name') | list }}"
           upstream: "{{ dns_upstream_list }}"
@@ -403,6 +403,23 @@
         - freeipa_dns_live_excluded | default([]) | length > 0
       tags: *dns_config_tags
 
+    # The pre_tasks summary prints the inventory's FreeIPA servers; this one
+    # prints what the stubs use after FreeIPA's live answer, and what was
+    # left out, so a pilot deploy log shows the exclusion next to the
+    # result rather than only in a WARNING line above it.
+    - name: "DNS — summary: FreeIPA servers the stubs use"
+      ansible.builtin.debug:
+        msg:
+          freeipa_servers_effective: "{{ dns_freeipa_servers }}"
+          freeipa_servers_left_out: >-
+            {{ freeipa_dns_live_excluded | default([])
+               | map(attribute='inventory_host') | list }}
+          freeipa_answered_authoritatively: >-
+            {{ freeipa_dns_live_authoritative | default([]) if (freeipa_dns_live_answered | default(false) | bool)
+               else 'no FreeIPA DNS server answered; nothing was left out' }}
+      when: dns_mode == 'freeipa-split'
+      tags: *dns_config_tags
+
     # ── G5: FreeIPA must be authoritative for every zone sent to it ────────
     # A zone FreeIPA does not serve gets an upward referral to the root for
     # an RD=0 query, which unbound turns into SERVFAIL (dns.md §0.2).
@@ -465,9 +482,10 @@
           FreeIPA does not serve would SERVFAIL every lookup under it. For a server: a
           freeipa-server-replica host with freeipa_setup_dns: true must be promoted with DNS first
           (freeipa-server-replica-apply.yml), or set freeipa_setup_dns: false on it; one that leaves
-          it unset and that FreeIPA does not list in its NS records is left out automatically (see
-          the warning above), so a server here is listed by FreeIPA, or nothing could be asked
-          (docs/verification/dns.md §5 G5).
+          it unset, does not answer the zone itself and that FreeIPA does not list in its NS records
+          is left out automatically (see the warning above). Any other server here is listed by FreeIPA
+          or is the primary: check named on it (systemctl status named), or no FreeIPA server
+          answered at all (docs/verification/dns.md §5 G5).
       tags: *dns_config_tags
 
     # ── G6: upstreams answer (and keep DNSSEC records when validating) ─────

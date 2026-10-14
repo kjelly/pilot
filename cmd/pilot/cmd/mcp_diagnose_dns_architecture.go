@@ -263,7 +263,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 			for i, op := range observed.Providers {
 				p, _ := model.Provider(op.Host)
 				if p.LeftOut {
-					observed.Providers[i].LeftOut = fmt.Sprintf("%s (%s) leaves freeipa_setup_dns unset, but FreeIPA's NS records for %s list only %s: it is not a FreeIPA DNS server yet, and dns-apply.yml and the resolver task leave it out; promote it with freeipa-server-replica-apply.yml (then re-run them), or set freeipa_setup_dns: false", op.Host, p.FQDN, model.FreeIPADomain, strings.Join(registered, ", "))
+					observed.Providers[i].LeftOut = fmt.Sprintf("%s (%s) leaves freeipa_setup_dns unset, but it did not answer %s authoritatively and FreeIPA's NS records list only %s, so dns-apply.yml and the resolver task leave it out; promote it with freeipa-server-replica-apply.yml, set freeipa_replica_fqdn to the name FreeIPA knows it by, or start named on it (then re-run them), or set freeipa_setup_dns: false", op.Host, p.FQDN, model.FreeIPADomain, strings.Join(registered, ", "))
 					leftOutIPs = append(leftOutIPs, p.IP)
 				}
 			}
