@@ -2,20 +2,24 @@ package ansible
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -43,6 +47,35 @@ func HoldLogUse(path string) func() {
 	}
 	logUseMu.RLock()
 	return logUseMu.RUnlock
+}
+
+// HoldLogUseContext is HoldLogUse that stops waiting when ctx ends:
+// maintenance holds the log exclusively while it runs, and the caller's
+// deadline (a step or probe timeout) must still bound the wait.
+func HoldLogUseContext(ctx context.Context, path string) (func(), error) {
+	if path == "" {
+		return func() {}, nil
+	}
+	for !logUseMu.TryRLock() {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("wait for Ansible log maintenance: %w", ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return logUseMu.RUnlock, nil
+}
+
+// HoldCommandLog holds the Ansible log that command writes, the
+// ANSIBLE_LOG_PATH of its environment (command.Env, or this process's when
+// that is nil), until the returned release is called. Run the command in
+// between, so that maintenance does not rewrite or rotate the log under it.
+func HoldCommandLog(ctx context.Context, command *exec.Cmd) (func(), error) {
+	env := command.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	return HoldLogUseContext(ctx, LogPathFromEnv(env))
 }
 
 func DefaultLogPolicy() LogPolicy {
@@ -76,10 +109,9 @@ func MaintainLogWithPolicy(path string, policy LogPolicy) error {
 	logUseMu.Lock()
 	defer logUseMu.Unlock()
 
-	// A rotation that was killed leaves the old log renamed aside, with
-	// lines it may not have scanned; remove it at once, not at the next
-	// rotation.
-	sweepStaleLogTemp(filepath.Dir(path), logRotatingTempPrefix)
+	if err := recoverRotations(path, policy); err != nil {
+		return err
+	}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -142,14 +174,16 @@ func MaintainLogWithPolicy(path string, policy LogPolicy) error {
 }
 
 // LogPathFromEnv extracts the path used by Ansible's log_path setting from a
-// process environment assembled by Pilot.
+// process environment assembled by Pilot. As for exec.Cmd, the last entry
+// wins.
 func LogPathFromEnv(env []string) string {
+	path := ""
 	for _, entry := range env {
-		if strings.HasPrefix(entry, "ANSIBLE_LOG_PATH=") {
-			return strings.TrimPrefix(entry, "ANSIBLE_LOG_PATH=")
+		if value, ok := strings.CutPrefix(entry, "ANSIBLE_LOG_PATH="); ok {
+			path = value
 		}
 	}
-	return ""
+	return path
 }
 
 func MaintainLogFromEnv(env []string) error {
@@ -159,8 +193,11 @@ func MaintainLogFromEnv(env []string) error {
 var (
 	sensitiveAssignment = regexp.MustCompile(`(?i)((?:["']?[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|vault[_-]?password|authorization)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,}\]]+))`)
 	sensitiveFlag       = regexp.MustCompile(`(?i)(--(?:password|passwd|passphrase|secret|token|api[-_]key|access[-_]key|private[-_]key|vault[-_]password)(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s]+)`)
-	privateKeyBegin     = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
-	privateKeyEnd       = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	// grownMarker is the marker followed by the extra brackets that each
+	// pass used to add (see RedactSecrets).
+	grownMarker     = regexp.MustCompile(`\[REDACTED\]\]+`)
+	privateKeyBegin = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+	privateKeyEnd   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	// ansibleRecord is the start of an Ansible log record: ansible-core
 	// 2.19 writes "%(asctime)s p=%(process)d u=%(user)s n=%(name)s
 	// %(levelname)s| %(message)s" (lib/ansible/utils/display.py), for
@@ -170,7 +207,20 @@ var (
 	ansibleRecord = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} p=\S+ u=\S+ (?:n=\S+ )?(?:[A-Z]+)?\| `)
 	// ansibleKeyRecord is a record whose whole message could be a line of
 	// key material, as when each line of a key is logged on its own.
-	ansibleKeyRecord = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} p=\S+ u=\S+ (?:n=\S+ )?(?:[A-Z]+)?\| [A-Za-z0-9+/=]*\r?\n?$`)
+	ansibleKeyRecord = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} p=\S+ u=\S+ (?:n=\S+ )?(?:[A-Z]+)?\| [A-Za-z0-9+/=]+\r?\n?$`)
+	// ansibleItemRecord is the result of one loop item, which the default
+	// callback labels with the item itself, as captured from ansible-core
+	// 2.19.2: "changed: [h] => (item=<line>)", "ok: [h] => (item=<line>) =>
+	// {" followed by lines such as "    \"msg\": \"<line>\"", and
+	// "failed: [h] (item=<line>) => {...}". A loop over a key's lines (for
+	// example with_lines: cat key.pem) logs one such record per line.
+	ansibleItemRecord = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} p=\S+ u=\S+ (?:n=\S+ )?(?:[A-Z]+)?\| [a-z]+: \[[^\]]*\](?: =>)? \(item=`)
+	// recordLevelPart is a start of the level and bar that end the record
+	// prefix ("INFO|", or "|" in the older format).
+	recordLevelPart = regexp.MustCompile(`^[A-Z]*\|?$`)
+	// ansibleBanner starts a play, a task or the recap; a loop does not go
+	// on past it.
+	ansibleBanner = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} p=\S+ u=\S+ (?:n=\S+ )?(?:[A-Z]+)?\| (?:PLAY \[|TASK \[|RUNNING HANDLER \[|PLAY RECAP)`)
 )
 
 const (
@@ -179,46 +229,44 @@ const (
 	// redactionFormat names the redaction behaviour that the regexes do not
 	// show. Change it whenever that behaviour changes, so that records
 	// written under the old behaviour are not trusted (see redactionRules).
-	redactionFormat = "pilot-ansible-log-redaction/2"
+	// TestRedactionGolden fails when the behaviour changes and this does
+	// not.
+	redactionFormat = "pilot-ansible-log-redaction/3"
 )
 
 // RedactSecrets masks common structured secret values in one line. It is a
 // defense-in-depth filter, not a replacement for Ansible no_log.
+//
+// One pass masks what main always masked, the same way, and then folds
+// "[REDACTED]]..." back into "[REDACTED]": the value pattern stops before
+// "]", so masking an already-masked value turned "[REDACTED]" into
+// "[REDACTED]]", one more bracket on every pass over the log (issue #70).
+// Folding only removes brackets. A masked flag value can still read
+// differently to the next pass ("--token=[REDACTED]" becomes "--token=
+// [REDACTED]"), so passes repeat until the line no longer changes; a line
+// with nothing to mask takes one. The result masks at least what main's
+// repeated passes did, and redacting it again changes nothing.
 func RedactSecrets(line string) string {
-	return sensitiveFlag.ReplaceAllString(redactAssignments(line), "$1[REDACTED]")
+	for range 4 {
+		next := redactSecretsOnce(line)
+		if next == line {
+			break
+		}
+		line = next
+	}
+	return line
 }
 
-// redactAssignments replaces the value of each sensitive assignment with
-// the marker. A value that already is the marker is left as it is: the value
-// pattern stops before "]", so "[REDACTED]" reads as "[REDACTED" followed by
-// "]", and replacing it again grew one more bracket on every pass over the
-// log (issue #70). Any other value, including one that only starts like the
-// marker ("[REDACTED-x", "[REDACTEDx"), is replaced. The text after a
-// value's end is not part of the match and is judged by the other rules,
-// as it always was.
-func redactAssignments(line string) string {
-	matches := sensitiveAssignment.FindAllStringIndex(line, -1)
-	if matches == nil {
-		return line
-	}
-	var b strings.Builder
-	last := 0
-	for _, m := range matches {
-		match := line[m[0]:m[1]]
-		b.WriteString(line[last:m[0]])
-		last = m[1]
+func redactSecretsOnce(line string) string {
+	line = sensitiveAssignment.ReplaceAllStringFunc(line, func(match string) string {
 		separator := strings.IndexAny(match, ":=")
-		switch {
-		case separator < 0:
-			b.WriteString(redactedMarker)
-		case strings.TrimLeft(match[separator+1:], " \t\r\n\f\v") == "[REDACTED" && strings.HasPrefix(line[m[1]:], "]"):
-			b.WriteString(match)
-		default:
-			b.WriteString(match[:separator+1] + " " + redactedMarker)
+		if separator < 0 {
+			return redactedMarker
 		}
-	}
-	b.WriteString(line[last:])
-	return b.String()
+		return match[:separator+1] + " " + redactedMarker
+	})
+	line = sensitiveFlag.ReplaceAllString(line, "${1}"+redactedMarker)
+	return grownMarker.ReplaceAllString(line, redactedMarker)
 }
 
 // redactionRules fingerprints the redaction rules. A record made under
@@ -231,10 +279,13 @@ func redactionRules() string {
 		redactionFormat,
 		sensitiveAssignment.String(),
 		sensitiveFlag.String(),
+		grownMarker.String(),
 		privateKeyBegin.String(),
 		privateKeyEnd.String(),
 		ansibleRecord.String(),
 		ansibleKeyRecord.String(),
+		ansibleItemRecord.String(),
+		ansibleBanner.String(),
 		redactedMarker,
 		privateKeyPlaceholder,
 	} {
@@ -244,27 +295,74 @@ func redactionRules() string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
+// keyState is where a stream of log lines stands with private keys.
+type keyState uint8
+
+const (
+	// inKey: inside a key's lines, up to its END marker.
+	inKey keyState = 1 << iota
+	// inKeyLoop: inside a loop over a key's lines (ansibleItemRecord). Each
+	// item's record, and the lines that belong to it, are key material, up
+	// to the item with the END marker or the next banner. Other records in
+	// between, such as an error report, are judged as usual.
+	inKeyLoop
+	// inKeyItem: the lines that follow belong to an item's record in such
+	// a loop.
+	inKeyItem
+)
+
 type streamRedactor struct {
-	inPrivateKey bool
+	state keyState
 }
 
 func (r *streamRedactor) redact(line string) string {
-	// A key whose END marker never came (a cut log, or a BEGIN marker
-	// quoted in a command) would otherwise mask every later line, in this
-	// run and every later one. Key material never starts with Ansible's
-	// record prefix, so a new record ends it, unless its whole message could
-	// be a line of key material.
-	if r.inPrivateKey && ansibleRecord.MatchString(line) && !ansibleKeyRecord.MatchString(line) {
-		r.inPrivateKey = false
+	if ansibleRecord.MatchString(line) {
+		r.state &^= inKeyItem
+		if r.state&inKeyLoop != 0 {
+			if ansibleItemRecord.MatchString(line) {
+				if privateKeyEnd.MatchString(line) {
+					r.state &^= inKeyLoop
+				} else {
+					r.state |= inKeyItem
+				}
+				return preserveLineEnding(line, privateKeyPlaceholder)
+			}
+			if ansibleBanner.MatchString(line) {
+				r.state &^= inKeyLoop
+			}
+		}
+		// A key whose END marker never came (a cut log, or a BEGIN marker
+		// quoted in a command) would otherwise mask every later line, in
+		// this run and every later one. Key material never starts with
+		// Ansible's record prefix, so a new record ends it, unless its whole
+		// message could be a line of key material.
+		if r.state&inKey != 0 && !ansibleKeyRecord.MatchString(line) {
+			r.state &^= inKey
+		}
+	} else if r.state&inKeyItem != 0 {
+		return preserveLineEnding(line, privateKeyPlaceholder)
 	}
-	if r.inPrivateKey {
+	if r.state&inKey != 0 {
 		if privateKeyEnd.MatchString(line) {
-			r.inPrivateKey = false
+			r.state &^= inKey
 		}
 		return preserveLineEnding(line, privateKeyPlaceholder)
 	}
 	if privateKeyBegin.MatchString(line) {
-		r.inPrivateKey = !privateKeyEnd.MatchString(line)
+		if !privateKeyEnd.MatchString(line) {
+			switch {
+			case ansibleItemRecord.MatchString(line):
+				r.state |= inKeyLoop | inKeyItem
+			case strings.Contains(line, "(item="):
+				// An item's record glued to the end of a line its writer
+				// never finished (a killed run, then the next one): it
+				// cannot be told from a key that starts in that line, so
+				// both are assumed.
+				r.state |= inKey | inKeyLoop | inKeyItem
+			default:
+				r.state |= inKey
+			}
+		}
 		return preserveLineEnding(line, privateKeyPlaceholder)
 	}
 	return RedactSecrets(line)
@@ -272,23 +370,81 @@ func (r *streamRedactor) redact(line string) string {
 
 // redactContinuation judges a line whose first maskedLen bytes are a final
 // line that an earlier maintenance masked before its writer finished it.
-// The original text of that part is gone. tailInPrivateKey is the
-// private-key state after it: when set, the rest of the line is key
-// material up to an END marker, unless it starts a new Ansible record.
-// Otherwise the masked part and the rest are judged together, as a full
-// pass over the log would.
-func (r *streamRedactor) redactContinuation(line string, maskedLen int64, tailInPrivateKey bool) string {
-	r.inPrivateKey = tailInPrivateKey
-	if !tailInPrivateKey {
+// The original text of that part is gone; tail is the state after it. When
+// that part was key material, the rest of the line is too, up to an END
+// marker, unless the rest starts a new Ansible record. Otherwise the masked
+// part and the rest are judged together, as a full pass over the log would.
+func (r *streamRedactor) redactContinuation(line string, maskedLen int64, tail keyState) string {
+	r.state = tail
+	if tail&(inKey|inKeyItem) == 0 {
 		return r.redact(line)
 	}
 	rest := line[maskedLen:]
-	if ansibleRecord.MatchString(rest) && !ansibleKeyRecord.MatchString(rest) {
-		r.inPrivateKey = false
+	if ansibleRecord.MatchString(rest) {
 		return privateKeyPlaceholder + r.redact(rest)
 	}
-	r.inPrivateKey = !privateKeyEnd.MatchString(rest)
+	// The masked part is gone, so the line may have been a line of the key,
+	// or a record (an item of a loop over a key, say) cut early in its
+	// message. Keep every state either reading leads to: masking more is
+	// the safe side, and a record or banner bounds it.
+	if begin := privateKeyBegin.FindStringIndex(rest); begin != nil && !privateKeyEnd.MatchString(rest[begin[1]:]) {
+		r.state |= inKey | inKeyLoop | inKeyItem
+	} else if privateKeyEnd.MatchString(rest) {
+		r.state &^= inKey
+	}
 	return preserveLineEnding(line, privateKeyPlaceholder)
+}
+
+// mayStartRecord reports whether line, a final line without its newline,
+// could be an Ansible record cut before the end of its prefix (see
+// ansibleRecord): "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| "
+// or "2026-09-15 09:50:37,791 p=pilot u=4242 | ", up to any point.
+func mayStartRecord(line string) bool {
+	line = strings.TrimSuffix(line, "\r")
+	const stamp = "0000-00-00 00:00:00,000"
+	for i := 0; i < len(line) && i < len(stamp); i++ {
+		digit := line[i] >= '0' && line[i] <= '9'
+		if stamp[i] == '0' && !digit || stamp[i] != '0' && line[i] != stamp[i] {
+			return false
+		}
+	}
+	if len(line) <= len(stamp) {
+		return true
+	}
+	tokens := strings.Split(line[len(stamp):], " ")
+	if tokens[0] != "" {
+		return false
+	}
+	tokens = tokens[1:]
+	// field reports whether tokens[i] is "name=value", or, as the last
+	// token, a start of one.
+	field := func(i int, name string) bool {
+		tok := tokens[i]
+		if i == len(tokens)-1 && strings.HasPrefix(name+"=", tok) {
+			return true
+		}
+		return strings.HasPrefix(tok, name+"=") && len(tok) > len(name)+1
+	}
+	i := 0
+	for _, name := range []string{"p", "u"} {
+		if i == len(tokens) {
+			return true
+		}
+		if !field(i, name) {
+			return false
+		}
+		i++
+	}
+	if i < len(tokens) && field(i, "n") {
+		i++
+	}
+	if i == len(tokens) {
+		return true
+	}
+	if i == len(tokens)-1 {
+		return recordLevelPart.MatchString(tokens[i])
+	}
+	return false
 }
 
 func preserveLineEnding(line, replacement string) string {
@@ -347,7 +503,10 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	// EPERM: the process exists but belongs to another user, for example a
+	// sudo pilot, or a container's PID 1, sharing the data directory.
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // redactionState records how much of the active log is already redacted.
@@ -373,17 +532,17 @@ func processAlive(pid int) bool {
 // because maintenance runs after Ansible exits and that line may never be
 // completed. Offset still stops at its start, so when a writer completes
 // it the line is judged again, from the masked part and the rest, as a full
-// pass would judge it. TailLength and TailInPrivateKey describe the masked
+// pass would judge it. TailLength and TailKeyState describe the masked
 // part.
 type redactionState struct {
-	Device           uint64 `json:"device"`
-	Inode            uint64 `json:"inode"`
-	Offset           int64  `json:"offset"`
-	InPrivateKey     bool   `json:"in_private_key"`
-	TailLength       int64  `json:"tail_length,omitempty"`
-	TailInPrivateKey bool   `json:"tail_in_private_key,omitempty"`
-	PrefixSHA256     string `json:"prefix_sha256,omitempty"`
-	Rules            string `json:"rules_sha256,omitempty"`
+	Device       uint64   `json:"device"`
+	Inode        uint64   `json:"inode"`
+	Offset       int64    `json:"offset"`
+	KeyState     keyState `json:"key_state"`
+	TailLength   int64    `json:"tail_length,omitempty"`
+	TailKeyState keyState `json:"tail_key_state,omitempty"`
+	PrefixSHA256 string   `json:"prefix_sha256,omitempty"`
+	Rules        string   `json:"rules_sha256,omitempty"`
 }
 
 func redactionStatePath(path string) string {
@@ -469,25 +628,34 @@ func cloneDigest(digest hash.Hash, input io.ReaderAt, n int64) (hash.Hash, error
 	return clone, err
 }
 
+// scanCatchUp bounds how far past the size seen at open a scan reads. A
+// writer outside this process may still append while maintenance holds
+// the log; reading until it stops would keep maintenance, and every Ansible
+// run waiting for it, going for as long as the writer is faster than the
+// scan. What it appends past the bound is scanned by the next maintenance,
+// or, when this one renames a new file over the log, never kept (as the
+// rename of a full pass always did).
+const scanCatchUp = 1 << 20
+
 // redactRangeStarts, when set by a test, sees where each scan starts.
 var redactRangeStarts func(offset int64)
 
-// redactRange redacts input from state.Offset to its end at the time of
-// reading, writing the result to w when w is not nil and adding the part
-// the returned record covers to digest. It returns the record for that
+// redactRange redacts input from state.Offset up to limit, or to its end
+// at the time of reading if that comes first, writing the result to w when
+// w is not nil and adding the part the returned record covers to digest. It returns the record for that
 // result, which starts at the same offset, and whether any line changed.
 // The returned Offset is just after the last complete line; a final line
 // without a newline is written masked (see redactionState) but stays after
 // Offset, so the next run judges it again once it is complete.
-func redactRange(input io.ReaderAt, state redactionState, w io.Writer, digest hash.Hash) (redactionState, bool, error) {
+func redactRange(input io.ReaderAt, state redactionState, limit int64, w io.Writer, digest hash.Hash) (redactionState, bool, error) {
 	if redactRangeStarts != nil {
 		redactRangeStarts(state.Offset)
 	}
-	// Read to the end as it is now, not as it was when the file was
-	// opened: a writer that still holds the file may have appended since.
-	reader := bufio.NewReaderSize(io.NewSectionReader(input, state.Offset, math.MaxInt64-state.Offset), 128*1024)
-	redactor := streamRedactor{inPrivateKey: state.InPrivateKey}
-	next := redactionState{Device: state.Device, Inode: state.Inode, Offset: state.Offset, InPrivateKey: state.InPrivateKey, Rules: state.Rules}
+	// Read past the size seen at open, up to limit (see scanCatchUp): a
+	// writer that still holds the file may have appended since.
+	reader := bufio.NewReaderSize(io.NewSectionReader(input, state.Offset, limit-state.Offset), 128*1024)
+	redactor := streamRedactor{state: state.KeyState}
+	next := redactionState{Device: state.Device, Inode: state.Inode, Offset: state.Offset, KeyState: state.KeyState, Rules: state.Rules}
 	maskedTail, changed := state.TailLength, false
 	for {
 		line, err := reader.ReadString('\n')
@@ -501,9 +669,18 @@ func redactRange(input io.ReaderAt, state redactionState, w io.Writer, digest ha
 		continued := maskedTail > 0 && int64(len(line)) >= maskedTail
 		maskedTail = 0
 		var redacted string
-		if continued {
-			redacted = redactor.redactContinuation(line, state.TailLength, state.TailInPrivateKey)
-		} else {
+		switch {
+		case continued:
+			redacted = redactor.redactContinuation(line, state.TailLength, state.TailKeyState)
+		case !complete && redactor.state&(inKey|inKeyItem) != 0 && !ansibleRecord.MatchString(line) && mayStartRecord(line):
+			// The start of a record, cut before the end of its prefix. Key
+			// material never looks like that (it has no "-" after digits, no
+			// spaces), so it is left as it is: masking it would hide where
+			// the record, and so the key's end, starts once it is complete.
+			// Only up to four digits, a cut year, could also start a line
+			// of key material.
+			redacted = line
+		default:
 			redacted = redactor.redact(line)
 		}
 		if redacted != line {
@@ -521,12 +698,12 @@ func redactRange(input io.ReaderAt, state redactionState, w io.Writer, digest ha
 		if !complete {
 			if covered {
 				next.TailLength = int64(len(redacted))
-				next.TailInPrivateKey = redactor.inPrivateKey
+				next.TailKeyState = redactor.state
 			}
 			return next, changed, nil
 		}
 		next.Offset += int64(len(redacted))
-		next.InPrivateKey = redactor.inPrivateKey
+		next.KeyState = redactor.state
 	}
 }
 
@@ -562,6 +739,7 @@ func redactLog(path string, state redactionState, rewrite bool) (redactionState,
 	}
 	device, inode, known := fileIdentity(info)
 	size := info.Size()
+	limit := size + scanCatchUp
 	rules := redactionRules()
 	fresh := redactionState{Device: device, Inode: inode, Rules: rules}
 	if !known || state.Device != device || state.Inode != inode || state.Rules != rules ||
@@ -584,7 +762,7 @@ func redactLog(path string, state redactionState, rewrite bool) (redactionState,
 	}
 
 	if !rewrite {
-		next, changed, err := redactRange(input, state, nil, digest)
+		next, changed, err := redactRange(input, state, limit, nil, digest)
 		if err != nil {
 			return redactionState{}, false, err
 		}
@@ -612,7 +790,7 @@ func redactLog(path string, state redactionState, rewrite bool) (redactionState,
 		_ = tmp.Close()
 		return redactionState{}, false, err
 	}
-	next, _, err := redactRange(input, state, writer, again)
+	next, _, err := redactRange(input, state, limit, writer, again)
 	if err != nil {
 		_ = tmp.Close()
 		return redactionState{}, false, err
@@ -707,10 +885,10 @@ func redactIfPresent(path string) error {
 // that still holds the log open (Ansible keeps its log file open for the
 // whole run) may have appended after the scan, and those bytes would land
 // in path.1, which nothing scans again. So the log is first renamed aside
-// and a new, empty active log takes its place. The renamed file is then
-// redacted to its end into a new file, whether or not anything needs
-// masking, so the writer is detached from what is kept; that file is
-// trimmed to the newest MaxBytes and becomes path.1.
+// and a new, empty active log takes its place; finishRotation then redacts
+// the renamed file into path.1. If that fails, or the process is killed,
+// the renamed file stays, and the next maintenance finishes the rotation
+// (recoverRotations): a failure never loses the log.
 func rotateRedacted(path string, policy LogPolicy) error {
 	aside := filepath.Join(filepath.Dir(path), fmt.Sprintf("%s-%d", logRotatingTempPrefix, os.Getpid()))
 	// The record describes the file being renamed, which keeps its inode.
@@ -718,7 +896,6 @@ func rotateRedacted(path string, policy LogPolicy) error {
 	if err := os.Rename(path, aside); err != nil {
 		return err
 	}
-	defer os.Remove(aside)
 	if err := removeRedactionState(path); err != nil {
 		return err
 	}
@@ -732,6 +909,18 @@ func rotateRedacted(path string, policy LogPolicy) error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
+	return finishRotation(path, aside, state, policy)
+}
+
+// finishRotation redacts aside, the former active log, to its end into a
+// new file, whether or not anything needs masking, so a writer that still
+// holds it is detached from what is kept; trims it to the newest MaxBytes;
+// and moves it to path.1. state is the record for aside, if any.
+func finishRotation(path, aside string, state redactionState, policy LogPolicy) error {
+	if policy.MaxFiles == 0 {
+		// Rotated logs are not kept at all.
+		return os.Remove(aside)
+	}
 	if _, _, err := redactLog(aside, state, true); err != nil {
 		return err
 	}
@@ -744,9 +933,57 @@ func rotateRedacted(path string, policy LogPolicy) error {
 	return retainRotated(path, aside, policy.MaxFiles)
 }
 
+// rotationLeftoverAge is how old a renamed-aside log must be before it is
+// recovered although a live process has the PID in its name: no rotation
+// takes that long, so the PID was reused.
+const rotationLeftoverAge = time.Hour
+
+// recoverRotations finishes rotations that failed, or were killed, after
+// renaming the log aside (rotateRedacted). Such a file holds the old log,
+// possibly with lines that were never scanned; it is redacted in full and
+// kept as path.1, as the rotation would have kept it, never removed with
+// its content lost. A recent file whose process is still running belongs to
+// a rotation in progress and is left alone.
+func recoverRotations(path string, policy LogPolicy) error {
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), logRotatingTempPrefix+"-*"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	type leftover struct {
+		name    string
+		modTime time.Time
+	}
+	var leftovers []leftover
+	self := os.Getpid()
+	for _, name := range matches {
+		pid, err := strconv.Atoi(strings.TrimPrefix(filepath.Base(name), logRotatingTempPrefix+"-"))
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(name)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		// This process holds logUseMu, so a file of its own is not in
+		// progress: an earlier call failed.
+		if pid != self && processAlive(pid) && time.Since(info.ModTime()) < rotationLeftoverAge {
+			continue
+		}
+		leftovers = append(leftovers, leftover{name, info.ModTime()})
+	}
+	// Oldest first, so the newest ends up as path.1.
+	sort.Slice(leftovers, func(i, j int) bool { return leftovers[i].modTime.Before(leftovers[j].modTime) })
+	for _, l := range leftovers {
+		if err := finishRotation(path, l.name, redactionState{}, policy); err != nil {
+			return fmt.Errorf("finish an interrupted rotation of the Ansible log (%s): %w", filepath.Base(l.name), err)
+		}
+	}
+	return nil
+}
+
 func trimFileToTail(path string, maxBytes int64) error {
 	info, err := os.Stat(path)
-	if err != nil || info.Size() <= maxBytes {
+	if err != nil || maxBytes <= 0 || info.Size() <= maxBytes {
 		return err
 	}
 	input, err := os.Open(path)

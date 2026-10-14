@@ -73,8 +73,15 @@ func (r *Runner) Run(ctx context.Context, args ...string) (*Result, error) {
 	}
 
 	start := time.Now()
-	releaseLog := HoldLogUse(r.LogPath)
-	err := cmd.Run()
+	logPath := r.LogPath
+	if logPath == "" {
+		logPath = LogPathFromEnv(cmd.Env)
+	}
+	releaseLog, err := HoldLogUseContext(c, logPath)
+	if err != nil {
+		return nil, fmt.Errorf("ansible run failed: %w", err)
+	}
+	err = cmd.Run()
 	releaseLog()
 	dur := time.Since(start)
 	logErr := MaintainLog(r.LogPath)

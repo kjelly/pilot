@@ -1,6 +1,7 @@
 package ansible
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -40,6 +41,8 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 		"--secret cli-secret --password=p",
 		"password=abc]def",
 		"password:[REDACTED]--password p",
+		" --password\t\"\"]",
+		"--password=[REDACTED]--password\rp",
 		"ordinary line",
 	} {
 		once := RedactSecrets(raw)
@@ -47,11 +50,15 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 			t.Errorf("RedactSecrets(%q): once %q, twice %q", raw, once, twice)
 		}
 	}
-	// Values that earlier versions grew by one bracket per pass are left
-	// as they are, not rewritten.
-	for _, masked := range []string{"password: [REDACTED]", "token= [REDACTED]]", `"secret": [REDACTED]]]], "other": 1`} {
-		if got := RedactSecrets(masked); got != masked {
-			t.Errorf("RedactSecrets(%q) = %q, want it unchanged", masked, got)
+	// Values that earlier versions grew by one bracket per pass are folded
+	// back to the marker.
+	for masked, want := range map[string]string{
+		"password: [REDACTED]":                "password: [REDACTED]",
+		"token= [REDACTED]]":                  "token= [REDACTED]",
+		`"secret": [REDACTED]]]], "other": 1`: `"secret": [REDACTED], "other": 1`,
+	} {
+		if got := RedactSecrets(masked); got != want {
+			t.Errorf("RedactSecrets(%q) = %q, want %q", masked, got, want)
 		}
 	}
 	// A full pass over an already-redacted log leaves it unchanged.
@@ -71,16 +78,18 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 	}
 }
 
-// Only the marker itself counts as already masked. A value that merely
-// starts like it is a value, and is masked (PR #71 review). Text after the
-// marker's closing bracket is not part of the value and is judged by the
-// other rules, as on main: a flag glued to it is still masked.
+// A value that merely starts like the marker is masked (PR #71 review), and
+// text glued after a marker is judged by the other rules, as on main: a
+// flag glued to it is still masked, also when its value follows a carriage
+// return (PR #71 follow-up review).
 func TestRedactSecretsMasksMarkerLookalikes(t *testing.T) {
 	for raw, want := range map[string]string{
-		"password: [REDACTED-synthetic-marker-secret":         "password: [REDACTED]",
-		"token=[REDACTEDsynthetic":                            "token= [REDACTED]",
-		"password: [redacted]":                                "password: [REDACTED]]",
-		"password:[REDACTED]--password synthetic-flag-secret": "password:[REDACTED]--password [REDACTED]",
+		"password: [REDACTED-synthetic-marker-secret":            "password: [REDACTED]",
+		"token=[REDACTEDsynthetic":                               "token= [REDACTED]",
+		"password: [redacted]":                                   "password: [REDACTED]",
+		"password:[REDACTED]--password synthetic-flag-secret":    "password: [REDACTED]--password [REDACTED]",
+		"--password=[REDACTED]--password\rsynthetic-flag-secret": "--password= [REDACTED]--password\r[REDACTED]",
+		" --password\t\"\"]":                                     " --password\t[REDACTED]",
 	} {
 		if got := RedactSecrets(raw); got != want {
 			t.Errorf("RedactSecrets(%q) = %q, want %q", raw, got, want)
@@ -950,6 +959,274 @@ func TestMaintainLogSweepsStaleRecordAndRotationTempFiles(t *testing.T) {
 	for _, name := range stale {
 		if _, err := os.Stat(name); !os.IsNotExist(err) {
 			t.Errorf("%s not swept: %v", filepath.Base(name), err)
+		}
+	}
+}
+
+// A loop over a key's lines (with_lines: cat key.pem, or a loop over
+// splitlines()) logs one record per line. The shapes are copied from a
+// capture with ansible-core 2.19.2 (host and key changed); key state must
+// survive those records, and an error report between them, up to the END
+// item (PR #71 follow-up review).
+func TestMaintainLogMasksAKeyLoggedOneLoopItemPerLine(t *testing.T) {
+	body := []string{"MIIEsyntheticloopkeybodyone", "syntheticloopkeybodytwo=="}
+	for name, log := range map[string]string{
+		"command loop": testRecord("TASK [loop over key lines] ***") + "\n" +
+			testRecord("changed: [h] => (item=-----BEGIN RSA PRIVATE KEY-----)") + "\n" +
+			testRecord("changed: [h] => (item="+body[0]+")") + "\n" +
+			testRecord("changed: [h] => (item="+body[1]+")") + "\n" +
+			testRecord("changed: [h] => (item=-----END RSA PRIVATE KEY-----)") + "\n",
+		"debug loop": testRecord("ok: [h] => (item=-----BEGIN RSA PRIVATE KEY-----) => {") + "\n" +
+			"    \"msg\": \"-----BEGIN RSA PRIVATE KEY-----\"\n}\n" +
+			testRecord("ok: [h] => (item="+body[0]+") => {") + "\n" +
+			"    \"msg\": \"" + body[0] + "\"\n}\n" +
+			testRecord("ok: [h] => (item="+body[1]+") => {") + "\n" +
+			"    \"msg\": \"" + body[1] + "\"\n}\n" +
+			testRecord("ok: [h] => (item=-----END RSA PRIVATE KEY-----) => {") + "\n" +
+			"    \"msg\": \"-----END RSA PRIVATE KEY-----\"\n}\n",
+		"failed items with an error report between them": testRecord("changed: [h] => (item=-----BEGIN RSA PRIVATE KEY-----)") + "\n" +
+			"2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n" +
+			testRecord(`failed: [h] (item=`+body[0]+`) => {"ansible_loop_var": "item", "changed": true, "cmd": ["false", "`+body[0]+`"], "item": "`+body[0]+`", "rc": 1}`) + "\n" +
+			testRecord(`failed: [h] (item=`+body[1]+`) => {"ansible_loop_var": "item", "item": "`+body[1]+`", "rc": 1}`) + "\n" +
+			testRecord("changed: [h] => (item=-----END RSA PRIVATE KEY-----)") + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ansible.log")
+			if err := os.WriteFile(path, []byte(log+testRecord("TASK [next] ***")+"\n"+testRecord("ok: [h] => synthetic-visible-after")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := maintainTwice(t, path)
+			for _, line := range body {
+				if strings.Contains(got, line) {
+					t.Errorf("key line %q left: %q", line, got)
+				}
+			}
+			if !strings.Contains(got, "synthetic-visible-after") {
+				t.Errorf("the record after the loop was masked: %q", got)
+			}
+		})
+	}
+}
+
+// A loop whose END item never comes ends at the next task; records of
+// other kinds in between, such as an error report, are not masked.
+func TestMaintainLogEndsAKeyLoopAtTheNextTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	log := testRecord("changed: [h] => (item=-----BEGIN RSA PRIVATE KEY-----)") + "\n" +
+		"2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: synthetic-error-report\n" +
+		testRecord("changed: [h] => (item=MIIEsyntheticloopkeybodyone)") + "\n" +
+		testRecord("TASK [next] ***") + "\n" +
+		testRecord("changed: [h] => (item=synthetic-visible-item)") + "\n"
+	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := maintainTwice(t, path)
+	if strings.Contains(got, "MIIEsynthetic") || !strings.Contains(got, "synthetic-error-report") || !strings.Contains(got, "synthetic-visible-item") {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+// numberedLines returns n lines that each say their number, and countLines
+// how many different ones of them the files under dir hold.
+func numberedLines(n int, extra string) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "ordinary line number %04d\n", i)
+		if i == n/2 {
+			b.WriteString(extra)
+		}
+	}
+	return b.String()
+}
+
+func countNumberedLines(t *testing.T, dir string) (int, string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	var all strings.Builder
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		all.Write(data)
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "ordinary line number ") {
+				seen[line] = true
+			}
+		}
+	}
+	return len(seen), all.String()
+}
+
+// A rotation that fails after renaming the log aside must not lose the
+// log (PR #71 follow-up review): main kept every line when its redaction
+// failed. The renamed file stays, and the next maintenance finishes the
+// rotation. A directory in the way of the redaction's temp file stands in
+// for ENOSPC or EIO.
+func TestMaintainLogKeepsTheLogWhenRotationFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ansible.log")
+	if err := os.WriteFile(path, []byte(numberedLines(200, "password: synthetic-rotation-secret\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	blocker := filepath.Join(dir, fmt.Sprintf("%s-%d", logRedactedTempPrefix, os.Getpid()))
+	if err := os.Mkdir(blocker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := LogPolicy{MaxBytes: 4096, MaxFiles: 2}
+	if err := MaintainLogWithPolicy(path, policy); err == nil {
+		t.Fatal("test setup: the rotation did not fail")
+	}
+	if n, _ := countNumberedLines(t, dir); n != 200 {
+		t.Fatalf("after the failed rotation %d of 200 lines are left", n)
+	}
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaintainLogWithPolicy(path, policy); err != nil {
+		t.Fatal(err)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, logRotatingTempPrefix+"-*")); len(leftovers) != 0 {
+		t.Fatalf("rotation leftovers: %v", leftovers)
+	}
+	rotated := readLog(t, path+".1")
+	if !strings.HasSuffix(rotated, "ordinary line number 0199\n") || len(rotated) > 4096 {
+		t.Fatalf("path.1 = ...%q (%d bytes)", rotated[max(0, len(rotated)-60):], len(rotated))
+	}
+	if _, all := countNumberedLines(t, dir); strings.Contains(all, "synthetic-rotation-secret") {
+		t.Fatal("a file keeps the secret")
+	}
+}
+
+// A rotation killed after renaming the log aside is finished by the next
+// maintenance: the renamed log is redacted and kept as path.1, not deleted.
+func TestMaintainLogFinishesAKilledRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ansible.log")
+	aside := filepath.Join(dir, logRotatingTempPrefix+"-"+strconv.Itoa(deadPIDForTest(t)))
+	if err := os.WriteFile(aside, []byte(numberedLines(300, "password: synthetic-killed-secret\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("ordinary line in the new log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if _, err := os.Stat(aside); !os.IsNotExist(err) {
+		t.Fatalf("the renamed log is still there: %v", err)
+	}
+	rotated := readLog(t, path+".1")
+	if n, all := countNumberedLines(t, dir); n != 300 || strings.Contains(all, "synthetic-killed-secret") || !strings.Contains(rotated, "password: [REDACTED]") {
+		t.Fatalf("%d of 300 lines kept; path.1 = %q...", n, rotated[:min(len(rotated), 80)])
+	}
+}
+
+// A process of another user is alive: signal 0 to it fails with EPERM. Its
+// rotation in progress is left alone, unless its file is so old that the
+// PID must have been reused (PR #71 follow-up review).
+func TestMaintainLogLeavesAnotherUsersRotationAlone(t *testing.T) {
+	if !processAlive(1) {
+		t.Fatal("PID 1 is reported dead")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ansible.log")
+	aside := filepath.Join(dir, logRotatingTempPrefix+"-1")
+	if err := os.WriteFile(aside, []byte(numberedLines(10, "password: synthetic-other-user\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if _, err := os.Stat(aside); err != nil {
+		t.Fatalf("a recent rotation of a live process was touched: %v", err)
+	}
+	old := time.Now().Add(-2 * rotationLeftoverAge)
+	if err := os.Chtimes(aside, old, old); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if _, err := os.Stat(aside); !os.IsNotExist(err) {
+		t.Fatalf("an old leftover was not finished: %v", err)
+	}
+	if n, all := countNumberedLines(t, dir); n != 10 || strings.Contains(all, "synthetic-other-user") {
+		t.Fatalf("%d of 10 lines kept, or the secret was kept", n)
+	}
+}
+
+// A writer outside this process that appends faster than the scan reads
+// would keep maintenance, and every Ansible run waiting for it, going. The
+// scan stops scanCatchUp past the size seen at open; the next maintenance
+// scans the rest.
+func TestMaintainLogBoundsTheScan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line before the scan\n", 100)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := fileSize(t, path)
+	burst := strings.Repeat("ordinary line appended during the scan\n", 2*scanCatchUp/38) + "password: synthetic-beyond-the-bound\n"
+	appended := false
+	redactRangeStarts = func(int64) {
+		if !appended {
+			appended = true
+			appendLog(t, path, burst)
+		}
+	}
+	defer func() { redactRangeStarts = nil }()
+	maintain(t, path)
+	if state := loadRedactionState(path); state.Offset > start+scanCatchUp {
+		t.Fatalf("scanned to %d, past %d + %d", state.Offset, start, scanCatchUp)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-beyond-the-bound") {
+		t.Fatal("the rest was not scanned by the next maintenance")
+	}
+}
+
+// Waiting for a maintenance in progress stops when the caller's context
+// ends, so a step or probe timeout still bounds it.
+func TestHoldLogUseContextStopsWaitingWhenTheContextEnds(t *testing.T) {
+	logUseMu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := HoldLogUseContext(ctx, "/x/ansible.log")
+	logUseMu.Unlock()
+	if err == nil || time.Since(started) > 5*time.Second {
+		t.Fatalf("HoldLogUseContext = %v after %v; want the context's error", err, time.Since(started))
+	}
+	release, err := HoldLogUseContext(context.Background(), "/x/ansible.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+}
+
+// Every proper start of a real record prefix may start a record; key
+// material, and a record glued after an unfinished one, do not.
+func TestMayStartRecord(t *testing.T) {
+	for _, prefix := range []string{testRecordPrefix, "2026-09-15 09:50:37,791 p=pilot u=4242 | ", "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible | "} {
+		for n := 1; n < len(prefix); n++ {
+			if !mayStartRecord(prefix[:n]) {
+				t.Errorf("mayStartRecord(%q) = false", prefix[:n])
+			}
+		}
+		if !ansibleRecord.MatchString(prefix) {
+			t.Errorf("ansibleRecord does not match %q", prefix)
+		}
+	}
+	for _, line := range []string{
+		"MIIEsyntheticKeyLine", "    MIIEsyntheticKeyLine", "2026a", "2026-09-15 09:50:37,791 p=4242 u=p2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| x",
+		"2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO|x", `    "msg": "MIIE`,
+	} {
+		if mayStartRecord(line) {
+			t.Errorf("mayStartRecord(%q) = true", line)
 		}
 	}
 }
