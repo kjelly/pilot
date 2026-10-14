@@ -487,6 +487,12 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 			DNSProvider:   ansibleBool(r.def(host, "freeipa_setup_dns", true)),
 		})
 	}
+	// The FQDNs are already normalised, so this duplicate check is
+	// deliberately stricter than the playbook gate in
+	// tasks/freeipa-server-pool.yml: Ansible's unique compares without case
+	// but keeps the trailing dot (ansible-core 2.19.2: ['IPA1.x', 'ipa1.x',
+	// 'ipa1.x.'] | unique is ['IPA1.x', 'ipa1.x.']), so a primary "ipa1.x"
+	// and a replica "ipa1.x." pass it, although they name the same server.
 	fqdns, ips := map[string]bool{}, map[string]bool{}
 	for _, p := range pool {
 		if fqdns[p.FQDN] {

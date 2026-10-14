@@ -23,7 +23,9 @@ import (
 // (pr91-dns, 192.168.122.12) and an Ubuntu 24.04.4 freeipa-dns-client
 // consumer (pr91-client, 192.168.122.4), with the forward zone
 // fwtest.example. → 192.0.2.53 (policy only): provider.txt, auth_role.txt,
-// tier.txt, tier_stopped.txt (unbound stopped) and client.txt. The same run
+// tier.txt, tier_stopped.txt (unbound stopped) and client.txt. That run's
+// auth_role.txt capture was byte-identical to the file from the first #66
+// run, which is kept as it was. The same run
 // gave client_resolved_stub.txt (pr91-client before any playbook ran:
 // systemd-resolved's stub 127.0.0.53) and client_freeipa_bind.txt
 // (pr91-ipa, whose first nameserver is its own BIND).
@@ -1057,5 +1059,18 @@ func TestBuildDNSArchModel_FQDNIsNormalisedOnce(t *testing.T) {
 	}
 	if _, ok := diffBySubject(diffs, "tier pr91-dns answer for ipa1.ipa.pilot.internal"); !ok {
 		t.Fatalf("the core comparison is missing: %+v", diffs)
+	}
+}
+
+// Deliberately stricter than the playbook gate (see buildProviderPool): a
+// primary and a replica whose FQDNs differ only by case or a trailing dot
+// name the same server and are reported as a duplicate, although
+// Ansible's unique keeps "ipa1.x" and "ipa1.x." apart.
+func TestBuildDNSArchModel_DuplicateFQDNIgnoresTheTrailingDot(t *testing.T) {
+	m := BuildDNSArchitectureModel(inv(
+		map[string][]string{"freeipa-server": {"ipa"}, "freeipa-server-replica": {"r1"}},
+		map[string]map[string]any{"ipa": {"ansible_host": "10.0.0.5", "freeipa_server_fqdn": "ipa1.example.test"}, "r1": {"ansible_host": "10.0.0.6", "freeipa_replica_fqdn": "IPA1.example.test."}}), "")
+	if !reflect.DeepEqual(m.ProviderErrors, []string{"duplicate FreeIPA FQDN ipa1.example.test in the server pool"}) {
+		t.Fatalf("provider errors %v", m.ProviderErrors)
 	}
 }

@@ -167,7 +167,12 @@ type dnsModelScenario struct {
 }
 
 // Every scenario is valid for the playbooks' gates; the Go-only tests in
-// internal/diagnose cover the invalid and templated inputs.
+// internal/diagnose cover the invalid and templated inputs. One deliberate
+// difference is not a scenario: the model reports a pool whose FQDNs
+// differ only by case or a trailing dot as a duplicate, while the
+// playbook's unique (ansible-core 2.19.2: case-insensitive, trailing dot
+// kept) lets "ipa1.x" and "ipa1.x." through
+// (TestBuildDNSArchModel_DuplicateFQDNIgnoresTheTrailingDot).
 var dnsModelScenarios = []dnsModelScenario{
 	{name: "no dns tier", inventory: `
 all:
@@ -182,7 +187,9 @@ all:
 `},
 	// r2 leaves freeipa_setup_dns unset (a DNS provider, issue #67) and
 	// writes its forwarders as a string (one forwarder, issue #68); r1's
-	// ipa_dns_forwarders wins over its freeipa_dns_forwarders.
+	// ipa_dns_forwarders wins over its freeipa_dns_forwarders. The
+	// primary's FQDN comes from group_vars/all.yml, where the tier play
+	// reads it, in upper case with a trailing dot (see compareDNSModel).
 	{name: "split tier with two DNS-providing replicas", inventory: `
 all:
   children:
@@ -202,7 +209,9 @@ all:
       hosts:
         c1: {ansible_host: 10.0.0.21}
         r1: {}
-`, groupVars: map[string]string{"dns.yml": `
+`, groupVars: map[string]string{"all.yml": `
+freeipa_server_fqdn: IPA1.Example.Test.
+`, "dns.yml": `
 dns_upstream: [1.1.1.1, 9.9.9.9]
 dns_freeipa_zones: [Svc.Example.Test.]
 dns_stub_zones: ["corp.example=10.9.0.1, 10.9.0.2"]
@@ -447,9 +456,18 @@ func compareDNSModel(t *testing.T, m DNSArchModel, inv networkcheck.ResolvedInve
 		want(tier.Host+" stub zones", zones, e.StubZones)
 		want(tier.Host+" local zones", nonNil(tier.LocalZones), nonNil(e.LocalZones))
 		if m.FreeIPAPresent {
+			// DNS names are case-insensitive and the trailing dot does
+			// not change the name. The playbook keeps the FQDN as the
+			// inventory writes it; the model normalises it on purpose
+			// (lower case, no trailing dot) so it compares with live
+			// answers. Both sides are normalised here and nothing else,
+			// so any other difference still fails.
 			var pool []emittedPoolMember
 			for _, p := range m.Providers {
-				pool = append(pool, emittedPoolMember{InventoryHost: p.InventoryHost, FQDN: p.FQDN, IP: p.IP, Kind: p.Kind, DNSProvider: p.DNSProvider})
+				pool = append(pool, emittedPoolMember{InventoryHost: p.InventoryHost, FQDN: normalizeZoneName(p.FQDN), IP: p.IP, Kind: p.Kind, DNSProvider: p.DNSProvider})
+			}
+			for i := range e.Pool {
+				e.Pool[i].FQDN = normalizeZoneName(e.Pool[i].FQDN)
 			}
 			want(tier.Host+" server pool", pool, e.Pool)
 		}
