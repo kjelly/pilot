@@ -153,3 +153,4 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 |---|---|---|
 | 2026-10-13 | 初版（issue #62）；§0.5 填入 candidate `f63d490` 的實跑結果 | pilot |
 | 2026-10-13 | replica 的 DNS 預設與 forwarders 改成跟安裝 playbook 一致（issue #67、#68），移除 `freeipa_replica_dns_unused` | pilot |
+| 2026-10-14 | PR #66 review：外部解析要 NOERROR 且有紀錄才算成功，SERVFAIL/查無紀錄是 `external_resolution_failed`、沒有回應是 `external_resolution_unknown`；連得到的主機上任何 `unknown` 的 live 事實都讓 `status` 變成 `partial`（`live_fact_unknown`）；`paths` 標出每台 FreeIPA DNS 的 live SOA | pilot |
