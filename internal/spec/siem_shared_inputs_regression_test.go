@@ -128,7 +128,7 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 		}
 		for _, bad := range []string{"/var/log", "/var", "/", "/srv", "/home", "/usr/share/siem", "/usr/lib", "/etc/rsyslog.d",
 			"/run/log", "var/log/siem", "/var/log/siem/", "/var//log/siem", "/var/log/../siem",
-			"/var/log/./siem", "/var/log/siem dir", "/var/log/$(id)"} {
+			"/var/log/./siem", "/var/log/siem dir", "/var/log/$(id)", "/var/log/siem-pr79\n"} {
 			if failed := run(bad); !strings.Contains(failed, names) {
 				t.Errorf("siem_log_root=%q: want %q to fail, got %q", bad, names, failed)
 			}
@@ -746,5 +746,84 @@ func TestRegression_LogrotateValidateRefusesBrokenPolicies(t *testing.T) {
 		case !tc.ok && err == nil:
 			t.Errorf("%s: want the validate to fail, it passed", tc.name)
 		}
+	}
+}
+
+// TestRegression_LogServerStep2DoesNotFollowASymlink: the gates check the
+// directory siem_log_root resolves to, and Step 2 then makes it owned by the
+// rsyslog user. On Ubuntu that user may write /var/log, so it could put a
+// symlink in place of the directory between the gates and Step 2. Step 2 must
+// work on the resolved path without following a symlink: run on a symlink it
+// fails and leaves the symlink's target alone.
+func TestRegression_LogServerStep2DoesNotFollowASymlink(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	play := loadFirstPlay(t, "log-server-apply.yml")
+	var step2 map[string]any
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if name, _ := x["name"].(string); strings.HasPrefix(name, "Step 2: Ensure") {
+				step2 = x
+			}
+			for _, child := range x {
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(play)
+	if step2 == nil {
+		t.Fatal("log-server-apply.yml has no \"Step 2: Ensure ...\" task")
+	}
+	args, _ := step2["ansible.builtin.file"].(map[string]any)
+	if args["path"] != "{{ siem_log_root_real }}" || args["follow"] != false {
+		t.Fatalf("Step 2 must work on siem_log_root_real with follow: false, got path=%v follow=%v", args["path"], args["follow"])
+	}
+
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "siem")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	group, err := user.LookupGroupId(me.Gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := map[string]any{"name": step2["name"], "ansible.builtin.file": args}
+	vars := map[string]any{"siem_log_root": link, "siem_log_root_real": link, "siem_log_owner": me.Username}
+	// The task sets owner and group from siem_log_owner; use a group this user
+	// is in so the only reason to fail is the symlink.
+	argsCopy := map[string]any{}
+	for k, v := range args {
+		argsCopy[k] = v
+	}
+	argsCopy["group"] = group.Name
+	task["ansible.builtin.file"] = argsCopy
+	if _, failed := tryInventoryPlay(t, "log-server", vars, []any{task, showTask([]string{"siem_log_root"})}, nil); failed == "" {
+		t.Fatalf("Step 2 on a symlink (%s -> %s): want it to fail, it passed", link, target)
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Errorf("Step 2 changed the symlink target's mode to %o; want it left at 700", fi.Mode().Perm())
 	}
 }

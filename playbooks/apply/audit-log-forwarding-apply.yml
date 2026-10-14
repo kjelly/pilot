@@ -107,6 +107,9 @@
     # 2514.0, 0x9C4, 02514 or 70000 would be read differently by rsyslog or
     # not at all. Checked before the fallback below so that 0 is refused
     # instead of silently becoming 514; unset, null and "" mean the default.
+    # An unquoted 02514 or 0x9C4 in YAML inventory is already another number
+    # (1356, 2500) when Ansible reads it and passes as that number; write
+    # ports in plain decimal.
     - name: "Gate: siem_forward_port is a TCP port number"
       ansible.builtin.assert:
         that:
@@ -136,8 +139,12 @@
     # apply still succeeds, so check them whenever the target is this
     # inventory's log-server: its inventory name, ansible_host, or the FQDN
     # or node name its facts report, compared without case and without a
-    # trailing dot (AGENTS.md §5.13). An external receiver, or a name for the
-    # log-server that none of those match, is not checked.
+    # trailing dot (AGENTS.md §5.13). The FQDN and node name come from facts,
+    # which exist only when this run gathered them for the log-server
+    # (site.yml, or the log-server is also in audit-log-forwarding); in a run
+    # without them, name the log-server in siem_forward_host by its inventory
+    # name or address. An external receiver, or a name for the log-server
+    # that none of those match, is not checked.
     - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
       ansible.builtin.assert:
         that:

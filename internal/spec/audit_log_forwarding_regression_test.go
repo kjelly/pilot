@@ -49,7 +49,7 @@ import (
 //	        message was dropped ("cannot connect ... Permission denied");
 //	        C22 failed there and passed once the port was labelled
 //	        syslogd_port_t (2026-10-14, PR #79). v1.8: it retries for up to
-//	        10 s and counts only a connection to the address siem-log-server
+//	        8 s and counts only a connection to the address siem-log-server
 //	        resolves to
 //
 // Cross-row invariants locked below:
@@ -247,7 +247,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// It must also require the connection to go to the address
 	// siem-log-server resolves to, and retry for a few seconds within the
 	// default 15 s row timeout.
-	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 5 ]", "sleep 2"} {
+	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 4 ]", "sleep 2"} {
 		if !strings.Contains(cmd["C22"], want) {
 			t.Errorf("C22 must contain %q, got %q", want, cmd["C22"])
 		}

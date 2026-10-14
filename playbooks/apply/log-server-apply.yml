@@ -102,6 +102,9 @@
     # 70000 would be read differently by rsyslog or not at all. Checked
     # before the fallback below so that 0 is refused instead of silently
     # becoming 514; unset, null and "" still mean the default.
+    # An unquoted 02514 or 0x9C4 in YAML inventory is already another number
+    # (1356, 2500) when Ansible reads it and passes as that number; write
+    # ports in plain decimal.
     - name: "Gate: siem_receiver_tcp_port is a TCP port number"
       ansible.builtin.assert:
         that:
@@ -137,7 +140,7 @@
       ansible.builtin.assert:
         that:
           - siem_log_root is string
-          - siem_log_root is match('^/[A-Za-z0-9._/-]+$')
+          - siem_log_root is match('^/[A-Za-z0-9._/-]+\Z')
           - (siem_log_root.split('/')[1:] | select('in', ['', '.', '..']) | list | length) == 0
           - siem_log_root not in siem_log_root_reserved
           - (siem_log_root.split('/')[:2] | join('/')) not in siem_log_root_system_trees
@@ -194,7 +197,10 @@
     # directory differs from this role's own only by its mode, and the mode
     # has to match too; a changed mode is refused with the command that
     # restores it. The one other directory accepted is the root of a newly
-    # mounted filesystem: a mount point holding nothing but lost+found.
+    # mounted filesystem: a mount point holding nothing but lost+found (an
+    # empty bind mount or btrfs subvolume passes too, which takes setting up
+    # on purpose). pw_name/gr_name are missing for a uid without a passwd
+    # entry, hence their defaults.
     # ansible-core renders fail_msg before the assertion runs, so every
     # value it reads has a default.
     - name: "Gate: siem_log_root resolves to a new directory or one this role created"
@@ -207,8 +213,8 @@
             not siem_log_root_stat.exists
             or (siem_log_root_stat.isdir
                 and (siem_log_root_files | length) == 0
-                and ((siem_log_root_stat.pw_name == siem_log_owner
-                      and siem_log_root_stat.gr_name == siem_log_owner
+                and (((siem_log_root_stat.pw_name | default('')) == siem_log_owner
+                      and (siem_log_root_stat.gr_name | default('')) == siem_log_owner
                       and siem_log_root_stat.mode == '0755')
                      or (siem_log_root_stat.dev != siem_log_root_parent.dev
                          and (siem_log_root_dirs | difference(['lost+found']) | length) == 0)))
@@ -299,7 +305,13 @@
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
           tags: [C6]
           ansible.builtin.file:
-            path: "{{ siem_log_root }}"
+            # The gates checked the directory siem_log_root resolves to. Work
+            # on that path and do not follow a symlink: on Ubuntu the rsyslog
+            # user may write /var/log, and a symlink put in place of the
+            # directory since the gates must fail this step rather than have
+            # it change the owner of whatever the symlink points to.
+            path: "{{ siem_log_root_real }}"
+            follow: false
             state: directory
             owner: "{{ siem_log_owner }}"
             group: "{{ siem_log_owner }}"

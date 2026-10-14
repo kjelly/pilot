@@ -116,6 +116,9 @@
     # differently or not at all. Checked before the fallback below so that 0
     # is refused instead of silently becoming 514; unset, null and "" mean
     # the default.
+    # An unquoted 02514 or 0x9C4 in YAML inventory is already another number
+    # (1356, 2500) when Ansible reads it and passes as that number; write
+    # ports in plain decimal.
     - name: "Gate: siem_forward_port is a TCP port number"
       ansible.builtin.assert:
         that:
