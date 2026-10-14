@@ -366,7 +366,8 @@ func processAlive(pid int) bool {
 // redactionRules() when the record was written. When either differs, or the
 // record has neither (written by an earlier build), the whole file is
 // redacted again. Hashing the prefix costs about 46 ms on a 74 MB log with
-// the CPU's SHA extensions; the regex pass it replaces cost about 11 s.
+// the CPU's SHA extensions and about 160 ms without; the regex pass it
+// replaces cost about 11 s.
 //
 // A final line without its newline is masked in place when it needs it,
 // because maintenance runs after Ansible exits and that line may never be
