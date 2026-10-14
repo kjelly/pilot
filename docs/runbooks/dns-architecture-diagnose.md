@@ -15,18 +15,18 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-14，candidate `8951d2e`（tree `a498757f3325e89ffb02272f29cae15a13f3390c`，PR #66 的 follow-up），
+最新驗證：2026-10-14，candidate `46fbc58`（tree `e3d041a24c503efad01505d3002ce79f52779c35`，PR #66 的 follow-up 第二輪），
 **PASS**。摘要：
-[`docs/evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)。
-前一輪（candidate `e862f1d`，14 個情境）的摘要：
-[`docs/evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)。
+[`docs/evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)。
+前兩輪：[`2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)（principal、查詢失敗、named 停止等情境）、
+[`2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)（14 個情境）。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`：FreeIPA 4.13.4 primary 與兩台有 DNS 的 replica（AlmaLinux 9.8）、unbound 1.19.2 tier 與一台 consumer（Ubuntu 24.04.4），由 PR #73 follow-up 的 candidate 部署，測完已移除 |
-| inventory host 集合 | `freeipa-server`: pr73-ipa；`freeipa-server-replica`: pr73-replica、pr73-replica2；`dns`: pr73-dns；`freeipa-dns-client`: pr73-client |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定與測試用的 SRV／role 變更）；`pr73-ipa` 的 `/etc/pilot/dns-reader.keytab` |
-| 結果 | 透過真實 `pilot mcp serve` 呼叫，跟 `main` 對照：健康時 `complete`、14 項比對全部 `match`；`-c/tmp@REALM` 與 `host/` principal 在啟動時被拒（`main` 接受，前者還留下一份 host ticket）；reader 的 role 加上 `DNS Administrators` 時 `auth_required` + `freeipa_principal_not_read_only`（`main` 照用）；tier 拒絕 client 時 `dns_query_failed: … first_hop_identity (… REFUSED)`、刪掉 `_kerberos._udp` 時三台 provider 都是 `dns_query_failed: … kerberos_srv (NXDOMAIN)`、replica 的 named 停止時 `freeipa_named_not_running`（`main` 三者都沒有 finding） |
+| 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建的 VM：`pr91-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4 有 DNS）、`pr91-dns`（Ubuntu 24.04.4，unbound 1.19.2）、`pr91-client`（Ubuntu 24.04.4）；由這個 branch 的 playbook（與 `main` 相同）部署，測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr91-ipa；`dns`: pr91-dns；`freeipa-dns-client`: pr91-client |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定與測試用的 forward zone）；`pr91-ipa` 的 `/etc/pilot/dns-reader.keytab` |
+| 結果 | 透過真實 `pilot mcp serve` 呼叫，跟前一版 `f3f3ae8` 對照：健康時 `complete`、8 項比對全部 `match`；第一個 nameserver 是 systemd-resolved stub（`127.0.0.53` 回 SERVFAIL）時不再誤報 `dns_query_failed: … first_hop_identity`；FreeIPA 自己的 BIND 是第一跳時判為「不是 tier」；tier 拒絕 client 時仍回報 `dns_query_failed: … first_hop_identity (… REFUSED)`；`freeipa_server_fqdn` 帶結尾的點時不再誤報 `declared_live_absent`；`K/M` 在啟動時被拒、`k@REALM` 不再被誤拒 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼
@@ -180,3 +180,4 @@ dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台
 | 2026-10-14 | PR #66 review：外部解析要 NOERROR 且有紀錄才算成功，SERVFAIL/查無紀錄是 `external_resolution_failed`、沒有回應是 `external_resolution_unknown`；連得到的主機上任何 `unknown` 的 live 事實都讓 `status` 變成 `partial`（`live_fact_unknown`）；`paths` 標出每台 FreeIPA DNS 的 live SOA | pilot |
 | 2026-10-14 | §0.5 改成 candidate `6522b94`（上兩列合併後）在全新 4 台 topology 上的實跑結果 | pilot |
 | 2026-10-14 | PR #66 follow-up：每個失敗或未知的事實都有 finding（`auth_required`、`dns_query_failed`、`freeipa_named_not_running`、`live_fact_unknown`、`comparison_unknown`、`probe_skipped`），拒絕 FreeIPA 服務 principal 與有寫入權的 principal；§0.5 改指向 candidate `8951d2e` | pilot |
+| 2026-10-14 | PR #91 review：第一跳只有在 tier 位址回錯誤 rcode 時才算查詢失敗；FQDN 在讀入時統一轉小寫、去掉結尾的點；寫入權限檢查只看全域 DNS 設定（`cn=dns`），說明照實寫；live fixture 換成同一次 pr91 擷取；§0.5 改指向 candidate `46fbc58` | pilot |
