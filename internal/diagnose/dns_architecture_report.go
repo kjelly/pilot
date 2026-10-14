@@ -397,7 +397,7 @@ func BuildDNSArchObservedTier(t DNSArchTierHost, internalName, externalName stri
 	out.Identity = sectionFact(id, sections, "identity", ok, func(s DNSArchSection) DNSArchFact {
 		v := strings.Trim(strings.TrimSpace(s.Output), `"`)
 		if s.RC != 0 || v == "" || strings.HasPrefix(v, ";;") {
-			return DNSArchFact{State: FactUnknown, Detail: firstLine(s.Output)}
+			return DNSArchFact{State: FactUnknown, Detail: firstNonEmptyString(firstLine(s.Output), "no id.server CH TXT answer")}
 		}
 		return DNSArchFact{State: FactObserved, Value: v}
 	})
@@ -419,7 +419,9 @@ func BuildDNSArchObservedTier(t DNSArchTierHost, internalName, externalName stri
 			// it did not resolve the name.
 			f.State, f.Detail = FactError, fmt.Sprintf("the tier answered %s %s with %s", extName, extType, q.Status)
 		case f.State == FactAbsent:
-			f.Detail = fmt.Sprintf("the tier answered %s %s with %s and no record", extName, extType, q.Status)
+			// NXDOMAIN, or NOERROR without a record of the asked type
+			// (for example a CNAME whose target has none).
+			f.Detail = fmt.Sprintf("the tier answered %s %s with %s and no %s record", extName, extType, q.Status, extType)
 		case f.State == FactObserved:
 			f.Detail = "an answer proves the tier can resolve external names, not which upstream answered; the configured forwarders are in forwards"
 		}
@@ -856,9 +858,9 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 			findings = append(findings, "freeipa_dns_not_authoritative_from_tier: "+t.Host+": "+a.Detail)
 		}
 		ext := t.ExternalResolution
-		switch _, resolved := dnsAnswered(ext); {
+		switch q, resolved := dnsAnswered(ext); {
 		case resolved:
-			findings = append(findings, "external_resolution_forwarder_unproven: "+t.Host+" resolved "+t.ExternalName+"; which upstream answered is not observable, only the configured forward zone is")
+			findings = append(findings, "external_resolution_forwarder_unproven: "+t.Host+" resolved "+q.Name+" "+q.Type+"; which upstream answered is not observable, only the configured forward zone is")
 		case ext.State == FactUnknown || ext.State == FactUnreachable:
 			partial = true
 			findings = append(findings, "external_resolution_unknown: "+t.Host+" ("+ext.Detail+")")
@@ -963,6 +965,11 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 			continue
 		}
 		line := fmt.Sprintf("FreeIPA DNS %s %s (%s): authoritative for %s", p.Kind, p.FQDN, p.IP, m.FreeIPADomain)
+		for _, op := range o.Providers {
+			if op.Host == p.InventoryHost {
+				line += "; live SOA " + liveAuthority(op.SOA)
+			}
+		}
 		if servers, ok := o.FreeIPA.ServerForwarders.Value.([]DNSArchServerForwarders); ok {
 			for _, s := range servers {
 				if strings.EqualFold(strings.TrimSuffix(s.Server, "."), p.FQDN) && len(s.Forwarders) > 0 {
@@ -998,6 +1005,20 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 		paths = append(paths, fmt.Sprintf("resolver %s (%s, %s) → %s", r.Host, managed, r.Selection, strings.Join(r.Servers, ", ")))
 	}
 	return paths
+}
+
+// liveAuthority summarises a provider's observed SOA for the paths: the
+// effective claim "authoritative for" is only a plan until the live
+// answer says so.
+func liveAuthority(f DNSArchFact) string {
+	q, isQuery := f.Value.(DNSQueryResult)
+	switch {
+	case !isQuery || (f.State != FactObserved && f.State != FactAbsent):
+		return f.State
+	case q.Status == "NOERROR" && q.Authoritative && len(q.Answers) > 0:
+		return "authoritative"
+	}
+	return fmt.Sprintf("%s, authoritative=%t", q.Status, q.Authoritative)
 }
 
 func firstNonEmptyString(values ...string) string {

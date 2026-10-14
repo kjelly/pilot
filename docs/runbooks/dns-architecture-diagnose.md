@@ -118,7 +118,7 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 |---|---|
 | `status` | `complete`、`partial`（有看不到的 live 事實或比對；連得到的主機上任何一項 probe 結果是 `unknown`，都會列在 finding `live_fact_unknown`）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
 | `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`live_fact_unknown` |
-| `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
+| `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；每台 FreeIPA DNS 的 live SOA（`authoritative`，或實際的 status 與 `aa`）；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
 | `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
 | `steps`、`audit_directory` | 每個 probe 的原始輸出（上限 64 KiB）與 audit record |

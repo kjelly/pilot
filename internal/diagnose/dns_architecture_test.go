@@ -18,10 +18,11 @@ import (
 // unbound 1.19.2, an Ubuntu 24.04 freeipa-dns-client consumer), as the
 // AGENTS.md §5.6 rule requires. Addresses are the libvirt network's.
 // docs/evidence/dns-architecture-diagnose/ records the run. The
-// tier_external_* and client_el* captures came the same way from two
-// single disposable VMs: an Ubuntu 24.04.4 host with only the dns role
-// (unbound 1.19.2-1ubuntu3.10, forward-only to 1.1.1.1) and a stock
-// AlmaLinux 9.8 host without systemd-resolved.
+// tier_external_servfail/nxdomain and client_el* captures came the same
+// way from two single disposable VMs: an Ubuntu 24.04.4 host with only the
+// dns role (unbound 1.19.2-1ubuntu3.10, forward-only to 1.1.1.1) and a
+// stock AlmaLinux 9.8 host without systemd-resolved; tier_external_cname*
+// from the dns tier of the four-VM topology of PR #73's evidence run.
 func fixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "dnsarch", name))
@@ -575,8 +576,13 @@ func withSection(t *testing.T, capture, key, from, fromKey string) string {
 
 func liveWithTier(t *testing.T, tierStdout string) (DNSArchModel, DNSArchObserved, string, []string) {
 	t.Helper()
+	return liveWithTierExternal(t, tierStdout, ".")
+}
+
+func liveWithTierExternal(t *testing.T, tierStdout, externalName string) (DNSArchModel, DNSArchObserved, string, []string) {
+	t.Helper()
 	m, o := liveTopology(t)
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tierStdout}})
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", externalName, m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tierStdout}})
 	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
 	return m, o, status, findings
 }
@@ -608,7 +614,7 @@ func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
 	// Should pass: NOERROR with records is a resolution, reported with
 	// the forwarder caveat.
 	_, _, status, findings := liveWithTier(t, tier)
-	if status != "complete" || len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved .;") {
+	if status != "complete" || len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved . NS;") {
 		t.Fatalf("status %s findings %v", status, findings)
 	}
 
@@ -617,6 +623,21 @@ func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
 	joined := strings.Join(findings, "\n")
 	if o.Tier[0].ExternalResolution.State != FactError || strings.Contains(joined, "external_resolution_forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns did not resolve . (the tier answered . NS with SERVFAIL)") {
 		t.Fatalf("SERVFAIL: status %s findings %v", status, findings)
+	}
+
+	// Should pass: a CNAME chain ending in an A record is a resolution
+	// (tier_external_cname.txt: www.github.com through the tier).
+	_, _, _, findings = liveWithTierExternal(t, withSection(t, tier, "external", fixture(t, "tier_external_cname.txt"), "external"), "www.github.com")
+	if len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved www.github.com A;") {
+		t.Fatalf("CNAME chain: findings %v", findings)
+	}
+
+	// Should trigger: a CNAME without a record of the asked type
+	// (tier_external_cname_only.txt: ipv6.google.com A) did not resolve.
+	_, o, _, findings = liveWithTierExternal(t, withSection(t, tier, "external", fixture(t, "tier_external_cname_only.txt"), "external"), "ipv6.google.com")
+	joined = strings.Join(findings, "\n")
+	if o.Tier[0].ExternalResolution.State != FactAbsent || strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns did not resolve ipv6.google.com (the tier answered ipv6.google.com A with NOERROR and no A record)") {
+		t.Fatalf("CNAME only: findings %v", findings)
 	}
 
 	// Should trigger: NXDOMAIN for the probe name is not a resolution.
@@ -723,5 +744,23 @@ func TestBuildDNSArchStatus_ClientWithoutSystemdResolved(t *testing.T) {
 	active := strings.Replace(fixture(t, "client_el.txt"), "inactive\n@@pilot-dnsarch resolved end rc=3", "active\n@@pilot-dnsarch resolved end rc=0", 1)
 	if c := BuildDNSArchObservedClient("dd-client", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: active}}); c.ResolvedDNS.State != FactUnknown {
 		t.Fatalf("resolvectl with resolved active = %+v, want unknown", c.ResolvedDNS)
+	}
+}
+
+// The paths line for a provider carries its live SOA, so the effective
+// "authoritative for" is never the only word on it.
+func TestBuildDNSArchPaths_ProviderLineShowsLiveAuthority(t *testing.T) {
+	m, o := liveTopology(t)
+	if paths := strings.Join(BuildDNSArchPaths(m, o), "\n"); !strings.Contains(paths, "authoritative for ipa.pilot.internal; live SOA authoritative") {
+		t.Fatalf("paths:\n%s", paths)
+	}
+	provider := withSection(t, fixture(t, "provider.txt"), "soa", fixture(t, "tier_external_servfail.txt"), "external")
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	if paths := strings.Join(BuildDNSArchPaths(m, o), "\n"); !strings.Contains(paths, "live SOA SERVFAIL, authoritative=false") {
+		t.Fatalf("SERVFAIL paths:\n%s", paths)
+	}
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.5 port 22: Connection timed out"}})
+	if paths := strings.Join(BuildDNSArchPaths(m, o), "\n"); !strings.Contains(paths, "live SOA unknown") {
+		t.Fatalf("unreachable paths:\n%s", paths)
 	}
 }
