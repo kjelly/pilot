@@ -154,6 +154,14 @@ func deployAnsibleRuntimeFromContext(ctx context.Context) deployAnsibleRuntime {
 	return runtime
 }
 
+// holdDeployAnsibleLog keeps log maintenance from rewriting or rotating the
+// controller Ansible log while a command from deployAnsibleCommand runs and
+// writes to it (see ansible.HoldLogUse). Release it before the command's
+// caller maintains the log.
+func holdDeployAnsibleLog(ctx context.Context) func() {
+	return ansible.HoldLogUse(deployAnsibleRuntimeFromContext(ctx).LogPath)
+}
+
 func deployAnsibleCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, name, args...)
 	if runtime := deployAnsibleRuntimeFromContext(ctx); len(runtime.Env) > 0 {
@@ -2299,7 +2307,10 @@ func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployI
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	release := holdDeployAnsibleLog(ctx)
+	err := command.Run()
+	release()
+	if err != nil {
 		return deployInventorySnapshot{}, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return parseDeployInventorySnapshot(stdout.String())
@@ -2396,7 +2407,10 @@ func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) 
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	release := holdDeployAnsibleLog(ctx)
+	err := command.Run()
+	release()
+	if err != nil {
 		// Ansible reports "pattern matches zero hosts" inconsistently: without
 		// --limit it is a [WARNING] (exit 0, "hosts (0):"); with --limit it is a
 		// hard [ERROR] (non-zero exit). Normalize the latter to the same "zero
@@ -2732,7 +2746,10 @@ func resolveInventoryVariables(ctx context.Context, inventory string, extraVars 
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	release := holdDeployAnsibleLog(ctx)
+	err := command.Run()
+	release()
+	if err != nil {
 		return nil, fmt.Errorf("resolve inventory variables: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	var raw struct {
