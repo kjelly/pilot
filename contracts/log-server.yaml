@@ -11,6 +11,14 @@ regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+# docs/verification/log-server.md §1.5. siem_log_root is also log-shipping's
+# input and siem_receiver_tcp_port must equal audit-log-forwarding's
+# siem_forward_port: hosts resolve each from the same inventory value.
+groupVars:
+  - {name: siem_receiver_tcp_port, type: string, required: false, default: "514", secret: false}
+  - {name: siem_log_root, type: string, required: false, default: /var/log/siem, secret: false}
+  - {name: siem_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
+  - {name: siem_logrotate_maxage, type: integer, required: false, default: 90, secret: false}
 endpoints:
   - {name: syslog, scheme: tcp, port: 6514}
 stagePolicy: {variable: stage, default: sandbox}

@@ -60,9 +60,6 @@
          if (groups["dashboard"] | default([]) | length > 0) else "" }}
     loki_effective_target_host: >-
       {{ loki_target_host | default("", true) or loki_inventory_target_host }}
-    loki_alias: pilot-loki-backend
-    loki_port: 3100
-    loki_endpoint: "{{ loki_alias }}:{{ loki_port }}"
     # siem_log_root is ALWAYS scraped (explicit override, else the
     # log-server default) — this is log-server.md's real receiver output,
     # and docs/verification/log-shipping.md's C3 hardcodes this exact
@@ -85,8 +82,6 @@
     # it.
     siem_log_root_default: /var/log/siem
     siem_wazuh_manager_container: single-node-wazuh.manager-1
-    promtail_job_label: pilot-siem
-    promtail_wazuh_job_label: "{{ promtail_job_label }}-wazuh-alerts"
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -117,6 +112,23 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # docs/verification/log-shipping.md §1.5). They are defaulted here instead
+    # of in the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        loki_alias: "{{ loki_alias | default('pilot-loki-backend', true) }}"
+        loki_port: "{{ loki_port | default(3100) }}"
+        promtail_job_label: "{{ promtail_job_label | default('pilot-siem', true) }}"
+      tags: [always]
+
+    - name: "Resolve the loki_endpoint and promtail_wazuh_job_label defaults from the resolved values"
+      ansible.builtin.set_fact:
+        loki_endpoint: "{{ loki_endpoint | default(loki_alias ~ ':' ~ loki_port, true) }}"
+        promtail_wazuh_job_label: "{{ promtail_wazuh_job_label | default(promtail_job_label ~ '-wazuh-alerts', true) }}"
       tags: [always]
 
     # Composability gate: without a resolvable Loki target (no explicit

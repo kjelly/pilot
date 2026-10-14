@@ -42,10 +42,6 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    audit_logrotate_rotate: 14
-    audit_logrotate_maxage: 90
-    syslog_logrotate_rotate: 14
-    syslog_logrotate_maxage: 90
     audit_syslog_path: "{{ '/var/log/messages' if ansible_os_family == 'RedHat' else '/var/log/syslog' }}"
     audit_syslog_group: "{{ 'root' if ansible_os_family == 'RedHat' else 'syslog' }}"
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
@@ -101,11 +97,17 @@
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
-    # siem_forward_port is also wazuh-manager's input (its group_vars
-    # example), and the two often share a host.
+    # siem_forward_port is also wazuh-manager's input, and the two often
+    # share a host. It must equal log-server's siem_receiver_tcp_port
+    # (log-server-apply.yml); both fall back to 514 for an empty or null
+    # value.
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
-        siem_forward_port: "{{ siem_forward_port | default('514') }}"
+        audit_logrotate_maxage: "{{ audit_logrotate_maxage | default(90) }}"
+        audit_logrotate_rotate: "{{ audit_logrotate_rotate | default(14) }}"
+        siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
+        syslog_logrotate_maxage: "{{ syslog_logrotate_maxage | default(90) }}"
+        syslog_logrotate_rotate: "{{ syslog_logrotate_rotate | default(14) }}"
       tags: [always]
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"

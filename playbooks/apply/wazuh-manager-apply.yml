@@ -113,7 +113,8 @@
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
-        siem_forward_port: "{{ siem_forward_port | default('514') }}"
+        # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
+        siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
         wazuh_docker_version: "{{ wazuh_docker_version | default('4.14.1') }}"
       tags: [always]
 
