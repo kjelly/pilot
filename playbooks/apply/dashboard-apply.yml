@@ -71,7 +71,6 @@
     # than an undefined-variable error.
     # Alias, port and URL defaults are applied at point of use so inventory
     # overrides remain effective. Docker DNS tracks the provider's current IP.
-    grafana_admin_password: ""
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"

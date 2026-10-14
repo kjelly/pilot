@@ -49,14 +49,6 @@
     confirm_prod: false
     staging_attested_within_hours: 168
 
-    snmp_exporter_version: "v0.30.1"
-    snmp_exporter_image: "quay.io/prometheus/snmp-exporter"
-    snmp_exporter_container_name: "pilot-snmp-exporter"
-    snmp_exporter_port: "9116"
-    snmp_exporter_listen_address: "127.0.0.1"
-    snmp_exporter_module_concurrency: "1"
-    snmp_exporter_config_dir: "/etc/pilot/snmp-exporter"
-    snmp_exporter_data_dir: "/var/lib/pilot/snmp-exporter"
     # Shared with prometheus-apply.yml/alertmanager-apply.yml/
     # thanos-query-apply.yml's own docker_network_name (same default,
     # same variable name — deliberately, not a coincidence): a co-located
@@ -71,7 +63,8 @@
     # membership is additive, not a replacement.
     docker_network_name: pilot-metrics
 
-    # Absolute path to the workspace's non-secret catalog (spec §6.4),
+    # snmp_catalog_file (defaulted to "" in pre_tasks): absolute path to
+    # the workspace's non-secret catalog (spec §6.4),
     # normally auto-filled by `pilot deploy`/`pilot reconcile`
     # (autoFillSNMPCatalogFile) from <workspace>/monitoring/snmp/catalog.yml
     # — same convention as prometheus-apply.yml's monitoring_targets_file/
@@ -85,17 +78,6 @@
     # catalog yet — the "Load SNMP catalog file" task below falls back to
     # an empty catalog (zero modules/authProfiles) instead of calling
     # lookup() at all.
-    snmp_catalog_file: ""
-
-    # Vault-supplied secret input (spec §6.4): {credentialRef: {username,
-    # authPassword, privPassword}} for a v3 profile, or
-    # {credentialRef: {community: ...}} for v1/v2c. Never committed.
-    snmp_exporter_credentials: {}
-
-    # Production break-glass (spec §13.2): {authProfileID: {reason, owner,
-    # expiry: "YYYY-MM-DD"}}. Empty by default — prod fails closed on any
-    # profile that isn't v3/authPriv.
-    snmp_insecure_auth_profile_exceptions: {}
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -126,6 +108,35 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        snmp_exporter_config_dir: "{{ snmp_exporter_config_dir | default('/etc/pilot/snmp-exporter') }}"
+        snmp_exporter_container_name: "{{ snmp_exporter_container_name | default('pilot-snmp-exporter') }}"
+        snmp_exporter_data_dir: "{{ snmp_exporter_data_dir | default('/var/lib/pilot/snmp-exporter') }}"
+        snmp_exporter_image: "{{ snmp_exporter_image | default('quay.io/prometheus/snmp-exporter') }}"
+        snmp_exporter_listen_address: "{{ snmp_exporter_listen_address | default('127.0.0.1') }}"
+        snmp_exporter_module_concurrency: "{{ snmp_exporter_module_concurrency | default('1') }}"
+        snmp_exporter_port: "{{ snmp_exporter_port | default('9116') }}"
+        snmp_exporter_version: "{{ snmp_exporter_version | default('v0.30.1') }}"
+        snmp_catalog_file: "{{ snmp_catalog_file | default('') }}"
+        # Production break-glass (spec §13.2), per auth profile. Empty by
+        # default: prod fails closed on any profile that isn't v3/authPriv.
+        snmp_insecure_auth_profile_exceptions: "{{ snmp_insecure_auth_profile_exceptions | default({}) }}"
+      tags: [always]
+
+    # Vault-supplied secret input (spec §6.4): {credentialRef: {username,
+    # authPassword, privPassword}} for a v3 profile, or
+    # {credentialRef: {community: ...}} for v1/v2c. Never committed.
+    - name: "Resolve the snmp_exporter_credentials default without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        snmp_exporter_credentials: "{{ snmp_exporter_credentials | default({}) }}"
+      no_log: true
       tags: [always]
 
     # ---- SNMP catalog: load, validate, render (pure computation, no
