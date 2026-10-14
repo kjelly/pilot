@@ -223,68 +223,78 @@ func sameInode(t *testing.T, a os.FileInfo, path string) bool {
 	return os.SameFile(a, b)
 }
 
+// scanStarts returns where maintenance started scanning during f.
+func scanStarts(t *testing.T, f func()) []int64 {
+	t.Helper()
+	var starts []int64
+	redactRangeStarts = func(offset int64) { starts = append(starts, offset) }
+	defer func() { redactRangeStarts = nil }()
+	f()
+	return starts
+}
+
+func maintain(t *testing.T, path string) {
+	t.Helper()
+	if err := MaintainLogWithPolicy(path, DefaultLogPolicy()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
 // Issue #70: maintenance after each Ansible run must cost what was appended,
 // not the size of the whole log. A run that finds nothing to mask leaves the
-// file alone, and content before the recorded offset is never scanned again:
-// a "secret" planted there after maintenance (same inode, same size) stays,
-// which shows the old part was not reread.
+// file alone, and the regex scan starts where the previous run stopped; the
+// part before it is only hashed and copied.
 func TestMaintainLogScansOnlyAppendedLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ansible.log")
-	policy := DefaultLogPolicy()
 	old := strings.Repeat("ordinary line from an earlier run\n", 2000)
 	if err := os.WriteFile(path, []byte(old+"password: early-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := MaintainLogWithPolicy(path, policy); err != nil {
-		t.Fatal(err)
+	if starts := scanStarts(t, func() { maintain(t, path) }); len(starts) == 0 || starts[0] != 0 {
+		t.Fatalf("first maintenance scan starts = %v, want the whole file", starts)
 	}
 	if got := readLog(t, path); strings.Contains(got, "early-secret") || !strings.HasPrefix(got, old) {
 		t.Fatal("first maintenance must redact the whole file and keep the rest")
 	}
 
-	// Nothing new to mask: the file is not rewritten.
+	// Nothing new to mask: only the appended line is scanned, and the file
+	// is not rewritten.
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	appendLog(t, path, "another ordinary line\n")
-	if err := MaintainLogWithPolicy(path, policy); err != nil {
-		t.Fatal(err)
+	if starts := scanStarts(t, func() { maintain(t, path) }); len(starts) != 1 || starts[0] != before.Size() {
+		t.Fatalf("scan starts = %v, want [%d]", starts, before.Size())
 	}
 	if !sameInode(t, before, path) {
 		t.Fatal("maintenance rewrote the log although nothing new needed masking")
 	}
 
-	// Plant a secret inside the already-redacted part, then append a clean
-	// line: the planted text is not reread.
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteAt([]byte("token=planted"), 0); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
-	appendLog(t, path, "a clean line\n")
-	if err := MaintainLogWithPolicy(path, policy); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(readLog(t, path), "token=planted") {
-		t.Fatal("maintenance rescanned content before the recorded offset")
-	}
-
-	// Should trigger: a secret appended later is still masked, and the
-	// planted prefix is copied unchanged when the file is rewritten.
+	// Should trigger: a secret appended later is masked, again scanning
+	// only from the end of the previous run, and the rest is kept.
+	cleanEnd := fileSize(t, path)
 	appendLog(t, path, "api_key: late-secret\n")
-	if err := MaintainLogWithPolicy(path, policy); err != nil {
-		t.Fatal(err)
+	for _, start := range scanStarts(t, func() { maintain(t, path) }) {
+		if start != cleanEnd {
+			t.Fatalf("scan started at %d, want %d", start, cleanEnd)
+		}
 	}
 	got := readLog(t, path)
-	if strings.Contains(got, "late-secret") || !strings.Contains(got, "api_key: [REDACTED]") {
+	if strings.Contains(got, "late-secret") || !strings.HasSuffix(got, "another ordinary line\napi_key: [REDACTED]\n") {
 		t.Fatalf("appended secret not redacted: %q", got[len(got)-80:])
 	}
-	if !strings.HasPrefix(got, "token=planted") {
+	if !strings.HasPrefix(got, old) {
 		t.Fatal("rewrite changed the already-redacted prefix")
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
@@ -296,6 +306,151 @@ func TestMaintainLogScansOnlyAppendedLines(t *testing.T) {
 	}
 	if info, err := os.Stat(redactionStatePath(path)); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("redaction state = %v, %v; want a 0600 file", info, err)
+	}
+
+	// Nothing appended: nothing is scanned.
+	if starts := scanStarts(t, func() { maintain(t, path) }); len(starts) != 0 {
+		t.Fatalf("scan starts = %v with nothing appended", starts)
+	}
+}
+
+// rewriteInPlace replaces the log's content through O_TRUNC, keeping the
+// inode, as "> file" or logrotate's copytruncate do.
+func rewriteInPlace(t *testing.T, path, content string) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !sameInode(t, before, path) {
+		t.Fatal("test setup: the rewrite replaced the inode")
+	}
+}
+
+// The record must not outlive the content it describes (PR #71 review). A
+// log truncated in place keeps its device and inode; once it has grown back
+// past the recorded offset, only the bytes it holds show that its start is
+// new and was never scanned.
+func TestMaintainLogRedactsALogTruncatedAndRegrown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line before the truncation\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	oldSize := fileSize(t, path)
+	rewriteInPlace(t, path, "password: synthetic-regrown-secret\n"+strings.Repeat("ordinary line after the truncation\n", 64))
+	if fileSize(t, path) <= oldSize {
+		t.Fatal("test setup: the regrown log must be longer than the old one")
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-regrown-secret") {
+		t.Fatalf("regrown log not redacted: %q", got[:80])
+	}
+}
+
+// Grown back to exactly the old size, the log takes the "nothing appended"
+// path, which must check the content too.
+func TestMaintainLogRedactsALogRegrownToItsOldSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	original := strings.Repeat("ordinary line before the truncation\n", 32)
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	regrown := "password: synthetic-same-size-secret\n"
+	regrown += strings.Repeat("x", len(original)-len(regrown)-1) + "\n"
+	rewriteInPlace(t, path, regrown)
+	if fileSize(t, path) != int64(len(original)) {
+		t.Fatal("test setup: the regrown log must have the old size")
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-same-size-secret") {
+		t.Fatalf("regrown log not redacted: %q", got[:80])
+	}
+}
+
+// A log deleted and recreated whose new inode gets the old number. The
+// filesystem decides whether a number is reused, so the record is pointed
+// at the new file instead, which is what such a reuse looks like.
+func TestMaintainLogRedactsARecreatedLogWithTheOldInodeNumber(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line in the first file\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("token=synthetic-recreated-secret\n"+strings.Repeat("ordinary line in the second file\n", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := loadRedactionState(path)
+	if state.Offset == 0 {
+		t.Fatal("test setup: no record from the first file")
+	}
+	state.Device, state.Inode, _ = fileIdentity(info)
+	if err := saveRedactionState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-recreated-secret") {
+		t.Fatalf("recreated log not redacted: %q", got[:80])
+	}
+}
+
+// Bytes before the recorded offset overwritten in place, without a change of
+// size, then a clean line appended; and the same with nothing appended.
+func TestMaintainLogRedactsAPrefixOverwrittenInPlace(t *testing.T) {
+	for _, appended := range []string{"a clean line\n", ""} {
+		path := filepath.Join(t.TempDir(), "ansible.log")
+		if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line from an earlier run\n", 32)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		maintain(t, path)
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt([]byte("token=synthetic-planted"), 34); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if appended != "" {
+			appendLog(t, path, appended)
+		}
+		if got := maintainTwice(t, path); strings.Contains(got, "synthetic-planted") {
+			t.Fatalf("appended %q: overwritten prefix not redacted: %q", appended, got[:120])
+		}
+	}
+}
+
+// A record written before the prefix hash existed is not trusted: the next
+// run redacts the whole file once, then works from the new record.
+func TestMaintainLogRedactsInFullOnceForARecordWithoutAHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	state := loadRedactionState(path)
+	state.PrefixSHA256 = ""
+	if err := saveRedactionState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	appendLog(t, path, "ordinary\n")
+	if starts := scanStarts(t, func() { maintain(t, path) }); len(starts) != 1 || starts[0] != 0 {
+		t.Fatalf("scan starts = %v, want one full pass", starts)
+	}
+	size := fileSize(t, path)
+	appendLog(t, path, "ordinary\n")
+	if starts := scanStarts(t, func() { maintain(t, path) }); len(starts) != 1 || starts[0] != size {
+		t.Fatalf("scan starts = %v, want [%d]", starts, size)
 	}
 }
 

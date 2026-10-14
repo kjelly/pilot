@@ -2,8 +2,11 @@ package ansible
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -270,10 +273,18 @@ func processAlive(pid int) bool {
 // Maintenance runs after every Pilot Ansible invocation, including every
 // pilot_diagnose_* step, and rescanning the whole log each time cost about
 // 11 s of CPU per call on a 74 MB log (issue #70). With this record each
-// run only scans what was appended since the previous one. Device and
-// inode tie the offset to one file: after rotation, trimming or any other
-// replacement the record no longer matches and the next run redacts the
-// whole file again.
+// run only scans what was appended since the previous one.
+//
+// The record is trusted only while the file still holds the bytes
+// maintenance left: PrefixSHA256 is the SHA-256 of the first
+// Offset+TailLength bytes, and every run checks it before using Offset.
+// Device, inode and size alone do not show that: a log truncated in place
+// (O_TRUNC, "> file", logrotate copytruncate) and written again past the old
+// offset, or deleted and recreated under a reused inode number, matches all
+// three, and its new start would never be scanned. When the hash differs,
+// or the record has none (written by an earlier version), the whole file is
+// redacted again. Hashing the prefix costs tens of milliseconds on a 74 MB
+// log; the regex pass it replaces cost about 11 s.
 //
 // A final line without its newline is masked in place when it needs it,
 // because maintenance runs after Ansible exits and that line may never be
@@ -287,6 +298,7 @@ type redactionState struct {
 	InPrivateKey     bool   `json:"in_private_key"`
 	TailLength       int64  `json:"tail_length,omitempty"`
 	TailInPrivateKey bool   `json:"tail_in_private_key,omitempty"`
+	PrefixSHA256     string `json:"prefix_sha256,omitempty"`
 }
 
 func redactionStatePath(path string) string {
@@ -329,13 +341,55 @@ func saveRedactionState(path string, state redactionState) error {
 	return nil
 }
 
+// verifyPrefix hashes the part of input that state covers and reports
+// whether it still matches state.PrefixSHA256. It returns the hash after
+// the first state.Offset bytes, for the caller to continue.
+func verifyPrefix(input io.ReaderAt, state redactionState) (hash.Hash, bool, error) {
+	digest := sha256.New()
+	if _, err := io.Copy(digest, io.NewSectionReader(input, 0, state.Offset)); err != nil {
+		return nil, false, err
+	}
+	covered := digest
+	if state.TailLength > 0 {
+		var err error
+		if covered, err = cloneDigest(digest, input, state.Offset); err != nil {
+			return nil, false, err
+		}
+		if _, err := io.Copy(covered, io.NewSectionReader(input, state.Offset, state.TailLength)); err != nil {
+			return nil, false, err
+		}
+	}
+	return digest, state.PrefixSHA256 != "" && hex.EncodeToString(covered.Sum(nil)) == state.PrefixSHA256, nil
+}
+
+// cloneDigest copies digest, the SHA-256 of input's first n bytes. Hashes
+// in the standard library can be cloned except in FIPS 140 v1.0.0 mode;
+// then the bytes are hashed again.
+func cloneDigest(digest hash.Hash, input io.ReaderAt, n int64) (hash.Hash, error) {
+	if cloner, ok := digest.(hash.Cloner); ok {
+		if clone, err := cloner.Clone(); err == nil {
+			return clone, nil
+		}
+	}
+	clone := sha256.New()
+	_, err := io.Copy(clone, io.NewSectionReader(input, 0, n))
+	return clone, err
+}
+
+// redactRangeStarts, when set by a test, sees where each scan starts.
+var redactRangeStarts func(offset int64)
+
 // redactRange redacts input from state.Offset to to, writing the result to
-// w when w is not nil. It returns the record for that result, which starts
-// at the same offset, and whether any line changed. The returned Offset is
-// just after the last complete line; a final line without a newline is
-// written masked (see redactionState) but stays after Offset, so the next
-// run judges it again once it is complete.
-func redactRange(input io.ReaderAt, state redactionState, to int64, w io.Writer) (redactionState, bool, error) {
+// w when w is not nil and adding the part the returned record covers to
+// digest when digest is not nil. It returns the record for that result,
+// which starts at the same offset, and whether any line changed. The
+// returned Offset is just after the last complete line; a final line
+// without a newline is written masked (see redactionState) but stays after
+// Offset, so the next run judges it again once it is complete.
+func redactRange(input io.ReaderAt, state redactionState, to int64, w io.Writer, digest hash.Hash) (redactionState, bool, error) {
+	if redactRangeStarts != nil {
+		redactRangeStarts(state.Offset)
+	}
 	reader := bufio.NewReaderSize(io.NewSectionReader(input, state.Offset, to-state.Offset), 128*1024)
 	redactor := streamRedactor{inPrivateKey: state.InPrivateKey}
 	next := redactionState{Device: state.Device, Inode: state.Inode, Offset: state.Offset, InPrivateKey: state.InPrivateKey}
@@ -370,8 +424,12 @@ func redactRange(input io.ReaderAt, state redactionState, to int64, w io.Writer)
 				return next, changed, err
 			}
 		}
+		covered := complete || continued || redacted != line
+		if covered && digest != nil {
+			_, _ = io.WriteString(digest, redacted) // hash.Hash writes never fail
+		}
 		if !complete {
-			if continued || redacted != line {
+			if covered {
 				next.TailLength = int64(len(redacted))
 				next.TailInPrivateKey = redactor.inPrivateKey
 			}
@@ -385,29 +443,38 @@ func redactRange(input io.ReaderAt, state redactionState, to int64, w io.Writer)
 // redactNewLines redacts what was appended to path since the previous
 // maintenance. When none of it needs masking the file is left untouched;
 // otherwise the file is rewritten through a temp file and a rename, as
-// redactFile does, but the already-redacted prefix is only copied, not
-// scanned again.
+// redactFile does, but the already-redacted prefix is only copied and
+// hashed, not scanned again.
 func redactNewLines(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	device, inode, known := fileIdentity(info)
-	size := info.Size()
-	state := loadRedactionState(path)
-	if !known || state.Device != device || state.Inode != inode || state.Offset < 0 || state.TailLength < 0 || state.Offset+state.TailLength > size {
-		state = redactionState{Device: device, Inode: inode}
-	}
-	if state.Offset+state.TailLength == size {
-		return nil
-	}
-
 	input, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
-	next, changed, err := redactRange(input, state, size, nil)
+	// Identity and size of the file actually read, not of whatever the
+	// path names later.
+	info, err := input.Stat()
+	if err != nil {
+		return err
+	}
+	device, inode, known := fileIdentity(info)
+	size := info.Size()
+	fresh := redactionState{Device: device, Inode: inode}
+	state := loadRedactionState(path)
+	if !known || state.Device != device || state.Inode != inode || state.Offset < 0 || state.TailLength < 0 || state.Offset+state.TailLength > size {
+		state = fresh
+	}
+	digest, trusted, err := verifyPrefix(input, state)
+	if err != nil {
+		return err
+	}
+	if !trusted {
+		state, digest = fresh, sha256.New()
+	} else if state.Offset+state.TailLength == size {
+		return nil
+	}
+
+	next, changed, err := redactRange(input, state, size, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -415,6 +482,10 @@ func redactNewLines(path string) error {
 		if !known {
 			return nil
 		}
+		if _, err := io.Copy(digest, io.NewSectionReader(input, state.Offset, next.Offset+next.TailLength-state.Offset)); err != nil {
+			return err
+		}
+		next.PrefixSHA256 = hex.EncodeToString(digest.Sum(nil))
 		return saveRedactionState(path, next)
 	}
 
@@ -435,11 +506,18 @@ func redactNewLines(path string) error {
 		_ = tmp.Close()
 		return err
 	}
-	if _, _, err := redactRange(input, state, size, writer); err != nil {
+	// digest already holds the copied prefix, as verified above.
+	next, _, err = redactRange(input, state, size, writer, digest)
+	if err != nil {
 		_ = tmp.Close()
 		return err
 	}
 	if err := writer.Flush(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	rewritten, err := tmp.Stat()
+	if err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -452,15 +530,12 @@ func redactNewLines(path string) error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
-	rewritten, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
 	device, inode, known = fileIdentity(rewritten)
 	if !known {
 		return nil
 	}
 	next.Device, next.Inode = device, inode
+	next.PrefixSHA256 = hex.EncodeToString(digest.Sum(nil))
 	return saveRedactionState(path, next)
 }
 
