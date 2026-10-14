@@ -227,3 +227,61 @@ func TestRegression_LoginProbeTargetListRendering(t *testing.T) {
 		}
 	}
 }
+
+func TestRegression_LoginProbeRollbackCoversManagedState(t *testing.T) {
+	apply, err := os.ReadFile("../../playbooks/apply/login-probe-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(apply)
+	for _, want := range []string{
+		"login_probe_rollback_paths:",
+		"{{ login_probe_bin_dest }}",
+		"{{ login_probe_key_path }}",
+		"{{ login_probe_key_path }}.pub",
+		"{{ login_probe_ssh_config_path }}",
+		"{{ login_probe_config_path }}",
+		"{{ login_probe_unit_path }}",
+		"{{ login_probe_textfile_path }}",
+		"ansible.builtin.service_facts:",
+		"Snapshot every existing managed file before mutation",
+		"ROLLBACK — restore every managed file that existed before apply",
+		"ROLLBACK — remove managed files created by this failed first install",
+		"ROLLBACK — restore pre-existing directory ownership and mode",
+		"ROLLBACK — restore whether the service was enabled and active before apply",
+		"ROLLBACK — restore the pre-existing service account attributes",
+		"ROLLBACK — remove a service account created by this failed first install",
+		"Private rollback snapshot retained at",
+	} {
+		if !strings.Contains(source, want) {
+			t.Errorf("login-probe apply rollback is missing %q", want)
+		}
+	}
+	if strings.Contains(source, "pilot-login-probe.prev") {
+		t.Error("rollback must snapshot the complete managed state, not only the previous binary")
+	}
+	if !strings.Contains(source, "login_probe_exporter_metrics") ||
+		!strings.Contains(source, "node_exporter_basic_auth_password") ||
+		!strings.Contains(source, "pilot_login_probe_textfile_preflight") {
+		t.Error("C7 apply must authenticate to node_exporter and prove it exposes a textfile metric")
+	}
+}
+
+func TestRegression_LoginProbeExampleTargetsMatchStringListContract(t *testing.T) {
+	example, err := os.ReadFile("../../group_vars/login-probe.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(example)
+	for _, want := range []string{
+		"- web01=web01.ipa.pilot.internal:22",
+		"- web02=web02.ipa.pilot.internal",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("example explicit target must use contract string syntax %q", want)
+		}
+	}
+	if strings.Contains(s, "{name: web01, host:") {
+		t.Error("the documented target example is a map but the contract/playbook accept name=host[:port] strings")
+	}
+}

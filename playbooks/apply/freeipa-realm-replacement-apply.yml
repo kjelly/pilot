@@ -2,8 +2,9 @@
 #
 # This is deliberately a client-wave migration, not a FreeIPA server restore.
 # The old server must remain available if automatic local rollback is expected
-# to yield a working old login path.  A rebuilt/retired old server makes the
-# old archive forensic material only, not a trust rollback mechanism.
+# to yield a working old login path: the rescue re-enrolls the client there
+# with its preserved host keys.  A rebuilt/retired old server makes the old
+# archive forensic material only, not a trust rollback mechanism.
 ---
 - name: Replace a client's FreeIPA realm enrollment
   hosts: "{{ target_group | default('freeipa-client') }}"
@@ -25,8 +26,6 @@
     freeipa_realm_replacement_expected_user_file: /etc/pilot/freeipa-realm-replacement.expected-user
     freeipa_realm_replacement_backup_link: /etc/pilot/freeipa-realm-replacement.backup
     freeipa_realm_replacement_backup_dir: /var/backups/pilot/freeipa-realm-replacement
-    freeipa_realm_replacement_backup_archive: >-
-      {{ freeipa_realm_replacement_backup_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}.tar.gz
 
   pre_tasks:
     - name: "Gate: realm replacement requires explicit human confirmation"
@@ -95,6 +94,9 @@
         '/^realm[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); exit $2 != want}'
         /etc/ipa/default.conf
       changed_when: false
+      # Read-only: check it in --check too. Check mode skips a shell task, so
+      # a preview passed this gate on a client in another realm.
+      check_mode: false
       when: not freeipa_realm_replacement_prior_state.stat.exists
       tags: [C1]
 
@@ -108,7 +110,44 @@
           reviewed recovery procedure instead of re-running destructive cleanup.
       tags: [always]
 
+    # ipa-client-install --uninstall and ipa-client-install both restart
+    # sshd. With a broken file in sshd_config.d the uninstall's restart
+    # fails, sshd stays down and the uninstall stops half done (seen
+    # 2026-10-12 on a freeipa-client decommission). Check before the
+    # snapshot and the switch; read-only, so --check previews it too.
+    - name: "Realm replacement — sshd -t before ipa-client-install restarts sshd"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+      register: freeipa_realm_replacement_sshd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the sshd configuration is valid before replacing the realm"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_realm_replacement_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to replace the realm: ipa-client-install --uninstall and the new
+          enrollment restart sshd, and sshd -t fails
+          ({{ ((freeipa_realm_replacement_sshd_check.stderr | default('')) or (freeipa_realm_replacement_sshd_check.stdout | default(''))) | trim }}).
+          Nothing was changed. Fix the sshd configuration, then run again.
+      tags: [always]
+
   tasks:
+    # Named once per run from the controller's clock, then used by the
+    # snapshot, the rescue, the completion marker and the link. The name used
+    # to come from ansible_date_time, which the one-hour fact cache
+    # (ansible.cfg `gathering = smart`) kept: every run within the hour
+    # reused the first run's name, and its tar overwrote that archive
+    # (2026-10-12/13 evidence).
+    - name: "Realm replacement — name this run's archive"
+      ansible.builtin.set_fact:
+        freeipa_realm_replacement_backup_archive: >-
+          {{ freeipa_realm_replacement_backup_dir }}/{{ inventory_hostname }}-{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}.tar.gz
+      tags: [always]
+
     - name: "Realm replacement — create local state and backup directories"
       ansible.builtin.file:
         path: "{{ item }}"
@@ -119,6 +158,26 @@
       loop:
         - "{{ freeipa_realm_replacement_state_dir }}"
         - "{{ freeipa_realm_replacement_backup_dir }}"
+      tags: [always, C2]
+
+    - name: "Realm replacement — look for an archive at this run's name"
+      ansible.builtin.stat:
+        path: "{{ freeipa_realm_replacement_backup_archive }}"
+      register: freeipa_realm_replacement_backup_archive_stat
+      tags: [always, C2]
+
+    # tar -czf truncates an existing file. An archive is rollback and
+    # forensic material, so never write over one (an operator-supplied
+    # -e freeipa_realm_replacement_backup_archive, or two runs within a
+    # second).
+    - name: "Gate: this run's archive must not exist yet"
+      ansible.builtin.assert:
+        that:
+          - not freeipa_realm_replacement_backup_archive_stat.stat.exists
+        fail_msg: >-
+          {{ freeipa_realm_replacement_backup_archive }} already exists. Refusing to
+          overwrite an earlier run's archive; nothing was changed. Run again for a
+          new name, or move that archive aside after reviewing it.
       tags: [always, C2]
 
     - name: "Realm replacement — snapshot old client trust before mutation"
@@ -141,17 +200,6 @@
 
     - name: "Realm replacement — destructive switch with automatic local restore"
       block:
-        - name: "Realm replacement — pin new server FQDN before enrollment"
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\s|$)'
-            line: >-
-              {{ freeipa_realm_replacement_new_server_ip }}
-              {{ freeipa_realm_replacement_new_server_fqdn }}
-              {{ freeipa_realm_replacement_new_server_fqdn.split('.')[0] }}
-            state: present
-          tags: [C3]
-
         - name: "Realm replacement — preflight new server HTTPS reachability"
           ansible.builtin.wait_for:
             host: "{{ freeipa_realm_replacement_new_server_ip }}"
@@ -160,11 +208,142 @@
           changed_when: false
           tags: [C1]
 
+        # The old realm's servers, from the client's own configuration, before
+        # the uninstall removes it: /etc/ipa/default.conf `server`, and SSSD's
+        # ipa_server/ipa_backup_server failover lists.
+        - name: "Realm replacement — read the old realm's client configuration"
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop: [/etc/ipa/default.conf, /etc/sssd/sssd.conf]
+          register: freeipa_realm_replacement_old_config
+          failed_when: false
+          tags: [always, C3]
+
+        # What the rescue needs to re-enroll this client in the old realm:
+        # default.conf's domain and host, and every server it was configured
+        # with.
+        - name: "Realm replacement — record the old enrollment"
+          ansible.builtin.set_fact:
+            freeipa_realm_replacement_old_enrollment:
+              domain: >-
+                {{ (freeipa_realm_replacement_old_config.results[0].content | default('') | b64decode
+                    | regex_findall('(?m)^\s*domain\s*=\s*(\S+)') + ['']) | first | lower }}
+              host: >-
+                {{ (freeipa_realm_replacement_old_config.results[0].content | default('') | b64decode
+                    | regex_findall('(?m)^\s*host\s*=\s*(\S+)') + ['']) | first | lower }}
+              servers: >-
+                {{ freeipa_realm_replacement_old_config.results
+                   | selectattr('content', 'defined') | map(attribute='content')
+                   | map('b64decode')
+                   | map('regex_findall', '(?m)^\s*(?:server|ipa_server|ipa_backup_server)\s*=\s*(.*)$') | flatten
+                   | map('split', ',') | flatten | map('trim') | map('lower')
+                   | reject('equalto', '_srv_') | reject('equalto', '')
+                   | unique | list }}
+          tags: [always, C3]
+
+        - name: "Realm replacement — the old enrollment can be restored"
+          ansible.builtin.assert:
+            that:
+              - freeipa_realm_replacement_old_enrollment.domain | length > 0
+              - freeipa_realm_replacement_old_enrollment.host | length > 0
+              - freeipa_realm_replacement_old_enrollment.servers | length > 0
+            fail_msg: >-
+              /etc/ipa/default.conf and /etc/sssd/sssd.conf do not name the old
+              enrollment's domain, host and servers
+              ({{ freeipa_realm_replacement_old_enrollment }}), so a failed switch
+              could not re-enroll this client in {{ freeipa_realm_replacement_old_realm }}.
+          tags: [C3]
+
+        - name: "Realm replacement — list the old realm's servers"
+          ansible.builtin.set_fact:
+            freeipa_realm_replacement_old_servers: >-
+              {{ freeipa_realm_replacement_old_enrollment.servers
+                 | difference([freeipa_realm_replacement_new_server_fqdn | lower]) }}
+          tags: [C3]
+
+        # ipa-client-install --uninstall unenrolls the host with its own keys
+        # (`ipa-join --unenroll`, which calls host_disable), and that voids the
+        # old realm's host keys on the old server: after a failed switch the
+        # archive's keytab no longer worked there, and the old realm stayed
+        # offline (2026-10-12). Remove the old realm's keys from the keytab
+        # first; the archive keeps them. The unenroll then cannot
+        # authenticate, and the uninstall logs "Unenrolling host failed" and
+        # carries on (ipaclient/install/client.py, FreeIPA 4.11 and 4.12).
+        # The old host entry stays enabled; the completion marker records it.
+        - name: "Realm replacement — keep the old host enabled on the old server"
+          ansible.builtin.command:
+            argv: [ipa-rmkeytab, -k, /etc/krb5.keytab, -r, "{{ freeipa_realm_replacement_old_realm }}"]
+          register: freeipa_realm_replacement_old_keys
+          changed_when: freeipa_realm_replacement_old_keys.rc == 0
+          failed_when: freeipa_realm_replacement_old_keys.rc not in [0, 5]
+          tags: [C3]
+
         - name: "Realm replacement — remove old client enrollment"
           ansible.builtin.command:
             argv: [ipa-client-install, --uninstall, -U]
           changed_when: true
           no_log: true
+          tags: [C3]
+
+        # The uninstall stops SSSD but leaves the Kerberos snippet SSSD wrote
+        # for the old domain, /var/lib/sss/pubconf/krb5.include.d/
+        # domain_realm_<domain>, which krb5.conf includes through
+        # /etc/krb5.conf.d/enable_sssd_conf_dir. It maps the old DNS domain to
+        # the old realm. When the new server keeps a name in that domain, the
+        # new enrollment asked the new KDC for a cross-realm ticket to the old
+        # realm ("Server krbtgt/IPA.PILOT.INTERNAL@NEW.EXAMPLE.TEST not found
+        # in Kerberos database") and failed (2026-10-13). SSSD writes the
+        # snippet again for the domain it serves when it starts.
+        - name: "Realm replacement — remove the old domain's SSSD Kerberos realm mapping"
+          ansible.builtin.file:
+            path: "/var/lib/sss/pubconf/krb5.include.d/domain_realm_{{ freeipa_realm_replacement_old_domain | replace('.', '_') }}"
+            state: absent
+          vars:
+            freeipa_realm_replacement_old_domain: >-
+              {{ (freeipa_realm_replacement_old_config.results[0].content | default('') | b64decode
+                  | regex_findall('(?m)^\s*domain\s*=\s*(\S+)') + ['']) | first | lower }}
+          when: freeipa_realm_replacement_old_domain | length > 0
+          tags: [C3]
+
+        # freeipa-client-apply.yml pins the old realm's servers in /etc/hosts,
+        # and the uninstall leaves them. With the old pin still there (its short
+        # name, e.g. `ipa1`, the same as the new server's), SSSD on Ubuntu 24.04
+        # sent the new host principal's AS requests to the old KDC, got "Client
+        # ... not found in Kerberos database" and stayed offline, so the
+        # identity wait failed (2026-07-29, root-caused 2026-10-12). Remove
+        # them after the uninstall, which still talks to the old server, and
+        # before the new enrollment. The rescue's archive restores them.
+        - name: "Realm replacement — remove the old realm's server pool block from /etc/hosts"
+          ansible.builtin.blockinfile:
+            path: /etc/hosts
+            marker: "# {mark} PILOT FREEIPA SERVER POOL"
+            state: absent
+          tags: [C3]
+
+        - name: "Realm replacement — remove other /etc/hosts pins of the old realm's servers"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '(?i)\s{{ item | regex_escape }}(\s|$)'
+            state: absent
+          loop: "{{ freeipa_realm_replacement_old_servers }}"
+          tags: [C3]
+
+        # After the old pins are gone. When the new server keeps the old
+        # server's FQDN, that name's line is inside the pool block removed
+        # above: a pin written before the removal went with the block, and the
+        # enrollment had to resolve the name through DNS, which may still
+        # point at the old server (review of #53, 2026-10-13). Pinning here
+        # also leaves the uninstall talking to the old server. Any case: the
+        # resolver matches names case-insensitively.
+        - name: "Realm replacement — pin new server FQDN before enrollment"
+          ansible.builtin.lineinfile:
+            path: /etc/hosts
+            regexp: '(?i)\s{{ freeipa_realm_replacement_new_server_fqdn | regex_escape }}(\s|$)'
+            line: >-
+              {{ freeipa_realm_replacement_new_server_ip }}
+              {{ freeipa_realm_replacement_new_server_fqdn }}
+              {{ freeipa_realm_replacement_new_server_fqdn.split('.')[0] }}
+            state: present
           tags: [C3]
 
         - name: "Realm replacement — enroll client in the new realm"
@@ -234,6 +413,7 @@
               client_fqdn={{ freeipa_realm_replacement_client_fqdn }}
               verify_user={{ freeipa_realm_replacement_verify_user }}
               backup_archive={{ freeipa_realm_replacement_backup_archive }}
+              old_host_still_enabled=host/{{ freeipa_realm_replacement_old_enrollment.host }}@{{ freeipa_realm_replacement_old_realm }}
           no_log: true
           tags: [C6]
 
@@ -254,19 +434,141 @@
           no_log: true
           tags: [C3, C4, C5, C6]
 
+        # Check mode skips the snapshot, so the archive does not exist and the
+        # link failed with "src file does not exist", sending every --check
+        # preview into the rescue. force only in check mode: a real run still
+        # refuses to link an archive that is missing.
         - name: "Realm replacement — expose archive through a stable root-only link"
           ansible.builtin.file:
             src: "{{ freeipa_realm_replacement_backup_archive }}"
             dest: "{{ freeipa_realm_replacement_backup_link }}"
             state: link
+            force: "{{ ansible_check_mode }}"
             owner: root
             group: root
           tags: [C6]
+      # Restoring the archive alone does not bring the old realm back once the
+      # old enrollment is gone: the uninstall also reverts authselect/PAM,
+      # the hostname, SSSD's and sshd's IPA settings, the CA trust and the
+      # installer's own state. So when the client is no longer enrolled in
+      # the old realm, re-enroll it there with the archived host keys (which
+      # the switch kept valid on the old server), then put the archived
+      # files back over that enrollment, except its fresh keytab.
       rescue:
+        - name: "Realm replacement — read the realm this client is enrolled in now"
+          tags: [always]
+          ansible.builtin.slurp:
+            src: /etc/ipa/default.conf
+          register: freeipa_realm_replacement_rescue_conf
+          failed_when: false
+
+        - name: "Realm replacement — decide how to restore the old enrollment"
+          tags: [always]
+          ansible.builtin.set_fact:
+            freeipa_realm_replacement_rescue_realm: >-
+              {{ (freeipa_realm_replacement_rescue_conf.content | default('') | b64decode
+                  | regex_findall('(?m)^\s*realm\s*=\s*(\S+)') + ['']) | first }}
+            freeipa_realm_replacement_rescue_reenroll: >-
+              {{ freeipa_realm_replacement_old_enrollment is defined
+                 and (freeipa_realm_replacement_rescue_conf.content | default('') | b64decode
+                      | regex_findall('(?m)^\s*realm\s*=\s*(\S+)') + ['']) | first
+                     != freeipa_realm_replacement_old_realm }}
+
+        - name: "Realm replacement — remove the new realm's enrollment"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [ipa-client-install, --uninstall, -U]
+          register: freeipa_realm_replacement_rescue_uninstall
+          changed_when: true
+          failed_when: false
+          no_log: true
+          when:
+            - freeipa_realm_replacement_rescue_reenroll | bool
+            - freeipa_realm_replacement_rescue_realm | length > 0
+
+        - name: "Realm replacement — put back the old server pins"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [tar, -xpf, "{{ freeipa_realm_replacement_backup_archive }}", -C, /, etc/hosts]
+          register: freeipa_realm_replacement_rescue_pins
+          changed_when: true
+          failed_when: false
+          when: freeipa_realm_replacement_rescue_reenroll | bool
+
+        - name: "Realm replacement — create a private directory for the archived host keytab"
+          tags: [always]
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: .realm-replacement
+          register: freeipa_realm_replacement_rescue_tmp
+          failed_when: false
+          when: freeipa_realm_replacement_rescue_reenroll | bool
+
+        - name: "Realm replacement — extract the archived host keytab"
+          tags: [always]
+          ansible.builtin.command:
+            argv:
+              - tar
+              - -xpf
+              - "{{ freeipa_realm_replacement_backup_archive }}"
+              - -C
+              - "{{ freeipa_realm_replacement_rescue_tmp.path }}"
+              - etc/krb5.keytab
+          register: freeipa_realm_replacement_rescue_keytab
+          changed_when: true
+          failed_when: false
+          no_log: true
+          when:
+            - freeipa_realm_replacement_rescue_reenroll | bool
+            - freeipa_realm_replacement_rescue_tmp.path is defined
+
+        # The same options as freeipa-client-apply.yml's enrollment;
+        # --force-join has no effect with --keytab.
+        - name: "Realm replacement — re-enroll in the old realm with the archived host keys"
+          tags: [always]
+          ansible.builtin.command:
+            argv: >-
+              {{
+                ['ipa-client-install', '-U',
+                 '--keytab=' ~ freeipa_realm_replacement_rescue_tmp.path ~ '/etc/krb5.keytab']
+                + (freeipa_realm_replacement_old_enrollment.servers | map('regex_replace', '^(.*)$', '--server=\1') | list)
+                + [
+                  '--domain=' ~ freeipa_realm_replacement_old_enrollment.domain,
+                  '--realm=' ~ freeipa_realm_replacement_old_realm,
+                  '--hostname=' ~ freeipa_realm_replacement_old_enrollment.host,
+                  '--mkhomedir',
+                  '--no-ntp',
+                  '--no-dns-sshfp',
+                ]
+              }}
+          register: freeipa_realm_replacement_reenroll
+          changed_when: true
+          failed_when: false
+          no_log: true
+          when:
+            - freeipa_realm_replacement_rescue_reenroll | bool
+            - (freeipa_realm_replacement_rescue_keytab.rc | default(1)) == 0
+
+        - name: "Realm replacement — remove the extracted host keytab"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ freeipa_realm_replacement_rescue_tmp.path }}"
+            state: absent
+          when: freeipa_realm_replacement_rescue_tmp.path is defined
+
+        # After a re-enrollment the keytab holds the old host's new keys;
+        # the archived one no longer works. Without a re-enrollment, the
+        # archive is all there is.
         - name: "Realm replacement — restore local pre-migration archive"
           tags: [always]
           ansible.builtin.command:
-            argv: [tar, -xpf, "{{ freeipa_realm_replacement_backup_archive }}", -C, /]
+            argv: >-
+              {{
+                ['tar']
+                + (['--exclude=etc/krb5.keytab'] if (freeipa_realm_replacement_reenroll.rc | default(1)) == 0 else [])
+                + ['-xpf', freeipa_realm_replacement_backup_archive, '-C', '/']
+              }}
+          register: freeipa_realm_replacement_rescue_restore
           changed_when: true
           no_log: true
           failed_when: false
@@ -276,17 +578,36 @@
           ansible.builtin.systemd:
             name: sssd
             state: restarted
+            enabled: true
           failed_when: false
 
         - name: "Realm replacement — stop with the rollback boundary"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              New realm enrollment failed. The prior local client configuration
-              was restored from {{ freeipa_realm_replacement_backup_archive }}.
-              This only restores working access if the old FreeIPA server and
-              its client principal still exist; a rebuilt/retired old server
-              cannot be recovered by restoring local files alone.
+              New realm enrollment failed.
+              {% if ansible_check_mode %}Check mode: nothing was removed,
+              enrolled or restored.
+              {% elif not (freeipa_realm_replacement_rescue_reenroll | bool) %}/etc/ipa/default.conf
+              still named {{ freeipa_realm_replacement_old_realm }}, so the client
+              was not re-enrolled; the prior local files were restored from
+              {{ freeipa_realm_replacement_backup_archive }}
+              (tar rc={{ freeipa_realm_replacement_rescue_restore.rc | default('n/a') }}).
+              {% elif (freeipa_realm_replacement_reenroll.rc | default(1)) == 0 %}The
+              client was re-enrolled in {{ freeipa_realm_replacement_old_realm }} as
+              {{ freeipa_realm_replacement_old_enrollment.host }} with its archived
+              host keys, and the prior local files were restored over that
+              enrollment from {{ freeipa_realm_replacement_backup_archive }}.
+              {% else %}Re-enrolling in {{ freeipa_realm_replacement_old_realm }}
+              failed too (new realm uninstall rc={{ freeipa_realm_replacement_rescue_uninstall.rc | default('n/a') }},
+              keytab extract rc={{ freeipa_realm_replacement_rescue_keytab.rc | default('n/a') }},
+              enrollment rc={{ freeipa_realm_replacement_reenroll.rc | default('n/a') }};
+              see /var/log/ipaclient-install.log). The prior local files were
+              restored from {{ freeipa_realm_replacement_backup_archive }}, but
+              the old realm's login path is not working: re-enroll this client by
+              hand.
+              {% endif %}A rebuilt or retired old server cannot be recovered
+              from this client.
 
   handlers:
     - name: Restart SSSD after realm replacement

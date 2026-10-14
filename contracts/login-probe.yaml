@@ -44,6 +44,12 @@ groupVars:
   - {name: login_probe_target_group, type: string, required: false, default: "freeipa-client", secret: false}
   - {name: login_probe_targets, type: stringList, required: false, default: [], secret: false}
   - {name: login_probe_ssh_port, type: integer, required: false, default: 22, secret: false}
+  # Shared same-host host-monitoring inputs used to prove that the running
+  # exporter actually reads the textfile directory. The password is the
+  # existing host-monitoring vault value, not a second login-probe secret.
+  - {name: node_exporter_port, type: string, required: false, default: "9100", secret: false}
+  - {name: node_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
+  - {name: node_exporter_basic_auth_password, type: string, required: true, secret: true}
   # Optional vault-supplied private key (PEM); empty = the probe host
   # generates and keeps its own key pair (see group_vars/login-probe.example.yml).
   - {name: login_probe_ssh_private_key, type: string, required: false, secret: true}

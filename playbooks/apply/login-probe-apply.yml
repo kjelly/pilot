@@ -55,6 +55,7 @@
     login_probe_config_path: /etc/pilot/login-probe/config.yml
     login_probe_ssh_config_path: /etc/pilot/login-probe/ssh_config
     login_probe_key_path: /etc/pilot/login-probe/id_ed25519
+    login_probe_unit_path: /etc/systemd/system/pilot-login-probe.service
     login_probe_textfile_dir: /var/lib/node_exporter/textfile
     login_probe_textfile_path: /var/lib/node_exporter/textfile/pilot_login_probe.prom
     login_probe_backup_dir: /var/backups/pilot-login-probe
@@ -348,6 +349,124 @@
       no_log: true
       tags: [always]
 
+    - name: "Resolve node_exporter auth defaults for the textfile collector preflight"
+      ansible.builtin.set_fact:
+        node_exporter_basic_auth_user: "{{ node_exporter_basic_auth_user | default('prometheus', true) }}"
+        node_exporter_port: "{{ node_exporter_port | default(9100, true) }}"
+      tags: [always]
+
+    - name: "Gate: host-monitoring credentials are available for the textfile collector preflight"
+      ansible.builtin.assert:
+        that:
+          - node_exporter_basic_auth_password is defined
+          - node_exporter_basic_auth_password | string | length > 0
+        fail_msg: >-
+          login-probe must verify that node_exporter actually exposes its
+          textfile collector. Supply the same node_exporter_basic_auth_password
+          used by the same-host host-monitoring role (through the vault).
+      no_log: true
+      tags: [always]
+
+    # Snapshot every path this play can change before the block starts. The
+    # private key is included because an upgrade that fails after key rotation
+    # must restore the old credential together with its config and service.
+    - name: "Define login-probe rollback file and directory sets"
+      ansible.builtin.set_fact:
+        login_probe_rollback_paths:
+          - "{{ login_probe_bin_dest }}"
+          - "{{ login_probe_key_path }}"
+          - "{{ login_probe_key_path }}.pub"
+          - "{{ login_probe_ssh_config_path }}"
+          - "{{ login_probe_config_path }}"
+          - "{{ login_probe_unit_path }}"
+          - "{{ login_probe_textfile_path }}"
+        login_probe_rollback_directories:
+          - "{{ login_probe_config_dir }}"
+          - "{{ login_probe_state_dir }}"
+          - "{{ login_probe_backup_dir }}"
+      tags: [always]
+
+    - name: "Capture the previous login-probe service state"
+      ansible.builtin.service_facts:
+      tags: [always]
+
+    - name: "Capture the previous login-probe service account"
+      ansible.builtin.command:
+        argv: [getent, passwd, "{{ login_probe_service_user }}"]
+      register: login_probe_passwd_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Capture the previous login-probe group"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ login_probe_service_user }}"]
+      register: login_probe_group_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Capture previous login-probe files and directories"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop: "{{ login_probe_rollback_paths + login_probe_rollback_directories }}"
+      register: login_probe_rollback_stat
+      tags: [always]
+
+    - name: "Record the immutable rollback snapshot location and previous state"
+      ansible.builtin.set_fact:
+        login_probe_rollback_dir: >-
+          {{ login_probe_backup_dir }}/apply-{{ ansible_date_time.epoch }}-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}
+        login_probe_previous_files: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', true)
+             | selectattr('item', 'in', login_probe_rollback_paths) | list }}
+        login_probe_absent_files: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', false)
+             | selectattr('item', 'in', login_probe_rollback_paths) | list }}
+        login_probe_previous_directories: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.isdir', 'defined')
+             | selectattr('stat.isdir', 'equalto', true)
+             | selectattr('item', 'in', login_probe_rollback_directories) | list }}
+        login_probe_absent_directories: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', false)
+             | selectattr('item', 'in', login_probe_rollback_directories) | list }}
+        login_probe_previous_service: "{{ ansible_facts.services.get('pilot-login-probe.service', {}) }}"
+        login_probe_previous_user_exists: "{{ login_probe_passwd_before.rc == 0 }}"
+        login_probe_previous_group_exists: "{{ login_probe_group_before.rc == 0 }}"
+      tags: [always]
+
+    - name: "Create the private rollback snapshot directory"
+      ansible.builtin.file:
+        path: "{{ login_probe_rollback_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      changed_when: false
+      tags: [always]
+
+    - name: "Snapshot every existing managed file before mutation"
+      ansible.builtin.copy:
+        src: "{{ item.item }}"
+        dest: "{{ login_probe_rollback_dir }}/{{ item.item | basename }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "preserve"
+      loop: "{{ login_probe_previous_files }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+      changed_when: false
+      tags: [always]
+
   tasks:
     - name: "Login probe install + systemd service"
       block:
@@ -371,30 +490,6 @@
           loop:
             - {path: "{{ login_probe_config_dir }}", owner: root, group: "{{ login_probe_service_user }}", mode: "0750"}
             - {path: "{{ login_probe_state_dir }}", owner: "{{ login_probe_service_user }}", group: "{{ login_probe_service_user }}", mode: "0750"}
-            - {path: "{{ login_probe_backup_dir }}", owner: root, group: root, mode: "0700"}
-
-        - name: "Step 3: inspect the previously installed binary (upgrade detection)"
-          tags: [always]
-          ansible.builtin.stat:
-            path: "{{ login_probe_bin_dest }}"
-            checksum_algorithm: sha256
-          register: login_probe_existing_binary_stat
-
-        - name: "Step 3b: determine whether this apply is an upgrade"
-          tags: [always]
-          ansible.builtin.set_fact:
-            login_probe_is_upgrade: >-
-              {{ login_probe_existing_binary_stat.stat.get('exists', false)
-                 and login_probe_existing_binary_stat.stat.get('checksum', '') != login_probe_artifact_sha256 }}
-
-        - name: "Step 3c: snapshot the previously installed binary (rollback material)"
-          tags: [always]
-          ansible.builtin.copy:
-            src: "{{ login_probe_bin_dest }}"
-            dest: "{{ login_probe_backup_dir }}/pilot-login-probe.prev"
-            remote_src: true
-            mode: "0755"
-          when: login_probe_is_upgrade | bool
 
         - name: "Step 4: copy the pinned binary to the probe host"
           tags: [C1]
@@ -640,6 +735,67 @@
             timeout: 60
           when: not ansible_check_mode
 
+        - name: "Step 15b: prove node_exporter serves the textfile collector output (spec C7)"
+          tags: [C7]
+          when: not ansible_check_mode
+          block:
+            - name: "Write a temporary collector preflight metric"
+              ansible.builtin.copy:
+                dest: "{{ login_probe_textfile_dir }}/pilot_login_probe_preflight.prom"
+                owner: root
+                group: root
+                mode: "0644"
+                content: |
+                  # HELP pilot_login_probe_textfile_preflight Temporary collector visibility check.
+                  # TYPE pilot_login_probe_textfile_preflight gauge
+                  pilot_login_probe_textfile_preflight{pilot_host="{{ inventory_hostname }}"} 1
+              changed_when: false
+
+            - name: "Read node_exporter metrics with the same-host host-monitoring credential"
+              ansible.builtin.uri:
+                url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+                method: GET
+                user: "{{ node_exporter_basic_auth_user }}"
+                password: "{{ node_exporter_basic_auth_password }}"
+                force_basic_auth: true
+                status_code: 200
+                return_content: true
+                timeout: 10
+              register: login_probe_exporter_metrics
+              changed_when: false
+              check_mode: false
+              retries: 10
+              delay: 1
+              until: >-
+                login_probe_exporter_metrics.status | default(0) == 200
+                and (login_probe_exporter_metrics.content | default(''))
+                    is search('(?m)^pilot_login_probe_textfile_preflight\{pilot_host="'
+                    ~ inventory_hostname
+                    ~ '"\} 1$')
+              no_log: true
+
+            - name: "Assert node_exporter actually exposes the temporary textfile metric"
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    login_probe_exporter_metrics.content
+                    is search('(?m)^pilot_login_probe_textfile_preflight\{pilot_host="'
+                    ~ inventory_hostname
+                    ~ '"\} 1$')
+                fail_msg: >-
+                  node_exporter answered, but did not expose the temporary
+                  login-probe textfile metric. Ensure the host-monitoring
+                  exporter on port {{ node_exporter_port }} uses
+                  --collector.textfile.directory={{ login_probe_textfile_dir }}.
+              no_log: true
+
+          always:
+            - name: "Remove the temporary collector preflight metric"
+              ansible.builtin.file:
+                path: "{{ login_probe_textfile_dir }}/pilot_login_probe_preflight.prom"
+                state: absent
+              changed_when: false
+
         - name: "Step 16: one health round — every target must be classified into a known stage (stage ok needs the canary key published, so it is not required here)"
           tags: [C10, C11]
           ansible.builtin.command:
@@ -702,41 +858,194 @@
               be able to run {{ login_probe_command }}.
 
       rescue:
-        - name: "ROLLBACK — stop the newly (mis)configured service"
+        - name: "ROLLBACK — stop login-probe before restoring its managed state"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-login-probe.service
             state: stopped
-          failed_when: false
           register: login_probe_rollback_stop
+          ignore_errors: true
 
-        - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
-          tags: [always]
-          ansible.builtin.copy:
-            src: "{{ login_probe_backup_dir }}/pilot-login-probe.prev"
-            dest: "{{ login_probe_bin_dest }}"
-            remote_src: true
-            mode: "0755"
-          when: login_probe_is_upgrade | default(false) | bool
-          failed_when: false
-          register: login_probe_rollback_binary
-
-        - name: "ROLLBACK — restart with the restored previous binary, if any"
+        - name: "ROLLBACK — disable a service that did not exist before this first install"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-login-probe.service
-            state: restarted
-          when:
-            - login_probe_is_upgrade | default(false) | bool
-            - login_probe_rollback_binary is succeeded
-          failed_when: false
-          register: login_probe_rollback_restart
+            state: stopped
+            enabled: false
+          when: login_probe_previous_service | length == 0
+          register: login_probe_rollback_new_service_disable
+          ignore_errors: true
 
-        - name: "ROLLBACK — surface the original failure"
+        - name: "ROLLBACK — restore every managed file that existed before apply"
+          tags: [always]
+          ansible.builtin.copy:
+            src: "{{ login_probe_rollback_dir }}/{{ item.item | basename }}"
+            dest: "{{ item.item }}"
+            remote_src: true
+            owner: "{{ item.stat.pw_name }}"
+            group: "{{ item.stat.gr_name }}"
+            mode: "{{ item.stat.mode }}"
+          loop: "{{ login_probe_previous_files }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_file_restore
+          no_log: true
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove managed files created by this failed first install"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: absent
+          loop: "{{ login_probe_absent_files }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_file_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore pre-existing directory ownership and mode"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: directory
+            owner: "{{ item.stat.pw_name }}"
+            group: "{{ item.stat.gr_name }}"
+            mode: "{{ item.stat.mode }}"
+          loop: "{{ login_probe_previous_directories }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_directory_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove config/state directories created by this failed first install"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: absent
+          loop: >-
+            {{ login_probe_absent_directories
+               | rejectattr('item', 'equalto', login_probe_backup_dir) | list }}
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_directory_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — reload systemd after restoring or removing the unit"
+          tags: [always]
+          ansible.builtin.systemd:
+            daemon_reload: true
+          register: login_probe_rollback_daemon_reload
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore whether the service was enabled and active before apply"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: "{{ 'started' if login_probe_previous_service.get('state', '') == 'running' else 'stopped' }}"
+            enabled: "{{ login_probe_previous_service.get('status', '') == 'enabled' }}"
+          when: login_probe_previous_service | length > 0
+          register: login_probe_rollback_service_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore the pre-existing service group"
+          tags: [always]
+          ansible.builtin.group:
+            name: "{{ login_probe_service_user }}"
+            state: present
+            gid: "{{ login_probe_group_before.stdout.split(':')[2] }}"
+          when: login_probe_previous_group_exists | bool
+          register: login_probe_rollback_group_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore the pre-existing service account attributes"
+          tags: [always]
+          ansible.builtin.user:
+            name: "{{ login_probe_service_user }}"
+            state: present
+            uid: "{{ login_probe_passwd_before.stdout.split(':')[2] }}"
+            group: "{{ login_probe_passwd_before.stdout.split(':')[3] }}"
+            home: "{{ login_probe_passwd_before.stdout.split(':')[5] }}"
+            shell: "{{ login_probe_passwd_before.stdout.split(':')[6] }}"
+            create_home: false
+          when: login_probe_previous_user_exists | bool
+          register: login_probe_rollback_user_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a service account created by this failed first install"
+          tags: [always]
+          ansible.builtin.user:
+            name: "{{ login_probe_service_user }}"
+            state: absent
+            force: true
+            remove: false
+          when: not (login_probe_previous_user_exists | bool)
+          register: login_probe_rollback_user_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a service group created by this failed first install"
+          tags: [always]
+          ansible.builtin.group:
+            name: "{{ login_probe_service_user }}"
+            state: absent
+          when: not (login_probe_previous_group_exists | bool)
+          register: login_probe_rollback_group_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — discard the private snapshot only when state restoration succeeded"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ login_probe_rollback_dir }}"
+            state: absent
+          when: >-
+            login_probe_rollback_stop is not failed
+            and login_probe_rollback_new_service_disable is not failed
+            and login_probe_rollback_file_restore is not failed
+            and login_probe_rollback_file_remove is not failed
+            and login_probe_rollback_directory_restore is not failed
+            and login_probe_rollback_directory_remove is not failed
+            and login_probe_rollback_daemon_reload is not failed
+            and login_probe_rollback_service_restore is not failed
+            and login_probe_rollback_group_restore is not failed
+            and login_probe_rollback_user_restore is not failed
+            and login_probe_rollback_user_remove is not failed
+            and login_probe_rollback_group_remove is not failed
+          register: login_probe_rollback_snapshot_cleanup
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a backup directory created only for this apply"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ login_probe_backup_dir }}"
+            state: absent
+          when:
+            - login_probe_rollback_snapshot_cleanup is succeeded
+            - login_probe_absent_directories | selectattr('item', 'equalto', login_probe_backup_dir) | list | length > 0
+          register: login_probe_rollback_backup_dir_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — surface the original failure and restoration result"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              login-probe apply FAILED (see task output above). Service stop:
-              {{ 'ok' if (login_probe_rollback_stop is succeeded) else 'failed' }};
-              previous binary restored:
-              {{ 'yes' if ((login_probe_rollback_binary | default({})) is changed) else 'no (fresh install or no snapshot)' }}.
+              login-probe apply FAILED (see task output above). Rollback
+              service stop={{ 'ok' if login_probe_rollback_stop is succeeded else 'failed' }};
+              file restore={{ 'ok' if login_probe_rollback_file_restore is succeeded else 'failed' }};
+              service state restore={{ 'ok' if login_probe_rollback_service_restore is not failed else 'failed' }}.
+              {% if login_probe_rollback_snapshot_cleanup is skipped or login_probe_rollback_snapshot_cleanup is failed %}
+              Private rollback snapshot retained at {{ login_probe_rollback_dir }} for recovery.
+              {% endif %}
+
+    - name: "Remove the private rollback snapshot after a successful apply"
+      tags: [always]
+      ansible.builtin.file:
+        path: "{{ login_probe_rollback_dir }}"
+        state: absent
+      changed_when: false
+
+    - name: "Remove the backup directory if this apply created it"
+      tags: [always]
+      ansible.builtin.file:
+        path: "{{ login_probe_backup_dir }}"
+        state: absent
+      when: login_probe_absent_directories | selectattr('item', 'equalto', login_probe_backup_dir) | list | length > 0
+      changed_when: false

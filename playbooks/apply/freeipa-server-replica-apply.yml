@@ -258,6 +258,35 @@
       when: (not ipa_setup_ntp | bool) and ('active' not in (ipa_ntp_check.stdout | default('')))
       tags: [always]
 
+    # Installing the FreeIPA packages can restart sshd (the package
+    # transaction did on a fresh AlmaLinux 9 host: systemd "Queuing
+    # reload/restart jobs for marked units" during `dnf install`,
+    # 2026-10-12), and step 1's ipa-client-install restarts it itself. With a
+    # broken file in sshd_config.d that restart fails and sshd stays down. So
+    # check before anything changes, while step 1 is still to run (its own
+    # `creates:`); read-only, so --check shows it too. Step 2 has its own
+    # check below.
+    - name: "FreeIPA replica — sshd -t before installing packages and running ipa-client-install"
+      ansible.builtin.command:
+        argv: [sshd, -t]
+        creates: "{{ ipa_client_log_marker }}"
+      register: ipa_replica_enroll_sshd_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the sshd configuration is valid before ipa-client-install"
+      ansible.builtin.assert:
+        that:
+          - (ipa_replica_enroll_sshd_check.rc | default(0)) == 0
+        fail_msg: >-
+          Refusing to install packages or run ipa-client-install: either can restart sshd,
+          and sshd -t fails
+          ({{ ((ipa_replica_enroll_sshd_check.stderr | default('')) or (ipa_replica_enroll_sshd_check.stdout | default(''))) | trim }}).
+          Nothing was changed. Fix the sshd configuration, then run again.
+      tags: [always]
+
   tasks:
     # Self-register this replica's own A record in the PRIMARY's authoritative
     # DNS, BEFORE anything else — `ipa-replica-install` (step 2/2 below) makes

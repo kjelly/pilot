@@ -95,25 +95,22 @@
     # node_exporter_targets) at the point of use instead, so an unset value
     # still resolves to an empty string/list (never an undefined-variable
     # error).
-    prometheus_scrape_interval: "15s"
-    prometheus_retention_time: "6h"
+    # prometheus_retention_time is DELIBERATELY NOT declared here, same
+    # reason as the four vars above: group_vars/prometheus.example.yml
+    # documents it as an inventory override, and a play-level default
+    # would silently shadow that value (AGENTS.md §4.5 item 3). The
+    # Prometheus container task reads it with `| default('24h', true)`.
     prometheus_scrape_configs: |
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
     thanos_s3_alias: thanos-s3-backend
     thanos_s3_port: 8333
-    thanos_s3_bucket: pilot-thanos-metrics
-    thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
-    alertmanager_alias: alertmanager-backend
-    alertmanager_port: 9093
-    # node_exporter_basic_auth_user has a safe universal default (not a
-    # secret). node_exporter_basic_auth_password is DELIBERATELY NOT
+    # node_exporter_basic_auth_password is DELIBERATELY NOT
     # declared here, same undeclared-secret convention as
     # thanos_aws_access_key_id below — it must be the SAME value given to
     # host-monitoring-apply.yml's node_exporter_basic_auth_password (see
     # docs/verification/host-monitoring.md §1.5).
-    node_exporter_basic_auth_user: prometheus
     # Host path (where this playbook writes the file) vs. container path
     # (what prometheus.yml's basic_auth.password_file must point to, since
     # the prom/prometheus process reads it through its OWN bind-mount, not
@@ -122,13 +119,11 @@
     # split as prometheus.yml and alert-rules.yml themselves).
     node_exporter_basic_auth_password_host_path: "{{ prometheus_config_dir }}/node-exporter-basic-auth-password"
     node_exporter_basic_auth_password_container_path: /etc/prometheus/node-exporter-basic-auth-password
-    # dcgm_exporter_basic_auth_user has a safe universal default (not a
-    # secret). dcgm_exporter_basic_auth_password is DELIBERATELY NOT
+    # dcgm_exporter_basic_auth_password is DELIBERATELY NOT
     # declared here, same undeclared-secret convention as
     # node_exporter_basic_auth_password above — it must be the SAME value
     # given to dcgm-exporter-apply.yml's dcgm_exporter_basic_auth_password
     # (see docs/verification/dcgm-exporter.md §1.5).
-    dcgm_exporter_basic_auth_user: prometheus
     dcgm_exporter_basic_auth_password_host_path: "{{ prometheus_config_dir }}/dcgm-exporter-basic-auth-password"
     dcgm_exporter_basic_auth_password_container_path: /etc/prometheus/dcgm-exporter-basic-auth-password
     # prometheus_alert_rules_file: path (relative to the playbook) to a
@@ -233,6 +228,21 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        alertmanager_alias: "{{ alertmanager_alias | default('alertmanager-backend') }}"
+        alertmanager_port: "{{ alertmanager_port | default(9093) }}"
+        dcgm_exporter_basic_auth_user: "{{ dcgm_exporter_basic_auth_user | default('prometheus') }}"
+        node_exporter_basic_auth_user: "{{ node_exporter_basic_auth_user | default('prometheus') }}"
+        prometheus_scrape_interval: "{{ prometheus_scrape_interval | default('15s') }}"
+        thanos_s3_bucket: "{{ thanos_s3_bucket | default('pilot-thanos-metrics') }}"
+        thanos_s3_endpoint: "{{ thanos_s3_endpoint | default(thanos_s3_alias ~ ':' ~ thanos_s3_port) }}"
       tags: [always]
 
     # Auto-fallback for the common single-inventory case: if the caller left
@@ -794,7 +804,7 @@
     # prometheus_node_exporter_scrape_block's documented \n-escaping
     # warning — never hand-build YAML structure as an interpolated string).
     # ---- Host-health + login-probe alert rules (GitHub issue #11,
-    # docs/verification/prometheus.md C20/C21). Resolved with default() so
+    # docs/verification/prometheus.md C23/C24). Resolved with default() so
     # group_vars/host_vars are never shadowed by play vars (AGENTS.md §4.5
     # point 3); rendered from templates/pilot-host-health-alert-rules.yml.j2.
     - name: "Resolve host-health alert thresholds without overriding inventory or extra vars"
@@ -892,9 +902,10 @@
         # prom/prometheus's official image runs as the "nobody" user
         # (uid/gid 65534), not root — the bind-mounted data dir must be
         # owned by that uid or Prometheus fails to write its TSDB at
-        # startup (permission denied). Thanos Sidecar only needs read
-        # access to this same directory (mounted :ro below), so it doesn't
-        # need matching ownership.
+        # startup (permission denied). Thanos Sidecar writes to this same
+        # directory too (thanos/upload/<ulid> before each upload, then
+        # thanos.shipper.json), so it runs as 65534:65534 as well — see
+        # the Sidecar task below.
         - name: "Ensure Prometheus host data dir (owned by container's nobody uid)"
           ansible.builtin.file:
             path: "{{ prometheus_host_data_dir }}"
@@ -932,6 +943,11 @@
         # hard requirement for the Sidecar to be able to ship 2h blocks to
         # object storage — Thanos Compactor (on the thanos-query host) owns
         # compaction/downsampling/retention from that point on.
+        #
+        # external_labels.site is rendered with to_json: a double-quoted
+        # string keeps labels such as `123`, `null` or `a: b` from being
+        # read as other YAML types, and spec C8/C22 pass the quoted value
+        # to `thanos tools bucket inspect --selector` as is.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
           tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
@@ -941,7 +957,7 @@
               global:
                 scrape_interval: {{ prometheus_scrape_interval }}
                 external_labels:
-                  site: {{ prometheus_site_label }}
+                  site: {{ prometheus_site_label | to_json }}
               rule_files:
               {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               alerting:
@@ -966,7 +982,7 @@
               global:
                 scrape_interval: {{ prometheus_scrape_interval }}
                 external_labels:
-                  site: {{ prometheus_site_label }}
+                  site: {{ prometheus_site_label | to_json }}
               rule_files:
               {{ prometheus_rule_files_list | to_nice_yaml(indent=2) }}
               scrape_configs:
@@ -976,13 +992,6 @@
               {{ prometheus_external_scrape_block }}
           register: prometheus_yml_no_am
           when: alertmanager_target_host | default('', true) | length == 0
-
-        - name: "Consolidate prometheus.yml result (for unified restart-gate below)"
-          ansible.builtin.set_fact:
-            prometheus_yml_result: >-
-              {{ prometheus_yml_with_am
-                 | default({'changed': False})
-                 | combine(prometheus_yml_no_am | default({'changed': False})) }}
 
         # The credential Prometheus presents on every node_exporter scrape.
         # mode 0644 (not 0600) is the SAME deliberate tradeoff as the Thanos
@@ -1150,9 +1159,9 @@
         # before this feature existed (spec §8.4, AC1).
         # Templated (not copy: src:) because the thresholds are inventory
         # inputs; the template keeps Prometheus's own {{ $labels }} syntax in
-        # raw blocks. Spec: docs/verification/prometheus.md C20.
+        # raw blocks. Spec: docs/verification/prometheus.md C23.
         - name: "Render host-health-alert-rules.yml (I/O stall, disk latency, metrics gap, login probe — issue #11)"
-          tags: [C20]
+          tags: [C23]
           ansible.builtin.template:
             src: templates/pilot-host-health-alert-rules.yml.j2
             dest: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
@@ -1161,7 +1170,7 @@
           when: prometheus_host_health_alert_rules_enabled | bool
 
         - name: "Remove host-health-alert-rules.yml when the host-health rules are disabled"
-          tags: [C20]
+          tags: [C23]
           ansible.builtin.file:
             path: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
             state: absent
@@ -1260,16 +1269,40 @@
             name: "{{ docker_network_name }}"
             state: present
 
-        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8, C12, C21
+        # Every config file below is a single-file bind mount: after `copy`
+        # replaces one, the running container keeps reading the old inode
+        # until it restarts (a /-/reload re-reads the old file too). The
+        # render results only cover a run that rendered the file AND got
+        # here; this also restarts a container still holding a file an
+        # earlier run rendered without restarting it.
+        # Spec: docs/verification/prometheus.md C20
+        - name: "Check whether pilot-prometheus still sees its current config files"
+          tags: [always, C20]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-prometheus
+
+        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8, C12, C20, C24
+        # The two prometheus.yml render tasks are mutually exclusive, so
+        # one of them is always skipped, and a skipped task registers
+        # `changed: false`. Check each one; never merge the two results
+        # (combine() let the skipped one's `changed: false` win, so with
+        # an Alertmanager configured a prometheus.yml change never
+        # restarted the container).
         - name: "Prometheus — run pilot-prometheus container"
-          tags: [C1, C3, C4, C7, C8, C12, C21]
+          tags: [C1, C3, C4, C7, C8, C12, C20, C24]
           community.docker.docker_container:
             name: pilot-prometheus
             image: "prom/prometheus:{{ prometheus_version }}"
             state: started
             restart_policy: unless-stopped
             restart: >-
-              {{ (prometheus_yml_result | default({})) is changed
+              {{ (prometheus_yml_with_am | default({})) is changed
+                 or (prometheus_yml_no_am | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool
                  or (alert_rules_result | default({})) is changed
                  or (snmp_alert_rules_result | default({})) is changed
                  or (host_health_alert_rules_result | default({})) is changed
@@ -1283,7 +1316,7 @@
             command: >-
               --config.file=/etc/prometheus/prometheus.yml
               --storage.tsdb.path=/prometheus
-              --storage.tsdb.retention.time={{ prometheus_retention_time }}
+              --storage.tsdb.retention.time={{ prometheus_retention_time | default('24h', true) }}
               --storage.tsdb.min-block-duration=2h
               --storage.tsdb.max-block-duration=2h
               --web.enable-lifecycle
@@ -1325,15 +1358,38 @@
           retries: 30
           delay: 2
 
-        # Spec: docs/verification/prometheus.md C2, C5, C6, C9
+        # objstore.yml is a single-file bind mount too (see the
+        # pilot-prometheus check above).
+        - name: "Check whether pilot-thanos-sidecar still sees its current objstore.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-thanos-sidecar
+
+        # Spec: docs/verification/prometheus.md C2, C5, C6, C9, C21, C22
+        # The Sidecar creates thanos/upload/<ulid> inside the TSDB dir
+        # before every upload and records shipped blocks in
+        # thanos.shipper.json there, so /prometheus must be writable by
+        # the Sidecar's user. thanosio/thanos runs as uid 1001 by default
+        # and the data dir is 65534:65534 0755, so the Sidecar runs as the
+        # Prometheus uid. With `:ro` every upload failed with
+        # "mkdir /prometheus/thanos: read-only file system"; dropping `:ro`
+        # alone fails with "permission denied" instead (both reproduced
+        # with these image versions, see prometheus.md §1.5).
         - name: "Thanos Sidecar — run pilot-thanos-sidecar container"
-          tags: [C2, C5, C6, C9]
+          tags: [C2, C5, C6, C9, C21, C22]
           community.docker.docker_container:
             name: pilot-thanos-sidecar
             image: "thanosio/thanos:{{ thanos_version }}"
+            user: "65534:65534"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (objstore_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (objstore_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -1344,7 +1400,7 @@
               --http-address=0.0.0.0:10902
               --grpc-address=0.0.0.0:10901
             volumes:
-              - "{{ prometheus_host_data_dir }}:/prometheus:ro"
+              - "{{ prometheus_host_data_dir }}:/prometheus"
               - "{{ thanos_config_dir }}/objstore.yml:/etc/thanos/objstore.yml:ro"
             ports:
               - "10901:10901"

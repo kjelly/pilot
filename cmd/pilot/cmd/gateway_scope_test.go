@@ -212,6 +212,36 @@ func TestBuildGatewayScopeArgsPlan(t *testing.T) {
 	}
 }
 
+// TestBuildGatewayScopeArgsVaultFileCannotReplaceTheScope locks the -e
+// order: Ansible gives the last -e precedence, so the vault file must come
+// before the scope, its validated host list and target_group.
+func TestBuildGatewayScopeArgsVaultFileCannotReplaceTheScope(t *testing.T) {
+	plan, err := buildGatewayScopeArgs("gpu", []string{"gpu-a.example.com"}, "inv.yml", "freeipa-server", "/vault/main.yaml", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automember, err := buildGatewayScopeAutomemberArgs("gpu", []string{"gpu-a.example.com"}, gatewayScopeAutomemberEnable, "inv.yml", "freeipa-server", "/vault/main.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{"reconcile": plan, "enable-auto": automember} {
+		vaultAt := -1
+		for i, arg := range args {
+			if arg == "@/vault/main.yaml" {
+				vaultAt = i
+			}
+		}
+		if vaultAt < 0 {
+			t.Fatalf("%s: no vault file in %q", name, args)
+		}
+		for i, arg := range args {
+			if (strings.HasPrefix(arg, "target_group=") || strings.HasPrefix(arg, "gateway_scope") || strings.HasPrefix(arg, `{"gateway_scope_hosts"`)) && i < vaultAt {
+				t.Errorf("%s: %s comes before the vault file, which would override it: %q", name, arg, args)
+			}
+		}
+	}
+}
+
 func TestBuildGatewayScopeArgsReconcileOmitsPlanOnly(t *testing.T) {
 	args, err := buildGatewayScopeArgs("gpu", []string{"gpu-a.example.com"}, "inv.yml", "all", "/vault/main.yaml", false)
 	if err != nil {

@@ -139,7 +139,7 @@ multi-run property.
   tags: [C6]
 - id: C7
   category: observability
-  check: the textfile collector file is present, declares the probe's metric families and was rewritten within the last 120 s (the daemon rewrites it every 15 s and after every round)
+  check: the textfile collector file is present, declares the probe's metric families and was rewritten within the last 120 s; apply also authenticates to the same-host node_exporter and proves a temporary textfile sample is exposed before removing the sample
   probe: |
     f=/var/lib/node_exporter/textfile/pilot_login_probe.prom
     grep -q '^# TYPE pilot_login_probe_success gauge$' "$f" || exit 1

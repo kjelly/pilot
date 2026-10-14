@@ -137,6 +137,23 @@ func TestRegression_HostHealthRulesKeepPrometheusTemplatesRaw(t *testing.T) {
 	}
 }
 
+func TestRegression_HostIOStallUsesFullPressureOnly(t *testing.T) {
+	tmpl, err := os.ReadFile(hostHealthTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(hostHealthPromTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmpl), "node_pressure_io_stalled_seconds_total{job=\"node\", kind=\"full\"}") {
+		t.Error("HostIOStall must select PSI kind=full; kind=some is not a full host I/O stall")
+	}
+	if !strings.Contains(string(fixture), "instance=\"io-some:9100\",pilot_host=\"io-some\",kind=\"some\"") {
+		t.Error("promtool fixture must include a high kind=some series to prove it stays out of HostIOStall")
+	}
+}
+
 // renderHostHealthRules renders the template with Ansible's own template
 // module (the engine prometheus-apply.yml uses) into dir.
 func renderHostHealthRules(t *testing.T, dir string, vars map[string]string) string {

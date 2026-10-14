@@ -666,6 +666,14 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    變數,不准在 play `vars:` 宣告;必填的讓既有 assert 擋,選填的用
    `_effective_` 別名加 `default()`。(§4.3 的 `stage`/`confirm_*` 預設值不在
    此限:它們由 `-e` 提供,而 `-e` 的優先順序高於 play vars。)
+   2026-10-13 第三次:15 支 playbook 在 play `vars:` 宣告了 60 個 contract
+   `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數(snmp-exporter
+   的 group_vars 範本整份沒有效果),`pilot deploy` 的 preflight 讀到 inventory
+   的值,Ansible 實際用的卻是 play 預設值。現在改在 stage gate 之後用一個標
+   `always` 的 `set_fact`(`x: "{{ x | default(...) }}"`)補預設值,並由全 repo
+   lint `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs`
+   鎖住:contract `groupVars` 與 example 的 key 都不准出現在 play `vars:`。
+   新增 groupVars 或 example key 時,預設值寫在這個 `set_fact`。
 4. **check mode 下被跳過的 task,register 出來的結果沒有 `stdout`**。直接對它做
    `from_json` 或取 `.stdout`/`.json`,在 `--check --diff` 會崩潰(`81f7090`
    Step 17/18)。依賴同一次 run 裡只被「模擬」的前置動作(建使用者、enroll)
@@ -769,6 +777,33 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    對全部 `playbooks/**` 檢查(`freeipa-dns-apply.yml` 的 `[ \\t]` 列在 allowlist:
    `ipa` 輸出只用空白縮排,結果正確,修正要另外對 freeipa-dns 實跑),
    `TestJinjaTemplateBackslashSemantics` 對本機 ansible-core 鎖住這個前提。
+13. **被 `when:` 跳過的 task 仍然會 register,值是 `{changed: false, skipped: true}`**:
+   用 `combine()` 合併兩個互斥 task 的 register 結果,最後合併的那個決定
+   `changed`。`prometheus-apply.yml` 這樣合併兩個 prometheus.yml render,
+   有 Alertmanager 時被跳過的「無 alerting」版本蓋掉 `changed: true`,設定
+   變更從未重啟 container(2026-10-12 正式環境:新的 dcgm-exporter target
+   寫進主機檔案好幾週,Prometheus 都沒 scrape)。**規則**:每個 register
+   結果各自用 `(x | default({})) is changed` 檢查再 `or`,不准合併;
+   `internal/spec/registered_result_combine_regression_test.go::TestRegression_RegisteredResultsAreNeverCombined`
+   對全部 `playbooks/**` 檢查。
+   同一次事故的另一半:**單檔 bind mount 在 `copy` 換掉檔案後仍指向舊 inode**。
+   `copy` 用 rename 寫檔,主機路徑換成新 inode,沒重啟的 container 繼續讀
+   舊檔,reload(Prometheus `/-/reload`、SIGHUP)也只重讀舊檔。只靠「這次
+   render 有沒有 changed」決定重啟,一旦某次 run render 了檔案卻沒走到重啟
+   (失敗、`--tags`、條件寫錯),之後每次 run 都看到檔案沒變,container 永遠
+   讀舊檔。container task 前 include `tasks/container-file-mount-drift.yml`
+   (比對 container 實際看到的檔案與主機檔案,不同就重啟),include 標
+   `always`、`when:` 跟 container task 相同,`restart:` 加上
+   `or container_mount_drift_stale | default(false) | bool`。目前 8 支
+   playbook 的 11 個 container 都已接上(prometheus、thanos-sidecar、
+   alertmanager、teams-proxy、loki、dcgm-exporter、promtail、seaweedfs、
+   snmp-exporter、thanos-store、thanos-compact);
+   `internal/spec/container_file_mount_regression_test.go::TestRegression_FileMountedContainersRestartOnStaleMounts`
+   對全部 `playbooks/**` 檢查:掛單一檔案的 docker_container 前面必須有
+   同一個 container 的檢查,`when:` 要相同,且 `restart:` 要讀它的結果。
+   這個檢查讀的 inspect 結果含 container 的 `Config.Env`,單獨掛載的密碼檔
+   hash 出來就是密碼的 SHA-256,所以它的 task 都是 `no_log`
+   (`TestRegression_ContainerFileMountDriftHidesWhatItReads`)。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -938,6 +973,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 | `group_vars/*.example.yml` 期待的 `dist/` artifact ↔ `images/Dockerfile.pilot-cli` | `cmd/pilot/cmd/dockerfile_artifact_consistency_test.go::TestDockerfileBakesEveryDistArtifactGroupVarsExpects` |
 | Go 常數 `pilotSSHConfig` ↔ `pilot-access-gateway-apply.yml` Step 12 的 ssh_config | `cmd/pilot/cmd/portal_ssh_config_sync_test.go::TestPilotSSHConfigMatchesApplyPlaybook` |
 | `docs/verification/*.md` 的 row ↔ apply playbook 的 tag | `cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`(見 §4.0) |
+| contract `groupVars` 與 `group_vars/<role>.example.yml` 的 key ↔ apply playbook 的 play `vars:`(不准宣告,見 §4.5 第 3 點) | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` |
 
 規則:
 
@@ -1401,4 +1437,6 @@ git status --short
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
-| 2026-10-13 | v1.47 | 新增第 41 支 apply playbook `login-probe-apply.yml`(GitHub issue #11:每站外部 SSH/PAM 登入探測，Go daemon `pilot-login-probe` 以最小權限 FreeIPA canary 帳號每 60 秒 spawn 系統 OpenSSH 真實登入、host-key 信任沿用 `sss_ssh_knownhostsproxy`、結果寫 node_exporter textfile;依賴 freeipa-client/host-monitoring sameHosts，opt-in、`site.include: false` 但 import 進 `site.yml`，比照 detection-engine);`prometheus-apply.yml` 新增第三份 Jinja 渲染的 rule file(I/O stall、磁碟延遲、監控資料缺口、login probe 各 stage 告警)，`alertmanager-apply.yml` 的 null/teams 設定加兩條 inhibit 規則;§4.3 清點更新為 41 支;§4.2 不需新增 restic 範例(只寫 `/etc` 與 textfile);Phase 0 真實擷取見 `docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md` | pilot |
+| 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
+| 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
+| 2026-10-14 | v1.49 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |

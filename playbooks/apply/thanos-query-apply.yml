@@ -58,10 +58,6 @@
     # undefined-variable error.
     thanos_s3_alias: thanos-s3-backend
     thanos_s3_port: 8333
-    thanos_s3_bucket: pilot-thanos-metrics
-    thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
-    thanos_query_store_group: prometheus
-    thanos_query_sidecar_grpc_port: 10901
     # Host-published port for Thanos Query's own HTTP API (what
     # dashboard-apply.yml's thanos_query_port talks to). Defaults to 10912,
     # NOT the container's internal 10902 listen port: a per-site
@@ -105,6 +101,18 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        thanos_query_sidecar_grpc_port: "{{ thanos_query_sidecar_grpc_port | default(10901) }}"
+        thanos_query_store_group: "{{ thanos_query_store_group | default('prometheus') }}"
+        thanos_s3_bucket: "{{ thanos_s3_bucket | default('pilot-thanos-metrics') }}"
+        thanos_s3_endpoint: "{{ thanos_s3_endpoint | default(thanos_s3_alias ~ ':' ~ thanos_s3_port) }}"
       tags: [always]
 
     - name: "Gate: required S3 secrets present (fail early, before any mutation)"
@@ -255,15 +263,29 @@
             name: "{{ docker_network_name }}"
             state: present
 
-        # Spec: docs/verification/thanos-query.md C2, C6, C8
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 13).
+        - name: "Check whether pilot-thanos-store still sees its current objstore.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-thanos-store
+
+        # Spec: docs/verification/thanos-query.md C2, C6, C8, C13
         - name: "Thanos Store Gateway — run pilot-thanos-store container"
-          tags: [C2, C6, C8]
+          tags: [C2, C6, C8, C13]
           community.docker.docker_container:
             name: pilot-thanos-store
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (objstore_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (objstore_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -279,18 +301,41 @@
               - "10903:10903"
               - "10904:10904"
 
+        # Same objstore.yml mount as pilot-thanos-store above.
+        - name: "Check whether pilot-thanos-compact still sees its current objstore.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-thanos-compact
+
         # Spec: docs/verification/thanos-query.md C3, C7
         # --wait makes this run continuously (not a one-shot batch job).
         # Only ONE compactor may ever run against a given bucket at a time
         # — this role is deliberately single-instance (thanos-query.md §1).
+        #
+        # Retention per resolution (thanos-query.md §1.5, C11): each
+        # resolution is deleted after its own period. Thanos refuses to
+        # start with raw <= 40h or 5m <= 10d. Raw defaults to the same 90d
+        # as the downsampled copies, never shorter: the Compactor only
+        # downsamples a raw block that spans at least 40h (its span, not
+        # its age), so a short-lived site's blocks and the last blocks of a
+        # site that stopped or changed labels exist only as raw and would
+        # be deleted with nothing left (scripts/thanos-retention-behavior-test.sh).
+        # These vars are read with `| default(...)` rather than declared in
+        # play vars so group_vars can override them (AGENTS.md §4.5 item 3).
         - name: "Thanos Compactor — run pilot-thanos-compact container"
-          tags: [C3, C7]
+          tags: [C3, C7, C11]
           community.docker.docker_container:
             name: pilot-thanos-compact
             image: "thanosio/thanos:{{ thanos_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (objstore_yml_result | default({})) is changed }}"
+            restart: >-
+              {{ (objstore_yml_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             networks:
               - name: "{{ docker_network_name }}"
             command: >-
@@ -300,13 +345,20 @@
               --http-address=0.0.0.0:10905
               --wait
               --wait-interval=5m
+              --retention.resolution-raw={{ thanos_compact_retention_raw | default('90d', true) }}
+              --retention.resolution-5m={{ thanos_compact_retention_5m | default('90d', true) }}
+              --retention.resolution-1h={{ thanos_compact_retention_1h | default('90d', true) }}
             volumes:
               - "{{ thanos_compact_data_dir }}:/var/lib/thanos-compact"
               - "{{ thanos_config_dir }}/objstore.yml:/etc/thanos/objstore.yml:ro"
             ports:
               - "10905:10905"
 
-        # Spec: docs/verification/thanos-query.md C1, C4, C5, C9, C10
+        # Spec: docs/verification/thanos-query.md C1, C4, C5, C9, C10, C12
+        # --query.auto-downsampling (C12): without it a range query that
+        # carries no max_source_resolution reads raw blocks only, so
+        # Grafana shows nothing once the Compactor has deleted raw data
+        # older than thanos_compact_retention_raw (thanos-query.md §1.5).
         # --store list is built from the Ansible inventory's
         # `prometheus` group, not a manually-maintained variable — see the
         # header comment. docker_container natively diffs its own
@@ -314,7 +366,7 @@
         # here (a site added/removed from inventory) is picked up on
         # re-apply without needing an extra restart-gate condition.
         - name: "Thanos Query — run pilot-thanos-query container"
-          tags: [C1, C4, C5, C9, C10]
+          tags: [C1, C4, C5, C9, C10, C12]
           community.docker.docker_container:
             name: pilot-thanos-query
             image: "thanosio/thanos:{{ thanos_version }}"
@@ -322,10 +374,13 @@
             restart_policy: unless-stopped
             networks:
               - name: "{{ docker_network_name }}"
+                aliases:
+                  - "{{ thanos_query_alias | default('thanos-query-backend', true) }}"
             command: >-
               query
               --http-address=0.0.0.0:10902
               --grpc-address=0.0.0.0:10901
+              --query.auto-downsampling
               --store=pilot-thanos-store:10903
               {% for h in groups[thanos_query_store_group] | default([]) %}
               --store={{ hostvars[h].ansible_host }}:{{ thanos_query_sidecar_grpc_port }}

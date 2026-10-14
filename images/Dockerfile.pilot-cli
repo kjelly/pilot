@@ -219,8 +219,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ANSIBLE_HOME, so it survives the redirection.
 # Use the system interpreter because this is an isolated controller image and
 # the installed Ansible entry points must remain directly available on PATH.
+# ansible-core is pinned to the 2.19 series: the playbook behaviour AGENTS.md
+# documents (ansible_run_tags as a tuple, rescue filtering under --tags,
+# include_tasks apply tags) was verified on 2.19.2, and an unpinned install
+# silently moved the image to 2.21. The CI playbook-lint job pins the same
+# series (cmd/pilot/cmd/ansible_core_pin_consistency_test.go).
 RUN uv pip install --system --no-cache \
-        ansible-core \
+        "ansible-core==2.19.*" \
         docker \
         psycopg2-binary \
     && ansible-galaxy collection install -p /usr/share/ansible/collections \

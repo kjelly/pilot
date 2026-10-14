@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -43,7 +44,23 @@ func TestRegression_FreeIPARealmReplacementContract(t *testing.T) {
 			t.Errorf("migration playbook must contain %q", required)
 		}
 	}
-	if strings.Contains(text, "state: absent\n") && strings.Contains(text, "freeipa_realm_replacement_backup_archive") {
-		t.Error("migration playbook must retain its backup archive; do not delete rollback material")
+	// No task may delete the rollback material: the archive, its directory
+	// or its link. (Removing /etc/hosts lines is fine.)
+	doc, _ := loadYAML(t, playbookPath).([]any)
+	for _, item := range doc {
+		play, _ := item.(map[string]any)
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				for _, key := range []string{"file", "ansible.builtin.file"} {
+					args, ok := task[key].(map[string]any)
+					if !ok || args["state"] != "absent" {
+						continue
+					}
+					if path := fmt.Sprint(args["path"]); strings.Contains(path, "freeipa_realm_replacement_backup") {
+						t.Errorf("%v deletes %s; the migration playbook must retain its rollback material", task["name"], path)
+					}
+				}
+			})
+		}
 	}
 }

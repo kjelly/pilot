@@ -54,15 +54,11 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    dcgm_exporter_version: "3.3.9-3.6.1-ubuntu22.04"
-    dcgm_exporter_port: 9400
     dcgm_exporter_webconfig_path: /etc/dcgm-exporter/web-config.yml
     dcgm_exporter_container_name: pilot-dcgm-exporter
-    # dcgm_exporter_basic_auth_user has a sane default (not a secret).
     # dcgm_exporter_basic_auth_password is DELIBERATELY NOT declared here —
     # same "don't shadow group_vars/host_vars with a hardcoded default"
     # reasoning as host-monitoring-apply.yml's node_exporter_basic_auth_password.
-    dcgm_exporter_basic_auth_user: prometheus
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -93,6 +89,17 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        dcgm_exporter_basic_auth_user: "{{ dcgm_exporter_basic_auth_user | default('prometheus') }}"
+        dcgm_exporter_port: "{{ dcgm_exporter_port | default(9400) }}"
+        dcgm_exporter_version: "{{ dcgm_exporter_version | default('3.3.9-3.6.1-ubuntu22.04') }}"
       tags: [always]
 
     # GPU detection runs BEFORE every other gate on purpose — a host with no
@@ -411,6 +418,18 @@
           when: dcgm_exporter_basic_auth_changed and not ansible_check_mode
           no_log: true
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 13).
+        - name: "Check whether {{ dcgm_exporter_container_name }} still sees its current web-config.yml"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: "{{ dcgm_exporter_container_name }}"
+
         # Active MIG instances require SYS_ADMIN plus an unrestricted seccomp
         # profile for DCGM CacheManager initialization.  Do not grant either
         # privilege on ordinary GPU hosts (see spec §5).
@@ -421,7 +440,9 @@
             image: "nvidia/dcgm-exporter:{{ dcgm_exporter_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (dcgm_exporter_webconfig_result | default({})) is changed }}"
+            restart: >-
+              {{ (dcgm_exporter_webconfig_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             runtime: nvidia
             capabilities: "{{ ['SYS_ADMIN'] if (dcgm_exporter_mig_enabled | bool) else omit }}"
             security_opts: "{{ ['seccomp=unconfined'] if (dcgm_exporter_mig_enabled | bool) else omit }}"

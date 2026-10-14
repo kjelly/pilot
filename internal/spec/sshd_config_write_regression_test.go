@@ -14,19 +14,11 @@ import (
 
 // sshdConfigWriteAllowlist lists sshd configuration writes that do not
 // follow TestRegression_SshdConfigWritesAreValidatedAndReverted yet, keyed
-// "<playbook>: <path>". Each needs its own vm-target run to fix; an entry
-// fails the test once the write follows the rule.
-var sshdConfigWriteAllowlist = map[string]string{
-	// Restarts sshd (not a reload): with another file in sshd_config.d
-	// broken, the restart fails and sshd stays down.
-	"playbooks/apply/freeipa-client-apply.yml: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf":               "written without validate, outside a block with a rescue, sshd restarted without sshd -t; needs a freeipa-client run on Ubuntu and AlmaLinux",
-	"playbooks/decommission/freeipa-client-decommission.yml: /etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf": "removed and sshd restarted without sshd -t; needs a host decommission run",
-	// The absent path: a failed sshd -t leaves the drop-in removed but
-	// loaded, and the reload is gated on the removal, so a later run never
-	// reloads. The policy left loaded is the restrictive one, and the host
-	// has already left pilot-transport-ready.
-	"playbooks/apply/pilot-access-target-policy-apply.yml: /etc/ssh/sshd_config.d/06-pilot-access-target-policy.conf": "the absent path's removal is not in a block with a rescue; needs a transport-topology run",
-}
+// "<playbook>: <path>". It is empty: freeipa-client's password-auth drop-in
+// (apply and decommission) and pilot-access-target-policy's absent path were
+// the last three, fixed on 2026-10-12. An entry needs a reason, and fails
+// the test once the write follows the rule.
+var sshdConfigWriteAllowlist = map[string]string{}
 
 // TestRegression_SshdConfigWritesAreValidatedAndReverted is a lint over the
 // real playbooks (playbooks/apply and playbooks/decommission; test
@@ -181,6 +173,28 @@ func sshdConfigWrites(doc any) []sshdConfigWrite {
 	return out
 }
 
+// sshdConfigWriteOf returns the module, the sshd configuration file and the
+// module args of a task that writes or removes that file, with a path that
+// is a single play var resolved; path is "" for any other task.
+func sshdConfigWriteOf(task map[string]any, vars map[string]any) (mod, path string, args map[string]any) {
+	mod, raw, ok := taskModule(task, sshdWriteModules)
+	if !ok {
+		return "", "", nil
+	}
+	args, _ = raw.(map[string]any)
+	path, _ = args["dest"].(string)
+	if path == "" {
+		path, _ = args["path"].(string)
+	}
+	if m := singleVarRE.FindStringSubmatch(path); m != nil {
+		path, _ = vars[m[1]].(string)
+	}
+	if !isSshdConfigPath(path) || (mod == "file" && args["state"] != "absent") {
+		return "", "", nil
+	}
+	return mod, path, args
+}
+
 func walkSshdWrites(list []any, vars map[string]any, inRescue, rescued bool, out *[]sshdConfigWrite) {
 	for i, item := range list {
 		task, ok := item.(map[string]any)
@@ -195,22 +209,8 @@ func walkSshdWrites(list []any, vars map[string]any, inRescue, rescued bool, out
 			walkSshdWrites(always, vars, inRescue, rescued, out)
 			continue
 		}
-		mod, raw, ok := taskModule(task, sshdWriteModules)
-		if !ok || inRescue {
-			continue
-		}
-		args, _ := raw.(map[string]any)
-		path, _ := args["dest"].(string)
-		if path == "" {
-			path, _ = args["path"].(string)
-		}
-		if m := singleVarRE.FindStringSubmatch(path); m != nil {
-			path, _ = vars[m[1]].(string)
-		}
-		if !isSshdConfigPath(path) {
-			continue
-		}
-		if mod == "file" && args["state"] != "absent" {
+		mod, path, args := sshdConfigWriteOf(task, vars)
+		if path == "" || inRescue {
 			continue
 		}
 		w := sshdConfigWrite{name: fmt.Sprint(task["name"]), path: path}
@@ -360,5 +360,529 @@ func TestRegression_SshdConfigWriteAllowlistPathsExist(t *testing.T) {
 		if _, err := os.Stat("../../" + rel); err != nil {
 			t.Errorf("sshdConfigWriteAllowlist: %s: %v", rel, err)
 		}
+	}
+}
+
+// containsTask reports whether item, or a task in its block, rescue or
+// always sections at any depth, satisfies pred.
+func containsTask(item any, pred func(map[string]any) bool) bool {
+	task, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	if pred(task) {
+		return true
+	}
+	for _, key := range []string{"block", "rescue", "always"} {
+		list, _ := task[key].([]any)
+		if slices.ContainsFunc(list, func(sub any) bool { return containsTask(sub, pred) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// sshdStepsAfterReload finds, in each block whose rescue puts sshd
+// configuration back, the tasks that run after the one that reloads or
+// restarts a service. It returns them and the number of such blocks.
+func sshdStepsAfterReload(doc any) (problems []string, blocks int) {
+	var walk func(list []any, vars map[string]any)
+	walk = func(list []any, vars map[string]any) {
+		for _, item := range list {
+			task, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			block, _ := task["block"].([]any)
+			rescue, _ := task["rescue"].([]any)
+			putsBack := slices.ContainsFunc(rescue, func(sub any) bool {
+				return containsTask(sub, func(t map[string]any) bool {
+					_, path, _ := sshdConfigWriteOf(t, vars)
+					return path != ""
+				})
+			})
+			if putsBack {
+				blocks++
+				reload := slices.IndexFunc(block, func(sub any) bool {
+					return containsTask(sub, func(t map[string]any) bool {
+						_, _, ok := taskModule(t, sshdServiceModules)
+						return ok
+					})
+				})
+				if reload >= 0 {
+					for _, after := range block[reload+1:] {
+						a, _ := after.(map[string]any)
+						r, _ := block[reload].(map[string]any)
+						problems = append(problems, fmt.Sprintf("%q runs after %q in %q, whose rescue puts sshd's configuration back although sshd has already loaded the new one",
+							fcName(a), fcName(r), fmt.Sprint(task["name"])))
+					}
+				}
+			}
+			for _, key := range []string{"block", "rescue", "always"} {
+				sub, _ := task[key].([]any)
+				walk(sub, vars)
+			}
+		}
+	}
+	items, _ := doc.([]any)
+	isPlaybook := slices.ContainsFunc(items, func(item any) bool {
+		m, _ := item.(map[string]any)
+		_, ok := m["hosts"]
+		return ok
+	})
+	if !isPlaybook {
+		walk(items, nil)
+		return problems, blocks
+	}
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		vars, _ := play["vars"].(map[string]any)
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+			list, _ := play[section].([]any)
+			walk(list, vars)
+		}
+	}
+	return problems, blocks
+}
+
+// TestRegression_SshdReloadEndsItsRollbackBlock: pilot-access-target-policy's
+// absent path removed its pre-change snapshot after the reload, in the block
+// whose rescue puts the drop-in back. When that removal failed, sshd already
+// ran without the policy, the rescue put the drop-in back on disk without a
+// reload, and the run said "sshd was not reloaded"; sshd's next restart
+// would load the policy again (PR #50 review). The present path's
+// post-reload `sshd -t` sat in its block the same way. In a block whose
+// rescue puts sshd configuration back, the reload must be the last step.
+func TestRegression_SshdReloadEndsItsRollbackBlock(t *testing.T) {
+	blocks := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(path, "../../")
+		if !strings.HasPrefix(rel, "playbooks/apply/") && !strings.HasPrefix(rel, "playbooks/decommission/") {
+			continue
+		}
+		problems, n := sshdStepsAfterReload(loadYAML(t, path))
+		blocks += n
+		for _, p := range problems {
+			t.Errorf("%s: %s", rel, p)
+		}
+	}
+	// Install and removal for the gateway, the Directory and target-policy,
+	// and the two freeipa-client ones.
+	if blocks < 8 {
+		t.Fatalf("found only %d blocks that put sshd configuration back; the detection is broken", blocks)
+	}
+}
+
+func TestSshdStepsAfterReload(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string // substrings, one per expected problem
+	}{
+		{"the PR #50 review: snapshot removal after the reload", `
+- hosts: all
+  vars:
+    dropin: /etc/ssh/sshd_config.d/06-x.conf
+  tasks:
+    - name: remove the policy
+      block:
+        - name: remove
+          file: {path: "{{ dropin }}", state: absent}
+        - name: check
+          command: {argv: [sshd, -t]}
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+        - name: remove the snapshot
+          file: {path: /etc/ssh/sshd_config.d/06-x.conf.bak, state: absent}
+      rescue:
+        - name: put back
+          copy: {dest: "{{ dropin }}", content: x}
+`, []string{`"remove the snapshot" runs after "reload"`}},
+		{"a check after the reload, even when the rescue reloads", `
+- hosts: all
+  tasks:
+    - name: install
+      block:
+        - name: write
+          ansible.builtin.copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: check
+          ansible.builtin.command: {argv: [sshd, -t]}
+        - name: reload
+          ansible.builtin.systemd: {name: ssh, state: reloaded}
+        - name: check again
+          ansible.builtin.command: {argv: [sshd, -t]}
+      rescue:
+        - name: put back
+          ansible.builtin.file: {path: /etc/ssh/sshd_config.d/06-x.conf, state: absent}
+        - name: reload
+          ansible.builtin.systemd: {name: ssh, state: reloaded}
+`, []string{`"check again" runs after "reload"`}},
+		{"the reload in a nested block, then a step", `
+- hosts: all
+  tasks:
+    - name: outer
+      block:
+        - name: write
+          copy: {dest: /etc/ssh/sshd_config, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: inner
+          block:
+            - name: check
+              command: {argv: [sshd, -t]}
+            - name: restart
+              service: {name: sshd, state: restarted}
+        - name: later
+          debug: {msg: x}
+      rescue:
+        - block:
+            - name: put back
+              copy: {dest: /etc/ssh/sshd_config, content: y}
+`, []string{`"later" runs after "inner"`}},
+		{"the reload last; later steps outside the block", `
+- hosts: all
+  tasks:
+    - name: install
+      block:
+        - name: write
+          copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: x, validate: /usr/sbin/sshd -t -f %s}
+        - name: check
+          command: {argv: [sshd, -t]}
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+      rescue:
+        - name: put back
+          copy: {dest: /etc/ssh/sshd_config.d/06-x.conf, content: y}
+    - name: remove the snapshot
+      file: {path: /etc/ssh/sshd_config.d/06-x.conf.bak, state: absent}
+`, nil},
+		{"a rescue that does not touch sshd configuration", `
+- hosts: all
+  tasks:
+    - name: decommission
+      block:
+        - name: reload
+          systemd: {name: ssh, state: reloaded}
+        - name: later
+          debug: {msg: x}
+      rescue:
+        - name: diagnostics
+          fail: {msg: x}
+`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc any
+			if err := yaml.Unmarshal([]byte(tc.yaml), &doc); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := sshdStepsAfterReload(doc)
+			if len(got) != len(tc.want) {
+				t.Fatalf("problems = %q, want %d matching %q", got, len(tc.want), tc.want)
+			}
+			for i, want := range tc.want {
+				if !strings.Contains(got[i], want) {
+					t.Errorf("problem %d = %q, want it to mention %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+// ipaInstallerAllowlist lists FreeIPA installer runs that do not check sshd's
+// configuration first yet, keyed "<playbook>: <task name>". It is empty: the
+// freeipa-server, freeipa-server-replica and freeipa-realm-replacement runs
+// were the last five, fixed on 2026-10-12. An entry needs a reason, and fails
+// the test once it is fixed.
+var ipaInstallerAllowlist = map[string]string{}
+
+var ipaInstallers = []string{"ipa-client-install", "ipa-server-install", "ipa-replica-install"}
+
+// runsIpaInstaller reports whether a task runs one of the FreeIPA installers,
+// named in its command or in the task vars its argv is built from.
+func runsIpaInstaller(task map[string]any) bool {
+	_, args, ok := taskModule(task, sshdCommandModules)
+	if !ok {
+		return false
+	}
+	var text string
+	switch a := args.(type) {
+	case string:
+		text = a
+	case map[string]any:
+		text = fmt.Sprint(a["argv"], " ", a["cmd"])
+	}
+	text += " " + fmt.Sprint(task["vars"])
+	for _, name := range ipaInstallers {
+		if strings.Contains(text, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ipaInstallersWithoutSshdCheck returns the names of installer tasks with no
+// whole-configuration `sshd -t` before them in the play: earlier in their
+// task list, in an enclosing list before their block, or in the play's
+// pre_tasks before its tasks.
+func ipaInstallersWithoutSshdCheck(doc any) []string {
+	var out []string
+	var walk func(list []any, checked bool) bool
+	walk = func(list []any, checked bool) bool {
+		for _, item := range list {
+			task, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if runsSshdCheck(task) {
+				checked = true
+			}
+			if runsIpaInstaller(task) && !checked {
+				out = append(out, fmt.Sprint(task["name"]))
+			}
+			block, _ := task["block"].([]any)
+			afterBlock := walk(block, checked)
+			for _, key := range []string{"rescue", "always"} {
+				sub, _ := task[key].([]any)
+				walk(sub, checked)
+			}
+			checked = afterBlock
+		}
+		return checked
+	}
+	items, _ := doc.([]any)
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		checked := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			list, _ := play[section].([]any)
+			checked = walk(list, checked)
+		}
+		handlers, _ := play["handlers"].([]any)
+		walk(handlers, false)
+	}
+	return out
+}
+
+// TestRegression_IpaInstallersRunAfterAnSshdCheck: ipa-client-install
+// (enrollment and --uninstall) and ipa-server-install restart sshd. With a
+// broken file in sshd_config.d that restart fails and sshd stays down;
+// ipa-client-install --uninstall then stopped half done (SSSD's
+// configuration removed, /etc/ipa/default.conf still there) on AlmaLinux 9
+// (2026-10-12). ipa-replica-install did not restart sshd when promoting an
+// enrolled client, but it is listed too: on a host that is not a client
+// yet it sets one up first. Every installer run in playbooks/apply and
+// playbooks/decommission needs a whole-configuration `sshd -t` earlier in
+// the play, and before the play's first package install: on a fresh
+// AlmaLinux 9 host the `dnf install` of the FreeIPA packages restarted sshd
+// itself (systemd "Queuing reload/restart jobs for marked units"), before
+// any check placed next to the installer could run.
+func TestRegression_IpaInstallersRunAfterAnSshdCheck(t *testing.T) {
+	found := map[string]bool{}
+	installers := 0
+	for _, path := range playbookFiles(t) {
+		rel := strings.TrimPrefix(path, "../../")
+		if !strings.HasPrefix(rel, "playbooks/apply/") && !strings.HasPrefix(rel, "playbooks/decommission/") {
+			continue
+		}
+		doc := loadYAML(t, path)
+		var all []string
+		items, _ := doc.([]any)
+		for _, item := range items {
+			play, _ := item.(map[string]any)
+			for _, section := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+				walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+					if runsIpaInstaller(task) {
+						all = append(all, fmt.Sprint(task["name"]))
+					}
+				})
+			}
+		}
+		installers += len(all)
+		for _, name := range ipaInstallersWithoutSshdCheck(doc) {
+			key := rel + ": " + name
+			found[key] = true
+			if _, ok := ipaInstallerAllowlist[key]; !ok {
+				t.Errorf("%s: runs a FreeIPA installer, which restarts sshd, with no `sshd -t` before it in the play", key)
+			}
+		}
+		for _, name := range packageInstallsBeforeSshdCheck(doc) {
+			key := rel + ": " + name
+			found[key] = true
+			if _, ok := ipaInstallerAllowlist[key]; !ok {
+				t.Errorf("%s; the package transaction can restart sshd, so check sshd -t first", key)
+			}
+		}
+	}
+	for key := range ipaInstallerAllowlist {
+		if !found[key] {
+			t.Errorf("ipaInstallerAllowlist: %s checks sshd first now (or no longer exists); remove it", key)
+		}
+	}
+	// freeipa-client, its decommission, the server, the replica (2) and the
+	// realm replacement (2).
+	if installers < 7 {
+		t.Fatalf("found only %d FreeIPA installer runs; the detection is broken", installers)
+	}
+}
+
+// installsPackages reports whether a task installs packages: dnf, yum, apt,
+// package, or an include of the shared apt framework.
+func installsPackages(task map[string]any) bool {
+	if _, _, ok := taskModule(task, []string{"dnf", "yum", "apt", "package"}); ok {
+		return true
+	}
+	_, inc, ok := taskModule(task, []string{"include_tasks", "import_tasks"})
+	return ok && strings.Contains(fmt.Sprint(inc), "apt-package-install.yml")
+}
+
+// packageInstallsBeforeSshdCheck returns, for each play that runs a FreeIPA
+// installer, the package installs that come before its first
+// whole-configuration `sshd -t`, as "<task> installs packages before the
+// sshd -t".
+func packageInstallsBeforeSshdCheck(doc any) []string {
+	var out []string
+	items, _ := doc.([]any)
+	for _, item := range items {
+		play, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		runs := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				if runsIpaInstaller(task) {
+					runs = true
+				}
+			})
+		}
+		if !runs {
+			continue
+		}
+		checked := false
+		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
+			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+				if runsSshdCheck(task) {
+					checked = true
+				}
+				if !checked && installsPackages(task) {
+					out = append(out, fmt.Sprintf("%v installs packages before the sshd -t", task["name"]))
+				}
+			})
+		}
+	}
+	return out
+}
+
+func TestPackageInstallsBeforeSshdCheck(t *testing.T) {
+	var doc any
+	if err := yaml.Unmarshal([]byte(`
+- hosts: fresh
+  tasks:
+    - name: packages
+      dnf: {name: ipa-server}
+    - name: check
+      command: {argv: [sshd, -t]}
+    - name: install
+      command: {argv: [ipa-server-install, -U]}
+- hosts: checked-first
+  pre_tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+  tasks:
+    - name: packages
+      include_tasks: {file: tasks/apt-package-install.yml}
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+- hosts: no-installer
+  tasks:
+    - name: packages
+      apt: {name: curl}
+`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	got := packageInstallsBeforeSshdCheck(doc)
+	if fmt.Sprint(got) != "[packages installs packages before the sshd -t]" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestIpaInstallersWithoutSshdCheck(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{"no check", `
+- hosts: all
+  tasks:
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+`, []string{"install"}},
+		{"check earlier in the list", `
+- hosts: all
+  tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+    - name: install
+      command: {argv: [ipa-client-install, -U]}
+`, nil},
+		{"check after the installer does not count", `
+- hosts: all
+  tasks:
+    - name: install
+      command: {argv: [ipa-client-install, --uninstall, -U]}
+    - name: check
+      command: {argv: [sshd, -t]}
+`, []string{"install"}},
+		{"check in pre_tasks covers a block in tasks", `
+- hosts: all
+  pre_tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+  tasks:
+    - block:
+        - name: install
+          command: {argv: [ipa-client-install, -U]}
+      rescue:
+        - name: restore
+          command: {argv: [tar, -xpf, a]}
+`, nil},
+		{"installer named in task vars; a check in another play does not count", `
+- hosts: a
+  tasks:
+    - name: check
+      command: {argv: [sshd, -t]}
+- hosts: b
+  tasks:
+    - name: install
+      command: {argv: "{{ args }}"}
+      vars:
+        base: [ipa-server-install, -U]
+`, []string{"install"}},
+		{"sshd -t -f checks one file only", `
+- hosts: all
+  tasks:
+    - name: check one file
+      command: {argv: [sshd, -t, -f, /tmp/x]}
+    - name: install
+      command: {argv: [ipa-replica-install, -U]}
+`, []string{"install"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc any
+			if err := yaml.Unmarshal([]byte(tc.yaml), &doc); err != nil {
+				t.Fatal(err)
+			}
+			got := ipaInstallersWithoutSshdCheck(doc)
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

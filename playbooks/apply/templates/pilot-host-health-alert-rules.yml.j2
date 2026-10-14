@@ -21,7 +21,7 @@ groups:
       - alert: HostIOStall
         expr: |
           max by (pilot_host) (
-            rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])
+            rate(node_pressure_io_stalled_seconds_total{job="node", kind="full"}[5m])
           ) > {{ host_io_stall_ratio_threshold }}
         for: {{ host_io_stall_for }}
         labels:

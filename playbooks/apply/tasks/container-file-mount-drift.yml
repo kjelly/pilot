@@ -1,0 +1,128 @@
+# Does a running container still see the current content of each regular
+# file it bind-mounts from the host?
+#
+# ansible.builtin.copy replaces a file by renaming a temp file over it, so
+# the path gets a new inode. A single-file bind mount keeps pointing at the
+# inode that existed when the container started: the host shows the new
+# content, the container keeps reading the old file, and a config reload
+# (Prometheus /-/reload, SIGHUP) re-reads the old file too. Only a container
+# restart re-resolves the source path. Apply playbooks restart when the
+# render task reports `changed`, but that only covers a run that both
+# rendered the file and reached the container task. Once a run renders the
+# file and then fails, is cut short by --tags, or gets its restart condition
+# wrong, every later run sees the file unchanged and never restarts.
+# prometheus-apply.yml hit this in production (2026-10-12): a new
+# dcgm-exporter target was in the host's prometheus.yml, the container kept
+# the copy it loaded weeks earlier. This file reads the container's own
+# view, so the caller can restart whenever the two differ, whatever an
+# earlier run did.
+#
+# Read-only. Directory bind mounts are skipped (a directory mount sees
+# files renamed into it). Hashes the container's files on the host through
+# /proc/<pid>/root as root (the play needs become), so it works for images
+# that ship no shell or coreutils. sha256sum, not ansible.builtin.stat:
+# stat resolves the path, /proc/<pid>/root reads back as "/", and it ends
+# up looking at the host's /etc/... instead (ansible-core 2.19.2, "[Errno 2]
+# No such file or directory: b'/etc/prometheus/prometheus.yml'").
+#
+# Caller contract:
+#   include with: vars: { container_mount_drift_name: "<container name>" }
+#   result:       container_mount_drift_stale (bool)
+#                 container_mount_drift_paths (container-side paths that differ)
+#   A container that does not exist or is not running is never stale:
+#   creating or starting it mounts the current files.
+#
+# no_log on every task that holds what docker or the files returned: the
+# inspect result carries the container's Config.Env (the Teams proxy's
+# TEAMS_WEBHOOK_URL), and a password file mounted on its own (Prometheus's
+# basic-auth password files) hashes to the unsalted SHA-256 of the password.
+# The callers hide those values where they set them (the Teams proxy's
+# container task, the password files' render tasks). The report at the end
+# lists only container paths.
+#
+# Included once per container, several times per play: reset the result
+# first so one container's answer never carries over to the next
+# (AGENTS.md §4.5 item 2).
+- name: "Reset container_mount_drift_* before inspecting {{ container_mount_drift_name }}"
+  ansible.builtin.set_fact:
+    container_mount_drift_stale: false
+    container_mount_drift_paths: []
+
+- name: "Inspect {{ container_mount_drift_name }}"
+  community.docker.docker_container_info:
+    name: "{{ container_mount_drift_name }}"
+  register: container_mount_drift_info
+  failed_when: false
+  no_log: true
+
+# The inspect above is no_log, which would also hide why it failed (docker
+# down, no permission on the socket). Its msg carries only the error.
+# failed_when: false resets `failed`, so test for `exists`, which every
+# successful inspect returns.
+- name: "Fail if {{ container_mount_drift_name }} could not be inspected"
+  ansible.builtin.fail:
+    msg: >-
+      docker could not inspect {{ container_mount_drift_name }}:
+      {{ container_mount_drift_info.msg | default('no error message') }}
+  when: container_mount_drift_info.exists is not defined
+
+- name: "Stat the host side of {{ container_mount_drift_name }}'s bind mounts"
+  vars:
+    container_mount_drift_state: "{{ (container_mount_drift_info.container or {}).get('State') or {} }}"
+  ansible.builtin.stat:
+    path: "{{ item.Source }}"
+    get_checksum: true
+    checksum_algorithm: sha256
+    get_mime: false
+    get_attributes: false
+  loop: >-
+    {{ ((container_mount_drift_info.container or {}).get('Mounts') or [])
+       | selectattr('Type', 'equalto', 'bind') | list
+       if (container_mount_drift_state.get('Running', false) and (container_mount_drift_state.get('Pid', 0) | int) > 0)
+       else [] }}
+  loop_control:
+    label: "{{ item.Source }}"
+  register: container_mount_drift_host
+  no_log: true
+
+# A path the container cannot read (rc != 0, e.g. "No such file or
+# directory") counts as stale below: restarting is harmless, serving an
+# unknown file is not.
+- name: "Hash what {{ container_mount_drift_name }} sees at its file mounts"
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - "--"
+      - "/proc/{{ container_mount_drift_info.container.State.Pid }}/root{{ item.item.Destination }}"
+  loop: "{{ (container_mount_drift_host.results | default([])) | selectattr('stat', 'defined') | selectattr('stat.isreg', 'defined') | selectattr('stat.isreg') | list }}"
+  loop_control:
+    label: "{{ item.item.Destination }}"
+  register: container_mount_drift_seen
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: "Record the file mounts whose content {{ container_mount_drift_name }} no longer sees"
+  ansible.builtin.set_fact:
+    container_mount_drift_paths: "{{ container_mount_drift_paths + [item.item.item.Destination] }}"
+  loop: "{{ container_mount_drift_seen.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.item.Destination }}"
+  # sha256sum prints "<hex>  <path>".
+  when: >-
+    item.rc != 0
+    or (item.stdout.split() | first | default('')) != item.item.stat.checksum
+  no_log: true
+
+- name: "Decide whether {{ container_mount_drift_name }} needs a restart to see its files"
+  ansible.builtin.set_fact:
+    container_mount_drift_stale: "{{ container_mount_drift_paths | length > 0 }}"
+
+- name: "Report stale file mounts in {{ container_mount_drift_name }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ container_mount_drift_name }} is still reading an older copy of
+      {{ container_mount_drift_paths | join(', ') }} than the host has; the
+      container will be restarted so the bind mount picks up the current file.
+  when: container_mount_drift_stale | bool

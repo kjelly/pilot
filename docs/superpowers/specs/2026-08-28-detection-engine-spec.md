@@ -1003,6 +1003,18 @@ eviction：
 bucket_time < evaluation_time - 24h
 → delete
 
+2026-10-13 修正：以上 wall-clock eviction 適用於 normal 狀態。
+candidate / firing / recovering 期間依 §16 凍結學習時，也必須保留已建立的
+正常 reference window；不得只停止寫入卻繼續淘汰，否則長時間異常會使
+baseline 不足 120 buckets，評分與恢復流程永久停止。
+reference 仍是凍結前的最多 24 小時樣本，不納入異常期間的新樣本。
+重啟時，firing / recovering episode 載入各 feature 最後正常樣本往前
+24 小時的持久 baseline，即使它已超過當下的 24 小時 cutoff；其他 subject
+仍只載入最近 24 小時樣本。有效 telemetry 才能推進恢復，資料缺失不得解除
+告警。episode 解除、回到 normal 後，恢復 wall-clock eviction 與正常學習。
+此修正針對實際部署中舊告警只剩 heartbeat_refresh 的問題，不放寬觸發、
+恢復或 telemetry validity 門檻。
+
 15. robust-baseline-v1 Formula
 
 對 feature f history H_f：

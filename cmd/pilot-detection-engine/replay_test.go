@@ -115,3 +115,38 @@ func TestRunReplay_RejectsEndBeforeStart(t *testing.T) {
 		t.Fatal("expected an error when --end is before --start")
 	}
 }
+
+func TestRunReplay_ResolvesAnomalyLastingOver24Hours(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const quiet, spike, recovery = 121, 1500, 8
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := make([][2]any, 0, quiet+spike+recovery)
+		for i := 0; i < quiet+spike+recovery; i++ {
+			value := "0.1"
+			if i >= quiet && i < quiet+spike {
+				value = "0.99"
+			}
+			values = append(values, [2]any{start.Unix() + int64(i)*60, value})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": "success", "data": map[string]any{
+				"resultType": "matrix", "result": []map[string]any{{
+					"metric": map[string]string{"pilot_host": "web-1", "site": "site-a"}, "values": values,
+				}},
+			},
+		}); err != nil {
+			t.Errorf("encode range response: %v", err)
+		}
+	}))
+	defer server.Close()
+	var out bytes.Buffer
+	if err := runReplay(context.Background(), &out, detection.NewThanosClient(server.URL, detection.QueryTimeout),
+		replayTestProfile(), start, start.Add((quiet+spike+recovery)*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	transitions, _, _ := strings.Cut(out.String(), "\nsummary:\n")
+	if !strings.Contains(transitions, "create_critical") || !strings.Contains(transitions, "enter_recovering") || !strings.Contains(transitions, "resolve") {
+		t.Fatalf("long-running replay did not complete fire -> recovery -> resolution:\n%s", out.String())
+	}
+}

@@ -1,10 +1,8 @@
 package spec
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -143,92 +141,12 @@ func TestRegexArgsWithDoubledBackslashes(t *testing.T) {
 }
 
 // runRealmPinTasks runs the realm replacement's two lineinfile pins on
-// localhost against hosts and sssdConf, with the paths, owner/group and
-// notify dropped or redirected. It returns the exit code and, per task,
-// whether it changed anything and its failure message.
+// localhost against hosts and sssdConf.
 func runRealmPinTasks(t *testing.T, hosts, sssdConf string) (int, map[string]bool, []string) {
 	t.Helper()
-	if _, err := exec.LookPath("ansible-playbook"); err != nil {
-		t.Skipf("ansible-playbook not installed: %v", err)
-	}
-	doc, _ := loadYAML(t, "../../playbooks/apply/freeipa-realm-replacement-apply.yml").([]any)
-	play := doc[0].(map[string]any)
-	var keep []any
-	walkTaskTree(play["tasks"], nil, func(task map[string]any, _ []string) {
-		name, _ := task["name"].(string)
-		if name != "Realm replacement — pin new server FQDN before enrollment" &&
-			name != "Realm replacement — pin SSSD to the new server" {
-			return
-		}
-		args := map[string]any{}
-		for k, v := range task["ansible.builtin.lineinfile"].(map[string]any) {
-			if k != "owner" && k != "group" {
-				args[k] = v
-			}
-		}
-		if args["path"] == "/etc/hosts" {
-			args["path"] = hosts
-		} else {
-			args["path"] = sssdConf
-		}
-		keep = append(keep, map[string]any{"name": name, "ansible.builtin.lineinfile": args})
-	})
-	if len(keep) != 2 {
-		t.Fatalf("found %d pin tasks, want 2", len(keep))
-	}
-	body, err := yaml.Marshal([]map[string]any{{
-		"hosts": "localhost", "connection": "local", "gather_facts": false, "become": false,
-		"vars": map[string]any{
-			"freeipa_realm_replacement_new_server_fqdn": "ipa1.new.example.test",
-			"freeipa_realm_replacement_new_server_ip":   "192.0.2.10",
-		},
-		"tasks": keep,
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "pins.yml")
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("ansible-playbook", "-i", "localhost,", path)
-	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1",
-		"ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False")
-	out, runErr := cmd.Output()
-	rc := 0
-	if ee, ok := runErr.(*exec.ExitError); ok {
-		rc = ee.ExitCode()
-	} else if runErr != nil {
-		t.Fatalf("ansible-playbook did not run: %v", runErr)
-	}
-	var cb struct {
-		Plays []struct {
-			Tasks []struct {
-				Task  struct{ Name string } `json:"task"`
-				Hosts map[string]struct {
-					Changed bool   `json:"changed"`
-					Failed  bool   `json:"failed"`
-					Msg     string `json:"msg"`
-				} `json:"hosts"`
-			} `json:"tasks"`
-		} `json:"plays"`
-	}
-	if err := json.Unmarshal(out, &cb); err != nil {
-		t.Fatalf("parse JSON callback output: %v\n%s", err, out)
-	}
-	changed := map[string]bool{}
-	var failures []string
-	for _, p := range cb.Plays {
-		for _, task := range p.Tasks {
-			for _, h := range task.Hosts {
-				changed[task.Task.Name] = h.Changed
-				if h.Failed {
-					failures = append(failures, task.Task.Name+": "+h.Msg)
-				}
-			}
-		}
-	}
-	return rc, changed, failures
+	return runRealmTasks(t,
+		[]string{"Realm replacement — pin new server FQDN before enrollment", "Realm replacement — pin SSSD to the new server"},
+		map[string]string{"/etc/hosts": hosts, "/etc/sssd/sssd.conf": sssdConf}, nil)
 }
 
 // TestRegression_RealmReplacementPinsReplaceTheirLines: the /etc/hosts pin

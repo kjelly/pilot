@@ -14,6 +14,8 @@
 #  探測主機（login-probe group）必須同時是 freeipa-client（提供
 #  sss_ssh_knownhostsproxy 的 host-key 信任鏈）與 host-monitoring（提供
 #  node_exporter textfile collector）；contract 以 sameHosts 依賴鎖住。
+#  apply 會使用 host-monitoring 的 node_exporter_basic_auth_user/password
+#  查詢 /metrics，確認執行中的 exporter 確實載入該 textfile collector。
 #  探測器每 login_probe_interval 以 canary 帳號用 OpenSSH 真實登入每個
 #  target 並執行 login_probe_command；canary 帳號、公鑰與只允許 sshd 的
 #  HBAC 規則由 freeipa-identity roster 管理（見 spec §canary）。
@@ -37,8 +39,8 @@ login_probe_artifact_sha256: ""
 #
 # 要明確指定（覆寫自動展開）時：
 # login_probe_targets:
-#   - {name: web01, host: web01.ipa.pilot.internal, port: 22}
-#   - {name: web02, host: web02.ipa.pilot.internal}
+#   - web01=web01.ipa.pilot.internal:22
+#   - web02=web02.ipa.pilot.internal
 
 # 通常不用改，會沿用 playbook 內建預設：
 # login_probe_interval: 60s          # 每輪間隔（issue #11 R1：60 秒）

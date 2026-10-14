@@ -12,10 +12,14 @@ tests:
     interval: 1m
     input_series:
       # PSI full stall: 30s stalled per minute = 0.5 > 0.25 (fires); 6s = 0.1 (quiet)
-      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy"}'
+      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy",kind="full"}'
         values: '0+30x40'
-      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm"}'
+      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-calm:9100",pilot_host="io-calm",kind="full"}'
         values: '0+6x40'
+      # PSI some can be high while no task is fully stalled; it must never
+      # be presented as the full-stall ratio used by HostIOStall.
+      - series: 'node_pressure_io_stalled_seconds_total{job="node",instance="io-some:9100",pilot_host="io-some",kind="some"}'
+        values: '0+50x40'
       # Latency: 0.5s of read time per second over 2 reads/s = 250ms (fires).
       - series: 'node_disk_read_time_seconds_total{job="node",instance="io-busy:9100",pilot_host="io-busy",device="vda"}'
         values: '0+30x40'

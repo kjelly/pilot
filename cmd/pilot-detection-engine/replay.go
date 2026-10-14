@@ -152,6 +152,16 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 				continue // spec §20.7: invalid cycle advances nothing
 			}
 
+			lc, ok := lifecycles[host]
+			if !ok {
+				lc = detection.NewHostLifecycleWithPolicy(profile.EffectiveLifecyclePolicy())
+				lifecycles[host] = lc
+			}
+			if lc.State == detection.StateNormal {
+				for name := range current {
+					baselines.Evict(host, name, bucket)
+				}
+			}
 			history := map[string][]float64{}
 			for name := range current {
 				history[name] = baselines.History(host, name)
@@ -162,10 +172,15 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 				detection.HostFeatureScoreResult{Valid: false}, // log: out of scope for this prototype
 			)
 
-			lc, ok := lifecycles[host]
-			if !ok {
-				lc = detection.NewHostLifecycleWithPolicy(profile.EffectiveLifecyclePolicy())
-				lifecycles[host] = lc
+			if local.Valid {
+				fused := detection.FuseLocalOnly(local)
+				transition := lc.Advance(profile.LifecycleScore(fused, current))
+				if transition.Action != detection.ActionNone {
+					counts[transition.Action]++
+					fmt.Fprintf(out, "%s  %-20s %-20s score=%.3f category=%q %s -> %s (severity=%s)\n",
+						bucketTime.Format(time.RFC3339), host, transition.Action, fused.Score, fused.Category,
+						transition.FromState, transition.ToState, transition.Severity)
+				}
 			}
 
 			// History accumulation must NOT be gated behind local.Valid —
@@ -180,21 +195,12 @@ func runReplay(ctx context.Context, out io.Writer, client *detection.ThanosClien
 					baselines.Observe(host, name, bucket, value)
 				}
 			}
-			for name := range current {
-				baselines.Evict(host, name, bucket)
-			}
-
-			if !local.Valid {
-				continue
-			}
-			fused := detection.FuseLocalOnly(local)
-
-			transition := lc.Advance(profile.LifecycleScore(fused, current))
-			if transition.Action != detection.ActionNone {
-				counts[transition.Action]++
-				fmt.Fprintf(out, "%s  %-20s %-20s score=%.3f category=%q %s -> %s (severity=%s)\n",
-					bucketTime.Format(time.RFC3339), host, transition.Action, fused.Score, fused.Category,
-					transition.FromState, transition.ToState, transition.Severity)
+			// Match the live engine: protect the frozen reference throughout
+			// candidate/firing/recovering, then resume eviction after resolution.
+			if lc.State == detection.StateNormal {
+				for name := range current {
+					baselines.Evict(host, name, bucket)
+				}
 			}
 		}
 	}

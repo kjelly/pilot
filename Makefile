@@ -106,6 +106,9 @@ playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks �
 	  echo "ansible-lint not installed — skipping L2 (pip install ansible-lint)"; \
 	fi
 
+thanos-retention-test: ## Run the Thanos Compactor with the playbook's retention defaults against synthetic blocks; fails if data younger than 90 days is deleted (needs docker, python3). See scripts/thanos-retention-behavior-test.sh.
+	./scripts/thanos-retention-behavior-test.sh
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
@@ -119,7 +122,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test
+.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

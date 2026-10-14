@@ -20,6 +20,7 @@ type deployPlaybook struct {
 	AutoHostVars    []autoHostVar // each => auto-detect a cross-role host address from inventory, sets -e <Var>=<ip>
 	MonitoringFiles bool          // true => auto-pass workspace monitoring registry files
 	Reconcile       bool          // true => eligible for pilot reconcile's day-2 declarative configuration flow
+	Deploy          bool          // for a reconciler, also expose its install/update entry under deploy
 }
 
 // autoHostVar describes one "-e <Var>=<ip>" pilot deploy can offer to fill
@@ -38,12 +39,10 @@ type autoHostVar struct {
 
 // deployCatalog is every playbooks/apply/*.yml entry the pilot CLI can
 // drive in "single component" mode. Order matches DELIVERY.md's table.
-// Entries with Reconcile:true are day-2 declarative reconcilers and are
-// exposed ONLY via `pilot reconcile` (and, where one exists, their own
-// dedicated CLI, e.g. `pilot gateway-scope`) — `pilot deploy`'s
-// single-component menu filters them out (see deploy.go's
-// runCatalogPlaybookDeploy), so the same playbook is never reachable
-// through two different question flows.
+// Entries with Reconcile:true support declarative reconciliation and are
+// exposed through reconcile. They remain hidden from deploy unless Deploy
+// explicitly enables both workflows (dashboard and thanos-query). Dedicated
+// day-2 commands such as gateway-scope retain their existing boundary.
 var deployCatalog = []deployPlaybook{
 	{
 		Key: "core-infra-provider", Label: "核心基礎服務 — NTP",
@@ -244,6 +243,8 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "thanos-query", Label: "中央 Thanos Query",
 		Playbook: "playbooks/apply/thanos-query-apply.yml", DefaultGroup: "thanos-query", StageVar: "stage",
+		Reconcile:    true,
+		Deploy:       true,
 		AutoHostVars: []autoHostVar{{Var: "thanos_s3_target_host", Group: "seaweedfs-s3", Label: "SeaweedFS S3 gateway(Thanos 物件儲存)"}},
 	},
 	{
@@ -276,6 +277,9 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "dashboard", Label: "觀測畫面(Grafana + Loki)",
 		Playbook: "playbooks/apply/dashboard-apply.yml", DefaultGroup: "dashboard", StageVar: "stage",
+		Reconcile:    true,
+		Deploy:       true,
+		Note:         "自動先套用 inventory 中的 Thanos Query 與必要的同主機依賴，再設定 Grafana datasource；共置時使用 Docker DNS，不需要固定 IP。",
 		AutoHostVars: []autoHostVar{{Var: "thanos_query_target_host", Group: "thanos-query", Label: "中央 Thanos Query"}},
 	},
 }

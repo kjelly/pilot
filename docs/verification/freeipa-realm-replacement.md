@@ -45,7 +45,7 @@
 - 工具：`pilot verify docs/verification/freeipa-realm-replacement.md -i <inventory>`
 - 原始輸出：gitignored `.verification/freeipa-realm-replacement-<UTC>.{ndjson,md}` 或 pilot evidence store
 - Sanitized 摘要：`docs/evidence/freeipa-realm-replacement/<date>-<tested-revision>.md`
-- 狀態：**DRAFT — TODO: VERIFY**（部分驗證）。2026-10-12，candidate `4f2087a`（修正三個 regex 的雙反斜線）：AlmaLinux 9 client 完整 migration，C1–C6 **6/6 PASS**；Ubuntu 24.04 client 仍在 C5 失敗——舊 realm 留在 `/etc/hosts` 的 server pin （與新 pin 共用短名稱 `ipa1`）讓 SSSD 把新 realm 的 AS_REQ 送到舊 KDC，尚未修正；`--check --diff` 會在 archive link 失敗。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md`](../evidence/freeipa-realm-replacement/2026-10-12-4f2087a.md)。Ubuntu 也通過、且有 rollback／negative-path evidence 之前，不得宣稱此 spec 已驗證。
+- 狀態：**DRAFT — TODO: VERIFY**（C1–C6、rollback 與 `--check --diff` 通過；runbook §2 的正式命令尚未定稿）。2026-10-13，candidate `56d3aa6`（每次 run 各自命名 archive、不覆寫既有 archive；`--check --diff` 不再在 archive link 失敗，old-realm gate 在 check mode 也執行）：Ubuntu 24.04 與 AlmaLinux 9 client，`--check --diff` 都 rc=0 且不寫入任何檔案；兩次 rollback 寫出兩個 archive，前一個內容不變；rollback 之後舊 realm 的 `admin` 能以密碼 SSH 登入，`freeipa-client.md` 12/12；migration C1–C6 各 **6/6 PASS**。enrollment 完成之後才 rollback 時，新 server 會留下 client 的 host entry（見 runbook §3）。Evidence：[`docs/evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md`](../evidence/freeipa-realm-replacement/2026-10-13-56d3aa6.md)。
 - Row 數：6
 
 ## 4. PASS / FAIL 規則
@@ -58,7 +58,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|----------|----------|------|
 | C5 | 若新 realm 禁止 `admin` 經 NSS 查詢，必須提供一個已建立、可解析的 `freeipa_realm_replacement_verify_user`；不得跳過有效 SSSD 查詢 | 有嚴格 admin policy 的站台 | 依站台 |
-| C6 | archive 只可回復 client 的舊本機設定；若舊 FreeIPA server 已重裝或退役，它不能恢復舊 realm 的信任關係 | 所有 server replacement | 永久 |
+| C6 | rollback 以 archive 裡的 host keytab 重新 enroll 回舊 realm，需要舊 FreeIPA server 仍在運作、且舊 host entry 仍有效（migration 刻意不在舊 server 上 disable 它，見 runbook §3/§4）；若舊 server 已重裝或退役，archive 不能恢復舊 realm 的信任關係 | 所有 server replacement | 永久 |
 | — | identity roster、HBAC/sudo、NFS automount 與其他 FreeIPA overlays 必須在 client wave 前於新 server 建好／wave 後另行驗收 | 所有站台 | 永久 |
 
 ## 6. 變更紀錄
@@ -66,3 +66,5 @@
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-07-29 | DRAFT v0.1 | 初版：明確切分 server readiness、client re-enrollment、local rollback archive 與 evidence boundary | sre |
+| 2026-10-12 | DRAFT v0.2 | 仍是 DRAFT。pre_tasks 新增 gate：`ipa-client-install --uninstall` 與新 realm 的 enrollment 都會 restart sshd，`sshd -t` 失敗時在建立 archive 與任何變更之前就拒絕（之前 uninstall 的 restart 失敗會讓 sshd 停在 down、uninstall 做到一半，2026-10-12 在 freeipa-client decommission 實測）；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |
+| 2026-10-13 | DRAFT v0.3 | 仍是 DRAFT。archive 名稱改為每次 run 以 controller 的 UTC 時鐘決定一次（`<inventory_hostname>-<YYYYmmddTHHMMSSZ>.tar.gz`）；原本取自 `ansible_date_time`，一小時的 fact cache 讓一小時內的重跑沿用第一次的名稱，tar 覆寫前一次的 archive。同名 archive 已存在時，在 snapshot 之前拒絕。`--check --diff`：check mode 不建立 archive，archive link 原本必定以 `src file does not exist` 失敗並進入 rescue，現在只在 check mode 帶 `force`；「client 仍在宣告的 old realm」gate 是唯讀的，改為 `check_mode: false`（原本 check mode 跳過它）。C1–C6 不變；`internal/spec/realm_replacement_archive_regression_test.go` 鎖住 | pilot |

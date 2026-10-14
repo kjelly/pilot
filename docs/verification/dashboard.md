@@ -1,6 +1,12 @@
 # Verification Spec — dashboard (Grafana + Loki，跨機房 Metrics/Log 觀測入口)
 
-> 版本：v1.2（2026-07-17：C8/`thanos_query_port` 的 port 從 10902 改成 10912，見 §6）
+> 版本：v1.3（2026-10-12：Docker DNS 與 Grafana 容器內的 datasource 連通性驗收）
+> 目前驗證：2026-10-13 UTC，candidate `0966cedadaa0ee0c5bdcf8c10e577e2b4a2bc8c1`，
+> tree `39cd8232f42c2f9940d487d1027f64d038885245`；兩台全新 Ubuntu 24.04、只 `--limit`
+> consumer 的真實 deploy/reconcile（變數檔另含 `target_group`）：14 PASS / 0 FAIL / 0 SKIP，
+> 再跑 reconcile changed=0。[Actual-run evidence](../evidence/dashboard/2026-10-13-0966ced-delivery.md)。
+> 同機全新 topology chain：2026-10-12 `9e6d684`，14 PASS，第二次 apply changed=0
+> （[evidence](../evidence/dashboard/2026-10-12-9e6d684-delivery.md)）。
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `thanos-query.md`/
 > `seaweedfs-s3.md` 的 docker container 模式）
 > 維護者：sre
@@ -9,8 +15,8 @@
 > `thanos-query.md`（跨站 metrics 全局查詢）+ `log-server.md`（中央日誌
 > 落地）已經分別把資料生出來、集中起來，但都只有各自的 CLI/HTTP API，
 > 沒有一個給人看的畫面。本角色是**純消費端**：Grafana 對 `thanos-query`
-> 的 Prometheus-compatible API（host-published port 預設 10912，見
-> `thanos_query_port` 說明）跟本機 Loki 開兩個唯讀
+> 的 Prometheus-compatible API（同機 Docker network 使用容器 port 10902；
+> 跨主機使用 host-published port 10912）跟本機 Loki 開兩個唯讀
 > datasource，Loki 則負責接 `log-shipping.md`（跑在 `log-server` 主機上
 > 的 Promtail agent）轉送過來的日誌。跟 `thanos-query` 一樣是本專案的
 > 中央單例角色（比照 `wazuh-manager`/`log-server`）。
@@ -47,21 +53,23 @@
 
 | 變數名稱 | 說明/用途 | 是否必填 | 預設值 |
 |---------|----------|---------|--------|
-| `thanos_query_target_host` | `thanos-query.md` 中央主機的 IP/FQDN，套用時會被 pin 進 `/etc/hosts`（比照 `thanos_s3_target_host`/`restic_s3_target_host` 的既有慣例） | 否（見下方 escape hatch） | 空字串 |
-| `thanos_query_alias` | 上面那個 IP 對應的 `/etc/hosts` 別名；Grafana 的 Prometheus datasource URL 與 C8 都指向這個固定別名，不是變數內插的 IP | 否 | `thanos-query-backend` |
-| `thanos_query_port` | Thanos Query 的 Prometheus-compatible API port（**不是**容器內部的 10902，是 `thanos-query-apply.yml`/`dashboard-apply.yml` 一致改用的 host-published port，見該檔 `thanos_query_http_port` 的說明：刻意避開跟站台 Prometheus 自己的 Thanos Sidecar 固定佔用的 10902 collide） | 否 | `10912` |
+| `thanos_query_target_host` | 相容既有部署的中央主機 IP/FQDN；未填時可由 inventory 的單一 `thanos-query` host 推導。同機時只用來判斷共置，datasource 不保存該 IP；跨機直接使用此名稱，建議提供可由容器 DNS 解析的 FQDN | 否 | 未填且沒有 provider 時使用 Docker DNS |
+| `thanos_query_alias` | Thanos Query 在 Docker network 的服務別名；由 provider 的 `thanos-query-apply.yml` 宣告，不寫入 hosts 檔 | 否 | `thanos-query-backend` |
+| `thanos_query_port` | datasource API port 覆寫；同機為容器內部 port，跨機為主機公開 port | 否 | 同機 `10902`；跨機 `10912` |
+| `thanos_query_url` | 完整 datasource URL 覆寫，跨主機建議使用中央 DNS 的服務 FQDN；保留 DNS 名稱，禁止含帳密、query 或 fragment | 否 | 由共置狀態、target、alias 與 port 推導 |
 | `grafana_admin_password` | Grafana admin 密碼（`GF_SECURITY_ADMIN_PASSWORD`） | 是 | 無 |
 | `grafana_host_data_dir` | Grafana 資料目錄（dashboards/session 等） | 否 | `/var/lib/pilot/grafana` |
 | `loki_host_data_dir` | Loki 資料目錄（chunks/index） | 否 | `/var/lib/pilot/loki` |
 | `dashboard_config_dir` | Grafana/Loki 設定檔根目錄 | 否 | `/etc/pilot/dashboard` |
 
-> `thanos_query_target_host` 留空且套用時不會 fail（跟 `thanos-query.md`
-> 的 `prometheus` group 可為空是同一種「上游還沒接上」正常狀態），但
-> Grafana 的 Prometheus datasource 會指向一個打不通的位址，C8（連通性）
-> 會如預期 fail——不是 bug，見 §5。**跟 S3 目的地那組 gate 不同**：這裡
-> 不做「必須可解析」的啟動前 assert，因為 dashboard 通常會比
-> `thanos-query` 早或晚上線，先把 Grafana/Loki 立起來、之後再補
-> `thanos_query_target_host` 重新套用是合理的操作順序。
+> 預設同機 URL 為 `http://thanos-query-backend:10902`，Docker DNS 負責將
+> alias 解析到目前容器 IP。重建 provider 不需要改 Grafana 的設定。
+> 跨主機時 Docker bridge DNS 不適用，使用可解析的服務 FQDN 與公開 port；
+> 可用 `thanos_query_url` 覆寫完整 URL。未部署上游時仍允許 Grafana/Loki
+> 先上線，但 C8 必須 fail；不將連線失敗當成完整交付成功。
+>
+> 既有 `thanos-query-backend` 主機 hosts pin 會在重新套用 dashboard 時移除。
+> C8 必須從 Grafana 容器讀取實際 datasource URL 並連線，不能只在主機 curl。
 >
 > Grafana 的兩個 datasource UID 是 apply playbook **寫死**的固定值
 > （`pilot-loki`、`pilot-thanos-query`），不是 Grafana 自動產生的隨機
@@ -91,7 +99,7 @@
 | C5  | config   | Grafana provisioning 檔含 Loki datasource（固定 uid `pilot-loki`）       | 0 | grep -qE 'uid:\s*pilot-loki' /etc/pilot/dashboard/grafana/provisioning/datasources/datasources.yml; echo $? |
 | C6  | config   | Grafana provisioning 檔含 Prometheus datasource（固定 uid `pilot-thanos-query`） | 0 | grep -qE 'uid:\s*pilot-thanos-query' /etc/pilot/dashboard/grafana/provisioning/datasources/datasources.yml; echo $? |
 | C7  | functional | Loki 本機注入一筆帶唯一 job label 的測試日誌，query 回同一筆              | ~PILOT-DASHBOARD-SELFTEST | sh -c 'curl -fsS -X POST http://127.0.0.1:3100/loki/api/v1/push -H "Content-Type: application/json" -d "{\"streams\":[{\"stream\":{\"job\":\"pilot-dashboard-selftest\"},\"values\":[[\"$(date +%s%N)\",\"PILOT-DASHBOARD-SELFTEST\"]]}]}"; sleep 2; curl -fsS -G http://127.0.0.1:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-dashboard-selftest\"}"' |
-| C8  | network  | `thanos-query-backend`別名（Prometheus datasource 上游）連通性           | ~200 | curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 http://thanos-query-backend:10912/-/healthy |
+| C8  | network  | Grafana 容器可連到實際配置的 Thanos datasource（含 DNS 與 HTTP） | 0 | docker exec pilot-grafana sh -ec 'url=$(sed -n "/uid: pilot-thanos-query/,/url:/s/^[[:space:]]*url: *\"\(.*\)\"/\1/p" /etc/grafana/provisioning/datasources/datasources.yml); test -n "$url"; wget -q -O /dev/null -T 5 "$url/-/healthy"' |
 | C9  | dir      | Grafana 資料目錄存在（dashboards/session 持久化）                        | present | test -d /var/lib/pilot/grafana |
 | C10 | dir      | Loki 資料目錄存在（chunks/index 持久化）                                 | present | test -d /var/lib/pilot/loki |
 | C11 | file     | Grafana dashboard provisioning provider 設定檔存在                     | present | test -f /etc/pilot/dashboard/grafana/provisioning/dashboards/dashboards.yml |
@@ -136,11 +144,9 @@
 > functional check），只證明 Loki 自己「收得進去、查得出來」正常運作，
 > 隔離 Grafana/Loki 本身的問題跟 Promtail 轉送鏈路的問題，方便先定位是
 > 哪一段壞掉。
-> C8 跟 Grafana 的 Prometheus datasource URL 都指向 `thanos-query-backend`
-> 這個固定別名，不是內插變數——比照 `thanos_s3_alias`/`restic_s3_target_host`
-> 的既有慣例，把部署期才知道的 IP 藏進 apply playbook 寫入的 `/etc/hosts`，
-> 讓 spec 的 Command/Expected 欄位維持固定字串（見 `verification-spec-template.md`
-> 「Command/Expected 是靜態文字，不能內插」的規則）。
+> C8 的 command 是固定文字，但讀的是 Grafana 容器內 datasource 的實際 URL，
+> 因此同機 Docker DNS 與跨機 FQDN 都經過與 Grafana 相同的 DNS/network 路徑。
+> 缺少 URL、DNS 解析失敗、逾時或 HTTP 錯誤都必須回傳非零退出碼。
 
 ## 3. 證據收集
 
@@ -158,7 +164,7 @@
   - C4 fail → Grafana 啟動失敗；常見原因是 `grafana_admin_password` 未設定
   - C5/C6 fail → provisioning 檔沒 render 成功或路徑不對；檢查 apply playbook 的 template task
   - C7 fail → Loki push/query API 本身有問題，跟轉送鏈路無關
-  - C8 fail → `thanos_query_target_host` 沒填、填錯，或該主機的 `thanos-query.md` 尚未套用/防火牆擋住 10912；若對方是套用了非預設 `-e thanos_query_http_port=<值>` 的舊環境，`thanos_query_port` 也要跟著改成同一個值
+  - C8 fail → 從 Grafana 容器檢查 datasource URL；同機需共用 Docker network 且 provider 宣告 alias，使用容器 port 10902；跨機需 FQDN 可解析與公開 port 可達。非預設 port 應使用 `thanos_query_port` 或完整 `thanos_query_url` 覆寫
   - C9/C10 fail → 目錄沒建立或權限有誤導致 container 啟動失敗（見 §5 uid 備註）
   - C11 fail → dashboard provisioning provider 設定檔沒 render 成功；檢查 apply playbook 的 template task
   - C12/C13 fail → 對應的 dashboard JSON 檔沒 render 成功，或 uid 被意外改掉
@@ -169,7 +175,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C3 | Loki 啟動後約需 10–15 秒完成 ring/compactor join 才會回 200（`/ready` 在此之前回 503）；apply playbook 的 wait 迴圈已內建重試，純手動 curl 驗證時遇到 503 屬正常暖機期 | 所有環境 | 永久（Loki 設計如此） |
-| C8 | `thanos_query_target_host` 未填或該中央尚未部署時，這行預期 fail | dashboard 早於 thanos-query 上線的環境 | 直到 `thanos-query.md` PASS 為止 |
+| C8 | datasource 指向的中央尚未部署時，這行預期 fail | dashboard 早於 thanos-query 上線的環境 | 直到 `thanos-query.md` PASS 為止 |
 | C5, C6, C9, C10, C11, C12, C13 | 這幾行的固定路徑（`/etc/pilot/dashboard/...`、`/var/lib/pilot/grafana`、`/var/lib/pilot/loki`）是 `dashboard_config_dir`/`grafana_host_data_dir`/`loki_host_data_dir` 的**預設值**；覆寫成非預設路徑的環境，這幾行會如預期 fail（功能本身仍正常） | 覆寫了預設路徑的環境 | 視站台設定 |
 | C12, C13 | `prometheus`/`log-server` 尚未部署時,兩份 dashboard 的 template variable 下拉選單會是空的(沒有 site/job 可選),但 dashboard 本身仍正確載入,C12/C13 仍應 pass——這兩行只驗證 dashboard 檔本身,不驗證裡面查得到多少資料 | 站台/log-server 尚未部署的環境 | 直到至少一站上線為止(不影響 C12/C13 本身) |
 
@@ -177,6 +183,7 @@
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-12 | v1.3 | 同機使用 Docker DNS alias 與容器 port；跨機保留 DNS URL。C8 改從 Grafana 容器內驗證實際 datasource，修正主機 hosts 可解析卻容器解析失敗的漏檢；Expected 從 HTTP 字串改成有效連線的退出碼，未放寬成功條件 | pilot |
 | 2026-07-06 | v1.0 | 初版 | sre |
 | 2026-07-06 | v1.1 | 新增 C11–C14:內建兩份 dashboard(Sites Overview、Logs Explorer),用 Grafana 原生 template variable 依環境自動列出 site/job,不需要重新套用 playbook | sre |
 | 2026-07-17 | v1.2 | 修正 C8 與 `thanos_query_port` 說明：`dashboard-apply.yml` 的 `thanos_query_port` 早已跟 `thanos-query-apply.yml` 的 `thanos_query_http_port` 一致改為預設 `10912`（避開跟站台 Prometheus 自己的 Thanos Sidecar 固定佔用的host port 10902 collide），本檔原本仍記載/寫死 `10902`，跟現行程式碼不符——`docs/runbooks/metrics-alerting.md` 整併重測發現 `thanos-query.md` 的同一種落差後，比對 `dashboard-apply.yml` 源碼與 `minimal-poc-architecture.md` v2.1 變更紀錄確認 dashboard 這邊也有同一個問題，一併修正 | sre |

@@ -53,7 +53,6 @@
     promtail_config_dir: /etc/pilot/promtail
     promtail_positions_dir: /var/lib/pilot/promtail
     docker_network_name: pilot-metrics
-    loki_target_host: ""
     # Prefer an explicit value; otherwise resolve the first dashboard host from the
     # actual inventory. Use ansible_host when present, then inventory hostname.
     loki_inventory_target_host: >-
@@ -84,7 +83,6 @@
     # container is present — that capability was already working and is
     # worth keeping alongside the fixed siem_log_root path, not instead of
     # it.
-    siem_log_root: ""
     siem_log_root_default: /var/log/siem
     siem_wazuh_manager_container: single-node-wazuh.manager-1
     promtail_job_label: pilot-siem
@@ -277,6 +275,18 @@
             name: "{{ docker_network_name }}"
             state: present
 
+        # A single-file bind mount keeps the inode the container started with;
+        # restart when the container no longer sees the host file, not only when
+        # this run rendered it (AGENTS.md §4.5 item 13).
+        - name: "Check whether pilot-promtail still sees its current config files"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/container-file-mount-drift.yml
+            apply:
+              tags: [always]
+          vars:
+            container_mount_drift_name: pilot-promtail
+
         # Spec: docs/verification/log-shipping.md C1, C2, C6, C7
         # grafana/promtail's official image runs as root, so it doesn't
         # need chowned host dirs to read log-server's rsyslog-owned files
@@ -288,7 +298,9 @@
             image: "grafana/promtail:{{ promtail_version }}"
             state: started
             restart_policy: unless-stopped
-            restart: "{{ (promtail_config_result | default({})) is changed }}"
+            restart: >-
+              {{ (promtail_config_result | default({})) is changed
+                 or container_mount_drift_stale | default(false) | bool }}
             command: "-config.file=/etc/promtail/config.yml"
             networks:
               - name: "{{ docker_network_name }}"
