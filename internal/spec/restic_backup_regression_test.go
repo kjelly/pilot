@@ -106,7 +106,8 @@ func TestRegression_ResticBackupSpec(t *testing.T) {
 		"restic_aws_access_key_id is defined and restic_aws_access_key_id | length > 0",
 		"restic_password is defined and restic_password | length > 0",
 		"Gate: backup destination must be resolvable",
-		`restic_backup_paths: ["/etc"]`,
+		// Defaulted in pre_tasks, not play vars:, so group_vars/host_vars win.
+		`restic_backup_paths: "{{ restic_backup_paths | default(['/etc']) }}"`,
 		"restic_backup_paths | join",
 		"restic_backup_timer_persistent: false",
 		"restic_backup_randomized_delay: 1h",

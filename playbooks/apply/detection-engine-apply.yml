@@ -61,22 +61,6 @@
     detection_metrics_source_alias: detection-thanos-query-backend
     detection_alertmanager_alias: detection-alertmanager-backend
 
-    # spec §11 scheduler constants — not expected to be overridden in
-    # normal operation, but exposed for testing/tuning.
-    detection_cycle_interval: 15s
-    detection_evaluation_delay: 20s
-
-    # Optional log pipeline (docs/superpowers/specs/2026-08-28-npu-detect-
-    # engine-spec.md §14-18) — a third, equally-weighted peer to baseline/
-    # cohort. Disabled by default; the original detection-engine spec's
-    # own Non-Goals excludes logs entirely, so a Stage A/B apply (no -e
-    # overrides at all) is completely unaffected.
-    detection_log_source_enabled: false
-    detection_log_source_base_url: ""
-    detection_log_source_query: ""
-    detection_log_source_current_window: 10m
-    detection_log_source_baseline_window: 6h
-
   pre_tasks:
     - name: "Resolve model provider defaults without overriding inventory or extra vars"
       ansible.builtin.set_fact:
@@ -128,6 +112,26 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        # spec §11 scheduler constants — not expected to be overridden in
+        # normal operation, but exposed for testing/tuning.
+        detection_cycle_interval: "{{ detection_cycle_interval | default('15s') }}"
+        detection_evaluation_delay: "{{ detection_evaluation_delay | default('20s') }}"
+        # Optional log pipeline (docs/superpowers/specs/2026-08-28-npu-detect-
+        # engine-spec.md §14-18), disabled by default: a Stage A/B apply
+        # with no overrides is unaffected.
+        detection_log_source_base_url: "{{ detection_log_source_base_url | default('') }}"
+        detection_log_source_baseline_window: "{{ detection_log_source_baseline_window | default('6h') }}"
+        detection_log_source_current_window: "{{ detection_log_source_current_window | default('10m') }}"
+        detection_log_source_enabled: "{{ detection_log_source_enabled | default(false) }}"
+        detection_log_source_query: "{{ detection_log_source_query | default('') }}"
       tags: [always]
 
     - name: "Gate: supported OS is Ubuntu 24.04 (spec §5.1)"

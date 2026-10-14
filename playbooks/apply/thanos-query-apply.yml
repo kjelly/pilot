@@ -58,10 +58,6 @@
     # undefined-variable error.
     thanos_s3_alias: thanos-s3-backend
     thanos_s3_port: 8333
-    thanos_s3_bucket: pilot-thanos-metrics
-    thanos_s3_endpoint: "{{ thanos_s3_alias }}:{{ thanos_s3_port }}"
-    thanos_query_store_group: prometheus
-    thanos_query_sidecar_grpc_port: 10901
     # Host-published port for Thanos Query's own HTTP API (what
     # dashboard-apply.yml's thanos_query_port talks to). Defaults to 10912,
     # NOT the container's internal 10902 listen port: a per-site
@@ -105,6 +101,18 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        thanos_query_sidecar_grpc_port: "{{ thanos_query_sidecar_grpc_port | default(10901) }}"
+        thanos_query_store_group: "{{ thanos_query_store_group | default('prometheus') }}"
+        thanos_s3_bucket: "{{ thanos_s3_bucket | default('pilot-thanos-metrics') }}"
+        thanos_s3_endpoint: "{{ thanos_s3_endpoint | default(thanos_s3_alias ~ ':' ~ thanos_s3_port) }}"
       tags: [always]
 
     - name: "Gate: required S3 secrets present (fail early, before any mutation)"

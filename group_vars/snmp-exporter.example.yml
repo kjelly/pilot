@@ -9,9 +9,9 @@
 #  對應 spec:docs/verification/snmp-exporter.md、
 #  docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md §6
 #
-#  Phase 0 skeleton:playbooks/apply/snmp-exporter-apply.yml 目前沒有任何
-#  task,這些變數還不會被實際讀取——先落地範本,Phase 1 補上真正的容器部
-#  署邏輯後才會生效。
+#  這裡設定的值會生效:playbooks/apply/snmp-exporter-apply.yml 在 pre_tasks
+#  才補預設值,不在 play 的 vars: 宣告(play vars 的優先順序高於 group_vars,
+#  2026-10-13 之前這份範本的設定都被它蓋掉;AGENTS.md §4.5 第 3 點)。
 # ============================================================================
 
 # 以下全部有內建預設值,通常不用填:

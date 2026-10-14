@@ -53,7 +53,6 @@
     promtail_config_dir: /etc/pilot/promtail
     promtail_positions_dir: /var/lib/pilot/promtail
     docker_network_name: pilot-metrics
-    loki_target_host: ""
     # Prefer an explicit value; otherwise resolve the first dashboard host from the
     # actual inventory. Use ansible_host when present, then inventory hostname.
     loki_inventory_target_host: >-
@@ -84,7 +83,6 @@
     # container is present — that capability was already working and is
     # worth keeping alongside the fixed siem_log_root path, not instead of
     # it.
-    siem_log_root: ""
     siem_log_root_default: /var/log/siem
     siem_wazuh_manager_container: single-node-wazuh.manager-1
     promtail_job_label: pilot-siem
