@@ -1,7 +1,9 @@
 package diagnose
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -283,14 +286,10 @@ func TestRegression_DNSArchitectureModelMatchesPlaybooks(t *testing.T) {
 				}
 			}
 			env := append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_HOME="+filepath.Join(dir, ".ansible"))
-			run := exec.Command("ansible-playbook", "-i", "inventory.yml", "play.yml", "-e", "out_dir="+out)
-			run.Dir, run.Env = dir, env
-			if output, err := run.CombinedOutput(); err != nil {
+			if output, err := runAnsible(t, dir, env, true, "ansible-playbook", "-i", "inventory.yml", "play.yml", "-e", "out_dir="+out); err != nil {
 				t.Fatalf("ansible-playbook: %v\n%s", err, output)
 			}
-			list := exec.Command("ansible-inventory", "-i", "inventory.yml", "--list")
-			list.Dir, list.Env = dir, env
-			listJSON, err := list.Output()
+			listJSON, err := runAnsible(t, dir, env, false, "ansible-inventory", "-i", "inventory.yml", "--list")
 			if err != nil {
 				t.Fatalf("ansible-inventory: %v", err)
 			}
@@ -301,6 +300,38 @@ func TestRegression_DNSArchitectureModelMatchesPlaybooks(t *testing.T) {
 			compareDNSModel(t, BuildDNSArchitectureModel(resolved), resolved, out)
 		})
 	}
+}
+
+// ansibleRunTimeout bounds each Ansible command of the test. Twice on the
+// maintainer's workstation, under heavy load, an ansible-playbook run of
+// this test (ansible-core 2.19.2) kept polling for results with no worker
+// process left and never exited, which held the whole package until go
+// test's own timeout (40 minutes); the bound turns that into a failure
+// that names the command.
+const ansibleRunTimeout = 5 * time.Minute
+
+// runAnsible runs one Ansible command in dir within ansibleRunTimeout and
+// returns its stdout, or stdout and stderr together when combined is set.
+func runAnsible(t *testing.T, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), ansibleRunTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir, cmd.Env = dir, env
+	// A worker that outlives the killed parent must not keep the pipes,
+	// and so the test, open.
+	cmd.WaitDelay = 10 * time.Second
+	var out []byte
+	var err error
+	if combined {
+		out, err = cmd.CombinedOutput()
+	} else {
+		out, err = cmd.Output()
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("%s did not finish within %s and was killed: %w", name, ansibleRunTimeout, err)
+	}
+	return out, err
 }
 
 type emittedZone struct {
