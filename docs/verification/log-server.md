@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.3
+> 版本：v1.4
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -50,7 +50,7 @@
 | C2  | service   | `rsyslog.service` 為 active                                          | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
 | C3  | file      | 接收端 drop-in 設定檔存在                                             | present  | test -f /etc/rsyslog.d/10-siem-receiver.conf |
 | C4  | config    | 設定檔含 `imtcp` module + input                                       | 0        | grep -qE 'module\(load="imtcp"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
-| C5  | network   | TCP 514 確實在監聽                                                    | 0        | sh -c 'ss -lnt | grep -q ":514" && echo 0 || echo 1' |
+| C5  | network   | 接收設定裡 `imtcp` 的 TCP port（`siem_receiver_tcp_port`，預設 514）確實在監聽 | 0        | sh -c 'p=$(grep -o "imtcp\" port=\"[0-9]*" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null | grep -o "[0-9]*$"); [ -n "$p" ] && ss -Hlnt "( sport = :$p )" | grep -q . && echo 0 || echo 1' |
 | C6  | dir       | 落地根目錄 `/var/log/siem` 存在                                       | present  | test -d /var/log/siem |
 | C7  | functional| 本機注入 `local6` 測試訊息，依 `%HOSTNAME%` 落地到 `audit.log`         | ~PILOT-SIEM-SELFTEST-AUDIT | sh -c 'logger -p local6.info "PILOT-SIEM-SELFTEST-AUDIT"; sleep 1; grep -r "PILOT-SIEM-SELFTEST-AUDIT" /var/log/siem/*/audit.log 2>/dev/null; true' |
 | C8  | functional| 本機注入 `authpriv` 測試訊息，依 `%HOSTNAME%` 落地到 `auth.log`        | ~PILOT-SIEM-SELFTEST-AUTH | sh -c 'logger -p authpriv.info "PILOT-SIEM-SELFTEST-AUTH"; sleep 1; grep -r "PILOT-SIEM-SELFTEST-AUTH" /var/log/siem/*/auth.log 2>/dev/null; true' |
@@ -145,3 +145,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-08-06 | v1.1 | 修真實 incident：6 台主機轉送到同時是 `wazuh-manager` 的主機（`siem-log-server` fallback 到 wazuh-manager），但該主機從未真正跑過 `log-server` 角色——舊版 apply playbook 有一個 `end_play` gate，只要 inventory 裡任何一台是 `wazuh-manager` 就整個跳過 log-server，理由是「避免 double-deployed syslog collectors」，但這個假設是錯的：官方 wazuh-docker compose 映射的 514/udp 從未接任何東西（`wazuh-manager.md` §5 早就記錄這件事）。移除該 gate；新增 `siem_receiver_udp_enabled`（同機是 wazuh-manager 時預設關閉 UDP，避開唯一真的會撞的埠），保留 TCP 514（`audit-log-forwarding.md` 實際轉送用的協定）一律開啟。新增 C4 對應的已知偏差列（§5；C6 實測不受影響，因為 Wazuh 自己的 compose 已經佔了 514/udp，通用監聽檢查依然回報有東西在聽） | sre |
 | 2026-08-06 | v1.2 | 拿掉整條 UDP 支援（`imudp`、`siem_receiver_udp_port`、`siem_receiver_udp_enabled` 全部移除）：確認本 repo 沒有任何角色轉送 UDP syslog，v1.1 留著的條件式 UDP 只是沒人用的推測性容量，直接拿掉比繼續維護「同機是 wazuh-manager 時關閉」的條件邏輯更簡單。Checklist 從 12 條收斂成 10 條（移除舊 C4「imudp module」與 C6「UDP 514 監聽」，其餘全部往前遞補：舊 C5→新 C4、舊 C7→新 C5、舊 C8→新 C6、舊 C9→新 C7、舊 C10→新 C8、舊 C11→新 C9、舊 C12→新 C10）；v1.1 新增的 C4 已知偏差列連同 UDP 一起移除，因為已經沒有 UDP 分支會 fail | sre |
 | 2026-08-07 | v1.3 | 新增 C11：`imtcp` input 綁定專屬 `ruleset="siemReceiver"`。real incident（minimal-poc round 20）：這個拓樸的中央 SIEM 主機同時也是 `audit-log-forwarding.md` 的 client，轉送給自己時，`imtcp` 收到的訊息若落回 default ruleset 會被 `99-siem-forward.conf` 的轉送規則二次處理、再度轉送出去，形成無窮迴圈——3 台主機中身兼兩角色的那台，`auth.log` 在不到一小時內長到 1.2 千萬行/13GB，把 77GB 磁碟塞到 100% 滿。修法：把接收動作移進專屬 ruleset，收到的訊息只寫一次 dynaFile，不再進 default ruleset | sre |
+| 2026-10-14 | v1.4 | C5 改成讀接收設定裡 `imtcp` 的 port 再檢查它在監聽，不再寫死 514。PR #79 讓 inventory 的 `siem_receiver_tcp_port` 生效後，`siem_receiver_tcp_port: 2514` 的 log-server 在 2514 監聽、client 的訊息也送達，舊 C5（`grep ":514"`）卻 FAIL；新 C5 在 2514 PASS，rsyslog 停掉時 FAIL（2026-10-14 對 pr79-log 實測）。也修掉舊寫法 `:514` 會被 `:5140` 這類 port 誤判成 PASS 的問題 | pilot |

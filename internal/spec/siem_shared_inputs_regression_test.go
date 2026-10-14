@@ -604,7 +604,7 @@ func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
 				}
 			}
 		}
-		if include < 0 || writer < 0 || restart < 0 || !(include < writer && writer < restart) {
+		if include < 0 || writer < 0 || restart < 0 || include >= writer || writer >= restart {
 			t.Errorf("%s: want the SELinux include before %q before %q; got indexes %d, %d, %d", c.playbook, c.writer, c.restart, include, writer, restart)
 		}
 	}

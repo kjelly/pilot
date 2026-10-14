@@ -14,7 +14,8 @@ import (
 //	C2  rsyslog.service active
 //	C3  receiver drop-in config file exists
 //	C4  imtcp module + input present in the drop-in
-//	C5  TCP 514 actually listening
+//	C5  the imtcp port of the receiver config (siem_receiver_tcp_port) is
+//	    listening — read from the config, not a fixed 514
 //	C6  landing directory /var/log/siem exists
 //	C7/C8 local6/authpriv selftest messages route into the dynaFile paths
 //	C9  logrotate policy file exists
@@ -92,6 +93,17 @@ func TestRegression_LogServerSpec(t *testing.T) {
 	// exits 0 (ansible never sees a FAILED-wrapper on the unhealthy path).
 	if !strings.Contains(cmd["C5"], "&& echo 0") || !strings.Contains(cmd["C5"], "|| echo 1") {
 		t.Errorf("C5 must use the `... && echo 0 || echo 1` form, got %q", cmd["C5"])
+	}
+	// C5 must check the port the receiver config names: siem_receiver_tcp_port
+	// is an inventory input, and with 2514 the receiver listened and received
+	// while `grep ":514"` failed.
+	for _, want := range []string{"10-siem-receiver.conf", "imtcp", "sport = :$p"} {
+		if !strings.Contains(cmd["C5"], want) {
+			t.Errorf("C5 must contain %q, got %q", want, cmd["C5"])
+		}
+	}
+	if strings.Contains(cmd["C5"], ":514") {
+		t.Errorf("C5 must not hard-code port 514, got %q", cmd["C5"])
 	}
 	if exp["C5"] != "0" {
 		t.Errorf("C5 expected must be rc-based `0`, got %q", exp["C5"])
