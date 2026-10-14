@@ -26,8 +26,6 @@
     freeipa_realm_replacement_expected_user_file: /etc/pilot/freeipa-realm-replacement.expected-user
     freeipa_realm_replacement_backup_link: /etc/pilot/freeipa-realm-replacement.backup
     freeipa_realm_replacement_backup_dir: /var/backups/pilot/freeipa-realm-replacement
-    freeipa_realm_replacement_backup_archive: >-
-      {{ freeipa_realm_replacement_backup_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}.tar.gz
 
   pre_tasks:
     - name: "Gate: realm replacement requires explicit human confirmation"
@@ -96,6 +94,9 @@
         '/^realm[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); exit $2 != want}'
         /etc/ipa/default.conf
       changed_when: false
+      # Read-only: check it in --check too. Check mode skips a shell task, so
+      # a preview passed this gate on a client in another realm.
+      check_mode: false
       when: not freeipa_realm_replacement_prior_state.stat.exists
       tags: [C1]
 
@@ -135,6 +136,18 @@
       tags: [always]
 
   tasks:
+    # Named once per run from the controller's clock, then used by the
+    # snapshot, the rescue, the completion marker and the link. The name used
+    # to come from ansible_date_time, which the one-hour fact cache
+    # (ansible.cfg `gathering = smart`) kept: every run within the hour
+    # reused the first run's name, and its tar overwrote that archive
+    # (2026-10-12/13 evidence).
+    - name: "Realm replacement — name this run's archive"
+      ansible.builtin.set_fact:
+        freeipa_realm_replacement_backup_archive: >-
+          {{ freeipa_realm_replacement_backup_dir }}/{{ inventory_hostname }}-{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}.tar.gz
+      tags: [always]
+
     - name: "Realm replacement — create local state and backup directories"
       ansible.builtin.file:
         path: "{{ item }}"
@@ -145,6 +158,26 @@
       loop:
         - "{{ freeipa_realm_replacement_state_dir }}"
         - "{{ freeipa_realm_replacement_backup_dir }}"
+      tags: [always, C2]
+
+    - name: "Realm replacement — look for an archive at this run's name"
+      ansible.builtin.stat:
+        path: "{{ freeipa_realm_replacement_backup_archive }}"
+      register: freeipa_realm_replacement_backup_archive_stat
+      tags: [always, C2]
+
+    # tar -czf truncates an existing file. An archive is rollback and
+    # forensic material, so never write over one (an operator-supplied
+    # -e freeipa_realm_replacement_backup_archive, or two runs within a
+    # second).
+    - name: "Gate: this run's archive must not exist yet"
+      ansible.builtin.assert:
+        that:
+          - not freeipa_realm_replacement_backup_archive_stat.stat.exists
+        fail_msg: >-
+          {{ freeipa_realm_replacement_backup_archive }} already exists. Refusing to
+          overwrite an earlier run's archive; nothing was changed. Run again for a
+          new name, or move that archive aside after reviewing it.
       tags: [always, C2]
 
     - name: "Realm replacement — snapshot old client trust before mutation"
@@ -401,11 +434,16 @@
           no_log: true
           tags: [C3, C4, C5, C6]
 
+        # Check mode skips the snapshot, so the archive does not exist and the
+        # link failed with "src file does not exist", sending every --check
+        # preview into the rescue. force only in check mode: a real run still
+        # refuses to link an archive that is missing.
         - name: "Realm replacement — expose archive through a stable root-only link"
           ansible.builtin.file:
             src: "{{ freeipa_realm_replacement_backup_archive }}"
             dest: "{{ freeipa_realm_replacement_backup_link }}"
             state: link
+            force: "{{ ansible_check_mode }}"
             owner: root
             group: root
           tags: [C6]
