@@ -6,7 +6,7 @@
 >
 > 最新 `--hosts all` actual-run evidence：[`2026-09-15-all-keyword.md`](../evidence/pilot-gateway-scope/2026-09-15-all-keyword.md)
 >
-> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `c328aa6`）：全新 vm-target topology 上 `vm-target topology test` L3／L4 `failed=0`、L5 3/3、L6 `changed=0`，主機上沒有任何 admin ticket；同一個 hostgroup 用 `main` 的 `ipa hostgroup-show` 版本為 0/3。紀錄：[`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md)
+> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `decc613`）：C1–C3 經 ldapi 以 SASL EXTERNAL 讀取，`spec.NeedsBecome` 會讓它們以 root 執行；同一台 FreeIPA 上以 root 或非 root 的 `ansible_user` 都是 3/3（`main` 的 binary 以非 root 執行為 0/3）。全新 topology 的 L3–L6 見 [`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md)，become 的實跑見 [`2026-10-15-decc613.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613.md)
 
 ## 1. 目標系統
 
