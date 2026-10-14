@@ -12,15 +12,22 @@ regressionTests:
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
 # docs/verification/log-server.md §1.5. siem_log_root is also log-shipping's
-# input and siem_receiver_tcp_port must equal audit-log-forwarding's
-# siem_forward_port: hosts resolve each from the same inventory value.
+# input; on a host in both groups both playbooks read the same value.
+# siem_receiver_tcp_port is a different variable from the clients'
+# siem_forward_port (audit-log-forwarding), usually set in a different
+# group_vars file: audit-log-forwarding-apply.yml fails when the two differ
+# for clients that forward to this inventory's log-server.
 groupVars:
-  - {name: siem_receiver_tcp_port, type: string, required: false, default: "514", secret: false}
+  - {name: siem_receiver_tcp_port, type: integer, required: false, default: 514, secret: false}
   - {name: siem_log_root, type: string, required: false, default: /var/log/siem, secret: false}
   - {name: siem_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
   - {name: siem_logrotate_maxage, type: integer, required: false, default: 90, secret: false}
+# The endpoint and the backup path below are the defaults of
+# siem_receiver_tcp_port and siem_log_root; a site that changes either must
+# use its own value for diagnostics and restic_backup_paths. (The endpoint
+# said 6514 before 2026-10-14; rsyslog only ever listened on 514.)
 endpoints:
-  - {name: syslog, scheme: tcp, port: 6514}
+  - {name: syslog, scheme: tcp, port: 514}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 lifecycle:

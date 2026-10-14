@@ -21,7 +21,7 @@ hostCardinality: exactly-one
 resources: {minCPU: 4, minRAMMiB: 8192, minDiskGiB: 50}
 groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
-  - {name: siem_forward_port, type: string, required: false, default: "514", secret: false}
+  - {name: siem_forward_port, type: integer, required: false, default: 514, secret: false}
   - {name: wazuh_docker_version, type: string, required: false, default: "4.14.1", secret: false}
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}

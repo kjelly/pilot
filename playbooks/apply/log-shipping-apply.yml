@@ -121,7 +121,7 @@
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         loki_alias: "{{ loki_alias | default('pilot-loki-backend', true) }}"
-        loki_port: "{{ loki_port | default(3100) }}"
+        loki_port: "{{ loki_port | default(3100, true) }}"
         promtail_job_label: "{{ promtail_job_label | default('pilot-siem', true) }}"
       tags: [always]
 

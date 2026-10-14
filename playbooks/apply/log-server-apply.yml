@@ -87,20 +87,25 @@
     # siem_log_root is also log-shipping's input, and Promtail tails it on
     # these same hosts: both playbooks must resolve the same value
     # (docs/verification/log-shipping.md §1.5), so an empty or null value
-    # falls back to the default here as it does there.
+    # falls back to the default here as it does there. An empty logrotate
+    # count would render `rotate ` and logrotate would skip the whole file.
     # siem_receiver_tcp_port must equal the clients' siem_forward_port
     # (audit-log-forwarding-apply.yml), which falls back the same way.
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         siem_log_root: "{{ siem_log_root | default('/var/log/siem', true) }}"
-        siem_logrotate_maxage: "{{ siem_logrotate_maxage | default(90) }}"
-        siem_logrotate_rotate: "{{ siem_logrotate_rotate | default(14) }}"
+        siem_logrotate_maxage: "{{ siem_logrotate_maxage | default(90, true) }}"
+        siem_logrotate_rotate: "{{ siem_logrotate_rotate | default(14, true) }}"
         siem_receiver_tcp_port: "{{ siem_receiver_tcp_port | default('514', true) }}"
       tags: [always]
 
     # Step 2 makes siem_log_root owned by the rsyslog user and Step 4
-    # rotates siem_log_root/*/*.log: a shared system directory such as
-    # /var/log would be taken over and its logs rotated by this policy.
+    # rotates siem_log_root/*/*.log: a directory that already belongs to
+    # something else (/var/log, /var/log/journal, /home/<user>, ...) would be
+    # taken over and its logs rotated by this policy. The name check refuses
+    # system trees and shared directories; the checks after it refuse a
+    # symlink in the path (Step 2 follows it) and an existing directory this
+    # role did not create.
     - name: "Gate: siem_log_root is a dedicated absolute directory"
       ansible.builtin.assert:
         that:
@@ -108,16 +113,72 @@
           - siem_log_root is match('^/[A-Za-z0-9._/-]+$')
           - (siem_log_root.split('/')[1:] | select('in', ['', '.', '..']) | list | length) == 0
           - siem_log_root not in siem_log_root_reserved
+          - (siem_log_root.split('/')[:2] | join('/')) not in siem_log_root_system_trees
         fail_msg: >-
           siem_log_root={{ siem_log_root }} must be an absolute path without
-          empty, '.' or '..' segments or a trailing '/', and must not be a
-          shared system directory ({{ siem_log_root_reserved | join(', ') }}).
+          empty, '.' or '..' segments or a trailing '/', must not be under
+          {{ siem_log_root_system_trees | join(', ') }}, and must not be a
+          shared directory ({{ siem_log_root_reserved | join(', ') }}).
           Use a dedicated directory such as /var/log/siem.
       vars:
-        siem_log_root_reserved: [/bin, /boot, /dev, /etc, /home, /lib, /lib64, /media, /mnt,
-                                 /opt, /proc, /root, /run, /sbin, /srv, /sys, /tmp, /usr,
-                                 /usr/local, /var, /var/cache, /var/lib, /var/log, /var/mail,
-                                 /var/opt, /var/run, /var/spool, /var/tmp]
+        siem_log_root_system_trees: [/bin, /boot, /dev, /etc, /lib, /lib32, /lib64, /libx32, /proc,
+                                     /run, /sbin, /sys, /usr]
+        siem_log_root_reserved: [/home, /media, /mnt, /opt, /root, /srv, /tmp, /var, /var/cache,
+                                 /var/lib, /var/log, /var/mail, /var/opt, /var/run, /var/spool,
+                                 /var/tmp]
+      tags: [always]
+
+    - name: "Gate: inspect every directory on the siem_log_root path"
+      ansible.builtin.stat:
+        path: "{{ siem_log_root.split('/')[:item] | join('/') }}"
+        follow: false
+        get_checksum: false
+        get_mime: false
+      loop: "{{ range(2, (siem_log_root.split('/') | length) + 1) | list }}"
+      register: siem_log_root_path_stat
+      tags: [always]
+
+    - name: "Gate: list an existing siem_log_root"
+      ansible.builtin.find:
+        paths: "{{ siem_log_root }}"
+        file_type: any
+        hidden: true
+        recurse: false
+      register: siem_log_root_entries
+      when:
+        - (siem_log_root_path_stat.results | last).stat.exists
+        - (siem_log_root_path_stat.results | last).stat.isdir | default(false)
+      tags: [always]
+
+    # An existing siem_log_root must already be what Step 2 leaves behind
+    # (owned by siem_log_owner:siem_log_owner, mode 0755) and hold only the
+    # per-host directories rsyslog's dynaFile creates. Step 2 then changes
+    # nothing on it, so reruns pass while a directory that belongs to
+    # something else (even an empty one such as /var/log/private) fails.
+    - name: "Gate: siem_log_root has no symlink and is new or already this role's"
+      ansible.builtin.assert:
+        that:
+          - siem_log_root_symlinks | length == 0
+          - >-
+            not siem_log_root_stat.exists
+            or (siem_log_root_stat.isdir
+                and siem_log_root_stat.pw_name == siem_log_owner
+                and siem_log_root_stat.gr_name == siem_log_owner
+                and siem_log_root_stat.mode == '0755'
+                and (siem_log_root_entries.files | default([]) | rejectattr('isdir') | list | length) == 0)
+        fail_msg: >-
+          siem_log_root={{ siem_log_root }}:
+          {% if siem_log_root_symlinks %}symlinks on the path: {{ siem_log_root_symlinks | join(', ') }}.
+          {% elif not (siem_log_root_stat.isdir | default(false)) %}it exists and is not a directory.
+          {% else %}it exists as {{ siem_log_root_stat.pw_name | default('-') }}:{{ siem_log_root_stat.gr_name | default('-') }}
+          mode {{ siem_log_root_stat.mode | default('-') }} with non-directories
+          {{ siem_log_root_entries.files | default([]) | rejectattr('isdir') | map(attribute='path') | list }};
+          an existing siem_log_root must be {{ siem_log_owner }}:{{ siem_log_owner }} mode 0755 and
+          hold only per-host directories.{% endif %}
+          Use a new directory, or prepare one in that state yourself.
+      vars:
+        siem_log_root_stat: "{{ (siem_log_root_path_stat.results | last).stat }}"
+        siem_log_root_symlinks: "{{ siem_log_root_path_stat.results | selectattr('stat.islnk', 'defined') | selectattr('stat.islnk') | map(attribute='stat.path') | list }}"
       tags: [always]
   tasks:
     # Previously: unconditionally end_play'd this whole host whenever
@@ -223,6 +284,9 @@
             owner: root
             group: root
             mode: "0644"
+            # logrotate exits 1 on a config error (e.g. "bad rotation count")
+            # and would skip this whole policy at its next run.
+            validate: logrotate -d %s
             content: |
               # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
               {{ siem_log_root }}/*/*.log {

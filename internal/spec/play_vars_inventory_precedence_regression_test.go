@@ -201,11 +201,14 @@ func TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs(t *testing.T) {
 	}
 }
 
-// specInputRow matches a variable row of a spec's §1.5 variable table.
-var specInputRow = regexp.MustCompile("^\\|\\s*`([a-z][a-z0-9_]*)`\\s*\\|")
+// specInputName matches a backticked variable name in a table cell.
+var specInputName = regexp.MustCompile("`([a-z][a-z0-9_]*)`")
 
-// specInputs returns the variables listed in the §1.5 tables of the specs a
-// contract owns.
+// specInputs returns the variables a contract's specs list as inputs: every
+// backticked name in the first cell of a table row under a level-2 heading
+// containing 變數契約 ("## 1.5 依賴變數契約" in most specs, "## 3. Apply
+// 變數契約" in dns.md). Tables of verify-time inputs (dns.md "## 4. Verify
+// inputs") are not inventory inputs and are not read.
 func specInputs(t *testing.T, c inventoryInputContract) map[string]bool {
 	t.Helper()
 	out := map[string]bool{}
@@ -217,10 +220,14 @@ func specInputs(t *testing.T, c inventoryInputContract) map[string]bool {
 		inTable := false
 		for _, line := range strings.Split(string(raw), "\n") {
 			if strings.HasPrefix(line, "## ") {
-				inTable = line == "## 1.5" || strings.HasPrefix(line, "## 1.5 ")
+				inTable = strings.Contains(line, "變數契約")
 				continue
 			}
-			if m := specInputRow.FindStringSubmatch(line); inTable && m != nil {
+			cells := strings.Split(line, "|")
+			if !inTable || !strings.HasPrefix(line, "|") || len(cells) < 3 {
+				continue
+			}
+			for _, m := range specInputName.FindAllStringSubmatch(cells[1], -1) {
 				out[m[1]] = true
 			}
 		}
@@ -228,43 +235,43 @@ func specInputs(t *testing.T, c inventoryInputContract) map[string]bool {
 	return out
 }
 
-// undeclaredSpecInputsAllowlist lists, per contract, the variables its specs'
-// §1.5 tables name but neither its groupVars nor its group_vars example
-// declares (issue #81). Most are still play vars that shadow inventory, or
-// are derived from other inputs and should leave §1.5. The list may only
-// shrink: the test fails for an entry that is declared or no longer listed.
+// undeclaredSpecInputsAllowlist lists, per contract, the variables its
+// specs list as inputs (see specInputs) that its contract's groupVars does
+// not declare (issue #81). Some are play vars that shadow inventory, some
+// are only in a group_vars example (which `pilot deploy`'s preflight does
+// not read), some are derived from other inputs or are roster/manifest
+// fields and should leave the table. The list may only shrink: the test
+// fails for an entry that is declared or no longer listed.
 var undeclaredSpecInputsAllowlist = map[string][]string{
-	"alertmanager": {"alertmanager_config_dir", "alertmanager_host_data_dir", "alertmanager_receiver_mode", "alertmanager_teams_proxy_image",
-		"alertmanager_teams_proxy_port", "alertmanager_teams_webhook_url", "alertmanager_version", "docker_network_name"},
-	"dashboard":          {"dashboard_config_dir", "grafana_host_data_dir", "loki_host_data_dir"},
-	"freeipa-client":     {"ipa_client_fqdn", "ipa_domain", "ipa_enroll_principal", "ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_verify_user", "pilot_annotations"},
-	"freeipa-dns-client": {"freeipa_setup_dns"},
-	"freeipa-dns":        {"freeipa_setup_dns"},
-	"freeipa-identity":   {"freeipa_roster_file", "netgroups"},
-	"freeipa-realm-replacement": {"freeipa_realm_replacement_client_fqdn", "freeipa_realm_replacement_confirm", "freeipa_realm_replacement_new_domain",
-		"freeipa_realm_replacement_new_realm", "freeipa_realm_replacement_new_server_fqdn", "freeipa_realm_replacement_new_server_ip",
-		"freeipa_realm_replacement_old_realm", "freeipa_realm_replacement_ticket", "freeipa_realm_replacement_verify_user"},
-	"freeipa-server-replica": {"ipa_dns_forwarders", "ipa_domain", "ipa_realm", "ipa_replica_fqdn", "ipa_replica_ip", "ipa_replica_setup_ca",
-		"ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
-	"freeipa-server": {"ipa_dm_password", "ipa_dns_allow_any_recursion", "ipa_dns_forwarders", "ipa_domain", "ipa_ds_instance", "ipa_enable_audit_log",
-		"ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
-	"pilot-access-gateway": {"pilot_access_gateway_recording_session_store_ingest_token_file"},
-	"prometheus":           {"prometheus_alert_rules_file", "prometheus_scrape_configs", "thanos_s3_alias", "thanos_s3_port"},
-	"restic-backup":        {"restic_backup_randomized_delay", "restic_backup_timer_persistent", "restic_lock_retry"},
-	"thanos-query":         {"thanos_s3_alias", "thanos_s3_port"},
+	"alertmanager":              {"alertmanager_config", "alertmanager_config_dir", "alertmanager_host_data_dir", "alertmanager_receiver_mode", "alertmanager_teams_proxy_image", "alertmanager_teams_proxy_port", "alertmanager_teams_webhook_url", "alertmanager_version", "docker_network_name"},
+	"dashboard":                 {"dashboard_config_dir", "grafana_admin_password", "grafana_host_data_dir", "loki_host_data_dir"},
+	"dns":                       {"dns_listen_addr", "dns_provider", "dns_zones", "freeipa_client_topology_mode", "freeipa_domain", "freeipa_server_fqdn", "freeipa_setup_dns"},
+	"freeipa-client":            {"ipa_client_fqdn", "ipa_domain", "ipa_enroll_principal", "ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_verify_user", "pilot_annotations"},
+	"freeipa-dns-client":        {"freeipa_setup_dns"},
+	"freeipa-dns":               {"freeipa_domain", "freeipa_realm", "freeipa_server_fqdn", "freeipa_setup_dns"},
+	"freeipa-identity":          {"freeipa_roster_file", "groups", "ipa_domain", "ipa_groups", "ipa_hbac_rules", "ipa_hostgroups", "ipa_realm", "ipa_sudo_rules", "ipa_users", "netgroups", "schema_version", "users"},
+	"freeipa-realm-replacement": {"freeipa_realm_replacement_client_fqdn", "freeipa_realm_replacement_confirm", "freeipa_realm_replacement_new_domain", "freeipa_realm_replacement_new_realm", "freeipa_realm_replacement_new_server_fqdn", "freeipa_realm_replacement_new_server_ip", "freeipa_realm_replacement_old_realm", "freeipa_realm_replacement_ticket", "freeipa_realm_replacement_verify_user"},
+	"freeipa-server-replica":    {"ipa_dns_forwarders", "ipa_domain", "ipa_realm", "ipa_replica_fqdn", "ipa_replica_ip", "ipa_replica_setup_ca", "ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
+	"freeipa-server":            {"ipa_dm_password", "ipa_dns_allow_any_recursion", "ipa_dns_forwarders", "ipa_domain", "ipa_ds_instance", "ipa_enable_audit_log", "ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
+	"pilot-access-gateway":      {"pilot_access_gateway_recording_session_store_ingest_token_file"},
+	"prometheus":                {"alertmanager_alias", "alertmanager_port", "prometheus_alert_rules_file", "prometheus_retention_time", "prometheus_scrape_configs", "prometheus_scrape_interval", "thanos_aws_access_key_id", "thanos_aws_secret_access_key", "thanos_s3_alias", "thanos_s3_bucket", "thanos_s3_endpoint", "thanos_s3_port"},
+	"restic-backup":             {"restic_backup_randomized_delay", "restic_backup_timer_persistent", "restic_lock_retry"},
+	"thanos-query":              {"thanos_aws_access_key_id", "thanos_aws_secret_access_key", "thanos_compact_retention_1h", "thanos_compact_retention_5m", "thanos_compact_retention_raw", "thanos_query_sidecar_grpc_port", "thanos_query_store_group", "thanos_s3_alias", "thanos_s3_bucket", "thanos_s3_endpoint", "thanos_s3_port"},
+	"wazuh-fim":                 {"wazuh_fim_directories", "wazuh_repo_channel"},
 }
 
 // TestRegression_SpecInputsAreDeclaredContractInputs closes the gap between
-// a spec's §1.5 variable table and the inventory inputs the play-vars lint
-// and `pilot deploy`'s preflight know about. log-server's §1.5 named
-// siem_receiver_tcp_port, but only contracts' groupVars and example keys
-// counted as inputs, so the play vars kept shadowing it: with
-// siem_forward_port and siem_receiver_tcp_port both set to 2514 in
-// inventory, clients sent to 2514 while rsyslog still listened on 514. A
-// variable a spec's §1.5 lists must be declared in its contract's groupVars
-// (or its group_vars example), apart from undeclaredSpecInputsAllowlist.
+// a spec's variable table and the inputs `pilot deploy`'s preflight and the
+// play-vars lint know about. log-server's §1.5 named siem_receiver_tcp_port,
+// but only contracts' groupVars and example keys counted as inputs, so the
+// play vars kept shadowing it: with siem_forward_port and
+// siem_receiver_tcp_port both set to 2514 in inventory, clients sent to 2514
+// while rsyslog still listened on 514. A variable a spec lists as an input
+// (see specInputs) must be declared in its contract's groupVars; a group_vars
+// example key alone does not count, because preflight reads only groupVars.
+// undeclaredSpecInputsAllowlist holds the ones not done yet.
 func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
-	contracts, inputs := inventoryInputs(t)
+	contracts, _ := inventoryInputs(t)
 	ids := make([]string, 0, len(contracts))
 	for id := range contracts {
 		ids = append(ids, id)
@@ -284,17 +291,21 @@ func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			_, declared := inputs[id][name]
+			declared := slices.ContainsFunc(contracts[id].GroupVars, func(gv struct {
+				Name string `yaml:"name"`
+			}) bool {
+				return gv.Name == name
+			})
 			switch {
 			case declared && pending[name]:
 				t.Errorf("%s: %s is declared now; remove it from undeclaredSpecInputsAllowlist", id, name)
 			case !declared && !pending[name]:
-				t.Errorf("%s: its spec's §1.5 lists %s, but contracts/%s.yaml groupVars does not declare it", id, name, id)
+				t.Errorf("%s: its spec lists %s as an input, but contracts/%s.yaml groupVars does not declare it", id, name, id)
 			}
 		}
 		for name := range pending {
 			if !spec[name] {
-				t.Errorf("%s: undeclaredSpecInputsAllowlist entry %s is no longer in its spec's §1.5", id, name)
+				t.Errorf("%s: undeclaredSpecInputsAllowlist entry %s is no longer listed in its spec", id, name)
 			}
 		}
 	}
@@ -303,10 +314,10 @@ func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
 			t.Errorf("undeclaredSpecInputsAllowlist names unknown contract %s", id)
 		}
 	}
-	// 188 §1.5 rows existed on 2026-10-14; far fewer means the table
+	// The tables named 227 variables on 2026-10-14; far fewer means the
 	// parser stopped finding them.
-	if listed < 150 {
-		t.Fatalf("only %d §1.5 variables found; the parser is broken", listed)
+	if listed < 200 {
+		t.Fatalf("only %d spec input variables found; the parser is broken", listed)
 	}
 }
 
@@ -564,11 +575,27 @@ func runInventoryPlay(t *testing.T, group string, playVars any, tasks []any, gro
 // the failed task's name and message instead of failing the test.
 func tryInventoryPlay(t *testing.T, group string, playVars any, tasks []any, groupVars map[string]any) (map[string]any, string) {
 	t.Helper()
-	dir := t.TempDir()
 	inv := map[string]any{"all": map[string]any{"children": map[string]any{
-		group: map[string]any{"hosts": map[string]any{"localhost": map[string]any{
-			"ansible_connection": "local", "ansible_python_interpreter": "/usr/bin/python3"}}},
+		group: map[string]any{"hosts": map[string]any{"localhost": localHostVars()}},
 	}}}
+	var files map[string]map[string]any
+	if groupVars != nil {
+		files = map[string]map[string]any{group: groupVars}
+	}
+	return tryInventoryPlayIn(t, inv, files, group, playVars, tasks)
+}
+
+// localHostVars connects an inventory host to the local machine.
+func localHostVars() map[string]any {
+	return map[string]any{"ansible_connection": "local", "ansible_python_interpreter": "/usr/bin/python3"}
+}
+
+// tryInventoryPlayIn runs one play on hosts of inv, with
+// group_vars/<group>.yml for every entry of groupVars, and returns the show
+// task's JSON object, or the failed task's name and message.
+func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]map[string]any, hosts string, playVars any, tasks []any) (map[string]any, string) {
+	t.Helper()
+	dir := t.TempDir()
 	write := func(path string, v any) {
 		body, err := yaml.Marshal(v)
 		if err != nil {
@@ -582,14 +609,14 @@ func tryInventoryPlay(t *testing.T, group string, playVars any, tasks []any, gro
 		}
 	}
 	write(filepath.Join(dir, "inventory.yml"), inv)
-	if groupVars != nil {
-		write(filepath.Join(dir, "group_vars", group+".yml"), groupVars)
+	for group, vars := range groupVars {
+		write(filepath.Join(dir, "group_vars", group+".yml"), vars)
 	}
 	if playVars == nil {
 		playVars = map[string]any{}
 	}
 	write(filepath.Join(dir, "play.yml"), []map[string]any{{
-		"name": "inventory inputs", "hosts": group, "gather_facts": false, "become": false,
+		"name": "inventory inputs", "hosts": hosts, "gather_facts": false, "become": false,
 		"vars": playVars, "tasks": tasks,
 	}})
 	cmd := exec.Command("ansible-playbook", "-i", filepath.Join(dir, "inventory.yml"), filepath.Join(dir, "play.yml"))

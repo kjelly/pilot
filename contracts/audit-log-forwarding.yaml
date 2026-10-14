@@ -21,7 +21,7 @@ hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
-  - {name: siem_forward_port, type: string, required: false, default: "514", secret: false}
+  - {name: siem_forward_port, type: integer, required: false, default: 514, secret: false}
   - {name: audit_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
   - {name: audit_logrotate_maxage, type: integer, required: false, default: 90, secret: false}
   - {name: syslog_logrotate_rotate, type: integer, required: false, default: 14, secret: false}

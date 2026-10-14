@@ -150,25 +150,11 @@ func hashPlaybookFile(repoRoot, playbookPath string) (string, error) {
 // classifyGroupVarType reports whether value is consistent with the
 // declared contract GroupVar type — an inconsistency is "ambiguous"
 // (design doc §17: "Missing/ambiguous blocks plan"), not silently
-// coerced.
+// coerced. It accepts exactly what `pilot deploy`'s preflight accepts
+// (contract.ValueMatchesType), so a value one of them takes the other
+// does not report as ambiguous.
 func classifyGroupVarType(typ string, value any) bool {
-	switch typ {
-	case "boolean":
-		_, ok := value.(bool)
-		return ok
-	case "integer":
-		switch value.(type) {
-		case float64, int, int64:
-			return true
-		}
-		return false
-	case "stringList":
-		_, ok := value.([]any)
-		return ok
-	default: // "string", "duration", or an unrecognized type — treat as opaque scalar
-		_, ok := value.(string)
-		return ok
-	}
+	return contract.ValueMatchesType(typ, value)
 }
 
 // resolveInputs classifies every declared GroupVar for comp against
