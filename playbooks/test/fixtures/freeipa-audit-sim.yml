@@ -47,27 +47,50 @@
       tags: [sim]
 
   tasks:
-    # ── Step 1: kinit as audituser ──────────────────────────────────────
-    - name: "Sim — kinit as {{ audit_demo_user }} (Kerberos TGT)"
+    # The sim's TGT goes to a private cache, destroyed in always: (issue #69).
+    # Before, the renewable (-r 7d) ticket stayed in root's default cache after
+    # the sim; the pre_tasks kdestroy only ran before the kinit. Nothing later in
+    # the sim uses the ticket: the SSH steps log in with a key.
+    - name: "Sim — Kerberos login as {{ audit_demo_user }} with a private cache"
       become: true
-      ansible.builtin.shell:
-        cmd: |
-          echo "{{ audit_demo_user_pass }}" | kinit -r 7d {{ audit_demo_user }}
-      register: kinit_result
-      changed_when: false
-      tags: [sim]
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Sim — kinit result"
-      ansible.builtin.debug:
-        msg: "{{ kinit_result.stdout_lines[-2:] if kinit_result.stdout_lines | length > 2 else kinit_result.stdout_lines }}"
-      tags: [sim]
+        # ── Step 1: kinit as audituser ──────────────────────────────────────
+        - name: "Sim — kinit as {{ audit_demo_user }} (Kerberos TGT)"
+          become: true
+          ansible.builtin.shell:
+            cmd: |
+              echo "{{ audit_demo_user_pass }}" | kinit -r 7d {{ audit_demo_user }}
+          register: kinit_result
+          changed_when: false
+          tags: [sim]
 
-    - name: "Sim — assert kinit succeeded"
-      ansible.builtin.assert:
-        that:
-          - kinit_result.rc == 0
-        fail_msg: "kinit failed: {{ kinit_result.stdout }} {{ kinit_result.stderr }}"
-      tags: [sim]
+        - name: "Sim — kinit result"
+          ansible.builtin.debug:
+            msg: "{{ kinit_result.stdout_lines[-2:] if kinit_result.stdout_lines | length > 2 else kinit_result.stdout_lines }}"
+          tags: [sim]
+
+        - name: "Sim — assert kinit succeeded"
+          ansible.builtin.assert:
+            that:
+              - kinit_result.rc == 0
+            fail_msg: "kinit failed: {{ kinit_result.stdout }} {{ kinit_result.stderr }}"
+          tags: [sim]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
     # ── Step 1b: real SSH login as audituser (loopback) ──────────────────
     # Proves audituser can actually log in to the client (sshd + PAM +
