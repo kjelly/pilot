@@ -15,15 +15,15 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-13，candidate `f63d490`（tree `42d4b6531cedec0467a0243fc3e714b2fa5f39ef`），
-**PASS**。完整摘要：[`docs/evidence/dns-architecture-diagnose/2026-10-13-f63d490.md`](../evidence/dns-architecture-diagnose/2026-10-13-f63d490.md)。
+最新驗證：2026-10-14，candidate `e862f1d`（tree `03b4688961327efbd3cafbd70524bd7baa86512e`），
+**PASS**。完整摘要：[`docs/evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建、以 `playbooks/test/dns-tier-chain.yml` 部署的 VM（FreeIPA 4.13.4 / AlmaLinux 9.8、unbound 1.19.2 / Ubuntu 24.04.4），測完已移除 |
-| inventory host 集合 | `freeipa-server`: dd-ipa；`dns`: dd-dns；`freeipa-dns-client`: dd-client。S7–S10 另用 inventory 副本加入連不到的 replica、拿掉 `dns` group、設定 client override |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與 §2 的唯讀 principal 設定用）；`dd-ipa` 的 `/etc/pilot/dns-reader.keytab` |
-| 結果 | 11 個情境全部符合預期：有核准 principal 時 `complete`、8 項比對全部 `match`；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`（不是「沒有 forwarder」）；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止、replica 連不到時 `partial`；沒有 tier、client override、replica 未設 `freeipa_setup_dns` 都有對應 finding；`admin` principal 在啟動時被拒絕 |
+| 目標環境 | `pilot vm-target topology`，4 台由 `topology up` 新建、由 PR #73 的 candidate `6522b94` 部署的 VM（FreeIPA 4.13.4 primary 與 replica / AlmaLinux 9.8、unbound 1.19.2 / Ubuntu 24.04.4、一台 consumer），測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr73-ipa；`freeipa-server-replica`: pr73-replica（未設 `freeipa_setup_dns`）；`dns`: pr73-dns；`freeipa-dns-client`: pr73-client。S7–S9 另用 inventory 副本加入連不到的 replica、拿掉 `dns` group、設定 client override |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與 §2 的唯讀 principal 設定用）；`pr73-ipa` 的 `/etc/pilot/dns-reader.keytab` |
+| 結果 | 14 個情境全部符合預期（2026-10-13 `f63d490` 的 11 個情境全部重跑，再加 3 個外部解析情境）：有核准 principal 時 `complete`；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止時 `partial`，並有 `external_resolution_unknown` 與 `live_fact_unknown`；replica 連不到時 `partial`；tier 回 SERVFAIL、或 CNAME 沒有 A 紀錄時是 `external_resolution_failed`，不再說「resolved」；CNAME 接 A 紀錄才算解析成功；`admin` principal 在啟動時被拒絕。同一個 topology 上，`1a3b498` 對 SERVFAIL 仍回報「resolved the external name」 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼
@@ -154,3 +154,4 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 日期 | 變更 | 變更者 |
 |---|---|---|
 | 2026-10-13 | 初版（issue #62）；§0.5 填入 candidate `f63d490` 的實跑結果 | pilot |
+| 2026-10-14 | PR #66 review：外部解析要 NOERROR 且有紀錄才算成功，SERVFAIL/查無紀錄是 `external_resolution_failed`、沒有回應是 `external_resolution_unknown`；連得到的主機上任何 `unknown` 的 live 事實都讓 `status` 變成 `partial`（`live_fact_unknown`）；`paths` 標出每台 FreeIPA DNS 的 live SOA；§0.5 改成 candidate `e862f1d` 的實跑結果 | pilot |
