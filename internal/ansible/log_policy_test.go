@@ -1,12 +1,16 @@
 package ansible
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRedactSecrets(t *testing.T) {
@@ -34,6 +38,8 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 		`"api_key": "key value"`,
 		`{"vault_password": 'x', "other": 1}`,
 		"--secret cli-secret --password=p",
+		"password=abc]def",
+		"password:[REDACTED]--password p",
 		"ordinary line",
 	} {
 		once := RedactSecrets(raw)
@@ -66,14 +72,15 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 }
 
 // Only the marker itself counts as already masked. A value that merely
-// starts like it is a value, and is masked (PR #71 review).
+// starts like it is a value, and is masked (PR #71 review). Text after the
+// marker's closing bracket is not part of the value and is judged by the
+// other rules, as on main: a flag glued to it is still masked.
 func TestRedactSecretsMasksMarkerLookalikes(t *testing.T) {
 	for raw, want := range map[string]string{
-		"password: [REDACTED-synthetic-marker-secret": "password: [REDACTED]",
-		"token=[REDACTEDsynthetic":                    "token= [REDACTED]",
-		"api_key: [REDACTED]synthetic-glued":          "api_key: [REDACTED]",
-		"secret: [REDACTED]]]synthetic-after-legacy":  "secret: [REDACTED]",
-		"password: [redacted]":                        "password: [REDACTED]",
+		"password: [REDACTED-synthetic-marker-secret":         "password: [REDACTED]",
+		"token=[REDACTEDsynthetic":                            "token= [REDACTED]",
+		"password: [redacted]":                                "password: [REDACTED]]",
+		"password:[REDACTED]--password synthetic-flag-secret": "password:[REDACTED]--password [REDACTED]",
 	} {
 		if got := RedactSecrets(raw); got != want {
 			t.Errorf("RedactSecrets(%q) = %q, want %q", raw, got, want)
@@ -491,9 +498,10 @@ func maintainTwice(t *testing.T, path string) string {
 }
 
 // Maintenance runs after Ansible exits, so a final line without its newline
-// may never be completed. It is masked now, and stays masked; if a writer
-// does complete it later, the line is judged whole again, so the rest of a
-// secret split across the two writes is masked too (PR #71 review).
+// may never be completed. It is masked now, and stays masked (PR #71
+// review). When something is appended later, for example the next run's
+// first record, the line is judged again as a whole, as a full pass would
+// judge it.
 func TestMaintainLogMasksAFinalLineWithoutNewline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ansible.log")
 	if err := os.WriteFile(path, []byte("ordinary\npassword: synthetic-eof-secret"), 0o600); err != nil {
@@ -502,9 +510,9 @@ func TestMaintainLogMasksAFinalLineWithoutNewline(t *testing.T) {
 	if got := maintainTwice(t, path); got != "ordinary\npassword: [REDACTED]" {
 		t.Fatalf("log = %q", got)
 	}
-	appendLog(t, path, "-synthetic-continued\nnext line\n")
-	if got := maintainTwice(t, path); got != "ordinary\npassword: [REDACTED]\nnext line\n" {
-		t.Fatalf("log = %q", got)
+	appendLog(t, path, testRecord("PLAY [next run]")+"\n")
+	if got, want := maintainTwice(t, path), "ordinary\npassword: [REDACTED]"+testRecord("PLAY [next run]")+"\n"; got != want {
+		t.Fatalf("log = %q, want %q", got, want)
 	}
 }
 
@@ -540,19 +548,68 @@ func TestMaintainLogMasksTheRestOfACutOneLineKey(t *testing.T) {
 	}
 }
 
-// A key's END marker cut before its newline is not secret and is left as
-// is: masking it would hide the marker and every later line would be read
-// as key material.
-func TestMaintainLogKeepsAHalfWrittenEndMarker(t *testing.T) {
+// testRecordPrefix is the record prefix ansible-core 2.19.2 writes, taken
+// from a real controller log line (pid and user changed).
+const testRecordPrefix = "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| "
+
+func testRecord(message string) string {
+	return testRecordPrefix + message
+}
+
+// A key whose END marker never comes must not mask the rest of the log
+// (PR #71 review): it used to mask every later line, in that run and every
+// later one. Key material never starts with an Ansible record prefix, so the
+// next record ends it.
+func TestMaintainLogEndsAnUnfinishedKeyAtTheNextRecord(t *testing.T) {
+	for name, tc := range map[string]struct{ log, completion string }{
+		"BEGIN marker quoted in a command": {
+			log: testRecord(`changed: [h] => {"cmd": "grep -q -- '-----BEGIN RSA PRIVATE KEY-----' /etc/x"}`) + "\n",
+		},
+		"run killed mid-key": {
+			log: testRecord("ok: [h] => ") + "\n-----BEGIN OPENSSH PRIVATE KEY-----\nsynthkeyline\nsynthkeyl",
+		},
+		"one-line key cut inside its END marker": {
+			log:        testRecord(`ok: [h] => {"key": "-----BEGIN RSA PRIVATE KEY-----\nsynthkeyline\n-----END RSA PRIV`),
+			completion: `ATE KEY-----\n"}` + "\n",
+		},
+		"indented key cut inside its END marker": {
+			log:        testRecord("ok: [h] => ") + "\n    -----BEGIN RSA PRIVATE KEY-----\n    synthkeyline\n    -----END RSA PRIV",
+			completion: "ATE KEY-----\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ansible.log")
+			if err := os.WriteFile(path, []byte(tc.log), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			maintainTwice(t, path)
+			if tc.completion != "" {
+				appendLog(t, path, tc.completion)
+				maintainTwice(t, path)
+			}
+			appendLog(t, path, testRecord("ok: [h] => synthetic-visible-after")+"\n"+testRecord("PLAY RECAP")+"\n")
+			got := maintainTwice(t, path)
+			if strings.Contains(got, "synthkey") || !strings.Contains(got, "synthetic-visible-after") || !strings.Contains(got, "PLAY RECAP") {
+				t.Fatalf("log = %q", got)
+			}
+		})
+	}
+}
+
+// A key logged one line per record keeps the key state: a record whose
+// whole message could be key material does not end it.
+func TestMaintainLogMasksAKeyLoggedOneRecordPerLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ansible.log")
-	if err := os.WriteFile(path, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsynthetic\n-----END OPENSSH PRIV"), 0o600); err != nil {
+	log := testRecord("-----BEGIN RSA PRIVATE KEY-----") + "\n" +
+		testRecord("MIIEsyntheticPerRecordKeyLine0123456789abcdef") + "\n" +
+		testRecord("Hw==") + "\n" +
+		testRecord("-----END RSA PRIVATE KEY-----") + "\n" +
+		testRecord("ok: [h] => synthetic-visible-after") + "\n"
+	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := maintainTwice(t, path); strings.Contains(got, "AAAA") || !strings.HasSuffix(got, "\n-----END OPENSSH PRIV") {
-		t.Fatalf("log = %q", got)
-	}
-	appendLog(t, path, "ATE KEY-----\nafter the key\n")
-	if got := maintainTwice(t, path); strings.Contains(got, "AAAA") || !strings.HasSuffix(got, "]\nafter the key\n") {
+	got := maintainTwice(t, path)
+	if strings.Contains(got, "MIIEsynthetic") || strings.Contains(got, "Hw==") || !strings.Contains(got, "synthetic-visible-after") {
 		t.Fatalf("log = %q", got)
 	}
 }
@@ -637,5 +694,262 @@ func TestMaintainLogResetsStateWhenItTruncates(t *testing.T) {
 	}
 	if got := readLog(t, path); strings.Contains(got, "after-truncation") {
 		t.Fatalf("log not redacted after truncation: %q", got)
+	}
+}
+
+// logFiles returns the active log and every retained log next to it.
+func logFiles(t *testing.T, path string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	for _, name := range []string{path, path + ".1", path + ".2", path + ".3"} {
+		data, err := os.ReadFile(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = string(data)
+	}
+	return files
+}
+
+// Rotation must not copy a byte it did not scan (PR #71 review). Ansible
+// keeps its log open for the whole run; when maintenance did not rewrite the
+// log, such a writer was still attached, and what it appended after the
+// scan was copied into path.1 as it was, where nothing scans it again.
+func TestMaintainLogRotationKeepsNoBytesItDidNotScan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line before the rotation\n", 250)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	// Every scan is preceded by a write through the open file.
+	writes := 0
+	redactRangeStarts = func(int64) {
+		writes++
+		if _, err := fmt.Fprintf(writer, "password: synthetic-window-secret-%d\n", writes); err != nil {
+			t.Error(err)
+		}
+	}
+	defer func() { redactRangeStarts = nil }()
+	policy := LogPolicy{MaxBytes: 4096, MaxFiles: 2}
+	for run := 0; run < 2; run++ {
+		if err := MaintainLogWithPolicy(path, policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writes == 0 {
+		t.Fatal("test setup: nothing was written during maintenance")
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("test setup: no rotation: %v", err)
+	}
+	for name, content := range logFiles(t, path) {
+		if strings.Contains(content, "synthetic-window-secret") {
+			t.Errorf("%s keeps a secret written during maintenance", filepath.Base(name))
+		}
+	}
+}
+
+// The same with a writer that starts appending a secret every 200 µs, as
+// maintenance starts to scan, through a file it opened before, while a
+// 512 KiB log rotates. After that maintenance no retained log may hold one, and
+// after the writer stops and one more maintenance, no file at all.
+func TestMaintainLogRotationUnderAConcurrentWriter(t *testing.T) {
+	defer func() { redactRangeStarts = nil }()
+	for round := 0; round < 3; round++ {
+		path := filepath.Join(t.TempDir(), "ansible.log")
+		if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line before the rotation, padded to 64 bytes.........\n", 512<<10/64)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writer, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stop, done := make(chan struct{}), make(chan struct{})
+		write := func() {
+			defer close(done)
+			for n := 0; ; n++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = fmt.Fprintf(writer, "password: synthetic-live-%d\n", n)
+				time.Sleep(200 * time.Microsecond)
+			}
+		}
+		started := false
+		redactRangeStarts = func(int64) {
+			if !started {
+				started = true
+				go write()
+			}
+		}
+		if err := MaintainLogWithPolicy(path, LogPolicy{MaxBytes: 256 << 10, MaxFiles: 2}); err != nil {
+			t.Fatal(err)
+		}
+		redactRangeStarts = nil
+		for name, content := range logFiles(t, path) {
+			if name != path && strings.Contains(content, "synthetic-live-") {
+				t.Errorf("round %d: %s keeps %d secrets the writer appended", round, filepath.Base(name), strings.Count(content, "synthetic-live-"))
+			}
+		}
+		if !started {
+			t.Fatal("test setup: the writer never started")
+		}
+		close(stop)
+		<-done
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		maintain(t, path)
+		for name, content := range logFiles(t, path) {
+			if strings.Contains(content, "synthetic-live-") {
+				t.Errorf("round %d: %s keeps a secret after the final maintenance", round, filepath.Base(name))
+			}
+		}
+	}
+}
+
+// Rotation itself redacts what it keeps: bytes a still-attached writer
+// appended after the last scan are masked in path.1, and what the writer
+// appends after the rotation reaches no file that is kept.
+func TestRotateRedactedRedactsBytesAppendedAfterTheScan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line before the rotation\n", 250)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	writer, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.WriteString("password: synthetic-after-scan\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rotateRedacted(path, LogPolicy{MaxBytes: 4096, MaxFiles: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString("password: synthetic-after-rotation\n"); err != nil {
+		t.Fatal(err)
+	}
+	files := logFiles(t, path)
+	if !strings.HasSuffix(files[path+".1"], "password: [REDACTED]\n") {
+		t.Fatalf("path.1 = ...%q", files[path+".1"][max(0, len(files[path+".1"])-80):])
+	}
+	for name, content := range files {
+		if strings.Contains(content, "synthetic-after") {
+			t.Errorf("%s keeps a secret", filepath.Base(name))
+		}
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() != 0 || info.Mode().Perm() != 0o600 {
+		t.Fatalf("active log after rotation = %v, %v; want an empty 0600 file", info, err)
+	}
+}
+
+// A record made under other rules is not trusted (PR #71 review): after an
+// upgrade that masks one more key name, that value must be masked in what
+// earlier runs already passed.
+func TestMaintainLogRedactsAgainWhenTheRulesChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte("cookie: synthetic-cookie-value\n"+strings.Repeat("ordinary\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if !strings.Contains(readLog(t, path), "synthetic-cookie-value") {
+		t.Fatal("test setup: the current rules mask cookies")
+	}
+	current := sensitiveAssignment
+	t.Cleanup(func() { sensitiveAssignment = current })
+	sensitiveAssignment = regexp.MustCompile(strings.Replace(current.String(), "|authorization)", "|authorization|cookie)", 1))
+	if sensitiveAssignment.String() == current.String() {
+		t.Fatal("test setup: the rule was not changed")
+	}
+	appendLog(t, path, "ordinary\n")
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-cookie-value") {
+		t.Fatalf("value the new rules mask kept: %q", got[:60])
+	}
+}
+
+// A symlinked log is replaced by the redacted file on the first maintenance,
+// as a full pass always did, so later writes, including secrets, go to a
+// file that maintenance redacts (PR #71 review). Before, a run with nothing
+// to mask kept the link, and Ansible kept writing through it into the
+// target, which maintenance never redacts.
+func TestMaintainLogReplacesASymlinkedLog(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "central", "pilot-ansible.log")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(strings.Repeat("ordinary\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ansible.log")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	maintain(t, path)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("log after maintenance = %v, %v; want a regular file", info, err)
+	}
+	appendLog(t, path, "password: synthetic-link-secret\n")
+	maintain(t, path)
+	for _, name := range []string{path, target} {
+		if strings.Contains(readLog(t, name), "synthetic-link-secret") {
+			t.Errorf("%s keeps the secret", name)
+		}
+	}
+}
+
+// A record whose offset and tail length overflow when added is not used.
+func TestMaintainLogIgnoresARecordThatOverflows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte("password: synthetic-overflow-secret\n"+strings.Repeat("ordinary\n", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode, _ := fileIdentity(info)
+	if err := saveRedactionState(path, redactionState{Device: device, Inode: inode, Offset: math.MaxInt64 - 4, TailLength: 8, Rules: redactionRules()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "synthetic-overflow-secret") {
+		t.Fatalf("log = %q", got[:60])
+	}
+}
+
+// The record's and rotation's per-PID temp files are swept like the others
+// once their process is gone, on any maintenance: the rotation's holds a
+// log that may not have been scanned.
+func TestMaintainLogSweepsStaleRecordAndRotationTempFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ordinary line\n", 400)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dead := strconv.Itoa(deadPIDForTest(t))
+	stale := []string{
+		redactionStatePath(path) + "-" + dead,
+		filepath.Join(filepath.Dir(path), logRotatingTempPrefix+"-"+dead),
+	}
+	for _, name := range stale {
+		if err := os.WriteFile(name, []byte("password: synthetic-stale\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	maintain(t, path)
+	for _, name := range stale {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Errorf("%s not swept: %v", filepath.Base(name), err)
+		}
 	}
 }
