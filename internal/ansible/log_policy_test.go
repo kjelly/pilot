@@ -41,6 +41,13 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 			t.Errorf("RedactSecrets(%q): once %q, twice %q", raw, once, twice)
 		}
 	}
+	// Values that earlier versions grew by one bracket per pass are left
+	// as they are, not rewritten.
+	for _, masked := range []string{"password: [REDACTED]", "token= [REDACTED]]", `"secret": [REDACTED]]]], "other": 1`} {
+		if got := RedactSecrets(masked); got != masked {
+			t.Errorf("RedactSecrets(%q) = %q, want it unchanged", masked, got)
+		}
+	}
 	// A full pass over an already-redacted log leaves it unchanged.
 	path := filepath.Join(t.TempDir(), "ansible.log")
 	if err := os.WriteFile(path, []byte("password: hunter2\ntoken=abc\n"), 0o600); err != nil {
@@ -55,6 +62,22 @@ func TestRedactSecretsIsIdempotent(t *testing.T) {
 	}
 	if second := readLog(t, path); second != first {
 		t.Fatalf("second pass changed the log: %q -> %q", first, second)
+	}
+}
+
+// Only the marker itself counts as already masked. A value that merely
+// starts like it is a value, and is masked (PR #71 review).
+func TestRedactSecretsMasksMarkerLookalikes(t *testing.T) {
+	for raw, want := range map[string]string{
+		"password: [REDACTED-synthetic-marker-secret": "password: [REDACTED]",
+		"token=[REDACTEDsynthetic":                    "token= [REDACTED]",
+		"api_key: [REDACTED]synthetic-glued":          "api_key: [REDACTED]",
+		"secret: [REDACTED]]]synthetic-after-legacy":  "secret: [REDACTED]",
+		"password: [redacted]":                        "password: [REDACTED]",
+	} {
+		if got := RedactSecrets(raw); got != want {
+			t.Errorf("RedactSecrets(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }
 
@@ -291,6 +314,90 @@ func TestMaintainLogWaitsForCompleteLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := readLog(t, path); got != "ordinary\npassword: [REDACTED]\n" {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+// maintainTwice runs maintenance twice and requires the second run to leave
+// the log as the first one did.
+func maintainTwice(t *testing.T, path string) string {
+	t.Helper()
+	if err := MaintainLogWithPolicy(path, DefaultLogPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	first := readLog(t, path)
+	if err := MaintainLogWithPolicy(path, DefaultLogPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if second := readLog(t, path); second != first {
+		t.Fatalf("second maintenance changed the log: %q -> %q", first, second)
+	}
+	return first
+}
+
+// Maintenance runs after Ansible exits, so a final line without its newline
+// may never be completed. It is masked now, and stays masked; if a writer
+// does complete it later, the line is judged whole again, so the rest of a
+// secret split across the two writes is masked too (PR #71 review).
+func TestMaintainLogMasksAFinalLineWithoutNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte("ordinary\npassword: synthetic-eof-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); got != "ordinary\npassword: [REDACTED]" {
+		t.Fatalf("log = %q", got)
+	}
+	appendLog(t, path, "-synthetic-continued\nnext line\n")
+	if got := maintainTwice(t, path); got != "ordinary\npassword: [REDACTED]\nnext line\n" {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+// The same for a private key whose last line has no newline.
+func TestMaintainLogMasksAFinalPrivateKeyLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsynthetic-first\nAAAAsynthetic-eof"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "AAAA") {
+		t.Fatalf("log = %q", got)
+	}
+	appendLog(t, path, "-rest\nAAAAsynthetic-more\n-----END OPENSSH PRIVATE KEY-----\nafter the key\n")
+	got := maintainTwice(t, path)
+	if strings.Contains(got, "AAAA") || strings.Contains(got, "-rest") || !strings.HasSuffix(got, "]\nafter the key\n") {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+// A key logged on one line (a JSON string with escaped newlines) that is cut
+// after its BEGIN marker: the rest of the key, written later, is masked.
+func TestMaintainLogMasksTheRestOfACutOneLineKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte(`{"key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEsynthetic-first`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "MIIE") {
+		t.Fatalf("log = %q", got)
+	}
+	appendLog(t, path, `MIIEsynthetic-second\n-----END RSA PRIVATE KEY-----\n"}`+"\nafter the key\n")
+	if got := maintainTwice(t, path); got != "[REDACTED PRIVATE KEY]\nafter the key\n" {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+// A key's END marker cut before its newline is not secret and is left as
+// is: masking it would hide the marker and every later line would be read
+// as key material.
+func TestMaintainLogKeepsAHalfWrittenEndMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ansible.log")
+	if err := os.WriteFile(path, []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAsynthetic\n-----END OPENSSH PRIV"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := maintainTwice(t, path); strings.Contains(got, "AAAA") || !strings.HasSuffix(got, "\n-----END OPENSSH PRIV") {
+		t.Fatalf("log = %q", got)
+	}
+	appendLog(t, path, "ATE KEY-----\nafter the key\n")
+	if got := maintainTwice(t, path); strings.Contains(got, "AAAA") || !strings.HasSuffix(got, "]\nafter the key\n") {
 		t.Fatalf("log = %q", got)
 	}
 }

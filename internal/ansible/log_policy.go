@@ -140,11 +140,23 @@ func MaintainLogFromEnv(env []string) error {
 }
 
 var (
-	sensitiveAssignment = regexp.MustCompile(`(?i)((?:["']?[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|vault[_-]?password|authorization)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,}\]]+))`)
+	// The value alternative "\[REDACTED\]+[^\s,}\]]*" reads a masked value
+	// and anything glued to it as one value, so RedactSecrets can tell the
+	// marker alone from the marker followed by more text.
+	sensitiveAssignment = regexp.MustCompile(`(?i)((?:["']?[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|vault[_-]?password|authorization)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\[REDACTED\]+[^\s,}\]]*|[^\s,}\]]+))`)
 	sensitiveFlag       = regexp.MustCompile(`(?i)(--(?:password|passwd|passphrase|secret|token|api[-_]key|access[-_]key|private[-_]key|vault[-_]password)(?:=|\s+))(?:"[^"]*"|'[^']*'|[^\s]+)`)
-	privateKeyBegin     = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
-	privateKeyEnd       = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	// maskedValue is a value RedactSecrets already masked: "[REDACTED]", or
+	// the "[REDACTED]]…" that earlier versions grew by one bracket per pass.
+	maskedValue     = regexp.MustCompile(`^\[REDACTED\]+$`)
+	privateKeyBegin = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+	privateKeyEnd   = regexp.MustCompile(`-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	// privateKeyMarkerPart is the start of a "-----END … PRIVATE KEY-----"
+	// line that is still being written. Key material is base64 and never
+	// starts with "-", so such a line is not secret.
+	privateKeyMarkerPart = regexp.MustCompile(`^-[-A-Z0-9 ]*\r?$`)
 )
+
+const privateKeyPlaceholder = "[REDACTED PRIVATE KEY]"
 
 // RedactSecrets masks common structured secret values in one line. It is a
 // defense-in-depth filter, not a replacement for Ansible no_log.
@@ -154,10 +166,12 @@ func RedactSecrets(line string) string {
 		if separator < 0 {
 			return "[REDACTED]"
 		}
-		// An already-masked value: the value pattern stops before "]", so
-		// replacing it again turned "[REDACTED]" into "[REDACTED]]", one
-		// more bracket on every pass over the log (issue #70).
-		if strings.HasPrefix(strings.TrimSpace(match[separator+1:]), "[REDACTED") {
+		// An already-masked value: the value pattern used to stop before
+		// "]", so replacing it again turned "[REDACTED]" into
+		// "[REDACTED]]", one more bracket on every pass over the log
+		// (issue #70). Only the marker itself counts: a value that merely
+		// starts like it, such as "[REDACTED-x" or "[REDACTED]x", is masked.
+		if maskedValue.MatchString(strings.TrimSpace(match[separator+1:])) {
 			return match
 		}
 		return match[:separator+1] + " [REDACTED]"
@@ -174,13 +188,26 @@ func (r *streamRedactor) redact(line string) string {
 		if privateKeyEnd.MatchString(line) {
 			r.inPrivateKey = false
 		}
-		return preserveLineEnding(line, "[REDACTED PRIVATE KEY]")
+		return preserveLineEnding(line, privateKeyPlaceholder)
 	}
 	if privateKeyBegin.MatchString(line) {
 		r.inPrivateKey = !privateKeyEnd.MatchString(line)
-		return preserveLineEnding(line, "[REDACTED PRIVATE KEY]")
+		return preserveLineEnding(line, privateKeyPlaceholder)
 	}
 	return RedactSecrets(line)
+}
+
+// redactContinuation judges a line whose first maskedLen bytes are a final
+// line that an earlier maintenance masked before its writer finished it.
+// The original text of that part is gone, so tailInPrivateKey, the
+// private-key state after it, decides how the rest is read.
+func (r *streamRedactor) redactContinuation(line string, maskedLen int64, tailInPrivateKey bool) string {
+	if tailInPrivateKey {
+		r.inPrivateKey = !privateKeyEnd.MatchString(line[maskedLen:])
+		return preserveLineEnding(line, privateKeyPlaceholder)
+	}
+	r.inPrivateKey = false
+	return r.redact(line)
 }
 
 func preserveLineEnding(line, replacement string) string {
@@ -247,11 +274,19 @@ func processAlive(pid int) bool {
 // inode tie the offset to one file: after rotation, trimming or any other
 // replacement the record no longer matches and the next run redacts the
 // whole file again.
+//
+// A final line without its newline is masked in place when it needs it,
+// because maintenance runs after Ansible exits and that line may never be
+// completed. Offset still stops at its start, so the line is judged again
+// once a writer completes it and a secret split across two writes is
+// masked whole. TailLength and TailInPrivateKey describe the masked part.
 type redactionState struct {
-	Device       uint64 `json:"device"`
-	Inode        uint64 `json:"inode"`
-	Offset       int64  `json:"offset"`
-	InPrivateKey bool   `json:"in_private_key"`
+	Device           uint64 `json:"device"`
+	Inode            uint64 `json:"inode"`
+	Offset           int64  `json:"offset"`
+	InPrivateKey     bool   `json:"in_private_key"`
+	TailLength       int64  `json:"tail_length,omitempty"`
+	TailInPrivateKey bool   `json:"tail_in_private_key,omitempty"`
 }
 
 func redactionStatePath(path string) string {
@@ -294,34 +329,56 @@ func saveRedactionState(path string, state redactionState) error {
 	return nil
 }
 
-// redactRange redacts the complete lines of input between from and to,
-// writing them to w when w is not nil. It returns the offset just after
-// the last complete line, the private-key state there, and whether any
-// line changed. A trailing line without a newline is left for the next
-// run, so a secret split across two writes is never judged by its first
-// half alone.
-func redactRange(input io.ReaderAt, from, to int64, inPrivateKey bool, w io.Writer) (int64, bool, bool, error) {
-	reader := bufio.NewReaderSize(io.NewSectionReader(input, from, to-from), 128*1024)
-	redactor := streamRedactor{inPrivateKey: inPrivateKey}
-	pos, changed := from, false
+// redactRange redacts input from state.Offset to to, writing the result to
+// w when w is not nil. It returns the record for that result, which starts
+// at the same offset, and whether any line changed. The returned Offset is
+// just after the last complete line; a final line without a newline is
+// written masked (see redactionState) but stays after Offset, so the next
+// run judges it again once it is complete.
+func redactRange(input io.ReaderAt, state redactionState, to int64, w io.Writer) (redactionState, bool, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(input, state.Offset, to-state.Offset), 128*1024)
+	redactor := streamRedactor{inPrivateKey: state.InPrivateKey}
+	next := redactionState{Device: state.Device, Inode: state.Inode, Offset: state.Offset, InPrivateKey: state.InPrivateKey}
+	maskedTail, changed := state.TailLength, false
 	for {
 		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			return pos, redactor.inPrivateKey, changed, nil
+		if err != nil && err != io.EOF {
+			return next, changed, err
 		}
-		if err != nil {
-			return pos, redactor.inPrivateKey, changed, err
+		if line == "" {
+			return next, changed, nil
 		}
-		redacted := redactor.redact(line)
+		complete := err == nil
+		continued := maskedTail > 0 && int64(len(line)) >= maskedTail
+		maskedTail = 0
+		var redacted string
+		switch {
+		case continued:
+			redacted = redactor.redactContinuation(line, state.TailLength, state.TailInPrivateKey)
+		case !complete && redactor.inPrivateKey && privateKeyMarkerPart.MatchString(line):
+			// Masking a half-written END marker would hide it, and every
+			// later line would be read as key material.
+			redacted = line
+		default:
+			redacted = redactor.redact(line)
+		}
 		if redacted != line {
 			changed = true
 		}
 		if w != nil {
 			if _, err := io.WriteString(w, redacted); err != nil {
-				return pos, redactor.inPrivateKey, changed, err
+				return next, changed, err
 			}
 		}
-		pos += int64(len(line))
+		if !complete {
+			if continued || redacted != line {
+				next.TailLength = int64(len(redacted))
+				next.TailInPrivateKey = redactor.inPrivateKey
+			}
+			return next, changed, nil
+		}
+		next.Offset += int64(len(redacted))
+		next.InPrivateKey = redactor.inPrivateKey
 	}
 }
 
@@ -336,12 +393,12 @@ func redactNewLines(path string) error {
 		return err
 	}
 	device, inode, known := fileIdentity(info)
+	size := info.Size()
 	state := loadRedactionState(path)
-	if !known || state.Device != device || state.Inode != inode || state.Offset < 0 || state.Offset > info.Size() {
+	if !known || state.Device != device || state.Inode != inode || state.Offset < 0 || state.TailLength < 0 || state.Offset+state.TailLength > size {
 		state = redactionState{Device: device, Inode: inode}
 	}
-	size := info.Size()
-	if state.Offset == size {
+	if state.Offset+state.TailLength == size {
 		return nil
 	}
 
@@ -350,16 +407,15 @@ func redactNewLines(path string) error {
 		return err
 	}
 	defer input.Close()
-	end, inPrivateKey, changed, err := redactRange(input, state.Offset, size, state.InPrivateKey, nil)
+	next, changed, err := redactRange(input, state, size, nil)
 	if err != nil {
 		return err
 	}
 	if !changed {
-		state.Offset, state.InPrivateKey = end, inPrivateKey
 		if !known {
 			return nil
 		}
-		return saveRedactionState(path, state)
+		return saveRedactionState(path, next)
 	}
 
 	dir := filepath.Dir(path)
@@ -379,12 +435,7 @@ func redactNewLines(path string) error {
 		_ = tmp.Close()
 		return err
 	}
-	if _, _, _, err := redactRange(input, state.Offset, size, state.InPrivateKey, writer); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	// The trailing partial line, if any, as is.
-	if _, err := io.Copy(writer, io.NewSectionReader(input, end, size-end)); err != nil {
+	if _, _, err := redactRange(input, state, size, writer); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -409,11 +460,8 @@ func redactNewLines(path string) error {
 	if !known {
 		return nil
 	}
-	return saveRedactionState(path, redactionState{
-		Device: device, Inode: inode,
-		Offset:       rewritten.Size() - (size - end),
-		InPrivateKey: inPrivateKey,
-	})
+	next.Device, next.Inode = device, inode
+	return saveRedactionState(path, next)
 }
 
 func redactFile(path string) error {
