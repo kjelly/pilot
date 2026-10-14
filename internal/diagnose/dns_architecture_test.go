@@ -13,29 +13,39 @@ import (
 
 // Fixtures under testdata/dnsarch are the real stdout of the probe scripts
 // in dns_architecture_probe.go, run through `ansible <host> -m command -a
-// <the step's JSON args>` against a disposable vm-target topology (FreeIPA
-// 4.13.4 on AlmaLinux 9.8 with DNS, an Ubuntu 24.04 dns tier host with
-// unbound 1.19.2, an Ubuntu 24.04 freeipa-dns-client consumer), as the
-// AGENTS.md §5.6 rule requires. Addresses are the libvirt network's.
-// docs/evidence/dns-architecture-diagnose/ records the run. The
-// tier_external_servfail/nxdomain and client_el* captures came the same
-// way from two single disposable VMs: an Ubuntu 24.04.4 host with only the
-// dns role (unbound 1.19.2-1ubuntu3.10, forward-only to 1.1.1.1) and a
-// stock AlmaLinux 9.8 host without systemd-resolved; tier_external_cname*
-// from the dns tier of the four-VM topology of PR #73's evidence run.
-// The 2026-10-14 second round came from a fresh five-VM topology (FreeIPA
-// primary and replica, unbound tier, Ubuntu consumer, stock AlmaLinux
-// 9.8): client_el*.txt and the first_hop section of client.txt (the
-// full-answer probe, so it names pr73-dns; the other sections of
-// client.txt are dd-client's), client_first_hop_refused.txt (the tier's
-// access-control refusing the consumer), client_lookup_nx.txt,
-// provider_named_stopped.txt, provider_srv_missing.txt (_kerberos._udp
-// deleted), auth_ticket_refused.txt (kinit rc 0, then every ipa command
-// "did not receive Kerberos credentials": what a principal read as a
-// kinit option produced before kinit got "--"), auth_writer.txt (the
-// reader given "DNS Administrators") and systemctl_states.txt (systemd
-// 252: a reloading unit, an unknown unit, a failed unit, and the bus
-// error of a user whose system bus is unreachable).
+// <the step's JSON args>` (no tty) against disposable vm-targets, as the
+// AGENTS.md §5.6 rule requires. Addresses are the libvirt network's;
+// docs/evidence/dns-architecture-diagnose/ records the runs.
+//
+// The live topology set (liveTopology) comes from one run of the pr91
+// topology (2026-10-14): FreeIPA 4.13.4 on AlmaLinux 9.8 with DNS
+// (pr91-ipa, 192.168.122.13), an Ubuntu 24.04.4 unbound 1.19.2 dns tier
+// (pr91-dns, 192.168.122.12) and an Ubuntu 24.04.4 freeipa-dns-client
+// consumer (pr91-client, 192.168.122.4), with the forward zone
+// fwtest.example. → 192.0.2.53 (policy only): provider.txt, auth_role.txt,
+// tier.txt, tier_stopped.txt (unbound stopped) and client.txt. The same run
+// gave client_resolved_stub.txt (pr91-client before any playbook ran:
+// systemd-resolved's stub 127.0.0.53) and client_freeipa_bind.txt
+// (pr91-ipa, whose first nameserver is its own BIND).
+//
+// Single-host captures from other runs: tier_external_servfail/nxdomain
+// and client_el* from two single VMs (an Ubuntu 24.04.4 host with only the
+// dns role, unbound 1.19.2-1ubuntu3.10 forward-only to 1.1.1.1, and a stock
+// AlmaLinux 9.8 host without systemd-resolved); tier_external_cname* from
+// the dns tier of PR #73's four-VM topology; and, from a fresh five-VM
+// topology of the #66 second round (FreeIPA primary and replica, unbound
+// tier pr73-dns at 192.168.122.8, Ubuntu consumer, stock AlmaLinux 9.8):
+// client_first_hop_refused.txt (the tier's access-control refusing the
+// consumer), client_lookup_nx.txt, provider_named_stopped.txt,
+// provider_srv_missing.txt (_kerberos._udp deleted),
+// auth_ticket_refused.txt (kinit rc 0, then every ipa command "did not
+// receive Kerberos credentials": what a principal read as a kinit option
+// produced before kinit got "--"), auth_writer.txt (the reader given "DNS
+// Administrators") and systemctl_states.txt (systemd 252: a reloading
+// unit, an unknown unit, a failed unit, and the bus error of a user whose
+// system bus is unreachable). tier_failures.txt is a tier capture from the
+// first #66 run; its authority@192.0.2.1 (a provider that does not answer)
+// and internal (NXDOMAIN) sections are used.
 func fixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "dnsarch", name))
@@ -108,7 +118,7 @@ func TestParseDNSArchSections(t *testing.T) {
 	if s := sections["unbound"]; !s.Complete || s.RC != 3 || s.Output != "inactive" {
 		t.Fatalf("unbound section = %+v", s)
 	}
-	if s := sections["authority@192.168.122.5"]; !s.Complete || s.RC != 0 {
+	if s := sections["authority@192.168.122.13"]; !s.Complete || s.RC != 0 {
 		t.Fatalf("authority section = %+v", s)
 	}
 	// A step that timed out mid-script leaves an open section.
@@ -120,18 +130,18 @@ func TestParseDNSArchSections(t *testing.T) {
 
 func TestParseDigComments_RealCaptures(t *testing.T) {
 	provider := ParseDNSArchSections(fixture(t, "provider.txt"))
-	soa := ParseDigComments("192.168.122.5", "ipa.pilot.internal.", "SOA", provider["soa"].Output, provider["soa"].RC)
+	soa := ParseDigComments("192.168.122.13", "ipa.pilot.internal.", "SOA", provider["soa"].Output, provider["soa"].RC)
 	if soa.Status != "NOERROR" || !soa.Authoritative || len(soa.Answers) != 1 || !strings.HasPrefix(soa.Answers[0], "ipa1.ipa.pilot.internal. hostmaster.") {
 		t.Fatalf("soa = %+v", soa)
 	}
-	srv := ParseDigComments("192.168.122.5", "_ldap._tcp.ipa.pilot.internal.", "SRV", provider["srv_ldap"].Output, 0)
+	srv := ParseDigComments("192.168.122.13", "_ldap._tcp.ipa.pilot.internal.", "SRV", provider["srv_ldap"].Output, 0)
 	if len(srv.Answers) != 1 || srv.Answers[0] != "0 100 389 ipa1.ipa.pilot.internal." {
 		t.Fatalf("srv = %+v", srv)
 	}
 
 	tier := ParseDNSArchSections(fixture(t, "tier.txt"))
 	internal := ParseDigComments("127.0.0.1", "ipa1.ipa.pilot.internal", "A", tier["internal"].Output, 0)
-	if internal.Status != "NOERROR" || internal.Authoritative || !reflect.DeepEqual(internal.Answers, []string{"192.168.122.5"}) {
+	if internal.Status != "NOERROR" || internal.Authoritative || !reflect.DeepEqual(internal.Answers, []string{"192.168.122.13"}) {
 		t.Fatalf("internal via tier = %+v", internal)
 	}
 	external := ParseDigComments("127.0.0.1", ".", "NS", tier["external"].Output, 0)
@@ -163,7 +173,7 @@ func TestParseUnboundZoneList_RealCapture(t *testing.T) {
 		t.Fatalf("forwards = %+v", forwards)
 	}
 	stubs := ParseUnboundZoneList(tier["stubs"].Output, "stub")
-	if len(stubs) != 2 || stubs[0].Zone != "." || !reflect.DeepEqual(stubs[1], DNSArchZoneServers{Zone: "ipa.pilot.internal.", Servers: []string{"192.168.122.5"}}) {
+	if len(stubs) != 2 || stubs[0].Zone != "." || !reflect.DeepEqual(stubs[1], DNSArchZoneServers{Zone: "ipa.pilot.internal.", Servers: []string{"192.168.122.13"}}) {
 		t.Fatalf("stubs = %+v", stubs)
 	}
 	// The documented two-server forms (docs/verification/dns.md §0.2).
@@ -198,7 +208,7 @@ func TestParseIPAOutput_RealCaptures(t *testing.T) {
 // ---- FreeIPA configuration and Kerberos -------------------------------------------
 
 func TestBuildDNSArchObservedFreeIPA_ReadOnlyRoleReadsEverything(t *testing.T) {
-	out, k := BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "auth_role.txt"))
+	out, k := BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "auth_role.txt"))
 	if k.State != "available" {
 		t.Fatalf("kerberos = %+v", k)
 	}
@@ -219,7 +229,7 @@ func TestBuildDNSArchObservedFreeIPA_ReadOnlyRoleReadsEverything(t *testing.T) {
 	if len(out.Zones.Value.([]string)) != 4 {
 		t.Fatalf("zones = %+v", out.Zones)
 	}
-	if got := out.GlobalForwarders.Evidence; !reflect.DeepEqual(got, []string{"step:freeipa-config-dd-ipa#dnsconfig"}) {
+	if got := out.GlobalForwarders.Evidence; !reflect.DeepEqual(got, []string{"step:freeipa-config-pr91-ipa#dnsconfig"}) {
 		t.Fatalf("evidence = %v", got)
 	}
 }
@@ -229,7 +239,7 @@ func TestBuildDNSArchObservedFreeIPA_ReadOnlyRoleReadsEverything(t *testing.T) {
 // the same as when nothing exists. Reporting that as "no forwarders" would
 // be a false absent; it must be permission_denied.
 func TestBuildDNSArchObservedFreeIPA_MissingPermissionIsNotAbsent(t *testing.T) {
-	out, k := BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "auth_norole.txt"))
+	out, k := BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "auth_norole.txt"))
 	if k.State != "available" {
 		t.Fatalf("kerberos = %+v, want available (kinit worked)", k)
 	}
@@ -253,7 +263,7 @@ func TestBuildDNSArchObservedFreeIPA_MissingPermissionIsNotAbsent(t *testing.T) 
 }
 
 func TestBuildDNSArchObservedFreeIPA_KinitFailureIsAuthRequired(t *testing.T) {
-	out, k := BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/missing.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "kinit_missing.txt"))
+	out, k := BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/missing.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "kinit_missing.txt"))
 	if k.State != FactAuthRequired || !strings.Contains(k.Detail, "Pre-authentication failed") {
 		t.Fatalf("kerberos = %+v", k)
 	}
@@ -269,13 +279,13 @@ func TestBuildDNSArchObservedFreeIPA_KinitFailureIsAuthRequired(t *testing.T) {
 // ---- tier, provider and client observations --------------------------------------
 
 func tierHost() DNSArchTierHost {
-	return DNSArchTierHost{Host: "dd-dns", State: "computed", Addr: "192.168.122.15", Mode: "freeipa-split", Upstream: []string{"1.1.1.1"},
-		FreeIPAServers: []string{"192.168.122.5"}, StubZones: []DNSArchZone{{Name: "ipa.pilot.internal", Addrs: []string{"192.168.122.5"}, Source: "FreeIPA"}}}
+	return DNSArchTierHost{Host: "pr91-dns", State: "computed", Addr: "192.168.122.12", Mode: "freeipa-split", Upstream: []string{"1.1.1.1"},
+		FreeIPAServers: []string{"192.168.122.13"}, StubZones: []DNSArchZone{{Name: "ipa.pilot.internal", Addrs: []string{"192.168.122.13"}, Source: "FreeIPA"}}}
 }
 
 func TestBuildDNSArchObservedTier_RealCaptures(t *testing.T) {
-	ot := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", []string{"192.168.122.5"}, "ipa.pilot.internal", fixtureResult(t, "tier-dd-dns", "tier.txt"))
-	if ot.UnboundActive.Value != true || ot.Identity.Value != "pilot-dns:dd-dns" || ot.RemoteUser != "root" {
+	ot := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", []string{"192.168.122.13"}, "ipa.pilot.internal", fixtureResult(t, "tier-pr91-dns", "tier.txt"))
+	if ot.UnboundActive.Value != true || ot.Identity.Value != "pilot-dns:pr91-dns" || ot.RemoteUser != "root" {
 		t.Fatalf("tier = %+v", ot)
 	}
 	if ot.ExternalResolution.State != FactObserved || !strings.Contains(ot.ExternalResolution.Detail, "not which upstream answered") {
@@ -285,25 +295,25 @@ func TestBuildDNSArchObservedTier_RealCaptures(t *testing.T) {
 		t.Fatalf("authority = %+v", ot.ProviderAuthority[0])
 	}
 
-	stopped := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", []string{"192.168.122.5"}, "ipa.pilot.internal", fixtureResult(t, "tier-dd-dns", "tier_stopped.txt"))
+	stopped := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", []string{"192.168.122.13"}, "ipa.pilot.internal", fixtureResult(t, "tier-pr91-dns", "tier_stopped.txt"))
 	if stopped.UnboundActive.Value != false || stopped.Forwards.State != FactUnknown || stopped.Identity.State != FactUnknown || stopped.ExternalResolution.State != FactUnknown {
 		t.Fatalf("stopped tier = %+v", stopped)
 	}
 
-	unreachable := BuildDNSArchObservedTier(tierHost(), "x", ".", nil, "", StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.0.2.1 port 22: Connection timed out"}})
+	unreachable := BuildDNSArchObservedTier(tierHost(), "x", ".", nil, "", StepResult{Step: Step{ID: "tier-pr91-dns"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.0.2.1 port 22: Connection timed out"}})
 	if unreachable.Reachable.State != FactUnreachable || unreachable.Forwards.State != FactUnknown {
 		t.Fatalf("unreachable tier = %+v", unreachable)
 	}
 }
 
 func TestBuildDNSArchObservedProviderAndClient_RealCaptures(t *testing.T) {
-	p := DNSArchProvider{InventoryHost: "dd-ipa", Kind: "primary", FQDN: "ipa1.ipa.pilot.internal", IP: "192.168.122.5", DNSProvider: true}
-	op := BuildDNSArchObservedProvider(p, "ipa.pilot.internal", "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-dd-ipa", "provider.txt"))
+	p := DNSArchProvider{InventoryHost: "pr91-ipa", Kind: "primary", FQDN: "ipa1.ipa.pilot.internal", IP: "192.168.122.13", DNSProvider: true}
+	op := BuildDNSArchObservedProvider(p, "ipa.pilot.internal", "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr91-ipa", "provider.txt"))
 	if op.NamedActive.Value != true || op.SOA.State != FactObserved || op.KerberosSRV.State != FactObserved || op.RemoteUser != "root" {
 		t.Fatalf("provider = %+v", op)
 	}
-	c := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client.txt"))
-	if !reflect.DeepEqual(c.Nameservers.Value, []string{"192.168.122.15", "192.168.122.5"}) || c.FirstHop.Value != "pilot-dns:pr73-dns" || c.Lookup.State != FactObserved {
+	c := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client.txt"), pr91TierAddrs)
+	if !reflect.DeepEqual(c.Nameservers.Value, []string{"192.168.122.12", "192.168.122.13"}) || c.FirstHop.Value != "pilot-dns:pr91-dns" || c.Lookup.State != FactObserved {
 		t.Fatalf("client = %+v", c)
 	}
 }
@@ -446,16 +456,24 @@ func TestBuildDNSArchitectureModel_ExtraResolverHostAndBound(t *testing.T) {
 
 // ---- differences and status ---------------------------------------------------------
 
+// pr91TierAddrs is the dns tier address of the live capture topology
+// (pr91-dns); pr73TierAddrs is pr73-dns's, the tier of the captures taken
+// on PR #73's topology (client_first_hop_refused.txt).
+var (
+	pr91TierAddrs = []string{"192.168.122.12"}
+	pr73TierAddrs = []string{"192.168.122.8"}
+)
+
 func liveTopology(t *testing.T) (DNSArchModel, DNSArchObserved) {
 	t.Helper()
 	m := BuildDNSArchitectureModel(inv(
-		map[string][]string{"freeipa-server": {"dd-ipa"}, "dns": {"dd-dns"}, "freeipa-dns-client": {"dd-client"}},
-		map[string]map[string]any{"dd-ipa": {"ansible_host": "192.168.122.5"}, "dd-dns": {"ansible_host": "192.168.122.15"}, "dd-client": {"ansible_host": "192.168.122.9"}}), "dd-client")
+		map[string][]string{"freeipa-server": {"pr91-ipa"}, "dns": {"pr91-dns"}, "freeipa-dns-client": {"pr91-client"}},
+		map[string]map[string]any{"pr91-ipa": {"ansible_host": "192.168.122.13"}, "pr91-dns": {"ansible_host": "192.168.122.12"}, "pr91-client": {"ansible_host": "192.168.122.4"}}), "pr91-client")
 	var o DNSArchObserved
-	o.Providers = []DNSArchObservedProvider{BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-dd-ipa", "provider.txt"))}
-	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "auth_role.txt"))
-	o.Tier = []DNSArchObservedTier{BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, fixtureResult(t, "tier-dd-dns", "tier.txt"))}
-	c := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client.txt"))
+	o.Providers = []DNSArchObservedProvider{BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr91-ipa", "provider.txt"))}
+	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "auth_role.txt"))
+	o.Tier = []DNSArchObservedTier{BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, fixtureResult(t, "tier-pr91-dns", "tier.txt"))}
+	c := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client.txt"), m.TierAddrs("pr91-client"))
 	o.Client = &c
 	return m, o
 }
@@ -480,7 +498,7 @@ func TestBuildDNSArchDifferences_LiveTopologyMatches(t *testing.T) {
 			t.Errorf("%s has no evidence reference", d.Subject)
 		}
 	}
-	for _, subject := range []string{"tier dd-dns forward zone .", "tier dd-dns stub zone ipa.pilot.internal", "tier dd-dns identity", "FreeIPA dd-ipa authoritative", "FreeIPA global forwarders", "FreeIPA dd-ipa server forwarders", "tier dd-dns answer for ipa1.ipa.pilot.internal", "client dd-client nameservers"} {
+	for _, subject := range []string{"tier pr91-dns forward zone .", "tier pr91-dns stub zone ipa.pilot.internal", "tier pr91-dns identity", "FreeIPA pr91-ipa authoritative", "FreeIPA global forwarders", "FreeIPA pr91-ipa server forwarders", "tier pr91-dns answer for ipa1.ipa.pilot.internal", "client pr91-client nameservers"} {
 		if _, ok := diffBySubject(diffs, subject); !ok {
 			t.Errorf("no comparison for %q in %+v", subject, diffs)
 		}
@@ -490,7 +508,7 @@ func TestBuildDNSArchDifferences_LiveTopologyMatches(t *testing.T) {
 		t.Fatalf("status %s findings %v", status, findings)
 	}
 	paths := strings.Join(BuildDNSArchPaths(m, o), "\n")
-	for _, want := range []string{"ipa.pilot.internal → 192.168.122.5 (FreeIPA)", "external . → 1.1.1.1", "server forwarders 8.8.8.8 (policy only)", "fwtest.example. → 192.0.2.53 (only)", "resolver dd-client (freeipa-dns-client, tier_first) → 192.168.122.15, 192.168.122.5"} {
+	for _, want := range []string{"ipa.pilot.internal → 192.168.122.13 (FreeIPA)", "external . → 1.1.1.1", "server forwarders 8.8.8.8 (policy only)", "fwtest.example. → 192.0.2.53 (only)", "resolver pr91-client (freeipa-dns-client, tier_first) → 192.168.122.12, 192.168.122.13"} {
 		if !strings.Contains(paths, want) {
 			t.Errorf("paths missing %q:\n%s", want, paths)
 		}
@@ -505,17 +523,17 @@ func TestBuildDNSArchDifferences_DriftIsReported(t *testing.T) {
 	m.Tier[0].Upstream = []string{"9.9.9.9"}
 	m.Forwarding.GlobalForwarders = []string{"1.0.0.1"}
 	m.Forwarding.ServerInstallForwarders[0].Forwarders = []string{"1.0.0.1"}
-	m.Resolvers[0].Servers = []string{"192.168.122.5", "192.168.122.15"}
+	m.Resolvers[0].Servers = []string{"192.168.122.13", "192.168.122.12"}
 	o.Tier[0].Identity.Value = "pilot-dns:other"
 	diffs := BuildDNSArchDifferences(m, o)
-	for _, subject := range []string{"tier dd-dns forward zone .", "FreeIPA global forwarders", "FreeIPA dd-ipa server forwarders", "client dd-client nameservers", "tier dd-dns identity"} {
+	for _, subject := range []string{"tier pr91-dns forward zone .", "FreeIPA global forwarders", "FreeIPA pr91-ipa server forwarders", "client pr91-client nameservers", "tier pr91-dns identity"} {
 		d, _ := diffBySubject(diffs, subject)
 		if d.Status != "mismatch" {
 			t.Errorf("%s = %+v, want mismatch", subject, d)
 		}
 	}
-	d, _ := diffBySubject(diffs, "tier dd-dns forward zone .")
-	if d.Evidence[0] != "inventory:hostvars[dd-dns].dns_upstream" || d.Evidence[1] != "step:tier-dd-dns#forwards" {
+	d, _ := diffBySubject(diffs, "tier pr91-dns forward zone .")
+	if d.Evidence[0] != "inventory:hostvars[pr91-dns].dns_upstream" || d.Evidence[1] != "step:tier-pr91-dns#forwards" {
 		t.Fatalf("evidence = %v", d.Evidence)
 	}
 	status, findings := BuildDNSArchStatus(m, o, diffs)
@@ -537,25 +555,25 @@ func TestBuildDNSArchStatus_AuthRequiredKeepsOtherFacts(t *testing.T) {
 	if d, _ := diffBySubject(diffs, "FreeIPA global forwarders"); d.Status != FactAuthRequired {
 		t.Fatalf("global forwarders comparison = %+v", d)
 	}
-	if d, _ := diffBySubject(diffs, "tier dd-dns forward zone ."); d.Status != "match" {
+	if d, _ := diffBySubject(diffs, "tier pr91-dns forward zone ."); d.Status != "match" {
 		t.Fatalf("tier comparison must still be made: %+v", d)
 	}
 }
 
 func TestBuildDNSArchStatus_UnreachableAndStopped(t *testing.T) {
 	m, o := liveTopology(t)
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.5 port 22: Connection timed out"}})
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, fixtureResult(t, "tier-dd-dns", "tier_stopped.txt"))
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.13 port 22: Connection timed out"}})
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, fixtureResult(t, "tier-pr91-dns", "tier_stopped.txt"))
 	diffs := BuildDNSArchDifferences(m, o)
 	status, findings := BuildDNSArchStatus(m, o, diffs)
 	joined := strings.Join(findings, "\n")
-	if status != "partial" || !strings.Contains(joined, "freeipa_dns_provider_unreachable: dd-ipa") || !strings.Contains(joined, "dns_tier_not_running: dd-dns") {
+	if status != "partial" || !strings.Contains(joined, "freeipa_dns_provider_unreachable: pr91-ipa") || !strings.Contains(joined, "dns_tier_not_running: pr91-dns") {
 		t.Fatalf("status %s findings %v", status, findings)
 	}
-	if d, _ := diffBySubject(diffs, "FreeIPA dd-ipa authoritative"); d.Status != FactUnknown {
+	if d, _ := diffBySubject(diffs, "FreeIPA pr91-ipa authoritative"); d.Status != FactUnknown {
 		t.Fatalf("authoritative comparison = %+v, want unknown (not absent)", d)
 	}
-	if d, _ := diffBySubject(diffs, "tier dd-dns forward zone ."); d.Status != FactUnknown {
+	if d, _ := diffBySubject(diffs, "tier pr91-dns forward zone ."); d.Status != FactUnknown {
 		t.Fatalf("forward comparison = %+v, want unknown", d)
 	}
 }
@@ -600,7 +618,7 @@ func liveWithTier(t *testing.T, tierStdout string) (DNSArchModel, DNSArchObserve
 func liveWithTierExternal(t *testing.T, tierStdout, externalName string) (DNSArchModel, DNSArchObserved, string, []string) {
 	t.Helper()
 	m, o := liveTopology(t)
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", externalName, m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tierStdout}})
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", externalName, m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-pr91-dns"}, Result: AdHocResult{Stdout: tierStdout}})
 	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
 	return m, o, status, findings
 }
@@ -620,7 +638,7 @@ func TestBuildDNSArchObservedTier_ExternalAnswerIsNotResolution(t *testing.T) {
 	if f := nx.ExternalResolution; f.State != FactAbsent || !strings.Contains(f.Detail, "NXDOMAIN") {
 		t.Fatalf("NXDOMAIN external = %+v, want absent", f)
 	}
-	ok := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", nil, "", fixtureResult(t, "tier-dd-dns", "tier.txt"))
+	ok := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", nil, "", fixtureResult(t, "tier-pr91-dns", "tier.txt"))
 	if _, answered := dnsAnswered(ok.ExternalResolution); !answered || ok.ExternalName != "." {
 		t.Fatalf("NOERROR external = %+v, want an answer", ok.ExternalResolution)
 	}
@@ -632,21 +650,21 @@ func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
 	// Should pass: NOERROR with records is a resolution, reported with
 	// the forwarder caveat.
 	_, _, status, findings := liveWithTier(t, tier)
-	if status != "complete" || len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved . NS;") {
+	if status != "complete" || len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: pr91-dns resolved . NS;") {
 		t.Fatalf("status %s findings %v", status, findings)
 	}
 
 	// Should trigger: SERVFAIL is a failed lookup, never "resolved".
 	_, o, status, findings := liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_external_servfail.txt"), "external"))
 	joined := strings.Join(findings, "\n")
-	if o.Tier[0].ExternalResolution.State != FactError || strings.Contains(joined, "external_resolution_forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns did not resolve . (the tier answered . NS with SERVFAIL)") {
+	if o.Tier[0].ExternalResolution.State != FactError || strings.Contains(joined, "external_resolution_forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: pr91-dns did not resolve . (the tier answered . NS with SERVFAIL)") {
 		t.Fatalf("SERVFAIL: status %s findings %v", status, findings)
 	}
 
 	// Should pass: a CNAME chain ending in an A record is a resolution
 	// (tier_external_cname.txt: www.github.com through the tier).
 	_, _, _, findings = liveWithTierExternal(t, withSection(t, tier, "external", fixture(t, "tier_external_cname.txt"), "external"), "www.github.com")
-	if len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved www.github.com A;") {
+	if len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: pr91-dns resolved www.github.com A;") {
 		t.Fatalf("CNAME chain: findings %v", findings)
 	}
 
@@ -654,13 +672,13 @@ func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
 	// (tier_external_cname_only.txt: ipv6.google.com A) did not resolve.
 	_, o, _, findings = liveWithTierExternal(t, withSection(t, tier, "external", fixture(t, "tier_external_cname_only.txt"), "external"), "ipv6.google.com")
 	joined = strings.Join(findings, "\n")
-	if o.Tier[0].ExternalResolution.State != FactAbsent || strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns did not resolve ipv6.google.com (the tier answered ipv6.google.com A with NOERROR and no A record)") {
+	if o.Tier[0].ExternalResolution.State != FactAbsent || strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: pr91-dns did not resolve ipv6.google.com (the tier answered ipv6.google.com A with NOERROR and no A record)") {
 		t.Fatalf("CNAME only: findings %v", findings)
 	}
 
 	// Should trigger: NXDOMAIN for the probe name is not a resolution.
 	_, _, _, findings = liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_external_nxdomain.txt"), "external"))
-	if joined := strings.Join(findings, "\n"); strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns") {
+	if joined := strings.Join(findings, "\n"); strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: pr91-dns") {
 		t.Fatalf("NXDOMAIN: findings %v", findings)
 	}
 
@@ -668,14 +686,14 @@ func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
 	// stopped-unbound capture) is unknown, so the report is partial.
 	_, o, status, findings = liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_stopped.txt"), "external"))
 	joined = strings.Join(findings, "\n")
-	if o.Tier[0].ExternalResolution.State != FactUnknown || status != "partial" || !strings.Contains(joined, "external_resolution_unknown: dd-dns (no answer from 127.0.0.1: communications error to 127.0.0.1#53: connection refused") {
+	if o.Tier[0].ExternalResolution.State != FactUnknown || status != "partial" || !strings.Contains(joined, "external_resolution_unknown: pr91-dns (no answer from 127.0.0.1: communications error to 127.0.0.1#53: connection refused") {
 		t.Fatalf("refused: status %s findings %v", status, findings)
 	}
 
 	// Should trigger: a step that stopped inside the external section.
 	cut := tier[:strings.Index(tier, dnsArchMarker+"external end")]
 	_, _, status, findings = liveWithTier(t, cut)
-	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "external_resolution_unknown: dd-dns (no complete output") {
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "external_resolution_unknown: pr91-dns (no complete output") {
 		t.Fatalf("cut: status %s findings %v", status, findings)
 	}
 }
@@ -686,21 +704,21 @@ func TestBuildDNSArchStatus_UnknownLiveFactsArePartial(t *testing.T) {
 	refused := fixture(t, "tier_stopped.txt")
 	m, o := liveTopology(t)
 	provider := withSection(t, fixture(t, "provider.txt"), "ns", refused, "external")
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Stdout: provider}})
 	if o.Providers[0].NS.State != FactUnknown {
 		t.Fatalf("ns = %+v", o.Providers[0].NS)
 	}
 	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
-	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-ipa: ns (no answer from 192.168.122.5: communications error to 127.0.0.1#53: connection refused") {
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: pr91-ipa: ns (no answer from 192.168.122.13: communications error to 127.0.0.1#53: connection refused") {
 		t.Fatalf("provider: status %s findings %v", status, findings)
 	}
 
 	m, o = liveTopology(t)
 	client := fixture(t, "client.txt")
-	c := BuildDNSArchObservedClient("dd-client", StepResult{Step: Step{ID: "client-dd-client"}, Result: AdHocResult{Stdout: client[:strings.Index(client, dnsArchMarker+"lookup end")]}})
+	c := BuildDNSArchObservedClient("pr91-client", StepResult{Step: Step{ID: "client-pr91-client"}, Result: AdHocResult{Stdout: client[:strings.Index(client, dnsArchMarker+"lookup end")]}}, pr91TierAddrs)
 	o.Client = &c
 	status, findings = BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
-	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-client: lookup") {
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: pr91-client: lookup") {
 		t.Fatalf("client: status %s findings %v", status, findings)
 	}
 
@@ -713,10 +731,10 @@ func TestBuildDNSArchStatus_UnknownLiveFactsArePartial(t *testing.T) {
 	// An unreachable provider from the tier (timeout, tier_failures.txt)
 	// is a finding and leaves the report partial.
 	m, o = liveTopology(t)
-	tier := withSection(t, fixture(t, "tier.txt"), "authority@192.168.122.5", fixture(t, "tier_failures.txt"), "authority@192.0.2.1")
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tier}})
+	tier := withSection(t, fixture(t, "tier.txt"), "authority@192.168.122.13", fixture(t, "tier_failures.txt"), "authority@192.0.2.1")
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-pr91-dns"}, Result: AdHocResult{Stdout: tier}})
 	status, findings = BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
-	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "freeipa_dns_not_authoritative_from_tier: dd-dns") {
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "freeipa_dns_not_authoritative_from_tier: pr91-dns") {
 		t.Fatalf("authority timeout: status %s findings %v", status, findings)
 	}
 }
@@ -727,10 +745,10 @@ func TestBuildDNSArchDifferences_ServfailIsNoAuthoritativeReference(t *testing.T
 	servfail := fixture(t, "tier_external_servfail.txt")
 	m, o := liveTopology(t)
 	provider := withSection(t, fixture(t, "provider.txt"), "internal", servfail, "external")
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Stdout: provider}})
 	tier := withSection(t, fixture(t, "tier.txt"), "internal", servfail, "external")
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tier}})
-	d, _ := diffBySubject(BuildDNSArchDifferences(m, o), "tier dd-dns answer for ipa1.ipa.pilot.internal")
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-pr91-dns"}, Result: AdHocResult{Stdout: tier}})
+	d, _ := diffBySubject(BuildDNSArchDifferences(m, o), "tier pr91-dns answer for ipa1.ipa.pilot.internal")
 	if d.Status != FactUnknown {
 		t.Fatalf("comparison = %+v, want unknown (no authoritative answer)", d)
 	}
@@ -742,7 +760,7 @@ func TestBuildDNSArchDifferences_ServfailIsNoAuthoritativeReference(t *testing.T
 // leaves the first hop unknown.
 func TestBuildDNSArchStatus_ClientWithoutSystemdResolved(t *testing.T) {
 	m, o := liveTopology(t)
-	c := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_el.txt"))
+	c := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_el.txt"), pr91TierAddrs)
 	if c.ResolvedDNS.State != FactNotApplicable || c.FirstHop.State != FactObserved {
 		t.Fatalf("client = %+v", c)
 	}
@@ -752,15 +770,15 @@ func TestBuildDNSArchStatus_ClientWithoutSystemdResolved(t *testing.T) {
 		t.Fatalf("findings %v, want no unknown live fact", findings)
 	}
 
-	stock := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_el_stock.txt"))
+	stock := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_el_stock.txt"), pr91TierAddrs)
 	o.Client = &stock
 	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
-	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-client: first_hop_identity (dig is not installed: environment: line 6: dig: command not found)") {
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: pr91-client: first_hop_identity (dig is not installed: environment: line 6: dig: command not found)") {
 		t.Fatalf("status %s findings %v", status, findings)
 	}
 	// The same resolvectl failure with systemd-resolved active is unknown.
 	active := strings.Replace(fixture(t, "client_el.txt"), "inactive\n@@pilot-dnsarch resolved end rc=3", "active\n@@pilot-dnsarch resolved end rc=0", 1)
-	if c := BuildDNSArchObservedClient("dd-client", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: active}}); c.ResolvedDNS.State != FactUnknown {
+	if c := BuildDNSArchObservedClient("pr91-client", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: active}}, pr91TierAddrs); c.ResolvedDNS.State != FactUnknown {
 		t.Fatalf("resolvectl with resolved active = %+v, want unknown", c.ResolvedDNS)
 	}
 }
@@ -773,11 +791,11 @@ func TestBuildDNSArchPaths_ProviderLineShowsLiveAuthority(t *testing.T) {
 		t.Fatalf("paths:\n%s", paths)
 	}
 	provider := withSection(t, fixture(t, "provider.txt"), "soa", fixture(t, "tier_external_servfail.txt"), "external")
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Stdout: provider}})
 	if paths := strings.Join(BuildDNSArchPaths(m, o), "\n"); !strings.Contains(paths, "live SOA SERVFAIL, authoritative=false") {
 		t.Fatalf("SERVFAIL paths:\n%s", paths)
 	}
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.5 port 22: Connection timed out"}})
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.13 port 22: Connection timed out"}})
 	if paths := strings.Join(BuildDNSArchPaths(m, o), "\n"); !strings.Contains(paths, "live SOA unknown") {
 		t.Fatalf("unreachable paths:\n%s", paths)
 	}
@@ -796,7 +814,7 @@ func statusOf(t *testing.T, m DNSArchModel, o DNSArchObserved) (string, string) 
 // complete.
 func TestBuildDNSArchStatus_TicketRefusedAfterKinit(t *testing.T) {
 	m, o := liveTopology(t)
-	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "auth_ticket_refused.txt"))
+	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "auth_ticket_refused.txt"))
 	if o.Kerberos.State != "available" || o.FreeIPA.GlobalForwarders.State != FactAuthRequired {
 		t.Fatalf("kerberos %+v forwarders %+v", o.Kerberos, o.FreeIPA.GlobalForwarders)
 	}
@@ -810,7 +828,7 @@ func TestBuildDNSArchStatus_TicketRefusedAfterKinit(t *testing.T) {
 // refused, and nothing it read is reported.
 func TestBuildDNSArchObservedFreeIPA_WriterIsRefused(t *testing.T) {
 	m, o := liveTopology(t)
-	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("dd-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-dd-ipa", "auth_writer.txt"))
+	o.FreeIPA, o.Kerberos = BuildDNSArchObservedFreeIPA("pr91-ipa", "reader@IPA.PILOT.INTERNAL", "/etc/pilot/r.keytab", fixtureResult(t, "freeipa-config-pr91-ipa", "auth_writer.txt"))
 	if o.Kerberos.State != KerberosRefusedPrivileged || o.FreeIPA.GlobalForwarders.State != FactAuthRequired || o.FreeIPA.GlobalForwarders.Value != nil {
 		t.Fatalf("kerberos %+v forwarders %+v", o.Kerberos, o.FreeIPA.GlobalForwarders)
 	}
@@ -819,7 +837,7 @@ func TestBuildDNSArchObservedFreeIPA_WriterIsRefused(t *testing.T) {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 	// Should pass: the read-only role's rights are r/rsc only.
-	if _, k := BuildDNSArchObservedFreeIPA("dd-ipa", "r@X", "/k", fixtureResult(t, "s", "auth_role.txt")); k.State != "available" {
+	if _, k := BuildDNSArchObservedFreeIPA("pr91-ipa", "r@X", "/k", fixtureResult(t, "s", "auth_role.txt")); k.State != "available" {
 		t.Fatalf("read-only reader = %+v", k)
 	}
 }
@@ -833,21 +851,21 @@ func TestBuildDNSArchStatus_ProviderQueryFailures(t *testing.T) {
 	servfail := fixture(t, "tier_external_servfail.txt")
 	provider := withSection(t, fixture(t, "provider.txt"), "ns", servfail, "external")
 	provider = withSection(t, provider, "srv_kerberos", fixture(t, "provider_srv_missing.txt"), "srv_kerberos")
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr91-ipa"}, Result: AdHocResult{Stdout: provider}})
 	if o.Providers[0].NS.State != FactError || o.Providers[0].KerberosSRV.State != FactAbsent {
 		t.Fatalf("ns %+v kerberos %+v", o.Providers[0].NS, o.Providers[0].KerberosSRV)
 	}
 	status, findings := statusOf(t, m, o)
-	if status != "complete" || !strings.Contains(findings, "dns_query_failed: dd-ipa: ns (192.168.122.5 answered SERVFAIL); kerberos_srv (NXDOMAIN)") {
+	if status != "complete" || !strings.Contains(findings, "dns_query_failed: pr91-ipa: ns (192.168.122.13 answered SERVFAIL); kerberos_srv (NXDOMAIN)") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 
 	// named stopped with SSH up (provider_named_stopped.txt): the
 	// queries time out, and the finding says named is down.
 	m, o = liveTopology(t)
-	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-dd-ipa", "provider_named_stopped.txt"))
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr91-ipa", "provider_named_stopped.txt"))
 	status, findings = statusOf(t, m, o)
-	if status != "partial" || !strings.Contains(findings, "freeipa_named_not_running: dd-ipa: named is inactive") || !strings.Contains(findings, "live_fact_unknown: dd-ipa: soa (no answer from 192.168.122.5: connection timed out; no servers could be reached)") {
+	if status != "partial" || !strings.Contains(findings, "freeipa_named_not_running: pr91-ipa: named is inactive") || !strings.Contains(findings, "live_fact_unknown: pr91-ipa: soa (no answer from 192.168.122.13: connection timed out; no servers could be reached)") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 }
@@ -858,31 +876,31 @@ func TestBuildDNSArchStatus_ProviderQueryFailures(t *testing.T) {
 // NOTIMP (client_el.txt) is simply not a tier host.
 func TestBuildDNSArchStatus_ClientQueryFailures(t *testing.T) {
 	m, o := liveTopology(t)
-	c := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_lookup_nx.txt"))
+	c := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_lookup_nx.txt"), pr91TierAddrs)
 	if c.Lookup.State != FactAbsent {
 		t.Fatalf("lookup %+v", c.Lookup)
 	}
 	o.Client = &c
-	if _, findings := statusOf(t, m, o); !strings.Contains(findings, "dns_query_failed: dd-client: lookup (getent: name not found)") {
+	if _, findings := statusOf(t, m, o); !strings.Contains(findings, "dns_query_failed: pr91-client: lookup (getent: name not found)") {
 		t.Fatalf("findings:\n%s", findings)
 	}
 
 	m, o = liveTopology(t)
-	c = BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_first_hop_refused.txt"))
+	c = BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_first_hop_refused.txt"), pr73TierAddrs)
 	if c.FirstHop.State != FactError {
 		t.Fatalf("first hop %+v, want error (REFUSED says nothing about who it is)", c.FirstHop)
 	}
 	o.Client = &c
-	if _, findings := statusOf(t, m, o); !strings.Contains(findings, "dns_query_failed: dd-client: first_hop_identity (192.168.122.8 answered REFUSED)") {
+	if _, findings := statusOf(t, m, o); !strings.Contains(findings, "dns_query_failed: pr91-client: first_hop_identity (192.168.122.8 answered REFUSED)") {
 		t.Fatalf("findings:\n%s", findings)
 	}
 
-	el := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_el.txt"))
+	el := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_el.txt"), pr91TierAddrs)
 	if el.FirstHop.State != FactObserved || el.FirstHop.Value != "" || !strings.Contains(el.FirstHop.Detail, "NOTIMP") {
 		t.Fatalf("NOTIMP first hop %+v", el.FirstHop)
 	}
-	tier := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client.txt"))
-	if tier.FirstHop.State != FactObserved || tier.FirstHop.Value != "pilot-dns:pr73-dns" {
+	tier := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client.txt"), pr91TierAddrs)
+	if tier.FirstHop.State != FactObserved || tier.FirstHop.Value != "pilot-dns:pr91-dns" {
 		t.Fatalf("tier first hop %+v", tier.FirstHop)
 	}
 }
@@ -908,13 +926,13 @@ func TestActiveFact_RealSystemctlStates(t *testing.T) {
 	bus := states["bus_error"]
 	busSection := "@@pilot-dnsarch unbound begin\n" + bus.Output + "\n@@pilot-dnsarch unbound end rc=1\n"
 	m, o := liveTopology(t)
-	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: withSection(t, fixture(t, "tier.txt"), "unbound", busSection, "unbound")}})
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-pr91-dns"}, Result: AdHocResult{Stdout: withSection(t, fixture(t, "tier.txt"), "unbound", busSection, "unbound")}})
 	status, findings := statusOf(t, m, o)
-	if status != "partial" || strings.Contains(findings, "dns_tier_not_running") || !strings.Contains(findings, "live_fact_unknown: dd-dns: unbound_active (systemctl is-active exited 1: Failed to connect to bus: No such file or directory)") {
+	if status != "partial" || strings.Contains(findings, "dns_tier_not_running") || !strings.Contains(findings, "live_fact_unknown: pr91-dns: unbound_active (systemctl is-active exited 1: Failed to connect to bus: No such file or directory)") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 	client := withSection(t, fixture(t, "client_el.txt"), "resolved", "@@pilot-dnsarch resolved begin\n"+bus.Output+"\n@@pilot-dnsarch resolved end rc=1\n", "resolved")
-	if c := BuildDNSArchObservedClient("c", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: client}}); c.ResolvedDNS.State != FactUnknown {
+	if c := BuildDNSArchObservedClient("c", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: client}}, pr91TierAddrs); c.ResolvedDNS.State != FactUnknown {
 		t.Fatalf("resolvectl with an unknown systemd-resolved = %+v, want unknown", c.ResolvedDNS)
 	}
 }
@@ -925,12 +943,12 @@ func TestBuildDNSArchStatus_UnknownConfigAndComparisonsAreNamed(t *testing.T) {
 	m, o := liveTopology(t)
 	o.FreeIPA.ServerForwarders = DNSArchFact{State: FactError, Detail: "ipa: ERROR: an internal error has occurred"}
 	status, findings := statusOf(t, m, o)
-	if status != "partial" || !strings.Contains(findings, "live_fact_unknown: dd-ipa (FreeIPA configuration): server_forwarders (ipa: ERROR: an internal error has occurred)") || !strings.Contains(findings, "comparison_unknown: FreeIPA dd-ipa server forwarders (install-time --forwarder)") {
+	if status != "partial" || !strings.Contains(findings, "live_fact_unknown: pr91-ipa (FreeIPA configuration): server_forwarders (ipa: ERROR: an internal error has occurred)") || !strings.Contains(findings, "comparison_unknown: FreeIPA pr91-ipa server forwarders (install-time --forwarder)") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 	m, o = liveTopology(t)
-	m.Unevaluated = []string{"inventory:hostvars[dd-dns].dns_upstream"}
-	if status, findings := statusOf(t, m, o); status != "partial" || !strings.Contains(findings, "declared_value_unevaluated: inventory:hostvars[dd-dns].dns_upstream") {
+	m.Unevaluated = []string{"inventory:hostvars[pr91-dns].dns_upstream"}
+	if status, findings := statusOf(t, m, o); status != "partial" || !strings.Contains(findings, "declared_value_unevaluated: inventory:hostvars[pr91-dns].dns_upstream") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 	m, o = liveTopology(t)
@@ -944,14 +962,14 @@ func TestBuildDNSArchStatus_UnknownConfigAndComparisonsAreNamed(t *testing.T) {
 // data diverged is a mismatch, not invisible.
 func TestBuildDNSArchDifferences_EveryProviderAnswersAlike(t *testing.T) {
 	m := BuildDNSArchitectureModel(inv(
-		map[string][]string{"freeipa-server": {"dd-ipa"}, "freeipa-server-replica": {"dd-ipa2"}},
-		map[string]map[string]any{"dd-ipa": {"ansible_host": "192.168.122.5"}, "dd-ipa2": {"ansible_host": "192.168.122.6", "freeipa_setup_dns": true}}))
+		map[string][]string{"freeipa-server": {"pr91-ipa"}, "freeipa-server-replica": {"dd-ipa2"}},
+		map[string]map[string]any{"pr91-ipa": {"ansible_host": "192.168.122.13"}, "dd-ipa2": {"ansible_host": "192.168.122.6", "freeipa_setup_dns": true}}))
 	var o DNSArchObserved
 	o.Providers = []DNSArchObservedProvider{
-		BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-dd-ipa", "provider.txt")),
+		BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr91-ipa", "provider.txt")),
 		BuildDNSArchObservedProvider(m.Providers[1], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-dd-ipa2", "provider.txt")),
 	}
-	d, ok := diffBySubject(BuildDNSArchDifferences(m, o), "FreeIPA dd-ipa2 answer for ipa1.ipa.pilot.internal equals dd-ipa's")
+	d, ok := diffBySubject(BuildDNSArchDifferences(m, o), "FreeIPA dd-ipa2 answer for ipa1.ipa.pilot.internal equals pr91-ipa's")
 	if !ok || d.Status != "match" {
 		t.Fatalf("same answer: %+v", d)
 	}
@@ -959,5 +977,85 @@ func TestBuildDNSArchDifferences_EveryProviderAnswersAlike(t *testing.T) {
 	o.Providers[1] = BuildDNSArchObservedProvider(m.Providers[1], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa2"}, Result: AdHocResult{Stdout: diverged}})
 	if d, _ := diffBySubject(BuildDNSArchDifferences(m, o), "FreeIPA dd-ipa2 answer for"); d.Status != "mismatch" {
 		t.Fatalf("diverged answer: %+v", d)
+	}
+}
+
+// The first hop's identity query (id.server CH TXT) decides only whether
+// the first nameserver is a tier host. Real captures from the pr91
+// topology: client_resolved_stub.txt is a stock Ubuntu 24.04.4 host, whose
+// systemd-resolved stub (127.0.0.53) answers SERVFAIL with aa;
+// client_freeipa_bind.txt is the FreeIPA 4.13.4 server, whose own BIND
+// (127.0.0.1) answers NOERROR with no TXT record.
+func TestBuildDNSArchObservedClient_NonTierFirstHop(t *testing.T) {
+	m, o := liveTopology(t)
+
+	// Should pass: the stub's SERVFAIL is "not a tier host", not a failed
+	// query.
+	stub := BuildDNSArchObservedClient("pr91-client", fixtureResult(t, "client-pr91-client", "client_resolved_stub.txt"), m.TierAddrs("pr91-client"))
+	if stub.FirstHop.State != FactObserved || stub.FirstHop.Value != "" || !strings.Contains(stub.FirstHop.Detail, "not a pilot dns tier host (127.0.0.53 answered SERVFAIL") {
+		t.Fatalf("stub first hop %+v", stub.FirstHop)
+	}
+	o.Client = &stub
+	_, findings := statusOf(t, m, o)
+	if strings.Contains(findings, "first_hop_identity") {
+		t.Fatalf("the stub's first hop must not be a failed or unknown query:\n%s", findings)
+	}
+	// The stock host cannot resolve the internal name: that stays a
+	// failed lookup.
+	if !strings.Contains(findings, "dns_query_failed: pr91-client: lookup (getent: name not found)") {
+		t.Fatalf("findings:\n%s", findings)
+	}
+
+	// Should pass: FreeIPA's BIND answers without the TXT record.
+	bind := BuildDNSArchObservedClient("pr91-ipa", fixtureResult(t, "client-pr91-ipa", "client_freeipa_bind.txt"), m.TierAddrs("pr91-ipa"))
+	if bind.FirstHop.State != FactObserved || bind.FirstHop.Value != "" || !strings.Contains(bind.FirstHop.Detail, "not a pilot dns tier host") {
+		t.Fatalf("FreeIPA BIND first hop %+v", bind.FirstHop)
+	}
+
+	// Should trigger: the same REFUSED is a failed query from a tier
+	// address, and only "not a tier host" from any other resolver.
+	tierRefused := BuildDNSArchObservedClient("c", fixtureResult(t, "client-c", "client_first_hop_refused.txt"), pr73TierAddrs)
+	if tierRefused.FirstHop.State != FactError {
+		t.Fatalf("REFUSED from a tier address %+v", tierRefused.FirstHop)
+	}
+	otherRefused := BuildDNSArchObservedClient("c", fixtureResult(t, "client-c", "client_first_hop_refused.txt"), pr91TierAddrs)
+	if otherRefused.FirstHop.State != FactObserved || !strings.Contains(otherRefused.FirstHop.Detail, "not a pilot dns tier host (192.168.122.8 answered REFUSED") {
+		t.Fatalf("REFUSED from another resolver %+v", otherRefused.FirstHop)
+	}
+}
+
+// A tier host that is the client reaches its own unbound on the loopback
+// address.
+func TestDNSArchModel_TierAddrs(t *testing.T) {
+	m, _ := liveTopology(t)
+	if got := m.TierAddrs("pr91-client"); !reflect.DeepEqual(got, []string{"192.168.122.12"}) {
+		t.Fatalf("client: %v", got)
+	}
+	if got := m.TierAddrs("pr91-dns"); !reflect.DeepEqual(got, []string{"192.168.122.12", "127.0.0.1", "::1"}) {
+		t.Fatalf("tier host: %v", got)
+	}
+}
+
+// Should pass: an FQDN written with upper case and a trailing dot is the
+// same server FreeIPA lists; nothing is reported missing.
+func TestBuildDNSArchModel_FQDNIsNormalisedOnce(t *testing.T) {
+	m := BuildDNSArchitectureModel(inv(
+		map[string][]string{"freeipa-server": {"pr91-ipa"}, "dns": {"pr91-dns"}, "freeipa-dns-client": {"pr91-client"}},
+		map[string]map[string]any{"pr91-ipa": {"ansible_host": "192.168.122.13", "freeipa_server_fqdn": "IPA1.ipa.pilot.internal."}, "pr91-dns": {"ansible_host": "192.168.122.12"}, "pr91-client": {"ansible_host": "192.168.122.4"}}), "pr91-client")
+	if m.Providers[0].FQDN != "ipa1.ipa.pilot.internal" {
+		t.Fatalf("FQDN = %q", m.Providers[0].FQDN)
+	}
+	_, o := liveTopology(t)
+	diffs := BuildDNSArchDifferences(m, o)
+	status, findings := BuildDNSArchStatus(m, o, diffs)
+	joined := strings.Join(findings, "\n")
+	if status != "complete" || strings.Contains(joined, "declared_live_absent") {
+		t.Fatalf("status %s findings %v", status, findings)
+	}
+	if d, ok := diffBySubject(diffs, "FreeIPA pr91-ipa server forwarders"); !ok || d.Status != "match" {
+		t.Fatalf("server forwarders = %+v (found %v)", d, ok)
+	}
+	if _, ok := diffBySubject(diffs, "tier pr91-dns answer for ipa1.ipa.pilot.internal"); !ok {
+		t.Fatalf("the core comparison is missing: %+v", diffs)
 	}
 }

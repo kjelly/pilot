@@ -67,22 +67,22 @@ all:
   children:
     freeipa-server:
       hosts:
-        dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}
+        pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13}
     dns:
       hosts:
-        dd-dns: {ansible_connection: local, ansible_host: 192.168.122.15}
+        pr91-dns: {ansible_connection: local, ansible_host: 192.168.122.12}
     freeipa-dns-client:
       hosts:
-        dd-client: {ansible_connection: local, ansible_host: 192.168.122.9}
+        pr91-client: {ansible_connection: local, ansible_host: 192.168.122.4}
 `
 
 // liveRunner answers the four probes of the live topology.
 func liveRunner(t *testing.T) *diagnoseFakeRunner {
 	return &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
-		diagnose.DNSArchProviderStep("dd-ipa", "ipa.pilot.internal", "192.168.122.5", "ipa1.ipa.pilot.internal").Command:            respond(t, "dd-ipa", dnsArchFixture(t, "provider.txt")),
-		diagnose.DNSArchAuthStep("dd-ipa", dnsArchReader, dnsArchKeytab).Command:                                                    respond(t, "dd-ipa", dnsArchFixture(t, "auth_role.txt")),
-		diagnose.DNSArchTierStep("dd-dns", "ipa1.ipa.pilot.internal", ".", "ipa.pilot.internal", []string{"192.168.122.5"}).Command: respond(t, "dd-dns", dnsArchFixture(t, "tier.txt")),
-		diagnose.DNSArchClientStep("dd-client", "ipa1.ipa.pilot.internal").Command:                                                  respond(t, "dd-client", dnsArchFixture(t, "client.txt")),
+		diagnose.DNSArchProviderStep("pr91-ipa", "ipa.pilot.internal", "192.168.122.13", "ipa1.ipa.pilot.internal").Command:            respond(t, "pr91-ipa", dnsArchFixture(t, "provider.txt")),
+		diagnose.DNSArchAuthStep("pr91-ipa", dnsArchReader, dnsArchKeytab).Command:                                                     respond(t, "pr91-ipa", dnsArchFixture(t, "auth_role.txt")),
+		diagnose.DNSArchTierStep("pr91-dns", "ipa1.ipa.pilot.internal", ".", "ipa.pilot.internal", []string{"192.168.122.13"}).Command: respond(t, "pr91-dns", dnsArchFixture(t, "tier.txt")),
+		diagnose.DNSArchClientStep("pr91-client", "ipa1.ipa.pilot.internal").Command:                                                   respond(t, "pr91-client", dnsArchFixture(t, "client.txt")),
 	}}
 }
 
@@ -117,7 +117,7 @@ func TestDiagnoseDNSArchitecture_SplitTierWithReaderIsComplete(t *testing.T) {
 	requireRealAnsible(t)
 	fake := liveRunner(t)
 	opts := dnsArchOpts(t, writeDNSArchInventory(t, dnsArchLiveInventory), fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab})
-	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
 
 	if out.Status != "complete" || out.AuditStatus != "persisted" || len(out.Steps) != 4 {
 		t.Fatalf("status=%s audit=%s steps=%d findings=%v", out.Status, out.AuditStatus, len(out.Steps), out.Findings)
@@ -127,7 +127,7 @@ func TestDiagnoseDNSArchitecture_SplitTierWithReaderIsComplete(t *testing.T) {
 			t.Errorf("%s = %s (%s)", d.Subject, d.Status, d.Detail)
 		}
 	}
-	if out.Execution.Kerberos.State != "available" || out.Execution.RemoteUsers["dd-dns"] != "root" || out.Execution.ControllerUser == "" {
+	if out.Execution.Kerberos.State != "available" || out.Execution.RemoteUsers["pr91-dns"] != "root" || out.Execution.ControllerUser == "" {
 		t.Fatalf("execution = %+v", out.Execution)
 	}
 	var dns dnsArchComponent
@@ -136,7 +136,7 @@ func TestDiagnoseDNSArchitecture_SplitTierWithReaderIsComplete(t *testing.T) {
 			dns = c
 		}
 	}
-	if !dns.Product || !dns.Assigned || dns.Hosts[0] != "dd-dns" || dns.RunState != "no_recorded_run" || dns.Contract != "contracts/dns.yaml" {
+	if !dns.Product || !dns.Assigned || dns.Hosts[0] != "pr91-dns" || dns.RunState != "no_recorded_run" || dns.Contract != "contracts/dns.yaml" {
 		t.Fatalf("dns component = %+v", dns)
 	}
 	if len(out.Declared) == 0 || out.Effective.Tier[0].Mode != "freeipa-split" {
@@ -154,7 +154,7 @@ func TestDiagnoseDNSArchitecture_MissingAuthKeepsOtherFacts(t *testing.T) {
 	requireRealAnsible(t)
 	fake := liveRunner(t)
 	opts := dnsArchOpts(t, writeDNSArchInventory(t, dnsArchLiveInventory), fake, diagnoseFreeIPAReader{})
-	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
 
 	if out.Status != "auth_required" || out.Execution.Kerberos.State != "not_configured" {
 		t.Fatalf("status=%s kerberos=%+v", out.Status, out.Execution.Kerberos)
@@ -167,7 +167,7 @@ func TestDiagnoseDNSArchitecture_MissingAuthKeepsOtherFacts(t *testing.T) {
 	if d, _ := dnsArchDiff(out, "FreeIPA global forwarders"); d.Status != "auth_required" {
 		t.Fatalf("global forwarders = %+v", d)
 	}
-	for _, subject := range []string{"tier dd-dns forward zone .", "FreeIPA dd-ipa authoritative", "client dd-client nameservers"} {
+	for _, subject := range []string{"tier pr91-dns forward zone .", "FreeIPA pr91-ipa authoritative", "client pr91-client nameservers"} {
 		if d, _ := dnsArchDiff(out, subject); d.Status != "match" {
 			t.Errorf("%s = %+v, want match without credentials", subject, d)
 		}
@@ -179,24 +179,24 @@ func TestDiagnoseDNSArchitecture_MissingAuthKeepsOtherFacts(t *testing.T) {
 func TestDiagnoseDNSArchitecture_NoTierPrimaryOnly(t *testing.T) {
 	requireRealAnsible(t)
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
-		diagnose.DNSArchProviderStep("dd-ipa", "ipa.pilot.internal", "192.168.122.5", "ipa1.ipa.pilot.internal").Command: respond(t, "dd-ipa", dnsArchFixture(t, "provider.txt")),
-		diagnose.DNSArchAuthStep("dd-ipa", dnsArchReader, dnsArchKeytab).Command:                                         respond(t, "dd-ipa", dnsArchFixture(t, "auth_role.txt")),
+		diagnose.DNSArchProviderStep("pr91-ipa", "ipa.pilot.internal", "192.168.122.13", "ipa1.ipa.pilot.internal").Command: respond(t, "pr91-ipa", dnsArchFixture(t, "provider.txt")),
+		diagnose.DNSArchAuthStep("pr91-ipa", dnsArchReader, dnsArchKeytab).Command:                                          respond(t, "pr91-ipa", dnsArchFixture(t, "auth_role.txt")),
 	}}
 	inv := writeDNSArchInventory(t, `
 all:
   children:
     freeipa-server:
       hosts:
-        dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}
+        pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13}
     freeipa-dns-client:
       hosts:
-        dd-client: {ansible_connection: local, ansible_host: 192.168.122.9}
+        pr91-client: {ansible_connection: local, ansible_host: 192.168.122.4}
 `)
 	out := callDNSArch(t, dnsArchOpts(t, inv, fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab}), diagnoseDNSArchitectureInput{})
 	if !strings.Contains(joinedFindings(out), "dns_tier_not_assigned") || out.Effective.TierAssigned || len(fake.calls) != 2 {
 		t.Fatalf("findings=%v calls=%v", out.Findings, fake.calls)
 	}
-	if r := out.Effective.Resolvers[0]; r.Selection != "freeipa_only" || r.Servers[0] != "192.168.122.5" {
+	if r := out.Effective.Resolvers[0]; r.Selection != "freeipa_only" || r.Servers[0] != "192.168.122.13" {
 		t.Fatalf("resolver = %+v", r)
 	}
 	for _, c := range out.Supported.Components {
@@ -215,7 +215,7 @@ func TestDiagnoseDNSArchitecture_DNSEnabledReplicaUnreachable(t *testing.T) {
 	requireRealAnsible(t)
 	fake := liveRunner(t)
 	fake.byCommand[diagnose.DNSArchProviderStep("dd-gone", "ipa.pilot.internal", "192.0.2.1", "ipa1.ipa.pilot.internal").Command] = realUnreachable(t)
-	fake.byCommand[diagnose.DNSArchTierStep("dd-dns", "ipa1.ipa.pilot.internal", ".", "ipa.pilot.internal", []string{"192.168.122.5", "192.0.2.1"}).Command] = respond(t, "dd-dns", dnsArchFixture(t, "tier.txt"))
+	fake.byCommand[diagnose.DNSArchTierStep("pr91-dns", "ipa1.ipa.pilot.internal", ".", "ipa.pilot.internal", []string{"192.168.122.13", "192.0.2.1"}).Command] = respond(t, "pr91-dns", dnsArchFixture(t, "tier.txt"))
 	inv := writeDNSArchInventory(t, dnsArchLiveInventory+`    freeipa-server-replica:
       hosts:
         dd-gone: {ansible_connection: local, ansible_host: 192.0.2.1, freeipa_setup_dns: true, freeipa_replica_fqdn: ipa2.ipa.pilot.internal}
@@ -233,7 +233,7 @@ func TestDiagnoseDNSArchitecture_DNSEnabledReplicaUnreachable(t *testing.T) {
 	}
 	// The tier's stub must hold both providers; the captured tier only
 	// has the primary, so the comparison reports the gap.
-	if d, _ := dnsArchDiff(out, "tier dd-dns stub zone ipa.pilot.internal"); d.Status != "mismatch" {
+	if d, _ := dnsArchDiff(out, "tier pr91-dns stub zone ipa.pilot.internal"); d.Status != "mismatch" {
 		t.Fatalf("stub comparison = %+v, want mismatch (replica missing live)", d)
 	}
 	// The install-time forwarders of the replica cannot be confirmed in the
@@ -249,14 +249,14 @@ func TestDiagnoseDNSArchitecture_ExplicitClientOverride(t *testing.T) {
 	requireRealAnsible(t)
 	fake := liveRunner(t)
 	inv := writeDNSArchInventory(t, strings.Replace(dnsArchLiveInventory,
-		"dd-client: {ansible_connection: local, ansible_host: 192.168.122.9}",
-		"dd-client: {ansible_connection: local, ansible_host: 192.168.122.9, freeipa_dns_client_servers: [192.168.122.5]}", 1))
-	out := callDNSArch(t, dnsArchOpts(t, inv, fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab}), diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
-	d, _ := dnsArchDiff(out, "client dd-client nameservers (explicit_override)")
-	if d.Status != "mismatch" || !strings.Contains(strings.Join(d.Evidence, " "), "inventory:hostvars[dd-client].freeipa_dns_client_servers") {
+		"pr91-client: {ansible_connection: local, ansible_host: 192.168.122.4}",
+		"pr91-client: {ansible_connection: local, ansible_host: 192.168.122.4, freeipa_dns_client_servers: [192.168.122.13]}", 1))
+	out := callDNSArch(t, dnsArchOpts(t, inv, fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab}), diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
+	d, _ := dnsArchDiff(out, "client pr91-client nameservers (explicit_override)")
+	if d.Status != "mismatch" || !strings.Contains(strings.Join(d.Evidence, " "), "inventory:hostvars[pr91-client].freeipa_dns_client_servers") {
 		t.Fatalf("client comparison = %+v", d)
 	}
-	if !strings.Contains(joinedFindings(out), "declared_live_mismatch: client dd-client nameservers") {
+	if !strings.Contains(joinedFindings(out), "declared_live_mismatch: client pr91-client nameservers") {
 		t.Fatalf("findings = %v", out.Findings)
 	}
 }
@@ -316,9 +316,21 @@ func TestValidateFreeIPAReader(t *testing.T) {
 		{Principal: "ipa-dnskeysyncd/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
 		{Principal: "administrator@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
 		{Principal: "krbtgt/IPA.PILOT.INTERNAL@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "K/M@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "k/m@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
 	} {
 		if err := validateFreeIPAReader(bad); err == nil {
 			t.Errorf("%+v accepted", bad)
+		}
+	}
+	// Should pass: only the KDC's master key K/M is refused, not every
+	// principal whose first component is "k".
+	for _, good := range []diagnoseFreeIPAReader{
+		{Principal: "k@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "k/reader@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+	} {
+		if err := validateFreeIPAReader(good); err != nil {
+			t.Errorf("%+v refused: %v", good, err)
 		}
 	}
 }
@@ -328,10 +340,10 @@ func TestValidateFreeIPAReader(t *testing.T) {
 // is still made (AGENTS.md §5.13).
 func TestDiagnoseDNSArchitecture_NormalizesThePrimaryFQDN(t *testing.T) {
 	requireRealAnsible(t)
-	inv := strings.Replace(dnsArchLiveInventory, "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}", "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5, freeipa_server_fqdn: IPA1.ipa.pilot.internal.}", 1)
+	inv := strings.Replace(dnsArchLiveInventory, "pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13}", "pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13, freeipa_server_fqdn: IPA1.ipa.pilot.internal.}", 1)
 	opts := dnsArchOpts(t, writeDNSArchInventory(t, inv), liveRunner(t), diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab})
-	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
-	if d, ok := dnsArchDiff(out, "tier dd-dns answer for ipa1.ipa.pilot.internal equals FreeIPA's authoritative answer"); !ok || d.Status != "match" {
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
+	if d, ok := dnsArchDiff(out, "tier pr91-dns answer for ipa1.ipa.pilot.internal equals FreeIPA's authoritative answer"); !ok || d.Status != "match" {
 		t.Fatalf("internal comparison = %+v (found %v); findings %v", d, ok, out.Findings)
 	}
 }
@@ -341,15 +353,15 @@ func TestDiagnoseDNSArchitecture_NormalizesThePrimaryFQDN(t *testing.T) {
 // silently.
 func TestDiagnoseDNSArchitecture_SkippedProbesAreReported(t *testing.T) {
 	requireRealAnsible(t)
-	inv := strings.Replace(dnsArchLiveInventory, "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}", "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5, freeipa_server_fqdn: ipa_1.bad}", 1)
+	inv := strings.Replace(dnsArchLiveInventory, "pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13}", "pr91-ipa: {ansible_connection: local, ansible_host: 192.168.122.13, freeipa_server_fqdn: ipa_1.bad}", 1)
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
-		diagnose.DNSArchProviderStep("dd-ipa", "ipa.pilot.internal", "192.168.122.5", "-").Command:           respond(t, "dd-ipa", dnsArchFixture(t, "provider.txt")),
-		diagnose.DNSArchAuthStep("dd-ipa", dnsArchReader, dnsArchKeytab).Command:                             respond(t, "dd-ipa", dnsArchFixture(t, "auth_role.txt")),
-		diagnose.DNSArchTierStep("dd-dns", "", ".", "ipa.pilot.internal", []string{"192.168.122.5"}).Command: respond(t, "dd-dns", dnsArchFixture(t, "tier.txt")),
-		diagnose.DNSArchClientStep("dd-client", "localhost").Command:                                         respond(t, "dd-client", dnsArchFixture(t, "client.txt")),
+		diagnose.DNSArchProviderStep("pr91-ipa", "ipa.pilot.internal", "192.168.122.13", "-").Command:           respond(t, "pr91-ipa", dnsArchFixture(t, "provider.txt")),
+		diagnose.DNSArchAuthStep("pr91-ipa", dnsArchReader, dnsArchKeytab).Command:                              respond(t, "pr91-ipa", dnsArchFixture(t, "auth_role.txt")),
+		diagnose.DNSArchTierStep("pr91-dns", "", ".", "ipa.pilot.internal", []string{"192.168.122.13"}).Command: respond(t, "pr91-dns", dnsArchFixture(t, "tier.txt")),
+		diagnose.DNSArchClientStep("pr91-client", "localhost").Command:                                          respond(t, "pr91-client", dnsArchFixture(t, "client.txt")),
 	}}
 	opts := dnsArchOpts(t, writeDNSArchInventory(t, inv), fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab})
-	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
 	if out.Status != "partial" || !strings.Contains(joinedFindings(out), `probe_skipped: the FreeIPA primary's FQDN "ipa_1.bad" is not a DNS name`) {
 		t.Fatalf("status %s findings %v", out.Status, out.Findings)
 	}

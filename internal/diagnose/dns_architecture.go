@@ -157,6 +157,22 @@ func (m DNSArchModel) DNSProviderIPs() []string {
 	return out
 }
 
+// TierAddrs returns the addresses at which a client reaches a dns tier
+// host: every tier host's service address, plus the loopback addresses
+// when the client is itself a tier host.
+func (m DNSArchModel) TierAddrs(clientHost string) []string {
+	var out []string
+	for _, t := range m.Tier {
+		if t.Addr != "" {
+			out = append(out, t.Addr)
+		}
+		if t.Host == clientHost {
+			out = append(out, "127.0.0.1", "::1")
+		}
+	}
+	return out
+}
+
 // Provider returns the pool member for an inventory host.
 func (m DNSArchModel) Provider(host string) (DNSArchProvider, bool) {
 	for _, p := range m.Providers {
@@ -351,6 +367,9 @@ func trimNonEmpty(items []string) []string {
 	return out
 }
 
+// normalizeZoneName is a DNS name as pilot compares it: lower case, without
+// the trailing dot (AGENTS.md §5.13). Zone names and the pool's FQDNs go
+// through it once, where the model reads them.
 func normalizeZoneName(name string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
 }
@@ -451,7 +470,7 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 	pool := []DNSArchProvider{{
 		InventoryHost: primary,
 		Kind:          "primary",
-		FQDN:          jinjaString(r.def(primary, "freeipa_server_fqdn", "ipa1."+domain)),
+		FQDN:          normalizeZoneName(jinjaString(r.def(primary, "freeipa_server_fqdn", "ipa1."+domain))),
 		IP:            jinjaString(r.def(primary, "ansible_host", "")),
 		DNSProvider:   ansibleBool(r.def(primary, "freeipa_setup_dns", true)),
 	}}
@@ -463,7 +482,7 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 		pool = append(pool, DNSArchProvider{
 			InventoryHost: host,
 			Kind:          "replica",
-			FQDN:          jinjaString(r.def(host, "freeipa_replica_fqdn", "ipa2."+replicaDomain)),
+			FQDN:          normalizeZoneName(jinjaString(r.def(host, "freeipa_replica_fqdn", "ipa2."+replicaDomain))),
 			IP:            jinjaString(r.def(host, "ansible_host", "")),
 			DNSProvider:   ansibleBool(r.def(host, "freeipa_setup_dns", true)),
 		})

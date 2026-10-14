@@ -65,9 +65,12 @@ root 的預設 cache 可能留著 `admin` 的 ticket，工具不會碰它）。`
 `root`，以及 FreeIPA 自己的 service principal（`host/`、`HTTP/`、`ldap/`、`DNS/`、
 `ipa-dnskeysyncd/`、`krbtgt/` 等，這些 keytab 能改目錄或 DNS 資料）在啟動時就被拒絕；
 principal 的每一段都要以英數字開頭，不能被 `kinit` 當成選項（例如 `-c/tmp@REALM`
-會變成指定 ccache）。讀取時 `--rights` 顯示這個 principal 對全域 DNS 設定有任何寫入
-權限（`w`、`o`）時，工具不採用它讀到的任何內容，Kerberos 狀態是 `refused_privileged`、
-status 是 `auth_required`，finding `freeipa_principal_not_read_only`。
+會變成指定 ccache）。讀取時 `--rights` 顯示這個 principal 對全域 DNS 設定（`cn=dns`，
+`ipa dnsconfig-show`）有任何寫入權限（`w`、`o`）時，工具不採用它讀到的任何內容，Kerberos
+狀態是 `refused_privileged`、status 是 `auth_required`，finding
+`freeipa_principal_not_read_only`。工具只檢查這一個 entry 的權限：只能改 zone 或 record
+（`idnsname=*`）、或能改 DNS 以外資料的 role 不會被這項檢查擋下，所以 reader 的 role
+必須維持下面的唯讀設定。
 
 在 FreeIPA server 上用管理員執行（`<fqdn>` 是這台 server 的 FQDN）：
 

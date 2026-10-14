@@ -2,6 +2,7 @@ package diagnose
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -9,7 +10,8 @@ import (
 // Fact states. "absent" means pilot looked and the thing is not there;
 // "unknown" means pilot could not tell. They are never merged.
 // KerberosRefusedPrivileged is the Kerberos state when the approved
-// principal turned out to have write rights.
+// principal's rights on the global DNS configuration (cn=dns) include
+// write.
 const KerberosRefusedPrivileged = "refused_privileged"
 
 const (
@@ -485,8 +487,11 @@ func BuildDNSArchObservedTier(t DNSArchTierHost, internalName, externalName stri
 	return out
 }
 
-// BuildDNSArchObservedClient interprets the client step.
-func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient {
+// BuildDNSArchObservedClient interprets the client step. tierAddrs are the
+// addresses of the dns tier hosts the client may use (DNSArchModel.TierAddrs):
+// a first nameserver among them that answers id.server with an error rcode
+// is a failed query; any other resolver that does is simply not a tier host.
+func BuildDNSArchObservedClient(host string, r StepResult, tierAddrs []string) DNSArchObservedClient {
 	out := DNSArchObservedClient{Host: host}
 	reach, ok := unreachableFact(r)
 	out.Reachable = reach
@@ -546,15 +551,18 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 				// server that answers without it is something else.
 				return DNSArchFact{State: FactObserved, Value: "", Detail: "the first nameserver is not a pilot dns tier host (" + f.Detail + " for id.server CH TXT)"}
 			case FactError:
-				if q.Status == "NOTIMP" || q.Status == "FORMERR" {
-					// unbound answers CHAOS identity queries; a server
-					// that does not implement them is not a tier host
-					// (libvirt's dnsmasq answers NOTIMP).
+				if !slices.Contains(tierAddrs, ns) {
+					// An error rcode from a resolver that is not a tier
+					// address: unbound answers id.server itself, so this
+					// is something else. systemd-resolved's stub
+					// (127.0.0.53) answers SERVFAIL, libvirt's dnsmasq
+					// NOTIMP.
 					return DNSArchFact{State: FactObserved, Value: "", Detail: "the first nameserver is not a pilot dns tier host (" + f.Detail + " for id.server CH TXT)"}
 				}
+				// A tier address that answers with an error: a tier
+				// whose access-control excludes this host refuses it.
 			}
-			// REFUSED, SERVFAIL or no answer: who it is stays unknown;
-			// a tier whose access-control excludes this host refuses.
+			// No answer, or an error rcode from a tier address.
 			return f
 		})
 	} else {

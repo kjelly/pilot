@@ -47,19 +47,22 @@ var (
 // @, lower-cased) a diagnosis must never authenticate as: administrators,
 // and the service principals FreeIPA itself and its servers run with
 // (host/, HTTP/, ldap/ and DNS/ keytabs can change the directory or DNS
-// data; krbtgt, kadmin and K/M are the KDC's own).
+// data; krbtgt and kadmin are the KDC's own). The KDC's master key
+// principal K/M is matched as a whole, not by its first component.
 var freeIPAPrivilegedPrincipals = map[string]bool{
 	"admin": true, "administrator": true, "root": true,
 	"host": true, "http": true, "ldap": true, "dns": true, "dogtag": true, "cifs": true,
-	"ipa-dnskeysyncd": true, "ipa-ods-exporter": true, "krbtgt": true, "kadmin": true, "k": true,
+	"ipa-dnskeysyncd": true, "ipa-ods-exporter": true, "krbtgt": true, "kadmin": true,
 }
 
 // validateFreeIPAReader checks the operator's --diagnose-freeipa-* flags.
 // The principal must be a dedicated reader: administrators and FreeIPA's
 // own service principals are refused outright, since a diagnosis must
-// never run with a ticket that can change anything. A reader that turns
-// out to have write rights is refused when the call reads them
-// (diagnose.KerberosRefusedPrivileged).
+// never run with a ticket that can change anything. A reader whose
+// rights on the global DNS configuration (cn=dns, the --rights of
+// ipa dnsconfig-show) include write is refused when the call reads them
+// (diagnose.KerberosRefusedPrivileged); rights on other entries are not
+// inspected, so the reader's role must stay the runbook's read-only one.
 func validateFreeIPAReader(r diagnoseFreeIPAReader) error {
 	if r.Principal == "" && r.Keytab == "" {
 		return nil
@@ -70,8 +73,9 @@ func validateFreeIPAReader(r diagnoseFreeIPAReader) error {
 	if !freeIPAReaderPrincipalRe.MatchString(r.Principal) {
 		return fmt.Errorf("--diagnose-freeipa-principal %q is not a Kerberos principal of the form name[/host]@REALM", r.Principal)
 	}
-	primary := strings.ToLower(strings.SplitN(strings.SplitN(r.Principal, "@", 2)[0], "/", 2)[0])
-	if freeIPAPrivilegedPrincipals[primary] {
+	name := strings.SplitN(r.Principal, "@", 2)[0]
+	primary := strings.ToLower(strings.SplitN(name, "/", 2)[0])
+	if freeIPAPrivilegedPrincipals[primary] || strings.EqualFold(name, "K/M") {
 		return fmt.Errorf("--diagnose-freeipa-principal must be a dedicated read-only principal, not %s", r.Principal)
 	}
 	if !freeIPAReaderKeytabRe.MatchString(r.Keytab) || strings.Contains(r.Keytab, "/../") || strings.HasSuffix(r.Keytab, "/..") {
@@ -144,7 +148,7 @@ type diagnoseDNSArchitectureOutput struct {
 func registerDiagnoseDNSArchitectureTool(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_dns_architecture",
-		Description: "read-only, one-call answer to \"how is DNS wired here\": the dns caching tier, the FreeIPA DNS providers (primary/replica, canonical FQDN, internal zones), FreeIPA forwarding (global forwarders, forward policy, per-server forwarders, forward zones) and each managed host's resolver path (tier first, FreeIPA fallback, explicit overrides). Four layers are kept apart: supported (component contracts), declared (inventory variables, with references), effective (what the canonical playbook rules compute from them) and observed (bounded live probes: authoritative SOA/NS/SRV on each provider, unbound forward/stub zones and internal/external resolution through each tier host, the optional client_host's resolver). Every declared/live difference carries evidence references; unknown and absent are separate states. External resolution through the tier is reported as such, never as proof that a particular forwarder answered. FreeIPA's DNS configuration is read only with the read-only principal the operator configured at server start (--diagnose-freeipa-principal/--diagnose-freeipa-keytab), in a private ccache; without one the call returns status auth_required with every other fact still filled in. Never accepts a password, never uses an admin ticket, refuses FreeIPA's own service principals at startup and any principal that turns out to have write rights. Every failed or unknown fact is named in findings; complete means every fact was seen, not that DNS works.",
+		Description: "read-only, one-call answer to \"how is DNS wired here\": the dns caching tier, the FreeIPA DNS providers (primary/replica, canonical FQDN, internal zones), FreeIPA forwarding (global forwarders, forward policy, per-server forwarders, forward zones) and each managed host's resolver path (tier first, FreeIPA fallback, explicit overrides). Four layers are kept apart: supported (component contracts), declared (inventory variables, with references), effective (what the canonical playbook rules compute from them) and observed (bounded live probes: authoritative SOA/NS/SRV on each provider, unbound forward/stub zones and internal/external resolution through each tier host, the optional client_host's resolver). Every declared/live difference carries evidence references; unknown and absent are separate states. External resolution through the tier is reported as such, never as proof that a particular forwarder answered. FreeIPA's DNS configuration is read only with the read-only principal the operator configured at server start (--diagnose-freeipa-principal/--diagnose-freeipa-keytab), in a private ccache; without one the call returns status auth_required with every other fact still filled in. Never accepts a password, never uses an admin ticket, refuses FreeIPA's own service principals at startup, and refuses a principal whose rights on the global DNS configuration (cn=dns) include write. Every failed or unknown fact is named in findings; complete means every fact was seen, not that DNS works.",
 	}, diagnoseDNSArchitectureHandler(opts))
 }
 
@@ -318,7 +322,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		}
 		if clientProbe != nil {
 			allResults = append(allResults, clientProbe.result)
-			oc := diagnose.BuildDNSArchObservedClient(in.ClientHost, clientProbe.result)
+			oc := diagnose.BuildDNSArchObservedClient(in.ClientHost, clientProbe.result, model.TierAddrs(in.ClientHost))
 			if oc.RemoteUser != "" {
 				remoteUsers[in.ClientHost] = oc.RemoteUser
 			}

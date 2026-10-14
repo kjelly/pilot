@@ -2,8 +2,8 @@
 root
 @@pilot-dnsarch whoami end rc=0
 @@pilot-dnsarch nameservers begin
-192.168.122.15
-192.168.122.5
+192.168.122.12
+192.168.122.13
 @@pilot-dnsarch nameservers end rc=0
 @@pilot-dnsarch options begin
 options timeout:1 attempts:2
@@ -12,20 +12,20 @@ options timeout:1 attempts:2
 active
 @@pilot-dnsarch resolved end rc=0
 @@pilot-dnsarch resolvectl begin
-Global: 192.168.122.15 192.168.122.5
+Global: 192.168.122.12 192.168.122.13
 Link 2 (enp1s0):
 @@pilot-dnsarch resolvectl end rc=0
 @@pilot-dnsarch first_hop begin
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 25132
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 57534
 ;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
 
 ;; OPT PSEUDOSECTION:
 ; EDNS: version: 0, flags:; udp: 1232
 ;; ANSWER SECTION:
-id.server.		0	CH	TXT	"pilot-dns:pr73-dns"
+id.server.		0	CH	TXT	"pilot-dns:pr91-dns"
 
 @@pilot-dnsarch first_hop end rc=0
 @@pilot-dnsarch lookup begin
-192.168.122.5   ipa1.ipa.pilot.internal
+192.168.122.13  ipa1.ipa.pilot.internal
 @@pilot-dnsarch lookup end rc=0
