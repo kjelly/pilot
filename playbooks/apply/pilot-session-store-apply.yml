@@ -74,7 +74,6 @@
     pilot_session_store_metrics_textfile_dir: /var/lib/node_exporter/textfile
     pilot_session_store_legacy_ingest_token_file: /etc/pilot/session-store-ingest.token
 
-    pilot_session_store_ingest_port: 8443
 
     pilot_binary_sha256: ""
     pilot_session_store_binary_sha256: ""
@@ -109,6 +108,15 @@
         that:
           - (staging_attested_within_hours | int) <= 168
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        pilot_session_store_ingest_port: "{{ pilot_session_store_ingest_port | default(8443) }}"
       tags: [always]
 
     # SS10 (spec.md §28.5): retention_days has no implicit default — a
