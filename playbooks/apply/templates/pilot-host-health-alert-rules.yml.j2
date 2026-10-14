@@ -15,13 +15,18 @@ groups:
   - name: pilot-host-io
     rules:
       # PSI "full" I/O stall: the share of wall time in which every runnable
-      # task on the host was blocked on I/O. Needs kernel PSI — absent on
-      # AlmaLinux/RHEL 9 without psi=1 (CONFIG_PSI_DEFAULT_DISABLED=y),
+      # task on the host was blocked on I/O. node_exporter publishes PSI
+      # without a kind label: node_pressure_io_stalled_seconds_total is the
+      # "full" line of /proc/pressure/io and
+      # node_pressure_io_waiting_seconds_total the "some" line (captured from
+      # node_exporter 1.12.1, the version host-monitoring installs). Needs
+      # kernel PSI — absent on AlmaLinux/RHEL 9 without psi=1
+      # (CONFIG_PSI_DEFAULT_DISABLED=y),
       # which HostPSIUnavailable below makes visible instead of silent.
       - alert: HostIOStall
         expr: |
           max by (pilot_host) (
-            rate(node_pressure_io_stalled_seconds_total{job="node", kind="full"}[5m])
+            rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])
           ) > {{ host_io_stall_ratio_threshold }}
         for: {{ host_io_stall_for }}
         labels:

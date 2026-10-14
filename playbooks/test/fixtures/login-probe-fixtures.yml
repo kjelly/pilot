@@ -93,91 +93,105 @@
         fail_msg: "Missing ipa_admin_password — pass a vault file with -e @..."
       tags: [always]
   tasks:
-    - name: Fixtures — kinit admin
-      ansible.builtin.shell:
-        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
-      changed_when: false
-      no_log: true
+    - name: "Fixtures with a private Kerberos cache for the admin ticket (issue #69)"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    # Not --raw: raw output shows ipaSshPubKey base64-encoded, so the key body
-    # would never match; the default output prints "SSH public key: <line>".
-    - name: Fixtures — read the canary user's current SSH public keys
-      ansible.builtin.command:
-        argv: [ipa, user-show, "{{ login_probe_fixture_user }}", --all]
-      register: login_probe_fixture_user_show
-      changed_when: false
-      when: not ansible_check_mode
+        - name: Fixtures — kinit admin
+          ansible.builtin.shell:
+            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          changed_when: false
+          no_log: true
 
-    - name: Fixtures — publish the probe host's key on the canary user
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-mod
-          - "{{ login_probe_fixture_user }}"
-          - "--sshpubkey={{ login_probe_fixture_pubkey | trim }}"
-      when:
-        - not ansible_check_mode
-        - login_probe_fixture_pubkey_body not in login_probe_fixture_user_show.stdout
-      register: login_probe_fixture_user_mod
-      changed_when: login_probe_fixture_user_mod.rc == 0
+        # Not --raw: raw output shows ipaSshPubKey base64-encoded, so the key body
+        # would never match; the default output prints "SSH public key: <line>".
+        - name: Fixtures — read the canary user's current SSH public keys
+          ansible.builtin.command:
+            argv: [ipa, user-show, "{{ login_probe_fixture_user }}", --all]
+          register: login_probe_fixture_user_show
+          changed_when: false
+          when: not ansible_check_mode
 
-    - name: "Fixtures — ensure HBAC rule {{ login_probe_fixture_hbac_rule }} exists"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - hbacrule-add
-          - "{{ login_probe_fixture_hbac_rule }}"
-          - "--desc=login-probe canary: sshd only, to the probe targets (test fixture)"
-      register: login_probe_fixture_rule_add
-      changed_when: "'Added HBAC rule' in (login_probe_fixture_rule_add.stdout | default(''))"
-      failed_when:
-        - login_probe_fixture_rule_add.rc != 0
-        - "'already exists' not in (login_probe_fixture_rule_add.stderr | default(''))"
+        - name: Fixtures — publish the probe host's key on the canary user
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - user-mod
+              - "{{ login_probe_fixture_user }}"
+              - "--sshpubkey={{ login_probe_fixture_pubkey | trim }}"
+          when:
+            - not ansible_check_mode
+            - login_probe_fixture_pubkey_body not in login_probe_fixture_user_show.stdout
+          register: login_probe_fixture_user_mod
+          changed_when: login_probe_fixture_user_mod.rc == 0
 
-    # hbacrule-add-{user,service,host} exit 1 when the member is already there
-    # ("This entry is already a member" / "Number of members added 0"), the
-    # same contract freeipa-client-fixtures.yml relies on for sudorule-add-user.
-    - name: "Fixtures — attach the canary user to {{ login_probe_fixture_hbac_rule }}"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - hbacrule-add-user
-          - "{{ login_probe_fixture_hbac_rule }}"
-          - "--users={{ login_probe_fixture_user }}"
-      register: login_probe_fixture_rule_user
-      changed_when: "'Number of members added 1' in (login_probe_fixture_rule_user.stdout | default(''))"
-      failed_when:
-        - login_probe_fixture_rule_user.rc != 0
-        - "'already a member' not in (login_probe_fixture_rule_user.stdout | default(''))"
+        - name: "Fixtures — ensure HBAC rule {{ login_probe_fixture_hbac_rule }} exists"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - hbacrule-add
+              - "{{ login_probe_fixture_hbac_rule }}"
+              - "--desc=login-probe canary: sshd only, to the probe targets (test fixture)"
+          register: login_probe_fixture_rule_add
+          changed_when: "'Added HBAC rule' in (login_probe_fixture_rule_add.stdout | default(''))"
+          failed_when:
+            - login_probe_fixture_rule_add.rc != 0
+            - "'already exists' not in (login_probe_fixture_rule_add.stderr | default(''))"
 
-    - name: "Fixtures — restrict {{ login_probe_fixture_hbac_rule }} to the sshd service"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - hbacrule-add-service
-          - "{{ login_probe_fixture_hbac_rule }}"
-          - --hbacsvcs=sshd
-      register: login_probe_fixture_rule_svc
-      changed_when: "'Number of members added 1' in (login_probe_fixture_rule_svc.stdout | default(''))"
-      failed_when:
-        - login_probe_fixture_rule_svc.rc != 0
-        - "'already a member' not in (login_probe_fixture_rule_svc.stdout | default(''))"
+        # hbacrule-add-{user,service,host} exit 1 when the member is already there
+        # ("This entry is already a member" / "Number of members added 0"), the
+        # same contract freeipa-client-fixtures.yml relies on for sudorule-add-user.
+        - name: "Fixtures — attach the canary user to {{ login_probe_fixture_hbac_rule }}"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - hbacrule-add-user
+              - "{{ login_probe_fixture_hbac_rule }}"
+              - "--users={{ login_probe_fixture_user }}"
+          register: login_probe_fixture_rule_user
+          changed_when: "'Number of members added 1' in (login_probe_fixture_rule_user.stdout | default(''))"
+          failed_when:
+            - login_probe_fixture_rule_user.rc != 0
+            - "'already a member' not in (login_probe_fixture_rule_user.stdout | default(''))"
 
-    - name: "Fixtures — allow {{ login_probe_fixture_hbac_rule }} on every probe target"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - hbacrule-add-host
-          - "{{ login_probe_fixture_hbac_rule }}"
-          - "--hosts={{ item }}"
-      loop: "{{ login_probe_fixture_target_fqdns }}"
-      register: login_probe_fixture_rule_host
-      changed_when: "'Number of members added 1' in (login_probe_fixture_rule_host.stdout | default(''))"
-      failed_when:
-        - login_probe_fixture_rule_host.rc != 0
-        - "'already a member' not in (login_probe_fixture_rule_host.stdout | default(''))"
+        - name: "Fixtures — restrict {{ login_probe_fixture_hbac_rule }} to the sshd service"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - hbacrule-add-service
+              - "{{ login_probe_fixture_hbac_rule }}"
+              - --hbacsvcs=sshd
+          register: login_probe_fixture_rule_svc
+          changed_when: "'Number of members added 1' in (login_probe_fixture_rule_svc.stdout | default(''))"
+          failed_when:
+            - login_probe_fixture_rule_svc.rc != 0
+            - "'already a member' not in (login_probe_fixture_rule_svc.stdout | default(''))"
 
-    - name: Fixtures — release the Kerberos ticket
-      ansible.builtin.command: kdestroy
-      changed_when: false
-      failed_when: false
+        - name: "Fixtures — allow {{ login_probe_fixture_hbac_rule }} on every probe target"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - hbacrule-add-host
+              - "{{ login_probe_fixture_hbac_rule }}"
+              - "--hosts={{ item }}"
+          loop: "{{ login_probe_fixture_target_fqdns }}"
+          register: login_probe_fixture_rule_host
+          changed_when: "'Number of members added 1' in (login_probe_fixture_rule_host.stdout | default(''))"
+          failed_when:
+            - login_probe_fixture_rule_host.rc != 0
+            - "'already a member' not in (login_probe_fixture_rule_host.stdout | default(''))"
+
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

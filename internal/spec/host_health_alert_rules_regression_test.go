@@ -146,11 +146,22 @@ func TestRegression_HostIOStallUsesFullPressureOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(tmpl), "node_pressure_io_stalled_seconds_total{job=\"node\", kind=\"full\"}") {
-		t.Error("HostIOStall must select PSI kind=full; kind=some is not a full host I/O stall")
+	// node_exporter publishes PSI without a kind label:
+	// node_pressure_io_stalled_seconds_total is the "full" line of
+	// /proc/pressure/io and node_pressure_io_waiting_seconds_total the
+	// "some" line (captured from node_exporter 1.12.1). A kind matcher
+	// selects nothing, so HostIOStall could never fire.
+	if !strings.Contains(string(tmpl), "rate(node_pressure_io_stalled_seconds_total{job=\"node\"}[5m])") {
+		t.Error("HostIOStall must rate node_pressure_io_stalled_seconds_total (PSI full) with no kind matcher")
 	}
-	if !strings.Contains(string(fixture), "instance=\"io-some:9100\",pilot_host=\"io-some\",kind=\"some\"") {
-		t.Error("promtool fixture must include a high kind=some series to prove it stays out of HostIOStall")
+	if strings.Contains(string(tmpl), "kind=") || strings.Contains(string(fixture), "kind=") {
+		t.Error("node_exporter's PSI series have no kind label; neither the rules nor the promtool fixture may use one")
+	}
+	if strings.Contains(string(tmpl), "node_pressure_io_waiting_seconds_total{") {
+		t.Error("HostIOStall must not read node_pressure_io_waiting_seconds_total (PSI some)")
+	}
+	if !strings.Contains(string(fixture), "node_pressure_io_waiting_seconds_total{job=\"node\",instance=\"io-some:9100\",pilot_host=\"io-some\"}") {
+		t.Error("promtool fixture must include a high PSI some (waiting) series on io-some to prove it stays out of HostIOStall")
 	}
 }
 
