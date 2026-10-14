@@ -42,7 +42,6 @@
     confirm_prod: false
     staging_attested_within_hours: 168
     siem_receiver_tcp_port: "514"
-    siem_log_root: /var/log/siem
     siem_logrotate_rotate: 14
     siem_logrotate_maxage: 90
     siem_receiver_conf: /etc/rsyslog.d/10-siem-receiver.conf
@@ -82,6 +81,18 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    # siem_log_root is also log-shipping's input (contracts/log-shipping.yaml
+    # groupVars), and Promtail tails it on these same hosts: both playbooks
+    # must resolve the same value (docs/verification/log-shipping.md §1.5).
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        siem_log_root: "{{ siem_log_root | default('/var/log/siem') }}"
       tags: [always]
   tasks:
     # Previously: unconditionally end_play'd this whole host whenever

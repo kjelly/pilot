@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -101,9 +102,27 @@ func playVarsShadowingInputs(playbook []byte, inputs map[string]string) ([]strin
 	return out, nil
 }
 
+// ipaRealmDerived is why the FreeIPA playbooks may keep ipa_realm in their
+// play vars although pilot-access-gateway/-directory list it as an input.
+const ipaRealmDerived = "derived from freeipa_realm/ipa_domain (group_vars/freeipa.yml) in the play vars; " +
+	"ipa_realm is an inventory input only of pilot-access-gateway and pilot-access-directory, " +
+	"which read it as an override of the same derivation"
+
+// playVarsInputAllowlist holds play vars, keyed "<playbook> <variable>", that
+// are another component's inventory input but are derived on purpose in that
+// playbook. The lint fails when an entry no longer matches a play var that is
+// an inventory input.
+var playVarsInputAllowlist = map[string]string{
+	"playbooks/apply/freeipa-client-apply.yml ipa_realm":         ipaRealmDerived,
+	"playbooks/apply/freeipa-dns-apply.yml ipa_realm":            ipaRealmDerived,
+	"playbooks/apply/freeipa-identity-apply.yml ipa_realm":       ipaRealmDerived,
+	"playbooks/apply/freeipa-server-apply.yml ipa_realm":         ipaRealmDerived,
+	"playbooks/apply/freeipa-server-replica-apply.yml ipa_realm": ipaRealmDerived,
+}
+
 // TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs is a repo-wide lint
 // (AGENTS.md §4.5 point 3, §5.10): no apply playbook may declare, in a
-// play's vars:, a variable its contract lists under groupVars or its
+// play's vars:, a variable that any contract lists under groupVars or any
 // group_vars/<role>.example.yml documents. Play vars outrank group_vars and
 // host_vars, so the operator's value was silently replaced by the play's
 // default while `pilot deploy`'s preflight read the inventory value. On
@@ -111,37 +130,83 @@ func playVarsShadowingInputs(playbook []byte, inputs map[string]string) ([]strin
 // group_vars example had no effect at all). Default them in an
 // `always`-tagged set_fact instead (`x: "{{ x | default(...) }}"`), or read
 // them with `| default(...)` where they are used.
+//
+// The inputs of every contract are checked against every apply playbook, not
+// only the playbook's own contract: a variable has one value per host, and
+// two playbooks on the same host must resolve it the same way. When only
+// log-shipping read siem_log_root from inventory, log-server kept writing to
+// its play-vars default while Promtail tailed the operator's directory.
 func TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs(t *testing.T) {
 	contracts, inputs := inventoryInputs(t)
-	checked := 0
-	ids := make([]string, 0, len(contracts))
-	for id := range contracts {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		c := contracts[id]
-		if len(inputs[id]) == 0 {
-			continue
+	all := map[string]string{}
+	withInputs := 0
+	for _, in := range inputs {
+		if len(in) > 0 {
+			withInputs++
 		}
-		raw, err := os.ReadFile("../../" + c.Playbooks.Apply)
-		if err != nil {
-			t.Fatalf("%s: %v", id, err)
-		}
-		violations, err := playVarsShadowingInputs(raw, inputs[id])
-		if err != nil {
-			t.Fatalf("%s: %v", c.Playbooks.Apply, err)
-		}
-		checked++
-		for _, v := range violations {
-			t.Errorf("%s (%s): %s", c.Playbooks.Apply, id, v)
+		for name, where := range in {
+			all[name] = joinWhere(all[name], where)
 		}
 	}
 	// 33 contracts had groupVars on 2026-10-13; far fewer means the loader
 	// stopped finding them.
-	if checked < 30 {
-		t.Fatalf("only %d contracts with inventory inputs checked; the loader is broken", checked)
+	if withInputs < 30 {
+		t.Fatalf("only %d contracts with inventory inputs found; the loader is broken", withInputs)
 	}
+	playbooks := map[string]bool{}
+	for _, c := range contracts {
+		playbooks[c.Playbooks.Apply] = true
+	}
+	paths := make([]string, 0, len(playbooks))
+	for path := range playbooks {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		raw, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := map[string]string{}
+		for name, where := range all {
+			if _, ok := playVarsInputAllowlist[path+" "+name]; !ok {
+				in[name] = where
+			}
+		}
+		violations, err := playVarsShadowingInputs(raw, in)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		for _, v := range violations {
+			t.Errorf("%s: %s", path, v)
+		}
+	}
+	for key := range playVarsInputAllowlist {
+		path, name, _ := strings.Cut(key, " ")
+		raw, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Errorf("stale playVarsInputAllowlist entry %q: %v", key, err)
+			continue
+		}
+		still, err := playVarsShadowingInputs(raw, map[string]string{name: all[name]})
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if all[name] == "" || len(still) == 0 {
+			t.Errorf("stale playVarsInputAllowlist entry %q: no longer a play var that is an inventory input", key)
+		}
+	}
+}
+
+// joinWhere adds where to a "; "-separated, sorted list of places a variable
+// is documented as an inventory input.
+func joinWhere(list, where string) string {
+	parts := []string{where}
+	if list != "" {
+		parts = append(parts, strings.Split(list, "; ")...)
+	}
+	sort.Strings(parts)
+	return strings.Join(slices.Compact(parts), "; ")
 }
 
 func TestPlayVarsShadowingInputs(t *testing.T) {
@@ -180,6 +245,7 @@ type playVarsCase struct {
 }
 
 var playVarsCases = []playVarsCase{
+	{"audit-log-forwarding-apply.yml", "audit-log-forwarding", map[string]any{"siem_forward_port": "514"}},
 	{"agent-controller-apply.yml", "agent-controller", map[string]any{
 		"agent_controller_listen_port": 8090, "agent_controller_max_concurrent_runs": 4,
 		"agent_controller_max_runs_per_host": 1, "agent_controller_max_body_bytes": 1048576,
@@ -200,6 +266,7 @@ var playVarsCases = []playVarsCase{
 		"node_exporter_version": "1.12.1", "node_exporter_port": 9100,
 		"node_exporter_user": "node_exporter", "node_exporter_basic_auth_user": "prometheus"}},
 	{"log-shipping-apply.yml", "log-server", map[string]any{"loki_target_host": nil, "siem_log_root": nil}},
+	{"log-server-apply.yml", "log-server", map[string]any{"siem_log_root": "/var/log/siem"}},
 	{"pilot-session-store-apply.yml", "pilot-session-store", map[string]any{"pilot_session_store_ingest_port": 8443}},
 	{"prometheus-apply.yml", "prometheus", map[string]any{
 		"prometheus_scrape_interval": "15s", "thanos_s3_bucket": "pilot-thanos-metrics",

@@ -672,7 +672,12 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    的值,Ansible 實際用的卻是 play 預設值。現在改在 stage gate 之後用一個標
    `always` 的 `set_fact`(`x: "{{ x | default(...) }}"`)補預設值,並由全 repo
    lint `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs`
-   鎖住:contract `groupVars` 與 example 的 key 都不准出現在 play `vars:`。
+   鎖住:任何一份 contract 的 `groupVars` 與 example 的 key,都不准出現在任何
+   apply playbook 的 play `vars:`,不只是它自己 contract 的那支——同一台主機上
+   一個變數只有一個值,兩支 playbook 必須讀到同一個值(只修 log-shipping 時,
+   log-server 仍用 play vars 的 `siem_log_root`,Promtail 會 tail 一個 rsyslog
+   沒寫入的目錄)。刻意由其他變數推導的(FreeIPA playbook 的 `ipa_realm`)列在
+   該測試的 `playVarsInputAllowlist` 並寫明理由。
    新增 groupVars 或 example key 時,預設值寫在這個 `set_fact`。
 4. **check mode 下被跳過的 task,register 出來的結果沒有 `stdout`**。直接對它做
    `from_json` 或取 `.stdout`/`.json`,在 `--check --diff` 會崩潰(`81f7090`
@@ -973,7 +978,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 | `group_vars/*.example.yml` 期待的 `dist/` artifact ↔ `images/Dockerfile.pilot-cli` | `cmd/pilot/cmd/dockerfile_artifact_consistency_test.go::TestDockerfileBakesEveryDistArtifactGroupVarsExpects` |
 | Go 常數 `pilotSSHConfig` ↔ `pilot-access-gateway-apply.yml` Step 12 的 ssh_config | `cmd/pilot/cmd/portal_ssh_config_sync_test.go::TestPilotSSHConfigMatchesApplyPlaybook` |
 | `docs/verification/*.md` 的 row ↔ apply playbook 的 tag | `cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`(見 §4.0) |
-| contract `groupVars` 與 `group_vars/<role>.example.yml` 的 key ↔ apply playbook 的 play `vars:`(不准宣告,見 §4.5 第 3 點) | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` |
+| 任何 contract 的 `groupVars` 與 `group_vars/<role>.example.yml` 的 key ↔ 每一支 apply playbook 的 play `vars:`(不准宣告,見 §4.5 第 3 點) | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` |
 
 規則:
 
@@ -1438,4 +1443,4 @@ git status --short
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
-| 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
+| 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:17 支 apply playbook 把 62 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、audit-log-forwarding、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-server、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager;log-server 的 `siem_log_root` 是 log-shipping 的 input、audit-log-forwarding 的 `siem_forward_port` 是 wazuh-manager 的 input,lint 因此對每支 playbook 檢查所有 contract 的 input);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
