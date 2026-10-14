@@ -794,11 +794,6 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 	for _, e := range m.ProviderErrors {
 		findings = append(findings, "freeipa_pool_invalid: "+e)
 	}
-	for _, p := range m.Providers {
-		if p.InstallsDNS && !p.DNSProvider {
-			findings = append(findings, "freeipa_replica_dns_unused: "+p.InventoryHost+" leaves freeipa_setup_dns unset, so freeipa-server-replica-apply.yml installs FreeIPA DNS on it (default true) while the server pool and resolver task count it as a DNS provider only when freeipa_setup_dns is true; no tier stub or client resolver sends queries to it")
-		}
-	}
 	if m.Forwarding.State == "invalid" {
 		findings = append(findings, "freeipa_forwarders_invalid: "+m.Forwarding.Source)
 	}
@@ -966,11 +961,7 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 	}
 	for _, p := range m.Providers {
 		if !p.DNSProvider {
-			state := "no DNS (freeipa_setup_dns false)"
-			if p.InstallsDNS {
-				state = "runs FreeIPA DNS but is not used by the tier or client resolvers (freeipa_setup_dns unset)"
-			}
-			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): %s", p.Kind, p.FQDN, p.IP, state))
+			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): no DNS (freeipa_setup_dns false)", p.Kind, p.FQDN, p.IP))
 			continue
 		}
 		line := fmt.Sprintf("FreeIPA DNS %s %s (%s): authoritative for %s", p.Kind, p.FQDN, p.IP, m.FreeIPADomain)

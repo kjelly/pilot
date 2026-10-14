@@ -45,8 +45,11 @@ freeipa_domain: ipa.pilot.internal
 # freeipa_setup_ntp: true
 
 # FreeIPA 自己的 named 用的上游 DNS forwarder(--forwarder=...),讓 FreeIPA
-# host 的 DNS 仍能解析公網(例如自己 yum/dnf 裝套件用)。預設 8.8.8.8;
-# 不想要任何 forwarder(改用 --no-forwarders)才需要覆寫成空字串或空陣列。
+# host 的 DNS 仍能解析公網(例如自己 yum/dnf 裝套件用)。primary 預設 8.8.8.8
+# (同時設成全域 forwarders);replica 沒設時不帶 server 自己的 forwarders,沿用
+# 全域清單。單一位址、空白分隔的字串或清單都可以,primary 與 replica 解讀方式
+# 相同(tasks/freeipa-dns-forwarders.yml)。不想要任何 forwarder(改用
+# --no-forwarders)才需要覆寫成空字串或空陣列。
 # freeipa_dns_forwarders: 8.8.8.8
 
 # 是否讓任意 client(不限本機子網路)都能把這台 FreeIPA 當一般 DNS resolver

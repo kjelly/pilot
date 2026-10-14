@@ -53,20 +53,16 @@ type DNSArchVar struct {
 }
 
 // DNSArchProvider is one member of the FreeIPA server pool. DNSProvider is
-// the pool's rule (tasks/freeipa-server-pool.yml and the resolver task:
-// freeipa_setup_dns defaults to true on the primary, false on a replica)
-// that decides whether tier stubs and client resolvers use this server;
-// InstallsDNS is the install playbook's rule (freeipa_setup_dns defaults to
-// true on both, freeipa-server-replica-apply.yml since the HA spec §10).
-// They differ for a replica that leaves freeipa_setup_dns unset: it runs
-// named, but nothing sends queries to it.
+// freeipa_setup_dns, default true on the primary and on a replica: the
+// install playbooks run FreeIPA DNS then, and the server pool and the
+// resolver task send tier stubs and client queries to it (issue #67 aligned
+// the replica default of the latter two).
 type DNSArchProvider struct {
 	InventoryHost string `json:"inventory_host"`
 	Kind          string `json:"kind"`
 	FQDN          string `json:"fqdn"`
 	IP            string `json:"ip"`
 	DNSProvider   bool   `json:"dns_provider"`
-	InstallsDNS   bool   `json:"installs_dns"`
 }
 
 // DNSArchZone is one stub zone a tier host sends to an authoritative server.
@@ -458,7 +454,6 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 		FQDN:          jinjaString(r.def(primary, "freeipa_server_fqdn", "ipa1."+domain)),
 		IP:            jinjaString(r.def(primary, "ansible_host", "")),
 		DNSProvider:   ansibleBool(r.def(primary, "freeipa_setup_dns", true)),
-		InstallsDNS:   ansibleBool(r.def(primary, "freeipa_setup_dns", true)),
 	}}
 	for _, host := range replicas {
 		replicaDomain := jinjaString(r.def(host, "freeipa_domain", dnsArchDefaultDomain))
@@ -470,8 +465,7 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 			Kind:          "replica",
 			FQDN:          jinjaString(r.def(host, "freeipa_replica_fqdn", "ipa2."+replicaDomain)),
 			IP:            jinjaString(r.def(host, "ansible_host", "")),
-			DNSProvider:   ansibleBool(r.def(host, "freeipa_setup_dns", false)),
-			InstallsDNS:   ansibleBool(r.def(host, "freeipa_setup_dns", true)),
+			DNSProvider:   ansibleBool(r.def(host, "freeipa_setup_dns", true)),
 		})
 	}
 	fqdns, ips := map[string]bool{}, map[string]bool{}
@@ -490,10 +484,13 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 	return pool, errs
 }
 
-// normalizeForwarders mirrors freeipa-server-apply.yml's
-// "Normalize DNS forwarders to a list": a string starting with '[' is
-// YAML, any other string is split on whitespace, a list is kept.
+// normalizeForwarders mirrors tasks/freeipa-dns-forwarders.yml, which both
+// install playbooks use: null is no forwarders, a string starting with '['
+// is YAML, any other string is split on whitespace, a list is kept.
 func normalizeForwarders(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	if s, ok := raw.(string); ok {
 		if strings.HasPrefix(strings.TrimSpace(s), "[") {
 			inner := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(s), "["), "]")
@@ -551,23 +548,26 @@ func buildForwarding(r *varReader, primary string, replicas []string) DNSArchFor
 	}
 	for _, host := range replicas {
 		// freeipa-server-replica-apply.yml: ipa_setup_dns =
-		// freeipa_setup_dns | default(true); ipa_dns_forwarders =
-		// freeipa_dns_forwarders | default([]), passed as one --forwarder
-		// per item (or --no-forwarders when empty) to ipa-replica-install
-		// and ipa-dns-install. That map runs over the value as is, so a
-		// string (the form group_vars/freeipa.example.yml shows) becomes
-		// one --forwarder per character.
+		// freeipa_setup_dns | default(true); the forwarders are
+		// ipa_dns_forwarders | default(freeipa_dns_forwarders |
+		// default([])) through the same tasks/freeipa-dns-forwarders.yml
+		// normalization as the primary, passed as one --forwarder per item
+		// (or --no-forwarders when empty) to ipa-replica-install and
+		// ipa-dns-install.
 		if !ansibleBool(r.def(host, "freeipa_setup_dns", true)) {
 			continue
 		}
-		install := DNSArchServerInstallFwd{Host: host, Source: dnsArchVarRef(host, "freeipa_dns_forwarders")}
-		switch raw := r.def(host, "freeipa_dns_forwarders", []any{}).(type) {
-		case []any:
-			install.Forwarders = stringItems(raw)
-		case string:
-			install.Error = fmt.Sprintf("freeipa_dns_forwarders is the string %q; freeipa-server-replica-apply.yml passes one --forwarder per character of a string, so the replica cannot be installed with it (use a list)", raw)
-		default:
-			install.Error = fmt.Sprintf("freeipa_dns_forwarders %v is not a list", raw)
+		install := DNSArchServerInstallFwd{Host: host, Source: dnsArchVarRef(host, "ipa_dns_forwarders")}
+		raw, ok := r.get(host, "ipa_dns_forwarders")
+		if !ok {
+			raw = r.def(host, "freeipa_dns_forwarders", []any{})
+			install.Source = dnsArchVarRef(host, "freeipa_dns_forwarders")
+		}
+		list, err := normalizeForwarders(raw)
+		if err != nil {
+			install.Error = err.Error()
+		} else {
+			install.Forwarders = list
 		}
 		f.ServerInstallForwarders = append(f.ServerInstallForwarders, install)
 	}
@@ -677,7 +677,7 @@ func buildResolver(r *varReader, inv networkcheck.ResolvedInventory, host string
 		}
 	}
 	for _, p := range inv.OrderedGroupHosts(FreeIPAReplicaGroup) {
-		if ansibleBool(r.def(p, "freeipa_setup_dns", false)) {
+		if ansibleBool(r.def(p, "freeipa_setup_dns", true)) {
 			providers = append(providers, provider{p, jinjaString(r.defTrue(p, "ansible_host", p))})
 		}
 	}
