@@ -17,7 +17,11 @@ import (
 // 4.13.4 on AlmaLinux 9.8 with DNS, an Ubuntu 24.04 dns tier host with
 // unbound 1.19.2, an Ubuntu 24.04 freeipa-dns-client consumer), as the
 // AGENTS.md §5.6 rule requires. Addresses are the libvirt network's.
-// docs/evidence/dns-architecture-diagnose/ records the run.
+// docs/evidence/dns-architecture-diagnose/ records the run. The
+// tier_external_* and client_el* captures came the same way from two
+// single disposable VMs: an Ubuntu 24.04.4 host with only the dns role
+// (unbound 1.19.2-1ubuntu3.10, forward-only to 1.1.1.1) and a stock
+// AlmaLinux 9.8 host without systemd-resolved.
 func fixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "dnsarch", name))
@@ -551,5 +555,179 @@ func TestBuildDNSArchStatus_NoTierIsAFinding(t *testing.T) {
 	}
 	if paths := BuildDNSArchPaths(m, DNSArchObserved{}); !strings.Contains(strings.Join(paths, "\n"), "dns tier: not assigned") {
 		t.Fatalf("paths = %v", paths)
+	}
+}
+
+// ---- observed is not succeeded; unknown is not complete -----------------------------
+
+// withSection returns capture with its section key replaced by section
+// fromKey of another real capture, so a single failure can be placed into
+// an otherwise complete topology without inventing dig output.
+func withSection(t *testing.T, capture, key, from, fromKey string) string {
+	t.Helper()
+	section := func(s, k string) (int, int) {
+		begin := strings.Index(s, dnsArchMarker+k+" begin\n")
+		end := strings.Index(s, dnsArchMarker+k+" end rc=")
+		if begin < 0 || end < 0 {
+			t.Fatalf("no complete %s section", k)
+		}
+		return begin, end + strings.Index(s[end:], "\n") + 1
+	}
+	b, e := section(capture, key)
+	fb, fe := section(from, fromKey)
+	moved := strings.ReplaceAll(from[fb:fe], dnsArchMarker+fromKey+" ", dnsArchMarker+key+" ")
+	return capture[:b] + moved + capture[e:]
+}
+
+func liveWithTier(t *testing.T, tierStdout string) (DNSArchModel, DNSArchObserved, string, []string) {
+	t.Helper()
+	m, o := liveTopology(t)
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tierStdout}})
+	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	return m, o, status, findings
+}
+
+// The external probe through the tier, captured on unbound 1.19.2
+// (tier_external_servfail.txt: dnssec-failed.org through a tier forwarding
+// to 1.1.1.1; tier_external_nxdomain.txt: a name under .invalid).
+func TestBuildDNSArchObservedTier_ExternalAnswerIsNotResolution(t *testing.T) {
+	servfail := BuildDNSArchObservedTier(tierHost(), "-", "dnssec-failed.org", nil, "", fixtureResult(t, "tier-pr73-cap", "tier_external_servfail.txt"))
+	if f := servfail.ExternalResolution; f.State != FactError || !strings.Contains(f.Detail, "SERVFAIL") || strings.Contains(f.Detail, "proves") {
+		t.Fatalf("SERVFAIL external = %+v, want error", f)
+	}
+	if _, ok := dnsAnswered(servfail.ExternalResolution); ok {
+		t.Fatal("a SERVFAIL counts as an answer")
+	}
+	nx := BuildDNSArchObservedTier(tierHost(), "-", "pilot-dnsarch-nx.invalid", nil, "", fixtureResult(t, "tier-pr73-cap", "tier_external_nxdomain.txt"))
+	if f := nx.ExternalResolution; f.State != FactAbsent || !strings.Contains(f.Detail, "NXDOMAIN") {
+		t.Fatalf("NXDOMAIN external = %+v, want absent", f)
+	}
+	ok := BuildDNSArchObservedTier(tierHost(), "ipa1.ipa.pilot.internal", ".", nil, "", fixtureResult(t, "tier-dd-dns", "tier.txt"))
+	if _, answered := dnsAnswered(ok.ExternalResolution); !answered || ok.ExternalName != "." {
+		t.Fatalf("NOERROR external = %+v, want an answer", ok.ExternalResolution)
+	}
+}
+
+func TestBuildDNSArchStatus_ExternalResolution(t *testing.T) {
+	tier := fixture(t, "tier.txt")
+
+	// Should pass: NOERROR with records is a resolution, reported with
+	// the forwarder caveat.
+	_, _, status, findings := liveWithTier(t, tier)
+	if status != "complete" || len(findings) != 1 || !strings.HasPrefix(findings[0], "external_resolution_forwarder_unproven: dd-dns resolved .;") {
+		t.Fatalf("status %s findings %v", status, findings)
+	}
+
+	// Should trigger: SERVFAIL is a failed lookup, never "resolved".
+	_, o, status, findings := liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_external_servfail.txt"), "external"))
+	joined := strings.Join(findings, "\n")
+	if o.Tier[0].ExternalResolution.State != FactError || strings.Contains(joined, "external_resolution_forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns did not resolve . (the tier answered . NS with SERVFAIL)") {
+		t.Fatalf("SERVFAIL: status %s findings %v", status, findings)
+	}
+
+	// Should trigger: NXDOMAIN for the probe name is not a resolution.
+	_, _, _, findings = liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_external_nxdomain.txt"), "external"))
+	if joined := strings.Join(findings, "\n"); strings.Contains(joined, "forwarder_unproven") || !strings.Contains(joined, "external_resolution_failed: dd-dns") {
+		t.Fatalf("NXDOMAIN: findings %v", findings)
+	}
+
+	// Should trigger: no answer at all (connection refused, from the
+	// stopped-unbound capture) is unknown, so the report is partial.
+	_, o, status, findings = liveWithTier(t, withSection(t, tier, "external", fixture(t, "tier_stopped.txt"), "external"))
+	joined = strings.Join(findings, "\n")
+	if o.Tier[0].ExternalResolution.State != FactUnknown || status != "partial" || !strings.Contains(joined, "external_resolution_unknown: dd-dns (no answer from 127.0.0.1: communications error to 127.0.0.1#53: connection refused") {
+		t.Fatalf("refused: status %s findings %v", status, findings)
+	}
+
+	// Should trigger: a step that stopped inside the external section.
+	cut := tier[:strings.Index(tier, dnsArchMarker+"external end")]
+	_, _, status, findings = liveWithTier(t, cut)
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "external_resolution_unknown: dd-dns (no complete output") {
+		t.Fatalf("cut: status %s findings %v", status, findings)
+	}
+}
+
+// Every live fact pilot could not determine on a reachable host makes the
+// report partial, and the finding names it.
+func TestBuildDNSArchStatus_UnknownLiveFactsArePartial(t *testing.T) {
+	refused := fixture(t, "tier_stopped.txt")
+	m, o := liveTopology(t)
+	provider := withSection(t, fixture(t, "provider.txt"), "ns", refused, "external")
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	if o.Providers[0].NS.State != FactUnknown {
+		t.Fatalf("ns = %+v", o.Providers[0].NS)
+	}
+	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-ipa: ns (no answer from 192.168.122.5: communications error to 127.0.0.1#53: connection refused") {
+		t.Fatalf("provider: status %s findings %v", status, findings)
+	}
+
+	m, o = liveTopology(t)
+	client := fixture(t, "client.txt")
+	c := BuildDNSArchObservedClient("dd-client", StepResult{Step: Step{ID: "client-dd-client"}, Result: AdHocResult{Stdout: client[:strings.Index(client, dnsArchMarker+"lookup end")]}})
+	o.Client = &c
+	status, findings = BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-client: lookup") {
+		t.Fatalf("client: status %s findings %v", status, findings)
+	}
+
+	m, o = liveTopology(t)
+	o.FreeIPA.ForwardPolicy = DNSArchFact{State: FactUnknown, Detail: "FreeIPA did not report the principal's rights on idnsforwardpolicy"}
+	if status, _ := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o)); status != "partial" {
+		t.Fatalf("unknown forward policy: status %s, want partial", status)
+	}
+
+	// An unreachable provider from the tier (timeout, tier_failures.txt)
+	// is a finding and leaves the report partial.
+	m, o = liveTopology(t)
+	tier := withSection(t, fixture(t, "tier.txt"), "authority@192.168.122.5", fixture(t, "tier_failures.txt"), "authority@192.0.2.1")
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tier}})
+	status, findings = BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "freeipa_dns_not_authoritative_from_tier: dd-dns") {
+		t.Fatalf("authority timeout: status %s findings %v", status, findings)
+	}
+}
+
+// A provider that answers SERVFAIL for the internal name is not a
+// reference: a SERVFAIL through the tier must not "match" it.
+func TestBuildDNSArchDifferences_ServfailIsNoAuthoritativeReference(t *testing.T) {
+	servfail := fixture(t, "tier_external_servfail.txt")
+	m, o := liveTopology(t)
+	provider := withSection(t, fixture(t, "provider.txt"), "internal", servfail, "external")
+	o.Providers[0] = BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-dd-ipa"}, Result: AdHocResult{Stdout: provider}})
+	tier := withSection(t, fixture(t, "tier.txt"), "internal", servfail, "external")
+	o.Tier[0] = BuildDNSArchObservedTier(m.Tier[0], "ipa1.ipa.pilot.internal", ".", m.DNSProviderIPs(), m.FreeIPADomain, StepResult{Step: Step{ID: "tier-dd-dns"}, Result: AdHocResult{Stdout: tier}})
+	d, _ := diffBySubject(BuildDNSArchDifferences(m, o), "tier dd-dns answer for ipa1.ipa.pilot.internal")
+	if d.Status != FactUnknown {
+		t.Fatalf("comparison = %+v, want unknown (no authoritative answer)", d)
+	}
+}
+
+// An AlmaLinux 9.8 host without systemd-resolved (client_el.txt;
+// client_el_stock.txt is the same host before bind-utils was installed).
+// resolvectl failing there is not a gap in the evidence, but a missing dig
+// leaves the first hop unknown.
+func TestBuildDNSArchStatus_ClientWithoutSystemdResolved(t *testing.T) {
+	m, o := liveTopology(t)
+	c := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_el.txt"))
+	if c.ResolvedDNS.State != FactNotApplicable || c.FirstHop.State != FactObserved {
+		t.Fatalf("client = %+v", c)
+	}
+	o.Client = &c
+	_, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	if joined := strings.Join(findings, "\n"); strings.Contains(joined, "live_fact_unknown") {
+		t.Fatalf("findings %v, want no unknown live fact", findings)
+	}
+
+	stock := BuildDNSArchObservedClient("dd-client", fixtureResult(t, "client-dd-client", "client_el_stock.txt"))
+	o.Client = &stock
+	status, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	if status != "partial" || !strings.Contains(strings.Join(findings, "\n"), "live_fact_unknown: dd-client: first_hop_identity (environment: line 6: dig: command not found)") {
+		t.Fatalf("status %s findings %v", status, findings)
+	}
+	// The same resolvectl failure with systemd-resolved active is unknown.
+	active := strings.Replace(fixture(t, "client_el.txt"), "inactive\n@@pilot-dnsarch resolved end rc=3", "active\n@@pilot-dnsarch resolved end rc=0", 1)
+	if c := BuildDNSArchObservedClient("dd-client", StepResult{Step: Step{ID: "c"}, Result: AdHocResult{Stdout: active}}); c.ResolvedDNS.State != FactUnknown {
+		t.Fatalf("resolvectl with resolved active = %+v, want unknown", c.ResolvedDNS)
 	}
 }
