@@ -23,8 +23,9 @@
 #       authPassword: "..."
 #       privPassword: "..."
 #
-# prod rejects an auth profile below v3 authPriv unless the same -e file
-# carries an exception for it with all five fields (spec C12, §13.2):
+# prod rejects an auth profile below v3 authPriv unless an exception for
+# it, in group_vars/host_vars or an -e file, has all five fields (spec C12,
+# §13.2):
 #   snmp_insecure_auth_profile_exceptions:
 #     lab-v2c:
 #       confirmed: true

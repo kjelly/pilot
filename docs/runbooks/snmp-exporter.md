@@ -243,10 +243,10 @@ snmp_insecure_auth_profile_exceptions:
   長度，`null`、`[]`、`{}` 因此被當成有內容（PR #65 review）。
 - 例外本身（`lab-v2c:`）不是 mapping，或整個 `snmp_insecure_auth_profile_exceptions` 是 `null` 時，
   視為沒有例外，由 gate 的訊息拒絕。
-- 這筆設定目前要放在用 `-e @<file>` 帶入的檔案（例如 vault 檔）。playbook 的 play `vars:`
-  宣告了 `snmp_insecure_auth_profile_exceptions: {}`，優先順序高於 inventory 的
-  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點）。PR #74 把這個預設值
-  移到 pre_tasks 的 `set_fact`，合併之後寫在 group_vars/host_vars 也會生效。
+- 這筆設定可以寫在 group_vars/host_vars，或用 `-e @<file>` 帶入的檔案（例如 vault 檔）。
+  PR #74 之前 play `vars:` 宣告了 `snmp_insecure_auth_profile_exceptions: {}`，優先順序高於
+  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點）；現在預設值改在
+  pre_tasks 的 `set_fact` 補上，由 `TestRegression_InventoryInputsReachThePlay` 鎖住。
 
 目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
 鎖住（expiry 17 個案例、其他欄位 28 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
