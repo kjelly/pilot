@@ -42,6 +42,8 @@ func snmpExceptionGate(t *testing.T) map[string]any {
 // snmpExceptionCase is one run of the prod gate: the exception for lab-v2c
 // as an operator writes it in a vars file (empty: none), the cached
 // ansible_date_time.date the gate used to read, and whether it is accepted.
+// exceptions is the body of lab-v2c's flow mapping, or, when it starts with
+// snmpExceptionsVar, the vars file's whole exceptions setting.
 type snmpExceptionCase struct {
 	name       string
 	exceptions string
@@ -53,6 +55,10 @@ type snmpExceptionCase struct {
 // its expiry, which each expiry case appends.
 const snmpValidException = `reason: lab, owner: ops, confirmed: true, networkEvidence: "CHG-1 mgmt VLAN ACL", `
 
+// snmpExceptionsVar is the exceptions variable, which a case's exceptions
+// may start with to give the whole setting instead of lab-v2c's fields.
+const snmpExceptionsVar = "snmp_insecure_auth_profile_exceptions:"
+
 // runSnmpExceptionCases runs the prod gate from snmp-exporter-apply.yml
 // through Ansible on localhost once per case, with a v3 authPriv profile
 // (never rejected) and the v2c profile lab-v2c.
@@ -62,9 +68,12 @@ func runSnmpExceptionCases(t *testing.T, cases []snmpExceptionCase) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			exceptions := "snmp_insecure_auth_profile_exceptions: {}\n"
-			if tc.exceptions != "" {
-				exceptions = "snmp_insecure_auth_profile_exceptions:\n  lab-v2c: {" + tc.exceptions + "}\n"
+			exceptions := snmpExceptionsVar + " {}\n"
+			switch {
+			case strings.HasPrefix(tc.exceptions, snmpExceptionsVar):
+				exceptions = tc.exceptions + "\n"
+			case tc.exceptions != "":
+				exceptions = snmpExceptionsVar + "\n  lab-v2c: {" + tc.exceptions + "}\n"
 			}
 			varsFile := filepath.Join(dir, "exceptions.yml")
 			body := exceptions + "ansible_date_time: {date: \"" + tc.factDate + "\"}\n"
@@ -155,24 +164,73 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 }
 
 // TestRegression_SnmpInsecureProfileExceptionFields runs the prod gate
-// (C12 v1.2) with a valid expiry and one of the other fields wrong. Spec
+// (C12 v1.3) with a valid expiry and one of the other fields wrong. Spec
 // §13.2 requires all five: confirm insecure SNMP (`confirmed`, the boolean
 // true), reason, expiry, owner and restricted management network evidence
 // (`networkEvidence`). Against the v1.1 gate, which checked only reason,
 // owner and expiry, every confirmed/networkEvidence rejection here passes.
+//
+// reason and owner must be non-blank strings, networkEvidence a non-blank
+// string or a number (a ticket number). Against the v1.2 gate, which turned
+// networkEvidence into a string before checking its length and took the
+// length of reason and owner as they were, null, an empty list or an empty
+// mapping passed as networkEvidence, a list or mapping passed as reason or
+// owner, and a blank reason or owner passed (PR #65 review). A null or
+// non-mapping exception, or a null exceptions setting, raised a templating
+// error instead of the gate's message.
 func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 	day := snmpTestDays(t)
 	const expiry = `expiry: "2099-12-31"`
+	const valid = `confirmed: true, reason: lab, owner: ops, networkEvidence: "CHG-1", `
+	// without returns the valid fields with one replaced: field "" drops it.
+	without := func(field, value string) string {
+		out := ""
+		for _, kv := range strings.Split(strings.TrimSuffix(valid, ", "), ", ") {
+			if strings.HasPrefix(kv, field+": ") {
+				if value != "" {
+					out += field + ": " + value + ", "
+				}
+				continue
+			}
+			out += kv + ", "
+		}
+		return out + expiry
+	}
 	runSnmpExceptionCases(t, []snmpExceptionCase{
 		{"all five fields", snmpValidException + expiry, day(0), true},
-		{"a ticket number as networkEvidence", `reason: lab, owner: ops, confirmed: true, networkEvidence: 1234, ` + expiry, day(0), true},
-		{"confirmed missing", `reason: lab, owner: ops, networkEvidence: "CHG-1", ` + expiry, day(0), false},
-		{"confirmed false", `reason: lab, owner: ops, confirmed: false, networkEvidence: "CHG-1", ` + expiry, day(0), false},
-		{"confirmed is the string true", `reason: lab, owner: ops, confirmed: "true", networkEvidence: "CHG-1", ` + expiry, day(0), false},
-		{"networkEvidence missing", `reason: lab, owner: ops, confirmed: true, ` + expiry, day(0), false},
-		{"networkEvidence blank", `reason: lab, owner: ops, confirmed: true, networkEvidence: "   ", ` + expiry, day(0), false},
-		{"reason missing", `owner: ops, confirmed: true, networkEvidence: "CHG-1", ` + expiry, day(0), false},
-		{"owner missing", `reason: lab, confirmed: true, networkEvidence: "CHG-1", ` + expiry, day(0), false},
+		{"a ticket number as networkEvidence", without("networkEvidence", "1234"), day(0), true},
+		{"confirmed missing", without("confirmed", ""), day(0), false},
+		{"confirmed false", without("confirmed", "false"), day(0), false},
+		{"confirmed is the string true", without("confirmed", `"true"`), day(0), false},
+		{"networkEvidence missing", without("networkEvidence", ""), day(0), false},
+		{"networkEvidence blank", without("networkEvidence", `"   "`), day(0), false},
+		{"networkEvidence null", without("networkEvidence", "null"), day(0), false},
+		{"networkEvidence empty list", without("networkEvidence", "[]"), day(0), false},
+		{"networkEvidence empty mapping", without("networkEvidence", "{}"), day(0), false},
+		{"networkEvidence list", without("networkEvidence", "[CHG-1]"), day(0), false},
+		{"networkEvidence mapping", without("networkEvidence", "{ticket: CHG-1}"), day(0), false},
+		{"networkEvidence boolean", without("networkEvidence", "true"), day(0), false},
+		{"networkEvidence written as a bare key", snmpExceptionsVar + `
+  lab-v2c:
+    confirmed: true
+    reason: lab
+    owner: ops
+    networkEvidence:
+    ` + expiry, day(0), false},
+		{"reason missing", without("reason", ""), day(0), false},
+		{"reason blank", without("reason", `"   "`), day(0), false},
+		{"reason null", without("reason", "null"), day(0), false},
+		{"reason list", without("reason", "[lab]"), day(0), false},
+		{"reason mapping", without("reason", "{why: lab}"), day(0), false},
+		{"reason number", without("reason", "42"), day(0), false},
+		{"owner missing", without("owner", ""), day(0), false},
+		{"owner blank", without("owner", `"   "`), day(0), false},
+		{"owner null", without("owner", "null"), day(0), false},
+		{"owner list", without("owner", "[ops]"), day(0), false},
+		{"owner mapping", without("owner", "{team: ops}"), day(0), false},
+		{"the exception is null", snmpExceptionsVar + "\n  lab-v2c:", day(0), false},
+		{"the exception is a list", snmpExceptionsVar + "\n  lab-v2c: [" + strings.TrimSuffix(valid, ", ") + "]", day(0), false},
+		{"the exceptions setting is null", snmpExceptionsVar, day(0), false},
 	})
 }
 

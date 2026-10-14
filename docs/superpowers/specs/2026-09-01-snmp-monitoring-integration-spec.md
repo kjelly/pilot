@@ -1535,7 +1535,7 @@ restricted management network evidence
 
 不得提供永久、無到期的 global allow flag。
 
-實作（2026-10-13）：每個 auth profile 一筆 `snmp_insecure_auth_profile_exceptions.<profile>`，欄位為 `confirmed: true`（confirm insecure SNMP）、`reason`、`expiry`（`YYYY-MM-DD`，UTC 當天結束前有效）、`owner`、`networkEvidence`（restricted management network evidence，例如變更單號或 ACL 說明）。`playbooks/apply/snmp-exporter-apply.yml` 的 prod gate 檢查全部五項；驗收見 `docs/verification/snmp-exporter.md` C12。
+實作（2026-10-13）：每個 auth profile 一筆 `snmp_insecure_auth_profile_exceptions.<profile>`，欄位為 `confirmed: true`（confirm insecure SNMP，布林）、`reason`（非空白字串）、`expiry`（`YYYY-MM-DD`，UTC 當天結束前有效）、`owner`（非空白字串）、`networkEvidence`（restricted management network evidence，例如變更單號或 ACL 說明；非空白字串或單號數字，`null`/list/mapping 不算）。`playbooks/apply/snmp-exporter-apply.yml` 的 prod gate 檢查全部五項；驗收見 `docs/verification/snmp-exporter.md` C12。
 
 ### 13.3 Exporter Endpoint Protection
 

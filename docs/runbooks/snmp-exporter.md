@@ -221,7 +221,7 @@ local` 對照組驗證，語意等同對 VM 驗證）：
 | 同上 + 一筆有效（未過期）`snmp_insecure_auth_profile_exceptions` | `assert` PASS |
 | 同上但 `expiry` 設在過去 | `assert` FAILED（斷言重新失敗，確認過期判斷真的有效） |
 
-prod 例外的規則（spec C12 v1.2，2026-10-13）：每個 auth profile 一筆，五個欄位都要有：
+prod 例外的規則（spec C12 v1.3，2026-10-14）：每個 auth profile 一筆，五個欄位都要有：
 
 ```yaml
 snmp_insecure_auth_profile_exceptions:
@@ -237,13 +237,19 @@ snmp_insecure_auth_profile_exceptions:
   `2026-9-30`）、不存在的日期（例如加了引號的 `"2099-02-29"`、`"2099-13-01"`，含閏年規則；沒加引號時
   Ansible 載入 vars 檔就會報錯）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
   本地日期，而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
-- `networkEvidence`：去掉空白後不能是空的。
+- `reason`、`owner`：字串，去掉空白後不能是空的。
+- `networkEvidence`：字串（去掉空白後不能是空的）或變更單號數字。`null`（包括只寫
+  `networkEvidence:` 沒有值）、布林、list、mapping 都會被拒絕：C12 v1.2 的 gate 先把值轉成字串再量
+  長度，`null`、`[]`、`{}` 因此被當成有內容（PR #65 review）。
+- 例外本身（`lab-v2c:`）不是 mapping，或整個 `snmp_insecure_auth_profile_exceptions` 是 `null` 時，
+  視為沒有例外，由 gate 的訊息拒絕。
 - 這筆設定目前要放在用 `-e @<file>` 帶入的檔案（例如 vault 檔）。playbook 的 play `vars:`
   宣告了 `snmp_insecure_auth_profile_exceptions: {}`，優先順序高於 inventory 的
-  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點，另案處理）。
+  group_vars/host_vars，寫在 group_vars 會被蓋掉（AGENTS.md §4.5 第 3 點）。PR #74 把這個預設值
+  移到 pre_tasks 的 `set_fact`，合併之後寫在 group_vars/host_vars 也會生效。
 
 目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
-鎖住（expiry 17 個案例、其他欄位 9 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
+鎖住（expiry 17 個案例、其他欄位 28 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 
 ## 9. `pilot verify` 正式驗收
