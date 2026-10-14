@@ -495,6 +495,14 @@ is not used by this contract.
 
 ## Actual-run evidence
 
+Current for the rows that read FreeIPA (2026-10-15, candidate `c328aa6`): C4, C5, C6, C13, C22 and C25
+read LDAP as root over ldapi with SASL EXTERNAL; they no longer depend on an admin ticket left in root's
+default cache (#69). On a fresh vm-target topology, each of the six passed on live records and failed on a
+wrong expected value (`pilot verify --probe`), and `internal-endpoint-apply.yml` present, rerun
+(`changed=0`), decommission query and absent all left no ticket behind. Record:
+[`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md). The dated entries below
+are earlier history.
+
 2026-08-13, two disposable `pilot vm-target` KVM VMs (`p5-ipa` AlmaLinux 9 FreeIPA server,
 `p5-client` Ubuntu 24.04 enrolled FreeIPA client, playing the certificate-owner role per
 spec.md §11.4's direct-mode worked example). Phase 5 (spec.md §63) implements only the

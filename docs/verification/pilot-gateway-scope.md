@@ -1,10 +1,12 @@
 # Verification Spec — Pilot Gateway Scope Publication
 
-> 版本：DRAFT v0.3（vm-target 已實測；尚未正式站台驗收）
+> 版本：DRAFT v0.4（vm-target 已實測；尚未正式站台驗收）。v0.4（2026-10-14）：C1–C3 改成 root 經 ldapi 以 SASL EXTERNAL 讀 LDAP，不再依賴 #69 殘留的 admin ticket
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md §9.6/§57（Phase 6 — Gateway scope publication）
 > 維護者：sre
 >
 > 最新 `--hosts all` actual-run evidence：[`2026-09-15-all-keyword.md`](../evidence/pilot-gateway-scope/2026-09-15-all-keyword.md)
+>
+> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `c328aa6`）：全新 vm-target topology 上 `vm-target topology test` L3／L4 `failed=0`、L5 3/3、L6 `changed=0`，主機上沒有任何 admin ticket；同一個 hostgroup 用 `main` 的 `ipa hostgroup-show` 版本為 0/3。紀錄：[`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md)
 
 ## 1. 目標系統
 
