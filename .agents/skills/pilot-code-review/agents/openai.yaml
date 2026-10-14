@@ -1,0 +1,3 @@
+interface:
+  display_name: "Pilot Code Review"
+  short_description: "Review pilot deployment semantics and recovery"
