@@ -49,9 +49,12 @@ server 的 topology 上 `complete`、10 項比對全部 `match`，見
 - `differences` 逐項比對 effective 與 observed，`evidence` 指到 inventory 變數與
   這次呼叫的 step（`step:<step id>#<section>`，audit record 裡有原始指令與輸出）。
   `unknown`（看不到）與 `absent`（看到了，沒有）不合併。
-- 經 tier 解析外部名稱成功，只代表 tier 解析得到，不代表是某個 forwarder 回答的；
-  工具只回報「設定的 forward zone」與「解析結果」，並以 finding
-  `external_resolution_forwarder_unproven` 標明。
+- 經 tier 解析外部名稱成功（NOERROR 且有紀錄），只代表 tier 解析得到，不代表是某個
+  forwarder 回答的；工具只回報「設定的 forward zone」與「解析結果」，並以 finding
+  `external_resolution_forwarder_unproven` 標明。tier 有回應但回 SERVFAIL、REFUSED 或
+  查無此名稱，是解析失敗（事實狀態 `error`／`absent`，finding
+  `external_resolution_failed`）；沒有任何回應（連線被拒、逾時）是看不到（`unknown`，
+  finding `external_resolution_unknown`，`status` 為 `partial`）。
 
 ## 2. 準備唯讀 principal（每個 realm 做一次）
 
@@ -113,8 +116,8 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 
 | 欄位 | 內容 |
 |---|---|
-| `status` | `complete`、`partial`（有看不到的 live 事實或比對）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報） |
-| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven` |
+| `status` | `complete`、`partial`（有看不到的 live 事實或比對；連得到的主機上任何一項 probe 結果是 `unknown`，都會列在 finding `live_fact_unknown`）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
+| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`live_fact_unknown` |
 | `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
 | `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
