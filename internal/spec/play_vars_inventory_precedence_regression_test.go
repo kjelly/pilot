@@ -591,9 +591,10 @@ func localHostVars() map[string]any {
 }
 
 // tryInventoryPlayIn runs one play on hosts of inv, with
-// group_vars/<group>.yml for every entry of groupVars, and returns the show
-// task's JSON object, or the failed task's name and message.
-func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]map[string]any, hosts string, playVars any, tasks []any) (map[string]any, string) {
+// group_vars/<group>.yml for every entry of groupVars and extra
+// ansible-playbook arguments, and returns the show task's JSON object, or the
+// failed task's name and message.
+func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]map[string]any, hosts string, playVars any, tasks []any, args ...string) (map[string]any, string) {
 	t.Helper()
 	dir := t.TempDir()
 	write := func(path string, v any) {
@@ -619,7 +620,7 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 		"name": "inventory inputs", "hosts": hosts, "gather_facts": false, "become": false,
 		"vars": playVars, "tasks": tasks,
 	}})
-	cmd := exec.Command("ansible-playbook", "-i", filepath.Join(dir, "inventory.yml"), filepath.Join(dir, "play.yml"))
+	cmd := exec.Command("ansible-playbook", append([]string{"-i", filepath.Join(dir, "inventory.yml"), filepath.Join(dir, "play.yml")}, args...)...)
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
 	out, runErr := cmd.Output()
 	if _, isExit := runErr.(*exec.ExitError); runErr != nil && !isExit {

@@ -30,7 +30,8 @@ siem_forward_host: ""
 #  siem_receiver_tcp_port(log-server 的接收埠)。轉送目標是這份 inventory
 #  的 log-server 時,兩邊不一致會讓 apply 在任何變更前失敗;外部 SIEM 不檢查。
 #  同時屬於 wazuh-manager group 的主機,這個值也是 Wazuh syslog_output(UDP)
-#  的目的埠。
+#  的目的埠。SELinux 主機上,非預設的埠會被標成 syslogd_port_t(rsyslogd 只能
+#  用 syslogd_port_t 與 514);已被其他服務占用的埠會讓 apply 失敗。
 # siem_forward_port: "514"
 # audit_logrotate_rotate: 14
 # audit_logrotate_maxage: 90

@@ -228,6 +228,25 @@
             group: "{{ siem_log_owner }}"
             mode: "0755"
 
+        # Under SELinux, imtcp may bind siem_receiver_tcp_port only once the
+        # port is labelled for rsyslogd (see the task file).
+        # The task file registers rsyslog_selinux_port_label; reset it so a
+        # label added earlier in this site.yml run (by another play on this
+        # host) does not trigger the restart below.
+        - name: "Step 2b: Reset the SELinux port label result"
+          tags: [C3, C4, C7, C8, C11]
+          ansible.builtin.set_fact:
+            rsyslog_selinux_port_label: {}
+
+        - name: "Step 2b: Let rsyslogd bind siem_receiver_tcp_port under SELinux"
+          tags: [C3, C4, C7, C8, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-selinux-tcp-port.yml
+            apply:
+              tags: [C3, C4, C7, C8, C11]
+          vars:
+            rsyslog_selinux_tcp_port: "{{ siem_receiver_tcp_port }}"
+
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
           tags: [C3, C4, C7, C8, C11]
           ansible.builtin.copy:
@@ -320,12 +339,14 @@
             state: started
             enabled: true
 
-        - name: "Step 6a: Restart rsyslog only if the receiver config actually changed"
+        - name: "Step 6a: Restart rsyslog only if the receiver config or its SELinux port label changed"
           tags: [C2, C5]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: (siem_receiver_conf_result | default({})) is changed
+          when: >-
+            ((siem_receiver_conf_result | default({})) is changed)
+            or ((rsyslog_selinux_port_label | default({})) is changed)
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
           when: ansible_os_family == "Debian"

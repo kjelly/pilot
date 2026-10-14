@@ -433,3 +433,179 @@ func TestRegression_LogrotateSyntaxCheckThroughAnsible(t *testing.T) {
 		}
 	}
 }
+
+// selinuxPortTasks returns tasks/rsyslog-selinux-tcp-port.yml rewritten to
+// run on a localhost without SELinux: the SELinux detection is dropped and
+// its condition forced true, the dnf task is dropped, the query runs under a fake seobject module
+// (records from $PILOT_FAKE_SEPORTS, or ImportError when that is "missing"),
+// and seport is replaced by a debug task so the test sees whether it ran.
+func selinuxPortTasks(t *testing.T) []any {
+	t.Helper()
+	raw, err := os.ReadFile("../../playbooks/apply/tasks/rsyslog-selinux-tcp-port.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]any
+	if err := yaml.Unmarshal(raw, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	fake := t.TempDir()
+	module := "import json, os\n" +
+		"if os.environ.get('PILOT_FAKE_SEPORTS') == 'missing':\n    raise ImportError('no seobject')\n" +
+		"class portRecords:\n    def get_all(self):\n" +
+		"        return {(r[0], r[0], 'tcp'): (r[1], 's0') for r in json.loads(os.environ.get('PILOT_FAKE_SEPORTS', '[]'))}\n"
+	if err := os.WriteFile(filepath.Join(fake, "seobject.py"), []byte(module), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const selinuxOn = "rsyslog_selinux_enforce.stat.exists"
+	var out []any
+	sawSeport := false
+	for _, task := range tasks {
+		if _, ok := task["ansible.builtin.dnf"]; ok {
+			continue
+		}
+		if stat, ok := task["ansible.builtin.stat"].(map[string]any); ok && stat["path"] == "/sys/fs/selinux/enforce" {
+			continue
+		}
+		switch w := task["when"].(type) {
+		case string:
+			if w == selinuxOn {
+				task["when"] = true
+			}
+		case []any:
+			for i, c := range w {
+				if c == selinuxOn {
+					w[i] = true
+				}
+			}
+		}
+		if cmd, ok := task["ansible.builtin.command"].(map[string]any); ok {
+			argv := cmd["argv"].([]any)
+			argv[0] = "/usr/bin/python3"
+			task["environment"] = map[string]any{"PYTHONPATH": fake, "PILOT_FAKE_SEPORTS": "{{ fake_seports }}"}
+		}
+		if _, ok := task["community.general.seport"]; ok {
+			delete(task, "community.general.seport")
+			task["ansible.builtin.debug"] = map[string]any{"msg": "label"}
+			sawSeport = true
+		}
+		out = append(out, task)
+	}
+	if !sawSeport || len(out) != 3 {
+		t.Fatalf("expected the query, the assert and seport in the task file; got %d tasks (seport %v)", len(out), sawSeport)
+	}
+	return append(out, map[string]any{
+		"name":                  "show",
+		"ansible.builtin.debug": map[string]any{"msg": "{{ {'type': rsyslog_selinux_port_type.stdout, 'labelled': not (rsyslog_selinux_port_label.skipped | default(false))} | to_json }}"},
+	})
+}
+
+// TestRegression_RsyslogSELinuxPortDecision: rsyslogd (syslogd_t) may use
+// only TCP ports labelled syslogd_port_t or rsh_port_t (tcp/514) —
+// `sesearch -A -s syslogd_t -c tcp_socket` on AlmaLinux 9.8,
+// selinux-policy-targeted 38.1.75. A port with no record of its own (2514 is
+// only in the unreserved_port_t range) must be labelled; one rsyslogd may
+// already use is left alone; one another service owns (http_port_t) is
+// refused rather than relabelled. Without the Python bindings the check run
+// skips the label and a real run fails.
+func TestRegression_RsyslogSELinuxPortDecision(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	tasks := selinuxPortTasks(t)
+	inv := map[string]any{"all": map[string]any{"children": map[string]any{
+		"log-server": map[string]any{"hosts": map[string]any{"localhost": localHostVars()}},
+	}}}
+	const gate = "SELinux: tcp/2514 is free for rsyslogd"
+	cases := []struct {
+		name, records string
+		check         bool
+		labelled      bool
+		fail          string
+	}{
+		{"no record of its own", `[[514, "rsh_port_t"]]`, false, true, ""},
+		{"already syslogd_port_t", `[[2514, "syslogd_port_t"]]`, false, false, ""},
+		{"rsh_port_t", `[[2514, "rsh_port_t"]]`, false, false, ""},
+		{"another service's port", `[[2514, "http_port_t"]]`, false, false, gate},
+		{"another service's port, check mode", `[[2514, "http_port_t"]]`, true, false, gate},
+		{"no bindings, check mode", "missing", true, false, ""},
+		{"no bindings", "missing", false, false, gate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vars := map[string]any{"rsyslog_selinux_tcp_port": 2514, "fake_seports": tc.records}
+			var args []string
+			if tc.check {
+				args = append(args, "--check")
+			}
+			got, failed := tryInventoryPlayIn(t, inv, nil, "log-server", vars, tasks, args...)
+			switch {
+			case tc.fail != "":
+				if !strings.Contains(failed, tc.fail) {
+					t.Errorf("want %q to fail, got %q", tc.fail, failed)
+				}
+			case failed != "":
+				t.Errorf("want success, got %q", failed)
+			case got["labelled"] != tc.labelled:
+				t.Errorf("labelled = %v, want %v (port type %v)", got["labelled"], tc.labelled, got["type"])
+			}
+		})
+	}
+}
+
+// TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem: both SIEM
+// playbooks include the SELinux task file for the port they configure, with
+// the tags of the task that writes that port, and restart rsyslog when the
+// label changes (imtcp does not retry a failed bind).
+func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
+	for _, c := range []struct {
+		playbook, port, writer, restart string
+	}{
+		{"log-server-apply.yml", "{{ siem_receiver_tcp_port }}", "Step 3: Render 10-siem-receiver.conf", "Step 6a: Restart rsyslog"},
+		{"audit-log-forwarding-apply.yml", "{{ siem_forward_port }}", "Step 7: Render 99-siem-forward.conf", "Step 9a: Restart rsyslog"},
+	} {
+		play := loadFirstPlay(t, c.playbook)
+		var flat []map[string]any
+		var walk func([]any)
+		walk = func(tasks []any) {
+			for _, raw := range tasks {
+				task, _ := raw.(map[string]any)
+				flat = append(flat, task)
+				if sub, ok := task["block"].([]any); ok {
+					walk(sub)
+				}
+			}
+		}
+		walk(play["tasks"].([]any))
+		include, writer, restart := -1, -1, -1
+		for i, task := range flat {
+			name, _ := task["name"].(string)
+			if inc, ok := task["ansible.builtin.include_tasks"].(map[string]any); ok && inc["file"] == "tasks/rsyslog-selinux-tcp-port.yml" {
+				include = i
+				vars, _ := task["vars"].(map[string]any)
+				if vars["rsyslog_selinux_tcp_port"] != c.port {
+					t.Errorf("%s: the SELinux include must pass rsyslog_selinux_tcp_port=%s, got %v", c.playbook, c.port, vars["rsyslog_selinux_tcp_port"])
+				}
+				apply, _ := inc["apply"].(map[string]any)
+				if fmt.Sprint(apply["tags"]) != fmt.Sprint(task["tags"]) {
+					t.Errorf("%s: include tags %v and apply tags %v differ", c.playbook, task["tags"], apply["tags"])
+				}
+			}
+			if strings.HasPrefix(name, c.writer) {
+				writer = i
+				if include >= 0 && fmt.Sprint(task["tags"]) != fmt.Sprint(flat[include]["tags"]) {
+					t.Errorf("%s: the SELinux include must carry the tags of %q (%v), got %v", c.playbook, c.writer, task["tags"], flat[include]["tags"])
+				}
+			}
+			if strings.HasPrefix(name, c.restart) {
+				restart = i
+				if !strings.Contains(fmt.Sprint(task["when"]), "rsyslog_selinux_port_label") {
+					t.Errorf("%s: %q must also restart when the SELinux port label changed, got when %v", c.playbook, name, task["when"])
+				}
+			}
+		}
+		if include < 0 || writer < 0 || restart < 0 || !(include < writer && writer < restart) {
+			t.Errorf("%s: want the SELinux include before %q before %q; got indexes %d, %d, %d", c.playbook, c.writer, c.restart, include, writer, restart)
+		}
+	}
+}

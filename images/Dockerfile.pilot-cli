@@ -191,6 +191,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   the playbook through --sandbox against a real EL9 vm-target (AGENTS.md
 #   §1.1 actual-run rule) — ansible failed with "couldn't resolve
 #   module/action 'community.general.nmcli'" until this collection was added.
+#   Also backs community.general.seport (playbooks/apply/tasks/
+#   rsyslog-selinux-tcp-port.yml, SIEM ports on SELinux hosts).
 #
 
 # Collections install to the system-wide path (-p), not the default

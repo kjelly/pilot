@@ -427,6 +427,27 @@
           register: audisp_syslog_args_result
           when: not ansible_check_mode
 
+        # Under SELinux, rsyslogd may connect to siem_forward_port only once the
+        # port is labelled for it (see the task file); without the label every
+        # forwarded message is dropped while the apply succeeds.
+        # The task file registers rsyslog_selinux_port_label; reset it so the
+        # label log-server-apply.yml may have added on this host earlier in
+        # the same site.yml run does not trigger the restart in Step 9a.
+        - name: "Step 6g: Reset the SELinux port label result"
+          tags: [C16, C17]
+          ansible.builtin.set_fact:
+            rsyslog_selinux_port_label: {}
+
+        - name: "Step 6g: Let rsyslogd connect to siem_forward_port under SELinux"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-selinux-tcp-port.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            rsyslog_selinux_tcp_port: "{{ siem_forward_port }}"
+          when: siem_forwarding_enabled | bool
+
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]
           ansible.builtin.copy:
@@ -523,12 +544,14 @@
             state: started
             enabled: true
 
-        - name: "Step 9a: Restart rsyslog only if the forward config actually changed"
+        - name: "Step 9a: Restart rsyslog only if the forward config or its SELinux port label changed"
           tags: [C19]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: (siem_forward_conf_result | default({})) is changed
+          when: >-
+            ((siem_forward_conf_result | default({})) is changed)
+            or ((rsyslog_selinux_port_label | default({})) is changed)
 
       rescue:
         - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"

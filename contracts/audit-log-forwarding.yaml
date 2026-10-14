@@ -33,5 +33,6 @@ traceability:
   tag: {kind: bare}
   exemptions:
     "docs/verification/audit-log-forwarding.md#C11": {kind: verifyOnly, reason: functional audit probe}
+    "docs/verification/audit-log-forwarding.md#C22": {kind: verifyOnly, reason: functional forwarding connection probe}
 verification: {autoDeploy: false}
 site: {include: true, order: 90, vars: {}, tags: [security, audit-log-forwarding], optIn: false}
