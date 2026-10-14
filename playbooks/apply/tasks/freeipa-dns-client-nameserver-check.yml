@@ -71,8 +71,11 @@
       ({{ item.role }}{{ (' ' ~ item.host) if item.host else '' }}) did not answer
       {{ freeipa_dns_ns_name }} now; it stays in the list and resolv.conf fails over to the next
       one.
-      {%- if item.role in ['freeipa', 'freeipa-self'] %} It is a FreeIPA DNS server FreeIPA
-      answers for: check named on {{ item.host }} (systemctl status named).
+      {%- if item.role in ['freeipa', 'freeipa-self'] and item.registered %} FreeIPA lists it
+      as a DNS server: check named on {{ item.host }} (systemctl status named).
+      {%- elif item.role in ['freeipa', 'freeipa-self'] %} No FreeIPA server answered, so
+      whether FreeIPA lists it is unknown: check named on {{ item.host }} (systemctl status
+      named), and on the other FreeIPA servers.
       {%- elif item.role == 'tier' %} It is a dns tier host: check unbound on {{ item.host }}, or
       apply playbooks/apply/dns-apply.yml to it.
       {%- else %} It is an explicit freeipa_dns_client_servers entry: check it, or remove it.

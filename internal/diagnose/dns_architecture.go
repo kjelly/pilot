@@ -588,6 +588,9 @@ func validForwarder(s string) bool {
 		}
 	}
 	addr, err := netip.ParseAddr(m[1])
+	// An IPv4-mapped address is judged as the IPv4 address it maps, as
+	// the playbook's Python check does.
+	addr = addr.Unmap()
 	return err == nil && !addr.IsUnspecified() && !addr.IsMulticast()
 }
 

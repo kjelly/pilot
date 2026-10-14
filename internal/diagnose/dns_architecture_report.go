@@ -513,17 +513,16 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 // DNSArchUnregisteredReplicas mirrors tasks/freeipa-dns-providers-live.yml:
 // the NS set FreeIPA answers authoritatively (from any provider's NS
 // probe), and the replicas that leave freeipa_setup_dns unset, did not
-// answer for the zone authoritatively themselves (their own SOA or NS
-// probe, both +norec) and are not in that set. Nothing is left out when
+// answer for the zone authoritatively themselves (their own NS probe,
+// +norec, as tasks/freeipa-dns-providers-live.yml asks) and are not in
+// that set. Nothing is left out when
 // no provider answered.
 func DNSArchUnregisteredReplicas(m DNSArchModel, observed []DNSArchObservedProvider) (leftOut, registered []string) {
 	seen := map[string]bool{}
 	selfAnswered := map[string]bool{}
 	for _, op := range observed {
-		for _, f := range []DNSArchFact{op.SOA, op.NS} {
-			if q, ok := dnsAnswered(f); ok && q.Status == "NOERROR" && q.Authoritative {
-				selfAnswered[op.Host] = true
-			}
+		if q, ok := dnsAnswered(op.NS); ok && q.Status == "NOERROR" && q.Authoritative {
+			selfAnswered[op.Host] = true
 		}
 		if q, ok := dnsAnswered(op.NS); ok && q.Authoritative {
 			for _, a := range q.Answers {
@@ -711,9 +710,12 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		case "unknown":
 			diffs = append(diffs, DNSArchDifference{Subject: "FreeIPA global forwarders", Status: FactUnknown, Detail: "the declared forwarders are Jinja templates the model cannot evaluate", Evidence: m.Forwarding.Unevaluated})
 		}
-		// Each DNS server keeps the --forwarder list it was installed
-		// with as its own setting; a later freeipa_dns_forwarders change
-		// only reaches the global list.
+		// Each DNS server has its own forwarder setting, which its named
+		// prefers over the global list: set by the installer's
+		// --forwarder, and on every apply since 2026-10-15 by
+		// freeipa-server-apply.yml / freeipa-server-replica-apply.yml
+		// (ipa dnsserver-mod), so a mismatch means no apply since the
+		// inventory changed.
 		servers, _ := o.FreeIPA.ServerForwarders.Value.([]DNSArchServerForwarders)
 		for _, sf := range m.Forwarding.ServerInstallForwarders {
 			p, _ := m.Provider(sf.Host)
@@ -725,7 +727,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 			if strings.HasPrefix(sf.Source, "inventory:") {
 				ev = []string{sf.Source}
 			}
-			subject := "FreeIPA " + sf.Host + " server forwarders (install-time --forwarder)"
+			subject := "FreeIPA " + sf.Host + " server forwarders (ipa dnsserver-mod)"
 			var observed []string
 			if f.State == FactObserved {
 				found := false
@@ -744,7 +746,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 			}
 			d := compareFact(subject, sf.Forwarders, f, observed, false, ev)
 			if d.Status == "mismatch" {
-				d.Detail = "the server's own forwarder setting differs from what the inventory would install it with; pilot only updates the global list after installation (ipa dnsserver-mod is not pilot-managed)"
+				d.Detail = "the server's own forwarder setting differs from the inventory's; re-apply freeipa-server-apply.yml (primary) or freeipa-server-replica-apply.yml (replica), which set it with ipa dnsserver-mod on every run"
 			}
 			diffs = append(diffs, d)
 		}

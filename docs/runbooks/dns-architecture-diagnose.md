@@ -141,9 +141,11 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
   用 `--rights` 確認全域設定讀得到，並以「FreeIPA 有列出 DNS server 時，自己的
   server 項目與網域 zone 一定存在」判斷 `-find` 的空結果是不是被隱藏；看不到就回
   `permission_denied`，不會回「沒有 forwarder」。
-- **各 server 的 forwarders**：每台 DNS server 安裝時的 `--forwarder` 會留成那台
-  server 自己的設定（`ipa dnsserver-*`），之後改 `freeipa_dns_forwarders` 只會更新
-  全域清單。兩者不一致時，`differences` 會列出那台 server 的項目。
+- **各 server 的 forwarders**：每台 DNS server 有自己的 forwarder 設定（`ipa dnsserver-*`），
+  它的 named 優先用這個。安裝時的 `--forwarder` 會寫進去，2026-10-15 起每次 apply
+  `freeipa-server-apply.yml`／`freeipa-server-replica-apply.yml` 也會用
+  `ipa dnsserver-mod` 讓它等於 inventory 的值。不一致時 `differences` 會列出那台
+  server，代表 inventory 改了之後還沒重新 apply。
 - replica 是否算 DNS 提供者、replica 的 forwarders 怎麼解讀，跟安裝 playbook 一致：
   `freeipa_setup_dns` 預設 `true`（issue #67），`freeipa_dns_forwarders` 用與 primary
   相同的 `tasks/freeipa-dns-forwarders.yml` 正規化（issue #68）。`freeipa_dns_forwarders`

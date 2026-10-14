@@ -527,6 +527,8 @@ var forwarderCases = []struct {
 	{"unspecified IPv4", map[string]any{"freeipa_dns_forwarders": "0.0.0.0"}, nil},
 	{"unspecified IPv6", map[string]any{"freeipa_dns_forwarders": "::"}, nil},
 	{"multicast", map[string]any{"freeipa_dns_forwarders": "224.0.0.1"}, nil},
+	{"IPv4-mapped unspecified", map[string]any{"freeipa_dns_forwarders": "::ffff:0.0.0.0"}, nil},
+	{"IPv4-mapped multicast", map[string]any{"freeipa_dns_forwarders": "::ffff:224.0.0.1"}, nil},
 	{"zone", map[string]any{"freeipa_dns_forwarders": []any{"fe80::1%eth0"}}, nil},
 	{"trailing newline in a list item", map[string]any{"freeipa_dns_forwarders": []any{"8.8.8.8\n"}}, nil},
 	{"number in a list", map[string]any{"freeipa_dns_forwarders": []any{53}}, nil},

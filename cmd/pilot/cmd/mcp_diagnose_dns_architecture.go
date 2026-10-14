@@ -450,14 +450,13 @@ func dnsArchSupportedLayer(opts diagnoseMCPToolsOptions, groupHosts func(string)
 		TierModes: []string{"freeipa-split (FreeIPA domain and dns_freeipa_zones stubbed to every FreeIPA DNS server, everything else forwarded to dns_upstream)", "forward-only (no FreeIPA DNS in the inventory)"},
 		Capabilities: []string{
 			"dns: unbound caching tier; split forwarding is derived from the inventory's FreeIPA DNS providers (playbooks/apply/dns-apply.yml)",
-			"freeipa-server / freeipa-server-replica: native FreeIPA DNS (freeipa_setup_dns); global forwarders from freeipa_dns_forwarders via ipa dnsconfig-mod; install-time --forwarder per server",
+			"freeipa-server / freeipa-server-replica: native FreeIPA DNS (freeipa_setup_dns); global forwarders and each DNS server's own forwarders from freeipa_dns_forwarders via ipa dnsconfig-mod and ipa dnsserver-mod on every apply",
 			"freeipa-dns-client and internal-endpoint's fleet-wide baseline: resolver list = explicit freeipa_dns_client_servers, else 127.0.0.1 plus the other providers on a provider, else up to 3 of (tier addresses, FreeIPA DNS providers), else the providers (playbooks/apply/tasks/freeipa-dns-client-resolver.yml)",
 			"freeipa-dns: records in FreeIPA-managed zones from a manifest",
 		},
 		NotManaged: []string{
 			"FreeIPA global forward policy (FreeIPA's default applies)",
 			"FreeIPA forward zones (ipa dnsforwardzone-*)",
-			"per-server forwarders after installation (ipa dnsserver-mod)",
 			"the resolver of a dns tier host itself (the dns role leaves it alone, docs/verification/dns.md B9)",
 		},
 	}

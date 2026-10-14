@@ -100,11 +100,11 @@ func TestRegression_ResolverNameserverCheck(t *testing.T) {
 		// Should pass.
 		{"tier and FreeIPA answer", true, []nsCheckServer{tier, ipa}, 0, nil, []string{"WARNING: localhost"}},
 		{"a registered FreeIPA server is down", true, []nsCheckServer{tier, ipa, replicaDown}, 0,
-			[]string{"WARNING: localhost: nameserver 192.168.122.8 (freeipa pr92-r2) did not answer", "check named on pr92-r2"}, nil},
+			[]string{"WARNING: localhost: nameserver 192.168.122.8 (freeipa pr92-r2) did not answer", "FreeIPA lists it as a DNS server: check named on pr92-r2"}, nil},
 		{"an IPv6-only answer is an address", true, []nsCheckServer{ipv6Only}, 0, nil, []string{"WARNING: localhost"}},
 		{"nobody from FreeIPA answered: an unregistered server only warns", false,
 			[]nsCheckServer{tier, {Addr: "192.168.122.8", Role: "freeipa", Host: "pr92-r2", A: "freeipa_a_connrefused.txt", AAAA: "freeipa_aaaa_connrefused.txt"}}, 0,
-			[]string{"WARNING: localhost: nameserver 192.168.122.8"}, nil},
+			[]string{"WARNING: localhost: nameserver 192.168.122.8", "whether FreeIPA lists it is unknown: check named on pr92-r2"}, []string{"FreeIPA lists it as"}},
 		{"an explicit server that does not answer only warns", true, []nsCheckServer{ipa, gone}, 0,
 			[]string{"WARNING: localhost: nameserver 192.0.2.1 (explicit) did not answer", "explicit freeipa_dns_client_servers entry"}, nil},
 		// Should trigger.

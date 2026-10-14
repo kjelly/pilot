@@ -86,6 +86,9 @@
                 ip = ipaddress.ip_address(m.group(1))
             except ValueError:
                 return False
+            # An IPv4-mapped address is judged as the IPv4 address it maps
+            # (Python before 3.13 does not), as net/netip's Unmap does.
+            ip = getattr(ip, "ipv4_mapped", None) or ip
             return not (ip.is_unspecified or ip.is_multicast)
         out, err = items(raw)
         bad = [] if out is None else [i if isinstance(i, str) else json.dumps(i) for i in out if not good(i)]
