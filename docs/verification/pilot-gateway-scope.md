@@ -1,6 +1,6 @@
 # Verification Spec — Pilot Gateway Scope Publication
 
-> 版本：DRAFT v0.2（vm-target 已實測；尚未正式站台驗收）
+> 版本：DRAFT v0.3（vm-target 已實測；尚未正式站台驗收）
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md §9.6/§57（Phase 6 — Gateway scope publication）
 > 維護者：sre
 >
@@ -71,12 +71,22 @@ pilot gateway-scope reconcile --scope gpu --hosts all --dir <workspace>
 
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
-| C1 | hostgroup | `pilot-target-gpu` hostgroup 存在 | 0 | ipa hostgroup-show pilot-target-gpu |
-| C2 | membership | `gpu-a.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-a.ipa.pilot.internal | ipa hostgroup-show pilot-target-gpu --all |
-| C3 | membership | `gpu-b.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-b.ipa.pilot.internal | ipa hostgroup-show pilot-target-gpu --all |
+| C1 | hostgroup | `pilot-target-gpu` hostgroup 存在 | 0 | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base cn 2>/dev/null |
+| C2 | membership | `gpu-a.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-a.ipa.pilot.internal | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base member 2>/dev/null |
+| C3 | membership | `gpu-b.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-b.ipa.pilot.internal | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base member 2>/dev/null |
 
 ## 3. 已知限制
 
+- C1–C3 在 FreeIPA server 上以 root 執行，用 ldapi unix socket 的 SASL EXTERNAL
+  autobind 唯讀查 LDAP（root 對應到 Directory Manager，看得到全部屬性、不需要密碼），
+  跟 `freeipa-identity.md` 同一個機制。C1 用 ldapsearch 的 rc：hostgroup 不存在時是 32。
+  - 2026-10-14 以前這三列直接跑 `ipa hostgroup-show`，沒有自己的 ticket。能通過只是
+    因為 `gateway-scope-apply.yml` 把 admin ticket 留在 root 的預設 cache（issue #69）。
+    那個 ticket 不再留下之後，三列都報 `ipa: ERROR: did not receive Kerberos credentials`。
+  - 也試過用 server 的 host keytab（`kinit -k`）。hostgroup 讀得到，但 FreeIPA 會對
+    host principal 隱藏部分屬性：同一筆 DNS record，admin 看得到的 `txtrecord`，
+    host principal 看不到，而且不報錯（`internal-endpoint.md` C22 因此會誤判）。
+    所以這幾列都改成 ldapi。
 - Checklist 目前只驗證「hostgroup 存在 + 兩台真實 fixture 主機在裡面」——不驗證 add/remove 對稱性本身；add/remove/keep 三種路徑的正確性已在
   `docs/evidence/pilot-access-gateway/2026-09-14-phase6-gateway-scope.md` 用一個獨立的、之後會清掉的 `test1` scope 全部實測過，不重複佔用這份長期驗收文件的位置。
 - idempotency（第二次 apply `changed=0`）由 `evidenceRequirement.idempotency: required`（contract）+ `pilot vm-target test` 通用驗證，不是這份 checklist 自己的一行。

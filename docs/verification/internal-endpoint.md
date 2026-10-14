@@ -84,6 +84,20 @@ wherever `pilot verify` executes, using fixture manifests under
 since that is where the reconciler itself executes and where its ledger
 and rendered artifacts live.
 
+**How C4, C5, C6, C13, C22 and C25 read FreeIPA.** They run as root on the
+FreeIPA server and read LDAP over the ldapi unix socket with SASL EXTERNAL
+autobind: root maps to Directory Manager, sees every attribute, and needs
+no password. `freeipa-identity.md` reads LDAP the same way. Realm, base DN
+and socket come from `/etc/ipa/default.conf`.
+- Before 2026-10-14 these rows ran `ipa dnsrecord-show`/`service-show` with
+  no ticket of their own. They passed only because the reconciler left its
+  admin ticket in root's default cache (issue #69); it no longer does.
+- The server's host keytab (`kinit -k`) is not a substitute. FreeIPA hides
+  attributes the host principal may not read, without an error: for the
+  same record, admin saw `txtrecord` and the host principal did not, which
+  would turn C22 into a silent false "missing" (captured on FreeIPA 4.13.4,
+  2026-10-14).
+
 **C25's test procedure** requires two reconcile runs: the fixture direct
 endpoint's `route.target.inventory_host` keeps the same `inventory_host`
 while `ansible_host` (the IP) changes between the two runs. The probe
@@ -125,7 +139,11 @@ cleanly.
   category: dns
   check: a direct route's A/AAAA record points at route.target's resolved address
   probe: |
-    got=$(ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_DIRECT_OWNER" --raw 2>/dev/null | grep -oE 'arecord: [0-9.]+' | awk '{print $2}' | head -n1)
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    zone="${PILOT_VAR_TEST_DNS_ZONE%.}."
+    got=$(ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "idnsname=$zone,cn=dns,$basedn" -s one "(idnsname=$PILOT_VAR_TEST_DIRECT_OWNER)" aRecord 2>/dev/null | grep -oiE '^arecord: [0-9.]+' | awk '{print $2}' | head -n1)
     if [ "$got" = "$PILOT_VAR_TEST_DIRECT_TARGET_IP" ]; then echo match; else echo "got=$got want=$PILOT_VAR_TEST_DIRECT_TARGET_IP"; fi
   expect: {stdout: {equals: match}}
   tags: [C4]
@@ -133,7 +151,11 @@ cleanly.
   category: dns
   check: a reverse_proxy route's A/AAAA record points at the proxy host, never the upstream
   probe: |
-    got=$(ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_PROXY_OWNER" --raw 2>/dev/null | grep -oE 'arecord: [0-9.]+' | awk '{print $2}' | head -n1)
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    zone="${PILOT_VAR_TEST_DNS_ZONE%.}."
+    got=$(ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "idnsname=$zone,cn=dns,$basedn" -s one "(idnsname=$PILOT_VAR_TEST_PROXY_OWNER)" aRecord 2>/dev/null | grep -oiE '^arecord: [0-9.]+' | awk '{print $2}' | head -n1)
     if [ "$got" = "$PILOT_VAR_TEST_PROXY_HOST_IP" ] && [ "$got" != "$PILOT_VAR_TEST_UPSTREAM_IP" ]; then echo correct; else echo "got=$got proxy=$PILOT_VAR_TEST_PROXY_HOST_IP upstream=$PILOT_VAR_TEST_UPSTREAM_IP"; fi
   expect: {stdout: {equals: correct}}
   tags: [C5]
@@ -141,7 +163,11 @@ cleanly.
   category: dns
   check: the generated DNS value never carries a port suffix
   probe: |
-    val=$(ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_DIRECT_OWNER" --raw 2>/dev/null | grep -oE 'arecord: [0-9.]+' | awk '{print $2}' | head -n1)
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    zone="${PILOT_VAR_TEST_DNS_ZONE%.}."
+    val=$(ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "idnsname=$zone,cn=dns,$basedn" -s one "(idnsname=$PILOT_VAR_TEST_DIRECT_OWNER)" aRecord 2>/dev/null | grep -oiE '^arecord: [0-9.]+' | awk '{print $2}' | head -n1)
     echo "$val" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && echo no-port || echo "invalid val=$val"
   expect: {stdout: {equals: no-port}}
   tags: [C6]
@@ -265,9 +291,12 @@ cleanly.
   # 2026-08-13's Phase 5 vm-target run (exists=0 despite the principal
   # genuinely existing, confirmed by manual inspection).
   probe: |
-    show=$(ipa service-show "HTTP/$PILOT_VAR_TEST_ENDPOINT_FQDN" --all --raw 2>/dev/null)
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    show=$(ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "cn=services,cn=accounts,$basedn" "(krbprincipalname=HTTP/$PILOT_VAR_TEST_ENDPOINT_FQDN@$realm)" managedBy 2>/dev/null)
     exists=$(printf '%s' "$show" | grep -c '^[[:space:]]*dn:')
-    managed=$(printf '%s' "$show" | grep -c "managedby.*$PILOT_VAR_TEST_EXPECTED_CERT_OWNER")
+    managed=$(printf '%s' "$show" | grep -ci "managedby.*$PILOT_VAR_TEST_EXPECTED_CERT_OWNER")
     if [ "$exists" -ge 1 ] && [ "$managed" -ge 1 ]; then echo correct; else echo "exists=$exists managed=$managed"; fi
   expect: {stdout: {equals: correct}}
   tags: [C13]
@@ -357,14 +386,22 @@ cleanly.
   # attempt on it — the fix was applied preemptively, mirroring the
   # already-known pattern rather than discovering it fresh a third time.
   probe: |
-    ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_DIRECT_OWNER" --raw 2>/dev/null | grep -q '^[[:space:]]*txtrecord' && echo foreign-record-intact || echo foreign-record-missing
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    zone="${PILOT_VAR_TEST_DNS_ZONE%.}."
+    ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "idnsname=$zone,cn=dns,$basedn" -s one "(idnsname=$PILOT_VAR_TEST_DIRECT_OWNER)" tXTRecord 2>/dev/null | grep -qi '^[[:space:]]*txtrecord' && echo foreign-record-intact || echo foreign-record-missing
   expect: {stdout: {equals: foreign-record-intact}}
   tags: [C22]
 - id: C25
   category: dns
   check: an inventory host IP change (same inventory_host, new ansible_host) reconciles the DNS record cleanly
   probe: |
-    got=$(ipa dnsrecord-show "$PILOT_VAR_TEST_DNS_ZONE" "$PILOT_VAR_TEST_DIRECT_OWNER" --raw 2>/dev/null | grep -oE 'arecord: [0-9.]+' | awk '{print $2}' | head -n1)
+    realm=$(sed -n 's/^realm *= *//p' /etc/ipa/default.conf)
+    basedn=$(sed -n 's/^basedn *= *//p' /etc/ipa/default.conf)
+    ldapi="ldapi://%2Frun%2Fslapd-$(printf %s "$realm" | tr . -).socket"
+    zone="${PILOT_VAR_TEST_DNS_ZONE%.}."
+    got=$(ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H "$ldapi" -b "idnsname=$zone,cn=dns,$basedn" -s one "(idnsname=$PILOT_VAR_TEST_DIRECT_OWNER)" aRecord 2>/dev/null | grep -oiE '^arecord: [0-9.]+' | awk '{print $2}' | head -n1)
     if [ "$got" = "$PILOT_VAR_TEST_DIRECT_TARGET_IP" ]; then echo current; else echo "stale got=$got want=$PILOT_VAR_TEST_DIRECT_TARGET_IP"; fi
   expect: {stdout: {equals: current}}
   tags: [C4]
@@ -686,3 +723,4 @@ verified independently, not yet in one combined pass).
 | 2026-08-14 | DRAFT (29 rows total) | Same-day: **C21, C23, and C24 retired by explicit decision** — the non-interactive `pilot reconcile internal-endpoint` CLI these 3 rows' probes required will not be built (the secret/vault-plumbing design it needs was repeatedly deferred since Phase 8; the user decided against it outright rather than continuing to defer). The underlying Ansible-side gates (dual-confirmation delete, ledger-presence delete, route-owner-migration rejection — spec.md §30-§32) are unchanged and remain independently proven via Phase 8's real negative-path VM tests; only their CLI-dependent verification rows are removed. Spec is now 29 rows (C1-C32 less C21/C23/C24); `tags: [C21]`/`[C23]`/`[C24]` removed from `internal-endpoint-apply.yml` (gate tasks themselves untouched) to satisfy `tag_coverage_test.go`'s orphan-tag lock. No row now depends on unbuilt work; a single combined verify run (not yet performed) would establish v1.0. |
 | 2026-09-24 | 29 rows (unchanged) | Tags: every include passes its row tags with `apply`; manifest/ledger/normalization pre_tasks are `always`; safety gates carry the rows they protect (C27 upstream, C22 delete, route-owner on every present-endpoint mutation); C13 kinit also carries C4-C6; the ledger write stays untagged (full runs only). Before this every `--tags` run crashed on undefined facts, including the decommission provider's `--tags iep_decommission_verify` query. Also fixed: deleting a `tls.mode: disabled` endpoint failed with "Empty hostname produced from delegate_to". Live: scoped C9/C10/C12/C13/C15/C27/C4 runs, the decommission query and a scoped C22 delete on a 4-node vm-target topology — `docs/evidence/include-apply-tags-apt-framework/2026-09-24-dfb58a5.md` | pilot |
 | 2026-10-01 | 29 rows (unchanged) | `internal_endpoint_normalized` 在累加 loop 前先設成 `[]`：manifest 是 `endpoints: []` 時 loop 不執行，fact 一直 undefined，decommission verify 查詢（`--tags iep_decommission_verify`）因此報 `'internal_endpoint_normalized' is undefined`。checklist 不變 | pilot |
+| 2026-10-14 | 29 rows (unchanged) | C4、C5、C6、C13、C22、C25 從 `ipa dnsrecord-show`/`service-show` 改成 root 透過 ldapi 的 SASL EXTERNAL 讀 LDAP（與 `freeipa-identity.md` 同機制，不需密碼）。之前這六列能通過，只是因為 reconciler 把 admin ticket 留在 root 的預設 cache（issue #69，PR #72 已修）。host keytab 不能代替：FreeIPA 對 host principal 隱藏 `txtrecord`，C22 會誤判。判讀邏輯不變 | pilot |
