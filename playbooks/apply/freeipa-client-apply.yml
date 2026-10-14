@@ -118,7 +118,6 @@
     # freeipa_client_register_dns left UNSET on purpose: the effective value is
     # computed in pre_tasks from the selected FreeIPA server's freeipa_setup_dns
     # when the operator hasn't set it explicitly (spec.md §4.2/§7).
-    freeipa_client_dns_addresses: []
     # Record name relative to the zone (`dnsrecord-add <zone> <name> ...` wants
     # the short label, not the FQDN) — reused by both enrollment planning and
     # the existing-client backfill path below.
@@ -257,6 +256,15 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        freeipa_client_dns_addresses: "{{ freeipa_client_dns_addresses | default([]) }}"
       tags: [always]
 
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"

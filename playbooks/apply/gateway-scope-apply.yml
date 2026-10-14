@@ -70,7 +70,6 @@
   become: false
   gather_facts: false
   vars:
-    gateway_scope_plan_only: false
     gateway_scope_automember_action: none
     stage: sandbox
     confirm_staging: false
@@ -104,6 +103,15 @@
         that:
           - (staging_attested_within_hours | int) <= 168
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        gateway_scope_plan_only: "{{ gateway_scope_plan_only | default(false) }}"
       tags: [always]
   tasks:
     - name: Validate required vars (common)
