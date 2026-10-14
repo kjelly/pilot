@@ -11,9 +11,11 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-15，candidate `09ded7e`（tree `b3ec2d907bf5651e126b78a3e464143c0381b5dc`，PR #92 第二輪），
+最新驗證：2026-10-15，candidate `5750f2a`（tree `996fd4b6d577775ffece125c79a0fc5435ec03b0`，PR #92 第二輪），
 **PASS**。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md)。
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-15-5750f2a.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-5750f2a.md)；
+與 `44e2d20` 的對照實跑（名稱不符的 replica、forwarders 收斂前後）見
+[`2026-10-15-09ded7e.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md)。
 dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
 `pilot deploy` 全站部署、`--limit`、`pilot reconcile`），摘要：
 [`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
