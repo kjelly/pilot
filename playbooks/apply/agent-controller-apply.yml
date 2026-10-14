@@ -50,18 +50,11 @@
     agent_controller_textfile_path: /var/lib/node_exporter/textfile/pilot_agent_controller.prom
     agent_controller_backup_dir: /var/backups/pilot-agent-controller
 
-    agent_controller_listen_port: 8090
     # Deliberately not defaulted to 0.0.0.0 or 127.0.0.1 — resolved below
     # from ansible_default_ipv4.address unless explicitly overridden.
     agent_controller_listen_addr: ""
 
-    agent_controller_max_concurrent_runs: 4
-    agent_controller_max_runs_per_host: 1
-    agent_controller_max_body_bytes: 1048576
 
-    agent_controller_dispatcher_kind: fake
-    agent_controller_dispatcher_endpoint: ""
-    agent_controller_dispatcher_timeout_seconds: 30
 
     # agent_controller_artifact_path / agent_controller_artifact_sha256 /
     # agent_controller_webhook_secret are DELIBERATELY NOT declared here
@@ -96,6 +89,21 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        agent_controller_dispatcher_endpoint: "{{ agent_controller_dispatcher_endpoint | default('') }}"
+        agent_controller_dispatcher_kind: "{{ agent_controller_dispatcher_kind | default('fake') }}"
+        agent_controller_dispatcher_timeout_seconds: "{{ agent_controller_dispatcher_timeout_seconds | default(30) }}"
+        agent_controller_listen_port: "{{ agent_controller_listen_port | default(8090) }}"
+        agent_controller_max_body_bytes: "{{ agent_controller_max_body_bytes | default(1048576) }}"
+        agent_controller_max_concurrent_runs: "{{ agent_controller_max_concurrent_runs | default(4) }}"
+        agent_controller_max_runs_per_host: "{{ agent_controller_max_runs_per_host | default(1) }}"
       tags: [always]
 
     - name: "Gate: supported OS is Ubuntu 24.04"

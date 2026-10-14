@@ -44,12 +44,6 @@
     confirm_prod: false
     staging_attested_within_hours: 168
     restic_s3_alias: s3-backup-server
-    restic_s3_port: 8333
-    restic_s3_bucket: pilot-restic-backup
-    restic_repository: "s3:http://{{ restic_s3_alias }}:{{ restic_s3_port }}/{{ restic_s3_bucket }}"
-    restic_backup_paths: ["/etc"]
-    restic_backup_pre_hook: ""
-    restic_backup_schedule: "*-*-* 02:00:00"
     # Do not catch up a missed timer invocation as soon as the playbook enables
     # it: that would run a real snapshot while apply is still configuring every
     # host in this shared repository.  Normal runs are spread over this window.
@@ -58,9 +52,6 @@
     # Every repository-writing command waits for a concurrent host instead of
     # treating its live restic lock as an apply failure.
     restic_lock_retry: 120s
-    restic_retention_daily: 7
-    restic_retention_weekly: 4
-    restic_retention_monthly: 6
     restic_env_path: /etc/pilot/restic-env
     restic_script_path: /usr/local/bin/pilot-restic-backup.sh
 
@@ -93,6 +84,27 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        restic_backup_paths: "{{ restic_backup_paths | default(['/etc']) }}"
+        restic_backup_pre_hook: "{{ restic_backup_pre_hook | default('') }}"
+        restic_backup_schedule: "{{ restic_backup_schedule | default('*-*-* 02:00:00') }}"
+        restic_retention_daily: "{{ restic_retention_daily | default(7) }}"
+        restic_retention_monthly: "{{ restic_retention_monthly | default(6) }}"
+        restic_retention_weekly: "{{ restic_retention_weekly | default(4) }}"
+        restic_s3_bucket: "{{ restic_s3_bucket | default('pilot-restic-backup') }}"
+        restic_s3_port: "{{ restic_s3_port | default(8333) }}"
+      tags: [always]
+
+    - name: "Resolve the restic_repository default from the resolved S3 port and bucket"
+      ansible.builtin.set_fact:
+        restic_repository: "{{ restic_repository | default('s3:http://' ~ restic_s3_alias ~ ':' ~ restic_s3_port ~ '/' ~ restic_s3_bucket) }}"
       tags: [always]
 
     - name: "Gate: supported OS (Debian/Ubuntu apt; EL via EPEL dnf)"

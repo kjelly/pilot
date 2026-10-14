@@ -132,8 +132,9 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 	}
 
 	// wazuh_fim_directories must be a real, templated (per-host overridable)
-	// list, not a hardcoded pair of directory lines.
-	if !strings.Contains(applyRaw, `wazuh_fim_directories: ["/etc", "/boot"]`) {
+	// list, not a hardcoded pair of directory lines. Its default is set in
+	// pre_tasks, not play vars:, which would outrank group_vars/host_vars.
+	if !strings.Contains(applyRaw, `wazuh_fim_directories: "{{ wazuh_fim_directories | default(['/etc', '/boot']) }}"`) {
 		t.Errorf("wazuh-fim-apply.yml must default wazuh_fim_directories to [\"/etc\", \"/boot\"]")
 	}
 	if !strings.Contains(applyRaw, "{% for dir in wazuh_fim_directories %}") {
