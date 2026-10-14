@@ -806,7 +806,11 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    第一個 task include `tasks/freeipa-private-ccache-open.yml`、`always:` include
    `tasks/freeipa-private-ccache-close.yml`(兩者都標 `always` 並帶
    `apply: {tags: [always]}`);block 裡(含 include 進來的檔案)的 kinit/ipa 都會用
-   私有 cache,成功、失敗、`--tags` 都會清掉,被 SIGKILL 留下的 cache 由下次執行清除。
+   私有 cache,成功、失敗、`--tags` 都會清掉,被 SIGKILL 留下的 cache 由同一個執行帳號
+   的下次執行清除——只清執行帳號自己的:共用的 sticky `/tmp` 裡別的帳號留下的 cache
+   (例如被中斷的 root run,遇上 `become: false` 的 gateway-scope)刪不掉,刪了會讓
+   整個 run 在 kinit 之前就 EPERM 失敗(PR #72 review,
+   `kinit_private_ccache_cleanup_regression_test.go` 鎖住)。
    會被別處 include 的 task 檔裡的 kinit 要自己寫 `environment: {KRB5CCNAME:
    "{{ pilot_krb5ccname }}"}`,在 block 外被 include 時直接失敗,不會退回預設 cache。
    不要用 play 層級的 `environment:`:它也會套到 `ipa-server-install`/`ipa-client-install`
@@ -1447,4 +1451,4 @@ git status --short
 | 2026-10-02 | v1.45 | §4.5 新增第 12 點：`{{ }}` 模板裡的 `\\` 不會被還原成 `\`，regex 靜默失效。修正 pilot-access-gateway AG82 的 `..` 拒絕訊息與路徑正規化，新增全 repo lint `TestRegression_JinjaTemplatesUseSingleBackslashes`（allowlist 一處：`freeipa-dns-apply.yml` 的 `[ \\t]`）與語意測試 `TestJinjaTemplateBackslashSemantics` | pilot |
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
-| 2026-10-13 | v1.48 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist） | pilot |
+| 2026-10-13 | v1.48 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
