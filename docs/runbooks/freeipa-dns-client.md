@@ -61,14 +61,18 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   5 台新 VM 的 dns tier 拓樸 C1–C7 21/21、重跑 `changed=0`。Ubuntu 與 AlmaLinux 上
   `timeout:10e-1`（glibc 用 10 秒）與 `attempts:20e-1`（glibc 用 5 次）新的 C7 都判 FAIL，
   先前的 C7 判 PASS。見 [evidence](../evidence/freeipa-dns-client/2026-10-02-065a1c6.md)。
+- 最新實跑（2026-10-14，candidate `6522b94`，replica 未設 `freeipa_setup_dns` 時也是 DNS
+  提供者，issue #67）：4 台新 VM（primary、replica、dns tier、consumer）`vm-target topology test`
+  L3 check mode→L6 PASS，本檔 7/7、重跑 `changed=0`；consumer 的 `/etc/resolv.conf` 依序是 tier、
+  primary、replica。見 [evidence](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
 
 ## 1. 邊界與前置
 
-- 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa-server-replica`
-  且 `freeipa_setup_dns: true`）已完成 `freeipa-server-apply.yml` 並健康。
+- 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa_setup_dns` 不是
+  `false` 的 `freeipa-server-replica`）已完成安裝並健康。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，

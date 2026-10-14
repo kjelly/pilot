@@ -606,200 +606,218 @@
     # DNS-write tasks in Phase 7 need one for EVERY present endpoint
     # regardless of tls_mode (a tls.disabled endpoint still gets a real DNS
     # record) and reuse this same kinit rather than kiniting again.
-    - name: "Kinit as IPA admin (identity + DNS reconcile)"
-      tags: [C13, C4, C5, C6]
-      ansible.builtin.shell: |
-        set -o pipefail
-        printf '%s' "{{ ipa_admin_password }}" | kinit admin
-      args:
-        executable: /bin/bash
-      no_log: true
-      changed_when: false
-      when:
-        - not ansible_check_mode
-        - internal_endpoint_present | length > 0
+    - name: "FreeIPA control plane, DNS, delete and decommission queries with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Create HTTP/<fqdn> service principal and managedBy delegation"
-      tags: [C13]
-      ansible.builtin.include_tasks:
-        file: tasks/internal-endpoint-cert-identity.yml
-        apply:
+        - name: "Kinit as IPA admin (identity + DNS reconcile)"
+          tags: [C13, C4, C5, C6]
+          ansible.builtin.shell: |
+            set -o pipefail
+            printf '%s' "{{ ipa_admin_password }}" | kinit admin
+          args:
+            executable: /bin/bash
+          no_log: true
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - internal_endpoint_present | length > 0
+
+        - name: "Create HTTP/<fqdn> service principal and managedBy delegation"
           tags: [C13]
-      loop: "{{ internal_endpoint_freeipa }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          ansible.builtin.include_tasks:
+            file: tasks/internal-endpoint-cert-identity.yml
+            apply:
+              tags: [C13]
+          loop: "{{ internal_endpoint_freeipa }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
 
-    # --- Phase 5: certificate owner — certmonger request/converge (spec.md §28) ---
+        # --- Phase 5: certificate owner — certmonger request/converge (spec.md §28) ---
 
-    # Spec: docs/verification/internal-endpoint.md C15 (spec.md §20-§22)
-    # Every task in the included file is delegated to the certificate owner
-    # host, never run on freeipa-server or the controller — spec.md §20's
-    # private-key boundary requires the key be generated and stay there.
-    - name: "Request/converge the endpoint certificate via certmonger (ipa-getcert)"
-      tags: [C15]
-      ansible.builtin.include_tasks:
-        file: tasks/internal-endpoint-cert-request.yml
-        apply:
+        # Spec: docs/verification/internal-endpoint.md C15 (spec.md §20-§22)
+        # Every task in the included file is delegated to the certificate owner
+        # host, never run on freeipa-server or the controller — spec.md §20's
+        # private-key boundary requires the key be generated and stay there.
+        - name: "Request/converge the endpoint certificate via certmonger (ipa-getcert)"
           tags: [C15]
-      loop: "{{ internal_endpoint_freeipa }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
-      when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
+          ansible.builtin.include_tasks:
+            file: tasks/internal-endpoint-cert-request.yml
+            apply:
+              tags: [C15]
+          loop: "{{ internal_endpoint_freeipa }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
 
-    # --- Phase 6: reverse_proxy only — render nginx candidate, nginx -t, reload, local backend check (spec.md §28) ---
+        # --- Phase 6: reverse_proxy only — render nginx candidate, nginx -t, reload, local backend check (spec.md §28) ---
 
-    # Spec: docs/verification/internal-endpoint.md C27 (spec.md §12.3/§12.4/§13)
-    - name: "Render the per-endpoint nginx vhost (http/https upstream), nginx -t, reload, local backend readiness check"
-      tags: [C27]
-      ansible.builtin.include_tasks:
-        file: tasks/internal-endpoint-reverse-proxy-vhost.yml
-        apply:
+        # Spec: docs/verification/internal-endpoint.md C27 (spec.md §12.3/§12.4/§13)
+        - name: "Render the per-endpoint nginx vhost (http/https upstream), nginx -t, reload, local backend readiness check"
           tags: [C27]
-      loop: "{{ internal_endpoint_reverse_proxy }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
-      when: iep_endpoint.route_owner_host not in (pilot_deferred_hosts | default([]))
+          ansible.builtin.include_tasks:
+            file: tasks/internal-endpoint-reverse-proxy-vhost.yml
+            apply:
+              tags: [C27]
+          loop: "{{ internal_endpoint_reverse_proxy }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          when: iep_endpoint.route_owner_host not in (pilot_deferred_hosts | default([]))
 
-    # --- Phase 7: DNS — create/update A/AAAA, changed last (spec.md §28) ---
+        # --- Phase 7: DNS — create/update A/AAAA, changed last (spec.md §28) ---
 
-    # Spec: docs/verification/internal-endpoint.md C4, C5, C6, C25 (spec.md
-    # §11.4 direct+reverse_proxy cases — same task reconciles both, DNS
-    # always points at route_owner_host regardless of mode — §11.5 no port
-    # suffix, §30 IP change). reverse_proxy's vhost/backend-check above must
-    # already have succeeded before its DNS record is written — "DNS IS
-    # CHANGED LAST" (spec.md §28).
-    - name: "Reconcile route A/AAAA records — direct target or reverse_proxy proxy host, never the upstream (DNS changed last)"
-      tags: [C4, C5, C6]
-      ansible.builtin.include_tasks:
-        file: tasks/internal-endpoint-direct-dns.yml
-        apply:
+        # Spec: docs/verification/internal-endpoint.md C4, C5, C6, C25 (spec.md
+        # §11.4 direct+reverse_proxy cases — same task reconciles both, DNS
+        # always points at route_owner_host regardless of mode — §11.5 no port
+        # suffix, §30 IP change). reverse_proxy's vhost/backend-check above must
+        # already have succeeded before its DNS record is written — "DNS IS
+        # CHANGED LAST" (spec.md §28).
+        - name: "Reconcile route A/AAAA records — direct target or reverse_proxy proxy host, never the upstream (DNS changed last)"
           tags: [C4, C5, C6]
-      loop: "{{ internal_endpoint_present }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          ansible.builtin.include_tasks:
+            file: tasks/internal-endpoint-direct-dns.yml
+            apply:
+              tags: [C4, C5, C6]
+          loop: "{{ internal_endpoint_present }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
 
-    # --- Delete sequence (spec.md §32) — runs before the ledger write below,
-    #     so a deleted endpoint is naturally excluded from the rewritten
-    #     ledger (delete step 9, "remove ledger entry", has no task of its
-    #     own — see tasks/internal-endpoint-delete.yml's header comment). ---
+        # --- Delete sequence (spec.md §32) — runs before the ledger write below,
+        #     so a deleted endpoint is naturally excluded from the rewritten
+        #     ledger (delete step 9, "remove ledger entry", has no task of its
+        #     own — see tasks/internal-endpoint-delete.yml's header comment). ---
 
-    # Spec: docs/verification/internal-endpoint.md C22 (spec.md §32-§34)
-    - name: "Delete sequence for each confirmed, ledger-known state=absent endpoint"
-      tags: [C22]
-      ansible.builtin.include_tasks:
-        file: tasks/internal-endpoint-delete.yml
-        apply:
+        # Spec: docs/verification/internal-endpoint.md C22 (spec.md §32-§34)
+        - name: "Delete sequence for each confirmed, ledger-known state=absent endpoint"
           tags: [C22]
-      loop: "{{ internal_endpoint_absent }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
-      when:
-        - iep_endpoint.get('route_owner_host', '') not in (pilot_deferred_hosts | default([]))
-        - iep_endpoint.get('cert_owner', '') not in (pilot_deferred_hosts | default([]))
+          ansible.builtin.include_tasks:
+            file: tasks/internal-endpoint-delete.yml
+            apply:
+              tags: [C22]
+          loop: "{{ internal_endpoint_absent }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          when:
+            - iep_endpoint.get('route_owner_host', '') not in (pilot_deferred_hosts | default([]))
+            - iep_endpoint.get('cert_owner', '') not in (pilot_deferred_hosts | default([]))
 
-    # --- Phase 9: atomically update the ownership ledger (spec.md §28, §29) ---
-    # Deliberately untagged, so only a full run rewrites the ledger. The new
-    # ledger is computed from internal_endpoint_present alone; a --tags run
-    # that skipped the C22 delete would otherwise drop still-live absent
-    # endpoints from it, and the §32 gate would then refuse to ever delete
-    # them.
+        # --- Phase 9: atomically update the ownership ledger (spec.md §28, §29) ---
+        # Deliberately untagged, so only a full run rewrites the ledger. The new
+        # ledger is computed from internal_endpoint_present alone; a --tags run
+        # that skipped the C22 delete would otherwise drop still-live absent
+        # endpoints from it, and the §32 gate would then refuse to ever delete
+        # them.
 
-    - name: "Compute each present endpoint's ownership-ledger entry"
-      ansible.builtin.include_tasks: tasks/internal-endpoint-ledger-entry.yml
-      loop: "{{ internal_endpoint_present }}"
-      loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
-      when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
+        - name: "Compute each present endpoint's ownership-ledger entry"
+          ansible.builtin.include_tasks: tasks/internal-endpoint-ledger-entry.yml
+          loop: "{{ internal_endpoint_present }}"
+          loop_control: {loop_var: iep_endpoint, label: "{{ iep_endpoint.fqdn }}"}
+          when: iep_endpoint.cert_owner not in (pilot_deferred_hosts | default([]))
 
-    - name: "Ensure the ownership ledger's parent directory exists"
-      ansible.builtin.file:
-        path: "{{ internal_endpoint_ledger_file | dirname }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+        - name: "Ensure the ownership ledger's parent directory exists"
+          ansible.builtin.file:
+            path: "{{ internal_endpoint_ledger_file | dirname }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
 
-    - name: "Atomically write the ownership ledger (spec.md §29 — ansible.builtin.copy writes temp+rename by default)"
-      ansible.builtin.copy:
-        content: "{{ {'schema_version': 1, 'endpoints': internal_endpoint_ledger_entries | default({})} | to_nice_json }}\n"
-        dest: "{{ internal_endpoint_ledger_file }}"
-        owner: root
-        group: root
-        mode: "0600"
-      when: not ansible_check_mode
+        - name: "Atomically write the ownership ledger (spec.md §29 — ansible.builtin.copy writes temp+rename by default)"
+          ansible.builtin.copy:
+            content: "{{ {'schema_version': 1, 'endpoints': internal_endpoint_ledger_entries | default({})} | to_nice_json }}\n"
+            dest: "{{ internal_endpoint_ledger_file }}"
+            owner: root
+            group: root
+            mode: "0600"
+          when: not ansible_check_mode
 
-    # --- Phase 10: read-only decommission verify query (spec.md §37 Phase
-    #     4, HD13) ---
-    #
-    # internal/decommission/providers.InternalEndpointProvider.Verify calls
-    # this independently AFTER the delete sequence above already ran (or
-    # even standalone, e.g. a plan-time check) — it must never trust the
-    # delete sequence's own task results (INV-10). Reuses
-    # internal_endpoint_normalized (computed by pre_tasks above from the
-    # SAME manifest file, regardless of query mode) purely to recover the
-    # target fqdn's own dns_zone/dns_owner — the manifest's entry (state:
-    # absent doesn't remove it, only the ledger drops it, per
-    # tasks/internal-endpoint-delete.yml's own header comment) is the only
-    # remaining source for that once this endpoint's ledger entry is gone.
-    # Mirrors freeipa-identity-apply.yml's own
-    # pilot_decommission_query/pilot_decommission_target_fqdn convention
-    # (its "freeipa_host_absent_inspect" read-only query block) exactly,
-    # keyed off a fqdn directly rather than any roster/manifest state, so
-    # it works whether or not this endpoint was ever actually deleted yet.
+        # --- Phase 10: read-only decommission verify query (spec.md §37 Phase
+        #     4, HD13) ---
+        #
+        # internal/decommission/providers.InternalEndpointProvider.Verify calls
+        # this independently AFTER the delete sequence above already ran (or
+        # even standalone, e.g. a plan-time check) — it must never trust the
+        # delete sequence's own task results (INV-10). Reuses
+        # internal_endpoint_normalized (computed by pre_tasks above from the
+        # SAME manifest file, regardless of query mode) purely to recover the
+        # target fqdn's own dns_zone/dns_owner — the manifest's entry (state:
+        # absent doesn't remove it, only the ledger drops it, per
+        # tasks/internal-endpoint-delete.yml's own header comment) is the only
+        # remaining source for that once this endpoint's ledger entry is gone.
+        # Mirrors freeipa-identity-apply.yml's own
+        # pilot_decommission_query/pilot_decommission_target_fqdn convention
+        # (its "freeipa_host_absent_inspect" read-only query block) exactly,
+        # keyed off a fqdn directly rather than any roster/manifest state, so
+        # it works whether or not this endpoint was ever actually deleted yet.
 
-    - name: "Kinit as IPA admin (decommission verify query)"
-      tags: [iep_decommission_verify]
-      ansible.builtin.shell: |
-        set -o pipefail
-        printf '%s' "{{ ipa_admin_password }}" | kinit admin
-      args:
-        executable: /bin/bash
-      no_log: true
-      changed_when: false
-      when:
-        - not ansible_check_mode
-        - pilot_decommission_query | default('') == 'endpoint_object'
-        - pilot_decommission_target_fqdn | default('') | length > 0
+        - name: "Kinit as IPA admin (decommission verify query)"
+          tags: [iep_decommission_verify]
+          ansible.builtin.shell: |
+            set -o pipefail
+            printf '%s' "{{ ipa_admin_password }}" | kinit admin
+          args:
+            executable: /bin/bash
+          no_log: true
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - pilot_decommission_query | default('') == 'endpoint_object'
+            - pilot_decommission_target_fqdn | default('') | length > 0
 
-    - name: "Resolve the query target fqdn's own manifest entry (dns_zone/dns_owner), if it still exists"
-      ansible.builtin.set_fact:
-        iep_decom_query_entry: >-
-          {{ (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
-              | list | first)
-             if (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
-                 | list | length > 0)
-             else {} }}
-      when:
-        - pilot_decommission_query | default('') == 'endpoint_object'
-        - pilot_decommission_target_fqdn | default('') | length > 0
-      tags: [iep_decommission_verify]
+        - name: "Resolve the query target fqdn's own manifest entry (dns_zone/dns_owner), if it still exists"
+          ansible.builtin.set_fact:
+            iep_decom_query_entry: >-
+              {{ (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
+                  | list | first)
+                 if (internal_endpoint_normalized | selectattr('fqdn', 'equalto', pilot_decommission_target_fqdn | default(''))
+                     | list | length > 0)
+                 else {} }}
+          when:
+            - pilot_decommission_query | default('') == 'endpoint_object'
+            - pilot_decommission_target_fqdn | default('') | length > 0
+          tags: [iep_decommission_verify]
 
-    - name: "Look up the current live host object for the query target endpoint (read-only, decommission verify)"
-      ansible.builtin.command:
-        argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
-      register: iep_decom_query_host
-      changed_when: false
-      failed_when: false
-      when:
-        - pilot_decommission_query | default('') == 'endpoint_object'
-        - pilot_decommission_target_fqdn | default('') | length > 0
-      tags: [iep_decommission_verify]
+        - name: "Look up the current live host object for the query target endpoint (read-only, decommission verify)"
+          ansible.builtin.command:
+            argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
+          register: iep_decom_query_host
+          changed_when: false
+          failed_when: false
+          when:
+            - pilot_decommission_query | default('') == 'endpoint_object'
+            - pilot_decommission_target_fqdn | default('') | length > 0
+          tags: [iep_decommission_verify]
 
-    - name: "Look up the current live DNS A/AAAA record for the query target endpoint (read-only, decommission verify)"
-      ansible.builtin.command:
-        argv: [ipa, dnsrecord-show, "{{ iep_decom_query_entry.get('dns_zone', '') }}", "{{ iep_decom_query_entry.get('dns_owner', '') }}"]
-      register: iep_decom_query_dns
-      changed_when: false
-      failed_when: false
-      when:
-        - pilot_decommission_query | default('') == 'endpoint_object'
-        - pilot_decommission_target_fqdn | default('') | length > 0
-        - iep_decom_query_entry.get('dns_zone', '') | length > 0
-      tags: [iep_decommission_verify]
+        - name: "Look up the current live DNS A/AAAA record for the query target endpoint (read-only, decommission verify)"
+          ansible.builtin.command:
+            argv: [ipa, dnsrecord-show, "{{ iep_decom_query_entry.get('dns_zone', '') }}", "{{ iep_decom_query_entry.get('dns_owner', '') }}"]
+          register: iep_decom_query_dns
+          changed_when: false
+          failed_when: false
+          when:
+            - pilot_decommission_query | default('') == 'endpoint_object'
+            - pilot_decommission_target_fqdn | default('') | length > 0
+            - iep_decom_query_entry.get('dns_zone', '') | length > 0
+          tags: [iep_decommission_verify]
 
-    - name: "Print endpoint_object query inspection for external tooling (read-only)"
-      ansible.builtin.debug:
-        msg: >-
-          ENDPOINT_INSPECT[{{ pilot_decommission_target_fqdn }}]
-          HOST_RESULT: {{ (iep_decom_query_host.stdout | default('')) ~ ' ' ~ (iep_decom_query_host.stderr | default('')) }}
-          DNS_RESULT: {{ (iep_decom_query_dns.stdout | default('')) ~ ' ' ~ (iep_decom_query_dns.stderr | default(''))
-                          if (iep_decom_query_entry.get('dns_zone', '') | default('') | length > 0)
-                          else 'skipped (no manifest entry — cannot resolve dns_zone/dns_owner)' }}
-      when:
-        - pilot_decommission_query | default('') == 'endpoint_object'
-        - pilot_decommission_target_fqdn | default('') | length > 0
-      tags: [iep_decommission_verify]
+        - name: "Print endpoint_object query inspection for external tooling (read-only)"
+          ansible.builtin.debug:
+            msg: >-
+              ENDPOINT_INSPECT[{{ pilot_decommission_target_fqdn }}]
+              HOST_RESULT: {{ (iep_decom_query_host.stdout | default('')) ~ ' ' ~ (iep_decom_query_host.stderr | default('')) }}
+              DNS_RESULT: {{ (iep_decom_query_dns.stdout | default('')) ~ ' ' ~ (iep_decom_query_dns.stderr | default(''))
+                              if (iep_decom_query_entry.get('dns_zone', '') | default('') | length > 0)
+                              else 'skipped (no manifest entry — cannot resolve dns_zone/dns_owner)' }}
+          when:
+            - pilot_decommission_query | default('') == 'endpoint_object'
+            - pilot_decommission_target_fqdn | default('') | length > 0
+          tags: [iep_decommission_verify]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

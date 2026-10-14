@@ -19,12 +19,17 @@
   ansible.builtin.set_fact:
     iep_ledger: "{{ internal_endpoint_ledger.endpoints[iep_endpoint.fqdn] }}"
 
+# Only included inside internal-endpoint-apply.yml's private-cache block
+# (issue #69); stated here as well so an include anywhere else fails on the
+# undefined cache instead of writing an admin ticket to the default cache.
 - name: "Kinit as IPA admin (delete sequence)"
   ansible.builtin.shell: |
     set -o pipefail
     printf '%s' "{{ ipa_admin_password }}" | kinit admin
   args:
     executable: /bin/bash
+  environment:
+    KRB5CCNAME: "{{ pilot_krb5ccname }}"
   no_log: true
   changed_when: false
   when: not ansible_check_mode

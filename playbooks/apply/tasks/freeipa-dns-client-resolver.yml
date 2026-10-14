@@ -16,9 +16,9 @@
 #                                 inventory auto-detection
 #
 # Auto-detection (no override needed in the common case): walks
-# groups['freeipa-server'] (freeipa_setup_dns defaults true there) and
-# groups['freeipa-server-replica'] (freeipa_setup_dns defaults false there
-# — opt-in per replica), collecting each DNS-providing host's own
+# groups['freeipa-server'] and groups['freeipa-server-replica'] (freeipa_setup_dns
+# defaults to true on both, as the install playbooks do; a host with
+# freeipa_setup_dns: false runs no named), collecting each DNS-providing host's own
 # ansible_host. If THIS host is itself one of those providers, its own
 # resolver is pointed at itself (127.0.0.1) first, with the remaining
 # providers as fallback.
@@ -97,7 +97,7 @@
     freeipa_dns_providers: >-
       {{ freeipa_dns_providers + [{'host': item, 'ip': hostvars[item].ansible_host | default(item, true)}] }}
   loop: "{{ groups['freeipa-server-replica'] | default([]) }}"
-  when: hostvars[item].freeipa_setup_dns | default(false) | bool
+  when: hostvars[item].freeipa_setup_dns | default(true) | bool
 
 # The dns tier (docs/verification/dns.md §2 B10): when the inventory has
 # hosts in the `dns` group, a consumer sends its queries to the tier first
@@ -136,8 +136,8 @@
       - freeipa_dns_client_effective_servers | length > 0
     fail_msg: >-
       No FreeIPA DNS-providing host found. Either set freeipa_dns_client_servers=[ip1,ip2]
-      explicitly, or make sure this inventory has a freeipa-server (or
-      freeipa-server-replica with freeipa_setup_dns=true) host.
+      explicitly, or make sure this inventory has a freeipa-server or
+      freeipa-server-replica host whose freeipa_setup_dns is not false.
 
 # docs/verification/freeipa-dns-client.md C7. glibc waits 5 seconds per
 # nameserver by default, so with a dns tier node down (packets dropped)

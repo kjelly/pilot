@@ -1,0 +1,20 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch nameservers begin
+192.168.122.1
+@@pilot-dnsarch nameservers end rc=0
+@@pilot-dnsarch options begin
+@@pilot-dnsarch options end rc=0
+@@pilot-dnsarch resolved begin
+inactive
+@@pilot-dnsarch resolved end rc=3
+@@pilot-dnsarch resolvectl begin
+environment: line 6: resolvectl: command not found
+@@pilot-dnsarch resolvectl end rc=127
+@@pilot-dnsarch first_hop begin
+environment: line 6: dig: command not found
+@@pilot-dnsarch first_hop end rc=127
+@@pilot-dnsarch lookup begin
+::1             localhost localhost.localdomain localhost6 localhost6.localdomain6
+@@pilot-dnsarch lookup end rc=0

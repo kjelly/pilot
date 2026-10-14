@@ -818,6 +818,27 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    hash 出來就是密碼的 SHA-256,所以它的 task 都是 `no_log`
    (`TestRegression_ContainerFileMountDriftHidesWhatItReads`)。
 
+14. **`kinit` 沒帶 `KRB5CCNAME` 就寫進執行帳號的預設 credential cache**,playbook
+   結束後 ticket 一直留在主機上,之後任何用預設 cache 的程式(其他自動化、操作者
+   手動的 `ipa`、診斷工具)都在不知情下以那個身分執行。2026-10-13(issue #69)全新
+   部署的 FreeIPA server 上 root 的 `KCM:0` 就留著 `admin@REALM`。**規則**:把用到
+   ticket 的 task 包進一個 block,block 的 `environment:` 設
+   `KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"`,
+   第一個 task include `tasks/freeipa-private-ccache-open.yml`、`always:` include
+   `tasks/freeipa-private-ccache-close.yml`(兩者都標 `always` 並帶
+   `apply: {tags: [always]}`);block 裡(含 include 進來的檔案)的 kinit/ipa 都會用
+   私有 cache,成功、失敗、`--tags` 都會清掉,被 SIGKILL 留下的 cache 由同一個執行帳號
+   的下次執行清除——只清執行帳號自己的:共用的 sticky `/tmp` 裡別的帳號留下的 cache
+   (例如被中斷的 root run,遇上 `become: false` 的 gateway-scope)刪不掉,刪了會讓
+   整個 run 在 kinit 之前就 EPERM 失敗(PR #72 review,
+   `kinit_private_ccache_cleanup_regression_test.go` 鎖住)。
+   會被別處 include 的 task 檔裡的 kinit 要自己寫 `environment: {KRB5CCNAME:
+   "{{ pilot_krb5ccname }}"}`,在 block 外被 include 時直接失敗,不會退回預設 cache。
+   不要用 play 層級的 `environment:`:它也會套到 `ipa-server-install`/`ipa-client-install`
+   這類安裝程式。`internal/spec/kinit_private_ccache_regression_test.go::TestRegression_KinitUsesAPrivateCredentialCache`
+   對全部 `playbooks/**` 檢查;已經會 `kdestroy` 但仍用預設 cache 的檔案列在
+   ratchet allowlist,遷移後要把項目拿掉。
+
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
 from-scratch install 之後。
@@ -1288,6 +1309,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 不要把 `ansible_host` 當成主機身分，也不要分大小寫比對 FQDN 或 FreeIPA 名稱（見 §5.13）
 - ❌ reconciler 不要只測新增；「從 desired state 移除 → live state 被清掉」與冪等 teardown 都要有測試（見 §5.14）
 - ❌ 新增畫面、參數、欄位時，不要只測函式本身；至少要有一個從真實入口走到底、再讀回結果的測試（見 §5.15）
+- ❌ `kinit` 不要寫進預設 credential cache；用 `tasks/freeipa-private-ccache-open.yml`/`-close.yml` 的私有 cache（見 §4.5 第 14 點）
 
 ---
 
@@ -1456,4 +1478,5 @@ git status --short
 | 2026-10-02 | v1.46 | §4.4 補一點：mutation 之前必須先跑的記錄/檢查 task 要帶齊 mutation 的每一個 tag，只該在 restart/health 之後做的清理在 `--tags` run 要自己確認前提。修正 pilot-access-gateway：AG82 的舊 token 路徑記錄補上 Step 11 的 AG01/AG41/AG42/AG94，刪除改成等沒有待生效重啟、config 不再指向 token、health 通過；錄影政策降級檢查補 AG94、AG81（PR #19 review）| pilot |
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
-| 2026-10-14 | v1.49 | §4.5 第 3 點、§5.7:play-vars lint 改成對每支 apply playbook 檢查所有 contract 的 input(log-server 的 `siem_log_root` 是 log-shipping 的 input,log-server 卻仍用 play vars,Promtail 找不到可 tail 的檔案、apply 失敗);新增 `TestRegression_SpecInputsAreDeclaredContractInputs`:spec 變數契約表列出的變數必須宣告在 contract `groupVars`(尚未處理的 15 個元件列在 `undeclaredSpecInputsAllowlist`,見 issue #81)。log-server、audit-log-forwarding、log-shipping 的變數契約表變數從 play vars 移到 `always` `set_fact`,並宣告進各自 contract;共用的 `siem_log_root`、SIEM 埠與 logrotate 次數的空值/null 一律回到預設,由 `TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` 鎖住兩邊一致;audit-log-forwarding 在 client 的 `siem_forward_port` 與 inventory log-server 的 `siem_receiver_tcp_port` 不一致時 fail;log-server 拒絕系統目錄、路徑上的 symlink,以及不是自己建立的既有目錄當 `siem_log_root`;logrotate 設定檔一律用只抓語法錯誤的 `logrotate -d` 檢查當 `validate`;SELinux 主機上 rsyslogd(`syslogd_t`)只能用 `syslogd_port_t`/`rsh_port_t` 的 TCP port,非預設的 SIEM port 由 `tasks/rsyslog-selinux-tcp-port.yml` 標成 `syslogd_port_t`(被其他服務占用的 port 直接 fail),audit-log-forwarding spec 新增 C22 檢查 rsyslogd 對轉送埠的連線真的建立。preflight 與 repair 共用 `contract.ValueMatchesType`:`integer` 接受 `ansible-inventory` JSON 的 float 與十進位字串,修正既有 integer input(例如 `dns_cache_max_ttl`)寫在 group_vars 時 preflight 一律失敗的問題;port 一律宣告成 `integer` | pilot |
+| 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
+| 2026-10-14 | v1.50 | §4.5 第 3 點、§5.7:play-vars lint 改成對每支 apply playbook 檢查所有 contract 的 input(log-server 的 `siem_log_root` 是 log-shipping 的 input,log-server 卻仍用 play vars,Promtail 找不到可 tail 的檔案、apply 失敗);新增 `TestRegression_SpecInputsAreDeclaredContractInputs`:spec 變數契約表列出的變數必須宣告在 contract `groupVars`(尚未處理的 15 個元件列在 `undeclaredSpecInputsAllowlist`,見 issue #81)。log-server、audit-log-forwarding、log-shipping 的變數契約表變數從 play vars 移到 `always` `set_fact`,並宣告進各自 contract;共用的 `siem_log_root`、SIEM 埠與 logrotate 次數的空值/null 一律回到預設,由 `TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` 鎖住兩邊一致;audit-log-forwarding 在 client 的 `siem_forward_port` 與 inventory log-server 的 `siem_receiver_tcp_port` 不一致時 fail;log-server 拒絕系統目錄、路徑上的 symlink,以及不是自己建立的既有目錄當 `siem_log_root`;logrotate 設定檔一律用只抓語法錯誤的 `logrotate -d` 檢查當 `validate`;SELinux 主機上 rsyslogd(`syslogd_t`)只能用 `syslogd_port_t`/`rsh_port_t` 的 TCP port,非預設的 SIEM port 由 `tasks/rsyslog-selinux-tcp-port.yml` 標成 `syslogd_port_t`(被其他服務占用的 port 直接 fail),audit-log-forwarding spec 新增 C22 檢查 rsyslogd 對轉送埠的連線真的建立。preflight 與 repair 共用 `contract.ValueMatchesType`:`integer` 接受 `ansible-inventory` JSON 的 float 與十進位字串,修正既有 integer input(例如 `dns_cache_max_ttl`)寫在 group_vars 時 preflight 一律失敗的問題;port 一律宣告成 `integer` | pilot |

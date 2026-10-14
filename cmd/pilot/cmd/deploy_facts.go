@@ -74,7 +74,10 @@ func probeHostFacts(ctx context.Context, inventory, host string) (delivery.HostF
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	release := holdDeployAnsibleLog(cctx)
+	err := command.Run()
+	release()
+	if err != nil {
 		return delivery.HostFacts{}, fmt.Errorf("probe %s: %w: %s", host, err, strings.TrimSpace(stderr.String()))
 	}
 	line, err := extractAdHocStdout(stdout.String(), host)
