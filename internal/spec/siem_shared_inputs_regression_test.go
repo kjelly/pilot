@@ -369,16 +369,20 @@ func TestRegression_SIEMCountsFallBackForEmptyValues(t *testing.T) {
 	}
 }
 
-// logrotateSyntaxCheck is the validate command for a logrotate policy: it
-// fails on a syntax error, which logrotate reports as "error: <file>:<line>"
-// and answers by skipping the whole policy. Captured 2026-10-14 on Ubuntu
-// 24.04 (logrotate 3.21.0) and AlmaLinux 9.8 (3.18.0): "error: x:3 argument
-// expected after rotate count", "error: x:3 bad rotation count 'abc'",
-// "error: x:4 unknown option 'bogusoption'". `logrotate -d` alone is not
-// usable: it also exits 1 for Ubuntu's distro rsyslog policy, which relies on
-// /etc/logrotate.conf's global `su root adm` ("skipping ... because parent
-// directory has insecure permissions").
-const logrotateSyntaxCheck = `/bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s`
+// logrotateSyntaxCheck is the validate of every logrotate policy the apply
+// playbooks write. It fails when logrotate reports an error about the policy
+// file itself ("error: <file>:..."), which makes logrotate skip the whole
+// policy: with a line number ("error: x:3 argument expected after rotate
+// count", "error: x:3 bad rotation count 'abc'", "error: x:4 unknown option
+// 'bogusoption'") or without one ("error: x:prerotate, postrotate or
+// preremove without endscript"). Captured 2026-10-14 on Ubuntu 24.04
+// (logrotate 3.21.0) and AlmaLinux 9.8 (3.18.0). `logrotate -d`'s exit code
+// alone is not usable: it is also 1 for Ubuntu's distro rsyslog policy, which
+// relies on /etc/logrotate.conf's global `su root adm` ("error: skipping ...
+// because parent directory has insecure permissions"), and for an unreadable
+// state file; neither names the policy file. The playbooks install logrotate
+// first; without it the check fails.
+const logrotateSyntaxCheck = `/bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s`
 
 // TestRegression_LogrotatePoliciesAreValidated: every task that writes a
 // logrotate policy validates it with logrotateSyntaxCheck.
@@ -703,46 +707,14 @@ func TestRegression_SIEMPortsAreTCPPortNumbers(t *testing.T) {
 	}
 }
 
-// TestRegression_LogrotateValidateRefusesBrokenPolicies runs the validate
-// command of every logrotate policy the SIEM playbooks render against real
-// logrotate. It must fail for an error about the policy file itself, with a
-// line number or without one (a postrotate block without endscript), and pass
-// for a valid policy; logrotate's errors that are not about the file (its
-// state file, or "error: skipping ..." for a log whose directory needs `su`)
-// must not fail it. Captured with logrotate 3.21 (Ubuntu 24.04) and 3.18
-// (AlmaLinux 9.8), 2026-10-14.
+// TestRegression_LogrotateValidateRefusesBrokenPolicies runs
+// logrotateSyntaxCheck, which TestRegression_LogrotatePoliciesAreValidated
+// requires of every logrotate policy, against real logrotate. It must fail
+// for an error about the policy file, with a line number or without one (a
+// postrotate block without endscript), and pass for a valid policy.
 func TestRegression_LogrotateValidateRefusesBrokenPolicies(t *testing.T) {
 	if _, err := exec.LookPath("logrotate"); err != nil {
 		t.Skipf("logrotate not installed: %v", err)
-	}
-	var validates []string
-	for _, playbook := range []string{"log-server-apply.yml", "audit-log-forwarding-apply.yml"} {
-		play := loadFirstPlay(t, playbook)
-		var walk func(v any)
-		walk = func(v any) {
-			switch x := v.(type) {
-			case map[string]any:
-				for k, child := range x {
-					if text, ok := child.(string); ok && k == "validate" && strings.Contains(text, "logrotate") {
-						validates = append(validates, strings.TrimSpace(text))
-					}
-					walk(child)
-				}
-			case []any:
-				for _, child := range x {
-					walk(child)
-				}
-			}
-		}
-		walk(play)
-	}
-	if len(validates) != 4 {
-		t.Fatalf("want the 4 logrotate validates (log-server Step 4, audit-log-forwarding Steps 4, 5, 5c), got %d", len(validates))
-	}
-	for _, v := range validates[1:] {
-		if v != validates[0] {
-			t.Errorf("logrotate validates differ:\n%s\n%s", validates[0], v)
-		}
 	}
 	dir := t.TempDir()
 	logs := filepath.Join(dir, "logs")
@@ -767,7 +739,7 @@ func TestRegression_LogrotateValidateRefusesBrokenPolicies(t *testing.T) {
 		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, err := exec.Command("/bin/sh", "-c", strings.ReplaceAll(validates[0], "%s", path)).CombinedOutput()
+		out, err := exec.Command("/bin/sh", "-c", strings.ReplaceAll(logrotateSyntaxCheck, "%s", path)).CombinedOutput()
 		switch {
 		case tc.ok && err != nil:
 			t.Errorf("%s: want the validate to pass, got %v\n%s", tc.name, err, out)
