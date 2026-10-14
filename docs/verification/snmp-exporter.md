@@ -163,9 +163,18 @@ SNMPv3 authPriv agent (read-only view) on a separate VM. Summary:
   view, spec §13.4) — runbook §5.
 - Secret scan clean across `catalog.yml`/`modules/if_mib.yml`/`auths.yml`
   — runbook §6.
-- Config negative lanes (missing credentialRef, secret-like key in
-  catalog, prod + v2c with no/expired/valid exception) all produced the
-  expected `assert` pass/fail — runbook §8.
+- Config negative lanes (2026-09-01): a missing credentialRef and a
+  secret-like key in the catalog each failed their `assert` — runbook §8.
+- C12, prod exception gate (2026-10-14, candidate `b347fb5`, tree
+  `8723db4a`): the real playbook in `--check` on the controller, host in
+  `snmp-exporter` and `prod`, exception in `group_vars`. A complete
+  exception passes under `--tags zzz`/`C3`/`C9`; `networkEvidence: null`
+  fails the gate under every tag selection; a placeholder (also in
+  fullwidth letters), misspelled keys, Hangul fillers, no exception, and
+  the three-field exception the 2026-09-01 lanes used are each rejected
+  with the problem named. That supersedes the 2026-09-01 exception lanes.
+  Record:
+  [`docs/evidence/snmp-exporter/2026-10-14-b347fb5.md`](../evidence/snmp-exporter/2026-10-14-b347fb5.md).
 
 ## Change record
 

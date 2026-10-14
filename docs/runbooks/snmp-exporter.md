@@ -213,13 +213,30 @@ snmp-exp   : ok=24   changed=0    unreachable=0    failed=0    skipped=3    resc
 pre_tasks gate 驗證（Jinja 邏輯與目標主機無關，故用 `ansible_connection:
 local` 對照組驗證，語意等同對 VM 驗證）：
 
-| 場景 | 結果 |
+| 場景（2026-09-01） | 結果 |
 |---|---|
 | `snmp_exporter_credentials` 缺 `lab-switch-v3` 條目 | `assert` FAILED："credentialRef ... is missing or incomplete"（spec §12） |
 | catalog 內混入 `community:` key | `assert` FAILED："must not contain community/username/password/privPassword"（spec §6.4 rule 3） |
-| `stage=prod` + v2c auth profile、無 exception | `assert` FAILED："which prod rejects unless ... has a non-expired reason/owner/expiry"（spec §13.2） |
-| 同上 + 一筆有效（未過期）`snmp_insecure_auth_profile_exceptions` | `assert` PASS |
-| 同上但 `expiry` 設在過去 | `assert` FAILED（斷言重新失敗，確認過期判斷真的有效） |
+
+prod 例外 gate 目前有效的實跑摘要（2026-10-14，candidate `b347fb5`，tree `8723db4a`；完整紀錄見
+[`docs/evidence/snmp-exporter/2026-10-14-b347fb5.md`](../evidence/snmp-exporter/2026-10-14-b347fb5.md)）：
+真實 playbook 對 controller 本機跑 `--check --diff`，localhost 屬於 `snmp-exporter` 與 `prod` group，
+catalog 是 repo 的 `monitoring/snmp/` 加一個 v2c profile `lab-v2c`，例外寫在 group_vars。
+
+| 場景 | 結果 |
+|---|---|
+| 五個欄位都正確（`--tags zzz`、`C3`、`C9`） | rc=0，gate 對兩個 profile 都 `ok` |
+| `networkEvidence: null`（`--tags zzz`、`C3`、`C9`、不帶 tags） | rc=2：`Rejected because: networkEvidence is null, not text or a ticket number`，gate 之後的 task 都沒有執行 |
+| `networkEvidence: TBD`、全形 `ＴＢＤ` | rc=2：`networkEvidence is the placeholder 'tbd'` |
+| 拼錯的 `networkevidence`、`Confirmed` | rc=2：`unknown key(s) Confirmed, networkevidence (...); networkEvidence is missing` |
+| `networkEvidence` 只有 Hangul filler | rc=2：`networkEvidence has too little text` |
+| 只有 reason/owner/expiry（2026-09-01 lane 用的寫法） | rc=2：`confirmed is missing; networkEvidence is missing` |
+| 沒有例外 | rc=2：`there is no exception for this profile` |
+| group_vars 為 null、`-e @file` 為正確的例外 | rc=0（`-e` 優先於 `set_fact` 的預設值） |
+
+對照 `main` `c560425`：`null`、`TBD`、只有三個欄位的例外都被接受（rc=0）。2026-09-01 的三個例外
+lane（無例外、有效例外、過期例外）用的是只有 reason/owner/expiry 的例外，已被上表取代：那個寫法在目前的
+gate 會被拒絕。
 
 prod 例外的規則（spec C12 v1.4，2026-10-14）：每個 auth profile 一筆，五個欄位都要有，不能有其他 key：
 
