@@ -164,8 +164,12 @@ func (g *secretLog) key(indent string, body int) {
 }
 
 // keyLoop logs a loop over a key's lines in the shapes captured from
-// ansible-core 2.19.2: one record per item, with the lines that belong to
-// it, and an error report between items.
+// ansible-core 2.19.2 (host, paths and key changed): one record per item,
+// with the lines that belong to it, and an error report between items; a
+// loop whose loop_control.label hides the item, so the BEGIN marker is only
+// in the first item's result body; an include_tasks loop ("included: <file>
+// for h => (item=...)"); and the included task run once per item, each run
+// under its own TASK banner (PR #90 review).
 func (g *secretLog) keyLoop() {
 	if g.r.Intn(2) == 0 {
 		g.record("TASK [loop over key lines] ***")
@@ -175,8 +179,22 @@ func (g *secretLog) keyLoop() {
 		lines = append(lines, g.secret()+g.secret())
 	}
 	lines = append(lines, "-----END RSA PRIVATE KEY-----")
-	shape := g.r.Intn(4)
+	shape := g.r.Intn(7)
 	for i, line := range lines {
+		switch shape {
+		case 4:
+			g.record(fmt.Sprintf("ok: [h] => (item=%d) => {", i+1))
+			g.b.WriteString("    \"msg\": \"" + line + "\"\n}\n")
+			continue
+		case 5:
+			g.record("included: /x/write_line.yml for h => (item=" + line + ")")
+			continue
+		case 6:
+			g.record("TASK [inner] *******************************************************************")
+			g.record("ok: [h] => {")
+			g.b.WriteString("    \"msg\": \"" + line + "\"\n}\n")
+			continue
+		}
 		switch shape {
 		case 0:
 			g.record("changed: [h] => (item=" + line + ")")
@@ -331,27 +349,16 @@ func FuzzMaintainLogMasksWhatMainMasks(f *testing.F) {
 	})
 }
 
-// checkRedactSecretsLine checks RedactSecrets on one line against main:
-// main's passes, folded, until the line stops changing (see
-// RedactSecrets); unchanged when redacted again; and no secret value left
-// that main masks even when it redacts the line three times, as it did at
-// every maintenance.
+// checkRedactSecretsLine checks RedactSecrets on one line: unchanged when
+// redacted again, and no secret value left that main masks even when it
+// redacts the line three times, as it did at every maintenance. Main's
+// output is used as it is: its grown brackets are what it wrote, and are
+// not folded here into what this code writes.
 func checkRedactSecretsLine(t *testing.T, line string) {
 	t.Helper()
 	once := RedactSecrets(line)
 	if again := RedactSecrets(once); again != once {
 		t.Errorf("RedactSecrets(%q) = %q, and again %q", line, once, again)
-	}
-	want := line
-	for range 4 {
-		next := grownMarker.ReplaceAllString(mainRedactSecrets(want), "[REDACTED]")
-		if next == want {
-			break
-		}
-		want = next
-	}
-	if once != want {
-		t.Errorf("RedactSecrets(%q) = %q; main's passes, folded, give %q", line, once, want)
 	}
 	mainRepeated := mainRedactSecrets(mainRedactSecrets(mainRedactSecrets(line)))
 	for _, secret := range secretValue.FindAllString(line, -1) {

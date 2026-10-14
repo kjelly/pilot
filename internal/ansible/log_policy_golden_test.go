@@ -70,6 +70,12 @@ func TestRedactionGolden(t *testing.T) {
 			golden.Cases[i].Want = got
 		}
 	}
+	if len(changed) > 0 && golden.Format == redactionFormat {
+		// Refused in update mode too: rewriting the outputs under the same
+		// format would make the guard pass for exactly the change it is for
+		// (PR #90 review).
+		t.Fatalf("redaction changed for %v, but redactionFormat is still %q, so records written under the old behaviour would still be trusted. Change redactionFormat first", changed, redactionFormat)
+	}
 	if *updateRedactionGolden {
 		golden.Format = redactionFormat
 		data, err := json.MarshalIndent(golden, "", "  ")
@@ -83,8 +89,6 @@ func TestRedactionGolden(t *testing.T) {
 	}
 	const update = "go test ./internal/ansible -run TestRedactionGolden -update-redaction-golden"
 	switch {
-	case len(changed) > 0 && golden.Format == redactionFormat:
-		t.Fatalf("redaction changed for %v, but redactionFormat is still %q, so records written under the old behaviour would still be trusted. Change redactionFormat, then run %s", changed, redactionFormat, update)
 	case len(changed) > 0:
 		t.Fatalf("redaction changed for %v under redactionFormat %q; run %s", changed, redactionFormat, update)
 	case golden.Format != redactionFormat:

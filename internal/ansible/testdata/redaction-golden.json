@@ -1,5 +1,5 @@
 {
-  "format": "pilot-ansible-log-redaction/3",
+  "format": "pilot-ansible-log-redaction/4",
   "cases": [
     {
       "name": "assignments",
@@ -21,7 +21,7 @@
       "pieces": [
         "password:[REDACTED]--password s1\n--password=[REDACTED]--password\rs2\n --password\t\"\"]\n"
       ],
-      "want": "password: [REDACTED]--password [REDACTED]\n--password= [REDACTED]--password\r[REDACTED]\n --password\t[REDACTED]\n"
+      "want": "password: [REDACTED]--password [REDACTED]\n--password= [REDACTED]--password\r[REDACTED]\n --password\t[REDACTED]]\n"
     },
     {
       "name": "marker lookalikes",
@@ -35,14 +35,14 @@
       "pieces": [
         "password: [REDACTED]]]]\ntoken= [REDACTED]]\n--token=,\n"
       ],
-      "want": "password: [REDACTED]\ntoken= [REDACTED]\n--token= [REDACTED]\n"
+      "want": "password: [REDACTED]]]]\ntoken= [REDACTED]]\n--token= [REDACTED]\n"
     },
     {
       "name": "values with brackets",
       "pieces": [
         "password=abc]def token: s1\n"
       ],
-      "want": "password= [REDACTED]def token: [REDACTED]\n"
+      "want": "password= [REDACTED]]def token: [REDACTED]\n"
     },
     {
       "name": "multi-line key",
@@ -70,7 +70,7 @@
       "pieces": [
         "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----BEGIN RSA PRIVATE KEY-----\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| MIIEs1\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| Hw==\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok\n"
       ],
-      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok\n"
     },
     {
       "name": "command loop over a key",
@@ -91,21 +91,21 @@
       "pieces": [
         "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=-----BEGIN RSA PRIVATE KEY-----)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed\nOrigin: /x/play.yml:20:7\n\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| failed: [h] (item=MIIEs1) =\u003e {\"item\": \"MIIEs1\", \"rc\": 1}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=-----END RSA PRIVATE KEY-----)\n"
       ],
-      "want": "[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed\nOrigin: /x/play.yml:20:7\n\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "key loop without an END item",
       "pieces": [
         "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=-----BEGIN RSA PRIVATE KEY-----)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=MIIEs1)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [next] ***\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=visible)\n"
       ],
-      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [next] ***\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e (item=visible)\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "BEGIN quoted in a command",
       "pieces": [
         "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e {\"cmd\": \"grep -q -- '-----BEGIN RSA PRIVATE KEY-----' /etc/x\"}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: visible\n"
       ],
-      "want": "[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: visible\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "run killed mid-key",
@@ -116,7 +116,7 @@
       "maintain_after": [
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| PLAY [next run] ***\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: visible\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "final line without newline",
@@ -138,7 +138,7 @@
       "maintain_after": [
         true
       ],
-      "want": "password: [REDACTED]-second-half and more\n"
+      "want": "password: [REDACTED] and more\n"
     },
     {
       "name": "split before the value",
@@ -187,7 +187,7 @@
       "pieces": [
         "2026-09-15 09:50:37,791 p=pilot u=4242 | -----BEGIN RSA PRIVATE KEY-----\ns1\n2026-09-15 09:50:37,791 p=pilot u=4242 | ok: visible\n"
       ],
-      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=pilot u=4242 | ok: visible\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "generated a",
@@ -203,7 +203,7 @@
         true,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n[REDACTED PRIVATE KEY]\nmulti-line record continuation XUQ\n    \"password\": [REDACTED]\",\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n[REDACTED PRIVATE KEY]\nmulti-line record continuation XUQ\n    \"password\": [REDACTED],\n"
     },
     {
       "name": "generated b",
@@ -241,7 +241,7 @@
         true,
         false
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| cmd: tool --password [REDACTED] --secret= [REDACTED] --token [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]def token: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"a"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| cmd: tool --password [REDACTED] --secret= [REDACTED] --token [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]]def token: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"a"
     },
     {
       "name": "generated d",
@@ -277,7 +277,7 @@
         true,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\nmulti-line record continuation MMJ\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]PRIVATE KEY-----\"], \"item\": \"-----END RSA PRIVATE KEY-----\", \"rc\": 1}\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\r\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\nmulti-line record continuation MMJ\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]PRIVATE KEY-----\"], \"item\": \"-----END RSA PRIVATE KEY-----\", \"rc\": 1}\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n[REDACTED PRIVATE KEY]\r\n[REDACTED PRIVATE KEY]\r\n"
     },
     {
       "name": "generated f",
@@ -295,7 +295,7 @@
         false,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]def token: [REDACTED]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]]def token: [REDACTED]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]"
     },
     {
       "name": "generated g",
@@ -307,7 +307,7 @@
         true,
         false
       ],
-      "want": "multi-line record continuation UMJ\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilo"
+      "want": "multi-line record continuation UMJ\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]"
     },
     {
       "name": "generated h",
@@ -321,7 +321,7 @@
         true,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"msg\": \"password: [REDACTED]\"}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]def token: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| changed: [h] =\u003e"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"msg\": \"password: [REDACTED]\"}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]]def token: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]"
     },
     {
       "name": "generated i",
@@ -341,7 +341,7 @@
         false,
         false
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED] vault_password: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"api_key\": [REDACTED], \"token\": [REDACTED], \"other\": 1}\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED]] vault_password: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"api_key\": [REDACTED], \"token\": [REDACTED], \"other\": 1}\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\r\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n"
     },
     {
       "name": "generated j",
@@ -445,7 +445,7 @@
         true,
         true
       ],
-      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \r\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \r\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]"
     },
     {
       "name": "generated p",
@@ -467,7 +467,7 @@
         true,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n    \"msg\": \"-----END RSA PRIVATE KEY-----\"\n}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| -----END RSA PRIVATE KEY-----\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [loop over key lines] ***\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n    \"msg\": \"-----END RSA PRIVATE KEY-----\"\n}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n"
     },
     {
       "name": "generated q",
@@ -477,7 +477,7 @@
       "maintain_after": [
         true
       ],
-      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]def token: [REDACTED]\nmulti-line record continuation JLL\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED] vault_password: [REDACTED]\n"
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password= [REDACTED]]def token: [REDACTED]\nmulti-line record continuation JLL\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED]] vault_password: [REDACTED]\n"
     },
     {
       "name": "generated r",
@@ -513,7 +513,7 @@
         true,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"msg\": \"password: [REDACTED]CTED]\"}\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"api_key\": [REDACTED], \"token\": [REDACTED], \"other\": 1}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"msg\": \"password: [REDACTED]]\"}\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]----END RSA PRIVATE KEY-----\"], \"stdout\": \"-----END RSA PRIVATE KEY-----\"}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e {\"api_key\": [REDACTED], \"token\": [REDACTED], \"other\": 1}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]"
     },
     {
       "name": "generated t",
@@ -535,7 +535,7 @@
         false,
         true
       ],
-      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n    \"password\": [REDACTED],\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED] vault_password: [REDACTED]\n"
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]\n    \"password\": [REDACTED],\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED] token= [REDACTED]] vault_password: [REDACTED]\n"
     },
     {
       "name": "generated u",
@@ -610,6 +610,37 @@
         false
       ],
       "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| TASK [x] client_secret = [REDACTED] Authorization: [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e \n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| password: [REDACTED]--password [REDACTED]\r\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e ordinary output line\n[REDACTED PRIVATE KEY]\n"
+    },
+    {
+      "name": "labeled loop over a key",
+      "pieces": [
+        "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e (item=1) =\u003e {\n    \"msg\": \"-----BEGIN RSA PRIVATE KEY-----\"\n}\n",
+        "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e (item=2) =\u003e {\n    \"msg\": \"MIIEsyntheticlabeledbody\"\n}\n",
+        "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e (item=3) =\u003e {\n    \"msg\": \"-----END RSA PRIVATE KEY-----\"\n}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e after\n"
+      ],
+      "maintain_after": [
+        true,
+        true
+      ],
+      "want": "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e (item=1) =\u003e {\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n}\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e after\n"
+    },
+    {
+      "name": "include_tasks loop over a key",
+      "pieces": [
+        "2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| included: /x/write_line.yml for h =\u003e (item=-----BEGIN RSA PRIVATE KEY-----)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| included: /x/write_line.yml for h =\u003e (item=MIIEsyntheticincludedbody)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| included: /x/write_line.yml for h =\u003e (item=-----END RSA PRIVATE KEY-----)\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e after\n"
+      ],
+      "want": "[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n[REDACTED PRIVATE KEY]\n2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible INFO| ok: [h] =\u003e after\n"
+    },
+    {
+      "name": "bracket after an assignment",
+      "pieces": [
+        "{\"list\": [password=abc]}\n",
+        "[--token=abc]\n"
+      ],
+      "maintain_after": [
+        true
+      ],
+      "want": "{\"list\": [password= [REDACTED]]}\n[--token= [REDACTED]]\n"
     }
   ]
 }

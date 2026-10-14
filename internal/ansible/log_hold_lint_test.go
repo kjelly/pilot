@@ -183,6 +183,10 @@ func heldAround(run, created token.Pos, command string, holds []logHold, release
 	return false
 }
 
+// newCmdBinaryIsAnsible makes isAnsibleCommand treat newCmd with a
+// variable binary as an Ansible command (TestAnsibleExecWrappersHoldTheLog).
+var newCmdBinaryIsAnsible bool
+
 // isAnsibleCommand reports whether call creates an exec.Cmd for an
 // Ansible program that can write the log: exec.Command(Context) with an
 // "ansible..." literal, or with the runner's Binary, and
@@ -206,6 +210,15 @@ func isAnsibleCommand(call *ast.CallExpr) bool {
 			return false
 		}
 		binary, args = call.Args[1], call.Args[2:]
+	case "newCmd":
+		// cmd/pilot/cmd's swappable exec.CommandContext.
+		if len(call.Args) < 2 {
+			return false
+		}
+		binary, args = call.Args[1], call.Args[2:]
+		if _, ok := binary.(*ast.Ident); ok && newCmdBinaryIsAnsible {
+			return true
+		}
 	default:
 		return false
 	}
@@ -248,4 +261,40 @@ func identName(expr ast.Expr) string {
 		return id.Name
 	}
 	return ""
+}
+
+// The exec wrappers in cmd/pilot/cmd that run ansible-playbook take the
+// binary as a parameter (execExternal) or inherit this process's environment
+// with extra entries (execAnsiblePlaybookCaptured), either of which may name
+// the controller Ansible log. Their commands must run inside a hold like
+// every other Ansible command; TestAnsibleCommandsHoldTheLog cannot see that
+// a variable binary is ansible-playbook, so this checks the wrappers by name
+// (PR #90 review).
+func TestAnsibleExecWrappersHoldTheLog(t *testing.T) {
+	newCmdBinaryIsAnsible = true
+	defer func() { newCmdBinaryIsAnsible = false }()
+	fset := token.NewFileSet()
+	for file, wrapper := range map[string]string{
+		"../../cmd/pilot/cmd/docker_target.go":       "execExternal",
+		"../../cmd/pilot/cmd/ansible_json_result.go": "execAnsiblePlaybookCaptured",
+	} {
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != wrapper || fn.Body == nil {
+				continue
+			}
+			found = true
+			if n := checkLogHolds(t, fset, fn.Body); n == 0 {
+				t.Errorf("%s: found no command to check in %s", file, wrapper)
+			}
+		}
+		if !found {
+			t.Errorf("%s: %s not found; update this test if it moved", file, wrapper)
+		}
+	}
 }
