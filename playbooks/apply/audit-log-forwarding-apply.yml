@@ -230,8 +230,13 @@
             group: root
             mode: "0644"
             backup: true
-            # logrotate exits 1 on a config error and would skip this policy.
-            validate: logrotate -d %s
+            # Fails only on a syntax error ("error: <file>:<line> ..."), which
+            # makes logrotate skip the whole policy. `logrotate -d` alone also
+            # exits 1 for a fragment that relies on /etc/logrotate.conf's
+            # global `su` (Ubuntu's distro rsyslog policy), so its rc is not
+            # used (captured on Ubuntu 24.04 and AlmaLinux 9.8, 2026-10-14).
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               /var/log/audit/audit.log {
@@ -254,7 +259,9 @@
             owner: root
             group: root
             mode: "0644"
-            validate: logrotate -d %s
+            # See Step 4.
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               {{ audit_syslog_path }} {
@@ -309,7 +316,9 @@
             path: /etc/logrotate.d/rsyslog
             regexp: '^{{ audit_syslog_path | regex_escape }}$'
             state: absent
-            validate: logrotate -d %s
+            # See Step 4: this distro policy relies on the global `su`.
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
             - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0

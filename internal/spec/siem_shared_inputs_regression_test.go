@@ -331,11 +331,19 @@ func TestRegression_SIEMCountsFallBackForEmptyValues(t *testing.T) {
 	}
 }
 
+// logrotateSyntaxCheck is the validate command for a logrotate policy: it
+// fails on a syntax error, which logrotate reports as "error: <file>:<line>"
+// and answers by skipping the whole policy. Captured 2026-10-14 on Ubuntu
+// 24.04 (logrotate 3.21.0) and AlmaLinux 9.8 (3.18.0): "error: x:3 argument
+// expected after rotate count", "error: x:3 bad rotation count 'abc'",
+// "error: x:4 unknown option 'bogusoption'". `logrotate -d` alone is not
+// usable: it also exits 1 for Ubuntu's distro rsyslog policy, which relies on
+// /etc/logrotate.conf's global `su root adm` ("skipping ... because parent
+// directory has insecure permissions").
+const logrotateSyntaxCheck = `/bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s`
+
 // TestRegression_LogrotatePoliciesAreValidated: every task that writes a
-// logrotate policy validates it with `logrotate -d`, which exits 1 on a
-// config error (captured on Ubuntu 24.04 logrotate 3.21.0 and AlmaLinux 9.8
-// logrotate 3.18.0: "argument expected after rotate count", "bad rotation
-// count"); logrotate otherwise skips the broken policy at every run.
+// logrotate policy validates it with logrotateSyntaxCheck.
 func TestRegression_LogrotatePoliciesAreValidated(t *testing.T) {
 	files, err := filepath.Glob("../../playbooks/apply/*.yml")
 	if err != nil {
@@ -365,8 +373,8 @@ func TestRegression_LogrotatePoliciesAreValidated(t *testing.T) {
 					continue
 				}
 				found++
-				if v, _ := m["validate"].(string); !strings.HasPrefix(v, "logrotate -d ") {
-					t.Errorf("%s: task %q writes %s without validate: logrotate -d %%s", path, task["name"], target)
+				if v, _ := m["validate"].(string); v != logrotateSyntaxCheck {
+					t.Errorf("%s: task %q writes %s with validate %q, want %q", path, task["name"], target, v, logrotateSyntaxCheck)
 				}
 			}
 		}
@@ -391,5 +399,37 @@ func TestRegression_LogrotatePoliciesAreValidated(t *testing.T) {
 	// log-server Step 4, audit-log-forwarding Steps 4, 5 and 5c.
 	if found < 4 {
 		t.Fatalf("found only %d logrotate writers; the walker is broken", found)
+	}
+}
+
+// TestRegression_LogrotateSyntaxCheckThroughAnsible runs logrotateSyntaxCheck
+// as a copy task's validate on localhost: a valid policy is written, and a
+// `rotate ` left empty or an unknown option fails validation.
+func TestRegression_LogrotateSyntaxCheckThroughAnsible(t *testing.T) {
+	for _, bin := range []string{"ansible-playbook", "logrotate"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not installed: %v", bin, err)
+		}
+	}
+	dir := t.TempDir()
+	policy := "%s/*.log {\n    daily\n    rotate %s\n    missingok\n}\n"
+	for _, tc := range []struct {
+		name, rotate string
+		ok           bool
+	}{{"valid", "14", true}, {"empty count", "", false}, {"bad count", "abc", false}, {"unknown option", "14\n    bogusoption", false}} {
+		dest := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-"))
+		tasks := []any{
+			map[string]any{"name": "write the policy", "ansible.builtin.copy": map[string]any{
+				"dest": dest, "mode": "0600", "content": fmt.Sprintf(policy, dir, tc.rotate), "validate": logrotateSyntaxCheck}},
+			showTask([]string{"inventory_hostname"}),
+		}
+		_, failed := tryInventoryPlay(t, "log-server", nil, tasks, nil)
+		_, statErr := os.Stat(dest)
+		switch {
+		case tc.ok && (failed != "" || statErr != nil):
+			t.Errorf("%s: want the policy written, got %q (stat: %v)", tc.name, failed, statErr)
+		case !tc.ok && (!strings.Contains(failed, "failed to validate") || statErr == nil):
+			t.Errorf("%s: want validation to fail and nothing written, got %q (stat: %v)", tc.name, failed, statErr)
+		}
 	}
 }

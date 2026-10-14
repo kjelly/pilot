@@ -284,9 +284,13 @@
             owner: root
             group: root
             mode: "0644"
-            # logrotate exits 1 on a config error (e.g. "bad rotation count")
-            # and would skip this whole policy at its next run.
-            validate: logrotate -d %s
+            # Fails only on a syntax error ("error: <file>:<line> ..."), which
+            # makes logrotate skip the whole policy. `logrotate -d` alone also
+            # exits 1 for a fragment that relies on /etc/logrotate.conf's
+            # global `su` (Ubuntu's distro rsyslog policy), so its rc is not
+            # used (captured on Ubuntu 24.04 and AlmaLinux 9.8, 2026-10-14).
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
             content: |
               # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
               {{ siem_log_root }}/*/*.log {
