@@ -1,16 +1,19 @@
 package diagnose
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -302,36 +305,83 @@ func TestRegression_DNSArchitectureModelMatchesPlaybooks(t *testing.T) {
 	}
 }
 
-// ansibleRunTimeout bounds each Ansible command of the test. Twice on the
-// maintainer's workstation, under heavy load, an ansible-playbook run of
-// this test (ansible-core 2.19.2) kept polling for results with no worker
-// process left and never exited, which held the whole package until go
-// test's own timeout (40 minutes); the bound turns that into a failure
-// that names the command.
+// ansibleRunTimeout bounds each Ansible command of the test.
 const ansibleRunTimeout = 5 * time.Minute
+
+// ansibleResultsThreadCrash is how ansible-core 2.19.2's results thread
+// dies under heavy load: results_thread_main raises KeyError in
+// _convert_wire_task_result_to_raw (plugins/strategy/__init__.py; the
+// worker's result names a task the strategy's _queued_task_cache no longer
+// holds), the thread ends, and the playbook waits for that result forever
+// with no worker left. A reviewer's run under load ~26 captured the
+// traceback; two runs on the maintainer's workstation hung the same way.
+// It is an ansible-core race, not a model difference, so a run that shows
+// it is retried once; any other failure or timeout fails the test.
+var ansibleResultsThreadCrash = []string{"_convert_wire_task_result_to_raw", "KeyError"}
+
+// crashWatch collects an Ansible command's output and kills the command as
+// soon as ansibleResultsThreadCrash appears in it.
+type crashWatch struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	cancel  context.CancelFunc
+	crashed bool
+}
+
+func (w *crashWatch) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if !w.crashed {
+		out := w.buf.Bytes()
+		w.crashed = true
+		for _, sig := range ansibleResultsThreadCrash {
+			w.crashed = w.crashed && bytes.Contains(out, []byte(sig))
+		}
+		if w.crashed {
+			w.cancel()
+		}
+	}
+	return n, err
+}
 
 // runAnsible runs one Ansible command in dir within ansibleRunTimeout and
 // returns its stdout, or stdout and stderr together when combined is set.
+// A run that hits ansibleResultsThreadCrash is retried once.
 func runAnsible(t *testing.T, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), ansibleRunTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir, cmd.Env = dir, env
-	// A worker that outlives the killed parent must not keep the pipes,
-	// and so the test, open.
-	cmd.WaitDelay = 10 * time.Second
-	var out []byte
-	var err error
-	if combined {
-		out, err = cmd.CombinedOutput()
-	} else {
-		out, err = cmd.Output()
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(t.Context(), ansibleRunTimeout)
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Dir, cmd.Env = dir, env
+		// A worker that outlives the killed parent must not keep the
+		// pipes, and so the test, open.
+		cmd.WaitDelay = 10 * time.Second
+		var stdout bytes.Buffer
+		watch := &crashWatch{cancel: cancel}
+		cmd.Stderr = watch
+		cmd.Stdout = watch
+		if !combined {
+			cmd.Stdout = io.MultiWriter(&stdout, watch)
+		}
+		err := cmd.Run()
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		out := watch.buf.Bytes()
+		if !combined {
+			out = stdout.Bytes()
+		}
+		switch {
+		case watch.crashed && attempt == 1:
+			t.Logf("%s: ansible-core's results thread crashed (KeyError in _convert_wire_task_result_to_raw); retrying once:\n%s", name, watch.buf.Bytes())
+			continue
+		case watch.crashed:
+			return watch.buf.Bytes(), fmt.Errorf("ansible-core's results thread crashed again on the retry: %w", err)
+		case timedOut:
+			return watch.buf.Bytes(), fmt.Errorf("did not finish within %s and was killed: %w", ansibleRunTimeout, err)
+		}
+		return out, err
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return out, fmt.Errorf("%s did not finish within %s and was killed: %w", name, ansibleRunTimeout, err)
-	}
-	return out, err
 }
 
 type emittedZone struct {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,6 +269,8 @@ func TestDiagnoseDNSArchitecture_RejectsBadInputBeforeAnyCall(t *testing.T) {
 		"unknown client":     {ClientHost: "nope"},
 		"group as client":    {ClientHost: "dns"},
 		"bad internal name":  {InternalName: "a b;rm"},
+		"zone apex as name":  {InternalName: "@"},
+		"apex as external":   {ExternalName: "@"},
 		"bad external name":  {ExternalName: "{{ lookup('pipe','id') }}"},
 		"template in client": {ClientHost: "{{ x }}"},
 	} {
@@ -301,9 +304,71 @@ func TestValidateFreeIPAReader(t *testing.T) {
 		{Principal: dnsArchReader, Keytab: "relative.keytab"},
 		{Principal: dnsArchReader, Keytab: "/etc/../root/admin.keytab"},
 		{Principal: dnsArchReader, Keytab: "/etc/pilot/{{ x }}"},
+		// A leading "-" would be a kinit option: -c picks the ccache.
+		{Principal: "-c/tmp@IPA.PILOT.INTERNAL", Keytab: "/etc/krb5.keytab"},
+		{Principal: "reader/-c@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "reader@-IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		// FreeIPA's own service principals and other administrators.
+		{Principal: "host/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: "/etc/krb5.keytab"},
+		{Principal: "DNS/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: "/etc/named.keytab"},
+		{Principal: "HTTP/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "ldap/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "ipa-dnskeysyncd/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "administrator@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
+		{Principal: "krbtgt/IPA.PILOT.INTERNAL@IPA.PILOT.INTERNAL", Keytab: dnsArchKeytab},
 	} {
 		if err := validateFreeIPAReader(bad); err == nil {
 			t.Errorf("%+v accepted", bad)
 		}
+	}
+}
+
+// The primary's FQDN as the inventory writes it (upper case, trailing dot)
+// is normalized before it is validated and used, so the core comparison
+// is still made (AGENTS.md §5.13).
+func TestDiagnoseDNSArchitecture_NormalizesThePrimaryFQDN(t *testing.T) {
+	requireRealAnsible(t)
+	inv := strings.Replace(dnsArchLiveInventory, "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}", "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5, freeipa_server_fqdn: IPA1.ipa.pilot.internal.}", 1)
+	opts := dnsArchOpts(t, writeDNSArchInventory(t, inv), liveRunner(t), diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab})
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
+	if d, ok := dnsArchDiff(out, "tier dd-dns answer for ipa1.ipa.pilot.internal equals FreeIPA's authoritative answer"); !ok || d.Status != "match" {
+		t.Fatalf("internal comparison = %+v (found %v); findings %v", d, ok, out.Findings)
+	}
+}
+
+// A primary FQDN that is not a DNS name, and tier hosts beyond the probe
+// bound, are named and make the report partial; nothing is skipped
+// silently.
+func TestDiagnoseDNSArchitecture_SkippedProbesAreReported(t *testing.T) {
+	requireRealAnsible(t)
+	inv := strings.Replace(dnsArchLiveInventory, "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5}", "dd-ipa: {ansible_connection: local, ansible_host: 192.168.122.5, freeipa_server_fqdn: ipa_1.bad}", 1)
+	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
+		diagnose.DNSArchProviderStep("dd-ipa", "ipa.pilot.internal", "192.168.122.5", "-").Command:           respond(t, "dd-ipa", dnsArchFixture(t, "provider.txt")),
+		diagnose.DNSArchAuthStep("dd-ipa", dnsArchReader, dnsArchKeytab).Command:                             respond(t, "dd-ipa", dnsArchFixture(t, "auth_role.txt")),
+		diagnose.DNSArchTierStep("dd-dns", "", ".", "ipa.pilot.internal", []string{"192.168.122.5"}).Command: respond(t, "dd-dns", dnsArchFixture(t, "tier.txt")),
+		diagnose.DNSArchClientStep("dd-client", "localhost").Command:                                         respond(t, "dd-client", dnsArchFixture(t, "client.txt")),
+	}}
+	opts := dnsArchOpts(t, writeDNSArchInventory(t, inv), fake, diagnoseFreeIPAReader{Principal: dnsArchReader, Keytab: dnsArchKeytab})
+	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "dd-client"})
+	if out.Status != "partial" || !strings.Contains(joinedFindings(out), `probe_skipped: the FreeIPA primary's FQDN "ipa_1.bad" is not a DNS name`) {
+		t.Fatalf("status %s findings %v", out.Status, out.Findings)
+	}
+	if strings.Contains(out.Observed.Tier[0].InternalResolution.Detail, "no FreeIPA in the inventory") {
+		t.Fatalf("tier internal resolution = %+v", out.Observed.Tier[0].InternalResolution)
+	}
+
+	var hosts strings.Builder
+	for i := 1; i <= maxDNSArchProbeHosts+1; i++ {
+		fmt.Fprintf(&hosts, "        t%d: {ansible_connection: local, ansible_host: 10.0.0.%d}\n", i, i)
+	}
+	many := "all:\n  children:\n    dns:\n      hosts:\n" + hosts.String()
+	everything := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+	for i := 1; i <= maxDNSArchProbeHosts; i++ {
+		h := fmt.Sprintf("t%d", i)
+		everything.byCommand[diagnose.DNSArchTierStep(h, "", ".", "", nil).Command] = respond(t, h, dnsArchFixture(t, "tier.txt"))
+	}
+	out = callDNSArch(t, dnsArchOpts(t, writeDNSArchInventory(t, many), everything, diagnoseFreeIPAReader{}), diagnoseDNSArchitectureInput{})
+	if out.Status != "partial" || !strings.Contains(joinedFindings(out), "probe_skipped: dns tier hosts beyond the first 5 were not probed: t6") {
+		t.Fatalf("status %s findings %v", out.Status, out.Findings)
 	}
 }

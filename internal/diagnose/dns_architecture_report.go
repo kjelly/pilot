@@ -8,6 +8,10 @@ import (
 
 // Fact states. "absent" means pilot looked and the thing is not there;
 // "unknown" means pilot could not tell. They are never merged.
+// KerberosRefusedPrivileged is the Kerberos state when the approved
+// principal turned out to have write rights.
+const KerberosRefusedPrivileged = "refused_privileged"
+
 const (
 	FactObserved         = "observed"
 	FactAbsent           = "absent"
@@ -35,7 +39,9 @@ func dnsArchEvidence(stepID, section string) []string {
 }
 
 // DNSArchKerberos is the authenticated-read status. State is
-// not_configured, available, auth_required, unreachable or not_applicable.
+// not_configured, available, auth_required, refused_privileged (the
+// approved principal can write FreeIPA's DNS configuration, so pilot does
+// not use what it read), unreachable or not_applicable.
 type DNSArchKerberos struct {
 	State     string   `json:"state"`
 	Principal string   `json:"principal,omitempty"`
@@ -119,6 +125,10 @@ type DNSArchObservedClient struct {
 
 // DNSArchObserved is the live layer.
 type DNSArchObserved struct {
+	// Skipped lists probes pilot planned but did not run, and why
+	// (bounds, names it would not pass to a probe); each makes the
+	// report partial.
+	Skipped   []string                  `json:"skipped,omitempty"`
 	Kerberos  DNSArchKerberos           `json:"kerberos"`
 	Providers []DNSArchObservedProvider `json:"providers,omitempty"`
 	FreeIPA   DNSArchObservedFreeIPA    `json:"freeipa"`
@@ -170,15 +180,22 @@ func commandMissing(s DNSArchSection) bool {
 	return s.RC == 127 || (strings.Contains(s.Output, "not found") && strings.Contains(s.Output, "command"))
 }
 
+// activeFact reads `systemctl is-active <unit>`. It exits 0 for a running
+// unit, also while it reloads ("reloading"), and 3 with "inactive" or
+// "failed" for one that is stopped or not installed. Anything else, such
+// as "Failed to connect to bus" (rc 1) or "activating", says nothing about
+// whether the service answers, so it is unknown, not "not running".
 func activeFact(s DNSArchSection) DNSArchFact {
 	state := strings.TrimSpace(s.Output)
-	if commandMissing(s) {
+	switch {
+	case commandMissing(s):
 		return DNSArchFact{State: FactUnknown, Detail: firstLine(s.Output)}
-	}
-	if s.RC == 0 && state == "active" {
+	case s.RC == 0:
 		return DNSArchFact{State: FactObserved, Value: true, Detail: state}
+	case s.RC == 3 && (state == "inactive" || state == "failed"):
+		return DNSArchFact{State: FactObserved, Value: false, Detail: state}
 	}
-	return DNSArchFact{State: FactObserved, Value: false, Detail: state}
+	return DNSArchFact{State: FactUnknown, Detail: fmt.Sprintf("systemctl is-active exited %d: %s", s.RC, firstLine(s.Output))}
 }
 
 func digFact(server, name, qtype string) func(DNSArchSection) DNSArchFact {
@@ -190,11 +207,15 @@ func digFact(server, name, qtype string) func(DNSArchSection) DNSArchFact {
 		if q.Error != "" {
 			return DNSArchFact{State: FactUnknown, Value: q, Detail: "no answer from " + server + ": " + q.Error}
 		}
-		if q.Status == "NXDOMAIN" || (q.Status == "NOERROR" && len(q.Answers) == 0) {
-			return DNSArchFact{State: FactAbsent, Value: q, Detail: q.Status}
-		}
-		if q.Status != "NOERROR" {
-			return DNSArchFact{State: FactObserved, Value: q, Detail: q.Status}
+		switch {
+		case q.Status == "NXDOMAIN":
+			return DNSArchFact{State: FactAbsent, Value: q, Detail: "NXDOMAIN"}
+		case q.Status == "NOERROR" && len(q.Answers) == 0:
+			return DNSArchFact{State: FactAbsent, Value: q, Detail: "NOERROR, no " + qtype + " record"}
+		case q.Status != "NOERROR":
+			// The server answered, with an error rcode (SERVFAIL,
+			// REFUSED, ...): the lookup failed.
+			return DNSArchFact{State: FactError, Value: q, Detail: server + " answered " + q.Status}
 		}
 		return DNSArchFact{State: FactObserved, Value: q}
 	}
@@ -231,7 +252,11 @@ func BuildDNSArchObservedProvider(p DNSArchProvider, domain, internalName string
 	out.NS = sectionFact(id, sections, "ns", ok, digFact(p.IP, domain+".", "NS"))
 	out.LDAPSRV = sectionFact(id, sections, "srv_ldap", ok, digFact(p.IP, "_ldap._tcp."+domain+".", "SRV"))
 	out.KerberosSRV = sectionFact(id, sections, "srv_kerberos", ok, digFact(p.IP, "_kerberos._udp."+domain+".", "SRV"))
-	out.Internal = sectionFact(id, sections, "internal", ok, digFact(p.IP, internalName, "A"))
+	if internalName == "" || internalName == "-" {
+		out.Internal = DNSArchFact{State: FactNotApplicable, Detail: "no valid internal name to resolve (see skipped)"}
+	} else {
+		out.Internal = sectionFact(id, sections, "internal", ok, digFact(p.IP, internalName, "A"))
+	}
 	return out
 }
 
@@ -280,6 +305,23 @@ func BuildDNSArchObservedFreeIPA(host, principal, keytab string, r StepResult) (
 	cfg := firstIPAEntry(sections["dnsconfig"])
 	dnsServers := SplitIPAList(cfg["IPA DNS servers"])
 	rights := ParseIPARights(cfg["attributelevelrights"])
+	// The principal must be read-only. --rights shows what it may do to
+	// the global DNS configuration; any write right (w, o, or the self
+	// forms W, O) means it is not the reader the operator should approve,
+	// and nothing it read is reported.
+	var writable []string
+	for attr, r := range rights {
+		if strings.ContainsAny(r, "woWO") {
+			writable = append(writable, attr+"="+r)
+		}
+	}
+	if len(writable) > 0 {
+		sort.Strings(writable)
+		k.State = KerberosRefusedPrivileged
+		k.Detail = fmt.Sprintf("%s is not read-only: FreeIPA grants it %s on the DNS configuration; approve a principal that only has the read permissions (docs/runbooks/dns-architecture-diagnose.md §2)", principal, strings.Join(writable, ", "))
+		gate(FactAuthRequired, k.Detail)
+		return out, k
+	}
 	readable := func(attr, permission string, f DNSArchFact) DNSArchFact {
 		r, known := rights[attr]
 		switch {
@@ -412,12 +454,12 @@ func BuildDNSArchObservedTier(t DNSArchTierHost, internalName, externalName stri
 	}
 	out.ExternalResolution = sectionFact(id, sections, "external", ok, func(s DNSArchSection) DNSArchFact {
 		f := digFact("127.0.0.1", extName, extType)(s)
-		q, isQuery := f.Value.(DNSQueryResult)
+		q, _ := f.Value.(DNSQueryResult)
 		switch {
-		case f.State == FactObserved && isQuery && q.Status != "NOERROR":
+		case f.State == FactError:
 			// The tier answered with an error rcode (SERVFAIL, REFUSED):
 			// it did not resolve the name.
-			f.State, f.Detail = FactError, fmt.Sprintf("the tier answered %s %s with %s", extName, extType, q.Status)
+			f.Detail = fmt.Sprintf("the tier answered %s %s with %s", extName, extType, q.Status)
 		case f.State == FactAbsent:
 			// NXDOMAIN, or NOERROR without a record of the asked type
 			// (for example a CNAME whose target has none).
@@ -464,6 +506,9 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 		return DNSArchFact{State: FactAbsent, Detail: "no nameserver line in /etc/resolv.conf"}
 	})
 	out.Options = sectionFact(id, sections, "options", ok, func(s DNSArchSection) DNSArchFact {
+		if s.RC != 0 {
+			return DNSArchFact{State: FactUnknown, Detail: firstLine(s.Output)}
+		}
 		if opts := lines(s); len(opts) > 0 {
 			return DNSArchFact{State: FactObserved, Value: opts}
 		}
@@ -482,15 +527,35 @@ func BuildDNSArchObservedClient(host string, r StepResult) DNSArchObservedClient
 		return DNSArchFact{State: FactObserved, Value: lines(s)}
 	})
 	if _, probed := sections["first_hop"]; probed || !ok {
+		ns := ""
+		if v, isList := out.Nameservers.Value.([]string); isList && len(v) > 0 {
+			ns = v[0]
+		}
 		out.FirstHop = sectionFact(id, sections, "first_hop", ok, func(s DNSArchSection) DNSArchFact {
-			v := strings.Trim(strings.TrimSpace(s.Output), `"`)
-			switch {
-			case strings.HasPrefix(v, "pilot-dns:"):
-				return DNSArchFact{State: FactObserved, Value: v, Detail: "the first nameserver is a pilot dns tier host"}
-			case s.RC == 0 && !strings.HasPrefix(v, ";;"):
+			f := digFact(ns, "id.server", "TXT")(s)
+			q, _ := f.Value.(DNSQueryResult)
+			switch f.State {
+			case FactObserved:
+				v := strings.Trim(q.Answers[0], `"`)
+				if strings.HasPrefix(v, "pilot-dns:") {
+					return DNSArchFact{State: FactObserved, Value: v, Detail: "the first nameserver is a pilot dns tier host"}
+				}
 				return DNSArchFact{State: FactObserved, Value: v, Detail: "the first nameserver is not a pilot dns tier host"}
+			case FactAbsent:
+				// A pilot dns tier host always answers id.server; a
+				// server that answers without it is something else.
+				return DNSArchFact{State: FactObserved, Value: "", Detail: "the first nameserver is not a pilot dns tier host (" + f.Detail + " for id.server CH TXT)"}
+			case FactError:
+				if q.Status == "NOTIMP" || q.Status == "FORMERR" {
+					// unbound answers CHAOS identity queries; a server
+					// that does not implement them is not a tier host
+					// (libvirt's dnsmasq answers NOTIMP).
+					return DNSArchFact{State: FactObserved, Value: "", Detail: "the first nameserver is not a pilot dns tier host (" + f.Detail + " for id.server CH TXT)"}
+				}
 			}
-			return DNSArchFact{State: FactUnknown, Detail: firstLine(s.Output)}
+			// REFUSED, SERVFAIL or no answer: who it is stays unknown;
+			// a tier whose access-control excludes this host refuses.
+			return f
 		})
 	} else {
 		out.FirstHop = DNSArchFact{State: FactNotApplicable, Detail: "no nameserver to ask"}
@@ -644,7 +709,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		switch {
 		case !p.DNSProvider:
 			continue
-		case op.SOA.State == FactObserved && isQuery:
+		case (op.SOA.State == FactObserved || op.SOA.State == FactError) && isQuery:
 			d.Observed = q.Authoritative
 			if q.Authoritative && q.Status == "NOERROR" {
 				d.Status = "match"
@@ -731,7 +796,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		switch {
 		case authoritative == nil:
 			d.Status, d.Detail = FactUnknown, "no FreeIPA provider returned an authoritative answer to compare with"
-		case ot.InternalResolution.State == FactObserved || ot.InternalResolution.State == FactAbsent:
+		case ot.InternalResolution.State == FactObserved || ot.InternalResolution.State == FactAbsent || ot.InternalResolution.State == FactError:
 			authQ := authoritative.Internal.Value.(DNSQueryResult)
 			d.Evidence = append(d.Evidence, authoritative.Internal.Evidence...)
 			d.Expected, d.Observed = authQ.Answers, tierQ.Answers
@@ -745,6 +810,34 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 			d.Status, d.Detail = FactUnknown, ot.InternalResolution.Detail
 		}
 		diffs = append(diffs, d)
+	}
+
+	// Every other DNS provider answers the internal name the way the
+	// reference does: a replica whose data diverged answers differently.
+	if authoritative != nil {
+		refQ := authoritative.Internal.Value.(DNSQueryResult)
+		for _, op := range o.Providers {
+			p, _ := m.Provider(op.Host)
+			if op.Host == authoritative.Host || !p.DNSProvider || op.Internal.State == FactNotApplicable {
+				continue
+			}
+			q, isQuery := op.Internal.Value.(DNSQueryResult)
+			d := DNSArchDifference{Subject: "FreeIPA " + op.Host + " answer for " + refQ.Name + " equals " + authoritative.Host + "'s", Expected: refQ.Answers,
+				Evidence: append(append([]string(nil), op.Internal.Evidence...), authoritative.Internal.Evidence...)}
+			switch {
+			case isQuery && (op.Internal.State == FactObserved || op.Internal.State == FactAbsent || op.Internal.State == FactError):
+				d.Observed = q.Answers
+				if q.Status == refQ.Status && q.Authoritative && sameSet(q.Answers, refQ.Answers) {
+					d.Status = "match"
+				} else {
+					d.Status = "mismatch"
+					d.Detail = fmt.Sprintf("%s %s aa=%t %v, %s %s %v", op.Host, q.Status, q.Authoritative, q.Answers, authoritative.Host, refQ.Status, refQ.Answers)
+				}
+			default:
+				d.Status, d.Detail = FactUnknown, op.Internal.Detail
+			}
+			diffs = append(diffs, d)
+		}
 	}
 
 	// The client's resolver list, in order.
@@ -812,35 +905,60 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 			findings = append(findings, "dns_tier_settings_invalid: "+t.Host+": "+e)
 		}
 	}
-	// unknownFacts adds a finding naming the live facts of one reachable
-	// host that could not be determined; any of them makes the report
-	// partial. Facts with their own finding are not repeated here.
-	unknownFacts := func(host string, facts map[string]DNSArchFact) {
-		var names []string
-		for name, f := range facts {
-			if f.State == FactUnknown || f.State == FactUnreachable {
-				names = append(names, name)
-			}
-		}
-		if len(names) == 0 {
-			return
-		}
-		sort.Strings(names)
-		for i, n := range names {
-			if d := facts[n].Detail; d != "" {
-				names[i] = n + " (" + d + ")"
-			}
-		}
+	if len(m.Unevaluated) > 0 {
+		findings = append(findings, "declared_value_unevaluated: "+strings.Join(m.Unevaluated, ", ")+" are Jinja templates the model cannot evaluate")
+	}
+	for _, sk := range o.Skipped {
 		partial = true
-		findings = append(findings, "live_fact_unknown: "+host+": "+strings.Join(names, "; "))
+		findings = append(findings, "probe_skipped: "+sk)
+	}
+	// liveFacts names, for one reachable host, every live fact pilot could
+	// not determine (live_fact_unknown, which makes the report partial)
+	// and every DNS query that got an answer saying the lookup failed
+	// (dns_query_failed: an error rcode, NXDOMAIN, or no record of the
+	// asked type).
+	type namedFact struct {
+		name  string
+		fact  DNSArchFact
+		query bool
+	}
+	withDetail := func(name, detail string) string {
+		if detail == "" {
+			return name
+		}
+		return name + " (" + detail + ")"
+	}
+	liveFacts := func(host string, facts []namedFact) {
+		var unknown, failed []string
+		for _, nf := range facts {
+			switch {
+			case nf.fact.State == FactUnknown || nf.fact.State == FactUnreachable:
+				unknown = append(unknown, withDetail(nf.name, nf.fact.Detail))
+			case nf.query && (nf.fact.State == FactAbsent || nf.fact.State == FactError):
+				failed = append(failed, withDetail(nf.name, nf.fact.Detail))
+			}
+		}
+		if len(unknown) > 0 {
+			partial = true
+			findings = append(findings, "live_fact_unknown: "+host+": "+strings.Join(unknown, "; "))
+		}
+		if len(failed) > 0 {
+			findings = append(findings, "dns_query_failed: "+host+": "+strings.Join(failed, "; "))
+		}
 	}
 	for _, p := range o.Providers {
+		if p.Reachable.State == FactNotApplicable {
+			continue // not probed: named in probe_skipped
+		}
 		if p.Reachable.State != FactObserved {
 			partial = true
 			findings = append(findings, "freeipa_dns_provider_unreachable: "+p.Host+" ("+p.Reachable.Detail+")")
 			continue
 		}
-		unknownFacts(p.Host, map[string]DNSArchFact{"named_active": p.NamedActive, "soa": p.SOA, "ns": p.NS, "ldap_srv": p.LDAPSRV, "kerberos_srv": p.KerberosSRV, "internal_name": p.Internal})
+		if p.NamedActive.State == FactObserved && p.NamedActive.Value == false {
+			findings = append(findings, "freeipa_named_not_running: "+p.Host+": named is "+p.NamedActive.Detail)
+		}
+		liveFacts(p.Host, []namedFact{{"named_active", p.NamedActive, false}, {"soa", p.SOA, true}, {"ns", p.NS, true}, {"ldap_srv", p.LDAPSRV, true}, {"kerberos_srv", p.KerberosSRV, true}, {"internal_name", p.Internal, true}})
 	}
 	for _, t := range o.Tier {
 		if t.Reachable.State != FactObserved {
@@ -851,7 +969,7 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 		if t.UnboundActive.State == FactObserved && t.UnboundActive.Value == false {
 			findings = append(findings, "dns_tier_not_running: "+t.Host+" is in the dns group but unbound is "+t.UnboundActive.Detail+" (assigned, not deployed or stopped)")
 		}
-		unknownFacts(t.Host, map[string]DNSArchFact{"unbound_active": t.UnboundActive, "forwards": t.Forwards, "stubs": t.Stubs, "identity": t.Identity, "internal_resolution": t.InternalResolution})
+		liveFacts(t.Host, []namedFact{{"unbound_active", t.UnboundActive, false}, {"forwards", t.Forwards, false}, {"stubs", t.Stubs, false}, {"identity", t.Identity, false}, {"internal_resolution", t.InternalResolution, true}})
 		for _, a := range t.ProviderAuthority {
 			q, ok := a.Value.(DNSQueryResult)
 			if a.State == FactObserved && ok && q.Status == "NOERROR" && q.Authoritative {
@@ -879,30 +997,66 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 			partial = true
 			findings = append(findings, "client_unreachable: "+c.Host+" ("+c.Reachable.Detail+")")
 		} else {
-			unknownFacts(c.Host, map[string]DNSArchFact{"nameservers": c.Nameservers, "options": c.Options, "systemd_resolved_active": c.ResolvedActive, "resolvectl_dns": c.ResolvedDNS, "first_hop_identity": c.FirstHop, "lookup": c.Lookup})
+			liveFacts(c.Host, []namedFact{{"nameservers", c.Nameservers, false}, {"options", c.Options, false}, {"systemd_resolved_active", c.ResolvedActive, false}, {"resolvectl_dns", c.ResolvedDNS, false}, {"first_hop_identity", c.FirstHop, true}, {"lookup", c.Lookup, true}})
 		}
 	}
+
+	// FreeIPA's configuration. kinit can succeed and FreeIPA still refuse
+	// the ticket ("did not receive Kerberos credentials"): that is
+	// auth_required as well, not a complete report.
+	authRequired := o.Kerberos.State == "not_configured" || o.Kerberos.State == FactAuthRequired || o.Kerberos.State == KerberosRefusedPrivileged
+	authFinding := "auth_required: " + o.Kerberos.Detail
+	if o.Kerberos.State == KerberosRefusedPrivileged {
+		authFinding = "freeipa_principal_not_read_only: " + o.Kerberos.Detail
+	}
+	var configUnknown []string
+	permissionReported := false
+	for _, nf := range []namedFact{{"global_forwarders", o.FreeIPA.GlobalForwarders, false}, {"forward_policy", o.FreeIPA.ForwardPolicy, false}, {"server_forwarders", o.FreeIPA.ServerForwarders, false}, {"forward_zones", o.FreeIPA.ForwardZones, false}, {"zones", o.FreeIPA.Zones, false}} {
+		switch f := nf.fact; f.State {
+		case FactPermissionDenied:
+			partial = true
+			if !permissionReported {
+				findings = append(findings, "freeipa_read_permission_missing: "+f.Detail)
+				permissionReported = true
+			}
+		case FactAuthRequired:
+			if !authRequired {
+				authRequired = true
+				authFinding = "auth_required: kinit with the approved keytab succeeded, but FreeIPA did not accept the ticket for " + nf.name + ": " + f.Detail
+			}
+		case FactUnknown, FactError, FactUnreachable:
+			configUnknown = append(configUnknown, withDetail(nf.name, f.Detail))
+		}
+	}
+	if len(configUnknown) > 0 {
+		partial = true
+		host := o.FreeIPA.QueriedOn
+		if host == "" {
+			host = "FreeIPA"
+		}
+		findings = append(findings, "live_fact_unknown: "+host+" (FreeIPA configuration): "+strings.Join(configUnknown, "; "))
+	}
+	if authRequired {
+		findings = append(findings, authFinding)
+	}
+
+	var comparisonsUnknown []string
 	for _, d := range diffs {
 		switch d.Status {
+		case "match", FactNotApplicable:
 		case "mismatch", "absent":
 			findings = append(findings, "declared_live_"+d.Status+": "+d.Subject)
-		case FactUnknown:
-			partial = true
+		case FactAuthRequired:
+			if !authRequired {
+				comparisonsUnknown = append(comparisonsUnknown, withDetail(d.Subject, d.Detail))
+			}
+		default:
+			comparisonsUnknown = append(comparisonsUnknown, withDetail(d.Subject, d.Detail))
 		}
 	}
-	authRequired := o.Kerberos.State == "not_configured" || o.Kerberos.State == FactAuthRequired
-	if authRequired {
-		findings = append(findings, "auth_required: "+o.Kerberos.Detail)
-	}
-	for _, f := range []DNSArchFact{o.FreeIPA.GlobalForwarders, o.FreeIPA.ForwardPolicy, o.FreeIPA.ServerForwarders, o.FreeIPA.ForwardZones, o.FreeIPA.Zones} {
-		if f.State == FactPermissionDenied {
-			partial = true
-			findings = append(findings, "freeipa_read_permission_missing: "+f.Detail)
-			break
-		}
-		if f.State == FactUnknown || f.State == FactError || f.State == FactUnreachable {
-			partial = true
-		}
+	if len(comparisonsUnknown) > 0 {
+		partial = true
+		findings = append(findings, "comparison_unknown: "+strings.Join(comparisonsUnknown, "; "))
 	}
 	switch {
 	case authRequired:
@@ -1022,7 +1176,7 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 func liveAuthority(f DNSArchFact) string {
 	q, isQuery := f.Value.(DNSQueryResult)
 	switch {
-	case !isQuery || (f.State != FactObserved && f.State != FactAbsent):
+	case !isQuery || (f.State != FactObserved && f.State != FactAbsent && f.State != FactError):
 		return f.State
 	case q.Status == "NOERROR" && q.Authoritative && len(q.Answers) > 0:
 		return "authoritative"

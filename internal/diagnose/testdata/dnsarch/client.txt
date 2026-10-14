@@ -16,7 +16,15 @@ Global: 192.168.122.15 192.168.122.5
 Link 2 (enp1s0):
 @@pilot-dnsarch resolvectl end rc=0
 @@pilot-dnsarch first_hop begin
-"pilot-dns:dd-dns"
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 25132
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+;; ANSWER SECTION:
+id.server.		0	CH	TXT	"pilot-dns:pr73-dns"
+
 @@pilot-dnsarch first_hop end rc=0
 @@pilot-dnsarch lookup begin
 192.168.122.5   ipa1.ipa.pilot.internal
