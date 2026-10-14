@@ -224,9 +224,14 @@
       register: ipa_precheck_cfg
       tags: [always]
 
+    # Shared with freeipa-server-replica-apply.yml (issue #68).
     - name: "Normalize DNS forwarders to a list"
-      ansible.builtin.set_fact:
-        ipa_dns_forwarders_normalized: "{{ (ipa_dns_forwarders_raw | from_yaml) if (ipa_dns_forwarders_raw is string and (ipa_dns_forwarders_raw | trim).startswith('[')) else (ipa_dns_forwarders_raw.split() if ipa_dns_forwarders_raw is string else ipa_dns_forwarders_raw) }}"  # noqa yaml[line-length]
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-forwarders.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders_raw }}"
       tags: [always]
 
     # Only meaningful before the first install: once ipa-server-install has

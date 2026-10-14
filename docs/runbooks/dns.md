@@ -11,8 +11,15 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-01，candidate `c257bfc`（tree `ecf68316f5d00aabbd46325c6452d201e638c159`），
-**PASS**。完整摘要：[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
+最新驗證：2026-10-14，candidate `6522b94`（tree `c8029314e417b78ad043b59ec8b32a4df256e379`），
+**PASS**：兩台 FreeIPA DNS server（primary + 未設 `freeipa_setup_dns` 的 replica，issue #67）
+在 tier 前面，4 台由 `topology up` 新建的 VM 跑 `vm-target topology test`：L3 check mode
+（全新 VM）`failed=0`、L4 `failed=0`、verify `dns.md` v1.2 16 pass / 0 fail / 4 not_applicable
+（測試後再跑 2 次結果相同）、`freeipa-server.md` 20、`freeipa-server-replica.md` 16、
+`freeipa-dns-client.md` 7 全部 pass、L6 `changed=0`。摘要：
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
+下表是 dns role 本身範圍最廣的一次驗證（2026-10-01 candidate `c257bfc`，E1–E8），摘要：
+[`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|

@@ -36,7 +36,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — dns（FreeIPA 前的第一層快取 DNS，自動分流）
 
-> 版本：**v1.1（2026-10-01，ACL 依實際涵蓋的網段判斷；candidate `c257bfc` 對 5 台全新 vm-target 實跑 PASS）**
+> 版本：**v1.2（2026-10-13，C14 接受任一台 FreeIPA DNS server 的 SOA；v1.1 2026-10-01 ACL 依實際涵蓋的網段判斷，candidate `c257bfc` 對 5 台全新 vm-target 實跑 PASS）**
 > 對齊規範：pilot 通用基礎設施**服務端**規範；擴充既有 `dns` role
 > （目前由 `core-infra-provider-apply.yml -e infra_role=dns` 實作）
 > 維護者：sre
@@ -474,14 +474,17 @@ test 的「應該觸發」案例，能在 vm-target 製造的也要實際觸發�
   check: a nonexistent internal name returns NXDOMAIN carrying the FreeIPA SOA with TTL at or below dns_cache_max_negative_ttl
   probe: |
     case "$PILOT_VAR_FREEIPA_DOMAIN $PILOT_VAR_FREEIPA_DNS_SERVER_IPS" in *none*) echo missing-input; exit 0 ;; esac
-    ipa=$(printf '%s\n' $PILOT_VAR_FREEIPA_DNS_SERVER_IPS | sed -n 1p)
     n="pilot-dns-nx-$(date +%s)-$$.$PILOT_VAR_FREEIPA_DOMAIN"
     r=$(dig +time=3 +tries=2 +noall +comments +authority @127.0.0.1 "$n" A)
     st=$(printf '%s\n' "$r" | sed -n 's/.*status: \([A-Z]*\),.*/\1/p')
     ttl=$(printf '%s\n' "$r" | awk '$4=="SOA" {print $2; exit}')
     mname=$(printf '%s\n' "$r" | awk '$4=="SOA" {print tolower($5); exit}')
-    want=$(dig +time=3 +tries=2 +norec +noall +answer @"$ipa" "$PILOT_VAR_FREEIPA_DOMAIN" SOA | awk '$4=="SOA" {print tolower($5); exit}')
-    if [ "$st" = NXDOMAIN ] && [ -n "$want" ] && [ "$mname" = "$want" ] && [ -n "$ttl" ] && [ "$ttl" -le "$PILOT_VAR_DNS_CACHE_MAX_NEGATIVE_TTL" ]; then echo nxdomain-from-freeipa; else echo "bad status=$st mname=$mname want=$want ttl=$ttl"; fi
+    want=""
+    for ipa in $PILOT_VAR_FREEIPA_DNS_SERVER_IPS; do
+      want="$want $(dig +time=3 +tries=2 +norec +noall +answer @"$ipa" "$PILOT_VAR_FREEIPA_DOMAIN" SOA | awk '$4=="SOA" {print tolower($5); exit}')"
+    done
+    case " $want " in *" $mname "*) from=freeipa ;; *) from=other ;; esac
+    if [ "$st" = NXDOMAIN ] && [ -n "$mname" ] && [ "$from" = freeipa ] && [ -n "$ttl" ] && [ "$ttl" -le "$PILOT_VAR_DNS_CACHE_MAX_NEGATIVE_TTL" ]; then echo nxdomain-from-freeipa; else echo "bad status=$st mname=$mname want=$(echo $want) ttl=$ttl"; fi
   expect: {stdout: {equals: nxdomain-from-freeipa}}
   appliesWhen:
     all:
@@ -716,3 +719,4 @@ resolver，沿用 `freeipa-dns-client` 既有的 snapshot 與 rollback。
 | 2026-10-01 | v1.1 | PR #33 review：G4 只擋 `0.0.0.0/0`、`::/0` 兩個字串，`1.2.3.4/0`、`::0/0`、`0.0.0.0/1`+`128.0.0.0/1` 都能讓 tier 對所有來源開放（Ubuntu 24.04 的 unbound 1.19.2 實測接受這些寫法並照原樣輸出）。B7、G4 改成依實際涵蓋的網段判斷（controller 上用 Python `ipaddress` 合併網段）並要求標準形式的 CIDR；C5 的驗收方法同樣改成合併 `allow*` 網段，原本只 grep 兩個字串的寫法是錯的，這次收緊不是放寬。`TestRegression_DNSACLClassifier`、`TestRegression_DNSC5RejectsEquivalentAllowAll` 用實測擷取的 `get_option` 輸出鎖住 | sre |
 | 2026-10-01 | v1.1 | Checks 不變。candidate `c257bfc` 重跑全部驗證（`docs/evidence/dns/2026-10-01-c257bfc.md`），加上 G4、C5 對允許全部來源 ACL 的真機觸發；只更新狀態與 §6 | sre |
 | 2026-10-01 | v1.1 | Checks 不變。§8 把 resolver 逾時從未知項移到決策 A9：consumer 有 2 筆以上 nameserver 時用 `timeout:1 attempts:2`，由 `freeipa-dns-client.md` C7 驗收 | sre |
+| 2026-10-13 | v1.2 | C14：NXDOMAIN 的 SOA mname 改成「任一台 `freeipa_dns_server_ips` 的 SOA mname」，不再只比第一台。每台 FreeIPA DNS server 在 SOA 寫的是自己的 FQDN（`ipa dnsserver-find` 的 SOA mname override），tier 的 stub 指向多台時，回答可能來自任一台；replica 從 issue #67 起預設算 DNS 提供者，兩台 server 的 vm-target 上 tier 的回答在 `ipa1`/`ipa2` 之間交替，舊寫法約一半機率 FAIL。`TestRegression_DNSC14AcceptsAnyFreeIPAServerSOA` 用實際擷取的 dig 輸出驗證 | pilot |

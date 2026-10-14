@@ -68,8 +68,8 @@ FreeIPA server/replica 自己用得到。
 - **RHEL/EL9 主機只會是 FreeIPA 相關主機**（`freeipa-server` /
   `freeipa-server-replica` / EL9 上的 `freeipa-client`），用
   `NetworkManager`（`community.general.nmcli`）設定，**這些主機也要套用本
-  playbook**——包含 FreeIPA server/replica 自己：若該主機本身就是一個有
-  `freeipa_setup_dns: true` 的 DNS 提供者，playbook 會讓它的 resolver 優先
+  playbook**——包含 FreeIPA server/replica 自己：若該主機本身就是一個
+  `freeipa_setup_dns` 不是 `false` 的 DNS 提供者，playbook 會讓它的 resolver 優先
   指向自己（`127.0.0.1`），其餘 DNS 提供者作為 fallback；這與
   `ipa-server-install --setup-dns` 本來就會做的事一致，不衝突。
 
@@ -80,7 +80,7 @@ FreeIPA server/replica 自己用得到。
 | Inventory group | `freeipa-dns-client`（day-2/opt-in；vm-target 測試時用 `-e target_group=all`）|
 | OS / version | Ubuntu/Debian（`systemd-resolved`，primary）与 EL9（`NetworkManager`，FreeIPA 相關主機）皆支援 |
 | 角色 | 任意目標主機的 DNS resolver 使用端；把系統 DNS 指向 FreeIPA server/replica 的 named |
-| FreeIPA DNS 提供者 | 自動從 inventory 偵測：`freeipa-server` group（其 `freeipa_setup_dns` 預設 `true`）+ `freeipa-server-replica` group 裡 `freeipa_setup_dns: true` 的主機 |
+| FreeIPA DNS 提供者 | 自動從 inventory 偵測：`freeipa-server` 與 `freeipa-server-replica` group 裡 `freeipa_setup_dns` 不是 `false` 的主機（兩者預設都是 `true`，與安裝 playbook 一致；2026-10-13 起 replica 也預設算入，issue #67） |
 | 套用範圍 | 任意主機（含 FreeIPA server/replica 自己）；多台各自套用同一 playbook |
 | 風險等級 | Medium（誤設會讓本機所有 DNS 查詢失敗，但不影響其他主機）|
 
@@ -92,10 +92,10 @@ FreeIPA server/replica 自己用得到。
 |---------|----------|---------|
 | `freeipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal`（**必須**與 `freeipa-server.md` §1.5 一致）| 否（有預設）|
 | `freeipa_dns_client_servers` | 明確指定 nameserver IP 清單（list），**設了就完全略過 inventory 自動偵測** | 否（未設時走自動偵測）|
-| `freeipa_setup_dns` | 沿用 `freeipa-server.md`/`freeipa-server-replica.md` 同名 hostvar，決定 inventory 裡哪些主機被視為「有在提供 DNS」；本 playbook 只讀取，不寫入 | 否（各自角色已有預設：`freeipa-server` group 預設 `true`，`freeipa-server-replica` group 預設 `false`）|
+| `freeipa_setup_dns` | 沿用 `freeipa-server.md`/`freeipa-server-replica.md` 同名 hostvar，決定 inventory 裡哪些主機被視為「有在提供 DNS」；本 playbook 只讀取，不寫入 | 否（各自角色已有預設：兩個 group 都是 `true`，跟安裝 playbook 一致；replica 自 issue #67 起） |
 
 > 自動偵測邏輯：走訪 `groups['freeipa-server']`（`freeipa_setup_dns \| default(true)`）
-> 與 `groups['freeipa-server-replica']`（`freeipa_setup_dns \| default(false)`），
+> 與 `groups['freeipa-server-replica']`（同樣 `freeipa_setup_dns \| default(true)`），
 > 用各主機自己的 `ansible_host` 組成 nameserver 清單；若本機自己也在清單內
 > （本機就是 DNS 提供者），把 `127.0.0.1` 排到最前面、其餘提供者接在後面當
 > fallback，其餘情況維持 inventory 偵測到的原始順序（`freeipa-server` 排最前）。
@@ -284,7 +284,7 @@ FreeIPA server/replica 自己用得到。
 ## 7. 動態行為 SOP（fixture：確保有 DNS 提供者可偵測）
 
 跑本檔驗證前，inventory 必須至少有一台 `freeipa-server`（或
-`freeipa-server-replica` 且 `freeipa_setup_dns: true`）已完成
+`freeipa_setup_dns` 不是 `false` 的 `freeipa-server-replica`）已完成
 `freeipa-server-apply.yml`（`--setup-dns`）並健康（見 `freeipa-server.md` §2）。
 本檔不建立/管理 FreeIPA server 本身，純粹消費它已經存在的 DNS 服務。
 
