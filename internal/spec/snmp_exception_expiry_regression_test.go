@@ -170,14 +170,16 @@ func TestRegression_SnmpInsecureProfileExceptionExpiry(t *testing.T) {
 // (`networkEvidence`). Against the v1.1 gate, which checked only reason,
 // owner and expiry, every confirmed/networkEvidence rejection here passes.
 //
-// reason and owner must be non-blank strings, networkEvidence a non-blank
-// string or a number (a ticket number). Against the v1.2 gate, which turned
-// networkEvidence into a string before checking its length and took the
-// length of reason and owner as they were, null, an empty list or an empty
-// mapping passed as networkEvidence, a list or mapping passed as reason or
-// owner, and a blank reason or owner passed (PR #65 review). A null or
-// non-mapping exception, or a null exceptions setting, raised a templating
-// error instead of the gate's message.
+// reason and owner must be strings with a letter or digit, networkEvidence
+// a string with a letter or digit or a positive integer (a ticket number).
+// Against the v1.2 gate, which turned networkEvidence into a string before
+// checking its length and took the length of reason and owner as they were,
+// null, an empty list or an empty mapping passed as networkEvidence, a list
+// or mapping passed as reason or owner, and a blank reason or owner passed
+// (PR #65 review). A null or non-mapping exception, or a null exceptions
+// setting, raised a templating error instead of the gate's message. The
+// first fix still accepted any number (0, -5, 1.5, .nan, .inf) and strings
+// of zero-width characters or punctuation only.
 func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 	day := snmpTestDays(t)
 	const expiry = `expiry: "2099-12-31"`
@@ -210,6 +212,18 @@ func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 		{"networkEvidence list", without("networkEvidence", "[CHG-1]"), day(0), false},
 		{"networkEvidence mapping", without("networkEvidence", "{ticket: CHG-1}"), day(0), false},
 		{"networkEvidence boolean", without("networkEvidence", "true"), day(0), false},
+		{"networkEvidence in another script", without("networkEvidence", `"管理網段 ACL 變更 7"`), day(0), true},
+		{"networkEvidence zero", without("networkEvidence", "0"), day(0), false},
+		{"networkEvidence negative", without("networkEvidence", "-5"), day(0), false},
+		{"networkEvidence float", without("networkEvidence", "1.5"), day(0), false},
+		{"networkEvidence NaN", without("networkEvidence", ".nan"), day(0), false},
+		{"networkEvidence infinity", without("networkEvidence", ".inf"), day(0), false},
+		{"networkEvidence tab and newline", without("networkEvidence", `"\t\n"`), day(0), false},
+		{"networkEvidence no-break space", without("networkEvidence", `"\u00a0"`), day(0), false},
+		{"networkEvidence ideographic space", without("networkEvidence", `"\u3000"`), day(0), false},
+		{"networkEvidence zero-width space", without("networkEvidence", `"\u200b"`), day(0), false},
+		{"networkEvidence punctuation only", without("networkEvidence", `"-"`), day(0), false},
+		{"networkEvidence underscores only", without("networkEvidence", `"___"`), day(0), false},
 		{"networkEvidence written as a bare key", snmpExceptionsVar + `
   lab-v2c:
     confirmed: true
@@ -223,15 +237,98 @@ func TestRegression_SnmpInsecureProfileExceptionFields(t *testing.T) {
 		{"reason list", without("reason", "[lab]"), day(0), false},
 		{"reason mapping", without("reason", "{why: lab}"), day(0), false},
 		{"reason number", without("reason", "42"), day(0), false},
+		{"reason zero-width space", without("reason", `"\u200b"`), day(0), false},
+		{"reason punctuation only", without("reason", `"---"`), day(0), false},
 		{"owner missing", without("owner", ""), day(0), false},
 		{"owner blank", without("owner", `"   "`), day(0), false},
 		{"owner null", without("owner", "null"), day(0), false},
 		{"owner list", without("owner", "[ops]"), day(0), false},
 		{"owner mapping", without("owner", "{team: ops}"), day(0), false},
+		{"owner zero-width space", without("owner", `"\u200b"`), day(0), false},
+		{"owner underscore only", without("owner", `"_"`), day(0), false},
 		{"the exception is null", snmpExceptionsVar + "\n  lab-v2c:", day(0), false},
 		{"the exception is a list", snmpExceptionsVar + "\n  lab-v2c: [" + strings.TrimSuffix(valid, ", ") + "]", day(0), false},
 		{"the exceptions setting is null", snmpExceptionsVar, day(0), false},
 	})
+}
+
+// TestRegression_SnmpExceptionFromGroupVars runs the prod gate after the
+// pre_task that defaults snmp_insecure_auth_profile_exceptions (PR #74),
+// with the exception in group_vars/snmp-exporter.yml instead of an -e file.
+// The default goes through set_fact, which re-templates the operator's
+// mapping; the field types the gate checks (a number, null, a bare YAML
+// date) must survive that, and an absent setting must still reject.
+func TestRegression_SnmpExceptionFromGroupVars(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/snmp-exporter-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []map[string]any
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		t.Fatal(err)
+	}
+	const resolveName = "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+	var tasks []map[string]any
+	for _, task := range plays[0]["pre_tasks"].([]any) {
+		if m, ok := task.(map[string]any); ok && (m["name"] == resolveName || m["name"] == snmpExceptionGateName) {
+			tasks = append(tasks, m)
+		}
+	}
+	if len(tasks) != 2 || tasks[0]["name"] != resolveName {
+		t.Fatalf("want %q followed by the gate in pre_tasks, found %d of them", resolveName, len(tasks))
+	}
+	const valid = `confirmed: true, reason: lab, owner: ops, expiry: 2099-12-31, `
+	for _, tc := range []struct {
+		name, groupVars string
+		accept          bool
+	}{
+		{"a text networkEvidence", snmpExceptionsVar + "\n  lab-v2c: {" + valid + `networkEvidence: "CHG-1"}`, true},
+		{"a ticket number", snmpExceptionsVar + "\n  lab-v2c: {" + valid + `networkEvidence: 1234}`, true},
+		{"networkEvidence null", snmpExceptionsVar + "\n  lab-v2c: {" + valid + `networkEvidence: null}`, false},
+		{"networkEvidence empty list", snmpExceptionsVar + "\n  lab-v2c: {" + valid + `networkEvidence: []}`, false},
+		{"networkEvidence zero", snmpExceptionsVar + "\n  lab-v2c: {" + valid + `networkEvidence: 0}`, false},
+		{"the exception null", snmpExceptionsVar + "\n  lab-v2c:", false},
+		{"the exceptions setting null", snmpExceptionsVar, false},
+		{"no exceptions setting", "other_var: 1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			inv := filepath.Join(dir, "inventory")
+			if err := os.MkdirAll(filepath.Join(inv, "group_vars"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			hosts := "snmp-exporter:\n  hosts:\n    localhost: {ansible_connection: local}\n"
+			if err := os.WriteFile(filepath.Join(inv, "hosts.yml"), []byte(hosts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(inv, "group_vars", "snmp-exporter.yml"), []byte(tc.groupVars+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			vars := map[string]any{
+				"stage": "prod",
+				"snmp_catalog_parsed": map[string]any{"authProfiles": map[string]any{
+					"lab-v2c": map[string]any{"version": 2, "securityLevel": "noAuthNoPriv", "credentialRef": "lab"},
+				}},
+			}
+			res := runLocalTasks(t, vars, tasks, dir, nil, "-i", filepath.Join(inv, "hosts.yml"))
+			if !res.ran[snmpExceptionGateName] {
+				t.Fatalf("the gate did not run:\n%s", res.raw)
+			}
+			if tc.accept {
+				if res.rc != 0 || len(res.failures) > 0 {
+					t.Fatalf("gate rejected a valid exception from group_vars (rc=%d): %v", res.rc, res.failures)
+				}
+				return
+			}
+			if res.rc == 0 {
+				t.Fatal("gate accepted the exception, want a rejection")
+			}
+			if len(res.failures) != 1 || !strings.HasPrefix(res.failures[0], snmpExceptionGateName+":") ||
+				!strings.Contains(res.raw, "which prod rejects unless") {
+				t.Fatalf("want the gate's own rejection, got rc=%d %v\n%s", res.rc, res.failures, res.raw)
+			}
+		})
+	}
 }
 
 // TestRegression_NoDecisionsOnCachedDateFacts is a repo-wide lint over

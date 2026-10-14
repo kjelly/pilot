@@ -260,13 +260,16 @@
     # ends in this gate's own message.
     # Spec §13.2 also requires "confirm insecure SNMP" and "restricted
     # management network evidence": `confirmed` must be the boolean true
-    # (not the string "true"), and `networkEvidence` a non-blank string or a
-    # number (a ticket number). reason and owner must be non-blank strings.
-    # Each type is checked before the value is turned into a string or
-    # measured: `| string` makes null, [] and {} non-empty ("None", "[]",
-    # "{}"), and `| length` counts a list's items, so those used to pass
-    # (PR #65 review). An exception, or the whole setting, that is not a
-    # mapping counts as no exception.
+    # (not the string "true"), and `networkEvidence` a string or a positive
+    # integer (a ticket number). reason, owner and a string networkEvidence
+    # must contain a letter or a digit: whitespace (Unicode included),
+    # zero-width characters or punctuation alone do not count. Each type is
+    # checked before the value is turned into a string or measured: `| string`
+    # makes null, [] and {} non-empty ("None", "[]", "{}"), and `| length`
+    # counts a list's items, so those used to pass (PR #65 review). The
+    # integer test excludes booleans; floats (1.5, .nan, .inf), 0 and
+    # negative numbers are not ticket numbers. An exception, or the whole
+    # setting, that is not a mapping counts as no exception.
     - name: "Gate: prod stage rejects insecure SNMP auth profiles unless an explicit reviewed exception exists"
       ansible.builtin.assert:
         that:
@@ -285,10 +288,11 @@
           non-expired reason/owner/expiry, confirmed: true and a
           networkEvidence (spec §13.2). This is not a permanent global allow
           flag — set it per profile, with an expiry. reason and owner are
-          non-blank strings; expiry is a YYYY-MM-DD date, valid through that
-          date in UTC (today, UTC: {{ now(utc=true, fmt='%Y-%m-%d') }});
-          networkEvidence is a non-blank string or a ticket number naming the
-          evidence that the device's management network is restricted.
+          strings with a letter or digit; expiry is a YYYY-MM-DD date, valid
+          through that date in UTC (today, UTC: {{ now(utc=true, fmt='%Y-%m-%d') }});
+          networkEvidence is a string with a letter or digit, or a positive
+          integer ticket number, naming the evidence that the device's
+          management network is restricted.
       vars:
         _snmp_exceptions: >-
           {{ snmp_insecure_auth_profile_exceptions
@@ -298,15 +302,15 @@
              if (_snmp_exceptions.get(item.key) is mapping) else {} }}
         _snmp_exception_reason_ok: >-
           {{ _snmp_exception.get('reason') is string
-             and (_snmp_exception.get('reason') | trim | length > 0) }}
+             and _snmp_exception.get('reason') is search('[^\W_]') }}
         _snmp_exception_owner_ok: >-
           {{ _snmp_exception.get('owner') is string
-             and (_snmp_exception.get('owner') | trim | length > 0) }}
+             and _snmp_exception.get('owner') is search('[^\W_]') }}
         _snmp_exception_network_evidence_ok: >-
           {{ (_snmp_exception.get('networkEvidence') is string
-              or (_snmp_exception.get('networkEvidence') is number
-                  and _snmp_exception.get('networkEvidence') is not boolean))
-             and (_snmp_exception.get('networkEvidence') | string | trim | length > 0) }}
+              and _snmp_exception.get('networkEvidence') is search('[^\W_]'))
+             or (_snmp_exception.get('networkEvidence') is integer
+                 and _snmp_exception.get('networkEvidence') > 0) }}
         _snmp_exception_expiry: >-
           {{ _snmp_exception.get('expiry', '') | string }}
         _snmp_exception_year: "{{ _snmp_exception_expiry[0:4] | int }}"

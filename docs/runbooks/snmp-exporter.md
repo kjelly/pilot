@@ -237,10 +237,10 @@ snmp_insecure_auth_profile_exceptions:
   `2026-9-30`）、不存在的日期（例如加了引號的 `"2099-02-29"`、`"2099-13-01"`，含閏年規則；沒加引號時
   Ansible 載入 vars 檔就會報錯）或已過期都會被拒絕。之前比較的是 `ansible_date_time.date`：目標主機的
   本地日期，而且來自最多一小時前的 fact cache；不加引號的日期會讓比較直接報 type error。
-- `reason`、`owner`：字串，去掉空白後不能是空的。
-- `networkEvidence`：字串（去掉空白後不能是空的）或變更單號數字。`null`（包括只寫
-  `networkEvidence:` 沒有值）、布林、list、mapping 都會被拒絕：C12 v1.2 的 gate 先把值轉成字串再量
-  長度，`null`、`[]`、`{}` 因此被當成有內容（PR #65 review）。
+- `reason`、`owner`：字串，至少要有一個字母或數字（只有空白、零寬字元或標點符號不算）。
+- `networkEvidence`：至少有一個字母或數字的字串，或正整數的變更單號。`null`（包括只寫
+  `networkEvidence:` 沒有值）、布林、list、mapping、小數（含 `.nan`、`.inf`）、0 與負數都會被拒絕：
+  C12 v1.2 的 gate 先把值轉成字串再量長度，`null`、`[]`、`{}` 因此被當成有內容（PR #65 review）。
 - 例外本身（`lab-v2c:`）不是 mapping，或整個 `snmp_insecure_auth_profile_exceptions` 是 `null` 時，
   視為沒有例外，由 gate 的訊息拒絕。
 - 這筆設定可以寫在 group_vars/host_vars，或用 `-e @<file>` 帶入的檔案（例如 vault 檔）。
@@ -249,7 +249,7 @@ snmp_insecure_auth_profile_exceptions:
   pre_tasks 的 `set_fact` 補上，由 `TestRegression_InventoryInputsReachThePlay` 鎖住。
 
 目前的行為由 `internal/spec/snmp_exception_expiry_regression_test.go` 在本機實際跑這道 gate
-鎖住（expiry 17 個案例、其他欄位 28 個案例），`TestRegression_NoDecisionsOnCachedDateFacts`
+鎖住（expiry 17 個案例、其他欄位 44 個案例，另有 8 個案例把例外寫在 group_vars），`TestRegression_NoDecisionsOnCachedDateFacts`
 禁止全部 playbook 的條件式讀 `ansible_date_time`。
 
 ## 9. `pilot verify` 正式驗收
