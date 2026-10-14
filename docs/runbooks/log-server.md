@@ -20,16 +20,16 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-14）**：candidate `1d9bd8c`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-14）**：candidate `4115817`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`topology test`
 > L3/L4 failed=0、L5 log-server 11/11、L6 changed=0。`pilot deploy` 以 inventory 設定
 > `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30` 後 preflight 通過、rsyslog 在
 > 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，log-server.md 11/11（C5 讀接收設定裡的
 > port）。`siem_receiver_tcp_port` 必須是 1–65535 的十進位整數；`siem_log_root`（與它解析到的
 > 真實路徑）不能是系統或共用目錄，既有目錄必須已是本角色建立的 `syslog:syslog 0755`
-> （只有 `lost+found` 的新掛載檔案系統根目錄例外；權限被改過時會給出還原指令）；
+> （只有 `lost+found` 的新掛載檔案系統根目錄例外；權限被改過時會給出還原指令），Step 2 只對解析後的真實路徑操作、不跟隨 symlink；
 > logrotate 會先安裝，設定檔的 `validate` 只在 logrotate 回報這個檔案本身的錯誤時失敗。
-> 紀錄：[`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)。
+> 紀錄：[`2026-10-14-4115817.md`](../evidence/play-vars-inventory-precedence/2026-10-14-4115817.md)（gate 的逐項實測見 [`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)）。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
