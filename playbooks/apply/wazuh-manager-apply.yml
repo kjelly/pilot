@@ -111,6 +111,24 @@
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    # siem_forward_port is rendered into syslog_output's <port> and shared with audit-log-forwarding's
+    # sender on hosts in both groups: 2514.0, 0x9C4, a leading zero or 70000 would be read
+    # differently or not at all. Checked before the fallback below so that 0
+    # is refused instead of silently becoming 514; unset, null and "" mean
+    # the default.
+    - name: "Gate: siem_forward_port is a TCP port number"
+      ansible.builtin.assert:
+        that:
+          - >-
+            siem_forward_port is not defined or siem_forward_port is none
+            or (siem_forward_port | string) == ''
+            or ((siem_forward_port | string) is match('^[1-9][0-9]{0,4}\Z')
+                and (siem_forward_port | int) <= 65535)
+        fail_msg: >-
+          siem_forward_port={{ siem_forward_port | default('') }} must be a TCP port number from 1 to 65535,
+          written in decimal without a sign, a fraction or leading zeros. Leave it unset for 514.
+      tags: [always]
+
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.

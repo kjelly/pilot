@@ -102,6 +102,25 @@
     # (log-server-apply.yml); both fall back to 514 for an empty or null
     # value. The logrotate counts fall back too: an empty count would render
     # `rotate ` and logrotate would skip that whole policy.
+    # siem_forward_port is rendered into the @@host:port forwarding rules and
+    # compared, as a string, with log-server's siem_receiver_tcp_port:
+    # 2514.0, 0x9C4, 02514 or 70000 would be read differently by rsyslog or
+    # not at all. Checked before the fallback below so that 0 is refused
+    # instead of silently becoming 514; unset, null and "" mean the default.
+    - name: "Gate: siem_forward_port is a TCP port number"
+      ansible.builtin.assert:
+        that:
+          - >-
+            siem_forward_port is not defined or siem_forward_port is none
+            or (siem_forward_port | string) == ''
+            or ((siem_forward_port | string) is match('^[1-9][0-9]{0,4}\Z')
+                and (siem_forward_port | int) <= 65535)
+        fail_msg: >-
+          siem_forward_port={{ siem_forward_port | default('') }} must be a TCP port number
+          from 1 to 65535, written in decimal without a sign, a fraction or leading zeros.
+          Leave it unset for 514.
+      tags: [always]
+
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         audit_logrotate_maxage: "{{ audit_logrotate_maxage | default(90, true) }}"
@@ -115,8 +134,10 @@
     # (log-server) are separate inputs, usually set in different group_vars
     # files. When they differ, rsyslog sends where nothing listens and the
     # apply still succeeds, so check them whenever the target is this
-    # inventory's log-server, by inventory name or ansible_host. An external
-    # receiver (siem_forward_host set to anything else) is not checked.
+    # inventory's log-server: its inventory name, ansible_host, or the FQDN
+    # or node name its facts report, compared without case and without a
+    # trailing dot (AGENTS.md §5.13). An external receiver, or a name for the
+    # log-server that none of those match, is not checked.
     - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
       ansible.builtin.assert:
         that:
@@ -126,7 +147,8 @@
           (siem_forward_port), but log-server {{ siem_forward_log_server }} listens on
           {{ siem_forward_receiver_port }} (siem_receiver_tcp_port). Set both to the same port.
       vars:
-        siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_effective_host in [h, (hostvars[h].ansible_host | default(h, true))] %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
+        siem_forward_target_name: "{{ (siem_forward_effective_host | string | lower).rstrip('.') }}"
+        siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
         siem_forward_receiver_port: "{{ hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true) if siem_forward_log_server else '' }}"
       when:
         - siem_forwarding_enabled | bool
@@ -203,6 +225,32 @@
         state: present
       when: ansible_os_family == "RedHat"
 
+    # Steps 4, 5 and 5c render or edit logrotate policies and validate them
+    # with logrotate, and the policies do nothing without it; minimal images
+    # such as pilot-target-ubuntu do not ship it. Tagged with those steps'
+    # rows so a tag-scoped run installs it too.
+    - name: "Step 1b: Install logrotate (Debian family)"
+      tags: [C1, C12, C13, C14, C20]
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C12, C13, C14, C20]
+      vars:
+        pilot_apt_packages: [logrotate]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: audit-log-forwarding-logrotate
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when: ansible_os_family == "Debian"
+
+    - name: "Step 1c: Install logrotate (RedHat family)"
+      tags: [C1, C12, C13, C14, C20]
+      ansible.builtin.dnf:
+        name: logrotate
+        state: present
+      when: ansible_os_family == "RedHat"
+
     - block:
         - name: "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)"
           tags: [C3, C4, C5, C6, C7, C8, C9]
@@ -230,13 +278,16 @@
             group: root
             mode: "0644"
             backup: true
-            # Fails only on a syntax error ("error: <file>:<line> ..."), which
-            # makes logrotate skip the whole policy. `logrotate -d` alone also
-            # exits 1 for a fragment that relies on /etc/logrotate.conf's
-            # global `su` (Ubuntu's distro rsyslog policy), so its rc is not
-            # used (captured on Ubuntu 24.04 and AlmaLinux 9.8, 2026-10-14).
+            # Fails when logrotate reports an error about this file
+            # ("error: <file>:<line> ..." or "error: <file>:prerotate,
+            # postrotate or preremove without endscript"), which makes it skip
+            # the whole policy. `logrotate -d` alone also exits 1 for a
+            # fragment that relies on /etc/logrotate.conf's global `su`
+            # (Ubuntu's distro rsyslog policy: "error: skipping ..."), so its
+            # rc is not used (captured on Ubuntu 24.04 and AlmaLinux 9.8,
+            # 2026-10-14). Without logrotate (Step 1b installs it) it fails.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               /var/log/audit/audit.log {
@@ -261,7 +312,7 @@
             mode: "0644"
             # See Step 4.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               {{ audit_syslog_path }} {
@@ -318,7 +369,7 @@
             state: absent
             # See Step 4: this distro policy relies on the global `su`.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
             - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0

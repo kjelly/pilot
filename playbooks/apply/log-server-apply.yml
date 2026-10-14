@@ -49,6 +49,12 @@
     # whichever user actually creates the per-hostname dynaFile subdirs
     # (createDirs="on"), or rsyslog gets "Permission denied".
     siem_log_owner: "{{ 'syslog' if ansible_os_family == 'Debian' else 'root' }}"
+    # siem_log_root must not be, or resolve to, one of these (see the gates).
+    siem_log_root_system_trees: [/bin, /boot, /dev, /etc, /lib, /lib32, /lib64, /libx32, /proc,
+                                 /run, /sbin, /sys, /usr]
+    siem_log_root_reserved: [/home, /media, /mnt, /opt, /root, /srv, /tmp, /var, /var/cache,
+                             /var/lib, /var/log, /var/mail, /var/opt, /var/run, /var/spool,
+                             /var/tmp]
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
@@ -91,6 +97,25 @@
     # count would render `rotate ` and logrotate would skip the whole file.
     # siem_receiver_tcp_port must equal the clients' siem_forward_port
     # (audit-log-forwarding-apply.yml), which falls back the same way.
+    # siem_receiver_tcp_port is rendered into imtcp's port= and compared, as
+    # a string, with the clients' siem_forward_port: 2514.0, 0x9C4, 02514 or
+    # 70000 would be read differently by rsyslog or not at all. Checked
+    # before the fallback below so that 0 is refused instead of silently
+    # becoming 514; unset, null and "" still mean the default.
+    - name: "Gate: siem_receiver_tcp_port is a TCP port number"
+      ansible.builtin.assert:
+        that:
+          - >-
+            siem_receiver_tcp_port is not defined or siem_receiver_tcp_port is none
+            or (siem_receiver_tcp_port | string) == ''
+            or ((siem_receiver_tcp_port | string) is match('^[1-9][0-9]{0,4}\Z')
+                and (siem_receiver_tcp_port | int) <= 65535)
+        fail_msg: >-
+          siem_receiver_tcp_port={{ siem_receiver_tcp_port | default('') }} must be a TCP port
+          number from 1 to 65535, written in decimal without a sign, a fraction or leading zeros.
+          Leave it unset for 514.
+      tags: [always]
+
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         siem_log_root: "{{ siem_log_root | default('/var/log/siem', true) }}"
@@ -99,13 +124,15 @@
         siem_receiver_tcp_port: "{{ siem_receiver_tcp_port | default('514', true) }}"
       tags: [always]
 
-    # Step 2 makes siem_log_root owned by the rsyslog user and Step 4
-    # rotates siem_log_root/*/*.log: a directory that already belongs to
-    # something else (/var/log, /var/log/journal, /home/<user>, ...) would be
-    # taken over and its logs rotated by this policy. The name check refuses
-    # system trees and shared directories; the checks after it refuse a
-    # symlink in the path (Step 2 follows it) and an existing directory this
-    # role did not create.
+    # Step 2 makes siem_log_root owned by the rsyslog user (file:
+    # state=directory follows a symlink) and Step 4 rotates
+    # siem_log_root/*/*.log: a directory that already belongs to something
+    # else (/var/log, /var/log/journal, /home/<user>, ...) would be taken
+    # over and its logs rotated. The name checks refuse system trees and
+    # shared directories, both for the path as written and for the path it
+    # resolves to: a symlink to /var/log is refused, while a host whose /var
+    # is itself a symlink still uses the default. The last check refuses an
+    # existing directory this role did not create.
     - name: "Gate: siem_log_root is a dedicated absolute directory"
       ansible.builtin.assert:
         that:
@@ -120,65 +147,89 @@
           {{ siem_log_root_system_trees | join(', ') }}, and must not be a
           shared directory ({{ siem_log_root_reserved | join(', ') }}).
           Use a dedicated directory such as /var/log/siem.
-      vars:
-        siem_log_root_system_trees: [/bin, /boot, /dev, /etc, /lib, /lib32, /lib64, /libx32, /proc,
-                                     /run, /sbin, /sys, /usr]
-        siem_log_root_reserved: [/home, /media, /mnt, /opt, /root, /srv, /tmp, /var, /var/cache,
-                                 /var/lib, /var/log, /var/mail, /var/opt, /var/run, /var/spool,
-                                 /var/tmp]
       tags: [always]
 
-    - name: "Gate: inspect every directory on the siem_log_root path"
+    - name: "Gate: siem_log_root — resolve the directory it names"
+      ansible.builtin.command:
+        argv: [realpath, -m, --, "{{ siem_log_root }}"]
+      register: siem_log_root_realpath
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: siem_log_root — remember the resolved path"
+      ansible.builtin.set_fact:
+        siem_log_root_real: "{{ siem_log_root_realpath.stdout }}"
+      tags: [always]
+
+    - name: "Gate: siem_log_root — inspect the resolved directory and its parent"
       ansible.builtin.stat:
-        path: "{{ siem_log_root.split('/')[:item] | join('/') }}"
+        path: "{{ item }}"
         follow: false
         get_checksum: false
         get_mime: false
-      loop: "{{ range(2, (siem_log_root.split('/') | length) + 1) | list }}"
+      loop:
+        - "{{ siem_log_root_real }}"
+        - "{{ siem_log_root_real | dirname }}"
       register: siem_log_root_path_stat
       tags: [always]
 
-    - name: "Gate: list an existing siem_log_root"
+    - name: "Gate: siem_log_root — list the existing directory"
       ansible.builtin.find:
-        paths: "{{ siem_log_root }}"
+        paths: "{{ siem_log_root_real }}"
         file_type: any
         hidden: true
         recurse: false
       register: siem_log_root_entries
       when:
-        - (siem_log_root_path_stat.results | last).stat.exists
-        - (siem_log_root_path_stat.results | last).stat.isdir | default(false)
+        - siem_log_root_path_stat.results[0].stat.exists
+        - siem_log_root_path_stat.results[0].stat.isdir | default(false)
       tags: [always]
 
-    # An existing siem_log_root must already be what Step 2 leaves behind
-    # (owned by siem_log_owner:siem_log_owner, mode 0755) and hold only the
-    # per-host directories rsyslog's dynaFile creates. Step 2 then changes
-    # nothing on it, so reruns pass while a directory that belongs to
-    # something else (even an empty one such as /var/log/private) fails.
-    - name: "Gate: siem_log_root has no symlink and is new or already this role's"
+    # An existing siem_log_root must already be what Step 2 leaves behind:
+    # siem_log_owner:siem_log_owner, mode 0755, holding only the per-host
+    # directories rsyslog's dynaFile creates. Reruns pass, while a directory
+    # that belongs to something else fails, even an empty one such as
+    # /var/log/private. On EL siem_log_owner is root, so a root-owned system
+    # directory differs from this role's own only by its mode, and the mode
+    # has to match too; a changed mode is refused with the command that
+    # restores it. The one other directory accepted is the root of a newly
+    # mounted filesystem: a mount point holding nothing but lost+found.
+    # ansible-core renders fail_msg before the assertion runs, so every
+    # value it reads has a default.
+    - name: "Gate: siem_log_root resolves to a new directory or one this role created"
       ansible.builtin.assert:
         that:
-          - siem_log_root_symlinks | length == 0
+          - siem_log_root_real is match('^/[^/]')
+          - siem_log_root_real not in siem_log_root_reserved
+          - (siem_log_root_real.split('/')[:2] | join('/')) not in siem_log_root_system_trees
           - >-
             not siem_log_root_stat.exists
             or (siem_log_root_stat.isdir
-                and siem_log_root_stat.pw_name == siem_log_owner
-                and siem_log_root_stat.gr_name == siem_log_owner
-                and siem_log_root_stat.mode == '0755'
-                and (siem_log_root_entries.files | default([]) | rejectattr('isdir') | list | length) == 0)
+                and (siem_log_root_files | length) == 0
+                and ((siem_log_root_stat.pw_name == siem_log_owner
+                      and siem_log_root_stat.gr_name == siem_log_owner
+                      and siem_log_root_stat.mode == '0755')
+                     or (siem_log_root_stat.dev != siem_log_root_parent.dev
+                         and (siem_log_root_dirs | difference(['lost+found']) | length) == 0)))
         fail_msg: >-
-          siem_log_root={{ siem_log_root }}:
-          {% if siem_log_root_symlinks %}symlinks on the path: {{ siem_log_root_symlinks | join(', ') }}.
-          {% elif not (siem_log_root_stat.isdir | default(false)) %}it exists and is not a directory.
-          {% else %}it exists as {{ siem_log_root_stat.pw_name | default('-') }}:{{ siem_log_root_stat.gr_name | default('-') }}
-          mode {{ siem_log_root_stat.mode | default('-') }} with non-directories
-          {{ siem_log_root_entries.files | default([]) | rejectattr('isdir') | map(attribute='path') | list }};
-          an existing siem_log_root must be {{ siem_log_owner }}:{{ siem_log_owner }} mode 0755 and
-          hold only per-host directories.{% endif %}
-          Use a new directory, or prepare one in that state yourself.
+          siem_log_root={{ siem_log_root }} resolves to {{ siem_log_root_real }}, which
+          {% if siem_log_root_real is not match('^/[^/]') or siem_log_root_real in siem_log_root_reserved
+                or (siem_log_root_real.split('/')[:2] | join('/')) in siem_log_root_system_trees %}is a
+          shared or system directory.
+          {% elif not (siem_log_root_stat.isdir | default(false)) %}exists and is not a directory.
+          {% elif siem_log_root_files %}holds entries other than per-host directories: {{ siem_log_root_files }}.
+          {% else %}exists as {{ siem_log_root_stat.pw_name | default('-') }}:{{ siem_log_root_stat.gr_name | default('-') }}
+          mode {{ siem_log_root_stat.mode | default('-') }}; an existing siem_log_root must be
+          {{ siem_log_owner }}:{{ siem_log_owner }} mode 0755, as this role creates it. If it is this
+          role's directory with a changed owner or mode, restore it with
+          `chown {{ siem_log_owner }}:{{ siem_log_owner }} {{ siem_log_root_real }} && chmod 0755 {{ siem_log_root_real }}`;
+          otherwise use a new directory.{% endif %}
       vars:
-        siem_log_root_stat: "{{ (siem_log_root_path_stat.results | last).stat }}"
-        siem_log_root_symlinks: "{{ siem_log_root_path_stat.results | selectattr('stat.islnk', 'defined') | selectattr('stat.islnk') | map(attribute='stat.path') | list }}"
+        siem_log_root_stat: "{{ siem_log_root_path_stat.results[0].stat }}"
+        siem_log_root_parent: "{{ siem_log_root_path_stat.results[1].stat }}"
+        siem_log_root_files: "{{ siem_log_root_entries.files | default([]) | rejectattr('isdir') | map(attribute='path') | list }}"
+        siem_log_root_dirs: "{{ siem_log_root_entries.files | default([]) | selectattr('isdir') | map(attribute='path') | map('basename') | list }}"
       tags: [always]
   tasks:
     # Previously: unconditionally end_play'd this whole host whenever
@@ -215,6 +266,32 @@
       tags: [C1]
       ansible.builtin.dnf:
         name: rsyslog
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    # Step 4 renders a logrotate policy and validates it with logrotate, and
+    # the policy does nothing without logrotate; minimal images such as
+    # pilot-target-ubuntu do not ship it. Tagged with Step 4's rows so a
+    # --tags C9/C10 run installs it too.
+    - name: "Step 1b: Install logrotate (Debian family)"
+      tags: [C1, C9, C10]
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C9, C10]
+      vars:
+        pilot_apt_packages: [logrotate]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: log-server-logrotate
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when: ansible_os_family == "Debian"
+
+    - name: "Step 1c: Install logrotate (RedHat family)"
+      tags: [C1, C9, C10]
+      ansible.builtin.dnf:
+        name: logrotate
         state: present
       when: ansible_os_family == "RedHat"
 
@@ -303,13 +380,16 @@
             owner: root
             group: root
             mode: "0644"
-            # Fails only on a syntax error ("error: <file>:<line> ..."), which
-            # makes logrotate skip the whole policy. `logrotate -d` alone also
-            # exits 1 for a fragment that relies on /etc/logrotate.conf's
-            # global `su` (Ubuntu's distro rsyslog policy), so its rc is not
-            # used (captured on Ubuntu 24.04 and AlmaLinux 9.8, 2026-10-14).
+            # Fails when logrotate reports an error about this file
+            # ("error: <file>:<line> ..." or "error: <file>:prerotate,
+            # postrotate or preremove without endscript"), which makes it skip
+            # the whole policy. `logrotate -d` alone also exits 1 for a
+            # fragment that relies on /etc/logrotate.conf's global `su`
+            # (Ubuntu's distro rsyslog policy: "error: skipping ..."), so its
+            # rc is not used (captured on Ubuntu 24.04 and AlmaLinux 9.8,
+            # 2026-10-14). Without logrotate (Step 1b installs it) it fails.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -E "^error: [^ ]+:[0-9]+ "' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
             content: |
               # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
               {{ siem_log_root }}/*/*.log {

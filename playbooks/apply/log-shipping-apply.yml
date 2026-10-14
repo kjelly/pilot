@@ -118,6 +118,23 @@
     # docs/verification/log-shipping.md §1.5). They are defaulted here instead
     # of in the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    # loki_port is rendered into Promtail's Loki push URL: 2514.0, 0x9C4, a leading zero or 70000 would be read
+    # differently or not at all. Checked before the fallback below so that 0
+    # is refused instead of silently becoming 3100; unset, null and "" mean
+    # the default.
+    - name: "Gate: loki_port is a TCP port number"
+      ansible.builtin.assert:
+        that:
+          - >-
+            loki_port is not defined or loki_port is none
+            or (loki_port | string) == ''
+            or ((loki_port | string) is match('^[1-9][0-9]{0,4}\Z')
+                and (loki_port | int) <= 65535)
+        fail_msg: >-
+          loki_port={{ loki_port | default('') }} must be a TCP port number from 1 to 65535,
+          written in decimal without a sign, a fraction or leading zeros. Leave it unset for 3100.
+      tags: [always]
+
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         loki_alias: "{{ loki_alias | default('pilot-loki-backend', true) }}"

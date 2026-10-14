@@ -79,11 +79,10 @@ func logServerGateTasks(t *testing.T, owner string) (map[string]any, []any) {
 	t.Helper()
 	play := loadFirstPlay(t, "log-server-apply.yml")
 	tasks := append(pickTasks(play, func(name string) bool {
-		return isDefaultsTask(name) || strings.HasPrefix(name, "Gate: siem_log_root") ||
-			name == "Gate: inspect every directory on the siem_log_root path" || name == "Gate: list an existing siem_log_root"
+		return isDefaultsTask(name) || strings.HasPrefix(name, "Gate: siem_log_root")
 	}), showTask([]string{"siem_log_root"}))
-	if len(tasks) != 6 {
-		t.Fatalf("expected the defaults task, four gate tasks and show; got %d tasks", len(tasks))
+	if len(tasks) != 8 {
+		t.Fatalf("expected the defaults task, six siem_log_root gate tasks and show; got %d tasks", len(tasks))
 	}
 	vars := map[string]any{}
 	for k, v := range play["vars"].(map[string]any) {
@@ -97,10 +96,13 @@ func logServerGateTasks(t *testing.T, owner string) (map[string]any, []any) {
 // defaults and its siem_log_root gates. log-server's Step 2 makes
 // siem_log_root owned by the rsyslog user (file: state=directory follows a
 // symlink) and Step 4 rotates siem_log_root/*/*.log, so since siem_log_root
-// comes from inventory a value such as /var/log, a path through a symlink,
-// or an existing directory this role did not create must fail before any
-// mutation, while a rerun on the directory it did create passes. An
-// existing directory must already be in the state Step 2 leaves it in.
+// comes from inventory a value such as /var/log, a path that resolves to a
+// shared directory, or an existing directory this role did not create must
+// fail before any mutation, while a rerun on the directory it did create
+// passes. A path through a symlink is judged by the directory it resolves
+// to: hosts whose /var is a symlink still use the default. The mount-point
+// exception (a new filesystem's root holding only lost+found) needs root and
+// is covered by the VM run in the evidence record.
 func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
@@ -109,129 +111,154 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := user.LookupGroupId(me.Gid)
-	if err != nil || group.Name != me.Username {
-		t.Skipf("the gate compares owner and group with one name; %s's primary group is not %s", me.Username, me.Username)
-	}
 	vars, tasks := logServerGateTasks(t, me.Username)
 	run := func(root string) string {
 		_, failed := tryInventoryPlay(t, "log-server", vars, tasks, map[string]any{"siem_log_root": root})
 		return failed
 	}
+	const names = "Gate: siem_log_root is a dedicated absolute directory"
+	const resolved = "Gate: siem_log_root resolves to a new directory or one this role created"
 
-	// Names.
-	for _, ok := range []string{"/var/log/siem-pr79-absent", "/srv/siem-pr79-absent", "/data/logs/siem_1.x"} {
-		if failed := run(ok); failed != "" {
-			t.Errorf("siem_log_root=%s: want accepted, got %s", ok, failed)
+	// Names do not depend on who owns what, so they always run.
+	t.Run("names", func(t *testing.T) {
+		for _, ok := range []string{"/var/log/siem-pr79-absent", "/srv/siem-pr79-absent", "/data/logs/siem_1.x"} {
+			if failed := run(ok); failed != "" {
+				t.Errorf("siem_log_root=%s: want accepted, got %s", ok, failed)
+			}
 		}
-	}
-	for _, bad := range []string{"/var/log", "/var", "/", "/srv", "/home", "/usr/share/siem", "/usr/lib", "/etc/rsyslog.d",
-		"/run/log", "var/log/siem", "/var/log/siem/", "/var//log/siem", "/var/log/../siem",
-		"/var/log/./siem", "/var/log/siem dir", "/var/log/$(id)"} {
-		if failed := run(bad); !strings.Contains(failed, "Gate: siem_log_root is a dedicated absolute directory") {
-			t.Errorf("siem_log_root=%q: want the name gate to fail, got %q", bad, failed)
+		for _, bad := range []string{"/var/log", "/var", "/", "/srv", "/home", "/usr/share/siem", "/usr/lib", "/etc/rsyslog.d",
+			"/run/log", "var/log/siem", "/var/log/siem/", "/var//log/siem", "/var/log/../siem",
+			"/var/log/./siem", "/var/log/siem dir", "/var/log/$(id)"} {
+			if failed := run(bad); !strings.Contains(failed, names) {
+				t.Errorf("siem_log_root=%q: want %q to fail, got %q", bad, names, failed)
+			}
 		}
-	}
-
-	// The filesystem: base is owned by this user and contains no symlink.
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	mkdir := func(path string) string {
-		t.Helper()
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		// A dedicated-looking name that resolves to a shared or system directory.
+		base, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
 			t.Fatal(err)
 		}
-		return path
-	}
-	const content = "Gate: siem_log_root has no symlink and is new or already this role's"
-	cases := []struct {
-		name string
-		root func() string
-		ok   bool
-	}{
-		{"absent", func() string { return filepath.Join(base, "absent", "siem") }, true},
-		{"empty", func() string { return mkdir(filepath.Join(base, "empty")) }, true},
-		{"rerun: only per-host directories", func() string {
-			root := mkdir(filepath.Join(base, "rerun"))
-			mkdir(filepath.Join(root, "client-1"))
-			if err := os.WriteFile(filepath.Join(root, "client-1", "audit.log"), []byte("x\n"), 0o644); err != nil {
+		toVarLog := filepath.Join(base, "to-var-log")
+		if err := os.Symlink("/var/log", toVarLog); err != nil {
+			t.Fatal(err)
+		}
+		bad := []string{toVarLog}
+		if fi, err := os.Lstat("/var/run"); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			bad = append(bad, "/var/run/siem-pr79") // resolves under /run
+		}
+		for _, root := range bad {
+			if failed := run(root); !strings.Contains(failed, resolved) || !strings.Contains(failed, "shared or system directory") {
+				t.Errorf("siem_log_root=%s: want %q to refuse it as a shared or system directory, got %q", root, resolved, failed)
+			}
+		}
+	})
+
+	// The filesystem cases compare an existing directory's owner and group
+	// with siem_log_owner, which the play uses for both.
+	t.Run("filesystem", func(t *testing.T) {
+		group, err := user.LookupGroupId(me.Gid)
+		if err != nil || group.Name != me.Username {
+			t.Skipf("the gate compares owner and group with one name; %s's primary group is not %s", me.Username, me.Username)
+		}
+		base, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkdir := func(path string) string {
+			t.Helper()
+			if err := os.MkdirAll(path, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			return root
-		}, true},
-		{"a file at the top", func() string {
-			root := mkdir(filepath.Join(base, "file"))
-			if err := os.WriteFile(filepath.Join(root, "syslog"), []byte("x\n"), 0o644); err != nil {
+			if err := os.Chmod(path, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			return root
-		}, false},
-		{"a hidden file at the top", func() string {
-			root := mkdir(filepath.Join(base, "hidden"))
-			if err := os.WriteFile(filepath.Join(root, ".profile"), []byte("x\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			return root
-		}, false},
-		{"siem_log_root is a symlink", func() string {
-			target := mkdir(filepath.Join(base, "target1"))
-			link := filepath.Join(base, "link1")
+			return path
+		}
+		symlink := func(target, link string) string {
+			t.Helper()
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
 			}
 			return link
-		}, false},
-		{"a parent is a symlink", func() string {
-			target := mkdir(filepath.Join(base, "target2"))
-			link := filepath.Join(base, "link2")
-			if err := os.Symlink(target, link); err != nil {
-				t.Fatal(err)
-			}
-			return filepath.Join(link, "siem")
-		}, false},
-		{"an empty directory with another mode (like /var/log/private, 0700)", func() string {
-			root := mkdir(filepath.Join(base, "private"))
-			if err := os.Chmod(root, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return root
-		}, false},
-		{"a regular file", func() string {
-			path := filepath.Join(base, "regular")
-			if err := os.WriteFile(path, nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			return path
-		}, false},
-	}
-	if fi, err := os.Lstat("/var/run"); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		cases = append(cases, struct {
+		}
+		cases := []struct {
 			name string
 			root func() string
 			ok   bool
-		}{"a system symlink on the path (/var/run -> /run)", func() string { return "/var/run/siem-pr79" }, false})
-	}
-	for _, tc := range cases {
-		root := tc.root()
-		failed := run(root)
-		switch {
-		case tc.ok && failed != "":
-			t.Errorf("%s (%s): want accepted, got %s", tc.name, root, failed)
-		case !tc.ok && !strings.Contains(failed, content):
-			t.Errorf("%s (%s): want %q to fail, got %q", tc.name, root, content, failed)
+			msg  string
+		}{
+			{"absent", func() string { return filepath.Join(base, "absent", "siem") }, true, ""},
+			{"empty", func() string { return mkdir(filepath.Join(base, "empty")) }, true, ""},
+			{"rerun: only per-host directories", func() string {
+				root := mkdir(filepath.Join(base, "rerun"))
+				mkdir(filepath.Join(root, "client-1"))
+				if err := os.WriteFile(filepath.Join(root, "client-1", "audit.log"), []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			}, true, ""},
+			{"a symlink to a new directory", func() string {
+				return symlink(mkdir(filepath.Join(base, "target1")), filepath.Join(base, "link1"))
+			}, true, ""},
+			{"a parent is a symlink", func() string {
+				return filepath.Join(symlink(mkdir(filepath.Join(base, "target2")), filepath.Join(base, "link2")), "siem")
+			}, true, ""},
+			{"a file at the top", func() string {
+				root := mkdir(filepath.Join(base, "file"))
+				if err := os.WriteFile(filepath.Join(root, "syslog"), []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			}, false, "holds entries other than per-host directories"},
+			{"a hidden file at the top", func() string {
+				root := mkdir(filepath.Join(base, "hidden"))
+				if err := os.WriteFile(filepath.Join(root, ".profile"), []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			}, false, "holds entries other than per-host directories"},
+			{"a symlink to a directory holding a file", func() string {
+				target := mkdir(filepath.Join(base, "target3"))
+				if err := os.WriteFile(filepath.Join(target, "data"), []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return symlink(target, filepath.Join(base, "link3"))
+			}, false, "holds entries other than per-host directories"},
+			{"an empty directory with another mode (like /var/log/private, 0700)", func() string {
+				root := mkdir(filepath.Join(base, "private"))
+				if err := os.Chmod(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			}, false, "chmod 0755"},
+			{"a regular file", func() string {
+				path := filepath.Join(base, "regular")
+				if err := os.WriteFile(path, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}, false, "exists and is not a directory"},
 		}
-	}
+		for _, tc := range cases {
+			root := tc.root()
+			failed := run(root)
+			switch {
+			case tc.ok && failed != "":
+				t.Errorf("%s (%s): want accepted, got %s", tc.name, root, failed)
+			case !tc.ok && (!strings.Contains(failed, resolved) || !strings.Contains(failed, tc.msg)):
+				t.Errorf("%s (%s): want %q to fail with %q, got %q", tc.name, root, resolved, tc.msg, failed)
+			}
+		}
 
-	// Directories owned by someone other than siem_log_owner, empty or not.
-	otherVars, _ := logServerGateTasks(t, "nobody")
-	for _, root := range []string{mkdir(filepath.Join(base, "other-empty")), mkdir(filepath.Join(base, "other", "client-1"))} {
-		root = strings.TrimSuffix(root, "/client-1")
-		if _, failed := tryInventoryPlay(t, "log-server", otherVars, tasks, map[string]any{"siem_log_root": root}); !strings.Contains(failed, content) {
-			t.Errorf("%s not owned by siem_log_owner: want %q to fail, got %q", root, content, failed)
+		// Directories owned by someone other than siem_log_owner, empty or not.
+		otherVars, _ := logServerGateTasks(t, "nobody")
+		for _, root := range []string{mkdir(filepath.Join(base, "other-empty")), mkdir(filepath.Join(base, "other", "client-1"))} {
+			root = strings.TrimSuffix(root, "/client-1")
+			if _, failed := tryInventoryPlay(t, "log-server", otherVars, tasks, map[string]any{"siem_log_root": root}); !strings.Contains(failed, resolved) {
+				t.Errorf("%s not owned by siem_log_owner: want %q to fail, got %q", root, resolved, failed)
+			}
 		}
-	}
+	})
 }
 
 // auditPortGate runs audit-log-forwarding's defaults and its port gate on
@@ -246,7 +273,8 @@ func auditPortGate(t *testing.T, serverVars, clientVars map[string]any) string {
 		t.Fatalf("expected the defaults task, the port gate and show; got %d tasks", len(tasks))
 	}
 	inv := map[string]any{"all": map[string]any{"children": map[string]any{
-		"log-server":           map[string]any{"hosts": map[string]any{"siem-1": map[string]any{"ansible_host": "192.0.2.10"}}},
+		"log-server": map[string]any{"hosts": map[string]any{"siem-1": map[string]any{
+			"ansible_host": "192.0.2.10", "ansible_fqdn": "siem-1.example.internal"}}},
 		"audit-log-forwarding": map[string]any{"hosts": map[string]any{"localhost": localHostVars()}},
 	}}}
 	_, failed := tryInventoryPlayIn(t, inv, map[string]map[string]any{"log-server": serverVars, "audit-log-forwarding": clientVars},
@@ -280,6 +308,16 @@ func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
 			map[string]any{"siem_forward_host": "siem-1"}, true},
 		{"external receiver is not checked", map[string]any{"siem_receiver_tcp_port": 2514},
 			map[string]any{"siem_forward_host": "198.51.100.7"}, false},
+		// AGENTS.md §5.13: a name for the log-server written with other
+		// case, as its FQDN, or with a trailing dot is still the log-server.
+		{"explicit siem_forward_host is the inventory name in upper case", map[string]any{"siem_receiver_tcp_port": 2514},
+			map[string]any{"siem_forward_host": "SIEM-1"}, true},
+		{"explicit siem_forward_host is the log-server's FQDN with a trailing dot", map[string]any{"siem_receiver_tcp_port": 2514},
+			map[string]any{"siem_forward_host": "siem-1.example.internal."}, true},
+		{"explicit siem_forward_host is the log-server's FQDN in mixed case", map[string]any{"siem_receiver_tcp_port": 2514},
+			map[string]any{"siem_forward_host": "Siem-1.Example.Internal"}, true},
+		{"the log-server's FQDN with matching ports", map[string]any{"siem_receiver_tcp_port": 2514},
+			map[string]any{"siem_forward_host": "siem-1.example.internal", "siem_forward_port": 2514}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -606,6 +644,135 @@ func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
 		}
 		if include < 0 || writer < 0 || restart < 0 || include >= writer || writer >= restart {
 			t.Errorf("%s: want the SELinux include before %q before %q; got indexes %d, %d, %d", c.playbook, c.writer, c.restart, include, writer, restart)
+		}
+	}
+}
+
+// TestRegression_SIEMPortsAreTCPPortNumbers: the SIEM ports and loki_port
+// are rendered into rsyslog, Wazuh and Promtail configuration and compared as
+// strings. Values that preflight or YAML accept as numbers, such as 2514.0,
+// 1e3, 0x9C4, 02514 or 70000, were passed through, and 0 silently became the
+// default. Each playbook refuses them before its defaults task; unset, null
+// and "" still mean the default. Values go in as JSON extra vars so that
+// floats and booleans reach Ansible as such.
+func TestRegression_SIEMPortsAreTCPPortNumbers(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	gates := []struct{ playbook, group, variable string }{
+		{"log-server-apply.yml", "log-server", "siem_receiver_tcp_port"},
+		{"audit-log-forwarding-apply.yml", "audit-log-forwarding", "siem_forward_port"},
+		{"wazuh-manager-apply.yml", "wazuh-manager", "siem_forward_port"},
+		{"log-shipping-apply.yml", "log-server", "loki_port"},
+	}
+	accepted := []string{`null`, `""`, `514`, `"514"`, `2514`, `"2514"`, `1`, `65535`}
+	refused := []string{`0`, `"0"`, `-1`, `"-1"`, `65536`, `70000`, `2514.0`, `"2514.0"`, `1e3`, `"0x9C4"`, `"02514"`,
+		`"+2514"`, `"2514 "`, `" 2514"`, `"2514\n"`, `true`, `"abc"`, `[2514]`}
+	for _, g := range gates {
+		g := g
+		t.Run(g.variable+"/"+g.playbook, func(t *testing.T) {
+			play := loadFirstPlay(t, g.playbook)
+			gateName := "Gate: " + g.variable + " is a TCP port number"
+			tasks := pickTasks(play, func(name string) bool { return name == gateName })
+			if len(tasks) != 1 {
+				t.Fatalf("%s: want exactly one %q task, got %d", g.playbook, gateName, len(tasks))
+			}
+			tasks = append(tasks, showTask([]string{g.variable}))
+			inv := map[string]any{"all": map[string]any{"children": map[string]any{
+				g.group: map[string]any{"hosts": map[string]any{"localhost": localHostVars()}},
+			}}}
+			try := func(value string) string {
+				_, failed := tryInventoryPlayIn(t, inv, nil, g.group, nil, tasks, "-e", `{"`+g.variable+`": `+value+`}`)
+				return failed
+			}
+			for _, v := range accepted {
+				if failed := try(v); failed != "" {
+					t.Errorf("%s=%s: want accepted, got %s", g.variable, v, failed)
+				}
+			}
+			for _, v := range refused {
+				if failed := try(v); !strings.Contains(failed, gateName) {
+					t.Errorf("%s=%s: want %q to fail, got %q", g.variable, v, gateName, failed)
+				}
+			}
+			// Unset: the variable is not passed at all.
+			if _, failed := tryInventoryPlayIn(t, inv, nil, g.group, nil, tasks); failed != "" {
+				t.Errorf("%s unset: want accepted, got %s", g.variable, failed)
+			}
+		})
+	}
+}
+
+// TestRegression_LogrotateValidateRefusesBrokenPolicies runs the validate
+// command of every logrotate policy the SIEM playbooks render against real
+// logrotate. It must fail for an error about the policy file itself, with a
+// line number or without one (a postrotate block without endscript), and pass
+// for a valid policy; logrotate's errors that are not about the file (its
+// state file, or "error: skipping ..." for a log whose directory needs `su`)
+// must not fail it. Captured with logrotate 3.21 (Ubuntu 24.04) and 3.18
+// (AlmaLinux 9.8), 2026-10-14.
+func TestRegression_LogrotateValidateRefusesBrokenPolicies(t *testing.T) {
+	if _, err := exec.LookPath("logrotate"); err != nil {
+		t.Skipf("logrotate not installed: %v", err)
+	}
+	var validates []string
+	for _, playbook := range []string{"log-server-apply.yml", "audit-log-forwarding-apply.yml"} {
+		play := loadFirstPlay(t, playbook)
+		var walk func(v any)
+		walk = func(v any) {
+			switch x := v.(type) {
+			case map[string]any:
+				for k, child := range x {
+					if text, ok := child.(string); ok && k == "validate" && strings.Contains(text, "logrotate") {
+						validates = append(validates, strings.TrimSpace(text))
+					}
+					walk(child)
+				}
+			case []any:
+				for _, child := range x {
+					walk(child)
+				}
+			}
+		}
+		walk(play)
+	}
+	if len(validates) != 4 {
+		t.Fatalf("want the 4 logrotate validates (log-server Step 4, audit-log-forwarding Steps 4, 5, 5c), got %d", len(validates))
+	}
+	for _, v := range validates[1:] {
+		if v != validates[0] {
+			t.Errorf("logrotate validates differ:\n%s\n%s", validates[0], v)
+		}
+	}
+	dir := t.TempDir()
+	logs := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policy := func(body string) string {
+		return logs + "/*.log {\n" + body + "}\n"
+	}
+	cases := []struct {
+		name, body string
+		ok         bool
+	}{
+		{"valid", policy("  daily\n  rotate 14\n  maxage 90\n  missingok\n  notifempty\n  compress\n  postrotate\n    true\n  endscript\n"), true},
+		{"empty rotate count", policy("  daily\n  rotate \n"), false},
+		{"non-numeric rotate count", policy("  daily\n  rotate abc\n"), false},
+		{"unknown option", policy("  daily\n  bogusoption\n"), false},
+		{"postrotate without endscript", policy("  daily\n  postrotate\n    true\n"), false},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-"))
+		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("/bin/sh", "-c", strings.ReplaceAll(validates[0], "%s", path)).CombinedOutput()
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("%s: want the validate to pass, got %v\n%s", tc.name, err, out)
+		case !tc.ok && err == nil:
+			t.Errorf("%s: want the validate to fail, it passed", tc.name)
 		}
 	}
 }
