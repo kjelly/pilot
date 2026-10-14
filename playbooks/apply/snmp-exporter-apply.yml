@@ -23,6 +23,17 @@
 #       authPassword: "..."
 #       privPassword: "..."
 #
+# prod rejects an auth profile below v3 authPriv unless an exception for
+# it, in group_vars/host_vars or an -e file, has all five fields (spec C12,
+# §13.2):
+#   snmp_insecure_auth_profile_exceptions:
+#     lab-v2c:
+#       confirmed: true
+#       reason: "..."
+#       owner: "..."
+#       networkEvidence: "..."   # restricted management network evidence
+#       expiry: 2026-12-31       # YYYY-MM-DD, valid through that day (UTC)
+#
 # Variables: see contracts/snmp-exporter.yaml groupVars.
 #
 # Stage gating (same convention as alertmanager-apply.yml):
@@ -236,37 +247,87 @@
       no_log: true
       tags: [always]
 
-    # expiry is a YYYY-MM-DD date, valid through that date in UTC by the
-    # controller's clock. It used to be compared with ansible_date_time.date:
-    # the target's local date, from a fact cache up to an hour old. A bare
-    # YAML date (`expiry: 2026-12-31`) loads as a date, so it is turned into
-    # a string first; the format check stops an unpadded date such as
-    # 2026-9-30 from comparing as later than 2026-10-13. The month and day
-    # are then checked against the calendar (leap years included), so a
-    # quoted "2099-02-29" or "2099-13-01" is rejected; unquoted, such a date
-    # already fails when Ansible loads the vars file. The check uses integer
-    # arithmetic and a dict lookup: no filter here can raise, so any input
-    # ends in this gate's own message.
+    # Spec §13.2: a production exception needs all five fields, per auth
+    # profile (docs/verification/snmp-exporter.md C12):
+    # - confirmed ("confirm insecure SNMP"): the boolean true. `yes`, `on`
+    #   and `True` load as that boolean (YAML 1.1); the string "true" and
+    #   the number 1 do not count.
+    # - reason, owner: text.
+    # - networkEvidence ("restricted management network evidence"): text,
+    #   or a positive integer ticket number.
+    # - expiry: a YYYY-MM-DD date, valid through that date in UTC by the
+    #   controller's clock. It used to be compared with
+    #   ansible_date_time.date: the target's local date, from a fact cache up
+    #   to an hour old. A bare YAML date (`expiry: 2026-12-31`) loads as a
+    #   date, so it is turned into a string first; the format check stops an
+    #   unpadded date such as 2026-9-30 from comparing as later than
+    #   2026-10-13. The month and day are then checked against the calendar
+    #   (leap years included), so a quoted "2099-02-29" or "2099-13-01" is
+    #   rejected; unquoted, such a date already fails when Ansible loads the
+    #   vars file.
+    # "Text" is a string with at least two different letters or digits once
+    # it is NFKC-normalized (community.general.unicode_normalize; the
+    # pilot-cli image installs community.general), so that fullwidth "ＴＢＤ"
+    # or "１２３", as a CJK input method in fullwidth mode types them, count
+    # as "TBD" and "123", and once the characters in _snmp_exception_blank
+    # are removed (whitespace,
+    # Unicode included; zero-width and format characters; Hangul fillers, the
+    # blank Braille pattern and other characters that render as nothing;
+    # combining and spacing modifier marks), that is not a placeholder word
+    # from _snmp_exception_placeholders (compared without case and
+    # punctuation: "N/A", "TBD", "None", "null", "false", ...), and not a
+    # number written as a string. A numeric string counts only as a
+    # networkEvidence ticket number, and only as a positive integer, the
+    # same rule as an unquoted number. Types are checked before content:
+    # `| string` made null, [] and {} non-empty ("None", "[]", "{}"), and
+    # `| length` counted a list's items, so those used to pass (PR #65
+    # review). Keys other than the five fields are rejected too: a
+    # misspelled `networkevidence` or `Confirmed` would otherwise be ignored
+    # without a word.
+    # _snmp_exception_problems lists every reason the profile's exception is
+    # refused, and the failure message names them. For any value that
+    # renders, the checks below cannot raise: they use type tests, regexes,
+    # integer arithmetic and dict lookups, so the input ends in this gate's
+    # own message. A value whose own template fails (`"{{ undefined }}"`)
+    # fails earlier, in the task that defaults the setting. Inside {% %},
+    # Jinja decodes string-literal escapes (ansible-core 2.19.2: '\1' became
+    # chr(1)), so the regexes there use no backreference; \W and \. are not
+    # escapes Python decodes and reach re unchanged.
     - name: "Gate: prod stage rejects insecure SNMP auth profiles unless an explicit reviewed exception exists"
       ansible.builtin.assert:
         that:
           - (item.value.version | int == 3 and item.value.securityLevel == 'authPriv')
             or
-            ((snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('reason', '') | length > 0)
-             and (snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('owner', '') | length > 0)
-             and (_snmp_exception_expiry_is_date | bool)
-             and _snmp_exception_expiry >= now(utc=true, fmt='%Y-%m-%d'))
+            (_snmp_exception_problems | length == 0)
         fail_msg: >-
           authProfile "{{ item.key }}" is version {{ item.value.version }}
           / {{ item.value.securityLevel }}, which prod rejects unless
           snmp_insecure_auth_profile_exceptions["{{ item.key }}"] has a
-          non-expired reason/owner/expiry (spec §13.2). This is not a
-          permanent global allow flag — set it per profile, with an expiry.
-          expiry is a YYYY-MM-DD date, valid through that date in UTC
-          (today, UTC: {{ now(utc=true, fmt='%Y-%m-%d') }}).
+          non-expired reason/owner/expiry, confirmed: true and a
+          networkEvidence (spec §13.2). Rejected because: {{ _snmp_exception_problems }}.
+          This is not a permanent global allow flag — set it per profile,
+          with an expiry. The fields are confirmed (the boolean true), reason
+          and owner (text: at least two different letters or digits, not a placeholder
+          such as n/a or TBD), networkEvidence (such text, or a positive
+          integer ticket number, naming the evidence that the device's
+          management network is restricted) and expiry (a YYYY-MM-DD date,
+          valid through that date in UTC; today, UTC:
+          {{ now(utc=true, fmt='%Y-%m-%d') }}).
       vars:
+        _snmp_exception_field_names: [confirmed, reason, owner, networkEvidence, expiry]
+        _snmp_exception_blank: >-
+          [\s­͏̀-ͯʰ-˿ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯⠀ㅤ︀-️﻿ﾠ\U0001d159\U0001d165-\U0001d169\U0001d16d-\U0001d182\U000e0000-\U000e007f\U000e0100-\U000e01ef]
+        _snmp_exception_placeholders: >-
+          none null nil nul undefined undef true false yes no on off nan inf
+          infinity na nd tbd tba tbc todo fixme xxx unknown unk placeholder
+          changeme dummy empty blank missing notapplicable nothing test
+          example 沒有 没有 不適用 不适用 待定 未定 待補 待补 暫無 暂无 未知 無 无 空
+        _snmp_exceptions: "{{ snmp_insecure_auth_profile_exceptions | default({}) }}"
+        _snmp_exception: >-
+          {{ _snmp_exceptions[item.key]
+             if (_snmp_exceptions is mapping and _snmp_exceptions.get(item.key) is mapping) else {} }}
         _snmp_exception_expiry: >-
-          {{ snmp_insecure_auth_profile_exceptions.get(item.key, {}).get('expiry', '') | string }}
+          {{ _snmp_exception.get('expiry', '') | string }}
         _snmp_exception_year: "{{ _snmp_exception_expiry[0:4] | int }}"
         _snmp_exception_month: "{{ _snmp_exception_expiry[5:7] | int }}"
         _snmp_exception_day: "{{ _snmp_exception_expiry[8:10] | int }}"
@@ -280,6 +341,79 @@
              and _snmp_exception_year >= 1
              and _snmp_exception_day >= 1
              and _snmp_exception_day <= _snmp_exception_month_days }}
+        _snmp_exception_problems: |-
+          {%- macro kind(v) -%}
+            {%- if v is none -%}null
+            {%- elif v is boolean -%}a boolean
+            {%- elif v is mapping -%}a mapping
+            {%- elif v is number -%}a number
+            {%- elif v is string -%}a string
+            {%- elif v is iterable -%}a list
+            {%- else -%}not text
+            {%- endif -%}
+          {%- endmacro -%}
+          {#- "ok", or what is wrong with field `name` (an empty macro result
+              renders as None in ansible-core 2.19, so "ok" stands for none). -#}
+          {%- macro text_problem(name, v, ticket) -%}
+            {%- if v is string -%}
+              {%- set visible = v | community.general.unicode_normalize('NFKC') | regex_replace(_snmp_exception_blank, '') -%}
+              {%- set key = visible | regex_replace('[\W_]+', '') | lower -%}
+              {%- if ticket and visible is match('^0*[1-9][0-9]*$') -%}
+                ok
+              {%- elif visible is match('(?i)^[-+]?(\.[0-9]+|[0-9][0-9_]*(\.[0-9_]*)?)(e[-+]?[0-9]+)?$|^[-+]?0[xob][0-9a-f_]+$') -%}
+                {{ name }} is a number written as a string{{ ' that is not a positive integer' if ticket else '' }}
+              {%- elif key | list | unique | length < 2 -%}
+                {{ name }} has too little text (it needs at least two different letters or digits)
+              {%- elif key in _snmp_exception_placeholders.split() -%}
+                {{ name }} is the placeholder '{{ key }}'
+              {%- else -%}
+                ok
+              {%- endif -%}
+            {%- elif ticket and v is integer and v > 0 -%}
+              ok
+            {%- elif ticket and v is integer -%}
+              {{ name }} is a number that is not a positive integer
+            {%- else -%}
+              {{ name }} is {{ kind(v) }}, not {{ 'text or a ticket number' if ticket else 'text' }}
+            {%- endif -%}
+          {%- endmacro -%}
+          {%- set ns = namespace(p=[]) -%}
+          {%- if _snmp_exceptions is not mapping -%}
+            {%- set ns.p = ['snmp_insecure_auth_profile_exceptions is ' ~ kind(_snmp_exceptions)
+                            ~ ', not a mapping (a value given as -e key=value is always a string; pass a mapping, for example with -e @file)'] -%}
+          {%- elif item.key not in _snmp_exceptions -%}
+            {%- set ns.p = ['there is no exception for this profile'] -%}
+          {%- elif _snmp_exceptions[item.key] is not mapping -%}
+            {%- set ns.p = ['the exception is ' ~ kind(_snmp_exceptions[item.key]) ~ ', not a mapping'] -%}
+          {%- else -%}
+            {%- set unknown = _snmp_exception.keys() | map('string') | reject('in', _snmp_exception_field_names) | sort -%}
+            {%- if unknown -%}
+              {%- set ns.p = ns.p + ['unknown key(s) ' ~ (unknown | join(', '))
+                                     ~ ' (the fields are ' ~ (_snmp_exception_field_names | join(', ')) ~ ')'] -%}
+            {%- endif -%}
+            {%- if 'confirmed' not in _snmp_exception -%}
+              {%- set ns.p = ns.p + ['confirmed is missing'] -%}
+            {%- elif _snmp_exception['confirmed'] is not sameas true -%}
+              {%- set ns.p = ns.p + ['confirmed is ' ~ ('false' if _snmp_exception['confirmed'] is sameas false else kind(_snmp_exception['confirmed']))
+                                     ~ ', not the boolean true'] -%}
+            {%- endif -%}
+            {%- for field in ['reason', 'owner', 'networkEvidence'] -%}
+              {%- if field not in _snmp_exception -%}
+                {%- set ns.p = ns.p + [field ~ ' is missing'] -%}
+              {%- else -%}
+                {%- set problem = text_problem(field, _snmp_exception[field], field == 'networkEvidence') | string | trim -%}
+                {%- if problem != 'ok' -%}{%- set ns.p = ns.p + [problem] -%}{%- endif -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {%- if 'expiry' not in _snmp_exception -%}
+              {%- set ns.p = ns.p + ['expiry is missing'] -%}
+            {%- elif not (_snmp_exception_expiry_is_date | bool) -%}
+              {%- set ns.p = ns.p + ['expiry is not a YYYY-MM-DD calendar date'] -%}
+            {%- elif _snmp_exception_expiry < now(utc=true, fmt='%Y-%m-%d') -%}
+              {%- set ns.p = ns.p + ['expiry ' ~ _snmp_exception_expiry ~ ' has passed'] -%}
+            {%- endif -%}
+          {%- endif -%}
+          {{- ns.p | join('; ') -}}
       loop: "{{ (snmp_catalog_parsed.authProfiles | default({})) | dict2items }}"
       loop_control: {label: "{{ item.key }}"}
       when: stage == 'prod'

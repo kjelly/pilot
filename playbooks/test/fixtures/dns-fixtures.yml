@@ -34,46 +34,64 @@
       tags: [always]
 
   tasks:
-    - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
-      ansible.builtin.shell:
-        cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ dns_fixture_domain | upper }}'
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      when: not ansible_check_mode
-      tags: [fixtures]
+    - name: "Fixtures with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    # Real `ipa dnszone-add` success output has no marker line to key off
-    # (freeipa-dns-apply.yml, confirmed live); rc 0 is a genuine creation and
-    # an existing zone fails with "already exists".
-    - name: "Fixtures — ensure the fixture zones exist"
-      ansible.builtin.command:
-        argv: [ipa, dnszone-add, "{{ item }}", --skip-overlap-check]
-      loop:
-        - "{{ dns_fixture_reverse_zone }}"
-        - svc.pilot.internal.
-        - stub.pilot.internal.
-      register: dns_fixture_zones
-      changed_when: dns_fixture_zones.rc == 0
-      failed_when:
-        - dns_fixture_zones.rc != 0
-        - "'already exists' not in (dns_fixture_zones.stdout | default('') + dns_fixture_zones.stderr | default(''))"
-      when: not ansible_check_mode
-      tags: [fixtures]
+        - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
+          ansible.builtin.shell:
+            cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ dns_fixture_domain | upper }}'
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+          tags: [fixtures]
 
-    - name: "Fixtures — ensure the fixture records exist"
-      ansible.builtin.command:
-        argv: "{{ ['ipa', 'dnsrecord-add'] + item }}"
-      loop:
-        - ["{{ dns_fixture_reverse_zone }}", "{{ dns_fixture_ptr_name }}", "--ptr-rec=ipa1.{{ dns_fixture_domain }}."]
-        - [svc.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
-        - [stub.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
-      loop_control:
-        label: "{{ item[0] }} {{ item[1] }}"
-      register: dns_fixture_records
-      changed_when: dns_fixture_records.rc == 0
-      failed_when:
-        - dns_fixture_records.rc != 0
-        - "'no modifications to be performed' not in (dns_fixture_records.stdout | default('') + dns_fixture_records.stderr | default(''))"
-      when: not ansible_check_mode
-      tags: [fixtures]
+        # Real `ipa dnszone-add` success output has no marker line to key off
+        # (freeipa-dns-apply.yml, confirmed live); rc 0 is a genuine creation and
+        # an existing zone fails with "already exists".
+        - name: "Fixtures — ensure the fixture zones exist"
+          ansible.builtin.command:
+            argv: [ipa, dnszone-add, "{{ item }}", --skip-overlap-check]
+          loop:
+            - "{{ dns_fixture_reverse_zone }}"
+            - svc.pilot.internal.
+            - stub.pilot.internal.
+          register: dns_fixture_zones
+          changed_when: dns_fixture_zones.rc == 0
+          failed_when:
+            - dns_fixture_zones.rc != 0
+            - "'already exists' not in (dns_fixture_zones.stdout | default('') + dns_fixture_zones.stderr | default(''))"
+          when: not ansible_check_mode
+          tags: [fixtures]
+
+        - name: "Fixtures — ensure the fixture records exist"
+          ansible.builtin.command:
+            argv: "{{ ['ipa', 'dnsrecord-add'] + item }}"
+          loop:
+            - ["{{ dns_fixture_reverse_zone }}", "{{ dns_fixture_ptr_name }}", "--ptr-rec=ipa1.{{ dns_fixture_domain }}."]
+            - [svc.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
+            - [stub.pilot.internal., probe, "--a-rec={{ dns_fixture_ip }}"]
+          loop_control:
+            label: "{{ item[0] }} {{ item[1] }}"
+          register: dns_fixture_records
+          changed_when: dns_fixture_records.rc == 0
+          failed_when:
+            - dns_fixture_records.rc != 0
+            - "'no modifications to be performed' not in (dns_fixture_records.stdout | default('') + dns_fixture_records.stderr | default(''))"
+          when: not ansible_check_mode
+          tags: [fixtures]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

@@ -120,103 +120,121 @@
       run_once: true
       tags: [always]
 
-    - name: "Kinit admin for read-only capability probe"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ identity_admin_password }}" |
-            kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      run_once: true
-      tags: [identity, capability]
-
   tasks:
-    - name: "Read global password policy (raw attributes)"
-      ansible.builtin.command:
-        argv: [ipa, pwpolicy-show, --raw]
-      register: pilot_cap_pwpolicy
-      changed_when: false
-      failed_when: false
+    - name: "Read-only FreeIPA queries with a private Kerberos cache for the admin ticket"
       environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, capability]
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Read ipa help for user-mod flags"
-      ansible.builtin.command:
-        argv: [ipa, help, user-mod]
-      register: pilot_cap_help_user_mod
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, capability]
+        - name: "Kinit admin for read-only capability probe"
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              printf %s "{{ identity_admin_password }}" |
+                kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          run_once: true
+          tags: [identity, capability]
 
-    - name: "Read ipa help for host-mod flags"
-      ansible.builtin.command:
-        argv: [ipa, help, host-mod]
-      register: pilot_cap_help_host_mod
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, capability]
+        - name: "Read global password policy (raw attributes)"
+          ansible.builtin.command:
+            argv: [ipa, pwpolicy-show, --raw]
+          register: pilot_cap_pwpolicy
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, capability]
 
-    - name: "List live sudo rules (raw attributes) for sudoNotBefore/After evidence"
-      ansible.builtin.command:
-        argv: [ipa, sudorule-find, --all, --raw]
-      register: pilot_cap_sudorule_find
-      changed_when: false
-      failed_when: false
-      environment:
-        LC_ALL: C
-      run_once: true
-      tags: [identity, capability]
+        - name: "Read ipa help for user-mod flags"
+          ansible.builtin.command:
+            argv: [ipa, help, user-mod]
+          register: pilot_cap_help_user_mod
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, capability]
 
-    - name: "Build machine-readable capability-probe result"
-      ansible.builtin.set_fact:
-        pilot_capability_result:
-          schema_version: 1
-          capabilities:
-            group_password_policy: >-
-              {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
-                                  'krbmaxpwdlife:' in (pilot_cap_pwpolicy.stdout | default('')))
-                 else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
-            password_lockout_policy: >-
-              {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
-                                  'krbpwdmaxfailure:' in (pilot_cap_pwpolicy.stdout | default('')))
-                 else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
-            user_auth_types: >-
-              {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
-                                  'user-auth-type' in (pilot_cap_help_user_mod.stdout | default('')))
-                 else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
-            principal_expiration: >-
-              {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
-                                  'principal-expiration' in (pilot_cap_help_user_mod.stdout | default('')))
-                 else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
-            authentication_indicator: >-
-              {{ 'supported' if (pilot_cap_help_host_mod.rc == 0 and
-                                  'auth-ind' in (pilot_cap_help_host_mod.stdout | default('')))
-                 else ('unsupported' if pilot_cap_help_host_mod.rc == 0 else 'unknown') }}
-            sudo_not_before_after: >-
-              {{ 'supported' if (pilot_cap_sudorule_find.rc == 0 and
-                                  ('sudonotbefore:' in (pilot_cap_sudorule_find.stdout | default('')) or
-                                   'sudonotafter:' in (pilot_cap_sudorule_find.stdout | default(''))))
-                 else 'unknown' }}
-      changed_when: false
-      run_once: true
-      tags: [identity, capability]
+        - name: "Read ipa help for host-mod flags"
+          ansible.builtin.command:
+            argv: [ipa, help, host-mod]
+          register: pilot_cap_help_host_mod
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, capability]
 
-    - name: "Write capability-probe result on the Ansible controller"
-      ansible.builtin.copy:
-        dest: "{{ pilot_capability_output }}"
-        mode: "0600"
-        content: "{{ pilot_capability_result | to_nice_json }}\n"
-      delegate_to: localhost
-      become: false
-      run_once: true
-      tags: [identity, capability]
+        - name: "List live sudo rules (raw attributes) for sudoNotBefore/After evidence"
+          ansible.builtin.command:
+            argv: [ipa, sudorule-find, --all, --raw]
+          register: pilot_cap_sudorule_find
+          changed_when: false
+          failed_when: false
+          environment:
+            LC_ALL: C
+          run_once: true
+          tags: [identity, capability]
+
+        - name: "Build machine-readable capability-probe result"
+          ansible.builtin.set_fact:
+            pilot_capability_result:
+              schema_version: 1
+              capabilities:
+                group_password_policy: >-
+                  {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
+                                      'krbmaxpwdlife:' in (pilot_cap_pwpolicy.stdout | default('')))
+                     else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
+                password_lockout_policy: >-
+                  {{ 'supported' if (pilot_cap_pwpolicy.rc == 0 and
+                                      'krbpwdmaxfailure:' in (pilot_cap_pwpolicy.stdout | default('')))
+                     else ('unknown' if pilot_cap_pwpolicy.rc == 0 else 'unsupported') }}
+                user_auth_types: >-
+                  {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
+                                      'user-auth-type' in (pilot_cap_help_user_mod.stdout | default('')))
+                     else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
+                principal_expiration: >-
+                  {{ 'supported' if (pilot_cap_help_user_mod.rc == 0 and
+                                      'principal-expiration' in (pilot_cap_help_user_mod.stdout | default('')))
+                     else ('unsupported' if pilot_cap_help_user_mod.rc == 0 else 'unknown') }}
+                authentication_indicator: >-
+                  {{ 'supported' if (pilot_cap_help_host_mod.rc == 0 and
+                                      'auth-ind' in (pilot_cap_help_host_mod.stdout | default('')))
+                     else ('unsupported' if pilot_cap_help_host_mod.rc == 0 else 'unknown') }}
+                sudo_not_before_after: >-
+                  {{ 'supported' if (pilot_cap_sudorule_find.rc == 0 and
+                                      ('sudonotbefore:' in (pilot_cap_sudorule_find.stdout | default('')) or
+                                       'sudonotafter:' in (pilot_cap_sudorule_find.stdout | default(''))))
+                     else 'unknown' }}
+          changed_when: false
+          run_once: true
+          tags: [identity, capability]
+
+        - name: "Write capability-probe result on the Ansible controller"
+          ansible.builtin.copy:
+            dest: "{{ pilot_capability_output }}"
+            mode: "0600"
+            content: "{{ pilot_capability_result | to_nice_json }}\n"
+          delegate_to: localhost
+          become: false
+          run_once: true
+          tags: [identity, capability]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
