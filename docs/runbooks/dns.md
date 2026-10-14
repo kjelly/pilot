@@ -11,19 +11,19 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-14，candidate `01a64f4`（tree `1475bb8d41ea6da6486cc07b667a4e1e1188b19e`，PR #73 的 follow-up），
+最新驗證：2026-10-15，candidate `09ded7e`（tree `b3ec2d907bf5651e126b78a3e464143c0381b5dc`，PR #92 第二輪），
 **PASS**。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-01a64f4.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-01a64f4.md)。
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md)。
 dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
 `pilot deploy` 全站部署、`--limit`、`pilot reconcile`），摘要：
 [`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，4 台由 `topology up` 新建、還沒跑過 playbook 的 VM：`pr73-ipa`、`pr73-replica`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr73-dns`（Ubuntu 24.04.4，unbound 1.19.2）、`pr73-client`（Ubuntu 24.04.4）；之後再加一台 `pr73-replica2`（AlmaLinux 9.8）。測完已移除 |
-| inventory host 集合 | `freeipa-server`: pr73-ipa；`freeipa-server-replica`: pr73-replica（不設 `freeipa_setup_dns`）、pr73-replica2（先列進 inventory 但不 promote，之後才 promote）；`dns`: pr73-dns；`freeipa-dns-client`: pr73-client |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與測試 fixture 用）；dns 設定用 role 預設值 |
-| 結果 | 鏈 `freeipa-server` → `freeipa-server-replica` → dns fixtures → `dns` → `freeipa-dns-client` 的 topology test：L3 check mode（全新 VM）四台 `failed=0`，其中 dns 的 preview 依設計在 G5 結束（check mode 下 FreeIPA 還沒安裝，dns 設定的部分沒有被 preview）；L4 `failed=0`；verify `freeipa-server.md` 20、`freeipa-server-replica.md` 16、`dns.md` 16 pass / 0 fail / 4 not_applicable、`freeipa-dns-client.md` 7；L6 `changed=0`。replica2 列在 inventory 但未 promote 時，全站 `site.yml` 五台 `failed=0`，dns 與 client 印出指名 replica2 的 WARNING 並把它排除；promote 之後 stub 與 resolver 都納入它，重跑 `changed=0` |
+| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建的 VM（`topology reset` 回到全新狀態後測試）：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2）、`pr92-client`（Ubuntu 24.04.4）；測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr92-ipa；`freeipa-server-replica`: pr92-r1、pr92-r2（不設 `freeipa_setup_dns`）、pr92-r3（列在 inventory、不 promote）；`dns`: pr92-dns；`freeipa-dns-client`: pr92-client。另用 inventory 副本把 pr92-r1 改成 FreeIPA 不認得的名稱 |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、測試 fixture 與診斷用唯讀 principal 設定）；dns 設定用 role 預設值 |
+| 結果 | topology test（freeipa-server → replica → dns fixtures → dns → freeipa-dns-client，`-l '!pr92-r3'`）：L3 五台 `failed=0`；L4 `failed=0`；L5 `freeipa-server.md` 20/0、`freeipa-server-replica.md` 16/0、`freeipa-dns-client.md` 7/0，`dns.md` 另以 `--input` 驗證 16 pass、4 not applicable；L6 五台 `changed=0`。之後：inventory 名稱與 FreeIPA 不同但自己權威回答 zone 的 replica 留在 stub（`.4 .7 .8`）；FreeIPA 列出的 replica named 停掉時 G5 擋下、consumer 只印 WARNING；primary forwarders 給空值時全域與 server 自己的 forwarders 都清掉、重跑 `changed=0`；forwarder gate 與安裝前的 port gate 都在任何變更前擋下；診斷 `complete`、12/12 `match` |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
