@@ -20,15 +20,16 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-14）**：candidate `78cf68c`（PR #79；VM 上執行的 playbook 與
-> task 檔和 `ea62947` 相同），3 台全新
-> vm-target（Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。
-> `topology test` L3/L4 failed=0、L5 log-server 11/11、L6 changed=0；`pilot deploy`
-> 以 inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30` 後
-> preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，log-server.md
-> 11/11（v1.4 的 C5 讀接收設定裡的 port）。SELinux 主機上非預設 port 會自動標成
-> `syslogd_port_t`；`siem_log_root` 拒絕系統目錄、symlink 與不是本角色建立的既有目錄。
-> 紀錄：[`2026-10-14-78cf68c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-78cf68c.md)。
+> **目前有效的驗證摘要（2026-10-14）**：candidate `1d9bd8c`（PR #79），3 台全新 vm-target
+> （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`topology test`
+> L3/L4 failed=0、L5 log-server 11/11、L6 changed=0。`pilot deploy` 以 inventory 設定
+> `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30` 後 preflight 通過、rsyslog 在
+> 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，log-server.md 11/11（C5 讀接收設定裡的
+> port）。`siem_receiver_tcp_port` 必須是 1–65535 的十進位整數；`siem_log_root`（與它解析到的
+> 真實路徑）不能是系統或共用目錄，既有目錄必須已是本角色建立的 `syslog:syslog 0755`
+> （只有 `lost+found` 的新掛載檔案系統根目錄例外；權限被改過時會給出還原指令）；
+> logrotate 會先安裝，設定檔的 `validate` 只在 logrotate 回報這個檔案本身的錯誤時失敗。
+> 紀錄：[`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```

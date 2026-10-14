@@ -30,17 +30,18 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-14）**：candidate `78cf68c`（PR #79；VM 上執行的 playbook 與
-> task 檔和 `ea62947` 相同），3 台全新
-> vm-target（Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux
-> Enforcing client）。`topology test` L3/L4 failed=0、L5 audit-log-forwarding 66/66
-> （v1.7，含 C22 轉送連線檢查）、L6 changed=0。`pilot deploy` 以 inventory 設定
-> `siem_forward_port: 2514` 後，AlmaLinux client 的 tcp/2514 被標成 `syslogd_port_t`
-> （沒有這個標籤時 rsyslog 回報 `Permission denied`、訊息全部丟失），兩台 client 的
-> 訊息都送達 log-server 與 Loki；client 的 `siem_forward_port` 與 inventory log-server
-> 的 `siem_receiver_tcp_port` 不一致時 apply 會在變更前失敗。換回其他 port 時，舊
-> port 的 SELinux 標籤會保留（`semanage port -d -t syslogd_port_t -p tcp <port>` 可移除）。
-> 紀錄：[`2026-10-14-78cf68c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-78cf68c.md)。
+> **目前有效的驗證摘要（2026-10-14）**：candidate `1d9bd8c`（PR #79），3 台全新 vm-target
+> （Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux Enforcing client）。
+> `topology test` L3/L4 failed=0、L5 audit-log-forwarding 66/66（v1.8，含 C22 轉送連線檢查）、
+> L6 changed=0。`pilot deploy` 以 inventory 設定 `siem_forward_port: 2514` 後，AlmaLinux client
+> 的 tcp/2514 被標成 `syslogd_port_t`（沒有這個標籤時 rsyslog 回報 `Permission denied`、
+> 訊息全部丟失），兩台 client 的訊息都送達 log-server 與 Loki，重跑 changed=0。
+> `siem_forward_port` 必須是 1–65535 的十進位整數，且與 inventory log-server 的
+> `siem_receiver_tcp_port` 一致（log-server 以 inventory 名稱、`ansible_host`、FQDN 比對，
+> 不分大小寫），否則 apply 會在變更前失敗。C22 在 log-server 停掉時 FAIL、恢復 30 秒後 PASS。
+> logrotate 會先安裝（最小化 image 沒有它）。換回其他 port 時，舊 port 的 SELinux 標籤會保留
+> （`semanage port -d -t syslogd_port_t -p tcp <port>` 可移除）。
+> 紀錄：[`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
