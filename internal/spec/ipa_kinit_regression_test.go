@@ -254,25 +254,3 @@ func cacheLabel(scope string) string {
 	}
 	return scope
 }
-
-// commandText returns a command/shell task's command line, or "".
-func commandText(task map[string]any) string {
-	for _, module := range []string{"command", "ansible.builtin.command", "shell", "ansible.builtin.shell"} {
-		switch v := task[module].(type) {
-		case string:
-			return v
-		case map[string]any:
-			if argv, ok := v["argv"].([]any); ok {
-				parts := make([]string, 0, len(argv))
-				for _, a := range argv {
-					parts = append(parts, fmt.Sprint(a))
-				}
-				return strings.Join(parts, " ")
-			}
-			if cmd, ok := v["cmd"].(string); ok {
-				return cmd
-			}
-		}
-	}
-	return ""
-}

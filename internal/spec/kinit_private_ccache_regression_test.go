@@ -472,7 +472,7 @@ func scanKinitDir(t *testing.T, root string) ([]kinitSite, []string) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !(strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml")) {
+		if d.IsDir() || (!strings.HasSuffix(p, ".yml") && !strings.HasSuffix(p, ".yaml")) {
 			return nil
 		}
 		data, err := os.ReadFile(p)
