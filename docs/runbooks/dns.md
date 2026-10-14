@@ -11,22 +11,19 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-14，candidate `6522b94`（tree `c8029314e417b78ad043b59ec8b32a4df256e379`），
-**PASS**：兩台 FreeIPA DNS server（primary + 未設 `freeipa_setup_dns` 的 replica，issue #67）
-在 tier 前面，4 台由 `topology up` 新建的 VM 跑 `vm-target topology test`：L3 check mode
-（全新 VM）`failed=0`、L4 `failed=0`、verify `dns.md` v1.2 16 pass / 0 fail / 4 not_applicable
-（測試後再跑 2 次結果相同）、`freeipa-server.md` 20、`freeipa-server-replica.md` 16、
-`freeipa-dns-client.md` 7 全部 pass、L6 `changed=0`。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
-下表是 dns role 本身範圍最廣的一次驗證（2026-10-01 candidate `c257bfc`，E1–E8），摘要：
+最新驗證：2026-10-14，candidate `01a64f4`（tree `1475bb8d41ea6da6486cc07b667a4e1e1188b19e`，PR #73 的 follow-up），
+**PASS**。摘要：
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-01a64f4.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-01a64f4.md)。
+dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
+`pilot deploy` 全站部署、`--limit`、`pilot reconcile`），摘要：
 [`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`（`docs/topologies/dns-tier-topology.yaml`），5 台由 `topology up` 新建的 VM，測完已移除 |
-| inventory host 集合 | `dns`: dt-dns-1, dt-dns-2；`freeipa-server`: dt-ipa；`freeipa-dns-client`: dt-dns-2, dt-client, dt-client-el |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA server 安裝與測試 fixture 用）；dns 設定在 workspace 的 `group_vars/dns.yml`，由 `pilot edit` 寫入 |
-| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0`。G4 擋下 `1.2.3.4/0`、`::0/0` 等允許全部來源的 ACL，C5 對手動加入的同類 ACL 判 FAIL。真實 `pilot deploy` 全站部署 + `--limit dt-dns-2` + `pilot reconcile`（`freeipa-dns-client`）之後 `dns.md` 31 / 0 / 8、`freeipa-dns-client.md` 18 / 0 |
+| 目標環境 | `pilot vm-target topology`，4 台由 `topology up` 新建、還沒跑過 playbook 的 VM：`pr73-ipa`、`pr73-replica`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr73-dns`（Ubuntu 24.04.4，unbound 1.19.2）、`pr73-client`（Ubuntu 24.04.4）；之後再加一台 `pr73-replica2`（AlmaLinux 9.8）。測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr73-ipa；`freeipa-server-replica`: pr73-replica（不設 `freeipa_setup_dns`）、pr73-replica2（先列進 inventory 但不 promote，之後才 promote）；`dns`: pr73-dns；`freeipa-dns-client`: pr73-client |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與測試 fixture 用）；dns 設定用 role 預設值 |
+| 結果 | 鏈 `freeipa-server` → `freeipa-server-replica` → dns fixtures → `dns` → `freeipa-dns-client` 的 topology test：L3 check mode（全新 VM）四台 `failed=0`，其中 dns 的 preview 依設計在 G5 結束（check mode 下 FreeIPA 還沒安裝，dns 設定的部分沒有被 preview）；L4 `failed=0`；verify `freeipa-server.md` 20、`freeipa-server-replica.md` 16、`dns.md` 16 pass / 0 fail / 4 not_applicable、`freeipa-dns-client.md` 7；L6 `changed=0`。replica2 列在 inventory 但未 promote 時，全站 `site.yml` 五台 `failed=0`，dns 與 client 印出指名 replica2 的 WARNING 並把它排除；promote 之後 stub 與 resolver 都納入它，重跑 `changed=0` |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
@@ -179,3 +176,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 2026-10-01 | v1.1 | §0.5 改指向 candidate `cbe95b8` 的驗證；加上真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果 | sre |
 | 2026-10-01 | v1.2 | §0.5 改指向 candidate `c257bfc`；§5 的 G4 列加上依實際網段判斷的 ACL 案例（PR #33 review） | sre |
 | 2026-10-01 | v1.3 | §7：consumer 有 2 筆以上 nameserver 時 resolver 逾時改成 1 秒（`freeipa-dns-client.md` C7）；證據為 candidate `5478c5d` | sre |
+| 2026-10-14 | v1.4 | §0.5 改指向 candidate `01a64f4`（PR #73 follow-up：未 promote 的 replica、forwarder 規則與 gate），事實表換成這次的 target 與 inventory，並註明 dns 的 L3 preview 停在 G5 | pilot |
