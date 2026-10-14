@@ -62,12 +62,13 @@
               tags: [always]
           tags: [always]
 
+        # Also tagged t3 and hbactest: those selections run the ipa reads below.
         - name: "Fixtures — kinit admin"
           ansible.builtin.shell:
             cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
           changed_when: false
           no_log: true
-          tags: [fixtures]
+          tags: [fixtures, t3, hbactest]
 
         # ── T3: structure verification ──────────────────────────────────────
         - name: "T3 — show hostgroups"
