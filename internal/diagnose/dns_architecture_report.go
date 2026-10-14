@@ -455,16 +455,16 @@ func BuildDNSArchObservedTier(t DNSArchTierHost, internalName, externalName stri
 	out.ExternalResolution = sectionFact(id, sections, "external", ok, func(s DNSArchSection) DNSArchFact {
 		f := digFact("127.0.0.1", extName, extType)(s)
 		q, _ := f.Value.(DNSQueryResult)
-		switch {
-		case f.State == FactError:
+		switch f.State {
+		case FactError:
 			// The tier answered with an error rcode (SERVFAIL, REFUSED):
 			// it did not resolve the name.
 			f.Detail = fmt.Sprintf("the tier answered %s %s with %s", extName, extType, q.Status)
-		case f.State == FactAbsent:
+		case FactAbsent:
 			// NXDOMAIN, or NOERROR without a record of the asked type
 			// (for example a CNAME whose target has none).
 			f.Detail = fmt.Sprintf("the tier answered %s %s with %s and no %s record", extName, extType, q.Status, extType)
-		case f.State == FactObserved:
+		case FactObserved:
 			f.Detail = "an answer proves the tier can resolve external names, not which upstream answered; the configured forwarders are in forwards"
 		}
 		return f
