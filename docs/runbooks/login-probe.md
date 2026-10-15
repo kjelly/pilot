@@ -95,7 +95,7 @@ sudo -u pilot-login-probe /usr/local/bin/pilot-login-probe probe \
 | `PilotLoginProbeSessionFailed`（warning） | `session` | 認證與 account 都過了，指令或 session 失敗（home、shell） |
 | `PilotLoginProbeTransportFailed`（warning） | `transport` | sshd、防火牆、DNS。node_exporter 也抓不到的主機不會觸發這個告警，只會有 `HostDown` |
 | `PilotLoginProbeStale`（warning，`action_required`） | — | 探測主機 `systemctl status pilot-login-probe`。它觸發時，**這台 probe**（`probe_host`）的其他 `PilotLoginProbe*` 會被 inhibit，其他 probe 的告警不受影響 |
-| `HostMetricsMissing`（warning，`action_required`） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符。它觸發時同主機的 `HostDown{job="node"}` 會被 inhibit（主機還活著）；probe 單輪失敗或重啟不會讓它中斷（`keep_firing_for`），所以 node_exporter 恢復後約 6–7 分鐘才 resolve（實測 5m41s） |
+| `HostMetricsMissing`（warning，`action_required`） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符。它觸發時同主機的 `HostDown{job="node"}` 會被 inhibit（主機還活著）；probe 單輪失敗或重啟不會讓它中斷（`keep_firing_for`），所以 node_exporter 恢復後最多約 6m15s 才 resolve（實測 5m40s） |
 | `HostIOStall` / `HostDiskLatencyHigh` / `HostDiskQueueDeep`（warning） | — | `node_disk_*` 依 device 拆開看；EL9 預設沒有 PSI，只會有後兩者 |
 | `HostPSIUnavailable`（info） | — | 這台主機沒有 PSI metrics，`HostIOStall` 不會在這台觸發 |
 
@@ -194,3 +194,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-15 | v0.4 | 更新至 candidate `dc883b3`（PR #80 review）：§3 的 inhibit 行為改寫（`HostMetricsMissing` 抑制同主機 `HostDown{job="node"}`、`PilotLoginProbeStale` 只抑制同 `probe_host`）、§4.5 退役 re-render 帶 vault、§6 補明確 target 名稱、解析不到的 target 與手動移除 role；§0.5 換成新一輪實測 | pilot |
 | 2026-10-15 | v0.5 | PR #80 第三輪 review：`HostMetricsMissing` 的 `keep_firing_for`、inhibit 帶 `site`、probe 新鮮度改用 `changes()`；§6 補 `node_exporter_targets` 與 probe 間隔的前提 | pilot |
 | 2026-10-15 | v0.6 | PR #80 第四輪 review：§6 補 probe 新鮮度與 `host_metrics_missing_for` 的兩道 gate；§3 `HostMetricsMissing` 恢復後的延遲改寫 | pilot |
+| 2026-10-15 | v0.7 | PR #80 第五輪 review：§3 `HostMetricsMissing` 恢復延遲改為最多約 6m15s | pilot |

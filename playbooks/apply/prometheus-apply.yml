@@ -889,7 +889,11 @@
     # A probe that stalls at the moment its target dies leaves a frozen
     # success=1 that still counts as fresh for up to login_probe_stale_seconds.
     # HostMetricsMissing must need at least that long to fire, or it reports
-    # the dead host "reachable over SSH" and mutes its HostDown.
+    # the dead host "reachable over SSH" and mutes its HostDown. This does not
+    # cover a probe that stalls up to one round (login_probe_interval +
+    # login_probe_total_timeout) after the target died: HostMetricsMissing
+    # then fires falsely for a few minutes, while HostDown still pages on time
+    # (docs/verification/alertmanager.md §1.7).
     - name: "Gate: host_metrics_missing_for is at least login_probe_stale_seconds"
       ansible.builtin.assert:
         that:

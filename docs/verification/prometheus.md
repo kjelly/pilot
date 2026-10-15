@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.11
+> 版本：v1.12
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -56,7 +56,7 @@
 | `thanos_s3_endpoint` | 完整覆寫 S3 endpoint（`host:port`），跳過 `thanos_s3_alias` 的 `/etc/hosts` pin，改指向外部/獨立 S3 | 否 | `"{{ thanos_s3_alias }}:{{ thanos_s3_port }}"` |
 | `thanos_aws_access_key_id` | S3 access key；一律用 vault 帶入，不進版控（拋棄式沙盒測試除外） | 是 | 無 |
 | `thanos_aws_secret_access_key` | S3 secret key | 是 | 無 |
-| `prometheus_scrape_interval` | 全域 scrape 間隔 | 否 | `15s` |
+| `prometheus_scrape_interval` | 全域 scrape 間隔。host-health 規則啟用時必須是單一 Prometheus duration（例如 `15s`，不接受 `1m30s`），且 `login_probe_stale_seconds` ≥ 3 × 此值，playbook 會擋 | 否 | `15s` |
 | `prometheus_retention_time` | 本機 TSDB 保留時間。長期保存在 S3（保留期限由 `thanos-query.md` 的 Compactor 決定），本機這份只是 Thanos Sidecar 的上傳緩衝：S3 中斷超過這個時間，中斷期間的資料就會遺失 | 否 | `24h` |
 | `prometheus_scrape_configs` | 完整覆寫 `scrape_configs:` 區塊內容（多行字串，可依主機覆寫成不同的 scrape job） | 否 | 只 scrape 自己（`localhost:9090`） |
 | `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
@@ -335,3 +335,4 @@
 | 2026-10-15 | v1.9 | PR #80 review（GitHub issue #11）：login-probe 告警都帶 `probe_host`，配合 `alertmanager.md` §1.7 的新 inhibit；`PilotLoginProbeTransportFailed` 排除 node scrape 也失敗的主機；`HostMetricsMissing` 只採信仍在寫 textfile 的 probe；`HostMetricsMissing` 與 `PilotLoginProbeStale` 加上 `action_required="true"`；`host_metrics_missing_for` 必須短於 10m。row 未變 | sre |
 | 2026-10-15 | v1.10 | PR #80 第三輪 review：`HostMetricsMissing` 加 `keep_firing_for`（probe 單輪失敗或重啟時不中斷，否則被它抑制的 `HostDown` 會送出）；probe 新鮮度與 `PilotLoginProbeStale` 改用寫入時間戳的 `changes()`，不再依賴探測主機時鐘；標頭版本對齊變更紀錄。row 未變 | sre |
 | 2026-10-15 | v1.11 | PR #80 第四輪 review：`prometheus-apply.yml` 新增兩道 gate——`login_probe_stale_seconds` ≥ 3 × `prometheus_scrape_interval`（`prometheus_scrape_interval` 必須是單一 duration），`host_metrics_missing_for` ≥ `login_probe_stale_seconds`；promtool 證明兩者各自防止的誤報。row 未變 | sre |
+| 2026-10-15 | v1.12 | PR #80 第五輪 review：`prometheus_scrape_interval` 一列寫明單一 duration 與 3 倍的限制。row 未變 | sre |

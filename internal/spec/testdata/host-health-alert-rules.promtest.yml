@@ -216,6 +216,44 @@ tests:
         exp_alerts:
           - exp_labels: {instance: "dead2:9100", job: node, pilot_host: dead2, severity: critical}
 
+  # The limit of that guarantee: the probe dies too, but only after it
+  # kept writing for up to one more round (login_probe_interval +
+  # login_probe_total_timeout, 90 s by default) without recording the
+  # failure. dead3's probe last wrote 75 s after the target died, dead4's
+  # 90 s after. Their frozen success=1 then counts as fresh for up to
+  # login_probe_stale_seconds more, so HostMetricsMissing falsely fires for
+  # a few minutes. It has resolved by the time HostDown fires (13m), so
+  # HostDown still pages on time. alertmanager.md §1.7 states this window.
+  - name: A probe that stalls within one round after its target dies
+    interval: 15s
+    input_series:
+      - series: 'up{job="node",instance="dead3:9100",pilot_host="dead3"}'
+        values: '1x8 0x60'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-t:9100",pilot_host="mon-t",probe_target="dead3"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-t:9100",pilot_host="mon-t"}'
+        values: '0+15x14 210x54'
+      - series: 'up{job="node",instance="dead4:9100",pilot_host="dead4"}'
+        values: '1x8 0x60'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-u:9100",pilot_host="mon-u",probe_target="dead4"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-u:9100",pilot_host="mon-u"}'
+        values: '0+15x15 225x53'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: dead3, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: dead4, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 13m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "dead3:9100", job: node, pilot_host: dead3, severity: critical}
+          - exp_labels: {instance: "dead4:9100", job: node, pilot_host: dead4, severity: critical}
+
   - name: Two probes — a stalled probe only speaks for itself
     interval: 1m
     input_series:
