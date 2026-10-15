@@ -30,20 +30,28 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-15）**：candidate `10f18d1`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-15）**：candidate `640362e`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux Enforcing client），
 > log-server 設定 `siem_log_root: /srv/siem`。`topology test` L3/L4 failed=0、L5 audit-log-forwarding
 > 66/66（v1.8，含 C22 轉送連線檢查）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/`。
-> 2026-10-14 candidate `4115817` 實測 `pilot deploy`：以 inventory 設定 `siem_forward_port: 2514` 後，AlmaLinux client
-> 的 tcp/2514 被標成 `syslogd_port_t`（沒有這個標籤時 rsyslog 回報 `Permission denied`、
-> 訊息全部丟失），兩台 client 的訊息都送達 log-server 與 Loki，重跑 changed=0。
-> `siem_forward_port` 必須是 1–65535 的整數（YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成
-> 另一個數字，請寫成十進位），且與 inventory log-server 的 `siem_receiver_tcp_port` 一致
-> （log-server 以 inventory 名稱、`ansible_host` 比對，不分大小寫；FQDN 與 node name 來自 facts，
-> 只有同一次 run 收集過 log-server 的 facts 時才比對得到，例如 `site.yml`），否則 apply 會在變更前失敗。C22 在 log-server 停掉時 FAIL、恢復 30 秒後 PASS。
-> logrotate 會先安裝（最小化 image 沒有它）。換回其他 port 時，舊 port 的 SELinux 標籤會保留
-> （`semanage port -d -t syslogd_port_t -p tcp <port>` 可移除）。
-> 紀錄：[`2026-10-15-10f18d1.md`](../evidence/play-vars-inventory-precedence/2026-10-15-10f18d1.md)（port 與 deploy 見 [`2026-10-14-4115817.md`](../evidence/play-vars-inventory-precedence/2026-10-14-4115817.md)，gate 的逐項實測見 [`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)）。
+> `pilot deploy` 以 workspace inventory 設定 `siem_forward_port: 2514`（沒加引號）：preflight 通過，
+> 三台都轉送到 `siem-log-server:2514`，AlmaLinux client 的 tcp/2514 被標成 `syslogd_port_t`（沒有這個
+> 標籤時 rsyslog 回報 `Permission denied`、訊息全部丟失），兩台 client 的訊息都送達 log-server 與 Loki，
+> 重跑 changed=0，audit-log-forwarding.md 66/66。
+>
+> 輸入限制：
+> - `siem_forward_port` 必須是 1–65535 的整數。YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成
+>   另一個數字，請寫成十進位。
+> - 它必須與 inventory log-server 的 `siem_receiver_tcp_port` 一致，否則 apply 會在變更前失敗。
+>   log-server 以 inventory 名稱、`ansible_host` 比對，不分大小寫；FQDN 與 node name 來自 facts，
+>   只有同一次 run 收集過 log-server 的 facts 時才比對得到，例如 `site.yml`。
+> - logrotate 會先安裝（最小化 image 沒有它）。
+> - 換回其他 port 時，舊 port 的 SELinux 標籤會保留（`semanage port -d -t syslogd_port_t -p tcp <port>`
+>   可移除）。
+>
+> C22 在 log-server 停掉時 FAIL、恢復 30 秒後 PASS，是較早的 candidate `4115817` 實測的
+> （`2026-10-14-4115817.md`，audit-log-forwarding 之後沒改）。
+> 紀錄：[`2026-10-15-640362e.md`](../evidence/play-vars-inventory-precedence/2026-10-15-640362e.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```

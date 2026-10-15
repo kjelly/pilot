@@ -20,25 +20,43 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-15）**：candidate `10f18d1`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-15）**：candidate `640362e`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client），inventory 設定
-> `siem_log_root: /srv/siem`。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.5）、
-> log-shipping 9/9（v1.4）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
-> C6–C8 從接收設定的 `SiemAuditPath` 讀出實際生效的根目錄，C7/C8 只認這次送出的 nonce 訊息：
-> rsyslog 停掉、兩個目錄都留有舊的固定字串時 C7/C8 FAIL，重新啟動後 11/11；拿掉 `siem_log_root`
-> 重套後回到 `/var/log/siem`，11/11。根目錄不在 `/var/log` 底下時，apply 會先讓受限的 rsyslogd
-> 能寫入（Ubuntu：在 AppArmor 的 `local/usr.sbin.rsyslogd` 加規則並重新載入；EL：`var_log_t`
-> file context + `restorecon`，AlmaLinux 實測 `/srv/siem-el` 收到 client 的訊息），權限有變時重啟
-> rsyslog。沒有這一步時 rsyslog 回報 `Permission denied`、訊息全部丟失，apply 卻成功。是否 relabel 看
-> 目錄實際的 SELinux type，不看這次 run 有沒有新增規則：規則已存在、目錄被刪掉重建後重跑也會標回
-> `var_log_t`（`--tags C7` 實測），relabel 後仍不是 `var_log_t` 時 apply 失敗。
-> 2026-10-14 candidate `4115817` 以 inventory 設定 `siem_receiver_tcp_port: 2514`、
-> `siem_logrotate_rotate: 30` 實測 `pilot deploy`：preflight 通過、rsyslog 在 2514 監聽、兩台
-> client 的訊息都送達，重跑 changed=0，log-server.md 11/11（C5 讀接收設定裡的 port）。`siem_receiver_tcp_port` 必須是 1–65535 的整數（字串或 `-e` 值要寫成十進位、不帶前導 0；YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成另一個數字 1356、2500，gate 看不出來，請寫成 `"2514"` 或 `2514`）；`siem_log_root`（與它解析到的
-> 真實路徑）不能是系統或共用目錄，兩者都只能用英數字與 `.`、`_`、`-`、`/`（真實路徑會寫進 AppArmor 規則），既有目錄必須已是本角色建立的 `syslog:syslog 0755`
-> （只有 `lost+found` 的新掛載檔案系統根目錄例外；權限被改過時會給出還原指令），Step 2 只對解析後的真實路徑操作、不跟隨 symlink；
-> logrotate 會先安裝，設定檔的 `validate` 只在 logrotate 回報這個檔案本身的錯誤時失敗。
-> 紀錄：[`2026-10-15-10f18d1.md`](../evidence/play-vars-inventory-precedence/2026-10-15-10f18d1.md)（port 與 deploy 見 [`2026-10-14-4115817.md`](../evidence/play-vars-inventory-precedence/2026-10-14-4115817.md)，gate 的逐項實測見 [`2026-10-14-1d9bd8c.md`](../evidence/play-vars-inventory-precedence/2026-10-14-1d9bd8c.md)）。
+> `siem_log_root: /srv/siem`。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.6）、
+> log-shipping 9/9（v1.5）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
+> - C6–C8 從接收設定的 `SiemAuditPath` 讀出實際生效的根目錄，C7/C8 只認這次送出的 nonce 訊息：
+>   rsyslog 停掉、兩個目錄都留有舊的固定字串時 C7/C8 FAIL，重新啟動後 11/11；拿掉 `siem_log_root`
+>   重套後回到 `/var/log/siem`，11/11。
+> - playbook 每個 task 都帶全部 row tag：`--tags C6`、`--tags C3,C5`、`--tags C7` 改根目錄時，
+>   接收設定、logrotate、AppArmor 規則都換到新目錄、訊息送達，11/11。
+> - 根目錄不在 `/var/log` 底下時，apply 先讓受限的 rsyslogd 能寫入，權限有變時重啟 rsyslog；
+>   沒有這一步時 rsyslog 回報 `Permission denied`、訊息全部丟失，apply 卻成功。
+>   - Ubuntu：在 AppArmor 的 `local/usr.sbin.rsyslogd` 加規則。是否重新載入看已載入 profile 的
+>     sha256，不看這次 run 有沒有改規則；沒載入的 profile 不載入，complain mode 維持 complain。
+>     Ubuntu 的 `rsyslog.service` 每次啟動也會自己重新載入 profile。
+>   - EL：`var_log_t` file context，看目錄實際的 type 決定要不要 `restorecon`。AlmaLinux 上
+>     `--check --diff`（全新主機）、套用、`--tags C7`、目錄重建後重跑都實測過；`pilot verify` 10/11，
+>     只有 C1 失敗：它用 `dpkg`，spec §1 目標是 Ubuntu。
+> - apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容（這次才建的就移除），
+>   重新載入 profile，移除這次加的 SELinux 規則；根目錄與 SELinux port 標籤留著。實測：Step 5 失敗後
+>   設定回到原本的目錄、profile 的 sha256 跟 run 之前相同；拿掉造成失敗的檔案並重啟 rsyslog 後 11/11。
+> - `pilot deploy` 以 workspace inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30`
+>   （沒加引號）：preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，
+>   log-server.md 11/11（C5 讀接收設定裡的 port）。
+>
+> 輸入限制：
+> - `siem_receiver_tcp_port` 必須是 1–65535 的整數。字串或 `-e` 值要寫成十進位、不帶前導 0。
+>   YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成 1356、2500，gate 看不出來，請寫成 `"2514"` 或 `2514`。
+> - `siem_log_root` 與它解析到的真實路徑不能是系統或共用目錄，兩者都只能用英數字與 `.`、`_`、`-`、`/`
+>   （真實路徑會寫進 AppArmor 規則）。
+> - 既有目錄必須已是本角色建立的 `syslog:syslog 0755`；只有 `lost+found` 的新掛載檔案系統根目錄例外，
+>   權限被改過時會給出還原指令。Step 2 只對解析後的真實路徑操作、不跟隨 symlink。
+> - logrotate 會先安裝，設定檔的 `validate` 只在 logrotate 回報這個檔案本身的錯誤時失敗。
+>
+> 這些 gate 由 Ansible 實跑的 regression test 鎖住。VM 上的逐項實測是較早的 candidate
+> （`2026-10-14-1d9bd8c.md`、`2026-10-14-4115817.md`），之後 gate 只多了真實路徑的字元檢查，
+> 那兩份不是這個 candidate 的證據。
+> 紀錄：[`2026-10-15-640362e.md`](../evidence/play-vars-inventory-precedence/2026-10-15-640362e.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
