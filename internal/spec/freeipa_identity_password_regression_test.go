@@ -53,10 +53,31 @@ const (
 	userShowMaxlife0SelfChanged = "testdata/freeipa-user-show-raw-maxlife0-self-changed.txt"
 )
 
-// identityTasks returns the identity playbook's pre_tasks and tasks named in
-// names, in playbook order, without no_log so the test can read their
-// results.
+// identityTasks returns identityPlaybookTasks(names) with the password lookup
+// reading pw_fixture_dir/<user>.txt and `ipa passwd` replaced by a debug task
+// printing "PASSWD <user>".
 func identityTasks(t *testing.T, names []string) []any {
+	t.Helper()
+	var out []any
+	for _, c := range identityPlaybookTasks(t, names) {
+		switch c["name"] {
+		case identityPwLookupTask:
+			c["ansible.builtin.command"] = map[string]any{"argv": []any{"cat", "{{ pw_fixture_dir }}/{{ item.name }}.txt"}}
+		case identityPwSetTask:
+			for _, k := range []string{"ansible.builtin.shell", "register", "changed_when", "failed_when"} {
+				delete(c, k)
+			}
+			c["ansible.builtin.debug"] = map[string]any{"msg": "PASSWD {{ item.name }}"}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// identityPlaybookTasks returns the identity playbook's pre_tasks and tasks
+// named in names, in playbook order, without no_log so the test can read
+// their results.
+func identityPlaybookTasks(t *testing.T, names []string) []map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(identityApplyPath)
 	if err != nil {
@@ -66,7 +87,7 @@ func identityTasks(t *testing.T, names []string) []any {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
-	var out []any
+	var out []map[string]any
 	found := map[string]bool{}
 	pre, _ := plays[0]["pre_tasks"].([]any)
 	for _, r := range append(slices.Clone(pre), plays[0]["tasks"].([]any)...) {
@@ -81,15 +102,6 @@ func identityTasks(t *testing.T, names []string) []any {
 			if k != "no_log" {
 				c[k] = v
 			}
-		}
-		switch name {
-		case identityPwLookupTask:
-			c["ansible.builtin.command"] = map[string]any{"argv": []any{"cat", "{{ pw_fixture_dir }}/{{ item.name }}.txt"}}
-		case identityPwSetTask:
-			for _, k := range []string{"ansible.builtin.shell", "register", "changed_when", "failed_when"} {
-				delete(c, k)
-			}
-			c["ansible.builtin.debug"] = map[string]any{"msg": "PASSWD {{ item.name }}"}
 		}
 		out = append(out, c)
 	}

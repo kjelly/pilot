@@ -295,7 +295,8 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 判斷依據是 `ipa user-show --all --raw` 的 `krbLastPwdChange` 與
 `krbPasswordExpiration`。查不到某個使用者的狀態時，apply 直接失敗，不會把它
-當成「還沒有密碼」而重設。（2026-10-15 之前，`force_password: true` 的使用者每
+當成「還沒有密碼」而重設。`ipa passwd` 本身失敗時，apply 也會失敗，並列出使用者
+與 `ipa: ERROR:` 訊息（不含密碼）；其他使用者的密碼仍會先處理完。（2026-10-15 之前，`force_password: true` 的使用者每
 次 apply 都會被重設，即使已經自己改過密碼；還沒完成首次改密碼的使用者也每次
 都會被重設。）
 
