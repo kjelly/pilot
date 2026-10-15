@@ -121,9 +121,12 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 - 工具：`pilot verify docs/verification/alertmanager.md -i <inventory> -l alertmanager`
 - 輸出格式：`.verification/alertmanager-<UTC>.{ndjson,md}`
 - 預期 row 數：10
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-f764131.md`
-  （2026-10-15，candidate `f764131`，tree `0c224ddf`；全新 4 台 vm-target，`null` mode；
-  L1-L6 PASS，本 spec 10/10 PASS（run `61c0ff81-262a-4538-b583-4db9c954d935`）；
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-a381ac3.md`
+  （2026-10-15，merge candidate `a381ac3`，tree `ca023f5d`；全新 4 台 vm-target，`null` mode；
+  L1-L6 PASS，本 spec 10/10 PASS（run `b043b8df-5d2b-4d1f-ac7f-81c25b5c149f`）；C10 對已部署的
+  Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL）。抑制行為的實測見
+  `docs/evidence/login-probe/2026-10-15-f764131.md`（candidate `f764131`，本 spec 10/10，
+  run `61c0ff81-262a-4538-b583-4db9c954d935`；
   C10 經真實 verify pipeline 對已部署的 Alertmanager PASS、對載入 `a742ad9` 舊規則的
   Alertmanager FAIL；真實 Alertmanager 上資料缺口、整台主機停擺、兩台 probe 其中一台停擺的
   抑制行為）。
