@@ -2,6 +2,7 @@ package accessportal
 
 import (
 	"context"
+	"sync"
 
 	"github.com/kjelly/pilot/internal/freeipaaccess"
 )
@@ -14,6 +15,7 @@ import (
 // captures documented in
 // docs/evidence/pilot-access-gateway/2026-09-14-phase2-accessportal.md.
 type fakeProvider struct {
+	mu                sync.Mutex
 	users             map[string]freeipaaccess.User
 	hosts             map[string]freeipaaccess.Host
 	hostShowErr       map[string]error
@@ -52,6 +54,8 @@ func (f *fakeProvider) GroupShow(ctx context.Context, name string) (freeipaacces
 }
 
 func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hostShowCalls == nil {
 		f.hostShowCalls = map[string]int{}
 	}
