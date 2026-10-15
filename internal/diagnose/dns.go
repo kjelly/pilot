@@ -2,6 +2,7 @@ package diagnose
 
 import (
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -14,12 +15,11 @@ import (
 // on whether the host is a DNS client or a DNS provider, so this check
 // must not assume either role. When name is non-empty (already validated
 // via inventory.ValidDNSRecordName) two more steps resolve it both via NSS
-// and directly against the loopback resolver, since comparing those two is
-// what actually localizes an nsswitch misconfiguration vs. an unreachable
-// upstream.
+// and directly against the loopback resolver. These are independent paths:
+// a client using a remote resolver need not have a loopback DNS service.
 func DNSSteps(name string) []Step {
 	steps := []Step{
-		{ID: "resolv-nameserver", Description: "first nameserver in /etc/resolv.conf", Module: "command", Command: `awk 'NR==1{print $2}' /etc/resolv.conf`},
+		{ID: "resolv-nameserver", Description: "first nameserver in /etc/resolv.conf", Module: "command", Command: `awk '$1 == "nameserver" {print $2; exit}' /etc/resolv.conf`},
 		{ID: "resolved-active", Description: "systemd-resolved service active", Module: "command", Command: "systemctl is-active systemd-resolved"},
 		{ID: "daemon-listening", Description: "a non-stub DNS daemon is listening on :53", Module: "shell", Command: `ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`},
 		{ID: "daemon-installed", Description: "a DNS daemon package (unbound/bind9/dnsmasq) is installed", Module: "shell", Command: `dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`},
@@ -27,7 +27,7 @@ func DNSSteps(name string) []Step {
 	if name != "" {
 		steps = append(steps,
 			Step{ID: "nss-resolve", Description: "resolves via NSS (getent hosts)", Module: "command", Command: fmt.Sprintf("getent hosts %s", name)},
-			Step{ID: "direct-resolve", Description: "resolves via a direct query against the loopback resolver", Module: "command", Command: fmt.Sprintf("dig +short %s @127.0.0.1", name)},
+			Step{ID: "direct-resolve", Description: "resolves via a direct A query against the loopback resolver", Module: "command", Command: fmt.Sprintf("dig +time=2 +tries=1 +noall +comments +answer %s @127.0.0.1 A", name)},
 		)
 	}
 	return steps
@@ -62,24 +62,36 @@ func BuildDNSOutput(name string, results []StepResult) DNSOutput {
 
 	out := DNSOutput{Steps: results, NameQueried: name != ""}
 
-	if r, ok := find("resolv-nameserver"); ok && r.Result.RunErr == nil && r.Result.RC == 0 {
-		out.Nameserver = strings.TrimSpace(r.Result.Stdout)
+	succeeded := func(r StepResult) bool {
+		return r.Result.RunErr == nil && !r.Result.Failed && !r.Result.Unreachable && r.Result.RC == 0
 	}
-	if r, ok := find("resolved-active"); ok && r.Result.RunErr == nil {
-		out.SystemdResolvedActive = r.Result.RC == 0
+	ns, nsFound := find("resolv-nameserver")
+	if nsFound && succeeded(ns) {
+		out.Nameserver = strings.TrimSpace(ns.Result.Stdout)
 	}
-	if r, ok := find("daemon-listening"); ok && r.Result.RunErr == nil {
+	if r, ok := find("resolved-active"); ok {
+		out.SystemdResolvedActive = succeeded(r)
+	}
+	if r, ok := find("daemon-listening"); ok && succeeded(r) {
 		out.LocalDaemonListening = strings.TrimSpace(r.Result.Stdout) != ""
 	}
-	if r, ok := find("daemon-installed"); ok && r.Result.RunErr == nil {
+	if r, ok := find("daemon-installed"); ok && succeeded(r) {
 		out.DNSDaemonInstalled = strings.TrimSpace(r.Result.Stdout) == "1"
 	}
 	if out.NameQueried {
-		if r, ok := find("nss-resolve"); ok && r.Result.RunErr == nil {
-			out.ResolvesViaNSS = r.Result.RC == 0
+		if r, ok := find("nss-resolve"); ok && succeeded(r) {
+			out.ResolvesViaNSS = strings.TrimSpace(r.Result.Stdout) != ""
 		}
-		if r, ok := find("direct-resolve"); ok && r.Result.RunErr == nil {
-			out.ResolvesViaDirectQuery = strings.TrimSpace(r.Result.Stdout) != ""
+		if r, ok := find("direct-resolve"); ok && succeeded(r) {
+			query := ParseDigComments("127.0.0.1", name, "A", r.Result.Stdout, r.Result.RC)
+			if query.Error == "" && query.Status == "NOERROR" {
+				for _, answer := range query.Answers {
+					if ip := net.ParseIP(answer); ip != nil && ip.To4() != nil {
+						out.ResolvesViaDirectQuery = true
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -87,15 +99,16 @@ func BuildDNSOutput(name string, results []StepResult) DNSOutput {
 	case out.NameQueried && out.ResolvesViaNSS && out.ResolvesViaDirectQuery:
 		out.Verdict = fmt.Sprintf("%q resolves both via NSS and directly against the loopback resolver — DNS resolution is working for this name", name)
 	case out.NameQueried && !out.ResolvesViaNSS && out.ResolvesViaDirectQuery:
-		out.Verdict = fmt.Sprintf("%q resolves via a direct query against 127.0.0.1 but not via NSS (getent) — nsswitch.conf's \"hosts\" line likely doesn't route through the local resolver", name)
+		out.Verdict = fmt.Sprintf("%q resolves via a direct query against 127.0.0.1; the NSS (getent) lookup did not succeed — compare NSS's configured resolution path with this loopback query", name)
 	case out.NameQueried && out.ResolvesViaNSS && !out.ResolvesViaDirectQuery:
-		out.Verdict = fmt.Sprintf("%q resolves via NSS but not via a direct query against 127.0.0.1 — NSS may be using a different resolution path (e.g. /etc/hosts) than the local DNS daemon", name)
-	case out.NameQueried && !out.LocalDaemonListening && !out.SystemdResolvedActive:
-		out.Verdict = fmt.Sprintf("%q does not resolve, and no local resolver (systemd-resolved or a DNS daemon) appears to be listening on this host", name)
+		out.Verdict = fmt.Sprintf("%q resolves via NSS; the direct A query against 127.0.0.1 did not succeed — NSS may use a remote resolver, systemd-resolved's stub, or /etc/hosts; a loopback DNS service is not required", name)
 	case out.NameQueried:
-		out.Verdict = fmt.Sprintf("%q does not resolve via NSS or a direct query against 127.0.0.1, even though a local resolver appears to be running — check the resolver's own zone/upstream configuration", name)
+		out.Verdict = fmt.Sprintf("%q: neither the NSS lookup nor the direct A query against 127.0.0.1 succeeded — inspect each step's evidence and the configured nameserver; the loopback result alone does not establish remote resolver health", name)
 	default:
 		out.Verdict = "facts only — supply a name to test actual resolution via NSS and a direct loopback query"
+	}
+	if nsFound && succeeded(ns) && out.Nameserver == "" {
+		out.Verdict += "; /etc/resolv.conf has no nameserver directive"
 	}
 	return out
 }

@@ -808,23 +808,46 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
 14. **`kinit` 沒帶 `KRB5CCNAME` 就寫進執行帳號的預設 credential cache**,playbook
    結束後 ticket 一直留在主機上,之後任何用預設 cache 的程式(其他自動化、操作者
    手動的 `ipa`、診斷工具)都在不知情下以那個身分執行。2026-10-13(issue #69)全新
-   部署的 FreeIPA server 上 root 的 `KCM:0` 就留著 `admin@REALM`。**規則**:把用到
-   ticket 的 task 包進一個 block,block 的 `environment:` 設
-   `KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"`,
-   第一個 task include `tasks/freeipa-private-ccache-open.yml`、`always:` include
-   `tasks/freeipa-private-ccache-close.yml`(兩者都標 `always` 並帶
-   `apply: {tags: [always]}`);block 裡(含 include 進來的檔案)的 kinit/ipa 都會用
-   私有 cache,成功、失敗、`--tags` 都會清掉,被 SIGKILL 留下的 cache 由同一個執行帳號
-   的下次執行清除——只清執行帳號自己的:共用的 sticky `/tmp` 裡別的帳號留下的 cache
-   (例如被中斷的 root run,遇上 `become: false` 的 gateway-scope)刪不掉,刪了會讓
-   整個 run 在 kinit 之前就 EPERM 失敗(PR #72 review,
-   `kinit_private_ccache_cleanup_regression_test.go` 鎖住)。
-   會被別處 include 的 task 檔裡的 kinit 要自己寫 `environment: {KRB5CCNAME:
-   "{{ pilot_krb5ccname }}"}`,在 block 外被 include 時直接失敗,不會退回預設 cache。
-   不要用 play 層級的 `environment:`:它也會套到 `ipa-server-install`/`ipa-client-install`
-   這類安裝程式。`internal/spec/kinit_private_ccache_regression_test.go::TestRegression_KinitUsesAPrivateCredentialCache`
-   對全部 `playbooks/**` 檢查;已經會 `kdestroy` 但仍用預設 cache 的檔案列在
-   ratchet allowlist,遷移後要把項目拿掉。
+   部署的 FreeIPA server 上 root 的 `KCM:0` 就留著 `admin@REALM`。只在成功路徑最後
+   `kdestroy` 不夠:失敗、`--tags`、以及 `KCM:`/`KEYRING:` collection(之後另一個
+   principal 的 kinit 會切換 primary cache,裸 `kdestroy` 只刪掉那一個)都會留下 ticket;
+   pilot-access-gateway 甚至從來不 `kdestroy`(PR #72 review)。**規則**:
+   - 把用到 ticket 的 task 包進一個 block,block 的 `environment:` 設
+     `KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"`,
+     第一個 task include `tasks/freeipa-private-ccache-open.yml`、`always:` include
+     `tasks/freeipa-private-ccache-close.yml`,兩者都標 `always` 並帶
+     `apply: {tags: [always]}`。block 裡(含 include 進來的檔案)的 kinit/ipa 都用這個
+     私有 cache,成功、失敗、`--tags` 都會清掉。kinit 以 `become` 執行時,block 也要
+     `become`,cache 才會屬於同一個帳號。
+   - close 會把 `pilot_krb5ccname` 設回不存在的路徑:fact 會活過 block 與 play,不重設的話,
+     之後的 kinit 會寫進已刪除的路徑,重新建出沒人清的 cache。被 SIGKILL 留下的 cache 由
+     同一個執行帳號下次執行時清除,而且只清自己的:共用 sticky `/tmp` 裡別的帳號的 cache
+     刪不掉,刪了會讓整個 run 在 kinit 之前 EPERM 失敗。`--check` 時只回報、不刪。
+   - 會被別處 include 的 task 檔裡的 kinit 自己寫 `environment: {KRB5CCNAME:
+     "{{ pilot_krb5ccname }}"}`,在 block 外被 include 時直接失敗,不會退回預設 cache。
+   - 也接受:`ansible.builtin.tempfile` 註冊的 cache,且外層 block 的 `always:` 對它
+     `kdestroy`,tag 涵蓋 kinit 的每一個 tag(`freeipa-dns-apply.yml` 的寫法);只需要
+     kinit 結果碼時用 `-c MEMORY:<name>`。字面值(`KCM:`、`""`、固定的 `/tmp` 路徑)不算私有。
+   - 不要用 play 層級的 `environment:`:它也會套到 `ipa-server-install`/`ipa-client-install`
+     這類安裝程式。
+   - `ipa` 指令要跟 kinit 用同一個 cache:放在同一個 block 裡;放在 block 後面就沒有 ticket。
+   - spec 的 checklist row 不能依賴 playbook 留下的 ticket:`pilot-gateway-scope.md`、
+     `internal-endpoint.md` 原本直接跑 `ipa`,能通過只是因為 #69 的 ticket 一直留著。
+     需要讀 FreeIPA 的 row 用 root 經 ldapi 的 SASL EXTERNAL(`freeipa-identity.md` 的寫法)。
+     這類 row 一定要以 root 執行:`spec.NeedsBecome` 看到 `ldapi://` 或 `-Y EXTERNAL` 就會 become
+     (非 root 的 SASL EXTERNAL 只會以該 uid 或匿名綁定,讀到的比較少,verdict 取決於誰連線),
+     `internal/spec/needs_become_ldapi_regression_test.go` 對全部 spec 鎖住。
+     server 的 host keytab 不能代替:FreeIPA 對 host principal 靜默隱藏部分屬性
+     (例如 `txtrecord`)。
+   - `vm-target run --sandbox` 會把整個 `playbooks/` 複製進 container,跨目錄的 include
+     (`playbooks/check/*` include `../apply/tasks/...`)才找得到。
+   - lint:`internal/spec/kinit_private_ccache_regression_test.go::TestRegression_KinitUsesAPrivateCredentialCache`
+     對全部 `playbooks/**`(`.yml` 與 `.yaml`)檢查每一個 kinit,沒有 allowlist;
+     `internal/spec/ipa_kinit_regression_test.go::TestRegression_IpaCommandsHaveAKinitForTheirTags`
+     檢查 `ipa` 跟 kinit 用同一個 cache;
+     `internal/spec/spec_probe_split_args_regression_test.go::TestRegression_SpecProbesSplitInAnsible`
+     檢查 spec row 能通過 Ansible 的 `split_args`(row 的註解裡有 `'` 會讓 `pilot verify`
+     在 shell 執行前就失敗)。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1462,3 +1485,4 @@ git status --short
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
+| 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |

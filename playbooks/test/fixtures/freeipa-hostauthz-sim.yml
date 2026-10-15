@@ -8,6 +8,9 @@
 # Both users' SSH keys must already be provisioned on this host by
 # freeipa-hostauthz-user-setup.yml (run once per user x host combination,
 # including the "wrong" combinations).
+# The sudo phase waits for command permission in the client's SSSD policy;
+# sim_sudo_policy_retries (120) / sim_sudo_policy_delay (10 seconds) bound
+# that wait. This does not prove that a cached rule came from the latest run.
 #
 # Two independently-runnable phases, split by tag because they have
 # different blast-radius requirements:
@@ -49,9 +52,10 @@
     sim_local_key: "/home/{{ sim_local_user }}/.ssh/id_ed25519"
     sim_foreign_key: "/home/{{ sim_foreign_user }}/.ssh/id_ed25519"
     # PreferredAuthentications=publickey matters here, not just for speed:
-    # the preceding kinit gives the shell a live Kerberos ticket, so without
-    # this, sshd's GSSAPI negotiation is tried first and can succeed on its
-    # own — masking whether the -i {{ sim_local_key }}/{{ sim_foreign_key }}
+    # any Kerberos ticket root holds would otherwise let sshd's GSSAPI
+    # negotiation be tried first and succeed on its own (before 2026-10-14
+    # the kinit below left exactly such a ticket; it now uses a private
+    # cache) — masking whether the -i {{ sim_local_key }}/{{ sim_foreign_key }}
     # pubkey below actually would have been accepted, and adding several
     # seconds of GSSAPI nego latency per hop (confirmed 2026-07-04: this is
     # what surfaced as slow/flaky sudo checks in T5.3).
@@ -68,21 +72,43 @@
       tags: [sim, positive, negative]
 
   tasks:
-    # ══ POSITIVE — safe regardless of allow_all state ═══════════════════
-    - name: "Sim[+] — kinit as {{ sim_local_user }}"
+    # The sim's TGT goes to a private cache, destroyed in always: (issue #69).
+    # Before, the renewable (-r 7d) ticket stayed in root's default cache after
+    # the sim. Nothing later uses it: the SSH steps force publickey.
+    - name: "Sim[+] — Kerberos login as {{ sim_local_user }} with a private cache"
       become: true
-      ansible.builtin.shell:
-        cmd: 'echo "{{ sim_local_password }}" | kinit -r 7d {{ sim_local_user }}'
-      register: kinit_local
-      changed_when: false
-      no_log: true
-      tags: [sim, positive]
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Sim[+] — assert kinit succeeded"
-      ansible.builtin.assert:
-        that: [kinit_local.rc == 0]
-        fail_msg: "kinit failed for {{ sim_local_user }}"
-      tags: [sim, positive]
+        # ══ POSITIVE — safe regardless of allow_all state ═══════════════════
+        - name: "Sim[+] — kinit as {{ sim_local_user }}"
+          become: true
+          ansible.builtin.shell:
+            cmd: 'echo "{{ sim_local_password }}" | kinit -r 7d {{ sim_local_user }}'
+          register: kinit_local
+          changed_when: false
+          no_log: true
+          tags: [sim, positive]
+
+        - name: "Sim[+] — assert kinit succeeded"
+          ansible.builtin.assert:
+            that: [kinit_local.rc == 0]
+            fail_msg: "kinit failed for {{ sim_local_user }}"
+          tags: [sim, positive]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
     - name: "Sim[+] — SSH login as {{ sim_local_user }} on its own host (expect SUCCEED)"
       become: true
@@ -98,6 +124,16 @@
           - local_login.rc == 0
           - sim_local_user in local_login.stdout
         fail_msg: "{{ sim_local_user }} should be able to log in to {{ inventory_hostname }}: {{ local_login.stdout }} {{ local_login.stderr }}"
+      tags: [sim, positive]
+
+    - name: "Sim[+] — wait for the client's sudo policy before testing authorization"
+      ansible.builtin.include_tasks:
+        file: freeipa-sudo-policy-ready.yml
+        apply:
+          tags: [sim, positive]
+      vars:
+        sim_sudo_policy_user: "{{ sim_local_user }}"
+        sim_sudo_policy_command: [/usr/bin/systemctl, is-active, sssd]
       tags: [sim, positive]
 
     - name: "Sim[+] — sudo -n systemctl as {{ sim_local_user }} (expect SUCCEED — host-scoped rule matches this host)"

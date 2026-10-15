@@ -66,87 +66,102 @@
       tags: [always]
 
   tasks:
-    # kinit reads the password from stdin (no_log so it never lands in the
-    # ansible log). changed_when:false — obtaining a ticket is not a change.
-    - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
-      ansible.builtin.shell:
-        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
-      register: ipa_kinit
-      changed_when: false
-      no_log: true
-      tags: [fixtures]
+    # The admin ticket goes to a private cache, destroyed in always: on success,
+    # failure and any --tags (issue #69). Before, it went to the default cache and
+    # the kdestroy at the end was skipped when a task in between failed.
+    - name: "Fixtures with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Fixtures — ensure IPA user {{ ipa_fixture_user }} exists"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-add
-          - "{{ ipa_fixture_user }}"
-          - "--first={{ ipa_fixture_user_first }}"
-          - "--last={{ ipa_fixture_user_last }}"
-      register: ipa_user_add
-      changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
-      failed_when:
-        - ipa_user_add.rc != 0
-        - "'already exists' not in (ipa_user_add.stderr | default(''))"
-      tags: [fixtures]
+        # kinit reads the password from stdin (no_log so it never lands in the
+        # ansible log). changed_when:false — obtaining a ticket is not a change.
+        - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
+          ansible.builtin.shell:
+            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          register: ipa_kinit
+          changed_when: false
+          no_log: true
+          tags: [fixtures]
 
-    - name: "Fixtures — ensure sudo rule {{ ipa_fixture_sudorule }} exists (all hosts, all cmds)"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - sudorule-add
-          - "{{ ipa_fixture_sudorule }}"
-          - "--hostcat=all"
-          - "--cmdcat=all"
-      register: ipa_rule_add
-      changed_when: "'Added Sudo Rule' in (ipa_rule_add.stdout | default(''))"
-      failed_when:
-        - ipa_rule_add.rc != 0
-        - "'already exists' not in (ipa_rule_add.stderr | default(''))"
-      when: ipa_fixture_manage_sudorule | bool
-      tags: [fixtures]
+        - name: "Fixtures — ensure IPA user {{ ipa_fixture_user }} exists"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - user-add
+              - "{{ ipa_fixture_user }}"
+              - "--first={{ ipa_fixture_user_first }}"
+              - "--last={{ ipa_fixture_user_last }}"
+          register: ipa_user_add
+          changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
+          failed_when:
+            - ipa_user_add.rc != 0
+            - "'already exists' not in (ipa_user_add.stderr | default(''))"
+          tags: [fixtures]
 
-    # sudorule-add-user exits NON-ZERO (rc=1) when the user is already a
-    # member ("This entry is already a member" / "Number of members added 0").
-    # Treat that as the idempotent no-op it is: only a real error (not the
-    # already-member case) fails the task; only an actual add is a change.
-    - name: "Fixtures — attach {{ ipa_fixture_user }} to {{ ipa_fixture_sudorule }}"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - sudorule-add-user
-          - "{{ ipa_fixture_sudorule }}"
-          - "--users={{ ipa_fixture_user }}"
-      register: ipa_rule_user
-      changed_when: "'Number of members added 1' in (ipa_rule_user.stdout | default(''))"
-      failed_when:
-        - ipa_rule_user.rc != 0
-        - "'already a member' not in (ipa_rule_user.stdout | default(''))"
-      when: ipa_fixture_manage_sudorule | bool
-      tags: [fixtures]
+        - name: "Fixtures — ensure sudo rule {{ ipa_fixture_sudorule }} exists (all hosts, all cmds)"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - sudorule-add
+              - "{{ ipa_fixture_sudorule }}"
+              - "--hostcat=all"
+              - "--cmdcat=all"
+          register: ipa_rule_add
+          changed_when: "'Added Sudo Rule' in (ipa_rule_add.stdout | default(''))"
+          failed_when:
+            - ipa_rule_add.rc != 0
+            - "'already exists' not in (ipa_rule_add.stderr | default(''))"
+          when: ipa_fixture_manage_sudorule | bool
+          tags: [fixtures]
 
-    # `pilot-all` (cmdcategory=all) still requires a password by default.
-    # Without !authenticate, `sudo -n` inside a non-interactive shell hangs
-    # waiting for a password.  Add it here so the C8 check (runuser + sudo -l)
-    # works without a TTY.  Idempotent: already-exists → rc=1 → no change.
-    - name: "Fixtures — set {{ ipa_fixture_sudorule }} to not require auth"
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - sudorule-add-option
-          - "{{ ipa_fixture_sudorule }}"
-          - --sudooption=!authenticate
-      register: ipa_rule_opt
-      changed_when: "'Added option' in (ipa_rule_opt.stdout | default(''))"
-      failed_when:
-        - ipa_rule_opt.rc != 0
-        - "'already exists' not in (ipa_rule_opt.stderr | default(''))"
-      when: ipa_fixture_manage_sudorule | bool
-      tags: [fixtures]
+        # sudorule-add-user exits NON-ZERO (rc=1) when the user is already a
+        # member ("This entry is already a member" / "Number of members added 0").
+        # Treat that as the idempotent no-op it is: only a real error (not the
+        # already-member case) fails the task; only an actual add is a change.
+        - name: "Fixtures — attach {{ ipa_fixture_user }} to {{ ipa_fixture_sudorule }}"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - sudorule-add-user
+              - "{{ ipa_fixture_sudorule }}"
+              - "--users={{ ipa_fixture_user }}"
+          register: ipa_rule_user
+          changed_when: "'Number of members added 1' in (ipa_rule_user.stdout | default(''))"
+          failed_when:
+            - ipa_rule_user.rc != 0
+            - "'already a member' not in (ipa_rule_user.stdout | default(''))"
+          when: ipa_fixture_manage_sudorule | bool
+          tags: [fixtures]
 
-    - name: "Fixtures — release the Kerberos ticket"
-      ansible.builtin.command: kdestroy
-      changed_when: false
-      failed_when: false
-      tags: [fixtures]
+        # `pilot-all` (cmdcategory=all) still requires a password by default.
+        # Without !authenticate, `sudo -n` inside a non-interactive shell hangs
+        # waiting for a password.  Add it here so the C8 check (runuser + sudo -l)
+        # works without a TTY.  Idempotent: already-exists → rc=1 → no change.
+        - name: "Fixtures — set {{ ipa_fixture_sudorule }} to not require auth"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - sudorule-add-option
+              - "{{ ipa_fixture_sudorule }}"
+              - --sudooption=!authenticate
+          register: ipa_rule_opt
+          changed_when: "'Added option' in (ipa_rule_opt.stdout | default(''))"
+          failed_when:
+            - ipa_rule_opt.rc != 0
+            - "'already exists' not in (ipa_rule_opt.stderr | default(''))"
+          when: ipa_fixture_manage_sudorule | bool
+          tags: [fixtures]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
