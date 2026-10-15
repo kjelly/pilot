@@ -153,27 +153,22 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 	if !strings.Contains(pb, `rsyslog_log_root: "{{ siem_log_root_real }}"`) {
 		t.Error("the include must pass the resolved root siem_log_root_real")
 	}
-	// restorecon labels the root, so Step 2 must have created it under every
-	// tag the include runs under. With Step 2 tagged only C6, `--tags C7` on a
-	// root not created yet failed at restorecon ("lstat(<root>) failed: No such
-	// file or directory"), and the rescue removed the running receiver's
-	// drop-ins (2026-10-15, pr79-el).
+	// restorecon labels the root, so Step 2 must create it first. Which tags
+	// run which steps is TestRegression_LogServerStepsRunUnderEveryRowTag.
 	create := strings.Index(pb, `name: "Step 2: Ensure {{ siem_log_root }} exists"`)
 	if create < 0 || create > include {
 		t.Fatalf("Step 2 must create the root before the include; got indexes %d, %d", create, include)
-	}
-	step2 := pb[create:include]
-	if end := strings.Index(step2[1:], "- name:"); end > 0 {
-		step2 = step2[:end+1]
-	}
-	if !strings.Contains(step2, "tags: [C6, C7, C8]") {
-		t.Errorf("Step 2 must carry the include's tags C6, C7, C8:\n%s", step2)
 	}
 	step6a := pb[restart:]
 	if end := strings.Index(step6a[1:], "- name:"); end > 0 {
 		step6a = step6a[:end+1]
 	}
-	for _, want := range []string{"rsyslog_apparmor_local", "rsyslog_selinux_relabel", "C6, C7, C8"} {
+	// The restart follows the reload's effect on the loaded profile, not the
+	// block's change flag (TestRegression_LogServerReloadsAppArmorByTheLoadedProfile).
+	if strings.Contains(step6a, "rsyslog_apparmor_local") {
+		t.Errorf("Step 6a must restart on the AppArmor reload's result, not on the block's change flag:\n%s", step6a)
+	}
+	for _, want := range []string{"rsyslog_apparmor_reload", "rsyslog_selinux_relabel"} {
 		if !strings.Contains(step6a, want) {
 			t.Errorf("Step 6a must restart rsyslog when the log-root access changes (%q missing):\n%s", want, step6a)
 		}
@@ -186,8 +181,8 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 	tf := string(raw)
 	for _, want := range []string{
 		"/etc/apparmor.d/local/usr.sbin.rsyslogd", "{{ rsyslog_log_root }}/ rw,", "{{ rsyslog_log_root }}/** rwk,",
-		"'absent' if rsyslog_log_root_in_var_log", "apparmor_parser, -r, /etc/apparmor.d/usr.sbin.rsyslogd",
-		"/sys/fs/selinux/enforce", "community.general.sefcontext", `target: "{{ rsyslog_log_root }}(/.*)?"`,
+		"'absent' if rsyslog_log_root_in_var_log", "apparmor_parser -r", "/etc/apparmor.d/usr.sbin.rsyslogd || exit 1",
+		"/sys/fs/selinux/enforce", "community.general.sefcontext", `target: "{{ rsyslog_selinux_fcontext_target }}"`,
 		"setype: var_log_t", "restorecon, -RF", "register: rsyslog_selinux_relabel", `argv: [stat, -c, "%C",`,
 		"not ansible_check_mode",
 	} {

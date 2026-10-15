@@ -7,7 +7,7 @@ import (
 )
 
 // TestRegression_LogShippingSpec locks the structure of
-// docs/verification/log-shipping.md (v1.4 — Promtail agent layered on top
+// docs/verification/log-shipping.md (v1.5 — Promtail agent layered on top
 // of log-server.md, forwarding to dashboard.md's Loki):
 //
 //	C1  pilot-promtail container running
@@ -148,12 +148,14 @@ func TestRegression_LogShippingSpec(t *testing.T) {
 
 	// C6/C9 must count only this run's nonce message: v1.3 grepped
 	// "PILOT-LOGSHIP-SELFTEST-[0-9]*", which an older message left in Loki
-	// also matched.
+	// also matched. The LogQL must also filter by the nonce (v1.5): an
+	// instant query returns at most 100 lines by default, and on a busy SIEM
+	// this run's message need not be among them.
 	for _, r := range s.Rows {
 		if r.ID != "C6" && r.ID != "C9" {
 			continue
 		}
-		for _, want := range []string{"date +%s%N", `grep -qF "$n"`, "&& echo 0 || echo 1"} {
+		for _, want := range []string{"date +%s%N", `grep -qF "$n"`, "&& echo 0 || echo 1", `} |= \"$n\""`} {
 			if !strings.Contains(r.Command, want) {
 				t.Errorf("%s must send and match a nonce unique to this run (%q); got %q", r.ID, want, r.Command)
 			}

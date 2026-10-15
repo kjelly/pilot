@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.5
+> 版本：v1.6
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -13,7 +13,7 @@
 | Hostname / Inventory group | log-server |
 | OS / version | Ubuntu 24.04 LTS（rsyslog 8.2312+，內建 RainerScript / imtcp） |
 | 角色 | 中央 syslog 接收端：收 client 端 rsyslog 轉送的 `auth,authpriv.*` 與 `local6.*`（auditd），依來源 hostname 分檔落地 |
-| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`siem_log_root`（預設 `/var/log/siem/`） |
+| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`siem_log_root`（預設 `/var/log/siem/`）；`siem_log_root` 不在 `/var/log` 底下時，另外寫 `/etc/apparmor.d/local/usr.sbin.rsyslogd` 的 pilot 區塊並重新載入 rsyslogd 的 AppArmor profile（Ubuntu），或加 `var_log_t` 的 SELinux file-context 規則並 `restorecon`（EL）。apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容、移除這次加的 file-context 規則；根目錄與 SELinux port 標籤留著 |
 | 風險等級 | Medium（對外開 514/tcp 收網路日誌；設定錯誤頂多漏收，不影響本機既有日誌） |
 
 > 為何選 rsyslog 而非 Loki/syslog-ng：client 端轉送已固定用 rsyslog 協定
@@ -112,6 +112,9 @@
 | C2, C5 | `ensure rsyslog enabled+restarted` | 只在設定檔語法檢查通過後才重啟（`rsyslogd -N1` gate） |
 | C3, C4, C7, C8, C11 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME%` dynaFile 路由，`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
 | C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
+| C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則 + 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
+
+> playbook 的每個 task 都帶全部 row tag（C1–C11）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
 | C9, C10 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數 |
 
 ## 7. SOP
@@ -150,3 +153,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-08-07 | v1.3 | 新增 C11：`imtcp` input 綁定專屬 `ruleset="siemReceiver"`。real incident（minimal-poc round 20）：這個拓樸的中央 SIEM 主機同時也是 `audit-log-forwarding.md` 的 client，轉送給自己時，`imtcp` 收到的訊息若落回 default ruleset 會被 `99-siem-forward.conf` 的轉送規則二次處理、再度轉送出去，形成無窮迴圈——3 台主機中身兼兩角色的那台，`auth.log` 在不到一小時內長到 1.2 千萬行/13GB，把 77GB 磁碟塞到 100% 滿。修法：把接收動作移進專屬 ruleset，收到的訊息只寫一次 dynaFile，不再進 default ruleset | sre |
 | 2026-10-14 | v1.4 | C5 改成讀接收設定裡 `imtcp` 的 port 再檢查它在監聽，不再寫死 514。PR #79 讓 inventory 的 `siem_receiver_tcp_port` 生效後，`siem_receiver_tcp_port: 2514` 的 log-server 在 2514 監聽、client 的訊息也送達，舊 C5（`grep ":514"`）卻 FAIL；新 C5 在 2514 PASS，rsyslog 停掉時 FAIL（2026-10-14 對 pr79-log 實測）。也修掉舊寫法 `:514` 會被 `:5140` 這類 port 誤判成 PASS 的問題 | pilot |
 | 2026-10-15 | v1.5 | C6–C8 改成從接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，不再寫死 `/var/log/siem`；C7/C8 改送這次唯一的 nonce 訊息（`PILOT-SIEM-SELFTEST-<AUDIT|AUTH>-$$-$(date +%s%N)`），只認這則訊息，最多等 6 秒，改用 rc 形式（expected `0`）。起因：PR #79 讓 inventory 的 `siem_log_root` 生效後，非預設根目錄的主機 C6–C8 會 FAIL，而預設目錄留有舊的固定字串時 C7/C8 會假 PASS（PR #79 review） | pilot |
+| 2026-10-15 | v1.6 | 只改說明，row 不變：§1 套用範圍補上 Step 2a 對 AppArmor local 檔、SELinux file-context 規則的修改與 rescue 會還原什麼；§6 補上 Step 2a 一列，並說明 playbook 每個 task 都帶全部 row tag（PR #79 review：`--tags C6` 改 `siem_log_root` 時只換了 AppArmor 規則，rsyslog 仍寫舊目錄，訊息全部丟失） | pilot |

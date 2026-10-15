@@ -15,7 +15,12 @@
 #
 # A root under /var/log needs neither, and an earlier pilot AppArmor block is
 # removed. An SELinux file-context rule added for an earlier root is left in
-# place (`semanage fcontext -d '<root>(/.*)?'` removes it).
+# place (`semanage fcontext -d '<root>(/.*)?'`, with each '.' of the root
+# written '\.', removes it).
+#
+# log-server-apply.yml's rescue undoes what this file changed in a failed
+# run: it restores the AppArmor local file and reloads the profile, and
+# removes a file-context rule this run added.
 #
 # The relabel follows the label on disk, not whether the rule changed in this
 # run: a file-context rule only takes effect through restorecon, and a root
@@ -57,13 +62,69 @@
   register: rsyslog_apparmor_local
   when: rsyslog_apparmor_profile.stat.exists
 
-- name: "MAC: reload the rsyslogd AppArmor profile"
+# Reload only a profile the kernel has loaded: one an administrator disabled
+# (/etc/apparmor.d/disable/) is not loaded, rsyslogd then runs unconfined
+# and needs no rule, and loading it here would confine rsyslogd again. A
+# profile in complain mode stays in complain mode (-C); a plain -r puts it
+# back in enforce mode (captured 2026-10-15).
+# Ubuntu 24.04's rsyslog.service also reloads the profile on every start
+# (ExecStartPre=/usr/lib/rsyslog/reload-apparmor-profile, `apparmor_parser
+# -r -W -T`), disabled or not, so there the restart in Step 6a reloads it
+# again in enforce mode. This reload is what a unit without that line gets.
+- name: "MAC: read the mode of the loaded rsyslogd AppArmor profile"
   ansible.builtin.command:
-    argv: [apparmor_parser, -r, /etc/apparmor.d/usr.sbin.rsyslogd]
+    argv: [cat, /sys/kernel/security/apparmor/profiles]
+  register: rsyslog_apparmor_profiles
+  changed_when: false
+  failed_when: false
+  check_mode: false
   when:
     - rsyslog_apparmor_profile.stat.exists
     - rsyslog_apparmor_enabled.stat.exists
-    - rsyslog_apparmor_local is changed
+
+- name: "MAC: remember the mode of the loaded rsyslogd AppArmor profile"
+  ansible.builtin.set_fact:
+    rsyslog_apparmor_mode: >-
+      {{ (rsyslog_apparmor_profiles.stdout | default(''))
+         | regex_search('(?m)^rsyslogd \(([a-z]+)\)$', '\1') | default([''], true) | first }}
+
+# The reload follows what the kernel has loaded, not whether the block
+# changed in this run: when a run wrote the block and then failed before or
+# at the reload, the next run finds the block unchanged. The kernel's sha256
+# of the loaded profile (it changes when the rules change, and a reload of
+# the same rules keeps it; captured 2026-10-15 on Ubuntu 24.04) tells
+# whether the reload changed anything. Under /var/log the block is only
+# removed, and an earlier grant left loaded until the next reload or boot is
+# harmless, so that case reloads only when the block changed.
+- name: "MAC: reload the rsyslogd AppArmor profile"
+  ansible.builtin.shell:
+    executable: /bin/sh
+    cmd: |
+      sha() {
+        for d in /sys/kernel/security/apparmor/policy/profiles/rsyslogd.*; do
+          cat "$d/sha256" 2>/dev/null
+          return 0
+        done
+      }
+      before=$(sha)
+      apparmor_parser -r {{ '-C ' if rsyslog_apparmor_mode == 'complain' else '' }}/etc/apparmor.d/usr.sbin.rsyslogd || exit 1
+      after=$(sha)
+      if [ -z "$before" ] || [ -z "$after" ]; then
+        echo unknown
+      elif [ "$before" != "$after" ]; then
+        echo changed
+      else
+        echo unchanged
+      fi
+  register: rsyslog_apparmor_reload
+  changed_when: >-
+    rsyslog_apparmor_reload.stdout == 'changed'
+    or (rsyslog_apparmor_reload.stdout == 'unknown' and rsyslog_apparmor_local is changed)
+  when:
+    - rsyslog_apparmor_profile.stat.exists
+    - rsyslog_apparmor_enabled.stat.exists
+    - rsyslog_apparmor_mode != ''
+    - (not rsyslog_log_root_in_var_log) or (rsyslog_apparmor_local is changed)
     - not ansible_check_mode
 
 - name: "MAC: is SELinux enabled"
@@ -81,9 +142,16 @@
     - not rsyslog_log_root_in_var_log
     - ansible_facts.os_family == 'RedHat'
 
+# The target is a regular expression: escape the dots, the only
+# metacharacter siem_log_root's gate lets through, so /srv/siem.1 does not
+# also label /srv/siemX1.
+- name: "MAC: the file-context rule for the log root"
+  ansible.builtin.set_fact:
+    rsyslog_selinux_fcontext_target: "{{ rsyslog_log_root | replace('.', '\\.') }}(/.*)?"
+
 - name: "MAC: label the log root var_log_t under SELinux"
   community.general.sefcontext:
-    target: "{{ rsyslog_log_root }}(/.*)?"
+    target: "{{ rsyslog_selinux_fcontext_target }}"
     setype: var_log_t
     state: present
   register: rsyslog_selinux_fcontext

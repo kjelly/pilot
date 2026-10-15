@@ -1,8 +1,13 @@
 # Apply playbook for docs/verification/log-server.md v1.2
 # rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
-# client hosts. Additive-only (no existing /etc file is mutated), so rescue
-# just removes the two drop-in files it created and restarts rsyslog back to
-# its pre-apply state.
+# client hosts. It writes two drop-ins (10-siem-receiver.conf,
+# siem-incoming) and, for a siem_log_root outside /var/log, a block in the
+# existing /etc/apparmor.d/local/usr.sbin.rsyslogd (Ubuntu) or an SELinux
+# file-context rule (EL). The block starts by reading those three files;
+# the rescue puts back their content from before the run (removing those
+# the run created), reloads the AppArmor profile, removes a file-context
+# rule the run added, and restarts rsyslog. It does not remove the log root
+# directory or an SELinux port label (tasks/rsyslog-selinux-tcp-port.yml).
 #
 # Usage (dry run):
 #   ./pilot vm-target run --name log-server \
@@ -256,12 +261,19 @@
     # only protocol this role uses since v1.2) never conflicted with
     # anything wazuh-manager's compose maps, so there is no conflict left
     # to work around here at all.
+    # Every task below carries every row tag. The steps share the log root,
+    # the port and the receiver config: Step 2 creates the root, Step 2a lets
+    # rsyslogd write it, Step 3 points rsyslog at it, Step 4 rotates it, and
+    # Step 5/6/6a validate and restart. A --tags run that ran only some of
+    # them left a changed root half applied: `--tags C6` moved the AppArmor
+    # grant to the new root and restarted rsyslog, which still wrote the old
+    # one (PR #79 review, 2026-10-15). Step 1 installs what Steps 4 and 5 run.
     - name: "Step 1: Install rsyslog (Debian family)"
-      tags: [C1]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
-          tags: [C1]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       vars:
         pilot_apt_packages: [rsyslog]
         pilot_apt_policy: tolerant
@@ -272,7 +284,7 @@
       when: ansible_os_family == "Debian"
 
     - name: "Step 1a: Install rsyslog (RedHat family)"
-      tags: [C1]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       ansible.builtin.dnf:
         name: rsyslog
         state: present
@@ -283,11 +295,11 @@
     # pilot-target-ubuntu do not ship it. Tagged with Step 4's rows so a
     # --tags C9/C10 run installs it too.
     - name: "Step 1b: Install logrotate (Debian family)"
-      tags: [C1, C9, C10]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
-          tags: [C1, C9, C10]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       vars:
         pilot_apt_packages: [logrotate]
         pilot_apt_policy: tolerant
@@ -298,17 +310,37 @@
       when: ansible_os_family == "Debian"
 
     - name: "Step 1c: Install logrotate (RedHat family)"
-      tags: [C1, C9, C10]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       ansible.builtin.dnf:
         name: logrotate
         state: present
       when: ansible_os_family == "RedHat"
 
     - block:
+        # Read before anything changes, for the rescue. Read-only, so
+        # `always`: the rescue runs under every --tags.
+        - name: "Snapshot: is each file this apply may change there"
+          tags: [always]
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            get_checksum: false
+          loop:
+            - "{{ siem_receiver_conf }}"
+            - "{{ siem_logrotate_conf }}"
+            - /etc/apparmor.d/local/usr.sbin.rsyslogd
+          register: log_server_snapshot_stat
+
+        - name: "Snapshot: keep the content of those that are"
+          tags: [always]
+          ansible.builtin.slurp:
+            src: "{{ item.item }}"
+          loop: "{{ log_server_snapshot_stat.results | selectattr('stat.exists') | list }}"
+          register: log_server_snapshot
+
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
           # C7, C8: Step 2a labels this directory under SELinux and runs
           # under those tags too.
-          tags: [C6, C7, C8]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.file:
             # The gates checked the directory siem_log_root resolves to. Work
             # on that path and do not follow a symlink: on Ubuntu the rsyslog
@@ -327,18 +359,19 @@
         # files and discarded every message while the apply succeeded (see
         # the task file).
         - name: "Step 2a: Reset the log-root access results"
-          tags: [C6, C7, C8]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.set_fact:
             rsyslog_apparmor_local: {}
+            rsyslog_apparmor_reload: {}
             rsyslog_selinux_fcontext: {}
             rsyslog_selinux_relabel: {}
 
         - name: "Step 2a: Let a confined rsyslogd write siem_log_root"
-          tags: [C6, C7, C8]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-confined-log-root.yml
             apply:
-              tags: [C6, C7, C8]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           vars:
             rsyslog_log_root: "{{ siem_log_root_real }}"
 
@@ -348,21 +381,21 @@
         # label added earlier in this site.yml run (by another play on this
         # host) does not trigger the restart below.
         - name: "Step 2b: Reset the SELinux port label result"
-          tags: [C3, C4, C7, C8, C11]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.set_fact:
             rsyslog_selinux_port_label: {}
 
         - name: "Step 2b: Let rsyslogd bind siem_receiver_tcp_port under SELinux"
-          tags: [C3, C4, C7, C8, C11]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-selinux-tcp-port.yml
             apply:
-              tags: [C3, C4, C7, C8, C11]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           vars:
             rsyslog_selinux_tcp_port: "{{ siem_receiver_tcp_port }}"
 
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
-          tags: [C3, C4, C7, C8, C11]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.copy:
             dest: "{{ siem_receiver_conf }}"
             owner: root
@@ -411,7 +444,7 @@
           register: siem_receiver_conf_result
 
         - name: "Step 4: Render /etc/logrotate.d/siem-incoming"
-          tags: [C9, C10]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.copy:
             dest: "{{ siem_logrotate_conf }}"
             owner: root
@@ -444,13 +477,14 @@
               }
 
         - name: "Step 5: Validate the effective rsyslog config (rsyslogd -N1)"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
           register: rsyslog_syntax
           changed_when: false
           failed_when: rsyslog_syntax.rc != 0
 
         - name: "Step 6: Ensure rsyslog enabled + started (spec C2, C5)"
-          tags: [C2, C5]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.systemd:
             name: rsyslog
             state: started
@@ -459,20 +493,21 @@
         # A confined rsyslogd that was refused the log root keeps that dynaFile
         # action failed and its imtcp queue full until it restarts (captured
         # 2026-10-15: after reloading the AppArmor profile, nothing landed
-        # until rsyslog restarted), so a new AppArmor rule or SELinux label
-        # restarts it too.
+        # until rsyslog restarted), so a reload that changed the loaded
+        # AppArmor profile, or an SELinux relabel, restarts it too.
         - name: "Step 6a: Restart rsyslog only if the receiver config, its SELinux port label or its log-root access changed"
-          tags: [C2, C5, C6, C7, C8]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
           when: >-
             ((siem_receiver_conf_result | default({})) is changed)
             or ((rsyslog_selinux_port_label | default({})) is changed)
-            or ((rsyslog_apparmor_local | default({})) is changed)
+            or ((rsyslog_apparmor_reload | default({})) is changed)
             or ((rsyslog_selinux_relabel | default({})) is changed)
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           when: ansible_os_family == "Debian"
           block:
             - name: "Check ufw status"
@@ -486,6 +521,7 @@
               when: "'Status: active' in ufw_status.stdout"
 
         - name: "Step 6b: Best-effort firewall opening — firewalld (RedHat)"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           when: ansible_os_family == "RedHat"
           block:
             - name: "Check firewalld state"
@@ -503,19 +539,58 @@
               when: firewalld_state.stdout == "running"
 
       rescue:
-        - name: "ROLLBACK — remove siem receiver drop-in config"
+        - name: "ROLLBACK — put back the content of the files this apply changed"
+          tags: [always]
+          ansible.builtin.copy:
+            dest: "{{ item.item.item }}"
+            content: "{{ item.content | b64decode }}"
+            mode: "{{ item.item.stat.mode }}"
+          loop: "{{ log_server_snapshot.results | default([]) }}"
+          loop_control:
+            label: "{{ item.item.item }}"
+          when: log_server_snapshot is defined
+
+        - name: "ROLLBACK — remove the files this apply created"
           tags: [always]
           ansible.builtin.file:
-            path: "{{ siem_receiver_conf }}"
+            path: "{{ item.item }}"
             state: absent
+          loop: "{{ log_server_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+          loop_control:
+            label: "{{ item.item }}"
+          when: log_server_snapshot_stat is defined
 
-        - name: "ROLLBACK — remove siem logrotate config"
+        - name: "ROLLBACK — reload the rsyslogd AppArmor profile with the restored rules"
           tags: [always]
-          ansible.builtin.file:
-            path: "{{ siem_logrotate_conf }}"
-            state: absent
+          ansible.builtin.command:
+            argv: "{{ ['apparmor_parser', '-r'] + (['-C'] if rsyslog_apparmor_mode == 'complain' else []) + ['/etc/apparmor.d/usr.sbin.rsyslogd'] }}"
+          when:
+            - rsyslog_apparmor_mode is defined
+            - rsyslog_apparmor_mode != ''
+            - >-
+              (rsyslog_apparmor_local is defined and rsyslog_apparmor_local is changed)
+              or (rsyslog_apparmor_reload is defined and rsyslog_apparmor_reload is changed)
 
-        - name: "ROLLBACK — restart rsyslog with the drop-ins removed"
+        - name: "ROLLBACK — remove the SELinux file-context rule this apply added"
+          tags: [always]
+          community.general.sefcontext:
+            target: "{{ rsyslog_selinux_fcontext_target }}"
+            setype: var_log_t
+            state: absent
+          when:
+            - rsyslog_selinux_fcontext is defined
+            - rsyslog_selinux_fcontext is changed
+            - rsyslog_selinux_fcontext_target is defined
+
+        - name: "ROLLBACK — relabel the log root without that rule"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [restorecon, -RF, "{{ siem_log_root_real }}"]
+          when:
+            - rsyslog_selinux_fcontext is defined
+            - rsyslog_selinux_fcontext is changed
+
+        - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
@@ -525,6 +600,11 @@
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              log-server apply failed (see task output above); the siem
-              receiver drop-in configs were removed and rsyslog restarted
-              back to its pre-apply state. Fix the failing task and re-run.
+              log-server apply failed (see task output above). The siem
+              receiver and logrotate drop-ins and the AppArmor local file are
+              back to their content from before this run (removed if this run
+              created them), the AppArmor profile was reloaded and an SELinux
+              file-context rule this run added was removed, and rsyslog was
+              restarted. Left in place: the log root directory and an SELinux
+              port label for siem_receiver_tcp_port. Fix the failing task and
+              re-run.

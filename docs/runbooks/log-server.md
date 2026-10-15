@@ -242,14 +242,22 @@ matcher 真正檢驗過。
 
 ## 6. 常見問題
 
-- **C6/C7 fail（埠沒監聽）**：確認 rsyslog 真的 active（`systemctl status
+- **C5 fail（埠沒監聽）**：確認 rsyslog 真的 active（`systemctl status
   rsyslog`）且設定檔語法正確（`sudo rsyslogd -N1 -f /etc/rsyslog.conf`）。
-- **C9/C10 fail（selftest 訊息沒落地）**：先確認 §5.1 的權限問題沒有重演
-  （`ls -la /var/log/siem`，owner 應為 `syslog`，Ubuntu）。
+- **C7/C8 fail（selftest 訊息沒落地）**：先確認 §5.1 的權限問題沒有重演
+  （`ls -la <siem_log_root>`，owner 應為 `syslog`，Ubuntu）。根目錄不在 `/var/log`
+  底下時，再看 `journalctl -u rsyslog` 有沒有 `Permission denied`：Ubuntu 看
+  `/etc/apparmor.d/local/usr.sbin.rsyslogd` 的 pilot 區塊是不是這個目錄；EL 看
+  `ls -Zd <siem_log_root>` 是不是 `var_log_t`。重跑 log-server apply 會補上並重啟 rsyslog。
 - **跨主機轉送收不到（§4 cross-check 失敗）**：先在 client 端確認
   `siem-log-server` 別名解析到正確 IP（`getent hosts siem-log-server`），
   再確認 log-server 這邊防火牆沒擋（拋棄式 vm-target 預設沒開防火牆，
   真實主機才需要檢查 `ufw`/`firewalld`）。
 - **想換落地目錄/埠**：在 inventory 設 `siem_log_root`、`siem_receiver_tcp_port`
-  （見 spec §1.5）。spec 的 C5–C8 從接收設定讀出實際的 port 與目錄，不用改 spec；
+  （見 spec §1.5），重跑 log-server 與 log-shipping（`--tags` 任一列都會跑完整的
+  log-server 步驟）。spec 的 C5–C8 從接收設定讀出實際的 port 與目錄，不用改 spec；
   client 端的 `siem_forward_port` 要改成同一個 port。
+- **換掉非預設根目錄之後（EL）**：舊目錄的 SELinux file-context 規則不會自動移除。
+  用 `semanage fcontext -l | grep '<舊目錄>'` 找到規則（目錄名裡的 `.` 寫成 `\.`），
+  再 `semanage fcontext -d '<規則>'` 移除；`semanage` 在 `policycoreutils-python-utils`
+  套件裡。Ubuntu 的 AppArmor 規則只保留目前的目錄，不用手動清。
