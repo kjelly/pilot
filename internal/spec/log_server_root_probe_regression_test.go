@@ -121,3 +121,53 @@ func TestRegression_LogServerProbesUseTheEffectiveRoot(t *testing.T) {
 		t.Errorf("log-shipping C3 with Promtail on %s: want 0, got %q", root, got)
 	}
 }
+
+// TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot: rsyslogd is
+// confined to /var/log by AppArmor on Ubuntu (usr.sbin.rsyslogd) and by
+// SELinux on EL. With siem_log_root: /srv/siem on Ubuntu 24.04, omfile failed
+// with "Permission denied", every message was discarded and the apply
+// succeeded; after the profile was fixed nothing landed until rsyslog
+// restarted (2026-10-15). log-server must grant the root to the confined
+// daemon before rsyslog is (re)started, and restart it when that grant
+// changes.
+func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/log-server-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := string(raw)
+	include := strings.Index(pb, "file: tasks/rsyslog-confined-log-root.yml")
+	render := strings.Index(pb, `name: "Step 3: Render 10-siem-receiver.conf`)
+	restart := strings.Index(pb, `name: "Step 6a: Restart rsyslog`)
+	if include < 0 || render < 0 || restart < 0 || include > render || render > restart {
+		t.Fatalf("log-server must include tasks/rsyslog-confined-log-root.yml before Step 3 and Step 6a; got indexes %d, %d, %d", include, render, restart)
+	}
+	if !strings.Contains(pb, `rsyslog_log_root: "{{ siem_log_root_real }}"`) {
+		t.Error("the include must pass the resolved root siem_log_root_real")
+	}
+	step6a := pb[restart:]
+	if end := strings.Index(step6a[1:], "- name:"); end > 0 {
+		step6a = step6a[:end+1]
+	}
+	for _, want := range []string{"rsyslog_apparmor_local", "rsyslog_selinux_fcontext", "C6, C7, C8"} {
+		if !strings.Contains(step6a, want) {
+			t.Errorf("Step 6a must restart rsyslog when the log-root access changes (%q missing):\n%s", want, step6a)
+		}
+	}
+
+	raw, err = os.ReadFile("../../playbooks/apply/tasks/rsyslog-confined-log-root.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf := string(raw)
+	for _, want := range []string{
+		"/etc/apparmor.d/local/usr.sbin.rsyslogd", "{{ rsyslog_log_root }}/ rw,", "{{ rsyslog_log_root }}/** rwk,",
+		"'absent' if rsyslog_log_root_in_var_log", "apparmor_parser, -r, /etc/apparmor.d/usr.sbin.rsyslogd",
+		"/sys/fs/selinux/enforce", "community.general.sefcontext", `target: "{{ rsyslog_log_root }}(/.*)?"`,
+		"setype: var_log_t", "restorecon, -RF", "not ansible_check_mode",
+	} {
+		if !strings.Contains(tf, want) {
+			t.Errorf("tasks/rsyslog-confined-log-root.yml must contain %q", want)
+		}
+	}
+}

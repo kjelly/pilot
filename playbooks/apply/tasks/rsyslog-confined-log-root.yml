@@ -1,0 +1,93 @@
+---
+# Let a confined rsyslogd write under one log root. Included by
+# log-server-apply.yml with:
+#   rsyslog_log_root  the resolved directory (siem_log_root_real)
+#
+# rsyslogd is confined on both families, and only to /var/log:
+# - Ubuntu's AppArmor profile /etc/apparmor.d/usr.sbin.rsyslogd allows
+#   `/var/log/** rw`. For any other root, omfile fails with
+#   "creating parent directories for file '<root>/<host>/audit.log' failed:
+#   Permission denied" and discards every message while the apply succeeds
+#   (captured 2026-10-15 on Ubuntu 24.04, rsyslog 8.2312.0). The profile
+#   ends with `#include <local/usr.sbin.rsyslogd>` for site additions.
+# - EL's SELinux lets syslogd_t write files labelled var_log_t; a directory
+#   created elsewhere gets its parent's type (e.g. var_t under /srv).
+#
+# A root under /var/log needs neither, and an earlier pilot AppArmor block is
+# removed. An SELinux file-context rule added for an earlier root is left in
+# place (`semanage fcontext -d '<root>(/.*)?'` removes it).
+#
+# Nothing changes on a host without AppArmor or SELinux.
+
+- name: "MAC: does the log root live under /var/log"
+  ansible.builtin.set_fact:
+    rsyslog_log_root_in_var_log: "{{ (rsyslog_log_root ~ '/').startswith('/var/log/') }}"
+
+- name: "MAC: is the rsyslogd AppArmor profile in use"
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/usr.sbin.rsyslogd
+    get_checksum: false
+  register: rsyslog_apparmor_profile
+
+- name: "MAC: is AppArmor enabled"
+  ansible.builtin.stat:
+    path: /sys/kernel/security/apparmor/profiles
+    get_checksum: false
+  register: rsyslog_apparmor_enabled
+
+- name: "MAC: allow rsyslogd to write the log root under AppArmor"
+  ansible.builtin.blockinfile:
+    path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+    marker: "# {mark} pilot log-server log root"
+    block: |
+      {{ rsyslog_log_root }}/ rw,
+      {{ rsyslog_log_root }}/** rwk,
+    state: "{{ 'absent' if rsyslog_log_root_in_var_log else 'present' }}"
+  register: rsyslog_apparmor_local
+  when: rsyslog_apparmor_profile.stat.exists
+
+- name: "MAC: reload the rsyslogd AppArmor profile"
+  ansible.builtin.command:
+    argv: [apparmor_parser, -r, /etc/apparmor.d/usr.sbin.rsyslogd]
+  when:
+    - rsyslog_apparmor_profile.stat.exists
+    - rsyslog_apparmor_enabled.stat.exists
+    - rsyslog_apparmor_local is changed
+    - not ansible_check_mode
+
+- name: "MAC: is SELinux enabled"
+  ansible.builtin.stat:
+    path: /sys/fs/selinux/enforce
+    get_checksum: false
+  register: rsyslog_selinux_enforce
+
+- name: "MAC: ensure the SELinux policy management bindings are installed"
+  ansible.builtin.dnf:
+    name: [python3-policycoreutils, python3-libsemanage, python3-libselinux]
+    state: present
+  when:
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+    - ansible_facts.os_family == 'RedHat'
+
+- name: "MAC: label the log root var_log_t under SELinux"
+  community.general.sefcontext:
+    target: "{{ rsyslog_log_root }}(/.*)?"
+    setype: var_log_t
+    state: present
+  register: rsyslog_selinux_fcontext
+  when:
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+    - not ansible_check_mode
+
+- name: "MAC: apply the log root's SELinux label"
+  ansible.builtin.command:
+    argv: [restorecon, -RF, "{{ rsyslog_log_root }}"]
+  when:
+    - rsyslog_selinux_fcontext is changed
+    - not ansible_check_mode

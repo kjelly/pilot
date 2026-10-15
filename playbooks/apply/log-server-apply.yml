@@ -317,6 +317,25 @@
             group: "{{ siem_log_owner }}"
             mode: "0755"
 
+        # rsyslogd is confined to /var/log by AppArmor on Ubuntu and SELinux on
+        # EL: for any other siem_log_root it could not create the per-host
+        # files and discarded every message while the apply succeeded (see
+        # the task file).
+        - name: "Step 2a: Reset the log-root access results"
+          tags: [C6, C7, C8]
+          ansible.builtin.set_fact:
+            rsyslog_apparmor_local: {}
+            rsyslog_selinux_fcontext: {}
+
+        - name: "Step 2a: Let a confined rsyslogd write siem_log_root"
+          tags: [C6, C7, C8]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-confined-log-root.yml
+            apply:
+              tags: [C6, C7, C8]
+          vars:
+            rsyslog_log_root: "{{ siem_log_root_real }}"
+
         # Under SELinux, imtcp may bind siem_receiver_tcp_port only once the
         # port is labelled for rsyslogd (see the task file).
         # The task file registers rsyslog_selinux_port_label; reset it so a
@@ -431,14 +450,21 @@
             state: started
             enabled: true
 
-        - name: "Step 6a: Restart rsyslog only if the receiver config or its SELinux port label changed"
-          tags: [C2, C5]
+        # A confined rsyslogd that was refused the log root keeps that dynaFile
+        # action failed and its imtcp queue full until it restarts (captured
+        # 2026-10-15: after reloading the AppArmor profile, nothing landed
+        # until rsyslog restarted), so a new AppArmor rule or SELinux label
+        # restarts it too.
+        - name: "Step 6a: Restart rsyslog only if the receiver config, its SELinux port label or its log-root access changed"
+          tags: [C2, C5, C6, C7, C8]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
           when: >-
             ((siem_receiver_conf_result | default({})) is changed)
             or ((rsyslog_selinux_port_label | default({})) is changed)
+            or ((rsyslog_apparmor_local | default({})) is changed)
+            or ((rsyslog_selinux_fcontext | default({})) is changed)
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
           when: ansible_os_family == "Debian"
