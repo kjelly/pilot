@@ -1,10 +1,12 @@
 # Verification Spec — Pilot Gateway Scope Publication
 
-> 版本：DRAFT v0.2（vm-target 已實測；尚未正式站台驗收）
+> 版本：DRAFT v0.4（vm-target 已實測；尚未正式站台驗收）。v0.4（2026-10-14）：C1–C3 改成 root 經 ldapi 以 SASL EXTERNAL 讀 LDAP，不再依賴 #69 殘留的 admin ticket
 > 對齊規範：docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md §9.6/§57（Phase 6 — Gateway scope publication）
 > 維護者：sre
 >
 > 最新 `--hosts all` actual-run evidence：[`2026-09-15-all-keyword.md`](../evidence/pilot-gateway-scope/2026-09-15-all-keyword.md)
+>
+> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `decc613`，tree `65bc3c93`，單台 AlmaLinux 9.8／FreeIPA 4.13.4 的 `freeipa-server` vm-target）：C1–C3 經 ldapi 以 SASL EXTERNAL 讀取，`spec.NeedsBecome` 會讓它們以 root 執行；同一台 FreeIPA 上以 root 或非 root 的 `ansible_user` 都是 3/3（`main` 的 binary 以非 root 執行為 0/3）。全新 topology 的 L3–L6（3/3，從 `decc613` 的乾淨 checkout 執行）見 [`2026-10-15-decc613-six-node.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-six-node.md)，become 的實跑（從 `decc613` 的乾淨 checkout 執行）見 [`2026-10-15-decc613-rerun.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-rerun.md)
 
 ## 1. 目標系統
 
@@ -71,12 +73,22 @@ pilot gateway-scope reconcile --scope gpu --hosts all --dir <workspace>
 
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
-| C1 | hostgroup | `pilot-target-gpu` hostgroup 存在 | 0 | ipa hostgroup-show pilot-target-gpu |
-| C2 | membership | `gpu-a.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-a.ipa.pilot.internal | ipa hostgroup-show pilot-target-gpu --all |
-| C3 | membership | `gpu-b.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-b.ipa.pilot.internal | ipa hostgroup-show pilot-target-gpu --all |
+| C1 | hostgroup | `pilot-target-gpu` hostgroup 存在 | 0 | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base cn 2>/dev/null |
+| C2 | membership | `gpu-a.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-a.ipa.pilot.internal | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base member 2>/dev/null |
+| C3 | membership | `gpu-b.ipa.pilot.internal` 是 hostgroup 成員 | ~gpu-b.ipa.pilot.internal | ldapsearch -o ldif-wrap=no -LLL -Y EXTERNAL -H ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket -b "cn=pilot-target-gpu,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal" -s base member 2>/dev/null |
 
 ## 3. 已知限制
 
+- C1–C3 在 FreeIPA server 上以 root 執行，用 ldapi unix socket 的 SASL EXTERNAL
+  autobind 唯讀查 LDAP（root 對應到 Directory Manager，看得到全部屬性、不需要密碼），
+  跟 `freeipa-identity.md` 同一個機制。C1 用 ldapsearch 的 rc：hostgroup 不存在時是 32。
+  - 2026-10-14 以前這三列直接跑 `ipa hostgroup-show`，沒有自己的 ticket。能通過只是
+    因為 `gateway-scope-apply.yml` 把 admin ticket 留在 root 的預設 cache（issue #69）。
+    那個 ticket 不再留下之後，三列都報 `ipa: ERROR: did not receive Kerberos credentials`。
+  - 也試過用 server 的 host keytab（`kinit -k`）。hostgroup 讀得到，但 FreeIPA 會對
+    host principal 隱藏部分屬性：同一筆 DNS record，admin 看得到的 `txtrecord`，
+    host principal 看不到，而且不報錯（`internal-endpoint.md` C22 因此會誤判）。
+    所以這幾列都改成 ldapi。
 - Checklist 目前只驗證「hostgroup 存在 + 兩台真實 fixture 主機在裡面」——不驗證 add/remove 對稱性本身；add/remove/keep 三種路徑的正確性已在
   `docs/evidence/pilot-access-gateway/2026-09-14-phase6-gateway-scope.md` 用一個獨立的、之後會清掉的 `test1` scope 全部實測過，不重複佔用這份長期驗收文件的位置。
 - idempotency（第二次 apply `changed=0`）由 `evidenceRequirement.idempotency: required`（contract）+ `pilot vm-target test` 通用驗證，不是這份 checklist 自己的一行。
