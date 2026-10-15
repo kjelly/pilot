@@ -454,11 +454,15 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 		if err != nil {
 			return nil, fmt.Errorf("freeipa-client verify %s: %s query: %w", fqdn, q.query, err)
 		}
-		found := ruleNamePattern.FindAllStringSubmatch(res.Stdout, -1)
+		found := rulesNamingHost(res.Stdout, fqdn)
+		detail := fmt.Sprintf("%d direct rule reference(s) live", len(found))
+		if len(found) > 0 {
+			detail += ": " + strings.Join(found, ", ")
+		}
 		out = append(out, Verification{
 			Provider: FreeIPAClientProviderID, Kind: q.kind, Identity: fqdn,
 			Status: statusForAbsence(len(found) == 0), Active: len(found) > 0,
-			Detail: fmt.Sprintf("%d direct rule reference(s) live", len(found)),
+			Detail: detail,
 		})
 	}
 
@@ -513,7 +517,60 @@ var (
 	aRecordPattern              = fieldPattern("arecord")
 	ruleNamePattern             = fieldPattern("Rule name")
 	notFoundPattern             = regexp.MustCompile(`(?i)not found`)
+	// ruleHostsPattern and ruleExternalHostPattern read one rule's
+	// "Hosts:" and "External host:" lines in `ipa hbacrule-find --all` /
+	// `sudorule-find --all` output. They require whitespace or a literal
+	// `\n` before the label so "Hosts:" does not match inside another label.
+	ruleHostsPattern        = regexp.MustCompile(`(?i)(?:^|\s|\\n)Hosts:\s*(.*?)(?:\\n|\n|$)`)
+	ruleExternalHostPattern = regexp.MustCompile(`(?i)(?:^|\s|\\n)External host:\s*(.*?)(?:\\n|\n|$)`)
 )
+
+// rulesNamingHost returns, sorted, the names of the rules in an
+// `ipa hbacrule-find --all` or `sudorule-find --all` listing (as printed
+// in a HOST_INSPECT blob) whose "Hosts:" or "External host:" names fqdn.
+// Those commands have no host filter, so the query lists every rule
+// (issue #104: the `--host=` it used before was read as `--hostcat` and
+// never matched). host-del removes a host from "Hosts:", but a sudo rule
+// can keep it as an external host. Names compare case-insensitively; a
+// short fqdn (no dot) also matches the first label of a listed FQDN.
+func rulesNamingHost(stdout, fqdn string) []string {
+	want := strings.ToLower(strings.TrimSpace(fqdn))
+	if want == "" {
+		return nil
+	}
+	short := !strings.Contains(want, ".")
+	starts := ruleNamePattern.FindAllStringSubmatchIndex(stdout, -1)
+	var names []string
+	for i, m := range starts {
+		end := len(stdout)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		block := stdout[m[0]:end]
+		if j := strings.Index(block, "Number of entries returned"); j >= 0 {
+			block = block[:j]
+		}
+		if ruleBlockNamesHost(block, want, short) {
+			names = append(names, strings.TrimSpace(stdout[m[2]:m[3]]))
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func ruleBlockNamesHost(block, want string, short bool) bool {
+	for _, pat := range []*regexp.Regexp{ruleHostsPattern, ruleExternalHostPattern} {
+		for _, m := range pat.FindAllStringSubmatch(block, -1) {
+			for _, h := range strings.Split(m[1], ",") {
+				h = strings.ToLower(strings.Trim(h, ` "`))
+				if h == want || (short && strings.SplitN(h, ".", 2)[0] == want) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 // discoverUnknownServicePrincipals runs the same read-only host_object
 // query Verify uses and classifies every service principal managed by
@@ -620,13 +677,14 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	}
 	// Bug found via Phase 3b live-target testing: this used to return res
 	// unconditionally regardless of whether the ansible-playbook PLAY
-	// itself actually ran (as opposed to an individual `ipa` command
-	// inside it failing, which every read-only task here already tolerates
-	// via failed_when: false) — a genuinely failed run (unreachable host,
+	// itself actually ran — a genuinely failed run (unreachable host,
 	// playbook not found under the caller's cwd, a bad inventory path) was
 	// silently read as empty/no-match output, which every caller's regex
 	// then interpreted as "nothing found" — i.e. a false PASS for HD10-
-	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead.
+	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead. The
+	// playbook's own lookups also fail the run on an `ipa` error other than
+	// "not found"/"no match" (issues #102, #104); only the DNS lookup still
+	// reads every error as absence (issue #105).
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
 	}

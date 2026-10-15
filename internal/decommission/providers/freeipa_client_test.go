@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -217,6 +218,7 @@ func TestFreeIPAProvider_HostObjectAndDNSAbsent(t *testing.T) {
 func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 	cases := []struct {
 		name          string
+		fqdn          string // default web1.ipa.pilot.internal
 		hostStdout    string
 		hbacStdout    string
 		sudoStdout    string
@@ -241,10 +243,19 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 		},
 		{
 			name:          "residual HBAC/sudo direct reference blocks",
+			fqdn:          "pwr-host3.ipa.pilot.internal",
 			hostStdout:    hostShowNotFound,
-			hbacStdout:    "  Rule name: web-login\n",
-			sudoStdout:    "  Rule name: web-sudo\n",
+			hbacStdout:    ruleReferencesFixture(t, "hbac-member-in-list"),
+			sudoStdout:    ruleReferencesFixture(t, "sudo-member"),
 			wantHostgroup: "pass", wantNetgroup: "pass", wantHBAC: "active_residue", wantSudo: "active_residue",
+		},
+		{
+			name:          "rules that name other hosts only",
+			fqdn:          "gone-host.ipa.pilot.internal",
+			hostStdout:    hostShowNotFound,
+			hbacStdout:    ruleReferencesFixture(t, "hbac-none"),
+			sudoStdout:    ruleReferencesFixture(t, "sudo-no-rules"),
+			wantHostgroup: "pass", wantNetgroup: "pass", wantHBAC: "pass", wantSudo: "pass",
 		},
 	}
 
@@ -262,7 +273,11 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 					return &ansible.Result{Stdout: tc.hostStdout}, nil
 				}
 			})
-			results, err := p.Verify(context.Background(), VerifyInput{HostName: "web1", FQDN: "web1.ipa.pilot.internal"})
+			fqdn := tc.fqdn
+			if fqdn == "" {
+				fqdn = "web1.ipa.pilot.internal"
+			}
+			results, err := p.Verify(context.Background(), VerifyInput{HostName: strings.SplitN(fqdn, ".", 2)[0], FQDN: fqdn})
 			if err != nil {
 				t.Fatalf("Verify() error = %v", err)
 			}
@@ -461,4 +476,52 @@ func findVerification(t *testing.T, results []Verification, kind string) Verific
 	}
 	t.Fatalf("no verification result with Kind=%q in %+v", kind, results)
 	return Verification{}
+}
+
+// ruleReferencesFixture returns ansible-playbook stdout captured from a
+// real decommission reference query (`--tags freeipa_host_absent_inspect
+// -e pilot_decommission_query=hbac_references|sudo_references`) against a
+// disposable FreeIPA 4.13.4 server on 2026-10-15. On that server the HBAC
+// rule pwr-hbac and the sudo rule pwr-sudo had member hosts
+// ipa1.ipa.pilot.internal and pwr-host3.ipa.pilot.internal, and pwr-sudo
+// also had the external hosts gone-host.ipa.pilot.internal and
+// pwr-host.ipa.pilot.internal; sudo-no-rules was taken with no sudo rule
+// at all. The stdout also carries the inspection of the roster's absent
+// host pwc-host2, as a real decommission query would.
+func ruleReferencesFixture(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "rule-references", name+".stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// Issue #104: the queries used `--host=`, which FreeIPA reads as
+// `--hostcat`, so they never matched; with the old parser (count "Rule
+// name:" lines) the real listings below would count every rule.
+func TestRulesNamingHost_RealOutput(t *testing.T) {
+	for _, tc := range []struct {
+		fixture, fqdn string
+		want          []string
+	}{
+		{"hbac-member-in-list", "pwr-host3.ipa.pilot.internal", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "ipa1.ipa.pilot.internal", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "PWR-HOST3.IPA.PILOT.INTERNAL", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "pwr-host3", []string{"pwr-hbac"}},
+		{"hbac-none", "gone-host.ipa.pilot.internal", nil},
+		{"hbac-none", "pwc-host2.ipa.pilot.internal", nil},
+		{"sudo-member", "pwr-host3.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-external", "pwr-host.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-external", "gone-host.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-none", "pwc-host2.ipa.pilot.internal", nil},
+		{"sudo-none", "pwr-host3.ipa", nil},
+		{"sudo-no-rules", "pwr-host3.ipa.pilot.internal", nil},
+	} {
+		t.Run(tc.fixture+"/"+tc.fqdn, func(t *testing.T) {
+			if got := rulesNamingHost(ruleReferencesFixture(t, tc.fixture), tc.fqdn); !slices.Equal(got, tc.want) {
+				t.Fatalf("rulesNamingHost = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

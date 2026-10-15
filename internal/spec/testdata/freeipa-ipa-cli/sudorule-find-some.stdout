@@ -1,0 +1,13 @@
+-------------------
+1 Sudo Rule matched
+-------------------
+  dn: ipaUniqueID=7e052e18-c870-11f1-bb64-5254001b059e,cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal
+  Rule name: pwr-sudo
+  Enabled: True
+  Hosts: ipa1.ipa.pilot.internal, pwr-host3.ipa.pilot.internal
+  External host: gone-host.ipa.pilot.internal, pwr-host.ipa.pilot.internal
+  ipauniqueid: 7e052e18-c870-11f1-bb64-5254001b059e
+  objectclass: ipaassociation, ipasudorule
+----------------------------
+Number of entries returned 1
+----------------------------

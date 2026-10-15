@@ -825,6 +825,14 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    這類安裝程式。`internal/spec/kinit_private_ccache_regression_test.go::TestRegression_KinitUsesAPrivateCredentialCache`
    對全部 `playbooks/**` 檢查;已經會 `kdestroy` 但仍用預設 cache 的檔案列在
    ratchet allowlist,遷移後要把項目拿掉。
+15. **`ipa` 的長選項接受唯一前綴**:`ipa` CLI 用 Python optparse,一個不存在的選項只要是
+   另一個選項的唯一前綴,就被靜默當成那個選項。`hbacrule-find`/`sudorule-find` 沒有 host 篩選,
+   host decommission 查詢用的 `--host=<fqdn>` 一直被當成 `--hostcat`,永遠查到 0 筆,HBAC/sudo
+   直接引用的檢查因此永遠 pass(issue #104,2026-10-15)。**規則**:playbook 裡每個
+   `ipa <子指令> --選項` 都要是該子指令 `--help` 列出的完整選項名稱;
+   `internal/spec/ipa_cli_options_regression_test.go::TestRegression_PlaybookIPAOptionsExistInIPAHelp`
+   對全部 `playbooks/**` 檢查,選項清單在 `internal/spec/testdata/freeipa-cli-options.txt`
+   (FreeIPA 4.13.4 擷取)。新增子指令時,在 FreeIPA server 跑 `ipa <cmd> --help` 補進清單。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1462,3 +1470,4 @@ git status --short
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
+| 2026-10-15 | v1.50 | §4.5 新增第 15 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |
