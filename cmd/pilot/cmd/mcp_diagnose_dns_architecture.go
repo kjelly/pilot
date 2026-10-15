@@ -37,13 +37,32 @@ type diagnoseFreeIPAReader struct {
 }
 
 var (
-	freeIPAReaderPrincipalRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?@[A-Z0-9._-]+$`)
+	// Every component starts with a letter or digit, so no value can be
+	// read as a kinit option (-c/tmp@R would pick the ccache).
+	freeIPAReaderPrincipalRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?@[A-Z0-9][A-Z0-9._-]*$`)
 	freeIPAReaderKeytabRe    = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
 
+// freeIPAPrivilegedPrincipals are principal names (the part before / or
+// @, lower-cased) a diagnosis must never authenticate as: administrators,
+// and the service principals FreeIPA itself and its servers run with
+// (host/, HTTP/, ldap/ and DNS/ keytabs can change the directory or DNS
+// data; krbtgt and kadmin are the KDC's own). The KDC's master key
+// principal K/M is matched as a whole, not by its first component.
+var freeIPAPrivilegedPrincipals = map[string]bool{
+	"admin": true, "administrator": true, "root": true,
+	"host": true, "http": true, "ldap": true, "dns": true, "dogtag": true, "cifs": true,
+	"ipa-dnskeysyncd": true, "ipa-ods-exporter": true, "krbtgt": true, "kadmin": true,
+}
+
 // validateFreeIPAReader checks the operator's --diagnose-freeipa-* flags.
-// The principal must be a dedicated reader: admin is refused outright,
-// since a diagnosis must never run with an administrator's ticket.
+// The principal must be a dedicated reader: administrators and FreeIPA's
+// own service principals are refused outright, since a diagnosis must
+// never run with a ticket that can change anything. A reader whose
+// rights on the global DNS configuration (cn=dns, the --rights of
+// ipa dnsconfig-show) include write is refused when the call reads them
+// (diagnose.KerberosRefusedPrivileged); rights on other entries are not
+// inspected, so the reader's role must stay the runbook's read-only one.
 func validateFreeIPAReader(r diagnoseFreeIPAReader) error {
 	if r.Principal == "" && r.Keytab == "" {
 		return nil
@@ -54,8 +73,9 @@ func validateFreeIPAReader(r diagnoseFreeIPAReader) error {
 	if !freeIPAReaderPrincipalRe.MatchString(r.Principal) {
 		return fmt.Errorf("--diagnose-freeipa-principal %q is not a Kerberos principal of the form name[/host]@REALM", r.Principal)
 	}
-	primary := strings.ToLower(strings.SplitN(strings.SplitN(r.Principal, "@", 2)[0], "/", 2)[0])
-	if primary == "admin" || primary == "root" {
+	name := strings.SplitN(r.Principal, "@", 2)[0]
+	primary := strings.ToLower(strings.SplitN(name, "/", 2)[0])
+	if freeIPAPrivilegedPrincipals[primary] || strings.EqualFold(name, "K/M") {
 		return fmt.Errorf("--diagnose-freeipa-principal must be a dedicated read-only principal, not %s", r.Principal)
 	}
 	if !freeIPAReaderKeytabRe.MatchString(r.Keytab) || strings.Contains(r.Keytab, "/../") || strings.HasSuffix(r.Keytab, "/..") {
@@ -128,7 +148,7 @@ type diagnoseDNSArchitectureOutput struct {
 func registerDiagnoseDNSArchitectureTool(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_dns_architecture",
-		Description: "read-only, one-call answer to \"how is DNS wired here\": the dns caching tier, the FreeIPA DNS providers (primary/replica, canonical FQDN, internal zones), FreeIPA forwarding (global forwarders, forward policy, per-server forwarders, forward zones) and each managed host's resolver path (tier first, FreeIPA fallback, explicit overrides). Four layers are kept apart: supported (component contracts), declared (inventory variables, with references), effective (what the canonical playbook rules compute from them) and observed (bounded live probes: authoritative SOA/NS/SRV on each provider, unbound forward/stub zones and internal/external resolution through each tier host, the optional client_host's resolver). Every declared/live difference carries evidence references; unknown and absent are separate states. External resolution through the tier is reported as such, never as proof that a particular forwarder answered. FreeIPA's DNS configuration is read only with the read-only principal the operator configured at server start (--diagnose-freeipa-principal/--diagnose-freeipa-keytab), in a private ccache; without one the call returns status auth_required with every other fact still filled in. Never accepts a password and never uses an admin ticket.",
+		Description: "read-only, one-call answer to \"how is DNS wired here\": the dns caching tier, the FreeIPA DNS providers (primary/replica, canonical FQDN, internal zones), FreeIPA forwarding (global forwarders, forward policy, per-server forwarders, forward zones) and each managed host's resolver path (tier first, FreeIPA fallback, explicit overrides). Four layers are kept apart: supported (component contracts), declared (inventory variables, with references), effective (what the canonical playbook rules compute from them) and observed (bounded live probes: authoritative SOA/NS/SRV on each provider, unbound forward/stub zones and internal/external resolution through each tier host, the optional client_host's resolver). Every declared/live difference carries evidence references; unknown and absent are separate states. External resolution through the tier is reported as such, never as proof that a particular forwarder answered. FreeIPA's DNS configuration is read only with the read-only principal the operator configured at server start (--diagnose-freeipa-principal/--diagnose-freeipa-keytab), in a private ccache; without one the call returns status auth_required with every other fact still filled in. Never accepts a password, never uses an admin ticket, refuses FreeIPA's own service principals at startup, and refuses a principal whose rights on the global DNS configuration (cn=dns) include write. Every failed or unknown fact is named in findings; complete means every fact was seen, not that DNS works.",
 	}, diagnoseDNSArchitectureHandler(opts))
 }
 
@@ -137,12 +157,12 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		fail := func(code, msg string) (*mcp.CallToolResult, diagnoseDNSArchitectureOutput, error) {
 			return toolErrorResult(mcpToolError{Code: code, Message: msg}), diagnoseDNSArchitectureOutput{}, nil
 		}
-		in.InternalName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(in.InternalName)), ".")
-		in.ExternalName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(in.ExternalName)), ".")
-		if in.InternalName != "" && !inventory.ValidDNSRecordName(in.InternalName) {
+		in.InternalName = normalizeDNSArchName(in.InternalName)
+		in.ExternalName = normalizeDNSArchName(in.ExternalName)
+		if in.InternalName != "" && !validDNSArchName(in.InternalName) {
 			return fail(mcpErrInvalidParam, fmt.Sprintf("internal_name %q is not a valid DNS name", in.InternalName))
 		}
-		if in.ExternalName != "" && !inventory.ValidDNSRecordName(in.ExternalName) {
+		if in.ExternalName != "" && !validDNSArchName(in.ExternalName) {
 			return fail(mcpErrInvalidParam, fmt.Sprintf("external_name %q is not a valid DNS name", in.ExternalName))
 		}
 		if err := validateFreeIPAReader(opts.FreeIPAReader); err != nil {
@@ -175,9 +195,20 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		}
 
 		model := diagnose.BuildDNSArchitectureModel(resolved, in.ClientHost)
+		var observed diagnose.DNSArchObserved
+		// The internal name every provider and tier host resolves: the
+		// operator's, or the primary's FQDN as a DNS name (lower case, no
+		// trailing dot, AGENTS.md §5.13). Without one the core comparison
+		// cannot be made, and the report says so.
 		internalName := in.InternalName
-		if internalName == "" && model.FreeIPAPresent && len(model.Providers) > 0 && inventory.ValidDNSRecordName(model.Providers[0].FQDN) {
-			internalName = model.Providers[0].FQDN
+		internalSkip := ""
+		if internalName == "" && model.FreeIPAPresent && len(model.Providers) > 0 {
+			if n := normalizeDNSArchName(model.Providers[0].FQDN); validDNSArchName(n) {
+				internalName = n
+			} else {
+				internalSkip = fmt.Sprintf("the FreeIPA primary's FQDN %q is not a DNS name, so no internal name was resolved on the providers or through the tier; pass internal_name", model.Providers[0].FQDN)
+				observed.Skipped = append(observed.Skipped, internalSkip)
+			}
 		}
 		externalName := in.ExternalName
 		if externalName == "" {
@@ -186,23 +217,35 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 
 		// Plan every independent probe first, run them concurrently, then
 		// read them back in plan order so steps and evidence stay stable.
-		domainOK := inventory.ValidDNSRecordName(model.FreeIPADomain)
+		domainOK := validDNSArchName(model.FreeIPADomain)
 		var providerProbes, tierProbes []*dnsArchProbe
 		var clientProbe *dnsArchProbe
-		var observed diagnose.DNSArchObserved
+		var overflow []string
 		for _, p := range model.Providers {
-			if !p.DNSProvider || len(providerProbes) >= maxDNSArchProbeHosts {
+			if !p.DNSProvider {
 				continue
 			}
-			probeName := internalName
-			if probeName == "" {
-				probeName = p.FQDN
+			if len(providerProbes) >= maxDNSArchProbeHosts {
+				overflow = append(overflow, p.InventoryHost)
+				continue
 			}
-			probe := &dnsArchProbe{host: p.InventoryHost, provider: p, name: probeName}
-			if domainOK && dnsArchProbeAddr(p.IP) {
+			probe := &dnsArchProbe{host: p.InventoryHost, provider: p, name: internalName}
+			switch {
+			case !domainOK:
+				observed.Skipped = append(observed.Skipped, fmt.Sprintf("FreeIPA DNS provider %s: the FreeIPA domain %q is not a DNS name, so it was not probed", p.InventoryHost, model.FreeIPADomain))
+			case !dnsArchProbeAddr(p.IP):
+				observed.Skipped = append(observed.Skipped, fmt.Sprintf("FreeIPA DNS provider %s: its ansible_host %q is not an IP address or DNS name, so it was not probed", p.InventoryHost, p.IP))
+			default:
+				probeName := internalName
+				if probeName == "" {
+					probeName = "-"
+				}
 				probe.step = diagnose.DNSArchProviderStep(p.InventoryHost, model.FreeIPADomain, p.IP, probeName)
 			}
 			providerProbes = append(providerProbes, probe)
+		}
+		if len(overflow) > 0 {
+			observed.Skipped = append(observed.Skipped, fmt.Sprintf("FreeIPA DNS providers beyond the first %d were not probed: %s", maxDNSArchProbeHosts, strings.Join(overflow, ", ")))
 		}
 		var validProviderIPs []string
 		for _, ip := range model.DNSProviderIPs() {
@@ -216,6 +259,11 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		}
 		for i, t := range model.Tier {
 			if i >= maxDNSArchProbeHosts {
+				var rest []string
+				for _, r := range model.Tier[i:] {
+					rest = append(rest, r.Host)
+				}
+				observed.Skipped = append(observed.Skipped, fmt.Sprintf("dns tier hosts beyond the first %d were not probed: %s", maxDNSArchProbeHosts, strings.Join(rest, ", ")))
 				break
 			}
 			tierProbes = append(tierProbes, &dnsArchProbe{host: t.Host, tier: t, step: diagnose.DNSArchTierStep(t.Host, internalName, externalName, tierDomain, validProviderIPs)})
@@ -238,7 +286,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		authHost := ""
 		for _, probe := range providerProbes {
 			if probe.step.ID == "" {
-				observed.Providers = append(observed.Providers, unprobedProvider(probe.provider, "the inventory's FreeIPA domain or this provider's ansible_host is not a plain DNS name or IP address, so it was not probed"))
+				observed.Providers = append(observed.Providers, unprobedProvider(probe.provider, "not probed: see skipped"))
 				continue
 			}
 			allResults = append(allResults, probe.result)
@@ -264,6 +312,9 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		for _, probe := range tierProbes {
 			allResults = append(allResults, probe.result)
 			ot := diagnose.BuildDNSArchObservedTier(probe.tier, internalName, externalName, validProviderIPs, tierDomain, probe.result)
+			if internalSkip != "" {
+				ot.InternalResolution.Detail = internalSkip
+			}
 			if ot.RemoteUser != "" {
 				remoteUsers[probe.host] = ot.RemoteUser
 			}
@@ -271,7 +322,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		}
 		if clientProbe != nil {
 			allResults = append(allResults, clientProbe.result)
-			oc := diagnose.BuildDNSArchObservedClient(in.ClientHost, clientProbe.result)
+			oc := diagnose.BuildDNSArchObservedClient(in.ClientHost, clientProbe.result, model.TierAddrs(in.ClientHost))
 			if oc.RemoteUser != "" {
 				remoteUsers[in.ClientHost] = oc.RemoteUser
 			}
@@ -356,11 +407,26 @@ func runDNSArchProbes(ctx context.Context, runner diagnose.AdHocRunner, opts dia
 // dnsArchProbeAddr accepts an inventory address for a probe argument: an
 // IP address or a plain DNS name (ansible_host may be either).
 func dnsArchProbeAddr(addr string) bool {
-	return net.ParseIP(addr) != nil || inventory.ValidDNSRecordName(strings.ToLower(addr))
+	return net.ParseIP(addr) != nil || validDNSArchName(normalizeDNSArchName(addr))
 }
 
+// normalizeDNSArchName is a DNS name as the probes use it: lower case,
+// without the trailing dot.
+func normalizeDNSArchName(s string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+}
+
+// validDNSArchName accepts a normalized host or domain name for a probe.
+// ValidDNSRecordName also accepts "@", the zone apex in a manifest, which
+// is not a name dig can resolve.
+func validDNSArchName(s string) bool {
+	return s != "@" && inventory.ValidDNSRecordName(s)
+}
+
+// unprobedProvider is a provider pilot planned but did not probe; the
+// reason is in observed.skipped, which makes the report partial.
 func unprobedProvider(p diagnose.DNSArchProvider, detail string) diagnose.DNSArchObservedProvider {
-	f := diagnose.DNSArchFact{State: diagnose.FactUnknown, Detail: detail}
+	f := diagnose.DNSArchFact{State: diagnose.FactNotApplicable, Detail: detail}
 	return diagnose.DNSArchObservedProvider{Host: p.InventoryHost, IP: p.IP, Reachable: f, NamedActive: f, SOA: f, NS: f, LDAPSRV: f, KerberosSRV: f, Internal: f}
 }
 
