@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/log-server.md v1.7
+# Apply playbook for docs/verification/log-server.md v1.8
 # rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
 # client hosts. It writes two drop-ins (10-siem-receiver.conf,
 # siem-incoming) and, for a siem_log_root outside /var/log, a block in the
@@ -625,7 +625,10 @@
               file-context rule this run added was removed.
               {{ 'rsyslog was restarted with the restored configuration.'
                  if (log_server_rescue_syntax.rc | default(1)) == 0 else
-                 'rsyslog was NOT restarted: rsyslogd -N1 still rejects the configuration (rc='
-                 ~ (log_server_rescue_syntax.rc | default('?')) ~ '), so the running rsyslog keeps what it has.' }}
+                 'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
+                 ~ (log_server_rescue_syntax.rc | default('?')) ~ ': '
+                 ~ ((log_server_rescue_syntax.stderr_lines | default([]) | last | default(''))
+                    or (log_server_rescue_syntax.msg | default('no output')))
+                 ~ '), so the running rsyslog keeps what it has.' }}
               Left in place: the log root directory and an SELinux port label
               for siem_receiver_tcp_port. Fix the failing task and re-run.

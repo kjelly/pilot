@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.7
+> 版本：v1.8
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -113,7 +113,6 @@
 | C3, C4, C7, C8, C11 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME%` dynaFile 路由，`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
 | C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
 | C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則 + 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
-
 | C9, C10 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數 |
 
 > playbook 的每個 task 都帶全部 row tag（C1–C11）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
@@ -158,3 +157,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.5 | C6–C8 改成從接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，不再寫死 `/var/log/siem`；C7/C8 改送這次唯一的 nonce 訊息（`PILOT-SIEM-SELFTEST-<AUDIT|AUTH>-$$-$(date +%s%N)`），只認這則訊息，最多等 6 秒，改用 rc 形式（expected `0`）。起因：PR #79 讓 inventory 的 `siem_log_root` 生效後，非預設根目錄的主機 C6–C8 會 FAIL，而預設目錄留有舊的固定字串時 C7/C8 會假 PASS（PR #79 review） | pilot |
 | 2026-10-15 | v1.6 | 只改說明，row 不變：§1 套用範圍補上 Step 2a 對 AppArmor local 檔、SELinux file-context 規則的修改與 rescue 會還原什麼；§6 補上 Step 2a 一列，並說明 playbook 每個 task 都帶全部 row tag（PR #79 review：`--tags C6` 改 `siem_log_root` 時只換了 AppArmor 規則，rsyslog 仍寫舊目錄，訊息全部丟失） | pilot |
 | 2026-10-15 | v1.7 | 只改說明，row 不變：§6 的說明移到表格下面（原本插在表格中間，C9/C10 那列因此沒有算在表格裡），並註明 `--skip-tags` 任一列會跳過整個 log-server 的步驟。§1 的 rescue 說明補上：rescue 先用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog | pilot |
+| 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |

@@ -587,6 +587,10 @@ func tryInventoryPlay(t *testing.T, group string, playVars any, tasks []any, gro
 	return tryInventoryPlayIn(t, inv, files, group, playVars, tasks)
 }
 
+// batchedTaskPrefix marks a task whose failure a block's rescue records;
+// tryInventoryPlayIn does not stop at it.
+const batchedTaskPrefix = "batched: "
+
 // localHostVars connects an inventory host to the local machine.
 func localHostVars() map[string]any {
 	return map[string]any{"ansible_connection": "local", "ansible_python_interpreter": "/usr/bin/python3"}
@@ -645,7 +649,9 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 	for _, p := range cb.Plays {
 		for _, task := range p.Tasks {
 			host := task.Hosts["localhost"]
-			if host.Failed {
+			// A task named with batchedTaskPrefix runs inside a block whose
+			// rescue records the failure, so the play goes on.
+			if host.Failed && !strings.HasPrefix(task.Task.Name, batchedTaskPrefix) {
 				return nil, task.Task.Name + ": " + host.Msg
 			}
 			if task.Task.Name != "show" {

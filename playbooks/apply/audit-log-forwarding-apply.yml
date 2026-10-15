@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/audit-log-forwarding.md v1.1
+# Apply playbook for docs/verification/audit-log-forwarding.md v1.8
 # auditd custom rules (setuid/setgid change+exec, sudo, /etc/passwd,
 # /etc/sudoers) + logrotate + rsyslog forwarding to a central SIEM receiver
 # (docs/verification/log-server.md).

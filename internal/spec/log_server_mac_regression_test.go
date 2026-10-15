@@ -383,3 +383,70 @@ func TestRegression_LogServerRescueRestoresWhatItChanged(t *testing.T) {
 		}
 	}
 }
+
+// TestRegression_LogServerRescueRestartsOnlyAValidConfiguration evaluates,
+// through Ansible, the rescue's restart condition and its failure message for
+// each result of the `rsyslogd -N1` check: a configuration rsyslogd accepts,
+// one it rejects (rsyslog's message for an invalid drop-in, captured on
+// 640362e's pr79-log), rsyslogd missing (the result Ansible registers for a
+// command that does not exist, captured with ansible-core 2.19.2), and the
+// check skipped. On 640362e the rescue restarted rsyslog in every case.
+func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	play := loadFirstPlay(t, "log-server-apply.yml")
+	var rescue []map[string]any
+	for _, task := range play["tasks"].([]any) {
+		if m, ok := task.(map[string]any); ok && m["rescue"] != nil {
+			for _, x := range m["rescue"].([]any) {
+				rescue = append(rescue, x.(map[string]any))
+			}
+		}
+	}
+	restart := taskNamed(t, rescue, "ROLLBACK — restart rsyslog with the restored configuration")
+	failure := taskNamed(t, rescue, "ROLLBACK — surface the original failure")
+	when, _ := restart["when"].(string)
+	msg, _ := failure["ansible.builtin.fail"].(map[string]any)["msg"].(string)
+	if when == "" || msg == "" {
+		t.Fatalf("the restart needs a when and the failure a msg; got %q, %q", when, msg)
+	}
+
+	cases := []struct {
+		name        string
+		result      map[string]any
+		wantRestart bool
+		wantMsg     string
+	}{
+		{"accepted", map[string]any{"rc": 0, "stderr_lines": []any{}}, true, "rsyslog was restarted with the restored configuration."},
+		{"rejected", map[string]any{"rc": 1, "stderr_lines": []any{
+			"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		}}, false, "did not pass (rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf"},
+		{"rsyslogd missing", map[string]any{"rc": 2, "msg": "Error executing command.", "stderr_lines": []any{}}, false, "did not pass (rc=2: Error executing command.)"},
+		{"check skipped", map[string]any{"skipped": true}, false, "did not pass (rc=?: no output)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			tasks := []any{
+				map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_rescue_syntax": c.result}},
+				map[string]any{"ansible.builtin.set_fact": map[string]any{
+					"restart": "{{ " + when + " }}",
+					"message": msg,
+				}},
+				showTask([]string{"restart", "message"}),
+			}
+			got, failed := tryInventoryPlay(t, "log-server", nil, tasks, nil)
+			if failed != "" {
+				t.Fatal(failed)
+			}
+			if got["restart"] != c.wantRestart {
+				t.Errorf("restart = %v, want %v", got["restart"], c.wantRestart)
+			}
+			if m, _ := got["message"].(string); !strings.Contains(m, c.wantMsg) {
+				t.Errorf("message %q does not contain %q", m, c.wantMsg)
+			}
+		})
+	}
+}

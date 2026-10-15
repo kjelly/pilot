@@ -708,27 +708,50 @@ func TestRegression_SIEMPortsAreTCPPortNumbers(t *testing.T) {
 			if len(tasks) != 1 {
 				t.Fatalf("%s: want exactly one %q task, got %d", g.playbook, gateName, len(tasks))
 			}
-			tasks = append(tasks, showTask([]string{g.variable}))
+			// One play per gate: each value runs the gate in its own block,
+			// parsed from its JSON text with from_json (the types -e JSON
+			// gives), and the rescue records the failed task. One
+			// ansible-playbook run per value took about a minute.
+			values := append(append([]string{}, accepted...), refused...)
+			batch := []any{map[string]any{"ansible.builtin.set_fact": map[string]any{"results": map[string]any{}}}}
+			for i := range len(values) + 1 {
+				key := fmt.Sprintf("v%d", i)
+				gate := map[string]any{}
+				for k, v := range tasks[0].(map[string]any) {
+					gate[k] = v
+				}
+				gate["name"] = batchedTaskPrefix + gateName
+				block := map[string]any{
+					"block": []any{gate, map[string]any{"ansible.builtin.set_fact": map[string]any{
+						"results": "{{ results | combine({'" + key + "': 'ok'}) }}"}}},
+					"rescue": []any{map[string]any{"ansible.builtin.set_fact": map[string]any{
+						"results": "{{ results | combine({'" + key + "': ansible_failed_task.name}) }}"}}},
+				}
+				if i < len(values) { // the last block leaves the variable unset
+					block["vars"] = map[string]any{g.variable: fmt.Sprintf("{{ port_values[%d] | from_json }}", i)}
+				}
+				batch = append(batch, block)
+			}
+			batch = append(batch, showTask([]string{"results"}))
 			inv := map[string]any{"all": map[string]any{"children": map[string]any{
 				g.group: map[string]any{"hosts": map[string]any{"localhost": localHostVars()}},
 			}}}
-			try := func(value string) string {
-				_, failed := tryInventoryPlayIn(t, inv, nil, g.group, nil, tasks, "-e", `{"`+g.variable+`": `+value+`}`)
-				return failed
+			got, failed := tryInventoryPlayIn(t, inv, nil, g.group, map[string]any{"port_values": values}, batch)
+			if failed != "" {
+				t.Fatal(failed)
 			}
-			for _, v := range accepted {
-				if failed := try(v); failed != "" {
-					t.Errorf("%s=%s: want accepted, got %s", g.variable, v, failed)
+			results, _ := got["results"].(map[string]any)
+			for i, v := range values {
+				r := results[fmt.Sprintf("v%d", i)]
+				if i < len(accepted) && r != "ok" {
+					t.Errorf("%s=%s: want accepted, got %v", g.variable, v, r)
+				}
+				if i >= len(accepted) && r != batchedTaskPrefix+gateName {
+					t.Errorf("%s=%s: want %q to fail, got %v", g.variable, v, gateName, r)
 				}
 			}
-			for _, v := range refused {
-				if failed := try(v); !strings.Contains(failed, gateName) {
-					t.Errorf("%s=%s: want %q to fail, got %q", g.variable, v, gateName, failed)
-				}
-			}
-			// Unset: the variable is not passed at all.
-			if _, failed := tryInventoryPlayIn(t, inv, nil, g.group, nil, tasks); failed != "" {
-				t.Errorf("%s unset: want accepted, got %s", g.variable, failed)
+			if r := results[fmt.Sprintf("v%d", len(values))]; r != "ok" {
+				t.Errorf("%s unset: want accepted, got %v", g.variable, r)
 			}
 		})
 	}
