@@ -6,7 +6,7 @@
 >
 > 最新 `--hosts all` actual-run evidence：[`2026-09-15-all-keyword.md`](../evidence/pilot-gateway-scope/2026-09-15-all-keyword.md)
 >
-> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `decc613`）：C1–C3 經 ldapi 以 SASL EXTERNAL 讀取，`spec.NeedsBecome` 會讓它們以 root 執行；同一台 FreeIPA 上以 root 或非 root 的 `ansible_user` 都是 3/3（`main` 的 binary 以非 root 執行為 0/3）。全新 topology 的 L3–L6 見 [`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md)，become 的實跑見 [`2026-10-15-decc613.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613.md)
+> 目前有效的 C1–C3 實跑摘要（2026-10-15，candidate `decc613`）：C1–C3 經 ldapi 以 SASL EXTERNAL 讀取，`spec.NeedsBecome` 會讓它們以 root 執行；同一台 FreeIPA 上以 root 或非 root 的 `ansible_user` 都是 3/3（`main` 的 binary 以非 root 執行為 0/3）。全新 topology 的 L3–L6 見 [`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md)，become 的實跑（從 `decc613` 的乾淨 checkout 執行）見 [`2026-10-15-decc613-rerun.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-rerun.md)
 
 ## 1. 目標系統
 
