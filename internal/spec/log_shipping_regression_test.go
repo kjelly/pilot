@@ -7,12 +7,13 @@ import (
 )
 
 // TestRegression_LogShippingSpec locks the structure of
-// docs/verification/log-shipping.md (v1.2 — Promtail agent layered on top
+// docs/verification/log-shipping.md (v1.4 — Promtail agent layered on top
 // of log-server.md, forwarding to dashboard.md's Loki):
 //
 //	C1  pilot-promtail container running
 //	C2  Promtail /ready (9080)
-//	C3  config references the siem_log_root scrape glob
+//	C3  config's scrape glob is <root>/**/*.log for the root the
+//	    co-located log-server's receiver config writes to (siem_log_root)
 //	C4  config references the pilot-loki-backend push URL
 //	C5  /etc/hosts has the pilot-loki-backend alias pinned
 //	C6  cross-host functional self-test: inject locally, query back from
@@ -94,8 +95,15 @@ func TestRegression_LogShippingSpec(t *testing.T) {
 		if r.ID != "C3" {
 			continue
 		}
-		if !strings.Contains(r.Command, "/var/log/siem") {
-			t.Errorf("C3 must reference the default siem_log_root; got %q", r.Command)
+		// PR #79 made siem_log_root an effective inventory input: C3 reads
+		// the root from the receiver config instead of a fixed default.
+		for _, want := range []string{"10-siem-receiver.conf", "SiemAuditPath", `grep -qF "__path__: $r/**/*.log"`} {
+			if !strings.Contains(r.Command, want) {
+				t.Errorf("C3 must contain %q; got %q", want, r.Command)
+			}
+		}
+		if strings.Contains(r.Command, "/var/log/siem") {
+			t.Errorf("C3 must not hard-code /var/log/siem; got %q", r.Command)
 		}
 	}
 
@@ -135,6 +143,23 @@ func TestRegression_LogShippingSpec(t *testing.T) {
 		}
 		if !strings.Contains(r.Command, "/loki/api/v1/query") {
 			t.Errorf("C6 must query via /loki/api/v1/query; got %q", r.Command)
+		}
+	}
+
+	// C6/C9 must count only this run's nonce message: v1.3 grepped
+	// "PILOT-LOGSHIP-SELFTEST-[0-9]*", which an older message left in Loki
+	// also matched.
+	for _, r := range s.Rows {
+		if r.ID != "C6" && r.ID != "C9" {
+			continue
+		}
+		for _, want := range []string{"date +%s%N", `grep -qF "$n"`, "&& echo 0 || echo 1"} {
+			if !strings.Contains(r.Command, want) {
+				t.Errorf("%s must send and match a nonce unique to this run (%q); got %q", r.ID, want, r.Command)
+			}
+		}
+		if strings.TrimSpace(r.Expected) != "0" {
+			t.Errorf("%s expected must be rc-based `0`; got %q", r.ID, r.Expected)
 		}
 	}
 

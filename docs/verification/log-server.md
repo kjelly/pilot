@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.4
+> 版本：v1.5
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -13,7 +13,7 @@
 | Hostname / Inventory group | log-server |
 | OS / version | Ubuntu 24.04 LTS（rsyslog 8.2312+，內建 RainerScript / imtcp） |
 | 角色 | 中央 syslog 接收端：收 client 端 rsyslog 轉送的 `auth,authpriv.*` 與 `local6.*`（auditd），依來源 hostname 分檔落地 |
-| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`/var/log/siem/` |
+| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`siem_log_root`（預設 `/var/log/siem/`） |
 | 風險等級 | Medium（對外開 514/tcp 收網路日誌；設定錯誤頂多漏收，不影響本機既有日誌） |
 
 > 為何選 rsyslog 而非 Loki/syslog-ng：client 端轉送已固定用 rsyslog 協定
@@ -51,9 +51,9 @@
 | C3  | file      | 接收端 drop-in 設定檔存在                                             | present  | test -f /etc/rsyslog.d/10-siem-receiver.conf |
 | C4  | config    | 設定檔含 `imtcp` module + input                                       | 0        | grep -qE 'module\(load="imtcp"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
 | C5  | network   | 接收設定裡 `imtcp` 的 TCP port（`siem_receiver_tcp_port`，預設 514）確實在監聽 | 0        | sh -c 'p=$(grep -o "imtcp\" port=\"[0-9]*" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null | grep -o "[0-9]*$"); [ -n "$p" ] && ss -Hlnt "( sport = :$p )" | grep -q . && echo 0 || echo 1' |
-| C6  | dir       | 落地根目錄 `/var/log/siem` 存在                                       | present  | test -d /var/log/siem |
-| C7  | functional| 本機注入 `local6` 測試訊息，依 `%HOSTNAME%` 落地到 `audit.log`         | ~PILOT-SIEM-SELFTEST-AUDIT | sh -c 'logger -p local6.info "PILOT-SIEM-SELFTEST-AUDIT"; sleep 1; grep -r "PILOT-SIEM-SELFTEST-AUDIT" /var/log/siem/*/audit.log 2>/dev/null; true' |
-| C8  | functional| 本機注入 `authpriv` 測試訊息，依 `%HOSTNAME%` 落地到 `auth.log`        | ~PILOT-SIEM-SELFTEST-AUTH | sh -c 'logger -p authpriv.info "PILOT-SIEM-SELFTEST-AUTH"; sleep 1; grep -r "PILOT-SIEM-SELFTEST-AUTH" /var/log/siem/*/auth.log 2>/dev/null; true' |
+| C6  | dir       | 接收設定裡 `SiemAuditPath` 的落地根目錄（`siem_log_root`，預設 `/var/log/siem`）存在 | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] && echo 0 || echo 1' |
+| C7  | functional| 本機注入這次唯一的 `local6` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `audit.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUDIT-$$-$(date +%s%N)"; logger -p local6.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/audit.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
+| C8  | functional| 本機注入這次唯一的 `authpriv` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `auth.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUTH-$$-$(date +%s%N)"; logger -p authpriv.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/auth.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 | C9  | file      | logrotate 策略檔存在                                                  | present  | test -f /etc/logrotate.d/siem-incoming |
 | C10 | logrotate | logrotate 策略檔語法正確（dry-run 不出錯）                            | 0        | logrotate -d /etc/logrotate.d/siem-incoming >/dev/null 2>&1; echo $? |
 | C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
@@ -62,11 +62,14 @@
 > grep + 數字 expected；C5 用 `sh -c '... && echo 0 || echo 1'` 讓外層指令
 > 恆回 rc=0，避免 ansible ad-hoc 把「沒監聽」的判定結果誤判成 task FAILED
 > 而把 rc 吃成 2（見 `verification-spec-template.md` 陷阱 1）。
-> C7/C8 用 `~contains` 而非 `^` 錨點，且用 `; true` 吸收 grep 找不到時的
-> non-zero rc，避免 wrapper 把「訊息還沒落地」的合法 FAIL 結果變成不可判讀
-> 的 ansible FAILED 輸出（陷阱 2）。
-> C7/C8 只驗證**本機注入**（走 `/dev/log` 進同一個 rsyslog daemon 的規則引擎，
-> `%HOSTNAME%` 會是 log-server 自己的 hostname）；驗證**跨主機**轉送有沒有真的
+> C6–C8 從 `10-siem-receiver.conf` 的 `SiemAuditPath` 讀出實際生效的落地根目錄
+> （`siem_log_root`），不寫死 `/var/log/siem`。C7/C8 每次送出唯一的 nonce 訊息（`$$` 加
+> `date +%s%N`），最多等 6 秒，只認這一則（`grep -qsF "$n"`），用 `sh -c '… echo 0 … echo 1'`
+> 讓外層恆回 rc=0、expected `0`：先前留在任何目錄裡的舊 selftest 字串都不會讓它們 PASS。
+> C7/C8 只驗證**本機注入**：訊息走 `/dev/log` 進 default ruleset，由同機的
+> `audit-log-forwarding` 轉送規則以 TCP 送回本機的 `imtcp`，再由 `siemReceiver` 依
+> `%HOSTNAME%`（log-server 自己的 hostname）落地，所以需要同機也部署 `audit-log-forwarding`
+> （本專案的 topology 一律如此，見 C11 的由來）；驗證**跨主機**轉送有沒有真的
 > 送到（client 端 `@@` 轉送 → 這台收到），屬於 Shape 3 cross-check，做法見
 > `docs/runbooks/audit-log-forwarding.md` §4（在 client 端注入、在這台讀檔驗證）。
 > **C11 的由來**：本 spec 原本假設「收到的訊息本來就只會被寫進 dynaFile，
@@ -108,7 +111,7 @@
 | C1 | `install rsyslog` | apt/dnf 依 `ansible_os_family` |
 | C2, C5 | `ensure rsyslog enabled+restarted` | 只在設定檔語法檢查通過後才重啟（`rsyslogd -N1` gate） |
 | C3, C4, C7, C8, C11 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME%` dynaFile 路由，`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
-| C6 | `create /var/log/siem` | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
+| C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
 | C9, C10 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數 |
 
 ## 7. SOP
@@ -146,3 +149,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-08-06 | v1.2 | 拿掉整條 UDP 支援（`imudp`、`siem_receiver_udp_port`、`siem_receiver_udp_enabled` 全部移除）：確認本 repo 沒有任何角色轉送 UDP syslog，v1.1 留著的條件式 UDP 只是沒人用的推測性容量，直接拿掉比繼續維護「同機是 wazuh-manager 時關閉」的條件邏輯更簡單。Checklist 從 12 條收斂成 10 條（移除舊 C4「imudp module」與 C6「UDP 514 監聽」，其餘全部往前遞補：舊 C5→新 C4、舊 C7→新 C5、舊 C8→新 C6、舊 C9→新 C7、舊 C10→新 C8、舊 C11→新 C9、舊 C12→新 C10）；v1.1 新增的 C4 已知偏差列連同 UDP 一起移除，因為已經沒有 UDP 分支會 fail | sre |
 | 2026-08-07 | v1.3 | 新增 C11：`imtcp` input 綁定專屬 `ruleset="siemReceiver"`。real incident（minimal-poc round 20）：這個拓樸的中央 SIEM 主機同時也是 `audit-log-forwarding.md` 的 client，轉送給自己時，`imtcp` 收到的訊息若落回 default ruleset 會被 `99-siem-forward.conf` 的轉送規則二次處理、再度轉送出去，形成無窮迴圈——3 台主機中身兼兩角色的那台，`auth.log` 在不到一小時內長到 1.2 千萬行/13GB，把 77GB 磁碟塞到 100% 滿。修法：把接收動作移進專屬 ruleset，收到的訊息只寫一次 dynaFile，不再進 default ruleset | sre |
 | 2026-10-14 | v1.4 | C5 改成讀接收設定裡 `imtcp` 的 port 再檢查它在監聽，不再寫死 514。PR #79 讓 inventory 的 `siem_receiver_tcp_port` 生效後，`siem_receiver_tcp_port: 2514` 的 log-server 在 2514 監聽、client 的訊息也送達，舊 C5（`grep ":514"`）卻 FAIL；新 C5 在 2514 PASS，rsyslog 停掉時 FAIL（2026-10-14 對 pr79-log 實測）。也修掉舊寫法 `:514` 會被 `:5140` 這類 port 誤判成 PASS 的問題 | pilot |
+| 2026-10-15 | v1.5 | C6–C8 改成從接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，不再寫死 `/var/log/siem`；C7/C8 改送這次唯一的 nonce 訊息（`PILOT-SIEM-SELFTEST-<AUDIT|AUTH>-$$-$(date +%s%N)`），只認這則訊息，最多等 6 秒，改用 rc 形式（expected `0`）。起因：PR #79 讓 inventory 的 `siem_log_root` 生效後，非預設根目錄的主機 C6–C8 會 FAIL，而預設目錄留有舊的固定字串時 C7/C8 會假 PASS（PR #79 review） | pilot |
