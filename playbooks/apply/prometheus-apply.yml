@@ -817,6 +817,7 @@
         host_disk_queue_depth_threshold: "{{ host_disk_queue_depth_threshold | default('10', true) | string }}"
         host_disk_latency_for: "{{ host_disk_latency_for | default('10m', true) }}"
         host_metrics_missing_for: "{{ host_metrics_missing_for | default('3m', true) }}"
+        host_metrics_missing_success_window: "{{ host_metrics_missing_success_window | default('2m', true) }}"
         login_probe_alert_for: "{{ login_probe_alert_for | default('3m', true) }}"
         login_probe_transport_alert_for: "{{ login_probe_transport_alert_for | default('5m', true) }}"
         login_probe_alert_keep_firing_for: "{{ login_probe_alert_keep_firing_for | default('5m', true) }}"
@@ -833,6 +834,7 @@
           - host_io_stall_for is match('^[0-9]+(ms|s|m|h|d)$')
           - host_disk_latency_for is match('^[0-9]+(ms|s|m|h|d)$')
           - host_metrics_missing_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - host_metrics_missing_success_window is match('^[0-9]+(ms|s|m|h|d)$')
           - login_probe_alert_for is match('^[0-9]+(ms|s|m|h|d)$')
           - login_probe_transport_alert_for is match('^[0-9]+(ms|s|m|h|d)$')
           - login_probe_alert_keep_firing_for is match('^[0-9]+(ms|s|m|h|d)$')
@@ -865,11 +867,11 @@
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]
 
-    # Probe freshness is changes() of the probe's write timestamp over
+    # PilotLoginProbeStale is changes() of the probe's write timestamp over
     # login_probe_stale_seconds (pilot-host-health-alert-rules.yml.j2). The
     # window must hold several scrapes of a healthy probe: with fewer, a
     # healthy probe looks stale (PilotLoginProbeStale fires and mutes all
-    # its alerts) and HostMetricsMissing's freshness term never holds.
+    # its alerts).
     - name: "Gate: login_probe_stale_seconds spans at least three node scrapes"
       ansible.builtin.assert:
         that:
@@ -886,25 +888,30 @@
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]
 
-    # A probe that stalls at the moment its target dies leaves a frozen
-    # success=1 that still counts as fresh for up to login_probe_stale_seconds.
-    # HostMetricsMissing must need at least that long to fire, or it reports
-    # the dead host "reachable over SSH" and mutes its HostDown. This does not
-    # cover a probe that stalls up to one round (login_probe_interval +
-    # login_probe_total_timeout) after the target died: HostMetricsMissing
-    # then fires falsely for a few minutes, while HostDown still pages on time
-    # (docs/verification/alertmanager.md §1.7).
-    - name: "Gate: host_metrics_missing_for is at least login_probe_stale_seconds"
+    # HostMetricsMissing only trusts a login that succeeded within
+    # host_metrics_missing_success_window (the target's own last-success
+    # timestamp changed). The window must be shorter than
+    # host_metrics_missing_for, so a dead host, whose last success is in
+    # the past, can never hold the condition for the whole `for:` (however
+    # slow the probe round or whether the probe stalled). It must also hold
+    # at least two scrapes, or a change can never be seen.
+    - name: "Gate: host_metrics_missing_success_window is shorter than host_metrics_missing_for and spans two scrapes"
       ansible.builtin.assert:
         that:
-          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) >= (login_probe_stale_seconds | int)
+          - (_win_count | int) * (_duration_seconds[_win_unit] | float) < (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float)
+          - (_win_count | int) * (_duration_seconds[_win_unit] | float) >= 2 * (_scrape_count | int) * (_duration_seconds[_scrape_unit] | float)
         fail_msg: >-
-          host_metrics_missing_for={{ host_metrics_missing_for }} must be at least
-          login_probe_stale_seconds={{ login_probe_stale_seconds }}s, or a probe that
-          stalls as its target dies makes HostMetricsMissing fire for a dead host.
+          host_metrics_missing_success_window={{ host_metrics_missing_success_window }} must be
+          shorter than host_metrics_missing_for={{ host_metrics_missing_for }} (or a dead host can
+          raise HostMetricsMissing and mute its HostDown) and at least 2 x
+          prometheus_scrape_interval={{ prometheus_scrape_interval }}.
       vars:
+        _win_count: "{{ host_metrics_missing_success_window | regex_search('^[0-9]+') }}"
+        _win_unit: "{{ host_metrics_missing_success_window | regex_search('[a-z]+$') }}"
         _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
         _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
+        _scrape_count: "{{ prometheus_scrape_interval | regex_search('^[0-9]+') }}"
+        _scrape_unit: "{{ prometheus_scrape_interval | regex_search('[a-z]+$') }}"
         _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]

@@ -2,18 +2,40 @@ package spec
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// alertRulesTestFiles hold the tests that need docker images or
-// ansible-playbook. The Go test job skips them; only `make alert-rules-test`
-// (CI's Playbook lint job, PILOT_REQUIRE_CONTAINER_TESTS=1) runs them.
-var alertRulesTestFiles = []string{
-	"host_health_alert_rules_regression_test.go",
-	"alertmanager_inhibit_regression_test.go",
-	"login_probe_regression_test.go",
+// alertRulesHelperCall marks a file whose tests use the helpers that need
+// docker images or ansible-playbook. The Go test job skips those tests;
+// only `make alert-rules-test` (CI's Playbook lint job,
+// PILOT_REQUIRE_CONTAINER_TESTS=1) runs them.
+var alertRulesHelperCall = regexp.MustCompile(`requireContainerImage\(|runLocalPlay\(|hostHealthPromtest\(|renderHostHealthRules\(`)
+
+// alertRulesTestFiles returns every test file in this package that uses
+// those helpers, except this one.
+func alertRulesTestFiles(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, f := range files {
+		if f == "alert_rules_make_target_regression_test.go" {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if alertRulesHelperCall.Match(data) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // externalToolCall marks a test body that renders, runs promtool or
@@ -61,7 +83,17 @@ func TestRegression_AlertRulesMakeTargetSelectsEveryToolTest(t *testing.T) {
 	if !strings.Contains(run.String(), "TestRegression_HostHealth") {
 		t.Errorf("alert-rules-test pattern %q must select TestRegression_HostHealth*", run)
 	}
-	for _, f := range alertRulesTestFiles {
+	files := alertRulesTestFiles(t)
+	for _, want := range []string{"host_health_alert_rules_regression_test.go", "alertmanager_inhibit_regression_test.go", "login_probe_regression_test.go"} {
+		found := false
+		for _, f := range files {
+			found = found || f == want
+		}
+		if !found {
+			t.Errorf("%s no longer uses the container/ansible helpers; the file scan missed it", want)
+		}
+	}
+	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

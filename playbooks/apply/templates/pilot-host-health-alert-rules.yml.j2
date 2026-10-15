@@ -112,11 +112,14 @@ groups:
     rules:
       # A monitoring data gap, distinct from a host outage: node_exporter is
       # not being scraped, yet an SSH login to the same host succeeded in
-      # the same window. Only a probe that is still writing its textfile
-      # counts: a stalled probe's frozen success=1 says nothing about now.
-      # "Still writing" is changes() of its write timestamp, not
-      # time() - timestamp, so a skewed clock on the probe host cannot make
-      # it look stale. While this fires, Alertmanager inhibits the seed
+      # the same window. Only a login that actually succeeded within
+      # host_metrics_missing_success_window counts: the target's own
+      # last-success timestamp must have changed (changes(), so the probe
+      # host's clock does not matter). A stalled probe's frozen success=1,
+      # or a slow round that has not reached a dead target yet, keeps
+      # success=1 but records no new success, and the window is shorter
+      # than host_metrics_missing_for (the playbook enforces it), so a dead
+      # host can never raise this alert. While this fires, Alertmanager inhibits the seed
       # HostDown{job="node"} of the same host (it answers SSH, so it is not
       # down); the playbook keeps host_metrics_missing_for below HostDown's
       # 10m so HostDown never notifies first. keep_firing_for holds it (and
@@ -132,8 +135,8 @@ groups:
           max by (pilot_host) (
             label_replace(
               (pilot_login_probe_success == 1)
-              and on (job, instance)
-              (changes(pilot_login_probe_metrics_last_write_timestamp_seconds[{{ login_probe_stale_seconds }}s]) > 0),
+              and on (job, instance, probe_target)
+              (changes(pilot_login_probe_last_success_timestamp_seconds[{{ host_metrics_missing_success_window }}]) > 0),
               "pilot_host", "$1", "probe_target", "(.+)"
             )
           )

@@ -163,10 +163,11 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 - node scrape target 要由 inventory 的 `host-monitoring` group 自動展開（帶 `pilot_host`）。
   用 `node_exporter_targets` 明確列 target 時沒有 `pilot_host`，`HostMetricsMissing` 不會觸發，
   主機掛掉時也會多送 `PilotLoginProbeTransportFailed`（`alertmanager.md` §1.7 的前提）。
-- `login_probe_interval` + `login_probe_total_timeout` 要明顯短於 `host_metrics_missing_for`
-  （預設 60s + 30s 對 3m）；兩邊屬於不同 role，playbook 沒有交叉檢查。
-- `login_probe_stale_seconds` 至少要 3 × `prometheus_scrape_interval`，`host_metrics_missing_for`
-  不能短於 `login_probe_stale_seconds`；`prometheus-apply.yml` 兩者都會擋（`alertmanager.md` §1.7）。
+- `login_probe_interval` + `login_probe_total_timeout` 要明顯短於 `host_metrics_missing_success_window`
+  （預設 60s + 30s 對 2m）；兩邊屬於不同 role，playbook 沒有交叉檢查。
+- `login_probe_stale_seconds` 至少要 3 × `prometheus_scrape_interval`；`host_metrics_missing_success_window`
+  （預設 2m）必須短於 `host_metrics_missing_for`、至少涵蓋兩次 scrape；`prometheus-apply.yml` 都會擋
+  （`alertmanager.md` §1.7）。
 - 解析不到的 target 不會擋下部署：它留在設定裡，apply 印出 WARNING，probe 回報
   `transport`，觸發 `PilotLoginProbeTransportFailed`。全部 target 都解析不到時才會
   fail closed（通常是 `login_probe_domain` 寫錯，或探測主機本身的 DNS 壞了）。
@@ -195,3 +196,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-15 | v0.5 | PR #80 第三輪 review：`HostMetricsMissing` 的 `keep_firing_for`、inhibit 帶 `site`、probe 新鮮度改用 `changes()`；§6 補 `node_exporter_targets` 與 probe 間隔的前提 | pilot |
 | 2026-10-15 | v0.6 | PR #80 第四輪 review：§6 補 probe 新鮮度與 `host_metrics_missing_for` 的兩道 gate；§3 `HostMetricsMissing` 恢復後的延遲改寫 | pilot |
 | 2026-10-15 | v0.7 | PR #80 第五輪 review：§3 `HostMetricsMissing` 恢復延遲改為最多約 6m15s | pilot |
+| 2026-10-15 | v0.8 | PR #80 第六輪 review：§6 改寫 `host_metrics_missing_success_window` 的前提 | pilot |

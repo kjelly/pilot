@@ -186,6 +186,7 @@ thanos_s3_target_host: ""
 # host_disk_queue_depth_threshold: "10"        # 平均 in-flight request 數
 # host_disk_latency_for: 10m
 # host_metrics_missing_for: 3m                 # node_exporter 抓不到但 SSH 探測成功
+# host_metrics_missing_success_window: 2m      # 這段時間內要有一次成功登入才算 SSH 連得上；必須短於 host_metrics_missing_for
 # login_probe_alert_for: 3m                    # account/auth/stall/hostkey/session
 # login_probe_transport_alert_for: 5m
 # login_probe_alert_keep_firing_for: 5m
