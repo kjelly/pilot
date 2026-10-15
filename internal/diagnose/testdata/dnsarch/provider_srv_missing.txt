@@ -1,0 +1,65 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch named begin
+active
+@@pilot-dnsarch named end rc=0
+@@pilot-dnsarch soa begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 20257
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 2, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 6184d87741b874ff010000006acf14d7f6380a83b7bc7e72 (good)
+;; ANSWER SECTION:
+ipa.pilot.internal.	86400	IN	SOA	ipa1.ipa.pilot.internal. hostmaster.ipa.pilot.internal. 1791956178 3600 900 1209600 3600
+
+@@pilot-dnsarch soa end rc=0
+@@pilot-dnsarch ns begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 22135
+;; flags: qr aa ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 8b54dddb50dcb54c010000006acf14d77c979887cd50915a (good)
+;; ANSWER SECTION:
+ipa.pilot.internal.	86400	IN	NS	ipa2.ipa.pilot.internal.
+ipa.pilot.internal.	86400	IN	NS	ipa1.ipa.pilot.internal.
+
+@@pilot-dnsarch ns end rc=0
+@@pilot-dnsarch srv_ldap begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 11008
+;; flags: qr aa ra; QUERY: 1, ANSWER: 2, AUTHORITY: 2, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 57ef6cbb4c992108010000006acf14d7718bd5dfe61309d7 (good)
+;; ANSWER SECTION:
+_ldap._tcp.ipa.pilot.internal. 86400 IN	SRV	0 100 389 ipa1.ipa.pilot.internal.
+_ldap._tcp.ipa.pilot.internal. 86400 IN	SRV	0 100 389 ipa2.ipa.pilot.internal.
+
+@@pilot-dnsarch srv_ldap end rc=0
+@@pilot-dnsarch srv_kerberos begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 30024
+;; flags: qr aa ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 43a7049e1b7ce075010000006acf14d7cd577b8444ce3f58 (good)
+@@pilot-dnsarch srv_kerberos end rc=0
+@@pilot-dnsarch internal begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 59046
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 2, ADDITIONAL: 2
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: b56020fd363f507c010000006acf14d7b7c058eba1ad3308 (good)
+;; ANSWER SECTION:
+ipa1.ipa.pilot.internal. 1200	IN	A	192.168.122.6
+
+@@pilot-dnsarch internal end rc=0

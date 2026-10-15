@@ -9,6 +9,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/ansible"
 )
 
 // AnsibleHostStats mirrors one host's entry in the "stats" object emitted
@@ -84,6 +86,13 @@ func execAnsiblePlaybookCaptured(ctx context.Context, teeTo io.Writer, extraEnv 
 	if len(extraEnv) > 0 {
 		c.Env = append(os.Environ(), extraEnv...)
 	}
-	err := c.Run()
+	// Hold the controller Ansible log if the environment names it (a no-op
+	// when it does not), as every Ansible run does.
+	release, err := ansible.HoldCommandLog(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	err = c.Run()
+	release()
 	return buf.String(), err
 }

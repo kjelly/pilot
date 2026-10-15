@@ -1,0 +1,49 @@
+# Read-only precondition shared by the sudo simulations. A rule newly added
+# on FreeIPA is not necessarily in this client's SSSD sudo cache yet.
+# Query the specific allowed command, not just `sudo -l` (which succeeds
+# even when only unrelated rules exist). Do not clear caches or restart SSSD:
+# the subsequent real SSH allow/deny checks must exercise the deployed policy.
+#
+# Defaults allow 20 minutes of retry delays for the usual 15-minute smart
+# refresh interval, plus each query's bounded runtime.
+# Override sim_sudo_policy_retries / sim_sudo_policy_delay for a shorter gate;
+# every individual query is also bounded by sim_sudo_policy_probe_timeout.
+# This proves effective command permission, not rule freshness or NOPASSWD;
+# the sim's SSH sudo -n checks remain authoritative for allow/deny behavior.
+---
+- name: "Sudo policy readiness — wait for {{ sim_sudo_policy_user }} on {{ inventory_hostname }}"
+  ansible.builtin.debug:
+    msg: >-
+      Waiting for the client's effective sudo policy to allow {{ sim_sudo_policy_command | join(' ') }}
+      for {{ sim_sudo_policy_user }} (SSSD may not have refreshed a newly created rule).
+      Limit: {{ sim_sudo_policy_retries | default(120) }} retries,
+      {{ sim_sudo_policy_delay | default(10) }} seconds between probes.
+
+- name: Wait for the command-specific sudo policy before testing authorization
+  when: not ansible_check_mode
+  block:
+    - name: Probe the effective sudo permission without running the command
+      become: true
+      ansible.builtin.command:
+        argv: >-
+          {{ ['timeout', '--kill-after=5s', (sim_sudo_policy_probe_timeout | default(10) | string) ~ 's',
+              'sudo', '-n', '-l', '-U', sim_sudo_policy_user, '--'] + sim_sudo_policy_command }}
+      register: sim_sudo_policy_result
+      changed_when: false
+      until: sim_sudo_policy_result.rc == 0
+      retries: "{{ sim_sudo_policy_retries | default(120) | int }}"
+      delay: "{{ sim_sudo_policy_delay | default(10) | int }}"
+
+  rescue:
+    - name: Report policy readiness failure separately from authorization assertions
+      ansible.builtin.fail:
+        msg: >-
+          SUDO_POLICY_NOT_READY: {{ sim_sudo_policy_user }} on {{ inventory_hostname }} cannot yet
+          list permission for {{ sim_sudo_policy_command | join(' ') }}.
+          The bounded wait expired before the SSH sudo allow/deny tests ran.
+          A newly created FreeIPA rule may not have reached this client's SSSD sudo cache;
+          also check the rule's user/host/command scope, sudoers NSS source and SSSD connectivity.
+          No cache was cleared. Adjust sim_sudo_policy_retries / sim_sudo_policy_delay if needed.
+          Last rc={{ sim_sudo_policy_result.rc | default('unavailable') }};
+          stdout={{ sim_sudo_policy_result.stdout | default('') }};
+          stderr={{ sim_sudo_policy_result.stderr | default('') }}

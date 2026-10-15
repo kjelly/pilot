@@ -57,7 +57,7 @@ func TestBuildLoginHostOutput_VerdictBranches(t *testing.T) {
 		stepResult("daemon-listening", 0, ""),
 		stepResult("daemon-installed", 0, "0"),
 		stepResult("nss-resolve", 0, "10.0.0.5 web1"),
-		stepResult("direct-resolve", 0, "10.0.0.5"),
+		stepResult("direct-resolve", 0, ParseDNSArchSections(fixture(t, "tier.txt"))["internal"].Output),
 	}
 
 	cases := []struct {

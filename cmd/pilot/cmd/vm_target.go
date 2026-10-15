@@ -879,24 +879,24 @@ func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbo
 		return fmt.Errorf("rewrite inventory for copied key: %w", err)
 	}
 
-	// 7. docker cp the playbook's whole containing directory (not just the
-	//    single file) into the container, then reference the playbook at
-	//    its same relative position inside the copy. A playbook's
-	//    include_tasks/import_tasks/template references resolve relative
-	//    to the playbook's OWN directory (not the ansible-playbook
-	//    process's cwd), so copying only the .yml file breaks any
-	//    playbook using a sibling tasks/templates/vars/files/handlers
-	//    directory — confirmed live: freeipa-server-apply.yml's
-	//    `include_tasks: tasks/cloud-init-etc-hosts-guard.yml` failed
-	//    with "Could not find or access '/tmp/tasks/...'" under the old
-	//    single-file copy.
-	pbDir := filepath.Dir(playbookPath)
+	// 7. docker cp the playbook's enclosing playbooks/ tree (not just the
+	//    single file or its directory) into the container, then reference
+	//    the playbook at its same relative position inside the copy. A
+	//    playbook's include_tasks/import_tasks/template references resolve
+	//    relative to the playbook's OWN directory (not the ansible-playbook
+	//    process's cwd), and they reach across directories:
+	//    playbooks/check/*.yml and playbooks/decommission/*.yml include
+	//    ../apply/tasks/freeipa-private-ccache-*.yml. Copying only the
+	//    playbook's directory failed those with "Could not find or access"
+	//    (PR #72 review); copying only the .yml file broke even
+	//    freeipa-server-apply.yml's `include_tasks: tasks/...`.
+	pbRoot, pbRel := sandboxPlaybookRoot(playbookPath)
 	pbCntDir := "/tmp/pilot-playbook-dir"
-	cpPb := newCmd(ctx, "docker", "cp", pbDir+"/.", containerID+":"+pbCntDir)
+	cpPb := newCmd(ctx, "docker", "cp", pbRoot+"/.", containerID+":"+pbCntDir)
 	if out, err := cpPb.CombinedOutput(); err != nil {
-		return fmt.Errorf("docker cp playbook directory %s: %w\n%s", pbDir, err, string(out))
+		return fmt.Errorf("docker cp playbook directory %s: %w\n%s", pbRoot, err, string(out))
 	}
-	pbCnt := pbCntDir + "/" + filepath.Base(playbookPath)
+	pbCnt := pbCntDir + "/" + filepath.ToSlash(pbRel)
 
 	invCnt := "/tmp/pilot-inventory.yaml"
 	cpInv := newCmd(ctx, "docker", "cp", cntInvPath, containerID+":"+invCnt)
@@ -956,6 +956,29 @@ func vtRunViaContainer(cmd *cobra.Command, keyTargets []*vmtarget.Target, playbo
 	runCmd.Stdout = out
 	runCmd.Stderr = os.Stderr
 	return runCmd.Run()
+}
+
+// sandboxPlaybookRoot returns the directory `vm-target run --sandbox` copies
+// into the container for playbookPath, and the playbook's path relative to
+// it: the nearest enclosing directory named playbooks, so includes between
+// playbooks/apply, check, decommission and test resolve inside the copy, or
+// the playbook's own directory for a playbook outside any such tree.
+func sandboxPlaybookRoot(playbookPath string) (root, rel string) {
+	abs, err := filepath.Abs(playbookPath)
+	if err != nil {
+		abs = playbookPath
+	}
+	for dir := filepath.Dir(abs); ; dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == "playbooks" {
+			if r, err := filepath.Rel(dir, abs); err == nil {
+				return dir, r
+			}
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			break
+		}
+	}
+	return filepath.Dir(abs), filepath.Base(abs)
 }
 
 // ---- verify ---------------------------------------------------------------

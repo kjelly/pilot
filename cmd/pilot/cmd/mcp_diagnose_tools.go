@@ -348,8 +348,6 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 				runErr = fmt.Errorf("maintain Ansible log: %w", err)
 			}
 		}()
-		releaseLog := ansible.HoldLogUse(logPath)
-		defer releaseLog()
 		cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
 		command := deployAnsibleCommand(cctx, "ansible", args...)
@@ -365,7 +363,12 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 		var stdout, stderr strings.Builder
 		command.Stdout = &stdout
 		command.Stderr = &stderr
-		err := command.Run()
+		releaseLog, err := ansible.HoldCommandLog(cctx, command)
+		if err != nil {
+			return "", 0, fmt.Errorf("ansible diagnose step: %w", err)
+		}
+		err = command.Run()
+		releaseLog()
 		exitCode = 0
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

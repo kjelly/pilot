@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/networkcheck"
 )
@@ -182,9 +183,11 @@ func resolveNetworkCheckInventory(ctx context.Context, inventory string) (networ
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	release := holdDeployAnsibleLog(ctx)
-	err := command.Run()
-	release()
+	release, err := ansible.HoldCommandLog(ctx, command)
+	if err == nil {
+		err = command.Run()
+		release()
+	}
 	if err != nil {
 		return networkcheck.ResolvedInventory{}, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
@@ -199,9 +202,12 @@ func realAdHocRunner(baseCtx context.Context) networkcheck.AdHocRunner {
 		cctx, cancel := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
 		defer cancel()
 		command := deployAnsibleCommand(cctx, "ansible", args...)
-		release := holdDeployAnsibleLog(cctx)
-		out, err := command.CombinedOutput()
-		release()
+		var out []byte
+		release, err := ansible.HoldCommandLog(cctx, command)
+		if err == nil {
+			out, err = command.CombinedOutput()
+			release()
+		}
 		exitCode := 0
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
