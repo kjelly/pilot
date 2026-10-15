@@ -348,7 +348,7 @@ func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return notFoundPattern.MatchString(res.Stdout), nil
+	return notFoundPattern.MatchString(inspectionFor(res.Stdout, e.fqdn)), nil
 }
 
 // Execute runs the real central reconciler (playbooks/apply/freeipa-
@@ -416,7 +416,8 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client verify %s: host object query: %w", fqdn, err)
 	}
-	hostAbsent := notFoundPattern.MatchString(hostRes.Stdout)
+	host := inspectionFor(hostRes.Stdout, fqdn)
+	hostAbsent := notFoundPattern.MatchString(host)
 	out = append(out, Verification{
 		Provider: FreeIPAClientProviderID, Kind: "host_object", Identity: fqdn,
 		Status: statusForAbsence(hostAbsent), Active: !hostAbsent,
@@ -430,16 +431,17 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 			Verification{Provider: FreeIPAClientProviderID, Kind: "service_principal", Identity: fqdn, Status: "pass", Detail: "host object absent"},
 		)
 	} else {
-		out = append(out, membershipVerification("hostgroup_membership", fqdn, memberOfHostgroupPattern.FindAllStringSubmatch(hostRes.Stdout, -1)))
-		out = append(out, membershipVerification("netgroup_membership", fqdn, memberOfNetgroupPattern.FindAllStringSubmatch(hostRes.Stdout, -1)))
-		out = append(out, servicePrincipalVerification(fqdn, unknownServicePrincipals(hostRes.Stdout, fqdn)))
+		out = append(out, membershipVerification("hostgroup_membership", fqdn, memberOfHostgroupPattern.FindAllStringSubmatch(host, -1)))
+		out = append(out, membershipVerification("netgroup_membership", fqdn, memberOfNetgroupPattern.FindAllStringSubmatch(host, -1)))
+		out = append(out, servicePrincipalVerification(fqdn, unknownServicePrincipals(host, fqdn)))
 	}
 
 	dnsRes, err := p.query(ctx, "host_dns", fqdn)
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client verify %s: dns query: %w", fqdn, err)
 	}
-	dnsAbsent := notFoundPattern.MatchString(dnsRes.Stdout) || len(aRecordPattern.FindAllStringSubmatch(dnsRes.Stdout, -1)) == 0
+	dns := inspectionFor(dnsRes.Stdout, fqdn)
+	dnsAbsent := notFoundPattern.MatchString(dns) || len(aRecordPattern.FindAllStringSubmatch(dns, -1)) == 0
 	out = append(out, Verification{
 		Provider: FreeIPAClientProviderID, Kind: "host_dns", Identity: fqdn,
 		Status: statusForAbsence(dnsAbsent), Active: !dnsAbsent,
@@ -454,7 +456,7 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 		if err != nil {
 			return nil, fmt.Errorf("freeipa-client verify %s: %s query: %w", fqdn, q.query, err)
 		}
-		found := rulesNamingHost(res.Stdout, fqdn)
+		found := rulesNamingHost(inspectionFor(res.Stdout, fqdn), fqdn)
 		detail := fmt.Sprintf("%d direct rule reference(s) live", len(found))
 		if len(found) > 0 {
 			detail += ": " + strings.Join(found, ", ")
@@ -572,6 +574,62 @@ func ruleBlockNamesHost(block, want string, short bool) bool {
 	return false
 }
 
+// hostInspectMarkerPattern finds each "HOST_INSPECT[<host>]: " marker the
+// identity playbook's read-only inspection tasks print.
+var hostInspectMarkerPattern = regexp.MustCompile(`HOST_INSPECT\[([^\]]*)\]: ?`)
+
+// inspectionFor returns the HOST_INSPECT text a query printed for fqdn
+// (several blocks joined). The query runs with --tags
+// freeipa_host_absent_inspect, which also prints one HOST_INSPECT block for
+// every `state: absent` host in the roster, and retired hosts stay there as
+// tombstones. Reading the whole stdout let another host's "host not found"
+// stand for this one: the converge step looked done, Plan skipped the
+// unknown-service check and Verify passed a host that still existed (issue
+// #108). Each block ends at the end of its debug message (the first
+// unescaped double quote) or at the next marker. Text with no marker at all
+// is returned unchanged.
+func inspectionFor(stdout, fqdn string) string {
+	locs := hostInspectMarkerPattern.FindAllStringSubmatchIndex(stdout, -1)
+	if len(locs) == 0 {
+		return stdout
+	}
+	var parts []string
+	for i, m := range locs {
+		if !strings.EqualFold(strings.TrimSpace(stdout[m[2]:m[3]]), strings.TrimSpace(fqdn)) {
+			continue
+		}
+		end := len(stdout)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := stdout[m[1]:end]
+		if j := unescapedQuote(body); j >= 0 {
+			body = body[:j]
+		}
+		parts = append(parts, body)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// unescapedQuote returns the index of the first double quote in s not
+// escaped by a backslash, or -1.
+func unescapedQuote(s string) int {
+	backslashes := 0
+	for i, r := range s {
+		switch r {
+		case '\\':
+			backslashes++
+			continue
+		case '"':
+			if backslashes%2 == 0 {
+				return i
+			}
+		}
+		backslashes = 0
+	}
+	return -1
+}
+
 // discoverUnknownServicePrincipals runs the same read-only host_object
 // query Verify uses and classifies every service principal managed by
 // this host OTHER than its own host/<fqdn> identity as unknown (spec.md
@@ -587,10 +645,11 @@ func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Con
 	if err != nil {
 		return nil, fqdn, err
 	}
-	if notFoundPattern.MatchString(res.Stdout) {
+	host := inspectionFor(res.Stdout, fqdn)
+	if notFoundPattern.MatchString(host) {
 		return nil, fqdn, nil // host object already gone -- nothing to check, nothing to resolve
 	}
-	return unknownServicePrincipals(res.Stdout, fqdn), resolveAuthoritativeFQDN(res.Stdout, fqdn), nil
+	return unknownServicePrincipals(host, fqdn), resolveAuthoritativeFQDN(host, fqdn), nil
 }
 
 // resolveAuthoritativeFQDN prefers `ipa host-show`'s own "Host name:"

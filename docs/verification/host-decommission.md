@@ -180,6 +180,16 @@ lists every rule (`--all --sizelimit=0`) and reports the rules whose
 from "Hosts:", but a sudo rule can keep it as an external host. A
 truncated or failed listing fails the query.
 
+**Tombstones (issue #108, 2026-10-15).** The queries run with `--tags
+freeipa_host_absent_inspect`, which also prints a `HOST_INSPECT` block for
+every `state: absent` host in the roster, and retired hosts stay there as
+tombstones. Until this date the provider read the whole stdout, so from
+the second decommission in a workspace on, an earlier host's "host not
+found" stood for the target: the central converge step looked done and
+skipped host-del, Plan skipped the HD12 unknown-service check, and Verify
+passed HD10 for a host or DNS record that still existed. Every check now
+reads only the target's own `HOST_INSPECT[<fqdn>]` blocks.
+
 **Known gap (2026-10-15).** The DNS part of HD10 reports pass when
 `ipa dnsrecord-show` fails for any reason, and the cleanup step skips the
 surgical DNS delete on such a failure (issue #105). Since issue #102 the
