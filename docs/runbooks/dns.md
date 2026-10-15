@@ -15,7 +15,9 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 **PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
 [`docs/evidence/freeipa-replica-dns-provider/2026-10-15-287cf79.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-287cf79.md)；
 同一 candidate 上與 `44e2d20` 的對照實跑（名稱不符的 replica、forwarders 收斂前後、replica 自己的 forwarders、forwarder gate）見
-[`2026-10-15-287cf79-targeted.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-287cf79-targeted.md)。
+[`2026-10-15-287cf79-targeted.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-287cf79-targeted.md)；
+還沒 promote 的 replica、`site.yml`、`freeipa_setup_dns: true`、promote 後重跑與 `main` 的對照見
+[`2026-10-15-287cf79-round1.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-287cf79-round1.md)。
 合併前的 candidate：[`2026-10-15-5750f2a.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-5750f2a.md)、
 [`2026-10-15-09ded7e.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-09ded7e.md)（兩輪都沒有在執行當下記錄 image digest）。
 dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
@@ -183,3 +185,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 2026-10-01 | v1.3 | §7：consumer 有 2 筆以上 nameserver 時 resolver 逾時改成 1 秒（`freeipa-dns-client.md` C7）；證據為 candidate `5478c5d` | sre |
 | 2026-10-14 | v1.4 | §0.5 改指向 candidate `01a64f4`（PR #73 follow-up：未 promote 的 replica、forwarder 規則與 gate），事實表換成這次的 target 與 inventory，並註明 dns 的 L3 preview 停在 G5 | pilot |
 | 2026-10-15 | v1.5 | §0.5 改指向 PR #92 與 `main`（#91）合併後的 candidate `287cf79`（6 台新建 VM，run ID、image digest、套件版本在執行當下記錄），結果欄只寫這輪實跑的情境。PR #92 第二、三輪（`09ded7e`、`5750f2a`）改 §0.5 時沒有補這裡的變更紀錄，一併記在這列 | pilot |
+| 2026-10-15 | v1.6 | §0.5 加上同一 candidate `287cf79` 的對照實跑：round 2 的 targeted checks（`287cf79-targeted`）與 round 1 的情境（`287cf79-round1`），兩份都在執行當下記錄 metadata；`01a64f4`、`09ded7e`、`5750f2a` 三份舊 record 標為 superseded | pilot |
