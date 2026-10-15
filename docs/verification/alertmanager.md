@@ -140,11 +140,13 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 - 工具：`pilot verify docs/verification/alertmanager.md -i <inventory> -l alertmanager`
 - 輸出格式：`.verification/alertmanager-<UTC>.{ndjson,md}`
 - 預期 row 數：10
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-69185d7.md`
-  （2026-10-15，candidate `69185d7`，tree `b28155ce`；全新 4 台 vm-target，`null` mode；
-  L1-L6 PASS，本 spec 10/10 PASS（run `1f0cfedb-2063-4faa-9aef-3d25215402d0`）；C10 經真實 verify
-  pipeline 對已部署的 Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL；同一輪在真實
-  Alertmanager 上實測資料缺口（含 probe 單輪失敗）、整台主機停擺、兩台 probe 其中一台停擺的抑制行為）。
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-5da3446.md`
+  （2026-10-15，candidate `5da3446`，tree `a728050c`；全新 4 台 vm-target，`null` mode；L1-L6 PASS，
+  本 spec 10/10 PASS（run `4c16cd7c-b5c6-4e05-af1a-d2f640d63497`）；C10 經真實 verify pipeline 對已部署的
+  Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL）。抑制行為的實測——資料缺口
+  （含 probe 單輪失敗）、整台主機停擺、兩台 probe 其中一台停擺——見
+  `docs/evidence/login-probe/2026-10-15-69185d7.md`；兩個 candidate 之間部署、規則與 Alertmanager 設定
+  完全相同（整個 tree 的差異只有 `Makefile`、測試、文件與 `prometheus-apply.yml` 的註解）。
 - 歷史：Teams mode 的 `/render` 與通知實測見 `docs/evidence/alertmanager/2026-09-17-30d6b92.md`
   （當時 9 個 row，早於 C10 與 issue #11 的 inhibit 規則）。
 
