@@ -303,6 +303,28 @@ func TestRegression_LogServerRescueRestoresWhatItChanged(t *testing.T) {
 	slurp := taskNamed(t, body, "Snapshot: keep the content of those that are")
 	restore := taskNamed(t, rescue, "ROLLBACK — put back the content of the files this apply changed")
 	remove := taskNamed(t, rescue, "ROLLBACK — remove the files this apply created")
+	// The rescue restarts rsyslog only if rsyslogd accepts the restored
+	// configuration: after a failure caused by another package's invalid
+	// drop-in, the unconditional restart left rsyslog without the drop-ins
+	// sorting after it, and the next run reported changed=0 (2026-10-15).
+	validate, restart := -1, -1
+	for i, task := range rescue {
+		switch task["name"] {
+		case "ROLLBACK — validate the restored rsyslog configuration":
+			validate = i
+			if cmd, _ := task["ansible.builtin.command"].(string); !strings.Contains(cmd, "rsyslogd -N1") || task["register"] != "log_server_rescue_syntax" {
+				t.Errorf("the rescue's validation must run rsyslogd -N1 into log_server_rescue_syntax; got %v", task)
+			}
+		case "ROLLBACK — restart rsyslog with the restored configuration":
+			restart = i
+			if when, _ := task["when"].(string); !strings.Contains(when, "log_server_rescue_syntax.rc") {
+				t.Errorf("the rescue must restart rsyslog only when the restored configuration validates; when = %v", task["when"])
+			}
+		}
+	}
+	if validate < 0 || restart < 0 || validate > restart {
+		t.Errorf("the rescue must validate the restored configuration before restarting rsyslog; got indexes %d, %d", validate, restart)
+	}
 	if loop, _ := stat["loop"].([]any); len(loop) != 3 || loop[2] != "/etc/apparmor.d/local/usr.sbin.rsyslogd" {
 		t.Fatalf("the snapshot must cover the receiver config, the logrotate policy and the AppArmor local file; got %v", stat["loop"])
 	}

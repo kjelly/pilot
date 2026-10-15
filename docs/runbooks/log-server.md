@@ -276,6 +276,6 @@ matcher 真正檢驗過。
   log-server 步驟）。spec 的 C5–C8 從接收設定讀出實際的 port 與目錄，不用改 spec；
   client 端的 `siem_forward_port` 要改成同一個 port。
 - **換掉非預設根目錄之後（EL）**：舊目錄的 SELinux file-context 規則不會自動移除。
-  用 `semanage fcontext -l | grep '<舊目錄>'` 找到規則（目錄名裡的 `.` 寫成 `\.`），
-  再 `semanage fcontext -d '<規則>'` 移除；`semanage` 在 `policycoreutils-python-utils`
-  套件裡。Ubuntu 的 AppArmor 規則只保留目前的目錄，不用手動清。
+  `semanage fcontext -l -C` 只列本機加的規則（目錄名裡的 `.` 會顯示成 `\.`，例如
+  `/srv/siem\.el2(/.*)?`），再用 `semanage fcontext -d '<該行第一欄>'` 移除；`semanage` 在
+  `policycoreutils-python-utils` 套件裡。Ubuntu 的 AppArmor 規則只保留目前的目錄，不用手動清。

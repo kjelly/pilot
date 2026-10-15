@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/log-shipping.md v1.1
+# Apply playbook for docs/verification/log-shipping.md v1.5
 #
 # Agent role that layers ON TOP of docs/verification/log-server.md (same
 # inventory group, same host) WITHOUT modifying that playbook/spec at all —

@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/log-server.md v1.2
+# Apply playbook for docs/verification/log-server.md v1.7
 # rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
 # client hosts. It writes two drop-ins (10-siem-receiver.conf,
 # siem-incoming) and, for a siem_log_root outside /var/log, a block in the
@@ -6,8 +6,9 @@
 # file-context rule (EL). The block starts by reading those three files;
 # the rescue puts back their content from before the run (removing those
 # the run created), reloads the AppArmor profile, removes a file-context
-# rule the run added, and restarts rsyslog. It does not remove the log root
-# directory or an SELinux port label (tasks/rsyslog-selinux-tcp-port.yml).
+# rule the run added, and restarts rsyslog if `rsyslogd -N1` accepts the
+# restored configuration. It does not remove the log root directory or an
+# SELinux port label (tasks/rsyslog-selinux-tcp-port.yml).
 #
 # Usage (dry run):
 #   ./pilot vm-target run --name log-server \
@@ -590,11 +591,28 @@
             - rsyslog_selinux_fcontext is defined
             - rsyslog_selinux_fcontext is changed
 
+        # A failure caused by something this playbook does not manage (an
+        # invalid drop-in of another package) is still there after the
+        # restore. Restarting then would replace a running rsyslog with one
+        # that could not read its configuration: it kept the receiver but
+        # lost every drop-in sorting after the invalid one, and the next run
+        # reported changed=0 (2026-10-15, pr79-log). Restart only a
+        # configuration rsyslogd accepts; otherwise the running rsyslog keeps
+        # what it has.
+        - name: "ROLLBACK — validate the restored rsyslog configuration"
+          tags: [always]
+          ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
+          register: log_server_rescue_syntax
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
         - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
+          when: (log_server_rescue_syntax.rc | default(1)) == 0
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]
@@ -604,7 +622,10 @@
               receiver and logrotate drop-ins and the AppArmor local file are
               back to their content from before this run (removed if this run
               created them), the AppArmor profile was reloaded and an SELinux
-              file-context rule this run added was removed, and rsyslog was
-              restarted. Left in place: the log root directory and an SELinux
-              port label for siem_receiver_tcp_port. Fix the failing task and
-              re-run.
+              file-context rule this run added was removed.
+              {{ 'rsyslog was restarted with the restored configuration.'
+                 if (log_server_rescue_syntax.rc | default(1)) == 0 else
+                 'rsyslog was NOT restarted: rsyslogd -N1 still rejects the configuration (rc='
+                 ~ (log_server_rescue_syntax.rc | default('?')) ~ '), so the running rsyslog keeps what it has.' }}
+              Left in place: the log root directory and an SELinux port label
+              for siem_receiver_tcp_port. Fix the failing task and re-run.
