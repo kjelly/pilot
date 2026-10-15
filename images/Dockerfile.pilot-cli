@@ -192,7 +192,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   §1.1 actual-run rule) — ansible failed with "couldn't resolve
 #   module/action 'community.general.nmcli'" until this collection was added.
 #   Also backs community.general.seport (playbooks/apply/tasks/
-#   rsyslog-selinux-tcp-port.yml, SIEM ports on SELinux hosts).
+#   rsyslog-selinux-tcp-port.yml, SIEM ports on SELinux hosts) and
+#   community.general.sefcontext (tasks/rsyslog-confined-log-root.yml and
+#   log-server-apply.yml's rescue, a non-default SIEM log root on SELinux
+#   hosts). CI's playbook-lint job installs the same collections
+#   (cmd/pilot/cmd/ansible_core_pin_consistency_test.go).
 #
 
 # Collections install to the system-wide path (-p), not the default

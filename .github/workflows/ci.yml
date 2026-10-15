@@ -74,7 +74,7 @@ jobs:
       - name: Install ansible toolchain
         run: |
           python3 -m pip install "ansible-core==2.19.*" ansible-lint pyyaml
-          ansible-galaxy collection install ansible.posix community.docker community.postgresql
+          ansible-galaxy collection install ansible.posix community.docker community.postgresql community.general
 
       - name: make playbook-lint
         run: make playbook-lint
