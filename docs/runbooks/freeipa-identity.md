@@ -307,6 +307,10 @@ onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名�
     （`ssh_keys: []`；canonical roster 是 `ssh_keys: {authoritative: true, values: []}`），
     playbook 會送 `--sshpubkey=` 清空。2026-10-15 之前空 list 不會清除任何金鑰
     （issue #113）。整個省略 `ssh_keys` 則表示不管理該帳號的金鑰，既有金鑰保持不變。
+  - **主機端的生效時間**：apply 只改 FreeIPA。已 enroll 的主機從 SSSD 快取讀金鑰，
+    撤銷或新增要等該主機的 SSSD 更新該使用者的快取才生效。2026-10-15 實測從 1 分鐘內到
+    超過 16 分鐘都有（預設 `entry_cache_timeout` 為 5400 秒）。要立即生效，在主機上執行
+    `sss_cache -u <user>`（issue #114 追蹤）。
   - 一次多把金鑰 → list 放多行即可。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
