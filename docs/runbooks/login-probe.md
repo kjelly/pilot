@@ -21,7 +21,7 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 | 目標環境 | 四台 ephemeral VM（topology 副本把 `lp-` 改名為 `pr80-`，`services: local`；此輪 Harbor 未再回 `401`，不需要 `services: none`）：`pr80-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr80-mon`（Ubuntu 24.04.4：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`pr80-target`（Ubuntu 24.04.4，有 PSI）、`pr80-target-el`（AlmaLinux 9.8，EL9 預設沒有 PSI）。node_exporter 1.12.1。 |
 | base image | 每台 VM 都是 `overlay.qcow2` 疊在 golden image 上：`almalinux-9-golden.qcow2` SHA-256 `b780998adca7c69ff6dbd41a05b51769ef6ab6708a7defbd286195186fbcc8ac`；`ubuntu-24.04-golden.qcow2` SHA-256 `bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394` |
 | inventory host 集合 | `pilot vm-target topology inventory` 產生：`freeipa-server`={pr80-ipa}；`freeipa-client`/`host-monitoring`={pr80-mon, pr80-target, pr80-target-el}；`docker`/`seaweedfs-s3`/`prometheus`/`alertmanager`/`login-probe`={pr80-mon} |
-| vault 依賴（只列 key） | `ipa_admin_password`、`node_exporter_basic_auth_password`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`、`restic_aws_access_key_id`、`restic_aws_secret_access_key`（此輪用一次性 vault）。login-probe 本身不需要 secret（`login_probe_ssh_private_key` 選填） |
+| vault 依賴（只列 key） | `ipa_admin_password`、`node_exporter_basic_auth_password`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`、`restic_aws_access_key_id`、`restic_aws_secret_access_key`（此輪用一次性 vault）。login-probe 本身需要 `node_exporter_basic_auth_password`（跟同主機 host-monitoring 同一個值，apply 用它確認 node_exporter 有讀到 textfile）；`login_probe_ssh_private_key` 選填 |
 | 對齊決定 | A（改 inventory）：topology 檔就是 spec §1 宣告的 group 集合 |
 | candidate topology test | 2026-10-15 00:42–01:02 UTC，`topology test` rc=0：L1 syntax PASS；L3 `--check --diff` 四台 `failed=0`；L4 四台 `failed=0`（pr80-ipa changed=22、pr80-mon=69、pr80-target=33、pr80-target-el=30）；L5 login-probe 14/14、Alertmanager 10/10 PASS；L6 四台 `changed=0`。 |
 | `HostIOStall` 實測 | 預設門檻（0.25、10m）下，`pr80-target` 跑 `dd oflag=dsync` 製造 I/O 壓力：`rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])`=0.303，01:09 UTC pending、01:17 UTC firing，Alertmanager 收到 `HostIOStall{pilot_host="pr80-target"}`；沒有負載的 `pr80-mon` 沒有觸發。node_exporter 的 PSI series 沒有 `kind` label（`stalled`=full、`waiting`=some），規則不得加 `kind=` matcher。 |
@@ -93,9 +93,9 @@ sudo -u pilot-login-probe /usr/local/bin/pilot-login-probe probe \
 | `PilotLoginProbeLoginStalled`（critical） | `timeout`：連上了但登入卡住 | target 上 `ps -o pid,stat,comm -C sssd_be,sssd_pam,sssd_nss`（`T`=stopped）、`journalctl -u sssd`；同時看 `HostIOStall`/`HostDiskLatencyHigh`。這時 `sssctl user-checks` 本身也會卡住（2026-10-13 實測 `sssd_be` 被凍結時 20 秒逾時），一律包 `timeout 20` 執行 |
 | `PilotLoginProbeHostKeyMismatch`（warning） | `hostkey` | 主機是否重裝/重產 host key 而沒重新 enroll；名字是否指到別台機器 |
 | `PilotLoginProbeSessionFailed`（warning） | `session` | 認證與 account 都過了，指令或 session 失敗（home、shell） |
-| `PilotLoginProbeTransportFailed`（warning） | `transport` | sshd、防火牆、DNS；同主機 `HostDown` 也在時會被 inhibit |
-| `PilotLoginProbeStale`（warning） | — | 探測主機 `systemctl status pilot-login-probe`；它觸發時同 site 的其他 `PilotLoginProbe*` 會被 inhibit |
-| `HostMetricsMissing`（warning） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符 |
+| `PilotLoginProbeTransportFailed`（warning） | `transport` | sshd、防火牆、DNS。node_exporter 也抓不到的主機不會觸發這個告警，只會有 `HostDown` |
+| `PilotLoginProbeStale`（warning，`action_required`） | — | 探測主機 `systemctl status pilot-login-probe`。它觸發時，**這台 probe**（`probe_host`）的其他 `PilotLoginProbe*` 會被 inhibit，其他 probe 的告警不受影響 |
+| `HostMetricsMissing`（warning，`action_required`） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符。它觸發時同主機的 `HostDown{job="node"}` 會被 inhibit（主機還活著） |
 | `HostIOStall` / `HostDiskLatencyHigh` / `HostDiskQueueDeep`（warning） | — | `node_disk_*` 依 device 拆開看；EL9 預設沒有 PSI，只會有後兩者 |
 | `HostPSIUnavailable`（info） | — | 這台主機沒有 PSI metrics，`HostIOStall` 不會在這台觸發 |
 
@@ -130,6 +130,9 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 `playbooks/decommission/login-probe-target-query.yml` 確認是否還列在清單上，已經不在就跳過，
 最後 verify 再查一次，任何一台 login-probe 主機沒有回報都算失敗，不會當成已清除。
 
+這個 step 會像 `pilot deploy` 一樣帶 workspace 的 `.vault/main.yaml`（`-e @<path>`，只傳檔案路徑），
+因為 `login-probe-apply.yml` 的 gate 需要 `node_exporter_basic_auth_password`。
+
 退役 login-probe 主機**本身**目前不支援（plan 會因 `login-probe` 沒有 decommission provider
 而 fail closed，跟 prometheus/detection-engine 主機一樣）。
 
@@ -153,7 +156,18 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 - 第一版 opt-in（`site.include: false`），但已 import 進 `playbooks/site.yml`，主機被加進
   `login-probe` group 後全站部署會套用。
 - 目標名稱必須是小寫 inventory 名稱（`probe_target` 要等於 Prometheus 的
-  `pilot_host`，否則 login 告警永遠對不上主機）；playbook 會 fail closed。
+  `pilot_host`，否則 login 告警永遠對不上主機）；自動展開時 playbook 會 fail closed。
+  明確設定 `login_probe_targets` 時 playbook 無法檢查：`name=` 必須寫成該主機的
+  inventory 名稱，否則 `HostMetricsMissing` 的 join，以及「主機掛掉時不送
+  `PilotLoginProbeTransportFailed`」的排除，都會靜默失效（`alertmanager.md` §1.7）。
+- 解析不到的 target 不會擋下部署：它留在設定裡，apply 印出 WARNING，probe 回報
+  `transport`，觸發 `PilotLoginProbeTransportFailed`。全部 target 都解析不到時才會
+  fail closed（通常是 `login_probe_domain` 寫錯，或探測主機本身的 DNS 壞了）。
+- 從 `hosts.yml` 拿掉某台主機的 `login-probe` role（主機本身沒有退役）時，沒有任何
+  playbook 會移除它：`pilot-login-probe.service` 會繼續跑，也繼續寫 textfile。請在那台
+  主機上手動清掉：`systemctl disable --now pilot-login-probe`，再刪除
+  `/var/lib/node_exporter/textfile/pilot_login_probe.prom`。刪掉 textfile 之後，
+  這台 probe 的 series 會消失，Prometheus 上也不會再有它的告警。
 - `prometheus.md` 的 C16–C19（GPU）在沒有 dcgm-exporter 主機的站台一定 FAIL，跟本功能無關。
 - C22 要等 Prometheus head 約 3 小時切出第一個 2h block，再由 Thanos Sidecar 上傳；fresh topology 剛部署時預期 FAIL，至少等待約 3 小時後再驗收此 row。
 - I/O、SSSD 卡住、metrics 缺口、probe 停擺、全站 HBAC 拒絕這幾個演練跑在 candidate 之前的

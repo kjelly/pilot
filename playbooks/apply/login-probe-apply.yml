@@ -249,16 +249,32 @@
       check_mode: false
       tags: [always]
 
-    - name: "Gate: assert every target FQDN resolves"
+    # One target that does not resolve stays in the config: the probe
+    # reports it as stage=transport (capture transport-unresolvable), so
+    # PilotLoginProbeTransportFailed names it, and it never blocks the
+    # deploy or a decommission re-render of every other target. No target
+    # resolving at all is a wrong login_probe_domain or broken DNS on this
+    # host, and is refused.
+    - name: "Gate: at least one target FQDN resolves"
       ansible.builtin.assert:
         that:
-          - (login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0) | list | length) == 0
+          - (login_probe_target_list | length) == 0 or
+            (login_probe_target_resolve.results | selectattr('rc', 'equalto', 0) | list | length) > 0
         fail_msg: >-
-          these probe targets do not resolve on {{ inventory_hostname }}:
-          {{ login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0)
-             | map(attribute='item') | map(attribute='host') | list }}.
-          Fix DNS / the /etc/hosts pin, or set login_probe_targets
-          explicitly — never fall back to an IP address silently.
+          no probe target resolves on {{ inventory_hostname }}:
+          {{ login_probe_target_resolve.results | map(attribute='item') | map(attribute='host') | list }}.
+          Check login_probe_domain and this host's DNS / the /etc/hosts pin, or set
+          login_probe_targets explicitly — never fall back to an IP address silently.
+      tags: [always]
+
+    - name: "Warn: these targets do not resolve; the probe reports them as transport failures"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | map(attribute='host') | list }} do not resolve on
+          {{ inventory_hostname }}. They stay probe targets and raise
+          PilotLoginProbeTransportFailed until DNS / the /etc/hosts pin is fixed.
+      when: (login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0) | list | length) > 0
       tags: [always]
 
     - name: "Gate: artifact path is supplied"
@@ -442,6 +458,10 @@
         login_probe_previous_group_exists: "{{ login_probe_group_before.rc == 0 }}"
       tags: [always]
 
+    # --check mutates nothing, so it takes no snapshot: the directory would
+    # not be created in check mode, and copying an existing managed file
+    # into it failed every --check --diff of an already-deployed probe host
+    # (a fresh host has no file to copy, which is why L3 never saw it).
     - name: "Create the private rollback snapshot directory"
       ansible.builtin.file:
         path: "{{ login_probe_rollback_dir }}"
@@ -450,6 +470,7 @@
         group: root
         mode: "0700"
       changed_when: false
+      when: not ansible_check_mode
       tags: [always]
 
     - name: "Snapshot every existing managed file before mutation"
@@ -465,6 +486,7 @@
         label: "{{ item.item }}"
       no_log: true
       changed_when: false
+      when: not ansible_check_mode
       tags: [always]
 
   tasks:
@@ -891,6 +913,8 @@
           register: login_probe_rollback_file_restore
           no_log: true
           ignore_errors: true
+          # --check took no snapshot and changed no file.
+          when: not ansible_check_mode
 
         - name: "ROLLBACK — remove managed files created by this failed first install"
           tags: [always]

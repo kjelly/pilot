@@ -76,9 +76,9 @@
 | `host_disk_latency_min_ops_per_second` | `HostDiskLatencyHigh` 只看每秒完成 I/O 數高於此值的裝置（避免極少量 I/O 的單次慢操作誤報） | 否 | `1` |
 | `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
 | `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
-| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0` 但同一台主機的 login probe 仍登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:` | 否 | `3m` |
+| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但同一台主機仍有一台還在寫 textfile 的 login probe 登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:`。必須短於 seed `HostDown` 的 10m（playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
 | `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
-| `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（`HostDown` 同時觸發時由 Alertmanager 抑制） | 否 | `5m` |
+| `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
 | `login_probe_alert_keep_firing_for` | 所有 login-probe 告警的 `keep_firing_for:`，避免單輪恢復造成 resolve/re-fire 抖動 | 否 | `5m` |
 | `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe 的 textfile 超過此秒數沒有重寫（daemon 每 15 秒寫一次） | 否 | `180` |
 
@@ -326,3 +326,4 @@
 | 2026-10-12 | v1.6 | 新增 C21/C22，`prometheus_retention_time` 預設由 `6h` 改為 `24h`。正式環境的 Thanos Sidecar 從來沒有上傳成功：`/prometheus` 以 `:ro` 掛載，上傳前建立 `thanos/upload` 目錄失敗，Store Gateway 載入 0 個 block，歷史資料只剩本機 6 小時。只拿掉 `:ro` 仍會因 uid 不同被拒（本機實測），所以 Sidecar 改以 `65534:65534` 執行並可寫入。C9 只檢查讀得到 bucket，抓不到這個問題；C21 檢查 Sidecar 的實際寫入權限，C22 檢查 bucket 裡有這一站 6 小時內的 block。本地緩衝改為 24 小時，S3 中斷不超過一天不會掉資料；長期保留期限見 `thanos-query.md` v1.3 | pilot |
 | 2026-10-12 | v1.7 | C8/C22 只讀 `global.external_labels.site`，`prometheus.yml` 的 site 改以 JSON 字串渲染。PR #39 review 在 vm-target 上發現：設了 `kind: snmp` profile 時 snmp-exporter job 的 `site` label 也被抓進 C22 的 selector，Thanos 拒絕解析，C22 永遠 FAIL；同一個寫法讓 C8 在沒有 external_labels 時仍然 PASS。新增 `prometheus_site_selector_behavior_test.go` 用 SNMP 渲染結果實際跑這兩行 | pilot |
 | 2026-10-14 | v1.8 | 保留主線新增的 C20–C22（執行中 container 的設定掛載、Sidecar 寫入權限與實際上傳），將 issue #11 的 host-health rule file 驗收改編為 C23–C24；container traceability 同時覆蓋設定掛載漂移與載入的告警規則 | pilot |
+| 2026-10-15 | v1.9 | PR #80 review（GitHub issue #11）：login-probe 告警都帶 `probe_host`，配合 `alertmanager.md` §1.7 的新 inhibit；`PilotLoginProbeTransportFailed` 排除 node scrape 也失敗的主機；`HostMetricsMissing` 只採信仍在寫 textfile 的 probe；`HostMetricsMissing` 與 `PilotLoginProbeStale` 加上 `action_required="true"`；`host_metrics_missing_for` 必須短於 10m。row 未變 | sre |

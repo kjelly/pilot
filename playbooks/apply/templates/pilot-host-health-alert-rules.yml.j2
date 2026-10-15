@@ -9,8 +9,11 @@
 # Identity: node_exporter series carry pilot_host (prometheus-apply.yml's
 # per-target label). The login probe publishes probe_target instead
 # (pilot_host on those series is the PROBE host), so every login-probe
-# rule projects probe_target onto pilot_host — Alertmanager's inhibit rules
-# and the dashboards then key on one host identity.
+# rule projects probe_target onto pilot_host — the joins with up{job="node"}
+# and the dashboards then key on one host identity — and keeps the probe
+# host as probe_host, which Alertmanager's PilotLoginProbeStale inhibit
+# matches on (one stalled probe mutes its own alerts, never another
+# probe's; docs/verification/alertmanager.md §1.7).
 groups:
   - name: pilot-host-io
     rules:
@@ -109,18 +112,29 @@ groups:
     rules:
       # A monitoring data gap, distinct from a host outage: node_exporter is
       # not being scraped, yet an SSH login to the same host succeeded in
-      # the same window. HostDown (seed rules) covers the "really down"
-      # case and Alertmanager inhibits this alert while HostDown fires.
+      # the same window. Only a probe that is still writing its textfile
+      # counts: a stalled probe's frozen success=1 says nothing about now.
+      # While this fires, Alertmanager inhibits the seed HostDown{job="node"}
+      # of the same host (it answers SSH, so it is not down); the playbook
+      # keeps host_metrics_missing_for below HostDown's 10m so HostDown never
+      # notifies first. action_required routes it to Teams, which would
+      # otherwise get nothing for a data gap.
       - alert: HostMetricsMissing
         expr: |
           max by (pilot_host) (up{job="node"} == 0)
           and on (pilot_host)
           max by (pilot_host) (
-            label_replace(pilot_login_probe_success == 1, "pilot_host", "$1", "probe_target", "(.+)")
+            label_replace(
+              (pilot_login_probe_success == 1)
+              and on (job, instance)
+              (time() - pilot_login_probe_metrics_last_write_timestamp_seconds <= {{ login_probe_stale_seconds }}),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           )
         for: {{ host_metrics_missing_for }}
         labels:
           severity: warning
+          action_required: "true"
           pilot_alert_source: host-health
         annotations:
 {% raw %}
@@ -135,8 +149,11 @@ groups:
       # is active (issue #11 AC2).
       - alert: PilotLoginProbeAccountDenied
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="account"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="account"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
         for: {{ login_probe_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
@@ -150,8 +167,11 @@ groups:
 {% endraw %}
       - alert: PilotLoginProbeAuthFailed
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="auth"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="auth"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
         for: {{ login_probe_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
@@ -167,8 +187,11 @@ groups:
       # frozen while sssd.service still reports active, or storage stalls).
       - alert: PilotLoginProbeLoginStalled
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="timeout"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="timeout"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
         for: {{ login_probe_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
@@ -182,8 +205,11 @@ groups:
 {% endraw %}
       - alert: PilotLoginProbeHostKeyMismatch
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="hostkey"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="hostkey"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
         for: {{ login_probe_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
@@ -197,8 +223,11 @@ groups:
 {% endraw %}
       - alert: PilotLoginProbeSessionFailed
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="session"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="session"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
         for: {{ login_probe_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
@@ -210,12 +239,19 @@ groups:
           summary: "SSH logins to {{ $labels.pilot_host }} authenticate but the session fails"
           description: "Authentication and PAM account passed, but the probe command did not exit 0 (session setup, home directory or shell problem)."
 {% endraw %}
-      # Inhibited by HostDown for the same host (Alertmanager).
+      # A host whose node_exporter scrape also fails is down, and the seed
+      # HostDown alert is the one to act on: excluding it here makes a dead
+      # host yield only HostDown, whatever the two `for:` durations are.
       - alert: PilotLoginProbeTransportFailed
         expr: |
-          max by (pilot_host) (
-            label_replace(pilot_login_probe_last_stage{stage="transport"}, "pilot_host", "$1", "probe_target", "(.+)")
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="transport"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
           ) == 1
+          unless on (pilot_host)
+          max by (pilot_host) (up{job="node"} == 0)
         for: {{ login_probe_transport_alert_for }}
         keep_firing_for: {{ login_probe_alert_keep_firing_for }}
         labels:
@@ -224,18 +260,22 @@ groups:
         annotations:
 {% raw %}
           summary: "No SSH connection can be established to {{ $labels.pilot_host }}"
-          description: "Refused, filtered, unresolvable or no SSH banner. If HostDown also fires for this host, that alert is the one to act on."
+          description: "Refused, filtered, unresolvable or no SSH banner, while node_exporter on the host is still scraped (a host whose scrape fails too raises HostDown instead)."
 {% endraw %}
       # The probe itself stopped publishing: its own frozen series would
       # otherwise keep (or never raise) the alerts above. Alertmanager
-      # inhibits every other PilotLoginProbe* alert of the same site while
-      # this fires.
+      # inhibits the other PilotLoginProbe* alerts of the same probe_host
+      # while this fires, so it must reach someone: action_required routes
+      # it to Teams.
       - alert: PilotLoginProbeStale
         expr: |
-          time() - max by (pilot_host) (pilot_login_probe_metrics_last_write_timestamp_seconds) > {{ login_probe_stale_seconds }}
+          time() - max by (pilot_host, probe_host) (
+            label_replace(pilot_login_probe_metrics_last_write_timestamp_seconds, "probe_host", "$1", "pilot_host", "(.+)")
+          ) > {{ login_probe_stale_seconds }}
         for: 5m
         labels:
           severity: warning
+          action_required: "true"
           pilot_alert_source: login-probe
         annotations:
 {% raw %}
@@ -244,7 +284,9 @@ groups:
 {% endraw %}
       - alert: PilotLoginProbeNoTargets
         expr: |
-          max by (pilot_host) (pilot_login_probe_targets) == 0
+          max by (pilot_host, probe_host) (
+            label_replace(pilot_login_probe_targets, "probe_host", "$1", "pilot_host", "(.+)")
+          ) == 0
         for: 15m
         labels:
           severity: info

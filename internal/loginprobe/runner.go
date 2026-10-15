@@ -55,6 +55,10 @@ type RawResult struct {
 	// StartErr is set when ssh could not be started at all (missing
 	// binary, permission): the attempt counts as transport failure.
 	StartErr error
+	// Canceled is set when the caller's context ended mid-attempt (the
+	// probe is stopping): ssh was killed, so its output says nothing about
+	// the target and the attempt has no result.
+	Canceled bool
 }
 
 // Argv is the exact command line for target t. -v is required: the
@@ -78,9 +82,9 @@ func (r Runner) Argv(t Target) []string {
 // the whole process group is killed so a hung ProxyCommand dies with ssh.
 func (r Runner) Run(ctx context.Context, t Target) RawResult {
 	argv := r.Argv(t)
-	ctx, cancel := context.WithTimeout(ctx, r.TotalTimeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, r.TotalTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(attemptCtx, argv[0], argv[1:]...)
 	cmd.Env = r.Env
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -93,7 +97,14 @@ func (r Runner) Run(ctx context.Context, t Target) RawResult {
 	start := time.Now()
 	err := cmd.Run()
 	res := RawResult{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
-	if ctx.Err() == context.DeadlineExceeded {
+	// A SIGTERM mid-login kills ssh after "Server accepts key", which
+	// classifies as a PAM account denial; never report that as a result.
+	if ctx.Err() != nil {
+		res.Canceled = true
+		res.ExitCode = -1
+		return res
+	}
+	if attemptCtx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		res.ExitCode = -1
 		return res

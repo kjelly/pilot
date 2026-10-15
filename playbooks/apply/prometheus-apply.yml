@@ -845,6 +845,26 @@
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]
 
+    # HostMetricsMissing mutes the seed HostDown{job="node"} of a host that
+    # still answers SSH (Alertmanager inhibit, docs/verification/alertmanager.md
+    # §1.7). That only works if it fires first: a longer `for:` would let
+    # HostDown (`for: 10m` in files/pilot-alert-rules-seed.yml) page "Target
+    # down" for a host that is up, before the data-gap alert exists.
+    - name: "Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m"
+      ansible.builtin.assert:
+        that:
+          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) < 600
+        fail_msg: >-
+          host_metrics_missing_for={{ host_metrics_missing_for }} must be shorter
+          than HostDown's 10m, or HostDown pages a host that still answers SSH
+          before HostMetricsMissing can mute it.
+      vars:
+        _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
+        _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
     - name: "Compute the rule_files list (spec §8.4; only alert-rules.yml when no kind:snmp profile is declared)"
       ansible.builtin.set_fact:
         prometheus_rule_files_list: >-

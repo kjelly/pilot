@@ -153,6 +153,9 @@ func newProbeCmd() *cobra.Command {
 			failed := false
 			rows := make([]probeOutput, 0, len(outcomes))
 			for _, o := range outcomes {
+				if o.Canceled {
+					return fmt.Errorf("interrupted before %s was probed", o.Target.Name)
+				}
 				if o.Stage != loginprobe.StageOK {
 					failed = true
 				}
@@ -218,6 +221,11 @@ func runServe(ctx context.Context, configPath string) error {
 	sched := loginprobe.NewScheduler(cfg.Interval)
 	sched.Run(ctx, func(ctx context.Context) {
 		outcomes := prober.Round(ctx)
+		if ctx.Err() != nil {
+			// Stopping mid-round: the canceled attempts were not recorded,
+			// and this partial round must not be written or counted.
+			return
+		}
 		metrics.RoundDone(sched.Overruns.Load())
 		ok := 0
 		for _, o := range outcomes {

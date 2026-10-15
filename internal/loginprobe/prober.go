@@ -29,9 +29,14 @@ func NewProber(cfg Config, runner Runner, metrics *Metrics, logger *slog.Logger)
 }
 
 // Round probes every target with at most Config.Concurrency attempts in
-// flight and returns the outcomes in target order.
+// flight and returns the outcomes in target order. When ctx ends mid-round,
+// the attempts it cut short, and the targets it never reached, come back
+// Canceled and are not recorded in Metrics.
 func (p *Prober) Round(ctx context.Context) []Outcome {
 	outcomes := make([]Outcome, len(p.Config.Targets))
+	for i, t := range p.Config.Targets {
+		outcomes[i] = Outcome{Target: t, Canceled: true}
+	}
 	sem := make(chan struct{}, p.Config.Concurrency)
 	var wg sync.WaitGroup
 	for i, t := range p.Config.Targets {
@@ -53,6 +58,10 @@ func (p *Prober) Round(ctx context.Context) []Outcome {
 
 func (p *Prober) probeOne(ctx context.Context, t Target) Outcome {
 	raw := p.Runner.Run(ctx, t)
+	if raw.Canceled {
+		p.Logger.Debug("login probe attempt canceled", "target", t.Name, "host", t.Host)
+		return Outcome{Target: t, Duration: raw.Duration, At: p.now(), Canceled: true}
+	}
 	stage, why := p.Classify(raw)
 	o := Outcome{Target: t, Stage: stage, ExitCode: raw.ExitCode, Duration: raw.Duration, At: p.now(), Summary: Redact(why)}
 	if p.Metrics != nil {

@@ -62,17 +62,20 @@
         group_wait: 30s
         group_interval: 5m
         repeat_interval: 12h
-      # Issue #11 (docs/verification/alertmanager.md C10): a host that is
-      # down explains its failed SSH transport and its missing metrics, and
-      # a stale login probe's frozen series must not keep paging. A custom
-      # alertmanager_config must carry the same two rules.
+      # Issue #11 (docs/verification/alertmanager.md §1.7/C10): a host that
+      # still answers SSH is not down, so its data gap (HostMetricsMissing)
+      # mutes the seed HostDown of its node scrape; and a stalled login
+      # probe mutes only its own frozen alerts (probe_host), never another
+      # probe's. A dead host yields only HostDown through the rules
+      # themselves. A custom alertmanager_config must carry the same two
+      # rules.
       inhibit_rules:
-        - source_matchers: ['alertname="HostDown"']
-          target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+        - source_matchers: ['alertname="HostMetricsMissing"']
+          target_matchers: ['alertname="HostDown"', 'job="node"']
           equal: ['pilot_host']
         - source_matchers: ['alertname="PilotLoginProbeStale"']
           target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-          equal: ['site']
+          equal: ['probe_host']
       receivers:
         - name: 'null'
     # Alertmanager's webhook_configs always POSTs its own fixed JSON
@@ -99,17 +102,20 @@
           - receiver: teams
             matchers:
               - 'action_required="true"'
-      # Issue #11 (docs/verification/alertmanager.md C10): a host that is
-      # down explains its failed SSH transport and its missing metrics, and
-      # a stale login probe's frozen series must not keep paging. A custom
-      # alertmanager_config must carry the same two rules.
+      # Issue #11 (docs/verification/alertmanager.md §1.7/C10): a host that
+      # still answers SSH is not down, so its data gap (HostMetricsMissing)
+      # mutes the seed HostDown of its node scrape; and a stalled login
+      # probe mutes only its own frozen alerts (probe_host), never another
+      # probe's. A dead host yields only HostDown through the rules
+      # themselves. A custom alertmanager_config must carry the same two
+      # rules.
       inhibit_rules:
-        - source_matchers: ['alertname="HostDown"']
-          target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+        - source_matchers: ['alertname="HostMetricsMissing"']
+          target_matchers: ['alertname="HostDown"', 'job="node"']
           equal: ['pilot_host']
         - source_matchers: ['alertname="PilotLoginProbeStale"']
           target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-          equal: ['site']
+          equal: ['probe_host']
       receivers:
         - name: 'null'
         - name: teams

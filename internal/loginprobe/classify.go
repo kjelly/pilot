@@ -7,12 +7,15 @@ import (
 
 // The markers below come from real OpenSSH 9.6p1 (Ubuntu 24.04) and 9.9p1
 // (AlmaLinux 9) `ssh -v` client output, captured against FreeIPA-enrolled
-// targets on 2026-10-13 (internal/loginprobe/testdata/capture, AGENTS.md
-// §5.6). Every pattern is anchored to a whole line so text a remote banner
+// targets on 2026-10-13, plus one direct (no ProxyCommand) login captured
+// on 2026-10-15 (internal/loginprobe/testdata/capture, AGENTS.md §5.6). Every pattern is anchored to a whole line so text a remote banner
 // or command prints mid-line cannot match.
 var (
 	// The login completed: authentication AND PAM account both passed.
-	authenticatedRe = regexp.MustCompile(`(?m)^Authenticated to \S+ (?:\(via proxy\) |\[[^\]]*\]:\d+ )?using "publickey"\.\r?$`)
+	// OpenSSH prints "(via proxy)" through a ProxyCommand (the deployed
+	// ssh_config's sss_ssh_knownhostsproxy) and "([<address>]:<port>)" on a
+	// direct connection (capture ok-direct-ubuntu).
+	authenticatedRe = regexp.MustCompile(`(?m)^Authenticated to \S+ (?:\(via proxy\)|\(\[[^\]]*\]:\d+\)) using "publickey"\.\r?$`)
 	// sshd accepted the canary's key (it is published and AuthorizedKeysCommand
 	// returned it); a disconnect after this is PAM account management.
 	serverAcceptsKeyRe = regexp.MustCompile(`(?m)^debug1: Server accepts key: `)

@@ -115,4 +115,7 @@ type Outcome struct {
 	// Summary is a one-line, redacted description of why the attempt ended
 	// where it did (the last relevant OpenSSH message). Safe to log.
 	Summary string
+	// Canceled marks an attempt the probe's own shutdown cut short (or
+	// never started): it has no Stage and is never recorded.
+	Canceled bool
 }

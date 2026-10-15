@@ -56,8 +56,9 @@ type LoginProbeTargetsProviderConfig struct {
 	// ProbeHosts are the inventory hosts carrying the login-probe role.
 	ProbeHosts []string
 
-	// ExtraArgs is appended verbatim to every ansible-playbook invocation —
-	// non-secret plumbing only.
+	// ExtraArgs is appended verbatim to every ansible-playbook invocation:
+	// non-secret plumbing and file references such as the workspace vault
+	// (`-e @<path>`), never a secret value.
 	ExtraArgs []string
 
 	// ApplyStageArgs returns the stage -e arguments for the login-probe

@@ -51,7 +51,7 @@
 - name: SeaweedFS S3 (Thanos object storage for the site Prometheus)
   ansible.builtin.import_playbook: ../apply/seaweedfs-s3-apply.yml
 
-- name: Alertmanager (inhibit rules for HostDown / PilotLoginProbeStale)
+- name: Alertmanager (inhibit rules for HostMetricsMissing / PilotLoginProbeStale)
   ansible.builtin.import_playbook: ../apply/alertmanager-apply.yml
 
 - name: Prometheus (host-health + login-probe alert rules)

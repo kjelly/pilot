@@ -36,22 +36,50 @@
 
 ## 1.7 Inhibit contract（GitHub issue #11）
 
-`null` 與 `teams` 模式內建下面兩條 inhibit 規則（`playbooks/apply/alertmanager-apply.yml`
-的 `alertmanager_default_config`/`alertmanager_teams_config`）。它們讓「主機整台掛掉」
-只產生 `HostDown`，而不是同時再噴 login probe 的 transport 失敗與 metrics 缺口；
-login probe 自己停擺（`PilotLoginProbeStale`）時，它凍結的舊 series 也不會繼續觸發
-其他 `PilotLoginProbe*`。`custom` 模式由 operator 自帶整份 `alertmanager_config`，
-**必須自行加入同樣的兩條**（C10 會檢查）：
+host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2`）
+與 seed 的 `HostDown`（`up != 1`，`for: 10m`）加上下面兩條 inhibit 規則，保證三件事：
+
+1. **整台主機掛掉只產生 `HostDown`。** `PilotLoginProbeTransportFailed` 的規則本身
+   排除 `up{job="node"} == 0` 的主機，跟兩個 `for:` 的長短無關；`HostMetricsMissing`
+   只採信仍在寫 textfile 的 probe 回報的登入成功，所以 probe 停擺時凍結的
+   `success=1` 不會讓掛掉的主機變成「SSH 連得上但 metrics 缺」。
+2. **監控資料缺口（node_exporter 停了或 9100 被擋，SSH 正常）只產生
+   `HostMetricsMissing`。** 它在 `host_metrics_missing_for`（預設 3m）就觸發，抑制
+   同一台主機 `job="node"` 的 `HostDown`（10m 才觸發，從一開始就被抑制）。
+   `prometheus-apply.yml` 拒絕 `host_metrics_missing_for` ≥ 10m。它帶
+   `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
+   任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
+3. **一台 login probe 停擺（`PilotLoginProbeStale`）只抑制它自己的告警。** 每個
+   `PilotLoginProbe*` 告警都帶 `probe_host`（看到它的 probe 主機），抑制只比對
+   `probe_host`；另一台 probe 回報的 `AccountDenied` 照常送出。`PilotLoginProbeStale`
+   帶 `action_required="true"`，`teams` 模式也會送出。
+
+`null` 與 `teams` 模式內建這兩條規則（`playbooks/apply/alertmanager-apply.yml` 的
+`alertmanager_default_config`/`alertmanager_teams_config`）。`custom` 模式由 operator
+自帶整份 `alertmanager_config`，**必須自行加入同樣的兩條**（C10 會檢查）：
 
 ```yaml
 inhibit_rules:
-  - source_matchers: ['alertname="HostDown"']
-    target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+  - source_matchers: ['alertname="HostMetricsMissing"']
+    target_matchers: ['alertname="HostDown"', 'job="node"']
     equal: ['pilot_host']
   - source_matchers: ['alertname="PilotLoginProbeStale"']
     target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-    equal: ['site']
+    equal: ['probe_host']
 ```
+
+上述保證有兩個前提：
+
+- 主機的 `pilot_host` 要等於 login probe 的 `probe_target`。自動展開的 target 一定成立；
+  明確設定 `login_probe_targets` 時，名稱要用 inventory 名稱，否則上面的對應會靜默失效
+  （見 `docs/runbooks/login-probe.md` §6）。
+- 用 `prometheus_alert_rules_file` 換掉 seed 規則時，必須保留同樣的 `HostDown`
+  （`up != 1`，`for: 10m`）。
+
+`internal/spec/alertmanager_inhibit_regression_test.go::TestRegression_AlertmanagerInhibitBehaviour`
+用 pinned 的 Alertmanager 實際跑兩種內建設定，確認哪些告警被抑制；
+`internal/spec/testdata/host-health-alert-rules.promtest.yml` 用 promtool 鎖住時序。
+CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且不允許 skip。
 
 `group_by` 仍是 `alertname + pilot_subject + signal_id`：login probe 告警沒有後兩者，
 所以同一個 alertname 的所有主機會併成一則通知（整站 HBAC 失效時不會每台主機各一則）。
@@ -69,7 +97,7 @@ inhibit_rules:
 | C7 | functional | 推一筆測試告警至 Alertmanager，`/api/v2/alerts` 可查得 | 0 | sh -c 'curl -fsS -X POST http://127.0.0.1:9093/api/v2/alerts -H "Content-Type: application/json" -d "[{\"labels\":{\"alertname\":\"pilot-alertmanager-selftest\",\"severity\":\"info\"},\"annotations\":{\"msg\":\"PILOT-ALERTMANAGER-SELFTEST\"}}]" >/dev/null 2>&1; sleep 1; curl -fsS http://127.0.0.1:9093/api/v2/alerts | grep -q pilot-alertmanager-selftest' |
 | C8 | docker | `pilot-alertmanager-teams-proxy`（teams 模式才存在）若存在則必須為 running 且 `/healthz` 回 200；non-teams 模式下容器不存在也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then docker ps --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy && curl -fsS -o /dev/null -w "%{http_code}" http://127.0.0.1:8095/healthz 2>/dev/null | grep -q "^200$"; else true; fi' |
 | C9 | functional | proxy 的 Alertmanager→Adaptive Card 轉換正確（`/render` 自我測試，不真的送 Teams）；容器不存在（non-teams 模式）也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then curl -fsS -X POST http://127.0.0.1:8095/render -H "Content-Type: application/json" -d "{\"status\":\"firing\",\"groupLabels\":{\"alertname\":\"pilot-teams-proxy-selftest\"},\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"pilot-teams-proxy-selftest\",\"severity\":\"info\"},\"annotations\":{}}]}" 2>/dev/null | grep -q "\"type\": \"AdaptiveCard\""; else true; fi' |
-| C10 | config | `alertmanager.yml` 帶 GitHub issue #11 的兩條 inhibit 規則：`HostDown` 抑制同 `pilot_host` 的 `PilotLoginProbeTransportFailed`/`HostMetricsMissing`，`PilotLoginProbeStale` 抑制同 `site` 的其他 `PilotLoginProbe*`；`amtool check-config` 回報至少 2 條 inhibit rule（`custom` 模式的設定也必須帶，見 §1.7） | 0 | sh -c 'f=/etc/pilot/alertmanager/alertmanager.yml; grep -q HostDown "$f" && grep -q PilotLoginProbeStale "$f" && grep -q HostMetricsMissing "$f" || exit 1; n=$(docker exec pilot-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>/dev/null | sed -n "s/^ - \([0-9][0-9]*\) inhibit rules$/\1/p"); [ "${n:-0}" -ge 2 ]' |
+| C10 | config | `alertmanager.yml` 帶 GitHub issue #11 的兩條 inhibit 規則：`HostMetricsMissing` 抑制同 `pilot_host` 的 `HostDown{job="node"}`，`PilotLoginProbeStale` 抑制同 `probe_host` 的其他 `PilotLoginProbe*`；`amtool check-config` 回報至少 2 條 inhibit rule（`custom` 模式的設定也必須帶，見 §1.7） | 0 | sh -c 'f=/etc/pilot/alertmanager/alertmanager.yml; grep -q HostDown "$f" && grep -q PilotLoginProbeStale "$f" && grep -q HostMetricsMissing "$f" || exit 1; n=$(docker exec pilot-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>/dev/null | sed -n "s/^ - \([0-9][0-9]*\) inhibit rules$/\1/p"); [ "${n:-0}" -ge 2 ]' |
 
 ## 3. 證據收集
 
@@ -96,6 +124,7 @@ inhibit_rules:
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-15 | v1.7 | GitHub issue #11 / PR #80 review：改寫兩條 inhibit（§1.7、C10）。舊規則讓 `HostDown`（10m）抑制先觸發的 `HostMetricsMissing`，資料缺口反而只剩「Target down」；`PilotLoginProbeStale` 以 `site` 比對，一台 probe 停擺會抑制整站其他 probe 的告警。改為 `HostMetricsMissing` 抑制同主機的 `HostDown{job="node"}`，`PilotLoginProbeStale` 只比對 `probe_host`。「整台主機掛掉只產生 `HostDown`」改由規則本身保證。新增實際啟動 Alertmanager 的行為測試，CI 也會跑 | sre |
 | 2026-10-13 | v1.6 | GitHub issue #11：`null`/`teams` 模式內建 HostDown 與 PilotLoginProbeStale 兩條 inhibit 規則（§1.7），新增 C10；`custom` 模式需自行加入 | sre |
 | 2026-09-17 | v1.5 | Teams 僅接收 critical／明確 actionable warning；以 subject + signal 分組、12h repeat，卡片顯示行動資訊；candidate `30d6b92` L1-L6 target evidence PASS | sre |
 | 2026-09-08 | v1.4 | 新增 `pilot-alertmanager-teams-proxy`：Alertmanager 原生 webhook_configs 無法直接餵給要求 Adaptive Card 的 Teams flowbot（Power Automate「當收到 Teams webhook 要求」觸發器），改成 webhook 先打內部 proxy 做格式轉換再轉發；新增 C8/C9 | sre |

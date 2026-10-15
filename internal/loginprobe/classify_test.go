@@ -46,6 +46,7 @@ var captureExpectations = map[string]Stage{
 	"ok-ubuntu":                           StageOK,
 	"ok-el":                               StageOK,
 	"ok-ip-address":                       StageOK,
+	"ok-direct-ubuntu":                    StageOK, // no ProxyCommand: "([<address>]:22)"
 	"ok-ipa-server-stopped":               StageOK, // SSSD offline cache keeps logins working
 	"session-command-exit-1":              StageSession,
 	"session-command-not-found":           StageSession,

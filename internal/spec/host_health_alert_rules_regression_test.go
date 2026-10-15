@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -24,6 +25,7 @@ const (
 	hostHealthApply    = "../../playbooks/apply/prometheus-apply.yml"
 	hostHealthContract = "../../contracts/prometheus.yaml"
 	hostHealthPromTest = "testdata/host-health-alert-rules.promtest.yml"
+	alertRulesSeed     = "../../playbooks/apply/files/pilot-alert-rules-seed.yml"
 	// Must stay the image prometheus-apply.yml runs (prometheus_version).
 	hostHealthPromImage = "prom/prometheus:v2.53.0"
 )
@@ -170,6 +172,9 @@ func TestRegression_HostIOStallUsesFullPressureOnly(t *testing.T) {
 func renderHostHealthRules(t *testing.T, dir string, vars map[string]string) string {
 	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("ansible-playbook not installed: %v (PILOT_REQUIRE_CONTAINER_TESTS=1)", err)
+		}
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	src, err := filepath.Abs(hostHealthTemplate)
@@ -242,7 +247,15 @@ func TestRegression_HostHealthRulesRenderFromTheirInputs(t *testing.T) {
 					t.Errorf("%s keep_firing_for = %q, want %q", r.Alert, r.KeepFiringFor, defaults["login_probe_alert_keep_firing_for"])
 				}
 				if !strings.Contains(r.Expr, `"pilot_host", "$1", "probe_target"`) {
-					t.Errorf("%s must project probe_target onto pilot_host (inhibit rules and dashboards key on it)", r.Alert)
+					t.Errorf("%s must project probe_target onto pilot_host (the up{job=\"node\"} joins and dashboards key on it)", r.Alert)
+				}
+			}
+			// Alertmanager's Stale inhibit matches on probe_host, so every
+			// login-probe alert must keep the probe host as probe_host
+			// (docs/verification/alertmanager.md §1.7).
+			if strings.HasPrefix(r.Alert, "PilotLoginProbe") {
+				if !strings.Contains(r.Expr, `"probe_host", "$1", "pilot_host"`) || !strings.Contains(r.Expr, "by (pilot_host, probe_host)") {
+					t.Errorf("%s must keep the probe host as probe_host and aggregate by (pilot_host, probe_host)", r.Alert)
 				}
 			}
 		}
@@ -278,12 +291,7 @@ func TestRegression_HostHealthRulesRenderFromTheirInputs(t *testing.T) {
 // included) and `test rules` on testdata/host-health-alert-rules.promtest.yml,
 // which makes every rule fire for one host and stay quiet for another.
 func TestRegression_HostHealthRulesPromtool(t *testing.T) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skipf("docker not installed: %v", err)
-	}
-	if err := exec.Command("docker", "image", "inspect", hostHealthPromImage).Run(); err != nil {
-		t.Skipf("%s not present locally (docker pull it to run promtool): %v", hostHealthPromImage, err)
-	}
+	requireContainerImage(t, hostHealthPromImage)
 	apply, err := os.ReadFile(hostHealthApply)
 	if err != nil {
 		t.Fatal(err)
@@ -309,27 +317,17 @@ func TestRegression_HostHealthRulesPromtool(t *testing.T) {
 	}
 
 	// promtool compares expanded annotations verbatim; the unit tests assert
-	// labels and timing, so they run against an annotation-free copy.
-	data, err := os.ReadFile(full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatal(err)
-	}
-	for _, g := range doc["groups"].([]any) {
-		for _, r := range g.(map[string]any)["rules"].([]any) {
-			delete(r.(map[string]any), "annotations")
-		}
-	}
-	stripped, err := yaml.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// labels and timing, so they run against annotation-free copies. The
+	// seed rules go along: HostDown's timing is part of the contract.
 	testDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(testDir, "host-health-alert-rules.yml"), stripped, 0o644); err != nil {
-		t.Fatal(err)
+	for src, dst := range map[string]string{full: "host-health-alert-rules.yml", alertRulesSeed: "seed-alert-rules.yml"} {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(testDir, dst), stripRuleAnnotations(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	unit, err := os.ReadFile(hostHealthPromTest)
 	if err != nil {
@@ -346,9 +344,78 @@ func TestRegression_HostHealthRulesPromtool(t *testing.T) {
 	if !strings.Contains(out, "SUCCESS") {
 		t.Errorf("promtool test rules: %s", out)
 	}
-	for _, name := range hostHealthRuleNames {
+	for _, name := range append([]string{"HostDown"}, hostHealthRuleNames...) {
 		if !strings.Contains(string(unit), "alertname: "+name+"\n") {
 			t.Errorf("promtest has no case for %s", name)
 		}
+	}
+}
+
+// stripRuleAnnotations returns a Prometheus rule file without annotations.
+func stripRuleAnnotations(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range doc["groups"].([]any) {
+		for _, r := range g.(map[string]any)["rules"].([]any) {
+			delete(r.(map[string]any), "annotations")
+		}
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestRegression_HostMetricsMissingFiresBeforeSeedHostDown locks the timing
+// the Alertmanager inhibit HostMetricsMissing -> HostDown{job="node"}
+// depends on (docs/verification/alertmanager.md §1.7): the data-gap alert
+// must fire before the seed HostDown rule, so HostDown never pages a host
+// that still answers SSH. prometheus-apply.yml refuses a longer
+// host_metrics_missing_for with a gate whose 600 s must stay HostDown's for.
+func TestRegression_HostMetricsMissingFiresBeforeSeedHostDown(t *testing.T) {
+	data, err := os.ReadFile(alertRulesSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seed renderedRules
+	if err := yaml.Unmarshal(data, &seed); err != nil {
+		t.Fatal(err)
+	}
+	var hostDownFor string
+	for _, g := range seed.Groups {
+		for _, r := range g.Rules {
+			if r.Alert == "HostDown" {
+				if strings.TrimSpace(r.Expr) != "up != 1" {
+					t.Errorf("seed HostDown expr = %q; the inhibit and TransportFailed's up{job=\"node\"} exclusion assume `up != 1`", r.Expr)
+				}
+				hostDownFor = r.For
+			}
+		}
+	}
+	if hostDownFor != "10m" {
+		t.Fatalf("seed HostDown for = %q; the prometheus-apply.yml gate (600 s), the rules' comments and §1.7 assume 10m", hostDownFor)
+	}
+	apply, err := os.ReadFile(hostHealthApply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m"`,
+		`(_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) < 600`,
+	} {
+		if !strings.Contains(string(apply), want) {
+			t.Errorf("prometheus-apply.yml is missing %q", want)
+		}
+	}
+	def, err := time.ParseDuration(hostHealthContractDefaults(t)["host_metrics_missing_for"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def >= 10*time.Minute {
+		t.Errorf("default host_metrics_missing_for %s must be shorter than HostDown's 10m", def)
 	}
 }

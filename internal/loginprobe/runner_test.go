@@ -75,3 +75,56 @@ func TestRunner_MissingBinaryIsAStartError(t *testing.T) {
 		t.Errorf("expected StartErr, got %+v", res)
 	}
 }
+
+// A SIGTERM while ssh is mid-login (key accepted, PAM account phase running)
+// kills ssh with exactly the signature of a PAM account denial. The attempt
+// must come back Canceled and leave the metrics as they were (PR #80
+// review: `systemctl stop` produced a critical AccountDenied).
+func TestProber_CanceledMidLoginIsNotRecorded(t *testing.T) {
+	bin := fakeSSH(t, `echo "debug1: Remote protocol version 2.0, remote software version OpenSSH_9.6p1" >&2
+echo "debug1: Server accepts key: /etc/pilot/login-probe/id_ed25519 ED25519 SHA256:x explicit" >&2
+sleep 30`)
+	targets := []Target{{Name: "t1", Host: "t1.x", Port: 22}}
+	cfg := Config{Targets: targets, Concurrency: 1}
+	metrics := NewMetrics(targets)
+	before := metrics.Registry.Render()
+	r := Runner{SSHBinary: bin, SSHConfig: "/dev/null", User: "u", Command: "/bin/true", ConnectTimeout: time.Second, TotalTimeout: 20 * time.Second, Env: []string{"PATH=/usr/bin:/bin"}}
+	p := NewProber(cfg, r, metrics, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	start := time.Now()
+	outcomes := p.Round(ctx)
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("Round took %s after cancel; ssh was not killed", el)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Canceled || outcomes[0].Stage != "" {
+		t.Fatalf("outcomes = %+v, want one Canceled outcome without a stage", outcomes)
+	}
+	if after := metrics.Registry.Render(); after != before {
+		t.Errorf("a canceled attempt changed the metrics:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+
+	// The same output without cancellation is a PAM account denial: the
+	// test above is about cancellation, not about the classifier.
+	r.TotalTimeout = 20 * time.Second
+	bin2 := fakeSSH(t, `echo "debug1: Remote protocol version 2.0, remote software version OpenSSH_9.6p1" >&2
+echo "debug1: Server accepts key: /etc/pilot/login-probe/id_ed25519 ED25519 SHA256:x explicit" >&2
+exit 255`)
+	r.SSHBinary = bin2
+	if got := NewProber(cfg, r, NewMetrics(targets), nil).Round(context.Background()); got[0].Canceled || got[0].Stage != StageAccount {
+		t.Errorf("uncanceled outcome = %+v, want stage account", got[0])
+	}
+}
+
+func TestProber_TargetsNeverStartedAreCanceled(t *testing.T) {
+	targets := []Target{{Name: "a", Host: "a.x", Port: 22}, {Name: "b", Host: "b.x", Port: 22}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := Runner{SSHBinary: "/bin/false", SSHConfig: "/dev/null", User: "u", Command: "/bin/true", ConnectTimeout: time.Second, TotalTimeout: time.Second}
+	for _, o := range NewProber(Config{Targets: targets, Concurrency: 1}, r, NewMetrics(targets), nil).Round(ctx) {
+		if !o.Canceled {
+			t.Errorf("%s: %+v, want Canceled", o.Target.Name, o)
+		}
+	}
+}

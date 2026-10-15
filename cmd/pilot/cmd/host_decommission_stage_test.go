@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -236,4 +237,83 @@ func TestHostDecommissionApply_SandboxHostNeedsNoStageFlags(t *testing.T) {
 	if !strings.Contains(string(logged), "--limit web2") || !strings.Contains(string(logged), "-e stage=sandbox") {
 		t.Errorf("sandbox run arguments = %q, want --limit web2 and -e stage=sandbox", logged)
 	}
+}
+
+// TestHostDecommissionApply_LoginProbeReRenderGetsTheVault drives `pilot
+// host decommission plan` and `apply` for a host that a login-probe host
+// probes. The re-render of the probe host runs login-probe-apply.yml,
+// whose always-tagged gate needs node_exporter_basic_auth_password from the
+// vault; without the workspace vault that step failed on every real probe
+// host (PR #80 review).
+func TestHostDecommissionApply_LoginProbeReRenderGetsTheVault(t *testing.T) {
+	ws, ansibleLog := writeHostDecommissionStageFixture(t)
+	t.Cleanup(func() { _, _ = runPilotForTest(t, "--help") })
+	hostsYAML := `hosts:
+  web2:
+    ansible_host: "10.0.0.6"
+    roles: [docker]
+  mon1:
+    ansible_host: "10.0.0.7"
+    roles: [docker, freeipa-client, host-monitoring, login-probe]
+`
+	if err := os.WriteFile(filepath.Join(ws, "hosts.yml"), []byte(hostsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vaultPath := filepath.Join(ws, ".vault", "main.yaml")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultPath, []byte("node_exporter_basic_auth_password: fixture-only-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The fake ansible-playbook reports web2 as a target on mon1 until the
+	// re-render has run, so apply really executes the step.
+	rendered := filepath.Join(t.TempDir(), "rendered")
+	script := "#!/bin/sh\necho \"$*\" >> '" + ansibleLog + "'\n" +
+		"case \"$*\" in *login-probe-apply.yml*) touch '" + rendered + "' ;; esac\n" +
+		"if [ -f '" + rendered + "' ]; then p=false; else p=true; fi\n" +
+		"echo \"ok: [mon1] => {\\\"msg\\\": \\\"LOGIN_PROBE_TARGET_PRESENT[mon1]=$p\\\"}\"\n" +
+		"echo 'ok: [x] => {\"msg\": \"PILOT_COMPONENT_DECOMMISSIONED=true\"}'\n"
+	bin := filepath.Dir(firstOnPath(t, "ansible-playbook"))
+	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runPilotForTest(t, "host", "decommission", "plan", "--dir", ws, "--host", "web2")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	out, err = runPilotForTest(t, "host", "decommission", "apply", "--dir", ws, "--id", extractPlanID(t, out), "--confirm-host", "web2")
+	if err != nil || !strings.Contains(out, "STATUS completed") {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(ansibleLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reRender string
+	for _, line := range strings.Split(string(logged), "\n") {
+		if strings.HasPrefix(line, "playbooks/apply/login-probe-apply.yml ") {
+			reRender = line
+		}
+	}
+	if reRender == "" {
+		t.Fatalf("apply never re-rendered the login-probe host; ansible-playbook calls:\n%s", logged)
+	}
+	if !strings.Contains(reRender, "-e @"+vaultPath) {
+		t.Errorf("login-probe re-render %q does not pass the workspace vault %s", reRender, vaultPath)
+	}
+	if strings.Contains(string(logged), "fixture-only-value") {
+		t.Error("a vault value reached the ansible-playbook command line; only the file reference may")
+	}
+}
+
+// firstOnPath returns the first name found on PATH.
+func firstOnPath(t *testing.T, name string) string {
+	t.Helper()
+	p, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

@@ -285,3 +285,123 @@ func TestRegression_LoginProbeExampleTargetsMatchStringListContract(t *testing.T
 		t.Error("the documented target example is a map but the contract/playbook accept name=host[:port] strings")
 	}
 }
+
+// loginProbePreTasks returns the named pre_tasks of login-probe-apply.yml,
+// in playbook order, failing unless every prefix matched exactly one task.
+func loginProbePreTasks(t *testing.T, prefixes ...string) []map[string]any {
+	t.Helper()
+	src, err := os.ReadFile("../../playbooks/apply/login-probe-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []struct {
+		PreTasks []map[string]any `yaml:"pre_tasks"`
+	}
+	if err := yaml.Unmarshal(src, &plays); err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	seen := map[string]int{}
+	for _, task := range plays[0].PreTasks {
+		name, _ := task["name"].(string)
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) {
+				out = append(out, task)
+				seen[p]++
+			}
+		}
+	}
+	for _, p := range prefixes {
+		if seen[p] != 1 {
+			t.Fatalf("login-probe-apply.yml has %d pre_tasks named %q..., want 1", seen[p], p)
+		}
+	}
+	return out
+}
+
+// runLocalPlay runs tasks against localhost and returns the output and
+// whether ansible-playbook succeeded.
+func runLocalPlay(t *testing.T, vars map[string]any, tasks []map[string]any, extra ...string) (string, bool) {
+	t.Helper()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("ansible-playbook not installed: %v (PILOT_REQUIRE_CONTAINER_TESTS=1)", err)
+		}
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	dir := t.TempDir()
+	play := []map[string]any{{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}}
+	data, err := yaml.Marshal(play)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "play.yml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("ansible-playbook", append([]string{"-i", "localhost,", "play.yml"}, extra...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
+	out, err := cmd.CombinedOutput()
+	return string(out), err == nil
+}
+
+// One unresolvable target must not block the deploy or a decommission
+// re-render (it stays a target and the probe reports transport); no target
+// resolving at all is a wrong domain or broken DNS and is refused (PR #80
+// review). Runs the playbook's own resolve tasks with getent.
+func TestRegression_LoginProbeUnresolvableTargetWarnsUnlessNoneResolve(t *testing.T) {
+	tasks := loginProbePreTasks(t,
+		"Gate: every target's FQDN resolves",
+		"Gate: at least one target FQDN resolves",
+		"Warn: these targets do not resolve")
+	target := func(name, host string) map[string]any { return map[string]any{"name": name, "host": host, "port": 22} }
+	for _, c := range []struct {
+		name    string
+		targets []map[string]any
+		ok      bool
+		warn    bool
+	}{
+		{"all resolve", []map[string]any{target("a", "localhost")}, true, false},
+		{"one does not resolve", []map[string]any{target("a", "localhost"), target("b", "pilot-no-such-host.invalid")}, true, true},
+		{"none resolve", []map[string]any{target("b", "pilot-no-such-host.invalid"), target("c", "pilot-no-such-host-2.invalid")}, false, false},
+	} {
+		out, ok := runLocalPlay(t, map[string]any{"login_probe_target_list": c.targets}, tasks)
+		if ok != c.ok {
+			t.Errorf("%s: ansible-playbook success = %v, want %v\n%s", c.name, ok, c.ok, out)
+		}
+		if warned := strings.Contains(out, "WARNING: ['pilot-no-such-host.invalid'] do not resolve"); warned != c.warn {
+			t.Errorf("%s: warning printed = %v, want %v\n%s", c.name, warned, c.warn, out)
+		}
+		if !c.ok && !strings.Contains(out, "no probe target resolves") {
+			t.Errorf("%s: refused without the no-target message:\n%s", c.name, out)
+		}
+	}
+}
+
+// --check --diff of an already-deployed probe host must not fail in the
+// rollback snapshot: check mode does not create the snapshot directory, so
+// copying an existing managed file into it failed every preview of a
+// deployed host (found by a --check run on the PR #80 topology). Runs the
+// playbook's own snapshot tasks in check mode with one existing file.
+func TestRegression_LoginProbeSnapshotSkipsCheckMode(t *testing.T) {
+	tasks := loginProbePreTasks(t,
+		"Create the private rollback snapshot directory",
+		"Snapshot every existing managed file before mutation")
+	dir := t.TempDir()
+	managed := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(managed, []byte("targets: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(dir, "backups", "apply-1-host")
+	vars := map[string]any{
+		"login_probe_rollback_dir":   snapshot,
+		"login_probe_previous_files": []map[string]any{{"item": managed, "stat": map[string]any{"exists": true}}},
+	}
+	out, ok := runLocalPlay(t, vars, tasks, "--check", "--diff")
+	if !ok {
+		t.Fatalf("snapshot tasks fail under --check:\n%s", out)
+	}
+	if _, err := os.Stat(snapshot); !os.IsNotExist(err) {
+		t.Errorf("--check created the snapshot directory %s (err=%v)", snapshot, err)
+	}
+}
