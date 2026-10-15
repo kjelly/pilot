@@ -26,7 +26,7 @@
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建的 VM：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8；前三台 ipa-server 4.13.4-1.el9_8，`pr92-r3` 列在 inventory 但沒 promote）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；由 candidate 的 playbook 部署，測完已移除 |
+| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建的 VM：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，與先前 record 相同的 base image digest；`pr92-ipa` 為 ipa-server 4.13.4-1.el9_8，其他節點的套件版本這次沒有記錄；`pr92-r3` 列在 inventory，最後才 promote）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；由 candidate 的 playbook 部署，測完已移除 |
 | inventory host 集合 | `freeipa-server`: pr92-ipa；`freeipa-server-replica`: pr92-r1、pr92-r2、pr92-r3（都不設 `freeipa_setup_dns`）；`dns`: pr92-dns；`freeipa-dns-client`: pr92-client |
 | 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定）；`pr92-ipa` 的 `/etc/pilot/dns-reader.keytab` |
 | 結果 | 透過真實 `pilot mcp serve` 呼叫：健康時 `complete`、14 項比對全部 `match`，沒 promote 的 `pr92-r3` 只有 `freeipa_replica_not_dns_server`（同一 tree 拿掉「跳過被排除的 replica」這一行的對照 binary：`partial`，`pr92-r3` 被報成 `unknown`）；stub 或 FreeIPA BIND 當第一跳時沒有第一跳誤報；tier 拒絕 client 時回報 `dns_query_failed: … first_hop_identity (… REFUSED)`；`freeipa_server_fqdn` 帶結尾的點時 `complete`；`K/M` 在啟動時被拒、`k` 被接受（`auth_required`）；promote 之後 17/17 |
