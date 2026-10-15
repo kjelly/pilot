@@ -19,6 +19,7 @@ import (
 // writes the message under <root>/<host>/ the way the siemReceiver dynaFile
 // does, or nothing when "rsyslog" is stopped.
 func TestRegression_LogServerProbesUseTheEffectiveRoot(t *testing.T) {
+	t.Parallel()
 	for _, tool := range []string{"sh", "sed", "grep", "date"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not installed: %v", tool, err)
@@ -60,6 +61,11 @@ func TestRegression_LogServerProbesUseTheEffectiveRoot(t *testing.T) {
 		"case \"$2\" in local6.*) f=audit.log;; *) f=auth.log;; esac\n" +
 		"mkdir -p " + root + "/testhost && printf '%s\\n' \"$3\" >> " + root + "/testhost/$f\n"
 	if err := os.WriteFile(filepath.Join(bin, "logger"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The fake logger delivers at once, so C7/C8 need not wait between
+	// their polls; without this the two refused cases take 6 s each.
+	if err := os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	run := func(command string) string {
@@ -199,6 +205,7 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 // existed (here a rerun after a failed `--tags C7` apply) stayed var_t and
 // rsyslog wrote nothing while the apply succeeded.
 func TestRegression_LogServerRelabelsTheRootByItsLabel(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}

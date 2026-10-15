@@ -513,11 +513,13 @@ func showTask(names []string) map[string]any {
 // must see those values; without it, the old defaults. Against the old
 // playbooks, the play vars replace every group_vars value.
 func TestRegression_InventoryInputsReachThePlay(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	for _, tc := range playVarsCases {
 		t.Run(tc.playbook, func(t *testing.T) {
+			t.Parallel()
 			raw, err := os.ReadFile("../../playbooks/apply/" + tc.playbook)
 			if err != nil {
 				t.Fatal(err)

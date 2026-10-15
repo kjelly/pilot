@@ -31,6 +31,7 @@ func siemResolve(t *testing.T, playbook, group string, keep func(string) bool, g
 // log-server as "" (rsyslog then wrote /%HOSTNAME%/audit.log) while
 // log-shipping tailed /var/log/siem.
 func TestRegression_SIEMSharedInputsResolveTheSameOnEverySide(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -49,6 +50,7 @@ func TestRegression_SIEMSharedInputsResolveTheSameOnEverySide(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var gv map[string]any
 			if tc.set {
 				gv = map[string]any{"siem_log_root": tc.value, "siem_forward_port": tc.port, "siem_receiver_tcp_port": tc.port}
@@ -104,6 +106,7 @@ func logServerGateTasks(t *testing.T, owner string) (map[string]any, []any) {
 // exception (a new filesystem's root holding only lost+found) needs root and
 // is covered by the VM run in the evidence record.
 func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -112,7 +115,8 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	vars, tasks := logServerGateTasks(t, me.Username)
-	run := func(root string) string {
+	run := func(t *testing.T, root string) string {
+		t.Helper()
 		_, failed := tryInventoryPlay(t, "log-server", vars, tasks, map[string]any{"siem_log_root": root})
 		return failed
 	}
@@ -121,15 +125,16 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 
 	// Names do not depend on who owns what, so they always run.
 	t.Run("names", func(t *testing.T) {
+		t.Parallel()
 		for _, ok := range []string{"/var/log/siem-pr79-absent", "/srv/siem-pr79-absent", "/data/logs/siem_1.x"} {
-			if failed := run(ok); failed != "" {
+			if failed := run(t, ok); failed != "" {
 				t.Errorf("siem_log_root=%s: want accepted, got %s", ok, failed)
 			}
 		}
 		for _, bad := range []string{"/var/log", "/var", "/", "/srv", "/home", "/usr/share/siem", "/usr/lib", "/etc/rsyslog.d",
 			"/run/log", "var/log/siem", "/var/log/siem/", "/var//log/siem", "/var/log/../siem",
 			"/var/log/./siem", "/var/log/siem dir", "/var/log/$(id)", "/var/log/siem-pr79\n"} {
-			if failed := run(bad); !strings.Contains(failed, names) {
+			if failed := run(t, bad); !strings.Contains(failed, names) {
 				t.Errorf("siem_log_root=%q: want %q to fail, got %q", bad, names, failed)
 			}
 		}
@@ -147,7 +152,7 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 			bad = append(bad, "/var/run/siem-pr79") // resolves under /run
 		}
 		for _, root := range bad {
-			if failed := run(root); !strings.Contains(failed, resolved) || !strings.Contains(failed, "shared or system directory") {
+			if failed := run(t, root); !strings.Contains(failed, resolved) || !strings.Contains(failed, "shared or system directory") {
 				t.Errorf("siem_log_root=%s: want %q to refuse it as a shared or system directory, got %q", root, resolved, failed)
 			}
 		}
@@ -162,7 +167,7 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 			if err := os.Symlink(dir, link); err != nil {
 				t.Fatal(err)
 			}
-			if failed := run(link); !strings.Contains(failed, resolved) || !strings.Contains(failed, "holds characters") {
+			if failed := run(t, link); !strings.Contains(failed, resolved) || !strings.Contains(failed, "holds characters") {
 				t.Errorf("siem_log_root=%s -> %q: want %q to refuse its characters, got %q", link, dir, resolved, failed)
 			}
 		}
@@ -171,6 +176,7 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 	// The filesystem cases compare an existing directory's owner and group
 	// with siem_log_owner, which the play uses for both.
 	t.Run("filesystem", func(t *testing.T) {
+		t.Parallel()
 		group, err := user.LookupGroupId(me.Gid)
 		if err != nil || group.Name != me.Username {
 			t.Skipf("the gate compares owner and group with one name; %s's primary group is not %s", me.Username, me.Username)
@@ -256,7 +262,7 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 		}
 		for _, tc := range cases {
 			root := tc.root()
-			failed := run(root)
+			failed := run(t, root)
 			switch {
 			case tc.ok && failed != "":
 				t.Errorf("%s (%s): want accepted, got %s", tc.name, root, failed)
@@ -303,6 +309,7 @@ func auditPortGate(t *testing.T, serverVars, clientVars map[string]any) string {
 // group_vars/log-server.yml. With log-server on 2514 and the clients on 514,
 // rsyslog forwarded to a port nothing listened on and the apply succeeded.
 func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -336,6 +343,7 @@ func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			failed := auditPortGate(t, tc.server, tc.client)
 			if tc.fail && !strings.Contains(failed, gate) {
 				t.Errorf("want %q to fail, got %q", gate, failed)
@@ -352,6 +360,7 @@ func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
 // whole policy, so /var/log/syslog stops rotating) and an empty loki_port
 // made the push URL `pilot-loki-backend:`.
 func TestRegression_SIEMCountsFallBackForEmptyValues(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -463,6 +472,7 @@ func TestRegression_LogrotatePoliciesAreValidated(t *testing.T) {
 // as a copy task's validate on localhost: a valid policy is written, and a
 // `rotate ` left empty or an unknown option fails validation.
 func TestRegression_LogrotateSyntaxCheckThroughAnsible(t *testing.T) {
+	t.Parallel()
 	for _, bin := range []string{"ansible-playbook", "logrotate"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not installed: %v", bin, err)
@@ -675,6 +685,7 @@ func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
 // and "" still mean the default. Values go in as JSON extra vars so that
 // floats and booleans reach Ansible as such.
 func TestRegression_SIEMPortsAreTCPPortNumbers(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
@@ -690,6 +701,7 @@ func TestRegression_SIEMPortsAreTCPPortNumbers(t *testing.T) {
 	for _, g := range gates {
 		g := g
 		t.Run(g.variable+"/"+g.playbook, func(t *testing.T) {
+			t.Parallel()
 			play := loadFirstPlay(t, g.playbook)
 			gateName := "Gate: " + g.variable + " is a TCP port number"
 			tasks := pickTasks(play, func(name string) bool { return name == gateName })
