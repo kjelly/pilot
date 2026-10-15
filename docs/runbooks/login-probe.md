@@ -17,17 +17,18 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-14，candidate `5f7c13b1eaa4c9aac5c8c54132b09792cf0094e3`（tree `594bcec9ffa695dd34fa6889fc908fe346d1ee02`），乾淨 detached worktree |
-| 目標環境 | 四台 ephemeral VM：`lp-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`lp-mon`（Ubuntu 24.04：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`lp-target`（Ubuntu 24.04）、`lp-target-el`（AlmaLinux 9.8）。使用 topology 的 `services: none` 臨時副本（SHA-256 `8aa29b4039d7d7dcd99ec4b90ada1ccea7dd63f32d0ffe2dc21da3a8e10183e8`）；本機 Harbor seed 回 `401 Unauthorized`，因此此輪未啟用 repo cache 服務。 |
-| base image | `almalinux-9-golden.qcow2` SHA-256 `b780998adca7c69ff6dbd41a05b51769ef6ab6708a7defbd286195186fbcc8ac`；`ubuntu-24.04-golden.qcow2` SHA-256 `bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394` |
-| inventory host 集合 | rendered topology：`freeipa-server`={lp-ipa}；`freeipa-client`/`host-monitoring`={lp-mon, lp-target, lp-target-el}；`docker`/`seaweedfs-s3`/`prometheus`/`alertmanager`/`login-probe`={lp-mon} |
-| vault 依賴（只列 key） | 主 vault：`ipa_admin_password`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`；另以臨時加密 vault 覆寫 `node_exporter_basic_auth_password`。login-probe 本身不需要 secret（`login_probe_ssh_private_key` 選填） |
+| 最新驗證 | 2026-10-15，candidate `0882d2cf499d60a63c11f7b96e69c64fbf1e666b`（tree `959db39647014a57ad539cf9a403b985cd45f37d`；merge `main` `f9fb701` 後修正 `HostIOStall`），乾淨 detached worktree |
+| 目標環境 | 四台 ephemeral VM（topology 副本把 `lp-` 改名為 `pr80-`，`services: local`；此輪 Harbor 未再回 `401`，不需要 `services: none`）：`pr80-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr80-mon`（Ubuntu 24.04.4：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`pr80-target`（Ubuntu 24.04.4，有 PSI）、`pr80-target-el`（AlmaLinux 9.8，EL9 預設沒有 PSI）。node_exporter 1.12.1。 |
+| base image | 每台 VM 都是 `overlay.qcow2` 疊在 golden image 上：`almalinux-9-golden.qcow2` SHA-256 `b780998adca7c69ff6dbd41a05b51769ef6ab6708a7defbd286195186fbcc8ac`；`ubuntu-24.04-golden.qcow2` SHA-256 `bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394` |
+| inventory host 集合 | `pilot vm-target topology inventory` 產生：`freeipa-server`={pr80-ipa}；`freeipa-client`/`host-monitoring`={pr80-mon, pr80-target, pr80-target-el}；`docker`/`seaweedfs-s3`/`prometheus`/`alertmanager`/`login-probe`={pr80-mon} |
+| vault 依賴（只列 key） | `ipa_admin_password`、`node_exporter_basic_auth_password`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`、`restic_aws_access_key_id`、`restic_aws_secret_access_key`（此輪用一次性 vault）。login-probe 本身不需要 secret（`login_probe_ssh_private_key` 選填） |
 | 對齊決定 | A（改 inventory）：topology 檔就是 spec §1 宣告的 group 集合 |
-| candidate topology test | 2026-10-14 04:01–04:21 UTC，fresh ephemeral VM 完整 L1–L6：L1 syntax PASS；L3 `--check --diff` 四台 `failed=0`；L4 四台 `failed=0`（lp-ipa changed=22、lp-mon=70、lp-target=33、lp-target-el=30）；L5 login-probe 14/14、Alertmanager 10/10 PASS；L6 四台 `changed=0`。 |
+| candidate topology test | 2026-10-15 00:42–01:02 UTC，`topology test` rc=0：L1 syntax PASS；L3 `--check --diff` 四台 `failed=0`；L4 四台 `failed=0`（pr80-ipa changed=22、pr80-mon=69、pr80-target=33、pr80-target-el=30）；L5 login-probe 14/14、Alertmanager 10/10 PASS；L6 四台 `changed=0`。 |
+| `HostIOStall` 實測 | 預設門檻（0.25、10m）下，`pr80-target` 跑 `dd oflag=dsync` 製造 I/O 壓力：`rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])`=0.303，01:09 UTC pending、01:17 UTC firing，Alertmanager 收到 `HostIOStall{pilot_host="pr80-target"}`；沒有負載的 `pr80-mon` 沒有觸發。node_exporter 的 PSI series 沒有 `kind` label（`stalled`=full、`waiting`=some），規則不得加 `kind=` matcher。 |
 | 演練 | 整台主機停擺時 `PilotLoginProbeTransportFailed` 被 `HostDown` inhibit；`pilot host decommission` 退役被探測主機後 probe 設定不再列它（HD36-LIVE） |
 | verify（fresh topology） | `login-probe.md` 14/14 PASS；`alertmanager.md` 10/10 PASS；另行跑 `prometheus.md` 為 19/24：C1–C15、C20/C21、C23/C24 PASS；C16–C19 因此拓樸沒有 GPU/dcgm-exporter、C22 因 fresh Thanos 尚未累積可上傳的 2h block 而 FAIL（見 §6）。 |
 | 冪等 | `login-probe-apply.yml` 第二次 apply `changed=0`；整條 chain 在全新 VM 上 L6 `changed=0` |
-| evidence | 最新 candidate：[`2026-10-14-5f7c13b.md`](../evidence/login-probe/2026-10-14-5f7c13b.md)，hash manifest：[`2026-10-14-5f7c13b-files.sha256`](../evidence/login-probe/2026-10-14-5f7c13b-files.sha256)；歷史 evidence：`docs/evidence/login-probe/2026-10-13-6bcfb8a.md`、`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`、`docs/evidence/login-probe/2026-10-13-drills.md` |
+| evidence | 最新 candidate：[`2026-10-15-0882d2c.md`](../evidence/login-probe/2026-10-15-0882d2c.md)，hash manifest：[`2026-10-15-0882d2c-files.sha256`](../evidence/login-probe/2026-10-15-0882d2c-files.sha256)；歷史 evidence：`docs/evidence/login-probe/2026-10-14-5f7c13b.md`、`docs/evidence/login-probe/2026-10-13-6bcfb8a.md`、`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`、`docs/evidence/login-probe/2026-10-13-drills.md` |
 
 ## 1. 為什麼
 
@@ -167,3 +168,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 |---|---|---|---|
 | 2026-10-13 | v0.1 | 初版：Phase 0 擷取、元件、告警規則、inhibit 規則與 topology 演練（issue #11） | pilot |
 | 2026-10-14 | v0.2 | 更新至 candidate `5f7c13b` 的 fresh topology 證據，記錄 image fingerprints 與 Prometheus C16–C19/C22 環境限制 | pilot |
+| 2026-10-15 | v0.3 | 更新至 candidate `0882d2c`：`HostIOStall` 改讀沒有 `kind` label 的 PSI full series，並在 fresh topology 上實際觸發；`services: local` 可用 | pilot |
