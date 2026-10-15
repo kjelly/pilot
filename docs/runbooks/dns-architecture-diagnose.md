@@ -17,7 +17,7 @@
 
 最新驗證：2026-10-14，candidate `46fbc58`（tree `e3d041a24c503efad01505d3002ce79f52779c35`，PR #66 的 follow-up 第二輪），
 **PASS**。摘要：
-[`docs/evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)。
+[`docs/evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)；同一 candidate 補齊 §3 run metadata（run ID、UTC 時段、target image digest、inventory 與 reader role 指紋）的重跑見 [`docs/evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)。
 前兩輪：[`2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)（principal、查詢失敗、named 停止等情境）、
 [`2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)（14 個情境）。
 
