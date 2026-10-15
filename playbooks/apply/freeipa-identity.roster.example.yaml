@@ -42,10 +42,17 @@ users:
     gid: null
     login_shell: /bin/bash
     home_directory: /home/alice
+    # `initial` is set only when the account has no password yet. With
+    # preserve_existing: true (the default) an existing password is never
+    # touched. preserve_existing: false resets it to `initial` — not again
+    # while the user is still on that password, but again after each change
+    # they make — so set it back to true once the reset is done.
+    # force_change: false is not honoured yet: FreeIPA always requires a
+    # password set by `ipa passwd` to be changed at the next login.
     password:
       initial: CHANGE-ME-alice-initial
       force_change: true
-      preserve_existing: false
+      preserve_existing: true
     ssh_keys:
       authoritative: true
       values:
