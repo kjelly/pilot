@@ -290,7 +290,14 @@ func TestRegression_LoginProbeExampleTargetsMatchStringListContract(t *testing.T
 // in playbook order, failing unless every prefix matched exactly one task.
 func loginProbePreTasks(t *testing.T, prefixes ...string) []map[string]any {
 	t.Helper()
-	src, err := os.ReadFile("../../playbooks/apply/login-probe-apply.yml")
+	return playbookPreTasks(t, "../../playbooks/apply/login-probe-apply.yml", prefixes...)
+}
+
+// playbookPreTasks returns the named pre_tasks of the first play in path,
+// in playbook order, failing unless every prefix matched exactly one task.
+func playbookPreTasks(t *testing.T, path string, prefixes ...string) []map[string]any {
+	t.Helper()
+	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +320,7 @@ func loginProbePreTasks(t *testing.T, prefixes ...string) []map[string]any {
 	}
 	for _, p := range prefixes {
 		if seen[p] != 1 {
-			t.Fatalf("login-probe-apply.yml has %d pre_tasks named %q..., want 1", seen[p], p)
+			t.Fatalf("%s has %d pre_tasks named %q..., want 1", path, seen[p], p)
 		}
 	}
 	return out

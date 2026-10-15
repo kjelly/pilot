@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.10
+> 版本：v1.11
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -76,11 +76,11 @@
 | `host_disk_latency_min_ops_per_second` | `HostDiskLatencyHigh` 只看每秒完成 I/O 數高於此值的裝置（避免極少量 I/O 的單次慢操作誤報） | 否 | `1` |
 | `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
 | `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
-| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但同一台主機仍有一台還在寫 textfile 的 login probe 登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:`。必須短於 seed `HostDown` 的 10m（playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
+| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但同一台主機仍有一台還在寫 textfile 的 login probe 登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:`。必須短於 seed `HostDown` 的 10m，且不短於 `login_probe_stale_seconds`（兩者 playbook 都會擋）：前者讓它能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`，後者讓 target 掛掉時同時停擺的 probe 不會讓它誤報（`alertmanager.md` §1.7） | 否 | `3m` |
 | `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
 | `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
 | `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動 | 否 | `5m` |
-| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe textfile 的寫入時間戳在此秒數內沒有變化（`changes()`，不依賴探測主機時鐘；daemon 每 15 秒寫一次）；`HostMetricsMissing` 也只採信這段時間內有變化的 probe | 否 | `180` |
+| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe textfile 的寫入時間戳在此秒數內沒有變化（`changes()`，不依賴探測主機時鐘；daemon 每 15 秒寫一次）；`HostMetricsMissing` 也只採信這段時間內有變化的 probe。必須 ≥ 3 × `prometheus_scrape_interval`（playbook 會擋），否則健康的 probe 會被當成停擺 | 否 | `180` |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -336,3 +336,4 @@
 | 2026-10-14 | v1.8 | 保留主線新增的 C20–C22（執行中 container 的設定掛載、Sidecar 寫入權限與實際上傳），將 issue #11 的 host-health rule file 驗收改編為 C23–C24；container traceability 同時覆蓋設定掛載漂移與載入的告警規則 | pilot |
 | 2026-10-15 | v1.9 | PR #80 review（GitHub issue #11）：login-probe 告警都帶 `probe_host`，配合 `alertmanager.md` §1.7 的新 inhibit；`PilotLoginProbeTransportFailed` 排除 node scrape 也失敗的主機；`HostMetricsMissing` 只採信仍在寫 textfile 的 probe；`HostMetricsMissing` 與 `PilotLoginProbeStale` 加上 `action_required="true"`；`host_metrics_missing_for` 必須短於 10m。row 未變 | sre |
 | 2026-10-15 | v1.10 | PR #80 第三輪 review：`HostMetricsMissing` 加 `keep_firing_for`（probe 單輪失敗或重啟時不中斷，否則被它抑制的 `HostDown` 會送出）；probe 新鮮度與 `PilotLoginProbeStale` 改用寫入時間戳的 `changes()`，不再依賴探測主機時鐘；標頭版本對齊變更紀錄。row 未變 | sre |
+| 2026-10-15 | v1.11 | PR #80 第四輪 review：`prometheus-apply.yml` 新增兩道 gate——`login_probe_stale_seconds` ≥ 3 × `prometheus_scrape_interval`（`prometheus_scrape_interval` 必須是單一 duration），`host_metrics_missing_for` ≥ `login_probe_stale_seconds`；promtool 證明兩者各自防止的誤報。row 未變 | sre |

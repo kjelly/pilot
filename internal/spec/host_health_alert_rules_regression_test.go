@@ -428,3 +428,121 @@ func TestRegression_HostMetricsMissingFiresBeforeSeedHostDown(t *testing.T) {
 		t.Errorf("default host_metrics_missing_for %s must be shorter than HostDown's 10m", def)
 	}
 }
+
+// hostHealthPromtest renders the rules with vars, loads them with the seed
+// rules into the pinned promtool and runs unit, returning promtool's
+// output and whether every case passed.
+func hostHealthPromtest(t *testing.T, vars map[string]string, unit string) (string, bool) {
+	t.Helper()
+	requireContainerImage(t, hostHealthPromImage)
+	full := renderHostHealthRules(t, t.TempDir(), vars)
+	dir := t.TempDir()
+	for src, dst := range map[string]string{full: "host-health-alert-rules.yml", alertRulesSeed: "seed-alert-rules.yml"} {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, dst), stripRuleAnnotations(t, data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "unit.yml"), []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--user", "65534", "-v", dir+":/w:ro", "--entrypoint", "promtool", hostHealthPromImage, "test", "rules", "/w/unit.yml").CombinedOutput()
+	return string(out), err == nil
+}
+
+// TestRegression_HostHealthTimingHazardsBehindTheGates proves, with the
+// pinned promtool, what prometheus-apply.yml's two freshness gates prevent
+// (TestRegression_HostHealthTimingGates runs the gates themselves):
+//
+//   - host_metrics_missing_for shorter than login_probe_stale_seconds: a
+//     probe that stalls as its target dies keeps a fresh-looking success=1
+//     long enough for HostMetricsMissing to call the dead host reachable;
+//   - a scrape interval longer than a third of login_probe_stale_seconds:
+//     a healthy probe's changes() window holds too few samples, so
+//     PilotLoginProbeStale fires for it (and mutes all its alerts).
+func TestRegression_HostHealthTimingHazardsBehindTheGates(t *testing.T) {
+	short := map[string]string{}
+	for k, v := range hostHealthContractDefaults(t) {
+		short[k] = v
+	}
+	short["host_metrics_missing_for"] = "1m"
+	frozen := `rule_files: [host-health-alert-rules.yml, seed-alert-rules.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="node",instance="dead2:9100",pilot_host="dead2"}'
+        values: '1x8 0x60'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-s:9100",pilot_host="mon-s",probe_target="dead2"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-s:9100",pilot_host="mon-s"}'
+        values: '0+15x8 120x60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: dead2, severity: warning, action_required: "true", pilot_alert_source: host-health}
+`
+	if out, ok := hostHealthPromtest(t, short, frozen); !ok {
+		t.Errorf("with host_metrics_missing_for=1m the stalled probe should make HostMetricsMissing fire for the dead host (the hazard the gate refuses):\n%s", out)
+	}
+	slow := `rule_files: [host-health-alert-rules.yml, seed-alert-rules.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 4m
+    input_series:
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon"}'
+        values: '0+240x10'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PilotLoginProbeStale
+        exp_alerts:
+          - exp_labels: {pilot_host: mon, probe_host: mon, severity: warning, action_required: "true", pilot_alert_source: login-probe}
+`
+	if out, ok := hostHealthPromtest(t, hostHealthContractDefaults(t), slow); !ok {
+		t.Errorf("a healthy probe scraped every 4m should look stale with the 180 s window (the hazard the gate refuses):\n%s", out)
+	}
+}
+
+// TestRegression_HostHealthTimingGates runs prometheus-apply.yml's own
+// timing gates with ansible-playbook: the defaults pass; a scrape interval
+// above a third of login_probe_stale_seconds, a host_metrics_missing_for
+// shorter than login_probe_stale_seconds or not shorter than HostDown's
+// 10m, and a compound scrape interval are refused.
+func TestRegression_HostHealthTimingGates(t *testing.T) {
+	tasks := playbookPreTasks(t, hostHealthApply,
+		"Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m",
+		"Gate: login_probe_stale_seconds spans at least three node scrapes",
+		"Gate: host_metrics_missing_for is at least login_probe_stale_seconds")
+	for _, c := range []struct {
+		name               string
+		hmm, scrape, stale string
+		ok                 bool
+	}{
+		{"defaults", "3m", "15s", "180", true},
+		{"1m scrape", "3m", "1m", "180", true},
+		{"61s scrape", "3m", "61s", "180", false},
+		{"4m scrape", "3m", "4m", "180", false},
+		{"compound scrape interval", "3m", "1m30s", "600", false},
+		{"HostMetricsMissing faster than the stale window", "1m", "15s", "180", false},
+		{"HostMetricsMissing as slow as HostDown", "10m", "15s", "180", false},
+		{"short stale window, short for", "1m", "15s", "60", true},
+	} {
+		vars := map[string]any{
+			"prometheus_host_health_alert_rules_enabled": true,
+			"host_metrics_missing_for":                   c.hmm,
+			"prometheus_scrape_interval":                 c.scrape,
+			"login_probe_stale_seconds":                  c.stale,
+		}
+		out, ok := runLocalPlay(t, vars, tasks)
+		if ok != c.ok {
+			t.Errorf("%s: gates passed = %v, want %v\n%s", c.name, ok, c.ok, out)
+		}
+	}
+}

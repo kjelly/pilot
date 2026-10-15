@@ -189,6 +189,33 @@ tests:
           - exp_labels: {instance: "gap-host:9100", job: node, pilot_host: gap-host, severity: critical}
           - exp_labels: {instance: "restart-host:9100", job: node, pilot_host: restart-host, severity: critical}
 
+  # 15 s samples (the default scrape interval): the target dies at 135 s,
+  # and the only probe listing it stalls at the same moment with
+  # success=1 frozen. Its write timestamp last changed at 120 s, so the
+  # freshness term holds for less than login_probe_stale_seconds (180 s),
+  # which host_metrics_missing_for (3m) must be at least (the playbook
+  # enforces it): HostMetricsMissing never fires and HostDown is not muted.
+  - name: A probe that stalls as its target dies cannot report it reachable
+    interval: 15s
+    input_series:
+      - series: 'up{job="node",instance="dead2:9100",pilot_host="dead2"}'
+        values: '1x8 0x60'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-s:9100",pilot_host="mon-s",probe_target="dead2"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-s:9100",pilot_host="mon-s"}'
+        values: '0+15x8 120x60'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "dead2:9100", job: node, pilot_host: dead2, severity: critical}
+
   - name: Two probes — a stalled probe only speaks for itself
     interval: 1m
     input_series:

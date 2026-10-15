@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.8
+> 版本：v1.9
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -49,9 +49,15 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
    同一台主機 `job="node"` 的 `HostDown`（10m 才觸發，從一開始就被抑制）。
    `prometheus-apply.yml` 拒絕 `host_metrics_missing_for` ≥ 10m。它帶
    `keep_firing_for`（`login_probe_alert_keep_firing_for`，預設 5m），probe 單輪失敗或重啟
-   （重啟後第一次寫出的 textfile 是 `success=0`）不會讓它中斷、讓 `HostDown` 漏出來；
-   代價是 node_exporter 恢復後它最多晚 5m 才 resolve，資料缺口期間主機真的掛掉時
-   `HostDown` 最多晚 5m 送出。它帶
+   （重啟後第一次寫出的 textfile 是 `success=0`）不會讓它中斷、讓 `HostDown` 漏出來。
+   代價是延遲（預設值，Prometheus 未設 `evaluation_interval`，即 1m）：
+   - node_exporter 恢復後，`HostMetricsMissing` 要等下一次 scrape（≤15s）與規則評估
+     （≤1m）才不再成立，再過 `keep_firing_for`（5m）與下一次評估（≤1m）才 resolve，
+     最多約 7m15s（實測 5m41s，`docs/evidence/login-probe/2026-10-15-f764131.md`）。
+   - 資料缺口期間主機真的掛掉時，probe 要到下一輪失敗才會寫出 `success=0`
+     （`login_probe_interval` 60s + `login_probe_total_timeout` 30s + textfile 寫出 ≤15s），
+     再經 scrape（≤15s）與評估（≤1m），`keep_firing_for` 才開始計時；所以 `HostDown`
+     最多約 9m 後才不再被抑制，之後 Alertmanager 依 `group_interval`（5m）送出。它帶
    `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
    任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
 3. **一台 login probe 停擺（`PilotLoginProbeStale`）只抑制它自己的告警。** 每個
@@ -91,7 +97,14 @@ C10 讀的是執行中 Alertmanager 載入的設定（`amtool config show`），
   `HostMetricsMissing` 不會觸發，主機掛掉時也不會排除 `PilotLoginProbeTransportFailed`。
 - `login_probe_interval`（預設 60s）加上 `login_probe_total_timeout` 要明顯短於
   `host_metrics_missing_for`（預設 3m）：一輪的間隔接近 3m 時，主機剛掛掉、下一輪還沒跑之前，
-  `HostMetricsMissing` 可能誤報「SSH 連得上」。
+  `HostMetricsMissing` 可能誤報「SSH 連得上」（兩邊屬於不同 role，playbook 沒有交叉檢查）。
+- probe 新鮮度看的是 `login_probe_stale_seconds` 內寫入時間戳的 `changes()`，這段時間至少要
+  有三次 scrape：`prometheus-apply.yml` 拒絕 `login_probe_stale_seconds` < 3 ×
+  `prometheus_scrape_interval`（否則健康的 probe 會被當成停擺，`PilotLoginProbeStale` 會抑制
+  它所有告警，`HostMetricsMissing` 也永遠不會成立）。
+- `host_metrics_missing_for` 必須 ≥ `login_probe_stale_seconds`（playbook 會擋）：probe 在
+  target 掛掉的同時停擺時，凍結的 `success=1` 最多還會被當成新鮮 `login_probe_stale_seconds`，
+  `HostMetricsMissing` 不能比這更快觸發。
 
 `internal/spec/alertmanager_inhibit_regression_test.go::TestRegression_AlertmanagerInhibitBehaviour`
 用 pinned 的 Alertmanager 實際跑兩種內建設定，確認哪些告警被抑制；
@@ -149,6 +162,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-15 | v1.9 | PR #80 第四輪 review：§1.7 的延遲改寫成推導出的上限（node_exporter 恢復後約 7m15s，實測 5m41s；資料缺口期間主機掛掉時 `HostDown` 約 9m 後才解除抑制）；補上 probe 新鮮度的 scrape 間隔前提與 `host_metrics_missing_for` ≥ `login_probe_stale_seconds`（`prometheus-apply.yml` 新增的兩道 gate） | sre |
 | 2026-10-15 | v1.8 | PR #80 第三輪 review：C10 改讀執行中 Alertmanager 載入的設定（`amtool config show`），要求兩條 inhibit 規則逐字相符，舊規則與少了 `site` 的規則都會 FAIL（`TestRegression_AlertmanagerC10DistinguishesInhibitRules` 對真的 Alertmanager 跑 C10）；兩條規則的 `equal` 加上 `site`；`HostMetricsMissing` 加 `keep_firing_for`，probe 新鮮度改用 `changes()`；§1.7 補前提（`node_exporter_targets`、probe 間隔）；標頭版本對齊變更紀錄 | sre |
 | 2026-10-15 | v1.7 | GitHub issue #11 / PR #80 review：改寫兩條 inhibit（§1.7、C10）。舊規則讓 `HostDown`（10m）抑制先觸發的 `HostMetricsMissing`，資料缺口反而只剩「Target down」；`PilotLoginProbeStale` 以 `site` 比對，一台 probe 停擺會抑制整站其他 probe 的告警。改為 `HostMetricsMissing` 抑制同主機的 `HostDown{job="node"}`，`PilotLoginProbeStale` 只比對 `probe_host`。「整台主機掛掉只產生 `HostDown`」改由規則本身保證。新增實際啟動 Alertmanager 的行為測試，CI 也會跑 | sre |
 | 2026-10-13 | v1.6 | GitHub issue #11：`null`/`teams` 模式內建 HostDown 與 PilotLoginProbeStale 兩條 inhibit 規則（§1.7），新增 C10；`custom` 模式需自行加入 | sre |

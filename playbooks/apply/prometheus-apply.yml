@@ -865,6 +865,46 @@
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]
 
+    # Probe freshness is changes() of the probe's write timestamp over
+    # login_probe_stale_seconds (pilot-host-health-alert-rules.yml.j2). The
+    # window must hold several scrapes of a healthy probe: with fewer, a
+    # healthy probe looks stale (PilotLoginProbeStale fires and mutes all
+    # its alerts) and HostMetricsMissing's freshness term never holds.
+    - name: "Gate: login_probe_stale_seconds spans at least three node scrapes"
+      ansible.builtin.assert:
+        that:
+          - prometheus_scrape_interval is match('^[0-9]+(ms|s|m|h|d)$')
+          - (login_probe_stale_seconds | int) >= 3 * (_scrape_count | int) * (_duration_seconds[_scrape_unit] | float)
+        fail_msg: >-
+          login_probe_stale_seconds={{ login_probe_stale_seconds }} must be at least
+          3 x prometheus_scrape_interval ({{ prometheus_scrape_interval }}, a single
+          Prometheus duration such as 15s), or a healthy login probe looks stale.
+      vars:
+        _scrape_count: "{{ prometheus_scrape_interval | regex_search('^[0-9]+') }}"
+        _scrape_unit: "{{ prometheus_scrape_interval | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
+    # A probe that stalls at the moment its target dies leaves a frozen
+    # success=1 that still counts as fresh for up to login_probe_stale_seconds.
+    # HostMetricsMissing must need at least that long to fire, or it reports
+    # the dead host "reachable over SSH" and mutes its HostDown.
+    - name: "Gate: host_metrics_missing_for is at least login_probe_stale_seconds"
+      ansible.builtin.assert:
+        that:
+          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) >= (login_probe_stale_seconds | int)
+        fail_msg: >-
+          host_metrics_missing_for={{ host_metrics_missing_for }} must be at least
+          login_probe_stale_seconds={{ login_probe_stale_seconds }}s, or a probe that
+          stalls as its target dies makes HostMetricsMissing fire for a dead host.
+      vars:
+        _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
+        _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
     - name: "Compute the rule_files list (spec §8.4; only alert-rules.yml when no kind:snmp profile is declared)"
       ansible.builtin.set_fact:
         prometheus_rule_files_list: >-
