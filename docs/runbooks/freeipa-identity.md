@@ -303,7 +303,10 @@ onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名�
 - **宣告式（重要）**：`ssh_keys:` 列的就是該帳號**完整**的金鑰集合。playbook 用
   `ipa user-mod --sshpubkey=...` **整組取代**。所以：
   - 換金鑰 → 改 list 內容再套用。
-  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。
+  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。撤銷最後一把時寫成空 list
+    （`ssh_keys: []`；canonical roster 是 `ssh_keys: {authoritative: true, values: []}`），
+    playbook 會送 `--sshpubkey=` 清空。2026-10-15 之前空 list 不會清除任何金鑰
+    （issue #113）。整個省略 `ssh_keys` 則表示不管理該帳號的金鑰，既有金鑰保持不變。
   - 一次多把金鑰 → list 放多行即可。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
