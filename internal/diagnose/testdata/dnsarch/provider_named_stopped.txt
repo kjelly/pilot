@@ -1,0 +1,26 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch named begin
+inactive
+@@pilot-dnsarch named end rc=3
+@@pilot-dnsarch soa begin
+;; connection timed out; no servers could be reached
+
+@@pilot-dnsarch soa end rc=9
+@@pilot-dnsarch ns begin
+;; connection timed out; no servers could be reached
+
+@@pilot-dnsarch ns end rc=9
+@@pilot-dnsarch srv_ldap begin
+;; connection timed out; no servers could be reached
+
+@@pilot-dnsarch srv_ldap end rc=9
+@@pilot-dnsarch srv_kerberos begin
+;; connection timed out; no servers could be reached
+
+@@pilot-dnsarch srv_kerberos end rc=9
+@@pilot-dnsarch internal begin
+;; connection timed out; no servers could be reached
+
+@@pilot-dnsarch internal end rc=9

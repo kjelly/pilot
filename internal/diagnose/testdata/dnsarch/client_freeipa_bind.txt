@@ -1,0 +1,27 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch nameservers begin
+127.0.0.1
+@@pilot-dnsarch nameservers end rc=0
+@@pilot-dnsarch options begin
+@@pilot-dnsarch options end rc=0
+@@pilot-dnsarch resolved begin
+inactive
+@@pilot-dnsarch resolved end rc=3
+@@pilot-dnsarch resolvectl begin
+environment: line 6: resolvectl: command not found
+@@pilot-dnsarch resolvectl end rc=127
+@@pilot-dnsarch first_hop begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 42266
+;; flags: qr aa rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 9723ebd9966ce051010000006acf9e29bfe766f795c8a302 (good)
+@@pilot-dnsarch first_hop end rc=0
+@@pilot-dnsarch lookup begin
+fe80::5054:ff:feb5:d829 ipa1.ipa.pilot.internal
+@@pilot-dnsarch lookup end rc=0

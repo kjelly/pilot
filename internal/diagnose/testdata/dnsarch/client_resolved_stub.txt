@@ -1,0 +1,26 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch nameservers begin
+127.0.0.53
+@@pilot-dnsarch nameservers end rc=0
+@@pilot-dnsarch options begin
+options edns0 trust-ad
+@@pilot-dnsarch options end rc=0
+@@pilot-dnsarch resolved begin
+active
+@@pilot-dnsarch resolved end rc=0
+@@pilot-dnsarch resolvectl begin
+Global:
+Link 2 (enp1s0): 192.168.122.1
+@@pilot-dnsarch resolvectl end rc=0
+@@pilot-dnsarch first_hop begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 17789
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 65494
+@@pilot-dnsarch first_hop end rc=0
+@@pilot-dnsarch lookup begin
+@@pilot-dnsarch lookup end rc=2
