@@ -17,6 +17,13 @@
 # removed. An SELinux file-context rule added for an earlier root is left in
 # place (`semanage fcontext -d '<root>(/.*)?'` removes it).
 #
+# The relabel follows the label on disk, not whether the rule changed in this
+# run: a file-context rule only takes effect through restorecon, and a root
+# created after the rule existed (a rerun after a failed apply, a recreated
+# directory) gets its parent's type. Captured 2026-10-15 on AlmaLinux 9.8:
+# with the rule already present, a new /srv/siem-el2 stayed
+# `unconfined_u:object_r:var_t:s0` and rsyslog wrote nothing.
+#
 # Nothing changes on a host without AppArmor or SELinux.
 
 - name: "MAC: does the log root live under /var/log"
@@ -85,9 +92,34 @@
     - not rsyslog_log_root_in_var_log
     - not ansible_check_mode
 
+- name: "MAC: read the log root's SELinux label"
+  ansible.builtin.command:
+    argv: [stat, -c, "%C", "{{ rsyslog_log_root }}"]
+  register: rsyslog_log_root_context
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+
 - name: "MAC: apply the log root's SELinux label"
   ansible.builtin.command:
     argv: [restorecon, -RF, "{{ rsyslog_log_root }}"]
+  register: rsyslog_selinux_relabel
   when:
-    - rsyslog_selinux_fcontext is changed
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
     - not ansible_check_mode
+    - (rsyslog_selinux_fcontext is changed) or (((rsyslog_log_root_context.stdout | default('')).split(':')[2:3]) != ['var_log_t'])
+
+# A more specific file-context rule (another service's tree) keeps its own
+# type: fail here instead of relabelling and restarting rsyslog on every run
+# while rsyslog still cannot write.
+- name: "MAC: the log root is labelled var_log_t"
+  ansible.builtin.command:
+    argv: [stat, -c, "%C", "{{ rsyslog_log_root }}"]
+  register: rsyslog_log_root_context_after
+  changed_when: false
+  failed_when: (rsyslog_log_root_context_after.stdout.split(':')[2:3]) != ['var_log_t']
+  when: rsyslog_selinux_relabel is not skipped

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_LogServerProbesUseTheEffectiveRoot runs log-server.md's
@@ -145,11 +147,27 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 	if !strings.Contains(pb, `rsyslog_log_root: "{{ siem_log_root_real }}"`) {
 		t.Error("the include must pass the resolved root siem_log_root_real")
 	}
+	// restorecon labels the root, so Step 2 must have created it under every
+	// tag the include runs under. With Step 2 tagged only C6, `--tags C7` on a
+	// root not created yet failed at restorecon ("lstat(<root>) failed: No such
+	// file or directory"), and the rescue removed the running receiver's
+	// drop-ins (2026-10-15, pr79-el).
+	create := strings.Index(pb, `name: "Step 2: Ensure {{ siem_log_root }} exists"`)
+	if create < 0 || create > include {
+		t.Fatalf("Step 2 must create the root before the include; got indexes %d, %d", create, include)
+	}
+	step2 := pb[create:include]
+	if end := strings.Index(step2[1:], "- name:"); end > 0 {
+		step2 = step2[:end+1]
+	}
+	if !strings.Contains(step2, "tags: [C6, C7, C8]") {
+		t.Errorf("Step 2 must carry the include's tags C6, C7, C8:\n%s", step2)
+	}
 	step6a := pb[restart:]
 	if end := strings.Index(step6a[1:], "- name:"); end > 0 {
 		step6a = step6a[:end+1]
 	}
-	for _, want := range []string{"rsyslog_apparmor_local", "rsyslog_selinux_fcontext", "C6, C7, C8"} {
+	for _, want := range []string{"rsyslog_apparmor_local", "rsyslog_selinux_relabel", "C6, C7, C8"} {
 		if !strings.Contains(step6a, want) {
 			t.Errorf("Step 6a must restart rsyslog when the log-root access changes (%q missing):\n%s", want, step6a)
 		}
@@ -164,10 +182,90 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 		"/etc/apparmor.d/local/usr.sbin.rsyslogd", "{{ rsyslog_log_root }}/ rw,", "{{ rsyslog_log_root }}/** rwk,",
 		"'absent' if rsyslog_log_root_in_var_log", "apparmor_parser, -r, /etc/apparmor.d/usr.sbin.rsyslogd",
 		"/sys/fs/selinux/enforce", "community.general.sefcontext", `target: "{{ rsyslog_log_root }}(/.*)?"`,
-		"setype: var_log_t", "restorecon, -RF", "not ansible_check_mode",
+		"setype: var_log_t", "restorecon, -RF", "register: rsyslog_selinux_relabel", `argv: [stat, -c, "%C",`,
+		"not ansible_check_mode",
 	} {
 		if !strings.Contains(tf, want) {
 			t.Errorf("tasks/rsyslog-confined-log-root.yml must contain %q", want)
 		}
+	}
+}
+
+// TestRegression_LogServerRelabelsTheRootByItsLabel evaluates, through
+// Ansible, the relabel condition and the label check of
+// tasks/rsyslog-confined-log-root.yml against `stat -c %C` output captured
+// on AlmaLinux 9.8 (2026-10-15). When the relabel ran only if the
+// file-context rule changed in this run, a root created after the rule
+// existed (here a rerun after a failed `--tags C7` apply) stayed var_t and
+// rsyslog wrote nothing while the apply succeeded.
+func TestRegression_LogServerRelabelsTheRootByItsLabel(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	raw, err := os.ReadFile("../../playbooks/apply/tasks/rsyslog-confined-log-root.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file []map[string]any
+	if err := yaml.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	find := func(name string) map[string]any {
+		t.Helper()
+		for _, task := range file {
+			if task["name"] == name {
+				return task
+			}
+		}
+		t.Fatalf("tasks/rsyslog-confined-log-root.yml has no task %q", name)
+		return nil
+	}
+	var when []string
+	for _, c := range find("MAC: apply the log root's SELinux label")["when"].([]any) {
+		when = append(when, "("+c.(string)+")")
+	}
+	failedWhen, _ := find("MAC: the log root is labelled var_log_t")["failed_when"].(string)
+	if failedWhen == "" {
+		t.Fatal("the label check must have a failed_when")
+	}
+
+	const unlabelled = "unconfined_u:object_r:var_t:s0" // a new directory under /srv
+	const labelled = "system_u:object_r:var_log_t:s0"   // after restorecon
+	cases := []struct {
+		name                  string
+		before, after         string
+		ruleChanged           bool
+		wantRelabel, wantFail bool
+	}{
+		{"root created after the rule existed", unlabelled, labelled, false, true, false},
+		{"rule added in this run", unlabelled, labelled, true, true, false},
+		{"labelled root, rule unchanged (rerun)", labelled, labelled, false, false, false},
+		{"restorecon left it var_t", unlabelled, unlabelled, false, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tasks := []any{
+				map[string]any{"ansible.builtin.set_fact": map[string]any{
+					"rsyslog_selinux_enforce":        map[string]any{"stat": map[string]any{"exists": true}},
+					"rsyslog_log_root_in_var_log":    false,
+					"rsyslog_selinux_fcontext":       map[string]any{"changed": c.ruleChanged},
+					"rsyslog_log_root_context":       map[string]any{"stdout": c.before},
+					"rsyslog_log_root_context_after": map[string]any{"stdout": c.after},
+				}},
+				map[string]any{"ansible.builtin.set_fact": map[string]any{
+					"relabel": "{{ " + strings.Join(when, " and ") + " }}",
+					"fails":   "{{ " + failedWhen + " }}",
+				}},
+				showTask([]string{"relabel", "fails"}),
+			}
+			got, failed := tryInventoryPlay(t, "log-server", nil, tasks, nil)
+			if failed != "" {
+				t.Fatal(failed)
+			}
+			if got["relabel"] != c.wantRelabel || got["fails"] != c.wantFail {
+				t.Errorf("before %s, after %s, rule changed %v: got relabel=%v fails=%v, want %v %v",
+					c.before, c.after, c.ruleChanged, got["relabel"], got["fails"], c.wantRelabel, c.wantFail)
+			}
+		})
 	}
 }

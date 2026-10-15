@@ -206,7 +206,7 @@
     - name: "Gate: siem_log_root resolves to a new directory or one this role created"
       ansible.builtin.assert:
         that:
-          - siem_log_root_real is match('^/[^/]')
+          - siem_log_root_real is match('^/[A-Za-z0-9._/-]+\Z')
           - siem_log_root_real not in siem_log_root_reserved
           - (siem_log_root_real.split('/')[:2] | join('/')) not in siem_log_root_system_trees
           - >-
@@ -220,7 +220,10 @@
                          and (siem_log_root_dirs | difference(['lost+found']) | length) == 0)))
         fail_msg: >-
           siem_log_root={{ siem_log_root }} resolves to {{ siem_log_root_real }}, which
-          {% if siem_log_root_real is not match('^/[^/]') or siem_log_root_real in siem_log_root_reserved
+          {% if siem_log_root_real is not match('^/[A-Za-z0-9._/-]+\Z') %}holds characters
+          other than letters, digits, '.', '_', '-' and '/'; the AppArmor rule for it
+          would not parse or would match other paths.
+          {% elif siem_log_root_real is not match('^/[^/]') or siem_log_root_real in siem_log_root_reserved
                 or (siem_log_root_real.split('/')[:2] | join('/')) in siem_log_root_system_trees %}is a
           shared or system directory.
           {% elif not (siem_log_root_stat.isdir | default(false)) %}exists and is not a directory.
@@ -303,7 +306,9 @@
 
     - block:
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
-          tags: [C6]
+          # C7, C8: Step 2a labels this directory under SELinux and runs
+          # under those tags too.
+          tags: [C6, C7, C8]
           ansible.builtin.file:
             # The gates checked the directory siem_log_root resolves to. Work
             # on that path and do not follow a symlink: on Ubuntu the rsyslog
@@ -326,6 +331,7 @@
           ansible.builtin.set_fact:
             rsyslog_apparmor_local: {}
             rsyslog_selinux_fcontext: {}
+            rsyslog_selinux_relabel: {}
 
         - name: "Step 2a: Let a confined rsyslogd write siem_log_root"
           tags: [C6, C7, C8]
@@ -464,7 +470,7 @@
             ((siem_receiver_conf_result | default({})) is changed)
             or ((rsyslog_selinux_port_label | default({})) is changed)
             or ((rsyslog_apparmor_local | default({})) is changed)
-            or ((rsyslog_selinux_fcontext | default({})) is changed)
+            or ((rsyslog_selinux_relabel | default({})) is changed)
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
           when: ansible_os_family == "Debian"

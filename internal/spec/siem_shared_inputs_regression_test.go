@@ -151,6 +151,21 @@ func TestRegression_LogServerRefusesASharedSiemLogRoot(t *testing.T) {
 				t.Errorf("siem_log_root=%s: want %q to refuse it as a shared or system directory, got %q", root, resolved, failed)
 			}
 		}
+		// log-server writes the resolved path into an AppArmor rule, where a
+		// space breaks the profile and a glob character matches other paths.
+		for i, target := range []string{"siem logs", "siem*", "siem{a,b}"} {
+			dir := filepath.Join(base, target)
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(base, fmt.Sprintf("to-odd-%d", i))
+			if err := os.Symlink(dir, link); err != nil {
+				t.Fatal(err)
+			}
+			if failed := run(link); !strings.Contains(failed, resolved) || !strings.Contains(failed, "holds characters") {
+				t.Errorf("siem_log_root=%s -> %q: want %q to refuse its characters, got %q", link, dir, resolved, failed)
+			}
+		}
 	})
 
 	// The filesystem cases compare an existing directory's owner and group
