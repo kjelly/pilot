@@ -17,18 +17,18 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-15，candidate `0882d2cf499d60a63c11f7b96e69c64fbf1e666b`（tree `959db39647014a57ad539cf9a403b985cd45f37d`；merge `main` `f9fb701` 後修正 `HostIOStall`），乾淨 detached worktree |
-| 目標環境 | 四台 ephemeral VM（topology 副本把 `lp-` 改名為 `pr80-`，`services: local`；此輪 Harbor 未再回 `401`，不需要 `services: none`）：`pr80-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr80-mon`（Ubuntu 24.04.4：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`pr80-target`（Ubuntu 24.04.4，有 PSI）、`pr80-target-el`（AlmaLinux 9.8，EL9 預設沒有 PSI）。node_exporter 1.12.1。 |
+| 最新驗證 | 2026-10-15，candidate `dc883b38f2c26992e6838c0955917f4eca60c170`（tree `c1a174226695534fadcb3f23f829cb31f44c476f`；PR #80 review 的 inhibit、decommission vault、probe 修正），乾淨 detached worktree；operator 為維護者工作站上的 OS 使用者 `kjelly`（由 coding agent 執行） |
+| 目標環境 | 四台 ephemeral VM（topology 副本把 `lp-` 改名為 `pr80-`，`services: local`）：`pr80-ipa`（AlmaLinux 9.8，FreeIPA 4.13.4）、`pr80-mon`（Ubuntu 24.04.4：freeipa-client、host-monitoring、docker、seaweedfs-s3、prometheus、alertmanager、login-probe）、`pr80-target`（Ubuntu 24.04.4，有 PSI）、`pr80-target-el`（AlmaLinux 9.8，EL9 預設沒有 PSI）。node_exporter 1.12.1；`pr80-mon` 上的 image digest 見 evidence。 |
 | base image | 每台 VM 都是 `overlay.qcow2` 疊在 golden image 上：`almalinux-9-golden.qcow2` SHA-256 `b780998adca7c69ff6dbd41a05b51769ef6ab6708a7defbd286195186fbcc8ac`；`ubuntu-24.04-golden.qcow2` SHA-256 `bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394` |
 | inventory host 集合 | `pilot vm-target topology inventory` 產生：`freeipa-server`={pr80-ipa}；`freeipa-client`/`host-monitoring`={pr80-mon, pr80-target, pr80-target-el}；`docker`/`seaweedfs-s3`/`prometheus`/`alertmanager`/`login-probe`={pr80-mon} |
 | vault 依賴（只列 key） | `ipa_admin_password`、`node_exporter_basic_auth_password`、`thanos_aws_access_key_id`、`thanos_aws_secret_access_key`、`restic_aws_access_key_id`、`restic_aws_secret_access_key`（此輪用一次性 vault）。login-probe 本身需要 `node_exporter_basic_auth_password`（跟同主機 host-monitoring 同一個值，apply 用它確認 node_exporter 有讀到 textfile）；`login_probe_ssh_private_key` 選填 |
 | 對齊決定 | A（改 inventory）：topology 檔就是 spec §1 宣告的 group 集合 |
-| candidate topology test | 2026-10-15 00:42–01:02 UTC，`topology test` rc=0：L1 syntax PASS；L3 `--check --diff` 四台 `failed=0`；L4 四台 `failed=0`（pr80-ipa changed=22、pr80-mon=69、pr80-target=33、pr80-target-el=30）；L5 login-probe 14/14、Alertmanager 10/10 PASS；L6 四台 `changed=0`。 |
-| `HostIOStall` 實測 | 預設門檻（0.25、10m）下，`pr80-target` 跑 `dd oflag=dsync` 製造 I/O 壓力：`rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])`=0.303，01:09 UTC pending、01:17 UTC firing，Alertmanager 收到 `HostIOStall{pilot_host="pr80-target"}`；沒有負載的 `pr80-mon` 沒有觸發。node_exporter 的 PSI series 沒有 `kind` label（`stalled`=full、`waiting`=some），規則不得加 `kind=` matcher。 |
-| 演練 | 整台主機停擺時 `PilotLoginProbeTransportFailed` 被 `HostDown` inhibit；`pilot host decommission` 退役被探測主機後 probe 設定不再列它（HD36-LIVE） |
-| verify（fresh topology） | `login-probe.md` 14/14 PASS；`alertmanager.md` 10/10 PASS；另行跑 `prometheus.md` 為 19/24：C1–C15、C20/C21、C23/C24 PASS；C16–C19 因此拓樸沒有 GPU/dcgm-exporter、C22 因 fresh Thanos 尚未累積可上傳的 2h block 而 FAIL（見 §6）。 |
+| candidate topology test | 2026-10-15 03:04–03:24 UTC，`topology test` rc=0（cluster snapshot `pre-test-1792033880`）：L1 syntax PASS；L3 `--check --diff` 四台 `failed=0`；L4 四台 `failed=0`（pr80-ipa changed=22、pr80-mon=69、pr80-target=33、pr80-target-el=30）；L5 login-probe 14/14、Alertmanager 10/10 PASS；L6 四台 `changed=0`。 |
+| `HostIOStall` 實測 | 歷史紀錄（candidate `0882d2c`；`HostIOStall` 的運算式此後沒有改）：預設門檻（0.25、10m）下，`pr80-target` 跑 `dd oflag=dsync`，`rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])`=0.303，01:09 UTC pending、01:17 UTC firing，Alertmanager 收到；沒有負載的主機沒有觸發。node_exporter 的 PSI series 沒有 `kind` label（`stalled`=full、`waiting`=some），規則不得加 `kind=` matcher。 |
+| 演練 | candidate `dc883b3`，真實 Prometheus + Alertmanager：(1) 停掉 `pr80-target` 的 node_exporter（SSH 正常）→ `HostMetricsMissing` 3.5 分鐘觸發，10 分鐘後的 `HostDown{job="node"}` 在 Alertmanager 為 suppressed；(2) `virsh suspend pr80-target-el` → 只有 `HostDown`，`PilotLoginProbeTransportFailed` 從未 pending/firing；(3) 兩台 probe：停擺的 probe 只抑制自己（`probe_host`）的告警，另一台的 critical `AccountDenied` 維持 active；(4) 已部署主機的 `--check --diff` rc=0，一個解析不到的 target 只印 WARNING，全部解析不到才拒絕；(5) HD36-LIVE：`pilot host decommission` 退役 `pr80-target`，re-render 帶 vault 通過 gate，probe 設定不再列它；(6) §6 手動移除 role 的兩個指令執行後 probe series 消失 |
+| verify（fresh topology） | `login-probe.md` 14/14 PASS；`alertmanager.md` 10/10 PASS；另行跑 `prometheus.md` 為 19/24：C1–C15、C20/C21、C23/C24 PASS；C16–C19 因此拓樸沒有 GPU/dcgm-exporter、C22 因 fresh Thanos 尚未累積可上傳的 2h block 而 FAIL（見 §6）。`thanos_aws_*` 必須等於 `restic_aws_*`，否則 C9 也會 FAIL。 |
 | 冪等 | `login-probe-apply.yml` 第二次 apply `changed=0`；整條 chain 在全新 VM 上 L6 `changed=0` |
-| evidence | 最新 candidate：[`2026-10-15-0882d2c.md`](../evidence/login-probe/2026-10-15-0882d2c.md)，hash manifest：[`2026-10-15-0882d2c-files.sha256`](../evidence/login-probe/2026-10-15-0882d2c-files.sha256)；歷史 evidence：`docs/evidence/login-probe/2026-10-14-5f7c13b.md`、`docs/evidence/login-probe/2026-10-13-6bcfb8a.md`、`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`、`docs/evidence/login-probe/2026-10-13-drills.md` |
+| evidence | 最新 candidate：[`2026-10-15-dc883b3.md`](../evidence/login-probe/2026-10-15-dc883b3.md)，hash manifest：[`2026-10-15-dc883b3-files.sha256`](../evidence/login-probe/2026-10-15-dc883b3-files.sha256)；歷史 evidence：`docs/evidence/login-probe/2026-10-15-0882d2c.md`、`docs/evidence/login-probe/2026-10-14-5f7c13b.md`、`docs/evidence/login-probe/2026-10-13-6bcfb8a.md`、`docs/evidence/login-probe/2026-10-13-phase0-ssh-capture.md`、`docs/evidence/login-probe/2026-10-13-drills.md` |
 
 ## 1. 為什麼
 
@@ -171,7 +171,8 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 - `prometheus.md` 的 C16–C19（GPU）在沒有 dcgm-exporter 主機的站台一定 FAIL，跟本功能無關。
 - C22 要等 Prometheus head 約 3 小時切出第一個 2h block，再由 Thanos Sidecar 上傳；fresh topology 剛部署時預期 FAIL，至少等待約 3 小時後再驗收此 row。
 - I/O、SSSD 卡住、metrics 缺口、probe 停擺、全站 HBAC 拒絕這幾個演練跑在 candidate 之前的
-  working tree（`2026-10-13-drills.md`）；candidate `6bcfb8a` 重跑的是 L1–L6、整台主機停擺與退役。
+  working tree（`2026-10-13-drills.md`）。candidate `dc883b3` 重跑了 L1–L6、資料缺口、整台主機停擺、
+  兩台 probe 其中一台停擺，以及退役（HD36-LIVE）；I/O stall 的實測停在 `0882d2c`。
 - `pilot host decommission` 不會移除 Prometheus 的 scrape target（host-decommission spec §19 尚未
   實作的部分，與本元件無關）；`prometheus-apply.yml` 只改 `prometheus.yml` 時不會重啟 Prometheus
   （既有 bug，見 candidate evidence §4）。
@@ -183,3 +184,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-13 | v0.1 | 初版：Phase 0 擷取、元件、告警規則、inhibit 規則與 topology 演練（issue #11） | pilot |
 | 2026-10-14 | v0.2 | 更新至 candidate `5f7c13b` 的 fresh topology 證據，記錄 image fingerprints 與 Prometheus C16–C19/C22 環境限制 | pilot |
 | 2026-10-15 | v0.3 | 更新至 candidate `0882d2c`：`HostIOStall` 改讀沒有 `kind` label 的 PSI full series，並在 fresh topology 上實際觸發；`services: local` 可用 | pilot |
+| 2026-10-15 | v0.4 | 更新至 candidate `dc883b3`（PR #80 review）：§3 的 inhibit 行為改寫（`HostMetricsMissing` 抑制同主機 `HostDown{job="node"}`、`PilotLoginProbeStale` 只抑制同 `probe_host`）、§4.5 退役 re-render 帶 vault、§6 補明確 target 名稱、解析不到的 target 與手動移除 role；§0.5 換成新一輪實測 | pilot |
