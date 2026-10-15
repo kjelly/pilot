@@ -11,11 +11,19 @@ import (
 	"testing"
 )
 
-// The tests below compare log maintenance with the redaction main did before
-// incremental redaction (main 6427b66): a full pass over the whole log on
-// every maintenance. Whatever that masked must be masked here too, however
-// the log is written in pieces and whenever maintenance runs between them
-// (PR #71 review).
+// The tests below compare log maintenance with main before incremental
+// redaction (6427b66, the base of PR #71): a full pass over the whole log on
+// every maintenance, with main's code copied here unchanged. Whatever that
+// masks must be masked here too, however the log is written in pieces,
+// whenever maintenance runs between them, and whether or not a writer keeps
+// the log open across maintenance and rotation (PR #71 reviews).
+//
+// The generated logs put secret values only where main masks them by its
+// rules: values of sensitive keys and flags, and lines of keys that have an
+// END marker. They never rely on main masking every line after a BEGIN
+// marker that has no END marker: that is the one case where this package
+// masks less on purpose (a new Ansible record ends such a key), so it is
+// left out of the comparison rather than copied into the reference.
 //
 // main's rules, copied unchanged.
 var (
@@ -36,11 +44,7 @@ func mainRedactSecrets(line string) string {
 	return mainSensitiveFlag.ReplaceAllString(line, "$1[REDACTED]")
 }
 
-// mainFullPass is main's redactFile on a string. One change is made on
-// purpose: like this package now, it ends a private key at the next Ansible
-// record whose message cannot be key material. main kept masking every line
-// up to an END marker that might never come; that is over-masking, which
-// the review asked to bound, not a rule to keep.
+// mainFullPass is main's redactFile on a string.
 func mainFullPass(content string) string {
 	var out strings.Builder
 	reader := bufio.NewReader(strings.NewReader(content))
@@ -48,9 +52,6 @@ func mainFullPass(content string) string {
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
-			if inPrivateKey && ansibleRecord.MatchString(line) && !ansibleKeyRecord.MatchString(line) {
-				inPrivateKey = false
-			}
 			switch {
 			case inPrivateKey:
 				inPrivateKey = !mainPrivateKeyEnd.MatchString(line)
@@ -162,9 +163,58 @@ func (g *secretLog) key(indent string, body int) {
 	g.b.WriteString(indent + "-----END OPENSSH PRIVATE KEY-----\n")
 }
 
+// keyLoop logs a loop over a key's lines in the shapes captured from
+// ansible-core 2.19.2 (host, paths and key changed): one record per item,
+// with the lines that belong to it, and an error report between items; a
+// loop whose loop_control.label hides the item, so the BEGIN marker is only
+// in the first item's result body; an include_tasks loop ("included: <file>
+// for h => (item=...)"); and the included task run once per item, each run
+// under its own TASK banner (PR #90 review).
+func (g *secretLog) keyLoop() {
+	if g.r.Intn(2) == 0 {
+		g.record("TASK [loop over key lines] ***")
+	}
+	lines := []string{"-----BEGIN RSA PRIVATE KEY-----"}
+	for n := 1 + g.r.Intn(3); n > 0; n-- {
+		lines = append(lines, g.secret()+g.secret())
+	}
+	lines = append(lines, "-----END RSA PRIVATE KEY-----")
+	shape := g.r.Intn(7)
+	for i, line := range lines {
+		switch shape {
+		case 4:
+			g.record(fmt.Sprintf("ok: [h] => (item=%d) => {", i+1))
+			g.b.WriteString("    \"msg\": \"" + line + "\"\n}\n")
+			continue
+		case 5:
+			g.record("included: /x/write_line.yml for h => (item=" + line + ")")
+			continue
+		case 6:
+			g.record("TASK [inner] *******************************************************************")
+			g.record("ok: [h] => {")
+			g.b.WriteString("    \"msg\": \"" + line + "\"\n}\n")
+			continue
+		}
+		switch shape {
+		case 0:
+			g.record("changed: [h] => (item=" + line + ")")
+		case 1:
+			g.record("ok: [h] => (item=" + line + ") => {")
+			g.b.WriteString("    \"msg\": \"" + line + "\"\n}\n")
+		case 2:
+			if i == 1 {
+				g.b.WriteString("2026-09-15 09:50:37,791 p=4242 u=pilot n=ansible ERROR| [ERROR]: Task failed: Module failed: non-zero return code\nOrigin: /x/play.yml:20:7\n\n")
+			}
+			g.record(`failed: [h] (item=` + line + `) => {"ansible_loop_var": "item", "changed": true, "cmd": ["false", "` + line + `"], "item": "` + line + `", "rc": 1}`)
+		default:
+			g.record(`changed: [h] => (item=` + line + `) => {"ansible_loop_var": "item", "changed": true, "cmd": ["echo", "` + line + `"], "stdout": "` + line + `"}`)
+		}
+	}
+}
+
 func (g *secretLog) piece() {
 	s := g.secret
-	switch g.r.Intn(18) {
+	switch g.r.Intn(20) {
 	case 0, 1:
 		g.record("ok: [h] => ordinary output line")
 	case 2:
@@ -202,21 +252,17 @@ func (g *secretLog) piece() {
 		g.record("password=abc]def token: " + s())
 	case 16:
 		g.record("ok: [h] => {\"msg\": \"password: [REDACTED]\"}")
+	case 17, 18:
+		g.keyLoop()
 	default:
 		g.b.WriteString("multi-line record continuation " + s()[:3] + "\n")
 	}
 }
 
-// generate returns one log and a random way to write and maintain it.
+// generateSecretLog returns one log and a random way to write and
+// maintain it.
 func generateSecretLog(r *rand.Rand) (string, []int, []bool) {
-	g := &secretLog{r: r}
-	for n := 1 + r.Intn(12); n > 0; n-- {
-		g.piece()
-	}
-	content := g.b.String()
-	if r.Intn(3) == 0 {
-		content = content[:r.Intn(len(content)+1)] // a run cut short
-	}
+	content, _ := generateSecretPieces(r)
 	cuts := make([]int, r.Intn(7))
 	for i := range cuts {
 		cuts[i] = r.Intn(len(content) + 1)
@@ -227,6 +273,26 @@ func generateSecretLog(r *rand.Rand) (string, []int, []bool) {
 		maintainAfter[i] = r.Intn(10) < 7
 	}
 	return content, cuts, maintainAfter
+}
+
+// generateSecretPieces returns one log and the offsets where its pieces
+// end. A piece is what one Ansible process writes as a whole: a record, or
+// a key, or a loop over one.
+func generateSecretPieces(r *rand.Rand) (string, []int) {
+	g := &secretLog{r: r}
+	var ends []int
+	for n := 1 + r.Intn(12); n > 0; n-- {
+		g.piece()
+		ends = append(ends, g.b.Len())
+	}
+	content := g.b.String()
+	if r.Intn(3) == 0 {
+		content = content[:r.Intn(len(content)+1)] // a run cut short
+		for i := range ends {
+			ends[i] = min(ends[i], len(content))
+		}
+	}
+	return content, ends
 }
 
 func sortInts(values []int) {
@@ -267,41 +333,90 @@ func TestMaintainLogMasksWhatMainMasksInTheReviewedCases(t *testing.T) {
 	}
 }
 
-// FuzzMaintainLogMasksWhatMainMasks explores other logs and other ways to
-// write them: plan's bytes give the cut points and when maintenance runs.
+// FuzzMaintainLogMasksWhatMainMasks explores more generated logs and ways
+// to write them, picked by seed. Free-form content would put secret values
+// where only main's masking of everything after a BEGIN marker without an
+// END marker covers them, the case left out of the comparison.
 func FuzzMaintainLogMasksWhatMainMasks(f *testing.F) {
-	r := rand.New(rand.NewSource(1))
-	for i := 0; i < 20; i++ {
-		content, cuts, maintainAfter := generateSecretLog(r)
-		plan := make([]byte, 0, len(cuts))
-		for j, cut := range cuts {
-			b := byte(0)
-			if len(content) > 0 {
-				b = byte(cut * 255 / len(content))
-			}
-			if maintainAfter[j] {
-				b |= 1
-			} else {
-				b &^= 1
-			}
-			plan = append(plan, b)
-		}
-		f.Add(content, plan)
+	for seed := int64(0); seed < 8; seed++ {
+		f.Add(seed)
 	}
-	f.Add("password:[REDACTED]--password QZXJLMUQZXJLMU\n", []byte{})
-	f.Add(`ok: [h] => {"private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nQZXJLMUQZXJLMU\n-----END OPENSSH PRIVATE KEY-----\n"}`+"\n", []byte{0x2f, 0x5f})
-	f.Fuzz(func(t *testing.T, content string, plan []byte) {
-		if len(content) > 4096 || len(plan) > 16 {
+	f.Fuzz(func(t *testing.T, seed int64) {
+		r := rand.New(rand.NewSource(seed))
+		content, cuts, maintainAfter := generateSecretLog(r)
+		checkMasksWhatMainMasks(t, content, cuts, maintainAfter)
+		checkKeepsNothingMainWouldMask(t, generateLogSteps(r))
+	})
+}
+
+// checkRedactSecretsLine checks RedactSecrets on one line: unchanged when
+// redacted again, and no secret value left that main masks even when it
+// redacts the line three times, as it did at every maintenance. Main's
+// output is used as it is: its grown brackets are what it wrote, and are
+// not folded here into what this code writes.
+func checkRedactSecretsLine(t *testing.T, line string) {
+	t.Helper()
+	once := RedactSecrets(line)
+	if again := RedactSecrets(once); again != once {
+		t.Errorf("RedactSecrets(%q) = %q, and again %q", line, once, again)
+	}
+	mainRepeated := mainRedactSecrets(mainRedactSecrets(mainRedactSecrets(line)))
+	for _, secret := range secretValue.FindAllString(line, -1) {
+		if !leaks(mainRepeated, secret) && leaks(once, secret) {
+			t.Errorf("RedactSecrets(%q) = %q keeps %s; main masks it: %q", line, once, secret, mainRepeated)
+		}
+	}
+}
+
+var redactLineAtoms = []string{
+	"password", "Password", "--password", "--secret", "--token=", "token", "api_key", "client_secret",
+	"Authorization", "vault_password", ":", "=", " ", "\t", "\r", "]", "]]", "[", "[REDACTED]", "[REDACTED",
+	"[redacted]", `"`, "'", ",", "}", "{", "-", "--", "x", "abc",
+}
+
+func randomRedactLine(r *rand.Rand) string {
+	var b strings.Builder
+	for n := 1 + r.Intn(14); n > 0; n-- {
+		if r.Intn(6) == 0 {
+			for i := 0; i < 12; i++ {
+				b.WriteByte(secretLetters[r.Intn(len(secretLetters))])
+			}
+			continue
+		}
+		b.WriteString(redactLineAtoms[r.Intn(len(redactLineAtoms))])
+	}
+	return b.String()
+}
+
+// RedactSecrets on random lines made of the pieces its rules care about
+// (PR #71 follow-up review: ` --password\t""]` and
+// `--password=[REDACTED]--password\rSECRET` were not stable).
+func TestRedactSecretsMatchesMainOnRandomLines(t *testing.T) {
+	cases := 20000
+	if testing.Short() {
+		cases = 2000
+	}
+	r := rand.New(rand.NewSource(3))
+	for i := 0; i < cases && !t.Failed(); i++ {
+		checkRedactSecretsLine(t, randomRedactLine(r))
+	}
+}
+
+func FuzzRedactSecrets(f *testing.F) {
+	for _, seed := range []string{
+		" --password\t\"\"]",
+		"--password=[REDACTED]--password\rQZXJLMUQZXJL",
+		"password:[REDACTED]--password QZXJLMUQZXJL",
+		"password: [REDACTED-QZXJLMUQZXJL",
+		"password=abc]def token: QZXJLMUQZXJL",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		if strings.ContainsAny(line, "\n") {
 			t.Skip()
 		}
-		cuts := make([]int, len(plan))
-		maintainAfter := make([]bool, len(plan)+1)
-		for i, b := range plan {
-			cuts[i] = int(b) * len(content) / 255
-			maintainAfter[i] = b&1 == 1
-		}
-		sortInts(cuts)
-		checkMasksWhatMainMasks(t, content, cuts, maintainAfter)
+		checkRedactSecretsLine(t, line)
 	})
 }
 
@@ -316,12 +431,12 @@ type logStep struct {
 }
 
 // checkKeepsNothingMainWouldMask runs steps, maintains once more at the
-// end, and fails if the log or a retained log keeps a secret value that
-// main's full pass over that file would mask: a byte that rotation or a
-// still-attached writer got past the scan, or one the rules here miss.
-// Which bytes are kept at all differs from main (main detaches the writer
-// on every maintenance, and trims at other offsets), so this compares each
-// kept file with main's rules rather than with main's files.
+// end, and fails if the log or a retained log keeps a secret value, or part
+// of one, that main masks: main's full pass at the same maintenance points
+// over everything written, in the order it was written. Which bytes are
+// kept at all differs from main (main detached a writer on every
+// maintenance, and trims at other offsets), so only the values kept here are
+// compared.
 func checkKeepsNothingMainWouldMask(t *testing.T, steps []logStep) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ansible.log")
@@ -330,12 +445,15 @@ func checkKeepsNothingMainWouldMask(t *testing.T, steps []logStep) {
 		t.Fatal(err)
 	}
 	defer writer.Close()
+	var written strings.Builder
+	reference := ""
 	for _, step := range steps {
 		switch {
 		case step.maintain:
 			if err := MaintainLogWithPolicy(path, step.policy); err != nil {
 				t.Fatal(err)
 			}
+			reference = mainFullPass(reference)
 		case step.attached:
 			if _, err := writer.WriteString(step.data); err != nil {
 				t.Fatal(err)
@@ -352,35 +470,50 @@ func checkKeepsNothingMainWouldMask(t *testing.T, steps []logStep) {
 				t.Fatal(err)
 			}
 		}
+		written.WriteString(step.data)
+		reference += step.data
 	}
 	maintain(t, path)
+	reference = mainFullPass(reference)
 	for name, content := range logFiles(t, path) {
-		reference := mainFullPass(content)
-		for _, secret := range secretValue.FindAllString(content, -1) {
-			if !leaks(reference, secret) {
-				t.Errorf("%s keeps %s, which main's rules mask\nsteps: %+v\nfile: %q", filepath.Base(name), secret, steps, content)
+		for _, secret := range secretValue.FindAllString(written.String(), -1) {
+			if !leaks(reference, secret) && leaks(content, secret) {
+				t.Errorf("%s keeps %s, which main masks\nsteps: %+v\nfile: %q\nmain: %q", filepath.Base(name), secret, steps, content, reference)
 			}
 		}
 	}
 }
 
+// generateLogSteps writes a generated log as Ansible processes would: each
+// piece (a record, a key, a loop over a key) by one writer, either the one
+// holding the log open from the start or a new open, with maintenance
+// (sometimes with rotation or truncation) between writes. The open writer
+// may write a piece in two parts with maintenance between them; a piece is
+// never continued by another writer.
 func generateLogSteps(r *rand.Rand) []logStep {
-	content, cuts, maintainAfter := generateSecretLog(r)
+	content, ends := generateSecretPieces(r)
 	var steps []logStep
-	start := 0
-	for i := 0; i <= len(cuts); i++ {
-		end := len(content)
-		if i < len(cuts) {
-			end = cuts[i]
+	maintenance := func() {
+		policy := DefaultLogPolicy()
+		if r.Intn(3) == 0 {
+			policy = LogPolicy{MaxBytes: int64(64 + r.Intn(512)), MaxFiles: r.Intn(3)}
 		}
-		steps = append(steps, logStep{data: content[start:end], attached: r.Intn(2) == 0})
+		steps = append(steps, logStep{maintain: true, policy: policy})
+	}
+	start := 0
+	for _, end := range ends {
+		piece := content[start:end]
 		start = end
-		if maintainAfter[i] {
-			policy := DefaultLogPolicy()
-			if r.Intn(3) == 0 {
-				policy = LogPolicy{MaxBytes: int64(64 + r.Intn(512)), MaxFiles: r.Intn(3)}
-			}
-			steps = append(steps, logStep{maintain: true, policy: policy})
+		attached := r.Intn(2) == 0
+		if attached && piece != "" && r.Intn(3) == 0 {
+			cut := r.Intn(len(piece) + 1)
+			steps = append(steps, logStep{data: piece[:cut], attached: true})
+			maintenance()
+			piece = piece[cut:]
+		}
+		steps = append(steps, logStep{data: piece, attached: attached})
+		if r.Intn(10) < 6 {
+			maintenance()
 		}
 	}
 	return steps

@@ -30,7 +30,8 @@ import (
 const dnsArchMarker = "@@pilot-dnsarch "
 
 // dnsArchProviderScript runs on a FreeIPA DNS provider. Args: domain,
-// provider IP, internal probe name. Every query goes to the provider's own
+// provider IP, internal probe name ("-" when there is no valid one, which
+// leaves the internal query out). Every query goes to the provider's own
 // service address with RD=0, so an answer is FreeIPA's authoritative data,
 // not something named resolved recursively.
 const dnsArchProviderScript = `d=$1
@@ -51,7 +52,7 @@ q soa "$d." SOA
 q ns "$d." NS
 q srv_ldap "_ldap._tcp.$d." SRV
 q srv_kerberos "_kerberos._udp.$d." SRV
-q internal "$iname" A
+[ "$iname" = "-" ] || q internal "$iname" A
 exit 0
 `
 
@@ -72,7 +73,7 @@ trap "exit 1" HUP INT TERM
 KRB5CCNAME="FILE:$cc"
 export KRB5CCNAME
 echo "@@pilot-dnsarch kinit begin"
-kinit -k -t "$kt" "$p" 2>&1
+kinit -k -t "$kt" -- "$p" 2>&1
 rc=$?
 echo "@@pilot-dnsarch kinit end rc=$rc"
 [ "$rc" -eq 0 ] || exit 0
@@ -133,7 +134,8 @@ exit 0
 // dnsArchClientScript runs on the requested client host. Args: internal
 // probe name. It reads the resolver the host actually uses and asks the
 // first nameserver who it is: a dns tier host answers id.server CH TXT with
-// "pilot-dns:<name>" (docs/verification/dns.md C18/C20).
+// "pilot-dns:<name>" (docs/verification/dns.md C18/C20). The full answer
+// is read, not +short, which prints nothing for REFUSED or SERVFAIL.
 const dnsArchClientScript = `iname=$1
 sec() {
   key=$1
@@ -149,7 +151,7 @@ sec resolved systemctl is-active systemd-resolved
 sec resolvectl resolvectl dns
 ns=$(awk '$1 == "nameserver" { print $2; exit }' /etc/resolv.conf)
 if [ -n "$ns" ]; then
-  sec first_hop dig +time=2 +tries=1 +short "@$ns" id.server CH TXT
+  sec first_hop dig +time=2 +tries=1 +noall +comments +answer "@$ns" id.server CH TXT
 fi
 sec lookup getent hosts "$iname"
 exit 0

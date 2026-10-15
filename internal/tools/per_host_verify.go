@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/spec"
 )
 
@@ -131,7 +132,12 @@ func (t *VerifySpecTool) listAnsibleHosts(ctx context.Context, pattern, limit st
 	}
 	cmd := exec.CommandContext(ctx, "ansible", args...)
 	cmd.Env = append(os.Environ(), t.Env...)
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	release, err := ansible.HoldCommandLog(ctx, cmd)
+	if err == nil {
+		out, err = cmd.CombinedOutput()
+		release()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ansible --list-hosts: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -211,7 +217,12 @@ func (t *VerifySpecTool) runAnsibleInventoryHost(ctx context.Context, inventory,
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	release, err := ansible.HoldCommandLog(ctx, cmd)
+	if err != nil {
+		return "", "", err
+	}
+	err = cmd.Run()
+	release()
 	return stdout.String(), stderr.String(), err
 }
 
@@ -410,7 +421,11 @@ func (t *VerifySpecTool) execAnsibleJSON(ctx context.Context, args []string, tim
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	release, err := ansible.HoldCommandLog(cctx, cmd)
+	if err == nil {
+		err = cmd.Run()
+		release()
+	}
 	rc := 0
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		rc = exitErr.ExitCode()
