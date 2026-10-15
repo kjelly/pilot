@@ -30,10 +30,12 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-15）**：candidate `640362e`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-15）**：candidate `1cdc8aa`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux Enforcing client），
-> log-server 設定 `siem_log_root: /srv/siem`。`topology test` L3/L4 failed=0、L5 audit-log-forwarding
-> 66/66（v1.8，含 C22 轉送連線檢查）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/`。
+> log-server 的 `siem_log_root: /srv/siem` 放在 checkout 外的 inventory group_vars。`topology test`
+> L3/L4 failed=0、L5 audit-log-forwarding 66/66（v1.8，含 C22 轉送連線檢查）、L6 changed=0；
+> 兩台 client 的訊息落在 `/srv/siem/<host>/`。log-server 的 rsyslog 停掉時，兩台 client 的 C22 FAIL
+> （其他列都 PASS）；啟動 30 秒後 44/44。
 > `pilot deploy` 以 workspace inventory 設定 `siem_forward_port: 2514`（沒加引號）：preflight 通過，
 > 三台都轉送到 `siem-log-server:2514`，AlmaLinux client 的 tcp/2514 被標成 `syslogd_port_t`（沒有這個
 > 標籤時 rsyslog 回報 `Permission denied`、訊息全部丟失），兩台 client 的訊息都送達 log-server 與 Loki，
@@ -49,9 +51,7 @@
 > - 換回其他 port 時，舊 port 的 SELinux 標籤會保留（`semanage port -d -t syslogd_port_t -p tcp <port>`
 >   可移除）。
 >
-> C22 在 log-server 停掉時 FAIL、恢復 30 秒後 PASS，是較早的 candidate `4115817` 實測的
-> （`2026-10-14-4115817.md`，audit-log-forwarding 之後沒改）。
-> 紀錄：[`2026-10-15-640362e.md`](../evidence/play-vars-inventory-precedence/2026-10-15-640362e.md)。
+> 紀錄：[`2026-10-15-1cdc8aa.md`](../evidence/play-vars-inventory-precedence/2026-10-15-1cdc8aa.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
