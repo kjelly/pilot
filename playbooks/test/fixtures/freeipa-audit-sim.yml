@@ -9,6 +9,9 @@
 # Variables (from vault + extra vars):
 #   audit_demo_user          : default audituser
 #   audit_demo_user_password : password for kinit
+#   sim_sudo_policy_retries  : retries waiting for effective ls permission (120)
+#   sim_sudo_policy_delay    : seconds between policy probes (10)
+# The readiness gate does not prove freshness of an already cached rule.
 #
 # Usage:
 #   pilot vm-target run --name freeipa-client \
@@ -116,6 +119,16 @@
     - name: "Sim — SSH login result"
       ansible.builtin.debug:
         msg: "{{ ssh_login_result.stdout_lines }}"
+      tags: [sim]
+
+    - name: "Sim — wait for the client's sudo policy before testing authorization"
+      ansible.builtin.include_tasks:
+        file: freeipa-sudo-policy-ready.yml
+        apply:
+          tags: [sim]
+      vars:
+        sim_sudo_policy_user: "{{ audit_demo_user }}"
+        sim_sudo_policy_command: [/usr/bin/ls, /]
       tags: [sim]
 
     # ── Step 2: sudo ls /  (should SUCCEED) ──────────────────────────────

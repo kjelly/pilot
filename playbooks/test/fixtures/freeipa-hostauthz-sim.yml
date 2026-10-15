@@ -8,6 +8,9 @@
 # Both users' SSH keys must already be provisioned on this host by
 # freeipa-hostauthz-user-setup.yml (run once per user x host combination,
 # including the "wrong" combinations).
+# The sudo phase waits for command permission in the client's SSSD policy;
+# sim_sudo_policy_retries (120) / sim_sudo_policy_delay (10 seconds) bound
+# that wait. This does not prove that a cached rule came from the latest run.
 #
 # Two independently-runnable phases, split by tag because they have
 # different blast-radius requirements:
@@ -121,6 +124,16 @@
           - local_login.rc == 0
           - sim_local_user in local_login.stdout
         fail_msg: "{{ sim_local_user }} should be able to log in to {{ inventory_hostname }}: {{ local_login.stdout }} {{ local_login.stderr }}"
+      tags: [sim, positive]
+
+    - name: "Sim[+] — wait for the client's sudo policy before testing authorization"
+      ansible.builtin.include_tasks:
+        file: freeipa-sudo-policy-ready.yml
+        apply:
+          tags: [sim, positive]
+      vars:
+        sim_sudo_policy_user: "{{ sim_local_user }}"
+        sim_sudo_policy_command: [/usr/bin/systemctl, is-active, sssd]
       tags: [sim, positive]
 
     - name: "Sim[+] — sudo -n systemctl as {{ sim_local_user }} (expect SUCCEED — host-scoped rule matches this host)"
