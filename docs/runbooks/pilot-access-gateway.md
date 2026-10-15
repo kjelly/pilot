@@ -26,11 +26,12 @@ keyboard-interactive, or public-key fallback.
 Full facts and raw artifact checksums are in the
 [latest evidence record](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md).
 
-Kerberos (2026-10-15, candidate `c328aa6`): the apply's `kinit admin` writes a private cache that the run
-destroys on success, failure and `--tags` runs, so the SSH ingress host keeps no admin ticket (`main` left
-`admin@<REALM>` in root's `KEYRING:persistent:0:0`). Fresh-topology run: L3/L4 `failed=0`,
-`pilot-access-gateway.md` 33/33, L6 `changed=0`. Record:
-[`2026-10-15-c328aa6.md`](../evidence/freeipa-private-ccache/2026-10-15-c328aa6.md).
+Kerberos (2026-10-15, candidate `decc613`, tree `65bc3c93`): the apply's `kinit admin` writes a private cache
+that the run destroys on success, failure and `--tags` runs, so the SSH ingress host keeps no admin ticket
+(`main` left `admin@<REALM>` in root's `KEYRING:persistent:0:0`). Six fresh nodes of
+`docs/topologies/per-host-recording-topology.yaml`: L3/L4 `failed=0`, `pilot-access-gateway.md` 33/33,
+L6 `changed=0`, with the image digests and run IDs captured during the run. Record:
+[`2026-10-15-decc613-six-node.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-six-node.md).
 
 ## 1. Scope and prerequisites
 
