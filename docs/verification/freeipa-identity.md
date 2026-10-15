@@ -2,8 +2,8 @@
 
 > 版本：v1.12（2026-10-15 密碼設定改依 roster schema：只在帳號還沒有密碼，
 > 或 `preserve_existing: false` 要求重設且使用者已不在上次重設的密碼時執行
-> `ipa passwd`，見 §7.4。開發期已在拋棄式 vm-target 實跑，正式 candidate
-> evidence 待補）
+> `ipa passwd`，見 §7.4。candidate `edc840f` 已在拋棄式 vm-target 實跑
+> PASS）
 > 上一版：v1.11（2026-09-07 對真實 FreeIPA vm-target 重跑一次 static HBAC
 > rule 刪除生命週期的完整驗證，並補上 Case C：v1.10 曾記錄「FreeIPA 對一般
 > HBAC login rule 沒有內建的 referential-integrity 阻擋，找不到可重現的
@@ -401,39 +401,42 @@ pilot vm-target exec --name <server-vm> -- \
 `force_change` 不決定要不要重設。判斷依據是 `ipa user-show --all --raw` 的
 `krbLastPwdChange`／`krbPasswordExpiration`；查不到狀態時 apply 失敗，不設任何密碼。
 
-roster 放三個使用者，`initial` 相同：`pwt-keep`（`force_change: true`、
-`preserve_existing: true`）、`pwt-reset`（`force_change: true`、
-`preserve_existing: false`）、`pwt-plain`（`force_change: false`、
-`preserve_existing: true`）。
+roster 放五個使用者，`initial` 相同：`pwe-keep`（`force_change: true`、
+`preserve_existing: true`）、`pwe-reset`（`true`、`false`）、`pwe-plain`
+（`false`、`true`）、`pwe-nomax-keep`（`true`、`true`）、`pwe-nomax-reset`
+（`true`、`false`）。另一份 roster 再多一個 `pwe-new`，用來驗證查詢失敗的路徑。
 
 ```bash
-# 套用（R1 首次、R2 立刻重跑、R3 使用者改密碼後、R4 再重跑）：
+# 套用（R1 首次、R2 立刻重跑、R3 使用者改密碼後、R4 再重跑；R5 再加 --tags passwords）：
 pilot vm-target run --name <server-vm> playbooks/apply/freeipa-identity-apply.yml \
     -e target_group=all -e freeipa_roster_file=<roster.yaml> -e @~/.vault/main.yaml
 # 查狀態（先以 admin kinit；vm-target exec 一律回 0，要看輸出判斷）：
 printf '%s\n' "<admin password>" | pilot vm-target exec --name <server-vm> -- kinit admin
 pilot vm-target exec --name <server-vm> -- ipa user-show <user> --all --raw \
     | grep -E 'krbLastPwdChange|krbPasswordExpiration'
-# R2 之後，模擬使用者自行改密碼（舊密碼、新密碼、新密碼再一次）：
+# R2 之後，模擬使用者自行改密碼（舊密碼、新密碼、新密碼再一次）；兩個 nomax 使用者
+# 在 `ipa pwpolicy-mod --maxlife=0` 之下改，改完再設回 90：
 printf '%s\n%s\n%s\n' "<initial>" "<new>" "<new>" \
     | pilot vm-target exec --name <server-vm> -- env KRB5CCNAME=FILE:/tmp/<user>.cc kinit <user>
 ```
 
-2026-10-15 開發期實跑（拋棄式 AlmaLinux 9.8 + FreeIPA 4.13.4 vm-target，未凍結
-candidate commit；正式 candidate evidence 待補）：
+最近一次驗證：2026-10-15，candidate `edc840f`（tree `9ee74da1`），拋棄式 AlmaLinux 9.8 +
+FreeIPA 4.13.4 vm-target，**PASS**。證據：
+[`docs/evidence/freeipa-identity/2026-10-15-edc840f.md`](../evidence/freeipa-identity/2026-10-15-edc840f.md)。
 
-| Run | PLAY RECAP | `ipa passwd` 執行對象 | 結果 |
-|---|---|---|---|
-| R0 `--check --diff`（全新） | `changed=0 failed=0` | 無 | |
-| R1 首次 | `changed=2 failed=0` | 三人（初始化） | 三人 `krbPasswordExpiration == krbLastPwdChange` |
-| R2 立刻重跑 | `changed=0 failed=0` | 無 | 三人 `krbLastPwdChange` 不變 |
-| 三人自行改密碼 | | | `krbPasswordExpiration` 移到 90 天後 |
-| R3 | `changed=1 failed=0` | 只有 `pwt-reset` | `pwt-keep`／`pwt-plain` 不變、新密碼 kinit 成功；`pwt-reset` 回到 `initial`、新密碼 kinit 失敗 |
-| R4 再重跑 | `changed=0 failed=0` | 無 | 三人不變 |
+| Run | PLAY RECAP | `ipa passwd` 執行對象 |
+|---|---|---|
+| R0 `--check --diff`（使用者都還不存在） | `changed=0 failed=0` | 無 |
+| R1 首次 | `changed=2 failed=0` | 五人（初始化） |
+| R2 立刻重跑 | `changed=0 failed=0` | 無 |
+| R3（五人自行改過密碼） | `changed=1 failed=0` | 只有 `pwe-reset`、`pwe-nomax-reset`；其餘三人 `krbLastPwdChange` 不變、用自己的密碼 kinit 成功 |
+| R4 再重跑 | `changed=0 failed=0` | 無 |
+| R5 `--tags passwords` | `changed=0 failed=0` | 無 |
+| R6 加入 `pwe-new`，`--tags passwords`（帳號還不存在） | `failed=1`，停在查詢失敗的 gate | 無 |
+| R7／R8 同一份 roster 完整套用、重跑 | `changed=2`／`changed=0` | `pwe-new`（初始化）／無 |
 
-同一台 VM 的 password policy 改成 `maxlife=0` 時，使用者自行改密碼後
-`krbPasswordExpiration` 不存在；舊條件把這種情況當成「還沒改過」而每輪重設，
-現在當成已自行改過。四種狀態的真實 `user-show` 輸出存成
+`maxlife=0` 時，使用者自行改密碼後 `krbPasswordExpiration` 不存在；舊條件把這種情況
+當成「還沒改過」而每輪重設，現在當成已自行改過。四種狀態的真實 `user-show` 輸出存成
 `internal/spec/testdata/freeipa-user-show-raw-*.txt`，由
 `internal/spec/freeipa_identity_password_regression_test.go` 鎖住決策結果。
 
@@ -552,7 +555,7 @@ range 高位、與遞增分配序列碰撞機率低很多，見檔案內註解�
 | 2026-08-27 | v1.9 | v3.2 Identity & Credential Hardening 交付（`password_policies`/`credential_policies`/`security.privileged_identity`/`users[].authentication` 四個新 roster 欄位）對真實 FreeIPA vm-target（拋棄式 AlmaLinux 9 `freeipa-v32-test`）完成端對端驗證，見 §10：privileged_identity fail-before-write gate、password_policy 建立/修改/刪除、user auth types 建立、兩者的冪等性、`pilot identity drift`/`--repair-managed`、`freeipa-capability-probe.yml`、`pilot identity hygiene` 全數 PASS。過程中發現並修好 3 個本次交付新增碼的真實 bug（單元測試用的假資料自洽但假資料本身錯，只有對真的 server 跑才會露餡）：(1) `freeipa-identity-apply.yml` 的 `ipa pwpolicy-add/-mod/-del` 三個 `changed_when` 字串比對全部落空（這三個指令成功時的真實輸出裡根本沒有被比對的字串），改用 `rc == 0`；(2) `freeipa-access-drift-probe.yml` 的 `max_life_days`/`min_life_hours` 漏了秒→天/小時換算，導致任何真的套用成功、毫無 drift 的 policy 都被永遠誤報成 drift；(3) `internal/accessgrants/hygiene.go` 把純資訊性的 `max_age_unknown` finding 誤算進 SSH compliance 判定，任何有設定 `ssh.max_age`（report-only）的 policy 底下的使用者都會被誤判 `ssh_key_compliance: fail`，即使金鑰完全乾淨。三者詳細修法與 §10.4 候選 checklist row（C27–C29）見 §10。`go test ./...`、`go vet`、`gofmt`、`ansible-playbook --syntax-check`、`ansible-lint` 全綠。 | pilot |
 | 2026-09-07 | v1.10 | 交付 `docs/superpowers/specs/2026-09-07-pilot-hbac-rule-deletion-spec.md` Phase 1（static HBAC rule 刪除生命週期）：`freeipa-identity-apply.yml` 新增 `ipa_hbac_rules_absent` 分流 + 單一 task 刪除（複用既有 `netgroup-del`/grant-HBAC-prune 的 `failed_when` 慣例，見 spec §6.2）+ check-mode preview debug 訊息 + `allow_all` Ansible 層防護；Go validator（`checkHBAC`）新增拒絕 `allow_all` + `state: absent` 的違規。新增永久 fixture rule `fixture-hbac-delete-target`。真實 vm-target 驗證見 §7.5、候選 row C30 見 §9.4：Case A（真實刪除）/Case B（冪等 no-op）/Case D（check-mode 預覽）/`allow_all` 防護皆 PASS；Case C（FreeIPA 因引用拒絕刪除）查證後認為此資料模型下不可重現，未執行，見 §7.5 說明。過程中順手修好兩個既有、與本功能無關的 pilot 缺陷：`vm-target run --sandbox` 的 `-e @~/...` vault 檔案路徑未展開 `~`（`expandHomeDir`，`TestExpandHomeDir` 鎖回歸）、canonical fixture 的硬編碼 IP 撞上新建 vm-target 的 DHCP 分配。`go test ./...`、`go vet`、`make playbook-lint`（此次修改的檔案部分；既有 `audit-log-forwarding-apply.yml` 的 duplicate-key 問題與本次改動無關，未修）全綠 | pilot |
 | 2026-09-07 | v1.11 | 對真實 FreeIPA vm-target（新建拋棄式 `hbac-delete-verify`，與 v1.10 是不同 VM）完整重跑 v1.10 交付的 static HBAC rule 刪除生命週期：Case A/B/D/`allow_all` 數字與 v1.10 完全一致（無回歸）。**更正 v1.10 的誤診**：v1.10 記錄「Case C（FreeIPA 因引用拒絕刪除）在目前資料模型下不可重現」，這次找到真實建構方式——用 `ipa selinuxusermap-add --hbacrule=<rule>` 建一個引用該 HBAC rule 的 SELinux User Map，`ipa hbacrule-del` 就會真的拒絕（`stderr="... cannot be deleted because SELinux User Map ... requires it"`）；透過 roster `state: absent` 走完整 apply playbook 觸發同一場景，`failed_when` 判斷邏輯**零程式碼改動**就正確 fail closed（`ok=77 changed=0 failed=1`，rule 未被刪除，無其他物件受影響）。§7.5、規格檔 `2026-09-07-pilot-hbac-rule-deletion-spec.md`（v1.6）與 §18 驗收準則同步更新 | pilot |
-| 2026-10-15 | v1.12 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；拋棄式 vm-target 開發期實跑 R0–R4 見 §7.4，正式 candidate evidence 待補 | pilot |
+| 2026-10-15 | v1.12 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；candidate `edc840f` 在拋棄式 vm-target 實跑 PASS（R0–R8，見 §7.4 與 `docs/evidence/freeipa-identity/2026-10-15-edc840f.md`） | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 
