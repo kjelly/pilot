@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -97,8 +98,8 @@ func TestRegression_AlertmanagerBuiltinConfigsCarryIssue11Inhibits(t *testing.T)
 		}
 		type rule struct{ source, target, equal string }
 		want := []rule{
-			{`alertname="HostMetricsMissing"`, `alertname="HostDown",job="node"`, "pilot_host"},
-			{`alertname="PilotLoginProbeStale"`, `PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)`, "probe_host"},
+			{`alertname="HostMetricsMissing"`, `alertname="HostDown",job="node"`, "pilot_host,site"},
+			{`alertname="PilotLoginProbeStale"`, `PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)`, "probe_host,site"},
 		}
 		if len(doc.InhibitRules) != len(want) {
 			t.Fatalf("%s has %d inhibit rules, want %d", name, len(doc.InhibitRules), len(want))
@@ -156,22 +157,28 @@ type amAlert map[string]string
 //     host, never a HostDown of another job;
 //   - a host that is really down keeps its HostDown;
 //   - two probes: a stalled probe mutes only its own alerts (probe_host);
-//   - a HostDown of a non-node job mutes nothing.
+//   - a HostDown of a non-node job mutes nothing;
+//   - the same host names in another site are never muted (site).
 //
 // In teams mode it also checks that the alerts which replace a muted one
 // (HostMetricsMissing, PilotLoginProbeStale) reach the teams receiver.
 func TestRegression_AlertmanagerInhibitBehaviour(t *testing.T) {
 	requireContainerImage(t, alertmanagerImage)
+	// Every alert carries the site external label Prometheus adds; the
+	// "s2-" alerts reuse site s1's host names in another site and must not
+	// be muted by s1's sources (this Alertmanager is central).
 	alerts := map[string]amAlert{
-		"gap-metrics":   {"alertname": "HostMetricsMissing", "pilot_host": "gap", "severity": "warning", "action_required": "true", "pilot_alert_source": "host-health"},
-		"gap-down":      {"alertname": "HostDown", "instance": "gap:9100", "job": "node", "pilot_host": "gap", "severity": "critical"},
-		"gap-dcgm":      {"alertname": "HostDown", "instance": "gap:9400", "job": "dcgm", "pilot_host": "gap", "severity": "critical"},
-		"dead-down":     {"alertname": "HostDown", "instance": "dead:9100", "job": "node", "pilot_host": "dead", "severity": "critical"},
-		"a-stale":       {"alertname": "PilotLoginProbeStale", "pilot_host": "mon-a", "probe_host": "mon-a", "severity": "warning", "action_required": "true", "pilot_alert_source": "login-probe"},
-		"a-denied-t1":   {"alertname": "PilotLoginProbeAccountDenied", "pilot_host": "t1", "probe_host": "mon-a", "severity": "critical", "pilot_alert_source": "login-probe"},
-		"b-denied-t2":   {"alertname": "PilotLoginProbeAccountDenied", "pilot_host": "t2", "probe_host": "mon-b", "severity": "critical", "pilot_alert_source": "login-probe"},
-		"gpu-dcgm":      {"alertname": "HostDown", "instance": "gpu1:9400", "job": "dcgm", "pilot_host": "gpu1", "severity": "critical"},
-		"gpu-transport": {"alertname": "PilotLoginProbeTransportFailed", "pilot_host": "gpu1", "probe_host": "mon-b", "severity": "warning", "pilot_alert_source": "login-probe"},
+		"gap-metrics":   {"alertname": "HostMetricsMissing", "pilot_host": "gap", "site": "s1", "severity": "warning", "action_required": "true", "pilot_alert_source": "host-health"},
+		"gap-down":      {"alertname": "HostDown", "instance": "gap:9100", "job": "node", "pilot_host": "gap", "site": "s1", "severity": "critical"},
+		"gap-dcgm":      {"alertname": "HostDown", "instance": "gap:9400", "job": "dcgm", "pilot_host": "gap", "site": "s1", "severity": "critical"},
+		"s2-gap-down":   {"alertname": "HostDown", "instance": "gap:9100", "job": "node", "pilot_host": "gap", "site": "s2", "severity": "critical"},
+		"dead-down":     {"alertname": "HostDown", "instance": "dead:9100", "job": "node", "pilot_host": "dead", "site": "s1", "severity": "critical"},
+		"a-stale":       {"alertname": "PilotLoginProbeStale", "pilot_host": "mon-a", "probe_host": "mon-a", "site": "s1", "severity": "warning", "action_required": "true", "pilot_alert_source": "login-probe"},
+		"a-denied-t1":   {"alertname": "PilotLoginProbeAccountDenied", "pilot_host": "t1", "probe_host": "mon-a", "site": "s1", "severity": "critical", "pilot_alert_source": "login-probe"},
+		"s2-a-denied":   {"alertname": "PilotLoginProbeAccountDenied", "pilot_host": "t1", "probe_host": "mon-a", "site": "s2", "severity": "critical", "pilot_alert_source": "login-probe"},
+		"b-denied-t2":   {"alertname": "PilotLoginProbeAccountDenied", "pilot_host": "t2", "probe_host": "mon-b", "site": "s1", "severity": "critical", "pilot_alert_source": "login-probe"},
+		"gpu-dcgm":      {"alertname": "HostDown", "instance": "gpu1:9400", "job": "dcgm", "pilot_host": "gpu1", "site": "s1", "severity": "critical"},
+		"gpu-transport": {"alertname": "PilotLoginProbeTransportFailed", "pilot_host": "gpu1", "probe_host": "mon-b", "site": "s1", "severity": "warning", "pilot_alert_source": "login-probe"},
 	}
 	wantSuppressed := map[string]bool{"gap-down": true, "a-denied-t1": true}
 
@@ -236,7 +243,7 @@ func TestRegression_AlertmanagerInhibitBehaviour(t *testing.T) {
 					t.Errorf("teams mode routes %s %v to %q, want teams", key, alerts[key], r)
 				}
 			}
-			if r := amtoolRoute(t, dir, name+".yml", amAlert{"alertname": "HostIOStall", "pilot_host": "x", "severity": "warning"}); r != "null" {
+			if r := amtoolRoute(t, dir, name+".yml", amAlert{"alertname": "HostIOStall", "pilot_host": "x", "site": "s1", "severity": "warning"}); r != "null" {
 				t.Errorf("teams mode routes a plain warning to %q, want null", r)
 			}
 		})
@@ -322,4 +329,160 @@ func amtoolRoute(t *testing.T, dir, config string, a amAlert) string {
 		t.Fatalf("amtool config routes test: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// oldInhibitConfigs are inhibit rules C10 must refuse: the a742ad9 rules
+// (HostDown as the source, Stale matched on site) and the dc883b3 rules
+// (right sources, no site).
+var oldInhibitConfigs = map[string]string{
+	"a742ad9": `route: {receiver: "null"}
+receivers: [{name: "null"}]
+inhibit_rules:
+  - source_matchers: ['alertname="HostDown"']
+    target_matchers: ['alertname=~"PilotLoginProbeTransportFailed|HostMetricsMissing"']
+    equal: ['pilot_host']
+  - source_matchers: ['alertname="PilotLoginProbeStale"']
+    target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
+    equal: ['site']
+`,
+	"dc883b3": `route: {receiver: "null"}
+receivers: [{name: "null"}]
+inhibit_rules:
+  - source_matchers: ['alertname="HostMetricsMissing"']
+    target_matchers: ['alertname="HostDown"', 'job="node"']
+    equal: ['pilot_host']
+  - source_matchers: ['alertname="PilotLoginProbeStale"']
+    target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
+    equal: ['probe_host']
+`,
+	"no-inhibit-rules": `route: {receiver: "null"}
+receivers: [{name: "null"}]
+`,
+}
+
+// TestRegression_AlertmanagerC10DistinguishesInhibitRules runs C10's own
+// command, as parsed from docs/verification/alertmanager.md, against the
+// pinned Alertmanager. It must pass with each built-in config and fail
+// with each config in oldInhibitConfigs: custom mode relies on C10 to tell
+// the rules apart (§1.7, AGENTS.md §5.12).
+func TestRegression_AlertmanagerC10DistinguishesInhibitRules(t *testing.T) {
+	requireContainerImage(t, alertmanagerImage)
+	s, err := Parse("../../docs/verification/alertmanager.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c10 string
+	for _, r := range s.Rows {
+		if r.ID == "C10" {
+			c10 = r.Command
+		}
+	}
+	const target = "docker exec pilot-alertmanager "
+	if strings.Count(c10, target) != 1 {
+		t.Fatalf("C10 must read the loaded config once through %q; got %q", target, c10)
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(name, cfg string) error {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name+".yml"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("docker", "run", "-d", "--rm", "-v", dir+":/w:ro",
+			alertmanagerImage, "--config.file=/w/"+name+".yml", "--storage.path=/tmp/am").CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker run alertmanager: %v\n%s", err, out)
+		}
+		id := strings.TrimSpace(string(out))
+		defer func() { _ = exec.Command("docker", "rm", "-f", id).Run() }()
+		ready := exec.Command("docker", "exec", id, "sh", "-c", "for i in $(seq 1 60); do wget -q -O /dev/null http://127.0.0.1:9093/-/ready && exit 0; sleep 0.5; done; exit 1")
+		if out, err := ready.CombinedOutput(); err != nil {
+			t.Fatalf("alertmanager %s not ready: %v\n%s", name, err, out)
+		}
+		return exec.Command("sh", "-c", strings.Replace(c10, target, "docker exec "+id+" ", 1)).Run()
+	}
+	for name, cfg := range builtinAlertmanagerConfigs(t) {
+		if err := run(name, cfg); err != nil {
+			t.Errorf("C10 fails on the built-in %s: %v", name, err)
+		}
+	}
+	for name, cfg := range oldInhibitConfigs {
+		if err := run(name, cfg); err == nil {
+			t.Errorf("C10 passes the %s inhibit rules; it must fail", name)
+		}
+	}
+}
+
+// staleInhibitUnmatched returns the names the PilotLoginProbeStale
+// inhibit's target regex does not match.
+func staleInhibitUnmatched(t *testing.T, targetRegex string, names []string) []string {
+	t.Helper()
+	re, err := regexp.Compile("^(?:" + targetRegex + ")$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, n := range names {
+		if !re.MatchString(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// TestRegression_StaleInhibitCoversEveryLoginProbeAlert ties the Stale
+// inhibit's target regex in both built-in configs to the login-probe alerts
+// the rules define. hostHealthRuleNames is kept equal to the template by
+// TestRegression_HostHealthRulesRenderFromTheirInputs. A new PilotLoginProbe*
+// alert without a matching regex entry would keep paging from a stalled
+// probe's frozen series (AGENTS.md §5.7).
+func TestRegression_StaleInhibitCoversEveryLoginProbeAlert(t *testing.T) {
+	var probeAlerts []string
+	for _, n := range hostHealthRuleNames {
+		if strings.HasPrefix(n, "PilotLoginProbe") && n != "PilotLoginProbeStale" {
+			probeAlerts = append(probeAlerts, n)
+		}
+	}
+	if len(probeAlerts) == 0 {
+		t.Fatal("no PilotLoginProbe* alerts in hostHealthRuleNames")
+	}
+	targetRe := regexp.MustCompile(`alertname=~"([^"]+)"`)
+	for name, cfg := range builtinAlertmanagerConfigs(t) {
+		var doc struct {
+			InhibitRules []struct {
+				SourceMatchers []string `yaml:"source_matchers"`
+				TargetMatchers []string `yaml:"target_matchers"`
+			} `yaml:"inhibit_rules"`
+		}
+		if err := yaml.Unmarshal([]byte(cfg), &doc); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, r := range doc.InhibitRules {
+			if strings.Join(r.SourceMatchers, ",") != `alertname="PilotLoginProbeStale"` {
+				continue
+			}
+			found = true
+			m := targetRe.FindStringSubmatch(strings.Join(r.TargetMatchers, ","))
+			if m == nil {
+				t.Fatalf("%s: Stale inhibit has no alertname=~ target", name)
+			}
+			if miss := staleInhibitUnmatched(t, m[1], probeAlerts); len(miss) > 0 {
+				t.Errorf("%s: Stale inhibit does not cover %v", name, miss)
+			}
+			if len(staleInhibitUnmatched(t, m[1], []string{"PilotLoginProbeStale"})) == 0 {
+				t.Errorf("%s: Stale inhibit must not target PilotLoginProbeStale itself", name)
+			}
+			// The check must notice an alert added to the rules without the regex.
+			miss := staleInhibitUnmatched(t, m[1], append(append([]string{}, probeAlerts...), "PilotLoginProbeNewStage"))
+			if len(miss) != 1 || miss[0] != "PilotLoginProbeNewStage" {
+				t.Errorf("%s: an alert missing from the regex went unnoticed: %v", name, miss)
+			}
+		}
+		if !found {
+			t.Errorf("%s has no PilotLoginProbeStale inhibit", name)
+		}
+	}
 }

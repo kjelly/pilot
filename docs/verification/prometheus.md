@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.8
+> 版本：v1.10
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -79,8 +79,8 @@
 | `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但同一台主機仍有一台還在寫 textfile 的 login probe 登入成功＝監控資料缺口，與 `HostDown` 分開）的 `for:`。必須短於 seed `HostDown` 的 10m（playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
 | `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
 | `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
-| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警的 `keep_firing_for:`，避免單輪恢復造成 resolve/re-fire 抖動 | 否 | `5m` |
-| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe 的 textfile 超過此秒數沒有重寫（daemon 每 15 秒寫一次） | 否 | `180` |
+| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動 | 否 | `5m` |
+| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe textfile 的寫入時間戳在此秒數內沒有變化（`changes()`，不依賴探測主機時鐘；daemon 每 15 秒寫一次）；`HostMetricsMissing` 也只採信這段時間內有變化的 probe | 否 | `180` |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -327,3 +327,4 @@
 | 2026-10-12 | v1.7 | C8/C22 只讀 `global.external_labels.site`，`prometheus.yml` 的 site 改以 JSON 字串渲染。PR #39 review 在 vm-target 上發現：設了 `kind: snmp` profile 時 snmp-exporter job 的 `site` label 也被抓進 C22 的 selector，Thanos 拒絕解析，C22 永遠 FAIL；同一個寫法讓 C8 在沒有 external_labels 時仍然 PASS。新增 `prometheus_site_selector_behavior_test.go` 用 SNMP 渲染結果實際跑這兩行 | pilot |
 | 2026-10-14 | v1.8 | 保留主線新增的 C20–C22（執行中 container 的設定掛載、Sidecar 寫入權限與實際上傳），將 issue #11 的 host-health rule file 驗收改編為 C23–C24；container traceability 同時覆蓋設定掛載漂移與載入的告警規則 | pilot |
 | 2026-10-15 | v1.9 | PR #80 review（GitHub issue #11）：login-probe 告警都帶 `probe_host`，配合 `alertmanager.md` §1.7 的新 inhibit；`PilotLoginProbeTransportFailed` 排除 node scrape 也失敗的主機；`HostMetricsMissing` 只採信仍在寫 textfile 的 probe；`HostMetricsMissing` 與 `PilotLoginProbeStale` 加上 `action_required="true"`；`host_metrics_missing_for` 必須短於 10m。row 未變 | sre |
+| 2026-10-15 | v1.10 | PR #80 第三輪 review：`HostMetricsMissing` 加 `keep_firing_for`（probe 單輪失敗或重啟時不中斷，否則被它抑制的 `HostDown` 會送出）；probe 新鮮度與 `PilotLoginProbeStale` 改用寫入時間戳的 `changes()`，不再依賴探測主機時鐘；標頭版本對齊變更紀錄。row 未變 | sre |

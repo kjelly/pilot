@@ -101,31 +101,44 @@ tests:
     input_series:
       # gap-host: node_exporter scrape fails, but the probe still logs in.
       - series: 'up{job="node",instance="gap-host:9100",pilot_host="gap-host"}'
-        values: '0x20'
+        values: '0x30'
       # down-host: scrape fails AND the probe fails — HostDown's case, not this one.
       - series: 'up{job="node",instance="down-host:9100",pilot_host="down-host"}'
-        values: '0x20'
+        values: '0x30'
       # frozen-host: scrape fails; the only probe that lists it stopped
       # writing at t=0 with success=1 frozen — that is no proof of SSH now.
       - series: 'up{job="node",instance="frozen-host:9100",pilot_host="frozen-host"}'
-        values: '0x20'
+        values: '0x30'
       # Probe series are scraped from the probe host (pilot_host=mon).
       - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="gap-host"}'
-        values: '1x20'
+        values: '1x30'
       - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="down-host"}'
-        values: '0x20'
+        values: '0x30'
       - series: 'pilot_login_probe_last_stage{job="node",instance="mon:9100",pilot_host="mon",probe_target="down-host",stage="transport"}'
-        values: '1x20'
+        values: '1x30'
       - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon"}'
-        values: '0+60x20'
+        values: '0+60x30'
       - series: 'pilot_login_probe_success{job="node",instance="mon-dead:9100",pilot_host="mon-dead",probe_target="frozen-host"}'
-        values: '1x20'
+        values: '1x30'
       - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-dead:9100",pilot_host="mon-dead"}'
-        values: '0x20'
+        values: '0x30'
+      # blip-host: a long data gap during which one probe round fails;
+      # restart-host: the probe restarts (its first textfile publishes
+      # success=0 before the first round) and that round fails too.
+      # HostMetricsMissing must keep firing through both (keep_firing_for),
+      # or the HostDown{job="node"} it inhibits pages "Target down".
+      - series: 'up{job="node",instance="blip-host:9100",pilot_host="blip-host"}'
+        values: '0x30'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="blip-host"}'
+        values: '1x14 0 1x15'
+      - series: 'up{job="node",instance="restart-host:9100",pilot_host="restart-host"}'
+        values: '0x30'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="restart-host"}'
+        values: '1x14 0 0 1x14'
       - series: 'up{job="node",instance="mon:9100",pilot_host="mon"}'
-        values: '1x20'
+        values: '1x30'
       - series: 'up{job="node",instance="mon-dead:9100",pilot_host="mon-dead"}'
-        values: '1x20'
+        values: '1x30'
     alert_rule_test:
       - eval_time: 2m
         alertname: HostMetricsMissing
@@ -135,7 +148,9 @@ tests:
       - eval_time: 5m
         alertname: HostMetricsMissing
         exp_alerts:
+          - exp_labels: {pilot_host: blip-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
           - exp_labels: {pilot_host: gap-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: restart-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
       - eval_time: 9m
         alertname: HostDown
         exp_alerts: []
@@ -145,16 +160,34 @@ tests:
       - eval_time: 15m
         alertname: HostMetricsMissing
         exp_alerts:
+          - exp_labels: {pilot_host: blip-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
           - exp_labels: {pilot_host: gap-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: restart-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      # 16m-18m: blip-host's probe failed at 15m and restart-host's at 15-16m;
+      # both still fire, so HostDown{job="node"} stays inhibited.
+      - eval_time: 16m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: blip-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: gap-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: restart-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 18m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: blip-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: gap-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
+          - exp_labels: {pilot_host: restart-host, severity: warning, action_required: "true", pilot_alert_source: host-health}
       - eval_time: 15m
         alertname: PilotLoginProbeTransportFailed
         exp_alerts: []
       - eval_time: 15m
         alertname: HostDown
         exp_alerts:
+          - exp_labels: {instance: "blip-host:9100", job: node, pilot_host: blip-host, severity: critical}
           - exp_labels: {instance: "down-host:9100", job: node, pilot_host: down-host, severity: critical}
           - exp_labels: {instance: "frozen-host:9100", job: node, pilot_host: frozen-host, severity: critical}
           - exp_labels: {instance: "gap-host:9100", job: node, pilot_host: gap-host, severity: critical}
+          - exp_labels: {instance: "restart-host:9100", job: node, pilot_host: restart-host, severity: critical}
 
   - name: Two probes — a stalled probe only speaks for itself
     interval: 1m
@@ -171,6 +204,12 @@ tests:
         values: '1x20'
       - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-b:9100",pilot_host="mon-b"}'
         values: '0+60x20'
+      # mon-c keeps writing, but its clock is 20 minutes behind: it is not
+      # stale, and its t3 denial must not be muted.
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon-c:9100",pilot_host="mon-c",probe_target="t3",stage="account"}'
+        values: '1x20'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-c:9100",pilot_host="mon-c"}'
+        values: '-1200+60x20'
     alert_rule_test:
       # Each alert names the probe that saw it (probe_host); Alertmanager's
       # Stale inhibit matches on it, so mon-a's frozen t1 is muted while
@@ -180,6 +219,7 @@ tests:
         exp_alerts:
           - exp_labels: {pilot_host: t1, probe_host: mon-a, severity: critical, pilot_alert_source: login-probe}
           - exp_labels: {pilot_host: t2, probe_host: mon-b, severity: critical, pilot_alert_source: login-probe}
+          - exp_labels: {pilot_host: t3, probe_host: mon-c, severity: critical, pilot_alert_source: login-probe}
       - eval_time: 12m
         alertname: PilotLoginProbeStale
         exp_alerts:

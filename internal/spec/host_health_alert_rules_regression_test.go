@@ -250,6 +250,15 @@ func TestRegression_HostHealthRulesRenderFromTheirInputs(t *testing.T) {
 					t.Errorf("%s must project probe_target onto pilot_host (the up{job=\"node\"} joins and dashboards key on it)", r.Alert)
 				}
 			}
+			// HostMetricsMissing holds the inhibit on HostDown{job="node"}: it
+			// must not drop on one failed probe round or a probe restart.
+			// Probe freshness must not depend on the probe host's clock.
+			if r.Alert == "HostMetricsMissing" && r.KeepFiringFor != defaults["login_probe_alert_keep_firing_for"] {
+				t.Errorf("HostMetricsMissing keep_firing_for = %q, want %q", r.KeepFiringFor, defaults["login_probe_alert_keep_firing_for"])
+			}
+			if (r.Alert == "HostMetricsMissing" || r.Alert == "PilotLoginProbeStale") && (strings.Contains(r.Expr, "time()") || !strings.Contains(r.Expr, "changes(pilot_login_probe_metrics_last_write_timestamp_seconds[")) {
+				t.Errorf("%s must judge probe freshness with changes() of the write timestamp, not time(): %s", r.Alert, r.Expr)
+			}
 			// Alertmanager's Stale inhibit matches on probe_host, so every
 			// login-probe alert must keep the probe host as probe_host
 			// (docs/verification/alertmanager.md §1.7).

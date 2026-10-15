@@ -114,11 +114,17 @@ groups:
       # not being scraped, yet an SSH login to the same host succeeded in
       # the same window. Only a probe that is still writing its textfile
       # counts: a stalled probe's frozen success=1 says nothing about now.
-      # While this fires, Alertmanager inhibits the seed HostDown{job="node"}
-      # of the same host (it answers SSH, so it is not down); the playbook
-      # keeps host_metrics_missing_for below HostDown's 10m so HostDown never
-      # notifies first. action_required routes it to Teams, which would
-      # otherwise get nothing for a data gap.
+      # "Still writing" is changes() of its write timestamp, not
+      # time() - timestamp, so a skewed clock on the probe host cannot make
+      # it look stale. While this fires, Alertmanager inhibits the seed
+      # HostDown{job="node"} of the same host (it answers SSH, so it is not
+      # down); the playbook keeps host_metrics_missing_for below HostDown's
+      # 10m so HostDown never notifies first. keep_firing_for holds it (and
+      # with it the inhibit) through one failed probe round or a probe
+      # restart, whose first textfile publishes success=0 before the first
+      # round: without it, a gap longer than 10m paged "Target down" on such
+      # a blip. action_required routes it to Teams, which would otherwise get
+      # nothing for a data gap.
       - alert: HostMetricsMissing
         expr: |
           max by (pilot_host) (up{job="node"} == 0)
@@ -127,11 +133,12 @@ groups:
             label_replace(
               (pilot_login_probe_success == 1)
               and on (job, instance)
-              (time() - pilot_login_probe_metrics_last_write_timestamp_seconds <= {{ login_probe_stale_seconds }}),
+              (changes(pilot_login_probe_metrics_last_write_timestamp_seconds[{{ login_probe_stale_seconds }}s]) > 0),
               "pilot_host", "$1", "probe_target", "(.+)"
             )
           )
         for: {{ host_metrics_missing_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
         labels:
           severity: warning
           action_required: "true"
@@ -262,16 +269,21 @@ groups:
           summary: "No SSH connection can be established to {{ $labels.pilot_host }}"
           description: "Refused, filtered, unresolvable or no SSH banner, while node_exporter on the host is still scraped (a host whose scrape fails too raises HostDown instead)."
 {% endraw %}
-      # The probe itself stopped publishing: its own frozen series would
-      # otherwise keep (or never raise) the alerts above. Alertmanager
+      # The probe itself stopped publishing (its write timestamp has not
+      # changed for login_probe_stale_seconds; changes() does not depend on
+      # the probe host's clock): its own frozen series would otherwise keep
+      # (or never raise) the alerts above. Alertmanager
       # inhibits the other PilotLoginProbe* alerts of the same probe_host
       # while this fires, so it must reach someone: action_required routes
       # it to Teams.
       - alert: PilotLoginProbeStale
         expr: |
-          time() - max by (pilot_host, probe_host) (
-            label_replace(pilot_login_probe_metrics_last_write_timestamp_seconds, "probe_host", "$1", "pilot_host", "(.+)")
-          ) > {{ login_probe_stale_seconds }}
+          max by (pilot_host, probe_host) (
+            label_replace(
+              changes(pilot_login_probe_metrics_last_write_timestamp_seconds[{{ login_probe_stale_seconds }}s]),
+              "probe_host", "$1", "pilot_host", "(.+)"
+            )
+          ) == 0
         for: 5m
         labels:
           severity: warning

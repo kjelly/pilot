@@ -67,15 +67,16 @@
       # mutes the seed HostDown of its node scrape; and a stalled login
       # probe mutes only its own frozen alerts (probe_host), never another
       # probe's. A dead host yields only HostDown through the rules
-      # themselves. A custom alertmanager_config must carry the same two
-      # rules.
+      # themselves. This Alertmanager is central: `site` (each Prometheus'
+      # external label) keeps two sites with the same host names apart. A
+      # custom alertmanager_config must carry the same two rules.
       inhibit_rules:
         - source_matchers: ['alertname="HostMetricsMissing"']
           target_matchers: ['alertname="HostDown"', 'job="node"']
-          equal: ['pilot_host']
+          equal: ['pilot_host', 'site']
         - source_matchers: ['alertname="PilotLoginProbeStale"']
           target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-          equal: ['probe_host']
+          equal: ['probe_host', 'site']
       receivers:
         - name: 'null'
     # Alertmanager's webhook_configs always POSTs its own fixed JSON
@@ -107,15 +108,16 @@
       # mutes the seed HostDown of its node scrape; and a stalled login
       # probe mutes only its own frozen alerts (probe_host), never another
       # probe's. A dead host yields only HostDown through the rules
-      # themselves. A custom alertmanager_config must carry the same two
-      # rules.
+      # themselves. This Alertmanager is central: `site` (each Prometheus'
+      # external label) keeps two sites with the same host names apart. A
+      # custom alertmanager_config must carry the same two rules.
       inhibit_rules:
         - source_matchers: ['alertname="HostMetricsMissing"']
           target_matchers: ['alertname="HostDown"', 'job="node"']
-          equal: ['pilot_host']
+          equal: ['pilot_host', 'site']
         - source_matchers: ['alertname="PilotLoginProbeStale"']
           target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-          equal: ['probe_host']
+          equal: ['probe_host', 'site']
       receivers:
         - name: 'null'
         - name: teams

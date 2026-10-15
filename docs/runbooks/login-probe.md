@@ -95,7 +95,7 @@ sudo -u pilot-login-probe /usr/local/bin/pilot-login-probe probe \
 | `PilotLoginProbeSessionFailed`（warning） | `session` | 認證與 account 都過了，指令或 session 失敗（home、shell） |
 | `PilotLoginProbeTransportFailed`（warning） | `transport` | sshd、防火牆、DNS。node_exporter 也抓不到的主機不會觸發這個告警，只會有 `HostDown` |
 | `PilotLoginProbeStale`（warning，`action_required`） | — | 探測主機 `systemctl status pilot-login-probe`。它觸發時，**這台 probe**（`probe_host`）的其他 `PilotLoginProbe*` 會被 inhibit，其他 probe 的告警不受影響 |
-| `HostMetricsMissing`（warning，`action_required`） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符。它觸發時同主機的 `HostDown{job="node"}` 會被 inhibit（主機還活著） |
+| `HostMetricsMissing`（warning，`action_required`） | — | SSH 登得進去但 `up{job="node"}==0`：node_exporter 停了、9100 被擋、或 Basic Auth 不符。它觸發時同主機的 `HostDown{job="node"}` 會被 inhibit（主機還活著）；probe 單輪失敗或重啟不會讓它中斷（`keep_firing_for`），所以恢復後最多晚 5m 才 resolve |
 | `HostIOStall` / `HostDiskLatencyHigh` / `HostDiskQueueDeep`（warning） | — | `node_disk_*` 依 device 拆開看；EL9 預設沒有 PSI，只會有後兩者 |
 | `HostPSIUnavailable`（info） | — | 這台主機沒有 PSI metrics，`HostIOStall` 不會在這台觸發 |
 
@@ -160,6 +160,11 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
   明確設定 `login_probe_targets` 時 playbook 無法檢查：`name=` 必須寫成該主機的
   inventory 名稱，否則 `HostMetricsMissing` 的 join，以及「主機掛掉時不送
   `PilotLoginProbeTransportFailed`」的排除，都會靜默失效（`alertmanager.md` §1.7）。
+- node scrape target 要由 inventory 的 `host-monitoring` group 自動展開（帶 `pilot_host`）。
+  用 `node_exporter_targets` 明確列 target 時沒有 `pilot_host`，`HostMetricsMissing` 不會觸發，
+  主機掛掉時也會多送 `PilotLoginProbeTransportFailed`（`alertmanager.md` §1.7 的前提）。
+- `login_probe_interval` + `login_probe_total_timeout` 要明顯短於 `host_metrics_missing_for`
+  （預設 60s + 30s 對 3m）；兩邊屬於不同 role，playbook 沒有交叉檢查。
 - 解析不到的 target 不會擋下部署：它留在設定裡，apply 印出 WARNING，probe 回報
   `transport`，觸發 `PilotLoginProbeTransportFailed`。全部 target 都解析不到時才會
   fail closed（通常是 `login_probe_domain` 寫錯，或探測主機本身的 DNS 壞了）。
@@ -185,3 +190,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-14 | v0.2 | 更新至 candidate `5f7c13b` 的 fresh topology 證據，記錄 image fingerprints 與 Prometheus C16–C19/C22 環境限制 | pilot |
 | 2026-10-15 | v0.3 | 更新至 candidate `0882d2c`：`HostIOStall` 改讀沒有 `kind` label 的 PSI full series，並在 fresh topology 上實際觸發；`services: local` 可用 | pilot |
 | 2026-10-15 | v0.4 | 更新至 candidate `dc883b3`（PR #80 review）：§3 的 inhibit 行為改寫（`HostMetricsMissing` 抑制同主機 `HostDown{job="node"}`、`PilotLoginProbeStale` 只抑制同 `probe_host`）、§4.5 退役 re-render 帶 vault、§6 補明確 target 名稱、解析不到的 target 與手動移除 role；§0.5 換成新一輪實測 | pilot |
+| 2026-10-15 | v0.5 | PR #80 第三輪 review：`HostMetricsMissing` 的 `keep_firing_for`、inhibit 帶 `site`、probe 新鮮度改用 `changes()`；§6 補 `node_exporter_targets` 與 probe 間隔的前提 | pilot |

@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -72,6 +71,15 @@ func TestHostDecommissionStageTargets(t *testing.T) {
 // prod and web2 with no env.
 func writeHostDecommissionStageFixture(t *testing.T) (workspaceDir, ansibleLog string) {
 	t.Helper()
+	workspaceDir, ansibleLog, _ = writeHostDecommissionStageFixtureBin(t)
+	return workspaceDir, ansibleLog
+}
+
+// writeHostDecommissionStageFixtureBin is writeHostDecommissionStageFixture
+// that also returns the directory holding the fake ansible-playbook, for
+// tests that replace it.
+func writeHostDecommissionStageFixtureBin(t *testing.T) (workspaceDir, ansibleLog, bin string) {
+	t.Helper()
 	root, workspaceDir := writeHostDecommissionFixture(t)
 	dockerComponent := `schemaVersion: 1
 id: docker
@@ -107,14 +115,14 @@ lifecycle:
 	// A fake ansible-playbook that records its arguments and reports the
 	// component as already removed, so apply inspects, verifies and
 	// finalizes without a real host.
-	bin := t.TempDir()
+	bin = t.TempDir()
 	ansibleLog = filepath.Join(t.TempDir(), "ansible-playbook.log")
 	script := "#!/bin/sh\necho \"$*\" >> '" + ansibleLog + "'\necho 'ok: [x] => {\"msg\": \"PILOT_COMPONENT_DECOMMISSIONED=true\"}'\n"
 	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return workspaceDir, ansibleLog
+	return workspaceDir, ansibleLog, bin
 }
 
 // runPilotForTest runs the root command with args after resetting the
@@ -246,7 +254,7 @@ func TestHostDecommissionApply_SandboxHostNeedsNoStageFlags(t *testing.T) {
 // vault; without the workspace vault that step failed on every real probe
 // host (PR #80 review).
 func TestHostDecommissionApply_LoginProbeReRenderGetsTheVault(t *testing.T) {
-	ws, ansibleLog := writeHostDecommissionStageFixture(t)
+	ws, ansibleLog, bin := writeHostDecommissionStageFixtureBin(t)
 	t.Cleanup(func() { _, _ = runPilotForTest(t, "--help") })
 	hostsYAML := `hosts:
   web2:
@@ -274,7 +282,6 @@ func TestHostDecommissionApply_LoginProbeReRenderGetsTheVault(t *testing.T) {
 		"if [ -f '" + rendered + "' ]; then p=false; else p=true; fi\n" +
 		"echo \"ok: [mon1] => {\\\"msg\\\": \\\"LOGIN_PROBE_TARGET_PRESENT[mon1]=$p\\\"}\"\n" +
 		"echo 'ok: [x] => {\"msg\": \"PILOT_COMPONENT_DECOMMISSIONED=true\"}'\n"
-	bin := filepath.Dir(firstOnPath(t, "ansible-playbook"))
 	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -306,14 +313,4 @@ func TestHostDecommissionApply_LoginProbeReRenderGetsTheVault(t *testing.T) {
 	if strings.Contains(string(logged), "fixture-only-value") {
 		t.Error("a vault value reached the ansible-playbook command line; only the file reference may")
 	}
-}
-
-// firstOnPath returns the first name found on PATH.
-func firstOnPath(t *testing.T, name string) string {
-	t.Helper()
-	p, err := exec.LookPath(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p
 }

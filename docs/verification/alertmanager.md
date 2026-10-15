@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.6
+> 版本：v1.8
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -42,17 +42,25 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
 1. **整台主機掛掉只產生 `HostDown`。** `PilotLoginProbeTransportFailed` 的規則本身
    排除 `up{job="node"} == 0` 的主機，跟兩個 `for:` 的長短無關；`HostMetricsMissing`
    只採信仍在寫 textfile 的 probe 回報的登入成功，所以 probe 停擺時凍結的
-   `success=1` 不會讓掛掉的主機變成「SSH 連得上但 metrics 缺」。
+   `success=1` 不會讓掛掉的主機變成「SSH 連得上但 metrics 缺」。「仍在寫」看的是 probe
+   的寫入時間戳在 `login_probe_stale_seconds` 內有沒有變化（`changes()`），不依賴探測主機的時鐘。
 2. **監控資料缺口（node_exporter 停了或 9100 被擋，SSH 正常）只產生
    `HostMetricsMissing`。** 它在 `host_metrics_missing_for`（預設 3m）就觸發，抑制
    同一台主機 `job="node"` 的 `HostDown`（10m 才觸發，從一開始就被抑制）。
    `prometheus-apply.yml` 拒絕 `host_metrics_missing_for` ≥ 10m。它帶
+   `keep_firing_for`（`login_probe_alert_keep_firing_for`，預設 5m），probe 單輪失敗或重啟
+   （重啟後第一次寫出的 textfile 是 `success=0`）不會讓它中斷、讓 `HostDown` 漏出來；
+   代價是 node_exporter 恢復後它最多晚 5m 才 resolve，資料缺口期間主機真的掛掉時
+   `HostDown` 最多晚 5m 送出。它帶
    `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
    任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
 3. **一台 login probe 停擺（`PilotLoginProbeStale`）只抑制它自己的告警。** 每個
    `PilotLoginProbe*` 告警都帶 `probe_host`（看到它的 probe 主機），抑制只比對
    `probe_host`；另一台 probe 回報的 `AccountDenied` 照常送出。`PilotLoginProbeStale`
    帶 `action_required="true"`，`teams` 模式也會送出。
+
+這個 Alertmanager 是所有站台共用的，兩條規則的 `equal` 都帶 `site`（每台 Prometheus 的
+external label），兩個站台用了相同主機名稱時不會互相抑制。
 
 `null` 與 `teams` 模式內建這兩條規則（`playbooks/apply/alertmanager-apply.yml` 的
 `alertmanager_default_config`/`alertmanager_teams_config`）。`custom` 模式由 operator
@@ -62,19 +70,28 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
 inhibit_rules:
   - source_matchers: ['alertname="HostMetricsMissing"']
     target_matchers: ['alertname="HostDown"', 'job="node"']
-    equal: ['pilot_host']
+    equal: ['pilot_host', 'site']
   - source_matchers: ['alertname="PilotLoginProbeStale"']
     target_matchers: ['alertname=~"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)"']
-    equal: ['probe_host']
+    equal: ['probe_host', 'site']
 ```
 
-上述保證有兩個前提：
+C10 讀的是執行中 Alertmanager 載入的設定（`amtool config show`），要求這兩條規則逐字相符；
+舊版規則（`HostDown` 當來源、Stale 以 `site` 比對）或少了 `site` 的版本都會 FAIL。
+
+上述保證有這些前提：
 
 - 主機的 `pilot_host` 要等於 login probe 的 `probe_target`。自動展開的 target 一定成立；
   明確設定 `login_probe_targets` 時，名稱要用 inventory 名稱，否則上面的對應會靜默失效
   （見 `docs/runbooks/login-probe.md` §6）。
 - 用 `prometheus_alert_rules_file` 換掉 seed 規則時，必須保留同樣的 `HostDown`
   （`up != 1`，`for: 10m`）。
+- node scrape target 由 inventory 的 `host-monitoring` group 自動展開（帶 `pilot_host`）。
+  改用 `node_exporter_targets` 明確列出 target 時，node series 沒有 `pilot_host`：
+  `HostMetricsMissing` 不會觸發，主機掛掉時也不會排除 `PilotLoginProbeTransportFailed`。
+- `login_probe_interval`（預設 60s）加上 `login_probe_total_timeout` 要明顯短於
+  `host_metrics_missing_for`（預設 3m）：一輪的間隔接近 3m 時，主機剛掛掉、下一輪還沒跑之前，
+  `HostMetricsMissing` 可能誤報「SSH 連得上」。
 
 `internal/spec/alertmanager_inhibit_regression_test.go::TestRegression_AlertmanagerInhibitBehaviour`
 用 pinned 的 Alertmanager 實際跑兩種內建設定，確認哪些告警被抑制；
@@ -97,7 +114,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 | C7 | functional | 推一筆測試告警至 Alertmanager，`/api/v2/alerts` 可查得 | 0 | sh -c 'curl -fsS -X POST http://127.0.0.1:9093/api/v2/alerts -H "Content-Type: application/json" -d "[{\"labels\":{\"alertname\":\"pilot-alertmanager-selftest\",\"severity\":\"info\"},\"annotations\":{\"msg\":\"PILOT-ALERTMANAGER-SELFTEST\"}}]" >/dev/null 2>&1; sleep 1; curl -fsS http://127.0.0.1:9093/api/v2/alerts | grep -q pilot-alertmanager-selftest' |
 | C8 | docker | `pilot-alertmanager-teams-proxy`（teams 模式才存在）若存在則必須為 running 且 `/healthz` 回 200；non-teams 模式下容器不存在也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then docker ps --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy && curl -fsS -o /dev/null -w "%{http_code}" http://127.0.0.1:8095/healthz 2>/dev/null | grep -q "^200$"; else true; fi' |
 | C9 | functional | proxy 的 Alertmanager→Adaptive Card 轉換正確（`/render` 自我測試，不真的送 Teams）；容器不存在（non-teams 模式）也算通過 | 0 | sh -c 'if docker ps -a --no-trunc 2>/dev/null | grep -q pilot-alertmanager-teams-proxy; then curl -fsS -X POST http://127.0.0.1:8095/render -H "Content-Type: application/json" -d "{\"status\":\"firing\",\"groupLabels\":{\"alertname\":\"pilot-teams-proxy-selftest\"},\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"pilot-teams-proxy-selftest\",\"severity\":\"info\"},\"annotations\":{}}]}" 2>/dev/null | grep -q "\"type\": \"AdaptiveCard\""; else true; fi' |
-| C10 | config | `alertmanager.yml` 帶 GitHub issue #11 的兩條 inhibit 規則：`HostMetricsMissing` 抑制同 `pilot_host` 的 `HostDown{job="node"}`，`PilotLoginProbeStale` 抑制同 `probe_host` 的其他 `PilotLoginProbe*`；`amtool check-config` 回報至少 2 條 inhibit rule（`custom` 模式的設定也必須帶，見 §1.7） | 0 | sh -c 'f=/etc/pilot/alertmanager/alertmanager.yml; grep -q HostDown "$f" && grep -q PilotLoginProbeStale "$f" && grep -q HostMetricsMissing "$f" || exit 1; n=$(docker exec pilot-alertmanager amtool check-config /etc/alertmanager/alertmanager.yml 2>/dev/null | sed -n "s/^ - \([0-9][0-9]*\) inhibit rules$/\1/p"); [ "${n:-0}" -ge 2 ]' |
+| C10 | config | 執行中的 Alertmanager 載入的設定（`amtool config show`，不是磁碟上的檔案）帶 GitHub issue #11 的兩條 inhibit 規則，內容逐字相符：`HostMetricsMissing` 抑制同 `pilot_host`、同 `site` 的 `HostDown{job="node"}`；`PilotLoginProbeStale` 抑制同 `probe_host`、同 `site` 的其他 `PilotLoginProbe*`。舊版（`HostDown` 當來源、`equal: site`）或少了 `site` 的規則都會 FAIL（`custom` 模式的設定也必須帶，見 §1.7） | 0 | sh -c 'r=$(docker exec pilot-alertmanager amtool config show --alertmanager.url=http://127.0.0.1:9093 2>/dev/null | awk "/^inhibit_rules:/{f=1;next} f&&/^[^ -]/{f=0} f&&/^- /{if(r!=\"\")print r;r=\"\"} f{sub(/^[ -]+/,\"\");r=r\" \"\$0} END{if(r!=\"\")print r}"); printf "%s\n" "$r" | grep -qxF " source_matchers: alertname=\"HostMetricsMissing\" target_matchers: alertname=\"HostDown\" job=\"node\" equal: pilot_host site" && printf "%s\n" "$r" | grep -qxF " source_matchers: alertname=\"PilotLoginProbeStale\" target_matchers: alertname=~\"PilotLoginProbe(AccountDenied|AuthFailed|LoginStalled|HostKeyMismatch|SessionFailed|TransportFailed|NoTargets)\" equal: probe_host site"' |
 
 ## 3. 證據收集
 
@@ -124,6 +141,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-15 | v1.8 | PR #80 第三輪 review：C10 改讀執行中 Alertmanager 載入的設定（`amtool config show`），要求兩條 inhibit 規則逐字相符，舊規則與少了 `site` 的規則都會 FAIL（`TestRegression_AlertmanagerC10DistinguishesInhibitRules` 對真的 Alertmanager 跑 C10）；兩條規則的 `equal` 加上 `site`；`HostMetricsMissing` 加 `keep_firing_for`，probe 新鮮度改用 `changes()`；§1.7 補前提（`node_exporter_targets`、probe 間隔）；標頭版本對齊變更紀錄 | sre |
 | 2026-10-15 | v1.7 | GitHub issue #11 / PR #80 review：改寫兩條 inhibit（§1.7、C10）。舊規則讓 `HostDown`（10m）抑制先觸發的 `HostMetricsMissing`，資料缺口反而只剩「Target down」；`PilotLoginProbeStale` 以 `site` 比對，一台 probe 停擺會抑制整站其他 probe 的告警。改為 `HostMetricsMissing` 抑制同主機的 `HostDown{job="node"}`，`PilotLoginProbeStale` 只比對 `probe_host`。「整台主機掛掉只產生 `HostDown`」改由規則本身保證。新增實際啟動 Alertmanager 的行為測試，CI 也會跑 | sre |
 | 2026-10-13 | v1.6 | GitHub issue #11：`null`/`teams` 模式內建 HostDown 與 PilotLoginProbeStale 兩條 inhibit 規則（§1.7），新增 C10；`custom` 模式需自行加入 | sre |
 | 2026-09-17 | v1.5 | Teams 僅接收 critical／明確 actionable warning；以 subject + signal 分組、12h repeat，卡片顯示行動資訊；candidate `30d6b92` L1-L6 target evidence PASS | sre |

@@ -77,13 +77,14 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 		}
 	}
 
-	// C10 (issue #11): both inhibit rules by name, and amtool's own count —
-	// the whole sh -c body must survive the table parser (it contains |).
+	// C10 (issue #11): the exact loaded inhibit records. The whole sh -c body
+	// must survive the table parser: it contains |, also inside the Stale
+	// regex. TestRegression_AlertmanagerC10DistinguishesInhibitRules runs it.
 	for _, r := range s.Rows {
 		if r.ID != "C10" {
 			continue
 		}
-		for _, want := range []string{"HostDown", "PilotLoginProbeStale", "HostMetricsMissing", "amtool check-config", `[ "${n:-0}" -ge 2 ]'`} {
+		for _, want := range []string{"amtool config show", `equal: pilot_host site`, `equal: probe_host site`, `alertname=\"HostMetricsMissing\" target_matchers: alertname=\"HostDown\" job=\"node\"`, `TransportFailed|NoTargets)\" equal: probe_host site"'`} {
 			if !strings.Contains(r.Command, want) {
 				t.Errorf("C10 must contain %q; got %q", want, r.Command)
 			}
