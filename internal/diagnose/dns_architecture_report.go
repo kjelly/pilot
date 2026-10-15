@@ -1173,6 +1173,10 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): no DNS (freeipa_setup_dns false)", p.Kind, p.FQDN, p.IP))
 			continue
 		}
+		if p.LeftOut {
+			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): left out of the DNS paths (freeipa_setup_dns unset, and FreeIPA does not list it as a DNS server)", p.Kind, p.FQDN, p.IP))
+			continue
+		}
 		line := fmt.Sprintf("FreeIPA DNS %s %s (%s): authoritative for %s", p.Kind, p.FQDN, p.IP, m.FreeIPADomain)
 		for _, op := range o.Providers {
 			if op.Host == p.InventoryHost {

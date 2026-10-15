@@ -849,6 +849,24 @@ func TestDNSArchUnregisteredReplicas_FollowFreeIPAsNSRecords(t *testing.T) {
 	}
 }
 
+// A left-out replica is not shown as an authoritative FreeIPA DNS path.
+func TestBuildDNSArchPaths_LeftOutReplicaIsNotAuthoritative(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr73-ipa"}, "freeipa-server-replica": {"pr73-replica3"}},
+		map[string]map[string]any{
+			"pr73-ipa":      {"ansible_host": "192.168.122.6"},
+			"pr73-replica3": {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa3.ipa.pilot.internal"},
+		})
+	m := BuildDNSArchitectureModelLeavingOut(invInput, []string{"pr73-replica3"})
+	paths := strings.Join(BuildDNSArchPaths(m, DNSArchObserved{}), "\n")
+	if strings.Contains(paths, "FreeIPA DNS replica ipa3.ipa.pilot.internal") || !strings.Contains(paths, "FreeIPA replica ipa3.ipa.pilot.internal (192.168.122.3): left out of the DNS paths") {
+		t.Fatalf("paths:\n%s", paths)
+	}
+	if !strings.Contains(paths, "FreeIPA DNS primary ipa1.ipa.pilot.internal (192.168.122.6): authoritative for ipa.pilot.internal") {
+		t.Fatalf("the primary's path is missing:\n%s", paths)
+	}
+}
+
 // A left-out replica is not a FreeIPA DNS server, so its answer for the
 // internal name is not compared with the reference provider's (the
 // comparison #91 added); otherwise its expected failure would be reported
