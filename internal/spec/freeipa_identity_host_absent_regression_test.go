@@ -19,6 +19,7 @@ package spec
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_ValidatorAcceptsOnlyPresentAbsent(
 	if idx < 0 {
 		t.Fatal("expected the canonical host state-validity gate task to exist")
 	}
-	nextTask := strings.Index(raw[idx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[idx+1:])
 	if nextTask < 0 {
 		t.Fatal("could not find the end of the host state-validity gate task")
 	}
@@ -79,7 +80,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_AbsentHostDoesNotRunHostAdd(t *tes
 	// Scope the search to this task's own body (up to the next task) so
 	// this assertion can't accidentally match an unrelated `when:` block
 	// elsewhere in this 2800+ line file.
-	nextTask := strings.Index(raw[idx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[idx+1:])
 	if nextTask < 0 {
 		t.Fatal("could not find the end of the host-add task")
 	}
@@ -120,7 +121,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_DNSDeletionIsExactValue(t *testing
 	if idx < 0 {
 		t.Fatal("expected the surgical DNS-delete task to exist")
 	}
-	nextTask := strings.Index(raw[idx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[idx+1:])
 	if nextTask < 0 {
 		t.Fatal("could not find the end of the DNS-delete task")
 	}
@@ -143,7 +144,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_UnknownServiceReferencesBlock(t *t
 	if idx < 0 {
 		t.Fatal("expected the unknown-service-principal gate to exist")
 	}
-	nextTask := strings.Index(raw[idx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[idx+1:])
 	if nextTask < 0 {
 		t.Fatal("could not find the end of the service-principal gate task")
 	}
@@ -182,7 +183,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_NoBroadDNSCascade(t *testing.T) {
 	if idx < 0 {
 		t.Fatal("expected the host-del task to exist")
 	}
-	nextTask := strings.Index(raw[idx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[idx+1:])
 	if nextTask < 0 {
 		t.Fatal("could not find the end of the host-del task")
 	}
@@ -212,7 +213,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_IdempotentRerunReportsNoChange(t *
 	if dnsDelIdx < 0 {
 		t.Fatal("expected the DNS-delete task to exist")
 	}
-	nextTask := strings.Index(raw[dnsDelIdx+1:], "\n    - name:")
+	nextTask := nextTaskOffset(raw[dnsDelIdx+1:])
 	dnsDelBody := raw[dnsDelIdx : dnsDelIdx+1+nextTask]
 	if !strings.Contains(dnsDelBody, `changed_when: "freeipa_absent_host_dns_del.rc == 0"`) {
 		t.Fatal("expected dnsrecord-del's changed_when to be based on its own rc, not hardcoded true")
@@ -223,7 +224,7 @@ func TestRegression_FreeIPAIdentityHostAbsent_IdempotentRerunReportsNoChange(t *
 	// already gone ("not found" is not a failure) — both together are
 	// what make a second reconcile idempotent (changed=false, no error).
 	hostDelIdx := strings.Index(raw, `name: "Delete the FreeIPA host object for each roster host marked absent`)
-	nextTask = strings.Index(raw[hostDelIdx+1:], "\n    - name:")
+	nextTask = nextTaskOffset(raw[hostDelIdx+1:])
 	hostDelBody := raw[hostDelIdx : hostDelIdx+1+nextTask]
 	if !strings.Contains(hostDelBody, `changed_when: "'Deleted host' in (freeipa_absent_host_del.stdout | default(''))"`) {
 		t.Fatal("expected host-del's changed_when to key off the real 'Deleted host' marker, not an unconditional true")
@@ -257,3 +258,15 @@ func TestRegression_FreeIPAIdentityHostAbsent_ExistingAbsentSemanticsUnchanged(t
 		}
 	}
 }
+
+// nextTaskOffset returns the offset in s of the next task's "- name:" line
+// at any indentation, or -1. The tasks sit inside the private Kerberos
+// cache block (issue #69), one level deeper than the play's tasks.
+func nextTaskOffset(s string) int {
+	if loc := nextTaskRe.FindStringIndex(s); loc != nil {
+		return loc[0]
+	}
+	return -1
+}
+
+var nextTaskRe = regexp.MustCompile(`\n[ ]+- name:`)

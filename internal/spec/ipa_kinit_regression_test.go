@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -11,20 +12,23 @@ import (
 )
 
 // TestRegression_IpaCommandsHaveAKinitForTheirTags is a repo-wide lint over
-// playbooks/apply/*.yml. A task that runs `ipa <command>` needs a Kerberos
-// ticket from an earlier kinit in the same play, and under --tags that kinit
-// is skipped unless it is `always` or carries the task's row tags. The
-// playbooks also kdestroy at the end of a full run, so no cached ticket
-// covers for it. Until 2026-10-01, freeipa-identity's admin kinit carried
-// only its group tags (every C<n> row run failed with "did not receive
-// Kerberos credentials"), and pilot-access-directory's AD_service and
-// pilot-session-store's SS_service rows ran `ipa group-add` without one.
-// Plays with no kinit at all (they authenticate another way) are not
-// checked.
+// the plays under playbooks/ (not the deprecated playbooks/verify/). A task
+// that runs `ipa <command>` needs a Kerberos ticket from an earlier kinit in
+// the same play that wrote the same credential cache, and under --tags that
+// kinit is skipped unless it is `always` or carries the task's row tags.
+// The playbooks destroy their caches (issue #69), so no ticket left over
+// from earlier covers for it. Until 2026-10-01, freeipa-identity's admin
+// kinit carried only its group tags (every C<n> row run failed with "did
+// not receive Kerberos credentials"), and pilot-access-directory's
+// AD_service and pilot-session-store's SS_service rows ran `ipa group-add`
+// without one. Since PR #72 the cache must match too: an ipa task after a
+// private-cache block, or with another block's cache, runs without the
+// ticket. Plays with no kinit at all (they authenticate another way) are
+// not checked.
 func TestRegression_IpaCommandsHaveAKinitForTheirTags(t *testing.T) {
 	checked := 0
 	for _, path := range playbookFiles(t) {
-		if !strings.Contains(path, "/playbooks/apply/") || strings.Contains(path, "/playbooks/apply/tasks/") {
+		if strings.Contains(path, "/playbooks/verify/") {
 			continue
 		}
 		problems, n := ipaTasksWithoutKinit(loadYAML(t, path))
@@ -33,9 +37,9 @@ func TestRegression_IpaCommandsHaveAKinitForTheirTags(t *testing.T) {
 			t.Errorf("%s: %s", strings.TrimPrefix(path, "../../"), p)
 		}
 	}
-	// Several apply playbooks kinit before ipa commands; none found means
-	// the detection broke.
-	if checked < 5 {
+	// Many playbooks kinit before ipa commands; few found means the
+	// detection broke.
+	if checked < 15 {
 		t.Fatalf("found only %d plays with a kinit; the detection is broken", checked)
 	}
 }
@@ -82,6 +86,46 @@ func TestIpaTasksWithoutKinit(t *testing.T) {
     - {name: show, tags: [C2], command: {argv: [ipa, host-show, h]}}
     - {name: kinit, tags: [always], shell: "echo pw | kinit admin"}
 `, 1},
+		{"ipa after the private-cache block runs without the ticket", `
+- hosts: all
+  tasks:
+    - name: b
+      environment: {KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/x') }}"}
+      block:
+        - {name: open, tags: [always], include_tasks: {file: tasks/freeipa-private-ccache-open.yml, apply: {tags: [always]}}}
+        - {name: kinit, tags: [always], shell: "echo pw | kinit admin"}
+        - {name: inside, tags: [C1], command: {argv: [ipa, host-show, h]}}
+      always:
+        - {name: close, tags: [always], include_tasks: {file: tasks/freeipa-private-ccache-close.yml, apply: {tags: [always]}}}
+    - {name: after, tags: [C1], command: {argv: [ipa, host-show, h]}}
+`, 1},
+		{"ipa in another private block than the kinit", `
+- hosts: all
+  tasks:
+    - name: b1
+      environment: {KRB5CCNAME: "{{ pilot_krb5ccname }}"}
+      block:
+        - {name: open, include_tasks: {file: tasks/freeipa-private-ccache-open.yml, apply: {tags: [always]}}, tags: [always]}
+        - {name: kinit, shell: "echo pw | kinit admin"}
+      always:
+        - {name: close, include_tasks: {file: tasks/freeipa-private-ccache-close.yml, apply: {tags: [always]}}, tags: [always]}
+    - name: b2
+      environment: {KRB5CCNAME: "{{ pilot_krb5ccname }}"}
+      block:
+        - {name: open, include_tasks: {file: tasks/freeipa-private-ccache-open.yml, apply: {tags: [always]}}, tags: [always]}
+        - {name: show, command: {argv: [ipa, host-show, h]}}
+      always:
+        - {name: close, include_tasks: {file: tasks/freeipa-private-ccache-close.yml, apply: {tags: [always]}}, tags: [always]}
+`, 1},
+		{"dedicated tempfile cache: kinit inline, ipa with the same env", `
+- hosts: all
+  tasks:
+    - {name: tf, tempfile: {state: file}, register: cc}
+    - {name: kinit, shell: 'echo pw | KRB5CCNAME="{{ cc.path }}" kinit admin'}
+    - {name: same, command: {argv: [ipa, host-show, h]}, environment: {KRB5CCNAME: "FILE:{{ cc.path }}"}}
+    - {name: other, command: {argv: [ipa, host-show, h]}, environment: {KRB5CCNAME: "{{ cc2.path }}"}}
+    - {name: default, command: {argv: [ipa, host-show, h]}}
+`, 2},
 		{"ipa-getcert and ipa_ variables are not ipa commands", `
 - hosts: all
   tasks:
@@ -107,14 +151,25 @@ func TestIpaTasksWithoutKinit(t *testing.T) {
 	}
 }
 
-var (
-	ipaCommand   = regexp.MustCompile(`(^|[\s;&|(])ipa\s+[a-z]`)
-	kinitCommand = regexp.MustCompile(`\bkinit\b`)
-)
+var ipaSubcommand = regexp.MustCompile(`^[a-z]`)
+
+// runsIpa reports whether segs run the ipa CLI with a subcommand (not
+// ipa-getcert and the other ipa-* programs).
+func runsIpa(segs [][]string) bool {
+	for _, seg := range segs {
+		for i, tok := range seg {
+			if path.Base(tok) == "ipa" && i+1 < len(seg) && ipaSubcommand.MatchString(seg[i+1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ipaTasksWithoutKinit returns one message per task in doc's plays that runs
-// an ipa command under a --tags selection that skips every earlier kinit in
-// its play, and the number of plays with a kinit.
+// an ipa command without an earlier kinit in its play that writes the same
+// credential cache and runs under every --tags selection the task does, and
+// the number of plays with a kinit.
 func ipaTasksWithoutKinit(doc any) ([]string, int) {
 	plays, _ := doc.([]any)
 	var out []string
@@ -124,22 +179,22 @@ func ipaTasksWithoutKinit(doc any) ([]string, int) {
 		if _, ok := play["hosts"]; !ok {
 			continue
 		}
-		type entry struct {
-			task map[string]any
-			tags []string
+		w := &krbWalker{}
+		scope := ""
+		if v, ok := envCache(play); ok {
+			scope = ccacheScope(v)
 		}
-		var tasks []entry
 		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
-			walkTaskTree(play[section], yamlTags(play), func(task map[string]any, tags []string) {
-				if task["block"] == nil {
-					tasks = append(tasks, entry{task, tags})
-				}
-			})
+			w.walk(taskList(play[section]), yamlTags(play), scope, nil)
 		}
-		var kinits [][]string
-		for _, e := range tasks {
-			if kinitCommand.MatchString(commandText(e.task)) {
-				kinits = append(kinits, e.tags)
+		type kinit struct {
+			scope string
+			tags  []string
+		}
+		var kinits []kinit
+		for _, e := range w.tasks {
+			if found, _ := kinitCache(commandSegments(e.task)); found {
+				kinits = append(kinits, kinit{})
 			}
 		}
 		if len(kinits) == 0 {
@@ -147,54 +202,55 @@ func ipaTasksWithoutKinit(doc any) ([]string, int) {
 		}
 		checked++
 		kinits = nil
-		for _, e := range tasks {
-			text := commandText(e.task)
-			if kinitCommand.MatchString(text) {
-				kinits = append(kinits, e.tags)
+		for _, e := range w.tasks {
+			segs := commandSegments(e.task)
+			if found, c := kinitCache(segs); found {
+				s := e.scope
+				if c != "" {
+					s = ccacheScope(c)
+				}
+				kinits = append(kinits, kinit{s, e.tags})
 				continue
 			}
-			if !ipaCommand.MatchString(text) || len(e.tags) == 0 {
+			if !runsIpa(segs) {
+				continue
+			}
+			var same [][]string
+			for _, k := range kinits {
+				if k.scope == e.scope {
+					same = append(same, k.tags)
+				}
+			}
+			if len(same) == 0 {
+				out = append(out, fmt.Sprintf("task %q runs ipa with credential cache %s, but no earlier kinit in its play writes that cache; run it inside the block that holds the kinit", e.name, cacheLabel(e.scope)))
+				continue
+			}
+			if len(e.tags) == 0 {
 				continue
 			}
 			var missing []string
 			if slices.Contains(e.tags, "always") {
-				if !slices.ContainsFunc(kinits, func(k []string) bool { return slices.Contains(k, "always") }) {
+				if !slices.ContainsFunc(same, func(k []string) bool { return slices.Contains(k, "always") }) {
 					missing = append(missing, "always")
 				}
 			} else {
 				for _, tag := range e.tags {
-					if !slices.ContainsFunc(kinits, func(k []string) bool { return slices.Contains(k, "always") || slices.Contains(k, tag) }) {
+					if !slices.ContainsFunc(same, func(k []string) bool { return slices.Contains(k, "always") || slices.Contains(k, tag) }) {
 						missing = append(missing, tag)
 					}
 				}
 			}
 			if len(missing) > 0 {
-				name, _ := e.task["name"].(string)
-				out = append(out, fmt.Sprintf("task %q runs ipa, but no earlier kinit in its play runs under --tags %s; tag a kinit always or with those tags", name, strings.Join(missing, ",")))
+				out = append(out, fmt.Sprintf("task %q runs ipa, but no earlier kinit in its play runs under --tags %s; tag a kinit always or with those tags", e.name, strings.Join(missing, ",")))
 			}
 		}
 	}
 	return out, checked
 }
 
-// commandText returns a command/shell task's command line, or "".
-func commandText(task map[string]any) string {
-	for _, module := range []string{"command", "ansible.builtin.command", "shell", "ansible.builtin.shell"} {
-		switch v := task[module].(type) {
-		case string:
-			return v
-		case map[string]any:
-			if argv, ok := v["argv"].([]any); ok {
-				parts := make([]string, 0, len(argv))
-				for _, a := range argv {
-					parts = append(parts, fmt.Sprint(a))
-				}
-				return strings.Join(parts, " ")
-			}
-			if cmd, ok := v["cmd"].(string); ok {
-				return cmd
-			}
-		}
+func cacheLabel(scope string) string {
+	if scope == "" {
+		return "(the default cache)"
 	}
-	return ""
+	return scope
 }

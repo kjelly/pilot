@@ -48,7 +48,9 @@
 # removed: the temp dir is shared and sticky, so a cache another user left
 # (a killed root run, seen by a `become: false` gateway-scope run) cannot be
 # unlinked here and is not this run's to remove; trying failed the whole
-# run with EPERM before kinit, on every retry.
+# run with EPERM before kinit, on every retry. The scan runs in --check (a
+# read), the removal does not: under --check it only reports what it would
+# remove.
 - name: "Private Kerberos cache — find caches a killed run left behind"
   ansible.builtin.find:
     paths: "{{ pilot_krb5ccname_file.path | dirname }}"
@@ -67,4 +69,3 @@
   loop_control:
     label: "{{ item.path }}"
   when: item.path != pilot_krb5ccname_file.path
-  check_mode: false
