@@ -16,6 +16,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// diagnoseDNSAnswer reuses a captured dig response from a real vm-target.
+func diagnoseDNSAnswer(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../../../internal/diagnose/testdata/dnsarch/tier.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return diagnose.ParseDNSArchSections(string(data))["internal"].Output
+}
+
 // writeDiagnoseFixtureInventory writes a minimal ansible-inventory-parseable
 // fixture with one host reachable via ansible_connection: local — the same
 // pattern network_check_test.go uses so tests exercise the real
@@ -356,16 +366,16 @@ func TestDiagnoseDNSHandler_SuccessWithNameBuildsOutputAndWritesAudit(t *testing
 	requireRealAnsible(t)
 	inv := writeDiagnoseFixtureInventory(t)
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
-		`awk 'NR==1{print $2}' /etc/resolv.conf`:                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
-		"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
-		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "udp UNCONN 0 0 10.0.0.5:53"), 0, nil },
+		`awk '$1 == "nameserver" {print $2; exit}' /etc/resolv.conf`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+		"systemctl is-active systemd-resolved":                       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`:  func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "udp UNCONN 0 0 10.0.0.5:53"), 0, nil },
 		`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "1"), 0, nil
 		},
 		"getent hosts keycloak.infra.internal": func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 keycloak.infra.internal"), 0, nil
 		},
-		"dig +short keycloak.infra.internal @127.0.0.1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+		"dig +time=2 +tries=1 +noall +comments +answer keycloak.infra.internal @127.0.0.1 A": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, diagnoseDNSAnswer(t)), 0, nil },
 	}}
 	handler := diagnoseDNSHandler(baseDiagnoseOpts(t, inv, fake.run))
 	result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseDNSInput{Host: "web1", Name: "keycloak.infra.internal"})
@@ -397,13 +407,59 @@ func TestDiagnoseDNSHandler_SuccessWithNameBuildsOutputAndWritesAudit(t *testing
 	}
 }
 
+func TestDiagnoseDNSHandler_FailedDigPreservesEvidence(t *testing.T) {
+	requireRealAnsible(t)
+	data, err := os.ReadFile("../../../internal/diagnose/testdata/dnsarch/tier_stopped.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dig := diagnose.ParseDNSArchSections(string(data))["internal"]
+	for _, nssOK := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nss=%v", nssOK), func(t *testing.T) {
+			inv := writeDiagnoseFixtureInventory(t)
+			fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){}}
+			for _, step := range diagnose.DNSSteps("example.test") {
+				rc, stdout := 0, ""
+				switch step.ID {
+				case "resolv-nameserver":
+					stdout = "192.0.2.53"
+				case "nss-resolve":
+					rc = 2
+					if nssOK {
+						rc, stdout = 0, "192.0.2.53 example.test"
+					}
+				case "direct-resolve":
+					rc, stdout = dig.RC, dig.Output
+				}
+				fake.byCommand[step.Command] = func() (string, int, error) {
+					return diagnoseOKDoc(t, "web1", rc, stdout), 0, nil
+				}
+			}
+			handler := diagnoseDNSHandler(baseDiagnoseOpts(t, inv, fake.run))
+			result, out, err := handler(context.Background(), &mcp.CallToolRequest{}, diagnoseDNSInput{Host: "web1", Name: "example.test"})
+			if err != nil || result != nil {
+				t.Fatalf("handler = %+v, %v", result, err)
+			}
+			if out.ResolvesViaDirectQuery || out.ResolvesViaNSS != nssOK || strings.Contains(out.Verdict, "nsswitch") {
+				t.Fatalf("inconsistent summary: %+v", out)
+			}
+			if len(out.Steps) != 6 {
+				t.Fatalf("steps = %+v", out.Steps)
+			}
+			if s := out.Steps[5]; s.RC != 9 || s.OK || s.Stdout != dig.Output {
+				t.Fatalf("dig evidence changed: %+v", s)
+			}
+		})
+	}
+}
+
 func TestDiagnoseDNSHandler_SuccessWithoutNameOmitsNameSteps(t *testing.T) {
 	requireRealAnsible(t)
 	inv := writeDiagnoseFixtureInventory(t)
 	fake := &diagnoseFakeRunner{byCommand: map[string]func() (string, int, error){
-		`awk 'NR==1{print $2}' /etc/resolv.conf`:                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "127.0.0.1"), 0, nil },
-		"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 3, ""), 0, nil },
-		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
+		`awk '$1 == "nameserver" {print $2; exit}' /etc/resolv.conf`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "127.0.0.1"), 0, nil },
+		"systemctl is-active systemd-resolved":                       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 3, ""), 0, nil },
+		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`:  func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
 		`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "0"), 0, nil
 		},
@@ -828,14 +884,14 @@ func TestDiagnoseLoginHandler_NoDashboardGroupSkipsSecurityLogsGracefully(t *tes
 		`D=$(sudo sssctl domain-list 2>/dev/null | head -n1); [ -n "$D" ] && sudo sssctl domain-status "$D" 2>&1 || echo "no sssd domain configured"`: func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "Domain: example.test\nOnline status: Online"), 0, nil
 		},
-		"awk 'NR==1{print $2}' /etc/resolv.conf":                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
-		"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
-		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
+		`awk '$1 == "nameserver" {print $2; exit}' /etc/resolv.conf`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
+		"systemctl is-active systemd-resolved":                       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+		`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`:  func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
 		`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "0"), 0, nil
 		},
-		"getent hosts web1":          func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
-		"dig +short web1 @127.0.0.1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+		"getent hosts web1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
+		"dig +time=2 +tries=1 +noall +comments +answer web1 @127.0.0.1 A": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, diagnoseDNSAnswer(t)), 0, nil },
 		"getent passwd alice": func() (string, int, error) {
 			return diagnoseOKDoc(t, "web1", 0, "alice:x:1000:1000::/home/alice:/bin/bash"), 0, nil
 		},
@@ -893,14 +949,14 @@ sudo:
 			`D=$(sudo sssctl domain-list 2>/dev/null | head -n1); [ -n "$D" ] && sudo sssctl domain-status "$D" 2>&1 || echo "no sssd domain configured"`: func() (string, int, error) {
 				return diagnoseOKDoc(t, "web1", 0, "Domain: example.test\nOnline status: Online"), 0, nil
 			},
-			"awk 'NR==1{print $2}' /etc/resolv.conf":                    func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
-			"systemctl is-active systemd-resolved":                      func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
-			`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
+			`awk '$1 == "nameserver" {print $2; exit}' /etc/resolv.conf`: func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.1"), 0, nil },
+			"systemctl is-active systemd-resolved":                       func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "active"), 0, nil },
+			`ss -tulnH | grep ":53 " | grep -v "127.0.0.53" | head -n1`:  func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, ""), 0, nil },
 			`dpkg-query -l bind9 bind9-dnsutils bind9-host bind9-libs unbound dnsmasq 2>/dev/null | awk "/^ii/ && /unbound|bind9|dnsmasq/{f=1} END{print f+0}"`: func() (string, int, error) {
 				return diagnoseOKDoc(t, "web1", 0, "0"), 0, nil
 			},
-			"getent hosts web1":          func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
-			"dig +short web1 @127.0.0.1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5"), 0, nil },
+			"getent hosts web1": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, "10.0.0.5 web1"), 0, nil },
+			"dig +time=2 +tries=1 +noall +comments +answer web1 @127.0.0.1 A": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 0, diagnoseDNSAnswer(t)), 0, nil },
 			// alice: roster declares HBAC but no sudo rule, and live sudo -l
 			// reports none either — no drift for alice, but the roster/live
 			// facts must both come through as "no sudo access".
