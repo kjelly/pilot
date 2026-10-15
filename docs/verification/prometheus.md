@@ -259,11 +259,9 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：24
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-a381ac3.md`
-  （2026-10-15，merge candidate `a381ac3`，tree `ca023f5d`；run `7defb702-0aff-4f20-947e-7183de3e625a`
-  為 19/24，未通過的 row 與下述 `f764131` 相同）與 `docs/evidence/login-probe/2026-10-15-f764131.md`
-  （candidate `f764131`，tree `0c224ddf`；全新 4 台 vm-target，有 seaweedfs-s3、
-  Alertmanager 與 login probe；run `e41d3684-5404-4a4c-bfa0-c0ae69d242a8` 為 19/24：
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-69185d7.md`
+  （2026-10-15，candidate `69185d7`，tree `b28155ce`；全新 4 台 vm-target，有 seaweedfs-s3、
+  Alertmanager 與 login probe；run `952d679c-3a8f-47c5-821c-8acab876d9f5` 為 19/24：
   C1–C15、C20/C21、C23/C24 PASS（host-health 與 login-probe 規則已渲染、通過 `promtool`、
   已載入）；C16–C19 因該 topology 沒有 GPU/dcgm-exporter、C22 因 fresh Thanos 尚未有
   第一個 2h block 而 FAIL；同一輪 `HostIOStall` 在真實 PSI 負載下觸發）。
