@@ -1,0 +1,69 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch named begin
+active
+@@pilot-dnsarch named end rc=0
+@@pilot-dnsarch soa begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 50913
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 2, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 83125d5683154f6d010000006acfb9ff5274f5f9f86e9818 (good)
+;; ANSWER SECTION:
+ipa.pilot.internal.	86400	IN	SOA	ipa1.ipa.pilot.internal. hostmaster.ipa.pilot.internal. 1791998424 3600 900 1209600 3600
+
+@@pilot-dnsarch soa end rc=0
+@@pilot-dnsarch ns begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 32309
+;; flags: qr aa ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: d4f8b7f464e78759010000006acfb9ff1c132b5a0ffa66e8 (good)
+;; ANSWER SECTION:
+ipa.pilot.internal.	86400	IN	NS	ipa-2.ipa.pilot.internal.
+ipa.pilot.internal.	86400	IN	NS	ipa1.ipa.pilot.internal.
+
+@@pilot-dnsarch ns end rc=0
+@@pilot-dnsarch srv_ldap begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 23417
+;; flags: qr aa ra; QUERY: 1, ANSWER: 2, AUTHORITY: 2, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 96cebd3f262b6792010000006acfb9ff0f093052bc6288ad (good)
+;; ANSWER SECTION:
+_ldap._tcp.ipa.pilot.internal. 86400 IN	SRV	0 100 389 ipa-2.ipa.pilot.internal.
+_ldap._tcp.ipa.pilot.internal. 86400 IN	SRV	0 100 389 ipa1.ipa.pilot.internal.
+
+@@pilot-dnsarch srv_ldap end rc=0
+@@pilot-dnsarch srv_kerberos begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 27324
+;; flags: qr aa ra; QUERY: 1, ANSWER: 2, AUTHORITY: 2, ADDITIONAL: 3
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 4a5d23e1ffaf436f010000006acfba00b4fa5da7b3504f2b (good)
+;; ANSWER SECTION:
+_kerberos._udp.ipa.pilot.internal. 86400 IN SRV	0 100 88 ipa1.ipa.pilot.internal.
+_kerberos._udp.ipa.pilot.internal. 86400 IN SRV	0 100 88 ipa-2.ipa.pilot.internal.
+
+@@pilot-dnsarch srv_kerberos end rc=0
+@@pilot-dnsarch internal begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 23613
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 2, ADDITIONAL: 2
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: f6cc8912c32f3cb2010000006acfba00e62d36f0ead4c84b (good)
+;; ANSWER SECTION:
+ipa1.ipa.pilot.internal. 1200	IN	A	192.168.122.4
+
+@@pilot-dnsarch internal end rc=0

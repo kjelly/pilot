@@ -15,19 +15,21 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-15，candidate `46fbc58`（tree `e3d041a24c503efad01505d3002ce79f52779c35`，PR #66 的 follow-up 第二輪），
-在新建的 3 台 topology 上重跑，**PASS**；run ID、UTC 時段、target image digest、inventory 與 reader role 指紋都在執行當下記錄。摘要：
-[`docs/evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)。
-前幾輪：[`2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)（同一 candidate 第一次實跑，含本機檢查與套件版本）、
-[`2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)（principal、查詢失敗、named 停止等情境）、
-[`2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)（14 個情境）。
+最新驗證：2026-10-16，candidate `b82a0c9`（tree `b733b150723485349bf915a9f15084ca9cc37798`，PR #92 的 3 個 FreeIPA kinit 都改由 stdin 傳密碼、與 `main` `afeacbd` 合併後），
+在新建的 6 台 topology 上，**PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)。
+#91 的情境（tier 拒絕 client、`freeipa_server_fqdn` 帶結尾的點、`K/M`／`k` principal、stub 與 FreeIPA BIND 當第一跳）也在這個 candidate 上重跑。
+更早幾輪（不同 candidate，僅供歷史參考）：[`2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)、
+[`2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)、
+[`2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)、
+[`2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建的 VM：`pr91-ipa`（AlmaLinux 9.8，FreeIPA 有 DNS）、`pr91-dns`（Ubuntu 24.04.4，unbound tier）、`pr91-client`（Ubuntu 24.04.4）；由這個 branch 的 playbook（與 `main` 相同）部署，測完已移除。base image digest 見摘要；這次沒有記錄套件版本 |
-| inventory host 集合 | `freeipa-server`: pr91-ipa；`dns`: pr91-dns；`freeipa-dns-client`: pr91-client |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定與測試用的 forward zone）；`pr91-ipa` 的 `/etc/pilot/dns-reader.keytab`；reader role `Pilot DNS Reader` 與 DNS 設定的狀態指紋見摘要 |
-| 結果 | 透過真實 `pilot mcp serve` 呼叫，跟前一版 `f3f3ae8` 對照：健康時 `complete`、8 項比對全部 `match`；第一個 nameserver 是 systemd-resolved stub（`127.0.0.53` 回 SERVFAIL）時不再誤報 `dns_query_failed: … first_hop_identity`；FreeIPA 自己的 BIND 是第一跳時判為「不是 tier」；tier 拒絕 client 時仍回報 `dns_query_failed: … first_hop_identity (… REFUSED)`；`freeipa_server_fqdn` 帶結尾的點時不再誤報 `declared_live_absent`；`K/M` 在啟動時被拒、`k@REALM` 不再被誤拒 |
+| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建的 VM：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，與先前 record 相同的 base image digest；`pr92-ipa` 為 ipa-server 4.13.4-1.el9_8，其他節點的套件版本這次沒有記錄；`pr92-r3` 列在 inventory，最後才 promote）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；由 candidate 的 playbook 部署，測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr92-ipa；`freeipa-server-replica`: pr92-r1、pr92-r2、pr92-r3（都不設 `freeipa_setup_dns`）；`dns`: pr92-dns；`freeipa-dns-client`: pr92-client |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定）；`pr92-ipa` 的 `/etc/pilot/dns-reader.keytab` |
+| 結果 | 透過真實 `pilot mcp serve` 呼叫：健康時 `complete`、14 項比對全部 `match`，沒 promote 的 `pr92-r3` 只有 `freeipa_replica_not_dns_server`（同一 tree 拿掉「跳過被排除的 replica」這一行的對照 binary：`partial`，`pr92-r3` 被報成 `unknown`）；stub 或 FreeIPA BIND 當第一跳時沒有第一跳誤報；tier 拒絕 client 時回報 `dns_query_failed: … first_hop_identity (… REFUSED)`；`freeipa_server_fqdn` 帶結尾的點時 `complete`；`K/M` 在啟動時被拒、`k` 被接受（`auth_required`）；promote 之後 17/17 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼
@@ -128,7 +130,7 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 欄位 | 內容 |
 |---|---|
 | `status` | `complete`、`partial`（有看不到的 live 事實或比對，或有沒跑的 probe）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀、kinit 成功但 FreeIPA 不接受 ticket，或 principal 有寫入權限；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
-| `findings` | 代碼加主體。每個失敗或看不到的事實都會出現在某個 finding：`live_fact_unknown`（看不到的 live 事實，含 FreeIPA 設定）、`dns_query_failed`（DNS 查詢有回應但失敗：SERVFAIL/REFUSED 等錯誤碼、NXDOMAIN、沒有該型別的紀錄；`getent` 查無此名稱）、`comparison_unknown`（做不了的比對）、`probe_skipped`（超過上限或名稱不合法而沒跑的 probe）、`declared_value_unevaluated`（Jinja 樣板）、`freeipa_named_not_running`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`dns_tier_host_unreachable`、`client_unreachable`、`freeipa_dns_not_authoritative_from_tier`、`declared_live_mismatch`/`declared_live_absent`、`freeipa_read_permission_missing`、`auth_required`、`freeipa_principal_not_read_only`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`dns_tier_not_assigned` |
+| `findings` | 代碼加主體。每個失敗或看不到的事實都會出現在某個 finding：`live_fact_unknown`（看不到的 live 事實，含 FreeIPA 設定）、`dns_query_failed`（DNS 查詢有回應但失敗：SERVFAIL/REFUSED 等錯誤碼、NXDOMAIN、沒有該型別的紀錄；`getent` 查無此名稱）、`comparison_unknown`（做不了的比對）、`probe_skipped`（超過上限或名稱不合法而沒跑的 probe）、`declared_value_unevaluated`（Jinja 樣板）、`freeipa_named_not_running`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`dns_tier_host_unreachable`、`client_unreachable`、`freeipa_dns_not_authoritative_from_tier`、`declared_live_mismatch`/`declared_live_absent`、`freeipa_read_permission_missing`、`auth_required`、`freeipa_principal_not_read_only`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`dns_tier_not_assigned`、`freeipa_replica_not_dns_server`（FreeIPA 沒有列為 DNS server、playbook 會排除的 replica；它的 probe 失敗是預期的） |
 | `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；每台 FreeIPA DNS 的 live SOA（`authoritative`，或實際的 status 與 `aa`）；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
 | `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`refused_privileged`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
@@ -146,15 +148,24 @@ dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台
 
 ## 5. 已知限制與注意事項
 
+- **還沒 promote 的 replica**：未設 `freeipa_setup_dns` 的 replica 要自己權威回答 FreeIPA 的
+  zone，或 FreeIPA 的 NS 紀錄列出它，`dns-apply.yml` 與 resolver task 才會用它
+  （`tasks/freeipa-dns-providers-live.yml`）。工具從各 provider 自己的 SOA／NS probe（`+norec`）
+  與 NS 紀錄做同樣的判斷：沒列出的 replica 會有 finding
+  `freeipa_replica_not_dns_server`，effective 的 tier stub 與 resolver 清單也跟 playbook 一樣
+  不含它，它自己 probe 失敗不算 `partial`。
+
 - **FreeIPA 不會說「沒權限」**：principal 缺少上面的 permission 時，`ipa
   dnsconfig-show` 回「Global DNS configuration is empty」、各 `-find` 回「Number of
   entries returned 0」（rc 1），跟真的沒有設定一模一樣（FreeIPA 4.13.4 實測）。工具
   用 `--rights` 確認全域設定讀得到，並以「FreeIPA 有列出 DNS server 時，自己的
   server 項目與網域 zone 一定存在」判斷 `-find` 的空結果是不是被隱藏；看不到就回
   `permission_denied`，不會回「沒有 forwarder」。
-- **各 server 的 forwarders**：每台 DNS server 安裝時的 `--forwarder` 會留成那台
-  server 自己的設定（`ipa dnsserver-*`），之後改 `freeipa_dns_forwarders` 只會更新
-  全域清單。兩者不一致時，`differences` 會列出那台 server 的項目。
+- **各 server 的 forwarders**：每台 DNS server 有自己的 forwarder 設定（`ipa dnsserver-*`），
+  它的 named 優先用這個。安裝時的 `--forwarder` 會寫進去，2026-10-15 起每次 apply
+  `freeipa-server-apply.yml`／`freeipa-server-replica-apply.yml` 也會用
+  `ipa dnsserver-mod` 讓它等於 inventory 的值。不一致時 `differences` 會列出那台
+  server，代表 inventory 改了之後還沒重新 apply。
 - replica 是否算 DNS 提供者、replica 的 forwarders 怎麼解讀，跟安裝 playbook 一致：
   `freeipa_setup_dns` 預設 `true`（issue #67），`freeipa_dns_forwarders` 用與 primary
   相同的 `tasks/freeipa-dns-forwarders.yml` 正規化（issue #68）。`freeipa_dns_forwarders`
@@ -183,3 +194,8 @@ dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台
 | 2026-10-14 | PR #66 follow-up：每個失敗或未知的事實都有 finding（`auth_required`、`dns_query_failed`、`freeipa_named_not_running`、`live_fact_unknown`、`comparison_unknown`、`probe_skipped`），拒絕 FreeIPA 服務 principal 與有寫入權的 principal；§0.5 改指向 candidate `8951d2e` | pilot |
 | 2026-10-14 | PR #91 review：第一跳只有在 tier 位址回錯誤 rcode 時才算查詢失敗；FQDN 在讀入時統一轉小寫、去掉結尾的點；寫入權限檢查只看全域 DNS 設定（`cn=dns`），說明照實寫；live fixture 換成同一次 pr91 擷取；§0.5 改指向 candidate `46fbc58` | pilot |
 | 2026-10-15 | PR #91 review：§0.5 改指向同一 candidate `46fbc58` 在新建 topology 上的重跑，這次在執行當下記錄 run ID、UTC 時段、target image digest、inventory 與 reader role 指紋；結果與前一輪相同。前一輪的套件版本沒有在這次重新確認，表格不再列出 | pilot |
+| 2026-10-15 | PR #92（#73 的 follow-up）：`freeipa_setup_dns` 未設、FreeIPA 的 NS 紀錄沒有列出、自己也不權威回答 zone 的 replica，比照 `dns-apply.yml` 與 resolver task 排除，只回報 `freeipa_replica_not_dns_server`；各 server 的 forwarders 由 FreeIPA playbook 管理，不一致時提示重新 apply。與 #91 合併時，provider 答案一致性比對改成跳過被排除的 replica；`paths` 不再把被排除的 replica 列成 authoritative，改列「left out of the DNS paths」 | pilot |
+| 2026-10-15 | §0.5 改指向合併後的 candidate `287cf79` 在新建 6 台 topology 上的實跑；#91 的其他情境註明最後一次實跑在 `46fbc58` | pilot |
+| 2026-10-15 | §0.5 改指向再次與 `main` 合併後的 candidate `b02b5cb`；#91 的情境也在它上面重跑，不再引用 `46fbc58` 當現行證據 | pilot |
+| 2026-10-16 | §0.5 改指向 candidate `cdcd39b`（PR #92 的 replica forwarder kinit 改由 stdin 傳密碼，並與 `main` `f98327b` 合併）；#91 的情境也在它上面重跑 | pilot |
+| 2026-10-16 | §0.5 改指向 candidate `b82a0c9`（PR #92 的 self-register 與 dnsconfig-mod kinit 也改由 stdin 傳密碼，並與 `main` `afeacbd` 合併）；#91 的情境也在它上面重跑。這輪 MCP server 的 `--dir` 是 candidate checkout，supported layer 有讀到 `contracts/`（`cdcd39b` 那輪用的是空目錄） | pilot |

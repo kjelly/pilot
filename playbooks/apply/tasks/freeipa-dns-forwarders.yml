@@ -3,23 +3,117 @@
 # (one --forwarder per item, or --no-forwarders when empty) and that
 # freeipa-server-apply.yml sets as the global list (ipa dnsconfig-mod).
 # Included by freeipa-server-apply.yml and freeipa-server-replica-apply.yml
-# so one freeipa_dns_forwarders value means the same forwarders on both
-# (issue #68): before, the replica mapped over the raw value, and the string
-# form group_vars/freeipa.example.yml shows (`freeipa_dns_forwarders:
-# 8.8.8.8`) became one --forwarder per character.
+# so the primary and a replica read the same inputs the same way (issue
+# #68): before, the replica mapped over the raw value, and the string form
+# group_vars/freeipa.example.yml shows (`freeipa_dns_forwarders: 8.8.8.8`)
+# became one --forwarder per character; and the primary turned an empty
+# value into 8.8.8.8 while the replica turned it into --no-forwarders.
 #
-# Accepted forms: a YAML list; a string starting with "[" (parsed as YAML,
-# e.g. "[8.8.4.4, 1.0.0.1]"); any other string, split on whitespace
-# ("8.8.8.8" or "8.8.8.8 1.1.1.1"); an empty or null value (no forwarders).
+# Which value: ipa_dns_forwarders if it is defined (any value, empty
+# included), else freeipa_dns_forwarders if it is defined, else
+# freeipa_dns_forwarders_default (the caller's: ['8.8.8.8'] on the primary,
+# whose list also becomes the realm's global forwarders; [] on a replica,
+# whose named then uses those global forwarders).
 #
-# Input:  freeipa_dns_forwarders_input
+# Accepted forms: a YAML list; a string starting with "[" and ending with
+# "]" (the items between the brackets, separated by commas, quotes
+# stripped: "[8.8.4.4, 1.0.0.1]"); any other string, split on whitespace
+# ("8.8.8.8" or "8.8.8.8 1.1.1.1"); null, "", [] or a whitespace-only
+# string (no forwarders). Every forwarder is an IPv4 or IPv6 address,
+# optionally followed by " port N" (FreeIPA's own forwarder syntax, as
+# ipa dnsconfig-mod --forwarder accepts it); in a whitespace-separated
+# string "1.1.1.1 port 53" is one forwarder. Anything else (a comma- or
+# semicolon-separated string, an invalid or unspecified or multicast
+# address, an address with a zone, a mapping, a number) fails here, before
+# any install.
+#
+# The parsing and the address check run in Python on the controller
+# (ansible_playbook_python, standard library ipaddress), because a regular
+# expression is either too loose (":::", "1::2::3") or too strict
+# ("::ffff:1.2.3.4") for IPv6, and the bracketed string is split here
+# rather than parsed as YAML, whose 1.1 rules read "1:2:3:4:5:6:7:8" as a
+# base-60 integer. internal/diagnose's normalizeForwarders implements the
+# same rules (TestNormalizeForwardersMatchesPlaybookGate runs this file on
+# the same inputs and compares).
+#
+# Input:  freeipa_dns_forwarders_default (list)
 # Output: ipa_dns_forwarders_normalized (list)
-- name: "FreeIPA DNS — normalize forwarders to a list"
+- name: "FreeIPA DNS — forwarder input (ipa_dns_forwarders, else freeipa_dns_forwarders, else the default)"
   ansible.builtin.set_fact:
-    ipa_dns_forwarders_normalized: >-
-      {{ [] if freeipa_dns_forwarders_input is none
-         else ((freeipa_dns_forwarders_input | from_yaml)
-               if (freeipa_dns_forwarders_input is string and (freeipa_dns_forwarders_input | trim).startswith('['))
-               else (freeipa_dns_forwarders_input.split()
-                     if freeipa_dns_forwarders_input is string
-                     else freeipa_dns_forwarders_input)) }}
+    freeipa_dns_forwarders_input: >-
+      {{ ipa_dns_forwarders if ipa_dns_forwarders is defined
+         else (freeipa_dns_forwarders if freeipa_dns_forwarders is defined
+               else freeipa_dns_forwarders_default) }}
+
+- name: "FreeIPA DNS — parse and check the forwarders (controller)"
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - -c
+      - |
+        import ipaddress, json, re, sys
+        raw = json.loads(sys.argv[1])
+        def items(v):
+            if v is None:
+                return [], None
+            if isinstance(v, str):
+                t = v.strip()
+                if t.startswith("["):
+                    if not t.endswith("]"):
+                        return None, "a string that starts with [ must end with ]"
+                    parts = [p.strip() for p in t[1:-1].split(",")]
+                    parts = [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "'\"" else p for p in parts]
+                    return [p for p in parts if p], None
+                toks, out, i = t.split(), [], 0
+                while i < len(toks):
+                    if toks[i] == "port" and out and i + 1 < len(toks):
+                        out[-1] = out[-1] + " port " + toks[i + 1]
+                        i += 2
+                        continue
+                    out.append(toks[i])
+                    i += 1
+                return out, None
+            if isinstance(v, list):
+                return v, None
+            return None, "neither a list nor a string"
+        def good(item):
+            if not isinstance(item, str):
+                return False
+            m = re.fullmatch(r"(\S+)(?: port ([0-9]{1,5}))?", item)
+            if not m or "%" in m.group(1) or (m.group(2) is not None and not 1 <= int(m.group(2)) <= 65535):
+                return False
+            try:
+                ip = ipaddress.ip_address(m.group(1))
+            except ValueError:
+                return False
+            # An IPv4-mapped address is judged as the IPv4 address it maps
+            # (Python before 3.13 does not), as net/netip's Unmap does.
+            ip = getattr(ip, "ipv4_mapped", None) or ip
+            return not (ip.is_unspecified or ip.is_multicast)
+        out, err = items(raw)
+        bad = [] if out is None else [i if isinstance(i, str) else json.dumps(i) for i in out if not good(i)]
+        print(json.dumps({"forwarders": out if out is not None and not bad else [], "bad": bad, "error": err}))
+      - "{{ freeipa_dns_forwarders_input | to_json }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: freeipa_dns_forwarders_parsed
+
+- name: "FreeIPA DNS — Gate: every forwarder is an IPv4 or IPv6 address, optionally with ' port N'"
+  vars:
+    _parsed: "{{ freeipa_dns_forwarders_parsed.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - _parsed.error is none
+      - _parsed.bad | length == 0
+    fail_msg: >-
+      DNS forwarders must be a list of IP addresses, a string of addresses separated by spaces,
+      or empty for none; each may end in " port N"
+      ({{ _parsed.error if _parsed.error is not none else 'not addresses: ' ~ (_parsed.bad | to_json) }};
+      input {{ freeipa_dns_forwarders_input | to_json }}, from ipa_dns_forwarders or
+      freeipa_dns_forwarders).
+
+- name: "FreeIPA DNS — normalized forwarders"
+  ansible.builtin.set_fact:
+    ipa_dns_forwarders_normalized: "{{ (freeipa_dns_forwarders_parsed.stdout | from_json).forwarders }}"
