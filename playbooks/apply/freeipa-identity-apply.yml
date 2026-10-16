@@ -784,6 +784,40 @@
       tags: [always, identity, groups, freeipa_host_absent_inspect]
 
     # ── Groups ─────────────────────────────────────────────────────────
+    # One listing replaces a `group-add` per group on reruns, the same way
+    # and for the same reasons as the user listings below. Groups missing
+    # from it still get `group-add`; private user groups are not listed and
+    # get it too, as before.
+    - name: "List existing IPA groups"
+      ansible.builtin.command:
+        argv: [ipa, group-find, --pkey-only, --sizelimit=0, --timelimit=0]
+      register: ipa_group_find_all
+      changed_when: false
+      failed_when: >-
+        ipa_group_find_all.rc != 0
+        or 'Search result has been truncated' in (ipa_group_find_all.stderr | default(''))
+      check_mode: false
+      tags: [identity, groups, C11, C12]
+
+    - name: "Index the existing IPA groups"
+      ansible.builtin.set_fact:
+        ipa_existing_groups: >-
+          {{ ipa_group_find_all.stdout_lines | select('match', '^  Group name: ')
+             | map('regex_replace', '^  Group name: ', '') | map('trim') | map('lower') | list }}
+      tags: [identity, groups, C11, C12]
+
+    - name: "Gate: the group listing was parsed completely"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ipa_group_find_all.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+            == ['Number of entries returned ' ~ (ipa_existing_groups | length)]
+        fail_msg: >-
+          `ipa group-find` printed a listing this playbook cannot parse: it parsed
+          {{ ipa_existing_groups | length }} groups, but the listing ends with
+          {{ ipa_group_find_all.stdout_lines[-2:] }}.
+      tags: [identity, groups, C11, C12]
+
     - name: "Ensure IPA groups exist"
       ansible.builtin.command:
         argv: >-
@@ -801,6 +835,7 @@
       failed_when:
         - ipa_group_add.rc != 0
         - "'already exists' not in (ipa_group_add.stderr | default(''))"
+      when: (item.name | lower) not in ipa_existing_groups
       tags: [identity, groups, C11, C12]
 
     # `group-add` above no-ops on "already exists" — an already-created
@@ -844,6 +879,68 @@
       tags: [identity, groups]
 
     # ── Users ──────────────────────────────────────────────────────────
+    # Two listings replace a `user-add` and a `user-enable`/`-disable` per
+    # user on reruns: without them every rerun spends one call per user on
+    # "already exists" and one on "already enabled" (238 of 1,189 calls in
+    # the 2026-10-15 120-user baseline). Both are `--pkey-only`: the default
+    # output also prints names users can edit themselves, and a name holding
+    # line breaks could pass for another user's "Account disabled:" line.
+    # Logins cannot hold line breaks. Users missing from the listing (new,
+    # or created between the read and the add) still get both calls.
+    # Preserved users are not listed, which is today's behaviour too.
+    - name: "List existing IPA users"
+      ansible.builtin.command:
+        argv: [ipa, user-find, --pkey-only, --sizelimit=0, --timelimit=0]
+      register: ipa_user_find_all
+      changed_when: false
+      failed_when: >-
+        ipa_user_find_all.rc != 0
+        or 'Search result has been truncated' in (ipa_user_find_all.stderr | default(''))
+      check_mode: false
+      tags: [identity, users, C9, C10]
+
+    - name: "List disabled IPA users"
+      ansible.builtin.command:
+        argv: [ipa, user-find, --disabled=True, --pkey-only, --sizelimit=0, --timelimit=0]
+      register: ipa_user_find_disabled
+      changed_when: false
+      failed_when: >-
+        (ipa_user_find_disabled.rc != 0
+         and 'Number of entries returned 0' not in (ipa_user_find_disabled.stdout | default('')))
+        or 'Search result has been truncated' in (ipa_user_find_disabled.stderr | default(''))
+      check_mode: false
+      tags: [identity, users, C9, C10]
+
+    - name: "Index the existing and the disabled IPA users"
+      ansible.builtin.set_fact:
+        ipa_existing_users: >-
+          {{ ipa_user_find_all.stdout_lines | select('match', '^  User login: ')
+             | map('regex_replace', '^  User login: ', '') | map('trim') | map('lower') | list }}
+        ipa_disabled_users: >-
+          {{ ipa_user_find_disabled.stdout_lines | select('match', '^  User login: ')
+             | map('regex_replace', '^  User login: ', '') | map('trim') | map('lower') | list }}
+      tags: [identity, users, C9, C10]
+
+    # A listing the parser does not understand (another output format or
+    # language) would read as "no users" or "no disabled users"; the
+    # second skips enabling users that are disabled. Each listing must end
+    # with FreeIPA's own count, and it must equal the logins parsed.
+    - name: "Gate: the user listings were parsed completely"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ipa_user_find_all.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+            == ['Number of entries returned ' ~ (ipa_existing_users | length)]
+          - >-
+            (ipa_user_find_disabled.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+            == ['Number of entries returned ' ~ (ipa_disabled_users | length)]
+        fail_msg: >-
+          `ipa user-find` printed a listing this playbook cannot parse: it parsed
+          {{ ipa_existing_users | length }} users and {{ ipa_disabled_users | length }}
+          disabled users, but the listings end with
+          {{ ipa_user_find_all.stdout_lines[-2:] }} and {{ ipa_user_find_disabled.stdout_lines[-2:] }}.
+      tags: [identity, users, C9, C10]
+
     - name: "Ensure IPA users exist"
       ansible.builtin.command:
         argv: >-
@@ -870,6 +967,7 @@
       failed_when:
         - ipa_user_add.rc != 0
         - "'already exists' not in (ipa_user_add.stderr | default(''))"
+      when: (item.name | lower) not in ipa_existing_users
       tags: [identity, users, C9, C10]
 
     # `user-add` above no-ops on "already exists" — an already-created
@@ -1153,6 +1251,37 @@
         - (item.item.membership | default({})).authoritative | default(true) | bool
       tags: [identity, users, groups]
 
+    # The direct members the lookup above read, so the adds below skip
+    # users and groups that are members already (on a rerun, nearly all of
+    # them). The removals in between only take away members the roster
+    # does not list, so they never make a skip wrong. A lookup skipped in
+    # check mode leaves no entry, and every add is attempted.
+    - name: "Start the canonical group member index"
+      ansible.builtin.set_fact:
+        canonical_group_live_members: {}
+      when: freeipa_roster.schema_version is defined
+      tags: [identity, users, groups]
+
+    - name: "Index canonical group direct members"
+      ansible.builtin.set_fact:
+        canonical_group_live_members: >-
+          {{ canonical_group_live_members | combine({(item.item.name | lower): {
+               'users': live_users | map('lower') | list,
+               'groups': live_groups | map('lower') | list}}) }}
+      vars:
+        stdout: "{{ item.stdout | default('') }}"
+        users_line: "{{ ((stdout | regex_findall('^  Member users: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        groups_line: "{{ ((stdout | regex_findall('^  Member groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+        live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
+        live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+      loop: "{{ canonical_group_show.results }}"
+      loop_control:
+        label: "{{ item.item.name | default('n/a') }}"
+      when:
+        - freeipa_roster.schema_version is defined
+        - not (item.skipped | default(false))
+      tags: [identity, users, groups]
+
     - name: "Remove stale canonical direct users"
       ansible.builtin.command:
         argv: [ipa, group-remove-member, "{{ item.0.name }}", "--users={{ item.1 }}"]
@@ -1188,7 +1317,11 @@
       failed_when:
         - canonical_group_user_add.rc != 0
         - "'already a member' not in (canonical_group_user_add.stdout | default('') + canonical_group_user_add.stderr | default(''))"
-      when: freeipa_roster.schema_version is defined
+      when:
+        - freeipa_roster.schema_version is defined
+        - >-
+          (item.1 | lower) not in
+          canonical_group_live_members.get(item.0.name | lower, {}).get('users', [])
       tags: [identity, users, groups]
 
     - name: "Ensure canonical direct nested-group membership"
@@ -1202,7 +1335,11 @@
       failed_when:
         - canonical_nested_group_add.rc != 0
         - "'already a member' not in (canonical_nested_group_add.stdout | default('') + canonical_nested_group_add.stderr | default(''))"
-      when: freeipa_roster.schema_version is defined
+      when:
+        - freeipa_roster.schema_version is defined
+        - >-
+          (item.1 | lower) not in
+          canonical_group_live_members.get(item.0.name | lower, {}).get('groups', [])
       tags: [identity, groups]
 
     - name: "Reconcile canonical account enabled state"
@@ -1219,7 +1356,13 @@
         - canonical_user_enabled.rc != 0
         - "'already enabled' not in (canonical_user_enabled.stderr | default(''))"
         - "'already disabled' not in (canonical_user_enabled.stderr | default(''))"
-      when: freeipa_roster.schema_version is defined
+      # Skipped when the listings above show the account already in the
+      # declared state; users missing from them are always reconciled.
+      when:
+        - freeipa_roster.schema_version is defined
+        - >-
+          (item.name | lower) not in ipa_existing_users
+          or ((item.name | lower) in ipa_disabled_users) == (item.enabled | default(true) | bool)
       tags: [identity, users, C10]
 
     - name: "Delete canonical users explicitly marked absent"
