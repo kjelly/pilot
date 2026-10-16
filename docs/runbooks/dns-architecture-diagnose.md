@@ -15,9 +15,9 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-15，candidate `b02b5cb`（tree `38a98e9403fa0505971413bc890620b7c1abf08c`，PR #92 與 `main` `cc38f58` 合併後），
+最新驗證：2026-10-16，candidate `cdcd39b`（tree `422ca9ec8272a5e0a709991d7a5407eba117d3ff`，PR #92 修正 replica forwarder 的 kinit、與 `main` `f98327b` 合併後），
 在新建的 6 台 topology 上，**PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-15-b02b5cb.md`](../evidence/freeipa-replica-dns-provider/2026-10-15-b02b5cb.md)。
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md)。
 #91 的情境（tier 拒絕 client、`freeipa_server_fqdn` 帶結尾的點、`K/M`／`k` principal、stub 與 FreeIPA BIND 當第一跳）也在這個 candidate 上重跑。
 更早幾輪（不同 candidate，僅供歷史參考）：[`2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)、
 [`2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)、
@@ -197,3 +197,4 @@ dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台
 | 2026-10-15 | PR #92（#73 的 follow-up）：`freeipa_setup_dns` 未設、FreeIPA 的 NS 紀錄沒有列出、自己也不權威回答 zone 的 replica，比照 `dns-apply.yml` 與 resolver task 排除，只回報 `freeipa_replica_not_dns_server`；各 server 的 forwarders 由 FreeIPA playbook 管理，不一致時提示重新 apply。與 #91 合併時，provider 答案一致性比對改成跳過被排除的 replica；`paths` 不再把被排除的 replica 列成 authoritative，改列「left out of the DNS paths」 | pilot |
 | 2026-10-15 | §0.5 改指向合併後的 candidate `287cf79` 在新建 6 台 topology 上的實跑；#91 的其他情境註明最後一次實跑在 `46fbc58` | pilot |
 | 2026-10-15 | §0.5 改指向再次與 `main` 合併後的 candidate `b02b5cb`；#91 的情境也在它上面重跑，不再引用 `46fbc58` 當現行證據 | pilot |
+| 2026-10-16 | §0.5 改指向 candidate `cdcd39b`（PR #92 的 replica forwarder kinit 改由 stdin 傳密碼，並與 `main` `f98327b` 合併）；#91 的情境也在它上面重跑 | pilot |
