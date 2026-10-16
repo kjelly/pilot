@@ -1,7 +1,8 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
 > 版本：v1.15（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
-> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。見 §8 v1.15）
+> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。candidate `b27e3ab`（接上 #106 後）在拋棄式
+> vm-target 實跑 PASS，見 `docs/evidence/host-decommission/2026-10-16-b27e3ab.md` 與 §8 v1.15）
 > 上一版：v1.14（2026-10-15 `ipa` 失敗不再被當成成功或「不存在」（issue #102）：
 > `ipa passwd` 失敗會讓 run 失敗並列出使用者；成員查詢失敗不再被讀成空集合；
 > 存在性檢查只放行真實擷取的 not found；HBAC lockdown rollback 如實回報結果。
@@ -575,7 +576,7 @@ range 高位、與遞增分配序列碰撞機率低很多，見檔案內註解�
 | 2026-10-15 | v1.12 | Netgroup authoritative pruning SOP 步驟 1 原本是 `sudo ipa netgroup-add-member`：#72 之後主機上沒有殘留的 admin ticket，這行會失敗（`did not receive Kerberos credentials`，2026-10-15 對拋棄式 FreeIPA 4.13.4 vm-target 實測）。改成以 root 經 ldapi 的 SASL EXTERNAL 先查出 netgroup 的 `ipaUniqueID` DN 再 `ldapmodify` 加入 `uid=admin`；同一台 VM 上依序跑完步驟 1–3：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user membership"），步驟 3 只剩 `fixture-v2-user-a` 與 `team-fixture-v2`。另外 C1–C24 都經 ldapi 讀取，現在一律以 root 執行（`spec.NeedsBecome`，PR #89） | pilot |
 | 2026-10-15 | v1.13 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；candidate `edc840f` 在拋棄式 vm-target 實跑 PASS（R0–R8，`docs/evidence/freeipa-identity/2026-10-15-edc840f.md`）；2026-10-16 合併 main（私有 Kerberos cache 的 block）後，candidate `d24a31c` 重跑 R0–R8，結果相同（`docs/evidence/freeipa-identity/2026-10-16-d24a31c.md`）。main 的 netgroup SOP 變更先用了 v1.12，本項改為 v1.13 | pilot |
 | 2026-10-15 | v1.14 | issue #102：`freeipa-identity-apply.yml` 不再把 `ipa` 失敗當成成功或「不存在」。`ipa passwd` 失敗時新的 gate 讓 run 失敗並列出使用者與 `ipa: ERROR:` 行（原本顯示 ok，帳號沒有密碼）；user/group/hostgroup/netgroup/HBAC/sudo 成員查詢失敗即失敗（原本讀成沒有成員，撤權被跳過）；刪除 group 前、canonical host、password policy、退役主機的 host／service 查詢只放行真實擷取的 not found／`Number of entries returned 0`（原本查詢出錯時 group 可能在沒有 history marker 的情況下被刪，退役主機的 unknown-service gate 被跳過而照樣 `host-del`）；HBAC lockdown rescue 的 rollback 依實際結果回報。新增 `freeipa_identity_ipa_failures_regression_test.go`（假 `ipa` 回放 FreeIPA 4.13.4 真實輸出）與 `failed_when: false` 白名單 lint；decommission 的 HBAC／sudo 引用查詢與 DNS 查詢另開 #104、#105。candidate `ae8f276`（接上合併 main 後的 #103）實跑 PASS（`docs/evidence/freeipa-identity/2026-10-16-ae8f276.md`） | pilot |
-| 2026-10-15 | v1.15 | issue #104：host decommission 的 HBAC／sudo 直接引用查詢原本用 `hbacrule-find`／`sudorule-find --host=<fqdn>`，但這兩個指令沒有 host 篩選，`--host=` 被當成 `--hostcat`，永遠回 0 筆，檢查永遠 pass。改成 `--all --sizelimit=0` 列出全部規則，由 Go 端（`rulesNamingHost`）挑出 `Hosts:` 或 `External host:` 含該主機的規則；查詢失敗或結果被截斷時 run 失敗。Go 測試改用真實擷取的 ansible 輸出（`internal/decommission/providers/testdata/rule-references/`） | pilot |
+| 2026-10-15 | v1.15 | issue #104：host decommission 的 HBAC／sudo 直接引用查詢原本用 `hbacrule-find`／`sudorule-find --host=<fqdn>`，但這兩個指令沒有 host 篩選，`--host=` 被當成 `--hostcat`，永遠回 0 筆，檢查永遠 pass。改成 `--all --sizelimit=0` 列出全部規則，由 Go 端（`rulesNamingHost`）挑出 `Hosts:` 或 `External host:` 含該主機的規則；查詢失敗或結果被截斷時 run 失敗。Go 測試改用真實擷取的 ansible 輸出（`internal/decommission/providers/testdata/rule-references/`）。接上 #106 後，candidate `b27e3ab` 實跑 PASS（`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`） | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 
