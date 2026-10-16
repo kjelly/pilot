@@ -598,7 +598,10 @@
         # lost every drop-in sorting after the invalid one, and the next run
         # reported changed=0 (2026-10-15, pr79-log). Restart only a
         # configuration rsyslogd accepts; otherwise the running rsyslog keeps
-        # what it has.
+        # what it has. The message quotes the last "error during parsing" line,
+        # which names the file and the error: `rsyslogd -N1` ends with the
+        # generic "could not interpret master config file" (rsyslog 8.2312.0,
+        # captured 2026-10-16).
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
@@ -627,7 +630,9 @@
                  if (log_server_rescue_syntax.rc | default(1)) == 0 else
                  'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
                  ~ (log_server_rescue_syntax.rc | default('?')) ~ ': '
-                 ~ ((log_server_rescue_syntax.stderr_lines | default([]) | last | default(''))
+                 ~ ((log_server_rescue_syntax.stderr_lines | default([])
+                     | select('search', 'error during parsing') | list | last
+                     | default(log_server_rescue_syntax.stderr_lines | default([]) | last | default(''), true))
                     or (log_server_rescue_syntax.msg | default('no output')))
                  ~ '), so the running rsyslog keeps what it has.' }}
               Left in place: the log root directory and an SELinux port label

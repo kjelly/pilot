@@ -387,10 +387,11 @@ func TestRegression_LogServerRescueRestoresWhatItChanged(t *testing.T) {
 // TestRegression_LogServerRescueRestartsOnlyAValidConfiguration evaluates,
 // through Ansible, the rescue's restart condition and its failure message for
 // each result of the `rsyslogd -N1` check: a configuration rsyslogd accepts,
-// one it rejects (rsyslog's message for an invalid drop-in, captured on
-// 640362e's pr79-log), rsyslogd missing (the result Ansible registers for a
+// one it rejects (the full output for an invalid drop-in, captured with
+// rsyslog 8.2312.0), rsyslogd missing (the result Ansible registers for a
 // command that does not exist, captured with ansible-core 2.19.2), and the
-// check skipped. On 640362e the rescue restarted rsyslog in every case.
+// check skipped. On 640362e the rescue restarted rsyslog in every case; on
+// d545868 the message quoted only rsyslogd's generic last line.
 func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
@@ -413,16 +414,35 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 		t.Fatalf("the restart needs a when and the failure a msg; got %q, %q", when, msg)
 	}
 
+	// rsyslogd -N1 results as `register` records them on Ubuntu 24.04,
+	// rsyslog 8.2312.0, for /etc/rsyslog.conf as shipped and with
+	// /etc/rsyslog.d/99-pr79-broken.conf holding `this is not rsyslog syntax {`
+	// (captured through Ansible on pr79-dev, 2026-10-16).
+	accepted := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: End of config validation run. Bye.",
+	}
+	rejected := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: could not interpret master config file '/etc/rsyslog.conf'. [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	}
 	cases := []struct {
 		name        string
 		result      map[string]any
 		wantRestart bool
 		wantMsg     string
 	}{
-		{"accepted", map[string]any{"rc": 0, "stderr_lines": []any{}}, true, "rsyslog was restarted with the restored configuration."},
-		{"rejected", map[string]any{"rc": 1, "stderr_lines": []any{
-			"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		}}, false, "did not pass (rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf"},
+		{"accepted", map[string]any{"rc": 0, "stderr_lines": accepted}, true, "rsyslog was restarted with the restored configuration."},
+		// The message names the broken file and the error, not the
+		// generic last line "could not interpret master config file".
+		{"rejected", map[string]any{"rc": 1, "stderr_lines": rejected}, false,
+			"did not pass (rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{'"},
 		{"rsyslogd missing", map[string]any{"rc": 2, "msg": "Error executing command.", "stderr_lines": []any{}}, false, "did not pass (rc=2: Error executing command.)"},
 		{"check skipped", map[string]any{"skipped": true}, false, "did not pass (rc=?: no output)"},
 	}
