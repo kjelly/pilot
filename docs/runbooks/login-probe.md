@@ -163,11 +163,18 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 - node scrape target 要由 inventory 的 `host-monitoring` group 自動展開（帶 `pilot_host`）。
   用 `node_exporter_targets` 明確列 target 時沒有 `pilot_host`，`HostMetricsMissing` 不會觸發，
   主機掛掉時也會多送 `PilotLoginProbeTransportFailed`（`alertmanager.md` §1.7 的前提）。
-- `login_probe_stale_seconds` 至少要 3 × `prometheus_scrape_interval`；`host_metrics_missing_success_window`
-  （預設 140s）+ 15s 不得超過 `host_metrics_missing_for`，且每台 login-probe 主機的 `login_probe_interval` +
-  `login_probe_total_timeout` + 15s + 一次 scrape 不得超過時間窗；`prometheus-apply.yml` 都會擋，後者讀
-  `login-probe` group 主機的 hostvars（`alertmanager.md` §1.7）。改 probe 間隔時要一起調整時間窗與
-  `host_metrics_missing_for`。
+- `login_probe_stale_seconds` 至少要 3 × `prometheus_scrape_interval`，`host_metrics_missing_for` 最多 9m，
+  `host_metrics_missing_success_window`（預設 150s）+ 15s 不得超過 `host_metrics_missing_for`：這三項由
+  `prometheus-apply.yml` 檢查。每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout`
+  + 15s + 2 × `prometheus_scrape_interval` 不得超過時間窗：`prometheus-apply.yml`（對每台 login-probe 主機）與
+  `login-probe-apply.yml`（對每台 Prometheus 主機）都會擋，所以單獨部署 login-probe 改長 probe 間隔也會被
+  擋下（`alertmanager.md` §1.7）。改 probe 間隔時要一起調整時間窗與 `host_metrics_missing_for`。
+  這道 gate 沒有算進 `login_probe_concurrency` 的排隊：同時卡住的嘗試多到佔滿 concurrency 時（例如大量
+  主機同時掛掉），健康主機的資料缺口告警可能中斷，改由 `HostDown` 送出（fail-safe）。
+- login-probe 主機**自己**的 node_exporter 停掉時（SSH 正常），這台 probe 的 series 全部消失：它回報的
+  登入告警都不見了，`PilotLoginProbeStale` 也不會觸發，只有它的 `HostDown` 在 10m 送出（GitHub issue #121，
+  `alertmanager.md` §1.7）。看到 probe 主機的 `HostDown` 時，先確認它的 SSH 與 node_exporter，並當作
+  這台 probe 的登入探測已經失明。
 - 解析不到的 target 不會擋下部署：它留在設定裡，apply 印出 WARNING，probe 回報
   `transport`，觸發 `PilotLoginProbeTransportFailed`。全部 target 都解析不到時才會
   fail closed（通常是 `login_probe_domain` 寫錯，或探測主機本身的 DNS 壞了）。
@@ -200,3 +207,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-15 | v0.7 | PR #80 第五輪 review：§3 `HostMetricsMissing` 恢復延遲改為最多約 6m15s | pilot |
 | 2026-10-15 | v0.8 | PR #80 第六輪 review：§6 改寫 `host_metrics_missing_success_window` 的前提 | pilot |
 | 2026-10-16 | v0.9 | PR #80 第七輪 review：§6 寫明 `host_metrics_missing_success_window` 的兩道 gate（含讀 login-probe 主機設定的交叉檢查） | pilot |
+| 2026-10-16 | v0.10 | PR #80 第八輪 review：§6 的時間窗 gate 改為 interval + timeout + 15s + 2 × scrape，`login-probe-apply.yml` 也會擋；寫明 `host_metrics_missing_for` 最多 9m、concurrency 排隊不在 gate 內，以及 login-probe 主機自己的監控資料缺口（#121） | pilot |

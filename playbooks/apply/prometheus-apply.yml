@@ -817,7 +817,7 @@
         host_disk_queue_depth_threshold: "{{ host_disk_queue_depth_threshold | default('10', true) | string }}"
         host_disk_latency_for: "{{ host_disk_latency_for | default('10m', true) }}"
         host_metrics_missing_for: "{{ host_metrics_missing_for | default('3m', true) }}"
-        host_metrics_missing_success_window: "{{ host_metrics_missing_success_window | default('140s', true) }}"
+        host_metrics_missing_success_window: "{{ host_metrics_missing_success_window | default('150s', true) }}"
         login_probe_alert_for: "{{ login_probe_alert_for | default('3m', true) }}"
         login_probe_transport_alert_for: "{{ login_probe_transport_alert_for | default('5m', true) }}"
         login_probe_alert_keep_firing_for: "{{ login_probe_alert_keep_firing_for | default('5m', true) }}"
@@ -851,15 +851,19 @@
     # still answers SSH (Alertmanager inhibit, docs/verification/alertmanager.md
     # §1.7). That only works if it fires first: a longer `for:` would let
     # HostDown (`for: 10m` in files/pilot-alert-rules-seed.yml) page "Target
-    # down" for a host that is up, before the data-gap alert exists.
-    - name: "Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m"
+    # down" for a host that is up, before the data-gap alert exists. The seed
+    # and host-health groups are evaluated at different offsets inside the
+    # 1m evaluation interval, so HostMetricsMissing can become firing up to
+    # one interval after its `for:`: it must leave that much room (9m).
+    - name: "Gate: host_metrics_missing_for leaves one evaluation interval before the seed HostDown rule's 10m"
       ansible.builtin.assert:
         that:
-          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) < 600
+          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) <= 540
         fail_msg: >-
-          host_metrics_missing_for={{ host_metrics_missing_for }} must be shorter
-          than HostDown's 10m, or HostDown pages a host that still answers SSH
-          before HostMetricsMissing can mute it.
+          host_metrics_missing_for={{ host_metrics_missing_for }} must be at most 9m:
+          HostDown fires at 10m, and the two rule groups are evaluated up to one 1m
+          interval apart, so a longer for lets HostDown page a host that still answers
+          SSH before HostMetricsMissing can mute it.
       vars:
         _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
         _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
@@ -921,52 +925,28 @@
 
     # The other side of the window: during a monitoring data gap a healthy
     # probe must record a new success of each target inside every window.
-    # Two successes of one target can be login_probe_interval +
-    # login_probe_total_timeout apart, published up to one textfile write
-    # (15 s) later and seen up to one scrape later. A longer gap lets
-    # HostMetricsMissing drop out, and then HostDown pages a host that
-    # answers SSH. The probe settings are the login-probe hosts' own
-    # (defaults 60s / 30s, as in login-probe-apply.yml).
+    # The bound lives in tasks/host-metrics-missing-probe-round-gate.yml,
+    # which login-probe-apply.yml also runs (this Prometheus against every
+    # login-probe host here; the probe against every Prometheus host
+    # there). The probe settings are the login-probe hosts' own (defaults
+    # 60s / 30s, as in login-probe-apply.yml).
     - name: "Gate: every login-probe host records a success inside host_metrics_missing_success_window"
-      ansible.builtin.assert:
-        that:
-          - _probe_bad | length == 0
-          - (_probe_worst_seconds | float) + _textfile_write_seconds + (_scrape_count | int) * (_duration_seconds[_scrape_unit] | float) <= (_win_count | int) * (_duration_seconds[_win_unit] | float)
-        fail_msg: >-
-          login_probe_interval + login_probe_total_timeout on the login-probe hosts
-          (worst {{ _probe_worst_seconds }} s{{ ', unparsable on ' ~ (_probe_bad | join(', ')) if _probe_bad | length > 0 else '' }})
-          plus the {{ _textfile_write_seconds }} s textfile write and one scrape
-          ({{ prometheus_scrape_interval }}) must fit in
-          host_metrics_missing_success_window={{ host_metrics_missing_success_window }}, or
-          HostMetricsMissing drops out during a data gap and HostDown pages a host that
-          answers SSH. Lengthen the window (and host_metrics_missing_for) or shorten the
-          probe interval.
+      ansible.builtin.include_tasks:
+        file: tasks/host-metrics-missing-probe-round-gate.yml
+        apply: {tags: [always]}
       vars:
-        _textfile_write_seconds: 15
-        _win_count: "{{ host_metrics_missing_success_window | regex_search('^[0-9]+') }}"
-        _win_unit: "{{ host_metrics_missing_success_window | regex_search('[a-z]+$') }}"
-        _scrape_count: "{{ prometheus_scrape_interval | regex_search('^[0-9]+') }}"
-        _scrape_unit: "{{ prometheus_scrape_interval | regex_search('[a-z]+$') }}"
-        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
-        _probe_settings: >-
+        hmm_gate_windows:
+          - name: "{{ inventory_hostname }}"
+            window: "{{ host_metrics_missing_success_window }}"
+            scrape: "{{ prometheus_scrape_interval }}"
+        hmm_gate_probes: >-
           {%- set out = [] -%}
           {%- for h in groups.get('login-probe', []) -%}
-            {%- set _ = out.append({'host': h,
+            {%- set _ = out.append({'name': h,
                 'interval': hostvars[h].login_probe_interval | default('60s', true) | string,
                 'timeout': hostvars[h].login_probe_total_timeout | default('30s', true) | string}) -%}
           {%- endfor -%}
           {{ out }}
-        _probe_bad: >-
-          {{ _probe_settings | rejectattr('interval', 'match', '^[0-9]+(s|m|h)$') | map(attribute='host') | list
-             + _probe_settings | rejectattr('timeout', 'match', '^[0-9]+(s|m|h)$') | map(attribute='host') | list }}
-        _probe_worst_seconds: >-
-          {%- set ns = namespace(m=0) -%}
-          {%- for p in _probe_settings if p.interval is match('^[0-9]+(s|m|h)$') and p.timeout is match('^[0-9]+(s|m|h)$') -%}
-            {%- set v = (p.interval | regex_search('^[0-9]+') | int) * _duration_seconds[p.interval | regex_search('[a-z]+$')]
-                      + (p.timeout | regex_search('^[0-9]+') | int) * _duration_seconds[p.timeout | regex_search('[a-z]+$')] -%}
-            {%- if v > ns.m -%}{%- set ns.m = v -%}{%- endif -%}
-          {%- endfor -%}
-          {{ ns.m }}
       when:
         - prometheus_host_health_alert_rules_enabled | bool
         - groups.get('login-probe', []) | length > 0

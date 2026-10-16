@@ -120,13 +120,18 @@ groups:
       # success=1 but records no new success. The last success before a
       # death is published up to one textfile write (15 s) later, so the
       # condition can hold for window + 15 s after the death; the playbook
-      # keeps that within host_metrics_missing_for, so a dead host does not
-      # raise this alert. It also keeps the window long enough for the probe
-      # hosts' interval + timeout, so a healthy probe holds it during a gap. While this fires, Alertmanager inhibits the seed
-      # HostDown{job="node"} of the same host (it answers SSH, so it is not
-      # down); the playbook keeps host_metrics_missing_for below HostDown's
-      # 10m so HostDown never notifies first. keep_firing_for holds it (and
-      # with it the inhibit) through one failed probe round or a probe
+      # keeps that within host_metrics_missing_for (15 s to spare at the
+      # defaults, 150 s + 15 s <= 3m), so a dead host does not raise this
+      # alert. One observed change keeps changes() > 0 for window - scrape,
+      # so the playbook also keeps the window at least the probe hosts'
+      # interval + timeout + 15 s + 2 x scrape (135 s at the defaults),
+      # and a healthy probe holds it during a gap
+      # (tasks/host-metrics-missing-probe-round-gate.yml). While this
+      # fires, Alertmanager inhibits the seed HostDown{job="node"} of the
+      # same host (it answers SSH, so it is not down); the playbook keeps
+      # host_metrics_missing_for at most 9m, one evaluation interval below
+      # HostDown's 10m, so HostDown does not notify first. keep_firing_for
+      # holds it (and with it the inhibit) through one failed probe round or a probe
       # restart, whose first textfile publishes success=0 before the first
       # round: without it, a gap longer than 10m paged "Target down" on such
       # a blip. action_required routes it to Teams, which would otherwise get

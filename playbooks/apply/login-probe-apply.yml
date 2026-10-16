@@ -277,6 +277,35 @@
       when: (login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0) | list | length) > 0
       tags: [always]
 
+    # HostMetricsMissing (prometheus-apply.yml's host-health rules) trusts
+    # a target only while this probe records a success of it inside every
+    # host_metrics_missing_success_window. prometheus-apply.yml checks that
+    # against every login-probe host; this checks the same bound
+    # (tasks/host-metrics-missing-probe-round-gate.yml) when only this
+    # probe's settings change, against every Prometheus host of the
+    # inventory whose host-health rules are on. Their defaults (150s,
+    # 15s, enabled) are prometheus-apply.yml's; kept equal by
+    # TestRegression_HostHealthTimingConstantsAgree.
+    - name: "Gate: this probe records a success inside every Prometheus host's host_metrics_missing_success_window"
+      ansible.builtin.include_tasks:
+        file: tasks/host-metrics-missing-probe-round-gate.yml
+        apply: {tags: [always]}
+      vars:
+        hmm_gate_windows: >-
+          {%- set out = [] -%}
+          {%- for h in groups.get('prometheus', []) if hostvars[h].prometheus_host_health_alert_rules_enabled | default(true) | bool -%}
+            {%- set _ = out.append({'name': h,
+                'window': hostvars[h].host_metrics_missing_success_window | default('150s', true) | string,
+                'scrape': hostvars[h].prometheus_scrape_interval | default('15s') | string}) -%}
+          {%- endfor -%}
+          {{ out }}
+        hmm_gate_probes:
+          - name: "{{ inventory_hostname }}"
+            interval: "{{ login_probe_interval }}"
+            timeout: "{{ login_probe_total_timeout }}"
+      when: groups.get('prometheus', []) | length > 0
+      tags: [always]
+
     - name: "Gate: artifact path is supplied"
       ansible.builtin.assert:
         that:

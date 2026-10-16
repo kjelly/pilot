@@ -1,0 +1,105 @@
+---
+# playbooks/apply/tasks/host-metrics-missing-probe-round-gate.yml — the one
+# place that computes the probe-round half of HostMetricsMissing's timing
+# contract (docs/verification/alertmanager.md §1.7). Two callers:
+#
+#   - prometheus-apply.yml: this Prometheus against every login-probe host;
+#   - login-probe-apply.yml: this login probe against every Prometheus host;
+#
+# so a change on either side is refused by that side's own apply.
+#
+# Inputs (include vars):
+#   hmm_gate_windows: [{name, window, scrape}] — host_metrics_missing_success_window
+#                     and prometheus_scrape_interval of a Prometheus host
+#                     (single Prometheus durations, ^[0-9]+(ms|s|m|h|d)$)
+#   hmm_gate_probes:  [{name, interval, timeout}] — login_probe_interval and
+#                     login_probe_total_timeout of a login-probe host (Go
+#                     durations, as contracts/login-probe.yaml types them:
+#                     60s, 1m30s, 1.5m, 500ms ...; a value time.ParseDuration
+#                     rejects, or one that is not positive, is refused —
+#                     TestRegression_HostHealthProbeRoundGateParsesGoDurations)
+#
+# The bound. During a data gap a healthy probe must record a new success of
+# each target inside every window, or HostMetricsMissing drops out and
+# HostDown pages a host that answers SSH. Two successes of one target can be
+# interval + total_timeout apart; each is published up to one textfile write
+# (15 s, cmd/pilot-login-probe textfileWriteInterval) later and observed at
+# the next scrape, so two observed changes can be
+# interval + total_timeout + 15 s + one scrape apart. changes(ts[window])
+# counts a change only while the sample before it is still in the range, so
+# one observed change keeps the condition true for window - scrape, not for
+# the whole window. Holding it from one observed change to the next needs
+#
+#   interval + total_timeout + 15 s + 2 x scrape <= window.
+#
+# Not modelled: queueing behind other targets of the same probe. A round
+# runs at most login_probe_concurrency attempts at once; when that many
+# other attempts hang, a target's attempt starts late and its successes can
+# be further apart (alertmanager.md §1.7 states the effect and the signal).
+- name: "Probe-round gate: reset this include's result"
+  ansible.builtin.set_fact:
+    _hmm_round_pairs: []
+  tags: [always]
+
+- name: "Probe-round gate: evaluate every (Prometheus window, login probe) pair"
+  ansible.builtin.set_fact:
+    _hmm_round_pairs: >-
+      {%- set go_units = {'ns': 0.000000001, 'us': 0.000001, 'µs': 0.000001, 'μs': 0.000001, 'ms': 0.001, 's': 1, 'm': 60, 'h': 3600} -%}
+      {%- set prom_units = {'ms': 0.001, 's': 1, 'm': 60, 'h': 3600, 'd': 86400} -%}
+      {%- set go_full = '^[+]?(([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h))+$' -%}
+      {%- set go_part = '([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)' -%}
+      {%- set prom_full = '^[0-9]+(ms|s|m|h|d)$' -%}
+      {%- set out = [] -%}
+      {%- for w in hmm_gate_windows -%}
+        {%- set wv = w.window | string -%}
+        {%- set sv = w.scrape | string -%}
+        {%- set w_ok = wv is match(prom_full) and sv is match(prom_full) -%}
+        {%- set w_s = ((wv | regex_search('^[0-9]+') | int) * prom_units[wv | regex_search('[a-z]+$')]) if w_ok else 0 -%}
+        {%- set s_s = ((sv | regex_search('^[0-9]+') | int) * prom_units[sv | regex_search('[a-z]+$')]) if w_ok else 0 -%}
+        {%- for p in hmm_gate_probes -%}
+          {%- set iv = p.interval | string -%}
+          {%- set tv = p.timeout | string -%}
+          {%- set ns = namespace(i=0, t=0) -%}
+          {%- if iv is match(go_full) -%}
+            {%- for m in iv | regex_findall(go_part) -%}{%- set ns.i = ns.i + (m[0] | float) * go_units[m[1]] -%}{%- endfor -%}
+          {%- endif -%}
+          {%- if tv is match(go_full) -%}
+            {%- for m in tv | regex_findall(go_part) -%}{%- set ns.t = ns.t + (m[0] | float) * go_units[m[1]] -%}{%- endfor -%}
+          {%- endif -%}
+          {%- set parsed = w_ok and ns.i > 0 and ns.t > 0 -%}
+          {%- set need = ns.i + ns.t + _textfile_write_seconds + 2 * s_s -%}
+          {%- set _ = out.append({'prometheus': w.name, 'window': wv, 'scrape': sv, 'window_seconds': w_s,
+                                  'probe': p.name, 'interval': iv, 'timeout': tv,
+                                  'interval_seconds': ns.i, 'timeout_seconds': ns.t,
+                                  'parsed': parsed, 'need_seconds': need,
+                                  'ok': parsed and need <= w_s}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+  vars:
+    _textfile_write_seconds: 15
+  tags: [always]
+
+- name: "Gate: every login probe records a success inside every host_metrics_missing_success_window"
+  ansible.builtin.assert:
+    that:
+      - _hmm_round_pairs | rejectattr('ok') | list | length == 0
+    quiet: true
+    fail_msg: >-
+      {% for p in _hmm_round_pairs | rejectattr('ok') -%}
+      {%- if not p.parsed -%}
+      login probe {{ p.probe }} (login_probe_interval={{ p.interval }}, login_probe_total_timeout={{ p.timeout }})
+      against Prometheus {{ p.prometheus }} (host_metrics_missing_success_window={{ p.window }},
+      prometheus_scrape_interval={{ p.scrape }}): a value does not parse (probe settings are Go
+      durations greater than 0, such as 60s or 1m30s; the window and scrape interval are single
+      Prometheus durations, such as 150s).
+      {%- else -%}
+      login probe {{ p.probe }} needs a window of at least {{ p.need_seconds }} s
+      (login_probe_interval {{ p.interval }} + login_probe_total_timeout {{ p.timeout }} + the 15 s
+      textfile write + 2 x prometheus_scrape_interval {{ p.scrape }}), but Prometheus {{ p.prometheus }}
+      has host_metrics_missing_success_window={{ p.window }}: HostMetricsMissing would drop out
+      during a data gap and HostDown would page a host that answers SSH.
+      {%- endif %} {% endfor -%}
+      Lengthen host_metrics_missing_success_window (and host_metrics_missing_for, which must stay
+      at least the window + 15 s), shorten the probe interval or timeout, or scrape more often.
+  tags: [always]

@@ -1,6 +1,8 @@
 package spec
 
 import (
+	"encoding/json"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -413,15 +415,15 @@ func TestRegression_HostMetricsMissingFiresBeforeSeedHostDown(t *testing.T) {
 		}
 	}
 	if hostDownFor != "10m" {
-		t.Fatalf("seed HostDown for = %q; the prometheus-apply.yml gate (600 s), the rules' comments and §1.7 assume 10m", hostDownFor)
+		t.Fatalf("seed HostDown for = %q; the prometheus-apply.yml gate (9m, one evaluation interval below it), the rules' comments and §1.7 assume 10m", hostDownFor)
 	}
 	apply, err := os.ReadFile(hostHealthApply)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`"Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m"`,
-		`(_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) < 600`,
+		`"Gate: host_metrics_missing_for leaves one evaluation interval before the seed HostDown rule's 10m"`,
+		`(_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) <= 540`,
 	} {
 		if !strings.Contains(string(apply), want) {
 			t.Errorf("prometheus-apply.yml is missing %q", want)
@@ -431,8 +433,8 @@ func TestRegression_HostMetricsMissingFiresBeforeSeedHostDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if def >= 10*time.Minute {
-		t.Errorf("default host_metrics_missing_for %s must be shorter than HostDown's 10m", def)
+	if def > 9*time.Minute {
+		t.Errorf("default host_metrics_missing_for %s must be at most 9m, one evaluation interval below HostDown's 10m", def)
 	}
 }
 
@@ -475,7 +477,16 @@ func hostHealthPromtest(t *testing.T, vars map[string]string, unit string) (stri
 //     window 5 s longer (refused) fires at 4m;
 //   - a scrape interval longer than a third of login_probe_stale_seconds:
 //     a healthy probe's changes() window holds too few samples, so
-//     PilotLoginProbeStale fires for it (and mutes all its alerts).
+//     PilotLoginProbeStale fires for it (and mutes all its alerts);
+//   - a host_metrics_missing_success_window that covers the gap between
+//     two seen changes but not one more scrape. changes(ts[W]) counts a
+//     change only while the sample before it is in the range, so one seen
+//     change holds for W - scrape. With a 1m scrape off the evaluation
+//     grid and changes seen 120 s apart (the probe-round model's
+//     interval + timeout + 15 s + one scrape), the one-scrape bound the
+//     gate used to apply accepts W = 120 s: HostMetricsMissing never fires
+//     and HostDown pages a host that answers SSH. W = 180 s (+ 2 scrapes,
+//     the gate's bound now) holds.
 func TestRegression_HostHealthTimingHazardsBehindTheGates(t *testing.T) {
 	// 1 s samples: logins succeed every minute; the previous one was
 	// published at 14 s, the last one (at 59 s) by the 74 s textfile write.
@@ -534,6 +545,64 @@ tests:
 `
 	if out, ok := hostHealthPromtest(t, hostHealthContractDefaults(t), slow); !ok {
 		t.Errorf("a healthy probe scraped every 4m should look stale with the 180 s window (the hazard the gate refuses):\n%s", out)
+	}
+	// 1 s steps; the target and the probe host are scraped every 60 s at
+	// 7 s past each minute (`_` elsewhere), so window edges fall between
+	// evaluations. The target's last-success timestamp is seen to change
+	// at every other scrape.
+	offGrid := func(value func(j int) string) string {
+		var b strings.Builder
+		for sec := 0; sec <= 780; sec++ {
+			if sec > 0 {
+				b.WriteByte(' ')
+			}
+			if (sec-7)%60 == 0 && sec >= 7 {
+				b.WriteString(value((sec - 7) / 60))
+			} else {
+				b.WriteByte('_')
+			}
+		}
+		return b.String()
+	}
+	roundBoundary := func(want string) string {
+		return `rule_files: [host-health-alert-rules.yml, seed-alert-rules.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 1s
+    input_series:
+      - series: 'up{job="node",instance="gap1:9100",pilot_host="gap1"}'
+        values: '` + offGrid(func(int) string { return "0" }) + `'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-r:9100",pilot_host="mon-r",probe_target="gap1"}'
+        values: '` + offGrid(func(int) string { return "1" }) + `'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-r:9100",pilot_host="mon-r",probe_target="gap1"}'
+        values: '` + offGrid(func(j int) string { return strconv.Itoa(120 * ((j + 1) / 2)) }) + `'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HostMetricsMissing
+        exp_alerts:` + want + `
+      - eval_time: 12m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "gap1:9100", job: node, pilot_host: gap1, severity: critical}
+`
+	}
+	holds := `
+          - exp_labels: {pilot_host: gap1, severity: warning, action_required: "true", pilot_alert_source: host-health}`
+	for _, c := range []struct {
+		window, want string
+	}{
+		{"120s", " []"}, // seen gap + one scrape: the old bound accepted it, and it drops out
+		{"180s", holds}, // seen gap + two scrapes: the gate's bound now
+	} {
+		vars := map[string]string{}
+		for k, v := range hostHealthContractDefaults(t) {
+			vars[k] = v
+		}
+		vars["host_metrics_missing_for"] = "4m"
+		vars["host_metrics_missing_success_window"] = c.window
+		if out, ok := hostHealthPromtest(t, vars, roundBoundary(c.want)); !ok {
+			t.Errorf("window %s, changes seen 120 s apart at a 1m scrape: unexpected HostMetricsMissing outcome:\n%s", c.window, out)
+		}
 	}
 }
 
@@ -637,10 +706,46 @@ tests:
 	}
 }
 
+const (
+	hostMetricsMissingRoundGate = "../../playbooks/apply/tasks/host-metrics-missing-probe-round-gate.yml"
+	loginProbeApply             = "../../playbooks/apply/login-probe-apply.yml"
+)
+
+// contractGroupVarDefaults returns every groupVars default of a contract.
+func contractGroupVarDefaults(t *testing.T, path string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		GroupVars []struct {
+			Name    string `yaml:"name"`
+			Default any    `yaml:"default"`
+		} `yaml:"groupVars"`
+	}
+	if err := yaml.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, v := range c.GroupVars {
+		out[v.Name] = strings.TrimSpace(hostHealthScalar(v.Default))
+	}
+	return out
+}
+
 // TestRegression_HostHealthTimingConstantsAgree ties the numbers the timing
-// gates assume to their sources (AGENTS.md §5.7): the 15 s textfile write
-// interval of cmd/pilot-login-probe, and login-probe-apply.yml's defaults
-// for login_probe_interval and login_probe_total_timeout.
+// gates assume to their sources (AGENTS.md §5.7):
+//
+//   - the 15 s textfile write interval of cmd/pilot-login-probe, used by
+//     prometheus-apply.yml's window gate and by the shared probe-round gate;
+//   - the login-probe defaults (contracts/login-probe.yaml, as
+//     login-probe-apply.yml resolves them) that prometheus-apply.yml assumes
+//     for login-probe hosts that do not set them;
+//   - the Prometheus defaults (contracts/prometheus.yaml and
+//     prometheus-apply.yml) that login-probe-apply.yml assumes for
+//     Prometheus hosts that do not set them;
+//   - both callers include the same gate file, which holds the arithmetic.
 func TestRegression_HostHealthTimingConstantsAgree(t *testing.T) {
 	main, err := os.ReadFile("../../cmd/pilot-login-probe/main.go")
 	if err != nil {
@@ -650,74 +755,149 @@ func TestRegression_HostHealthTimingConstantsAgree(t *testing.T) {
 	if m == nil {
 		t.Fatal("cmd/pilot-login-probe/main.go: no `const textfileWriteInterval = N * time.Second`")
 	}
-	apply, err := os.ReadFile(hostHealthApply)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(string(apply), "_textfile_write_seconds: "+string(m[1])+"\n"); got != 2 {
-		t.Errorf("prometheus-apply.yml's two window gates must use _textfile_write_seconds: %s (textfileWriteInterval); found %d", m[1], got)
-	}
-	probe, err := os.ReadFile("../../playbooks/apply/login-probe-apply.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, def := range map[string]string{"login_probe_interval": "60s", "login_probe_total_timeout": "30s"} {
-		if !strings.Contains(string(probe), name+`: "{{ `+name+` | default('`+def+`', true) }}"`) {
-			t.Errorf("login-probe-apply.yml no longer defaults %s to %s", name, def)
+	read := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(string(apply), "hostvars[h]."+name+" | default('"+def+"', true)") {
-			t.Errorf("prometheus-apply.yml's probe-round gate must default %s to %s, as login-probe-apply.yml does", name, def)
+		return string(data)
+	}
+	apply, probe, gate := read(hostHealthApply), read(loginProbeApply), read(hostMetricsMissingRoundGate)
+	want := "_textfile_write_seconds: " + string(m[1]) + "\n"
+	if got := strings.Count(apply, want); got != 1 {
+		t.Errorf("prometheus-apply.yml's window gate must use %q (textfileWriteInterval); found %d", strings.TrimSpace(want), got)
+	}
+	if got := strings.Count(gate, want); got != 1 {
+		t.Errorf("the probe-round gate must use %q (textfileWriteInterval); found %d", strings.TrimSpace(want), got)
+	}
+	for _, src := range []struct{ name, text string }{{"prometheus-apply.yml", apply}, {"login-probe-apply.yml", probe}} {
+		if got := strings.Count(src.text, "file: tasks/host-metrics-missing-probe-round-gate.yml"); got != 1 {
+			t.Errorf("%s must include tasks/host-metrics-missing-probe-round-gate.yml once; found %d", src.name, got)
+		}
+		if strings.Contains(src.text, "2 * s_s") || strings.Contains(src.text, "_probe_worst_seconds") {
+			t.Errorf("%s computes the probe-round bound itself; it belongs in the gate file only", src.name)
+		}
+	}
+	lp := contractGroupVarDefaults(t, "../../contracts/login-probe.yaml")
+	for _, name := range []string{"login_probe_interval", "login_probe_total_timeout"} {
+		def := lp[name]
+		if def == "" {
+			t.Fatalf("contracts/login-probe.yaml has no default for %s", name)
+		}
+		if !strings.Contains(probe, name+`: "{{ `+name+` | default('`+def+`', true) }}"`) {
+			t.Errorf("login-probe-apply.yml must default %s to the contract's %s", name, def)
+		}
+		if !strings.Contains(apply, "hostvars[h]."+name+" | default('"+def+"', true)") {
+			t.Errorf("prometheus-apply.yml's probe-round gate must default %s to the contract's %s", name, def)
+		}
+	}
+	pr := contractGroupVarDefaults(t, hostHealthContract)
+	for _, c := range []struct{ playbook, gate string }{
+		{`host_metrics_missing_success_window: "{{ host_metrics_missing_success_window | default('` + pr["host_metrics_missing_success_window"] + `', true) }}"`,
+			"hostvars[h].host_metrics_missing_success_window | default('" + pr["host_metrics_missing_success_window"] + "', true)"},
+		{`prometheus_scrape_interval: "{{ prometheus_scrape_interval | default('15s') }}"`,
+			"hostvars[h].prometheus_scrape_interval | default('15s')"},
+		{`prometheus_host_health_alert_rules_enabled: "{{ prometheus_host_health_alert_rules_enabled | default(` + pr["prometheus_host_health_alert_rules_enabled"] + `) | bool }}"`,
+			"hostvars[h].prometheus_host_health_alert_rules_enabled | default(" + pr["prometheus_host_health_alert_rules_enabled"] + ") | bool"},
+	} {
+		if !strings.Contains(apply, c.playbook) {
+			t.Errorf("prometheus-apply.yml no longer resolves %q", c.playbook)
+		}
+		if !strings.Contains(probe, c.gate) {
+			t.Errorf("login-probe-apply.yml's probe-round gate must read %q, the default prometheus-apply.yml uses", c.gate)
 		}
 	}
 }
 
+// runnableTasks rewrites the relative include_tasks paths of tasks taken
+// from a playbook, so they run from a temporary play.
+func runnableTasks(t *testing.T, tasks []map[string]any) []map[string]any {
+	t.Helper()
+	out := make([]map[string]any, 0, len(tasks))
+	for _, task := range tasks {
+		c := map[string]any{}
+		for k, v := range task {
+			c[k] = v
+		}
+		if inc, ok := task["ansible.builtin.include_tasks"].(map[string]any); ok {
+			n := map[string]any{}
+			for k, v := range inc {
+				n[k] = v
+			}
+			abs, err := filepath.Abs(filepath.Join("../../playbooks/apply", inc["file"].(string)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			n["file"] = abs
+			c["ansible.builtin.include_tasks"] = n
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // TestRegression_HostHealthTimingGates runs prometheus-apply.yml's own
-// timing gates with ansible-playbook, against an inventory with one
-// login-probe host. The defaults pass. These are refused: a scrape interval
-// above a third of login_probe_stale_seconds; a compound scrape interval; a
-// host_metrics_missing_for not shorter than HostDown's 10m; a
-// host_metrics_missing_success_window that, plus the probe's 15 s textfile
-// write, exceeds host_metrics_missing_for (a dead host would fire); one
-// shorter than two scrapes; and one too short for the probe host's
-// login_probe_interval + login_probe_total_timeout + 15 s + one scrape (a
-// data gap would drop out and HostDown would page a live host).
+// timing gates with ansible-playbook, against an inventory with login-probe
+// hosts. The defaults pass. These are refused:
+//
+//   - a scrape interval above a third of login_probe_stale_seconds, or a
+//     compound one;
+//   - a host_metrics_missing_for over 9m (HostDown fires at 10m, and the
+//     rule groups are evaluated up to 1m apart);
+//   - a host_metrics_missing_success_window that, plus the probe's 15 s
+//     textfile write, exceeds host_metrics_missing_for (a dead host would
+//     fire), or that is shorter than two scrapes;
+//   - a window shorter than some login-probe host's login_probe_interval +
+//     login_probe_total_timeout + 15 s + 2 scrapes (a data gap would drop
+//     out and HostDown would page a live host). The second login-probe
+//     host is the bad one in those cases, so a gate that reads only the
+//     first host fails here.
 func TestRegression_HostHealthTimingGates(t *testing.T) {
-	tasks := playbookPreTasks(t, hostHealthApply,
-		"Gate: host_metrics_missing_for is shorter than the seed HostDown rule's 10m",
+	tasks := runnableTasks(t, playbookPreTasks(t, hostHealthApply,
+		"Gate: host_metrics_missing_for leaves one evaluation interval before the seed HostDown rule's 10m",
 		"Gate: login_probe_stale_seconds spans at least three node scrapes",
 		"Gate: host_metrics_missing_success_window plus one textfile write fits in host_metrics_missing_for",
-		"Gate: every login-probe host records a success inside host_metrics_missing_success_window")
+		"Gate: every login-probe host records a success inside host_metrics_missing_success_window"))
 	inventory := func(interval, timeout string) string {
-		probe := "probe1: {}"
+		probe2 := "probe2: {}"
 		if interval != "" {
-			probe = "probe1: {login_probe_interval: \"" + interval + "\", login_probe_total_timeout: \"" + timeout + "\"}"
+			probe2 = "probe2: {login_probe_interval: \"" + interval + "\", login_probe_total_timeout: \"" + timeout + "\"}"
 		}
-		return "all:\n  hosts:\n    localhost: {ansible_connection: local}\n  children:\n    login-probe:\n      hosts:\n        " + probe + "\n"
+		return "all:\n  hosts:\n    localhost: {ansible_connection: local}\n  children:\n    login-probe:\n      hosts:\n        probe1: {}\n        " + probe2 + "\n"
 	}
 	for _, c := range []struct {
 		name                       string
 		hmm, window, scrape, stale string
-		interval, timeout          string // "" = the login-probe defaults (60s / 30s)
+		interval, timeout          string // probe2's; "" = the login-probe defaults (60s / 30s)
 		ok                         bool
 	}{
-		{"defaults", "3m", "140s", "15s", "180", "", "", true},
-		{"1m scrape", "3m", "140s", "1m", "180", "", "", false}, // 60+30+15+60 > 140
-		{"61s scrape", "3m", "140s", "61s", "180", "", "", false},
-		{"4m scrape", "3m", "140s", "4m", "180", "", "", false},
-		{"compound scrape interval", "3m", "140s", "1m30s", "600", "", "", false},
+		{"defaults", "3m", "150s", "15s", "180", "", "", true},
+		{"1m scrape", "3m", "150s", "1m", "180", "", "", false}, // 60+30+15+120 > 150
+		{"61s scrape", "3m", "150s", "61s", "180", "", "", false},
+		{"4m scrape", "3m", "150s", "4m", "180", "", "", false},
+		{"compound scrape interval", "3m", "150s", "1m30s", "600", "", "", false},
 		{"window + 15 s exactly the for", "3m", "165s", "15s", "180", "", "", true},
 		{"window + 15 s past the for (dead host fires at 4m)", "3m", "170s", "15s", "180", "", "", false},
 		{"window + 15 s past a 9m for (dead host mutes HostDown)", "9m", "530s", "15s", "180", "", "", false},
 		{"window longer than the for", "3m", "6m", "15s", "180", "", "", false},
-		{"window shorter than two scrapes", "3m", "20s", "15s", "180", "10s", "5s", false},
-		{"window exactly the default probe round", "3m", "120s", "15s", "180", "", "", true}, // 60+30+15+15 = 120
-		{"window one second short of the default probe round", "3m", "119s", "15s", "180", "", "", false},
+		{"window shorter than two scrapes", "3m", "20s", "15s", "180", "5s", "2s", false},
+		{"window exactly the default probe round", "3m", "135s", "15s", "180", "", "", true}, // 60+30+15+2x15 = 135
+		{"window one second short of the default probe round", "3m", "134s", "15s", "180", "", "", false},
+		{"the old one-scrape bound at a 15s scrape", "3m", "120s", "15s", "180", "", "", false}, // 60+30+15+15
+		{"the old one-scrape bound at a 30s scrape", "3m", "135s", "30s", "180", "", "", false}, // 60+30+15+30
+		{"the old one-scrape bound at a 1m scrape", "3m", "165s", "1m", "180", "", "", false},   // 60+30+15+60
 		{"short for, shorter window, default probe", "1m", "45s", "15s", "60", "", "", false},
 		{"3m probe interval", "9m", "8m", "15s", "180", "3m", "30s", true},
-		{"3m probe interval, default window", "3m", "140s", "15s", "180", "3m", "30s", false},
-		{"fast probe, short window", "2m", "100s", "15s", "180", "30s", "20s", true},
-		{"unparsable probe interval", "3m", "140s", "15s", "180", "1m30s", "30s", false},
-		{"HostMetricsMissing as slow as HostDown", "10m", "140s", "15s", "180", "", "", false},
+		{"3m probe interval, default window", "3m", "150s", "15s", "180", "3m", "30s", false},
+		{"fast second probe, window at the first probe's round", "150s", "135s", "15s", "180", "30s", "20s", true},
+		{"compound Go duration probe interval", "3m", "150s", "15s", "180", "1m0s", "30s", true},
+		{"fractional Go duration probe interval", "3m", "150s", "15s", "180", "0.75m", "30s", true}, // 45+30+15+30 = 120
+		{"compound Go duration over the window", "3m", "150s", "15s", "180", "1m30s", "30s", false}, // 90+30+15+30 = 165
+		{"unparsable probe interval", "3m", "150s", "15s", "180", "60", "30s", false},
+		{"zero probe timeout", "3m", "150s", "15s", "180", "60s", "0s", false},
+		{"9m for", "9m", "8m", "15s", "180", "", "", true},
+		{"590s for (HostDown could notify first)", "590s", "8m", "15s", "180", "", "", false},
+		{"HostMetricsMissing as slow as HostDown", "10m", "150s", "15s", "180", "", "", false},
 	} {
 		vars := map[string]any{
 			"prometheus_host_health_alert_rules_enabled": true,
@@ -736,5 +916,94 @@ func TestRegression_HostHealthTimingGates(t *testing.T) {
 		"host_metrics_missing_success_window": "60s", "prometheus_scrape_interval": "15s", "login_probe_stale_seconds": "180"}
 	if out, ok := runLocalPlay(t, vars, tasks); !ok {
 		t.Errorf("no login-probe hosts: gates refused a 60s window\n%s", out)
+	}
+}
+
+// TestRegression_LoginProbeChecksTheHostMetricsMissingWindow runs
+// login-probe-apply.yml's copy of the probe-round gate (the same task file
+// prometheus-apply.yml runs): a probe whose interval no longer fits a
+// Prometheus host's window is refused by the login-probe apply itself, so
+// `pilot deploy` of login-probe alone cannot silently disable
+// HostMetricsMissing (PR #80 review). The second Prometheus host is the
+// short one, and one with the host-health rules off is ignored.
+func TestRegression_LoginProbeChecksTheHostMetricsMissingWindow(t *testing.T) {
+	tasks := runnableTasks(t, playbookPreTasks(t, loginProbeApply,
+		"Gate: this probe records a success inside every Prometheus host's host_metrics_missing_success_window"))
+	inventory := func(prom2 string) string {
+		return "all:\n  hosts:\n    localhost: {ansible_connection: local}\n  children:\n    prometheus:\n      hosts:\n        prom1: {}\n        prom2: " + prom2 + "\n        prom3: {prometheus_host_health_alert_rules_enabled: false, host_metrics_missing_success_window: 10s}\n"
+	}
+	for _, c := range []struct {
+		name, prom2, interval, timeout string
+		ok                             bool
+	}{
+		{"defaults", "{}", "60s", "30s", true},
+		{"a 3m probe interval", "{}", "3m", "30s", false},
+		{"a 3m probe interval, a long window", "{host_metrics_missing_success_window: 8m, host_metrics_missing_for: 9m}", "3m", "30s", false}, // prom1 still has 150s
+		{"a short window on the second Prometheus", "{host_metrics_missing_success_window: 120s}", "60s", "30s", false},
+		{"a 1m scrape on the second Prometheus", "{prometheus_scrape_interval: 1m}", "60s", "30s", false},
+		{"a compound Go duration", "{}", "1m0s", "30s", true},
+	} {
+		vars := map[string]any{"login_probe_interval": c.interval, "login_probe_total_timeout": c.timeout}
+		out, ok := runLocalPlayInventory(t, inventory(c.prom2), vars, tasks)
+		if ok != c.ok {
+			t.Errorf("%s: gate passed = %v, want %v\n%s", c.name, ok, c.ok, out)
+		}
+	}
+	if out, ok := runLocalPlay(t, map[string]any{"login_probe_interval": "3m", "login_probe_total_timeout": "30s"}, tasks); !ok {
+		t.Errorf("no Prometheus host: the gate refused\n%s", out)
+	}
+}
+
+// TestRegression_HostHealthProbeRoundGateParsesGoDurations ties the gate's duration
+// parser to the format contracts/login-probe.yaml allows (AGENTS.md §5.7):
+// the login-probe durations are Go durations, so every value
+// time.ParseDuration accepts with a positive result must parse to the same
+// number of seconds, and the rest must be refused.
+func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
+	values := []string{"60s", "1m", "1m30s", "1.5m", "0.75m", "90s", "1h", "500ms", "2m0s", "1m30.5s", ".5h", "1.s",
+		"100us", "100µs", "1h2m3s4ms", "60", "1d", "-1s", "+1s", "1m30", "0s", "0", "s", "1 m", "1M", ""}
+	gate, err := filepath.Abs(hostMetricsMissingRoundGate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "pairs.json")
+	probes := []map[string]any{}
+	for i, v := range values {
+		probes = append(probes, map[string]any{"name": "p" + strconv.Itoa(i), "interval": v, "timeout": "1s"})
+	}
+	tasks := []map[string]any{
+		{"ansible.builtin.include_tasks": gate, "vars": map[string]any{
+			"hmm_gate_windows": []map[string]any{{"name": "prom", "window": "1d", "scrape": "15s"}},
+			"hmm_gate_probes":  probes}},
+	}
+	// The assert fails (some values are refused); write the pairs first.
+	tasks = []map[string]any{{"block": tasks, "always": []map[string]any{
+		{"ansible.builtin.copy": map[string]any{"content": "{{ _hmm_round_pairs | to_json }}", "dest": out}}}}}
+	runLocalPlay(t, map[string]any{}, tasks)
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("the gate wrote no result: %v", err)
+	}
+	var pairs []struct {
+		Probe           string  `json:"probe"`
+		IntervalSeconds float64 `json:"interval_seconds"`
+		Parsed          bool    `json:"parsed"`
+	}
+	if err := json.Unmarshal(data, &pairs); err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != len(values) {
+		t.Fatalf("got %d pairs, want %d", len(pairs), len(values))
+	}
+	for i, v := range values {
+		d, err := time.ParseDuration(v)
+		goOK := err == nil && d > 0
+		if pairs[i].Parsed != goOK {
+			t.Errorf("%q: gate parsed = %v, time.ParseDuration ok and > 0 = %v", v, pairs[i].Parsed, goOK)
+			continue
+		}
+		if goOK && math.Abs(pairs[i].IntervalSeconds-d.Seconds()) > 1e-6 {
+			t.Errorf("%q: gate = %v s, time.ParseDuration = %v s", v, pairs[i].IntervalSeconds, d.Seconds())
+		}
 	}
 }

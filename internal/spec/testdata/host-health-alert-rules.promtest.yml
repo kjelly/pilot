@@ -267,17 +267,20 @@ tests:
           - exp_labels: {instance: "dead3:9100", job: node, pilot_host: dead3, severity: critical}
           - exp_labels: {instance: "dead4:9100", job: node, pilot_host: dead4, severity: critical}
 
-  # 15 s samples. gap8: a data gap where the probe's successes of the
-  # target land every 105 s (login_probe_interval 60 s + total_timeout
-  # 30 s + the 15 s textfile write, the slowest the defaults allow) and
-  # are seen one scrape later: the 140 s window always holds a change, so
-  # HostMetricsMissing fires and stays. gap9: a probe slowed down so far
-  # (e.g. many hosts down at once) that successes land 240 s apart, far
-  # longer than the window: HostMetricsMissing drops out between them,
+  # 15 s samples. gap8: a data gap during which the target's last-success
+  # timestamp is seen to change every 120 s, the most the defaults allow
+  # (login_probe_interval 60 s + total_timeout 30 s + the 15 s textfile
+  # write + one scrape). One seen change keeps changes() > 0 for
+  # window - scrape = 135 s, so the 150 s window always holds one and
+  # HostMetricsMissing fires and stays. (On this aligned grid, evaluated
+  # every minute, a too-short window would not show its drops; the
+  # off-grid boundary case in TestRegression_HostHealthTimingHazardsBehindTheGates
+  # does.) gap9: the probe is healthy (success stays 1) but so slow, e.g.
+  # with many hosts down at once, that successes are seen 240 s apart,
+  # far longer than the window: HostMetricsMissing drops out between them,
   # never fires, and HostDown pages a host that still answers SSH — the
-  # fail-safe side (alertmanager.md §1.7 point 2). In between (successes
-  # just over window + 15 s + one scrape apart) the outcome depends on
-  # the evaluation phase.
+  # fail-safe side (alertmanager.md §1.7 point 2). With a 600 s window
+  # this case fails: gap9 would fire.
   - name: A data gap holds only while the probe records successes inside the window
     interval: 15s
     input_series:
@@ -286,13 +289,13 @@ tests:
       - series: 'pilot_login_probe_success{job="node",instance="mon-v:9100",pilot_host="mon-v",probe_target="gap8"}'
         values: '1x68'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-v:9100",pilot_host="mon-v",probe_target="gap8"}'
-        values: '0 0 0 0 0 0 0 105 105 105 105 105 105 105 210 210 210 210 210 210 210 315 315 315 315 315 315 315 420 420 420 420 420 420 420 525 525 525 525 525 525 525 630 630 630 630 630 630 630 735 735 735 735 735 735 735 840 840 840 840 840 840 840 945 945 945 945 945 945'
+        values: '0 0 0 0 0 0 0 0 120 120 120 120 120 120 120 120 240 240 240 240 240 240 240 240 360 360 360 360 360 360 360 360 480 480 480 480 480 480 480 480 600 600 600 600 600 600 600 600 720 720 720 720 720 720 720 720 840 840 840 840 840 840 840 840 960 960 960 960 960'
       - series: 'up{job="node",instance="gap9:9100",pilot_host="gap9"}'
         values: '0x68'
       - series: 'pilot_login_probe_success{job="node",instance="mon-w:9100",pilot_host="mon-w",probe_target="gap9"}'
-        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 960 960 960 960 960'
+        values: '1x68'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-w:9100",pilot_host="mon-w",probe_target="gap9"}'
-        values: '0 0 0 0 0 0 0 0 0 0 0 0 180 180 180 180 180 180 180 180 180 180 180 180 360 360 360 360 360 360 360 360 360 360 360 360 540 540 540 540 540 540 540 540 540 540 540 540 720 720 720 720 720 720 720 720 720 720 720 720 900 900 900 900 900 900 900 900 900'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 960 960 960 960 960'
     alert_rule_test:
       - eval_time: 6m
         alertname: HostMetricsMissing
@@ -308,18 +311,20 @@ tests:
           - exp_labels: {instance: "gap8:9100", job: node, pilot_host: gap8, severity: critical}
           - exp_labels: {instance: "gap9:9100", job: node, pilot_host: gap9, severity: critical}
 
-  # A data gap (node_exporter down, SSH fine) and then, at 11m, the host
-  # dies: success drops to 0 and no new success is recorded.
-  # HostMetricsMissing stops holding and resolves keep_firing_for (5m)
-  # later, inside the §1.7 bound of about 8m after the death, so the
-  # HostDown it inhibited is released.
+  # A data gap (node_exporter down, SSH fine) and then, just after the
+  # 10m success, the host dies. No new success is recorded; success
+  # stays 1 until the probe's next round records the failure (seen at
+  # 12m). HostMetricsMissing stops holding once the last change leaves
+  # the window, and resolves keep_firing_for (5m) later, inside the §1.7
+  # bound of about 8m after the death, so the HostDown it inhibited is
+  # released.
   - name: A data gap that turns into a dead host releases HostDown
     interval: 1m
     input_series:
       - series: 'up{job="node",instance="gapdead:9100",pilot_host="gapdead"}'
         values: '0x30'
       - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="gapdead"}'
-        values: '1x10 0x20'
+        values: '1x11 0x19'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon",probe_target="gapdead"}'
         values: '0+60x10 600x20'
     alert_rule_test:
@@ -338,6 +343,42 @@ tests:
         alertname: HostDown
         exp_alerts:
           - exp_labels: {instance: "gapdead:9100", job: node, pilot_host: gapdead, severity: critical}
+
+  # Not covered (alertmanager.md §1.7, runbook §6): a data gap on the
+  # login-probe host itself. Its node_exporter also serves the probe's
+  # textfile, so every pilot_login_probe_* series of that probe stops with
+  # it: HostMetricsMissing cannot fire for it, PilotLoginProbeStale sees
+  # no samples (changes() over an empty range returns nothing), and every
+  # login alert from that probe disappears. Only HostDown pages, at 10m,
+  # although the host answers SSH. This case locks today's behaviour; the
+  # fix is tracked in the issue §1.7 names.
+  - name: A data gap on the probe host itself silences its probe (known gap)
+    interval: 1m
+    input_series:
+      - series: 'up{job="node",instance="mon-g:9100",pilot_host="mon-g"}'
+        values: '1 1 0x14'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="mon-g"}'
+        values: '1 1 _x14'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="mon-g"}'
+        values: '0 60 _x14'
+      - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-g:9100",pilot_host="mon-g"}'
+        values: '0 60 _x14'
+      - series: 'pilot_login_probe_last_stage{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="t-g",stage="account"}'
+        values: '1 1 _x14'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: PilotLoginProbeStale
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "mon-g:9100", job: node, pilot_host: mon-g, severity: critical}
 
   - name: Two probes — a stalled probe only speaks for itself
     interval: 1m

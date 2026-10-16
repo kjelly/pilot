@@ -58,7 +58,7 @@ groupVars:
   - {name: host_disk_queue_depth_threshold, type: string, required: false, default: "10", secret: false, validation: "^[0-9]+([.][0-9]+)?$"}
   - {name: host_disk_latency_for, type: string, required: false, default: "10m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
   - {name: host_metrics_missing_for, type: string, required: false, default: "3m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
-  - {name: host_metrics_missing_success_window, type: string, required: false, default: "140s", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: host_metrics_missing_success_window, type: string, required: false, default: "150s", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
   - {name: login_probe_alert_for, type: string, required: false, default: "3m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
   - {name: login_probe_transport_alert_for, type: string, required: false, default: "5m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
   - {name: login_probe_alert_keep_firing_for, type: string, required: false, default: "5m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
