@@ -49,10 +49,11 @@ lint:          	## Run golangci-lint
 	golangci-lint run ./...
 
 # -timeout: go test's default is 10m per package. Under -race on GitHub
-# runners, internal/spec takes 12-15m (738-895 s across 2026-10-15 runs; one
-# PR run hit the old 15m limit at 900 s) and cmd/pilot/cmd 7-8m. 30m keeps
-# about a 2x margin for the slowest package. CI runs this target; its job
-# timeout-minutes must stay above this (TestCIGoTestTimeoutFiresBeforeJobLimit).
+# runners, internal/spec takes 12-15m when it passes (738-895 s on
+# 2026-10-15/16), and four runs on 2026-10-15 hit the old 15m limit at 900 s.
+# cmd/pilot/cmd takes 7-8m. 30m keeps about a 2x margin for the slowest
+# package. CI runs this target; its job timeout-minutes must stay above this
+# (TestCIGoTestTimeoutFiresBeforeJobLimit).
 test-race:     	## Run tests with the race detector (CI runs this target)
 	go test -race -count=1 -timeout 30m ./...
 
