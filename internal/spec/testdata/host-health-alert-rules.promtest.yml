@@ -140,7 +140,7 @@ tests:
       - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="restart-host"}'
         values: '1x14 0 0 1x14'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon",probe_target="restart-host"}'
-        values: '0 60 120 180 240 300 360 420 480 540 600 660 720 780 840 840 840 1020 1080 1140 1200 1260 1320 1380 1440 1500 1560 1620 1680 1740 1800'
+        values: '0 60 120 180 240 300 360 420 480 540 600 660 720 780 840 0 0 1020 1080 1140 1200 1260 1320 1380 1440 1500 1560 1620 1680 1740 1800'
       - series: 'up{job="node",instance="mon:9100",pilot_host="mon"}'
         values: '1x30'
       - series: 'up{job="node",instance="mon-dead:9100",pilot_host="mon-dead"}'
@@ -231,6 +231,14 @@ tests:
         values: '1x36 0x31'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-u:9100",pilot_host="mon-u",probe_target="dead4"}'
         values: '0x3 60x3 120x60'
+      # mon-u also probes live4, which is up and logs in every minute: its
+      # moving timestamp must not count for dead4 (the join is per target).
+      - series: 'up{job="node",instance="live4:9100",pilot_host="live4"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-u:9100",pilot_host="mon-u",probe_target="live4"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-u:9100",pilot_host="mon-u",probe_target="live4"}'
+        values: '0x3 60x3 120x3 180x3 240x3 300x3 360x3 420x3 480x3 540x3 600x3 660x3 720x3 780x3 840x3 900x3 960x3'
       # Probe heartbeats (the textfile writer, every 15 s): mon-s stops at
       # 120 s, mon-t at 210 s, mon-u never stops.
       - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-s:9100",pilot_host="mon-s"}'
@@ -258,6 +266,78 @@ tests:
           - exp_labels: {instance: "dead2:9100", job: node, pilot_host: dead2, severity: critical}
           - exp_labels: {instance: "dead3:9100", job: node, pilot_host: dead3, severity: critical}
           - exp_labels: {instance: "dead4:9100", job: node, pilot_host: dead4, severity: critical}
+
+  # 15 s samples. gap8: a data gap where the probe's successes of the
+  # target land every 105 s (login_probe_interval 60 s + total_timeout
+  # 30 s + the 15 s textfile write, the slowest the defaults allow) and
+  # are seen one scrape later: the 140 s window always holds a change, so
+  # HostMetricsMissing fires and stays. gap9: a probe slowed down so far
+  # (e.g. many hosts down at once) that successes land 240 s apart, far
+  # longer than the window: HostMetricsMissing drops out between them,
+  # never fires, and HostDown pages a host that still answers SSH — the
+  # fail-safe side (alertmanager.md §1.7 point 2). In between (successes
+  # just over window + 15 s + one scrape apart) the outcome depends on
+  # the evaluation phase.
+  - name: A data gap holds only while the probe records successes inside the window
+    interval: 15s
+    input_series:
+      - series: 'up{job="node",instance="gap8:9100",pilot_host="gap8"}'
+        values: '0x68'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-v:9100",pilot_host="mon-v",probe_target="gap8"}'
+        values: '1x68'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-v:9100",pilot_host="mon-v",probe_target="gap8"}'
+        values: '0 0 0 0 0 0 0 105 105 105 105 105 105 105 210 210 210 210 210 210 210 315 315 315 315 315 315 315 420 420 420 420 420 420 420 525 525 525 525 525 525 525 630 630 630 630 630 630 630 735 735 735 735 735 735 735 840 840 840 840 840 840 840 945 945 945 945 945 945'
+      - series: 'up{job="node",instance="gap9:9100",pilot_host="gap9"}'
+        values: '0x68'
+      - series: 'pilot_login_probe_success{job="node",instance="mon-w:9100",pilot_host="mon-w",probe_target="gap9"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 240 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 480 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 720 960 960 960 960 960'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-w:9100",pilot_host="mon-w",probe_target="gap9"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 180 180 180 180 180 180 180 180 180 180 180 180 360 360 360 360 360 360 360 360 360 360 360 360 540 540 540 540 540 540 540 540 540 540 540 540 720 720 720 720 720 720 720 720 720 720 720 720 900 900 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: gap8, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 13m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: gap8, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 13m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "gap8:9100", job: node, pilot_host: gap8, severity: critical}
+          - exp_labels: {instance: "gap9:9100", job: node, pilot_host: gap9, severity: critical}
+
+  # A data gap (node_exporter down, SSH fine) and then, at 11m, the host
+  # dies: success drops to 0 and no new success is recorded.
+  # HostMetricsMissing stops holding and resolves keep_firing_for (5m)
+  # later, inside the §1.7 bound of about 8m after the death, so the
+  # HostDown it inhibited is released.
+  - name: A data gap that turns into a dead host releases HostDown
+    interval: 1m
+    input_series:
+      - series: 'up{job="node",instance="gapdead:9100",pilot_host="gapdead"}'
+        values: '0x30'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",pilot_host="mon",probe_target="gapdead"}'
+        values: '1x10 0x20'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon:9100",pilot_host="mon",probe_target="gapdead"}'
+        values: '0+60x10 600x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: gapdead, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 15m
+        alertname: HostMetricsMissing
+        exp_alerts:
+          - exp_labels: {pilot_host: gapdead, severity: warning, action_required: "true", pilot_alert_source: host-health}
+      - eval_time: 19m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: HostDown
+        exp_alerts:
+          - exp_labels: {instance: "gapdead:9100", job: node, pilot_host: gapdead, severity: critical}
 
   - name: Two probes — a stalled probe only speaks for itself
     interval: 1m

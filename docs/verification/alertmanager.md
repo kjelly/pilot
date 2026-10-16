@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.11
+> 版本：v1.12
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -41,13 +41,13 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
 
 1. **整台主機掛掉只產生 `HostDown`。** `PilotLoginProbeTransportFailed` 的規則本身
    排除 `up{job="node"} == 0` 的主機，跟兩個 `for:` 的長短無關。`HostMetricsMissing`
-   只採信這台主機在 `host_metrics_missing_success_window`（預設 2m）內真的登入成功過一次：
+   只採信這台主機在 `host_metrics_missing_success_window`（預設 140s）內真的登入成功過一次：
    probe 為這個 target 記錄的 last-success 時間戳要有變化（`changes()`，不依賴探測主機時鐘）。
-   這個時間窗必須短於 `host_metrics_missing_for`（預設 3m，playbook 會擋），而主機掛掉後就不會再有
-   新的成功登入，所以掛掉的主機永遠不會觸發 `HostMetricsMissing`，不論 probe 同時停擺、晚一輪才停擺，
-   或是因為大量主機同時掛掉、一輪要跑很久才輪到它（凍結或遲遲未更新的 `success=1` 都不算），
-   `HostDown` 一律照自己的時程送出。promtool 案例鎖住這三種情況（probe 同時停擺、75s 後停擺、
-   正常但 420s 後才記下失敗）。
+   主機掛掉後不會再有新的成功登入；最後一次成功最多晚一次 textfile 寫出（15s）才被看見，所以
+   條件在主機掛掉後最多還成立 時間窗 + 15s。只要這段時間不超過 `host_metrics_missing_for`（預設
+   140s + 15s ≤ 3m，playbook 會擋），掛掉的主機就不會觸發 `HostMetricsMissing`——不論 probe 同時
+   停擺、晚一輪才停擺，或因為大量主機同時掛掉、一輪要跑很久才輪到它——`HostDown` 照自己的時程送出。
+   promtool 案例鎖住這些情況，也鎖住邊界（3m 的 `for` 配 165s 的時間窗不觸發，170s 會觸發）。
 2. **監控資料缺口（node_exporter 停了或 9100 被擋，SSH 正常）只產生
    `HostMetricsMissing`。** 它在 `host_metrics_missing_for`（預設 3m）就觸發，抑制
    同一台主機 `job="node"` 的 `HostDown`（10m 才觸發，從一開始就被抑制）。
@@ -61,7 +61,11 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
    - 資料缺口期間主機真的掛掉時，probe 要到下一輪失敗才會寫出 `success=0`
      （`login_probe_interval` 60s + `login_probe_total_timeout` 30s + textfile 寫出 ≤15s），
      再經 scrape（≤15s）與評估（≤1m）才不再成立，加上 `keep_firing_for` 5m，`HostDown`
-     最多約 8m 後才不再被抑制，之後 Alertmanager 依 `group_interval`（5m）送出。它帶
+     最多約 8m 後才不再被抑制，之後 Alertmanager 依 `group_interval`（5m）送出。
+   - 資料缺口期間 probe 必須在每個時間窗內為這台主機記到一次成功登入。probe 正常時這由 playbook
+     的 gate 保證（見下面前提）；probe 慢到同一台主機兩次成功的間隔超過時間窗（例如大量主機同時
+     掛掉、一輪跑很久，`pilot_login_probe_round_overruns_total` 會增加）時，`HostMetricsMissing`
+     會中斷或不觸發，`HostDown` 照常送出——寧可多送「Target down」，不會漏送（fail-safe）。它帶
    `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
    任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
 3. **一台 login probe 停擺（`PilotLoginProbeStale`）只抑制它自己的告警。** 每個
@@ -102,10 +106,12 @@ C10 讀的是執行中 Alertmanager 載入的設定（`amtool config show`），
 - `PilotLoginProbeStale` 看的是 `login_probe_stale_seconds` 內 probe 寫入時間戳的 `changes()`，這段
   時間至少要有三次 scrape：`prometheus-apply.yml` 拒絕 `login_probe_stale_seconds` < 3 ×
   `prometheus_scrape_interval`（否則健康的 probe 會被當成停擺，`PilotLoginProbeStale` 會抑制它所有告警）。
-- `host_metrics_missing_success_window` 必須短於 `host_metrics_missing_for`、且至少涵蓋兩次 scrape
-  （playbook 會擋）；`login_probe_interval` 加上 `login_probe_total_timeout` 要明顯短於這個時間窗，
-  否則資料缺口期間正常的 probe 也可能來不及在時間窗內記到一次成功，`HostMetricsMissing` 會晚觸發
-  或中斷（兩邊屬於不同 role，playbook 沒有交叉檢查；預設 60s + 30s 對 2m）。
+- `prometheus-apply.yml` 對 `host_metrics_missing_success_window` 有兩道 gate：時間窗 + 15s（probe 的
+  textfile 寫出間隔）不得超過 `host_metrics_missing_for`，否則掛掉的主機可能觸發 `HostMetricsMissing`
+  並抑制它的 `HostDown`；而每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout`
+  + 15s + 一次 scrape 不得超過時間窗，否則資料缺口期間 `HostMetricsMissing` 會中斷。後者讀
+  `login-probe` group 每台主機的 hostvars（預設 60s / 30s，與 `login-probe-apply.yml` 相同）；預設
+  140s 兩邊各留 15–20s 餘裕（60 + 30 + 15 + 15 = 120 ≤ 140，140 + 15 = 155 ≤ 180）。
 
 `internal/spec/alertmanager_inhibit_regression_test.go::TestRegression_AlertmanagerInhibitBehaviour`
 用 pinned 的 Alertmanager 實際跑兩種內建設定，確認哪些告警被抑制；
@@ -159,6 +165,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-16 | v1.12 | PR #80 第七輪 review：第 1 點寫明餘裕（時間窗 + 15s textfile 寫出 ≤ `host_metrics_missing_for`）；第 2 點補上 probe 太慢時的 fail-safe 行為；`host_metrics_missing_success_window` 預設改為 140s，`prometheus-apply.yml` 新增兩道 gate（時間窗 + 15s ≤ `for`；probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗），promtool 鎖住邊界 | sre |
 | 2026-10-15 | v1.11 | PR #80 第六輪 review：`HostMetricsMissing` 改看 target 自己的 last-success 時間戳在 `host_metrics_missing_success_window`（預設 2m，必須短於 `host_metrics_missing_for`）內有沒有變化，不再看 probe 的 textfile 心跳；掛掉的主機因此永遠不會觸發它（probe 停擺、晚一輪停擺、或大量主機同時掛掉讓一輪跑很久都一樣），第 1 點的例外刪除，promtool 鎖住三種情況 | sre |
 | 2026-10-15 | v1.10 | PR #80 第五輪 review：§1.7 第 1 點補上例外（probe 在 target 掛掉後一輪內才停擺時，`HostMetricsMissing` 會誤報幾分鐘，`HostDown` 照常送出），promtool 案例鎖住；延遲上限收緊為約 6m15s 與約 8m（`keep_firing_for` 從第一次不成立的評估開始算） | sre |
 | 2026-10-15 | v1.9 | PR #80 第四輪 review：§1.7 的延遲改寫成推導出的上限（node_exporter 恢復後約 7m15s，實測 5m41s；資料缺口期間主機掛掉時 `HostDown` 約 9m 後才解除抑制）；補上 probe 新鮮度的 scrape 間隔前提與 `host_metrics_missing_for` ≥ `login_probe_stale_seconds`（`prometheus-apply.yml` 新增的兩道 gate） | sre |

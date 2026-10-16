@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.13
+> 版本：v1.14
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -77,7 +77,7 @@
 | `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
 | `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
 | `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但這台主機在 `host_metrics_missing_success_window` 內有一次成功登入＝監控資料缺口，與 `HostDown` 分開）的 `for:`。必須短於 seed `HostDown` 的 10m（playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
-| `host_metrics_missing_success_window` | `HostMetricsMissing` 只採信 target 自己的 last-success 時間戳在這段時間內有變化（`changes()`）。必須短於 `host_metrics_missing_for`、至少涵蓋兩次 scrape（playbook 會擋），掛掉的主機才不會觸發它；`login_probe_interval` + `login_probe_total_timeout` 要明顯短於它 | 否 | `2m` |
+| `host_metrics_missing_success_window` | `HostMetricsMissing` 只採信 target 自己的 last-success 時間戳在這段時間內有變化（`changes()`）。playbook 會擋：時間窗 + 15s（probe 的 textfile 寫出間隔）不得超過 `host_metrics_missing_for`（否則掛掉的主機可能觸發它），且每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout` + 15s + 一次 scrape 不得超過時間窗（否則資料缺口期間會中斷）；至少涵蓋兩次 scrape | 否 | `140s` |
 | `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
 | `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
 | `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動 | 否 | `5m` |
@@ -338,3 +338,4 @@
 | 2026-10-15 | v1.11 | PR #80 第四輪 review：`prometheus-apply.yml` 新增兩道 gate——`login_probe_stale_seconds` ≥ 3 × `prometheus_scrape_interval`（`prometheus_scrape_interval` 必須是單一 duration），`host_metrics_missing_for` ≥ `login_probe_stale_seconds`；promtool 證明兩者各自防止的誤報。row 未變 | sre |
 | 2026-10-15 | v1.12 | PR #80 第五輪 review：`prometheus_scrape_interval` 一列寫明單一 duration 與 3 倍的限制。row 未變 | sre |
 | 2026-10-15 | v1.13 | PR #80 第六輪 review：新增 `host_metrics_missing_success_window`（預設 2m）；`HostMetricsMissing` 改看 target 自己的 last-success 時間戳，取代 `host_metrics_missing_for` ≥ `login_probe_stale_seconds` 的 gate。row 未變 | sre |
+| 2026-10-16 | v1.14 | PR #80 第七輪 review：`host_metrics_missing_success_window` 預設改為 140s，兩道 gate 改為「時間窗 + 15s ≤ `host_metrics_missing_for`」與「probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗」。row 未變 | sre |

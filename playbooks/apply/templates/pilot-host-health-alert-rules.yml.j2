@@ -117,9 +117,12 @@ groups:
       # last-success timestamp must have changed (changes(), so the probe
       # host's clock does not matter). A stalled probe's frozen success=1,
       # or a slow round that has not reached a dead target yet, keeps
-      # success=1 but records no new success, and the window is shorter
-      # than host_metrics_missing_for (the playbook enforces it), so a dead
-      # host can never raise this alert. While this fires, Alertmanager inhibits the seed
+      # success=1 but records no new success. The last success before a
+      # death is published up to one textfile write (15 s) later, so the
+      # condition can hold for window + 15 s after the death; the playbook
+      # keeps that within host_metrics_missing_for, so a dead host does not
+      # raise this alert. It also keeps the window long enough for the probe
+      # hosts' interval + timeout, so a healthy probe holds it during a gap. While this fires, Alertmanager inhibits the seed
       # HostDown{job="node"} of the same host (it answers SSH, so it is not
       # down); the playbook keeps host_metrics_missing_for below HostDown's
       # 10m so HostDown never notifies first. keep_firing_for holds it (and

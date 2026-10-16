@@ -330,6 +330,14 @@ func playbookPreTasks(t *testing.T, path string, prefixes ...string) []map[strin
 // whether ansible-playbook succeeded.
 func runLocalPlay(t *testing.T, vars map[string]any, tasks []map[string]any, extra ...string) (string, bool) {
 	t.Helper()
+	return runLocalPlayInventory(t, "", vars, tasks, extra...)
+}
+
+// runLocalPlayInventory is runLocalPlay against inventory inv (YAML; it must
+// define localhost), so tasks can read other hosts' hostvars and groups.
+// An empty inv means "localhost," only.
+func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks []map[string]any, extra ...string) (string, bool) {
+	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
 			t.Fatalf("ansible-playbook not installed: %v (PILOT_REQUIRE_CONTAINER_TESTS=1)", err)
@@ -345,7 +353,14 @@ func runLocalPlay(t *testing.T, vars map[string]any, tasks []map[string]any, ext
 	if err := os.WriteFile(filepath.Join(dir, "play.yml"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("ansible-playbook", append([]string{"-i", "localhost,", "play.yml"}, extra...)...)
+	invArg := "localhost,"
+	if inv != "" {
+		invArg = filepath.Join(dir, "inv.yml")
+		if err := os.WriteFile(invArg, []byte(inv), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("ansible-playbook", append([]string{"-i", invArg, "play.yml"}, extra...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
 	out, err := cmd.CombinedOutput()
