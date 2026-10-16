@@ -1,0 +1,12 @@
+{
+  "result": null,
+  "error": {
+    "code": 4010,
+    "message": "This entry is already disabled",
+    "data": {},
+    "name": "AlreadyInactive"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

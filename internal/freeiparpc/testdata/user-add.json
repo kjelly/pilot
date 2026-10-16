@@ -1,0 +1,81 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "P0 Alice"
+      ],
+      "gecos": [
+        "P0 Alice"
+      ],
+      "uid": [
+        "p0-alice"
+      ],
+      "givenname": [
+        "P0"
+      ],
+      "displayname": [
+        "P0 Alice"
+      ],
+      "krbprincipalname": [
+        "p0-alice@IPA.PILOT.INTERNAL"
+      ],
+      "uidnumber": [
+        "1927600192"
+      ],
+      "sn": [
+        "Alice"
+      ],
+      "mail": [
+        "p0-alice@example.test"
+      ],
+      "krbcanonicalname": [
+        "p0-alice@IPA.PILOT.INTERNAL"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "gidnumber": [
+        "1927600192"
+      ],
+      "ipauniqueid": [
+        "61288518-c921-11f1-9342-5254001b059e"
+      ],
+      "homedirectory": [
+        "/home/p0-alice"
+      ],
+      "initials": [
+        "PA"
+      ],
+      "mepmanagedentry": [
+        "cn=p0-alice,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      ],
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ],
+      "dn": "uid=p0-alice,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p0-alice",
+    "summary": "Added user \"p0-alice\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

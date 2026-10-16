@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 905,
+    "message": "unknown command 'p0_no_such_command'",
+    "data": {
+      "name": "p0_no_such_command"
+    },
+    "name": "CommandError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
