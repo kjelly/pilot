@@ -413,16 +413,23 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 	if when == "" || msg == "" {
 		t.Fatalf("the restart needs a when and the failure a msg; got %q, %q", when, msg)
 	}
+	// In check mode a command is skipped and registers rc=0 ("Command would
+	// have run if not in check mode", ansible-core 2.19.2), which the
+	// condition reads as accepted. The check must run in check mode too.
+	if validate := taskNamed(t, rescue, "ROLLBACK — validate the restored rsyslog configuration"); validate["check_mode"] != false {
+		t.Errorf("the rescue's validation must keep check_mode: false; got %v", validate["check_mode"])
+	}
 
 	// rsyslogd -N1 results as `register` records them on Ubuntu 24.04,
 	// rsyslog 8.2312.0, for /etc/rsyslog.conf as shipped and with
-	// /etc/rsyslog.d/99-pr79-broken.conf holding `this is not rsyslog syntax {`
-	// (captured through Ansible on pr79-dev, 2026-10-16).
+	// /etc/rsyslog.d/99-pr79-broken.conf holding the content named in each
+	// comment (captured through Ansible on pr79-dev, 2026-10-16).
 	accepted := []any{
 		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
 		"rsyslogd: End of config validation run. Bye.",
 	}
-	rejected := []any{
+	// "this is not rsyslog syntax {\n"
+	rejectedSyntax := []any{
 		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
 		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
 		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
@@ -432,6 +439,30 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
 		"rsyslogd: could not interpret master config file '/etc/rsyslog.conf'. [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
 	}
+	// "action(type=\"omfile\")\n"
+	rejectedOmfile := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: omfile: either the \"file\" or \"dynafile\" parameter must be given [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: errors occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	}
+	// "if $msg contains 'x' then {\n  stop\n"
+	rejectedUnterminated := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: error during parsing file /etc/rsyslog.conf, on or before line 54: syntax error on token '' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+		"rsyslogd: could not interpret master config file '/etc/rsyslog.conf'. [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	}
+	// "$FooBarDirective on\n"
+	rejectedUnknownDirective := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: invalid or yet-unknown config file command 'FooBarDirective' - have you forgotten to load a module? [v8.2312.0 try https://www.rsyslog.com/e/3003 ]",
+	}
+	// "module(load=\"imnonexistent\")\n"
+	rejectedMissingModule := []any{
+		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
+		"rsyslogd: could not load module 'imnonexistent', errors: trying to load module /usr/lib/x86_64-linux-gnu/rsyslog/imnonexistent.so: /usr/lib/x86_64-linux-gnu/rsyslog/imnonexistent.so: cannot open shared object file: No such file or directory [v8.2312.0 try https://www.rsyslog.com/e/2066 ]",
+	}
+	// What ansible-core 2.19.2 registers when `when:` skips the check.
+	notRun := map[string]any{"changed": false, "false_condition": false, "skip_reason": "Conditional result was False", "skipped": true}
 	cases := []struct {
 		name        string
 		result      map[string]any
@@ -439,12 +470,20 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 		wantMsg     string
 	}{
 		{"accepted", map[string]any{"rc": 0, "stderr_lines": accepted}, true, "rsyslog was restarted with the restored configuration."},
-		// The message names the broken file and the error, not the
-		// generic last line "could not interpret master config file".
-		{"rejected", map[string]any{"rc": 1, "stderr_lines": rejected}, false,
-			"did not pass (rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{'"},
+		// The parsing line with the error, not rsyslogd's summary lines.
+		{"rejected: syntax error", map[string]any{"rc": 1, "stderr_lines": rejectedSyntax}, false,
+			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{'"},
+		{"rejected: omfile without a file", map[string]any{"rc": 1, "stderr_lines": rejectedOmfile}, false,
+			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: omfile: either the \"file\" or \"dynafile\" parameter must be given"},
+		{"rejected: unterminated block, blamed on rsyslog.conf", map[string]any{"rc": 1, "stderr_lines": rejectedUnterminated}, false,
+			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.conf, on or before line 54: syntax error on token ''"},
+		// No parsing line: the last line.
+		{"rejected: unknown directive", map[string]any{"rc": 1, "stderr_lines": rejectedUnknownDirective}, false,
+			"(rc=1: rsyslogd: invalid or yet-unknown config file command 'FooBarDirective'"},
+		{"rejected: module does not load", map[string]any{"rc": 1, "stderr_lines": rejectedMissingModule}, false,
+			"(rc=1: rsyslogd: could not load module 'imnonexistent'"},
 		{"rsyslogd missing", map[string]any{"rc": 2, "msg": "Error executing command.", "stderr_lines": []any{}}, false, "did not pass (rc=2: Error executing command.)"},
-		{"check skipped", map[string]any{"skipped": true}, false, "did not pass (rc=?: no output)"},
+		{"validation did not run", notRun, false, "did not pass (rc=?: no output)"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

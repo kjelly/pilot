@@ -598,10 +598,14 @@
         # lost every drop-in sorting after the invalid one, and the next run
         # reported changed=0 (2026-10-15, pr79-log). Restart only a
         # configuration rsyslogd accepts; otherwise the running rsyslog keeps
-        # what it has. The message quotes the last "error during parsing" line,
-        # which names the file and the error: `rsyslogd -N1` ends with the
-        # generic "could not interpret master config file" (rsyslog 8.2312.0,
-        # captured 2026-10-16).
+        # what it has. `rsyslogd -N1` ends with a generic line such as "could
+        # not interpret master config file", so the message quotes the last
+        # "error during parsing" line that is not rsyslogd's summary
+        # ("warnings/errors occurred in file ..."). That line states the error
+        # and the file rsyslogd blames, which for an unterminated block in a
+        # drop-in is /etc/rsyslog.conf. Without such a line (an unknown
+        # directive, a module that does not load) it quotes the last line,
+        # then Ansible's message (rsyslog 8.2312.0, captured 2026-10-16).
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
@@ -631,7 +635,8 @@
                  'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
                  ~ (log_server_rescue_syntax.rc | default('?')) ~ ': '
                  ~ ((log_server_rescue_syntax.stderr_lines | default([])
-                     | select('search', 'error during parsing') | list | last
+                     | select('search', 'error during parsing')
+                     | reject('search', '(warnings|errors) occurred in file') | list | last
                      | default(log_server_rescue_syntax.stderr_lines | default([]) | last | default(''), true))
                     or (log_server_rescue_syntax.msg | default('no output')))
                  ~ '), so the running rsyslog keeps what it has.' }}
