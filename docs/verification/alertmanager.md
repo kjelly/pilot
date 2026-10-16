@@ -53,11 +53,13 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
    同一台主機 `job="node"` 的 `HostDown`（10m 才觸發，從一開始就被抑制）。
    `prometheus-apply.yml` 拒絕 `host_metrics_missing_for` ≥ 10m。它帶
    `keep_firing_for`（`login_probe_alert_keep_firing_for`，預設 5m），probe 單輪失敗或重啟
-   （重啟後第一次寫出的 textfile 是 `success=0`）不會讓它中斷、讓 `HostDown` 漏出來。
+   （重啟後第一次寫出的 textfile 是 `success=0`）不會讓它中斷、讓 `HostDown` 漏出來。它帶
+   `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
+   任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
    代價是延遲（預設值，Prometheus 未設 `evaluation_interval`，即 1m）：
    - node_exporter 恢復後，`HostMetricsMissing` 要等下一次 scrape（≤15s）與規則評估
      （≤1m）才不再成立；`keep_firing_for` 從那次評估開始算，剛好 5m 後 resolve，
-     所以最多約 6m15s（實測 5m40s，`docs/evidence/login-probe/2026-10-15-243987b.md`）。
+     所以最多約 6m15s（實測 5m43s，`docs/evidence/login-probe/2026-10-16-a45dfca.md`）。
    - 資料缺口期間主機真的掛掉時，probe 要到下一輪失敗才會寫出 `success=0`
      （`login_probe_interval` 60s + `login_probe_total_timeout` 30s + textfile 寫出 ≤15s），
      再經 scrape（≤15s）與評估（≤1m）才不再成立，加上 `keep_firing_for` 5m，`HostDown`
@@ -65,9 +67,7 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
    - 資料缺口期間 probe 必須在每個時間窗內為這台主機記到一次成功登入。probe 正常時這由 playbook
      的 gate 保證（見下面前提）；probe 慢到同一台主機兩次成功的間隔超過時間窗（例如大量主機同時
      掛掉、一輪跑很久，`pilot_login_probe_round_overruns_total` 會增加）時，`HostMetricsMissing`
-     會中斷或不觸發，`HostDown` 照常送出——寧可多送「Target down」，不會漏送（fail-safe）。它帶
-   `action_required="true"`，`teams` 模式也會送出，不會因為 `HostDown` 被抑制而沒有
-   任何通知。其他 job（例如 `dcgm`）的 `HostDown` 不受影響。
+     會中斷或不觸發，`HostDown` 照常送出——寧可多送「Target down」，不會漏送（fail-safe）。
 3. **一台 login probe 停擺（`PilotLoginProbeStale`）只抑制它自己的告警。** 每個
    `PilotLoginProbe*` 告警都帶 `probe_host`（看到它的 probe 主機），抑制只比對
    `probe_host`；另一台 probe 回報的 `AccountDenied` 照常送出。`PilotLoginProbeStale`
@@ -141,11 +141,13 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 - 工具：`pilot verify docs/verification/alertmanager.md -i <inventory> -l alertmanager`
 - 輸出格式：`.verification/alertmanager-<UTC>.{ndjson,md}`
 - 預期 row 數：10
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-243987b.md`
-  （2026-10-15，candidate `243987b`，tree `f51ec98b`；全新 4 台 vm-target，`null` mode；L1-L6 PASS，
-  本 spec 10/10 PASS（run `058add65-c90f-4aa4-934f-7031796c5f19`）；C10 經真實 verify pipeline 對已部署的
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-16-a45dfca.md`
+  （2026-10-16，candidate `a45dfca`，tree `1f9d9d28`；全新 4 台 vm-target，`null` mode；L1-L6 PASS，
+  本 spec 10/10 PASS（run `5a860814-6062-4806-b74c-a47116464127`）；C10 經真實 verify pipeline 對已部署的
   Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL；同一輪在真實 Alertmanager 上實測資料缺口
-  （含 probe 單輪失敗）、整台主機停擺、兩台 probe 其中一台停擺的抑制行為）。
+  （含 probe 重啟與單輪失敗）、整台主機停擺（同時另一台的 SSSD 卡住）、兩台 probe 其中一台停擺、
+  全站 HBAC 拒絕（三個 `AccountDenied` 合成一個 group）的抑制與分組行為；兩道時間窗 gate 在真實主機上
+  拒絕錯誤設定）。
 - 歷史：Teams mode 的 `/render` 與通知實測見 `docs/evidence/alertmanager/2026-09-17-30d6b92.md`
   （當時 9 個 row，早於 C10 與 issue #11 的 inhibit 規則）。
 
