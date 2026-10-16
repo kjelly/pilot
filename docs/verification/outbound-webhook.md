@@ -372,9 +372,9 @@ row's probe never has to be renamed once its test exists:
   verifyOnly: true
 - id: C22
   category: projection
-  check: snapshot hosts come only from hosts.yml, roster host references map to inventory IDs by one exact address match, and every explicit access host reference resolves without a dangling target
+  check: snapshot hosts come only from hosts.yml; declared external roster hosts with no inventory address match are outside the snapshot scope and do not disable it; hostgroup and access targets retain only inventory hosts, external-only access rules are omitted, and dangling references or ambiguous matches still fail closed
   probe: |
-    go test ./internal/outbound/... -run '^TestOutboundProjection_P2[012]$' -v
+    go test ./internal/outbound/... -run '^TestOutboundProjection_(P2[012].*|External.*|RosterHostMappingFailsClosed)$' -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
 - id: C23
