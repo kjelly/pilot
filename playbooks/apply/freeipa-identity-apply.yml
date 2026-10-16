@@ -1005,11 +1005,17 @@
         # AuthorizedKeysCommand (sss_ssh_authorizedkeys), configured by
         # ipa-client-install — no per-host authorized_keys file needed.
         # Keys go through argv (not shell) so their spaces/base64 never hit a shell.
+        # An empty list sends `--sshpubkey=`, which clears every key. Without it
+        # the command was a bare `ipa user-mod <user>` ("no modifications to be
+        # performed"), so removing a user's last key never revoked it (issue
+        # #113). Clearing a user with no key answers the same "no
+        # modifications" (captured, FreeIPA 4.13.4), so it stays a no-op.
         - name: "Set SSH public keys for users (declarative replace)"
           ansible.builtin.command:
             argv: >-
               {{ ['ipa', 'user-mod', item.name]
-                 + (item.ssh_keys | map('regex_replace', '^(.*)$', '--sshpubkey=\1') | list) }}
+                 + ((item.ssh_keys | map('regex_replace', '^(.*)$', '--sshpubkey=\1') | list)
+                    if (item.ssh_keys | length) > 0 else ['--sshpubkey=']) }}
           loop: "{{ ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list }}"
           loop_control:
             label: "{{ item.name }} ({{ item.ssh_keys | length }} key(s))"
