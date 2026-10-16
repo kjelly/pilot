@@ -20,7 +20,7 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-16）**：candidate `032a8b3`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-16）**：candidate `56c7582`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`siem_log_root: /srv/siem`
 > 放在 checkout 外的 inventory group_vars。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.8）、
 > log-shipping 9/9（v1.5）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
@@ -43,11 +43,17 @@
 >     只有 C1 失敗：它用 `dpkg`，spec §1 目標是 Ubuntu。
 > - apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容（這次才建的就移除），
 >   重新載入 profile，移除這次加的 SELinux 規則；`rsyslogd -N1` 接受還原後的設定才重啟 rsyslog。
->   兩種情況都實測過：失敗原因是別的無效 drop-in 時，rescue 沒有重啟，原本的 rsyslog 繼續正常運作（11/11），
->   失敗訊息引用 rsyslogd 最後一個不是「warnings/errors occurred in file」的 `error during parsing` 行
->   （錯誤與 rsyslogd 指出的檔案；未結束的區塊會被算在 `/etc/rsyslog.conf` 上），沒有這種行時
->   （例如不認得的指令）引用最後一行；
->   失敗原因在這次 run 自己（`siem_logrotate_maxage=abc` 讓 Step 4 失敗）時，還原後的設定通過檢查，rescue 重啟 rsyslog（11/11）。
+>   - 失敗原因是別的無效 drop-in 時，rescue 不重啟，原本的 rsyslog 繼續正常運作（11/11）。Ubuntu 上實測了
+>     語法錯誤、不認得的指令、找不到的 template、`omfwd` 不合法的 protocol；AlmaLinux 上實測了語法錯誤、
+>     不認得的指令、`omfwd`。
+>   - 失敗訊息引用 `rsyslogd -N1` stderr 裡第一個既不是版本行（`config validation run`）、也不是
+>     「warnings occurred in file」摘要的行；沒有這種行時（rsyslogd 不存在、檢查沒執行）引用 Ansible 的訊息。
+>     在 rsyslog 8.2312.0 與 8.2510.0 擷取的 18 種拒絕情況裡，那一行都是 rsyslogd 回報的第一個錯誤：
+>     例如 `input()` 的 module 沒載入時是「input module name … is unknown」，不是後面的 `parameter … not known`；
+>     未結束的區塊會被算在 `/etc/rsyslog.conf` 上。
+>   - 失敗原因在這次 run 自己（`siem_logrotate_maxage=abc` 讓 Step 4 失敗）時，還原後的設定通過檢查，rescue 重啟 rsyslog（11/11）。
+> - 已知缺口（Ubuntu）：改根目錄的 run 在 Step 2a 重新載入 AppArmor profile 後、rsyslog 重啟前（失敗時則到 rescue
+>   重新載入前），正在跑的 rsyslogd 不能寫舊的根目錄，這段時間收到的訊息會遺失（實測遺失 2 筆）。EL 不受影響。
 > - `pilot deploy` 以 workspace inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30`
 >   （沒加引號）：preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，
 >   log-server.md 11/11。修正前的 `31f97a6` 用同樣的輸入在套用前就以 `must be string` 拒絕。
@@ -63,7 +69,7 @@
 >
 > 這些 gate 由 Ansible 實跑的 regression test 鎖住；VM 上的逐項實測只在較早的 candidate 做過，
 > 不算這個 candidate 的證據。
-> 紀錄：[`2026-10-16-032a8b3.md`](../evidence/play-vars-inventory-precedence/2026-10-16-032a8b3.md)。
+> 紀錄：[`2026-10-16-56c7582.md`](../evidence/play-vars-inventory-precedence/2026-10-16-56c7582.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
