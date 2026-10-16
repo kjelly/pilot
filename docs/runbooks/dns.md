@@ -11,21 +11,21 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-16，candidate `cdcd39b`（tree `422ca9ec8272a5e0a709991d7a5407eba117d3ff`，PR #92 修正 replica forwarder 的 kinit、與 `main` `f98327b` 合併後），
+最新驗證：2026-10-16，candidate `b82a0c9`（tree `b733b150723485349bf915a9f15084ca9cc37798`，PR #92 的 3 個 FreeIPA kinit 都改由 stdin 傳密碼、與 `main` `afeacbd` 合併後），
 **PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md)
-（topology test、`dns.md`、與 `44e2d20`／`main` `f9fb701`／`c6bcfe9` 的對照、還沒 promote 的 replica、`site.yml`、forwarders 與 gate、含特殊字元的 admin 密碼，全部在同一個 candidate 上重跑）。
-更早的 candidate（`b02b5cb`、`287cf79`、`5750f2a`、`09ded7e`、`01a64f4`）的 record 都已標為 superseded。
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)
+（topology test、`dns.md`、與 `44e2d20`／`main` `f9fb701`／`c6bcfe9`／`3dbc0ef` 的對照、還沒 promote 的 replica、`site.yml`、forwarders 與 gate、含特殊字元的 admin 密碼，全部在同一個 candidate 上重跑）。
+更早的 candidate（`cdcd39b`、`b02b5cb`、`287cf79`、`5750f2a`、`09ded7e`、`01a64f4`）的 record 都已標為 superseded。
 dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
 `pilot deploy` 全站部署、`--limit`、`pilot reconcile`），摘要：
 [`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建、未跑過任何 playbook 的 VM（`cdcd39b` 這輪重新建立；consumer 端的情境另用 4 台的 topology）：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，ipa-server 4.13.4-1.el9_8）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；測完已移除 |
+| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建、未跑過任何 playbook 的 VM（`b82a0c9` 這輪重新建立；consumer 端的情境另用 4 台的 topology）：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，ipa-server 4.13.4-1.el9_8）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；測完已移除 |
 | inventory host 集合 | `freeipa-server`: pr92-ipa；`freeipa-server-replica`: pr92-r1、pr92-r2（不設 `freeipa_setup_dns`）、pr92-r3（列在 inventory、不 promote）；`dns`: pr92-dns；`freeipa-dns-client`: pr92-client。另用 inventory 副本把 pr92-r1 改成 FreeIPA 不認得的名稱 |
 | 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、測試 fixture 與診斷用唯讀 principal 設定）；含特殊字元密碼的檢查另用兩份一次性 vault（只有 `ipa_admin_password`，跑完刪除）；dns 設定用 role 預設值 |
-| 結果 | topology test（freeipa-server → replica → dns fixtures → dns → freeipa-dns-client，`-l '!pr92-r3'`）：L3 五台 `failed=0`；L4 `failed=0`；L5 `freeipa-server.md` 20/0、`freeipa-server-replica.md` 16/0、`freeipa-dns-client.md` 7/0，`dns.md` 另以 `--input` 驗證 16 pass、4 not applicable；L6 五台 `changed=0`。之後：FreeIPA 列出的 replica named 停掉時 G5 擋下、consumer 只印 WARNING；primary forwarders 給空值時全域與 server 自己的 forwarders 都清掉、重跑 `changed=0`；forwarder gate 與安裝前的 port gate 都在任何變更前擋下；診斷 `complete`、14/14 `match`，沒 promote 的 replica 只有 `freeipa_replica_not_dns_server`。inventory 名稱與 FreeIPA 不同、但自己權威回答 zone 的 replica 留在 stub（`44e2d20` 會把它排除），見 `cdcd39b` record 的 R2.1。admin 密碼含 `$`、反引號、`$(...)` 時，對既有 DNS replica 重跑 replica playbook：`c6bcfe9` 在 forwarder 的 kinit 失敗，密碼裡的指令在 replica 上以 root 執行；`cdcd39b` 正常設定 forwarders、重跑 `changed=0`，指令沒有被執行 |
+| 結果 | topology test（freeipa-server → replica → dns fixtures → dns → freeipa-dns-client，`-l '!pr92-r3'`）：L3 五台 `failed=0`；L4 `failed=0`；L5 `freeipa-server.md` 20/0、`freeipa-server-replica.md` 16/0、`freeipa-dns-client.md` 7/0，`dns.md` 另以 `--input` 驗證 16 pass、4 not applicable；L6 五台 `changed=0`。之後：FreeIPA 列出的 replica named 停掉時 G5 擋下、consumer 只印 WARNING；primary forwarders 給空值時全域與 server 自己的 forwarders 都清掉、重跑 `changed=0`；forwarder gate 與安裝前的 port gate 都在任何變更前擋下；診斷 `complete`、14/14 `match`，沒 promote 的 replica 只有 `freeipa_replica_not_dns_server`。inventory 名稱與 FreeIPA 不同、但自己權威回答 zone 的 replica 留在 stub（`44e2d20` 會把它排除），見 `b82a0c9` record 的 R2.1。admin 密碼含 `$`、反引號、`$(...)`（另一組再加引號）時，三種情境的結果如下（對照組失敗，密碼裡的 `touch` 以 root 執行；`b82a0c9` 正常完成、重跑 `changed=0`，指令沒有被執行）：(1) 單機 vm-target inventory（沒有 `freeipa-server` group，self-register 不跑），對既有 DNS replica 重跑 replica playbook：`c6bcfe9` 在 forwarder 的 kinit 失敗，指令在 replica 上執行；(2) topology inventory（有 `freeipa-server` group，self-register 委派到 primary 執行）：`3dbc0ef` 在 self-register 的 kinit 失敗，指令在 primary 上執行；(3) primary 跑 `freeipa-server-apply.yml --tags freeipa-verify`（這個 tag 只選到 dnsconfig-mod 的 kinit 會讀密碼）：`3dbc0ef` 在該 kinit 失敗，指令在 primary 上執行。`main` 上其他仍用 shell 的 kinit 與 `ldapmodify -w`（#118，例如 dns fixtures、`freeipa-server-apply.yml` 的 389-ds audit 寫入）遇到這種密碼仍會失敗或執行其中的指令，所以完整的 apply 鏈沒有用這種密碼跑 |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
@@ -184,3 +184,4 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 2026-10-15 | v1.6 | §0.5 加上同一 candidate `287cf79` 的對照實跑：round 2 的 targeted checks（`287cf79-targeted`）與 round 1 的情境（`287cf79-round1`），兩份都在執行當下記錄 metadata；`01a64f4`、`09ded7e`、`5750f2a` 三份舊 record 標為 superseded | pilot |
 | 2026-10-15 | v1.7 | §0.5 改指向再次與 `main`（`cc38f58`：#89、#101、#107）合併後的 candidate `b02b5cb`，所有對照與情境都在它上面重跑；`287cf79` 的三份 record 標為 superseded | pilot |
 | 2026-10-16 | v1.8 | §0.5 改指向 candidate `cdcd39b`：PR #92 review（`c6bcfe9` 的 P2）後，replica forwarder 的 kinit 改由 stdin 傳密碼，並與 `main` `f98327b` 合併；所有對照與情境在新建 VM 上重跑，另加含特殊字元 admin 密碼的實跑；`b02b5cb` 的 record 標為 superseded | pilot |
+| 2026-10-16 | v1.9 | §0.5 改指向 candidate `b82a0c9`：PR #92 review（`3dbc0ef` 的 B1）後，replica self-register 與 primary dnsconfig-mod 的 kinit 也改由 stdin 傳密碼，並與 `main` `afeacbd` 合併；所有對照與情境在新建 VM 上重跑。結果欄寫明特殊字元密碼三種情境各自的 inventory 條件，以及 #118 的其他 shell kinit 仍會失敗（review S1）；`cdcd39b` 的 record 標為 superseded | pilot |

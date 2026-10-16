@@ -65,11 +65,11 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   提供者，issue #67）：4 台新 VM（primary、replica、dns tier、consumer）`vm-target topology test`
   L3 check mode→L6 PASS，本檔 7/7、重跑 `changed=0`；consumer 的 `/etc/resolv.conf` 依序是 tier、
   primary、replica。見 [evidence](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
-- 最新實跑（2026-10-16，candidate `cdcd39b`，tree `422ca9ec`，PR #92：沒被 FreeIPA 列為 DNS server 的 replica 排除、
-  nameserver 寫入前逐一檢查）：6 台與 4 台新 VM 的 `vm-target topology test` L3→L6 PASS，本檔 7/7（`4790534e`、`04385fa5`）、
+- 最新實跑（2026-10-16，candidate `b82a0c9`，tree `b733b150`，PR #92：沒被 FreeIPA 列為 DNS server 的 replica 排除、
+  nameserver 寫入前逐一檢查）：6 台與 4 台新 VM 的 `vm-target topology test` L3→L6 PASS，本檔 7/7（`023cd719`、`d3ace139`）、
   重跑 `changed=0`；沒 promote 的 replica 不寫進 `resolv.conf`（`main` 會寫）、`freeipa_setup_dns: true` 時在任何變更前擋下、
   promote 之後納入；FreeIPA 列出的 replica named 停掉時只印 WARNING。見
-  [evidence](../evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md)。
+  [evidence](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。

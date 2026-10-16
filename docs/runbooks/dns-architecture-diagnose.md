@@ -15,9 +15,9 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-16，candidate `cdcd39b`（tree `422ca9ec8272a5e0a709991d7a5407eba117d3ff`，PR #92 修正 replica forwarder 的 kinit、與 `main` `f98327b` 合併後），
+最新驗證：2026-10-16，candidate `b82a0c9`（tree `b733b150723485349bf915a9f15084ca9cc37798`，PR #92 的 3 個 FreeIPA kinit 都改由 stdin 傳密碼、與 `main` `afeacbd` 合併後），
 在新建的 6 台 topology 上，**PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-cdcd39b.md)。
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)。
 #91 的情境（tier 拒絕 client、`freeipa_server_fqdn` 帶結尾的點、`K/M`／`k` principal、stub 與 FreeIPA BIND 當第一跳）也在這個 candidate 上重跑。
 更早幾輪（不同 candidate，僅供歷史參考）：[`2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)、
 [`2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)、
@@ -198,3 +198,4 @@ dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台
 | 2026-10-15 | §0.5 改指向合併後的 candidate `287cf79` 在新建 6 台 topology 上的實跑；#91 的其他情境註明最後一次實跑在 `46fbc58` | pilot |
 | 2026-10-15 | §0.5 改指向再次與 `main` 合併後的 candidate `b02b5cb`；#91 的情境也在它上面重跑，不再引用 `46fbc58` 當現行證據 | pilot |
 | 2026-10-16 | §0.5 改指向 candidate `cdcd39b`（PR #92 的 replica forwarder kinit 改由 stdin 傳密碼，並與 `main` `f98327b` 合併）；#91 的情境也在它上面重跑 | pilot |
+| 2026-10-16 | §0.5 改指向 candidate `b82a0c9`（PR #92 的 self-register 與 dnsconfig-mod kinit 也改由 stdin 傳密碼，並與 `main` `afeacbd` 合併）；#91 的情境也在它上面重跑。這輪 MCP server 的 `--dir` 是 candidate checkout，supported layer 有讀到 `contracts/`（`cdcd39b` 那輪用的是空目錄） | pilot |
