@@ -164,22 +164,38 @@
   changed_when: true
   tags: [always]
 
-- name: "FreeIPA client failover — validate: kinit with host keytab succeeds after krb5.conf mutation"  # noqa no-handler - inline rollback decision
-  ansible.builtin.command:
-    argv: [kinit, -k, -t, /etc/krb5.keytab, "host/{{ ipa_client_fqdn }}@{{ ipa_realm }}"]
-  register: freeipa_client_krb5_validate
-  changed_when: false
-  failed_when: false
+# The validation ticket goes to a private cache, destroyed in always: (issue
+# #69). Before, kinit -k wrote root's default cache (on a KCM:/KEYRING:
+# collection it also switched the primary cache) and a bare kdestroy removed
+# whatever was primary afterwards.
+- name: "FreeIPA client failover — validate the reconciled server list with a private Kerberos cache"
   when: freeipa_client_krb5_write is changed
   tags: [always]
+  environment:
+    KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+  block:
+    - name: "Private Kerberos cache for the tickets below (issue #69)"
+      ansible.builtin.include_tasks:
+        file: freeipa-private-ccache-open.yml
+        apply:
+          tags: [always]
+      tags: [always]
 
-- name: "FreeIPA client failover — destroy the validation ticket"  # noqa no-handler - cleanup, not a config reaction
-  ansible.builtin.command:
-    argv: [kdestroy]
-  changed_when: false
-  failed_when: false
-  when: freeipa_client_krb5_write is changed
-  tags: [always]
+    - name: "FreeIPA client failover — validate: kinit with host keytab succeeds after krb5.conf mutation"  # noqa no-handler - inline rollback decision
+      ansible.builtin.command:
+        argv: [kinit, -k, -t, /etc/krb5.keytab, "host/{{ ipa_client_fqdn }}@{{ ipa_realm }}"]
+      register: freeipa_client_krb5_validate
+      changed_when: false
+      failed_when: false
+      when: freeipa_client_krb5_write is changed
+      tags: [always]
+  always:
+    - name: "Destroy the private Kerberos cache"
+      ansible.builtin.include_tasks:
+        file: freeipa-private-ccache-close.yml
+        apply:
+          tags: [always]
+      tags: [always]
 
 - name: "FreeIPA client failover — rollback + fail if post-mutation validation failed"
   when:

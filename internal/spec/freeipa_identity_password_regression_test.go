@@ -90,12 +90,8 @@ func identityPlaybookTasks(t *testing.T, names []string) []map[string]any {
 	var out []map[string]any
 	found := map[string]bool{}
 	pre, _ := plays[0]["pre_tasks"].([]any)
-	for _, r := range append(slices.Clone(pre), plays[0]["tasks"].([]any)...) {
-		task := r.(map[string]any)
+	for _, task := range namedTasks(append(slices.Clone(pre), plays[0]["tasks"].([]any)...), names) {
 		name, _ := task["name"].(string)
-		if !slices.Contains(names, name) {
-			continue
-		}
 		found[name] = true
 		c := map[string]any{}
 		for k, v := range task {
@@ -108,6 +104,30 @@ func identityPlaybookTasks(t *testing.T, names []string) []map[string]any {
 	for _, n := range names {
 		if !found[n] {
 			t.Fatalf("task %q not found in %s", n, identityApplyPath)
+		}
+	}
+	return out
+}
+
+// namedTasks returns the tasks named in names, in playbook order, at any
+// depth: most reconcile tasks sit inside the private Kerberos cache block
+// (issue #69), so a top-level scan would not find them. A requested block
+// task comes back whole, its rescue included; any other block is searched.
+func namedTasks(tasks []any, names []string) []map[string]any {
+	var out []map[string]any
+	for _, r := range tasks {
+		task, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := task["name"].(string); slices.Contains(names, name) {
+			out = append(out, task)
+			continue
+		}
+		for _, section := range []string{"block", "rescue", "always"} {
+			if inner, ok := task[section].([]any); ok {
+				out = append(out, namedTasks(inner, names)...)
+			}
 		}
 	}
 	return out

@@ -218,9 +218,12 @@ func (c *Client) ensureSession(ctx context.Context) (*spnego.Client, string, err
 	return nil, "", fmt.Errorf("freeipaaccess: could not establish a session against any configured server (%d tried): %w", len(c.cfg.Servers), lastErr)
 }
 
-func (c *Client) dropSession() {
+func (c *Client) dropSession(expired *spnego.Client) {
 	c.mu.Lock()
-	c.session = nil
+	// Another parallel RPC may already have refreshed this session.
+	if c.session == expired {
+		c.session = nil
+	}
 	c.mu.Unlock()
 }
 
@@ -233,7 +236,11 @@ func (c *Client) doCall(ctx context.Context, sc *spnego.Client, server string, b
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Referer", "https://"+server+"/ipa")
-	resp, err := sc.Do(req)
+	// loginTo established the IPA session cookie. The underlying http.Client
+	// and cookie jar support concurrent RPCs; spnego.Client.Do has mutable
+	// redirect state and must remain confined to the serialized login path.
+	// A 401 here is handled by call's bounded, synchronized session refresh.
+	resp, err := sc.Client.Do(req)
 	if err != nil {
 		return rpcEnvelope{}, fmt.Errorf("freeipa json-rpc call to %s: %w", server, err)
 	}
@@ -267,7 +274,7 @@ func (c *Client) call(ctx context.Context, method string, positional []any, name
 	}
 	env, err := c.doCall(ctx, sc, server, body)
 	if errors.Is(err, errSessionExpired) {
-		c.dropSession()
+		c.dropSession(sc)
 		sc, server, err = c.ensureSession(ctx)
 		if err != nil {
 			return rpcEnvelope{}, err

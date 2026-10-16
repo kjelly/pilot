@@ -1397,11 +1397,19 @@ inventory host: inventory:<hosts.yml name>
 ```
 
 Roster `hosts[]` MUST include a real FQDN and IPv4 address, but its entries
-are not emitted as `snapshot.hosts[]` entities. Each present roster host MUST
-match exactly one `hosts.yml` host by `ip_address == ansible_host`; the
-projection maps its FQDN references to that inventory host ID. Missing or
-ambiguous matches make the projection unavailable. `state: absent` roster
-hosts are omitted from the mapping.
+are not emitted as `snapshot.hosts[]` entities. A present roster host with
+exactly one `hosts.yml` match by `ip_address == ansible_host` maps its FQDN
+references to that inventory host ID. A declared host with no inventory
+address match is an external device (for example an NFS NAS), outside this
+inventory-scoped projection; it does not make the projection unavailable.
+Ambiguous matches still make the projection unavailable. `state: absent`
+roster hosts are omitted from the mapping.
+
+2026-10-16 contract correction: the previous requirement that every roster
+host match inventory prevented an unrelated external NAS from coexisting with
+user/access publication. External devices remain in the operational roster;
+the webhook neither enrolls them in Ansible nor invents projected hosts for
+them. `source_complete` describes the complete inventory-scoped projection.
 
 MUST NOT include：
 
@@ -1426,7 +1434,8 @@ IP reverse DNS 猜 FQDN
 The current single-source projection uses an exact, unique
 `ansible_host == roster.ip_address` mapping to resolve roster access
 references to `inventory:<hosts.yml name>`. It never emits a second roster
-host entity and fails closed if the address match is missing or ambiguous.
+host entity. Declared external hosts with no address match are excluded;
+ambiguous address matches still fail closed.
 
 Access target MUST 使用 inventory host ID：
 
@@ -1434,7 +1443,7 @@ Access target MUST 使用 inventory host ID：
 inventory:<hosts.yml name>
 ```
 
-因此每個 `ProjectedLoginAccess.HostIDs`／`ProjectedSudoAccess.HostIDs` 都能 join 到 `snapshot.hosts[].id`。Projection builder MUST 驗證 referential integrity；任何 explicit access host 無法映射到 present inventory host 時，projection unavailable，不得輸出 dangling reference。`all_hosts=true` 的 universe 是 snapshot 中的 inventory hosts。
+因此每個 `ProjectedLoginAccess.HostIDs`／`ProjectedSudoAccess.HostIDs` 都能 join 到 `snapshot.hosts[].id`。Projection builder MUST 驗證 referential integrity：hostgroup direct/effective membership 與 explicit access targets 只保留 inventory host IDs；已宣告的外部設備被排除，完全不存在或 absent 的 roster host 引用仍使 projection unavailable。排除外部設備後沒有 inventory target 的 explicit access rule 必須 omitted，不得轉成 `all_hosts=true`。`all_hosts=true` 的 universe 是 snapshot 中的 inventory hosts。
 
 ## 11.5 Roster source
 
@@ -1665,7 +1674,7 @@ Reuse 不代表直接複製現有 return value。特別是現有 `EffectiveSudoA
 4. sudo grant 只有 `EvaluateGrantLifecycle(...) == active` 才輸出；未到 `valid_not_before` 或已過 `valid_not_after` 都 omit。仍保留 not-before/not-after，讓 consumer 在長時間沒有新 event 時也能強制終點時間。
 5. breakglass 只有 `Activation.IsActive(now)` 且 roster definition仍 present 時輸出；`ValidUntil=activation.ExpiresAt`。
 6. 每條 access 的 users 必須與「present 且 Enabled=true」user set 取交集；結果為空的 rule omit。
-7. explicit hosts/hostgroups 展開後全部轉成對應的 `inventory:<hosts.yml name>` IDs；任何 dangling、missing 或 ambiguous address mapping 使整個 projection unavailable。
+7. explicit hosts/hostgroups 展開後，已宣告的外部設備被排除，其餘轉成對應的 `inventory:<hosts.yml name>` IDs；完全不存在或 absent 的 roster host 引用與 ambiguous address mapping 仍使整個 projection unavailable。若 explicit access rule 排除外部設備後沒有 inventory target，omit 該 rule，不得擴大為 all-hosts。
 8. `all_hosts=true` 時 `host_ids` 必須 omitted；consumer 以 snapshot 中的 inventory hosts 作 universe。
 
 Static sudo 的 `commands` 必須是 direct allow commands 與 allow command groups 的 resolved union；`denied_commands` 必須是 direct deny commands 與 deny command groups 的 resolved union。`run_as_users`、`run_as_groups`、`options` 必須原樣語意化、sort/dedupe 後輸出。任一 referenced user/group/host/hostgroup/command-group 不存在或 absent，必須使 projection unavailable，不得像現有 read-only helper 一樣 silent skip。
@@ -4178,7 +4187,7 @@ README / DELIVERY 若有 command surface table，補上相關入口。
 | P17 | configured unreadable roster never becomes empty authoritative users |
 | P18 | disabled HBAC rule omitted from effective login |
 | P19 | disabled/account-expired user omitted from access users but retained as user entity |
-| P20 | snapshot hosts come only from hosts.yml; roster host references map to inventory IDs by one exact address match |
+| P20 | snapshot hosts come only from hosts.yml; exact address matches map to inventory IDs; declared external devices never disable the projection or create inventory hosts, and external-only access is omitted |
 | P21 | every explicit access host_id resolves to a projected inventory host |
 | P22 | absent roster entities omitted; invalid dangling membership fails closed |
 | P23 | duplicate active breakglass records collapse to one stable entity |

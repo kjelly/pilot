@@ -205,9 +205,22 @@
       register: nfs_exports_rollback_state
       tags: [always, C7]
 
+    # The admin ticket for ipa service-add / ipa-getkeytab lives in a private
+    # cache, destroyed in `always:` (tasks/freeipa-private-ccache-open.yml,
+    # issue #69). Before, it was written to root's default cache and a bare
+    # kdestroy removed whatever that cache held at the end.
     - name: "Reconcile NFS identity, exports, and ACL with rollback"
       when: not ansible_check_mode
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
       block:
+        - name: "Private Kerberos cache for the admin ticket"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
+
         - name: "Snapshot managed exports fragment"
           ansible.builtin.copy:
             src: "{{ nfs_exports_fragment }}"
@@ -464,10 +477,11 @@
           ansible.builtin.fail:
             msg: "NFS reconciliation failed; the managed exports fragment was restored."
       always:
-        - name: "Release Kerberos ticket"
-          ansible.builtin.command: kdestroy
-          changed_when: false
-          failed_when: false
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
           tags: [always]
 
   handlers:

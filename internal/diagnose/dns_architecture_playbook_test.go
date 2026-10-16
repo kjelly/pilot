@@ -1,16 +1,19 @@
 package diagnose
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,7 +167,12 @@ type dnsModelScenario struct {
 }
 
 // Every scenario is valid for the playbooks' gates; the Go-only tests in
-// internal/diagnose cover the invalid and templated inputs.
+// internal/diagnose cover the invalid and templated inputs. One deliberate
+// difference is not a scenario: the model reports a pool whose FQDNs
+// differ only by case or a trailing dot as a duplicate, while the
+// playbook's unique (ansible-core 2.19.2: case-insensitive, trailing dot
+// kept) lets "ipa1.x" and "ipa1.x." through
+// (TestBuildDNSArchModel_DuplicateFQDNIgnoresTheTrailingDot).
 var dnsModelScenarios = []dnsModelScenario{
 	{name: "no dns tier", inventory: `
 all:
@@ -179,7 +187,9 @@ all:
 `},
 	// r2 leaves freeipa_setup_dns unset (a DNS provider, issue #67) and
 	// writes its forwarders as a string (one forwarder, issue #68); r1's
-	// ipa_dns_forwarders wins over its freeipa_dns_forwarders.
+	// ipa_dns_forwarders wins over its freeipa_dns_forwarders. The
+	// primary's FQDN comes from group_vars/all.yml, where the tier play
+	// reads it, in upper case with a trailing dot (see compareDNSModel).
 	{name: "split tier with two DNS-providing replicas", inventory: `
 all:
   children:
@@ -199,7 +209,9 @@ all:
       hosts:
         c1: {ansible_host: 10.0.0.21}
         r1: {}
-`, groupVars: map[string]string{"dns.yml": `
+`, groupVars: map[string]string{"all.yml": `
+freeipa_server_fqdn: IPA1.Example.Test.
+`, "dns.yml": `
 dns_upstream: [1.1.1.1, 9.9.9.9]
 dns_freeipa_zones: [Svc.Example.Test.]
 dns_stub_zones: ["corp.example=10.9.0.1, 10.9.0.2"]
@@ -306,36 +318,83 @@ func TestRegression_DNSArchitectureModelMatchesPlaybooks(t *testing.T) {
 	}
 }
 
-// ansibleRunTimeout bounds each Ansible command of the test. Twice on the
-// maintainer's workstation, under heavy load, an ansible-playbook run of
-// this test (ansible-core 2.19.2) kept polling for results with no worker
-// process left and never exited, which held the whole package until go
-// test's own timeout (40 minutes); the bound turns that into a failure
-// that names the command.
+// ansibleRunTimeout bounds each Ansible command of the test.
 const ansibleRunTimeout = 5 * time.Minute
+
+// ansibleResultsThreadCrash is how ansible-core 2.19.2's results thread
+// dies under heavy load: results_thread_main raises KeyError in
+// _convert_wire_task_result_to_raw (plugins/strategy/__init__.py; the
+// worker's result names a task the strategy's _queued_task_cache no longer
+// holds), the thread ends, and the playbook waits for that result forever
+// with no worker left. A reviewer's run under load ~26 captured the
+// traceback; two runs on the maintainer's workstation hung the same way.
+// It is an ansible-core race, not a model difference, so a run that shows
+// it is retried once; any other failure or timeout fails the test.
+var ansibleResultsThreadCrash = []string{"_convert_wire_task_result_to_raw", "KeyError"}
+
+// crashWatch collects an Ansible command's output and kills the command as
+// soon as ansibleResultsThreadCrash appears in it.
+type crashWatch struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	cancel  context.CancelFunc
+	crashed bool
+}
+
+func (w *crashWatch) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if !w.crashed {
+		out := w.buf.Bytes()
+		w.crashed = true
+		for _, sig := range ansibleResultsThreadCrash {
+			w.crashed = w.crashed && bytes.Contains(out, []byte(sig))
+		}
+		if w.crashed {
+			w.cancel()
+		}
+	}
+	return n, err
+}
 
 // runAnsible runs one Ansible command in dir within ansibleRunTimeout and
 // returns its stdout, or stdout and stderr together when combined is set.
+// A run that hits ansibleResultsThreadCrash is retried once.
 func runAnsible(t *testing.T, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), ansibleRunTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir, cmd.Env = dir, env
-	// A worker that outlives the killed parent must not keep the pipes,
-	// and so the test, open.
-	cmd.WaitDelay = 10 * time.Second
-	var out []byte
-	var err error
-	if combined {
-		out, err = cmd.CombinedOutput()
-	} else {
-		out, err = cmd.Output()
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(t.Context(), ansibleRunTimeout)
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Dir, cmd.Env = dir, env
+		// A worker that outlives the killed parent must not keep the
+		// pipes, and so the test, open.
+		cmd.WaitDelay = 10 * time.Second
+		var stdout bytes.Buffer
+		watch := &crashWatch{cancel: cancel}
+		cmd.Stderr = watch
+		cmd.Stdout = watch
+		if !combined {
+			cmd.Stdout = io.MultiWriter(&stdout, watch)
+		}
+		err := cmd.Run()
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		out := watch.buf.Bytes()
+		if !combined {
+			out = stdout.Bytes()
+		}
+		switch {
+		case watch.crashed && attempt == 1:
+			t.Logf("%s: ansible-core's results thread crashed (KeyError in _convert_wire_task_result_to_raw); retrying once:\n%s", name, watch.buf.Bytes())
+			continue
+		case watch.crashed:
+			return watch.buf.Bytes(), fmt.Errorf("ansible-core's results thread crashed again on the retry: %w", err)
+		case timedOut:
+			return watch.buf.Bytes(), fmt.Errorf("did not finish within %s and was killed: %w", ansibleRunTimeout, err)
+		}
+		return out, err
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return out, fmt.Errorf("%s did not finish within %s and was killed: %w", name, ansibleRunTimeout, err)
-	}
-	return out, err
 }
 
 type emittedZone struct {
@@ -397,9 +456,18 @@ func compareDNSModel(t *testing.T, m DNSArchModel, inv networkcheck.ResolvedInve
 		want(tier.Host+" stub zones", zones, e.StubZones)
 		want(tier.Host+" local zones", nonNil(tier.LocalZones), nonNil(e.LocalZones))
 		if m.FreeIPAPresent {
+			// DNS names are case-insensitive and the trailing dot does
+			// not change the name. The playbook keeps the FQDN as the
+			// inventory writes it; the model normalises it on purpose
+			// (lower case, no trailing dot) so it compares with live
+			// answers. Both sides are normalised here and nothing else,
+			// so any other difference still fails.
 			var pool []emittedPoolMember
 			for _, p := range m.Providers {
-				pool = append(pool, emittedPoolMember{InventoryHost: p.InventoryHost, FQDN: p.FQDN, IP: p.IP, Kind: p.Kind, DNSProvider: p.DNSProvider})
+				pool = append(pool, emittedPoolMember{InventoryHost: p.InventoryHost, FQDN: normalizeZoneName(p.FQDN), IP: p.IP, Kind: p.Kind, DNSProvider: p.DNSProvider})
+			}
+			for i := range e.Pool {
+				e.Pool[i].FQDN = normalizeZoneName(e.Pool[i].FQDN)
 			}
 			want(tier.Host+" server pool", pool, e.Pool)
 		}

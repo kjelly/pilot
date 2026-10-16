@@ -103,83 +103,103 @@
         fail_msg: "Missing ipa_admin_password — pass a vault file with -e @..."
       tags: [always]
   tasks:
-    - name: Fixtures — kinit admin
-      ansible.builtin.shell:
-        cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
-      changed_when: false
-      no_log: true
+    # The admin ticket goes to a private cache, destroyed in always: on success,
+    # failure and any --tags (issue #69). Before, it went to the default cache and
+    # the kdestroy at the end was skipped when a task in between failed.
+    - name: "Fixtures with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    # Not --raw: raw output shows ipaSshPubKey base64-encoded (the whole
-    # "<type> <base64> <comment>" line), so the key body would never match;
-    # the default output prints it decoded as "SSH public key: ...".
-    - name: Fixtures — read the IPA user's current SSH public keys
-      ansible.builtin.command:
-        argv: [ipa, user-show, "{{ transport_fixture_user_effective }}", --all]
-      register: transport_user_show
-      changed_when: false
-      when: not ansible_check_mode
+        - name: Fixtures — kinit admin
+          ansible.builtin.shell:
+            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          changed_when: false
+          no_log: true
 
-    - name: Fixtures — publish the workstation key on the IPA user
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-mod
-          - "{{ transport_fixture_user_effective }}"
-          - "--sshpubkey={{ transport_ws_pubkey | trim }}"
-      when:
-        - not ansible_check_mode
-        - transport_ws_pubkey_body not in transport_user_show.stdout
-      register: transport_user_mod
-      changed_when: transport_user_mod.rc == 0
+        # Not --raw: raw output shows ipaSshPubKey base64-encoded (the whole
+        # "<type> <base64> <comment>" line), so the key body would never match;
+        # the default output prints it decoded as "SSH public key: ...".
+        - name: Fixtures — read the IPA user's current SSH public keys
+          ansible.builtin.command:
+            argv: [ipa, user-show, "{{ transport_fixture_user_effective }}", --all]
+          register: transport_user_show
+          changed_when: false
+          when: not ansible_check_mode
 
-    # Optional: a FreeIPA password for transportuser, needed only by the E2E
-    # probes that exercise the legacy pilot-connect path (it takes a
-    # session-scoped Kerberos password in the Portal). Supplied from a
-    # disposable secrets file (-e @<file>), never argv. Idempotent: the
-    # password is (re)set only when a kinit with it fails, and it is set
-    # non-expiring because an admin-set FreeIPA password is otherwise
-    # immediately expired.
-    - name: Fixtures — does the E2E password already work?
-      ansible.builtin.command:
-        argv: [kinit, -c, "FILE:/tmp/pilot-transport-e2e-pwcheck", "{{ transport_fixture_user_effective }}@{{ ipa_realm }}"]
-        stdin: "{{ transport_fixture_user_password }}"
-      register: transport_user_pwcheck
-      changed_when: false
-      failed_when: false
-      no_log: true
-      when: transport_fixture_user_password is defined and not ansible_check_mode
+        - name: Fixtures — publish the workstation key on the IPA user
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - user-mod
+              - "{{ transport_fixture_user_effective }}"
+              - "--sshpubkey={{ transport_ws_pubkey | trim }}"
+          when:
+            - not ansible_check_mode
+            - transport_ws_pubkey_body not in transport_user_show.stdout
+          register: transport_user_mod
+          changed_when: transport_user_mod.rc == 0
 
-    - name: Fixtures — set the E2E password (only when it does not work yet)
-      ansible.builtin.command:
-        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", --password]
-        stdin: "{{ transport_fixture_user_password }}\n{{ transport_fixture_user_password }}"
-      no_log: true
-      when:
-        - transport_fixture_user_password is defined
-        - not ansible_check_mode
-        - transport_user_pwcheck.rc != 0
+        # Optional: a FreeIPA password for transportuser, needed only by the E2E
+        # probes that exercise the legacy pilot-connect path (it takes a
+        # session-scoped Kerberos password in the Portal). Supplied from a
+        # disposable secrets file (-e @<file>), never argv. Idempotent: the
+        # password is (re)set only when a kinit with it fails, and it is set
+        # non-expiring because an admin-set FreeIPA password is otherwise
+        # immediately expired.
+        # MEMORY: — the check only needs kinit's exit code; the ticket lives in
+        # that kinit process and is gone when it exits (issue #69). Before,
+        # it went to the fixed, predictable /tmp/pilot-transport-e2e-pwcheck.
+        - name: Fixtures — does the E2E password already work?
+          ansible.builtin.command:
+            argv: [kinit, -c, "MEMORY:pilot-transport-e2e-pwcheck", "{{ transport_fixture_user_effective }}@{{ ipa_realm }}"]
+            stdin: "{{ transport_fixture_user_password }}"
+          register: transport_user_pwcheck
+          changed_when: false
+          failed_when: false
+          no_log: true
+          when: transport_fixture_user_password is defined and not ansible_check_mode
 
-    - name: Fixtures — keep the E2E password from expiring
-      ansible.builtin.command:
-        argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", "--setattr=krbPasswordExpiration=20380101000000Z"]
-      register: transport_user_pwexp
-      changed_when: transport_user_pwexp.rc == 0
-      failed_when:
-        - transport_user_pwexp.rc != 0
-        - "'no modifications' not in (transport_user_pwexp.stderr | default(''))"
-      when:
-        - transport_fixture_user_password is defined
-        - not ansible_check_mode
-        - transport_user_pwcheck.rc != 0
+        - name: Fixtures — set the E2E password (only when it does not work yet)
+          ansible.builtin.command:
+            argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", --password]
+            stdin: "{{ transport_fixture_user_password }}\n{{ transport_fixture_user_password }}"
+          no_log: true
+          when:
+            - transport_fixture_user_password is defined
+            - not ansible_check_mode
+            - transport_user_pwcheck.rc != 0
 
-    - name: Fixtures — drop the password-check ticket cache
-      ansible.builtin.file:
-        path: /tmp/pilot-transport-e2e-pwcheck
-        state: absent
-      changed_when: false
-      when: transport_fixture_user_password is defined
+        - name: Fixtures — keep the E2E password from expiring
+          ansible.builtin.command:
+            argv: [ipa, user-mod, "{{ transport_fixture_user_effective }}", "--setattr=krbPasswordExpiration=20380101000000Z"]
+          register: transport_user_pwexp
+          changed_when: transport_user_pwexp.rc == 0
+          failed_when:
+            - transport_user_pwexp.rc != 0
+            - "'no modifications' not in (transport_user_pwexp.stderr | default(''))"
+          when:
+            - transport_fixture_user_password is defined
+            - not ansible_check_mode
+            - transport_user_pwcheck.rc != 0
 
-    - name: Fixtures — release the Kerberos ticket
-      ansible.builtin.command: kdestroy
-      changed_when: false
-      failed_when: false
+        # Removes the file an older version of this fixture left behind.
+        - name: Fixtures — drop the password-check ticket cache of earlier runs
+          ansible.builtin.file:
+            path: /tmp/pilot-transport-e2e-pwcheck
+            state: absent
+          changed_when: false
+          when: transport_fixture_user_password is defined
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

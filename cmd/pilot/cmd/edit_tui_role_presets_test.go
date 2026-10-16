@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,47 @@ import (
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
+
+// The management title includes a temporary path, which can wrap directly
+// after "管理". Match the title and this screen's actions independently so
+// terminal width and temporary directory length do not decide navigation.
+func rolePresetManagerVisible(output []byte) bool {
+	screen := string(output)
+	return strings.Contains(screen, "管理") &&
+		strings.Contains(screen, "新增範本") && strings.Contains(screen, "返回")
+}
+
+func waitForRolePresetManager(t *testing.T, tm *teatest.TestModel) {
+	t.Helper()
+	teatest.WaitFor(t, tm.Output(), rolePresetManagerVisible,
+		teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
+}
+
+func TestRolePresetManagerVisible_RequiresTitleAndActions(t *testing.T) {
+	for _, output := range []string{
+		"管理角色範本", "管理 role-presets.yml\n返回", "新增範本\n返回", "管理\n新增範本",
+	} {
+		if rolePresetManagerVisible([]byte(output)) {
+			t.Fatalf("unrelated or incomplete screen matched: %q", output)
+		}
+	}
+}
+
+func TestRolePresetManagerVisible_RenderedWidths(t *testing.T) {
+	for _, width := range []int{50, 80, 100, 160} {
+		t.Run(fmt.Sprintf("width=%d", width), func(t *testing.T) {
+			dir := t.TempDir()
+			var router editRouterModel
+			hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node-1"}}}
+			pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
+			next, _ := router.Update(tea.WindowSizeMsg{Width: width, Height: 52})
+			view := viewContent(next.(editRouterModel).View())
+			if !rolePresetManagerVisible([]byte(view)) {
+				t.Fatalf("management screen not recognized at width %d:\n%s", width, view)
+			}
+		})
+	}
+}
 
 func TestDefaultRolePresets_CoversCompactTopology(t *testing.T) {
 	presets := defaultRolePresets()
@@ -86,17 +128,13 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	hf := &inventory.HostsFile{Hosts: []inventory.Host{{Name: "node-1"}}}
 	var router editRouterModel
 	pushRolePresetManager(&router, dir, filepath.Join(dir, "hosts.yml"), hf, "node-1", "")
-	// 52, not the usual 40: the role checklist this test drives into
-	// renders one row per role contract, and each added role
-	// (snmp-exporter, SNMP monitoring integration spec Phase 0;
-	// pilot-access-target-policy, captive-transport spec Phase 4) pushed
-	// the huh MultiSelect's title line off the top of a smaller fixed-size
-	// test terminal.
-	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, 52))
+	// Allow three lines per role for wrapped descriptions plus the title
+	// and help. The catalog grows; a fixed height crops the checklist title
+	// and prevents the test from observing the screen it must interact with.
+	height := 3*len(inventory.Roles()) + 10
+	tm := teatest.NewTestModel(t, router, teatest.WithInitialTermSize(100, height))
 
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return strings.Contains(string(b), "管理 ")
-	}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
+	waitForRolePresetManager(t, tm)
 	for range defaultRolePresets() {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -146,6 +184,10 @@ func TestEditRouter_Teatest_RolePresetManagerCreatesEnvironmentOverride(t *testi
 	}
 	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
+	final := tm.FinalModel(t).(editRouterModel)
+	if got := final.current.AutomationState().ScreenID; got != "hosts.role_preset_manager" {
+		t.Fatalf("screen after save = %q, want role preset manager", got)
+	}
 	presets, customized, err := loadRolePresets(dir)
 	if err != nil {
 		t.Fatalf("load created preset: %v", err)
@@ -178,7 +220,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *te
 		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	waitFor("管理 ")
+	waitForRolePresetManager(t, tm)
 	for range defaultRolePresets() {
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
@@ -186,13 +228,17 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnCreateReturnsToManager(t *te
 	waitFor("角色範本名稱")
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // create-flow esc -> back to the manager list
-	waitFor("管理 ")
+	waitForRolePresetManager(t, tm)
 
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
 	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
+	final := tm.FinalModel(t).(editRouterModel)
+	if got := final.current.AutomationState().ScreenID; got != "hosts.role_preset_manager" {
+		t.Fatalf("screen after canceling create = %q, want role preset manager", got)
+	}
 	if _, customized, err := loadRolePresets(dir); err != nil || customized {
 		t.Fatalf("esc-canceling a create should not have persisted a preset: customized=%v err=%v", customized, err)
 	}
@@ -215,7 +261,7 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *tes
 		}, teatest.WithDuration(teatestWaitTimeout), teatest.WithCheckInterval(10*time.Millisecond))
 	}
 
-	waitFor("管理 ")
+	waitForRolePresetManager(t, tm)
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // first preset in the list -> its action menu
 	waitFor("範本 ")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // "✏ 修改名稱與角色"
@@ -229,6 +275,10 @@ func TestEditRouter_Teatest_RolePresetNameFlow_EscOnRenameReturnsToAction(t *tes
 	}
 	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
 
+	final := tm.FinalModel(t).(editRouterModel)
+	if got := final.current.AutomationState().ScreenID; got != "hosts.role_preset_action" {
+		t.Fatalf("screen after canceling rename = %q, want role preset action", got)
+	}
 	if presets, customized, err := loadRolePresets(dir); err != nil || customized || len(presets) != len(defaultRolePresets()) {
 		t.Fatalf("esc-canceling a rename should leave the default presets untouched: presets=%+v customized=%v err=%v", presets, customized, err)
 	}

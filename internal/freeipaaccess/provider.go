@@ -26,7 +26,8 @@ import (
 // never a raw HTTP/JSON-RPC call built ad hoc elsewhere. It mirrors exactly
 // the operations spec.md §10.3 lists for the "Pilot Access Gateway Reader"
 // FreeIPA role; anything not listed here has no business being called by
-// pilot-access-gateway.
+// pilot-access-gateway. Implementations must support concurrent reads: access
+// resolution fetches independent referenced objects in bounded parallel batches.
 type Provider interface {
 	// Ping verifies Kerberos auth and connectivity without touching any
 	// application data (spec.md §10.3, §58 doctor).
