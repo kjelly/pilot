@@ -415,12 +415,14 @@
           changed_when: false
           check_mode: false
 
+        # argv + stdin: the password never passes through a shell, so `$`,
+        # backticks and quotes in it reach kinit unchanged.
         - name: "FreeIPA replica DNS self-register — kinit admin into the dedicated ccache"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_replica_dns_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ ipa_enroll_password }}"
+          environment:
+            KRB5CCNAME: "{{ ipa_replica_dns_ccache_file.path }}"
           changed_when: false
           no_log: true
           check_mode: false

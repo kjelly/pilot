@@ -690,10 +690,12 @@
                   tags: [always]
               tags: [always]
 
-            - name: "Kinit admin (for dnsconfig-mod)"  # noqa risky-shell-pipe
-              ansible.builtin.shell:
-                cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
-                executable: /bin/bash
+            # argv + stdin: the password never passes through a shell, so
+            # `$`, backticks and quotes in it reach kinit unchanged.
+            - name: "Kinit admin (for dnsconfig-mod)"
+              ansible.builtin.command:
+                argv: [kinit, "admin@{{ ipa_realm }}"]
+                stdin: "{{ ipa_admin_password }}"
               changed_when: false
               no_log: true
 
