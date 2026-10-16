@@ -230,8 +230,11 @@ func TestRegression_LogServerDropsOldRootRulesOnlyAfterTheRestart(t *testing.T) 
 	probe := index("Step 7: Check that rsyslog runs the receiver config and listens on its port")
 	check := index("Step 7: rsyslog is running and listens on the receiver port")
 	narrow := index("Step 7a: Drop the AppArmor rules for roots rsyslog no longer writes")
-	if !(grant < pending && pending < restart && restart < probe && probe < check && check < narrow) {
-		t.Fatalf("want Step 2a < the pending check < Step 6a < the probe < Step 7 < Step 7a; got %d %d %d %d %d %d", grant, pending, restart, probe, check, narrow)
+	order := []int{grant, pending, restart, probe, check, narrow}
+	for i := 1; i < len(order); i++ {
+		if order[i-1] >= order[i] {
+			t.Fatalf("want Step 2a < the pending check < Step 6a < the probe < Step 7 < Step 7a; got %v", order)
+		}
 	}
 	phase := func(i int) any {
 		vars, _ := body[i]["vars"].(map[string]any)
