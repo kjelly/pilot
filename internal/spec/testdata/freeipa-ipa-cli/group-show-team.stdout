@@ -1,0 +1,10 @@
+  dn: cn=team-pwb-01,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  Group name: team-pwb-01
+  Description: Bench team 1
+  GID: 1927600023
+  Member users: pwb-u001, pwb-u011, pwb-u021, pwb-u031, pwb-u041, pwb-u051, pwb-u061, pwb-u071, pwb-u081, pwb-u091, pwb-u101, pwb-u111
+  Member of groups: data-pwb-01, access-pwb-01
+  Member of HBAC rule: hbac-pwb-01
+  ipantsecurityidentifier: S-1-5-21-3998632271-3893472475-798555519-1023
+  ipauniqueid: 3cc67b3a-c877-11f1-872b-5254001b059e
+  objectclass: top, groupofnames, nestedgroup, ipausergroup, ipaobject, posixgroup, ipantgroupattrs

@@ -300,6 +300,17 @@ ansible-playbook -i inventory-freeipa.yaml \
 次 apply 都會被重設，即使已經自己改過密碼；還沒完成首次改密碼的使用者也每次
 都會被重設。）
 
+2026-10-16 起，apply 不再發出已知是 no-op 的呼叫：
+- 先用 `ipa user-find --pkey-only` 讀出全部使用者與停用的使用者。已存在的不再 `user-add`；已是名冊狀態的不再 `user-enable`／`user-disable`。
+- 先用 `ipa group-find --pkey-only` 讀出全部群組，已存在的不再 `group-add`。
+- 成員查詢已列出的直接成員不再 `group-add-member`。
+
+讀不完整時，apply 在改動之前就失敗：查詢被截斷，或
+`Gate: the user listings were parsed completely`／`Gate: the group listing was parsed completely`
+讀不懂輸出。後者通常是 `ipa` 輸出
+被翻成其他語言：ssh session 的 `LANG` 來自 server 的系統語系（`/etc/locale.conf`），
+不是英文且裝了該語言時，`ipa` 就印那個語言。這支 playbook 只認英文輸出。
+
 ---
 
 ## 5.1 SSH 公鑰管理（免每台機器維護 authorized_keys）

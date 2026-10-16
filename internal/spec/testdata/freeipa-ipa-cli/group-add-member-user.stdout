@@ -1,0 +1,9 @@
+  Group name: team-pwb-01
+  Description: Bench team 1
+  GID: 1927600023
+  Member users: pwb-u001, pwb-u011, pwb-u021, pwb-u031, pwb-u041, pwb-u051, pwb-u061, pwb-u071, pwb-u081, pwb-u091, pwb-u101, pwb-u111, uf-enabled
+  Member of groups: access-pwb-01, data-pwb-01
+  Member of HBAC rule: hbac-pwb-01
+-------------------------
+Number of members added 1
+-------------------------

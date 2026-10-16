@@ -1,0 +1,20 @@
+-------------------
+Added user "uf-new"
+-------------------
+  User login: uf-new
+  First name: User
+  Last name: Listing
+  Full name: User Listing
+  Display name: User Listing
+  Initials: UL
+  Home directory: /home/uf-new
+  GECOS: User Listing
+  Login shell: /bin/sh
+  Principal name: uf-new@IPA.PILOT.INTERNAL
+  Principal alias: uf-new@IPA.PILOT.INTERNAL
+  Email address: uf-new@ipa.pilot.internal
+  UID: 1927600187
+  GID: 1927600187
+  Password: False
+  Member of groups: ipausers
+  Kerberos keys available: False
