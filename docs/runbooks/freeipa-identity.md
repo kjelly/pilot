@@ -16,7 +16,17 @@
 跟 `freeipa-server-apply.yml` 是同一套慣例（gate、`no_log`、冪等、stage gating），也
 沿用 repo 既有的 `~/.vault/` 機密模式（見 `freeipa-server-apply.yml` 的 `-e @~/.vault/…`）。
 
-## 0.5 目前有效的事實快照（2026-08-11）
+## 0.5 目前有效的事實快照
+
+- 最新驗證（2026-10-15，candidate `decc613`，tree `65bc3c93473fe70575df026767a0e1985e0c2eda`，PR #89）：
+  `docs/verification/freeipa-identity.md` v1.12。單台全新的 `freeipa-server` vm-target（AlmaLinux 9.8，
+  ipa-server 4.13.4-1.el9_8），依序套用 `freeipa-identity-v2-fixtures.yml`、`freeipa-identity-fixtures.yml`、
+  `freeipa-identity-canonical-fixtures.yml` 後，C1–C24 經 ldapi 以 root 執行，
+  SSH 使用者是 root 或非 root 都是 **24/24 PASS**（`main` 的 binary 以非 root 執行為 2/24）；§7.1a 的 netgroup
+  pruning SOP 步驟 1–3 照文件原樣執行：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user
+  membership"），步驟 3 只剩宣告的成員；每一步之後 root 與非 root 使用者都沒有 Kerberos ticket。摘要：
+  [`2026-10-15-decc613-rerun.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-rerun.md)。
+  下面是 2026-08-11 roster schema v2 交付時的快照。
 
 - Roster schema v2 delivery：schema v1/v2 版本判定與自動升級
   （`pilot roster migrate`、`EnsureRosterCurrent`——`pilot edit`/MCP roster
@@ -780,3 +790,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-07-17 | v1.1 | 文件整併：`freeipa-hostauthz-test-plan.md` 併入 §5.3（該檔已歸檔）。用整併驗證環境重新實跑 T1–T7 全部步驟，新增 reconciler 撤銷語意驗證（roster 移除 `hz_web` 的 group membership，重新 apply 後 live sudo 權限真的被撤銷，恢復後再確認可逆）。重測中發現並修好 `freeipa-hostauthz-demo.yml` T3 assert 寫死 FQDN 字串、沒有走 `webhost_fqdn`/`dbhost_fqdn` 變數的真事故 | sre |
 | 2026-07-22 | v1.2 | Delivery batch 1：canonical v1 users/groups、legacy compatibility、12-row verification 與 immutable candidate evidence；新增 `freeipa_roster_file` namespaced 入口及 Ansible magic-variable/duplicate-alias gotcha | pilot |
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
+| 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |

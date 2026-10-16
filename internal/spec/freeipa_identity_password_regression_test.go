@@ -69,7 +69,7 @@ func identityTasks(t *testing.T, names []string) []any {
 	var out []any
 	found := map[string]bool{}
 	pre, _ := plays[0]["pre_tasks"].([]any)
-	for _, r := range append(slices.Clone(pre), plays[0]["tasks"].([]any)...) {
+	for _, r := range flattenTasks(append(slices.Clone(pre), plays[0]["tasks"].([]any)...)) {
 		task := r.(map[string]any)
 		name, _ := task["name"].(string)
 		if !slices.Contains(names, name) {
@@ -96,6 +96,30 @@ func identityTasks(t *testing.T, names []string) []any {
 	for _, n := range names {
 		if !found[n] {
 			t.Fatalf("task %q not found in %s", n, identityApplyPath)
+		}
+	}
+	return out
+}
+
+// flattenTasks lists the tasks in playbook order, descending into blocks:
+// most reconcile tasks sit inside the private Kerberos cache block (issue
+// #69), so a top-level scan would not find them.
+func flattenTasks(tasks []any) []any {
+	var out []any
+	for _, r := range tasks {
+		task, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		sections := []string{"block", "rescue", "always"}
+		if _, isBlock := task["block"]; !isBlock {
+			out = append(out, task)
+			continue
+		}
+		for _, section := range sections {
+			if inner, ok := task[section].([]any); ok {
+				out = append(out, flattenTasks(inner)...)
+			}
 		}
 	}
 	return out

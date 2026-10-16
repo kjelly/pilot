@@ -2,8 +2,8 @@
 // declarative sources (design spec §11, §12): hosts.yml supplies the host
 // entities, while the FreeIPA identity roster supplies users, groups,
 // hostgroups, and access rules. Roster host FQDNs are resolved to inventory
-// host IDs by an exact address match; an absent or ambiguous match fails
-// closed instead of creating a second host entity.
+// host IDs by an exact address match. Declared external devices are outside
+// this inventory-scoped projection; ambiguous matches still fail closed.
 package outbound
 
 import (
@@ -180,10 +180,15 @@ func mapRosterHostsToInventory(rosterHosts []inventory.ExternalRosterHost, inven
 	mapping := make(map[string]string, len(rosterHosts))
 	for _, rosterHost := range rosterHosts {
 		address := strings.TrimSpace(rosterHost.Address)
+		if address == "" || strings.TrimSpace(rosterHost.Name) == "" {
+			return nil, fmt.Errorf("roster host must have a name and address")
+		}
 		matches := byAddress[address]
 		switch len(matches) {
 		case 0:
-			return nil, fmt.Errorf("roster host %q with address %q has no matching hosts.yml host", rosterHost.Name, address)
+			// Keep a declared-but-external entry so reference resolution can
+			// distinguish it from a dangling or state:absent roster host.
+			mapping[rosterHostID(rosterHost.Name)] = ""
 		case 1:
 			mapping[rosterHostID(rosterHost.Name)] = matches[0]
 		default:
@@ -267,15 +272,18 @@ func buildHostgroups(root map[string]any, rosterToInventoryID map[string]string)
 	return out, nil
 }
 
-// namespaceHostRefs converts roster host FQDNs into the corresponding
-// inventory IDs, failing closed if any does not resolve to a present roster
-// host with an unambiguous hosts.yml address match.
+// namespaceHostRefs converts roster host FQDNs into inventory IDs. An empty
+// mapping value marks a declared external device outside the snapshot scope;
+// a missing key is a dangling/absent roster reference and still fails closed.
 func namespaceHostRefs(names []string, rosterToInventoryID map[string]string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	for _, name := range names {
 		id, ok := rosterToInventoryID[rosterHostID(name)]
 		if !ok {
-			return nil, fmt.Errorf("dangling host reference %q: no matching present hosts.yml host", name)
+			return nil, fmt.Errorf("dangling host reference %q: no matching present roster host", name)
+		}
+		if id == "" {
+			continue
 		}
 		out = append(out, id)
 	}
@@ -304,6 +312,9 @@ func buildAccess(root map[string]any, now time.Time, breakglass []inventory.Brea
 			hostIDs, err = namespaceHostRefs(l.HostIDs, rosterToInventoryID)
 			if err != nil {
 				return nil, nil, err
+			}
+			if len(hostIDs) == 0 {
+				continue
 			}
 		}
 		login = append(login, ProjectedLoginAccess{
@@ -334,6 +345,9 @@ func buildAccess(root map[string]any, now time.Time, breakglass []inventory.Brea
 			hostIDs, err = namespaceHostRefs(s.HostIDs, rosterToInventoryID)
 			if err != nil {
 				return nil, nil, err
+			}
+			if len(hostIDs) == 0 {
+				continue
 			}
 		}
 		sudo = append(sudo, ProjectedSudoAccess{

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/kjelly/pilot/internal/gatewayapi"
 )
@@ -25,7 +24,7 @@ type portalClient struct {
 func newPortalClient(socketPath string) *portalClient {
 	return &portalClient{
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: accessAPIRequestTimeout,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					var d net.Dialer
@@ -39,7 +38,7 @@ func newPortalClient(socketPath string) *portalClient {
 func (c *portalClient) do(req *http.Request, out any) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("pilot-access-gateway unreachable: %w", err)
+		return localAPIRequestError("pilot-access-gateway", req, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)

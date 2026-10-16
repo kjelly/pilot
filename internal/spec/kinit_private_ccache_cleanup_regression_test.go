@@ -29,34 +29,42 @@ type privateCcacheOpened struct {
 	Name string `json:"krb5ccname"`
 }
 
-// runPrivateCcacheOpenClose runs the shared open and close task files on
-// localhost with TMPDIR set to dir, so the cache and the stale-cache scan
-// both live there, and returns what the open task produced.
-func runPrivateCcacheOpenClose(t *testing.T, dir string) privateCcacheOpened {
+// privateCcacheTasks returns include tasks for the shared open and close
+// task files.
+func privateCcacheTasks(t *testing.T) (open, closeTask map[string]any) {
 	t.Helper()
-	if _, err := exec.LookPath("ansible-playbook"); err != nil {
-		t.Skipf("ansible-playbook not installed: %v", err)
-	}
 	tasksDir, err := filepath.Abs("../../playbooks/apply/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return map[string]any{"ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-private-ccache-open.yml")}},
+		map[string]any{"ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-private-ccache-close.yml")}}
+}
+
+// recordTask writes content (a Jinja expression) to dest, also under --check.
+func recordTask(dest, content string) map[string]any {
+	return map[string]any{
+		"ansible.builtin.copy": map[string]any{"dest": dest, "content": content},
+		"check_mode":           false,
+	}
+}
+
+// runCcachePlay runs tasks in one localhost play with TMPDIR set to dir, so
+// the cache and the stale-cache scan both live there, and returns the
+// output. It fails the test when ansible-playbook fails.
+func runCcachePlay(t *testing.T, dir string, tasks []map[string]any, args ...string) string {
+	t.Helper()
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
 	work := t.TempDir()
-	record := filepath.Join(work, "opened.json")
 	play := []map[string]any{{
-		"name":         "open and close a private Kerberos cache",
+		"name":         "private Kerberos cache",
 		"hosts":        "localhost",
 		"connection":   "local",
 		"gather_facts": false,
 		"environment":  map[string]any{"TMPDIR": dir},
-		"tasks": []map[string]any{
-			{"ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-private-ccache-open.yml")}},
-			{"ansible.builtin.copy": map[string]any{
-				"dest":    record,
-				"content": "{{ {'path': pilot_krb5ccname_file.path, 'mode': pilot_krb5ccname_file.mode, 'uid': pilot_krb5ccname_file.uid, 'krb5ccname': pilot_krb5ccname} | to_json }}",
-			}},
-			{"ansible.builtin.include_tasks": map[string]any{"file": filepath.Join(tasksDir, "freeipa-private-ccache-close.yml")}},
-		},
+		"tasks":        tasks,
 	}}
 	raw, err := yaml.Marshal(play)
 	if err != nil {
@@ -66,13 +74,27 @@ func runPrivateCcacheOpenClose(t *testing.T, dir string) privateCcacheOpened {
 	if err := os.WriteFile(pb, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("ansible-playbook", "-i", "localhost,", pb)
+	cmd := exec.Command("ansible-playbook", append([]string{"-i", "localhost,", pb}, args...)...)
 	cmd.Dir = work
 	cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("ansible-playbook: %v\n%s", err, out)
 	}
+	return string(out)
+}
+
+// runPrivateCcacheOpenClose runs the shared open and close task files and
+// returns what the open task produced.
+func runPrivateCcacheOpenClose(t *testing.T, dir string, args ...string) privateCcacheOpened {
+	t.Helper()
+	open, closeTask := privateCcacheTasks(t)
+	record := filepath.Join(t.TempDir(), "opened.json")
+	runCcachePlay(t, dir, []map[string]any{
+		open,
+		recordTask(record, "{{ {'path': pilot_krb5ccname_file.path, 'mode': pilot_krb5ccname_file.mode, 'uid': pilot_krb5ccname_file.uid, 'krb5ccname': pilot_krb5ccname} | to_json }}"),
+		closeTask,
+	}, args...)
 	var opened privateCcacheOpened
 	if err := json.Unmarshal([]byte(readFile(t, record)), &opened); err != nil {
 		t.Fatal(err)
@@ -205,5 +227,66 @@ func TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches(t *testing.T) {
 	}
 	if exists(opened.Path) {
 		t.Errorf("close left the cache %s behind", opened.Path)
+	}
+}
+
+// --check must not delete anything: the stale cache stays, while the run's
+// own cache is still created (kinit/ipa reads run in check mode) and
+// removed.
+func TestRegression_PrivateCcacheOpenRemovesNothingUnderCheck(t *testing.T) {
+	dir := stickyTempDir(t)
+	stale := filepath.Join(dir, "pilot-krb5cc-killedrun.ccache")
+	writeAgedFile(t, stale, 48*time.Hour)
+
+	opened := runPrivateCcacheOpenClose(t, dir, "--check")
+
+	if !exists(stale) {
+		t.Errorf("--check removed the stale cache %s", stale)
+	}
+	if filepath.Dir(opened.Path) != dir || exists(opened.Path) {
+		t.Errorf("--check: cache %s was not created in %s and removed again", opened.Path, dir)
+	}
+}
+
+// After close the cache name points nowhere again, so a kinit later in the
+// same run (another play, or a task file that names {{ pilot_krb5ccname }}
+// outside any block) fails instead of recreating the deleted file. A second
+// open in the same run gets a fresh cache, and its close removes it.
+func TestRegression_PrivateCcacheCloseForgetsTheCache(t *testing.T) {
+	dir := stickyTempDir(t)
+	open, closeTask := privateCcacheTasks(t)
+	work := t.TempDir()
+	first := filepath.Join(work, "first")
+	after := filepath.Join(work, "after")
+	second := filepath.Join(work, "second")
+	// Stands in for a kinit writing the cache named by KRB5CCNAME.
+	write := map[string]any{
+		"ansible.builtin.shell": `: > "${KRB5CCNAME#FILE:}"`,
+		"environment":           map[string]any{"KRB5CCNAME": "{{ pilot_krb5ccname }}"},
+		"register":              "write_after_close",
+		"failed_when":           false,
+	}
+	runCcachePlay(t, dir, []map[string]any{
+		open,
+		recordTask(first, "{{ pilot_krb5ccname_file.path }}"),
+		closeTask,
+		recordTask(after, "{{ pilot_krb5ccname }}"),
+		write,
+		open,
+		recordTask(second, "{{ pilot_krb5ccname_file.path }}"),
+		closeTask,
+	})
+	firstPath, secondPath := readFile(t, first), readFile(t, second)
+	if got := readFile(t, after); got != "FILE:/nonexistent/pilot-krb5cc-not-open" {
+		t.Errorf("pilot_krb5ccname after close = %q, want the path that cannot exist", got)
+	}
+	if exists(firstPath) {
+		t.Errorf("a write through pilot_krb5ccname after close recreated %s", firstPath)
+	}
+	if secondPath == firstPath || filepath.Dir(secondPath) != dir {
+		t.Errorf("second open: cache %s, want a new file in %s (first was %s)", secondPath, dir, firstPath)
+	}
+	if exists(secondPath) {
+		t.Errorf("second close left %s behind", secondPath)
 	}
 }

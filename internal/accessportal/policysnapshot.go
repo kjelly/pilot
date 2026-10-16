@@ -11,8 +11,8 @@ import (
 
 // PolicySnapshot is everything about one user's FreeIPA policy that does
 // NOT depend on which gateway scope it is being resolved against: their
-// effective group membership, every HBAC/sudo rule (hbacrule_find/
-// sudorule_find are already global, unfiltered by scope), and the
+// effective group membership, the active HBAC/sudo rules matching that user
+// (hbacrule_find/sudorule_find remain global, unfiltered by scope), and the
 // referenced hostgroup/service-group/command-group expansions those rules
 // point at. The one thing it deliberately excludes is the gateway's own
 // target_hostgroup expansion — that's scope-specific and stays in
@@ -110,8 +110,8 @@ func HostRecordingAccessPolicy(host freeipaaccess.Host, err error) SSHRecordingA
 
 // LoadPolicySnapshot loads the query plan spec.md §9.3/§21 describes for
 // one user: one UserShow (via ResolveUserContext), one hbacrule_find, one
-// sudorule_find, then one call per DISTINCT referenced hostgroup/
-// service-group/command-group — never anything gateway-scope-specific.
+// sudorule_find, then one call per DISTINCT hostgroup/service-group/command-group
+// referenced by an applicable rule — never anything gateway-scope-specific.
 func LoadPolicySnapshot(ctx context.Context, provider freeipaaccess.Provider, username string, now time.Time) (PolicySnapshot, error) {
 	r := &Resolver{Provider: provider}
 
@@ -128,6 +128,27 @@ func LoadPolicySnapshot(ctx context.Context, provider freeipaaccess.Provider, us
 	if err != nil {
 		return PolicySnapshot{}, fmt.Errorf("sudorule_find: %w", err)
 	}
+
+	// A snapshot belongs to one user. Rules that cannot match that user (or
+	// are disabled/expired) cannot contribute SSH or sudo access, so their
+	// referenced groups need no RPCs. Keep matching rules intact for provenance.
+	effectiveGroups := make(map[string]struct{}, len(userCtx.EffectiveGroups))
+	for _, name := range userCtx.EffectiveGroups {
+		effectiveGroups[name] = struct{}{}
+	}
+	applicableHBAC := make([]freeipaaccess.HBACRule, 0, len(hbacRules))
+	for _, rule := range hbacRules {
+		if ok, _ := subjectMatch(rule.UserCategoryAll, rule.Users, rule.Groups, userCtx.Username, effectiveGroups); rule.Enabled && ok {
+			applicableHBAC = append(applicableHBAC, rule)
+		}
+	}
+	applicableSudo := make([]freeipaaccess.SudoRule, 0, len(sudoRules))
+	for _, rule := range sudoRules {
+		if ok, _ := subjectMatch(rule.UserCategoryAll, rule.Users, rule.Groups, userCtx.Username, effectiveGroups); sudoRuleActive(rule, now) && ok {
+			applicableSudo = append(applicableSudo, rule)
+		}
+	}
+	hbacRules, sudoRules = applicableHBAC, applicableSudo
 
 	hostgroupHosts, err := r.expandReferencedHostgroups(ctx, hbacRules, sudoRules)
 	if err != nil {
@@ -184,15 +205,25 @@ func ResolveScopeAccess(ctx context.Context, provider freeipaaccess.Provider, sn
 			continue
 		}
 		sudo := resolveSudoAccess(snapshot.SudoRules, snapshot.GeneratedAt, snapshot.User.Username, effectiveGroups, fqdn, snapshot.HostgroupHosts, snapshot.CommandGroups)
-		meta := cache.get(ctx, provider, fqdn)
-		var annotations map[string]string
+		result.Hosts = append(result.Hosts, HostAccess{FQDN: fqdn, SSH: ssh, Sudo: sudo})
+	}
+	names := make([]string, len(result.Hosts))
+	for i, host := range result.Hosts {
+		names[i] = host.FQDN
+	}
+	metadata, err := queryBatch(ctx, names, func(ctx context.Context, fqdn string) (hostMetadataResult, error) {
+		// Preserve per-host failure isolation: a failed read marks recording
+		// policy unknown; it must never become an absent/valid policy.
+		return cache.get(ctx, provider, fqdn), nil
+	})
+	if err != nil {
+		return UserAccess{}, err
+	}
+	for i, meta := range metadata {
 		if meta.Err == nil {
-			annotations = meta.Host.Annotations
+			result.Hosts[i].Annotations = meta.Host.Annotations
 		}
-		result.Hosts = append(result.Hosts, HostAccess{
-			FQDN: fqdn, SSH: ssh, Sudo: sudo, Annotations: annotations,
-			SSHRecording: recordingAccessPolicy(meta),
-		})
+		result.Hosts[i].SSHRecording = recordingAccessPolicy(meta)
 	}
 	return result, nil
 }

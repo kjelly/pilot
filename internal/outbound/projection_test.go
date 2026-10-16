@@ -529,6 +529,7 @@ func TestOutboundProjection_P19(t *testing.T) {
 // references are resolved to the inventory IDs instead of creating a second
 // host entity.
 func TestOutboundProjection_P20(t *testing.T) {
+	t.Run("external_devices", testProjectionExternalDevices)
 	dir, rosterPath := writeProjectionFixture(t)
 	result := buildTestProjection(t, dir, rosterPath)
 	if !result.Available {
@@ -550,8 +551,12 @@ func TestOutboundProjection_P20(t *testing.T) {
 func TestOutboundProjection_RosterHostMappingFailsClosed(t *testing.T) {
 	inventoryHosts := []ProjectedHost{{ID: "inventory:web1", Address: "10.0.0.21"}}
 
-	if _, err := mapRosterHostsToInventory([]inventory.ExternalRosterHost{{Name: "web1.ipa.pilot.internal", Address: "10.0.0.22"}}, inventoryHosts); err == nil {
-		t.Fatal("expected an unmatched roster host address to fail closed")
+	mapping, err := mapRosterHostsToInventory([]inventory.ExternalRosterHost{{Name: "nas.ipa.pilot.internal", Address: "10.0.0.99"}}, inventoryHosts)
+	if err != nil {
+		t.Fatalf("declared external host must not disable projection: %v", err)
+	}
+	if id, declared := mapping[rosterHostID("nas.ipa.pilot.internal")]; !declared || id != "" {
+		t.Fatalf("external host must be declared but outside inventory scope: %v", mapping)
 	}
 
 	ambiguous := append(append([]ProjectedHost(nil), inventoryHosts...), ProjectedHost{ID: "inventory:web2", Address: "10.0.0.21"})
