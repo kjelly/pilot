@@ -1,6 +1,11 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.13（2026-10-15 密碼設定改依 roster schema：只在帳號還沒有密碼，
+> 版本：v1.14（2026-10-15 `ipa` 失敗不再被當成成功或「不存在」（issue #102）：
+> `ipa passwd` 失敗會讓 run 失敗並列出使用者；成員查詢失敗不再被讀成空集合；
+> 存在性檢查只放行真實擷取的 not found；HBAC lockdown rollback 如實回報結果。
+> candidate `ae8f276`（接上合併 main 後的 #103）在拋棄式 vm-target 實跑 PASS，見
+> `docs/evidence/freeipa-identity/2026-10-16-ae8f276.md`）
+> 上一版：v1.13（2026-10-15 密碼設定改依 roster schema：只在帳號還沒有密碼，
 > 或 `preserve_existing: false` 要求重設且使用者已不在上次重設的密碼時執行
 > `ipa passwd`，見 §7.4。candidate `d24a31c`（合併 main 後）已在拋棄式 vm-target
 > 實跑 PASS）
@@ -270,6 +275,7 @@ verdict: PASS  (pass=24 fail=0 skip=0)
 | — | `migration`（roster 內宣告式批次改名/刪除）仍是獨立的 fail-closed 工作流程，尚未交付；playbook 對非空值 fail closed，不把忽略欄位偽裝成成功。Users/groups/hosts/hostgroups（含巢狀）/HBAC/sudo/netgroups 皆已交付 | canonical roster | 待定 |
 | — | netgroup 巢狀 cycle 偵測（`ng-a → ng-b → ng-a` 這類）只在 Go 層（`internal/inventory/roster_netgroup.go`、`pilot roster lint`）擋，**沒有**在 `freeipa-identity-apply.yml` 重複實作同一個檢查——刻意的設計決策：Jinja 沒有安全的方式走任意深度 graph traversal，硬做風險（見 `freeipa-dns.md` changelog 記載過的規則格式假設猜錯、靜默失效案例）大於效益。前提：roster 必須先過 `pilot roster lint`（或走 `pilot edit`/`EnsureRosterCurrent` 的自動升級路徑）才套用——繞過 `pilot` 直接手改 roster 再 `ansible-playbook` 套用的人，本來就已經在其他既有 gate（Go validator 完全沒跑到）的保護範圍之外 | 直接 `ansible-playbook`（不經 `pilot`）套用 netgroups 的情境 | 永久 |
 | — | `password.force_change: false` 沒有作用：FreeIPA 對 `ipa passwd` 設定的密碼一律要求下次登入更改。`force_change` 只描述這件事，不決定要不要重設（見 §7.4） | 全部 | 待定 |
+| — | host decommission 的 HBAC／sudo 直接引用查詢（`hbacrule-find`／`sudorule-find --host=`）被 FreeIPA 當成 `--hostcat`，永遠回 0 筆（issue #104）；兩個 DNS 查詢把 `dnsrecord-show` 的錯誤當成沒有紀錄（issue #105）。這四個 task 仍是 `failed_when: false`，由 `TestRegression_IdentityFailedWhenFalseIsAllowlisted` 列出原因 | host decommission | 待定 |
 | — | 本 spec 不含密碼自行變更保護（§7.4）的 checklist row：該行為的證據（`krbLastPwdChange`/`krbPasswordExpiration` 前後比對）本質是「rerun 前後對比」，同樣不適合單指令快照——手動走 §7.4 的 SOP 驗證 | 全部 | 永久 |
 | — | 本 spec 不含 netgroup authoritative pruning（roster 移除一個 netgroup 成員、rerun 後 live 真的移除）的 checklist row，理由同 C1–C12——這是「改 → rerun → 比較」動態行為，見 §7.1a 的 pruning 驗證記錄 | 全部 | 永久 |
 
@@ -566,6 +572,7 @@ range 高位、與遞增分配序列碰撞機率低很多，見檔案內註解�
 | 2026-09-07 | v1.11 | 對真實 FreeIPA vm-target（新建拋棄式 `hbac-delete-verify`，與 v1.10 是不同 VM）完整重跑 v1.10 交付的 static HBAC rule 刪除生命週期：Case A/B/D/`allow_all` 數字與 v1.10 完全一致（無回歸）。**更正 v1.10 的誤診**：v1.10 記錄「Case C（FreeIPA 因引用拒絕刪除）在目前資料模型下不可重現」，這次找到真實建構方式——用 `ipa selinuxusermap-add --hbacrule=<rule>` 建一個引用該 HBAC rule 的 SELinux User Map，`ipa hbacrule-del` 就會真的拒絕（`stderr="... cannot be deleted because SELinux User Map ... requires it"`）；透過 roster `state: absent` 走完整 apply playbook 觸發同一場景，`failed_when` 判斷邏輯**零程式碼改動**就正確 fail closed（`ok=77 changed=0 failed=1`，rule 未被刪除，無其他物件受影響）。§7.5、規格檔 `2026-09-07-pilot-hbac-rule-deletion-spec.md`（v1.6）與 §18 驗收準則同步更新 | pilot |
 | 2026-10-15 | v1.12 | Netgroup authoritative pruning SOP 步驟 1 原本是 `sudo ipa netgroup-add-member`：#72 之後主機上沒有殘留的 admin ticket，這行會失敗（`did not receive Kerberos credentials`，2026-10-15 對拋棄式 FreeIPA 4.13.4 vm-target 實測）。改成以 root 經 ldapi 的 SASL EXTERNAL 先查出 netgroup 的 `ipaUniqueID` DN 再 `ldapmodify` 加入 `uid=admin`；同一台 VM 上依序跑完步驟 1–3：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user membership"），步驟 3 只剩 `fixture-v2-user-a` 與 `team-fixture-v2`。另外 C1–C24 都經 ldapi 讀取，現在一律以 root 執行（`spec.NeedsBecome`，PR #89） | pilot |
 | 2026-10-15 | v1.13 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；candidate `edc840f` 在拋棄式 vm-target 實跑 PASS（R0–R8，`docs/evidence/freeipa-identity/2026-10-15-edc840f.md`）；2026-10-16 合併 main（私有 Kerberos cache 的 block）後，candidate `d24a31c` 重跑 R0–R8，結果相同（`docs/evidence/freeipa-identity/2026-10-16-d24a31c.md`）。main 的 netgroup SOP 變更先用了 v1.12，本項改為 v1.13 | pilot |
+| 2026-10-15 | v1.14 | issue #102：`freeipa-identity-apply.yml` 不再把 `ipa` 失敗當成成功或「不存在」。`ipa passwd` 失敗時新的 gate 讓 run 失敗並列出使用者與 `ipa: ERROR:` 行（原本顯示 ok，帳號沒有密碼）；user/group/hostgroup/netgroup/HBAC/sudo 成員查詢失敗即失敗（原本讀成沒有成員，撤權被跳過）；刪除 group 前、canonical host、password policy、退役主機的 host／service 查詢只放行真實擷取的 not found／`Number of entries returned 0`（原本查詢出錯時 group 可能在沒有 history marker 的情況下被刪，退役主機的 unknown-service gate 被跳過而照樣 `host-del`）；HBAC lockdown rescue 的 rollback 依實際結果回報。新增 `freeipa_identity_ipa_failures_regression_test.go`（假 `ipa` 回放 FreeIPA 4.13.4 真實輸出）與 `failed_when: false` 白名單 lint；decommission 的 HBAC／sudo 引用查詢與 DNS 查詢另開 #104、#105。candidate `ae8f276`（接上合併 main 後的 #103）實跑 PASS（`docs/evidence/freeipa-identity/2026-10-16-ae8f276.md`） | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 

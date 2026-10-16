@@ -1018,8 +1018,25 @@
           when: (ipa_pwd_actions | default({})).get(item.name, 'none') in ['initialize', 'reset']
           register: ipa_passwd
           changed_when: ipa_passwd.rc == 0
+          # Not failed here: no_log would hide which user failed. The gate below
+          # reports it.
           failed_when: false
           no_log: true
+          tags: [identity, users, passwords]
+
+        # Names the users whose `ipa passwd` failed, with ipa's "ipa: ERROR:"
+        # lines only (they never contain the password). Until issue #102 a
+        # failure here was reported as ok and the account kept no password.
+        - name: "Gate: every password this run set was accepted"
+          ansible.builtin.assert:
+            that:
+              - ipa_passwd_failed | length == 0
+            fail_msg: >-
+              ipa passwd failed, so these passwords were not set:
+              {% for r in ipa_passwd_failed %}{{ r.item.name }} (rc={{ r.rc }}:
+              {{ r.stderr_lines | default([]) | select('match', 'ipa: ERROR:') | join(' ') }}){{ '; ' if not loop.last }}{% endfor %}
+          vars:
+            ipa_passwd_failed: "{{ (ipa_passwd.results | default([])) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}"
           tags: [identity, users, passwords]
 
         # SSH public keys are declarative: user-mod REPLACES the whole ipaSshPubKey
@@ -1067,6 +1084,10 @@
         # `ipa user-show`'s "Member of groups:" line also lists IPA's own
         # `ipausers` (every user is auto-added to it), which must never be
         # touched since it isn't something any roster manages.
+        # The membership lookups below fail the run when `ipa` fails: read as
+        # "no members", a failed lookup would silently skip removing stale
+        # access (issue #102). The objects were created earlier in the run, so
+        # "not found" is an error too.
         - name: "Look up current user group memberships"
           ansible.builtin.command:
             argv: [ipa, user-show, "{{ item.name }}", --all]
@@ -1075,7 +1096,7 @@
             label: "{{ item.name }}"
           register: ipa_user_show
           changed_when: false
-          failed_when: false
+          failed_when: ipa_user_show.rc != 0
           when: freeipa_roster.schema_version is not defined
           tags: [identity, users, groups]
 
@@ -1120,7 +1141,7 @@
             label: "{{ item.name }}"
           register: canonical_group_show
           changed_when: false
-          failed_when: false
+          failed_when: canonical_group_show.rc != 0
           when: freeipa_roster.schema_version is defined
           tags: [identity, users, groups]
 
@@ -1230,6 +1251,8 @@
           when: freeipa_roster.schema_version is defined
           tags: [identity, users]
 
+        # "group not found" means already gone; any other failure stops the run
+        # here, before group-del could run without the history marker below.
         - name: "Look up actual FreeIPA group before deleting"
           ansible.builtin.command:
             argv: [ipa, group-show, "{{ item.name }}"]
@@ -1238,7 +1261,9 @@
             label: "{{ item.name }}"
           register: canonical_group_absent_show
           changed_when: false
-          failed_when: false
+          failed_when:
+            - canonical_group_absent_show.rc != 0
+            - "'group not found' not in (canonical_group_absent_show.stderr | default(''))"
           when: freeipa_roster.schema_version is defined
           tags: [identity, groups]
 
@@ -1287,7 +1312,9 @@
           loop: "{{ freeipa_roster.hosts | default([]) }}"
           register: ipa_canonical_host_show
           changed_when: false
-          failed_when: false
+          failed_when:
+            - ipa_canonical_host_show.rc != 0
+            - "'host not found' not in (ipa_canonical_host_show.stderr | default(''))"
           when:
             - freeipa_roster.schema_version is defined
             - item.state | default('present') == 'present'
@@ -1425,7 +1452,7 @@
             label: "{{ item.name }}"
           register: ipa_hostgroup_show
           changed_when: false
-          failed_when: false
+          failed_when: ipa_hostgroup_show.rc != 0
           tags: [identity, hostgroups]
 
         - name: "Compute stale hostgroup memberships to remove"
@@ -1613,7 +1640,7 @@
             label: "{{ item.name }}"
           register: ipa_netgroup_show
           changed_when: false
-          failed_when: false
+          failed_when: ipa_netgroup_show.rc != 0
           tags: [identity, netgroups]
 
         # membership.authoritative is required true by the earlier structural
@@ -1777,7 +1804,7 @@
             label: "{{ item.name }}"
           register: ipa_hbacrule_show
           changed_when: false
-          failed_when: false
+          failed_when: ipa_hbacrule_show.rc != 0
           tags: [identity, hbac, C14]
 
         # Scoped removal: only ever removes a host/hostgroup/service/user/group
@@ -2129,13 +2156,25 @@
               changed_when: false
               failed_when: "'Access granted: True' not in (ipa_hbac_postlock_test.stdout | default(''))"
           rescue:
+            # failed_when: false so the fail task below always runs; it reports
+            # whether the rollback worked instead of claiming it did.
             - name: "Rollback HBAC lockdown by re-enabling allow_all"
               ansible.builtin.command: ipa hbacrule-enable allow_all
-              changed_when: true
+              register: ipa_hbac_rollback
+              changed_when: ipa_hbac_rollback.rc == 0
               failed_when: false
             - name: "Fail after HBAC lockdown rollback"
               ansible.builtin.fail:
-                msg: "HBAC lockdown verification failed; allow_all was re-enabled."
+                msg: >-
+                  HBAC lockdown verification failed;
+                  {{ 'check mode, allow_all was not changed.'
+                     if (ipa_hbac_rollback.skipped | default(false))
+                     else ('allow_all was re-enabled.'
+                           if (ipa_hbac_rollback.rc | default(1)) == 0
+                              or 'already enabled' in (ipa_hbac_rollback.stderr | default(''))
+                           else 're-enabling allow_all FAILED (rc=' ~ (ipa_hbac_rollback.rc | default('?'))
+                                ~ ': ' ~ (ipa_hbac_rollback.stderr | default('') | trim)
+                                ~ '); check HBAC access now.') }}
 
         # ── Sudo rules (what a logged-in user may run, and where) ───────────
         # Catch the mutual-exclusivity mistake before it can silently happen
@@ -2251,7 +2290,7 @@
             label: "{{ item.name }}"
           register: ipa_sudorule_show
           changed_when: false
-          failed_when: false
+          failed_when: ipa_sudorule_show.rc != 0
           tags: [identity, sudo, C17]
 
         # Scoped removal: only ever removes a host/hostgroup/command/user/group
@@ -2753,7 +2792,9 @@
             index_var: pilot_pwpolicy_show_index
           register: pilot_pwpolicy_show
           changed_when: false
-          failed_when: false
+          failed_when:
+            - pilot_pwpolicy_show.rc != 0
+            - "'password policy not found' not in (pilot_pwpolicy_show.stderr | default(''))"
           environment:
             LC_ALL: C
           tags: [identity, password_policy]
@@ -2998,6 +3039,13 @@
         # --man-by-hosts=<fqdn>` query for services (host-show never lists
         # them, raw or not — that relationship is only queryable from the
         # service side).
+        #
+        # These lookups (and the host_object pair below) fail on any error but
+        # "not found": the deletion gates further down run only for a lookup
+        # that worked, and host-del does not wait for them, so an error used to
+        # skip the gates and delete the host anyway (issue #102). service-find
+        # exits 1 both when nothing matches and on errors; only its "Number of
+        # entries returned 0" line tells them apart (captured, FreeIPA 4.13.4).
         - name: "Look up the current live host object for each absent roster host (spec.md §16.6/§16.7)"
           ansible.builtin.command:
             argv: [ipa, host-show, "{{ item.name }}"]
@@ -3006,7 +3054,9 @@
             label: "{{ item.name }}"
           register: freeipa_absent_host_show
           changed_when: false
-          failed_when: false
+          failed_when:
+            - freeipa_absent_host_show.rc != 0
+            - "'host not found' not in (freeipa_absent_host_show.stderr | default(''))"
           tags: [identity, hosts, freeipa_host_absent_inspect]
 
         - name: "Look up services managed by each absent host (spec.md §16.6) — separate from host-show, which never lists them"
@@ -3017,7 +3067,9 @@
             label: "{{ item.name }}"
           register: freeipa_absent_host_services
           changed_when: false
-          failed_when: false
+          failed_when:
+            - freeipa_absent_host_services.rc != 0
+            - "'Number of entries returned 0' not in (freeipa_absent_host_services.stdout | default(''))"
           tags: [identity, hosts, freeipa_host_absent_inspect]
 
         - name: "Print live host inspection for external tooling (read-only)"
@@ -3061,7 +3113,9 @@
             argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
           register: freeipa_decom_query_host
           changed_when: false
-          failed_when: false
+          failed_when:
+            - freeipa_decom_query_host.rc != 0
+            - "'host not found' not in (freeipa_decom_query_host.stderr | default(''))"
           when:
             - pilot_decommission_query | default('') == 'host_object'
             - pilot_decommission_target_fqdn | default('') | length > 0
@@ -3072,7 +3126,9 @@
             argv: [ipa, service-find, "--man-by-hosts={{ pilot_decommission_target_fqdn | default('') }}"]
           register: freeipa_decom_query_host_services
           changed_when: false
-          failed_when: false
+          failed_when:
+            - freeipa_decom_query_host_services.rc != 0
+            - "'Number of entries returned 0' not in (freeipa_decom_query_host_services.stdout | default(''))"
           when:
             - pilot_decommission_query | default('') == 'host_object'
             - pilot_decommission_target_fqdn | default('') | length > 0

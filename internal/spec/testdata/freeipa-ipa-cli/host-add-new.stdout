@@ -1,0 +1,10 @@
+----------------------------------------
+Added host "pwc-host.ipa.pilot.internal"
+----------------------------------------
+  Host name: pwc-host.ipa.pilot.internal
+  Description: pwc-host
+  Principal name: host/pwc-host.ipa.pilot.internal@IPA.PILOT.INTERNAL
+  Principal alias: host/pwc-host.ipa.pilot.internal@IPA.PILOT.INTERNAL
+  Password: False
+  Keytab: False
+  Managed by: pwc-host.ipa.pilot.internal

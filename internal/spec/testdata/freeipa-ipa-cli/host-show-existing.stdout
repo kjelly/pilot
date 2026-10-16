@@ -1,0 +1,8 @@
+  Host name: ipa1.ipa.pilot.internal
+  Principal name: host/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL
+  Principal alias: host/ipa1.ipa.pilot.internal@IPA.PILOT.INTERNAL
+  SSH public key fingerprint: SHA256:N6auwjkbDpBXrWtqC15nggHvYWFQ6KrhZ2MGygz19zA root@pwfix-ipa (ssh-rsa), SHA256:X1ESCOG7eZPPJecsksl3tEZuXJnLk9z6zo7rFY05YPg root@pwfix-ipa (ecdsa-sha2-nistp256), SHA256:YOr4A84AyrWkzvhXRnPSAta/DABv80JGqR9AxoGzbuY root@pwfix-ipa (ssh-ed25519)
+  Password: False
+  Member of host-groups: ipaservers
+  Keytab: True
+  Managed by: ipa1.ipa.pilot.internal

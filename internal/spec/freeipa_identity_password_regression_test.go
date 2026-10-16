@@ -53,10 +53,31 @@ const (
 	userShowMaxlife0SelfChanged = "testdata/freeipa-user-show-raw-maxlife0-self-changed.txt"
 )
 
-// identityTasks returns the identity playbook's pre_tasks and tasks named in
-// names, in playbook order, without no_log so the test can read their
-// results.
+// identityTasks returns identityPlaybookTasks(names) with the password lookup
+// reading pw_fixture_dir/<user>.txt and `ipa passwd` replaced by a debug task
+// printing "PASSWD <user>".
 func identityTasks(t *testing.T, names []string) []any {
+	t.Helper()
+	var out []any
+	for _, c := range identityPlaybookTasks(t, names) {
+		switch c["name"] {
+		case identityPwLookupTask:
+			c["ansible.builtin.command"] = map[string]any{"argv": []any{"cat", "{{ pw_fixture_dir }}/{{ item.name }}.txt"}}
+		case identityPwSetTask:
+			for _, k := range []string{"ansible.builtin.shell", "register", "changed_when", "failed_when"} {
+				delete(c, k)
+			}
+			c["ansible.builtin.debug"] = map[string]any{"msg": "PASSWD {{ item.name }}"}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// identityPlaybookTasks returns the identity playbook's pre_tasks and tasks
+// named in names, in playbook order, without no_log so the test can read
+// their results.
+func identityPlaybookTasks(t *testing.T, names []string) []map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(identityApplyPath)
 	if err != nil {
@@ -66,30 +87,17 @@ func identityTasks(t *testing.T, names []string) []any {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
-	var out []any
+	var out []map[string]any
 	found := map[string]bool{}
 	pre, _ := plays[0]["pre_tasks"].([]any)
-	for _, r := range flattenTasks(append(slices.Clone(pre), plays[0]["tasks"].([]any)...)) {
-		task := r.(map[string]any)
+	for _, task := range namedTasks(append(slices.Clone(pre), plays[0]["tasks"].([]any)...), names) {
 		name, _ := task["name"].(string)
-		if !slices.Contains(names, name) {
-			continue
-		}
 		found[name] = true
 		c := map[string]any{}
 		for k, v := range task {
 			if k != "no_log" {
 				c[k] = v
 			}
-		}
-		switch name {
-		case identityPwLookupTask:
-			c["ansible.builtin.command"] = map[string]any{"argv": []any{"cat", "{{ pw_fixture_dir }}/{{ item.name }}.txt"}}
-		case identityPwSetTask:
-			for _, k := range []string{"ansible.builtin.shell", "register", "changed_when", "failed_when"} {
-				delete(c, k)
-			}
-			c["ansible.builtin.debug"] = map[string]any{"msg": "PASSWD {{ item.name }}"}
 		}
 		out = append(out, c)
 	}
@@ -101,24 +109,24 @@ func identityTasks(t *testing.T, names []string) []any {
 	return out
 }
 
-// flattenTasks lists the tasks in playbook order, descending into blocks:
-// most reconcile tasks sit inside the private Kerberos cache block (issue
-// #69), so a top-level scan would not find them.
-func flattenTasks(tasks []any) []any {
-	var out []any
+// namedTasks returns the tasks named in names, in playbook order, at any
+// depth: most reconcile tasks sit inside the private Kerberos cache block
+// (issue #69), so a top-level scan would not find them. A requested block
+// task comes back whole, its rescue included; any other block is searched.
+func namedTasks(tasks []any, names []string) []map[string]any {
+	var out []map[string]any
 	for _, r := range tasks {
 		task, ok := r.(map[string]any)
 		if !ok {
 			continue
 		}
-		sections := []string{"block", "rescue", "always"}
-		if _, isBlock := task["block"]; !isBlock {
+		if name, _ := task["name"].(string); slices.Contains(names, name) {
 			out = append(out, task)
 			continue
 		}
-		for _, section := range sections {
+		for _, section := range []string{"block", "rescue", "always"} {
 			if inner, ok := task[section].([]any); ok {
-				out = append(out, flattenTasks(inner)...)
+				out = append(out, namedTasks(inner, names)...)
 			}
 		}
 	}
