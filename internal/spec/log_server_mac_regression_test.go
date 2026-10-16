@@ -1,6 +1,8 @@
 package spec
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -386,12 +388,17 @@ func TestRegression_LogServerRescueRestoresWhatItChanged(t *testing.T) {
 
 // TestRegression_LogServerRescueRestartsOnlyAValidConfiguration evaluates,
 // through Ansible, the rescue's restart condition and its failure message for
-// each result of the `rsyslogd -N1` check: a configuration rsyslogd accepts,
-// one it rejects (the full output for an invalid drop-in, captured with
-// rsyslog 8.2312.0), rsyslogd missing (the result Ansible registers for a
-// command that does not exist, captured with ansible-core 2.19.2), and the
-// check skipped. On 640362e the rescue restarted rsyslog in every case; on
-// d545868 the message quoted only rsyslogd's generic last line.
+// real registered results of its `rsyslogd -N1` validation
+// (testdata/rsyslogd-n1-registers.json): ten configurations each on Ubuntu
+// 24.04 (rsyslog 8.2312.0) and AlmaLinux 9 (8.2510.0), one of them accepted,
+// plus rsyslogd missing and the validation skipped by `when:`. Only an
+// accepted configuration may restart rsyslog, and the message must quote
+// the first error rsyslogd reports. On 640362e the rescue restarted rsyslog
+// in every case. The message quoted rsyslogd's generic last line on d545868,
+// the "errors occurred" summary after an omfile error on 939b3fe, and on
+// 032a8b3 that summary after a template or omfwd error, "parameter 'port'
+// not known" instead of the unknown input module before it, and the second
+// of two errors.
 func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
@@ -420,92 +427,115 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 		t.Errorf("the rescue's validation must keep check_mode: false; got %v", validate["check_mode"])
 	}
 
-	// rsyslogd -N1 results as `register` records them on Ubuntu 24.04,
-	// rsyslog 8.2312.0, for /etc/rsyslog.conf as shipped and with
-	// /etc/rsyslog.d/99-pr79-broken.conf holding the content named in each
-	// comment (captured through Ansible on pr79-dev, 2026-10-16).
-	accepted := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: End of config validation run. Bye.",
+	raw, err := os.ReadFile("testdata/rsyslogd-n1-registers.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// "this is not rsyslog syntax {\n"
-	rejectedSyntax := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: warnings occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: could not interpret master config file '/etc/rsyslog.conf'. [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	var captured struct {
+		Ubuntu  captureSet                `json:"ubuntu-24.04"`
+		EL      captureSet                `json:"almalinux-9"`
+		Ansible map[string]map[string]any `json:"ansible"`
 	}
-	// "action(type=\"omfile\")\n"
-	rejectedOmfile := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: omfile: either the \"file\" or \"dynafile\" parameter must be given [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: errors occurred in file '/etc/rsyslog.d/99-pr79-broken.conf' around line 1 [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	if err := json.Unmarshal(raw, &captured); err != nil {
+		t.Fatal(err)
 	}
-	// "if $msg contains 'x' then {\n  stop\n"
-	rejectedUnterminated := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: error during parsing file /etc/rsyslog.conf, on or before line 54: syntax error on token '' [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
-		"rsyslogd: could not interpret master config file '/etc/rsyslog.conf'. [v8.2312.0 try https://www.rsyslog.com/e/2207 ]",
+	// The stderr line the message quotes for each rejected configuration:
+	// the first error, after the version banner (line 0).
+	firstError := map[string]int{
+		"syntax":            6, // after five "warnings occurred in file" summaries
+		"omfile":            1, // not the "errors occurred in file" summary after it
+		"omfile-twice":      1, // the error on line 1 of the drop-in, not the one on line 2
+		"unterminated":      1, // blamed on /etc/rsyslog.conf
+		"unknown-directive": 1,
+		"missing-module":    1,
+		"template":          1, // Ubuntu: not a parsing line; EL: one
+		"omfwd":             1, // not a parsing line
+		"imtcp":             1, // "input module name 'imtcp' is unknown", not "parameter 'port' not known"
 	}
-	// "$FooBarDirective on\n"
-	rejectedUnknownDirective := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: invalid or yet-unknown config file command 'FooBarDirective' - have you forgotten to load a module? [v8.2312.0 try https://www.rsyslog.com/e/3003 ]",
+	type rescueCase struct {
+		name     string
+		register map[string]any
+		restart  bool
+		message  string
 	}
-	// "module(load=\"imnonexistent\")\n"
-	rejectedMissingModule := []any{
-		"rsyslogd: version 8.2312.0, config validation run (level 1), master config /etc/rsyslog.conf",
-		"rsyslogd: could not load module 'imnonexistent', errors: trying to load module /usr/lib/x86_64-linux-gnu/rsyslog/imnonexistent.so: /usr/lib/x86_64-linux-gnu/rsyslog/imnonexistent.so: cannot open shared object file: No such file or directory [v8.2312.0 try https://www.rsyslog.com/e/2066 ]",
-	}
-	// What ansible-core 2.19.2 registers when `when:` skips the check.
-	notRun := map[string]any{"changed": false, "false_condition": false, "skip_reason": "Conditional result was False", "skipped": true}
-	cases := []struct {
-		name        string
-		result      map[string]any
-		wantRestart bool
-		wantMsg     string
-	}{
-		{"accepted", map[string]any{"rc": 0, "stderr_lines": accepted}, true, "rsyslog was restarted with the restored configuration."},
-		// The parsing line with the error, not rsyslogd's summary lines.
-		{"rejected: syntax error", map[string]any{"rc": 1, "stderr_lines": rejectedSyntax}, false,
-			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: syntax error on token '{'"},
-		{"rejected: omfile without a file", map[string]any{"rc": 1, "stderr_lines": rejectedOmfile}, false,
-			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.d/99-pr79-broken.conf, on or before line 1: omfile: either the \"file\" or \"dynafile\" parameter must be given"},
-		{"rejected: unterminated block, blamed on rsyslog.conf", map[string]any{"rc": 1, "stderr_lines": rejectedUnterminated}, false,
-			"(rc=1: rsyslogd: error during parsing file /etc/rsyslog.conf, on or before line 54: syntax error on token ''"},
-		// No parsing line: the last line.
-		{"rejected: unknown directive", map[string]any{"rc": 1, "stderr_lines": rejectedUnknownDirective}, false,
-			"(rc=1: rsyslogd: invalid or yet-unknown config file command 'FooBarDirective'"},
-		{"rejected: module does not load", map[string]any{"rc": 1, "stderr_lines": rejectedMissingModule}, false,
-			"(rc=1: rsyslogd: could not load module 'imnonexistent'"},
-		{"rsyslogd missing", map[string]any{"rc": 2, "msg": "Error executing command.", "stderr_lines": []any{}}, false, "did not pass (rc=2: Error executing command.)"},
-		{"validation did not run", notRun, false, "did not pass (rc=?: no output)"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			tasks := []any{
-				map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_rescue_syntax": c.result}},
-				map[string]any{"ansible.builtin.set_fact": map[string]any{
-					"restart": "{{ " + when + " }}",
-					"message": msg,
-				}},
-				showTask([]string{"restart", "message"}),
+	var cases []rescueCase
+	for _, set := range []struct {
+		distro string
+		captureSet
+	}{{"ubuntu", captured.Ubuntu}, {"el", captured.EL}} {
+		if len(set.Cases) != len(firstError)+1 {
+			t.Fatalf("%s: %d captures, want %d", set.distro, len(set.Cases), len(firstError)+1)
+		}
+		for _, c := range set.Cases {
+			rc, _ := c.Register["rc"].(float64)
+			lines, _ := c.Register["stderr_lines"].([]any)
+			if c.Name == "accepted" {
+				if rc != 0 {
+					t.Fatalf("%s accepted: rc=%v", set.distro, rc)
+				}
+				cases = append(cases, rescueCase{set.distro + "/" + c.Name, c.Register, true, "rsyslog was restarted with the restored configuration."})
+				continue
 			}
-			got, failed := tryInventoryPlay(t, "log-server", nil, tasks, nil)
-			if failed != "" {
-				t.Fatal(failed)
+			i, ok := firstError[c.Name]
+			if !ok || rc == 0 || i >= len(lines) {
+				t.Fatalf("%s %s: no expected line for rc=%v, %d lines", set.distro, c.Name, rc, len(lines))
 			}
-			if got["restart"] != c.wantRestart {
-				t.Errorf("restart = %v, want %v", got["restart"], c.wantRestart)
-			}
-			if m, _ := got["message"].(string); !strings.Contains(m, c.wantMsg) {
-				t.Errorf("message %q does not contain %q", m, c.wantMsg)
-			}
+			cases = append(cases, rescueCase{set.distro + "/" + c.Name, c.Register, false,
+				fmt.Sprintf("did not pass (rc=%d: %s), so the running rsyslog keeps what it has.", int(rc), lines[i])})
+		}
+	}
+	cases = append(cases,
+		rescueCase{"rsyslogd missing", captured.Ansible["rsyslogd missing"], false, "did not pass (rc=2: Error executing command.), so"},
+		rescueCase{"validation did not run", captured.Ansible["validation did not run"], false, "did not pass (rc=?: no output), so"},
+	)
+
+	// One play: each case sets the register as a block variable and records
+	// what the restart condition and the message evaluate to, or the error.
+	registers := make([]any, len(cases))
+	tasks := []any{map[string]any{"ansible.builtin.set_fact": map[string]any{"results": map[string]any{}}}}
+	for i, c := range cases {
+		registers[i] = c.register
+		key := fmt.Sprintf("c%d", i)
+		tasks = append(tasks, map[string]any{
+			"vars": map[string]any{"log_server_rescue_syntax": fmt.Sprintf("{{ rescue_registers[%d] }}", i)},
+			"block": []any{
+				map[string]any{"name": batchedTaskPrefix + "evaluate", "ansible.builtin.set_fact": map[string]any{
+					"restart_now": "{{ " + when + " }}", "message_now": msg}},
+				map[string]any{"name": batchedTaskPrefix + "record", "ansible.builtin.set_fact": map[string]any{
+					"results": "{{ results | combine({'" + key + "': {'restart': restart_now, 'message': message_now}}) }}"}},
+			},
+			"rescue": []any{map[string]any{"ansible.builtin.set_fact": map[string]any{
+				"results": "{{ results | combine({'" + key + "': {'error': ansible_failed_result.msg}}) }}"}}},
 		})
 	}
+	tasks = append(tasks, showTask([]string{"results"}))
+	got, failed := tryInventoryPlay(t, "log-server", map[string]any{"rescue_registers": registers}, tasks, nil)
+	if failed != "" {
+		t.Fatal(failed)
+	}
+	results, _ := got["results"].(map[string]any)
+	for i, c := range cases {
+		r, _ := results[fmt.Sprintf("c%d", i)].(map[string]any)
+		if r["error"] != nil {
+			t.Errorf("%s: %v", c.name, r["error"])
+			continue
+		}
+		if r["restart"] != c.restart {
+			t.Errorf("%s: restart = %v, want %v", c.name, r["restart"], c.restart)
+		}
+		if m, _ := r["message"].(string); !strings.Contains(m, c.message) {
+			t.Errorf("%s: message %q does not contain %q", c.name, m, c.message)
+		}
+	}
+}
+
+// captureSet is one distribution's captures in
+// testdata/rsyslogd-n1-registers.json.
+type captureSet struct {
+	Rsyslog string `json:"rsyslog"`
+	Cases   []struct {
+		Name     string            `json:"name"`
+		Config   map[string]string `json:"config"`
+		Register map[string]any    `json:"register"`
+	} `json:"cases"`
 }

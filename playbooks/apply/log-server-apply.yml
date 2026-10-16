@@ -598,14 +598,19 @@
         # lost every drop-in sorting after the invalid one, and the next run
         # reported changed=0 (2026-10-15, pr79-log). Restart only a
         # configuration rsyslogd accepts; otherwise the running rsyslog keeps
-        # what it has. `rsyslogd -N1` ends with a generic line such as "could
-        # not interpret master config file", so the message quotes the last
-        # "error during parsing" line that is not rsyslogd's summary
-        # ("warnings/errors occurred in file ..."). That line states the error
-        # and the file rsyslogd blames, which for an unterminated block in a
-        # drop-in is /etc/rsyslog.conf. Without such a line (an unknown
-        # directive, a module that does not load) it quotes the last line,
-        # then Ansible's message (rsyslog 8.2312.0, captured 2026-10-16).
+        # what it has. `rsyslogd -N1` prints a version banner first. A syntax
+        # error can follow "warnings occurred in file ..." summaries and is
+        # followed by a generic "could not interpret master config file"; an
+        # action's error is followed by an "errors occurred in file ..."
+        # summary; an input whose module is not loaded reports "input module
+        # name ... is unknown" before "parameter ... not known". The message
+        # quotes the first line after the banner that is not a "warnings
+        # occurred" summary; in every captured case that is the first error
+        # rsyslogd reports. For an unterminated block in a drop-in, rsyslogd
+        # blames /etc/rsyslog.conf. Without such a line (rsyslogd missing,
+        # the validation did not run) it quotes Ansible's message. Captures:
+        # internal/spec/testdata/rsyslogd-n1-registers.json (rsyslog 8.2312.0
+        # and 8.2510.0, 2026-10-16).
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
@@ -634,11 +639,9 @@
                  if (log_server_rescue_syntax.rc | default(1)) == 0 else
                  'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
                  ~ (log_server_rescue_syntax.rc | default('?')) ~ ': '
-                 ~ ((log_server_rescue_syntax.stderr_lines | default([])
-                     | select('search', 'error during parsing')
-                     | reject('search', '(warnings|errors) occurred in file') | list | last
-                     | default(log_server_rescue_syntax.stderr_lines | default([]) | last | default(''), true))
-                    or (log_server_rescue_syntax.msg | default('no output')))
+                 ~ (log_server_rescue_syntax.stderr_lines
+                    | reject('search', 'config validation run|warnings occurred in file') | first
+                    | default(log_server_rescue_syntax.msg | default('no output')))
                  ~ '), so the running rsyslog keeps what it has.' }}
               Left in place: the log root directory and an SELinux port label
               for siem_receiver_tcp_port. Fix the failing task and re-run.
