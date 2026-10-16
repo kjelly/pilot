@@ -487,6 +487,12 @@ func TestRegression_LogServerRescueKeepsTheRootRsyslogWrites(t *testing.T) {
 			if err := os.WriteFile(conf, []byte("# receiver on "+c.before+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			// rsyslog started after this; Step 6a restarts it when the
+			// config is newer than its start.
+			written := time.Now().Add(-time.Hour).Truncate(time.Second)
+			if err := os.Chtimes(conf, written, written); err != nil {
+				t.Fatal(err)
+			}
 			if c.localBefore != nil {
 				if err := os.WriteFile(local, []byte(*c.localBefore), 0o644); err != nil {
 					t.Fatal(err)
@@ -576,6 +582,18 @@ func TestRegression_LogServerRescueKeepsTheRootRsyslogWrites(t *testing.T) {
 			}
 			if final, root := fmt.Sprint(got["final"]), fmt.Sprint(got["writes"]); c.wantFinal != nil && !grants(final, root) {
 				t.Errorf("after the rescue the rules do not grant %s, which the running rsyslog writes", root)
+			}
+			// While rsyslog runs the configuration from before the run, the
+			// put-back config keeps its time from before the run, so the
+			// next run does not restart rsyslog for it; once rsyslog runs
+			// this run's configuration, the config stays newer than its start.
+			info, err := os.Stat(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stillOld := !c.restartedInRun && c.rc != 0
+			if kept := info.ModTime().Equal(written); stillOld != kept {
+				t.Errorf("receiver config time %v (before the run %v); want it kept: %v", info.ModTime(), written, stillOld)
 			}
 		})
 	}

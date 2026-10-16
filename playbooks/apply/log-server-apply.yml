@@ -793,6 +793,27 @@
                  or (log_server_snapshot_rsyslog.stdout is defined
                      and log_server_rescue_rsyslog.stdout == log_server_snapshot_rsyslog.stdout) }}
 
+        # Step 6a restarts an rsyslog that started before the receiver config
+        # was last written. Putting back the config rewrote it, so while
+        # rsyslog still runs the configuration from before this run (not
+        # restarted since the snapshot, and not by the rescue), its time from
+        # before the run goes back too; the next run then restarts it only
+        # if it would have anyway. Without this, the run after a rejected
+        # rescue restarted rsyslog once (changed=1; pr79-log, 2026-10-16).
+        - name: "ROLLBACK — keep the receiver config's time while rsyslog still runs it"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [touch, -m, -d, "@{{ log_server_rescue_conf_stat.stat.mtime }}", "{{ siem_receiver_conf }}"]
+          when:
+            - log_server_rescue_conf_stat.stat.exists | default(false)
+            - (log_server_rescue_syntax.rc | default(1)) != 0
+            - log_server_snapshot_rsyslog.stdout is defined
+            - log_server_rescue_rsyslog.stdout == log_server_snapshot_rsyslog.stdout
+          vars:
+            log_server_rescue_conf_stat: >-
+              {{ log_server_snapshot_stat.results | default([])
+                 | selectattr('item', 'equalto', siem_receiver_conf) | first | default({}) }}
+
         - name: "ROLLBACK — put back the AppArmor local file"
           tags: [always]
           ansible.builtin.copy:
