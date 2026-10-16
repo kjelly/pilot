@@ -307,9 +307,12 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 讀不完整時，apply 在改動之前就失敗：查詢被截斷，或
 `Gate: the user listings were parsed completely`／`Gate: the group listing was parsed completely`
-讀不懂輸出。後者通常是 `ipa` 輸出
-被翻成其他語言：ssh session 的 `LANG` 來自 server 的系統語系（`/etc/locale.conf`），
-不是英文且裝了該語言時，`ipa` 就印那個語言。這支 playbook 只認英文輸出。
+讀不懂輸出。後者通常是 `ipa` 輸出被翻成其他語言：ssh session 的 `LANG` 來自 server
+的系統語系（`/etc/locale.conf`），不是英文且裝了該語言時，`ipa` 就印那個語言。這支
+playbook 只認英文輸出。
+
+120 位使用者的穩態重跑從 1,189 次 API 呼叫降到 642 次，約 845 秒降到 480–520 秒
+（candidate `01fcc5d`，`docs/evidence/freeipa-identity/2026-10-16-01fcc5d.md`）。
 
 ---
 
