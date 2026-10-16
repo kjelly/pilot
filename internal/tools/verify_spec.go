@@ -157,7 +157,12 @@ func (t *VerifySpecTool) stageVerifyEnv(invPath string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ansible", args...)
 	cmd.Env = append(os.Environ(), t.Env...)
+	release, err := ansible.HoldCommandLog(ctx, cmd)
+	if err != nil {
+		return
+	}
 	_ = cmd.Run()
+	release()
 }
 
 // Execute runs every row in the spec and returns the joined NDJSON
@@ -402,10 +407,13 @@ func (t *VerifySpecTool) assertSecretRef(ctx context.Context, host, variable str
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	release, err := ansible.HoldCommandLog(ctx, command)
+	if err != nil {
 		return err
 	}
-	return nil
+	err = command.Run()
+	release()
+	return err
 }
 
 func (t *VerifySpecTool) cleanupLocal(ctx context.Context, row spec.Row, result VerifyRow, timeoutSec int, inputs map[string]string) VerifyRow {
@@ -717,7 +725,14 @@ func (t *VerifySpecTool) execAnsible(ctx context.Context, args []string, timeout
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "ansible", args...)
 	cmd.Env = append(os.Environ(), t.Env...)
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	release, err := ansible.HoldCommandLog(cctx, cmd)
+	if err == nil {
+		out, err = cmd.CombinedOutput()
+		release()
+	} else {
+		out = []byte(err.Error())
+	}
 	rc := 0
 	if ee, ok := err.(*exec.ExitError); ok {
 		rc = ee.ExitCode()

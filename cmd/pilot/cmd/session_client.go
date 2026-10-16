@@ -51,7 +51,7 @@ func (c *sessionStoreClient) get(ctx context.Context, path string, out any) erro
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("pilot-session-store unreachable: %w", err)
+		return localAPIRequestError("pilot-session-store", req, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)

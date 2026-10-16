@@ -9,51 +9,51 @@ active
 @@pilot-dnsarch forwards end rc=0
 @@pilot-dnsarch stubs begin
 . IN stub prime M.ROOT-SERVERS.NET. L.ROOT-SERVERS.NET. K.ROOT-SERVERS.NET. J.ROOT-SERVERS.NET. I.ROOT-SERVERS.NET. H.ROOT-SERVERS.NET. G.ROOT-SERVERS.NET. F.ROOT-SERVERS.NET. E.ROOT-SERVERS.NET. D.ROOT-SERVERS.NET. C.ROOT-SERVERS.NET. B.ROOT-SERVERS.NET. A.ROOT-SERVERS.NET. 2001:dc3::35 2001:500:9f::42 2001:7fd::1 2001:503:c27::2:30 2001:7fe::53 2001:500:1::53 2001:500:12::d0d 2001:500:2f::f 2001:500:a8::e 2001:500:2d::d 2001:500:2::c 2001:500:200::b 2001:503:ba3e::2:30 202.12.27.33 199.7.83.42 193.0.14.129 192.58.128.30 192.36.148.17 198.97.190.53 192.112.36.4 192.5.5.241 192.203.230.10 199.7.91.13 192.33.4.12 199.9.14.201 198.41.0.4
-ipa.pilot.internal. IN stub noprime +i 192.168.122.5
+ipa.pilot.internal. IN stub noprime +i 192.168.122.13
 @@pilot-dnsarch stubs end rc=0
 @@pilot-dnsarch identity begin
-"pilot-dns:dd-dns"
+"pilot-dns:pr91-dns"
 @@pilot-dnsarch identity end rc=0
 @@pilot-dnsarch internal begin
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 62244
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 62949
 ;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
 
 ;; OPT PSEUDOSECTION:
 ; EDNS: version: 0, flags:; udp: 1232
 ;; ANSWER SECTION:
-ipa1.ipa.pilot.internal. 68	IN	A	192.168.122.5
+ipa1.ipa.pilot.internal. 22	IN	A	192.168.122.13
 
 @@pilot-dnsarch internal end rc=0
 @@pilot-dnsarch external begin
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4065
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 11519
 ;; flags: qr rd ra ad; QUERY: 1, ANSWER: 13, AUTHORITY: 0, ADDITIONAL: 1
 
 ;; OPT PSEUDOSECTION:
 ; EDNS: version: 0, flags:; udp: 1232
 ;; ANSWER SECTION:
-.			62	IN	NS	f.root-servers.net.
-.			62	IN	NS	g.root-servers.net.
-.			62	IN	NS	h.root-servers.net.
-.			62	IN	NS	i.root-servers.net.
-.			62	IN	NS	j.root-servers.net.
-.			62	IN	NS	k.root-servers.net.
-.			62	IN	NS	l.root-servers.net.
-.			62	IN	NS	m.root-servers.net.
-.			62	IN	NS	a.root-servers.net.
-.			62	IN	NS	b.root-servers.net.
-.			62	IN	NS	c.root-servers.net.
-.			62	IN	NS	d.root-servers.net.
-.			62	IN	NS	e.root-servers.net.
+.			145	IN	NS	k.root-servers.net.
+.			145	IN	NS	l.root-servers.net.
+.			145	IN	NS	m.root-servers.net.
+.			145	IN	NS	a.root-servers.net.
+.			145	IN	NS	b.root-servers.net.
+.			145	IN	NS	c.root-servers.net.
+.			145	IN	NS	d.root-servers.net.
+.			145	IN	NS	e.root-servers.net.
+.			145	IN	NS	f.root-servers.net.
+.			145	IN	NS	g.root-servers.net.
+.			145	IN	NS	h.root-servers.net.
+.			145	IN	NS	i.root-servers.net.
+.			145	IN	NS	j.root-servers.net.
 
 @@pilot-dnsarch external end rc=0
-@@pilot-dnsarch authority@192.168.122.5 begin
+@@pilot-dnsarch authority@192.168.122.13 begin
 ;; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 32553
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 21649
 ;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 1, ADDITIONAL: 2
 
 ;; OPT PSEUDOSECTION:
 ; EDNS: version: 0, flags:; udp: 1232
-; COOKIE: 59f3a761814e987d010000006acde3281c5b323df7839d05 (good)
-@@pilot-dnsarch authority@192.168.122.5 end rc=0
+; COOKIE: 4178f85c99a1da57010000006acf9f3da9807f1af5e9830f (good)
+@@pilot-dnsarch authority@192.168.122.13 end rc=0

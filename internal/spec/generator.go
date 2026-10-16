@@ -334,6 +334,12 @@ func NeedsBecome(r Row) bool {
 		"docker", "podman",
 		// root-only daemon / socket probes
 		"pg_isready", "ss ", "netstat",
+		// LDAP over the 389-ds ldapi socket with SASL EXTERNAL: only root
+		// autobinds as Directory Manager; any other uid binds as itself or
+		// anonymously and reads less, so the row would fail or pass on
+		// what that uid happens to see (freeipa-identity.md,
+		// pilot-gateway-scope.md, freeipa-dns.md).
+		"ldapi://", "-y external",
 	}
 	joined := cmd + " " + exp
 	for _, m := range markers {

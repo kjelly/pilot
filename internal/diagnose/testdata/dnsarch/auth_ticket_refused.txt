@@ -1,0 +1,17 @@
+@@pilot-dnsarch whoami begin
+root
+@@pilot-dnsarch whoami end rc=0
+@@pilot-dnsarch kinit begin
+@@pilot-dnsarch kinit end rc=0
+@@pilot-dnsarch dnsconfig begin
+ipa: ERROR: did not receive Kerberos credentials
+@@pilot-dnsarch dnsconfig end rc=1
+@@pilot-dnsarch dnsserver begin
+ipa: ERROR: did not receive Kerberos credentials
+@@pilot-dnsarch dnsserver end rc=1
+@@pilot-dnsarch forwardzones begin
+ipa: ERROR: did not receive Kerberos credentials
+@@pilot-dnsarch forwardzones end rc=1
+@@pilot-dnsarch zones begin
+ipa: ERROR: did not receive Kerberos credentials
+@@pilot-dnsarch zones end rc=1

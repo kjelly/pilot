@@ -2,6 +2,7 @@ package spec
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -212,11 +213,11 @@ func TestRegression_FreeipaIdentityAuthenticatesBeforeCheckModeProbes(t *testing
 	if kinitStart < 0 {
 		t.Fatal("identity playbook must contain the Kinit admin task")
 	}
-	kinitEnd := strings.Index(playbook[kinitStart:], "\n    # ── Groups")
-	if kinitEnd < 0 {
+	kinitEnd := regexp.MustCompile(`\n[ ]+# ── Groups`).FindStringIndex(playbook[kinitStart:])
+	if kinitEnd == nil {
 		t.Fatal("could not isolate Kinit admin task")
 	}
-	kinit := playbook[kinitStart : kinitStart+kinitEnd]
+	kinit := playbook[kinitStart : kinitStart+kinitEnd[0]]
 	if !strings.Contains(kinit, "check_mode: false") {
 		t.Fatal("Kinit admin must run during --check previews so live IPA probes have a fresh ticket")
 	}

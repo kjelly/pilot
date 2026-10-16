@@ -15,18 +15,19 @@
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-14，candidate `6522b94`（tree `c8029314e417b78ad043b59ec8b32a4df256e379`；replica 規則對齊 issue #67/#68，
-並含 PR #66 的 `e862f1d`），**PASS**。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
-同一個 topology 上 PR #66 candidate `e862f1d` 的結果：
-[`docs/evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)。
+最新驗證：2026-10-15，candidate `46fbc58`（tree `e3d041a24c503efad01505d3002ce79f52779c35`，PR #66 的 follow-up 第二輪），
+在新建的 3 台 topology 上重跑，**PASS**；run ID、UTC 時段、target image digest、inventory 與 reader role 指紋都在執行當下記錄。摘要：
+[`docs/evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-15-46fbc58.md)。
+前幾輪：[`2026-10-14-46fbc58.md`](../evidence/dns-architecture-diagnose/2026-10-14-46fbc58.md)（同一 candidate 第一次實跑，含本機檢查與套件版本）、
+[`2026-10-14-8951d2e.md`](../evidence/dns-architecture-diagnose/2026-10-14-8951d2e.md)（principal、查詢失敗、named 停止等情境）、
+[`2026-10-14-e862f1d.md`](../evidence/dns-architecture-diagnose/2026-10-14-e862f1d.md)（14 個情境）。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`，4 台由 `topology up` 新建、由 candidate `6522b94` 部署的 VM（FreeIPA 4.13.4 primary 與 replica / AlmaLinux 9.8、unbound 1.19.2 / Ubuntu 24.04.4、一台 consumer），測完已移除 |
-| inventory host 集合 | `freeipa-server`: pr73-ipa；`freeipa-server-replica`: pr73-replica（未設 `freeipa_setup_dns`）；`dns`: pr73-dns；`freeipa-dns-client`: pr73-client。S7–S9 另用 inventory 副本加入連不到的 replica、拿掉 `dns` group、設定 client override |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝與 §2 的唯讀 principal 設定用）；`pr73-ipa` 的 `/etc/pilot/dns-reader.keytab` |
-| 結果 | 14 個情境全部符合預期：有核准 principal 時 `complete`、10 項比對全部 `match`（兩台 FreeIPA 都是 DNS 提供者，replica 的 server forwarders `9.9.9.9`）；沒有 principal 時 `auth_required` 且其他事實完整；principal 沒有 role 時 `permission_denied`；keytab 錯誤 `auth_required`；改 global forwarders 回報 `mismatch`；unbound 停止時 `partial`，並有 `external_resolution_unknown` 與 `live_fact_unknown`；replica 連不到時 `partial`；tier 回 SERVFAIL、或 CNAME 沒有 A 紀錄時是 `external_resolution_failed`；CNAME 接 A 紀錄才算解析成功；`admin` principal 在啟動時被拒絕 |
+| 目標環境 | `pilot vm-target topology`，3 台由 `topology up` 新建的 VM：`pr91-ipa`（AlmaLinux 9.8，FreeIPA 有 DNS）、`pr91-dns`（Ubuntu 24.04.4，unbound tier）、`pr91-client`（Ubuntu 24.04.4）；由這個 branch 的 playbook（與 `main` 相同）部署，測完已移除。base image digest 見摘要；這次沒有記錄套件版本 |
+| inventory host 集合 | `freeipa-server`: pr91-ipa；`dns`: pr91-dns；`freeipa-dns-client`: pr91-client |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、§2 的唯讀 principal 設定與測試用的 forward zone）；`pr91-ipa` 的 `/etc/pilot/dns-reader.keytab`；reader role `Pilot DNS Reader` 與 DNS 設定的狀態指紋見摘要 |
+| 結果 | 透過真實 `pilot mcp serve` 呼叫，跟前一版 `f3f3ae8` 對照：健康時 `complete`、8 項比對全部 `match`；第一個 nameserver 是 systemd-resolved stub（`127.0.0.53` 回 SERVFAIL）時不再誤報 `dns_query_failed: … first_hop_identity`；FreeIPA 自己的 BIND 是第一跳時判為「不是 tier」；tier 拒絕 client 時仍回報 `dns_query_failed: … first_hop_identity (… REFUSED)`；`freeipa_server_fqdn` 帶結尾的點時不再誤報 `declared_live_absent`；`K/M` 在啟動時被拒、`k@REALM` 不再被誤拒 |
 | 對齊決定 | 不需要：這個工具不對應 verification spec，也不寫 inventory |
 
 ## 1. 為什麼
@@ -61,7 +62,16 @@
 FreeIPA 的 DNS 設定（global forwarders、forward policy、各 server 的 forwarders、
 forward zone、zone 清單）要有 Kerberos ticket 才讀得到。工具只用操作者事先核准的
 唯讀 principal：不收密碼、不使用主機預設 credential cache 裡現有的 ticket（部署後
-root 的預設 cache 可能留著 `admin` 的 ticket，工具不會碰它），`admin` 也會被拒絕。
+root 的預設 cache 可能留著 `admin` 的 ticket，工具不會碰它）。`admin`、`administrator`、
+`root`，以及 FreeIPA 自己的 service principal（`host/`、`HTTP/`、`ldap/`、`DNS/`、
+`ipa-dnskeysyncd/`、`krbtgt/` 等，這些 keytab 能改目錄或 DNS 資料）在啟動時就被拒絕；
+principal 的每一段都要以英數字開頭，不能被 `kinit` 當成選項（例如 `-c/tmp@REALM`
+會變成指定 ccache）。讀取時 `--rights` 顯示這個 principal 對全域 DNS 設定（`cn=dns`，
+`ipa dnsconfig-show`）有任何寫入權限（`w`、`o`）時，工具不採用它讀到的任何內容，Kerberos
+狀態是 `refused_privileged`、status 是 `auth_required`，finding
+`freeipa_principal_not_read_only`。工具只檢查這一個 entry 的權限：只能改 zone 或 record
+（`idnsname=*`）、或能改 DNS 以外資料的 role 不會被這項檢查擋下，所以 reader 的 role
+必須維持下面的唯讀設定。
 
 在 FreeIPA server 上用管理員執行（`<fqdn>` 是這台 server 的 FQDN）：
 
@@ -99,8 +109,9 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
     --diagnose-freeipa-keytab /etc/pilot/dns-reader.keytab
 ```
 
-- 兩個 `--diagnose-freeipa-*` 要一起給；principal 格式不對、是 `admin`/`root`、
-  keytab 不是絕對路徑或含 `..` 時，server 直接拒絕啟動。
+- 兩個 `--diagnose-freeipa-*` 要一起給；principal 格式不對、任何一段以 `-` 開頭、是
+  §2 列的管理員或 FreeIPA service principal、keytab 不是絕對路徑或含 `..` 時，server
+  直接拒絕啟動。
 - 不給時工具照常回答，只是 FreeIPA 設定那幾項是 `auth_required`，整體 status 是
   `auth_required`。
 
@@ -109,22 +120,29 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 參數 | 意義 |
 |---|---|
 | `client_host` | 確切的 inventory 主機名稱；讀它實際的 resolver（`/etc/resolv.conf`、systemd-resolved、第一個 nameserver 回不回 `pilot-dns:` identity），跟 pilot 會替它寫的清單比對 |
-| `internal_name` | 在每台 FreeIPA DNS provider 上權威查詢、也經每台 tier 查詢的內部名稱；預設是 primary 的 FQDN |
+| `internal_name` | 在每台 FreeIPA DNS provider 上權威查詢、也經每台 tier 查詢的內部名稱；預設是 primary 的 FQDN（轉小寫、去掉結尾的 `.`）。primary 的 FQDN 不是合法的 DNS 名稱又沒給這個參數時，內部名稱的比對不做，並以 `probe_skipped` 回報 |
 | `external_name` | 經 tier 查詢的外部名稱（A）；預設查 root NS（`.`），跟 dns role 自己的 G6/G8 一樣 |
 
 ## 4. 讀結果
 
 | 欄位 | 內容 |
 |---|---|
-| `status` | `complete`、`partial`（有看不到的 live 事實或比對；連得到的主機上任何一項 probe 結果是 `unknown`，都會列在 finding `live_fact_unknown`）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
-| `findings` | 代碼加主體，例如 `dns_tier_not_assigned`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`declared_live_mismatch`、`freeipa_read_permission_missing`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`live_fact_unknown` |
+| `status` | `complete`、`partial`（有看不到的 live 事實或比對，或有沒跑的 probe）、`auth_required`（FreeIPA 設定沒有核准的 credential 可讀、kinit 成功但 FreeIPA 不接受 ticket，或 principal 有寫入權限；其他事實照樣回報）。`complete` 只代表每項事實都看得到，不代表 DNS 正常：失敗本身列在 `findings` |
+| `findings` | 代碼加主體。每個失敗或看不到的事實都會出現在某個 finding：`live_fact_unknown`（看不到的 live 事實，含 FreeIPA 設定）、`dns_query_failed`（DNS 查詢有回應但失敗：SERVFAIL/REFUSED 等錯誤碼、NXDOMAIN、沒有該型別的紀錄；`getent` 查無此名稱）、`comparison_unknown`（做不了的比對）、`probe_skipped`（超過上限或名稱不合法而沒跑的 probe）、`declared_value_unevaluated`（Jinja 樣板）、`freeipa_named_not_running`、`dns_tier_not_running`、`freeipa_dns_provider_unreachable`、`dns_tier_host_unreachable`、`client_unreachable`、`freeipa_dns_not_authoritative_from_tier`、`declared_live_mismatch`/`declared_live_absent`、`freeipa_read_permission_missing`、`auth_required`、`freeipa_principal_not_read_only`、`freeipa_forwarders_invalid`、`external_resolution_forwarder_unproven`、`external_resolution_failed`、`external_resolution_unknown`、`dns_tier_not_assigned` |
 | `paths` | 精簡的路徑：tier 把哪些 zone 送到哪台 FreeIPA、`.` 送到哪個 upstream；每台 FreeIPA DNS 的 live SOA（`authoritative`，或實際的 status 與 `aa`）；FreeIPA 的 forwarders；每台主機的 resolver 順序 |
-| `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`unreachable`、`not_applicable`） |
+| `execution` | MCP server 的執行帳號、每台被 probe 主機上的遠端帳號、Kerberos 狀態（`not_configured`、`available`、`auth_required`、`refused_privileged`、`unreachable`、`not_applicable`） |
 | `supported` / `declared` / `effective` / `observed` / `differences` | 見 §1 |
 | `steps`、`audit_directory` | 每個 probe 的原始輸出（上限 64 KiB）與 audit record |
 
 事實狀態：`observed`、`absent`、`unknown`、`auth_required`、`permission_denied`、
-`unreachable`、`not_applicable`、`error`。
+`unreachable`、`not_applicable`、`error`。DNS 查詢：NOERROR 且有該型別的紀錄是
+`observed`；NXDOMAIN 或沒有該型別的紀錄是 `absent`；SERVFAIL、REFUSED 等錯誤碼是
+`error`；沒有回應（逾時、連線被拒）是 `unknown`。服務狀態（`systemctl is-active`）：
+rc 0 是在跑（含 `reloading`），rc 3 且 `inactive`/`failed` 是沒在跑，其他（例如
+`Failed to connect to bus`）是 `unknown`。client 的 first hop 讀完整的 `id.server CH TXT`
+回應：`pilot-dns:<name>` 是 tier；回應了但沒有 identity（含 NOTIMP，例如 libvirt 的
+dnsmasq）不是 tier；REFUSED（例如 tier 的 access-control 不允許這台 client）是
+`dns_query_failed`。
 
 ## 5. 已知限制與注意事項
 
@@ -143,9 +161,16 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
   不是清單也不是字串時，finding `freeipa_forwarders_invalid`。
 - probe 不用 become：`unbound-control` 需要讀 unbound 的 control key，`ansible_user`
   不是 root 時 tier 的 forward/stub zone 會是 `unknown`。
-- 有上限：最多 probe 5 台 FreeIPA DNS provider、5 台 tier 主機；resolver 清單最多
-  50 台。inventory 裡是 Jinja 樣板（`ansible-inventory` 不會展開）的值，effective
-  回 `unknown` 並列出變數，不會猜。
+- 有上限：最多 probe 5 台 FreeIPA DNS provider、5 台 tier 主機，其餘的列在
+  `probe_skipped`，status 是 `partial`；resolver 清單最多 50 台。inventory 裡是 Jinja
+  樣板（`ansible-inventory` 不會展開）的值，effective 回 `unknown` 並列出變數，不會猜
+  （finding `declared_value_unevaluated`）。
+- 內部名稱只查 A 紀錄：只有 IPv6 位址（AAAA）的 FreeIPA 主機，內部名稱會是
+  `dns_query_failed`（沒有 A 紀錄），status 是 `partial`。pilot 的 FreeIPA 部署目前
+  以 IPv4 為準。
+- 每台 FreeIPA DNS provider 對內部名稱的權威回答都會跟第一台回答的比對
+  （`FreeIPA <host> answer for <name> equals <first>'s`），資料沒同步的 replica 會是
+  `mismatch`。
 
 ## 6. 變更紀錄
 
@@ -155,3 +180,6 @@ pilot mcp serve --dir <workspace> --enable-diagnose \
 | 2026-10-13 | replica 的 DNS 預設與 forwarders 改成跟安裝 playbook 一致（issue #67、#68），移除 `freeipa_replica_dns_unused` | pilot |
 | 2026-10-14 | PR #66 review：外部解析要 NOERROR 且有紀錄才算成功，SERVFAIL/查無紀錄是 `external_resolution_failed`、沒有回應是 `external_resolution_unknown`；連得到的主機上任何 `unknown` 的 live 事實都讓 `status` 變成 `partial`（`live_fact_unknown`）；`paths` 標出每台 FreeIPA DNS 的 live SOA | pilot |
 | 2026-10-14 | §0.5 改成 candidate `6522b94`（上兩列合併後）在全新 4 台 topology 上的實跑結果 | pilot |
+| 2026-10-14 | PR #66 follow-up：每個失敗或未知的事實都有 finding（`auth_required`、`dns_query_failed`、`freeipa_named_not_running`、`live_fact_unknown`、`comparison_unknown`、`probe_skipped`），拒絕 FreeIPA 服務 principal 與有寫入權的 principal；§0.5 改指向 candidate `8951d2e` | pilot |
+| 2026-10-14 | PR #91 review：第一跳只有在 tier 位址回錯誤 rcode 時才算查詢失敗；FQDN 在讀入時統一轉小寫、去掉結尾的點；寫入權限檢查只看全域 DNS 設定（`cn=dns`），說明照實寫；live fixture 換成同一次 pr91 擷取；§0.5 改指向 candidate `46fbc58` | pilot |
+| 2026-10-15 | PR #91 review：§0.5 改指向同一 candidate `46fbc58` 在新建 topology 上的重跑，這次在執行當下記錄 run ID、UTC 時段、target image digest、inventory 與 reader role 指紋；結果與前一輪相同。前一輪的套件版本沒有在這次重新確認，表格不再列出 | pilot |

@@ -6,6 +6,12 @@
 #
 # `pilot_krb5ccname_file.path is defined`, not just `is defined`: when the
 # open task was skipped its registered result has no path.
+#
+# The last task forgets the cache. Facts outlive the block and the play:
+# without it, a later kinit in the same run (another play, or a task file
+# that names `{{ pilot_krb5ccname }}` outside any block) would write to the
+# deleted path and recreate a cache nothing removes. After close the name is
+# the same path that cannot exist as before open, so such a kinit fails.
 
 - name: "Private Kerberos cache — destroy the tickets in it"
   ansible.builtin.command:
@@ -24,3 +30,8 @@
   when: pilot_krb5ccname_file.path is defined
   changed_when: false
   check_mode: false
+
+- name: "Private Kerberos cache — forget it"
+  ansible.builtin.set_fact:
+    pilot_krb5ccname: "FILE:/nonexistent/pilot-krb5cc-not-open"
+    pilot_krb5ccname_file: {}

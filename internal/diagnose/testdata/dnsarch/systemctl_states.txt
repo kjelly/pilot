@@ -1,0 +1,12 @@
+@@pilot-dnsarch reloading begin
+reloading
+@@pilot-dnsarch reloading end rc=0
+@@pilot-dnsarch not_installed begin
+inactive
+@@pilot-dnsarch not_installed end rc=3
+@@pilot-dnsarch stopped begin
+failed
+@@pilot-dnsarch stopped end rc=3
+@@pilot-dnsarch bus_error begin
+Failed to connect to bus: No such file or directory
+@@pilot-dnsarch bus_error end rc=1
