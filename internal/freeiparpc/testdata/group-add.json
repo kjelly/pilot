@@ -1,0 +1,34 @@
+{
+  "result": {
+    "result": {
+      "description": [
+        "Phase 0"
+      ],
+      "gidnumber": [
+        "1927600194"
+      ],
+      "cn": [
+        "p0-team"
+      ],
+      "objectclass": [
+        "top",
+        "groupofnames",
+        "nestedgroup",
+        "ipausergroup",
+        "ipaobject",
+        "posixgroup",
+        "ipantgroupattrs"
+      ],
+      "ipauniqueid": [
+        "6249b7a0-c921-11f1-bb64-5254001b059e"
+      ],
+      "dn": "cn=p0-team,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p0-team",
+    "summary": "Added group \"p0-team\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

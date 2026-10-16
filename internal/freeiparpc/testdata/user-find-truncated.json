@@ -1,0 +1,121 @@
+{
+  "result": {
+    "result": [
+      {
+        "gidnumber": [
+          "1927600000"
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "homedirectory": [
+          "/home/admin"
+        ],
+        "krbcanonicalname": [
+          "admin@IPA.PILOT.INTERNAL"
+        ],
+        "uid": [
+          "admin"
+        ],
+        "uidnumber": [
+          "1927600000"
+        ],
+        "sn": [
+          "Administrator"
+        ],
+        "krbprincipalname": [
+          "admin@IPA.PILOT.INTERNAL",
+          "root@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=admin,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "gidnumber": [
+          "1927600003"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/pw-nokey"
+        ],
+        "givenname": [
+          "No"
+        ],
+        "krbcanonicalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "uid": [
+          "pw-nokey"
+        ],
+        "mail": [
+          "pw-nokey@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600003"
+        ],
+        "sn": [
+          "Key"
+        ],
+        "krbprincipalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=pw-nokey,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "gidnumber": [
+          "1927600004"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/pw-pending"
+        ],
+        "givenname": [
+          "Reset"
+        ],
+        "krbcanonicalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "uid": [
+          "pw-pending"
+        ],
+        "mail": [
+          "pw-pending@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600004"
+        ],
+        "sn": [
+          "Pending"
+        ],
+        "krbprincipalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=pw-pending,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": true,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "SearchResultTruncated",
+        "message": "Search result has been truncated: Configured size limit exceeded",
+        "code": 13017,
+        "data": {
+          "reason": "Configured size limit exceeded"
+        }
+      }
+    ],
+    "summary": "3 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,9 @@
+{
+  "result": {
+    "summary": "IPA server version 4.13.4. API version 2.257"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

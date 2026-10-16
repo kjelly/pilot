@@ -1,0 +1,63 @@
+{
+  "result": {
+    "result": {
+      "uid": [
+        "p0-carol"
+      ],
+      "givenname": [
+        "P0"
+      ],
+      "krbprincipalname": [
+        "p0-carol@IPA.PILOT.INTERNAL"
+      ],
+      "uidnumber": [
+        "1927600195"
+      ],
+      "sn": [
+        "Carol"
+      ],
+      "mail": [
+        "p0-carol@ipa.pilot.internal"
+      ],
+      "krbcanonicalname": [
+        "p0-carol@IPA.PILOT.INTERNAL"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "gidnumber": [
+        "1927600195"
+      ],
+      "title": [
+        "before"
+      ],
+      "homedirectory": [
+        "/home/p0-carol"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ],
+      "dn": "uid=p0-carol,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p0-carol",
+    "messages": [
+      {
+        "type": "warning",
+        "name": "VersionMissing",
+        "message": "API Version number was not sent, forward compatibility not guaranteed. Assuming server's API version, 2.257",
+        "code": 13001,
+        "data": {
+          "server_version": "2.257"
+        }
+      }
+    ],
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,37 @@
+{
+  "result": {
+    "completed": 0,
+    "failed": {
+      "member": {
+        "user": [
+          [
+            "p0-bob",
+            "This entry is not a member"
+          ]
+        ],
+        "group": [],
+        "service": [],
+        "idoverrideuser": []
+      }
+    },
+    "result": {
+      "cn": [
+        "p0-team"
+      ],
+      "gidnumber": [
+        "1927600194"
+      ],
+      "description": [
+        "Phase 0"
+      ],
+      "member_user": [
+        "p0-alice"
+      ],
+      "dn": "cn=p0-team,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    }
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
