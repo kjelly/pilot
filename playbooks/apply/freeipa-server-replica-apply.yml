@@ -725,10 +725,12 @@
               tags: [always]
           tags: [always]
 
+        # argv + stdin: the password never passes through a shell, so `$`,
+        # backticks and quotes in it reach kinit unchanged.
         - name: "FreeIPA replica DNS — kinit admin (for dnsserver-mod)"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
 
