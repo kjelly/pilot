@@ -41,6 +41,16 @@ phase-by-phase history — each row goes from "not yet executable" to a
 real PASS as its owning phase (§48 Phase 1-5 of the design spec) is
 implemented.
 
+**Latest C22 verification (2026-10-16):** candidate `4baffb8`, tree
+`214a5554ea5f28d302fee137d31e2c117066faf8`. A read-only control-node container
+probe against an existing 26-host inventory and roster containing an external
+NFS appliance produced a complete snapshot (118 users, 26 hosts, 38 groups,
+12 hostgroups), with an identical snapshot ID on repeat. Dangling references
+still failed closed. Formal webhook/CLI checks: 150 passing test/subtest
+results, 0 failures; spec regression/shell syntax: 6 passing results; lint:
+30 rows, 0 findings. Scope and evidence:
+[external-device correction](../evidence/outbound-webhook/2026-10-16-4baffb8-external-devices.md).
+
 - **Phase 0** recorded the intended checks only; no unit-test or
   actual-run evidence existed for any row.
 - **Phase 1** landed `contract.Effects` (E1-E3 in
