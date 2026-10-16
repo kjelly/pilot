@@ -92,21 +92,33 @@ func (c *Client) Find(ctx context.Context, method string, args []any, opts map[s
 	if err != nil {
 		return nil, err
 	}
+	// count, truncated and result must all be there: a missing truncated
+	// flag cannot prove the read complete, and a missing result is not an
+	// empty set. A real empty answer has all three (captured:
+	// count 0, truncated false, result []).
 	var r struct {
-		Count     int              `json:"count"`
-		Truncated bool             `json:"truncated"`
-		Result    []map[string]any `json:"result"`
+		Count     *int              `json:"count"`
+		Truncated *bool             `json:"truncated"`
+		Result    *[]map[string]any `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("freeiparpc: decode %s: %w", method, err)
+		return nil, fmt.Errorf("freeiparpc: decode %s: %w (%w)", method, ErrIncompleteResponse, err)
 	}
-	if r.Truncated {
+	if r.Count == nil || r.Truncated == nil || r.Result == nil {
+		return nil, fmt.Errorf("freeiparpc: %s answer lacks count, truncated or result: %w", method, ErrIncompleteResponse)
+	}
+	if *r.Truncated {
 		return nil, fmt.Errorf("%s: %w", method, ErrTruncated)
 	}
-	if r.Count != len(r.Result) {
-		return nil, fmt.Errorf("freeiparpc: %s reported %d entries but returned %d", method, r.Count, len(r.Result))
+	if *r.Count != len(*r.Result) {
+		return nil, fmt.Errorf("freeiparpc: %s reported %d entries but returned %d: %w", method, *r.Count, len(*r.Result), ErrIncompleteResponse)
 	}
-	return r.Result, nil
+	for i, e := range *r.Result {
+		if e == nil {
+			return nil, fmt.Errorf("freeiparpc: %s entry %d is not an object: %w", method, i, ErrIncompleteResponse)
+		}
+	}
+	return *r.Result, nil
 }
 
 // BatchItem is one command's outcome in a batch: Result or Err.
@@ -136,31 +148,55 @@ func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error)
 	if err != nil {
 		return nil, err
 	}
+	out, err := decodeBatch(raw, len(cmds))
+	if err != nil {
+		// The batch was sent and answered, but the answer does not say
+		// what each write did: some may have been applied.
+		if isWrite {
+			return nil, c.unknown("batch", err)
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+// decodeBatch reads a batch answer that must account for want commands.
+func decodeBatch(raw json.RawMessage, want int) ([]BatchItem, error) {
 	var r struct {
-		Count   int               `json:"count"`
-		Results []json.RawMessage `json:"results"`
+		Count   *int               `json:"count"`
+		Results *[]json.RawMessage `json:"results"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return nil, fmt.Errorf("freeiparpc: decode batch: %w", err)
+		return nil, fmt.Errorf("freeiparpc: decode batch: %w (%w)", ErrIncompleteResponse, err)
 	}
-	if r.Count != len(cmds) || len(r.Results) != len(cmds) {
-		return nil, fmt.Errorf("freeiparpc: batch of %d returned %d results", len(cmds), len(r.Results))
+	if r.Count == nil || r.Results == nil {
+		return nil, fmt.Errorf("freeiparpc: batch answer lacks count or results: %w", ErrIncompleteResponse)
 	}
-	out := make([]BatchItem, len(r.Results))
-	for i, item := range r.Results {
+	if *r.Count != want || len(*r.Results) != want {
+		return nil, fmt.Errorf("freeiparpc: batch of %d answered with count %d and %d results: %w", want, *r.Count, len(*r.Results), ErrIncompleteResponse)
+	}
+	out := make([]BatchItem, want)
+	for i, item := range *r.Results {
 		// A failed item carries the message in "error" and the name and
-		// code beside it, unlike the top-level error object (captured).
+		// code beside it, unlike the top-level error object (captured). A
+		// succeeded item has "error": null and a non-null "result".
 		var e struct {
 			Error     *string `json:"error"`
 			ErrorName string  `json:"error_name"`
 			ErrorCode int     `json:"error_code"`
 		}
 		if err := json.Unmarshal(item, &e); err != nil {
-			return nil, fmt.Errorf("freeiparpc: decode batch item %d: %w", i, err)
+			return nil, fmt.Errorf("freeiparpc: decode batch item %d: %w (%w)", i, ErrIncompleteResponse, err)
 		}
 		if e.Error != nil {
+			if e.ErrorName == "" {
+				return nil, fmt.Errorf("freeiparpc: batch item %d failed without an error name: %w", i, ErrIncompleteResponse)
+			}
 			out[i].Err = &RPCError{Code: e.ErrorCode, Name: e.ErrorName, Message: *e.Error}
 			continue
+		}
+		if err := requireField(item, "result"); err != nil {
+			return nil, fmt.Errorf("freeiparpc: batch item %d: %w", i, err)
 		}
 		out[i].Result = item
 	}
@@ -186,26 +222,31 @@ type MemberResult struct {
 // DecodeMemberResult reads a group_add_member or group_remove_member
 // result and checks that every requested member is accounted for.
 func DecodeMemberResult(raw json.RawMessage, requested int) (MemberResult, error) {
+	// FreeIPA always sends completed and failed.member with one list per
+	// member type (captured); a missing one cannot account for the members.
 	var r struct {
 		Completed *int `json:"completed"`
-		Failed    struct {
-			Member map[string][][]string `json:"member"`
+		Failed    *struct {
+			Member map[string]*[][]string `json:"member"`
 		} `json:"failed"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return MemberResult{}, fmt.Errorf("freeiparpc: decode member result: %w", err)
+		return MemberResult{}, fmt.Errorf("freeiparpc: decode member result: %w (%w)", ErrIncompleteResponse, err)
 	}
-	if r.Completed == nil {
-		return MemberResult{}, fmt.Errorf("freeiparpc: member result has no completed count")
+	if r.Completed == nil || r.Failed == nil || r.Failed.Member == nil {
+		return MemberResult{}, fmt.Errorf("freeiparpc: member result lacks completed or failed.member: %w", ErrIncompleteResponse)
 	}
 	res := MemberResult{Completed: *r.Completed}
 	types := make([]string, 0, len(r.Failed.Member))
-	for t := range r.Failed.Member {
+	for t, list := range r.Failed.Member {
+		if list == nil {
+			return MemberResult{}, fmt.Errorf("freeiparpc: member result failed.member.%s is null: %w", t, ErrIncompleteResponse)
+		}
 		types = append(types, t)
 	}
 	slices.Sort(types)
 	for _, t := range types {
-		for _, f := range r.Failed.Member[t] {
+		for _, f := range *r.Failed.Member[t] {
 			if len(f) != 2 {
 				return MemberResult{}, fmt.Errorf("freeiparpc: unexpected failed member entry %q", f)
 			}
@@ -213,7 +254,7 @@ func DecodeMemberResult(raw json.RawMessage, requested int) (MemberResult, error
 		}
 	}
 	if res.Completed+len(res.Failed) != requested {
-		return res, fmt.Errorf("freeiparpc: %d members requested, %d completed and %d failed", requested, res.Completed, len(res.Failed))
+		return res, fmt.Errorf("freeiparpc: %d members requested, %d completed and %d failed: %w", requested, res.Completed, len(res.Failed), ErrIncompleteResponse)
 	}
 	return res, nil
 }

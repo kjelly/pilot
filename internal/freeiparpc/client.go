@@ -257,7 +257,8 @@ func (cmd Command) params() [2]any {
 
 // Call sends one allowlisted command and returns its result object (the
 // envelope's "result": result/value/summary, or count/truncated/result for
-// a find). An application error comes back as *RPCError.
+// a find). An application error comes back as *RPCError. A write whose
+// answer does not carry a result is an *OutcomeUnknownError.
 func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error) {
 	kind, ok := allowlist[cmd.Method]
 	if !ok {
@@ -267,7 +268,28 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 	if err != nil {
 		return nil, err
 	}
-	return c.do(ctx, cmd.Method, kind == write, 1, body)
+	res, err := c.do(ctx, cmd.Method, kind == write, 1, body)
+	if err != nil {
+		return nil, err
+	}
+	// Every allowlisted command but ping answers with a non-null "result"
+	// inside the result object (captured); ping has only a summary.
+	if cmd.Method != "ping" {
+		if err := requireField(res, "result"); err != nil {
+			err = fmt.Errorf("freeiparpc: %s: %w", cmd.Method, err)
+			if kind == write {
+				return nil, c.unknown(cmd.Method, err)
+			}
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+// unknown counts and returns a write whose outcome cannot be confirmed.
+func (c *Client) unknown(method string, err error) error {
+	c.count(func(s *Stats) { s.Unknown++ })
+	return &OutcomeUnknownError{Method: method, Err: err}
 }
 
 // do sends a JSON-RPC body, logging in again once when the server rejects
@@ -293,8 +315,7 @@ func (c *Client) do(ctx context.Context, method string, isWrite bool, items int,
 			sent := !errors.As(err, &te) || te.Sent
 			switch {
 			case isWrite && sent:
-				c.count(func(s *Stats) { s.Unknown++ })
-				return nil, &OutcomeUnknownError{Method: method, Err: err}
+				return nil, c.unknown(method, err)
 			case !isWrite && !retried && ctx.Err() == nil:
 				retried = true
 				c.count(func(s *Stats) { s.ReadRetries++ })
@@ -318,8 +339,7 @@ func (c *Client) do(ctx context.Context, method string, isWrite bool, items int,
 		}
 		if resp.StatusCode != http.StatusOK {
 			if isWrite {
-				c.count(func(s *Stats) { s.Unknown++ })
-				return nil, &OutcomeUnknownError{Method: method, Err: &HTTPError{Status: resp.StatusCode}}
+				return nil, c.unknown(method, &HTTPError{Status: resp.StatusCode})
 			}
 			return nil, fmt.Errorf("freeiparpc: %s: %w", method, &HTTPError{Status: resp.StatusCode})
 		}
@@ -327,8 +347,7 @@ func (c *Client) do(ctx context.Context, method string, isWrite bool, items int,
 		if err != nil {
 			var rpcErr *RPCError
 			if isWrite && !errors.As(err, &rpcErr) {
-				c.count(func(s *Stats) { s.Unknown++ })
-				return nil, &OutcomeUnknownError{Method: method, Err: err}
+				return nil, c.unknown(method, err)
 			}
 			return nil, err
 		}
@@ -336,18 +355,50 @@ func (c *Client) do(ctx context.Context, method string, isWrite bool, items int,
 	}
 }
 
-type envelope struct {
-	Result json.RawMessage `json:"result"`
-	Error  *RPCError       `json:"error"`
+// ErrIncompleteResponse is an answer without the fields that say what
+// happened: it is never taken as success.
+var ErrIncompleteResponse = errors.New("incomplete response")
+
+// decodeEnvelope returns the result object of a JSON-RPC answer, or its
+// *RPCError. Every FreeIPA answer has "error" (null on success) and, on
+// success, a "result" object (captured); anything else is incomplete.
+func decodeEnvelope(raw []byte) (json.RawMessage, error) {
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &env); err != nil || env == nil {
+		return nil, fmt.Errorf("freeiparpc: decode response: %w", ErrIncompleteResponse)
+	}
+	if e, ok := env["error"]; ok && !isNull(e) {
+		var rpcErr RPCError
+		if err := json.Unmarshal(e, &rpcErr); err != nil || rpcErr.Name == "" {
+			return nil, fmt.Errorf("freeiparpc: error object without a name: %w", ErrIncompleteResponse)
+		}
+		return nil, &rpcErr
+	}
+	res, ok := env["result"]
+	if !ok || !isObject(res) {
+		return nil, fmt.Errorf("freeiparpc: no result object: %w", ErrIncompleteResponse)
+	}
+	return res, nil
 }
 
-func decodeEnvelope(raw []byte) (json.RawMessage, error) {
-	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("freeiparpc: decode response: %w", err)
+func isNull(raw json.RawMessage) bool {
+	return len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func isObject(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) > 0 && t[0] == '{'
+}
+
+// requireField fails unless obj is a JSON object holding key with a
+// non-null value.
+func requireField(obj json.RawMessage, key string) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(obj, &m); err != nil || m == nil {
+		return fmt.Errorf("result is not an object: %w", ErrIncompleteResponse)
 	}
-	if env.Error != nil {
-		return nil, env.Error
+	if v, ok := m[key]; !ok || isNull(v) {
+		return fmt.Errorf("result has no %q: %w", key, ErrIncompleteResponse)
 	}
-	return env.Result, nil
+	return nil
 }

@@ -85,6 +85,9 @@ type fakeServer struct {
 	// hook runs before answering a JSON-RPC call; returning true means it
 	// handled the request.
 	hook func(w http.ResponseWriter, method string) bool
+	// logoutBody, when set, replaces the session_logout answer (fault
+	// injection).
+	logoutBody string
 }
 
 // newFakeServer starts a TLS server whose certificate names certName,
@@ -164,6 +167,10 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 			f.mu.Lock()
 			delete(f.valid, ck.Value)
 			f.mu.Unlock()
+			if f.logoutBody != "" {
+				_, _ = w.Write([]byte(f.logoutBody))
+				return
+			}
 			f.write(w, "session-logout")
 			return
 		}
@@ -627,6 +634,152 @@ func TestSecretsStayOutOfErrorsAndFormatting(t *testing.T) {
 			if strings.Contains(text, secret) {
 				t.Fatalf("a secret leaked: %s", text)
 			}
+		}
+	}
+}
+
+// injectBody makes the fake server answer every JSON-RPC call with body
+// and HTTP 200. These bodies are fault injection, not captures: FreeIPA was
+// never seen sending them. They stand for a broken or foreign server, whose
+// answer must not be taken as success.
+func injectBody(f *fakeServer, body string) {
+	f.hook = func(w http.ResponseWriter, _ string) bool {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+		return true
+	}
+}
+
+func TestIncompleteAnswersAreNotSuccess(t *testing.T) {
+	for _, body := range []string{
+		`{}`,
+		`{"error":null}`,
+		`{"error":null,"result":null}`,
+		`{"error":null,"result":[]}`,
+		`{"error":null,"result":{}}`,
+		`{"error":null,"result":{"result":null,"value":"p0-alice","summary":"Modified user"}}`,
+		`{"error":{},"result":null}`,
+		`[]`,
+		`not json`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			f, c := loggedIn(t, nil)
+			injectBody(f, body)
+			ctx := context.Background()
+
+			_, err := c.Call(ctx, Command{Method: "user_mod", Args: []any{"p0-alice"}, Options: map[string]any{"title": "x"}})
+			if !errors.As(err, new(*OutcomeUnknownError)) || !errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("write = %v, want an unknown outcome caused by an incomplete response", err)
+			}
+			if s := c.Stats(); s.Unknown != 1 || s.Writes != 1 {
+				t.Fatalf("stats after the write = %+v, want 1 write, 1 unknown, no resend", s)
+			}
+
+			_, err = c.Call(ctx, Command{Method: "user_show", Args: []any{"p0-alice"}})
+			if err == nil || errors.As(err, new(*OutcomeUnknownError)) || !errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("read = %v, want an incomplete-response error", err)
+			}
+			if s := c.Stats(); s.Unknown != 1 || s.Reads != 1 {
+				t.Fatalf("stats after the read = %+v", s)
+			}
+		})
+	}
+}
+
+func TestFindRequiresACompleteAnswer(t *testing.T) {
+	t.Run("a real empty answer is an empty set", func(t *testing.T) {
+		_, c := loggedIn(t, map[string]string{"user_find": "user-find-no-match", "group_find": "group-find-no-match"})
+		for _, m := range []string{"user_find", "group_find"} {
+			entries, err := c.Find(context.Background(), m, []any{"p0-no-such"}, nil)
+			if err != nil || entries == nil || len(entries) != 0 {
+				t.Fatalf("%s = %v, %v; want an empty, non-nil set", m, entries, err)
+			}
+		}
+	})
+	for name, body := range map[string]string{
+		"result object empty":       `{"error":null,"result":{}}`,
+		"result null":               `{"error":null,"result":null}`,
+		"entries without truncated": `{"error":null,"result":{"count":1,"result":[{"uid":["a"]}]}}`,
+		"entries without count":     `{"error":null,"result":{"truncated":false,"result":[{"uid":["a"]}]}}`,
+		"entry list null":           `{"error":null,"result":{"count":0,"truncated":false,"result":null}}`,
+		"count of the wrong type":   `{"error":null,"result":{"count":"1","truncated":false,"result":[{"uid":["a"]}]}}`,
+		"count not matching":        `{"error":null,"result":{"count":2,"truncated":false,"result":[{"uid":["a"]}]}}`,
+		"entry that is null":        `{"error":null,"result":{"count":1,"truncated":false,"result":[null]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, c := loggedIn(t, nil)
+			injectBody(f, body)
+			entries, err := c.Find(context.Background(), "user_find", nil, nil)
+			if !errors.Is(err, ErrIncompleteResponse) || entries != nil {
+				t.Fatalf("Find = %v, %v; want ErrIncompleteResponse", entries, err)
+			}
+		})
+	}
+}
+
+func TestBatchAnswersThatCannotBeConfirmed(t *testing.T) {
+	bodies := map[string]string{
+		// The real answer to an empty batch, given to a batch of one.
+		"no results for one command": "fixture:batch-empty",
+		"result not an object":       `{"error":null,"result":[]}`,
+		"results missing":            `{"error":null,"result":{"count":1}}`,
+		"item not an object":         `{"error":null,"result":{"count":1,"results":[123]}}`,
+		"item without a result":      `{"error":null,"result":{"count":1,"results":[{"error":null}]}}`,
+		"failed item without a name": `{"error":null,"result":{"count":1,"results":[{"error":"boom"}]}}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			setup := func() (*fakeServer, *Client) {
+				if fx, ok := strings.CutPrefix(body, "fixture:"); ok {
+					return loggedIn(t, map[string]string{"batch": fx})
+				}
+				f, c := loggedIn(t, nil)
+				injectBody(f, body)
+				return f, c
+			}
+			_, c := setup()
+			_, err := c.Batch(context.Background(), []Command{{Method: "user_mod", Args: []any{"p0-alice"}, Options: map[string]any{"title": "x"}}})
+			if !errors.As(err, new(*OutcomeUnknownError)) || !errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("write batch = %v, want an unknown outcome", err)
+			}
+			if s := c.Stats(); s.Unknown != 1 {
+				t.Fatalf("stats = %+v, want 1 unknown", s)
+			}
+
+			_, c = setup()
+			_, err = c.Batch(context.Background(), []Command{{Method: "user_show", Args: []any{"p0-alice"}}})
+			if err == nil || errors.As(err, new(*OutcomeUnknownError)) || !errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("read batch = %v, want a plain incomplete-response error", err)
+			}
+			if s := c.Stats(); s.Unknown != 0 {
+				t.Fatalf("a read batch counted as unknown: %+v", s)
+			}
+		})
+	}
+}
+
+// Fault injection: FreeIPA always sends completed and failed.member.
+func TestMemberResultsMustAccountForEveryField(t *testing.T) {
+	for _, raw := range []string{
+		`{"completed":1}`,
+		`{"completed":1,"failed":{}}`,
+		`{"completed":0,"failed":{"member":{"user":null}}}`,
+		`{"failed":{"member":{"user":[]}}}`,
+	} {
+		if _, err := DecodeMemberResult(json.RawMessage(raw), 1); !errors.Is(err, ErrIncompleteResponse) {
+			t.Fatalf("DecodeMemberResult(%s) = %v, want ErrIncompleteResponse", raw, err)
+		}
+	}
+}
+
+// Fault injection: Logout reads only the envelope, so an answer without a
+// result object must fail there.
+func TestLogoutNeedsACompleteAnswer(t *testing.T) {
+	for _, body := range []string{`{}`, `{"error":null,"result":null}`, `{"error":null,"result":[]}`} {
+		f, c := loggedIn(t, nil)
+		f.logoutBody = body
+		if err := c.Logout(context.Background()); !errors.Is(err, ErrIncompleteResponse) {
+			t.Fatalf("Logout answered %s = %v, want ErrIncompleteResponse", body, err)
 		}
 	}
 }
