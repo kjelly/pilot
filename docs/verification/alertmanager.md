@@ -57,7 +57,7 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
    代價是延遲（預設值，Prometheus 未設 `evaluation_interval`，即 1m）：
    - node_exporter 恢復後，`HostMetricsMissing` 要等下一次 scrape（≤15s）與規則評估
      （≤1m）才不再成立；`keep_firing_for` 從那次評估開始算，剛好 5m 後 resolve，
-     所以最多約 6m15s（實測 5m40s，`docs/evidence/login-probe/2026-10-15-69185d7.md`）。
+     所以最多約 6m15s（實測 5m40s，`docs/evidence/login-probe/2026-10-15-243987b.md`）。
    - 資料缺口期間主機真的掛掉時，probe 要到下一輪失敗才會寫出 `success=0`
      （`login_probe_interval` 60s + `login_probe_total_timeout` 30s + textfile 寫出 ≤15s），
      再經 scrape（≤15s）與評估（≤1m）才不再成立，加上 `keep_firing_for` 5m，`HostDown`
@@ -135,13 +135,11 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 - 工具：`pilot verify docs/verification/alertmanager.md -i <inventory> -l alertmanager`
 - 輸出格式：`.verification/alertmanager-<UTC>.{ndjson,md}`
 - 預期 row 數：10
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-5da3446.md`
-  （2026-10-15，candidate `5da3446`，tree `a728050c`；全新 4 台 vm-target，`null` mode；L1-L6 PASS，
-  本 spec 10/10 PASS（run `4c16cd7c-b5c6-4e05-af1a-d2f640d63497`）；C10 經真實 verify pipeline 對已部署的
-  Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL）。抑制行為的實測——資料缺口
-  （含 probe 單輪失敗）、整台主機停擺、兩台 probe 其中一台停擺——見
-  `docs/evidence/login-probe/2026-10-15-69185d7.md`；兩個 candidate 之間部署、規則與 Alertmanager 設定
-  完全相同（整個 tree 的差異只有 `Makefile`、測試、文件與 `prometheus-apply.yml` 的註解）。
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-243987b.md`
+  （2026-10-15，candidate `243987b`，tree `f51ec98b`；全新 4 台 vm-target，`null` mode；L1-L6 PASS，
+  本 spec 10/10 PASS（run `058add65-c90f-4aa4-934f-7031796c5f19`）；C10 經真實 verify pipeline 對已部署的
+  Alertmanager PASS、對載入 `a742ad9` 舊規則的 Alertmanager FAIL；同一輪在真實 Alertmanager 上實測資料缺口
+  （含 probe 單輪失敗）、整台主機停擺、兩台 probe 其中一台停擺的抑制行為）。
 - 歷史：Teams mode 的 `/render` 與通知實測見 `docs/evidence/alertmanager/2026-09-17-30d6b92.md`
   （當時 9 個 row，早於 C10 與 issue #11 的 inhibit 規則）。
 

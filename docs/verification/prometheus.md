@@ -260,13 +260,12 @@
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
 - 預期 row 數：24
-- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-5da3446.md`
-  （2026-10-15，candidate `5da3446`，tree `a728050c`；全新 4 台 vm-target，有 seaweedfs-s3、
-  Alertmanager 與 login probe；run `3f9d17ec-7428-4487-b528-2dc1f0b41057` 為 19/24：
+- 最新 actual-run evidence：`docs/evidence/login-probe/2026-10-15-243987b.md`
+  （2026-10-15，candidate `243987b`，tree `f51ec98b`；全新 4 台 vm-target，有 seaweedfs-s3、
+  Alertmanager 與 login probe；run `6b823a59-9678-464c-9cf3-6c304eb95dd2` 為 19/24：
   C1–C15、C20/C21、C23/C24 PASS（host-health 與 login-probe 規則已渲染、通過 `promtool`、
   已載入）；C16–C19 因該 topology 沒有 GPU/dcgm-exporter、C22 因 fresh Thanos 尚未有
-  第一個 2h block 而 FAIL）。`HostIOStall` 在真實 PSI 負載下觸發的實測見
-  `docs/evidence/login-probe/2026-10-15-69185d7.md`（規則與部署跟 `5da3446` 相同）。
+  第一個 2h block 而 FAIL；同一輪 `HostIOStall` 在真實 PSI 負載下觸發）。
 - 歷史 Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
   （2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級，tree 見該檔；真實
   vm-target，站台設了 `kind: snmp` profile，有 seaweedfs-s3 與中央 thanos-query；
