@@ -189,7 +189,7 @@ ipa_users:
     first: Alice
     last: Wang
     password: "initial-pw"          # 初始密碼；可省略（改用 OTP 帶外設定）
-    force_password: true            # 預設 false；首次 onboard 或刻意重設才要加這行
+    force_password: true            # 預設 false；只有刻意重設已有的密碼才要加這行（新帳號不需要）
     groups: [developers]
     ssh_keys:                       # 選填；宣告式（見 §5.1）。密碼＋金鑰可並存
       - "ssh-ed25519 AAAA... alice@laptop"
@@ -292,13 +292,22 @@ ansible-playbook -i inventory-freeipa.yaml \
 `failed_when` 對齊 `freeipa-server-apply.yml`）。重跑同一份名冊 → `PLAY RECAP`
 的 `changed=0`。
 
-例外：**密碼是設定就無條件套用**的（IPA 沒有可 diff 的 read-back），且 `ipa
-passwd` 是 admin reset，不管密碼值有沒有變都會把帳號重新標成「下次登入強制改密
-碼」。所以 `force_password` 預設 **false**：帶 `password:` 的 user 只有同時明講
-`force_password: true` 時，這次 apply 才會真的執行 `ipa passwd`（並因此
-`changed`）。首次幫某個 user 設密碼（onboard）或要刻意重設時才加這行；一旦
-onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名冊就不會再動到他的密
-碼／forced-change 狀態。
+例外：密碼沒有可 diff 的 read-back，且 `ipa passwd` 是 admin reset，不管密碼值
+有沒有變都會把帳號重新標成「下次登入強制改密碼」。所以 apply 只在下列情況執行
+`ipa passwd`（並因此 `changed`）：
+
+- 帳號在 FreeIPA 還沒有密碼（沒有 Kerberos key）：用 `password:` 初始化，不看
+  `force_password`。
+- `force_password: true`（canonical roster 是 `password.preserve_existing:
+  false`）：要求重設已有的密碼。使用者還在用上次重設的密碼時不會重複重設；使用
+  者自己改過之後，下一次 apply 會再重設一次，所以重設完成後把這行拿掉（或設
+  `false`）。
+
+判斷依據是 `ipa user-show --all --raw` 的 `krbLastPwdChange` 與
+`krbPasswordExpiration`。查不到某個使用者的狀態時，apply 直接失敗，不會把它
+當成「還沒有密碼」而重設。（2026-10-15 之前，`force_password: true` 的使用者每
+次 apply 都會被重設，即使已經自己改過密碼；還沒完成首次改密碼的使用者也每次
+都會被重設。）
 
 ---
 
