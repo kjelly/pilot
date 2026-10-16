@@ -25,9 +25,9 @@ groupVars:
   - {name: snmp_exporter_version, type: string, required: false, default: "v0.30.1", secret: false}
   - {name: snmp_exporter_image, type: string, required: false, default: "quay.io/prometheus/snmp-exporter", secret: false}
   - {name: snmp_exporter_container_name, type: string, required: false, default: "pilot-snmp-exporter", secret: false}
-  - {name: snmp_exporter_port, type: string, required: false, default: "9116", secret: false}
+  - {name: snmp_exporter_port, type: integer, required: false, default: 9116, secret: false}
   - {name: snmp_exporter_listen_address, type: string, required: false, default: "127.0.0.1", secret: false}
-  - {name: snmp_exporter_module_concurrency, type: string, required: false, default: "1", secret: false}
+  - {name: snmp_exporter_module_concurrency, type: integer, required: false, default: 1, secret: false}
   - {name: snmp_exporter_config_dir, type: string, required: false, default: "/etc/pilot/snmp-exporter", secret: false}
   - {name: snmp_exporter_data_dir, type: string, required: false, default: "/var/lib/pilot/snmp-exporter", secret: false}
 endpoints:

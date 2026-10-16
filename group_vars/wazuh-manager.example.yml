@@ -39,4 +39,7 @@ siem_forward_host: ""
 
 # 以下通常不用填,會沿用 playbook 內建預設:
 # siem_forward_port: "514"
+#  siem_forward_port 是 Wazuh syslog_output(UDP)的目的埠。同一台主機也在
+#  audit-log-forwarding group 時,這個值也會用在它的 rsyslog TCP 轉送,而那
+#  個埠必須等於 log-server 的 siem_receiver_tcp_port。
 # wazuh_docker_version: "4.14.1"

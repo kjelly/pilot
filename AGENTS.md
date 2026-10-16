@@ -672,7 +672,20 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    的值,Ansible 實際用的卻是 play 預設值。現在改在 stage gate 之後用一個標
    `always` 的 `set_fact`(`x: "{{ x | default(...) }}"`)補預設值,並由全 repo
    lint `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs`
-   鎖住:contract `groupVars` 與 example 的 key 都不准出現在 play `vars:`。
+   鎖住:任何一份 contract 的 `groupVars` 與 example 的 key,都不准出現在任何
+   apply playbook 的 play `vars:`,不只是它自己 contract 的那支——同一台主機上
+   一個變數只有一個值,兩支 playbook 必須讀到同一個值(只修 log-shipping 時,
+   log-server 仍用 play vars 的 `siem_log_root`,Promtail 會 tail 一個 rsyslog
+   沒寫入的目錄)。刻意由其他變數推導的(FreeIPA playbook 的 `ipa_realm`)列在
+   該測試的 `playVarsInputAllowlist` 並寫明理由。spec 變數契約表(標題含「變數契約」
+   的 `##` 段落,例如 §1.5 依賴變數契約、dns.md §3 Apply 變數契約)第一欄列出的變數
+   也必須宣告在 contract `groupVars`:只寫在 group_vars example 不算,因為 preflight
+   只讀 `groupVars`(`TestRegression_SpecInputsAreDeclaredContractInputs`;還沒處理的
+   列在 `undeclaredSpecInputsAllowlist`,見 issue #81,只准縮小)。log-server 的
+   `siem_receiver_tcp_port` 只寫在 spec,play vars 一直蓋掉 inventory,client 改送
+   2514 時 rsyslog 仍聽 514。宣告成 `integer` 的 input,preflight 與 repair 都接受
+   整數、整數值的 float(`ansible-inventory --list` JSON 的數字)與十進位字串
+   (`contract.ValueMatchesType`),port 一律宣告成 `integer`。
    新增 groupVars 或 example key 時,預設值寫在這個 `set_fact`。
 4. **check mode 下被跳過的 task,register 出來的結果沒有 `stdout`**。直接對它做
    `from_json` 或取 `.stdout`/`.json`,在 `--check --diff` 會崩潰(`81f7090`
@@ -1017,7 +1030,11 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 | `group_vars/*.example.yml` 期待的 `dist/` artifact ↔ `images/Dockerfile.pilot-cli` | `cmd/pilot/cmd/dockerfile_artifact_consistency_test.go::TestDockerfileBakesEveryDistArtifactGroupVarsExpects` |
 | Go 常數 `pilotSSHConfig` ↔ `pilot-access-gateway-apply.yml` Step 12 的 ssh_config | `cmd/pilot/cmd/portal_ssh_config_sync_test.go::TestPilotSSHConfigMatchesApplyPlaybook` |
 | `docs/verification/*.md` 的 row ↔ apply playbook 的 tag | `cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`(見 §4.0) |
-| contract `groupVars` 與 `group_vars/<role>.example.yml` 的 key ↔ apply playbook 的 play `vars:`(不准宣告,見 §4.5 第 3 點) | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` |
+| 任何 contract 的 `groupVars` 與 `group_vars/<role>.example.yml` 的 key ↔ 每一支 apply playbook 的 play `vars:`(不准宣告,見 §4.5 第 3 點) | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` |
+| spec 變數契約表列出的變數 ↔ contract `groupVars` | `internal/spec/play_vars_inventory_precedence_regression_test.go::TestRegression_SpecInputsAreDeclaredContractInputs` |
+| log-server 的 `siem_log_root`/`siem_receiver_tcp_port` ↔ log-shipping 的 `siem_log_root`、audit-log-forwarding/wazuh-manager 的 `siem_forward_port` | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` |
+| audit-log-forwarding client 的 `siem_forward_port` ↔ inventory log-server 的 `siem_receiver_tcp_port`(apply 時的 gate) | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_AuditForwardPortMatchesTheLogServerReceiver` |
+| `pilot deploy` preflight ↔ `pilot repair` 對 contract input 型別的判斷(單一來源 `contract.ValueMatchesType`) | `internal/repair/reapply_plan_test.go::TestBuildReapplyPlan_IntegerInputFormsMatchPreflight`、`cmd/pilot/cmd/deploy_input_types_test.go::TestDeployPreflightAcceptsInventoryNumbers` |
 
 規則:
 
@@ -1485,4 +1502,5 @@ git status --short
 | 2026-10-12 | v1.47 | §4.5 新增第 13 點:互斥 task 的 register 結果不准用 `combine()` 合併(被跳過的 task 帶 `changed: false`),單檔 bind mount 在檔案被換掉後要比對 container 實際看到的內容再決定重啟。修正 `prometheus-apply.yml`(有 Alertmanager 時設定變更從未重啟 container),新增共用 `tasks/container-file-mount-drift.yml`、全 repo lint `TestRegression_RegisteredResultsAreNeverCombined`、`prometheus.md` C20;同一個檢查接上其餘 7 支 playbook 的 9 個掛單檔的 container,新增 lint `TestRegression_FileMountedContainersRestartOnStaleMounts`(也檢查 include 與 container 的 `when:` 相同);檢查的 task 一律 `no_log`(inspect 含 env、密碼檔的 hash),由 `TestRegression_ContainerFileMountDriftHidesWhatItReads` 鎖住 | pilot |
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
+| 2026-10-14 | v1.50 | §4.5 第 3 點、§5.7:play-vars lint 改成對每支 apply playbook 檢查所有 contract 的 input(log-server 的 `siem_log_root` 是 log-shipping 的 input,log-server 卻仍用 play vars,Promtail 找不到可 tail 的檔案、apply 失敗);新增 `TestRegression_SpecInputsAreDeclaredContractInputs`:spec 變數契約表列出的變數必須宣告在 contract `groupVars`(尚未處理的 15 個元件列在 `undeclaredSpecInputsAllowlist`,見 issue #81)。log-server、audit-log-forwarding、log-shipping 的變數契約表變數從 play vars 移到 `always` `set_fact`,並宣告進各自 contract;共用的 `siem_log_root`、SIEM 埠與 logrotate 次數的空值/null 一律回到預設,由 `TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` 鎖住兩邊一致;audit-log-forwarding 在 client 的 `siem_forward_port` 與 inventory log-server 的 `siem_receiver_tcp_port` 不一致時 fail;log-server 拒絕系統或共用目錄當 `siem_log_root`(寫出的路徑與 `realpath` 解析後的真實路徑都檢查),既有目錄必須已是本角色建立的狀態(只有 `lost+found` 的新掛載檔案系統根目錄例外);SIEM port 與 `loki_port` 必須是 1–65535 的十進位整數;logrotate 設定檔的 `validate` 只在 `logrotate -d` 回報這個檔案本身的錯誤時失敗,並先安裝 logrotate;SELinux 主機上 rsyslogd(`syslogd_t`)只能用 `syslogd_port_t`/`rsh_port_t` 的 TCP port,非預設的 SIEM port 由 `tasks/rsyslog-selinux-tcp-port.yml` 標成 `syslogd_port_t`(被其他服務占用的 port 直接 fail),audit-log-forwarding spec 新增 C22 檢查 rsyslogd 對轉送埠的連線真的建立。preflight 與 repair 共用 `contract.ValueMatchesType`:`integer` 接受 `ansible-inventory` JSON 的 float 與十進位字串,修正既有 integer input(例如 `dns_cache_max_ttl`)寫在 group_vars 時 preflight 一律失敗的問題;port 一律宣告成 `integer` | pilot |
 | 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |

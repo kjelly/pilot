@@ -25,3 +25,6 @@
 # node_exporter_basic_auth_user: prometheus
 # node_exporter_version: "1.12.1"
 # node_exporter_port: 9100
+#  改了 node_exporter_port 的話,Prometheus 自動展開 host-monitoring group 時
+#  仍固定 scrape 9100(docs/verification/prometheus.md §1.5),要在 Prometheus
+#  端另外設 node_exporter_targets。

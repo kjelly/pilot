@@ -18,6 +18,8 @@
 # snmp_exporter_version: "v0.30.1"
 # snmp_exporter_image: "quay.io/prometheus/snmp-exporter"
 # snmp_exporter_container_name: "pilot-snmp-exporter"
+#  改了容器名稱的話,同機 Prometheus 預設仍連 pilot-snmp-exporter:9116,
+#  要用 -e snmp_exporter_endpoint=<名稱>:9116 指定(prometheus-apply.yml)。
 # snmp_exporter_port: "9116"
 # snmp_exporter_listen_address: "127.0.0.1"
 # snmp_exporter_module_concurrency: "1"
