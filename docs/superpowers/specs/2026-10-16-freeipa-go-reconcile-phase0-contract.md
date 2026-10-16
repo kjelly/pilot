@@ -40,6 +40,7 @@ Phase 0 交付：
 | membership | 已是成員、找不到成員時仍為 HTTP 200、`error: null`；`result.completed` 為 0，`result.failed.member.<type>` 列出 `[名稱, 原因]` | `MemberResult` 逐成員解析；`completed` 與 `failed` 必須和要求的成員數一致 |
 | batch | `batch` 回 `count` 與 `results[]`；單項失敗不影響其他項。失敗項的格式與最外層不同：`error` 是訊息字串，另有 `error_name`、`error_code`、`error_kw` | 逐項判讀，兩種錯誤格式分別解析；batch 不是交易 |
 | 截斷 | `*_find` 結果帶 `truncated: true`（`sizelimit` 不足時） | 呼叫端一律帶 `sizelimit=0`、`timelimit=0`，`truncated` 為 true 即失敗 |
+| 回應的必要欄位 | 每個回應都有 `error`（成功時為 null）與 `result` 物件；除 `ping`（只有 `summary`）外，每個允許的命令在 `result` 內都有非 null 的 `result`；`*_find` 一定有 `count`、`truncated`、`result`，沒有命中時是 `count: 0`、`truncated: false`、`result: []`；membership 結果一定有 `completed` 與 `failed.member` | 缺欄位、欄位為 null 或型別不對的回應**不算成功**，是 `ErrIncompleteResponse`：寫入（含有寫入的 batch）視為結果未知，讀取直接失敗；只有真實的空結果才是空集合（PR #120 review 後修正） |
 | keep-alive | 一條連線約 100 個請求後被 httpd 關閉，Transport 會重新 dial（每次一個新的 `ssh -W`，約 0.8 秒） | 接受；大量讀取用 `*_find --all` 或 `batch` 降低請求數 |
 | 延遲（拋棄式 VM，同機） | ping p50 52 ms；6 次 `*_find --all` 讀完 users、groups、hosts、hostgroups、HBAC、sudo 約 3.7 秒；120 次 `user_show --all` 逐一 33.7 秒、一次 batch 5.7 秒 | 讀取以 `*_find --all` 為主；每次 `ipa` CLI 呼叫約 800 ms，這是改用 JSON-RPC 的主要收益 |
 
@@ -88,6 +89,10 @@ Phase 1 起轉成可執行的檢查：
 - **TLS 與 API 版本 fail closed。** CA 或 hostname 不符時，在送出任何 HTTP 請求（含密碼）之前失敗。API 版本不在支援清單時，在任何寫入前失敗。
 - **401 只重登一次。** 401 重新登入一次後重送（§2 已證明 401 發生於執行前）；連續兩次 401 即失敗。
 - **結果未知要明說。** 寫入在送出後遇到傳輸中斷、逾時或取消時回報 unknown，不自動重送；讀取可重試一次。
+- **不完整的回應不算成功。** 缺欄位、null 或型別不對的回應：
+  - 單次寫入，或含有寫入的 batch：回報 unknown，並計入 `Stats.Unknown`；
+  - 讀取：直接失敗。
+  - 只有回應明確說「零筆、未截斷」時，才可當成空集合（§2「回應的必要欄位」）。
 - **sshd 拒絕轉送時說明原因。** `AllowTcpForwarding no`、`DisableForwarding yes`、`PermitOpen` 不含目的地時，preflight 在 mutation 前失敗並指出原因。
 - **遠端鎖。** 同時兩個 writer 時，第二個在等待時限後失敗；持有者的 SSH 中斷後鎖釋放。
 - **效能**：計畫 §6。

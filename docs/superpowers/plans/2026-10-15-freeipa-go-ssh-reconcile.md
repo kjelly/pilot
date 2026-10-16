@@ -235,7 +235,7 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 
 退出條件：本機 Go 經 SSH tunnel 能在指定 VM 上直接查詢及變更單一測試帳號，共用 session，重跑不產生多餘寫入；密碼與 session cookie 不洩漏。
 
-**結果（2026-10-16）**：candidate `ba253a6` 在拋棄式 VM 實跑 PASS，退出條件成立，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-ba253a6.md`。
+**結果（2026-10-16）**：candidate `ba253a6` 在拋棄式 VM 實跑 PASS，退出條件成立，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-ba253a6.md`。PR #120 review 後，修正「缺欄位的成功回應被當成有效結果」與「含寫入的 batch 解析失敗沒有歸為 unknown」，candidate `33e38e4` 重跑 PASS，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-33e38e4.md`。
 - 單一帳號建立、改一個欄位各一次寫入；重跑零寫入，server log 核對一致。
 - session 在 server 端結束後，只重登一次，寫入只套用一次。
 - 中斷的寫入回報 unknown，實際未套用；逾時的寫入回報 unknown，實際已套用。所以 unknown 一定要讀回。
