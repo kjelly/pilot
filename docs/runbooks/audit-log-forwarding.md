@@ -30,7 +30,7 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-15）**：candidate `d545868`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-16）**：candidate `939b3fe`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux Enforcing client），
 > log-server 的 `siem_log_root: /srv/siem` 放在 checkout 外的 inventory group_vars。`topology test`
 > L3/L4 failed=0、L5 audit-log-forwarding 66/66（v1.8，含 C22 轉送連線檢查）、L6 changed=0；
@@ -51,7 +51,7 @@
 > - 換回其他 port 時，舊 port 的 SELinux 標籤會保留（`semanage port -d -t syslogd_port_t -p tcp <port>`
 >   可移除）。
 >
-> 紀錄：[`2026-10-15-d545868.md`](../evidence/play-vars-inventory-precedence/2026-10-15-d545868.md)。
+> 紀錄：[`2026-10-16-939b3fe.md`](../evidence/play-vars-inventory-precedence/2026-10-16-939b3fe.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```

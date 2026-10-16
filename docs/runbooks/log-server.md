@@ -20,7 +20,7 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-15）**：candidate `d545868`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-16）**：candidate `939b3fe`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`siem_log_root: /srv/siem`
 > 放在 checkout 外的 inventory group_vars。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.8）、
 > log-shipping 9/9（v1.5）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
@@ -43,7 +43,8 @@
 >     只有 C1 失敗：它用 `dpkg`，spec §1 目標是 Ubuntu。
 > - apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容（這次才建的就移除），
 >   重新載入 profile，移除這次加的 SELinux 規則；`rsyslogd -N1` 接受還原後的設定才重啟 rsyslog。
->   兩種情況都實測過：失敗原因是別的無效 drop-in 時，rescue 沒有重啟，原本的 rsyslog 繼續正常運作（11/11）；
+>   兩種情況都實測過：失敗原因是別的無效 drop-in 時，rescue 沒有重啟，原本的 rsyslog 繼續正常運作（11/11），
+>   失敗訊息會寫出 rsyslogd 指出的檔案與錯誤（例如 `error during parsing file /etc/rsyslog.d/99-…conf … syntax error`）；
 >   失敗原因在這次 run 自己（`siem_logrotate_maxage=abc` 讓 Step 4 失敗）時，還原後的設定通過檢查，rescue 重啟 rsyslog（11/11）。
 > - `pilot deploy` 以 workspace inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30`
 >   （沒加引號）：preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，
@@ -60,7 +61,7 @@
 >
 > 這些 gate 由 Ansible 實跑的 regression test 鎖住；VM 上的逐項實測只在較早的 candidate 做過，
 > 不算這個 candidate 的證據。
-> 紀錄：[`2026-10-15-d545868.md`](../evidence/play-vars-inventory-precedence/2026-10-15-d545868.md)。
+> 紀錄：[`2026-10-16-939b3fe.md`](../evidence/play-vars-inventory-precedence/2026-10-16-939b3fe.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
