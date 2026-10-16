@@ -226,20 +226,21 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 - **穩態**理論上只剩這些讀取加上比較，mutation 為 0，users／groups 的 30 秒目標與完整 identity 的 180 秒目標都有餘裕。有差異時，每個寫入約 50 ms 加上 server 端成本。
 - **`*_show --all` 的 server 端成本**約 230 ms，遠高於傳輸。需要逐物件讀取時用 `batch`，或改用 `*_find --all`。
 - **連線重建**：httpd 的 keep-alive 每條連線約 100 個請求就關閉，連線會重建（每次一個新的 `ssh -W`，約 0.8 秒）。Phase 0 要確認上限的實際值，並決定是否以 `batch` 降低請求數。
-- **仍待驗證**（下列項目維持未勾選）：
-  - session 到期與 401；
-  - batch 的逐項錯誤；
-  - 遠端鎖；
-  - 第四項的各種失敗情境；
-  - 寫入；
-  - 正式環境的 SSH RTT。
+- 這段量測之後的項目已在下面完成，只剩正式環境的 SSH RTT 與 FreeIPA 版本需在接入前確認。
 
-- [ ] 先建立 verification acceptance contract 與現有功能對照矩陣，再實作 mutation；確認 user/group 範圍與密碼語意。
-- [ ] 用拋棄式 FreeIPA server/client VM 驗證：`ssh -W` dialer、loopback 目的地加 FQDN SNI、login_password session（Referer、cookie、CA pin）、session 重用、session 到期與 401 語意、batch 逐項結果、遠端鎖的取得與中斷釋放。
-- [ ] 實測 SSH 中斷、RPC 逾時、權限不足、API 不相容、hostname/CA 不符、sshd 禁止 forwarding，證明 mutation 前失敗或結果未知能正確呈現。
-- [ ] 取得實際 API fixtures 與基準（含 SSH RTT），列出支援的 FreeIPA 版本，不使用自編成功字串作 fixture。
+- [x] 先建立 verification acceptance contract 與現有功能對照矩陣，再實作 mutation；確認 user/group 範圍與密碼語意。（`docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md` §3、§4；engine 專屬條件於 Phase 1 轉成可執行檢查）
+- [x] 用拋棄式 FreeIPA server/client VM 驗證：`ssh -W` dialer、loopback 目的地加 FQDN SNI、login_password session（Referer、cookie、CA pin）、session 重用、session 到期與 401 語意、batch 逐項結果、遠端鎖的取得與中斷釋放。
+- [x] 實測 SSH 中斷、RPC 逾時、權限不足、API 不相容、hostname/CA 不符、sshd 禁止 forwarding，證明 mutation 前失敗或結果未知能正確呈現。（API 不相容：server 不拒絕任何版本，改由 client 檢查，以擷取與單元測試證明）
+- [x] 取得實際 API fixtures 與基準（含 SSH RTT），列出支援的 FreeIPA 版本，不使用自編成功字串作 fixture。（支援清單目前只有實測過的 FreeIPA 4.13.4／API 2.257；正式環境的版本與 SSH RTT 需在接入前確認）
 
 退出條件：本機 Go 經 SSH tunnel 能在指定 VM 上直接查詢及變更單一測試帳號，共用 session，重跑不產生多餘寫入；密碼與 session cookie 不洩漏。
+
+**結果（2026-10-16）**：candidate `ba253a6` 在拋棄式 VM 實跑 PASS，退出條件成立，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-ba253a6.md`。
+- 單一帳號建立、改一個欄位各一次寫入；重跑零寫入，server log 核對一致。
+- session 在 server 端結束後，只重登一次，寫入只套用一次。
+- 中斷的寫入回報 unknown，實際未套用；逾時的寫入回報 unknown，實際已套用。所以 unknown 一定要讀回。
+- 密碼與 cookie 在輸出與 server log 都是 0 次。
+- Phase 1 尚未開始。
 
 ### Phase 1 唯讀 observer 與 planner
 
