@@ -597,7 +597,15 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 	var capturedOut, capturedErr bytes.Buffer
 	c.Stdout = io.MultiWriter(stdout, &capturedOut)
 	c.Stderr = io.MultiWriter(os.Stderr, &capturedErr)
-	err := c.Run()
+	// An Ansible command here inherits this process's environment, which
+	// may name the controller Ansible log (ANSIBLE_LOG_PATH); hold it as
+	// every Ansible run does (a no-op when it does not).
+	release, err := ansible.HoldCommandLog(ctx, c)
+	if err != nil {
+		return err
+	}
+	err = c.Run()
+	release()
 	if err != nil && filepath.Base(bin) == "ansible-playbook" {
 		fmt.Fprint(os.Stderr, ansible.FailureSummary(capturedOut.String()+"\n"+capturedErr.String()))
 	}

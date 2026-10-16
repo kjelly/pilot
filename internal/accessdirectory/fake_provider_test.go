@@ -3,6 +3,7 @@ package accessdirectory
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/kjelly/pilot/internal/freeipaaccess"
 )
@@ -15,6 +16,7 @@ import (
 // resolution — this package only needs realistic already-resolved domain
 // values and a way to prove call counts.
 type fakeProvider struct {
+	mu                sync.Mutex
 	users             map[string]freeipaaccess.User
 	hosts             map[string]freeipaaccess.Host
 	hostgroups        map[string]freeipaaccess.Hostgroup
@@ -47,6 +49,8 @@ func (f *fakeProvider) Ping(ctx context.Context) (freeipaaccess.PingResult, erro
 }
 
 func (f *fakeProvider) UserShow(ctx context.Context, username string) (freeipaaccess.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.userShowCalls == nil {
 		f.userShowCalls = map[string]int{}
 	}
@@ -63,6 +67,8 @@ func (f *fakeProvider) GroupShow(ctx context.Context, name string) (freeipaacces
 }
 
 func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess.Host, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hostShowCalls == nil {
 		f.hostShowCalls = map[string]int{}
 	}
@@ -74,6 +80,8 @@ func (f *fakeProvider) HostShow(ctx context.Context, fqdn string) (freeipaaccess
 }
 
 func (f *fakeProvider) HostgroupShow(ctx context.Context, name string) (freeipaaccess.Hostgroup, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.hostgroupShowCalls == nil {
 		f.hostgroupShowCalls = map[string]int{}
 	}
@@ -104,6 +112,8 @@ func (f *fakeProvider) HostgroupFind(ctx context.Context, criteria string) ([]fr
 }
 
 func (f *fakeProvider) HBACRuleFind(ctx context.Context) ([]freeipaaccess.HBACRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.hbacRuleFindCalls++
 	return f.hbacRules, nil
 }
@@ -117,6 +127,8 @@ func (f *fakeProvider) HBACServiceGroupShow(ctx context.Context, name string) (f
 }
 
 func (f *fakeProvider) SudoRuleFind(ctx context.Context) ([]freeipaaccess.SudoRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sudoRuleFindCalls++
 	return f.sudoRules, nil
 }

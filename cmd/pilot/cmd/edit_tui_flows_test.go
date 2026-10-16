@@ -525,7 +525,7 @@ func TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu(t *te
 		tm.Send(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter}) // -> role preset manager
-	waitFor("管理 ")
+	waitForRolePresetManager(t, tm)
 
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // preset manager -> roles menu
 	waitFor("的角色")
@@ -540,6 +540,9 @@ func TestEditRouter_Teatest_EscWalksBackThroughDeepChainThenQuitsAtTopMenu(t *te
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEsc}) // top menu -> the one screen that still quits for real
 
 	tm.WaitFinished(t, teatest.WithFinalTimeout(teatestFinalTimeout))
+	if final := tm.FinalModel(t).(editRouterModel); !final.quit || final.err != nil {
+		t.Fatalf("expected a clean quit from the top menu: quit=%v err=%v", final.quit, final.err)
+	}
 
 	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); !os.IsNotExist(err) {
 		t.Fatalf("expected no hosts.yml to be written after discarding, stat err=%v", err)

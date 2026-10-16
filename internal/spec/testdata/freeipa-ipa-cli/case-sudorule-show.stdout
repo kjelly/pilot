@@ -1,0 +1,10 @@
+  dn: ipaUniqueID=36ebf9f4-c94b-11f1-8260-5254001b059e,cn=sudorules,cn=sudo,dc=ipa,dc=pilot,dc=internal
+  Rule name: P0Case-Sudo
+  Enabled: True
+  Users: p0case-user
+  User Groups: p0case-child
+  Hosts: p0case-host.ipa.pilot.internal
+  Host Groups: p0case-hg
+  Sudo Allow Commands: /usr/bin/P0CaseCmd
+  ipauniqueid: 36ebf9f4-c94b-11f1-8260-5254001b059e
+  objectclass: ipaassociation, ipasudorule

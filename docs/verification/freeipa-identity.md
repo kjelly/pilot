@@ -1,21 +1,23 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
-> 版本：v1.15（2026-10-16 重跑不再發出已知是 no-op 的呼叫：以 `ipa user-find`／`group-find --pkey-only`
+> 版本：v1.16（2026-10-16 重跑不再發出已知是 no-op 的呼叫：以 `ipa user-find`／`group-find --pkey-only`
 > 批次讀取，已存在的使用者與群組不再 `user-add`／`group-add`，已是宣告狀態的帳號不再
 > `user-enable`／`-disable`，成員查詢已列出的直接成員不再 `group-add-member`；讀取不完整時在任何
-> 變更前失敗。外部可觀察的結果不變。candidate `01fcc5d` 實跑 PASS，見
-> `docs/evidence/freeipa-identity/2026-10-16-01fcc5d.md` 與 §8 v1.15）
-> 上一版：v1.14（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
-> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。見 §8 v1.14）
-> 上一版：v1.13（2026-10-15 `ipa` 失敗不再被當成成功或「不存在」（issue #102）：
+> 變更前失敗。成員比較改為不分大小寫（FreeIPA 把 group、hostgroup、host、netgroup 名稱存成小寫）。
+> 外部可觀察的結果不變。見 §8 v1.16）
+> 上一版：v1.15（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
+> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。candidate `b27e3ab`（接上 #106 後）在拋棄式
+> vm-target 實跑 PASS，見 `docs/evidence/host-decommission/2026-10-16-b27e3ab.md` 與 §8 v1.15）
+> 上一版：v1.14（2026-10-15 `ipa` 失敗不再被當成成功或「不存在」（issue #102）：
 > `ipa passwd` 失敗會讓 run 失敗並列出使用者；成員查詢失敗不再被讀成空集合；
 > 存在性檢查只放行真實擷取的 not found；HBAC lockdown rollback 如實回報結果。
-> candidate `1d54942` 在拋棄式 vm-target 實跑 PASS，見
-> `docs/evidence/freeipa-identity/2026-10-15-1d54942.md`）
-> 上一版：v1.12（2026-10-15 密碼設定改依 roster schema：只在帳號還沒有密碼，
+> candidate `ae8f276`（接上合併 main 後的 #103）在拋棄式 vm-target 實跑 PASS，見
+> `docs/evidence/freeipa-identity/2026-10-16-ae8f276.md`）
+> 上一版：v1.13（2026-10-15 密碼設定改依 roster schema：只在帳號還沒有密碼，
 > 或 `preserve_existing: false` 要求重設且使用者已不在上次重設的密碼時執行
-> `ipa passwd`，見 §7.4。candidate `edc840f` 已在拋棄式 vm-target 實跑
-> PASS）
+> `ipa passwd`，見 §7.4。candidate `d24a31c`（合併 main 後）已在拋棄式 vm-target
+> 實跑 PASS）
+> 上一版：v1.12（2026-10-15：netgroup 撤銷 SOP 步驟 1 改成 ldapi 寫入，不再依賴主機殘留的 admin ticket）
 > 上一版：v1.11（2026-09-07 對真實 FreeIPA vm-target 重跑一次 static HBAC
 > rule 刪除生命週期的完整驗證，並補上 Case C：v1.10 曾記錄「FreeIPA 對一般
 > HBAC login rule 沒有內建的 referential-integrity 阻擋，找不到可重現的
@@ -299,8 +301,8 @@ verdict: PASS  (pass=24 fail=0 skip=0)
 | C4/C6 | `Attach groups to HBAC/sudo rules` + `Remove stale groups from HBAC/sudo rules` | 後者是本次新增的移除半邊 |
 | C7 | `Reconcile IPA hostgroup descriptions`（`tags: [identity, hostgroups]`）| 本次新增 |
 | C8 | `Reconcile user first/last names`（`tags: [identity, users]`）| 本次新增 |
-| C9/C10 | `List existing IPA users`、`List disabled IPA users`、`Gate: the user listings were parsed completely`、`Ensure IPA users exist`、`Reconcile user first/last names`、`Reconcile canonical account enabled state`（`tags: [identity, users]`）| canonical attribute/state reconcile；已存在的使用者不再 `user-add`，已是宣告狀態的帳號不再 `user-enable`／`-disable`（v1.15） |
-| C11/C12 | `List existing IPA groups`、`Gate: the group listing was parsed completely`、`Ensure IPA groups exist`、`Index canonical group direct members`、`Ensure/Remove stale canonical direct user/nested-group membership`（`tags: [identity, users, groups]`）| authoritative direct membership；已存在的群組不再 `group-add`，已是直接成員的不再 `group-add-member`（v1.15） |
+| C9/C10 | `List existing IPA users`、`List disabled IPA users`、`Gate: the user listings were parsed completely`、`Ensure IPA users exist`、`Reconcile user first/last names`、`Reconcile canonical account enabled state`（`tags: [identity, users]`）| canonical attribute/state reconcile；已存在的使用者不再 `user-add`，已是宣告狀態的帳號不再 `user-enable`／`-disable`（v1.16） |
+| C11/C12 | `List existing IPA groups`、`Gate: the group listing was parsed completely`、`Ensure IPA groups exist`、`Index canonical group direct members`、`Ensure/Remove stale canonical direct user/nested-group membership`（`tags: [identity, users, groups]`）| authoritative direct membership；已存在的群組不再 `group-add`，已是直接成員的不再 `group-add-member`（v1.16） |
 | C19 | `Ensure nested hostgroup membership` + `Remove stale nested hostgroup memberships`（`tags: [identity, hostgroups, C19]`）| roster-schema-v2 migration spec §8；`membership.hostgroups` 從完全未 reconcile 變成 authoritative |
 | C20/C21 | `Ensure netgroup direct user membership`（`C20`）+ `Ensure netgroup direct group membership`（`C21`）+ 對應的 `Remove stale netgroup direct user/group membership` | netgroup 的 user/group 成員在 LDAP 層共用 `memberUser`，Ansible 層仍是各自獨立的 task/roster 欄位 |
 | C22/C23 | `Ensure netgroup direct host membership`（`C22`）+ `Ensure netgroup direct hostgroup membership`（`C23`）+ 對應的 `Remove stale netgroup direct host/hostgroup membership` | 同上，LDAP 層共用 `memberHost` |
@@ -341,7 +343,13 @@ rerun → 比較」動態行為，理由同樣不適合塞進 §2 單指令快�
 
 ```bash
 # 1. 手動在 live 端幫 ng-fixture-v2-clients 加一個 roster 沒宣告的 member：
-pilot vm-target exec --name <server-vm> -- sudo ipa netgroup-add-member ng-fixture-v2-clients --users=admin
+#    以 root 經 ldapi 的 SASL EXTERNAL 寫入（與步驟 3 的讀法相同）：不需要 kinit，也不留任何 ticket。
+#    主機上不會有可用的 admin ticket（#69），所以不能直接 `ipa netgroup-add-member`。
+#    FreeIPA 的 netgroup DN 是 `ipaUniqueID=...`，先查出來再修改。
+pilot vm-target exec --name <server-vm> -- sudo sh -c 'u=ldapi://%2Frun%2Fslapd-IPA-PILOT-INTERNAL.socket; \
+    dn=$(ldapsearch -o ldif-wrap=no -LLL -Q -Y EXTERNAL -H $u -b cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal "(cn=ng-fixture-v2-clients)" dn | sed -n "s/^dn: //p"); \
+    printf "%s\n" "dn: $dn" "changetype: modify" "add: memberUser" "memberUser: uid=admin,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal" \
+    | ldapmodify -Q -Y EXTERNAL -H $u'
 # 2. 重新套用 fixture（roster 沒變，membership.users 仍只有 fixture-v2-user-a）：
 pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml \
     -e fixtures_target_group=all -e @~/.vault/main.yaml
@@ -433,9 +441,11 @@ printf '%s\n%s\n%s\n' "<initial>" "<new>" "<new>" \
     | pilot vm-target exec --name <server-vm> -- env KRB5CCNAME=FILE:/tmp/<user>.cc kinit <user>
 ```
 
-最近一次驗證：2026-10-15，candidate `edc840f`（tree `9ee74da1`），拋棄式 AlmaLinux 9.8 +
-FreeIPA 4.13.4 vm-target，**PASS**。證據：
-[`docs/evidence/freeipa-identity/2026-10-15-edc840f.md`](../evidence/freeipa-identity/2026-10-15-edc840f.md)。
+最近一次驗證：2026-10-16，candidate `d24a31c`（tree `902922c3`，合併 `main` `afeacbd` 之後；
+tasks 已在私有 Kerberos cache 的 block 內，R1、R8 之後 server 上 `klist -A` 都沒有任何
+cache），拋棄式 AlmaLinux 9.8 + FreeIPA 4.13.4 vm-target，**PASS**，結果與 2026-10-15 的
+`edc840f` 相同。證據：
+[`docs/evidence/freeipa-identity/2026-10-16-d24a31c.md`](../evidence/freeipa-identity/2026-10-16-d24a31c.md)。
 
 | Run | PLAY RECAP | `ipa passwd` 執行對象 |
 |---|---|---|
@@ -568,10 +578,11 @@ range 高位、與遞增分配序列碰撞機率低很多，見檔案內註解�
 | 2026-08-27 | v1.9 | v3.2 Identity & Credential Hardening 交付（`password_policies`/`credential_policies`/`security.privileged_identity`/`users[].authentication` 四個新 roster 欄位）對真實 FreeIPA vm-target（拋棄式 AlmaLinux 9 `freeipa-v32-test`）完成端對端驗證，見 §10：privileged_identity fail-before-write gate、password_policy 建立/修改/刪除、user auth types 建立、兩者的冪等性、`pilot identity drift`/`--repair-managed`、`freeipa-capability-probe.yml`、`pilot identity hygiene` 全數 PASS。過程中發現並修好 3 個本次交付新增碼的真實 bug（單元測試用的假資料自洽但假資料本身錯，只有對真的 server 跑才會露餡）：(1) `freeipa-identity-apply.yml` 的 `ipa pwpolicy-add/-mod/-del` 三個 `changed_when` 字串比對全部落空（這三個指令成功時的真實輸出裡根本沒有被比對的字串），改用 `rc == 0`；(2) `freeipa-access-drift-probe.yml` 的 `max_life_days`/`min_life_hours` 漏了秒→天/小時換算，導致任何真的套用成功、毫無 drift 的 policy 都被永遠誤報成 drift；(3) `internal/accessgrants/hygiene.go` 把純資訊性的 `max_age_unknown` finding 誤算進 SSH compliance 判定，任何有設定 `ssh.max_age`（report-only）的 policy 底下的使用者都會被誤判 `ssh_key_compliance: fail`，即使金鑰完全乾淨。三者詳細修法與 §10.4 候選 checklist row（C27–C29）見 §10。`go test ./...`、`go vet`、`gofmt`、`ansible-playbook --syntax-check`、`ansible-lint` 全綠。 | pilot |
 | 2026-09-07 | v1.10 | 交付 `docs/superpowers/specs/2026-09-07-pilot-hbac-rule-deletion-spec.md` Phase 1（static HBAC rule 刪除生命週期）：`freeipa-identity-apply.yml` 新增 `ipa_hbac_rules_absent` 分流 + 單一 task 刪除（複用既有 `netgroup-del`/grant-HBAC-prune 的 `failed_when` 慣例，見 spec §6.2）+ check-mode preview debug 訊息 + `allow_all` Ansible 層防護；Go validator（`checkHBAC`）新增拒絕 `allow_all` + `state: absent` 的違規。新增永久 fixture rule `fixture-hbac-delete-target`。真實 vm-target 驗證見 §7.5、候選 row C30 見 §9.4：Case A（真實刪除）/Case B（冪等 no-op）/Case D（check-mode 預覽）/`allow_all` 防護皆 PASS；Case C（FreeIPA 因引用拒絕刪除）查證後認為此資料模型下不可重現，未執行，見 §7.5 說明。過程中順手修好兩個既有、與本功能無關的 pilot 缺陷：`vm-target run --sandbox` 的 `-e @~/...` vault 檔案路徑未展開 `~`（`expandHomeDir`，`TestExpandHomeDir` 鎖回歸）、canonical fixture 的硬編碼 IP 撞上新建 vm-target 的 DHCP 分配。`go test ./...`、`go vet`、`make playbook-lint`（此次修改的檔案部分；既有 `audit-log-forwarding-apply.yml` 的 duplicate-key 問題與本次改動無關，未修）全綠 | pilot |
 | 2026-09-07 | v1.11 | 對真實 FreeIPA vm-target（新建拋棄式 `hbac-delete-verify`，與 v1.10 是不同 VM）完整重跑 v1.10 交付的 static HBAC rule 刪除生命週期：Case A/B/D/`allow_all` 數字與 v1.10 完全一致（無回歸）。**更正 v1.10 的誤診**：v1.10 記錄「Case C（FreeIPA 因引用拒絕刪除）在目前資料模型下不可重現」，這次找到真實建構方式——用 `ipa selinuxusermap-add --hbacrule=<rule>` 建一個引用該 HBAC rule 的 SELinux User Map，`ipa hbacrule-del` 就會真的拒絕（`stderr="... cannot be deleted because SELinux User Map ... requires it"`）；透過 roster `state: absent` 走完整 apply playbook 觸發同一場景，`failed_when` 判斷邏輯**零程式碼改動**就正確 fail closed（`ok=77 changed=0 failed=1`，rule 未被刪除，無其他物件受影響）。§7.5、規格檔 `2026-09-07-pilot-hbac-rule-deletion-spec.md`（v1.6）與 §18 驗收準則同步更新 | pilot |
-| 2026-10-15 | v1.12 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；candidate `edc840f` 在拋棄式 vm-target 實跑 PASS（R0–R8，見 §7.4 與 `docs/evidence/freeipa-identity/2026-10-15-edc840f.md`） | pilot |
-| 2026-10-15 | v1.13 | issue #102：`freeipa-identity-apply.yml` 不再把 `ipa` 失敗當成成功或「不存在」。`ipa passwd` 失敗時新的 gate 讓 run 失敗並列出使用者與 `ipa: ERROR:` 行（原本顯示 ok，帳號沒有密碼）；user/group/hostgroup/netgroup/HBAC/sudo 成員查詢失敗即失敗（原本讀成沒有成員，撤權被跳過）；刪除 group 前、canonical host、password policy、退役主機的 host／service 查詢只放行真實擷取的 not found／`Number of entries returned 0`（原本查詢出錯時 group 可能在沒有 history marker 的情況下被刪，退役主機的 unknown-service gate 被跳過而照樣 `host-del`）；HBAC lockdown rescue 的 rollback 依實際結果回報。新增 `freeipa_identity_ipa_failures_regression_test.go`（假 `ipa` 回放 FreeIPA 4.13.4 真實輸出）與 `failed_when: false` 白名單 lint；decommission 的 HBAC／sudo 引用查詢與 DNS 查詢另開 #104、#105。candidate `1d54942` 實跑 PASS（`docs/evidence/freeipa-identity/2026-10-15-1d54942.md`） | pilot |
-| 2026-10-15 | v1.14 | issue #104：host decommission 的 HBAC／sudo 直接引用查詢原本用 `hbacrule-find`／`sudorule-find --host=<fqdn>`，但這兩個指令沒有 host 篩選，`--host=` 被當成 `--hostcat`，永遠回 0 筆，檢查永遠 pass。改成 `--all --sizelimit=0` 列出全部規則，由 Go 端（`rulesNamingHost`）挑出 `Hosts:` 或 `External host:` 含該主機的規則；查詢失敗或結果被截斷時 run 失敗。Go 測試改用真實擷取的 ansible 輸出（`internal/decommission/providers/testdata/rule-references/`） | pilot |
-| 2026-10-16 | v1.15 | 計畫文件 `2026-10-15-freeipa-go-ssh-reconcile.md` Phase −1 選做項與群組的延伸：`freeipa-identity-apply.yml` 在 `Ensure IPA users exist` 前以 `ipa user-find --pkey-only --sizelimit=0 --timelimit=0` 與 `--disabled=True` 讀出全部及停用的使用者，已存在的使用者跳過 `user-add`，已是宣告狀態的帳號跳過 `user-enable`／`-disable`；清單外的使用者照舊兩個呼叫都做。用 `--pkey-only` 是因為預設輸出含使用者可自行修改的姓名，含換行的姓名可偽造別人的 `Account disabled:` 行。查詢失敗或被截斷時失敗；`Gate: the user listings were parsed completely` 要求解析出的登入名數等於 FreeIPA 印出的筆數（例如輸出被翻成德文時失敗）。群組同樣以 `ipa group-find --pkey-only` 跳過已存在的 `group-add`（同樣的截斷檢查與筆數 gate）；`Look up canonical group direct membership` 已讀出的直接成員（`Member users:`／`Member groups:`，不含 indirect）不再 `group-add-member`，名冊列出的間接成員仍會加成直接成員。C9–C12 的驗收不變。新增 `freeipa_identity_user_listing_regression_test.go`、`freeipa_identity_group_noop_regression_test.go`，fixture 為 FreeIPA 4.13.4 真實擷取（含德文輸出）；`freeipa-cli-options.txt` 補 `user-find`、`group-find`。candidate `01fcc5d` 在拋棄式 vm-target 實跑 PASS：120 users 穩態重跑 1,189 → 642 次 API 呼叫、與 parent 交錯量測 845 秒 → 479–520 秒；新增／停用／啟用／加成員只發出必要的呼叫；server 語系為德文時兩道 gate 在任何變更前擋下（`docs/evidence/freeipa-identity/2026-10-16-01fcc5d.md`） | pilot |
+| 2026-10-15 | v1.12 | Netgroup authoritative pruning SOP 步驟 1 原本是 `sudo ipa netgroup-add-member`：#72 之後主機上沒有殘留的 admin ticket，這行會失敗（`did not receive Kerberos credentials`，2026-10-15 對拋棄式 FreeIPA 4.13.4 vm-target 實測）。改成以 root 經 ldapi 的 SASL EXTERNAL 先查出 netgroup 的 `ipaUniqueID` DN 再 `ldapmodify` 加入 `uid=admin`；同一台 VM 上依序跑完步驟 1–3：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user membership"），步驟 3 只剩 `fixture-v2-user-a` 與 `team-fixture-v2`。另外 C1–C24 都經 ldapi 讀取，現在一律以 root 執行（`spec.NeedsBecome`，PR #89） | pilot |
+| 2026-10-15 | v1.13 | 修正密碼重設條件（`freeipa-identity-apply.yml`）：原條件 `force_password or needs_reset` 讓 `force_change: true` 的使用者每次 apply 都被重設（含已自行改過密碼者，§7.4 自 `b425fb4`（2026-07-17）起不再成立）、還沒完成首次改密碼的使用者也每次被重設，且完全沒讀 `preserve_existing`。改依 `freeipa-config.md` §6.4：沒有 Kerberos key 時初始化；`preserve_existing: false` 才重設，使用者還在上次重設的密碼時不重複；`user-show` 失敗時 fail closed；`force_change`/`preserve_existing` 必須是 boolean（playbook gate 與 Go validator）。`maxlife=0` 時自行改密碼後沒有 `krbPasswordExpiration`，舊條件也會每輪重設。真實 `user-show` 擷取存為 fixture，新增 `freeipa_identity_password_regression_test.go`；candidate `edc840f` 在拋棄式 vm-target 實跑 PASS（R0–R8，`docs/evidence/freeipa-identity/2026-10-15-edc840f.md`）；2026-10-16 合併 main（私有 Kerberos cache 的 block）後，candidate `d24a31c` 重跑 R0–R8，結果相同（`docs/evidence/freeipa-identity/2026-10-16-d24a31c.md`）。main 的 netgroup SOP 變更先用了 v1.12，本項改為 v1.13 | pilot |
+| 2026-10-15 | v1.14 | issue #102：`freeipa-identity-apply.yml` 不再把 `ipa` 失敗當成成功或「不存在」。`ipa passwd` 失敗時新的 gate 讓 run 失敗並列出使用者與 `ipa: ERROR:` 行（原本顯示 ok，帳號沒有密碼）；user/group/hostgroup/netgroup/HBAC/sudo 成員查詢失敗即失敗（原本讀成沒有成員，撤權被跳過）；刪除 group 前、canonical host、password policy、退役主機的 host／service 查詢只放行真實擷取的 not found／`Number of entries returned 0`（原本查詢出錯時 group 可能在沒有 history marker 的情況下被刪，退役主機的 unknown-service gate 被跳過而照樣 `host-del`）；HBAC lockdown rescue 的 rollback 依實際結果回報。新增 `freeipa_identity_ipa_failures_regression_test.go`（假 `ipa` 回放 FreeIPA 4.13.4 真實輸出）與 `failed_when: false` 白名單 lint；decommission 的 HBAC／sudo 引用查詢與 DNS 查詢另開 #104、#105。candidate `ae8f276`（接上合併 main 後的 #103）實跑 PASS（`docs/evidence/freeipa-identity/2026-10-16-ae8f276.md`） | pilot |
+| 2026-10-15 | v1.15 | issue #104：host decommission 的 HBAC／sudo 直接引用查詢原本用 `hbacrule-find`／`sudorule-find --host=<fqdn>`，但這兩個指令沒有 host 篩選，`--host=` 被當成 `--hostcat`，永遠回 0 筆，檢查永遠 pass。改成 `--all --sizelimit=0` 列出全部規則，由 Go 端（`rulesNamingHost`）挑出 `Hosts:` 或 `External host:` 含該主機的規則；查詢失敗或結果被截斷時 run 失敗。Go 測試改用真實擷取的 ansible 輸出（`internal/decommission/providers/testdata/rule-references/`）。接上 #106 後，candidate `b27e3ab` 實跑 PASS（`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`） | pilot |
+| 2026-10-16 | v1.16 | 計畫文件 `2026-10-15-freeipa-go-ssh-reconcile.md` Phase −1 選做項與群組的延伸：`freeipa-identity-apply.yml` 在 `Ensure IPA users exist` 前以 `ipa user-find --pkey-only --sizelimit=0 --timelimit=0` 與 `--disabled=True` 讀出全部及停用的使用者，已存在的使用者跳過 `user-add`，已是宣告狀態的帳號跳過 `user-enable`／`-disable`；清單外的使用者照舊兩個呼叫都做。用 `--pkey-only` 是因為預設輸出含使用者可自行修改的姓名，含換行的姓名可偽造別人的 `Account disabled:` 行。查詢失敗或被截斷時失敗；`Gate: the user listings were parsed completely` 要求解析出的登入名數等於 FreeIPA 印出的筆數（例如輸出被翻成德文時失敗）。群組同樣以 `ipa group-find --pkey-only` 跳過已存在的 `group-add`（同樣的截斷檢查與筆數 gate）；`Look up canonical group direct membership` 已讀出的直接成員（`Member users:`／`Member groups:`，不含 indirect）不再 `group-add-member`，名冊列出的間接成員仍會加成直接成員。成員撤銷原本以大小寫敏感的差集計算：名冊寫 `team-Child`、FreeIPA 存的是 `team-child` 時，每輪先移除再加回，配合上述跳過則加回被略過、成員關係消失（PR #119 review）。canonical group、legacy group、hostgroup、netgroup 與 sudo（hosts、hostgroups、users、groups）的撤銷改為兩邊都轉小寫後比較，與 HBAC 既有的作法一致；sudo 指令路徑大小寫敏感（實測 `/usr/bin/P0CaseCmd` 以小寫查不到），維持原樣。C9–C12 的驗收不變。新增 `freeipa_identity_user_listing_regression_test.go`、`freeipa_identity_group_noop_regression_test.go`、`freeipa_identity_membership_case_regression_test.go`，fixture 為 FreeIPA 4.13.4 真實擷取（含德文輸出）；`freeipa-cli-options.txt` 補 `user-find`、`group-find` | pilot |
 
 ## 9. `pilot roster remove-user` / `remove-group`（roster-local undo，非 FreeIPA 撤權）
 

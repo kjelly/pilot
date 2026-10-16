@@ -182,8 +182,8 @@ func (r *Resolver) expandReferencedHostgroups(ctx context.Context, hbacRules []f
 			names[hg] = struct{}{}
 		}
 	}
-	result := make(map[string]map[string]struct{}, len(names))
-	for name := range names {
+	keys := sortedKeys(names)
+	rows, err := queryBatch(ctx, keys, func(ctx context.Context, name string) (map[string]struct{}, error) {
 		hg, err := r.Provider.HostgroupShow(ctx, name)
 		if err != nil {
 			return nil, fmt.Errorf("hostgroup_show %q: %w", name, err)
@@ -195,7 +195,14 @@ func (r *Resolver) expandReferencedHostgroups(ctx context.Context, hbacRules []f
 		for _, h := range hg.IndirectMemberHosts {
 			set[CanonicalizeFQDN(h)] = struct{}{}
 		}
-		result[name] = set
+		return set, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]map[string]struct{}, len(keys))
+	for i, name := range keys {
+		result[name] = rows[i]
 	}
 	return result, nil
 }
@@ -207,8 +214,8 @@ func (r *Resolver) expandReferencedServiceGroups(ctx context.Context, hbacRules 
 			names[sg] = struct{}{}
 		}
 	}
-	result := make(map[string]map[string]struct{}, len(names))
-	for name := range names {
+	keys := sortedKeys(names)
+	rows, err := queryBatch(ctx, keys, func(ctx context.Context, name string) (map[string]struct{}, error) {
 		sg, err := r.Provider.HBACServiceGroupShow(ctx, name)
 		if err != nil {
 			return nil, fmt.Errorf("hbacsvcgroup_show %q: %w", name, err)
@@ -217,7 +224,14 @@ func (r *Resolver) expandReferencedServiceGroups(ctx context.Context, hbacRules 
 		for _, s := range sg.Services {
 			set[s] = struct{}{}
 		}
-		result[name] = set
+		return set, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]map[string]struct{}, len(keys))
+	for i, name := range keys {
+		result[name] = rows[i]
 	}
 	return result, nil
 }
@@ -232,8 +246,8 @@ func (r *Resolver) expandReferencedCommandGroups(ctx context.Context, sudoRules 
 			names[g] = struct{}{}
 		}
 	}
-	result := make(map[string]map[string]struct{}, len(names))
-	for name := range names {
+	keys := sortedKeys(names)
+	rows, err := queryBatch(ctx, keys, func(ctx context.Context, name string) (map[string]struct{}, error) {
 		cg, err := r.Provider.SudoCommandGroupShow(ctx, name)
 		if err != nil {
 			return nil, fmt.Errorf("sudocmdgroup_show %q: %w", name, err)
@@ -242,7 +256,14 @@ func (r *Resolver) expandReferencedCommandGroups(ctx context.Context, sudoRules 
 		for _, c := range cg.Commands {
 			set[c] = struct{}{}
 		}
-		result[name] = set
+		return set, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]map[string]struct{}, len(keys))
+	for i, name := range keys {
+		result[name] = rows[i]
 	}
 	return result, nil
 }

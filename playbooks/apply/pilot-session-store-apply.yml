@@ -276,76 +276,92 @@
         home: /nonexistent
       tags: [SS_service]
 
-    # SS-auditor (spec.md §29): role-pilot-session-auditor is the group
-    # gating the read/replay Unix socket (read_api.go's authorizedPeer) —
-    # self-provisioned scaffolding, same pattern pilot-access-gateway/
-    # pilot-access-directory already established for their own analogous
-    # groups. Membership (who is an auditor) is deliberately NOT managed
-    # here — that stays roster-owned identity data.
-    - name: "Kinit admin (management-plane operations only — never shipped to this host)"
-      ansible.builtin.shell: |
-        set -euo pipefail
-        echo '{{ ipa_admin_password }}' | kinit admin
-      args:
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      tags: [SS_enrollment, SS_cert, SS_service]
+    # The admin ticket for the ipa calls below lives in a private cache, destroyed
+    # in always: on success, failure and any --tags (issue #69). Before, it went
+    # to root's default cache and was destroyed only at the end of a full run.
+    # The kinit keeps its SS_* tags.
+    - name: "FreeIPA management-plane operations with a private Kerberos cache"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Ensure role-pilot-session-auditor group exists"
-      ansible.builtin.command:
-        argv: [ipa, group-add, "{{ pilot_session_store_auditor_group }}", "--desc=Pilot Session Store read/replay auditors"]
-      register: session_store_auditor_group_add
-      changed_when: "'Added group' in (session_store_auditor_group_add.stdout | default(''))"
-      failed_when:
-        - session_store_auditor_group_add.rc != 0
-        - "'already exists' not in (session_store_auditor_group_add.stderr | default(''))"
-      tags: [SS_service]
+        # SS-auditor (spec.md §29): role-pilot-session-auditor is the group
+        # gating the read/replay Unix socket (read_api.go's authorizedPeer) —
+        # self-provisioned scaffolding, same pattern pilot-access-gateway/
+        # pilot-access-directory already established for their own analogous
+        # groups. Membership (who is an auditor) is deliberately NOT managed
+        # here — that stays roster-owned identity data.
+        - name: "Kinit admin (management-plane operations only — never shipped to this host)"
+          ansible.builtin.shell: |
+            set -euo pipefail
+            echo '{{ ipa_admin_password }}' | kinit admin
+          args:
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          tags: [SS_enrollment, SS_cert, SS_service]
 
-    - name: "Verify auditor group resolves via SSSD (never a local fallback)"
-      ansible.builtin.command:
-        argv: [getent, group, "{{ pilot_session_store_auditor_group }}"]
-      register: session_store_auditor_group_check
-      changed_when: false
-      failed_when: false
-      tags: [SS_service]
+        - name: "Ensure role-pilot-session-auditor group exists"
+          ansible.builtin.command:
+            argv: [ipa, group-add, "{{ pilot_session_store_auditor_group }}", "--desc=Pilot Session Store read/replay auditors"]
+          register: session_store_auditor_group_add
+          changed_when: "'Added group' in (session_store_auditor_group_add.stdout | default(''))"
+          failed_when:
+            - session_store_auditor_group_add.rc != 0
+            - "'already exists' not in (session_store_auditor_group_add.stderr | default(''))"
+          tags: [SS_service]
 
-    - name: "Gate: auditor group must resolve via SSSD"
-      ansible.builtin.assert:
-        that:
-          # In check mode the group-add above is skipped, so a group this
-          # run would create cannot resolve yet.
-          - session_store_auditor_group_check.rc == 0 or ansible_check_mode
-        fail_msg: >-
-          Group {{ pilot_session_store_auditor_group }} was just
-          created/confirmed in FreeIPA above but does not resolve locally
-          via getent — SSSD/enrollment problem on this host, not a
-          missing group. This playbook never creates a local fallback
-          group.
-      tags: [SS_service]
+        - name: "Verify auditor group resolves via SSSD (never a local fallback)"
+          ansible.builtin.command:
+            argv: [getent, group, "{{ pilot_session_store_auditor_group }}"]
+          register: session_store_auditor_group_check
+          changed_when: false
+          failed_when: false
+          tags: [SS_service]
 
-    # SS-cert (spec.md §28.2): request the ingest TLS cert from the
-    # FreeIPA integrated CA via certmonger — same argv-list/owner-string
-    # gotchas playbooks/apply/tasks/internal-endpoint-cert-request.yml
-    # already documents (a free-form command string silently shlex-splits
-    # and truncates -C's value; -o/-O take one "user:group" OWNER string,
-    # not a separate group flag). `-w` blocks until the request finishes,
-    # so no separate poll-until-issued step is needed.
-    - name: "Ensure the pilot-session-store service principal exists"
-      ansible.builtin.command:
-        argv: [ipa, service-add, "pilot-session-store/{{ session_store_effective_fqdn }}"]
-      register: session_store_service_add
-      changed_when: "'Added service' in (session_store_service_add.stdout | default(''))"
-      failed_when:
-        - session_store_service_add.rc != 0
-        - "'already exists' not in (session_store_service_add.stderr | default(''))"
-      tags: [SS_cert]
+        - name: "Gate: auditor group must resolve via SSSD"
+          ansible.builtin.assert:
+            that:
+              # In check mode the group-add above is skipped, so a group this
+              # run would create cannot resolve yet.
+              - session_store_auditor_group_check.rc == 0 or ansible_check_mode
+            fail_msg: >-
+              Group {{ pilot_session_store_auditor_group }} was just
+              created/confirmed in FreeIPA above but does not resolve locally
+              via getent — SSSD/enrollment problem on this host, not a
+              missing group. This playbook never creates a local fallback
+              group.
+          tags: [SS_service]
 
-    - name: "Destroy the management-plane admin ticket"
-      ansible.builtin.command:
-        argv: [kdestroy]
-      changed_when: false
-      tags: [SS_enrollment, SS_cert, SS_service]
+        # SS-cert (spec.md §28.2): request the ingest TLS cert from the
+        # FreeIPA integrated CA via certmonger — same argv-list/owner-string
+        # gotchas playbooks/apply/tasks/internal-endpoint-cert-request.yml
+        # already documents (a free-form command string silently shlex-splits
+        # and truncates -C's value; -o/-O take one "user:group" OWNER string,
+        # not a separate group flag). `-w` blocks until the request finishes,
+        # so no separate poll-until-issued step is needed.
+        - name: "Ensure the pilot-session-store service principal exists"
+          ansible.builtin.command:
+            argv: [ipa, service-add, "pilot-session-store/{{ session_store_effective_fqdn }}"]
+          register: session_store_service_add
+          changed_when: "'Added service' in (session_store_service_add.stdout | default(''))"
+          failed_when:
+            - session_store_service_add.rc != 0
+            - "'already exists' not in (session_store_service_add.stderr | default(''))"
+          tags: [SS_cert]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
     - name: "Ensure /etc/pilot exists"
       ansible.builtin.file:

@@ -246,216 +246,254 @@
           `ipa dnsrecord-add <zone> {{ directory_effective_fqdn.split('.')[0] }} --a-rec=<ip>`.
       tags: [AD_enrollment]
 
-    - name: "Kinit admin (management-plane operations only — never shipped to this host)"
-      ansible.builtin.shell: |
-        set -euo pipefail
-        echo '{{ ipa_admin_password }}' | kinit admin
-      args:
-        executable: /bin/bash
-      changed_when: false
-      no_log: true
-      tags: [AD_enrollment, AD_keytab, AD_service]
+    # Steps 5-8 run ipa commands with an admin ticket in a private cache,
+    # destroyed in always: on success, failure and any --tags (issue #69). Before,
+    # the ticket went to root's default cache: --tags AD_enrollment never reached
+    # the kdestroy, and on a KCM:/KEYRING: collection the Step 9 reader kinit
+    # switched the primary cache, so the bare kdestroy removed only the reader's
+    # ticket and admin's stayed.
+    - name: "FreeIPA management-plane operations with a private Kerberos cache"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    # Step 5 (spec.md §31/D4): this Directory host joins
-    # pilot-access-directories — the hostgroup that controls who may SSH
-    # TO the Directory itself (the single canonical ingress, D4).
-    - name: "Step 5: ensure pilot-access-directories hostgroup exists"
-      ansible.builtin.command:
-        argv: [ipa, hostgroup-add, pilot-access-directories, "--desc=Pilot Access Directory hosts"]
-      register: directory_hostgroup_add
-      changed_when: "'Added hostgroup' in (directory_hostgroup_add.stdout | default(''))"
-      failed_when:
-        - directory_hostgroup_add.rc != 0
-        - "'already exists' not in (directory_hostgroup_add.stderr | default(''))"
-      tags: [AD_enrollment]
+        - name: "Kinit admin (management-plane operations only — never shipped to this host)"
+          ansible.builtin.shell: |
+            set -euo pipefail
+            echo '{{ ipa_admin_password }}' | kinit admin
+          args:
+            executable: /bin/bash
+          changed_when: false
+          no_log: true
+          tags: [AD_enrollment, AD_keytab, AD_service]
 
-    - name: "Step 5: add this host to pilot-access-directories"
-      ansible.builtin.command:
-        argv: [ipa, hostgroup-add-member, pilot-access-directories, "--hosts={{ directory_effective_fqdn }}"]
-      register: directory_hostgroup_member_add
-      changed_when: "'Number of members added 1' in (directory_hostgroup_member_add.stdout | default(''))"
-      failed_when:
-        - directory_hostgroup_member_add.rc != 0
-        - "'already a member' not in (directory_hostgroup_member_add.stdout | default('') + directory_hostgroup_member_add.stderr | default(''))"
-      tags: [AD_enrollment]
+        # Step 5 (spec.md §31/D4): this Directory host joins
+        # pilot-access-directories — the hostgroup that controls who may SSH
+        # TO the Directory itself (the single canonical ingress, D4).
+        - name: "Step 5: ensure pilot-access-directories hostgroup exists"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-add, pilot-access-directories, "--desc=Pilot Access Directory hosts"]
+          register: directory_hostgroup_add
+          changed_when: "'Added hostgroup' in (directory_hostgroup_add.stdout | default(''))"
+          failed_when:
+            - directory_hostgroup_add.rc != 0
+            - "'already exists' not in (directory_hostgroup_add.stderr | default(''))"
+          tags: [AD_enrollment]
 
-    - name: "Create pilot-directory system user"
-      ansible.builtin.user:
-        name: "{{ pilot_directory_user }}"
-        system: true
-        shell: /usr/sbin/nologin
-        create_home: false
-        home: /nonexistent
-      tags: [AD_service]
+        - name: "Step 5: add this host to pilot-access-directories"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-add-member, pilot-access-directories, "--hosts={{ directory_effective_fqdn }}"]
+          register: directory_hostgroup_member_add
+          changed_when: "'Number of members added 1' in (directory_hostgroup_member_add.stdout | default(''))"
+          failed_when:
+            - directory_hostgroup_member_add.rc != 0
+            - "'already a member' not in (directory_hostgroup_member_add.stdout | default('') + directory_hostgroup_member_add.stderr | default(''))"
+          tags: [AD_enrollment]
 
-    # Step 6/7 (spec.md §31): role-pilot-portal-user + the
-    # pilot-access-directory-login HBAC rule — same self-provisioned
-    # FreeIPA scaffolding pattern pilot-access-gateway-apply.yml already
-    # established for its own analogous group/rule pair. Group membership
-    # (who is a portal user) is deliberately NOT managed here — that
-    # stays roster-owned identity data, exactly like Gateway's own split.
-    - name: "Step 6: ensure portal-user group exists"
-      ansible.builtin.command:
-        argv: [ipa, group-add, "{{ directory_effective_portal_user_group }}", "--desc=Pilot portal users"]
-      register: directory_portal_group_add
-      changed_when: "'Added group' in (directory_portal_group_add.stdout | default(''))"
-      failed_when:
-        - directory_portal_group_add.rc != 0
-        - "'already exists' not in (directory_portal_group_add.stderr | default(''))"
-      tags: [AD_service]
+        - name: "Create pilot-directory system user"
+          ansible.builtin.user:
+            name: "{{ pilot_directory_user }}"
+            system: true
+            shell: /usr/sbin/nologin
+            create_home: false
+            home: /nonexistent
+          tags: [AD_service]
 
-    - name: "Step 7: ensure pilot-access-directory-login HBAC rule exists"
-      ansible.builtin.command:
-        argv: [ipa, hbacrule-add, pilot-access-directory-login]
-      register: directory_login_hbac_add
-      changed_when: "'Added HBAC rule' in (directory_login_hbac_add.stdout | default(''))"
-      failed_when:
-        - directory_login_hbac_add.rc != 0
-        - "'already exists' not in (directory_login_hbac_add.stderr | default(''))"
-      tags: [AD_service]
+        # Step 6/7 (spec.md §31): role-pilot-portal-user + the
+        # pilot-access-directory-login HBAC rule — same self-provisioned
+        # FreeIPA scaffolding pattern pilot-access-gateway-apply.yml already
+        # established for its own analogous group/rule pair. Group membership
+        # (who is a portal user) is deliberately NOT managed here — that
+        # stays roster-owned identity data, exactly like Gateway's own split.
+        - name: "Step 6: ensure portal-user group exists"
+          ansible.builtin.command:
+            argv: [ipa, group-add, "{{ directory_effective_portal_user_group }}", "--desc=Pilot portal users"]
+          register: directory_portal_group_add
+          changed_when: "'Added group' in (directory_portal_group_add.stdout | default(''))"
+          failed_when:
+            - directory_portal_group_add.rc != 0
+            - "'already exists' not in (directory_portal_group_add.stderr | default(''))"
+          tags: [AD_service]
 
-    - name: "Step 7: ensure pilot-access-directory-login targets pilot-access-directories"
-      ansible.builtin.command:
-        argv: [ipa, hbacrule-add-host, pilot-access-directory-login, --hostgroups=pilot-access-directories]
-      register: directory_login_hbac_hostgroup
-      changed_when: "'Number of members added 1' in (directory_login_hbac_hostgroup.stdout | default(''))"
-      failed_when:
-        - directory_login_hbac_hostgroup.rc != 0
-        - "'already a member' not in (directory_login_hbac_hostgroup.stdout | default('') + directory_login_hbac_hostgroup.stderr | default(''))"
-      tags: [AD_service]
+        - name: "Step 7: ensure pilot-access-directory-login HBAC rule exists"
+          ansible.builtin.command:
+            argv: [ipa, hbacrule-add, pilot-access-directory-login]
+          register: directory_login_hbac_add
+          changed_when: "'Added HBAC rule' in (directory_login_hbac_add.stdout | default(''))"
+          failed_when:
+            - directory_login_hbac_add.rc != 0
+            - "'already exists' not in (directory_login_hbac_add.stderr | default(''))"
+          tags: [AD_service]
 
-    - name: "Step 7: ensure pilot-access-directory-login allows sshd"
-      ansible.builtin.command:
-        argv: [ipa, hbacrule-add-service, pilot-access-directory-login, --hbacsvcs=sshd]
-      register: directory_login_hbac_service
-      changed_when: "'Number of members added 1' in (directory_login_hbac_service.stdout | default(''))"
-      failed_when:
-        - directory_login_hbac_service.rc != 0
-        - "'already a member' not in (directory_login_hbac_service.stdout | default('') + directory_login_hbac_service.stderr | default(''))"
-      tags: [AD_service]
+        - name: "Step 7: ensure pilot-access-directory-login targets pilot-access-directories"
+          ansible.builtin.command:
+            argv: [ipa, hbacrule-add-host, pilot-access-directory-login, --hostgroups=pilot-access-directories]
+          register: directory_login_hbac_hostgroup
+          changed_when: "'Number of members added 1' in (directory_login_hbac_hostgroup.stdout | default(''))"
+          failed_when:
+            - directory_login_hbac_hostgroup.rc != 0
+            - "'already a member' not in (directory_login_hbac_hostgroup.stdout | default('') + directory_login_hbac_hostgroup.stderr | default(''))"
+          tags: [AD_service]
 
-    - name: "Step 7: ensure pilot-access-directory-login authorizes the portal-user group"
-      ansible.builtin.command:
-        argv: [ipa, hbacrule-add-user, pilot-access-directory-login, "--groups={{ directory_effective_portal_user_group }}"]
-      register: directory_login_hbac_group
-      changed_when: "'Number of members added 1' in (directory_login_hbac_group.stdout | default(''))"
-      failed_when:
-        - directory_login_hbac_group.rc != 0
-        - "'already a member' not in (directory_login_hbac_group.stdout | default('') + directory_login_hbac_group.stderr | default(''))"
-      tags: [AD_service]
+        - name: "Step 7: ensure pilot-access-directory-login allows sshd"
+          ansible.builtin.command:
+            argv: [ipa, hbacrule-add-service, pilot-access-directory-login, --hbacsvcs=sshd]
+          register: directory_login_hbac_service
+          changed_when: "'Number of members added 1' in (directory_login_hbac_service.stdout | default(''))"
+          failed_when:
+            - directory_login_hbac_service.rc != 0
+            - "'already a member' not in (directory_login_hbac_service.stdout | default('') + directory_login_hbac_service.stderr | default(''))"
+          tags: [AD_service]
 
-    - name: "Verify portal-user group resolves via SSSD (never a local fallback)"
-      ansible.builtin.command:
-        argv: [getent, group, "{{ directory_effective_portal_user_group }}"]
-      register: directory_portal_group_check
-      changed_when: false
-      failed_when: false
-      tags: [AD_service]
+        - name: "Step 7: ensure pilot-access-directory-login authorizes the portal-user group"
+          ansible.builtin.command:
+            argv: [ipa, hbacrule-add-user, pilot-access-directory-login, "--groups={{ directory_effective_portal_user_group }}"]
+          register: directory_login_hbac_group
+          changed_when: "'Number of members added 1' in (directory_login_hbac_group.stdout | default(''))"
+          failed_when:
+            - directory_login_hbac_group.rc != 0
+            - "'already a member' not in (directory_login_hbac_group.stdout | default('') + directory_login_hbac_group.stderr | default(''))"
+          tags: [AD_service]
 
-    - name: "Gate: portal-user group must resolve via SSSD"
-      ansible.builtin.assert:
-        that:
-          # In check mode the group-add above is skipped, so a group this
-          # run would create cannot resolve yet.
-          - directory_portal_group_check.rc == 0 or ansible_check_mode
-        fail_msg: >-
-          Group {{ directory_effective_portal_user_group }} was just
-          created/confirmed in FreeIPA above but does not resolve locally
-          via getent — SSSD/enrollment problem on this host, not a
-          missing group. This playbook never creates a local fallback
-          group (nsswitch's "files" source is checked before "sss" and
-          would silently shadow the real FreeIPA group forever).
-      tags: [AD_service]
+        - name: "Verify portal-user group resolves via SSSD (never a local fallback)"
+          ansible.builtin.command:
+            argv: [getent, group, "{{ directory_effective_portal_user_group }}"]
+          register: directory_portal_group_check
+          changed_when: false
+          failed_when: false
+          tags: [AD_service]
 
-    - name: "Ensure /etc/pilot exists"
-      ansible.builtin.file:
-        path: /etc/pilot
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-      tags: [AD_service]
+        - name: "Gate: portal-user group must resolve via SSSD"
+          ansible.builtin.assert:
+            that:
+              # In check mode the group-add above is skipped, so a group this
+              # run would create cannot resolve yet.
+              - directory_portal_group_check.rc == 0 or ansible_check_mode
+            fail_msg: >-
+              Group {{ directory_effective_portal_user_group }} was just
+              created/confirmed in FreeIPA above but does not resolve locally
+              via getent — SSSD/enrollment problem on this host, not a
+              missing group. This playbook never creates a local fallback
+              group (nsswitch's "files" source is checked before "sss" and
+              would silently shadow the real FreeIPA group forever).
+          tags: [AD_service]
 
-    # Step 8 (spec.md §31/D2's reader-principal reuse pattern): provision
-    # the read-only reader keytab. Idempotent by construction — same
-    # "never unconditionally rotate" rule pilot-access-gateway-apply.yml's
-    # own Step 8 documents (ipa-getkeytab always increments kvno).
-    - name: "Step 8: check whether the directory keytab already exists"
-      ansible.builtin.stat:
-        path: /etc/pilot/pilot-access-directory.keytab
-      register: directory_keytab_stat
-      tags: [AD_keytab]
+        - name: "Ensure /etc/pilot exists"
+          ansible.builtin.file:
+            path: /etc/pilot
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          tags: [AD_service]
 
-    - name: "Step 8: create the directory service principal (idempotent)"
-      ansible.builtin.command:
-        argv: [ipa, service-add, "pilot-access-directory/{{ directory_effective_fqdn }}"]
-      register: directory_service_add
-      changed_when: "'Added service' in (directory_service_add.stdout | default(''))"
-      failed_when:
-        - directory_service_add.rc != 0
-        - "'already exists' not in (directory_service_add.stderr | default(''))"
-      tags: [AD_keytab]
+        # Step 8 (spec.md §31/D2's reader-principal reuse pattern): provision
+        # the read-only reader keytab. Idempotent by construction — same
+        # "never unconditionally rotate" rule pilot-access-gateway-apply.yml's
+        # own Step 8 documents (ipa-getkeytab always increments kvno).
+        - name: "Step 8: check whether the directory keytab already exists"
+          ansible.builtin.stat:
+            path: /etc/pilot/pilot-access-directory.keytab
+          register: directory_keytab_stat
+          tags: [AD_keytab]
 
-    - name: "Step 8: fetch the directory keytab (ONLY when it does not exist yet)"
-      ansible.builtin.command:
-        argv:
-          - ipa-getkeytab
-          - -s
-          - "{{ directory_effective_freeipa_servers[0] }}"
-          - -p
-          - "pilot-access-directory/{{ directory_effective_fqdn }}"
-          - -k
-          - /etc/pilot/pilot-access-directory.keytab
-      when: not directory_keytab_stat.stat.exists
-      changed_when: true
-      tags: [AD_keytab]
+        - name: "Step 8: create the directory service principal (idempotent)"
+          ansible.builtin.command:
+            argv: [ipa, service-add, "pilot-access-directory/{{ directory_effective_fqdn }}"]
+          register: directory_service_add
+          changed_when: "'Added service' in (directory_service_add.stdout | default(''))"
+          failed_when:
+            - directory_service_add.rc != 0
+            - "'already exists' not in (directory_service_add.stderr | default(''))"
+          tags: [AD_keytab]
 
-    # Under --check on a fresh host the keytab retrieval above is skipped,
-    # so there is no file to fix up yet (AGENTS.md §4.0 fresh-host check).
-    - name: "Step 8: keytab ownership/mode"
-      ansible.builtin.file:
-        path: /etc/pilot/pilot-access-directory.keytab
-        owner: "{{ pilot_directory_user }}"
-        group: "{{ pilot_directory_user }}"
-        mode: "0400"
-      when: not (ansible_check_mode and not directory_keytab_stat.stat.exists)
-      tags: [AD_keytab]
+        - name: "Step 8: fetch the directory keytab (ONLY when it does not exist yet)"
+          ansible.builtin.command:
+            argv:
+              - ipa-getkeytab
+              - -s
+              - "{{ directory_effective_freeipa_servers[0] }}"
+              - -p
+              - "pilot-access-directory/{{ directory_effective_fqdn }}"
+              - -k
+              - /etc/pilot/pilot-access-directory.keytab
+          when: not directory_keytab_stat.stat.exists
+          changed_when: true
+          tags: [AD_keytab]
 
-    # Step 9 (spec.md §31/§8.2): confirm the reader can actually list
-    # hostgroups (hostgroup_find) — Directory's one FreeIPA read
-    # capability Gateway never needed. Reuses the keytab Step 8 just
-    # fetched, exactly like Phase 0's spike proved this works with no
-    # additional grant beyond what a Gateway reader already has.
-    - name: "Step 9: obtain a ticket for the directory reader principal"
-      ansible.builtin.command:
-        argv: [kinit, -kt, /etc/pilot/pilot-access-directory.keytab, "pilot-access-directory/{{ directory_effective_fqdn }}"]
-      changed_when: false
-      tags: [AD_keytab]
+        # Under --check on a fresh host the keytab retrieval above is skipped,
+        # so there is no file to fix up yet (AGENTS.md §4.0 fresh-host check).
+        - name: "Step 8: keytab ownership/mode"
+          ansible.builtin.file:
+            path: /etc/pilot/pilot-access-directory.keytab
+            owner: "{{ pilot_directory_user }}"
+            group: "{{ pilot_directory_user }}"
+            mode: "0400"
+          when: not (ansible_check_mode and not directory_keytab_stat.stat.exists)
+          tags: [AD_keytab]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Step 9: probe hostgroup_find capability"
-      ansible.builtin.command:
-        argv: [ipa, hostgroup-find, "{{ directory_target_hostgroup_prefix }}", --sizelimit=1]
-      register: directory_hostgroup_find_probe
-      changed_when: false
-      tags: [AD_keytab]
+    # The reader principal gets a private cache of its own, so the probe runs
+    # with exactly that identity and nothing of it outlives the block (issue #69).
+    - name: "Step 9: reader capability probe with its own private Kerberos cache"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
-    - name: "Step 9: gate — reader principal can call hostgroup_find"
-      ansible.builtin.assert:
-        that:
-          - directory_hostgroup_find_probe.rc == 0
-        fail_msg: >-
-          pilot-access-directory/{{ directory_effective_fqdn }} could not
-          call hostgroup_find — the reader role needs at least the same
-          read grant pilot-access-gateway's reader already has (spec.md
-          §8.2 Phase 0 confirmed this needs no additional privilege on a
-          stock Gateway reader).
-      tags: [AD_keytab]
+        # Step 9 (spec.md §31/§8.2): confirm the reader can actually list
+        # hostgroups (hostgroup_find) — Directory's one FreeIPA read
+        # capability Gateway never needed. Reuses the keytab Step 8 just
+        # fetched, exactly like Phase 0's spike proved this works with no
+        # additional grant beyond what a Gateway reader already has.
+        - name: "Step 9: obtain a ticket for the directory reader principal"
+          ansible.builtin.command:
+            argv: [kinit, -kt, /etc/pilot/pilot-access-directory.keytab, "pilot-access-directory/{{ directory_effective_fqdn }}"]
+          changed_when: false
+          tags: [AD_keytab]
 
-    - name: "Step 9: destroy the management-plane ticket"
-      ansible.builtin.command:
-        argv: [kdestroy]
-      changed_when: false
-      tags: [AD_keytab, AD_service]
+        - name: "Step 9: probe hostgroup_find capability"
+          ansible.builtin.command:
+            argv: [ipa, hostgroup-find, "{{ directory_target_hostgroup_prefix }}", --sizelimit=1]
+          register: directory_hostgroup_find_probe
+          changed_when: false
+          tags: [AD_keytab]
+
+        - name: "Step 9: gate — reader principal can call hostgroup_find"
+          ansible.builtin.assert:
+            that:
+              - directory_hostgroup_find_probe.rc == 0
+            fail_msg: >-
+              pilot-access-directory/{{ directory_effective_fqdn }} could not
+              call hostgroup_find — the reader role needs at least the same
+              read grant pilot-access-gateway's reader already has (spec.md
+              §8.2 Phase 0 confirmed this needs no additional privilege on a
+              stock Gateway reader).
+          tags: [AD_keytab]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
     # Step 10/11 (spec.md §31): install both binaries.
     - name: "Step 10: install pilot CLI"

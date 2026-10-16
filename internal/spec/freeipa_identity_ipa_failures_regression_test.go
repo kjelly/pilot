@@ -304,7 +304,6 @@ var identityFailedWhenFalse = map[string]string{
 	"Look up password state for users with a declared password":                     `"Gate: the password state of every declared password was read" fails the run`,
 	"Set password for users that need one (first-time onboard, or requested reset)": `"Gate: every password this run set was accepted" fails the run; no_log would hide the user here`,
 	"Rollback HBAC lockdown by re-enabling allow_all":                               `rescue; the next task always fails and reports whether the rollback worked`,
-	"Release the Kerberos ticket":                                                   "cleanup",
 	// Known gaps with their own issues:
 	"Look up the current live DNS A record for the query target host (read-only, decommission verify)": "issue #105: the error text of a FreeIPA without integrated DNS is not captured yet, so errors cannot be told apart",
 	"Check the current DNS A record value for each absent host's owner (surgical delete step 1)":       "issue #105: same as the verify DNS query",

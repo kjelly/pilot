@@ -41,6 +41,16 @@ phase-by-phase history — each row goes from "not yet executable" to a
 real PASS as its owning phase (§48 Phase 1-5 of the design spec) is
 implemented.
 
+**Latest C22 verification (2026-10-16):** candidate `4baffb8`, tree
+`214a5554ea5f28d302fee137d31e2c117066faf8`. A read-only control-node container
+probe against an existing 26-host inventory and roster containing an external
+NFS appliance produced a complete snapshot (118 users, 26 hosts, 38 groups,
+12 hostgroups), with an identical snapshot ID on repeat. Dangling references
+still failed closed. Formal webhook/CLI checks: 150 passing test/subtest
+results, 0 failures; spec regression/shell syntax: 6 passing results; lint:
+30 rows, 0 findings. Scope and evidence:
+[external-device correction](../evidence/outbound-webhook/2026-10-16-4baffb8-external-devices.md).
+
 - **Phase 0** recorded the intended checks only; no unit-test or
   actual-run evidence existed for any row.
 - **Phase 1** landed `contract.Effects` (E1-E3 in
@@ -372,9 +382,9 @@ row's probe never has to be renamed once its test exists:
   verifyOnly: true
 - id: C22
   category: projection
-  check: snapshot hosts come only from hosts.yml, roster host references map to inventory IDs by one exact address match, and every explicit access host reference resolves without a dangling target
+  check: snapshot hosts come only from hosts.yml; declared external roster hosts with no inventory address match are outside the snapshot scope and do not disable it; hostgroup and access targets retain only inventory hosts, external-only access rules are omitted, and dangling references or ambiguous matches still fail closed
   probe: |
-    go test ./internal/outbound/... -run '^TestOutboundProjection_P2[012]$' -v
+    go test ./internal/outbound/... -run '^TestOutboundProjection_(P2[012].*|External.*|RosterHostMappingFailsClosed)$' -v
   expect: {stdout: {contains: "PASS"}}
   verifyOnly: true
 - id: C23

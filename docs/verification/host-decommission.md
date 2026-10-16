@@ -189,8 +189,10 @@ found" stood for the target: the central converge step looked done and
 skipped host-del, Plan skipped the HD12 unknown-service check, and Verify
 passed HD10 for a host or DNS record that still existed. Every check now
 reads only the target's own `HOST_INSPECT[<fqdn>]` blocks. Last verified
-for #104 and #108: candidate `0cad952` on a disposable FreeIPA 4.13.4
-vm-target, PASS (`docs/evidence/host-decommission/2026-10-15-0cad952.md`).
+for #104 and #108: candidate `b27e3ab` (after merging the new #106, so the
+queries run inside the private Kerberos cache block) on a disposable
+FreeIPA 4.13.4 vm-target, PASS
+(`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`).
 
 **Known gap (2026-10-15).** The DNS part of HD10 reports pass when
 `ipa dnsrecord-show` fails for any reason, and the cleanup step skips the

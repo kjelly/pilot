@@ -1,0 +1,26 @@
+  dn: uid=p0case-user,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  User login: p0case-user
+  First name: P0
+  Last name: Case
+  Full name: P0 Case
+  Display name: P0 Case
+  Initials: PC
+  Home directory: /home/p0case-user
+  GECOS: P0 Case
+  Login shell: /bin/sh
+  Principal name: p0case-user@IPA.PILOT.INTERNAL
+  Principal alias: p0case-user@IPA.PILOT.INTERNAL
+  Email address: p0case-user@ipa.pilot.internal
+  UID: 1927600212
+  GID: 1927600212
+  Account disabled: False
+  Preserved user: False
+  Password: False
+  Member of groups: p0case-parent, ipausers
+  Member of netgroups: p0case-ng
+  Member of Sudo rule: P0Case-Sudo
+  Kerberos keys available: False
+  ipantsecurityidentifier: S-1-5-21-3998632271-3893472475-798555519-1212
+  ipauniqueid: 32a3d24a-c94b-11f1-a74c-5254001b059e
+  mepmanagedentry: cn=p0case-user,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  objectclass: top, person, organizationalperson, inetorgperson, inetuser, posixaccount, krbprincipalaux, krbticketpolicyaux, ipaobject, ipasshuser, ipaSshGroupOfPubKeys, mepOriginEntry, ipantuserattrs
