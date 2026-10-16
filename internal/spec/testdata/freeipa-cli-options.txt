@@ -1,0 +1,76 @@
+# Options each ipa subcommand used under playbooks/ accepts, from `ipa <cmd> --help`
+# on FreeIPA 4.13.4 (API 2.257, AlmaLinux 9.8), captured 2026-10-15. One line per
+# subcommand: the name, then its options. Read by
+# internal/spec/ipa_cli_options_regression_test.go. To add a subcommand, run
+# `ipa <cmd> --help` on a FreeIPA server and append its --options here.
+automember-add --addattr --all --desc --help --raw --setattr --type
+automember-add-condition --all --desc --exclusive-regex --help --inclusive-regex --key --raw --type
+automember-del --help --type
+automember-rebuild --all --help --hosts --no-wait --raw --type --users
+automountkey-add --addattr --all --help --info --key --raw --setattr
+automountkey-mod --addattr --all --delattr --help --info --key --newinfo --raw --rename --rights --setattr
+config-mod --addattr --add-sids --all --ca-renewal-master-server --defaultgroup --defaultshell --delattr --domain-resolution-order --emaildomain --enable-migration --enable-sid --groupobjectclasses --groupsearch --help --homedirectory --ipaconfigstring --ipaselinuxusermapdefault --ipaselinuxusermaporder --key-type-size --maxhostname --maxusername --netbios-name --pac-type --pwdexpnotify --raw --rights --searchrecordslimit --searchtimelimit --setattr --user-auth-type --user-default-subid --userobjectclasses --usersearch
+dnsconfig-mod --addattr --all --allow-sync-ptr --delattr --forwarder --forward-policy --help --raw --rights --setattr
+dnsrecord-add --a6-data --a6-rec --aaaa-create-reverse --aaaa-ip-address --aaaa-rec --a-create-reverse --addattr --afsdb-hostname --afsdb-rec --afsdb-subtype --a-ip-address --all --a-rec --cert-algorithm --cert-certificate-or-crl --cert-key-tag --cert-rec --cert-type --cname-hostname --cname-rec --dlv-algorithm --dlv-digest --dlv-digest-type --dlv-key-tag --dlv-rec --dname-rec --dname-target --ds-algorithm --ds-digest --ds-digest-type --ds-key-tag --ds-rec --force --help --kx-exchanger --kx-preference --kx-rec --loc-altitude --loc-h-precision --loc-lat-deg --loc-lat-dir --loc-lat-min --loc-lat-sec --loc-lon-deg --loc-lon-dir --loc-lon-min --loc-lon-sec --loc-rec --loc-size --loc-v-precision --mx-exchanger --mx-preference --mx-rec --naptr-flags --naptr-order --naptr-preference --naptr-rec --naptr-regexp --naptr-replacement --naptr-service --ns-hostname --ns-rec --ptr-hostname --ptr-rec --raw --setattr --srv-port --srv-priority --srv-rec --srv-target --srv-weight --sshfp-algorithm --sshfp-fingerprint --sshfp-fp-type --sshfp-rec --structured --tlsa-cert-association-data --tlsa-cert-usage --tlsa-matching-type --tlsa-rec --tlsa-selector --ttl --txt-data --txt-rec --uri-priority --uri-rec --uri-target --uri-weight
+dnsrecord-del --a6-rec --aaaa-rec --afsdb-rec --a-rec --cert-rec --cname-rec --del-all --dlv-rec --dname-rec --ds-rec --help --kx-rec --loc-rec --mx-rec --naptr-rec --ns-rec --ptr-rec --srv-rec --sshfp-rec --structured --tlsa-rec --ttl --txt-rec --uri-rec
+dnsrecord-find --a6-rec --aaaa-rec --afsdb-rec --all --a-rec --cert-rec --cname-rec --dlv-rec --dname-rec --ds-rec --help --kx-rec --loc-rec --mx-rec --name --naptr-rec --ns-rec --pkey-only --ptr-rec --raw --sizelimit --srv-rec --sshfp-rec --structured --timelimit --tlsa-rec --ttl --txt-rec --uri-rec
+dnsrecord-show --all --help --raw --rights --structured
+dnszone-add --addattr --admin-email --all --allow-query --allow-sync-ptr --allow-transfer --default-ttl --dnssec --dynamic-update --expire --force --forwarder --forward-policy --help --minimum --name-from-ip --name-server --nsec3param-rec --raw --refresh --retry --setattr --skip-nameserver-check --skip-overlap-check --ttl --update-policy
+dnszone-find --admin-email --all --allow-query --allow-sync-ptr --allow-transfer --default-ttl --dnssec --dynamic-update --expire --forwarder --forward-only --forward-policy --help --minimum --name --name-from-ip --name-server --nsec3param-rec --pkey-only --raw --refresh --retry --sizelimit --timelimit --ttl --update-policy --zone-active
+group-add --addattr --all --desc --external --gid --help --no-members --nonposix --raw --setattr
+group-add-member --all --external --groups --help --idoverrideusers --no-members --raw --services --users
+group-mod --addattr --all --delattr --desc --external --gid --help --no-members --posix --raw --rename --rights --setattr
+group-remove-member --all --external --groups --help --idoverrideusers --no-members --raw --services --users
+group-show --all --help --no-members --raw --rights
+hbacrule-add --addattr --all --desc --help --hostcat --no-members --raw --servicecat --setattr --usercat
+hbacrule-add-host --all --help --hostgroups --hosts --no-members --raw
+hbacrule-add-service --all --hbacsvcgroups --hbacsvcs --help --no-members --raw
+hbacrule-add-user --all --groups --help --no-members --raw --users
+hbacrule-find --all --desc --help --hostcat --name --pkey-only --raw --servicecat --sizelimit --timelimit --usercat
+hbacrule-mod --addattr --all --delattr --desc --help --hostcat --no-members --raw --rename --rights --servicecat --setattr --usercat
+hbacrule-remove-host --all --help --hostgroups --hosts --no-members --raw
+hbacrule-remove-service --all --hbacsvcgroups --hbacsvcs --help --no-members --raw
+hbacrule-remove-user --all --groups --help --no-members --raw --users
+hbacrule-show --all --help --no-members --raw --rights
+hbactest --disabled --enabled --help --host --nodetail --rules --service --sizelimit --user
+host-add --addattr --all --auth-ind --certificate --class --desc --force --help --ip-address --locality --location --macaddress --no-members --no-reverse --ok-as-delegate --ok-to-auth-as-delegate --os --password --platform --random --raw --requires-pre-auth --setattr --sshpubkey
+host-add-managedby --all --help --hosts --no-members --raw
+host-mod --addattr --all --auth-ind --certificate --class --delattr --desc --help --krbprincipalname --locality --location --macaddress --no-members --ok-as-delegate --ok-to-auth-as-delegate --os --password --platform --random --raw --requires-pre-auth --rights --setattr --sshpubkey --updatedns
+host-show --all --help --no-members --out --raw --rights
+hostgroup-add --addattr --all --desc --help --no-members --raw --setattr
+hostgroup-add-member --all --help --hostgroups --hosts --no-members --raw
+hostgroup-find --all --desc --help --hostgroup-name --hostgroups --hosts --in-hbacrules --in-hostgroups --in-netgroups --in-sudorules --membermanager-groups --membermanager-users --no-hostgroups --no-hosts --not-in-hbacrules --not-in-hostgroups --not-in-netgroups --not-in-sudorules --not-membermanager-groups --not-membermanager-users --pkey-only --raw --sizelimit --timelimit
+hostgroup-mod --addattr --all --delattr --desc --help --no-members --raw --rename --rights --setattr
+hostgroup-remove-member --all --help --hostgroups --hosts --no-members --raw
+hostgroup-show --all --help --no-members --raw --rights
+netgroup-add --addattr --all --desc --help --hostcat --nisdomain --no-members --raw --setattr --usercat
+netgroup-add-member --all --groups --help --hostgroups --hosts --netgroups --no-members --raw --users
+netgroup-mod --addattr --all --delattr --desc --help --hostcat --nisdomain --no-members --raw --rights --setattr --usercat
+netgroup-remove-member --all --groups --help --hostgroups --hosts --netgroups --no-members --raw --users
+netgroup-show --all --help --no-members --raw --rights
+pwpolicy-add --addattr --all --dcredit --dictcheck --failinterval --gracelimit --help --history --lcredit --lockouttime --maxfail --maxlife --maxrepeat --maxsequence --minclasses --minlength --minlife --ocredit --priority --raw --setattr --ucredit --usercheck
+pwpolicy-mod --addattr --all --dcredit --delattr --dictcheck --failinterval --gracelimit --help --history --lcredit --lockouttime --maxfail --maxlife --maxrepeat --maxsequence --minclasses --minlength --minlife --ocredit --priority --raw --rights --setattr --ucredit --usercheck
+pwpolicy-show --all --help --raw --rights --user
+server-find --all --help --in-locations --maxlevel --minlevel --name --not-in-locations --no-topologysuffixes --pkey-only --raw --servroles --sizelimit --timelimit --topologysuffixes
+service-add --addattr --all --auth-ind --certificate --force --help --no-members --ok-as-delegate --ok-to-auth-as-delegate --pac-type --raw --requires-pre-auth --setattr --skip-host-check
+service-add-host --all --help --hosts --no-members --raw
+service-find --all --auth-ind --canonical-principal --help --man-by-hosts --not-man-by-hosts --pac-type --pkey-only --principal --raw --sizelimit --timelimit
+sudocmd-add --addattr --all --desc --help --no-members --raw --setattr
+sudocmdgroup-add-member --all --help --no-members --raw --sudocmds
+sudorule-add --addattr --all --cmdcat --desc --externaluser --help --hostcat --no-members --order --raw --runasexternalgroup --runasexternaluser --runasgroupcat --runasusercat --setattr --usercat
+sudorule-add-allow-command --all --help --no-members --raw --sudocmdgroups --sudocmds
+sudorule-add-deny-command --all --help --no-members --raw --sudocmdgroups --sudocmds
+sudorule-add-host --all --help --hostgroups --hostmask --hosts --no-members --raw
+sudorule-add-option --all --help --no-members --raw --sudooption
+sudorule-add-runasgroup --all --groups --help --no-members --raw
+sudorule-add-runasuser --all --groups --help --no-members --raw --users
+sudorule-add-user --all --groups --help --no-members --raw --users
+sudorule-find --all --cmdcat --desc --externaluser --help --hostcat --order --pkey-only --raw --runasexternalgroup --runasexternaluser --runasgroupcat --runasusercat --sizelimit --sudorule-name --timelimit --usercat
+sudorule-mod --addattr --all --cmdcat --delattr --desc --externaluser --help --hostcat --no-members --order --raw --rename --rights --runasexternalgroup --runasexternaluser --runasgroupcat --runasusercat --setattr --usercat
+sudorule-remove-allow-command --all --help --no-members --raw --sudocmdgroups --sudocmds
+sudorule-remove-host --all --help --hostgroups --hostmask --hosts --no-members --raw
+sudorule-remove-user --all --groups --help --no-members --raw --users
+sudorule-show --all --help --no-members --raw --rights
+user-add --addattr --all --carlicense --certificate --city --class --cn --departmentnumber --displayname --email --employeenumber --employeetype --fax --first --gecos --gidnumber --help --homedir --idp --idp-user-id --initials --last --manager --mobile --no-members --noprivate --orgunit --pager --password --password-expiration --phone --postalcode --preferredlanguage --principal --principal-expiration --radius --radius-username --random --raw --setattr --shell --sshpubkey --state --street --title --uid --user-auth-type
+user-mod --addattr --all --carlicense --certificate --city --class --cn --delattr --departmentnumber --displayname --email --employeenumber --employeetype --fax --first --gecos --gidnumber --help --homedir --idp --idp-user-id --initials --last --manager --mobile --no-members --orgunit --pager --password --password-expiration --phone --postalcode --preferredlanguage --principal --principal-expiration --radius --radius-username --random --raw --rename --rights --setattr --shell --smb-home-dir --smb-home-drive --smb-logon-script --smb-profile-path --sshpubkey --state --street --title --uid --user-auth-type
+user-show --all --help --no-members --out --raw --rights

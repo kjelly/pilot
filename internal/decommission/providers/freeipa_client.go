@@ -348,7 +348,7 @@ func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return notFoundPattern.MatchString(res.Stdout), nil
+	return notFoundPattern.MatchString(inspectionFor(res.Stdout, e.fqdn)), nil
 }
 
 // Execute runs the real central reconciler (playbooks/apply/freeipa-
@@ -416,7 +416,8 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client verify %s: host object query: %w", fqdn, err)
 	}
-	hostAbsent := notFoundPattern.MatchString(hostRes.Stdout)
+	host := inspectionFor(hostRes.Stdout, fqdn)
+	hostAbsent := notFoundPattern.MatchString(host)
 	out = append(out, Verification{
 		Provider: FreeIPAClientProviderID, Kind: "host_object", Identity: fqdn,
 		Status: statusForAbsence(hostAbsent), Active: !hostAbsent,
@@ -430,16 +431,17 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 			Verification{Provider: FreeIPAClientProviderID, Kind: "service_principal", Identity: fqdn, Status: "pass", Detail: "host object absent"},
 		)
 	} else {
-		out = append(out, membershipVerification("hostgroup_membership", fqdn, memberOfHostgroupPattern.FindAllStringSubmatch(hostRes.Stdout, -1)))
-		out = append(out, membershipVerification("netgroup_membership", fqdn, memberOfNetgroupPattern.FindAllStringSubmatch(hostRes.Stdout, -1)))
-		out = append(out, servicePrincipalVerification(fqdn, unknownServicePrincipals(hostRes.Stdout, fqdn)))
+		out = append(out, membershipVerification("hostgroup_membership", fqdn, memberOfHostgroupPattern.FindAllStringSubmatch(host, -1)))
+		out = append(out, membershipVerification("netgroup_membership", fqdn, memberOfNetgroupPattern.FindAllStringSubmatch(host, -1)))
+		out = append(out, servicePrincipalVerification(fqdn, unknownServicePrincipals(host, fqdn)))
 	}
 
 	dnsRes, err := p.query(ctx, "host_dns", fqdn)
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client verify %s: dns query: %w", fqdn, err)
 	}
-	dnsAbsent := notFoundPattern.MatchString(dnsRes.Stdout) || len(aRecordPattern.FindAllStringSubmatch(dnsRes.Stdout, -1)) == 0
+	dns := inspectionFor(dnsRes.Stdout, fqdn)
+	dnsAbsent := notFoundPattern.MatchString(dns) || len(aRecordPattern.FindAllStringSubmatch(dns, -1)) == 0
 	out = append(out, Verification{
 		Provider: FreeIPAClientProviderID, Kind: "host_dns", Identity: fqdn,
 		Status: statusForAbsence(dnsAbsent), Active: !dnsAbsent,
@@ -454,11 +456,15 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 		if err != nil {
 			return nil, fmt.Errorf("freeipa-client verify %s: %s query: %w", fqdn, q.query, err)
 		}
-		found := ruleNamePattern.FindAllStringSubmatch(res.Stdout, -1)
+		found := rulesNamingHost(inspectionFor(res.Stdout, fqdn), fqdn)
+		detail := fmt.Sprintf("%d direct rule reference(s) live", len(found))
+		if len(found) > 0 {
+			detail += ": " + strings.Join(found, ", ")
+		}
 		out = append(out, Verification{
 			Provider: FreeIPAClientProviderID, Kind: q.kind, Identity: fqdn,
 			Status: statusForAbsence(len(found) == 0), Active: len(found) > 0,
-			Detail: fmt.Sprintf("%d direct rule reference(s) live", len(found)),
+			Detail: detail,
 		})
 	}
 
@@ -513,7 +519,116 @@ var (
 	aRecordPattern              = fieldPattern("arecord")
 	ruleNamePattern             = fieldPattern("Rule name")
 	notFoundPattern             = regexp.MustCompile(`(?i)not found`)
+	// ruleHostsPattern and ruleExternalHostPattern read one rule's
+	// "Hosts:" and "External host:" lines in `ipa hbacrule-find --all` /
+	// `sudorule-find --all` output. They require whitespace or a literal
+	// `\n` before the label so "Hosts:" does not match inside another label.
+	ruleHostsPattern        = regexp.MustCompile(`(?i)(?:^|\s|\\n)Hosts:\s*(.*?)(?:\\n|\n|$)`)
+	ruleExternalHostPattern = regexp.MustCompile(`(?i)(?:^|\s|\\n)External host:\s*(.*?)(?:\\n|\n|$)`)
 )
+
+// rulesNamingHost returns, sorted, the names of the rules in an
+// `ipa hbacrule-find --all` or `sudorule-find --all` listing (as printed
+// in a HOST_INSPECT blob) whose "Hosts:" or "External host:" names fqdn.
+// Those commands have no host filter, so the query lists every rule
+// (issue #104: the `--host=` it used before was read as `--hostcat` and
+// never matched). host-del removes a host from "Hosts:", but a sudo rule
+// can keep it as an external host. Names compare case-insensitively; a
+// short fqdn (no dot) also matches the first label of a listed FQDN.
+func rulesNamingHost(stdout, fqdn string) []string {
+	want := strings.ToLower(strings.TrimSpace(fqdn))
+	if want == "" {
+		return nil
+	}
+	short := !strings.Contains(want, ".")
+	starts := ruleNamePattern.FindAllStringSubmatchIndex(stdout, -1)
+	var names []string
+	for i, m := range starts {
+		end := len(stdout)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		block := stdout[m[0]:end]
+		if j := strings.Index(block, "Number of entries returned"); j >= 0 {
+			block = block[:j]
+		}
+		if ruleBlockNamesHost(block, want, short) {
+			names = append(names, strings.TrimSpace(stdout[m[2]:m[3]]))
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func ruleBlockNamesHost(block, want string, short bool) bool {
+	for _, pat := range []*regexp.Regexp{ruleHostsPattern, ruleExternalHostPattern} {
+		for _, m := range pat.FindAllStringSubmatch(block, -1) {
+			for _, h := range strings.Split(m[1], ",") {
+				h = strings.ToLower(strings.Trim(h, ` "`))
+				if h == want || (short && strings.SplitN(h, ".", 2)[0] == want) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hostInspectMarkerPattern finds each "HOST_INSPECT[<host>]: " marker the
+// identity playbook's read-only inspection tasks print.
+var hostInspectMarkerPattern = regexp.MustCompile(`HOST_INSPECT\[([^\]]*)\]: ?`)
+
+// inspectionFor returns the HOST_INSPECT text a query printed for fqdn
+// (several blocks joined). The query runs with --tags
+// freeipa_host_absent_inspect, which also prints one HOST_INSPECT block for
+// every `state: absent` host in the roster, and retired hosts stay there as
+// tombstones. Reading the whole stdout let another host's "host not found"
+// stand for this one: the converge step looked done, Plan skipped the
+// unknown-service check and Verify passed a host that still existed (issue
+// #108). Each block ends at the end of its debug message (the first
+// unescaped double quote) or at the next marker. Text with no marker at all
+// is returned unchanged.
+func inspectionFor(stdout, fqdn string) string {
+	locs := hostInspectMarkerPattern.FindAllStringSubmatchIndex(stdout, -1)
+	if len(locs) == 0 {
+		return stdout
+	}
+	var parts []string
+	for i, m := range locs {
+		if !strings.EqualFold(strings.TrimSpace(stdout[m[2]:m[3]]), strings.TrimSpace(fqdn)) {
+			continue
+		}
+		end := len(stdout)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := stdout[m[1]:end]
+		if j := unescapedQuote(body); j >= 0 {
+			body = body[:j]
+		}
+		parts = append(parts, body)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// unescapedQuote returns the index of the first double quote in s not
+// escaped by a backslash, or -1.
+func unescapedQuote(s string) int {
+	backslashes := 0
+	for i, r := range s {
+		switch r {
+		case '\\':
+			backslashes++
+			continue
+		case '"':
+			if backslashes%2 == 0 {
+				return i
+			}
+		}
+		backslashes = 0
+	}
+	return -1
+}
 
 // discoverUnknownServicePrincipals runs the same read-only host_object
 // query Verify uses and classifies every service principal managed by
@@ -530,10 +645,11 @@ func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Con
 	if err != nil {
 		return nil, fqdn, err
 	}
-	if notFoundPattern.MatchString(res.Stdout) {
+	host := inspectionFor(res.Stdout, fqdn)
+	if notFoundPattern.MatchString(host) {
 		return nil, fqdn, nil // host object already gone -- nothing to check, nothing to resolve
 	}
-	return unknownServicePrincipals(res.Stdout, fqdn), resolveAuthoritativeFQDN(res.Stdout, fqdn), nil
+	return unknownServicePrincipals(host, fqdn), resolveAuthoritativeFQDN(host, fqdn), nil
 }
 
 // resolveAuthoritativeFQDN prefers `ipa host-show`'s own "Host name:"
@@ -620,13 +736,14 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	}
 	// Bug found via Phase 3b live-target testing: this used to return res
 	// unconditionally regardless of whether the ansible-playbook PLAY
-	// itself actually ran (as opposed to an individual `ipa` command
-	// inside it failing, which every read-only task here already tolerates
-	// via failed_when: false) — a genuinely failed run (unreachable host,
+	// itself actually ran — a genuinely failed run (unreachable host,
 	// playbook not found under the caller's cwd, a bad inventory path) was
 	// silently read as empty/no-match output, which every caller's regex
 	// then interpreted as "nothing found" — i.e. a false PASS for HD10-
-	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead.
+	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead. The
+	// playbook's own lookups also fail the run on an `ipa` error other than
+	// "not found"/"no match" (issues #102, #104); only the DNS lookup still
+	// reads every error as absence (issue #105).
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
 	}

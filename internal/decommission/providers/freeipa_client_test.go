@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -217,6 +218,7 @@ func TestFreeIPAProvider_HostObjectAndDNSAbsent(t *testing.T) {
 func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 	cases := []struct {
 		name          string
+		fqdn          string // default web1.ipa.pilot.internal
 		hostStdout    string
 		hbacStdout    string
 		sudoStdout    string
@@ -241,10 +243,19 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 		},
 		{
 			name:          "residual HBAC/sudo direct reference blocks",
+			fqdn:          "pwr-host3.ipa.pilot.internal",
 			hostStdout:    hostShowNotFound,
-			hbacStdout:    "  Rule name: web-login\n",
-			sudoStdout:    "  Rule name: web-sudo\n",
+			hbacStdout:    ruleReferencesFixture(t, "hbac-member-in-list"),
+			sudoStdout:    ruleReferencesFixture(t, "sudo-member"),
 			wantHostgroup: "pass", wantNetgroup: "pass", wantHBAC: "active_residue", wantSudo: "active_residue",
+		},
+		{
+			name:          "rules that name other hosts only",
+			fqdn:          "gone-host.ipa.pilot.internal",
+			hostStdout:    hostShowNotFound,
+			hbacStdout:    ruleReferencesFixture(t, "hbac-none"),
+			sudoStdout:    ruleReferencesFixture(t, "sudo-no-rules"),
+			wantHostgroup: "pass", wantNetgroup: "pass", wantHBAC: "pass", wantSudo: "pass",
 		},
 	}
 
@@ -262,7 +273,11 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 					return &ansible.Result{Stdout: tc.hostStdout}, nil
 				}
 			})
-			results, err := p.Verify(context.Background(), VerifyInput{HostName: "web1", FQDN: "web1.ipa.pilot.internal"})
+			fqdn := tc.fqdn
+			if fqdn == "" {
+				fqdn = "web1.ipa.pilot.internal"
+			}
+			results, err := p.Verify(context.Background(), VerifyInput{HostName: strings.SplitN(fqdn, ".", 2)[0], FQDN: fqdn})
 			if err != nil {
 				t.Fatalf("Verify() error = %v", err)
 			}
@@ -461,4 +476,149 @@ func findVerification(t *testing.T, results []Verification, kind string) Verific
 	}
 	t.Fatalf("no verification result with Kind=%q in %+v", kind, results)
 	return Verification{}
+}
+
+// ruleReferencesFixture returns ansible-playbook stdout captured from a
+// real decommission reference query (`--tags freeipa_host_absent_inspect
+// -e pilot_decommission_query=hbac_references|sudo_references`) against a
+// disposable FreeIPA 4.13.4 server on 2026-10-15. On that server the HBAC
+// rule pwr-hbac and the sudo rule pwr-sudo had member hosts
+// ipa1.ipa.pilot.internal and pwr-host3.ipa.pilot.internal, and pwr-sudo
+// also had the external hosts gone-host.ipa.pilot.internal and
+// pwr-host.ipa.pilot.internal; sudo-no-rules was taken with no sudo rule
+// at all. The stdout also carries the inspection of the roster's absent
+// host pwc-host2, as a real decommission query would.
+func ruleReferencesFixture(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "rule-references", name+".stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// Issue #104: the queries used `--host=`, which FreeIPA reads as
+// `--hostcat`, so they never matched; with the old parser (count "Rule
+// name:" lines) the real listings below would count every rule.
+func TestRulesNamingHost_RealOutput(t *testing.T) {
+	for _, tc := range []struct {
+		fixture, fqdn string
+		want          []string
+	}{
+		{"hbac-member-in-list", "pwr-host3.ipa.pilot.internal", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "ipa1.ipa.pilot.internal", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "PWR-HOST3.IPA.PILOT.INTERNAL", []string{"pwr-hbac"}},
+		{"hbac-member-in-list", "pwr-host3", []string{"pwr-hbac"}},
+		{"hbac-none", "gone-host.ipa.pilot.internal", nil},
+		{"hbac-none", "pwc-host2.ipa.pilot.internal", nil},
+		{"sudo-member", "pwr-host3.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-external", "pwr-host.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-external", "gone-host.ipa.pilot.internal", []string{"pwr-sudo"}},
+		{"sudo-none", "pwc-host2.ipa.pilot.internal", nil},
+		{"sudo-none", "pwr-host3.ipa", nil},
+		{"sudo-no-rules", "pwr-host3.ipa.pilot.internal", nil},
+	} {
+		t.Run(tc.fixture+"/"+tc.fqdn, func(t *testing.T) {
+			if got := rulesNamingHost(ruleReferencesFixture(t, tc.fixture), tc.fqdn); !slices.Equal(got, tc.want) {
+				t.Fatalf("rulesNamingHost = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// inspectFixture returns ansible-playbook stdout captured on 2026-10-15
+// from a real decommission query against a disposable FreeIPA 4.13.4
+// server whose roster had a tombstone: pwc-host2.ipa.pilot.internal,
+// `state: absent`, already deleted. Besides the target's HOST_INSPECT the
+// stdout carries the tombstone's, with "host not found".
+//   - host-object-present-with-tombstone: host_object for
+//     pwr-host3.ipa.pilot.internal, which exists and manages
+//     HTTP/pwr-host3.ipa.pilot.internal.
+//   - host-dns-present-with-tombstone: host_dns for
+//     pwr-host.ipa.pilot.internal, whose A record 192.168.122.253 remains.
+func inspectFixture(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "inspect", name+".stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+// Issue #108: another host's "host not found" in the same stdout must not
+// stand for the target.
+func TestInspectionFor_ReadsOnlyTheTargetsBlocks(t *testing.T) {
+	out := inspectFixture(t, "host-object-present-with-tombstone")
+	target := inspectionFor(out, "pwr-host3.ipa.pilot.internal")
+	if !strings.Contains(target, "HTTP/pwr-host3.ipa.pilot.internal") || notFoundPattern.MatchString(target) {
+		t.Fatalf("target block wrong: %q", target)
+	}
+	if strings.Contains(target, "pwc-host2") || strings.Contains(target, "PLAY RECAP") {
+		t.Fatalf("target block reaches past its message: %q", target)
+	}
+	if tomb := inspectionFor(out, "PWC-HOST2.ipa.pilot.internal"); !notFoundPattern.MatchString(tomb) {
+		t.Fatalf("tombstone block wrong: %q", tomb)
+	}
+	if plain := inspectionFor(hostShowNotFound, "web1.ipa.pilot.internal"); plain != hostShowNotFound {
+		t.Fatalf("text without markers changed: %q", plain)
+	}
+}
+
+func TestFreeIPAProvider_TombstoneDoesNotHideTheTarget(t *testing.T) {
+	hostObject := inspectFixture(t, "host-object-present-with-tombstone")
+	hostDNS := inspectFixture(t, "host-dns-present-with-tombstone")
+	exec := func(args []string) (*ansible.Result, error) {
+		switch queryKind(args) {
+		case "host_dns":
+			return &ansible.Result{Stdout: hostDNS}, nil
+		case "hbac_references", "sudo_references":
+			return &ansible.Result{Stdout: ruleReferencesFixture(t, "sudo-no-rules")}, nil
+		default:
+			return &ansible.Result{Stdout: hostObject}, nil
+		}
+	}
+
+	t.Run("converge step is not done while the host exists", func(t *testing.T) {
+		p, _ := testProvider(t, exec)
+		ex, err := p.ExecutorForStep(Step{Provider: FreeIPAClientProviderID, Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "pwr-host3.ipa.pilot.internal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done, err := ex.Inspect(context.Background()); err != nil || done {
+			t.Fatalf("Inspect() = %v, %v; want not converged", done, err)
+		}
+	})
+
+	t.Run("Plan still blocks on the unknown service principal", func(t *testing.T) {
+		p, _ := testProvider(t, exec)
+		_, err := p.Plan(context.Background(), PlanInput{HostName: "pwr-host3", FQDN: "pwr-host3.ipa.pilot.internal"})
+		if !errors.Is(err, ErrUnknownServicePrincipal) {
+			t.Fatalf("Plan() error = %v, want ErrUnknownServicePrincipal", err)
+		}
+	})
+
+	t.Run("Verify reports the host object", func(t *testing.T) {
+		p, _ := testProvider(t, exec)
+		results, err := p.Verify(context.Background(), VerifyInput{HostName: "pwr-host3", FQDN: "pwr-host3.ipa.pilot.internal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := findVerification(t, results, "host_object").Status; got != "active_residue" {
+			t.Fatalf("host_object = %q, want active_residue", got)
+		}
+		if got := findVerification(t, results, "service_principal").Status; got != "unknown_ownership" {
+			t.Fatalf("service_principal = %q, want unknown_ownership", got)
+		}
+	})
+
+	t.Run("Verify reports the DNS record", func(t *testing.T) {
+		p, _ := testProvider(t, exec)
+		results, err := p.Verify(context.Background(), VerifyInput{HostName: "pwr-host", FQDN: "pwr-host.ipa.pilot.internal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := findVerification(t, results, "host_dns").Status; got != "active_residue" {
+			t.Fatalf("host_dns = %q, want active_residue", got)
+		}
+	})
 }

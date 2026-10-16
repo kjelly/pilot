@@ -849,6 +849,15 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
      檢查 spec row 能通過 Ansible 的 `split_args`(row 的註解裡有 `'` 會讓 `pilot verify`
      在 shell 執行前就失敗)。
 
+15. **`ipa` 的長選項接受唯一前綴**:`ipa` CLI 用 Python optparse,一個不存在的選項只要是
+   另一個選項的唯一前綴,就被靜默當成那個選項。`hbacrule-find`/`sudorule-find` 沒有 host 篩選,
+   host decommission 查詢用的 `--host=<fqdn>` 一直被當成 `--hostcat`,永遠查到 0 筆,HBAC/sudo
+   直接引用的檢查因此永遠 pass(issue #104,2026-10-15)。**規則**:playbook 裡每個
+   `ipa <子指令> --選項` 都要是該子指令 `--help` 列出的完整選項名稱;
+   `internal/spec/ipa_cli_options_regression_test.go::TestRegression_PlaybookIPAOptionsExistInIPAHelp`
+   對全部 `playbooks/**` 檢查,選項清單在 `internal/spec/testdata/freeipa-cli-options.txt`
+   (FreeIPA 4.13.4 擷取)。新增子指令時,在 FreeIPA server 跑 `ipa <cmd> --help` 補進清單。
+
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
 from-scratch install 之後。
@@ -1486,3 +1495,4 @@ git status --short
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
 | 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |
+| 2026-10-15 | v1.54 | §4.5 新增第 15 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |

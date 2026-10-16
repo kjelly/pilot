@@ -307,8 +307,6 @@ var identityFailedWhenFalse = map[string]string{
 	// Known gaps with their own issues:
 	"Look up the current live DNS A record for the query target host (read-only, decommission verify)": "issue #105: the error text of a FreeIPA without integrated DNS is not captured yet, so errors cannot be told apart",
 	"Check the current DNS A record value for each absent host's owner (surgical delete step 1)":       "issue #105: same as the verify DNS query",
-	"Look up direct HBAC rules referencing the query target host (read-only, decommission verify)":     "issue #104: the query itself is wrong (--host= is read as --hostcat) and always matches nothing",
-	"Look up direct sudo rules referencing the query target host (read-only, decommission verify)":     "issue #104: same as the HBAC query",
 }
 
 func TestRegression_IdentityFailedWhenFalseIsAllowlisted(t *testing.T) {
@@ -397,5 +395,35 @@ func TestRegression_IdentityAbsentHostLookupsStopBeforeHostDel(t *testing.T) {
 				t.Fatalf("host-del ran: %v, want %v; calls %v", got, tc.wantDel, calls())
 			}
 		})
+	}
+}
+
+// Issue #104: the decommission reference queries list every rule. `find`
+// exits 1 when there is no rule at all and 0, with a stderr warning, when
+// the listing is truncated; a truncated or failed listing must stop the
+// run rather than read as "no rule names the host".
+func TestRegression_IdentityRuleReferenceQueriesStopOnErrors(t *testing.T) {
+	for _, q := range []struct{ kind, task, find string }{
+		{"hbac_references", "Look up direct HBAC rules referencing the query target host (read-only, decommission verify)", "hbacrule-find --all --sizelimit=0"},
+		{"sudo_references", "Look up direct sudo rules referencing the query target host (read-only, decommission verify)", "sudorule-find --all --sizelimit=0"},
+	} {
+		vars := map[string]any{"pilot_decommission_query": q.kind, "pilot_decommission_target_fqdn": "pwr-host3.ipa.pilot.internal"}
+		for _, tc := range []struct {
+			name, answer string
+			wantFail     bool
+		}{
+			{"rules listed", "sudorule-find-some", false},
+			{"no rule at all", "sudorule-find-no-rules", false},
+			{"truncated listing", "hbacrule-find-truncated", true},
+			{"lookup error", "no-kerberos-ticket", true},
+		} {
+			t.Run(q.kind+"/"+tc.name, func(t *testing.T) {
+				fakeIPA(t, map[string]string{q.find: tc.answer})
+				res := runIdentityTasks(t, []string{q.task}, vars)
+				if failed := res.rc != 0; failed != tc.wantFail || (tc.wantFail && failureOf(res, q.task) == "") {
+					t.Fatalf("rc=%d failures=%v, want failure at the query: %v", res.rc, res.failures, tc.wantFail)
+				}
+			})
+		}
 	}
 }

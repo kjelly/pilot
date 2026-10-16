@@ -170,16 +170,36 @@ that `docs/verification/freeipa-client.md`,
 `docs/verification/internal-endpoint.md` already own — it only verifies
 that decommission *reuses* those paths safely.
 
-**Known gaps (2026-10-15).** HD11's HBAC and sudo direct-reference checks
-do not work against a real server: Verify queries
-`ipa hbacrule-find --host=<fqdn>` / `ipa sudorule-find --host=<fqdn>`,
-which FreeIPA 4.13.4 reads as `--hostcat` and which therefore never match,
-so both report pass whatever the live state (issue #104). The DNS part of
-HD10 reports pass when `ipa dnsrecord-show` fails for any reason, and the
-cleanup step skips the surgical DNS delete on such a failure (issue #105).
-Since issue #102 the host-object and service-principal lookups fail the
-run on any error other than "host not found" / "0 services matched", so
-Plan and Verify stop instead of reading an error as "absent".
+**HD11's HBAC and sudo checks (issue #104, 2026-10-15).** Until this
+date Verify queried `ipa hbacrule-find --host=<fqdn>` /
+`ipa sudorule-find --host=<fqdn>`. Those commands have no host filter;
+FreeIPA 4.13.4 reads `--host=` as `--hostcat`, so the queries never
+matched and both checks reported pass whatever the live state. Verify now
+lists every rule (`--all --sizelimit=0`) and reports the rules whose
+"Hosts:" or "External host:" names the host. host-del removes the host
+from "Hosts:", but a sudo rule can keep it as an external host. A
+truncated or failed listing fails the query.
+
+**Tombstones (issue #108, 2026-10-15).** The queries run with `--tags
+freeipa_host_absent_inspect`, which also prints a `HOST_INSPECT` block for
+every `state: absent` host in the roster, and retired hosts stay there as
+tombstones. Until this date the provider read the whole stdout, so from
+the second decommission in a workspace on, an earlier host's "host not
+found" stood for the target: the central converge step looked done and
+skipped host-del, Plan skipped the HD12 unknown-service check, and Verify
+passed HD10 for a host or DNS record that still existed. Every check now
+reads only the target's own `HOST_INSPECT[<fqdn>]` blocks. Last verified
+for #104 and #108: candidate `b27e3ab` (after merging the new #106, so the
+queries run inside the private Kerberos cache block) on a disposable
+FreeIPA 4.13.4 vm-target, PASS
+(`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`).
+
+**Known gap (2026-10-15).** The DNS part of HD10 reports pass when
+`ipa dnsrecord-show` fails for any reason, and the cleanup step skips the
+surgical DNS delete on such a failure (issue #105). Since issue #102 the
+host-object and service-principal lookups fail the run on any error other
+than "host not found" / "0 services matched", so Plan and Verify stop
+instead of reading an error as "absent".
 
 ## Checks
 
