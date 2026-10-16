@@ -1,14 +1,18 @@
-# Apply playbook for docs/verification/log-server.md v1.8
+# Apply playbook for docs/verification/log-server.md v1.9
 # rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
 # client hosts. It writes two drop-ins (10-siem-receiver.conf,
 # siem-incoming) and, for a siem_log_root outside /var/log, a block in the
 # existing /etc/apparmor.d/local/usr.sbin.rsyslogd (Ubuntu) or an SELinux
-# file-context rule (EL). The block starts by reading those three files;
-# the rescue puts back their content from before the run (removing those
-# the run created), reloads the AppArmor profile, removes a file-context
-# rule the run added, and restarts rsyslog if `rsyslogd -N1` accepts the
-# restored configuration. It does not remove the log root directory or an
-# SELinux port label (tasks/rsyslog-selinux-tcp-port.yml).
+# file-context rule (EL). A changed root is added to the AppArmor block
+# before rsyslog restarts, and the old root's rules are dropped only after
+# rsyslog runs the new receiver config and listens on its port (Step 7a).
+# The block starts by reading those three files; the rescue puts back the
+# two drop-ins (removing those the run created), removes a file-context rule
+# the run added, and restarts rsyslog if `rsyslogd -N1` accepts the restored
+# configuration. Until rsyslog runs a configuration the old AppArmor rules
+# cover, the rescue keeps the rules for both roots; then it puts back the
+# local file. It does not remove the log root directory or an SELinux port
+# label (tasks/rsyslog-selinux-tcp-port.yml).
 #
 # Usage (dry run):
 #   ./pilot vm-target run --name log-server \
@@ -338,6 +342,16 @@
           loop: "{{ log_server_snapshot_stat.results | selectattr('stat.exists') | list }}"
           register: log_server_snapshot
 
+        # Tells the rescue whether rsyslog still runs the configuration from
+        # before this run (empty while rsyslog is stopped).
+        - name: "Snapshot: which rsyslog process is running"
+          tags: [always]
+          ansible.builtin.command: systemctl show -p InvocationID --value rsyslog
+          register: log_server_snapshot_rsyslog
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
           # C7, C8: Step 2a labels this directory under SELinux and runs
           # under those tags too.
@@ -365,6 +379,7 @@
             rsyslog_apparmor_local: {}
             rsyslog_apparmor_reload: {}
             rsyslog_selinux_fcontext: {}
+            rsyslog_selinux_fcontext_added: false
             rsyslog_selinux_relabel: {}
 
         - name: "Step 2a: Let a confined rsyslogd write siem_log_root"
@@ -375,6 +390,7 @@
               tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           vars:
             rsyslog_log_root: "{{ siem_log_root_real }}"
+            rsyslog_log_root_phase: grant
 
         # Under SELinux, imtcp may bind siem_receiver_tcp_port only once the
         # port is labelled for rsyslogd (see the task file).
@@ -491,6 +507,24 @@
             state: started
             enabled: true
 
+        # A run interrupted between Step 3 and Step 6a, or a rescue that put
+        # back the receiver config but could not restart rsyslog, leaves
+        # rsyslog running an older config; the next run sees no change in
+        # Step 3. rsyslog that started before the config was last written
+        # restarts too.
+        - name: "Step 6a: Check whether rsyslog started before the receiver config was last written"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.shell:
+            executable: /bin/sh
+            cmd: |
+              started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || exit 0
+              written=$(date -r {{ siem_receiver_conf | quote }} +%s.%N) || exit 0
+              awk -v s="$started" -v w="$written" 'BEGIN { exit !(s < w) }' && echo pending
+              exit 0
+          register: log_server_restart_pending
+          changed_when: false
+          check_mode: false
+
         # A confined rsyslogd that was refused the log root keeps that dynaFile
         # action failed and its imtcp queue full until it restarts (captured
         # 2026-10-15: after reloading the AppArmor profile, nothing landed
@@ -506,6 +540,7 @@
             or ((rsyslog_selinux_port_label | default({})) is changed)
             or ((rsyslog_apparmor_reload | default({})) is changed)
             or ((rsyslog_selinux_relabel | default({})) is changed)
+            or ((log_server_restart_pending.stdout | default('')) == 'pending')
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
           tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
@@ -539,14 +574,63 @@
                 state: enabled
               when: firewalld_state.stdout == "running"
 
+        # Step 2a kept the AppArmor rules for the root rsyslog wrote before
+        # this run. They are dropped only once rsyslog runs this receiver
+        # config: it is active, it started after the config was last written,
+        # and rsyslogd listens on the receiver port. This step checks that
+        # itself rather than trusting that Step 6a ran.
+        - name: "Step 7: Check that rsyslog runs the receiver config and listens on its port"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.shell:
+            executable: /bin/sh
+            cmd: |
+              systemctl is-active --quiet rsyslog || { echo inactive; exit 0; }
+              started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || { echo unknown; exit 0; }
+              written=$(date -r {{ siem_receiver_conf | quote }} +%s.%N) || { echo unknown; exit 0; }
+              awk -v s="$started" -v w="$written" 'BEGIN { exit !(s >= w) }' || { echo pending-restart; exit 0; }
+              ss -Hlntp "( sport = :{{ siem_receiver_tcp_port | int }} )" | grep -qF '"rsyslogd"' || { echo not-listening; exit 0; }
+              echo ok
+          register: log_server_receiver_state
+          changed_when: false
+          check_mode: false
+          until: log_server_receiver_state.stdout != 'not-listening'
+          retries: 10
+          delay: 1
+          when: not ansible_check_mode
+
+        - name: "Step 7: rsyslog is running and listens on the receiver port"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.assert:
+            that: log_server_receiver_state.stdout not in ['inactive', 'not-listening']
+            fail_msg: >-
+              After the restart rsyslog is {{ log_server_receiver_state.stdout }}
+              {{ '(no rsyslogd listener on tcp/' ~ siem_receiver_tcp_port ~ ')'
+                 if log_server_receiver_state.stdout == 'not-listening' else '' }}.
+          when: not ansible_check_mode
+
+        - name: "Step 7a: Drop the AppArmor rules for roots rsyslog no longer writes"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-confined-log-root.yml
+            apply:
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          vars:
+            rsyslog_log_root: "{{ siem_log_root_real }}"
+            rsyslog_log_root_phase: narrow
+          when:
+            - not ansible_check_mode
+            - log_server_receiver_state.stdout == 'ok'
+
       rescue:
+        # The AppArmor local file is handled below: the running rsyslogd may
+        # still write the root this run moved to.
         - name: "ROLLBACK — put back the content of the files this apply changed"
           tags: [always]
           ansible.builtin.copy:
             dest: "{{ item.item.item }}"
             content: "{{ item.content | b64decode }}"
             mode: "{{ item.item.stat.mode }}"
-          loop: "{{ log_server_snapshot.results | default([]) }}"
+          loop: "{{ log_server_snapshot.results | default([]) | rejectattr('item.item', 'equalto', '/etc/apparmor.d/local/usr.sbin.rsyslogd') | list }}"
           loop_control:
             label: "{{ item.item.item }}"
           when: log_server_snapshot is defined
@@ -556,12 +640,76 @@
           ansible.builtin.file:
             path: "{{ item.item }}"
             state: absent
-          loop: "{{ log_server_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+          loop: >-
+            {{ log_server_snapshot_stat.results | default([]) | rejectattr('stat.exists')
+               | rejectattr('item', 'equalto', '/etc/apparmor.d/local/usr.sbin.rsyslogd') | list }}
           loop_control:
             label: "{{ item.item }}"
           when: log_server_snapshot_stat is defined
 
-        - name: "ROLLBACK — reload the rsyslogd AppArmor profile with the restored rules"
+        # Until rsyslog runs a configuration the rules from before this run
+        # cover, the profile must grant both those rules and the ones this
+        # run wrote: rsyslog may have restarted on this run's root (a failure
+        # after Step 6a), and reloading only the old rules refused it that
+        # root, as Step 2a used to refuse it the old one. Read the local file
+        # as the failed run left it, and keep the union of both rule sets.
+        - name: "ROLLBACK — is there an AppArmor local file now"
+          tags: [always]
+          ansible.builtin.stat:
+            path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+            get_checksum: false
+          register: log_server_rescue_local_stat
+
+        - name: "ROLLBACK — read the AppArmor local file the failed run left"
+          tags: [always]
+          ansible.builtin.slurp:
+            src: /etc/apparmor.d/local/usr.sbin.rsyslogd
+          register: log_server_rescue_local
+          when: log_server_rescue_local_stat.stat.exists
+
+        # Whether the file existed comes from the snapshot's stat, its content
+        # from the snapshot's slurp; either is missing if the snapshot did not
+        # finish, and then the file is not put back or removed.
+        - name: "ROLLBACK — the AppArmor local file before and after the failed run"
+          tags: [always]
+          ansible.builtin.set_fact:
+            log_server_rescue_local_existed: "{{ log_server_rescue_snapshot_stat.stat.exists | default(none) }}"
+            log_server_rescue_local_mode: "{{ log_server_rescue_snapshot_stat.stat.mode | default('0644') }}"
+            log_server_rescue_local_saved: "{{ log_server_rescue_snapshot_local.content is defined }}"
+            log_server_rescue_local_before: "{{ log_server_rescue_snapshot_local.content | default('') | b64decode }}"
+            log_server_rescue_local_after: "{{ log_server_rescue_local.content | default('') | b64decode }}"
+          vars:
+            log_server_rescue_snapshot_stat: >-
+              {{ log_server_snapshot_stat.results | default([])
+                 | selectattr('item', 'equalto', '/etc/apparmor.d/local/usr.sbin.rsyslogd') | first | default({}) }}
+            log_server_rescue_snapshot_local: >-
+              {{ log_server_snapshot.results | default([])
+                 | selectattr('item.item', 'equalto', '/etc/apparmor.d/local/usr.sbin.rsyslogd') | first | default({}) }}
+
+        - name: "ROLLBACK — grant the AppArmor rules from before and from this run"
+          tags: [always]
+          ansible.builtin.blockinfile:
+            path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+            marker: "# {mark} pilot log-server log root"
+            block: "{{ (rules_before + (rules_after | reject('in', rules_before) | list)) | join('\n') }}"
+            state: "{{ 'present' if (rules_before + rules_after) else 'absent' }}"
+          register: log_server_rescue_union
+          when: log_server_rescue_local_stat.stat.exists
+          vars:
+            lines_before: "{{ log_server_rescue_local_before.splitlines() }}"
+            lines_after: "{{ log_server_rescue_local_after.splitlines() }}"
+            rules_before: >-
+              {{ lines_before[lines_before.index('# BEGIN pilot log-server log root') + 1:
+                              lines_before.index('# END pilot log-server log root')] | select | list
+                 if '# BEGIN pilot log-server log root' in lines_before
+                    and '# END pilot log-server log root' in lines_before else [] }}
+            rules_after: >-
+              {{ lines_after[lines_after.index('# BEGIN pilot log-server log root') + 1:
+                             lines_after.index('# END pilot log-server log root')] | select | list
+                 if '# BEGIN pilot log-server log root' in lines_after
+                    and '# END pilot log-server log root' in lines_after else [] }}
+
+        - name: "ROLLBACK — reload the rsyslogd AppArmor profile with those rules"
           tags: [always]
           ansible.builtin.command:
             argv: "{{ ['apparmor_parser', '-r'] + (['-C'] if rsyslog_apparmor_mode == 'complain' else []) + ['/etc/apparmor.d/usr.sbin.rsyslogd'] }}"
@@ -569,8 +717,8 @@
             - rsyslog_apparmor_mode is defined
             - rsyslog_apparmor_mode != ''
             - >-
-              (rsyslog_apparmor_local is defined and rsyslog_apparmor_local is changed)
-              or (rsyslog_apparmor_reload is defined and rsyslog_apparmor_reload is changed)
+              (log_server_rescue_local_after != log_server_rescue_local_before)
+              or (log_server_rescue_union is changed)
 
         - name: "ROLLBACK — remove the SELinux file-context rule this apply added"
           tags: [always]
@@ -579,8 +727,8 @@
             setype: var_log_t
             state: absent
           when:
-            - rsyslog_selinux_fcontext is defined
-            - rsyslog_selinux_fcontext is changed
+            - rsyslog_selinux_fcontext_added is defined
+            - rsyslog_selinux_fcontext_added
             - rsyslog_selinux_fcontext_target is defined
 
         - name: "ROLLBACK — relabel the log root without that rule"
@@ -588,8 +736,8 @@
           ansible.builtin.command:
             argv: [restorecon, -RF, "{{ siem_log_root_real }}"]
           when:
-            - rsyslog_selinux_fcontext is defined
-            - rsyslog_selinux_fcontext is changed
+            - rsyslog_selinux_fcontext_added is defined
+            - rsyslog_selinux_fcontext_added
 
         # A failure caused by something this playbook does not manage (an
         # invalid drop-in of another package) is still there after the
@@ -626,15 +774,71 @@
             state: restarted
           when: (log_server_rescue_syntax.rc | default(1)) == 0
 
+        # rsyslog now runs a configuration the rules from before this run
+        # cover when the rescue restarted it, or when it has not restarted
+        # since the snapshot. Only then put the local file back.
+        - name: "ROLLBACK — which rsyslog process is running now"
+          tags: [always]
+          ansible.builtin.command: systemctl show -p InvocationID --value rsyslog
+          register: log_server_rescue_rsyslog
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: "ROLLBACK — does rsyslog run a configuration the old AppArmor rules cover"
+          tags: [always]
+          ansible.builtin.set_fact:
+            log_server_rescue_local_restore: >-
+              {{ (log_server_rescue_syntax.rc | default(1)) == 0
+                 or (log_server_snapshot_rsyslog.stdout is defined
+                     and log_server_rescue_rsyslog.stdout == log_server_snapshot_rsyslog.stdout) }}
+
+        - name: "ROLLBACK — put back the AppArmor local file"
+          tags: [always]
+          ansible.builtin.copy:
+            dest: /etc/apparmor.d/local/usr.sbin.rsyslogd
+            content: "{{ log_server_rescue_local_before }}"
+            mode: "{{ log_server_rescue_local_mode }}"
+          register: log_server_rescue_local_put
+          when:
+            - log_server_rescue_local_restore
+            - log_server_rescue_local_existed is sameas true
+            - log_server_rescue_local_saved
+
+        - name: "ROLLBACK — remove the AppArmor local file this apply created"
+          tags: [always]
+          ansible.builtin.file:
+            path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+            state: absent
+          register: log_server_rescue_local_removed
+          when:
+            - log_server_rescue_local_restore
+            - log_server_rescue_local_existed is sameas false
+
+        - name: "ROLLBACK — reload the rsyslogd AppArmor profile with the restored rules"
+          tags: [always]
+          ansible.builtin.command:
+            argv: "{{ ['apparmor_parser', '-r'] + (['-C'] if rsyslog_apparmor_mode == 'complain' else []) + ['/etc/apparmor.d/usr.sbin.rsyslogd'] }}"
+          when:
+            - rsyslog_apparmor_mode is defined
+            - rsyslog_apparmor_mode != ''
+            - (log_server_rescue_local_put is changed) or (log_server_rescue_local_removed is changed)
+
         - name: "ROLLBACK — surface the original failure"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
               log-server apply failed (see task output above). The siem
-              receiver and logrotate drop-ins and the AppArmor local file are
-              back to their content from before this run (removed if this run
-              created them), the AppArmor profile was reloaded and an SELinux
-              file-context rule this run added was removed.
+              receiver and logrotate drop-ins are back to their content from
+              before this run (removed if this run created them), and an
+              SELinux file-context rule this run added was removed.
+              {{ 'The AppArmor local file grants the log roots from before and from this run, because rsyslog still runs the configuration this run started it with; the next successful run drops the rules it no longer needs.'
+                 if not (log_server_rescue_local_restore | default(true))
+                    and (log_server_rescue_local_after | default('')) != (log_server_rescue_local_before | default(''))
+                 else 'The AppArmor local file is back to its content from before this run.'
+                 if (log_server_rescue_local_existed | default(none)) is sameas true
+                    or (log_server_rescue_local_stat.stat.exists | default(false))
+                 else '' }}
               {{ 'rsyslog was restarted with the restored configuration.'
                  if (log_server_rescue_syntax.rc | default(1)) == 0 else
                  'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='

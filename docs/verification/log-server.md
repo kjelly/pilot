@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.8
+> 版本：v1.9
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -13,7 +13,7 @@
 | Hostname / Inventory group | log-server |
 | OS / version | Ubuntu 24.04 LTS（rsyslog 8.2312+，內建 RainerScript / imtcp） |
 | 角色 | 中央 syslog 接收端：收 client 端 rsyslog 轉送的 `auth,authpriv.*` 與 `local6.*`（auditd），依來源 hostname 分檔落地 |
-| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`siem_log_root`（預設 `/var/log/siem/`）；`siem_log_root` 不在 `/var/log` 底下時，另外寫 `/etc/apparmor.d/local/usr.sbin.rsyslogd` 的 pilot 區塊並重新載入 rsyslogd 的 AppArmor profile（Ubuntu），或加 `var_log_t` 的 SELinux file-context 規則並 `restorecon`（EL）。apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容、移除這次加的 file-context 規則，再用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog（不通過時，例如失敗原因是別的 drop-in，就不重啟，讓正在跑的 rsyslog 維持原狀）；根目錄與 SELinux port 標籤留著 |
+| 套用範圍 | `/etc/rsyslog.d/10-siem-receiver.conf`、`/etc/logrotate.d/siem-incoming`、`siem_log_root`（預設 `/var/log/siem/`）；`siem_log_root` 不在 `/var/log` 底下時，另外寫 `/etc/apparmor.d/local/usr.sbin.rsyslogd` 的 pilot 區塊並重新載入 rsyslogd 的 AppArmor profile（Ubuntu），或加 `var_log_t` 的 SELinux file-context 規則並 `restorecon`（EL）。換根目錄時，AppArmor 區塊在 rsyslog 重啟前同時保留舊根目錄與新根目錄的規則；等 rsyslog 以新的接收設定啟動、rsyslogd 在接收 port 監聽之後，才拿掉舊根目錄的規則。舊根目錄的 SELinux 規則刻意保留，不會移除。apply 失敗時 rescue 把兩個 drop-in 還原成這次 run 之前的內容、移除這次加的 file-context 規則，再用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog（不通過時，例如失敗原因是別的 drop-in，就不重啟，讓正在跑的 rsyslog 維持原狀）。AppArmor local 檔在 rescue 中先同時授權這次 run 之前與這次 run 的規則；rsyslog 跑的是舊規則涵蓋的設定（rescue 重啟了它，或這次 run 沒有重啟過它）時，才還原成這次 run 之前的內容，否則保留兩者。根目錄與 SELinux port 標籤留著 |
 | 風險等級 | Medium（對外開 514/tcp 收網路日誌；設定錯誤頂多漏收，不影響本機既有日誌） |
 
 > 為何選 rsyslog 而非 Loki/syslog-ng：client 端轉送已固定用 rsyslog 協定
@@ -109,10 +109,12 @@
 | Spec ID | Apply task | 備註 |
 |---------|------------|------|
 | C1 | `install rsyslog` | apt/dnf 依 `ansible_os_family` |
-| C2, C5 | `ensure rsyslog enabled+restarted` | 只在設定檔語法檢查通過後才重啟（`rsyslogd -N1` gate） |
+| C2, C5 | `ensure rsyslog enabled+restarted` | 只在設定檔語法檢查通過後才重啟（`rsyslogd -N1` gate）；rsyslog 啟動時間早於接收設定最後寫入的時間（上一次 run 中斷，或 rescue 還原設定卻無法重啟）時也重啟 |
+| C2, C5 | `Step 7: rsyslog runs the receiver config and listens on its port` | 重啟後 rsyslog 必須在跑、接收 port 由 rsyslogd 監聽，否則 apply 失敗 |
 | C3, C4, C7, C8, C11 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME%` dynaFile 路由，`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
 | C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
-| C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則 + 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
+| C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`，phase `grant`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則（保留區塊裡現有的規則）+ 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
+| C6, C7, C8 | `drop the AppArmor rules for roots rsyslog no longer writes`（Step 7a，同一個 task 檔，phase `narrow`） | 只在 Step 7 的檢查此刻成立時執行：區塊只留新根目錄的規則（`/var/log` 底下則整段移除），有變才重新載入 |
 | C9, C10 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數 |
 
 > playbook 的每個 task 都帶全部 row tag（C1–C11）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
@@ -158,3 +160,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.6 | 只改說明，row 不變：§1 套用範圍補上 Step 2a 對 AppArmor local 檔、SELinux file-context 規則的修改與 rescue 會還原什麼；§6 補上 Step 2a 一列，並說明 playbook 每個 task 都帶全部 row tag（PR #79 review：`--tags C6` 改 `siem_log_root` 時只換了 AppArmor 規則，rsyslog 仍寫舊目錄，訊息全部丟失） | pilot |
 | 2026-10-15 | v1.7 | 只改說明，row 不變：§6 的說明移到表格下面（原本插在表格中間，C9/C10 那列因此沒有算在表格裡），並註明 `--skip-tags` 任一列會跳過整個 log-server 的步驟。§1 的 rescue 說明補上：rescue 先用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog | pilot |
 | 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |
+| 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |

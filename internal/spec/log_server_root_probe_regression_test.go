@@ -180,8 +180,8 @@ func TestRegression_LogServerLetsConfinedRsyslogWriteTheRoot(t *testing.T) {
 	}
 	tf := string(raw)
 	for _, want := range []string{
-		"/etc/apparmor.d/local/usr.sbin.rsyslogd", "{{ rsyslog_log_root }}/ rw,", "{{ rsyslog_log_root }}/** rwk,",
-		"'absent' if rsyslog_log_root_in_var_log", "apparmor_parser -r", "/etc/apparmor.d/usr.sbin.rsyslogd || exit 1",
+		"/etc/apparmor.d/local/usr.sbin.rsyslogd", "rsyslog_log_root ~ '/ rw,'", "rsyslog_log_root ~ '/** rwk,'",
+		"[] if rsyslog_log_root_in_var_log", "apparmor_parser -r", "/etc/apparmor.d/usr.sbin.rsyslogd || exit 1",
 		"/sys/fs/selinux/enforce", "community.general.sefcontext", `target: "{{ rsyslog_selinux_fcontext_target }}"`,
 		"setype: var_log_t", "restorecon, -RF", "register: rsyslog_selinux_relabel", `argv: [stat, -c, "%C",`,
 		"not ansible_check_mode",

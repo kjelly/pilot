@@ -133,36 +133,42 @@ func TestRegression_LogServerReloadsAppArmorByTheLoadedProfile(t *testing.T) {
 	const enforce = "tcpdump (enforce)\nwpcom (unconfined)\nrsyslogd (enforce)\n/usr/lib/snapd/snap-confine (enforce)\nman_filter (enforce)\n"
 	const complain = "tcpdump (enforce)\nrsyslogd (complain)\nman_filter (enforce)\n"
 	const disabled = "tcpdump (enforce)\nwpcom (unconfined)\nman_filter (enforce)\n" // after apparmor_parser -R
+	// rules: whether the block holds rules after this phase (none for a
+	// root under /var/log once the narrow phase dropped an earlier root's).
 	cases := []struct {
 		name         string
 		profiles     string
-		inVarLog     bool
+		phase        string
+		rules        bool
 		blockChanged bool
 		reloadOutput string
 		wantMode     string
 		wantReload   bool
 		wantChanged  bool
 	}{
-		{"block written by an earlier failed run", enforce, false, false, "changed", "enforce", true, true},
-		{"rerun with the rule loaded", enforce, false, false, "unchanged", "enforce", true, false},
-		{"block added in this run", enforce, false, true, "changed", "enforce", true, true},
-		{"complain mode", complain, false, false, "unchanged", "complain", true, false},
-		{"profile disabled", disabled, false, true, "changed", "", false, true},
-		{"default root, nothing changed", enforce, true, false, "unchanged", "enforce", false, false},
-		{"default root, earlier block removed", enforce, true, true, "changed", "enforce", true, true},
-		{"no sha256 in sysfs, block changed", enforce, false, true, "unknown", "enforce", true, true},
-		{"no sha256 in sysfs, block unchanged", enforce, false, false, "unknown", "enforce", true, false},
+		{"block written by an earlier failed run", enforce, "grant", true, false, "changed", "enforce", true, true},
+		{"rerun with the rule loaded", enforce, "grant", true, false, "unchanged", "enforce", true, false},
+		{"block added in this run", enforce, "grant", true, true, "changed", "enforce", true, true},
+		{"complain mode", complain, "grant", true, false, "unchanged", "complain", true, false},
+		{"profile disabled", disabled, "grant", true, true, "changed", "", false, true},
+		{"default root, nothing changed", enforce, "grant", false, false, "unchanged", "enforce", false, false},
+		{"default root, earlier block removed", enforce, "narrow", false, true, "changed", "enforce", true, true},
+		{"no sha256 in sysfs, block changed", enforce, "grant", true, true, "unknown", "enforce", true, true},
+		{"no sha256 in sysfs, block unchanged", enforce, "grant", true, false, "unknown", "enforce", true, false},
+		{"narrow, old root's rules dropped", enforce, "narrow", true, true, "changed", "enforce", true, true},
+		{"narrow, nothing to drop", enforce, "narrow", true, false, "unchanged", "enforce", false, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			tasks := []any{
 				map[string]any{"ansible.builtin.set_fact": map[string]any{
-					"rsyslog_apparmor_profiles":   map[string]any{"stdout": c.profiles},
-					"rsyslog_apparmor_profile":    map[string]any{"stat": map[string]any{"exists": true}},
-					"rsyslog_apparmor_enabled":    map[string]any{"stat": map[string]any{"exists": true}},
-					"rsyslog_log_root_in_var_log": c.inVarLog,
-					"rsyslog_apparmor_local":      map[string]any{"changed": c.blockChanged},
+					"rsyslog_apparmor_profiles": map[string]any{"stdout": c.profiles},
+					"rsyslog_apparmor_profile":  map[string]any{"stat": map[string]any{"exists": true}},
+					"rsyslog_apparmor_enabled":  map[string]any{"stat": map[string]any{"exists": true}},
+					"rsyslog_log_root_phase":    c.phase,
+					"rsyslog_apparmor_rules":    map[bool][]any{true: {"/srv/siem/ rw,", "/srv/siem/** rwk,"}, false: {}}[c.rules],
+					"rsyslog_apparmor_local":    map[string]any{"changed": c.blockChanged},
 				}},
 				map[string]any{"ansible.builtin.set_fact": mode["ansible.builtin.set_fact"]},
 				map[string]any{"ansible.builtin.set_fact": map[string]any{
