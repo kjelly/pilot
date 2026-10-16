@@ -47,6 +47,13 @@ login_probe_artifact_sha256: ""
 # login_probe_connect_timeout: 10s   # OpenSSH ConnectTimeout
 # login_probe_total_timeout: 30s     # 單一 target 含 proxy/認證/指令的總上限
 # login_probe_concurrency: 4         # 同時探測的 target 數
+#
+# 改 login_probe_interval / login_probe_total_timeout 前先看 Prometheus 主機的
+# host_metrics_missing_success_window：interval + total_timeout + 15s + 2 ×
+# prometheus_scrape_interval 必須不超過它（預設 60 + 30 + 15 + 30 = 135s ≤ 150s）。
+# login-probe-apply.yml 會對 inventory 裡每台開了 host-health 規則的 Prometheus
+# 主機檢查，放不進去就拒絕套用；prometheus-apply.yml 也會反過來檢查
+# （docs/verification/alertmanager.md §1.7）。
 # login_probe_ssh_port: 22           # 自動展開 target 時的 sshd port
 # login_probe_user: pilot-login-canary
 # login_probe_command: /bin/true     # 非互動指令；canary 沒有 sudo

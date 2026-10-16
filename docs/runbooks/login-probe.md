@@ -171,6 +171,16 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
   擋下（`alertmanager.md` §1.7）。改 probe 間隔時要一起調整時間窗與 `host_metrics_missing_for`。
   這道 gate 沒有算進 `login_probe_concurrency` 的排隊：同時卡住的嘗試多到佔滿 concurrency 時（例如大量
   主機同時掛掉），健康主機的資料缺口告警可能中斷，改由 `HostDown` 送出（fail-safe）。
+  gate 目前還有幾個限制（強化項目見 GitHub issue #123）：
+  - 兩邊的交叉檢查只讀**對方 inventory 裡的 hostvars**。只在一邊用 `-e` 覆寫（例如
+    `prometheus-apply.yml -e host_metrics_missing_success_window=...`）時，另一邊下次 apply 時看不到這個值。
+    這些值請寫在 inventory，不要只用 `-e` 帶。
+  - gate 接受剛好相等（interval + timeout + 15s + 2 × scrape = 時間窗）。真實的 Prometheus 在等號邊界上，
+    會留下一段約等於 probe 主機那次 scrape 耗時的空隙；設定時請留餘裕（預設留 15s）。
+  - `login_probe_alert_keep_firing_for` 沒有上限。它也決定資料缺口變成主機掛掉之後，`HostDown` 還要被
+    抑制多久：預設 5m 約 8m，設成 30m 時主機掛掉 20m 後仍被抑制。
+  - duration 的 regex 會把 `60s` 後面帶換行的值、以及超過 Go duration 上限的值當成可解析；兩者目前都無害
+    （inventory 的值不會帶結尾換行，溢位的值會因為需要的時間窗太長而被擋下）。
 - login-probe 主機**自己**的 node_exporter 停掉時（SSH 正常），這台 probe 的 series 全部消失：它回報的
   登入告警都不見了，`PilotLoginProbeStale` 也不會觸發，只有它的 `HostDown` 在 10m 送出（GitHub issue #121，
   `alertmanager.md` §1.7）。看到 probe 主機的 `HostDown` 時，先確認它的 SSH 與 node_exporter，並當作
@@ -208,3 +218,4 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 | 2026-10-15 | v0.8 | PR #80 第六輪 review：§6 改寫 `host_metrics_missing_success_window` 的前提 | pilot |
 | 2026-10-16 | v0.9 | PR #80 第七輪 review：§6 寫明 `host_metrics_missing_success_window` 的兩道 gate（含讀 login-probe 主機設定的交叉檢查） | pilot |
 | 2026-10-16 | v0.10 | PR #80 第八輪 review：§6 的時間窗 gate 改為 interval + timeout + 15s + 2 × scrape，`login-probe-apply.yml` 也會擋；寫明 `host_metrics_missing_for` 最多 9m、concurrency 排隊不在 gate 內，以及 login-probe 主機自己的監控資料缺口（#121） | pilot |
+| 2026-10-16 | v0.11 | PR #80 第八輪 review 後續：§6 寫明 gate 的四個已知限制（只讀對方 inventory、等號邊界、`keep_firing_for` 沒有上限、duration regex 錨定），強化追蹤於 #123 | pilot |

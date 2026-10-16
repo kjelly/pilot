@@ -207,9 +207,10 @@ tests:
   #   dead4 — a healthy but slow probe (many targets down at once) only
   #           records the failure 420 s after the death.
   # No new success is recorded for any of them, so the last-success
-  # timestamp stops changing; host_metrics_missing_success_window (2m) is
-  # shorter than host_metrics_missing_for (3m), so HostMetricsMissing
-  # never fires and HostDown pages on its own schedule (13m here).
+  # timestamp stops changing; host_metrics_missing_success_window (150s,
+  # rendered from the contract default) plus the 15 s textfile write fits
+  # in host_metrics_missing_for (3m), so HostMetricsMissing never fires
+  # and HostDown pages on its own schedule (13m here).
   - name: A dead host never raises HostMetricsMissing, whatever its probe does
     interval: 15s
     input_series:
@@ -347,35 +348,44 @@ tests:
   # Not covered (alertmanager.md §1.7, runbook §6): a data gap on the
   # login-probe host itself. Its node_exporter also serves the probe's
   # textfile, so every pilot_login_probe_* series of that probe stops with
-  # it: HostMetricsMissing cannot fire for it, PilotLoginProbeStale sees
-  # no samples (changes() over an empty range returns nothing), and every
-  # login alert from that probe disappears. Only HostDown pages, at 10m,
-  # although the host answers SSH. This case locks today's behaviour; the
-  # fix is tracked in the issue §1.7 names.
+  # it. Here mon-g's probe reports t-g account-denied, and that alert fires
+  # (5m) before mon-g's node_exporter stops at 6m. Then the alert
+  # disappears without being resolved by the probe, HostMetricsMissing
+  # cannot fire for mon-g, PilotLoginProbeStale sees no samples
+  # (changes() over an empty range returns nothing), and only HostDown
+  # pages, at 16m, although the host answers SSH. This case locks today's
+  # behaviour; the fix is tracked in GitHub issue #121.
   - name: A data gap on the probe host itself silences its probe (known gap)
     interval: 1m
     input_series:
       - series: 'up{job="node",instance="mon-g:9100",pilot_host="mon-g"}'
-        values: '1 1 0x14'
+        values: '1x5 0x20'
       - series: 'pilot_login_probe_success{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="mon-g"}'
-        values: '1 1 _x14'
+        values: '1x5 _x20'
       - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="mon-g"}'
-        values: '0 60 _x14'
+        values: '0+60x5 _x20'
       - series: 'pilot_login_probe_metrics_last_write_timestamp_seconds{job="node",instance="mon-g:9100",pilot_host="mon-g"}'
-        values: '0 60 _x14'
+        values: '0+60x5 _x20'
       - series: 'pilot_login_probe_last_stage{job="node",instance="mon-g:9100",pilot_host="mon-g",probe_target="t-g",stage="account"}'
-        values: '1 1 _x14'
+        values: '1x5 _x20'
     alert_rule_test:
-      - eval_time: 14m
-        alertname: HostMetricsMissing
-        exp_alerts: []
-      - eval_time: 14m
-        alertname: PilotLoginProbeStale
-        exp_alerts: []
-      - eval_time: 14m
+      - eval_time: 5m
+        alertname: PilotLoginProbeAccountDenied
+        exp_alerts:
+          - exp_labels: {pilot_host: t-g, probe_host: mon-g, severity: critical, pilot_alert_source: login-probe}
+      - eval_time: 20m
         alertname: PilotLoginProbeAccountDenied
         exp_alerts: []
-      - eval_time: 14m
+      - eval_time: 20m
+        alertname: HostMetricsMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PilotLoginProbeStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HostDown
+        exp_alerts: []
+      - eval_time: 20m
         alertname: HostDown
         exp_alerts:
           - exp_labels: {instance: "mon-g:9100", job: node, pilot_host: mon-g, severity: critical}

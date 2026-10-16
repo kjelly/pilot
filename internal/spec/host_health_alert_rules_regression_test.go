@@ -2,6 +2,7 @@ package spec
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -774,8 +775,32 @@ func TestRegression_HostHealthTimingConstantsAgree(t *testing.T) {
 		if got := strings.Count(src.text, "file: tasks/host-metrics-missing-probe-round-gate.yml"); got != 1 {
 			t.Errorf("%s must include tasks/host-metrics-missing-probe-round-gate.yml once; found %d", src.name, got)
 		}
-		if strings.Contains(src.text, "2 * s_s") || strings.Contains(src.text, "_probe_worst_seconds") {
-			t.Errorf("%s computes the probe-round bound itself; it belongs in the gate file only", src.name)
+	}
+	for _, msg := range probeRoundArithmeticOutsideGate(t, hostHealthApply, loginProbeApply) {
+		t.Error(msg)
+	}
+	// The check catches a playbook that computes the bound itself (§5.12).
+	gateTask := "    - name: \"Gate: every login-probe host records a success inside host_metrics_missing_success_window\"\n"
+	ownGate := "    - name: \"Gate: own probe-round arithmetic\"\n" +
+		"      ansible.builtin.assert:\n" +
+		"        that: [\"(hostvars[h].login_probe_interval | regex_search('^[0-9]+') | int) <= 90\"]\n" +
+		"      tags: [always]\n\n"
+	for _, m := range []struct{ name, apply, probe string }{
+		{"a second probe-round gate in prometheus-apply.yml", strings.Replace(apply, gateTask, ownGate+gateTask, 1), probe},
+		{"arithmetic in prometheus-apply.yml's include", strings.Replace(apply,
+			"'interval': hostvars[h].login_probe_interval | default('60s', true) | string,",
+			"'interval': (hostvars[h].login_probe_interval | default('60s', true) | regex_search('^[0-9]+') | int) * 1,", 1), probe},
+		{"a window read outside login-probe-apply.yml's include", apply, strings.Replace(probe,
+			"    - name: \"Gate: artifact path is supplied\"\n",
+			"    - name: \"Window\"\n      ansible.builtin.debug: {msg: \"{{ hostvars[groups.prometheus[0]].host_metrics_missing_success_window }}\"}\n      tags: [always]\n\n    - name: \"Gate: artifact path is supplied\"\n", 1)},
+	} {
+		if m.apply == apply && m.probe == probe {
+			t.Fatalf("mutation %q changed nothing", m.name)
+		}
+		if got := probeRoundArithmeticIn(t, map[string]string{"prometheus-apply.yml": m.apply, "login-probe-apply.yml": m.probe}); len(got) == 0 {
+			t.Errorf("mutation %q: the single-source check found nothing", m.name)
+		} else {
+			t.Logf("mutation %q caught: %s", m.name, got[0])
 		}
 	}
 	lp := contractGroupVarDefaults(t, "../../contracts/login-probe.yaml")
@@ -807,6 +832,123 @@ func TestRegression_HostHealthTimingConstantsAgree(t *testing.T) {
 			t.Errorf("login-probe-apply.yml's probe-round gate must read %q, the default prometheus-apply.yml uses", c.gate)
 		}
 	}
+}
+
+var jinjaStringLiteral = regexp.MustCompile(`'[^']*'|"[^"]*"`)
+
+// stringLeaves returns every string inside v (maps and lists walked).
+func stringLeaves(v any) []string {
+	switch x := v.(type) {
+	case string:
+		return []string{x}
+	case map[string]any:
+		var out []string
+		for _, e := range x {
+			out = append(out, stringLeaves(e)...)
+		}
+		return out
+	case []any:
+		var out []string
+		for _, e := range x {
+			out = append(out, stringLeaves(e)...)
+		}
+		return out
+	}
+	return nil
+}
+
+// probeRoundGateInclude marks the task that hands one side's settings to
+// the shared probe-round gate.
+const probeRoundGateInclude = "tasks/host-metrics-missing-probe-round-gate.yml"
+
+// probeRoundArithmeticOutsideGate checks that only the shared gate file
+// computes the probe-round bound (AGENTS.md §5.7). Each playbook reads the
+// other side's settings — prometheus-apply.yml the login-probe hosts'
+// interval and timeout, login-probe-apply.yml the Prometheus hosts' window
+// and scrape interval — only in its include of the gate, and passes them
+// through there as strings, without parsing or arithmetic.
+func probeRoundArithmeticOutsideGate(t *testing.T, prometheusApply, loginProbeApply string) []string {
+	t.Helper()
+	read := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	return probeRoundArithmeticIn(t, map[string]string{
+		filepath.Base(prometheusApply): read(prometheusApply),
+		filepath.Base(loginProbeApply): read(loginProbeApply),
+	})
+}
+
+// probeRoundArithmeticIn is probeRoundArithmeticOutsideGate on the playbooks'
+// contents, keyed by file name.
+func probeRoundArithmeticIn(t *testing.T, playbooks map[string]string) []string {
+	t.Helper()
+	numeric := regexp.MustCompile(`\|\s*(int|float|round)\b|regex_(search|findall|replace)|[)\]0-9a-z_]\s*[-+*/]\s*[(0-9a-z_]`)
+	var out []string
+	for _, side := range []struct {
+		path  string
+		other []string
+	}{
+		{"prometheus-apply.yml", []string{"login_probe_interval", "login_probe_total_timeout"}},
+		{"login-probe-apply.yml", []string{"host_metrics_missing_success_window", "prometheus_scrape_interval"}},
+	} {
+		src, ok := playbooks[side.path]
+		if !ok {
+			t.Fatalf("no contents for %s", side.path)
+		}
+		var plays []map[string]any
+		if err := yaml.Unmarshal([]byte(src), &plays); err != nil {
+			t.Fatal(err)
+		}
+		var walk func(tasks []any)
+		walk = func(tasks []any) {
+			for _, raw := range tasks {
+				task, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				for _, k := range []string{"block", "rescue", "always"} {
+					if sub, ok := task[k].([]any); ok {
+						walk(sub)
+					}
+				}
+				data, err := yaml.Marshal(task)
+				if err != nil {
+					t.Fatal(err)
+				}
+				text := string(data)
+				if inc, ok := task["ansible.builtin.include_tasks"].(map[string]any); ok && inc["file"] == probeRoundGateInclude {
+					for _, v := range stringLeaves(task["vars"]) {
+						// Jinja whitespace markers ({%- -%}) and string
+						// literals ('login-probe', '60s') are not arithmetic.
+						plain := strings.NewReplacer("{%-", "{%", "-%}", "%}", "{{-", "{{", "-}}", "}}").Replace(v)
+						plain = jinjaStringLiteral.ReplaceAllString(plain, "''")
+						if m := numeric.FindString(plain); m != "" {
+							out = append(out, fmt.Sprintf("%s: the include of the probe-round gate converts or computes (%q); pass the settings through as strings", side.path, m))
+						}
+					}
+					continue
+				}
+				for _, name := range side.other {
+					if regexp.MustCompile(`\b` + name + `\b`).MatchString(text) {
+						n, _ := task["name"].(string)
+						out = append(out, fmt.Sprintf("%s: task %q reads %s outside the include of the probe-round gate", side.path, n, name))
+					}
+				}
+			}
+		}
+		for _, play := range plays {
+			for _, k := range []string{"pre_tasks", "tasks", "post_tasks", "handlers"} {
+				if tasks, ok := play[k].([]any); ok {
+					walk(tasks)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // runnableTasks rewrites the relative include_tasks paths of tasks taken
@@ -958,10 +1100,31 @@ func TestRegression_LoginProbeChecksTheHostMetricsMissingWindow(t *testing.T) {
 // parser to the format contracts/login-probe.yaml allows (AGENTS.md §5.7):
 // the login-probe durations are Go durations, so every value
 // time.ParseDuration accepts with a positive result must parse to the same
-// number of seconds, and the rest must be refused.
+// number of seconds, and every other value must be refused — with two
+// known exceptions, locked at their actual outcome below and tracked as gate
+// hardening in GitHub issue #123:
+//
+//   - "60s\n": the gate's `$` also matches before a trailing newline, so it
+//     parses as 60 s, which time.ParseDuration rejects. An inventory value
+//     reaches the gate without it (a plain YAML scalar has no trailing
+//     newline);
+//   - "2562048h": time.ParseDuration rejects the overflow, while the gate
+//     parses it and then refuses it, because it needs a window far longer
+//     than any Prometheus host has.
 func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 	values := []string{"60s", "1m", "1m30s", "1.5m", "0.75m", "90s", "1h", "500ms", "2m0s", "1m30.5s", ".5h", "1.s",
-		"100us", "100µs", "1h2m3s4ms", "60", "1d", "-1s", "+1s", "1m30", "0s", "0", "s", "1 m", "1M", ""}
+		"100us", "100µs", "1h2m3s4ms", "60", "1d", "-1s", "+1s", "1m30", "0s", "0", "s", "1 m", "1M", "",
+		"60s\n", "2562048h"}
+	// The exceptions: what the gate does with them (parsed, seconds, pair ok).
+	type outcome struct {
+		parsed  bool
+		seconds float64
+		ok      bool
+	}
+	known := map[string]outcome{
+		"60s\n":    {true, 60, true},
+		"2562048h": {true, 2562048 * 3600, false},
+	}
 	gate, err := filepath.Abs(hostMetricsMissingRoundGate)
 	if err != nil {
 		t.Fatal(err)
@@ -988,6 +1151,7 @@ func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 		Probe           string  `json:"probe"`
 		IntervalSeconds float64 `json:"interval_seconds"`
 		Parsed          bool    `json:"parsed"`
+		OK              bool    `json:"ok"`
 	}
 	if err := json.Unmarshal(data, &pairs); err != nil {
 		t.Fatal(err)
@@ -996,6 +1160,16 @@ func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 		t.Fatalf("got %d pairs, want %d", len(pairs), len(values))
 	}
 	for i, v := range values {
+		if want, ok := known[v]; ok {
+			if _, err := time.ParseDuration(v); err == nil {
+				t.Errorf("%q: time.ParseDuration now accepts it; it is no longer an exception", v)
+			}
+			got := outcome{pairs[i].Parsed, pairs[i].IntervalSeconds, pairs[i].OK}
+			if got.parsed != want.parsed || math.Abs(got.seconds-want.seconds) > 1e-3 || got.ok != want.ok {
+				t.Errorf("%q: gate gave parsed=%v seconds=%v ok=%v, want %+v", v, got.parsed, got.seconds, got.ok, want)
+			}
+			continue
+		}
 		d, err := time.ParseDuration(v)
 		goOK := err == nil && d > 0
 		if pairs[i].Parsed != goOK {
@@ -1004,6 +1178,148 @@ func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 		}
 		if goOK && math.Abs(pairs[i].IntervalSeconds-d.Seconds()) > 1e-6 {
 			t.Errorf("%q: gate = %v s, time.ParseDuration = %v s", v, pairs[i].IntervalSeconds, d.Seconds())
+		}
+	}
+}
+
+// hostHealthTimingAssumptionViolations checks the Prometheus settings the
+// timing gates assume against prometheus-apply.yml (apply), the seed rules
+// (seed) and the host-health rules template (template):
+//
+//   - the 9m cap on host_metrics_missing_for assumes the default 1m
+//     evaluation interval: neither rendered prometheus.yml sets
+//     evaluation_interval, and no rule group sets interval:;
+//   - the probe-round gate uses the global prometheus_scrape_interval as the
+//     node job's: each rendered prometheus.yml has exactly one
+//     scrape_interval, `{{ prometheus_scrape_interval }}`, and the node
+//     scrape job sets none of its own.
+func hostHealthTimingAssumptionViolations(t *testing.T, apply, seed, template string) []string {
+	t.Helper()
+	var out []string
+	var plays []map[string]any
+	if err := yaml.Unmarshal([]byte(apply), &plays); err != nil {
+		t.Fatal(err)
+	}
+	var renders []string
+	nodeBlock := ""
+	var walk func(tasks []any)
+	walk = func(tasks []any) {
+		for _, raw := range tasks {
+			task, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, k := range []string{"block", "rescue", "always"} {
+				if sub, ok := task[k].([]any); ok {
+					walk(sub)
+				}
+			}
+			name, _ := task["name"].(string)
+			if copyArgs, ok := task["ansible.builtin.copy"].(map[string]any); ok && strings.HasPrefix(name, "Render prometheus.yml") {
+				content, _ := copyArgs["content"].(string)
+				renders = append(renders, content)
+			}
+			if facts, ok := task["ansible.builtin.set_fact"].(map[string]any); ok {
+				if v, ok := facts["prometheus_node_exporter_scrape_block"].(string); ok {
+					nodeBlock = v
+				}
+			}
+		}
+	}
+	for _, play := range plays {
+		for _, k := range []string{"pre_tasks", "tasks"} {
+			if tasks, ok := play[k].([]any); ok {
+				walk(tasks)
+			}
+		}
+	}
+	if len(renders) != 2 {
+		out = append(out, fmt.Sprintf("prometheus-apply.yml: found %d \"Render prometheus.yml\" tasks, want 2", len(renders)))
+	}
+	evalRe := regexp.MustCompile(`(?m)^\s*evaluation_interval:`)
+	scrapeRe := regexp.MustCompile(`(?m)^\s*scrape_interval:\s*(.*?)\s*$`)
+	for i, c := range renders {
+		if evalRe.MatchString(c) {
+			out = append(out, fmt.Sprintf("rendered prometheus.yml #%d sets evaluation_interval; the 9m host_metrics_missing_for cap assumes the 1m default", i+1))
+		}
+		got := scrapeRe.FindAllStringSubmatch(c, -1)
+		if len(got) != 1 || got[0][1] != "{{ prometheus_scrape_interval }}" {
+			out = append(out, fmt.Sprintf("rendered prometheus.yml #%d scrape_interval lines = %v; the probe-round gate assumes exactly the global `{{ prometheus_scrape_interval }}`", i+1, got))
+		}
+	}
+	if nodeBlock == "" {
+		out = append(out, "prometheus-apply.yml: no set_fact of prometheus_node_exporter_scrape_block")
+	} else if strings.Contains(nodeBlock, "scrape_interval") || strings.Contains(nodeBlock, "evaluation_interval") {
+		out = append(out, "the node scrape job sets its own scrape_interval; the probe-round gate uses the global prometheus_scrape_interval")
+	}
+	var seedRules struct {
+		Groups []map[string]any `yaml:"groups"`
+	}
+	if err := yaml.Unmarshal([]byte(seed), &seedRules); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range seedRules.Groups {
+		if _, ok := g["interval"]; ok {
+			out = append(out, fmt.Sprintf("seed rule group %v sets interval:; the 9m cap assumes the 1m default", g["name"]))
+		}
+	}
+	// Group keys sit at four spaces in the template (rule keys at eight).
+	if m := regexp.MustCompile(`(?m)^    interval:`).FindString(template); m != "" {
+		out = append(out, "a host-health rule group sets interval:; the 9m cap assumes the 1m default")
+	}
+	return out
+}
+
+// TestRegression_HostHealthTimingAssumptionsMatchTheRenderedConfig ties the
+// timing gates' Prometheus assumptions to the config prometheus-apply.yml
+// actually renders (AGENTS.md §5.7, PR #80 review): no evaluation_interval
+// and no rule-group interval (the 9m cap assumes the 1m default), and no
+// node-job scrape_interval (the probe-round gate's scrape input is the
+// global prometheus_scrape_interval). Each assumption is also broken on
+// purpose, to show the check catches it (§5.12).
+func TestRegression_HostHealthTimingAssumptionsMatchTheRenderedConfig(t *testing.T) {
+	read := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	apply, seed, template := read(hostHealthApply), read(alertRulesSeed), read(hostHealthTemplate)
+	for _, msg := range hostHealthTimingAssumptionViolations(t, apply, seed, template) {
+		t.Error(msg)
+	}
+	mutate := func(s, old, new string) string {
+		t.Helper()
+		if !strings.Contains(s, old) {
+			t.Fatalf("mutation anchor %q not found", old)
+		}
+		return strings.ReplaceAll(s, old, new)
+	}
+	for _, m := range []struct {
+		name                  string
+		apply, seed, template string
+	}{
+		{"evaluation_interval in prometheus.yml", mutate(apply,
+			"                scrape_interval: {{ prometheus_scrape_interval }}\n",
+			"                scrape_interval: {{ prometheus_scrape_interval }}\n                evaluation_interval: 30s\n"), seed, template},
+		{"a literal global scrape_interval", mutate(apply,
+			"                scrape_interval: {{ prometheus_scrape_interval }}\n",
+			"                scrape_interval: 30s\n"), seed, template},
+		{"a node-job scrape_interval", mutate(apply,
+			"{{ ([{'job_name': 'node',",
+			"{{ ([{'job_name': 'node', 'scrape_interval': '30s',"), seed, template},
+		{"a seed rule-group interval", apply, mutate(seed,
+			"  - name: pilot-seed\n",
+			"  - name: pilot-seed\n    interval: 30s\n"), template},
+		{"a host-health rule-group interval", apply, seed, mutate(template,
+			"  - name: pilot-host-telemetry\n",
+			"  - name: pilot-host-telemetry\n    interval: 30s\n")},
+	} {
+		if got := hostHealthTimingAssumptionViolations(t, m.apply, m.seed, m.template); len(got) == 0 {
+			t.Errorf("mutation %q: the check found nothing", m.name)
+		} else {
+			t.Logf("mutation %q caught: %s", m.name, got[0])
 		}
 	}
 }
