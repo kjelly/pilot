@@ -20,9 +20,9 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-16）**：candidate `56c7582`（PR #79），3 台全新 vm-target
+> **目前有效的驗證摘要（2026-10-16）**：candidate `71ec617`（PR #79），3 台全新 vm-target
 > （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`siem_log_root: /srv/siem`
-> 放在 checkout 外的 inventory group_vars。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.8）、
+> 放在 checkout 外的 inventory group_vars。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.9）、
 > log-shipping 9/9（v1.5）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
 > - C6–C8 從接收設定的 `SiemAuditPath` 讀出實際生效的根目錄，C7/C8 只認這次送出的 nonce 訊息：
 >   rsyslog 停掉、兩個目錄都留有舊的固定字串時 C7/C8 FAIL，重新啟動後 11/11；拿掉 `siem_log_root`
@@ -41,8 +41,16 @@
 >   - EL：`var_log_t` file context，看目錄實際的 type 決定要不要 `restorecon`。AlmaLinux 上
 >     `--check --diff`（全新主機）、套用、`--tags C7`、目錄重建後重跑都實測過；`pilot verify` 10/11，
 >     只有 C1 失敗：它用 `dpkg`，spec §1 目標是 Ubuntu。
-> - apply 失敗時 rescue 把兩個 drop-in 與 AppArmor local 檔還原成這次 run 之前的內容（這次才建的就移除），
->   重新載入 profile，移除這次加的 SELinux 規則；`rsyslogd -N1` 接受還原後的設定才重啟 rsyslog。
+>   - 換根目錄（Ubuntu）：Step 2a 保留 AppArmor 區塊裡現有的規則、再加上新根目錄的規則；Step 7 確認 rsyslog
+>     在跑、啟動時間晚於接收設定、rsyslogd 在接收 port 監聽之後，Step 7a 才只留新根目錄的規則。rsyslog 啟動時間
+>     早於接收設定（上次 run 中斷，或 rescue 還原設定卻無法重啟）時，Step 6a 也重啟。舊根目錄的 SELinux 規則刻意保留。
+>   - 換根目錄時持續送訊息實測（`pr79-client` 每 0.1 秒一筆、20 個 HOSTNAME 直送接收端）：`56c7582` 成功的 run
+>     掉 30/299 筆、在重新載入後重啟前失敗的 run 掉 41/300 筆（接收端記錄 62、156 筆 `Permission denied`）；
+>     `71ec617` 在成功、重啟前失敗、重啟後失敗（rescue 能重啟或不能重啟）四種 run 都沒有掉、沒有 `Permission denied`。
+>     EL 兩個版本都沒有因 SELinux 掉訊息。
+> - apply 失敗時 rescue 把兩個 drop-in 還原成這次 run 之前的內容（這次才建的就移除），移除這次加的 SELinux 規則；
+>   AppArmor local 檔先同時授權這次 run 之前與這次 run 的規則並重新載入，`rsyslogd -N1` 接受還原後的設定才重啟
+>   rsyslog；rsyslog 跑的是舊規則涵蓋的設定時才把 local 檔還原，接收設定也回到原本的修改時間（之後重跑 changed=0）。
 >   - 失敗原因是別的無效 drop-in 時，rescue 不重啟，原本的 rsyslog 繼續正常運作（11/11）。Ubuntu 上實測了
 >     語法錯誤、不認得的指令、找不到的 template、`omfwd` 不合法的 protocol；AlmaLinux 上實測了語法錯誤、
 >     不認得的指令、`omfwd`。
@@ -52,8 +60,8 @@
 >     例如 `input()` 的 module 沒載入時是「input module name … is unknown」，不是後面的 `parameter … not known`；
 >     未結束的區塊會被算在 `/etc/rsyslog.conf` 上。
 >   - 失敗原因在這次 run 自己（`siem_logrotate_maxage=abc` 讓 Step 4 失敗）時，還原後的設定通過檢查，rescue 重啟 rsyslog（11/11）。
-> - 已知缺口（Ubuntu）：改根目錄的 run 在 Step 2a 重新載入 AppArmor profile 後、rsyslog 重啟前（失敗時則到 rescue
->   重新載入前），正在跑的 rsyslogd 不能寫舊的根目錄，這段時間收到的訊息會遺失（實測遺失 2 筆）。EL 不受影響。
+> - 已知缺口（兩個版本、`main` 都有）：接收端 rsyslog 重啟時，client 的轉送若剛好在重啟中重連，會暫停 30 秒、
+>   這段時間的訊息丟掉（實測 130–138 筆，四次重啟中三次發生）；EL 的 rsyslog 重啟約 3.7–3.9 秒拒絕連線。
 > - `pilot deploy` 以 workspace inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30`
 >   （沒加引號）：preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，
 >   log-server.md 11/11。修正前的 `31f97a6` 用同樣的輸入在套用前就以 `must be string` 拒絕。
@@ -69,7 +77,7 @@
 >
 > 這些 gate 由 Ansible 實跑的 regression test 鎖住；VM 上的逐項實測只在較早的 candidate 做過，
 > 不算這個 candidate 的證據。
-> 紀錄：[`2026-10-16-56c7582.md`](../evidence/play-vars-inventory-precedence/2026-10-16-56c7582.md)。
+> 紀錄：[`2026-10-16-71ec617.md`](../evidence/play-vars-inventory-precedence/2026-10-16-71ec617.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
