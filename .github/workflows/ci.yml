@@ -38,13 +38,11 @@ jobs:
         run: go build ./...
 
       - name: go test
-        # -timeout: go test's default is 10m per package. Under -race here,
-        # internal/spec now takes 12-15m (738-895 s across 2026-10-15 runs;
-        # one PR run hit the old 15m limit at 900 s) and cmd/pilot/cmd 7-8m.
-        # 30m keeps about a 2x margin for the slowest package and still fires
-        # before the job's 40-minute limit, so a hung test ends in a Go stack
-        # dump that names it, not a silent job cancellation.
-        run: go test -race -count=1 -timeout 30m ./...
+        # The flags, including go test's -timeout (30m), live in the Makefile.
+        # This job's timeout-minutes stays above that -timeout plus setup, so
+        # a hung test ends in a Go stack dump that names it, not a silent job
+        # cancellation (TestCIGoTestTimeoutFiresBeforeJobLimit).
+        run: make test-race
 
       - name: Install PyYAML
         run: python3 -m pip install pyyaml
