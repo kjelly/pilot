@@ -13,6 +13,12 @@ inactive
 environment: line 6: resolvectl: command not found
 @@pilot-dnsarch resolvectl end rc=127
 @@pilot-dnsarch first_hop begin
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOTIMP, id: 65332
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
 @@pilot-dnsarch first_hop end rc=0
 @@pilot-dnsarch lookup begin
 ::1             localhost localhost.localdomain localhost6 localhost6.localdomain6

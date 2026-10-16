@@ -59,7 +59,7 @@ go run ./cmd/pilot vm-target test --name <vm> \
 - **TUI 測試**：`edit`/`deploy` 的 Bubble Tea 流程有三層——model 單元測試、
   teatest 整合測試、真實 binary PTY E2E。PTY 測試在互動 shell 下會誤判,
   一律 `CI=1 go test ./cmd/pilot/cmd/`。
-- **race detector**：`make test-race`（= `go test -race -count=1 ./...`）。
+- **race detector**：`make test-race`（= `go test -race -count=1 -timeout 30m ./...`，CI 跑的就是這個 target）。
 - **Python callback**：`make test-callback`。
 - **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /
   `mcp_test.go` 用真的 MCP client（非 mock handler）對編譯出的 `pilot` binary

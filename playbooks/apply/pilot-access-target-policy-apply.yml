@@ -388,73 +388,101 @@
           when: not ansible_check_mode
           tags: [TP02]
 
-        # Only after the policy is verified: make the host transport-ready.
-        - name: "Kinit admin (FreeIPA hostgroup membership only)"
-          ansible.builtin.command:
-            argv: [kinit, admin]
-            stdin: "{{ ipa_admin_password }}"
-          changed_when: false
-          no_log: true
-          when: not ansible_check_mode
+        # The admin ticket lives in a private cache, destroyed in always: whether the
+        # ipa calls succeed or fail (issue #69). Before, it went to root's default
+        # cache, and a failed ipa call skipped the kdestroy.
+        - name: "Join the transport-ready hostgroup with a private Kerberos cache"
+          environment:
+            KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+          block:
+            - name: "Private Kerberos cache for the tickets below (issue #69)"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-open.yml
+                apply:
+                  tags: [always]
+              tags: [always]
 
-        - name: "Ensure the {{ pilot_access_target_ready_hostgroup }} hostgroup exists"
-          ansible.builtin.command:
-            argv: [ipa, hostgroup-add, "{{ pilot_access_target_ready_hostgroup }}", "--desc=Pilot captive SSH transport targets with a verified sshd forwarding policy"]
-          register: pilot_access_target_hostgroup_add
-          changed_when: "'Added hostgroup' in (pilot_access_target_hostgroup_add.stdout | default(''))"
-          failed_when:
-            - pilot_access_target_hostgroup_add.rc != 0
-            - "'already exists' not in (pilot_access_target_hostgroup_add.stderr | default(''))"
-          when: not ansible_check_mode
+            # Only after the policy is verified: make the host transport-ready.
+            - name: "Kinit admin (FreeIPA hostgroup membership only)"
+              ansible.builtin.command:
+                argv: [kinit, admin]
+                stdin: "{{ ipa_admin_password }}"
+              changed_when: false
+              no_log: true
+              when: not ansible_check_mode
 
-        - name: "Add this host to {{ pilot_access_target_ready_hostgroup }}"
-          ansible.builtin.command:
-            argv: [ipa, hostgroup-add-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
-          register: pilot_access_target_member_add
-          changed_when: "'Number of members added 1' in (pilot_access_target_member_add.stdout | default(''))"
-          failed_when:
-            - pilot_access_target_member_add.rc != 0
-            - "'already a member' not in (pilot_access_target_member_add.stdout | default(''))"
-          when: not ansible_check_mode
+            - name: "Ensure the {{ pilot_access_target_ready_hostgroup }} hostgroup exists"
+              ansible.builtin.command:
+                argv: [ipa, hostgroup-add, "{{ pilot_access_target_ready_hostgroup }}", "--desc=Pilot captive SSH transport targets with a verified sshd forwarding policy"]
+              register: pilot_access_target_hostgroup_add
+              changed_when: "'Added hostgroup' in (pilot_access_target_hostgroup_add.stdout | default(''))"
+              failed_when:
+                - pilot_access_target_hostgroup_add.rc != 0
+                - "'already exists' not in (pilot_access_target_hostgroup_add.stderr | default(''))"
+              when: not ansible_check_mode
 
-        - name: "Release the Kerberos ticket"
-          ansible.builtin.command: kdestroy
-          changed_when: false
-          failed_when: false
-          when: not ansible_check_mode
+            - name: "Add this host to {{ pilot_access_target_ready_hostgroup }}"
+              ansible.builtin.command:
+                argv: [ipa, hostgroup-add-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
+              register: pilot_access_target_member_add
+              changed_when: "'Number of members added 1' in (pilot_access_target_member_add.stdout | default(''))"
+              failed_when:
+                - pilot_access_target_member_add.rc != 0
+                - "'already a member' not in (pilot_access_target_member_add.stdout | default(''))"
+              when: not ansible_check_mode
+          always:
+            - name: "Destroy the private Kerberos cache"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-close.yml
+                apply:
+                  tags: [always]
+              tags: [always]
 
     # ---- absent: leave pilot-transport-ready FIRST, then drop the policy --
     - name: "Target policy — absent"
       when: pilot_access_target_effective_policy_state == 'absent'
       tags: [pilot-access-target-policy]
       block:
-        - name: "Kinit admin (FreeIPA hostgroup membership only)"
-          ansible.builtin.command:
-            argv: [kinit, admin]
-            stdin: "{{ ipa_admin_password }}"
-          changed_when: false
-          no_log: true
-          when: not ansible_check_mode
+        # Same private cache as the present path (issue #69).
+        - name: "Leave the transport-ready hostgroup with a private Kerberos cache"
+          environment:
+            KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+          block:
+            - name: "Private Kerberos cache for the tickets below (issue #69)"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-open.yml
+                apply:
+                  tags: [always]
+              tags: [always]
 
-        # rc=1 "This entry is not a member" and rc=2 "host group not found"
-        # both mean "already not transport-ready" (real output: Phase 0
-        # evidence §4).
-        - name: "Remove this host from {{ pilot_access_target_ready_hostgroup }}"
-          ansible.builtin.command:
-            argv: [ipa, hostgroup-remove-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
-          register: pilot_access_target_member_remove
-          changed_when: "'Number of members removed 1' in (pilot_access_target_member_remove.stdout | default(''))"
-          failed_when:
-            - pilot_access_target_member_remove.rc != 0
-            - "'is not a member' not in (pilot_access_target_member_remove.stdout | default(''))"
-            - "'host group not found' not in (pilot_access_target_member_remove.stderr | default(''))"
-          when: not ansible_check_mode
+            - name: "Kinit admin (FreeIPA hostgroup membership only)"
+              ansible.builtin.command:
+                argv: [kinit, admin]
+                stdin: "{{ ipa_admin_password }}"
+              changed_when: false
+              no_log: true
+              when: not ansible_check_mode
 
-        - name: "Release the Kerberos ticket"
-          ansible.builtin.command: kdestroy
-          changed_when: false
-          failed_when: false
-          when: not ansible_check_mode
+            # rc=1 "This entry is not a member" and rc=2 "host group not found"
+            # both mean "already not transport-ready" (real output: Phase 0
+            # evidence §4).
+            - name: "Remove this host from {{ pilot_access_target_ready_hostgroup }}"
+              ansible.builtin.command:
+                argv: [ipa, hostgroup-remove-member, "{{ pilot_access_target_ready_hostgroup }}", "--hosts={{ pilot_access_target_fqdn }}"]
+              register: pilot_access_target_member_remove
+              changed_when: "'Number of members removed 1' in (pilot_access_target_member_remove.stdout | default(''))"
+              failed_when:
+                - pilot_access_target_member_remove.rc != 0
+                - "'is not a member' not in (pilot_access_target_member_remove.stdout | default(''))"
+                - "'host group not found' not in (pilot_access_target_member_remove.stderr | default(''))"
+              when: not ansible_check_mode
+          always:
+            - name: "Destroy the private Kerberos cache"
+              ansible.builtin.include_tasks:
+                file: tasks/freeipa-private-ccache-close.yml
+                apply:
+                  tags: [always]
+              tags: [always]
 
         # Remove, `sshd -t`, reload as one block, the reload last. If
         # `sshd -t` or the reload fails, the rescue puts the drop-in back,

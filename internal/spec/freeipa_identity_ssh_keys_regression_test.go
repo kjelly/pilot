@@ -35,10 +35,29 @@ func sshKeysTask(t *testing.T) map[string]any {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range plays[0]["tasks"].([]any) {
-		if task, ok := r.(map[string]any); ok && task["name"] == sshKeysTaskName {
-			return task
+	// The task sits inside the private Kerberos cache block (issue #69).
+	var find func(tasks []any) map[string]any
+	find = func(tasks []any) map[string]any {
+		for _, r := range tasks {
+			task, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			if task["name"] == sshKeysTaskName {
+				return task
+			}
+			for _, section := range []string{"block", "rescue", "always"} {
+				if inner, ok := task[section].([]any); ok {
+					if found := find(inner); found != nil {
+						return found
+					}
+				}
+			}
 		}
+		return nil
+	}
+	if task := find(plays[0]["tasks"].([]any)); task != nil {
+		return task
 	}
 	t.Fatalf("task %q not found", sshKeysTaskName)
 	return nil
