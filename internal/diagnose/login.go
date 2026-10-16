@@ -35,6 +35,10 @@ func LoginSteps(host string, users []string) []Step {
 		steps = append(steps,
 			Step{ID: "getent-passwd:" + user, Description: fmt.Sprintf("NSS passwd entry for %s", user), Module: "command", Command: fmt.Sprintf("getent passwd %s", user)},
 			Step{ID: "sudo-l:" + user, Description: fmt.Sprintf("central FreeIPA sudo rule grants %s access", user), Module: "command", Command: fmt.Sprintf("sudo -l -U %s", user)},
+			// Auxiliary PAM account check through sshd's own stack (GitHub
+			// issue #11 R4): it shows HBAC/disabled-account denials, but the
+			// login probe's real SSH login stays the availability signal.
+			Step{ID: "pam-acct-sshd:" + user, Description: fmt.Sprintf("PAM account management for %s through the sshd service (sssctl user-checks)", user), Module: "command", Command: fmt.Sprintf("sudo sssctl user-checks -a acct -s sshd %s", user)},
 		)
 	}
 	return steps
@@ -121,7 +125,30 @@ type LoginUserOutput struct {
 	AccountResolvesViaSSSD      bool
 	PasswdEntry                 string
 	CentralSudoRuleGrantsAccess bool
-	Verdict                     string
+	// PamAccountChecked is true when sssctl user-checks reported a
+	// pam_acct_mgmt result; PamAccountAllowed is that result being
+	// "Success"; PamAccountResult is the result text itself.
+	PamAccountChecked bool
+	PamAccountAllowed bool
+	PamAccountResult  string
+	Verdict           string
+}
+
+// pamAcctResultRe matches sssctl user-checks' verdict line. sssctl prints
+// it on stderr and exits 0 whatever the result (captured 2026-10-13 against
+// SSSD 2.9.4: "pam_acct_mgmt: Success", "pam_acct_mgmt: Permission denied",
+// "pam_acct_mgmt: Authentication failure" for an unknown user), so neither
+// the exit status nor stdout alone can say whether the account is allowed.
+var pamAcctResultRe = regexp.MustCompile(`(?m)^pam_acct_mgmt: (.+?)\r?$`)
+
+// parsePamAcctResult returns sssctl user-checks' pam_acct_mgmt result.
+func parsePamAcctResult(r AdHocResult) (string, bool) {
+	for _, stream := range []string{r.Stderr, r.Stdout} {
+		if m := pamAcctResultRe.FindStringSubmatch(stream); m != nil {
+			return strings.TrimSpace(m[1]), true
+		}
+	}
+	return "", false
 }
 
 // BuildLoginUserOutput synthesizes one user's LoginUserOutput.
@@ -161,12 +188,21 @@ func BuildLoginUserOutput(user, host string, hostOut LoginHostOutput, results []
 	if r, ok := find("sudo-l:" + user); ok && r.Result.RunErr == nil {
 		out.CentralSudoRuleGrantsAccess = r.Result.RC == 0
 	}
+	if r, ok := find("pam-acct-sshd:" + user); ok && r.Result.RunErr == nil {
+		if result, found := parsePamAcctResult(r.Result); found {
+			out.PamAccountChecked = true
+			out.PamAccountResult = result
+			out.PamAccountAllowed = result == "Success"
+		}
+	}
 
 	switch {
 	case !hostOut.SssdActive || !hostOut.HasKerberosMachineIdentity:
 		out.Verdict = fmt.Sprintf("a host-level failure blocks every user, including %q — see the host verdict", user)
 	case !out.AccountResolvesViaSSSD:
 		out.Verdict = fmt.Sprintf("sssd cannot resolve user %q on this host (getent passwd found nothing) — the account doesn't exist here or sssd's cache is stale", user)
+	case out.PamAccountChecked && !out.PamAccountAllowed:
+		out.Verdict = fmt.Sprintf("PAM account management for sshd denies %q on this host (sssctl user-checks: pam_acct_mgmt: %s) — no enabled HBAC rule allows sshd for this user on this host, or the account is disabled in FreeIPA; SSH logins are refused after the key or password is accepted", user, out.PamAccountResult)
 	case rosterAvailable && out.RosterSudoAuthorized && !out.CentralSudoRuleGrantsAccess:
 		out.Verdict = fmt.Sprintf("roster declares a sudo rule for %q on this host, but live `sudo -l -U` reports none — the rule likely hasn't reconciled onto this host yet", user)
 	case rosterAvailable && !out.RosterSudoAuthorized && out.CentralSudoRuleGrantsAccess:

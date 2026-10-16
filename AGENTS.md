@@ -437,7 +437,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 40 支**都有 `stage`/`confirm_staging`/
+`playbooks/apply/*.yml` 現在**全部 41 支**都有 `stage`/`confirm_staging`/
 `confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`dns`、`docker`、
 `freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
 `freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
@@ -446,7 +446,7 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
-`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`)。
+`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`、`login-probe`)。
 `freeipa-server-replica`、
 `freeipa-realm-replacement`、
 `freeipa-dns`、`freeipa-dns-client`、`freeipa-ca-trust`、`internal-endpoint`、`agent-controller` 與後五支可觀測性堆疊一樣是**還沒接進
@@ -1486,3 +1486,4 @@ git status --short
 | 2026-10-13 | v1.48 | §4.5 第 3 點、§5.7:15 支 apply playbook 把 60 個 contract `groupVars` 或 `group_vars/<role>.example.yml` 記載的變數宣告在 play `vars:`,蓋掉 inventory 的值(agent-controller、dashboard、dcgm-exporter、detection-engine、freeipa-client、gateway-scope、host-monitoring、log-shipping、pilot-session-store、prometheus、restic-backup、snmp-exporter、thanos-query、wazuh-fim、wazuh-manager);改用 stage gate 之後的 `always` `set_fact` 補預設值(必填 secret 與已在讀取處 `default()` 的變數只移除),預設值不變。新增全 repo lint `TestRegression_ApplyPlayVarsDoNotShadowInventoryInputs` 與在 localhost 實際跑 Ansible 的 `TestRegression_InventoryInputsReachThePlay` | pilot |
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
 | 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |
+| 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |

@@ -48,6 +48,21 @@ groupVars:
   - {name: dcgm_exporter_targets, type: stringList, required: false, secret: false}
   - {name: dcgm_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
   - {name: dcgm_exporter_basic_auth_password, type: string, required: false, secret: true}
+  # Host-health + login-probe alert rules (GitHub issue #11; rendered from
+  # playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2).
+  - {name: prometheus_host_health_alert_rules_enabled, type: boolean, required: false, default: true, secret: false}
+  - {name: host_io_stall_ratio_threshold, type: string, required: false, default: "0.25", secret: false, validation: "^[0-9]+([.][0-9]+)?$"}
+  - {name: host_io_stall_for, type: string, required: false, default: "10m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: host_disk_latency_seconds_threshold, type: string, required: false, default: "0.1", secret: false, validation: "^[0-9]+([.][0-9]+)?$"}
+  - {name: host_disk_latency_min_ops_per_second, type: string, required: false, default: "1", secret: false, validation: "^[0-9]+([.][0-9]+)?$"}
+  - {name: host_disk_queue_depth_threshold, type: string, required: false, default: "10", secret: false, validation: "^[0-9]+([.][0-9]+)?$"}
+  - {name: host_disk_latency_for, type: string, required: false, default: "10m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: host_metrics_missing_for, type: string, required: false, default: "3m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: host_metrics_missing_success_window, type: string, required: false, default: "150s", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: login_probe_alert_for, type: string, required: false, default: "3m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: login_probe_transport_alert_for, type: string, required: false, default: "5m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: login_probe_alert_keep_firing_for, type: string, required: false, default: "5m", secret: false, validation: "^[0-9]+(ms|s|m|h|d)$"}
+  - {name: login_probe_stale_seconds, type: integer, required: false, default: 180, secret: false}
 endpoints:
   - {name: prometheus, scheme: http, port: 9090, autoPublish: {eligible: false, reason: "no auth of its own; publishing this operational surface through the shared reverse-proxy would put unauthenticated metrics on the same trust boundary as user-facing apps"}}
   - {name: sidecar, scheme: grpc, port: 10901}

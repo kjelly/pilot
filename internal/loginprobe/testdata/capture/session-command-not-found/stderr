@@ -1,0 +1,57 @@
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.16, OpenSSL 3.0.13 30 Jan 2024
+debug1: Reading configuration data /etc/pilot/login-probe/ssh_config
+debug1: /etc/pilot/login-probe/ssh_config line 2: Applying options for *
+debug1: Executing proxy command: exec /usr/bin/sss_ssh_knownhostsproxy -p 22 lp-target.ipa.pilot.internal
+debug1: identity file /etc/pilot/login-probe/id_ed25519 type 3
+debug1: identity file /etc/pilot/login-probe/id_ed25519-cert type -1
+debug1: Local version string SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16
+debug1: Remote protocol version 2.0, remote software version OpenSSH_9.6p1 Ubuntu-3ubuntu13.16
+debug1: compat_banner: match: OpenSSH_9.6p1 Ubuntu-3ubuntu13.16 pat OpenSSH* compat 0x04000000
+debug1: Authenticating to lp-target.ipa.pilot.internal:22 as 'pilot-login-canary'
+debug1: SSH2_MSG_KEXINIT sent
+debug1: SSH2_MSG_KEXINIT received
+debug1: kex: algorithm: sntrup761x25519-sha512@openssh.com
+debug1: kex: host key algorithm: ssh-ed25519
+debug1: kex: server->client cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: kex: client->server cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: expecting SSH2_MSG_KEX_ECDH_REPLY
+debug1: SSH2_MSG_KEX_ECDH_REPLY received
+debug1: Server host key: ssh-ed25519 SHA256:z/MA9rYUb5a4Y9nI9oFlGk4rM9UIRUE/6RzzaHkscf8
+debug1: Host 'lp-target.ipa.pilot.internal' is known and matches the ED25519 host key.
+debug1: Found key in /var/lib/sss/pubconf/known_hosts:7
+debug1: ssh_packet_send2_wrapped: resetting send seqnr 3
+debug1: rekey out after 134217728 blocks
+debug1: SSH2_MSG_NEWKEYS sent
+debug1: Sending SSH2_MSG_EXT_INFO
+debug1: expecting SSH2_MSG_NEWKEYS
+debug1: ssh_packet_read_poll2: resetting read seqnr 3
+debug1: SSH2_MSG_NEWKEYS received
+debug1: rekey in after 134217728 blocks
+debug1: SSH2_MSG_EXT_INFO received
+debug1: kex_ext_info_client_parse: server-sig-algs=<ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256>
+debug1: kex_ext_info_check_ver: publickey-hostbound@openssh.com=<0>
+debug1: kex_ext_info_check_ver: ping@openssh.com=<0>
+debug1: SSH2_MSG_SERVICE_ACCEPT received
+debug1: SSH2_MSG_EXT_INFO received
+debug1: kex_ext_info_client_parse: server-sig-algs=<ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com,rsa-sha2-512,rsa-sha2-256>
+debug1: Authentications that can continue: publickey,gssapi-keyex,gssapi-with-mic,password,keyboard-interactive
+debug1: Next authentication method: publickey
+debug1: Will attempt key: /etc/pilot/login-probe/id_ed25519 ED25519 SHA256:PQLw+gZW4q5C8A5UwIR3pS2k4itPZar0lWQUXf0wYRA explicit
+debug1: Offering public key: /etc/pilot/login-probe/id_ed25519 ED25519 SHA256:PQLw+gZW4q5C8A5UwIR3pS2k4itPZar0lWQUXf0wYRA explicit
+debug1: Server accepts key: /etc/pilot/login-probe/id_ed25519 ED25519 SHA256:PQLw+gZW4q5C8A5UwIR3pS2k4itPZar0lWQUXf0wYRA explicit
+Authenticated to lp-target.ipa.pilot.internal (via proxy) using "publickey".
+debug1: channel 0: new session [client-session] (inactive timeout: 0)
+debug1: Requesting no-more-sessions@openssh.com
+debug1: Entering interactive session.
+debug1: pledge: proc
+debug1: client_input_global_request: rtype hostkeys-00@openssh.com want_reply 0
+debug1: Remote: /usr/bin/sss_ssh_authorizedkeys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding
+debug1: Remote: /usr/bin/sss_ssh_authorizedkeys:1: key options: agent-forwarding port-forwarding pty user-rc x11-forwarding
+debug1: Sending command: /nonexistent/cmd
+debug1: pledge: fork
+debug1: client_input_channel_req: channel 0 rtype exit-status reply 0
+sh: 1: /nonexistent/cmd: not found
+debug1: channel 0: free: client-session, nchannels 1
+Transferred: sent 3556, received 4120 bytes, in 0.1 seconds
+Bytes per second: sent 35846.5, received 41531.9
+debug1: Exit status 127

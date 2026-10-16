@@ -43,6 +43,9 @@ func TestRegression_HostDecommissionSpec(t *testing.T) {
 	// a staging client with a prod FreeIPA server decommissioned on real
 	// vm-targets. Appended in file order.
 	wantIDs = append(wantIDs, "HD34", "HD35", "HD34-LIVE")
+	// login-probe target cleanup (GitHub issue #11 follow-up): HD36 is the
+	// go-test row, HD36-LIVE the real vm-target counterpart.
+	wantIDs = append(wantIDs, "HD36", "HD36-LIVE")
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}

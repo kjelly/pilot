@@ -546,4 +546,24 @@ that decommission *reuses* those paths safely.
   expect: {stdout: {equals: "UNINSTALLED"}}
   scope: per-host
   verifyOnly: true
+# ── login-probe target cleanup (GitHub issue #11 follow-up, 2026-10-13):
+# a probed host is re-rendered out of every login-probe host's target list
+# before finalization (spec.md §19), via the reference-driven
+# login-probe-targets provider. HD36 is the go-test row, HD36-LIVE its real
+# vm-target counterpart (docs/evidence/login-probe/).
+- id: HD36
+  category: monitoring
+  check: a host that login-probe hosts probe gets a central login-probe-targets step (spec.md §19 active alert-target residue) that re-renders every other login-probe host with the host excluded, carries the login-probe hosts' stage, does not require the retiring host to be reachable, treats a probe host that did not report as an error rather than clean, and is not added for a retiring login-probe host itself
+  probe: |
+    go test ./internal/decommission/... -run 'TestPlanner_LoginProbeTargets|TestLoginProbeTargets_' -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: HD36-LIVE
+  category: monitoring
+  check: after `pilot host decommission apply` of a probed freeipa-client host, the login-probe host's rendered target list no longer contains it (no PilotLoginProbe* alert keeps firing for the retired host)
+  probe: |
+    ssh -i <probe-host-key> root@<probe-host-ip> 'grep -c "<retired-host>" /etc/pilot/login-probe/config.yml || true'
+  expect: {stdout: {equals: "0"}}
+  scope: per-host
+  verifyOnly: true
 ```

@@ -803,12 +803,164 @@
     # instead of two rule_files entries. Same class of trap as
     # prometheus_node_exporter_scrape_block's documented \n-escaping
     # warning — never hand-build YAML structure as an interpolated string).
+    # ---- Host-health + login-probe alert rules (GitHub issue #11,
+    # docs/verification/prometheus.md C23/C24). Resolved with default() so
+    # group_vars/host_vars are never shadowed by play vars (AGENTS.md §4.5
+    # point 3); rendered from templates/pilot-host-health-alert-rules.yml.j2.
+    - name: "Resolve host-health alert thresholds without overriding inventory or extra vars"
+      ansible.builtin.set_fact:
+        prometheus_host_health_alert_rules_enabled: "{{ prometheus_host_health_alert_rules_enabled | default(true) | bool }}"
+        host_io_stall_ratio_threshold: "{{ host_io_stall_ratio_threshold | default('0.25', true) | string }}"
+        host_io_stall_for: "{{ host_io_stall_for | default('10m', true) }}"
+        host_disk_latency_seconds_threshold: "{{ host_disk_latency_seconds_threshold | default('0.1', true) | string }}"
+        host_disk_latency_min_ops_per_second: "{{ host_disk_latency_min_ops_per_second | default('1', true) | string }}"
+        host_disk_queue_depth_threshold: "{{ host_disk_queue_depth_threshold | default('10', true) | string }}"
+        host_disk_latency_for: "{{ host_disk_latency_for | default('10m', true) }}"
+        host_metrics_missing_for: "{{ host_metrics_missing_for | default('3m', true) }}"
+        host_metrics_missing_success_window: "{{ host_metrics_missing_success_window | default('150s', true) }}"
+        login_probe_alert_for: "{{ login_probe_alert_for | default('3m', true) }}"
+        login_probe_transport_alert_for: "{{ login_probe_transport_alert_for | default('5m', true) }}"
+        login_probe_alert_keep_firing_for: "{{ login_probe_alert_keep_firing_for | default('5m', true) }}"
+        login_probe_stale_seconds: "{{ login_probe_stale_seconds | default(180, true) | int }}"
+      tags: [always]
+
+    - name: "Gate: host-health alert thresholds are numbers and durations are Prometheus durations"
+      ansible.builtin.assert:
+        that:
+          - host_io_stall_ratio_threshold is match('^[0-9]+([.][0-9]+)?$')
+          - host_disk_latency_seconds_threshold is match('^[0-9]+([.][0-9]+)?$')
+          - host_disk_latency_min_ops_per_second is match('^[0-9]+([.][0-9]+)?$')
+          - host_disk_queue_depth_threshold is match('^[0-9]+([.][0-9]+)?$')
+          - host_io_stall_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - host_disk_latency_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - host_metrics_missing_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - host_metrics_missing_success_window is match('^[0-9]+(ms|s|m|h|d)$')
+          - login_probe_alert_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - login_probe_transport_alert_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - login_probe_alert_keep_firing_for is match('^[0-9]+(ms|s|m|h|d)$')
+          - (login_probe_stale_seconds | int) >= 30
+        fail_msg: >-
+          host-health alert inputs must be plain numbers (thresholds), Prometheus
+          durations like 10m (for/keep_firing_for) and login_probe_stale_seconds
+          >= 30 (see docs/verification/prometheus.md §1.5); refusing to render
+          rules Prometheus would reject at load time.
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
+    # HostMetricsMissing mutes the seed HostDown{job="node"} of a host that
+    # still answers SSH (Alertmanager inhibit, docs/verification/alertmanager.md
+    # §1.7). That only works if it fires first: a longer `for:` would let
+    # HostDown (`for: 10m` in files/pilot-alert-rules-seed.yml) page "Target
+    # down" for a host that is up, before the data-gap alert exists. The seed
+    # and host-health groups are evaluated at different offsets inside the
+    # 1m evaluation interval, so HostMetricsMissing can become firing up to
+    # one interval after its `for:`: it must leave that much room (9m).
+    - name: "Gate: host_metrics_missing_for leaves one evaluation interval before the seed HostDown rule's 10m"
+      ansible.builtin.assert:
+        that:
+          - (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float) <= 540
+        fail_msg: >-
+          host_metrics_missing_for={{ host_metrics_missing_for }} must be at most 9m:
+          HostDown fires at 10m, and the two rule groups are evaluated up to one 1m
+          interval apart, so a longer for lets HostDown page a host that still answers
+          SSH before HostMetricsMissing can mute it.
+      vars:
+        _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
+        _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
+    # PilotLoginProbeStale is changes() of the probe's write timestamp over
+    # login_probe_stale_seconds (pilot-host-health-alert-rules.yml.j2). The
+    # window must hold several scrapes of a healthy probe: with fewer, a
+    # healthy probe looks stale (PilotLoginProbeStale fires and mutes all
+    # its alerts).
+    - name: "Gate: login_probe_stale_seconds spans at least three node scrapes"
+      ansible.builtin.assert:
+        that:
+          - prometheus_scrape_interval is match('^[0-9]+(ms|s|m|h|d)$')
+          - (login_probe_stale_seconds | int) >= 3 * (_scrape_count | int) * (_duration_seconds[_scrape_unit] | float)
+        fail_msg: >-
+          login_probe_stale_seconds={{ login_probe_stale_seconds }} must be at least
+          3 x prometheus_scrape_interval ({{ prometheus_scrape_interval }}, a single
+          Prometheus duration such as 15s), or a healthy login probe looks stale.
+      vars:
+        _scrape_count: "{{ prometheus_scrape_interval | regex_search('^[0-9]+') }}"
+        _scrape_unit: "{{ prometheus_scrape_interval | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
+    # HostMetricsMissing only trusts a login that succeeded within
+    # host_metrics_missing_success_window (the target's own last-success
+    # timestamp changed). A success reaches Prometheus up to one textfile
+    # write later (cmd/pilot-login-probe textfileWriteInterval, 15 s; kept
+    # equal by TestRegression_HostHealthTimingConstantsAgree), so after a
+    # host dies the condition can hold for window + 15 s. That must not
+    # reach host_metrics_missing_for, or a dead host raises the alert and
+    # mutes its HostDown. The window must also hold at least two scrapes.
+    - name: "Gate: host_metrics_missing_success_window plus one textfile write fits in host_metrics_missing_for"
+      ansible.builtin.assert:
+        that:
+          - (_win_count | int) * (_duration_seconds[_win_unit] | float) + _textfile_write_seconds <= (_hmm_count | int) * (_duration_seconds[_hmm_unit] | float)
+          - (_win_count | int) * (_duration_seconds[_win_unit] | float) >= 2 * (_scrape_count | int) * (_duration_seconds[_scrape_unit] | float)
+        fail_msg: >-
+          host_metrics_missing_success_window={{ host_metrics_missing_success_window }} plus the
+          probe's {{ _textfile_write_seconds }} s textfile write must not exceed
+          host_metrics_missing_for={{ host_metrics_missing_for }} (or a dead host can raise
+          HostMetricsMissing and mute its HostDown), and the window must be at least 2 x
+          prometheus_scrape_interval={{ prometheus_scrape_interval }}.
+      vars:
+        _textfile_write_seconds: 15
+        _win_count: "{{ host_metrics_missing_success_window | regex_search('^[0-9]+') }}"
+        _win_unit: "{{ host_metrics_missing_success_window | regex_search('[a-z]+$') }}"
+        _hmm_count: "{{ host_metrics_missing_for | regex_search('^[0-9]+') }}"
+        _hmm_unit: "{{ host_metrics_missing_for | regex_search('[a-z]+$') }}"
+        _scrape_count: "{{ prometheus_scrape_interval | regex_search('^[0-9]+') }}"
+        _scrape_unit: "{{ prometheus_scrape_interval | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
+    # The other side of the window: during a monitoring data gap a healthy
+    # probe must record a new success of each target inside every window.
+    # The bound lives in tasks/host-metrics-missing-probe-round-gate.yml,
+    # which login-probe-apply.yml also runs (this Prometheus against every
+    # login-probe host here; the probe against every Prometheus host
+    # there). The probe settings are the login-probe hosts' own (defaults
+    # 60s / 30s, as in login-probe-apply.yml).
+    - name: "Gate: every login-probe host records a success inside host_metrics_missing_success_window"
+      ansible.builtin.include_tasks:
+        file: tasks/host-metrics-missing-probe-round-gate.yml
+        apply: {tags: [always]}
+      vars:
+        hmm_gate_windows:
+          - name: "{{ inventory_hostname }}"
+            window: "{{ host_metrics_missing_success_window }}"
+            scrape: "{{ prometheus_scrape_interval }}"
+        hmm_gate_probes: >-
+          {%- set out = [] -%}
+          {%- for h in groups.get('login-probe', []) -%}
+            {%- set _ = out.append({'name': h,
+                'interval': hostvars[h].login_probe_interval | default('60s', true) | string,
+                'timeout': hostvars[h].login_probe_total_timeout | default('30s', true) | string}) -%}
+          {%- endfor -%}
+          {{ out }}
+      when:
+        - prometheus_host_health_alert_rules_enabled | bool
+        - groups.get('login-probe', []) | length > 0
+      tags: [always]
+
     - name: "Compute the rule_files list (spec §8.4; only alert-rules.yml when no kind:snmp profile is declared)"
       ansible.builtin.set_fact:
         prometheus_rule_files_list: >-
           {{ ['/etc/prometheus/alert-rules.yml']
              + (['/etc/prometheus/snmp-alert-rules.yml']
                 if ((monitoring_profiles_resolved.values() | selectattr('kind', 'defined') | selectattr('kind', 'equalto', 'snmp') | list | length) > 0)
+                else [])
+             + (['/etc/prometheus/host-health-alert-rules.yml']
+                if (prometheus_host_health_alert_rules_enabled | bool)
                 else []) }}
       tags: [always]
 
@@ -1112,6 +1264,26 @@
         # (prometheus_has_snmp_profile's own gate) — a no-SNMP
         # deployment's config directory footprint stays exactly as it was
         # before this feature existed (spec §8.4, AC1).
+        # Templated (not copy: src:) because the thresholds are inventory
+        # inputs; the template keeps Prometheus's own {{ $labels }} syntax in
+        # raw blocks. Spec: docs/verification/prometheus.md C23.
+        - name: "Render host-health-alert-rules.yml (I/O stall, disk latency, metrics gap, login probe — issue #11)"
+          tags: [C23]
+          ansible.builtin.template:
+            src: templates/pilot-host-health-alert-rules.yml.j2
+            dest: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
+            mode: "0644"
+          register: host_health_alert_rules_result
+          when: prometheus_host_health_alert_rules_enabled | bool
+
+        - name: "Remove host-health-alert-rules.yml when the host-health rules are disabled"
+          tags: [C23]
+          ansible.builtin.file:
+            path: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
+            state: absent
+          register: host_health_alert_rules_removed
+          when: not (prometheus_host_health_alert_rules_enabled | bool)
+
         - name: "Render snmp-alert-rules.yml (SNMPTargetDown/SNMPExporterDown seed, spec §8.4)"
           ansible.builtin.copy:
             src: "{{ prometheus_snmp_alert_rules_file }}"
@@ -1220,7 +1392,7 @@
           vars:
             container_mount_drift_name: pilot-prometheus
 
-        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8, C12, C20
+        # Spec: docs/verification/prometheus.md C1, C3, C4, C7, C8, C12, C20, C24
         # The two prometheus.yml render tasks are mutually exclusive, so
         # one of them is always skipped, and a skipped task registers
         # `changed: false`. Check each one; never merge the two results
@@ -1228,7 +1400,7 @@
         # an Alertmanager configured a prometheus.yml change never
         # restarted the container).
         - name: "Prometheus — run pilot-prometheus container"
-          tags: [C1, C3, C4, C7, C8, C12, C20]
+          tags: [C1, C3, C4, C7, C8, C12, C20, C24]
           community.docker.docker_container:
             name: pilot-prometheus
             image: "prom/prometheus:{{ prometheus_version }}"
@@ -1240,6 +1412,8 @@
                  or container_mount_drift_stale | default(false) | bool
                  or (alert_rules_result | default({})) is changed
                  or (snmp_alert_rules_result | default({})) is changed
+                 or (host_health_alert_rules_result | default({})) is changed
+                 or (host_health_alert_rules_removed | default({})) is changed
                  or (node_exporter_password_file_result | default({})) is changed
                  or (dcgm_exporter_password_file_result | default({})) is changed
                  or (dcgm_exporter_password_file_removed | default({})) is changed
@@ -1276,7 +1450,9 @@
                    + ([monitoring_secrets_host_dir ~ ':' ~ monitoring_secrets_container_dir ~ ':ro']
                       if ((monitoring_profiles_resolved.values() | selectattr('authRef', 'defined') | list | length) > 0) else [])
                    + ([prometheus_config_dir ~ '/snmp-alert-rules.yml:/etc/prometheus/snmp-alert-rules.yml:ro']
-                      if (prometheus_has_snmp_profile | bool) else []) }}
+                      if (prometheus_has_snmp_profile | bool) else [])
+                   + ([prometheus_config_dir ~ '/host-health-alert-rules.yml:/etc/prometheus/host-health-alert-rules.yml:ro']
+                      if (prometheus_host_health_alert_rules_enabled | bool) else []) }}
             ports:
               - "9090:9090"
 

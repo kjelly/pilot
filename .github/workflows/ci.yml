@@ -82,6 +82,22 @@ jobs:
       - name: make playbook-lint
         run: make playbook-lint
 
+      # promtool unit tests of the host-health/login-probe alert rules and
+      # the Alertmanager inhibit behaviour (docs/verification/alertmanager.md
+      # §1.7), with the Prometheus/Alertmanager images the playbooks pin.
+      # They render the rules with the ansible-core installed above; the Go
+      # test job skips them (no images, no ansible-playbook), so here
+      # PILOT_REQUIRE_CONTAINER_TESTS=1 pulls the images and turns a skip
+      # into a failure.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make alert-rules-test
+        run: make alert-rules-test
+
   thanos-retention:
     # Runs the Thanos Compactor (the image version the playbooks deploy)
     # with thanos-query-apply.yml's retention defaults against synthetic

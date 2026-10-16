@@ -39,6 +39,24 @@ func TestHostDecommissionStageTargets(t *testing.T) {
 		}
 	}
 
+	// The login-probe target re-render runs on the login-probe hosts, so
+	// their stage is what apply must have confirmation for.
+	probeScope := decommission.NewStageScope([]inventory.Host{
+		{Name: "c1", Roles: []string{"freeipa-client"}},
+		{Name: "mon1", Env: "prod", Roles: []string{"freeipa-client", "host-monitoring", "login-probe"}},
+	}, noStageAuthorization())
+	probePlan := &decommission.Plan{
+		Host:       decommission.HostSnapshot{Name: "c1"},
+		Components: []decommission.ComponentPlan{{ComponentID: providers.LoginProbeTargetsProviderID}},
+	}
+	probeTargets := hostDecommissionStageTargets(probePlan, probeScope)
+	if len(probeTargets) != 2 || !slices.Equal(probeTargets[1].Hosts, []string{"mon1"}) {
+		t.Fatalf("login-probe targets: %+v, want the retired host then the login-probe hosts", probeTargets)
+	}
+	if _, err := probeScope.Args(probeTargets[1].Hosts); err == nil {
+		t.Error("a prod login-probe host without --confirm-prod must refuse the re-render up front")
+	}
+
 	// Without an apply-converge step, internal-endpoint only queries, and
 	// that read-only query carries no stage.
 	plan.Components = []decommission.ComponentPlan{{ComponentID: providers.InternalEndpointProviderID, Steps: []providers.Step{{Action: providers.ActionInternalEndpointManifestAbsent}}}}
@@ -52,6 +70,15 @@ func TestHostDecommissionStageTargets(t *testing.T) {
 // executable and apply runs the generic provider, and two hosts: web1 in
 // prod and web2 with no env.
 func writeHostDecommissionStageFixture(t *testing.T) (workspaceDir, ansibleLog string) {
+	t.Helper()
+	workspaceDir, ansibleLog, _ = writeHostDecommissionStageFixtureBin(t)
+	return workspaceDir, ansibleLog
+}
+
+// writeHostDecommissionStageFixtureBin is writeHostDecommissionStageFixture
+// that also returns the directory holding the fake ansible-playbook, for
+// tests that replace it.
+func writeHostDecommissionStageFixtureBin(t *testing.T) (workspaceDir, ansibleLog, bin string) {
 	t.Helper()
 	root, workspaceDir := writeHostDecommissionFixture(t)
 	dockerComponent := `schemaVersion: 1
@@ -88,14 +115,14 @@ lifecycle:
 	// A fake ansible-playbook that records its arguments and reports the
 	// component as already removed, so apply inspects, verifies and
 	// finalizes without a real host.
-	bin := t.TempDir()
+	bin = t.TempDir()
 	ansibleLog = filepath.Join(t.TempDir(), "ansible-playbook.log")
 	script := "#!/bin/sh\necho \"$*\" >> '" + ansibleLog + "'\necho 'ok: [x] => {\"msg\": \"PILOT_COMPONENT_DECOMMISSIONED=true\"}'\n"
 	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return workspaceDir, ansibleLog
+	return workspaceDir, ansibleLog, bin
 }
 
 // runPilotForTest runs the root command with args after resetting the
@@ -217,5 +244,73 @@ func TestHostDecommissionApply_SandboxHostNeedsNoStageFlags(t *testing.T) {
 	}
 	if !strings.Contains(string(logged), "--limit web2") || !strings.Contains(string(logged), "-e stage=sandbox") {
 		t.Errorf("sandbox run arguments = %q, want --limit web2 and -e stage=sandbox", logged)
+	}
+}
+
+// TestHostDecommissionApply_LoginProbeReRenderGetsTheVault drives `pilot
+// host decommission plan` and `apply` for a host that a login-probe host
+// probes. The re-render of the probe host runs login-probe-apply.yml,
+// whose always-tagged gate needs node_exporter_basic_auth_password from the
+// vault; without the workspace vault that step failed on every real probe
+// host (PR #80 review).
+func TestHostDecommissionApply_LoginProbeReRenderGetsTheVault(t *testing.T) {
+	ws, ansibleLog, bin := writeHostDecommissionStageFixtureBin(t)
+	t.Cleanup(func() { _, _ = runPilotForTest(t, "--help") })
+	hostsYAML := `hosts:
+  web2:
+    ansible_host: "10.0.0.6"
+    roles: [docker]
+  mon1:
+    ansible_host: "10.0.0.7"
+    roles: [docker, freeipa-client, host-monitoring, login-probe]
+`
+	if err := os.WriteFile(filepath.Join(ws, "hosts.yml"), []byte(hostsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vaultPath := filepath.Join(ws, ".vault", "main.yaml")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultPath, []byte("node_exporter_basic_auth_password: fixture-only-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The fake ansible-playbook reports web2 as a target on mon1 until the
+	// re-render has run, so apply really executes the step.
+	rendered := filepath.Join(t.TempDir(), "rendered")
+	script := "#!/bin/sh\necho \"$*\" >> '" + ansibleLog + "'\n" +
+		"case \"$*\" in *login-probe-apply.yml*) touch '" + rendered + "' ;; esac\n" +
+		"if [ -f '" + rendered + "' ]; then p=false; else p=true; fi\n" +
+		"echo \"ok: [mon1] => {\\\"msg\\\": \\\"LOGIN_PROBE_TARGET_PRESENT[mon1]=$p\\\"}\"\n" +
+		"echo 'ok: [x] => {\"msg\": \"PILOT_COMPONENT_DECOMMISSIONED=true\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runPilotForTest(t, "host", "decommission", "plan", "--dir", ws, "--host", "web2")
+	if err != nil {
+		t.Fatalf("plan: %v\n%s", err, out)
+	}
+	out, err = runPilotForTest(t, "host", "decommission", "apply", "--dir", ws, "--id", extractPlanID(t, out), "--confirm-host", "web2")
+	if err != nil || !strings.Contains(out, "STATUS completed") {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(ansibleLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reRender string
+	for _, line := range strings.Split(string(logged), "\n") {
+		if strings.HasPrefix(line, "playbooks/apply/login-probe-apply.yml ") {
+			reRender = line
+		}
+	}
+	if reRender == "" {
+		t.Fatalf("apply never re-rendered the login-probe host; ansible-playbook calls:\n%s", logged)
+	}
+	if !strings.Contains(reRender, "-e @"+vaultPath) {
+		t.Errorf("login-probe re-render %q does not pass the workspace vault %s", reRender, vaultPath)
+	}
+	if strings.Contains(string(logged), "fixture-only-value") {
+		t.Error("a vault value reached the ansible-playbook command line; only the file reference may")
 	}
 }
