@@ -788,6 +788,61 @@
                           and log_server_snapshot_rsyslog.stdout | default('') | length > 0
                           and log_server_rescue_rsyslog.stdout | default('') == log_server_snapshot_rsyslog.stdout)) }}
 
+        # A pre-existing root may already have hand-applied var_log_t labels
+        # without a mapping. restorecon after removing a new mapping would
+        # then revoke permissions that predate this run. Also, an unchanged
+        # invocation does not prove which on-disk config it originally loaded.
+        # Only undo labels on a newly created root, after a successful rescue
+        # restart, with a recognized restored receiver using another tree.
+        - name: "ROLLBACK — resolve the roots used by the restored receiver"
+          tags: [always]
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - |
+                import os, re, sys
+                try:
+                    text = "\n".join(line for line in open(sys.argv[1])
+                                     if not line.lstrip().startswith('#'))
+                    names = re.findall(r'\bname\s*=\s*"(SiemAuditPath|SiemAuthPath)"', text)
+                    if sorted(names) != ['SiemAuditPath', 'SiemAuthPath']:
+                        sys.exit(1)
+                    roots = []
+                    for name, leaf in [('SiemAuditPath', 'audit'), ('SiemAuthPath', 'auth')]:
+                        pattern = (r'^[ \t]*template\(name="' + name
+                                   + r'" type="string" string="(/[A-Za-z0-9._/-]+)/%HOSTNAME%/'
+                                   + leaf + r'\.log"\)[ \t]*$')
+                        matches = re.findall(pattern, text, re.M)
+                        if len(matches) != 1:
+                            sys.exit(1)
+                        roots.append(matches[0])
+                    if len(set(roots)) != 1:
+                        sys.exit(1)
+                    print(os.path.realpath(roots[0]))
+                except OSError:
+                    sys.exit(1)
+              - "{{ siem_receiver_conf }}"
+          register: log_server_rescue_root
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          when: rsyslog_selinux_fcontext_added | default(false)
+
+        - name: "ROLLBACK — can the new SELinux grant be safely withdrawn"
+          tags: [always]
+          ansible.builtin.set_fact:
+            log_server_rescue_selinux_remove: >-
+              {{ log_server_rescue_local_restore
+                 and not (log_server_rescue_restart.skipped | default(false))
+                 and not (log_server_rescue_restart.failed | default(true))
+                 and siem_log_root_path_stat.results is defined
+                 and siem_log_root_path_stat.results | length > 0
+                 and not (siem_log_root_path_stat.results[0].stat.exists | default(true))
+                 and (log_server_rescue_root.rc | default(1)) == 0
+                 and log_server_rescue_root.stdout | default('') | length > 0
+                 and not ((log_server_rescue_root.stdout ~ '/').startswith(siem_log_root_real ~ '/')) }}
+
         # Do not revoke the new root while the daemon may still use it. A
         # rejected/failed rescue restart preserves its rule and label, just
         # as it preserves the union of AppArmor rules below. A later run
@@ -799,7 +854,7 @@
             setype: var_log_t
             state: absent
           when:
-            - log_server_rescue_local_restore
+            - log_server_rescue_selinux_remove
             - rsyslog_selinux_fcontext_added is defined
             - rsyslog_selinux_fcontext_added
             - rsyslog_selinux_fcontext_target is defined
@@ -809,7 +864,7 @@
           ansible.builtin.command:
             argv: [restorecon, -RF, "{{ siem_log_root_real }}"]
           when:
-            - log_server_rescue_local_restore
+            - log_server_rescue_selinux_remove
             - rsyslog_selinux_fcontext_added is defined
             - rsyslog_selinux_fcontext_added
 
@@ -874,8 +929,8 @@
               receiver and logrotate drop-ins are back to their content from
               before this run (removed if this run created them).
               {{ 'The SELinux file-context rule this run added was removed and the root relabelled.'
-                 if (rsyslog_selinux_fcontext_added | default(false)) and log_server_rescue_local_restore
-                 else 'The SELinux file-context rule and label this run added were kept because rsyslog may still write that root; older root rules remain on subsequent runs by design.'
+                 if (rsyslog_selinux_fcontext_added | default(false)) and log_server_rescue_selinux_remove
+                 else 'The SELinux file-context rule and label this run added were kept because safe withdrawal was not confirmed (runtime/configuration or pre-existing labels); older root rules remain on subsequent runs by design.'
                  if rsyslog_selinux_fcontext_added | default(false) else '' }}
               {{ 'The AppArmor local file grants the log roots from before and from this run, because rsyslog still runs the configuration this run started it with; the next successful run drops the rules it no longer needs.'
                  if not (log_server_rescue_local_restore | default(true))
@@ -885,7 +940,7 @@
                     or (log_server_rescue_local_stat.stat.exists | default(false))
                  else '' }}
               {{ 'rsyslog was restarted with the restored configuration.'
-                 if not (log_server_rescue_restart.skipped | default(true))
+                 if not (log_server_rescue_restart.skipped | default(false))
                     and not (log_server_rescue_restart.failed | default(true))
                     and (log_server_rescue_active.rc | default(1)) == 0 else
                  'The restored configuration passed validation, but its restart failed or rsyslog is not confirmed active; permissions were preserved unless the original active invocation was confirmed.'

@@ -161,7 +161,7 @@ func TestRegression_LogServerKeepsTheOldRootGrantedUntilRsyslogRestarts(t *testi
 		}
 		got, failed := tryInventoryPlay(t, "log-server", nil, []any{
 			map[string]any{"ansible.builtin.set_fact": map[string]any{
-				"rsyslog_log_root_phase": "grant", "rsyslog_selinux_fcontext": map[string]any{"changed": true}, "log_server_rescue_local_restore": true,
+				"rsyslog_log_root_phase": "grant", "rsyslog_selinux_fcontext": map[string]any{"changed": true}, "log_server_rescue_selinux_remove": true,
 			}},
 			remember,
 			// What the narrow phase registers for the skipped sefcontext task.
