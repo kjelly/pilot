@@ -22,6 +22,9 @@ import (
 // not evidence that the running process has loaded that config.
 func TestRegression_LoginProbeTaggedRuntime(t *testing.T) {
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("ansible-playbook is required: %v", err)
+		}
 		t.Skip(err)
 	}
 	dir := t.TempDir()
