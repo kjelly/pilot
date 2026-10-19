@@ -17,7 +17,7 @@ import (
 // These are hostile-response fault injections, not FreeIPA captures.
 func TestRedirectsNeverResendSessionRequests(t *testing.T) {
 	for _, status := range []int{301, 302, 303, 307, 308} {
-		for _, dest := range []string{"plaintext", "other-origin", "same-origin"} {
+		for _, dest := range []string{"plaintext", "other-origin", "same-origin", "malformed-location"} {
 			for _, operation := range []string{"login", "read", "write", "logout"} {
 				t.Run(fmt.Sprintf("%d/%s/%s", status, dest, operation), func(t *testing.T) {
 					var leaked atomic.Int32
@@ -43,6 +43,9 @@ func TestRedirectsNeverResendSessionRequests(t *testing.T) {
 							}
 							if dest == "other-origin" {
 								location = "https://other.example.test/leaked"
+							}
+							if dest == "malformed-location" {
+								location = "http://%invalid/"
 							}
 							w.Header().Set("Location", location+"?secret="+testPassword)
 							w.WriteHeader(status)

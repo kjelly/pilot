@@ -165,7 +165,14 @@ func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme != "https" || req.URL.Host != t.host || req.URL.User != nil || (req.Host != "" && req.Host != t.host) {
 		return nil, &notSentError{errors.New("freeiparpc: request outside pinned HTTPS origin")}
 	}
-	return t.transport.RoundTrip(req)
+	resp, err := t.transport.RoundTrip(req)
+	if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// http.Client parses Location before CheckRedirect. Discard it here
+		// so even an invalid, secret-bearing URL cannot be echoed by that
+		// parser. The original status still controls the outcome classification.
+		resp.Header.Del("Location")
+	}
+	return resp, err
 }
 
 // Stats returns the counters so far.
