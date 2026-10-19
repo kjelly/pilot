@@ -1,6 +1,6 @@
 # Verification Spec — log-shipping (Promtail：log-server → dashboard Loki)
 
-> 版本：v1.3
+> 版本：v1.5
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `audit-log-forwarding.md`
 > 的「client 端疊一個轉送 agent、central 端固定變數」模式）
 > 維護者：sre
@@ -55,7 +55,7 @@
 > wazuh-manager 是實際上的 SIEM 接收端」——這個假設在真實站台被證明是錯的
 > （見 `log-server.md` v1.1 的 incident 記錄：那台主機其實從沒有真正的
 > 514/tcp 接收端，local6/auth/authpriv 全部石沉大海）。v1.1 修正為兩者並存：
-> `siem_log_root` 一律 scrape（對齊 C3 的固定字串期待），wazuh 的 alerts-log
+> `siem_log_root` 一律 scrape（C3 驗證它），wazuh 的 alerts-log
 > 只在偵測到容器時額外加開第二個 job，兩條資料流各自獨立進 Loki，用
 > `job` label 區分查詢。**
 >
@@ -102,23 +102,26 @@
 |-----|----------|----------------------------------------------------------------------|----------|---------|
 | C1  | docker   | `pilot-promtail` container 存在且 running                             | ~pilot-promtail | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-promtail' | head -n1 |
 | C2  | http     | Promtail `/ready`（9080）回 200                                       | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9080/ready |
-| C3  | config   | Promtail 設定檔含 `siem_log_root` 的 scrape glob                       | 0 | grep -qE '__path__:\s*/var/log/siem/\*\*/\*\.log' /etc/pilot/promtail/promtail-config.yml; echo $? |
+| C3  | config   | Promtail 設定檔含 `siem_log_root` 的 scrape glob                       | 0 | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && grep -qF "__path__: $r/**/*.log" /etc/pilot/promtail/promtail-config.yml && echo 0 || echo 1' |
 | C4  | config   | Promtail 設定檔的 push 目標指向 `pilot-loki-backend` 別名                | 0 | grep -qE 'url:\s*"http://pilot-loki-backend:3100/loki/api/v1/push"' /etc/pilot/promtail/promtail-config.yml; echo $? |
 | C5  | network  | `/etc/hosts` 已 pin `pilot-loki-backend` 別名                          | 0 | grep -qE '\spilot-loki-backend$' /etc/hosts; echo $? |
-| C6  | functional | 本機注入唯一測試訊息，透過 Promtail 轉送後，向中央 Loki 查詢確實查到    | ~PILOT-LOGSHIP-SELFTEST | sh -c 'logger -p local6.info "PILOT-LOGSHIP-SELFTEST-$$"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\"}" | grep -o "PILOT-LOGSHIP-SELFTEST-[0-9]*"; true' |
+| C6  | functional | 本機注入唯一測試訊息，透過 Promtail 轉送後，向中央 Loki 查詢確實查到    | 0 | sh -c 'n="PILOT-LOGSHIP-SELFTEST-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
 | C7  | dir      | Promtail positions 檔目錄存在（記錄 tail 進度，重啟不重複轉送）          | present | test -d /var/lib/pilot/promtail |
 | C8  | config   | Promtail 設定檔含 `host` label 的 pipeline stage（從 `filename` 抽取來源主機名）| 0 | grep -qE 'source:\s*filename' /etc/pilot/promtail/promtail-config.yml; echo $? |
-| C9  | functional | 本機注入唯一測試訊息，向中央 Loki 用「本機 hostname」當 `host` label 篩選查詢確實查到——證明的不只是「資料有沒有進 Loki」（C6 已驗），而是「這筆資料能不能用 `host` label 篩出**這一台**」| ~PILOT-LOGSHIP-HOSTLABEL | sh -c 'logger -p local6.info "PILOT-LOGSHIP-HOSTLABEL-$$"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\", host=\"$(hostname)\"}" | grep -o "PILOT-LOGSHIP-HOSTLABEL-[0-9]*"; true' |
+| C9  | functional | 本機注入唯一測試訊息，向中央 Loki 用「本機 hostname」當 `host` label 篩選查詢確實查到——證明的不只是「資料有沒有進 Loki」（C6 已驗），而是「這筆資料能不能用 `host` label 篩出**這一台**」| 0 | sh -c 'n="PILOT-LOGSHIP-HOSTLABEL-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\", host=\"$(hostname)\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
 
-> C3/C4 的路徑/別名是固定字串，不是變數內插——`siem_log_root`/`loki_alias`
-> 若被覆寫成非預設值，這兩行在該環境下屬已知偏差（見 §5），不是本 spec
-> 的責任範圍（比照 `prometheus.md` C8 只驗預設情境的既有慣例）。
-> C6/C9 用 `~contains` 而非 `^` 錨點，且用 `; true` 吸收 grep 找不到時的
-> non-zero rc，避免 wrapper 把「還沒轉送到」的合法 FAIL 結果變成不可
+> C3 從同機 log-server 的接收設定（`10-siem-receiver.conf` 的 `SiemAuditPath`）讀出實際生效的
+> `siem_log_root`，再比對 Promtail 的 `__path__`，所以非預設根目錄也驗得到。C4 的
+> `loki_alias` 仍是固定字串，覆寫成非預設值時屬已知偏差（見 §5，比照 `prometheus.md` C8
+> 只驗預設情境的既有慣例）。
+> C6/C9 送出這次唯一的 nonce 訊息（`$$` 加 `date +%s%N`），只認這則訊息
+> （`grep -qF "$n" && echo 0 || echo 1`，expected `0`），先前留在 Loki 的舊訊息不會讓它們 PASS；
+> 用 `sh -c '… && echo 0 || echo 1'` 讓 wrapper 不會把「還沒轉送到」的合法 FAIL 結果變成不可
 > 判讀的 ansible FAILED 輸出（`verification-spec-template.md` 陷阱 2）。
-> 測試訊息帶 `$$`（shell PID）是為了讓每次驗證的字串都不同，避免查到
-> 上一輪驗證留下的舊資料造成偽陽性；`grep -o` 只驗證有匹配到這個模式
-> （不驗證精確 PID 值），因為 Command/Expected 欄位不能因每次執行而變。
+> 測試訊息帶 `$$`（shell PID）與 `date +%s%N` 是為了讓每次驗證的字串都不同，避免查到
+> 上一輪驗證留下的舊資料造成偽陽性；Command 欄位的文字固定，執行時才展開成這次的值，
+> 再用 `grep -qF "$n"` 比對這次送出的完整字串。LogQL 加上 `|= "$n"`，只取含這則訊息的行：
+> Loki instant query 預設最多回 100 行，日誌量大的 SIEM 上這則訊息可能不在最新的 100 行裡。
 > C9 的 `$(hostname)` 跟 C6/C9 的 `$$` 是同一種道理——這段 shell
 > 語法本身是固定字串，只是**執行時**在不同主機/不同次會展開成不同值，不
 > 算違反「Command 欄位不能因每次執行而變」的規則（規則管的是欄位文字本
@@ -139,7 +142,8 @@
 - 任一 C1–C5, C7, C8 fail → **FAIL**，常見修法：
   - C1 fail → container 沒起；`docker logs pilot-promtail`
   - C2 fail → 設定檔語法錯或掛載路徑錯
-  - C3/C4 fail → apply playbook 的 template task 沒 render 成功
+  - C3 fail → Promtail 的 `__path__` 跟同機接收設定 `SiemAuditPath` 的根目錄不同（`siem_log_root` 改過之後只重套了 log-server 或 log-shipping 其中一個；兩個都重套），或這台沒有 `/etc/rsyslog.d/10-siem-receiver.conf`（log-server 沒套用到這台），或 template task 沒 render 成功
+  - C4 fail → apply playbook 的 template task 沒 render 成功
   - C5 fail → `loki_target_host` 沒填或 `/etc/hosts` pin task 沒跑到
   - C6 fail → 先確認 C1–C5 都 pass；再檢查中央 `dashboard.md` 的 Loki 是否真的在跑（`dashboard.md` C1/C3）、網路是否可達（`pilot-loki-backend` 別名解析、防火牆）
   - C7 fail → 目錄沒建立（volume 掛載會自動建，除非 apply 漏了 file task）
@@ -151,7 +155,7 @@
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
 | C6, C9 | `loki_target_host` 未填或 `dashboard.md` 尚未部署時，這兩行預期 fail | dashboard 尚未上線的環境 | 直到 `dashboard.md` PASS 為止 |
-| C3, C4 | `siem_log_root`/`loki_alias` 被覆寫成非預設值時，這兩行的固定字串比對會 fail（功能本身仍正常，只是驗證用的字串跟著變了） | 覆寫了預設路徑/別名的環境 | 視站台設定 |
+| C4 | `loki_alias` 被覆寫成非預設值時，這一行的固定字串比對會 fail（功能本身仍正常，只是驗證用的字串跟著變了）。`siem_log_root` 自 v1.4 起由 C3 從接收設定讀出，不再是已知偏差 | 覆寫了預設別名的環境 | 視站台設定 |
 
 ## 6. 變更紀錄
 
@@ -161,3 +165,5 @@
 | 2026-08-06 | v1.1 | 修真實 incident 的下游影響：v1.0 讓同機 wazuh-manager 容器的 alerts-log 路徑取代 `siem_log_root`，配上 `log-server.md` 當時的 bug（同機有 wazuh-manager 時整個跳過部署），local6/auth/authpriv 轉送全部石沉大海，Promtail 只看得到 Wazuh 自己的告警文字。改為 `siem_log_root` 一律 scrape、wazuh alerts-log 只在偵測到容器時額外加開第二個 job（`promtail_wazuh_job_label`），兩者並存不互斥。實測 2026-08-06：兩台全新 vm-target（client 轉送 local6/auth,authpriv → 同機 wazuh-manager+log-server 的接收端 → Promtail → Loki），`pilot verify` 7/7 全綠，`curl` 直接向 Loki 查詢確認兩筆測試訊息都真的進了 `job="pilot-siem"` | sre |
 | 2026-08-06 | v1.2 | 補上跨主機覆蓋率的實際查詢能力：新增 C8（config，`host` label 的 pipeline stage 存在）與 C9（functional，用本機 hostname 當 `host` label 篩選查得到自己剛注入的訊息）；`pilot-siem` job 用 Promtail 內建的 `filename` label + regex 抽出 `%HOSTNAME%`，`pilot-siem-wazuh-alerts` job 改用 `json` pipeline stage 解析每行告警的 `agent.name` 欄位，兩者統一升成同名 `host` label。同時把 wazuh-alerts job 的 glob 從 `**/*.log` 收斂成只掃 `alerts/*.log`——`archives.log`/`api.log`/`cluster.log` 等檔案在 Wazuh 預設設定（`<logall>`/`<logall_json>` 都是 `no`）下永遠不會有新內容，繼續掃它們只會製造「target 讀取位置永遠 0，看起來像壞了」的假訊號，而 raw audit trail 的完整性已經由 `siem_log_root` 這條路徑負責，不需要靠 Wazuh 的 archives 機制重複提供。實測 2026-08-06：`pilot verify` 9/9 全綠，`curl` 用 `{job="pilot-siem", host="<hostname>"}` 篩選查詢確實只查到該台自己注入的訊息 | sre |
 | 2026-08-07 | v1.3 | 修 v1.2 自己引入的 bug：wazuh-alerts job 的 `alerts/*.log` glob 只吃到 Wazuh 同時落地的純文字版告警檔，`json` pipeline stage 對純文字內容解析永遠失敗、`host` label 永遠不會被設定——而且不會報錯，看起來像「job 有資料，只是沒篩選能力」而非明顯故障。real incident：minimal-poc round 20 對一個全新 clean-room 拓樸做深入 Loki 查核時，`/loki/api/v1/series` 對這個 job 查出來只有 `filename`/`job` 兩個 label，完全沒有 `host`。修法：`__path__` 從 `alerts/*.log` 改成明確指定同目錄下 Wazuh 一律會寫的 `alerts/alerts.json`（不受 `<logall>`/`<logall_json>` 影響，那兩個設定管的是 archives 而非 alerts）。修前修後都在同一組 3 台主機（AlmaLinux 9 + 2×Ubuntu 24.04）實測確認：修前 host label 完全空白；修後 `{job="pilot-siem-wazuh-alerts"}` 每一筆都有正確的 `host` label | sre |
+| 2026-10-15 | v1.4 | C3 改成從 log-server 接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，再確認 Promtail 的 `__path__` 是 `<root>/**/*.log`，不再寫死 `/var/log/siem`（PR #79 讓 inventory 的 `siem_log_root` 生效，非預設根目錄不再是已知偏差）。C6/C9 改送這次唯一的 nonce 訊息並只認這則訊息（`grep -qF`，expected `0`）；v1.3 的 `grep -o "PILOT-LOGSHIP-SELFTEST-[0-9]*"` 會把先前留在 Loki 的舊訊息當成這次的結果（PR #79 review） | pilot |
+| 2026-10-15 | v1.5 | C6/C9 的 LogQL 加上 `\|= "$n"`，只取含這次 nonce 的行：Loki instant query 預設最多回 100 行，日誌量大時這則訊息可能不在其中而假 FAIL（PR #79 review）。§2 說明改成現在的 `grep -qF "$n"` 比對（拿掉舊的 `grep -o` 說法）；§4 補上 C3 fail 的成因（log-server 與 log-shipping 的 `siem_log_root` 不一致、這台沒有接收設定） | pilot |

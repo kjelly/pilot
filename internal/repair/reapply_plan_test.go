@@ -186,6 +186,31 @@ func TestBuildReapplyPlan_AmbiguousTypeBlocksPlan(t *testing.T) {
 	}
 }
 
+// TestBuildReapplyPlan_IntegerInputFormsMatchPreflight: repair classifies
+// an integer input exactly as `pilot deploy`'s preflight does
+// (contract.ValueMatchesType). An unquoted number arrives as a float64 from
+// ansible-inventory JSON and a quoted one as a string; both are whole
+// numbers Ansible renders the same way, while 14.5 is not an integer.
+func TestBuildReapplyPlan_IntegerInputFormsMatchPreflight(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		ok    bool
+	}{{float64(30), true}, {"30", true}, {30, true}, {14.5, false}, {"14.5", false}} {
+		root, relPath := reapplyTestRepoRoot(t)
+		c := reapplyTestContract(relPath)
+		c.GroupVars = []contract.GroupVar{{Name: "retention_days", Type: "integer", Required: true}}
+		catalog := testCatalog(t, c)
+		resolved := reapplyTestResolvedInventory()
+		resolved.HostVars["web-1"]["retention_days"] = tc.value
+		_, err := BuildReapplyPlan(context.Background(), catalog, resolved, noDeps, fakePreview(true, "", 0, nil),
+			root, "/tmp/inv.yml", "plan-1", "inc-1", "web-1", "prometheus", "reapply", time.Now())
+		if tc.ok != (err == nil) || tc.ok != contract.ValueMatchesType("integer", tc.value) {
+			t.Errorf("retention_days=%#v: plan error %v, preflight accepts %v; want both to accept=%v",
+				tc.value, err, contract.ValueMatchesType("integer", tc.value), tc.ok)
+		}
+	}
+}
+
 func TestBuildReapplyPlan_UnsupportedPreviewIsRecordedNotSkipped(t *testing.T) {
 	root, relPath := reapplyTestRepoRoot(t)
 	catalog := testCatalog(t, reapplyTestContract(relPath))
