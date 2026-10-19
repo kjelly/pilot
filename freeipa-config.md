@@ -765,9 +765,12 @@ password:
 
 規則：
 
-* `initial` 僅在新使用者建立或明確要求 reset 時使用。
+* `initial` 僅在新使用者建立或明確要求 reset 時使用。帳號在 FreeIPA 還沒有密碼（沒有 Kerberos key）時，一律以 `initial` 初始化。
 * 重跑 playbook 不得每次重設密碼。
-* `preserve_existing: true` 時忽略 `initial`。
+* `preserve_existing` 預設 `true`：已有密碼的帳號忽略 `initial`。
+* `preserve_existing: false` 是明確要求 reset：已有密碼的帳號重設為 `initial`。使用者仍在用上次重設的密碼（還沒自己改過）時不重複重設；使用者改過之後，下一次 apply 會再重設一次，所以 reset 完成後要改回 `true`。
+* `force_change` 只表示設定後使用者下次登入是否須改密碼，不決定要不要重設。FreeIPA 對 `ipa passwd` 設定的密碼一律要求下次登入更改，`force_change: false` 目前沒有作用。
+* `force_change`、`preserve_existing` 只接受 `true`/`false`；`null` 或字串在套用前就被拒絕，避免被當成 `false`。
 * 真實密碼只能存在 Ansible Vault。
 * Agent 輸出不得顯示密碼。
 * Ansible task 必須使用 `no_log: true`。

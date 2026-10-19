@@ -1,0 +1,40 @@
+  dn: uid=pw-pending,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  uid: pw-pending
+  givenname: Reset
+  sn: Pending
+  cn: Reset Pending
+  initials: RP
+  homedirectory: /home/pw-pending
+  gecos: Reset Pending
+  loginshell: /bin/sh
+  krbcanonicalname: pw-pending@IPA.PILOT.INTERNAL
+  krbprincipalname: pw-pending@IPA.PILOT.INTERNAL
+  mail: pw-pending@ipa.pilot.internal
+  uidnumber: 1927600004
+  gidnumber: 1927600004
+  nsaccountlock: FALSE
+  has_password: TRUE
+  has_keytab: TRUE
+  displayName: Reset Pending
+  ipaNTSecurityIdentifier: S-1-5-21-3998632271-3893472475-798555519-1004
+  ipaUniqueID: 0fad1082-c863-11f1-872b-5254001b059e
+  krbExtraData: AALxdNBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA
+  krbLastAdminUnlock: 20261015063841Z
+  krbLastPwdChange: 20261015063841Z
+  krbLoginFailedCount: 0
+  krbPasswordExpiration: 20261015063841Z
+  memberof: cn=ipausers,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  mepManagedEntry: cn=pw-pending,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  objectClass: top
+  objectClass: person
+  objectClass: organizationalperson
+  objectClass: inetorgperson
+  objectClass: inetuser
+  objectClass: posixaccount
+  objectClass: krbprincipalaux
+  objectClass: krbticketpolicyaux
+  objectClass: ipaobject
+  objectClass: ipasshuser
+  objectClass: ipaSshGroupOfPubKeys
+  objectClass: mepOriginEntry
+  objectClass: ipantuserattrs
