@@ -1,8 +1,10 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
 > 版本：v1.15（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
-> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。candidate `b27e3ab`（接上 #106 後）在拋棄式
-> vm-target 實跑 PASS，見 `docs/evidence/host-decommission/2026-10-16-b27e3ab.md` 與 §8 v1.15）
+> 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。2026-10-19 candidate `e64cd44`（tree
+> `554e4d1ed66b819c87ee4bb160eef7783fd949ba`）在隔離 native EL9 vm-target 完成 provider 矩陣與 identity
+> preview/apply/idempotency，PASS；最後重跑 changed=0。image digest、external-state fingerprint、UTC 與 run IDs 見
+> [目前有效 evidence](../evidence/host-decommission/2026-10-19-e64cd44.md)；驗證範圍為退役查詢與 tombstone reconcile）
 > 上一版：v1.14（2026-10-15 `ipa` 失敗不再被當成成功或「不存在」（issue #102）：
 > `ipa passwd` 失敗會讓 run 失敗並列出使用者；成員查詢失敗不再被讀成空集合；
 > 存在性檢查只放行真實擷取的 not found；HBAC lockdown rollback 如實回報結果。

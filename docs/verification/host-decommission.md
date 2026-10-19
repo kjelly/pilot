@@ -192,10 +192,13 @@ reads only the target's own `HOST_INSPECT[<fqdn>]` blocks. A query must
 contain a nonempty observation for that target; exit-zero no-hosts runs,
 missing callback output and another tombstone alone are unverifiable
 and stop Plan, Verify and converge inspection. Last verified
-for #104 and #108: candidate `b27e3ab` (after merging the new #106, so the
-queries run inside the private Kerberos cache block) on a disposable
-FreeIPA 4.13.4 vm-target, PASS
-(`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`).
+for #104 and #108: 2026-10-19 candidate `e64cd44`, tree
+`554e4d1ed66b819c87ee4bb160eef7783fd949ba`, on an isolated native
+AlmaLinux 9.8 / FreeIPA 4.13.4 vm-target. Both three-target provider
+matrices PASS; identity preview/apply/idempotency PASS, final changed=0;
+61 packages pass the full race gate. Image digest, external-state
+fingerprint and run IDs are in the
+[current evidence record](../evidence/host-decommission/2026-10-19-e64cd44.md).
 
 **Known gap (2026-10-15).** The DNS part of HD10 reports pass when
 `ipa dnsrecord-show` fails for any reason, and the cleanup step skips the
