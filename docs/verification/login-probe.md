@@ -71,6 +71,19 @@ this row's own probe only confirms every stage series is structurally
 published for every target. C14 (idempotent re-apply) is the usual
 multi-run property.
 
+Applying a binary (C1), configuration (C3), or unit (C6/C12) update must
+activate it in the running daemon, including a tagged apply and a retry
+after files were written without a completed restart. Removed targets
+must disappear from the daemon's SSH attempts and metrics; added targets,
+the canary user and the interval must match the new configuration. An
+unchanged healthy activation remains idempotent. A replacement process
+must rewrite its metrics before apply records it as healthy; an existing
+textfile alone cannot prove that replacement healthy. Failed updates
+restore the prior managed files and service state and remain retryable.
+These are multi-run acceptance properties, covered by the runtime
+regression and disposable VM update/failure scenarios in the latest
+evidence; C3's single-host probe independently validates the disk schema.
+
 ## Checks
 
 ```yaml

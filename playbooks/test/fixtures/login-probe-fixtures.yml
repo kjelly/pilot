@@ -105,8 +105,9 @@
           tags: [always]
 
         - name: Fixtures — kinit admin
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
 

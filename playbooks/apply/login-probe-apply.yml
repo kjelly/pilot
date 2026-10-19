@@ -59,6 +59,9 @@
     login_probe_textfile_dir: /var/lib/node_exporter/textfile
     login_probe_textfile_path: /var/lib/node_exporter/textfile/pilot_login_probe.prom
     login_probe_backup_dir: /var/backups/pilot-login-probe
+    # Root owns this proof of the last healthy process; the daemon cannot
+    # write it. InvocationID prevents reusing health from another process.
+    login_probe_runtime_marker_path: /etc/pilot/login-probe/.applied-runtime
 
   pre_tasks:
     - name: "Gate: staging or prod requires explicit confirm"
@@ -424,6 +427,7 @@
           - "{{ login_probe_ssh_config_path }}"
           - "{{ login_probe_config_path }}"
           - "{{ login_probe_unit_path }}"
+          - "{{ login_probe_runtime_marker_path }}"
           - "{{ login_probe_textfile_path }}"
         login_probe_rollback_directories:
           - "{{ login_probe_config_dir }}"
@@ -438,7 +442,7 @@
     - name: "Capture the previous login-probe service account"
       ansible.builtin.command:
         argv: [getent, passwd, "{{ login_probe_service_user }}"]
-      register: login_probe_passwd_before
+      register: login_probe_account_before
       changed_when: false
       failed_when: false
       check_mode: false
@@ -483,7 +487,7 @@
              | selectattr('stat.exists', 'equalto', false)
              | selectattr('item', 'in', login_probe_rollback_directories) | list }}
         login_probe_previous_service: "{{ ansible_facts.services.get('pilot-login-probe.service', {}) }}"
-        login_probe_previous_user_exists: "{{ login_probe_passwd_before.rc == 0 }}"
+        login_probe_previous_user_exists: "{{ login_probe_account_before.rc == 0 }}"
         login_probe_previous_group_exists: "{{ login_probe_group_before.rc == 0 }}"
       tags: [always]
 
@@ -699,7 +703,7 @@
           register: login_probe_config_result
 
         - name: "Step 9: validate the rendered config before any restart"
-          tags: [C3]
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.command:
             argv: ["{{ login_probe_bin_dest }}", "config", "validate", "--config", "{{ login_probe_config_path }}"]
           changed_when: false
@@ -708,7 +712,7 @@
         - name: "Step 10: render pilot-login-probe.service (dedicated account, read-only system, no listener)"
           tags: [C6, C12]
           ansible.builtin.copy:
-            dest: /etc/systemd/system/pilot-login-probe.service
+            dest: "{{ login_probe_unit_path }}"
             mode: "0644"
             content: |
               [Unit]
@@ -741,34 +745,112 @@
               WantedBy=multi-user.target
           register: login_probe_unit_result
 
-        - name: "Step 11: reload systemd if the unit file changed"
+        # Do not rely on this run's changed flags: a tagged apply or an
+        # interrupted run may already have written the desired files while
+        # the daemon still uses its old config. Missing proof is also stale.
+        - name: "Runtime: inspect the root-owned activation record without following links"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.stat:
+            path: "{{ login_probe_runtime_marker_path }}"
+            follow: false
+            get_checksum: false
+          register: login_probe_runtime_marker_stat
+          when: not ansible_check_mode
+
+        - name: "Runtime: reject an unsafe activation record"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.assert:
+            that:
+              - not login_probe_runtime_marker_stat.stat.exists or (login_probe_runtime_marker_stat.stat.isreg | default(false) and login_probe_runtime_marker_stat.stat.uid == 0 and login_probe_runtime_marker_stat.stat.mode == '0600')
+            fail_msg: "login-probe activation record must be a root-owned regular file with mode 0600"
+          when: not ansible_check_mode
+
+        - name: "Runtime: read the prior healthy activation record"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.slurp:
+            src: "{{ login_probe_runtime_marker_path }}"
+          register: login_probe_runtime_marker
+          when: not ansible_check_mode and login_probe_runtime_marker_stat.stat.exists
+
+        - name: "Runtime: fingerprint the binary, loaded configuration and unit"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: sha256
+          loop:
+            - "{{ login_probe_bin_dest }}"
+            - "{{ login_probe_config_path }}"
+            - "{{ login_probe_unit_path }}"
+          register: login_probe_runtime_files
+          when: not ansible_check_mode
+
+        - name: "Step 11: reload systemd to recover interrupted unit updates too"
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.systemd:
             daemon_reload: true
-          when: (login_probe_unit_result | default({})) is changed
+          changed_when: false
+          when: not ansible_check_mode
 
         - name: "Step 12: ensure pilot-login-probe.service is enabled and started"
-          tags: [C2, C6]
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.systemd:
             name: pilot-login-probe.service
             state: started
             enabled: true
           when: not ansible_check_mode
 
-        - name: "Step 13: restart if the binary, key, ssh_config, config or unit changed"
+        - name: "Runtime: read the running service invocation"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation_before
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Runtime: decide whether this process has proven the current files healthy"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.set_fact:
+            login_probe_runtime_fingerprint: "{{ login_probe_runtime_files.results | map(attribute='stat.checksum') | join(' ') }}"
+            login_probe_runtime_restart_needed: >-
+              {{ (login_probe_runtime_marker.content | default('') | b64decode | trim)
+                 != ((login_probe_runtime_files.results | map(attribute='stat.checksum') | join(' '))
+                     ~ ' ' ~ (login_probe_runtime_invocation_before.stdout | trim))
+                 or (login_probe_runtime_invocation_before.stdout | trim | length == 0) }}
+          when: not ansible_check_mode
+
+        - name: "Step 13: restart when runtime differs from the last healthy activation"
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.systemd:
             name: pilot-login-probe.service
             state: restarted
-          when: >-
-            not ansible_check_mode
-            and ((login_probe_binary_result | default({})) is changed
-            or (login_probe_vault_key_result | default({})) is changed
-            or (login_probe_generated_key_result | default({})) is changed
-            or (login_probe_ssh_config_result | default({})) is changed
-            or (login_probe_config_result | default({})) is changed
-            or (login_probe_unit_result | default({})) is changed)
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: remember the textfile generation after restart"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - 'import os,sys; p=sys.argv[1]; print(os.stat(p).st_mtime_ns if os.path.exists(p) else -1)'
+              - "{{ login_probe_textfile_path }}"
+          register: login_probe_runtime_textfile_before
+          changed_when: false
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: read the service invocation to validate"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation
+          changed_when: false
+          failed_when: >-
+            login_probe_runtime_invocation.rc != 0
+            or (not (login_probe_runtime_restart_needed | bool)
+                and login_probe_runtime_invocation.stdout != login_probe_runtime_invocation_before.stdout)
+          when: not ansible_check_mode
 
         - name: "Step 14: wait for the service to report active"
-          tags: [C2]
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.command:
             argv: [systemctl, is-active, pilot-login-probe.service]
           register: login_probe_active_check
@@ -778,12 +860,53 @@
           until: login_probe_active_check.rc == 0
           when: not ansible_check_mode
 
-        - name: "Step 15: wait for the first textfile write"
-          tags: [C7]
+        - name: "Step 15: wait for this daemon to rewrite the metrics textfile"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - >-
+                import os,sys; p=sys.argv[1];
+                sys.exit(0 if os.path.exists(p) and os.stat(p).st_mtime_ns > int(sys.argv[2])
+                and 'pilot_login_probe_metrics_last_write_timestamp_seconds ' in open(p).read() else 1)
+              - "{{ login_probe_textfile_path }}"
+              - "{{ login_probe_runtime_textfile_before.stdout }}"
+          register: login_probe_runtime_fresh_metrics
+          changed_when: false
+          retries: 30
+          delay: 2
+          until: login_probe_runtime_fresh_metrics.rc == 0
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: confirm health belongs to the same service invocation"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation_after
+          changed_when: false
+          failed_when: >-
+            login_probe_runtime_invocation_after.rc != 0
+            or login_probe_runtime_invocation_after.stdout | trim | length == 0
+            or login_probe_runtime_invocation_after.stdout != login_probe_runtime_invocation.stdout
+          when: not ansible_check_mode
+
+        - name: "Runtime: require the metrics textfile on an unchanged activation too"
+          tags: [C1, C2, C3, C6, C7, C12]
           ansible.builtin.wait_for:
             path: "{{ login_probe_textfile_path }}"
             search_regex: '^pilot_login_probe_metrics_last_write_timestamp_seconds '
             timeout: 60
+          when: not ansible_check_mode and not (login_probe_runtime_restart_needed | bool)
+
+        - name: "Runtime: record the proven activation for idempotent retries"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_runtime_marker_path }}"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "{{ login_probe_runtime_fingerprint }} {{ login_probe_runtime_invocation_after.stdout | trim }}\n"
           when: not ansible_check_mode
 
         - name: "Step 15b: prove node_exporter serves the textfile collector output (spec C7)"
@@ -1015,10 +1138,10 @@
           ansible.builtin.user:
             name: "{{ login_probe_service_user }}"
             state: present
-            uid: "{{ login_probe_passwd_before.stdout.split(':')[2] }}"
-            group: "{{ login_probe_passwd_before.stdout.split(':')[3] }}"
-            home: "{{ login_probe_passwd_before.stdout.split(':')[5] }}"
-            shell: "{{ login_probe_passwd_before.stdout.split(':')[6] }}"
+            uid: "{{ login_probe_account_before.stdout.split(':')[2] }}"
+            group: "{{ login_probe_account_before.stdout.split(':')[3] }}"
+            home: "{{ login_probe_account_before.stdout.split(':')[5] }}"
+            shell: "{{ login_probe_account_before.stdout.split(':')[6] }}"
             create_home: false
           when: login_probe_previous_user_exists | bool
           register: login_probe_rollback_user_restore
