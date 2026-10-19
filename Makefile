@@ -116,7 +116,7 @@ thanos-retention-test: ## Run the Thanos Compactor with the playbook's retention
 	./scripts/thanos-retention-behavior-test.sh
 
 alert-rules-test: ## Run the host-health/login-probe alert rules under the pinned promtool, the Alertmanager inhibit rules in the pinned Alertmanager and the login-probe playbook-task tests (needs docker, ansible-playbook); pulls the images and fails instead of skipping.
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_HostHealth|TestRegression_HostIOStall|TestRegression_HostMetricsMissing|TestRegression_Alertmanager|TestRegression_StaleInhibit|TestRegression_LoginProbe)' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_HostHealth|TestRegression_HostIOStall|TestRegression_HostMetricsMissing|TestRegression_Alertmanager|TestRegression_StaleInhibit|TestRegression_LoginProbe|TestRegression_PrometheusTaggedRuntime)' ./internal/spec/
 
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks

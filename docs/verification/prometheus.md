@@ -155,6 +155,8 @@
 
 ## 2. Checklist
 
+C23/C24 的 tagged apply 必須讓執行中的 Prometheus 載入目前的規則與啟用狀態。除了檔案語法，驗收還須比較 API 中的實際 threshold、停用後規則消失、重新啟用，以及磁碟已更新但記憶體仍舊時的重試；未變更 render 的重跑仍須完成一次成功 reload，PLAY RECAP 保持 changed=0。
+
 | ID  | Category      | Check                                                     | Expected | Command |
 |-----|---------------|------------------------------------------------------------|----------|---------|
 | C1  | docker        | `pilot-prometheus` container 存在且 running                  | ~pilot-prometheus | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-prometheus' | head -n1 |

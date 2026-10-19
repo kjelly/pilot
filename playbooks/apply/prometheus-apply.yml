@@ -1056,7 +1056,7 @@
         # read as other YAML types, and spec C8/C22 pass the quoted value
         # to `thanos tools bucket inspect --selector` as is.
         - name: "Render prometheus.yml (with alerting.alertmanagers)"
-          tags: [C8, C11, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
+          tags: [C8, C11, C13, C15, C16, C18, C23, C24, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -1081,7 +1081,7 @@
           when: alertmanager_target_host | default('', true) | length > 0
 
         - name: "Render prometheus.yml (without alerting — alertmanager_target_host empty)"
-          tags: [C8, C13, C15, C16, C18, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
+          tags: [C8, C13, C15, C16, C18, C23, C24, ext-target, ext-target-C3, host-meta, host-meta-C1, host-meta-C2, host-meta-C3, host-meta-C4, host-meta-C5, host-meta-C9]
           ansible.builtin.copy:
             dest: "{{ prometheus_config_dir }}/prometheus.yml"
             mode: "0644"
@@ -1268,7 +1268,7 @@
         # inputs; the template keeps Prometheus's own {{ $labels }} syntax in
         # raw blocks. Spec: docs/verification/prometheus.md C23.
         - name: "Render host-health-alert-rules.yml (I/O stall, disk latency, metrics gap, login probe — issue #11)"
-          tags: [C23]
+          tags: [C23, C24]
           ansible.builtin.template:
             src: templates/pilot-host-health-alert-rules.yml.j2
             dest: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
@@ -1277,7 +1277,7 @@
           when: prometheus_host_health_alert_rules_enabled | bool
 
         - name: "Remove host-health-alert-rules.yml when the host-health rules are disabled"
-          tags: [C23]
+          tags: [C23, C24]
           ansible.builtin.file:
             path: "{{ prometheus_config_dir }}/host-health-alert-rules.yml"
             state: absent
@@ -1400,9 +1400,13 @@
         # an Alertmanager configured a prometheus.yml change never
         # restarted the container).
         - name: "Prometheus — run pilot-prometheus container"
-          tags: [C1, C3, C4, C7, C8, C12, C20, C24]
+          tags: [C1, C3, C4, C7, C8, C12, C20, C23, C24]
           community.docker.docker_container:
             name: pilot-prometheus
+            # Disabling optional rules must remove their old single-file
+            # mounts before Docker tries to restart with absent sources.
+            comparisons:
+              volumes: strict
             image: "prom/prometheus:{{ prometheus_version }}"
             state: started
             restart_policy: unless-stopped
@@ -1457,6 +1461,7 @@
               - "9090:9090"
 
         - name: "Wait for Prometheus to become ready"
+          tags: [C1, C3, C4, C7, C8, C12, C20, C23, C24]
           ansible.builtin.uri:
             url: "http://127.0.0.1:9090/-/ready"
             status_code: 200
@@ -1464,6 +1469,52 @@
           until: prometheus_ready.status == 200
           retries: 30
           delay: 2
+
+        # A bind mount can see the current file while Prometheus still
+        # serves an earlier in-memory ruleset (for example after an in-place
+        # edit or an interrupted reload). Reconcile even when every render
+        # is unchanged. Validate before signalling, then require proof that
+        # this reload succeeded; readiness alone accepts an old ruleset.
+        # SIGHUP uses the existing process without adding an HTTP endpoint.
+        - name: "Runtime: Prometheus validate the mounted configuration and rules"
+          tags: [C23, C24]
+          ansible.builtin.command:
+            argv: [docker, exec, pilot-prometheus, promtool, check, config, /etc/prometheus/prometheus.yml]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Runtime: Prometheus read the last successful reload timestamp"
+          tags: [C23, C24]
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:9090/metrics"
+            return_content: true
+          register: prometheus_reload_before
+          no_log: true
+          when: not ansible_check_mode
+
+        - name: "Runtime: Prometheus reload the current configuration and rules"
+          tags: [C23, C24]
+          ansible.builtin.command:
+            argv: [docker, kill, --signal=HUP, pilot-prometheus]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Runtime: Prometheus require a newly successful configuration reload"
+          tags: [C23, C24]
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:9090/metrics"
+            return_content: true
+          register: prometheus_reload_after
+          until:
+            - prometheus_reload_after.status == 200
+            - "(prometheus_reload_after.content | regex_findall('(?m)^prometheus_config_last_reload_successful ([0-9.e+-]+)$') | first | default('0') | float) == 1"
+            - >-
+              (prometheus_reload_after.content | regex_findall('(?m)^prometheus_config_last_reload_success_timestamp_seconds ([0-9.e+-]+)$') | first | default('0') | float)
+              > (prometheus_reload_before.content | regex_findall('(?m)^prometheus_config_last_reload_success_timestamp_seconds ([0-9.e+-]+)$') | first | default('0') | float)
+          retries: 30
+          delay: 2
+          no_log: true
+          when: not ansible_check_mode
 
         # objstore.yml is a single-file bind mount too (see the
         # pilot-prometheus check above).
