@@ -503,7 +503,13 @@ func TestRegression_LogServerRescueRestartsOnlyAValidConfiguration(t *testing.T)
 		registers[i] = c.register
 		key := fmt.Sprintf("c%d", i)
 		tasks = append(tasks, map[string]any{
-			"vars": map[string]any{"log_server_rescue_syntax": fmt.Sprintf("{{ rescue_registers[%d] }}", i)},
+			"vars": map[string]any{
+				"log_server_rescue_syntax": fmt.Sprintf("{{ rescue_registers[%d] }}", i),
+				// This test evaluates the diagnostic after the restart/probe
+				// tasks: accepted captures represent a completed active restart.
+				"log_server_rescue_restart": fmt.Sprintf("{{ {'failed': false} if (rescue_registers[%d].rc | default(1)) == 0 else {'skipped': true} }}", i),
+				"log_server_rescue_active":  map[string]any{"rc": 0},
+			},
 			"block": []any{
 				map[string]any{"name": batchedTaskPrefix + "evaluate", "ansible.builtin.set_fact": map[string]any{
 					"restart_now": "{{ " + when + " }}", "message_now": msg}},
