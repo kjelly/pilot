@@ -65,7 +65,9 @@ jobs:
     # delivery image.
     name: Playbook lint
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The identity Ansible regressions have their own 5m Go timeout; leave
+    # room after syntax/tool setup and the alert-rules behavior suite.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -97,6 +99,9 @@ jobs:
 
       - name: make alert-rules-test
         run: make alert-rules-test
+
+      - name: make identity-noop-test
+        run: make identity-noop-test
 
   thanos-retention:
     # Runs the Thanos Compactor (the image version the playbooks deploy)
