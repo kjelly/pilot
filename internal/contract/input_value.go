@@ -15,7 +15,9 @@ var decimalInteger = regexp.MustCompile(`^[+-]?[0-9]+$`)
 // YAML-decoded `-e key=2514` is an int, and a quoted `"2514"` in group_vars
 // is a string. Ansible renders all three the same way into a template, so
 // an integer is accepted as an int, a whole float, a json.Number or a
-// decimal string. Other types keep their single Go form.
+// decimal string. stringOrStringList preserves scalar, list and explicit-null
+// inputs used by FreeIPA forwarders; required-input checks still reject null.
+// Other types keep their existing Go forms.
 func ValueMatchesType(typ string, value any) bool {
 	switch typ {
 	case "string", "duration":
@@ -24,6 +26,19 @@ func ValueMatchesType(typ string, value any) bool {
 	case "stringList":
 		switch value.(type) {
 		case []string, []any:
+			return true
+		}
+		return false
+	case "stringOrStringList":
+		switch v := value.(type) {
+		case nil, string, []string:
+			return true
+		case []any:
+			for _, item := range v {
+				if _, ok := item.(string); !ok {
+					return false
+				}
+			}
 			return true
 		}
 		return false

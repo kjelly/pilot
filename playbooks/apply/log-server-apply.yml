@@ -827,7 +827,9 @@
           changed_when: false
           failed_when: false
           check_mode: false
-          when: rsyslog_selinux_fcontext_added | default(false)
+          when:
+            - rsyslog_selinux_fcontext_added is defined
+            - rsyslog_selinux_fcontext_added
 
         - name: "ROLLBACK — can the new SELinux grant be safely withdrawn"
           tags: [always]
@@ -929,9 +931,9 @@
               receiver and logrotate drop-ins are back to their content from
               before this run (removed if this run created them).
               {{ 'The SELinux file-context rule this run added was removed and the root relabelled.'
-                 if (rsyslog_selinux_fcontext_added | default(false)) and log_server_rescue_selinux_remove
+                 if rsyslog_selinux_fcontext_added is defined and rsyslog_selinux_fcontext_added and log_server_rescue_selinux_remove
                  else 'The SELinux file-context rule and label this run added were kept because safe withdrawal was not confirmed (runtime/configuration or pre-existing labels); older root rules remain on subsequent runs by design.'
-                 if rsyslog_selinux_fcontext_added | default(false) else '' }}
+                 if rsyslog_selinux_fcontext_added is defined and rsyslog_selinux_fcontext_added else '' }}
               {{ 'The AppArmor local file grants the log roots from before and from this run, because rsyslog still runs the configuration this run started it with; the next successful run drops the rules it no longer needs.'
                  if not (log_server_rescue_local_restore | default(true))
                     and (log_server_rescue_local_after | default('')) != (log_server_rescue_local_before | default(''))
