@@ -323,7 +323,14 @@ ansible-playbook -i inventory-freeipa.yaml \
 - **宣告式（重要）**：`ssh_keys:` 列的就是該帳號**完整**的金鑰集合。playbook 用
   `ipa user-mod --sshpubkey=...` **整組取代**。所以：
   - 換金鑰 → 改 list 內容再套用。
-  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。
+  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。撤銷最後一把時寫成空 list
+    （`ssh_keys: []`；canonical roster 是 `ssh_keys: {authoritative: true, values: []}`），
+    playbook 會送 `--sshpubkey=` 清空。2026-10-15 之前空 list 不會清除任何金鑰
+    （issue #113）。整個省略 `ssh_keys` 則表示不管理該帳號的金鑰，既有金鑰保持不變。
+  - **主機端的生效時間**：apply 只改 FreeIPA。已 enroll 的主機從 SSSD 快取讀金鑰，
+    撤銷或新增要等該主機的 SSSD 更新該使用者的快取才生效。2026-10-15 實測從 1 分鐘內到
+    超過 16 分鐘都有（預設 `entry_cache_timeout` 為 5400 秒）。要立即生效，在主機上執行
+    `sss_cache -u <user>`（issue #114 追蹤）。
   - 一次多把金鑰 → list 放多行即可。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
