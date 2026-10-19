@@ -235,11 +235,11 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 
 退出條件：本機 Go 經 SSH tunnel 能在指定 VM 上直接查詢及變更單一測試帳號，共用 session，重跑不產生多餘寫入；密碼與 session cookie 不洩漏。
 
-**結果（2026-10-16）**：candidate `ba253a6` 在拋棄式 VM 實跑 PASS，退出條件成立，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-ba253a6.md`。PR #120 review 後，修正「缺欄位的成功回應被當成有效結果」與「含寫入的 batch 解析失敗沒有歸為 unknown」，candidate `33e38e4` 重跑 PASS，見 `docs/evidence/freeipa-go-reconcile/2026-10-16-33e38e4.md`。
-- 單一帳號建立、改一個欄位各一次寫入；重跑零寫入，server log 核對一致。
-- session 在 server 端結束後，只重登一次，寫入只套用一次。
-- 中斷的寫入回報 unknown，實際未套用；逾時的寫入回報 unknown，實際已套用。所以 unknown 一定要讀回。
-- 密碼與 cookie 在輸出與 server log 都是 0 次。
+**目前結果（2026-10-19）**：candidate `c40c836` 在全新 FreeIPA 4.13.4／API 2.257 VM 上完成真實 SSH/RPC 驗證；[目前證據](../../evidence/freeipa-go-reconcile/2026-10-19-c40c836.md) 記錄 candidate/tree、image digest、外部狀態指紋及 UTC/run ID。修正 redirect 越界、缺少 `error` 被誤報成功、合法 summary-only ping batch 被拒絕；完整 race 與 GitHub checks 為 ready 前剩餘 gate。
+- 單一帳號建立、改一個欄位各一次寫入；重跑零寫入。
+- summary-only ping 與寫入可在同一真實 batch 成功；失效 session 只重登一次。
+- 中斷寫入回報 unknown 且未套用；逾時寫入回報 unknown 且已套用，必須讀回。
+- 轉送拒絕、CA／hostname 不符與遠端鎖均實測通過；測試輸出及 server-log 範圍的密碼／cookie prefix 掃描均為零。
 - Phase 1 尚未開始。
 
 ### Phase 1 唯讀 observer 與 planner
