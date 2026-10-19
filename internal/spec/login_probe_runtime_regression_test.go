@@ -102,7 +102,11 @@ if action in ('started','restarted') and not active:
 				collect(block)
 				continue
 			}
-			if !(strings.HasPrefix(name, "Step 4:") || strings.HasPrefix(name, "Step 5:") || strings.HasPrefix(name, "Step 8:") || strings.HasPrefix(name, "Step 9:") || strings.HasPrefix(name, "Step 10:") || strings.HasPrefix(name, "Step 11:") || strings.HasPrefix(name, "Step 12:") || strings.HasPrefix(name, "Step 13:") || strings.HasPrefix(name, "Step 14:") || strings.HasPrefix(name, "Step 15:") || strings.HasPrefix(name, "Runtime:")) {
+			selected := false
+			for _, prefix := range []string{"Step 4:", "Step 5:", "Step 8:", "Step 9:", "Step 10:", "Step 11:", "Step 12:", "Step 13:", "Step 14:", "Step 15:", "Runtime:"} {
+				selected = selected || strings.HasPrefix(name, prefix)
+			}
+			if !selected {
 				continue
 			}
 			for _, mod := range []string{"ansible.builtin.copy", "ansible.builtin.file"} {
