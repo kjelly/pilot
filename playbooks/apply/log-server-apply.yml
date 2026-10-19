@@ -7,11 +7,11 @@
 # before rsyslog restarts, and the old root's rules are dropped only after
 # rsyslog runs the new receiver config and listens on its port (Step 7a).
 # The block starts by reading those three files; the rescue puts back the
-# two drop-ins (removing those the run created), removes a file-context rule
-# the run added, and restarts rsyslog if `rsyslogd -N1` accepts the restored
-# configuration. Until rsyslog runs a configuration the old AppArmor rules
-# cover, the rescue keeps the rules for both roots; then it puts back the
-# local file. It does not remove the log root directory or an SELinux port
+# two drop-ins (removing those the run created), and attempts a restart only
+# if `rsyslogd -N1` accepts the restored configuration. Until an active daemon
+# is confirmed to use the old configuration, AppArmor and SELinux keep the
+# new root granted. Then the rescue restores the local file and removes a
+# file-context rule this run added. It does not remove the log root directory or an SELinux port
 # label (tasks/rsyslog-selinux-tcp-port.yml).
 #
 # Usage (dry run):
@@ -720,25 +720,6 @@
               (log_server_rescue_local_after != log_server_rescue_local_before)
               or (log_server_rescue_union is changed)
 
-        - name: "ROLLBACK — remove the SELinux file-context rule this apply added"
-          tags: [always]
-          community.general.sefcontext:
-            target: "{{ rsyslog_selinux_fcontext_target }}"
-            setype: var_log_t
-            state: absent
-          when:
-            - rsyslog_selinux_fcontext_added is defined
-            - rsyslog_selinux_fcontext_added
-            - rsyslog_selinux_fcontext_target is defined
-
-        - name: "ROLLBACK — relabel the log root without that rule"
-          tags: [always]
-          ansible.builtin.command:
-            argv: [restorecon, -RF, "{{ siem_log_root_real }}"]
-          when:
-            - rsyslog_selinux_fcontext_added is defined
-            - rsyslog_selinux_fcontext_added
-
         # A failure caused by something this playbook does not manage (an
         # invalid drop-in of another package) is still there after the
         # restore. Restarting then would replace a running rsyslog with one
@@ -772,6 +753,8 @@
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
+          register: log_server_rescue_restart
+          ignore_errors: true
           when: (log_server_rescue_syntax.rc | default(1)) == 0
 
         # rsyslog now runs a configuration the rules from before this run
@@ -785,13 +768,50 @@
           failed_when: false
           check_mode: false
 
-        - name: "ROLLBACK — does rsyslog run a configuration the old AppArmor rules cover"
+        - name: "ROLLBACK — is rsyslog active after recovery"
+          tags: [always]
+          ansible.builtin.command: systemctl is-active --quiet rsyslog
+          register: log_server_rescue_active
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: "ROLLBACK — does rsyslog run a configuration the old permissions cover"
           tags: [always]
           ansible.builtin.set_fact:
             log_server_rescue_local_restore: >-
-              {{ (log_server_rescue_syntax.rc | default(1)) == 0
-                 or (log_server_snapshot_rsyslog.stdout is defined
-                     and log_server_rescue_rsyslog.stdout == log_server_snapshot_rsyslog.stdout) }}
+              {{ (log_server_rescue_active.rc | default(1)) == 0
+                 and (((log_server_rescue_restart | default({})) is not skipped
+                       and not (log_server_rescue_restart.failed | default(true)))
+                      or ((log_server_snapshot_rsyslog.rc | default(1)) == 0
+                          and (log_server_rescue_rsyslog.rc | default(1)) == 0
+                          and log_server_snapshot_rsyslog.stdout | default('') | length > 0
+                          and log_server_rescue_rsyslog.stdout | default('') == log_server_snapshot_rsyslog.stdout)) }}
+
+        # Do not revoke the new root while the daemon may still use it. A
+        # rejected/failed rescue restart preserves its rule and label, just
+        # as it preserves the union of AppArmor rules below. A later run
+        # reuses that rule; older SELinux root rules remain by design.
+        - name: "ROLLBACK — remove the SELinux file-context rule this apply added"
+          tags: [always]
+          community.general.sefcontext:
+            target: "{{ rsyslog_selinux_fcontext_target }}"
+            setype: var_log_t
+            state: absent
+          when:
+            - log_server_rescue_local_restore
+            - rsyslog_selinux_fcontext_added is defined
+            - rsyslog_selinux_fcontext_added
+            - rsyslog_selinux_fcontext_target is defined
+
+        - name: "ROLLBACK — relabel the log root without that rule"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [restorecon, -RF, "{{ siem_log_root_real }}"]
+          when:
+            - log_server_rescue_local_restore
+            - rsyslog_selinux_fcontext_added is defined
+            - rsyslog_selinux_fcontext_added
 
         # Step 6a restarts an rsyslog that started before the receiver config
         # was last written. Putting back the config rewrote it, so while
@@ -807,6 +827,7 @@
           when:
             - log_server_rescue_conf_stat.stat.exists | default(false)
             - (log_server_rescue_syntax.rc | default(1)) != 0
+            - log_server_rescue_local_restore
             - log_server_snapshot_rsyslog.stdout is defined
             - log_server_rescue_rsyslog.stdout == log_server_snapshot_rsyslog.stdout
           vars:
@@ -851,8 +872,11 @@
             msg: >-
               log-server apply failed (see task output above). The siem
               receiver and logrotate drop-ins are back to their content from
-              before this run (removed if this run created them), and an
-              SELinux file-context rule this run added was removed.
+              before this run (removed if this run created them).
+              {{ 'The SELinux file-context rule this run added was removed and the root relabelled.'
+                 if (rsyslog_selinux_fcontext_added | default(false)) and log_server_rescue_local_restore
+                 else 'The SELinux file-context rule and label this run added were kept because rsyslog may still write that root; older root rules remain on subsequent runs by design.'
+                 if rsyslog_selinux_fcontext_added | default(false) else '' }}
               {{ 'The AppArmor local file grants the log roots from before and from this run, because rsyslog still runs the configuration this run started it with; the next successful run drops the rules it no longer needs.'
                  if not (log_server_rescue_local_restore | default(true))
                     and (log_server_rescue_local_after | default('')) != (log_server_rescue_local_before | default(''))
@@ -861,8 +885,12 @@
                     or (log_server_rescue_local_stat.stat.exists | default(false))
                  else '' }}
               {{ 'rsyslog was restarted with the restored configuration.'
+                 if not (log_server_rescue_restart.skipped | default(true))
+                    and not (log_server_rescue_restart.failed | default(true))
+                    and (log_server_rescue_active.rc | default(1)) == 0 else
+                 'The restored configuration passed validation, but its restart failed or rsyslog is not confirmed active; permissions were preserved unless the original active invocation was confirmed.'
                  if (log_server_rescue_syntax.rc | default(1)) == 0 else
-                 'rsyslog was NOT restarted: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
+                 'rsyslog recovery was NOT confirmed: `rsyslogd -N1 -f /etc/rsyslog.conf` did not pass (rc='
                  ~ (log_server_rescue_syntax.rc | default('?')) ~ ': '
                  ~ (log_server_rescue_syntax.stderr_lines
                     | reject('search', 'config validation run|warnings occurred in file') | first

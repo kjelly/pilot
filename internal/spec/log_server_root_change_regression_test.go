@@ -161,7 +161,7 @@ func TestRegression_LogServerKeepsTheOldRootGrantedUntilRsyslogRestarts(t *testi
 		}
 		got, failed := tryInventoryPlay(t, "log-server", nil, []any{
 			map[string]any{"ansible.builtin.set_fact": map[string]any{
-				"rsyslog_log_root_phase": "grant", "rsyslog_selinux_fcontext": map[string]any{"changed": true},
+				"rsyslog_log_root_phase": "grant", "rsyslog_selinux_fcontext": map[string]any{"changed": true}, "log_server_rescue_local_restore": true,
 			}},
 			remember,
 			// What the narrow phase registers for the skipped sefcontext task.
@@ -513,7 +513,7 @@ func TestRegression_LogServerRescueKeepsTheRootRsyslogWrites(t *testing.T) {
 			for _, task := range withPath(t, snapshot, apparmorLocal, local) {
 				m := task.(map[string]any)
 				if m["name"] == "Snapshot: which rsyslog process is running" {
-					m = map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_snapshot_rsyslog": map[string]any{"stdout": invocation}}}
+					m = map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_snapshot_rsyslog": map[string]any{"stdout": invocation, "rc": 0}}}
 				}
 				delete(m, "tags")
 				tasks = append(tasks, m)
@@ -537,7 +537,9 @@ func TestRegression_LogServerRescueKeepsTheRootRsyslogWrites(t *testing.T) {
 					delete(m, "ansible.builtin.systemd")
 				case m["name"] == "ROLLBACK — which rsyslog process is running now":
 					m = map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_rescue_rsyslog": map[string]any{
-						"stdout": "{{ 'restarted-by-rescue' if rescue_restarted | default(false) else '" + now + "' }}"}}}
+						"rc": 0, "stdout": "{{ 'restarted-by-rescue' if rescue_restarted | default(false) else '" + now + "' }}"}}}
+				case m["name"] == "ROLLBACK — is rsyslog active after recovery":
+					m = map[string]any{"ansible.builtin.set_fact": map[string]any{"log_server_rescue_active": map[string]any{"rc": 0}}}
 				case m["name"] == "ROLLBACK — surface the original failure":
 					m["ansible.builtin.set_fact"] = map[string]any{"message": m["ansible.builtin.fail"].(map[string]any)["msg"]}
 					delete(m, "ansible.builtin.fail")

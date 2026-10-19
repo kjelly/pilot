@@ -33,7 +33,8 @@
 #
 # log-server-apply.yml's rescue undoes what this file changed in a failed
 # run: it restores the AppArmor local file and reloads the profile, and
-# removes a file-context rule this run added.
+# removes a file-context rule this run added only once the running daemon
+# is confirmed to use the old permissions; otherwise both grants stay.
 #
 # The relabel follows the label on disk, not whether the rule changed in this
 # run: a file-context rule only takes effect through restorecon, and a root
