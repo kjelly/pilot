@@ -300,6 +300,23 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 			observed.Providers = append(observed.Providers, op)
 		}
 
+		// A replica FreeIPA does not list as a DNS server is left out by
+		// dns-apply.yml and the resolver task
+		// (tasks/freeipa-dns-providers-live.yml); the model follows, from
+		// the same live NS records.
+		leftOut, registered := diagnose.DNSArchUnregisteredReplicas(model, observed.Providers)
+		var leftOutIPs []string
+		if len(leftOut) > 0 {
+			model = diagnose.BuildDNSArchitectureModelLeavingOut(resolved, leftOut, in.ClientHost)
+			for i, op := range observed.Providers {
+				p, _ := model.Provider(op.Host)
+				if p.LeftOut {
+					observed.Providers[i].LeftOut = fmt.Sprintf("%s (%s) leaves freeipa_setup_dns unset, but it did not answer %s authoritatively and FreeIPA's NS records list only %s, so dns-apply.yml and the resolver task leave it out; promote it with freeipa-server-replica-apply.yml, set freeipa_replica_fqdn to the name FreeIPA knows it by, or start named on it (then re-run them), or set freeipa_setup_dns: false", op.Host, p.FQDN, model.FreeIPADomain, strings.Join(registered, ", "))
+					leftOutIPs = append(leftOutIPs, p.IP)
+				}
+			}
+		}
+
 		// FreeIPA's own DNS configuration, only through the approved reader,
 		// on the first provider that answered.
 		observed.FreeIPA, observed.Kerberos = freeIPAConfigObservation(ctx, opts, runner, model, authHost, &allResults)
@@ -312,6 +329,16 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		for _, probe := range tierProbes {
 			allResults = append(allResults, probe.result)
 			ot := diagnose.BuildDNSArchObservedTier(probe.tier, internalName, externalName, validProviderIPs, tierDomain, probe.result)
+			// The tier's G5-style authority probe of a left-out replica is
+			// expected to fail; dns-apply.yml no longer sends it queries.
+			var kept []diagnose.DNSArchFact
+			for i, a := range ot.ProviderAuthority {
+				if i < len(validProviderIPs) && stringInList(leftOutIPs, validProviderIPs[i]) {
+					continue
+				}
+				kept = append(kept, a)
+			}
+			ot.ProviderAuthority = kept
 			if internalSkip != "" {
 				ot.InternalResolution.Detail = internalSkip
 			}
@@ -410,6 +437,15 @@ func dnsArchProbeAddr(addr string) bool {
 	return net.ParseIP(addr) != nil || validDNSArchName(normalizeDNSArchName(addr))
 }
 
+func stringInList(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeDNSArchName is a DNS name as the probes use it: lower case,
 // without the trailing dot.
 func normalizeDNSArchName(s string) string {
@@ -480,14 +516,13 @@ func dnsArchSupportedLayer(opts diagnoseMCPToolsOptions, groupHosts func(string)
 		TierModes: []string{"freeipa-split (FreeIPA domain and dns_freeipa_zones stubbed to every FreeIPA DNS server, everything else forwarded to dns_upstream)", "forward-only (no FreeIPA DNS in the inventory)"},
 		Capabilities: []string{
 			"dns: unbound caching tier; split forwarding is derived from the inventory's FreeIPA DNS providers (playbooks/apply/dns-apply.yml)",
-			"freeipa-server / freeipa-server-replica: native FreeIPA DNS (freeipa_setup_dns); global forwarders from freeipa_dns_forwarders via ipa dnsconfig-mod; install-time --forwarder per server",
+			"freeipa-server / freeipa-server-replica: native FreeIPA DNS (freeipa_setup_dns); global forwarders and each DNS server's own forwarders from freeipa_dns_forwarders via ipa dnsconfig-mod and ipa dnsserver-mod on every apply",
 			"freeipa-dns-client and internal-endpoint's fleet-wide baseline: resolver list = explicit freeipa_dns_client_servers, else 127.0.0.1 plus the other providers on a provider, else up to 3 of (tier addresses, FreeIPA DNS providers), else the providers (playbooks/apply/tasks/freeipa-dns-client-resolver.yml)",
 			"freeipa-dns: records in FreeIPA-managed zones from a manifest",
 		},
 		NotManaged: []string{
 			"FreeIPA global forward policy (FreeIPA's default applies)",
 			"FreeIPA forward zones (ipa dnsforwardzone-*)",
-			"per-server forwarders after installation (ipa dnsserver-mod)",
 			"the resolver of a dns tier host itself (the dns role leaves it alone, docs/verification/dns.md B9)",
 		},
 	}
