@@ -268,7 +268,10 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 				stubDeploymentAvailabilityAllReachable(t)
 				request := catalogDeploymentRequest{playbook: "playbooks/apply/dashboard-apply.yml", inv: inv, limit: "consumer-a", tags: "C8", extraVars: []string{"target_group=consumer-a", "stage=sandbox"}, vault: vaultInput{ExtraVarsFile: varsFile}, stage: "sandbox", componentHints: []string{"dashboard"}}
 				var out bytes.Buffer
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				// Bound the whole workflow, including several real Ansible
+				// inventory/list-hosts startups on slower CI hosts. This is a
+				// hang watchdog, not a latency assertion.
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer cancel()
 				if workflow == "deploy" {
 					err = executeRecordedDeployment(ctx, runner, &out, request.playbook, inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints)
