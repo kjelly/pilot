@@ -32,7 +32,7 @@ hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 256, minDiskGiB: 1}
 groupVars:
   - {name: node_exporter_version, type: string, required: false, default: "1.12.1", secret: false}
-  - {name: node_exporter_port, type: string, required: false, default: "9100", secret: false}
+  - {name: node_exporter_port, type: integer, required: false, default: 9100, secret: false}
   - {name: node_exporter_user, type: string, required: false, default: "node_exporter", secret: false}
   - {name: node_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
   - {name: node_exporter_basic_auth_password, type: string, required: true, secret: true}

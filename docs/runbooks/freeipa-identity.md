@@ -189,7 +189,7 @@ ipa_users:
     first: Alice
     last: Wang
     password: "initial-pw"          # 初始密碼；可省略（改用 OTP 帶外設定）
-    force_password: true            # 預設 false；首次 onboard 或刻意重設才要加這行
+    force_password: true            # 預設 false；只有刻意重設已有的密碼才要加這行（新帳號不需要）
     groups: [developers]
     ssh_keys:                       # 選填；宣告式（見 §5.1）。密碼＋金鑰可並存
       - "ssh-ed25519 AAAA... alice@laptop"
@@ -292,13 +292,23 @@ ansible-playbook -i inventory-freeipa.yaml \
 `failed_when` 對齊 `freeipa-server-apply.yml`）。重跑同一份名冊 → `PLAY RECAP`
 的 `changed=0`。
 
-例外：**密碼是設定就無條件套用**的（IPA 沒有可 diff 的 read-back），且 `ipa
-passwd` 是 admin reset，不管密碼值有沒有變都會把帳號重新標成「下次登入強制改密
-碼」。所以 `force_password` 預設 **false**：帶 `password:` 的 user 只有同時明講
-`force_password: true` 時，這次 apply 才會真的執行 `ipa passwd`（並因此
-`changed`）。首次幫某個 user 設密碼（onboard）或要刻意重設時才加這行；一旦
-onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名冊就不會再動到他的密
-碼／forced-change 狀態。
+例外：密碼沒有可 diff 的 read-back，且 `ipa passwd` 是 admin reset，不管密碼值
+有沒有變都會把帳號重新標成「下次登入強制改密碼」。所以 apply 只在下列情況執行
+`ipa passwd`（並因此 `changed`）：
+
+- 帳號在 FreeIPA 還沒有密碼（沒有 Kerberos key）：用 `password:` 初始化，不看
+  `force_password`。
+- `force_password: true`（canonical roster 是 `password.preserve_existing:
+  false`）：要求重設已有的密碼。使用者還在用上次重設的密碼時不會重複重設；使用
+  者自己改過之後，下一次 apply 會再重設一次，所以重設完成後把這行拿掉（或設
+  `false`）。
+
+判斷依據是 `ipa user-show --all --raw` 的 `krbLastPwdChange` 與
+`krbPasswordExpiration`。查不到某個使用者的狀態時，apply 直接失敗，不會把它
+當成「還沒有密碼」而重設。`ipa passwd` 本身失敗時，apply 也會失敗，並列出使用者
+與 `ipa: ERROR:` 訊息（不含密碼）；其他使用者的密碼仍會先處理完。（2026-10-15 之前，`force_password: true` 的使用者每
+次 apply 都會被重設，即使已經自己改過密碼；還沒完成首次改密碼的使用者也每次
+都會被重設。）
 
 ---
 
@@ -313,7 +323,14 @@ onboard 完成，把這行拿掉（或設 `false`），之後重跑同一份名�
 - **宣告式（重要）**：`ssh_keys:` 列的就是該帳號**完整**的金鑰集合。playbook 用
   `ipa user-mod --sshpubkey=...` **整組取代**。所以：
   - 換金鑰 → 改 list 內容再套用。
-  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。
+  - **撤銷金鑰 → 從 list 拿掉再套用**（不是留著不管）。撤銷最後一把時寫成空 list
+    （`ssh_keys: []`；canonical roster 是 `ssh_keys: {authoritative: true, values: []}`），
+    playbook 會送 `--sshpubkey=` 清空。2026-10-15 之前空 list 不會清除任何金鑰
+    （issue #113）。整個省略 `ssh_keys` 則表示不管理該帳號的金鑰，既有金鑰保持不變。
+  - **主機端的生效時間**：apply 只改 FreeIPA。已 enroll 的主機從 SSSD 快取讀金鑰，
+    撤銷或新增要等該主機的 SSSD 更新該使用者的快取才生效。2026-10-15 實測從 1 分鐘內到
+    超過 16 分鐘都有（預設 `entry_cache_timeout` 為 5400 秒）。要立即生效，在主機上執行
+    `sss_cache -u <user>`（issue #114 追蹤）。
   - 一次多把金鑰 → list 放多行即可。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。

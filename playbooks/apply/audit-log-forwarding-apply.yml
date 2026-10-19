@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/audit-log-forwarding.md v1.1
+# Apply playbook for docs/verification/audit-log-forwarding.md v1.8
 # auditd custom rules (setuid/setgid change+exec, sudo, /etc/passwd,
 # /etc/sudoers) + logrotate + rsyslog forwarding to a central SIEM receiver
 # (docs/verification/log-server.md).
@@ -42,11 +42,6 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    siem_forward_port: "514"
-    audit_logrotate_rotate: 14
-    audit_logrotate_maxage: 90
-    syslog_logrotate_rotate: 14
-    syslog_logrotate_maxage: 90
     audit_syslog_path: "{{ '/var/log/messages' if ansible_os_family == 'RedHat' else '/var/log/syslog' }}"
     audit_syslog_group: "{{ 'root' if ansible_os_family == 'RedHat' else 'syslog' }}"
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
@@ -96,6 +91,76 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    # Values an operator may set in group_vars/host_vars (contract groupVars,
+    # group_vars/<role>.example.yml). They are defaulted here instead of in
+    # the play's vars:, which outrank group_vars/host_vars and silently
+    # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    # siem_forward_port is also wazuh-manager's input, and the two often
+    # share a host. It must equal log-server's siem_receiver_tcp_port
+    # (log-server-apply.yml); both fall back to 514 for an empty or null
+    # value. The logrotate counts fall back too: an empty count would render
+    # `rotate ` and logrotate would skip that whole policy.
+    # siem_forward_port is rendered into the @@host:port forwarding rules and
+    # compared, as a string, with log-server's siem_receiver_tcp_port:
+    # 2514.0, 0x9C4, 02514 or 70000 would be read differently by rsyslog or
+    # not at all. Checked before the fallback below so that 0 is refused
+    # instead of silently becoming 514; unset, null and "" mean the default.
+    # An unquoted 02514 or 0x9C4 in YAML inventory is already another number
+    # (1356, 2500) when Ansible reads it and passes as that number; write
+    # ports in plain decimal.
+    - name: "Gate: siem_forward_port is a TCP port number"
+      ansible.builtin.assert:
+        that:
+          - >-
+            siem_forward_port is not defined or siem_forward_port is none
+            or (siem_forward_port | string) == ''
+            or ((siem_forward_port | string) is match('^[1-9][0-9]{0,4}\Z')
+                and (siem_forward_port | int) <= 65535)
+        fail_msg: >-
+          siem_forward_port={{ siem_forward_port | default('') }} must be a TCP port number
+          from 1 to 65535, written in decimal without a sign, a fraction or leading zeros.
+          Leave it unset for 514.
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+      ansible.builtin.set_fact:
+        audit_logrotate_maxage: "{{ audit_logrotate_maxage | default(90, true) }}"
+        audit_logrotate_rotate: "{{ audit_logrotate_rotate | default(14, true) }}"
+        siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
+        syslog_logrotate_maxage: "{{ syslog_logrotate_maxage | default(90, true) }}"
+        syslog_logrotate_rotate: "{{ syslog_logrotate_rotate | default(14, true) }}"
+      tags: [always]
+
+    # siem_forward_port (these clients) and siem_receiver_tcp_port
+    # (log-server) are separate inputs, usually set in different group_vars
+    # files. When they differ, rsyslog sends where nothing listens and the
+    # apply still succeeds, so check them whenever the target is this
+    # inventory's log-server: its inventory name, ansible_host, or the FQDN
+    # or node name its facts report, compared without case and without a
+    # trailing dot (AGENTS.md §5.13). The FQDN and node name come from facts,
+    # which exist only when this run gathered them for the log-server
+    # (site.yml, or the log-server is also in audit-log-forwarding); in a run
+    # without them, name the log-server in siem_forward_host by its inventory
+    # name or address. An external receiver, or a name for the log-server
+    # that none of those match, is not checked.
+    - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
+      ansible.builtin.assert:
+        that:
+          - (siem_forward_port | string) == (siem_forward_receiver_port | string)
+        fail_msg: >-
+          {{ inventory_hostname }} would forward to {{ siem_forward_effective_host }}:{{ siem_forward_port }}
+          (siem_forward_port), but log-server {{ siem_forward_log_server }} listens on
+          {{ siem_forward_receiver_port }} (siem_receiver_tcp_port). Set both to the same port.
+      vars:
+        siem_forward_target_name: "{{ (siem_forward_effective_host | string | lower).rstrip('.') }}"
+        siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
+        siem_forward_receiver_port: "{{ hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true) if siem_forward_log_server else '' }}"
+      when:
+        - siem_forwarding_enabled | bool
+        # An empty for-loop renders as None, not "", in ansible-core 2.19.
+        - (siem_forward_log_server | default('', true)) | length > 0
       tags: [always]
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
@@ -167,6 +232,32 @@
         state: present
       when: ansible_os_family == "RedHat"
 
+    # Steps 4, 5 and 5c render or edit logrotate policies and validate them
+    # with logrotate, and the policies do nothing without it; minimal images
+    # such as pilot-target-ubuntu do not ship it. Tagged with those steps'
+    # rows so a tag-scoped run installs it too.
+    - name: "Step 1b: Install logrotate (Debian family)"
+      tags: [C1, C12, C13, C14, C20]
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C12, C13, C14, C20]
+      vars:
+        pilot_apt_packages: [logrotate]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: audit-log-forwarding-logrotate
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when: ansible_os_family == "Debian"
+
+    - name: "Step 1c: Install logrotate (RedHat family)"
+      tags: [C1, C12, C13, C14, C20]
+      ansible.builtin.dnf:
+        name: logrotate
+        state: present
+      when: ansible_os_family == "RedHat"
+
     - block:
         - name: "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)"
           tags: [C3, C4, C5, C6, C7, C8, C9]
@@ -194,6 +285,16 @@
             group: root
             mode: "0644"
             backup: true
+            # Fails when logrotate reports an error about this file
+            # ("error: <file>:<line> ..." or "error: <file>:prerotate,
+            # postrotate or preremove without endscript"), which makes it skip
+            # the whole policy. `logrotate -d` alone also exits 1 for a
+            # fragment that relies on /etc/logrotate.conf's global `su`
+            # (Ubuntu's distro rsyslog policy: "error: skipping ..."), so its
+            # rc is not used (captured on Ubuntu 24.04 and AlmaLinux 9.8,
+            # 2026-10-14). Without logrotate (Step 1b installs it) it fails.
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               /var/log/audit/audit.log {
@@ -216,6 +317,9 @@
             owner: root
             group: root
             mode: "0644"
+            # See Step 4.
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               {{ audit_syslog_path }} {
@@ -270,6 +374,9 @@
             path: /etc/logrotate.d/rsyslog
             regexp: '^{{ audit_syslog_path | regex_escape }}$'
             state: absent
+            # See Step 4: this distro policy relies on the global `su`.
+            validate: >-
+              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
             - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
@@ -378,6 +485,27 @@
           register: audisp_syslog_args_result
           when: not ansible_check_mode
 
+        # Under SELinux, rsyslogd may connect to siem_forward_port only once the
+        # port is labelled for it (see the task file); without the label every
+        # forwarded message is dropped while the apply succeeds.
+        # The task file registers rsyslog_selinux_port_label; reset it so the
+        # label log-server-apply.yml may have added on this host earlier in
+        # the same site.yml run does not trigger the restart in Step 9a.
+        - name: "Step 6g: Reset the SELinux port label result"
+          tags: [C16, C17]
+          ansible.builtin.set_fact:
+            rsyslog_selinux_port_label: {}
+
+        - name: "Step 6g: Let rsyslogd connect to siem_forward_port under SELinux"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-selinux-tcp-port.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            rsyslog_selinux_tcp_port: "{{ siem_forward_port }}"
+          when: siem_forwarding_enabled | bool
+
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]
           ansible.builtin.copy:
@@ -474,12 +602,14 @@
             state: started
             enabled: true
 
-        - name: "Step 9a: Restart rsyslog only if the forward config actually changed"
+        - name: "Step 9a: Restart rsyslog only if the forward config or its SELinux port label changed"
           tags: [C19]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: (siem_forward_conf_result | default({})) is changed
+          when: >-
+            ((siem_forward_conf_result | default({})) is changed)
+            or ((rsyslog_selinux_port_label | default({})) is changed)
 
       rescue:
         - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"

@@ -803,6 +803,155 @@ func TestBuildDNSArchPaths_ProviderLineShowsLiveAuthority(t *testing.T) {
 	}
 }
 
+// ---- replicas FreeIPA does not list as DNS servers (issue #67 follow-up) ----------
+
+// provider_two_dns_servers.txt is the primary of a topology with one
+// promoted replica: its NS records list ipa1 and ipa2. A third replica
+// that leaves freeipa_setup_dns unset is not listed, so the playbooks leave
+// it out; one with an explicit true stays in.
+func TestDNSArchUnregisteredReplicas_FollowFreeIPAsNSRecords(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr73-ipa"}, "freeipa-server-replica": {"pr73-replica3", "pr73-replica", "pr73-replica4"}, "dns": {"pr73-dns"}, "freeipa-dns-client": {"pr73-client"}},
+		map[string]map[string]any{
+			"pr73-ipa":      {"ansible_host": "192.168.122.6"},
+			"pr73-replica":  {"ansible_host": "192.168.122.2", "freeipa_replica_fqdn": "IPA2.ipa.pilot.internal."},
+			"pr73-replica3": {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa3.ipa.pilot.internal"},
+			"pr73-replica4": {"ansible_host": "192.168.122.4", "freeipa_replica_fqdn": "ipa4.ipa.pilot.internal", "freeipa_setup_dns": true},
+			"pr73-dns":      {"ansible_host": "192.168.122.8"},
+			"pr73-client":   {"ansible_host": "192.168.122.11"},
+		})
+	m := BuildDNSArchitectureModel(invInput)
+	primary := BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr73-ipa", "provider_two_dns_servers.txt"))
+	leftOut, registered := DNSArchUnregisteredReplicas(m, []DNSArchObservedProvider{primary})
+	if !reflect.DeepEqual(leftOut, []string{"pr73-replica3"}) || !reflect.DeepEqual(registered, []string{"ipa1.ipa.pilot.internal", "ipa2.ipa.pilot.internal"}) {
+		t.Fatalf("left out %v, registered %v", leftOut, registered)
+	}
+	m = BuildDNSArchitectureModelLeavingOut(invInput, leftOut)
+	if got := m.Tier[0].StubZones[0].Addrs; !reflect.DeepEqual(got, []string{"192.168.122.6", "192.168.122.2", "192.168.122.4"}) {
+		t.Fatalf("stub = %v", got)
+	}
+	if got := m.Resolvers[0].Servers; !reflect.DeepEqual(got, []string{"192.168.122.8", "192.168.122.6", "192.168.122.2"}) {
+		t.Fatalf("resolver = %v, want the tier, the primary and the registered replica (not the left-out one ahead of it)", got)
+	}
+	// No authoritative NS answer: nothing is left out.
+	if leftOut, _ := DNSArchUnregisteredReplicas(BuildDNSArchitectureModel(invInput), nil); leftOut != nil {
+		t.Fatalf("left out without an answer: %v", leftOut)
+	}
+	// The left-out replica's failing probes are expected: one finding,
+	// not live_fact_unknown and partial.
+	var o DNSArchObserved
+	o.Providers = []DNSArchObservedProvider{primary, BuildDNSArchObservedProvider(m.Providers[1], m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr73-replica3"}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host 192.168.122.3 port 22: Connection timed out"}})}
+	o.Providers[1].LeftOut = "pr73-replica3 (ipa3.ipa.pilot.internal) is not a FreeIPA DNS server yet"
+	_, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	joined := strings.Join(findings, "\n")
+	if !strings.Contains(joined, "freeipa_replica_not_dns_server: pr73-replica3") || strings.Contains(joined, "freeipa_dns_provider_unreachable: pr73-replica3") {
+		t.Fatalf("findings:\n%s", joined)
+	}
+}
+
+// A left-out replica is not shown as an authoritative FreeIPA DNS path.
+func TestBuildDNSArchPaths_LeftOutReplicaIsNotAuthoritative(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr73-ipa"}, "freeipa-server-replica": {"pr73-replica3"}},
+		map[string]map[string]any{
+			"pr73-ipa":      {"ansible_host": "192.168.122.6"},
+			"pr73-replica3": {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa3.ipa.pilot.internal"},
+		})
+	m := BuildDNSArchitectureModelLeavingOut(invInput, []string{"pr73-replica3"})
+	paths := strings.Join(BuildDNSArchPaths(m, DNSArchObserved{}), "\n")
+	if strings.Contains(paths, "FreeIPA DNS replica ipa3.ipa.pilot.internal") || !strings.Contains(paths, "FreeIPA replica ipa3.ipa.pilot.internal (192.168.122.3): left out of the DNS paths") {
+		t.Fatalf("paths:\n%s", paths)
+	}
+	if !strings.Contains(paths, "FreeIPA DNS primary ipa1.ipa.pilot.internal (192.168.122.6): authoritative for ipa.pilot.internal") {
+		t.Fatalf("the primary's path is missing:\n%s", paths)
+	}
+}
+
+// A left-out replica is not a FreeIPA DNS server, so its answer for the
+// internal name is not compared with the reference provider's (the
+// comparison #91 added); otherwise its expected failure would be reported
+// as a mismatch. A replica that is a DNS provider still is compared.
+func TestBuildDNSArchDifferences_LeftOutReplicaIsNotComparedWithTheReference(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr73-ipa"}, "freeipa-server-replica": {"pr73-replica3"}},
+		map[string]map[string]any{
+			"pr73-ipa":      {"ansible_host": "192.168.122.6"},
+			"pr73-replica3": {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa3.ipa.pilot.internal"},
+		})
+	m := BuildDNSArchitectureModel(invInput)
+	primary := BuildDNSArchObservedProvider(m.Providers[0], m.FreeIPADomain, "ipa1.ipa.pilot.internal", fixtureResult(t, "provider-pr73-ipa", "provider_two_dns_servers.txt"))
+	replica := primary
+	replica.Host, replica.IP = "pr73-replica3", "192.168.122.3"
+	replica.Internal = DNSArchFact{State: FactError, Value: DNSQueryResult{Server: "192.168.122.3", Name: "ipa1.ipa.pilot.internal", Type: "A", Status: "REFUSED"}, Detail: "192.168.122.3 answered REFUSED"}
+	var o DNSArchObserved
+	o.Providers = []DNSArchObservedProvider{primary, replica}
+	compared := func(m DNSArchModel) *DNSArchDifference {
+		for _, d := range BuildDNSArchDifferences(m, o) {
+			if strings.HasPrefix(d.Subject, "FreeIPA pr73-replica3 answer for ") {
+				return &d
+			}
+		}
+		return nil
+	}
+	if d := compared(m); d == nil || d.Status != "mismatch" {
+		t.Fatalf("a DNS-providing replica must be compared: %+v", d)
+	}
+	m = BuildDNSArchitectureModelLeavingOut(invInput, []string{"pr73-replica3"})
+	o.Providers[1].LeftOut = "pr73-replica3 (ipa3.ipa.pilot.internal) is not a FreeIPA DNS server yet"
+	if d := compared(m); d != nil {
+		t.Fatalf("a left-out replica was compared: %+v", *d)
+	}
+	_, findings := BuildDNSArchStatus(m, o, BuildDNSArchDifferences(m, o))
+	for _, f := range findings {
+		if strings.Contains(f, "pr73-replica3") && !strings.HasPrefix(f, "freeipa_replica_not_dns_server: ") {
+			t.Fatalf("unexpected finding for the left-out replica: %s", f)
+		}
+	}
+}
+
+// provider_replica_other_name.txt is a replica that answers the zone
+// authoritatively itself (+norec SOA and NS, aa) but was installed as
+// ipa-2.ipa.pilot.internal while the inventory names it ipa2;
+// provider_ns_other_name.txt is the primary of that topology, whose NS
+// records list ipa1 and ipa-2. The NS names alone left the working replica
+// out (PR #92 review); its own answer keeps it in. A replica that answers
+// nothing and is not listed is still left out. Both captured on the
+// disposable pr92 topology, FreeIPA 4.13.4 on AlmaLinux 9.8.
+func TestDNSArchUnregisteredReplicas_KeepAReplicaThatAnswersItself(t *testing.T) {
+	invInput := inv(
+		map[string][]string{"freeipa-server": {"pr92-ipa"}, "freeipa-server-replica": {"pr92-r1", "pr92-r3"}, "dns": {"pr92-dns"}},
+		map[string]map[string]any{
+			"pr92-ipa": {"ansible_host": "192.168.122.4"},
+			"pr92-r1":  {"ansible_host": "192.168.122.7", "freeipa_replica_fqdn": "ipa2.ipa.pilot.internal"},
+			"pr92-r3":  {"ansible_host": "192.168.122.3", "freeipa_replica_fqdn": "ipa4.ipa.pilot.internal"},
+			"pr92-dns": {"ansible_host": "192.168.122.2"},
+		})
+	m := BuildDNSArchitectureModel(invInput)
+	files := map[string]string{"pr92-ipa": "provider_ns_other_name.txt", "pr92-r1": "provider_replica_other_name.txt"}
+	var observed []DNSArchObservedProvider
+	for _, p := range m.Providers {
+		r := StepResult{Step: Step{ID: "provider-" + p.InventoryHost}, Result: AdHocResult{Unreachable: true, Stdout: "ssh: connect to host " + p.IP + " port 22: Connection timed out"}}
+		if f, ok := files[p.InventoryHost]; ok {
+			r = fixtureResult(t, "provider-"+p.InventoryHost, f)
+		}
+		observed = append(observed, BuildDNSArchObservedProvider(p, m.FreeIPADomain, "ipa1.ipa.pilot.internal", r))
+	}
+	leftOut, registered := DNSArchUnregisteredReplicas(m, observed)
+	if !reflect.DeepEqual(leftOut, []string{"pr92-r3"}) || !reflect.DeepEqual(registered, []string{"ipa-2.ipa.pilot.internal", "ipa1.ipa.pilot.internal"}) {
+		t.Fatalf("left out %v, registered %v; want only pr92-r3 left out", leftOut, registered)
+	}
+	// Its NS answer without aa is no longer its own authoritative answer.
+	noAA := strings.ReplaceAll(fixture(t, "provider_replica_other_name.txt"), ";; flags: qr aa ra;", ";; flags: qr ra;")
+	for i, p := range m.Providers {
+		if p.InventoryHost == "pr92-r1" {
+			observed[i] = BuildDNSArchObservedProvider(p, m.FreeIPADomain, "ipa1.ipa.pilot.internal", StepResult{Step: Step{ID: "provider-pr92-r1"}, Result: AdHocResult{Stdout: noAA}})
+		}
+	}
+	if leftOut, _ := DNSArchUnregisteredReplicas(m, observed); !reflect.DeepEqual(leftOut, []string{"pr92-r1", "pr92-r3"}) {
+		t.Fatalf("without aa: left out %v, want pr92-r1 and pr92-r3", leftOut)
+	}
+}
+
 // ---- second review round: every failed or unknown fact is named --------------------
 
 func statusOf(t *testing.T, m DNSArchModel, o DNSArchObserved) (string, string) {
@@ -945,7 +1094,7 @@ func TestBuildDNSArchStatus_UnknownConfigAndComparisonsAreNamed(t *testing.T) {
 	m, o := liveTopology(t)
 	o.FreeIPA.ServerForwarders = DNSArchFact{State: FactError, Detail: "ipa: ERROR: an internal error has occurred"}
 	status, findings := statusOf(t, m, o)
-	if status != "partial" || !strings.Contains(findings, "live_fact_unknown: pr91-ipa (FreeIPA configuration): server_forwarders (ipa: ERROR: an internal error has occurred)") || !strings.Contains(findings, "comparison_unknown: FreeIPA pr91-ipa server forwarders (install-time --forwarder)") {
+	if status != "partial" || !strings.Contains(findings, "live_fact_unknown: pr91-ipa (FreeIPA configuration): server_forwarders (ipa: ERROR: an internal error has occurred)") || !strings.Contains(findings, "comparison_unknown: FreeIPA pr91-ipa server forwarders (ipa dnsserver-mod)") {
 		t.Fatalf("status %s findings:\n%s", status, findings)
 	}
 	m, o = liveTopology(t)

@@ -14,9 +14,12 @@ import (
 //	C2  rsyslog.service active
 //	C3  receiver drop-in config file exists
 //	C4  imtcp module + input present in the drop-in
-//	C5  TCP 514 actually listening
-//	C6  landing directory /var/log/siem exists
-//	C7/C8 local6/authpriv selftest messages route into the dynaFile paths
+//	C5  the imtcp port of the receiver config (siem_receiver_tcp_port) is
+//	    listening — read from the config, not a fixed 514
+//	C6  the landing root of the receiver config (SiemAuditPath, i.e.
+//	    siem_log_root) exists — read from the config, not a fixed
+//	    /var/log/siem
+//	C7/C8 a local6/authpriv message unique to this run lands under that root
 //	C9  logrotate policy file exists
 //	C10 logrotate policy passes a dry-run
 //	C11 the imtcp input is bound to its own dedicated ruleset, not the
@@ -41,10 +44,15 @@ import (
 //     the healthy path (see verification-spec-template.md trap 1).
 //   - C5 must use the `sh -c '... && echo 0 || echo 1'` form so the
 //     outer command always exits 0 regardless of match outcome.
-//   - C7/C8 must use `~contains` (never a `^`-anchored regex) and must
-//     neutralize a non-matching grep's non-zero rc (via `; true` or
-//     equivalent) so a legitimate "not routed yet" FAIL renders as a
-//     clean mismatch instead of a corrupted ansible FAILED wrapper.
+//   - C6–C8 read the effective root from the receiver config's
+//     SiemAuditPath template and never hard-code /var/log/siem (PR #79
+//     made siem_log_root an effective inventory input; a non-default root
+//     failed C6–C8 while an old fixed string left in /var/log/siem could
+//     make C7/C8 pass).
+//   - C7/C8 send a nonce unique to this run ($$ and date +%s%N), match only
+//     that message (grep -qsF "$n") and report through
+//     `sh -c '… echo 0 … echo 1'` with expected `0`, so a legitimate
+//     "not routed yet" FAIL renders as a clean mismatch.
 //   - No row may use `~active` (matches `inactive` as a substring).
 func TestRegression_LogServerSpec(t *testing.T) {
 	const specPath = "../../docs/verification/log-server.md"
@@ -93,21 +101,44 @@ func TestRegression_LogServerSpec(t *testing.T) {
 	if !strings.Contains(cmd["C5"], "&& echo 0") || !strings.Contains(cmd["C5"], "|| echo 1") {
 		t.Errorf("C5 must use the `... && echo 0 || echo 1` form, got %q", cmd["C5"])
 	}
+	// C5 must check the port the receiver config names: siem_receiver_tcp_port
+	// is an inventory input, and with 2514 the receiver listened and received
+	// while `grep ":514"` failed.
+	for _, want := range []string{"10-siem-receiver.conf", "imtcp", "sport = :$p"} {
+		if !strings.Contains(cmd["C5"], want) {
+			t.Errorf("C5 must contain %q, got %q", want, cmd["C5"])
+		}
+	}
+	if strings.Contains(cmd["C5"], ":514") {
+		t.Errorf("C5 must not hard-code port 514, got %q", cmd["C5"])
+	}
 	if exp["C5"] != "0" {
 		t.Errorf("C5 expected must be rc-based `0`, got %q", exp["C5"])
 	}
 
-	// C7/C8: contains-match, never a ^-anchored regex, and the grep's
-	// own non-zero rc on a legitimate miss must be neutralized.
+	// C6–C8 must read the root siem_log_root resolves to from the receiver
+	// config; C7/C8 must count only this run's nonce message.
+	for _, id := range []string{"C6", "C7", "C8"} {
+		for _, want := range []string{"10-siem-receiver.conf", "SiemAuditPath", "sh -c '"} {
+			if !strings.Contains(cmd[id], want) {
+				t.Errorf("%s must contain %q, got %q", id, want, cmd[id])
+			}
+		}
+		if strings.Contains(cmd[id], "/var/log/siem") {
+			t.Errorf("%s must not hard-code /var/log/siem, got %q", id, cmd[id])
+		}
+		if exp[id] != "0" {
+			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
+		}
+	}
 	for _, id := range []string{"C7", "C8"} {
-		if !strings.HasPrefix(exp[id], "~") {
-			t.Errorf("%s expected should be a ~contains match, got %q", id, exp[id])
+		for _, want := range []string{"date +%s%N", `grep -qsF "$n"`, "logger -p"} {
+			if !strings.Contains(cmd[id], want) {
+				t.Errorf("%s must send and match a nonce unique to this run (%q), got %q", id, want, cmd[id])
+			}
 		}
-		if strings.HasPrefix(exp[id], "^") {
-			t.Errorf("%s must not use a ^-anchored regex, got %q", id, exp[id])
-		}
-		if !strings.Contains(cmd[id], "; true") {
-			t.Errorf("%s must neutralize a non-matching grep's rc (e.g. `; true`), got %q", id, cmd[id])
+		if strings.Contains(cmd[id], "grep -r ") || strings.Contains(cmd[id], "; true") {
+			t.Errorf("%s must not match a fixed selftest string, got %q", id, cmd[id])
 		}
 	}
 

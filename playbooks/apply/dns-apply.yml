@@ -330,7 +330,7 @@
         msg:
           mode: "{{ dns_mode }}"
           service_addr: "{{ dns_service_addr }}"
-          freeipa_servers: "{{ dns_freeipa_servers }}"
+          freeipa_servers_from_inventory: "{{ dns_freeipa_servers }}"
           stub_zones: "{{ dns_stub_zone_list | map(attribute='name') | list }}"
           local_zones: "{{ dns_local_zone_list | map(attribute='name') | list }}"
           upstream: "{{ dns_upstream_list }}"
@@ -352,6 +352,74 @@
             class: os
       when: not ansible_check_mode
 
+    # ── Replicas FreeIPA does not list as DNS servers yet ──────────────────
+    # A replica that leaves freeipa_setup_dns unset is a DNS provider in the
+    # pool (it gets DNS when it is promoted), but freeipa-server-replica is a
+    # day-2 playbook outside site.yml, so the inventory may list it before it
+    # is promoted. tasks/freeipa-dns-providers-live.yml asks FreeIPA (NS
+    # records, +norec) which servers run its DNS and leaves such a replica
+    # out of the stubs with a warning; an explicit freeipa_setup_dns: true
+    # stays in and G5 below fails closed if it does not answer. Runs after
+    # dig is installed: on a fresh host in check mode it cannot ask and
+    # leaves the list as it is.
+    - name: "DNS — FreeIPA DNS servers FreeIPA itself lists"
+      ansible.builtin.include_tasks:
+        file: tasks/freeipa-dns-providers-live.yml
+        apply:
+          tags: &dns_config_tags [dns, dns-C2, dns-C3, dns-C4, dns-C5, dns-C6, dns-C8, dns-C9, dns-C10, dns-C11, dns-C18]
+      vars:
+        freeipa_dns_live_candidates: "{{ freeipa_server_pool | default([]) | selectattr('dns_provider') | list }}"
+        freeipa_dns_live_domain: "{{ dns_freeipa_domain }}"
+        freeipa_dns_live_purpose: "this dns tier's stub zones"
+      when: dns_mode == 'freeipa-split'
+      tags: *dns_config_tags
+
+    - name: "DNS — leave those replicas out of the FreeIPA servers"
+      ansible.builtin.set_fact:
+        dns_freeipa_servers: >-
+          {{ dns_freeipa_servers | reject('in', freeipa_dns_live_excluded | map(attribute='ip') | map('string') | list) | list }}
+        dns_stub_zone_rebuilt: []
+      when:
+        - dns_mode == 'freeipa-split'
+        - freeipa_dns_live_excluded | default([]) | length > 0
+      tags: *dns_config_tags
+
+    - name: "DNS — and out of the FreeIPA stub zones"
+      ansible.builtin.set_fact:
+        dns_stub_zone_rebuilt: "{{ dns_stub_zone_rebuilt + [item | combine({'addrs': dns_freeipa_servers}) if item.source == 'FreeIPA' else item] }}"
+      loop: "{{ dns_stub_zone_list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - dns_mode == 'freeipa-split'
+        - freeipa_dns_live_excluded | default([]) | length > 0
+      tags: *dns_config_tags
+
+    - name: "DNS — use the rebuilt stub zones"
+      ansible.builtin.set_fact:
+        dns_stub_zone_list: "{{ dns_stub_zone_rebuilt }}"
+      when:
+        - dns_mode == 'freeipa-split'
+        - freeipa_dns_live_excluded | default([]) | length > 0
+      tags: *dns_config_tags
+
+    # The pre_tasks summary prints the inventory's FreeIPA servers; this one
+    # prints what the stubs use after FreeIPA's live answer, and what was
+    # left out, so a pilot deploy log shows the exclusion next to the
+    # result rather than only in a WARNING line above it.
+    - name: "DNS — summary: FreeIPA servers the stubs use"
+      ansible.builtin.debug:
+        msg:
+          freeipa_servers_effective: "{{ dns_freeipa_servers }}"
+          freeipa_servers_left_out: >-
+            {{ freeipa_dns_live_excluded | default([])
+               | map(attribute='inventory_host') | list }}
+          freeipa_answered_authoritatively: >-
+            {{ freeipa_dns_live_authoritative | default([]) if (freeipa_dns_live_answered | default(false) | bool)
+               else 'no FreeIPA DNS server answered; nothing was left out' }}
+      when: dns_mode == 'freeipa-split'
+      tags: *dns_config_tags
+
     # ── G5: FreeIPA must be authoritative for every zone sent to it ────────
     # A zone FreeIPA does not serve gets an upward referral to the root for
     # an RD=0 query, which unbound turns into SERVFAIL (dns.md §0.2).
@@ -366,7 +434,7 @@
       changed_when: false
       failed_when: false
       when: dns_mode == 'freeipa-split'
-      tags: &dns_config_tags [dns, dns-C2, dns-C3, dns-C4, dns-C5, dns-C6, dns-C8, dns-C9, dns-C10, dns-C11, dns-C18]
+      tags: *dns_config_tags
 
     - name: "Gate G5: collect zones FreeIPA does not answer authoritatively"
       ansible.builtin.set_fact:
@@ -385,9 +453,13 @@
     - name: "Gate G5: check mode before FreeIPA is serving — stop the preview here"
       ansible.builtin.debug:
         msg: >-
-          Check mode: FreeIPA does not answer authoritatively for {{ dns_g5_failures }} yet
-          (expected on a fresh topology before freeipa-server-apply has really run). The
-          dns config preview stops here; a real run fails at this gate instead.
+          Check mode: FreeIPA does not answer authoritatively for {{ dns_g5_failures }}. On a
+          fresh topology that is expected (freeipa-server-apply has not really run, and this
+          host has no dig yet to ask FreeIPA which replicas serve DNS). Otherwise a listed
+          server runs no FreeIPA DNS: a freeipa-server-replica host with freeipa_setup_dns: true
+          that is not promoted yet (run freeipa-server-replica-apply.yml on it first, or set
+          freeipa_setup_dns: false), or a primary or zone without DNS. The dns config preview
+          stops here; a real run fails at this gate instead.
       when:
         - ansible_check_mode
         - dns_g5_failures | length > 0
@@ -406,8 +478,14 @@
           - dns_g5_failures | length == 0
         fail_msg: >-
           FreeIPA did not answer SOA authoritatively (NOERROR + aa) for: {{ dns_g5_failures }}.
-          Remove the zone from dns_freeipa_zones, or create it in FreeIPA first; a stub zone FreeIPA
-          does not serve would SERVFAIL every lookup under it (docs/verification/dns.md §5 G5).
+          For a zone: remove it from dns_freeipa_zones, or create it in FreeIPA first; a stub zone
+          FreeIPA does not serve would SERVFAIL every lookup under it. For a server: a
+          freeipa-server-replica host with freeipa_setup_dns: true must be promoted with DNS first
+          (freeipa-server-replica-apply.yml), or set freeipa_setup_dns: false on it; one that leaves
+          it unset, does not answer the zone itself and that FreeIPA does not list in its NS records
+          is left out automatically (see the warning above). Any other server here is listed by FreeIPA
+          or is the primary: check named on it (systemctl status named), or no FreeIPA server
+          answered at all (docs/verification/dns.md §5 G5).
       tags: *dns_config_tags
 
     # ── G6: upstreams answer (and keep DNSSEC records when validating) ─────

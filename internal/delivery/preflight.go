@@ -148,21 +148,7 @@ func validateInputs(component contract.Contract, values map[string]any) error {
 }
 
 func validateInputType(input contract.GroupVar, value any) error {
-	valid := false
-	switch input.Type {
-	case "string", "duration":
-		_, valid = value.(string)
-	case "stringList":
-		switch value.(type) {
-		case []string, []any:
-			valid = true
-		}
-	case "integer":
-		_, valid = value.(int)
-	case "boolean":
-		_, valid = value.(bool)
-	}
-	if !valid {
+	if !contract.ValueMatchesType(input.Type, value) {
 		return fmt.Errorf("must be %s", input.Type)
 	}
 	if input.Validation != "" {

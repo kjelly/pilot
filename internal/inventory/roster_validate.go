@@ -266,6 +266,16 @@ func checkUsers(users []any) []RosterViolation {
 		if unk := unknownKeys(pw, knownUserPasswordKeys); len(unk) > 0 {
 			out = append(out, RosterViolation{Rule: "user password keys", Detail: fmt.Sprintf("user %q: unknown password field(s) %s", label, strings.Join(unk, ", "))})
 		}
+		// These decide whether the apply playbook resets an existing
+		// password. Its gate accepts only booleans, so a null or a string is
+		// never read as false (which would reset the password).
+		for _, key := range []string{"force_change", "preserve_existing"} {
+			if v, ok := pw[key]; ok {
+				if _, isBool := v.(bool); !isBool {
+					out = append(out, RosterViolation{Rule: "user password flag", Detail: fmt.Sprintf("user %q: password.%s must be true or false", label, key)})
+				}
+			}
+		}
 		sshKeys := mapField(u, "ssh_keys")
 		if unk := unknownKeys(sshKeys, knownUserSSHKeysKeys); len(unk) > 0 {
 			out = append(out, RosterViolation{Rule: "user ssh_keys keys", Detail: fmt.Sprintf("user %q: unknown ssh_keys field(s) %s", label, strings.Join(unk, ", "))})

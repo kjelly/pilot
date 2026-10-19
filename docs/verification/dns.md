@@ -269,7 +269,7 @@ inventory 的 `pilot_inputs`），不從 playbook 讀，避免 spec 跟實作有
 | `dns_cache_max_ttl`、`dns_cache_max_negative_ttl` | C10、C13、C14 | |
 | `dns_dnssec_validation` | C8、C9 的 `appliesWhen` | |
 | `external_probe_name` | C7、C8、C19 | 外部名稱；DNSSEC 開啟時必須是有簽章的名稱（例如 `isc.org`） |
-| `freeipa_domain`、`freeipa_dns_server_ips`（空白分隔）、`freeipa_probe_fqdn` | C11–C14、C20 | forward-only 模式填 `none`；split 模式填 `none` 時 probe 印 `missing-input` 並 fail |
+| `freeipa_domain`、`freeipa_dns_server_ips`（空白分隔）、`freeipa_probe_fqdn` | C11–C14、C20 | `freeipa_dns_server_ips` 要列出 tier 實際 stub 到的每一台 FreeIPA DNS server：primary，加上每台 `freeipa_setup_dns` 不是 `false` 且 FreeIPA 的 NS 紀錄已列出的 replica（未設 `freeipa_setup_dns`、還沒 promote 的 replica 會被 `dns-apply.yml` 略過，不要列）。少列或多列，C11（stub 的 server 集合要完全相同）與 C14（NXDOMAIN 的 SOA 要來自其中一台）會 fail。forward-only 模式填 `none`；split 模式填 `none` 時 probe 印 `missing-input` 並 fail |
 | `freeipa_extra_zone_probe_fqdn` | C15 | `dns_freeipa_zones` 裡某個 zone 的 **A record**；沒有額外 zone 時填 `none`（C15 變成 not_applicable） |
 | `freeipa_reverse_probe_ip` | C16 | FreeIPA 反解 zone 裡有 PTR 的 IP；沒有反解 zone 時填 `none` |
 | `dns_zone_probe_fqdn` | C17 | `dns_zones` 或 `dns_stub_zones` 裡的名稱（取代舊 C7 的 `$DNS_PROBE_NAME`）；都沒有時填 `none` |
