@@ -1,0 +1,3 @@
+# Real OpenSSH stderr captures: ssh ends these lines with \r\n. Keep them
+# byte for byte.
+*.stderr -text -whitespace

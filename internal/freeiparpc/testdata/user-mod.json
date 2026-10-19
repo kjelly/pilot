@@ -1,0 +1,51 @@
+{
+  "result": {
+    "result": {
+      "krbprincipalname": [
+        "p0-alice@IPA.PILOT.INTERNAL"
+      ],
+      "mail": [
+        "p0-alice@example.test"
+      ],
+      "uidnumber": [
+        "1927600192"
+      ],
+      "givenname": [
+        "P0"
+      ],
+      "homedirectory": [
+        "/home/p0-alice"
+      ],
+      "title": [
+        "Phase 0"
+      ],
+      "krbcanonicalname": [
+        "p0-alice@IPA.PILOT.INTERNAL"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "sn": [
+        "Alice"
+      ],
+      "gidnumber": [
+        "1927600192"
+      ],
+      "uid": [
+        "p0-alice"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ]
+    },
+    "value": "p0-alice",
+    "summary": "Modified user \"p0-alice\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -35,7 +35,7 @@ var secretCommandTextAllowlist = map[string]int{
 	"playbooks/apply/dcgm-exporter-apply.yml::Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)":             1,
 	"playbooks/apply/freeipa-dns-apply.yml::Kinit admin into the dedicated ccache":                                                                 1,
 	"playbooks/apply/freeipa-identity-apply.yml::Kinit admin":                                                                                      1,
-	"playbooks/apply/freeipa-identity-apply.yml::Set password for users that need one (forced, or first-time onboard)":                             1,
+	"playbooks/apply/freeipa-identity-apply.yml::Set password for users that need one (first-time onboard, or requested reset)":                    1,
 	"playbooks/apply/freeipa-server-apply.yml::FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)":                1,
 	"playbooks/apply/gateway-scope-apply.yml::Kinit admin":                                                                                         1,
 	"playbooks/apply/host-monitoring-apply.yml::Step 8: Generate bcrypt hash for basic auth (spec C10; only when the credential changed)":          1,

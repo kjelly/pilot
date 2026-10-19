@@ -1,0 +1,12 @@
+{
+  "result": {
+    "result": [],
+    "count": 0,
+    "truncated": false,
+    "summary": "0 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
