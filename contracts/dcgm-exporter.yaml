@@ -21,7 +21,7 @@ hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
   - {name: dcgm_exporter_version, type: string, required: false, default: "3.3.9-3.6.1-ubuntu22.04", secret: false}
-  - {name: dcgm_exporter_port, type: string, required: false, default: "9400", secret: false}
+  - {name: dcgm_exporter_port, type: integer, required: false, default: 9400, secret: false}
   - {name: dcgm_exporter_basic_auth_user, type: string, required: false, default: "prometheus", secret: false}
   - {name: dcgm_exporter_basic_auth_password, type: string, required: true, secret: true}
 endpoints:

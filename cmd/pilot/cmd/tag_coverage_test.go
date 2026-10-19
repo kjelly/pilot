@@ -52,6 +52,7 @@ var specTagMap = []specTagMapping{
 	{spec: "audit-log-forwarding.md", playbook: "audit-log-forwarding-apply.yml",
 		exemptRows: map[string]string{
 			"C11": "functional probe (run sudo, assert audit.log recorded it) — verify-only outcome of the C1..C10 auditd config",
+			"C22": "functional probe (send a local6 message, assert rsyslogd's TCP connection to the forward port) — verify-only outcome of C15..C17 and the SELinux port label",
 		}},
 	{spec: "core-infra-provider.md", playbook: "core-infra-provider-apply.yml",
 		prefixes: []string{"ntp"}},

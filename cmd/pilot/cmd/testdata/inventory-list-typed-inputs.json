@@ -1,0 +1,45 @@
+{
+    "_meta": {
+        "hostvars": {
+            "client-1": {
+                "ansible_host": "192.0.2.20",
+                "audit_logrotate_maxage": 120,
+                "dns_cache_max_ttl": 600,
+                "siem_forward_port": "2514"
+            },
+            "siem-1": {
+                "ansible_host": "192.0.2.10",
+                "audit_logrotate_maxage": 120,
+                "siem_forward_port": "2514",
+                "siem_log_root": "/var/log/siem-site",
+                "siem_logrotate_rotate": 30,
+                "siem_receiver_tcp_port": 2514
+            }
+        },
+        "profile": "inventory_legacy"
+    },
+    "all": {
+        "children": [
+            "ungrouped",
+            "log-server",
+            "audit-log-forwarding",
+            "dns"
+        ]
+    },
+    "audit-log-forwarding": {
+        "hosts": [
+            "siem-1",
+            "client-1"
+        ]
+    },
+    "dns": {
+        "hosts": [
+            "client-1"
+        ]
+    },
+    "log-server": {
+        "hosts": [
+            "siem-1"
+        ]
+    }
+}

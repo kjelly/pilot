@@ -543,7 +543,7 @@ func validateFixtureFields(root string, contract fixtureContract) error {
 			return fmt.Errorf("duplicate group var %q", groupVar.Name)
 		}
 		switch groupVar.Type {
-		case "string", "stringList", "integer", "boolean", "duration":
+		case "string", "stringList", "stringOrStringList", "integer", "boolean", "duration":
 		default:
 			return fmt.Errorf("group var %s has invalid type %q", groupVar.Name, groupVar.Type)
 		}
@@ -578,8 +578,8 @@ func validateFixtureFields(root string, contract fixtureContract) error {
 				if condition.Value != nil {
 					return fmt.Errorf("input rule operator nonEmpty cannot have value")
 				}
-				if groupVar.Type != "string" && groupVar.Type != "stringList" {
-					return fmt.Errorf("input rule operator nonEmpty requires string or stringList input")
+				if groupVar.Type != "string" && groupVar.Type != "stringList" && groupVar.Type != "stringOrStringList" {
+					return fmt.Errorf("input rule operator nonEmpty requires string, stringList or stringOrStringList input")
 				}
 			case "equals", "notEquals":
 				if condition.Value == nil {
@@ -733,6 +733,20 @@ func validateFixtureGroupVarDefault(groupVar fixtureGroupVar) error {
 		return nil
 	}
 	switch groupVar.Type {
+	case "stringOrStringList":
+		switch v := groupVar.Default.(type) {
+		case string, []string:
+			return nil
+		case []any:
+			for _, item := range v {
+				if _, ok := item.(string); !ok {
+					return fmt.Errorf("group var %s default must be stringOrStringList", groupVar.Name)
+				}
+			}
+			return nil
+		default:
+			return fmt.Errorf("group var %s default must be stringOrStringList", groupVar.Name)
+		}
 	case "string":
 		if _, ok := groupVar.Default.(string); !ok {
 			return fmt.Errorf("group var %s default must be string", groupVar.Name)

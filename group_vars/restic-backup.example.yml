@@ -90,7 +90,9 @@ restic_s3_target_host: ""
 #     docker exec pilot-postgres pg_dumpall -U keycloak
 #     > /var/backups/keycloak-db/dump.sql
 #
-#   # host_vars/log-server-1.yml(中央 SIEM 接收端:設定 + 已落地的日誌)
+#   # host_vars/log-server-1.yml(中央 SIEM 接收端:設定 + 已落地的日誌;
+#   # inventory 設了 siem_log_root 時,日誌落在那個目錄,要一起列進來,
+#   # 例如再加 "/srv/siem")
 #   restic_backup_paths: ["/etc/rsyslog.conf", "/etc/rsyslog.d", "/var/log"]
 #
 #   # host_vars/wazuh-manager-1.yml(Wazuh manager,Docker 部署:官方發行包

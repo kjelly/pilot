@@ -1,0 +1,40 @@
+  dn: uid=pw-self,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  uid: pw-self
+  givenname: Self
+  sn: Changed
+  cn: Self Changed
+  initials: SC
+  homedirectory: /home/pw-self
+  gecos: Self Changed
+  loginshell: /bin/sh
+  krbcanonicalname: pw-self@IPA.PILOT.INTERNAL
+  krbprincipalname: pw-self@IPA.PILOT.INTERNAL
+  mail: pw-self@ipa.pilot.internal
+  uidnumber: 1927600005
+  gidnumber: 1927600005
+  nsaccountlock: FALSE
+  has_password: TRUE
+  has_keytab: TRUE
+  displayName: Self Changed
+  ipaNTSecurityIdentifier: S-1-5-21-3998632271-3893472475-798555519-1005
+  ipaUniqueID: 119a4996-c863-11f1-9178-5254001b059e
+  krbExtraData: AAL2dNBqa2FkbWluZEBJUEEuUElMT1QuSU5URVJOQUwA
+  krbLastAdminUnlock: 20261015063844Z
+  krbLastPwdChange: 20261015063846Z
+  krbLoginFailedCount: 0
+  krbPasswordExpiration: 20270113063846Z
+  memberof: cn=ipausers,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  mepManagedEntry: cn=pw-self,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  objectClass: top
+  objectClass: person
+  objectClass: organizationalperson
+  objectClass: inetorgperson
+  objectClass: inetuser
+  objectClass: posixaccount
+  objectClass: krbprincipalaux
+  objectClass: krbticketpolicyaux
+  objectClass: ipaobject
+  objectClass: ipasshuser
+  objectClass: ipaSshGroupOfPubKeys
+  objectClass: mepOriginEntry
+  objectClass: ipantuserattrs
