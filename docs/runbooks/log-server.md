@@ -20,14 +20,14 @@
 
 ## 1. §0.5 目前有效的事實快照（AGENTS.md §2）
 
-> **2026-10-19 target 驗證 PASS；完整 repo race gate 尚待完成。**
-> Target candidate `5d9f468a516b842b44c4a66021b4a3b6ba6853ab`，tree
-> `58d69f8d518e4cc189ca52d5710719938eb6a312`。兩台專用 vm-target：Ubuntu 24.04
-> （AppArmor）及 AlmaLinux 9.8（SELinux Enforcing）。實際 inventory 各只有一個 host，
+> **2026-10-19 target 驗證及完整 repo race gate PASS。**
+> Target candidate `ea9200923ce54b2c3b0dd1169d89252508a02708`，tree
+> `74a148a0cdf4b3af4c1a96aad810e2f0cd46aad7`。兩台專用 vm-target：Ubuntu 24.04
+> （rsyslogd AppArmor enforce）及 AlmaLinux 9.8（SELinux Enforcing）。實際 inventory 各只有一個 host，
 > 均在 `all`，以 `target_group=all` 對齊單機測試；不是從 spec 群組推定 host。
 > 根目錄 `/srv/pr79-base`，TCP 514；checkout 外的 loopback forwarding fixture 提供
 > C7/C8 的本機轉送前置，沒有 vault 或秘密值。Image digest、inventory／外部狀態指紋與 run IDs
-> 見 [本輪 evidence](../evidence/play-vars-inventory-precedence/2026-10-19-5d9f468.md)。兩台 VM 已拆除。
+> 見 [本輪 evidence](../evidence/play-vars-inventory-precedence/2026-10-19-ea92009.md)。兩台 VM 已拆除。
 >
 > - Ubuntu：fresh check/apply `failed=0`，log-server v1.9 **11/11**，第一次重跑 `changed=0`。
 > - EL：fresh check/apply 通過、第一次重跑 `changed=0`；spec **10/11**，只有限定 Ubuntu 的
