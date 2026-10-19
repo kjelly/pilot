@@ -30,54 +30,11 @@
   本輪沒有重新宣稱 C1–C24 全表或 120-user 效能驗收；舊效能數據只屬原 candidate/date。
   image digest、external-state fingerprint、run IDs、UTC 與結果：
   [`2026-10-19-747d84c.md`](../evidence/freeipa-identity/2026-10-19-747d84c.md)。
-  下面是 2026-08-11 roster schema v2 交付時的快照。
-
-- Roster schema v2 delivery：schema v1/v2 版本判定與自動升級
-  （`pilot roster migrate`、`EnsureRosterCurrent`——`pilot edit`/MCP roster
-  driver/`pilot deploy`/`pilot reconcile` preflight 開啟 roster 時自動觸發，
-  含加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀
-  membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、
-  NFS export selector 新增 hostgroup/netgroup 型別。完整技術細節、LDAP
-  schema gotcha 與逐項 checklist 見
-  `docs/verification/freeipa-identity.md` v1.6（§8 changelog）。
-- Target：`freeipa-server` vm-target（AlmaLinux 9 native `ipa-server-install`）。
-- 結果：`playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml` 首次套用
-  `changed=13 failed=0`，立刻重跑 `changed=0 failed=0`；手動注入一個 roster
-  未宣告的 netgroup 成員後重新 apply，`changed=1`（只有 pruning 那個 task
-  變動），LDAP 查證該成員已移除；`docs/verification/freeipa-identity.md`
-  依序套用 legacy/canonical v1/schema-v2 三份 fixture 後 `pilot vm-target
-  verify` 為 **24/24 PASS**。`go test ./...`（1626 tests）、
-  `ansible-playbook --syntax-check`、`go vet`、`gofmt`、`-race` 全綠。
-
-<details>
-<summary>先前快照（2026-07-22，delivery batch 1）</summary>
-
-- Tested candidate/tree：`070d618a322f86b3cb638920a4a4e528728d2eb4` /
-  `667573a8c8a491656d2181e4188177eeaaf41798`
-- Target：AlmaLinux 9 vm-target `freeipa-identity-v2`；inventory 內
-  `freeipa-identity-v2` 與 `freeipa-server` 是同一台 VM 的兩個 alias。
-- 對齊決定：使用單一 host + `target_group` 例外；正式 run 一律指定
-  `fixtures_target_group=freeipa-identity-v2`，不可用 `all`，否則同一 play 會平行執行兩次。
-- Vault 外部 state：`~/.vault/main.yaml` 已確認含 `ipa_admin_password` key；只檢查 key name，
-  未擷取值。
-- 結果：canonical check `changed=0 failed=0`；legacy apply `changed=0 failed=0`；
-  canonical apply/idempotency 皆 `changed=0 failed=0`；spec `12/12 PASS`。
-- Evidence：[2026-07-22 candidate 070d618](../evidence/freeipa-identity/2026-07-22-070d618.md)
-
-當時只完成 delivery batch 1：canonical users/groups 與 legacy compatibility；
-canonical hosts/hostgroups/HBAC/sudo/NFS/migration 尚未交付——**這個限制已在
-2026-08-11 的 roster-schema-v2 delivery 中解除**（hosts/hostgroups/HBAC/sudo
-其實在 2026-07-22 之後、2026-08-11 之前的某次未記錄變更中就已交付，見
-`docs/verification/freeipa-identity.md` C9–C18；本次新增的是 netgroups 與
-hostgroup 巢狀 membership）。`migration`（roster 內宣告式批次改名/刪除）仍是
-唯一尚未交付的部分。
-
-</details>
 
 已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
 deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
-contract-backed 的 day-2 reconciler。此版本已實機跑過 canonical/legacy/schema-v2
-apply、24-row verify 與 idempotency；目前結果見 §0.5。未來 Nginx config 之類的
+contract-backed 的 day-2 reconciler。本輪驗證小型 schema-2 roster 的新增、帳號啟停、
+成員增撤、check mode 與冪等，並以 LDAP 獨立讀回；驗證範圍與結果見 §0.5。未來 Nginx config 之類的
 設定型角色，必須先具備自己的 contract、apply playbook、schema 與 verification
 evidence，才可加入這個入口。
 
