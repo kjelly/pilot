@@ -1,0 +1,321 @@
+# Managed by prometheus-apply.yml from
+# playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2 — do not
+# edit on the host. Deterministic host-health and login-probe alerts
+# (GitHub issue kjelly/pilot#11); thresholds and durations come from the
+# prometheus role's group vars (docs/verification/prometheus.md §1.5).
+# Prometheus's own template syntax is kept inside raw blocks so Ansible's
+# Jinja pass leaves it untouched.
+#
+# Identity: node_exporter series carry pilot_host (prometheus-apply.yml's
+# per-target label). The login probe publishes probe_target instead
+# (pilot_host on those series is the PROBE host), so every login-probe
+# rule projects probe_target onto pilot_host — the joins with up{job="node"}
+# and the dashboards then key on one host identity — and keeps the probe
+# host as probe_host, which Alertmanager's PilotLoginProbeStale inhibit
+# matches on (one stalled probe mutes its own alerts, never another
+# probe's; docs/verification/alertmanager.md §1.7).
+groups:
+  - name: pilot-host-io
+    rules:
+      # PSI "full" I/O stall: the share of wall time in which every runnable
+      # task on the host was blocked on I/O. node_exporter publishes PSI
+      # without a kind label: node_pressure_io_stalled_seconds_total is the
+      # "full" line of /proc/pressure/io and
+      # node_pressure_io_waiting_seconds_total the "some" line (captured from
+      # node_exporter 1.12.1, the version host-monitoring installs). Needs
+      # kernel PSI — absent on AlmaLinux/RHEL 9 without psi=1
+      # (CONFIG_PSI_DEFAULT_DISABLED=y),
+      # which HostPSIUnavailable below makes visible instead of silent.
+      - alert: HostIOStall
+        expr: |
+          max by (pilot_host) (
+            rate(node_pressure_io_stalled_seconds_total{job="node"}[5m])
+          ) > {{ host_io_stall_ratio_threshold }}
+        for: {{ host_io_stall_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: host-health
+        annotations:
+{% raw %}
+          summary: "Host {{ $labels.pilot_host }} spends {{ $value | humanizePercentage }} of its time fully stalled on I/O"
+          description: "PSI io full stall ratio over 5m. Logins, SSSD and every service on this host wait on storage; check HostDiskLatencyHigh and the per-device node_disk_* series."
+{% endraw %}
+      # Average completion time per I/O across the host's block devices —
+      # the same PromQL as the detection-engine linux-host-v1 profile's
+      # disk_io_latency_seconds feature (same device filter), so the
+      # deterministic and adaptive paths agree on what latency is. Works
+      # without PSI, so it is the EL9 coverage.
+      - alert: HostDiskLatencyHigh
+        expr: |
+          max by (pilot_host) (
+            (
+              rate(node_disk_read_time_seconds_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+              +
+              rate(node_disk_write_time_seconds_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+            )
+            /
+            clamp_min(
+              rate(node_disk_reads_completed_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+              +
+              rate(node_disk_writes_completed_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m]),
+              0.000001
+            )
+            and
+            (
+              rate(node_disk_reads_completed_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+              +
+              rate(node_disk_writes_completed_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+            ) > {{ host_disk_latency_min_ops_per_second }}
+          ) > {{ host_disk_latency_seconds_threshold }}
+        for: {{ host_disk_latency_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: host-health
+        annotations:
+{% raw %}
+          summary: "Host {{ $labels.pilot_host }} block I/O averages {{ $value | humanizeDuration }} per operation"
+          description: "Mean read+write completion time over 5m on a device doing real I/O. Sustained storage latency stalls logins (PAM/SSSD) and services before the host is down."
+{% endraw %}
+      # Weighted I/O time = average number of requests in flight.
+      - alert: HostDiskQueueDeep
+        expr: |
+          max by (pilot_host) (
+            rate(node_disk_io_time_weighted_seconds_total{job="node", device!~"^(loop|ram|fd|sr)[0-9]*$"}[5m])
+          ) > {{ host_disk_queue_depth_threshold }}
+        for: {{ host_disk_latency_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: host-health
+        annotations:
+{% raw %}
+          summary: "Host {{ $labels.pilot_host }} keeps {{ $value | humanize }} block I/O requests in flight"
+          description: "Average block-device queue depth over 5m."
+{% endraw %}
+      # Makes "no I/O stall alert can ever fire here" visible: the host is
+      # scraped but publishes no PSI series (EL9 default kernel). Info only.
+      - alert: HostPSIUnavailable
+        expr: |
+          max by (pilot_host) (up{job="node"} == 1)
+          unless on (pilot_host)
+          max by (pilot_host) (node_pressure_io_stalled_seconds_total{job="node"})
+        for: 30m
+        labels:
+          severity: info
+          pilot_alert_source: host-health
+        annotations:
+{% raw %}
+          summary: "Host {{ $labels.pilot_host }} has no PSI (pressure stall) metrics; HostIOStall cannot fire there"
+          description: "The kernel was booted without PSI (AlmaLinux/RHEL 9 default). HostDiskLatencyHigh and HostDiskQueueDeep still cover storage latency; enabling psi=1 needs a reboot and is an operator decision."
+{% endraw %}
+
+  - name: pilot-host-telemetry
+    rules:
+      # A monitoring data gap, distinct from a host outage: node_exporter is
+      # not being scraped, yet an SSH login to the same host succeeded in
+      # the same window. Only a login that actually succeeded within
+      # host_metrics_missing_success_window counts: the target's own
+      # last-success timestamp must have changed (changes(), so the probe
+      # host's clock does not matter). A stalled probe's frozen success=1,
+      # or a slow round that has not reached a dead target yet, keeps
+      # success=1 but records no new success. The last success before a
+      # death is published up to one textfile write (15 s) later, so the
+      # condition can hold for window + 15 s after the death; the playbook
+      # keeps that within host_metrics_missing_for (15 s to spare at the
+      # defaults, 150 s + 15 s <= 3m), so a dead host does not raise this
+      # alert. One observed change keeps changes() > 0 for window - scrape,
+      # so the playbook also keeps the window at least the probe hosts'
+      # interval + timeout + 15 s + 2 x scrape (135 s at the defaults),
+      # and a healthy probe holds it during a gap
+      # (tasks/host-metrics-missing-probe-round-gate.yml). While this
+      # fires, Alertmanager inhibits the seed HostDown{job="node"} of the
+      # same host (it answers SSH, so it is not down); the playbook keeps
+      # host_metrics_missing_for at most 9m, one evaluation interval below
+      # HostDown's 10m, so HostDown does not notify first. keep_firing_for
+      # holds it (and with it the inhibit) through one failed probe round or a probe
+      # restart, whose first textfile publishes success=0 before the first
+      # round: without it, a gap longer than 10m paged "Target down" on such
+      # a blip. action_required routes it to Teams, which would otherwise get
+      # nothing for a data gap.
+      - alert: HostMetricsMissing
+        expr: |
+          max by (pilot_host) (up{job="node"} == 0)
+          and on (pilot_host)
+          max by (pilot_host) (
+            label_replace(
+              (pilot_login_probe_success == 1)
+              and on (job, instance, probe_target)
+              (changes(pilot_login_probe_last_success_timestamp_seconds[{{ host_metrics_missing_success_window }}]) > 0),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          )
+        for: {{ host_metrics_missing_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: warning
+          action_required: "true"
+          pilot_alert_source: host-health
+        annotations:
+{% raw %}
+          summary: "Host {{ $labels.pilot_host }} is reachable over SSH but its metrics are not being collected"
+          description: "up{job=\"node\"} is 0 while the login probe still logs in: node_exporter is stopped, blocked (tcp/9100) or rejecting the scrape credential. Alerts that read this host's metrics are blind until it is fixed."
+{% endraw %}
+
+  - name: pilot-login-probe
+    rules:
+      # PAM account management denied a login whose key sshd had already
+      # accepted (HBAC, disabled account) — fires even while sssd.service
+      # is active (issue #11 AC2).
+      - alert: PilotLoginProbeAccountDenied
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="account"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+        for: {{ login_probe_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: critical
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "SSH logins to {{ $labels.pilot_host }} are denied by PAM account checks"
+          description: "The canary's key is accepted but PAM account management refuses the session (sshd: 'Access denied ... by PAM account configuration'). Run `sssctl user-checks -a acct -s sshd <canary>` on the host; check the HBAC rules and the account's state in FreeIPA."
+{% endraw %}
+      - alert: PilotLoginProbeAuthFailed
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="auth"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+        for: {{ login_probe_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: critical
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "SSH public-key authentication of the login canary fails on {{ $labels.pilot_host }}"
+          description: "sshd refused the canary key: the account is unknown to SSSD on the host, or its key is not (yet) served by sss_ssh_authorizedkeys. A just-rotated probe key reaches a host only when SSSD refreshes its cached user entry (observed: up to half of entry_cache_timeout)."
+{% endraw %}
+      # Transport was up, then the login hung (SSSD responder or backend
+      # frozen while sssd.service still reports active, or storage stalls).
+      - alert: PilotLoginProbeLoginStalled
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="timeout"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+        for: {{ login_probe_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: critical
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "SSH logins to {{ $labels.pilot_host }} hang after the connection is established"
+          description: "sshd answers but the login never completes. Typical cause: an SSSD process (sssd_be/sssd_pam/sssd_nss) is stuck while sssd.service stays active, or the host is stalled on I/O (see HostIOStall/HostDiskLatencyHigh)."
+{% endraw %}
+      - alert: PilotLoginProbeHostKeyMismatch
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="hostkey"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+        for: {{ login_probe_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "The SSH host key of {{ $labels.pilot_host }} does not match the one FreeIPA holds"
+          description: "Host key verification failed against the keys SSSD serves from FreeIPA. The host was re-keyed or re-installed without re-enrollment, or the name now reaches a different machine."
+{% endraw %}
+      - alert: PilotLoginProbeSessionFailed
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="session"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+        for: {{ login_probe_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "SSH logins to {{ $labels.pilot_host }} authenticate but the session fails"
+          description: "Authentication and PAM account passed, but the probe command did not exit 0 (session setup, home directory or shell problem)."
+{% endraw %}
+      # A host whose node_exporter scrape also fails is down, and the seed
+      # HostDown alert is the one to act on: excluding it here makes a dead
+      # host yield only HostDown, whatever the two `for:` durations are.
+      - alert: PilotLoginProbeTransportFailed
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              label_replace(pilot_login_probe_last_stage{stage="transport"}, "probe_host", "$1", "pilot_host", "(.+)"),
+              "pilot_host", "$1", "probe_target", "(.+)"
+            )
+          ) == 1
+          unless on (pilot_host)
+          max by (pilot_host) (up{job="node"} == 0)
+        for: {{ login_probe_transport_alert_for }}
+        keep_firing_for: {{ login_probe_alert_keep_firing_for }}
+        labels:
+          severity: warning
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "No SSH connection can be established to {{ $labels.pilot_host }}"
+          description: "Refused, filtered, unresolvable or no SSH banner, while node_exporter on the host is still scraped (a host whose scrape fails too raises HostDown instead)."
+{% endraw %}
+      # The probe itself stopped publishing (its write timestamp has not
+      # changed for login_probe_stale_seconds; changes() does not depend on
+      # the probe host's clock): its own frozen series would otherwise keep
+      # (or never raise) the alerts above. Alertmanager
+      # inhibits the other PilotLoginProbe* alerts of the same probe_host
+      # while this fires, so it must reach someone: action_required routes
+      # it to Teams.
+      - alert: PilotLoginProbeStale
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(
+              changes(pilot_login_probe_metrics_last_write_timestamp_seconds[{{ login_probe_stale_seconds }}s]),
+              "probe_host", "$1", "pilot_host", "(.+)"
+            )
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+          action_required: "true"
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "The login probe on {{ $labels.pilot_host }} stopped writing its metrics"
+          description: "pilot-login-probe rewrites its textfile every 15s; it is stopped, crash-looping or cannot write /var/lib/node_exporter/textfile. Login alerts from this probe are frozen until it recovers."
+{% endraw %}
+      - alert: PilotLoginProbeNoTargets
+        expr: |
+          max by (pilot_host, probe_host) (
+            label_replace(pilot_login_probe_targets, "probe_host", "$1", "pilot_host", "(.+)")
+          ) == 0
+        for: 15m
+        labels:
+          severity: info
+          pilot_alert_source: login-probe
+        annotations:
+{% raw %}
+          summary: "The login probe on {{ $labels.pilot_host }} has no targets configured"
+          description: "login_probe_target_group expanded to no hosts and login_probe_targets is empty; nothing is being probed."
+{% endraw %}

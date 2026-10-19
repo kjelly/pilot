@@ -115,6 +115,10 @@ playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks �
 thanos-retention-test: ## Run the Thanos Compactor with the playbook's retention defaults against synthetic blocks; fails if data younger than 90 days is deleted (needs docker, python3). See scripts/thanos-retention-behavior-test.sh.
 	./scripts/thanos-retention-behavior-test.sh
 
+alert-rules-test: ## Run the host-health/login-probe alert rules under the pinned promtool, the Alertmanager inhibit rules in the pinned Alertmanager and the login-probe playbook-task tests (needs docker, ansible-playbook); pulls the images and fails instead of skipping.
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_HostHealth|TestRegression_HostIOStall|TestRegression_HostMetricsMissing|TestRegression_Alertmanager|TestRegression_StaleInhibit|TestRegression_LoginProbe|TestRegression_PrometheusTaggedRuntime)' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_LoginProbeDecommissionRuntime|TestFreeIPAQuery_NoHostsIsNotAnObservation)$$' ./internal/decommission/providers/
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
@@ -128,7 +132,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test
+.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

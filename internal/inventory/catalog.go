@@ -48,6 +48,7 @@ var topLevelOrder = []string{
 	"prometheus",
 	"thanos-query",
 	"detection-engine",
+	"login-probe",
 	"agent-controller",
 	"dashboard",
 	"pilot-access-gateway",

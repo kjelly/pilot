@@ -1,0 +1,20 @@
+------------------------
+Modified user "pwb-u002"
+------------------------
+  User login: pwb-u002
+  First name: Bench
+  Last name: U002
+  Home directory: /home/pwb-u002
+  Login shell: /bin/bash
+  Principal name: pwb-u002@IPA.PILOT.INTERNAL
+  Principal alias: pwb-u002@IPA.PILOT.INTERNAL
+  Email address: pwb-u002@ipa.pilot.internal
+  UID: 1927600064
+  GID: 1927600064
+  Account disabled: False
+  Password: True
+  Member of groups: ipausers, team-pwb-02, role-pwb-02
+  Indirect Member of group: data-pwb-02, access-pwb-02
+  Indirect Member of Sudo rule: sudo-pwb-02
+  Indirect Member of HBAC rule: hbac-pwb-02
+  Kerberos keys available: True

@@ -11,22 +11,21 @@ FreeIPA，其餘送到你設定的外部 upstream；consumer 先問這一層，�
 
 ## 0.5 目前有效的事實快照
 
-最新驗證：2026-10-14，candidate `6522b94`（tree `c8029314e417b78ad043b59ec8b32a4df256e379`），
-**PASS**：兩台 FreeIPA DNS server（primary + 未設 `freeipa_setup_dns` 的 replica，issue #67）
-在 tier 前面，4 台由 `topology up` 新建的 VM 跑 `vm-target topology test`：L3 check mode
-（全新 VM）`failed=0`、L4 `failed=0`、verify `dns.md` v1.2 16 pass / 0 fail / 4 not_applicable
-（測試後再跑 2 次結果相同）、`freeipa-server.md` 20、`freeipa-server-replica.md` 16、
-`freeipa-dns-client.md` 7 全部 pass、L6 `changed=0`。摘要：
-[`docs/evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md`](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
-下表是 dns role 本身範圍最廣的一次驗證（2026-10-01 candidate `c257bfc`，E1–E8），摘要：
+最新驗證：2026-10-16，candidate `b82a0c9`（tree `b733b150723485349bf915a9f15084ca9cc37798`，PR #92 的 3 個 FreeIPA kinit 都改由 stdin 傳密碼、與 `main` `afeacbd` 合併後），
+**PASS**；run ID、UTC 時段、target image digest、套件版本與 inventory 指紋都在執行當下記錄。摘要：
+[`docs/evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md`](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)
+（topology test、`dns.md`、與 `44e2d20`／`main` `f9fb701`／`c6bcfe9`／`3dbc0ef` 的對照、還沒 promote 的 replica、`site.yml`、forwarders 與 gate、含特殊字元的 admin 密碼，全部在同一個 candidate 上重跑）。
+更早的 candidate（`cdcd39b`、`b02b5cb`、`287cf79`、`5750f2a`、`09ded7e`、`01a64f4`）的 record 都已標為 superseded。
+dns role 本身範圍最廣的一次驗證是 2026-10-01 candidate `c257bfc`（5 台 VM，E1–E8：ACL gate、真實
+`pilot deploy` 全站部署、`--limit`、`pilot reconcile`），摘要：
 [`docs/evidence/dns/2026-10-01-c257bfc.md`](../evidence/dns/2026-10-01-c257bfc.md)。
 
 | 項目 | 事實 |
 |---|---|
-| 目標環境 | `pilot vm-target topology`（`docs/topologies/dns-tier-topology.yaml`），5 台由 `topology up` 新建的 VM，測完已移除 |
-| inventory host 集合 | `dns`: dt-dns-1, dt-dns-2；`freeipa-server`: dt-ipa；`freeipa-dns-client`: dt-dns-2, dt-client, dt-client-el |
-| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA server 安裝與測試 fixture 用）；dns 設定在 workspace 的 `group_vars/dns.yml`，由 `pilot edit` 寫入 |
-| 結果 | L3 check mode（全新 VM）`failed=0`；L4 `failed=0`；verify `dns.md` 37 pass / 0 fail / 2 not_applicable、`freeipa-dns-client.md` 18 pass；L6 `changed=0`。G4 擋下 `1.2.3.4/0`、`::0/0` 等允許全部來源的 ACL，C5 對手動加入的同類 ACL 判 FAIL。真實 `pilot deploy` 全站部署 + `--limit dt-dns-2` + `pilot reconcile`（`freeipa-dns-client`）之後 `dns.md` 31 / 0 / 8、`freeipa-dns-client.md` 18 / 0 |
+| 目標環境 | `pilot vm-target topology`，6 台由 `topology up` 新建、未跑過任何 playbook 的 VM（`b82a0c9` 這輪重新建立；consumer 端的情境另用 4 台的 topology）：`pr92-ipa`、`pr92-r1`、`pr92-r2`、`pr92-r3`（AlmaLinux 9.8，ipa-server 4.13.4-1.el9_8）、`pr92-dns`（Ubuntu 24.04.4，unbound 1.19.2-1ubuntu3.10）、`pr92-client`（Ubuntu 24.04.4）；測完已移除 |
+| inventory host 集合 | `freeipa-server`: pr92-ipa；`freeipa-server-replica`: pr92-r1、pr92-r2（不設 `freeipa_setup_dns`）、pr92-r3（列在 inventory、不 promote）；`dns`: pr92-dns；`freeipa-dns-client`: pr92-client。另用 inventory 副本把 pr92-r1 改成 FreeIPA 不認得的名稱 |
+| 外部 state | `~/.vault/main.yaml` 的 `ipa_admin_password`（只給 FreeIPA 安裝、測試 fixture 與診斷用唯讀 principal 設定）；含特殊字元密碼的檢查另用兩份一次性 vault（只有 `ipa_admin_password`，跑完刪除）；dns 設定用 role 預設值 |
+| 結果 | topology test（freeipa-server → replica → dns fixtures → dns → freeipa-dns-client，`-l '!pr92-r3'`）：L3 五台 `failed=0`；L4 `failed=0`；L5 `freeipa-server.md` 20/0、`freeipa-server-replica.md` 16/0、`freeipa-dns-client.md` 7/0，`dns.md` 另以 `--input` 驗證 16 pass、4 not applicable；L6 五台 `changed=0`。之後：FreeIPA 列出的 replica named 停掉時 G5 擋下、consumer 只印 WARNING；primary forwarders 給空值時全域與 server 自己的 forwarders 都清掉、重跑 `changed=0`；forwarder gate 與安裝前的 port gate 都在任何變更前擋下；診斷 `complete`、14/14 `match`，沒 promote 的 replica 只有 `freeipa_replica_not_dns_server`。inventory 名稱與 FreeIPA 不同、但自己權威回答 zone 的 replica 留在 stub（`44e2d20` 會把它排除），見 `b82a0c9` record 的 R2.1。admin 密碼含 `$`、反引號、`$(...)`（另一組再加引號）時，三種情境的結果如下（對照組失敗，密碼裡的 `touch` 以 root 執行；`b82a0c9` 正常完成、重跑 `changed=0`，指令沒有被執行）：(1) 單機 vm-target inventory（沒有 `freeipa-server` group，self-register 不跑），對既有 DNS replica 重跑 replica playbook：`c6bcfe9` 在 forwarder 的 kinit 失敗，指令在 replica 上執行；(2) topology inventory（有 `freeipa-server` group，self-register 委派到 primary 執行）：`3dbc0ef` 在 self-register 的 kinit 失敗，指令在 primary 上執行；(3) primary 跑 `freeipa-server-apply.yml --tags freeipa-verify`（這個 tag 只選到 dnsconfig-mod 的 kinit 會讀密碼）：`3dbc0ef` 在該 kinit 失敗，指令在 primary 上執行。`main` 上其他仍用 shell 的 kinit 與 `ldapmodify -w`（#118，例如 dns fixtures、`freeipa-server-apply.yml` 的 389-ds audit 寫入）遇到這種密碼仍會失敗或執行其中的指令，所以完整的 apply 鏈沒有用這種密碼跑 |
 | 對齊決定 | 不需要：spec 的目標 role `dns` 與 inventory 的 `dns` group 一致 |
 
 ## 1. 為什麼
@@ -132,7 +131,7 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
   --input dns_mode=freeipa-split --input dns_upstream_servers=1.1.1.1 \
   --input "dns_access_control=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" \
   --input dns_cache_max_ttl=300 --input dns_cache_max_negative_ttl=60 --input dns_dnssec_validation=true \
-  --input external_probe_name=isc.org --input freeipa_domain=ipa.pilot.internal --input freeipa_dns_server_ips=<FreeIPA IP> \
+  --input external_probe_name=isc.org --input freeipa_domain=ipa.pilot.internal --input "freeipa_dns_server_ips=<primary IP> <每台已 promote 的 DNS replica IP>" \
   --input freeipa_probe_fqdn=ipa1.ipa.pilot.internal --input freeipa_extra_zone_probe_fqdn=none --input freeipa_reverse_probe_ip=none \
   --input dns_zone_probe_fqdn=none --input pilot_inventory_path=<inventory 絕對路徑> --input dns_consumer_pattern=freeipa-dns-client
 ```
@@ -142,6 +141,10 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 情況 | 結果 |
 |---|---|
 | `dns_freeipa_zones` 有 FreeIPA 沒有的 zone | G5 擋下：「FreeIPA did not answer SOA authoritatively」，設定不變 |
+| inventory 列了 replica、未設 `freeipa_setup_dns`，但還沒 promote（它自己不權威回答 zone，FreeIPA 的 NS 紀錄也沒有它） | 不擋：印出 `WARNING: <host> … did not answer <domain> authoritatively and FreeIPA's NS records list only …`，並列出 promote、改 `freeipa_replica_fqdn`、啟動 named、改設 `freeipa_setup_dns: false` 四個做法；stub 只指向其他 server，`DNS — summary: FreeIPA servers the stubs use` 列出實際使用與被略過的主機。promote 之後重跑 `dns-apply.yml` 才會加入。全站部署（`site.yml` 不含 replica playbook）因此不會被尚未 promote 的 replica 擋下。replica 自己權威回答 zone 時（例如用 `-e ipa_replica_fqdn=` 以另一個名稱安裝）一律保留；沒有任何 FreeIPA server 回答時不略過任何主機，並印出說明 |
+| FreeIPA 列為 DNS server 的 replica（或 primary）此刻 named 沒在跑 | dns tier 的 G5 擋下（「FreeIPA did not answer SOA authoritatively」，訊息說明檢查該主機的 named），設定不變：stub zone 會把查詢送給它，tier 不寫入一台不回答的 FreeIPA server。consumer 端（`freeipa-dns-client`）只印 WARNING，見下一列 |
+| replica 明確設 `freeipa_setup_dns: true` 但沒有在跑 DNS | G5 擋下，訊息說明兩個做法：先用 `freeipa-server-replica-apply.yml` promote（含 DNS），或改設 `freeipa_setup_dns: false`；設定不變 |
+| consumer（`freeipa-dns-client`）要寫入的 nameserver | 寫入前逐台問 FreeIPA server 的 FQDN（A 與 AAAA）：有回答但沒有位址、FreeIPA 不承認也不回答的 FreeIPA server、或沒有任何一台可用時擋下，`resolv.conf` 不變；只是暫時沒回答（已登記的 FreeIPA server 維護停機、dns tier 停機、明確指定的 server）印出 WARNING 並照樣寫入（`freeipa-dns-client.md` §1.5）。未 promote、未設 `freeipa_setup_dns` 的 replica 會先被略過並警告 |
 | upstream 不可達 | G6 擋下：「Upstream check failed」，設定不變；upstream 會剝掉 DNSSEC 時改設 `dns_dnssec_validation: false` |
 | 共用的 `dns_listen_addr` | G10 擋下：「is not an IPv4 address of <host>」，設定不變 |
 | `dns_zones` 寫了無效的紀錄 | checkconf 失敗，rescue 還原：「Rollback: …/pilot-dns.conf restored; unbound restarted」 |
@@ -176,3 +179,9 @@ pilot verify docs/verification/dns.md -i <inventory> -l dns \
 | 2026-10-01 | v1.1 | §0.5 改指向 candidate `cbe95b8` 的驗證；加上真實 `pilot deploy` 全站部署、`--limit`、`pilot reconcile` 的結果 | sre |
 | 2026-10-01 | v1.2 | §0.5 改指向 candidate `c257bfc`；§5 的 G4 列加上依實際網段判斷的 ACL 案例（PR #33 review） | sre |
 | 2026-10-01 | v1.3 | §7：consumer 有 2 筆以上 nameserver 時 resolver 逾時改成 1 秒（`freeipa-dns-client.md` C7）；證據為 candidate `5478c5d` | sre |
+| 2026-10-14 | v1.4 | §0.5 改指向 candidate `01a64f4`（PR #73 follow-up：未 promote 的 replica、forwarder 規則與 gate），事實表換成這次的 target 與 inventory，並註明 dns 的 L3 preview 停在 G5 | pilot |
+| 2026-10-15 | v1.5 | §0.5 改指向 PR #92 與 `main`（#91）合併後的 candidate `287cf79`（6 台新建 VM，run ID、image digest、套件版本在執行當下記錄），結果欄只寫這輪實跑的情境。PR #92 第二、三輪（`09ded7e`、`5750f2a`）改 §0.5 時沒有補這裡的變更紀錄，一併記在這列 | pilot |
+| 2026-10-15 | v1.6 | §0.5 加上同一 candidate `287cf79` 的對照實跑：round 2 的 targeted checks（`287cf79-targeted`）與 round 1 的情境（`287cf79-round1`），兩份都在執行當下記錄 metadata；`01a64f4`、`09ded7e`、`5750f2a` 三份舊 record 標為 superseded | pilot |
+| 2026-10-15 | v1.7 | §0.5 改指向再次與 `main`（`cc38f58`：#89、#101、#107）合併後的 candidate `b02b5cb`，所有對照與情境都在它上面重跑；`287cf79` 的三份 record 標為 superseded | pilot |
+| 2026-10-16 | v1.8 | §0.5 改指向 candidate `cdcd39b`：PR #92 review（`c6bcfe9` 的 P2）後，replica forwarder 的 kinit 改由 stdin 傳密碼，並與 `main` `f98327b` 合併；所有對照與情境在新建 VM 上重跑，另加含特殊字元 admin 密碼的實跑；`b02b5cb` 的 record 標為 superseded | pilot |
+| 2026-10-16 | v1.9 | §0.5 改指向 candidate `b82a0c9`：PR #92 review（`3dbc0ef` 的 B1）後，replica self-register 與 primary dnsconfig-mod 的 kinit 也改由 stdin 傳密碼，並與 `main` `afeacbd` 合併；所有對照與情境在新建 VM 上重跑。結果欄寫明特殊字元密碼三種情境各自的 inventory 條件，以及 #118 的其他 shell kinit 仍會失敗（review S1）；`cdcd39b` 的 record 標為 superseded | pilot |

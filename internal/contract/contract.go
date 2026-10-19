@@ -751,7 +751,7 @@ func validateGroupVars(groupVars []GroupVar, rules []InputRule) error {
 			return fmt.Errorf("duplicate group var %q", groupVar.Name)
 		}
 		switch groupVar.Type {
-		case "string", "stringList", "integer", "boolean", "duration":
+		case "string", "stringList", "stringOrStringList", "integer", "boolean", "duration":
 		default:
 			return fmt.Errorf("group var %s has invalid type %q", groupVar.Name, groupVar.Type)
 		}
@@ -773,6 +773,10 @@ func validateDefault(groupVar GroupVar) error {
 		return nil
 	}
 	switch groupVar.Type {
+	case "stringOrStringList":
+		if !ValueMatchesType(groupVar.Type, groupVar.Default) {
+			return fmt.Errorf("group var %s default must be stringOrStringList", groupVar.Name)
+		}
 	case "string":
 		if _, ok := groupVar.Default.(string); !ok {
 			return fmt.Errorf("group var %s default must be string", groupVar.Name)
@@ -829,8 +833,8 @@ func validateInputRules(rules []InputRule, known map[string]GroupVar) error {
 				if condition.Value != nil {
 					return fmt.Errorf("input rule operator nonEmpty cannot have value")
 				}
-				if groupVar.Type != "string" && groupVar.Type != "stringList" {
-					return fmt.Errorf("input rule operator nonEmpty requires string or stringList input")
+				if groupVar.Type != "string" && groupVar.Type != "stringList" && groupVar.Type != "stringOrStringList" {
+					return fmt.Errorf("input rule operator nonEmpty requires string, stringList or stringOrStringList input")
 				}
 			case "equals", "notEquals":
 				if condition.Value == nil {

@@ -1,0 +1,73 @@
+{
+  "result": {
+    "count": 3,
+    "results": [
+      {
+        "result": {
+          "uid": [
+            "p0-alice"
+          ],
+          "nsaccountlock": false,
+          "givenname": [
+            "P0"
+          ],
+          "krbprincipalname": [
+            "p0-alice@IPA.PILOT.INTERNAL"
+          ],
+          "uidnumber": [
+            "1927600192"
+          ],
+          "sn": [
+            "Alice"
+          ],
+          "mail": [
+            "p0-alice@example.test"
+          ],
+          "krbcanonicalname": [
+            "p0-alice@IPA.PILOT.INTERNAL"
+          ],
+          "loginshell": [
+            "/bin/sh"
+          ],
+          "gidnumber": [
+            "1927600192"
+          ],
+          "title": [
+            "Phase 0"
+          ],
+          "homedirectory": [
+            "/home/p0-alice"
+          ],
+          "has_password": false,
+          "has_keytab": false,
+          "memberof_group": [
+            "p0-team",
+            "ipausers"
+          ],
+          "dn": "uid=p0-alice,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "value": "p0-alice",
+        "summary": null,
+        "error": null
+      },
+      {
+        "error": "p0-missing: user not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p0-missing: user not found"
+        }
+      },
+      {
+        "error": "no modifications to be performed",
+        "error_code": 4202,
+        "error_name": "EmptyModlist",
+        "error_kw": {}
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,97 @@
+# Four-node topology for the login-probe component and the host-health alert
+# rules (docs/superpowers/plans/2026-10-13-issue-11-login-probe-io-pressure-evaluation.md §4,
+# GitHub issue kjelly/pilot#11).
+#
+#   lp-ipa        FreeIPA server (ipa1.ipa.pilot.internal)
+#   lp-mon        FreeIPA client + host-monitoring + docker + seaweedfs-s3
+#                 (Thanos object storage) + prometheus + alertmanager +
+#                 login-probe (the site's probe runs here and SSHes OUT to
+#                 every freeipa-client host, itself included)
+#   lp-target     FreeIPA client + host-monitoring (Ubuntu probe target)
+#   lp-target-el  FreeIPA client + host-monitoring (AlmaLinux 9 probe target:
+#                 covers the EL9 sshd/PAM path and the "PSI disabled by
+#                 default" fallback for the I/O stall rules)
+#
+#   pilot vm-target topology up        --topology docs/topologies/login-probe-topology.yaml
+#   pilot vm-target topology inventory --topology docs/topologies/login-probe-topology.yaml
+#   pilot vm-target topology down      --topology docs/topologies/login-probe-topology.yaml
+#
+# The apply chain is playbooks/test/login-probe-chain.yml, e.g.:
+#   pilot vm-target topology test --topology docs/topologies/login-probe-topology.yaml \
+#       --playbook playbooks/test/login-probe-chain.yml \
+#       --verify docs/verification/login-probe.md=login-probe \
+#       --verify docs/verification/prometheus.md=prometheus \
+#       --verify docs/verification/alertmanager.md=alertmanager \
+#       -- -e @~/.vault/<sandbox>.yaml
+services: local
+nodes:
+  - name: lp-ipa
+    base_image: almalinux-9
+    # The guest sees about 95% of this; freeipa-server needs 4096 MiB
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server
+    wire:
+      - lp-mon=lp-mon.ipa.pilot.internal
+      - lp-target=lp-target.ipa.pilot.internal
+      - lp-target-el=lp-target-el.ipa.pilot.internal
+
+  - name: lp-mon
+    base_image: ubuntu-24.04
+    # SeaweedFS, Prometheus + Thanos sidecar, Alertmanager and SSSD share
+    # this node; seaweedfs-s3/prometheus each need 2048 MiB and 20 GiB
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - host-monitoring
+      - docker
+      - seaweedfs-s3
+      - prometheus
+      - alertmanager
+      - login-probe
+    wire:
+      - lp-ipa=ipa1.ipa.pilot.internal
+      - lp-target=lp-target.ipa.pilot.internal
+      - lp-target-el=lp-target-el.ipa.pilot.internal
+
+  - name: lp-target
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - host-monitoring
+    wire:
+      - lp-ipa=ipa1.ipa.pilot.internal
+      - lp-mon=lp-mon.ipa.pilot.internal
+
+  - name: lp-target-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - host-monitoring
+    wire:
+      - lp-ipa=ipa1.ipa.pilot.internal
+      - lp-mon=lp-mon.ipa.pilot.internal

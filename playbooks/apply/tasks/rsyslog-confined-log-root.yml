@@ -1,0 +1,257 @@
+---
+# Let a confined rsyslogd write under one log root. Included by
+# log-server-apply.yml twice, with:
+#   rsyslog_log_root        the resolved directory (siem_log_root_real)
+#   rsyslog_log_root_phase  `grant` (Step 2a, before rsyslog restarts) or
+#                           `narrow` (Step 7a, once rsyslog runs the new root)
+#
+# rsyslogd is confined on both families, and only to /var/log:
+# - Ubuntu's AppArmor profile /etc/apparmor.d/usr.sbin.rsyslogd allows
+#   `/var/log/** rw`. For any other root, omfile fails with
+#   "creating parent directories for file '<root>/<host>/audit.log' failed:
+#   Permission denied" and discards every message while the apply succeeds
+#   (captured 2026-10-15 on Ubuntu 24.04, rsyslog 8.2312.0). The profile
+#   ends with `#include <local/usr.sbin.rsyslogd>` for site additions.
+# - EL's SELinux lets syslogd_t write files labelled var_log_t; a directory
+#   created elsewhere gets its parent's type (e.g. var_t under /srv).
+#
+# A root under /var/log needs neither. An SELinux file-context rule added
+# for an earlier root is left in place, by design (`semanage fcontext -d
+# '<root>(/.*)?'`, with each '.' of the root written '\.', removes it).
+#
+# Changing the root must not revoke the rules for the root the running
+# rsyslogd writes before it restarts on the new one. The AppArmor block used
+# to hold only the new root from the `grant` reload on, and until Step 6a
+# restarted rsyslog (or the rescue reloaded after a failure) the running
+# rsyslogd was refused the old root: on pr79-log two audit messages from a
+# client were lost, "open error: Permission denied" (2026-10-16). So the
+# `grant` phase keeps every rule the pilot block grants now, as read from
+# the local file, and adds the new root's; the `narrow` phase, which
+# log-server-apply.yml runs only once rsyslog has restarted on the receiver
+# config and listens on its port, leaves the new root's rules alone (none
+# under /var/log). SELinux needs no such step: the old root's rule stays.
+#
+# log-server-apply.yml's rescue undoes what this file changed in a failed
+# run: it restores the AppArmor local file and reloads the profile, and
+# removes a file-context rule this run added only once the running daemon
+# is confirmed to use the old permissions; otherwise both grants stay.
+#
+# The relabel follows the label on disk, not whether the rule changed in this
+# run: a file-context rule only takes effect through restorecon, and a root
+# created after the rule existed (a rerun after a failed apply, a recreated
+# directory) gets its parent's type. Captured 2026-10-15 on AlmaLinux 9.8:
+# with the rule already present, a new /srv/siem-el2 stayed
+# `unconfined_u:object_r:var_t:s0` and rsyslog wrote nothing.
+#
+# Nothing changes on a host without AppArmor or SELinux.
+
+- name: "MAC: does the log root live under /var/log"
+  ansible.builtin.set_fact:
+    rsyslog_log_root_in_var_log: "{{ (rsyslog_log_root ~ '/').startswith('/var/log/') }}"
+
+- name: "MAC: is the rsyslogd AppArmor profile in use"
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/usr.sbin.rsyslogd
+    get_checksum: false
+  register: rsyslog_apparmor_profile
+
+- name: "MAC: is AppArmor enabled"
+  ansible.builtin.stat:
+    path: /sys/kernel/security/apparmor/profiles
+    get_checksum: false
+  register: rsyslog_apparmor_enabled
+
+- name: "MAC: is there an AppArmor local file"
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+    get_checksum: false
+  register: rsyslog_apparmor_local_file
+
+- name: "MAC: read the AppArmor local file"
+  ansible.builtin.slurp:
+    src: /etc/apparmor.d/local/usr.sbin.rsyslogd
+  register: rsyslog_apparmor_local_content
+  when: rsyslog_apparmor_local_file.stat.exists
+
+# The rules between the pilot markers, as this file writes them.
+- name: "MAC: the rules the pilot block grants now, and the rules it must hold"
+  ansible.builtin.set_fact:
+    rsyslog_apparmor_rules: >-
+      {{ rsyslog_apparmor_root_rules
+         + (rsyslog_apparmor_granted_now | reject('in', rsyslog_apparmor_root_rules) | list
+            if rsyslog_log_root_phase | default('grant') == 'grant' else []) }}
+  vars:
+    rsyslog_apparmor_lines: >-
+      {{ ((rsyslog_apparmor_local_content.content | default('') | b64decode)
+          if rsyslog_apparmor_local_file.stat.exists else '').splitlines() }}
+    rsyslog_apparmor_granted_now: >-
+      {{ rsyslog_apparmor_lines[rsyslog_apparmor_lines.index('# BEGIN pilot log-server log root') + 1:
+                                rsyslog_apparmor_lines.index('# END pilot log-server log root')]
+         | select | list
+         if '# BEGIN pilot log-server log root' in rsyslog_apparmor_lines
+            and '# END pilot log-server log root' in rsyslog_apparmor_lines else [] }}
+    rsyslog_apparmor_root_rules: >-
+      {{ [] if rsyslog_log_root_in_var_log
+         else [rsyslog_log_root ~ '/ rw,', rsyslog_log_root ~ '/** rwk,'] }}
+
+- name: "MAC: allow rsyslogd to write the log root under AppArmor"
+  ansible.builtin.blockinfile:
+    path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+    marker: "# {mark} pilot log-server log root"
+    block: "{{ rsyslog_apparmor_rules | join('\n') }}"
+    state: "{{ 'present' if rsyslog_apparmor_rules else 'absent' }}"
+  register: rsyslog_apparmor_local
+  when: rsyslog_apparmor_profile.stat.exists
+
+# Reload only a profile the kernel has loaded: one an administrator disabled
+# (/etc/apparmor.d/disable/) is not loaded, rsyslogd then runs unconfined
+# and needs no rule, and loading it here would confine rsyslogd again. A
+# profile in complain mode stays in complain mode (-C); a plain -r puts it
+# back in enforce mode (captured 2026-10-15).
+# Ubuntu 24.04's rsyslog.service also reloads the profile on every start
+# (ExecStartPre=/usr/lib/rsyslog/reload-apparmor-profile, `apparmor_parser
+# -r -W -T`), disabled or not, so there the restart in Step 6a reloads it
+# again in enforce mode. This reload is what a unit without that line gets.
+- name: "MAC: read the mode of the loaded rsyslogd AppArmor profile"
+  ansible.builtin.command:
+    argv: [cat, /sys/kernel/security/apparmor/profiles]
+  register: rsyslog_apparmor_profiles
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - rsyslog_apparmor_profile.stat.exists
+    - rsyslog_apparmor_enabled.stat.exists
+
+- name: "MAC: remember the mode of the loaded rsyslogd AppArmor profile"
+  ansible.builtin.set_fact:
+    rsyslog_apparmor_mode: >-
+      {{ (rsyslog_apparmor_profiles.stdout | default(''))
+         | regex_search('(?m)^rsyslogd \(([a-z]+)\)$', '\1') | default([''], true) | first }}
+
+# The reload follows what the kernel has loaded, not whether the block
+# changed in this run: when a run wrote the block and then failed before or
+# at the reload, the next run finds the block unchanged. The kernel's sha256
+# of the loaded profile (it changes when the rules change, and a reload of
+# the same rules keeps it; captured 2026-10-15 on Ubuntu 24.04) tells
+# whether the reload changed anything. A block with no rules (a root under
+# /var/log) and the `narrow` phase only remove rules, and a rule left loaded
+# until the next reload or boot is harmless, so those reload only when the
+# block changed.
+- name: "MAC: reload the rsyslogd AppArmor profile"
+  ansible.builtin.shell:
+    executable: /bin/sh
+    cmd: |
+      sha() {
+        for d in /sys/kernel/security/apparmor/policy/profiles/rsyslogd.*; do
+          cat "$d/sha256" 2>/dev/null
+          return 0
+        done
+      }
+      before=$(sha)
+      apparmor_parser -r {{ '-C ' if rsyslog_apparmor_mode == 'complain' else '' }}/etc/apparmor.d/usr.sbin.rsyslogd || exit 1
+      after=$(sha)
+      if [ -z "$before" ] || [ -z "$after" ]; then
+        echo unknown
+      elif [ "$before" != "$after" ]; then
+        echo changed
+      else
+        echo unchanged
+      fi
+  register: rsyslog_apparmor_reload
+  changed_when: >-
+    rsyslog_apparmor_reload.stdout == 'changed'
+    or (rsyslog_apparmor_reload.stdout == 'unknown' and rsyslog_apparmor_local is changed)
+  when:
+    - rsyslog_apparmor_profile.stat.exists
+    - rsyslog_apparmor_enabled.stat.exists
+    - rsyslog_apparmor_mode != ''
+    - >-
+      (rsyslog_apparmor_rules | length > 0 and rsyslog_log_root_phase | default('grant') == 'grant')
+      or (rsyslog_apparmor_local is changed)
+    - not ansible_check_mode
+
+# SELinux runs in the `grant` phase only: the old root's rule stays, so
+# nothing is left to narrow.
+- name: "MAC: is SELinux enabled"
+  ansible.builtin.stat:
+    path: /sys/fs/selinux/enforce
+    get_checksum: false
+  register: rsyslog_selinux_enforce
+  when: rsyslog_log_root_phase | default('grant') == 'grant'
+
+- name: "MAC: ensure the SELinux policy management bindings are installed"
+  ansible.builtin.dnf:
+    name: [python3-policycoreutils, python3-libsemanage, python3-libselinux]
+    state: present
+  when:
+    - rsyslog_log_root_phase | default('grant') == 'grant'
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+    - ansible_facts.os_family == 'RedHat'
+
+# The target is a regular expression: escape the dots, the only
+# metacharacter siem_log_root's gate lets through, so /srv/siem.1 does not
+# also label /srv/siemX1.
+- name: "MAC: the file-context rule for the log root"
+  ansible.builtin.set_fact:
+    rsyslog_selinux_fcontext_target: "{{ rsyslog_log_root | replace('.', '\\.') }}(/.*)?"
+  when: rsyslog_log_root_phase | default('grant') == 'grant'
+
+- name: "MAC: label the log root var_log_t under SELinux"
+  community.general.sefcontext:
+    target: "{{ rsyslog_selinux_fcontext_target }}"
+    setype: var_log_t
+    state: present
+  register: rsyslog_selinux_fcontext
+  when:
+    - rsyslog_log_root_phase | default('grant') == 'grant'
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+    - not ansible_check_mode
+
+- name: "MAC: read the log root's SELinux label"
+  ansible.builtin.command:
+    argv: [stat, -c, "%C", "{{ rsyslog_log_root }}"]
+  register: rsyslog_log_root_context
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - rsyslog_log_root_phase | default('grant') == 'grant'
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+
+- name: "MAC: apply the log root's SELinux label"
+  ansible.builtin.command:
+    argv: [restorecon, -RF, "{{ rsyslog_log_root }}"]
+  register: rsyslog_selinux_relabel
+  when:
+    - rsyslog_log_root_phase | default('grant') == 'grant'
+    - rsyslog_selinux_enforce.stat.exists
+    - not rsyslog_log_root_in_var_log
+    - not ansible_check_mode
+    - (rsyslog_selinux_fcontext is changed) or (((rsyslog_log_root_context.stdout | default('')).split(':')[2:3]) != ['var_log_t'])
+
+# A more specific file-context rule (another service's tree) keeps its own
+# type: fail here instead of relabelling and restarting rsyslog on every run
+# while rsyslog still cannot write.
+- name: "MAC: the log root is labelled var_log_t"
+  ansible.builtin.command:
+    argv: [stat, -c, "%C", "{{ rsyslog_log_root }}"]
+  register: rsyslog_log_root_context_after
+  changed_when: false
+  failed_when: (rsyslog_log_root_context_after.stdout.split(':')[2:3]) != ['var_log_t']
+  when: rsyslog_selinux_relabel is not skipped
+
+# The rescue removes a rule this run added. A skipped task still registers
+# its result, so the `narrow` phase would overwrite rsyslog_selinux_fcontext;
+# this fact is set in the `grant` phase only.
+- name: "MAC: remember whether this run added the file-context rule"
+  ansible.builtin.set_fact:
+    rsyslog_selinux_fcontext_added: "{{ rsyslog_selinux_fcontext is changed }}"
+  when: rsyslog_log_root_phase | default('grant') == 'grant'

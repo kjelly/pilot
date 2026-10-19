@@ -84,3 +84,64 @@ func TestAnsibleCoreRequirementsDetectUnpinnedInstall(t *testing.T) {
 		t.Fatalf("ansibleCoreRequirements = %q, want %q", got, want)
 	}
 }
+
+// galaxyCollections returns the collections named by every
+// `ansible-galaxy collection install` command on non-comment lines of the
+// file, following backslash continuations and skipping options.
+func galaxyCollections(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	joined := strings.ReplaceAll(strings.Join(lines, "\n"), "\\\n", " ")
+	var collections []string
+	for line := range strings.SplitSeq(joined, "\n") {
+		_, rest, ok := strings.Cut(line, "ansible-galaxy collection install")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		for i := 0; i < len(fields); i++ {
+			f := fields[i]
+			if f == "&&" || f == ";" || f == "|" {
+				break
+			}
+			if f == "-p" || f == "--collections-path" {
+				i++
+				continue
+			}
+			if strings.HasPrefix(f, "-") {
+				continue
+			}
+			collections = append(collections, f)
+		}
+	}
+	slices.Sort(collections)
+	return collections
+}
+
+// TestAnsibleCollectionsMatchBetweenImageAndCI: the CI playbook-lint job is
+// meant to syntax-check against the collections the delivery image ships.
+// The image added community.general on 2026-07-31 and CI never did, so a
+// community.general module used directly in a playbook failed CI's
+// syntax-check while the image ran it (PR #79, community.general.sefcontext
+// in log-server's rescue, 2026-10-15).
+func TestAnsibleCollectionsMatchBetweenImageAndCI(t *testing.T) {
+	root := repoRootForTest(t)
+	image := galaxyCollections(t, filepath.Join(root, "images", "Dockerfile.pilot-cli"))
+	ci := galaxyCollections(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if len(image) == 0 {
+		t.Fatal("found no ansible-galaxy collection install in images/Dockerfile.pilot-cli")
+	}
+	if !slices.Equal(image, ci) {
+		t.Errorf("collections differ: the image installs %v, CI's playbook-lint installs %v", image, ci)
+	}
+}

@@ -35,6 +35,7 @@
 | **跨主機通用備份到 S3（restic），含 FreeIPA 災難復原(DR)演練** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
 | **被監控主機的監控 agent（node_exporter，強制 Basic Auth）** | [`runbooks/host-monitoring.md`](./runbooks/host-monitoring.md) |
 | **GPU 主機的監控 agent（NVIDIA dcgm-exporter，GPU 自動偵測 + 強制 Basic Auth）** | [`runbooks/dcgm-exporter.md`](./runbooks/dcgm-exporter.md) |
+| **外部 SSH/PAM 登入探測與主機 I/O 告警（login-probe：FreeIPA canary 每 60 秒真實登入、PAM account/auth/卡住/連線分開告警、I/O stall 與監控資料缺口）** | [`runbooks/login-probe.md`](./runbooks/login-probe.md) |
 | **跨機房指標彙總 + 中央告警（Prometheus + Thanos 全局查詢 + Alertmanager）** | [`runbooks/metrics-alerting.md`](./runbooks/metrics-alerting.md) |
 | **Prometheus 監控 Pilot 不管理的第三方 exporter（NAS/UPS/switch...）** | [`runbooks/prometheus-external-targets.md`](./runbooks/prometheus-external-targets.md) |
 | **觀測畫面（Grafana + Loki 看 Prometheus/log-server 資料）** | [`runbooks/dashboard.md`](./runbooks/dashboard.md) |

@@ -1,0 +1,86 @@
+---
+# Let rsyslogd use one TCP port under SELinux. Included by
+# log-server-apply.yml (imtcp receiver, siem_receiver_tcp_port) and
+# audit-log-forwarding-apply.yml (omfwd sender, siem_forward_port) with:
+#   rsyslog_selinux_tcp_port  the port number
+#
+# rsyslogd runs as syslogd_t, which may bind and connect only to TCP ports
+# labelled syslogd_port_t or rsh_port_t (tcp/514). Any other port, e.g. 2514
+# (unreserved_port_t), fails with "Permission denied" and no AVC is logged
+# (dontaudit): the sender's omfwd action suspends itself and the apply still
+# succeeds. Captured 2026-10-14 on AlmaLinux 9.8, selinux-policy-targeted
+# 38.1.75 (`sesearch -A -s syslogd_t -c tcp_socket`).
+#
+# A port with no record of its own (only a range such as unreserved_port_t)
+# is labelled syslogd_port_t. A port another service owns (an exact record
+# of any other type, e.g. http_port_t) is refused rather than relabelled.
+# A label added for an earlier port is left in place when the port changes
+# (`semanage port -d -t syslogd_port_t -p tcp <port>` removes it).
+#
+# Nothing changes on a host without SELinux. SELinux is detected by its
+# filesystem (/sys/fs/selinux/enforce exists in enforcing and permissive
+# mode), not by the ansible_selinux fact, which reports "Missing selinux
+# Python library" instead of "enabled" on a host without python3-libselinux.
+
+- name: "SELinux: is SELinux enabled"
+  ansible.builtin.stat:
+    path: /sys/fs/selinux/enforce
+    get_checksum: false
+  register: rsyslog_selinux_enforce
+
+- name: "SELinux: ensure the policy management bindings are installed"
+  ansible.builtin.dnf:
+    name: [python3-policycoreutils, python3-libsemanage, python3-libselinux]
+    state: present
+  when:
+    - rsyslog_selinux_enforce.stat.exists
+    - ansible_facts.os_family == 'RedHat'
+
+# check_mode: false — a read-only query. In --check on a host that lacked
+# the bindings, the dnf task above only simulated the install, so the query
+# reports __nobindings__ and the label task below is skipped.
+- name: "SELinux: read the port type of tcp/{{ rsyslog_selinux_tcp_port }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_facts.python.executable }}"
+      - -c
+      - |
+        import sys
+        try:
+            import seobject
+        except ImportError:
+            print("__nobindings__")
+            sys.exit(0)
+        port = int(sys.argv[1])
+        print(seobject.portRecords().get_all().get((port, port, "tcp"), ("",))[0])
+      - "{{ rsyslog_selinux_tcp_port }}"
+  register: rsyslog_selinux_port_type
+  changed_when: false
+  check_mode: false
+  when: rsyslog_selinux_enforce.stat.exists
+
+- name: "SELinux: tcp/{{ rsyslog_selinux_tcp_port }} is free for rsyslogd"
+  ansible.builtin.assert:
+    that:
+      - rsyslog_selinux_port_type.stdout != '__nobindings__' or ansible_check_mode
+      - rsyslog_selinux_port_type.stdout in ['', 'syslogd_port_t', 'rsh_port_t', '__nobindings__']
+    fail_msg: >-
+      {% if rsyslog_selinux_port_type.stdout == '__nobindings__' %}The SELinux Python
+      bindings (seobject) are missing on {{ inventory_hostname }}.{% else %}tcp/{{ rsyslog_selinux_tcp_port }}
+      is labelled {{ rsyslog_selinux_port_type.stdout }}, so it belongs to another service and
+      rsyslogd (syslogd_t) may not use it. Pick another port, or relabel it yourself
+      (semanage port -m -t syslogd_port_t -p tcp {{ rsyslog_selinux_tcp_port }}).{% endif %}
+  when: rsyslog_selinux_enforce.stat.exists
+
+- name: "SELinux: label tcp/{{ rsyslog_selinux_tcp_port }} syslogd_port_t"
+  community.general.seport:
+    ports: "{{ rsyslog_selinux_tcp_port | string }}"
+    proto: tcp
+    setype: syslogd_port_t
+    state: present
+  # The caller restarts rsyslog when this changed: imtcp does not retry a
+  # failed bind, and omfwd keeps dropping messages until its next retry.
+  register: rsyslog_selinux_port_label
+  when:
+    - rsyslog_selinux_enforce.stat.exists
+    - rsyslog_selinux_port_type.stdout == ''

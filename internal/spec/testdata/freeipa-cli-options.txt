@@ -1,5 +1,6 @@
 # Options each ipa subcommand used under playbooks/ accepts, from `ipa <cmd> --help`
 # on FreeIPA 4.13.4 (API 2.257, AlmaLinux 9.8), captured 2026-10-15. One line per
+# dnsserver-mod was captured on a fresh server of the same version, 2026-10-19.
 # subcommand: the name, then its options. Read by
 # internal/spec/ipa_cli_options_regression_test.go. To add a subcommand, run
 # `ipa <cmd> --help` on a FreeIPA server and append its --options here.
@@ -15,6 +16,7 @@ dnsrecord-add --a6-data --a6-rec --aaaa-create-reverse --aaaa-ip-address --aaaa-
 dnsrecord-del --a6-rec --aaaa-rec --afsdb-rec --a-rec --cert-rec --cname-rec --del-all --dlv-rec --dname-rec --ds-rec --help --kx-rec --loc-rec --mx-rec --naptr-rec --ns-rec --ptr-rec --srv-rec --sshfp-rec --structured --tlsa-rec --ttl --txt-rec --uri-rec
 dnsrecord-find --a6-rec --aaaa-rec --afsdb-rec --all --a-rec --cert-rec --cname-rec --dlv-rec --dname-rec --ds-rec --help --kx-rec --loc-rec --mx-rec --name --naptr-rec --ns-rec --pkey-only --ptr-rec --raw --sizelimit --srv-rec --sshfp-rec --structured --timelimit --tlsa-rec --ttl --txt-rec --uri-rec
 dnsrecord-show --all --help --raw --rights --structured
+dnsserver-mod --addattr --all --delattr --forward-policy --forwarder --help --raw --rights --setattr --soa-mname-override
 dnszone-add --addattr --admin-email --all --allow-query --allow-sync-ptr --allow-transfer --default-ttl --dnssec --dynamic-update --expire --force --forwarder --forward-policy --help --minimum --name-from-ip --name-server --nsec3param-rec --raw --refresh --retry --setattr --skip-nameserver-check --skip-overlap-check --ttl --update-policy
 dnszone-find --admin-email --all --allow-query --allow-sync-ptr --allow-transfer --default-ttl --dnssec --dynamic-update --expire --forwarder --forward-only --forward-policy --help --minimum --name --name-from-ip --name-server --nsec3param-rec --pkey-only --raw --refresh --retry --sizelimit --timelimit --ttl --update-policy --zone-active
 group-add --addattr --all --desc --external --gid --help --no-members --nonposix --raw --setattr

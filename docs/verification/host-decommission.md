@@ -188,11 +188,17 @@ the second decommission in a workspace on, an earlier host's "host not
 found" stood for the target: the central converge step looked done and
 skipped host-del, Plan skipped the HD12 unknown-service check, and Verify
 passed HD10 for a host or DNS record that still existed. Every check now
-reads only the target's own `HOST_INSPECT[<fqdn>]` blocks. Last verified
-for #104 and #108: candidate `b27e3ab` (after merging the new #106, so the
-queries run inside the private Kerberos cache block) on a disposable
-FreeIPA 4.13.4 vm-target, PASS
-(`docs/evidence/host-decommission/2026-10-16-b27e3ab.md`).
+reads only the target's own `HOST_INSPECT[<fqdn>]` blocks. A query must
+contain a nonempty observation for that target; exit-zero no-hosts runs,
+missing callback output and another tombstone alone are unverifiable
+and stop Plan, Verify and converge inspection. Last verified
+for #104 and #108: 2026-10-19 candidate `e64cd44`, tree
+`554e4d1ed66b819c87ee4bb160eef7783fd949ba`, on an isolated native
+AlmaLinux 9.8 / FreeIPA 4.13.4 vm-target. Both three-target provider
+matrices PASS; identity preview/apply/idempotency PASS, final changed=0;
+61 packages pass the full race gate. Image digest, external-state
+fingerprint and run IDs are in the
+[current evidence record](../evidence/host-decommission/2026-10-19-e64cd44.md).
 
 **Known gap (2026-10-15).** The DNS part of HD10 reports pass when
 `ipa dnsrecord-show` fails for any reason, and the cleanup step skips the
@@ -575,6 +581,26 @@ instead of reading an error as "absent".
   probe: |
     ssh -i <client-key> root@<client-ip> 'test -f /etc/ipa/default.conf && echo ENROLLED || echo UNINSTALLED'
   expect: {stdout: {equals: "UNINSTALLED"}}
+  scope: per-host
+  verifyOnly: true
+# ── login-probe target cleanup (GitHub issue #11 follow-up, 2026-10-13):
+# a probed host is re-rendered out of every login-probe host's target list
+# before finalization (spec.md §19), via the reference-driven
+# login-probe-targets provider. HD36 is the go-test row, HD36-LIVE its real
+# vm-target counterpart (docs/evidence/login-probe/).
+- id: HD36
+  category: monitoring
+  check: a host that login-probe hosts probe gets a central login-probe-targets step (spec.md §19 active alert-target residue) that re-renders every other login-probe host with the host excluded, carries the login-probe hosts' stage, does not require the retiring host to be reachable, treats a probe host that did not report as an error rather than clean, and is not added for a retiring login-probe host itself
+  probe: |
+    go test ./internal/decommission/... -run 'TestPlanner_LoginProbeTargets|TestLoginProbeTargets_' -v
+  expect: {stdout: {contains: "PASS"}}
+  verifyOnly: true
+- id: HD36-LIVE
+  category: monitoring
+  check: after `pilot host decommission apply` of a probed freeipa-client host, the login-probe host's rendered target list no longer contains it (no PilotLoginProbe* alert keeps firing for the retired host)
+  probe: |
+    ssh -i <probe-host-key> root@<probe-host-ip> 'grep -c "<retired-host>" /etc/pilot/login-probe/config.yml || true'
+  expect: {stdout: {equals: "0"}}
   scope: per-host
   verifyOnly: true
 ```

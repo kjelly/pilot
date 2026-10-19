@@ -42,6 +42,15 @@ import (
 //	        local6 at all, so C15-C17's forwarding/receiving config being
 //	        perfectly correct still leaves audit.log never appearing
 //	        anywhere; confirmed live 2026-08-07, minimal-poc round 20)
+//	C22     after a local6 test message, rsyslogd holds an ESTABLISHED TCP
+//	        connection to the port 99-siem-forward.conf names. C16/C17 only
+//	        read the config: on AlmaLinux 9.8 with SELinux Enforcing and
+//	        siem_forward_port 2514, the config was right while every
+//	        message was dropped ("cannot connect ... Permission denied");
+//	        C22 failed there and passed once the port was labelled
+//	        syslogd_port_t (2026-10-14, PR #79). v1.8: it retries for up to
+//	        8 s and counts only a connection to the address siem-log-server
+//	        resolves to
 //
 // Cross-row invariants locked below:
 //
@@ -79,7 +88,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	wantIDs := []string{
 		"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
 		"C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20",
-		"C21",
+		"C21", "C22",
 	}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
@@ -104,7 +113,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// checks and legitimately use `present` instead). C11 uses the
 	// `sh -c '... && echo 0 || echo 1'` idiom so the outer command
 	// always exits 0 regardless of match outcome.
-	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21"}
+	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22"}
 	for _, id := range rcRows {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
@@ -230,6 +239,17 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	for _, r := range s.Rows {
 		if strings.EqualFold(strings.TrimSpace(r.Expected), "~active") {
 			t.Errorf("row %s uses ~active (matches inactive); use rc-based systemctl is-active", r.ID)
+		}
+	}
+
+	// C22 must send a message and check the live connection to the port the
+	// forward config names, not the config text alone.
+	// It must also require the connection to go to the address
+	// siem-log-server resolves to, and retry for a few seconds within the
+	// default 15 s row timeout.
+	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 4 ]", "sleep 2"} {
+		if !strings.Contains(cmd["C22"], want) {
+			t.Errorf("C22 must contain %q, got %q", want, cmd["C22"])
 		}
 	}
 

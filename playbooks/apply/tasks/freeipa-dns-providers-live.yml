@@ -1,0 +1,136 @@
+---
+# Shared task: keep out of a DNS provider list a replica that FreeIPA itself
+# says is not a DNS server yet. Included by dns-apply.yml (the tier's stub
+# zones) and tasks/freeipa-dns-client-resolver.yml (a consumer's
+# nameservers), after dig is installed.
+#
+# Why: a freeipa-server-replica host that leaves freeipa_setup_dns unset is
+# a DNS provider, because freeipa-server-replica-apply.yml installs FreeIPA
+# DNS on it by default (issue #67). But that playbook is a day-2 step
+# (contracts/freeipa-server-replica.yaml site.include: false), so an
+# inventory normally lists a replica before it is promoted, and a replica
+# promoted before 2026-09-17 may run no named. Sending queries to such a
+# host would fail dns.md G5 on the tier and write a dead nameserver on a
+# consumer.
+#
+# How it decides: from FreeIPA's own live state, never from the inventory
+# alone (AGENTS.md §5.9). Each candidate is asked for <domain> NS with
+# RD=0, with the same retry budget as dns-apply.yml's G5 (+tries=2).
+#   - A candidate whose own answer is NOERROR with aa serves the zone: it
+#     stays in, whatever name the inventory gives it (a replica installed
+#     with -e ipa_replica_fqdn=<another name> answers for the zone too).
+#   - Otherwise a candidate whose FQDN is in the NS set FreeIPA answers is
+#     a registered FreeIPA DNS server that is down or did not answer now:
+#     it stays in, and the caller decides (G5 fails closed on the tier; the
+#     resolver warns).
+#   - A replica is left out only when it leaves freeipa_setup_dns unset
+#     (an explicit true is the operator saying it serves DNS: it stays in,
+#     and G5 or the resolver's check fails closed if it does not answer),
+#     some FreeIPA server answered authoritatively, and the replica neither
+#     answered authoritatively itself nor is in that NS set.
+# When no candidate answers authoritatively (FreeIPA not deployed yet, or
+# every server unreachable), nothing is left out, freeipa_dns_live_answered
+# is false, and a message says so; the caller's own gates decide. Every
+# replica left out is named in a warning with its remedies.
+#
+# Input:
+#   freeipa_dns_live_candidates: DNS-providing members of
+#     tasks/freeipa-server-pool.yml's pool, {inventory_host, fqdn, ip, kind
+#     ('primary' or 'replica'), dns_provider_explicit (freeipa_setup_dns is
+#     defined)}
+#   freeipa_dns_live_domain: the FreeIPA DNS domain
+#   freeipa_dns_live_purpose: what the list is for, for the warning
+# Output:
+#   freeipa_dns_live_answered: true when some candidate answered
+#     authoritatively
+#   freeipa_dns_live_authoritative: inventory hosts that answered for the
+#     zone authoritatively themselves
+#   freeipa_dns_live_registered: the FQDNs of FreeIPA's NS records
+#     (lower case, no trailing dot), [] when no server answered
+#   freeipa_dns_live_excluded: the candidates left out
+#   freeipa_dns_live_providers: the candidates kept
+# Included more than once per run (dns-apply.yml, the resolver task):
+# reset this include's own facts first (AGENTS.md §4.5 point 2).
+- name: "FreeIPA DNS providers — reset"
+  ansible.builtin.set_fact:
+    freeipa_dns_live_answered: false
+    freeipa_dns_live_authoritative: []
+    freeipa_dns_live_registered: []
+    freeipa_dns_live_excluded: []
+    freeipa_dns_live_providers: []
+
+- name: "FreeIPA DNS providers — ask each candidate for the zone's NS records (+norec)"
+  ansible.builtin.command:
+    argv: [dig, +norec, +time=2, +tries=2, +noall, +comments, +answer, "@{{ item.ip }}", "{{ freeipa_dns_live_domain }}.", NS]
+  loop: "{{ freeipa_dns_live_candidates }}"
+  loop_control:
+    label: "{{ item.inventory_host }} @{{ item.ip }}"
+  register: freeipa_dns_live_ns
+  check_mode: false
+  changed_when: false
+  failed_when: false
+
+- name: "FreeIPA DNS providers — who answered authoritatively, and the NS set they answer"
+  vars:
+    _authoritative: >-
+      {{ freeipa_dns_live_ns.results | default([])
+         | rejectattr('skipped', 'defined')
+         | selectattr('stdout', 'defined')
+         | selectattr('stdout', 'search', 'status: NOERROR')
+         | selectattr('stdout', 'search', 'flags:[^;]* aa[ ;]')
+         | list }}
+  ansible.builtin.set_fact:
+    freeipa_dns_live_answered: "{{ _authoritative | length > 0 }}"
+    freeipa_dns_live_authoritative: "{{ _authoritative | map(attribute='item') | map(attribute='inventory_host') | list }}"
+    freeipa_dns_live_registered: >-
+      {{ _authoritative
+         | map(attribute='stdout')
+         | map('regex_findall', '\sIN\s+NS\s+(\S+)')
+         | flatten | map('lower') | map('regex_replace', '[.]$', '') | unique | list }}
+
+- name: "FreeIPA DNS providers — replicas FreeIPA does not list as DNS servers"
+  ansible.builtin.set_fact:
+    freeipa_dns_live_excluded: "{{ freeipa_dns_live_excluded + [item] }}"
+  loop: "{{ freeipa_dns_live_candidates }}"
+  loop_control:
+    label: "{{ item.inventory_host }}"
+  when:
+    - freeipa_dns_live_answered | bool
+    - item.kind == 'replica'
+    - not (item.dns_provider_explicit | bool)
+    - item.inventory_host not in freeipa_dns_live_authoritative
+    - (item.fqdn | lower | regex_replace('[.]$', '')) not in freeipa_dns_live_registered
+
+- name: "FreeIPA DNS providers — keep the rest"
+  ansible.builtin.set_fact:
+    freeipa_dns_live_providers: >-
+      {{ freeipa_dns_live_candidates
+         | rejectattr('inventory_host', 'in', freeipa_dns_live_excluded | map(attribute='inventory_host') | list)
+         | list }}
+
+- name: "FreeIPA DNS providers — no FreeIPA server answered for the zone"
+  ansible.builtin.debug:
+    msg: >-
+      No FreeIPA DNS server answered {{ freeipa_dns_live_domain }} NS authoritatively (asked
+      {{ freeipa_dns_live_candidates | map(attribute='inventory_host') | list }}): FreeIPA is not
+      deployed yet or none of its DNS servers is reachable, so FreeIPA's live state cannot say
+      which replicas run DNS. Nothing is left out of {{ freeipa_dns_live_purpose }} on this basis;
+      the gates that follow decide.
+  when:
+    - not (freeipa_dns_live_answered | bool)
+    - freeipa_dns_live_candidates | length > 0
+
+- name: "FreeIPA DNS providers — WARNING: replicas left out"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ item.inventory_host }} ({{ item.fqdn }}) is in freeipa-server-replica and leaves
+      freeipa_setup_dns unset, so it is meant to serve DNS, but it did not answer
+      {{ freeipa_dns_live_domain }} authoritatively and FreeIPA's NS records list only
+      {{ freeipa_dns_live_registered }}: it is left out of {{ freeipa_dns_live_purpose }}. If it is
+      not promoted yet, run playbooks/apply/freeipa-server-replica-apply.yml on it (it installs
+      DNS) and re-run this playbook; if FreeIPA knows it under another name, set
+      freeipa_replica_fqdn to that name; if its DNS is stopped, start named on it; or set
+      freeipa_setup_dns: false on it if it should not serve DNS.
+  loop: "{{ freeipa_dns_live_excluded }}"
+  loop_control:
+    label: "{{ item.inventory_host }}"

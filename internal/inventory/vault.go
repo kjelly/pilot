@@ -227,6 +227,19 @@ var vaultSections = map[string]vaultSection{
 			},
 		},
 	},
+	"login-probe": {
+		Title: "Login probe canary 私鑰（選填）",
+		Note:  "預設留空：login-probe-apply.yml 會在探測主機上產生 ed25519 金鑰對，私鑰永不離開該主機；apply 完成後把 /etc/pilot/login-probe/id_ed25519.pub 登記到 freeipa-identity roster 的 canary 使用者（users[].ssh_keys）。只有要集中管理或輪替金鑰時才填入 PEM 私鑰全文（見 docs/verification/login-probe.md）。",
+		Keys: []vaultField{
+			{
+				Name:      "login_probe_ssh_private_key",
+				Value:     "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+				Comment:   "canary 帳號的 OpenSSH ed25519 私鑰全文；留空（註解掉）= 由探測主機自行產生並保存",
+				Optional:  true,
+				Multiline: true,
+			},
+		},
+	},
 }
 
 var vaultSectionOrder = []string{
@@ -242,6 +255,7 @@ var vaultSectionOrder = []string{
 	"snmp-exporter",
 	"detection-model-provider",
 	"agent-controller",
+	"login-probe",
 }
 
 // VaultSectionExpectedKeys returns one vault section's *required* key

@@ -9,11 +9,10 @@
 // PreviewRunner boundary: "caller owns the runtime"), never a direct
 // os/exec call from this package. *internal/ansible.Runner satisfies
 // ansibleExecutor for real (its Run method already has this exact
-// signature); every test in this package substitutes an in-package fake
-// that returns canned stdout/exit codes — no live host, no real
-// ansible-playbook binary, is ever touched by `go test` here (Phase 3a is
-// code + fixture tests only; actual disposable FreeIPA evidence is a
-// separate Phase 3b, see spec.md §37 Phase 3's own list).
+// signature). Fixture tests substitute an in-package fake; the no-hosts
+// regression runs real local Ansible without contacting a host. The
+// explicitly configured live test exercises this provider on a dedicated
+// disposable FreeIPA server.
 //
 // Two logically separate targets are involved, matching spec.md §16's own
 // split between client-side and central cleanup:
@@ -33,14 +32,9 @@
 // which live-state question is being asked; the corresponding read-only
 // server-side task/tag wiring in freeipa-identity-apply.yml is a Phase 3b
 // finding (see that playbook's own "Hosts marked absent" section for what
-// exists today: the "freeipa_host_absent_inspect" tag covers the host-
-// object/hostgroup/netgroup/service-principal question this provider
-// calls "host_object"). The DNS/HBAC/sudo-reference query kinds
-// (host_dns/hbac_references/sudo_references) are this provider's intended
-// contract for that same playbook to grow read-only entry points for in a
-// later phase — deliberately not built out further here, since Phase 3a's
-// job is the Go-level contract + fixture tests, not a live-validated
-// playbook surface for every one of them.
+// exists today: the "freeipa_host_absent_inspect" tag covers host_object,
+// host_dns, hbac_references and sudo_references). Every query requires an
+// explicit nonempty HOST_INSPECT observation for its own target.
 package providers
 
 import (
@@ -715,9 +709,7 @@ func (p *FreeIPAClientProvider) queryHostObject(ctx context.Context, fqdn string
 
 // query issues one read-only central-plane discovery call against
 // playbooks/apply/freeipa-identity-apply.yml, tagged so it only runs the
-// relevant read-only lookup (never a mutating task) — see this file's
-// package doc comment for which query kinds have a real corresponding
-// playbook-side implementation today vs. remain a Phase 3b contract.
+// relevant read-only lookup (never a mutating task).
 func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*ansible.Result, error) {
 	args := []string{p.cfg.IdentityApplyPlaybook}
 	if p.cfg.ServerInventory != "" {
@@ -746,6 +738,16 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	// reads every error as absence (issue #105).
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
+	}
+	// Ansible also exits zero when no server matches its inventory pattern.
+	// Only this target's explicit observation can prove anything about it;
+	// another roster tombstone, a suppressed callback or an empty debug
+	// message must not turn missing evidence into zero references / no
+	// unknown services. Keep the permissive standalone parser out of this
+	// production boundary (issue #108).
+	if !hostInspectMarkerPattern.MatchString(res.Stdout) ||
+		strings.TrimSpace(strings.ReplaceAll(inspectionFor(res.Stdout, fqdn), `\n`, "\n")) == "" {
+		return nil, fmt.Errorf("freeipa-client %s query for %s: missing or empty target HOST_INSPECT observation", kind, fqdn)
 	}
 	return res, nil
 }

@@ -1,0 +1,34 @@
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.16, OpenSSL 3.0.13 30 Jan 2024
+debug1: Reading configuration data /etc/pilot/login-probe/ssh_config
+debug1: /etc/pilot/login-probe/ssh_config line 2: Applying options for *
+debug1: Executing proxy command: exec /usr/bin/sss_ssh_knownhostsproxy -p 22 lp-target.ipa.pilot.internal
+debug1: identity file /etc/pilot/login-probe/id_ed25519 type 3
+debug1: identity file /etc/pilot/login-probe/id_ed25519-cert type -1
+debug1: Local version string SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16
+debug1: Remote protocol version 2.0, remote software version OpenSSH_9.6p1 Ubuntu-3ubuntu13.16
+debug1: compat_banner: match: OpenSSH_9.6p1 Ubuntu-3ubuntu13.16 pat OpenSSH* compat 0x04000000
+debug1: Authenticating to lp-target.ipa.pilot.internal:22 as 'pilot-login-canary'
+debug1: SSH2_MSG_KEXINIT sent
+debug1: SSH2_MSG_KEXINIT received
+debug1: kex: algorithm: sntrup761x25519-sha512@openssh.com
+debug1: kex: host key algorithm: ssh-ed25519
+debug1: kex: server->client cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: kex: client->server cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none
+debug1: expecting SSH2_MSG_KEX_ECDH_REPLY
+debug1: SSH2_MSG_KEX_ECDH_REPLY received
+debug1: Server host key: ssh-ed25519 SHA256:Bx/s/qfCVQRS/e9AJ6O+bNmRYVGQFCdaP7fHLhjl+dg
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:Bx/s/qfCVQRS/e9AJ6O+bNmRYVGQFCdaP7fHLhjl+dg.
+Please contact your system administrator.
+Add correct host key in /dev/null to get rid of this message.
+Offending ECDSA key in /var/lib/sss/pubconf/known_hosts:9
+  remove with:
+  ssh-keygen -f '/var/lib/sss/pubconf/known_hosts' -R 'lp-target.ipa.pilot.internal'
+Host key for lp-target.ipa.pilot.internal has changed and you have requested strict checking.
+Host key verification failed.

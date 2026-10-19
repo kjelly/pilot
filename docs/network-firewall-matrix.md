@@ -50,8 +50,9 @@ are not required for this PoC's agent/FIM path:
 - UDP `514` is not used because no separate `log-server` is deployed.
 - TCP `443`, `9200`, and `55000` are dashboard/indexer/API management surfaces and should be
   restricted to an approved admin network.
-- If a separate `log-server` is enabled, add Wazuh manager → log-server UDP `514` or the explicitly
-  configured TCP `6514`.
+- If a separate `log-server` is enabled, add Wazuh manager → log-server UDP `514`, and
+  audit-log-forwarding clients → log-server TCP `siem_receiver_tcp_port` (default `514`; the
+  clients' `siem_forward_port` must match).
 
 ## Controlled outbound access
 

@@ -1,0 +1,1227 @@
+# Apply playbook for docs/verification/login-probe.md (GitHub issue kjelly/pilot#11).
+#
+# Installs pilot-login-probe on a FreeIPA-enrolled host that also runs
+# host-monitoring (both are sameHosts dependencies in
+# contracts/login-probe.yaml). The daemon logs in to every target every
+# login_probe_interval as the least-privileged canary account through the
+# system OpenSSH client, with host-key trust taken from SSSD/FreeIPA
+# (sss_ssh_knownhostsproxy — the same path pilot-access-gateway uses; never
+# an ssh-keyscan snapshot, AGENTS.md §5.9), and publishes one stage per
+# target through the node_exporter textfile collector.
+#
+# The canary account, its SSH public key and an sshd-only HBAC rule are
+# directory objects: manage them in the freeipa-identity roster
+# (users[].ssh_keys, hbac.rules). This playbook generates the probe host's
+# ed25519 key pair unless login_probe_ssh_private_key is supplied from the
+# vault, and leaves /etc/pilot/login-probe/id_ed25519.pub for the operator
+# to publish. Until the key is published every target reports stage=auth;
+# the apply does not fail for that (the one-shot health round only proves
+# the daemon can classify every target).
+#
+# Usage (dry run against a vm-target topology):
+#   pilot vm-target run --name lp-mon playbooks/apply/login-probe-apply.yml \
+#       --check --diff -e target_group=login-probe
+#   # The pilot-cli image supplies dist/pilot-login-probe-linux-amd64 and its
+#   # .sha256 sidecar; outside the image build them with
+#   # scripts/build-login-probe.sh.
+#
+# Variables: see contracts/login-probe.yaml groupVars and
+# group_vars/login-probe.example.yml. Inventory-tunable values are resolved
+# in pre_tasks with default() so group_vars/host_vars are never shadowed by
+# play vars (AGENTS.md §4.5 point 3). One input is NOT an inventory
+# setting: login_probe_exclude_targets (list of inventory names/FQDNs) is
+# passed only by `pilot host decommission`'s login-probe-targets step
+# (internal/decommission/providers/login_probe_targets.go) to re-render the
+# probe hosts without a host that is being retired.
+#
+# Stage gating (same convention as every apply playbook, AGENTS.md §4.3):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+- name: Apply login-probe (external SSH/PAM login canary)
+  hosts: "{{ target_group | default('login-probe') }}"
+  become: true
+  gather_facts: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    login_probe_service_user: pilot-login-probe
+    login_probe_state_dir: /var/lib/pilot-login-probe
+    login_probe_bin_dest: /usr/local/bin/pilot-login-probe
+    login_probe_config_dir: /etc/pilot/login-probe
+    login_probe_config_path: /etc/pilot/login-probe/config.yml
+    login_probe_ssh_config_path: /etc/pilot/login-probe/ssh_config
+    login_probe_key_path: /etc/pilot/login-probe/id_ed25519
+    login_probe_unit_path: /etc/systemd/system/pilot-login-probe.service
+    login_probe_textfile_dir: /var/lib/node_exporter/textfile
+    login_probe_textfile_path: /var/lib/node_exporter/textfile/pilot_login_probe.prom
+    login_probe_backup_dir: /var/backups/pilot-login-probe
+    # Root owns this proof of the last healthy process; the daemon cannot
+    # write it. InvocationID prevents reusing health from another process.
+    login_probe_runtime_marker_path: /etc/pilot/login-probe/.applied-runtime
+
+  pre_tasks:
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。inventory 的 staging/prod group 只是給
+          target_group 篩選用的標籤,不會自動決定 stage——必須自己帶對的 -e stage=,
+          且要跟這台機器所屬的環境 group 一致。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve login-probe settings without overriding inventory or extra vars"
+      ansible.builtin.set_fact:
+        login_probe_artifact_path: "{{ login_probe_artifact_path | default('dist/pilot-login-probe-linux-amd64', true) }}"
+        login_probe_interval: "{{ login_probe_interval | default('60s', true) }}"
+        login_probe_connect_timeout: "{{ login_probe_connect_timeout | default('10s', true) }}"
+        login_probe_total_timeout: "{{ login_probe_total_timeout | default('30s', true) }}"
+        login_probe_concurrency: "{{ login_probe_concurrency | default(4, true) | int }}"
+        login_probe_user: "{{ login_probe_user | default('pilot-login-canary', true) }}"
+        login_probe_command: "{{ login_probe_command | default('/bin/true', true) }}"
+        login_probe_target_group: "{{ login_probe_target_group | default('freeipa-client', true) }}"
+        login_probe_targets: "{{ login_probe_targets | default([], true) }}"
+        login_probe_ssh_port: "{{ login_probe_ssh_port | default(22, true) | int }}"
+        # Same derivation as freeipa-client-apply.yml's ipa_domain, so a
+        # target's SSH HostName is the FQDN it was enrolled with.
+        login_probe_domain: "{{ freeipa_domain | default('ipa.pilot.internal', true) | lower }}"
+        # Decommission-only input (internal/decommission/providers/
+        # login_probe_targets.go): names (inventory name or FQDN) to leave
+        # out of the rendered target list while the host is still in the
+        # inventory. Not an inventory setting — never put it in group_vars.
+        # A distinct name because set_fact cannot override an extra var.
+        login_probe_excluded_names: >-
+          {{ ((login_probe_exclude_targets | default([], true))
+              if (login_probe_exclude_targets | default([], true)) is not string
+              else [login_probe_exclude_targets]) | map('lower') | list }}
+      tags: [always]
+
+    - name: "Gate: supported OS is Ubuntu 24.04"
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version == '24.04'
+        fail_msg: >-
+          login-probe only has actual-run evidence on Ubuntu 24.04 (the probe
+          host; targets may be any FreeIPA client). Detected
+          {{ ansible_distribution }} {{ ansible_distribution_version }}.
+      tags: [always]
+
+    - name: "Gate: supported CPU architecture is x86_64/amd64"
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == 'x86_64'
+        fail_msg: "login-probe ships a linux/amd64 binary only. Detected {{ ansible_architecture }}."
+      tags: [always]
+
+    - name: "Gate: inspect the SSSD host-key proxy and the host-monitoring textfile directory"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/bin/sss_ssh_knownhostsproxy
+        - "{{ login_probe_textfile_dir }}"
+      register: login_probe_prereq_stat
+      tags: [always]
+
+    # On a brand-new host a --check run of the whole chain only simulates
+    # freeipa-client/host-monitoring, so these prerequisites cannot exist
+    # yet (AGENTS.md §4.0 round 13, §4.5 point 4): end the preview for this
+    # host with an explicit message instead of failing; a real run still
+    # fails closed on the assert below.
+    - name: "Check-mode preview: stop here when the sameHosts prerequisites are not installed yet"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: /usr/bin/sss_ssh_knownhostsproxy or
+          {{ login_probe_textfile_dir }} is missing — in a real run
+          freeipa-client-apply.yml and host-monitoring-apply.yml create them
+          first; ending the --check preview of login-probe for this host.
+      when:
+        - ansible_check_mode
+        - not (login_probe_prereq_stat.results[0].stat.get('exists', false)
+               and login_probe_prereq_stat.results[1].stat.get('isdir', false))
+      tags: [always]
+
+    - name: "Check-mode preview: end this host"
+      ansible.builtin.meta: end_host
+      when:
+        - ansible_check_mode
+        - not (login_probe_prereq_stat.results[0].stat.get('exists', false)
+               and login_probe_prereq_stat.results[1].stat.get('isdir', false))
+      tags: [always]
+
+    - name: "Gate: this host is a FreeIPA client and runs host-monitoring (sameHosts dependencies)"
+      ansible.builtin.assert:
+        that:
+          - login_probe_prereq_stat.results[0].stat.get('exists', false)
+          - login_probe_prereq_stat.results[1].stat.get('isdir', false)
+        fail_msg: >-
+          login-probe needs /usr/bin/sss_ssh_knownhostsproxy (apply
+          freeipa-client-apply.yml on this host first: SSSD supplies the
+          FreeIPA host keys the probe trusts) and
+          {{ login_probe_textfile_dir }} (apply host-monitoring-apply.yml on
+          this host first: the probe publishes only through the textfile
+          collector).
+      tags: [always]
+
+    - name: "Gate: explicit login_probe_targets entries are name=host[:port]"
+      ansible.builtin.assert:
+        that:
+          - item is match('^[a-z0-9][a-z0-9._-]*=[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$')
+        fail_msg: >-
+          login_probe_targets entry "{{ item }}" must be
+          "<lower-case name>=<FQDN>[:port]" (the name is the probe_target
+          label, the FQDN is what OpenSSH and sss_ssh_knownhostsproxy use).
+      loop: "{{ login_probe_targets }}"
+      tags: [always]
+
+    # probe_target must equal the pilot_host label Prometheus gives the same
+    # host (prometheus-apply.yml: pilot_host = inventory_hostname, case
+    # preserved): the login-probe alert rules join on it. A mixed-case
+    # inventory name would make every login alert for that host silently
+    # never fire, so refuse it instead of lower-casing behind the rules' back.
+    - name: "Gate: auto-expanded target inventory names are lower case (probe_target must equal Prometheus' pilot_host)"
+      ansible.builtin.assert:
+        that:
+          - (groups.get(login_probe_target_group, []) | reject('match', '^[a-z0-9][a-z0-9._-]*$') | list | length) == 0
+        fail_msg: >-
+          these {{ login_probe_target_group }} inventory names are not lower-case host
+          names: {{ groups.get(login_probe_target_group, []) | reject('match', '^[a-z0-9][a-z0-9._-]*$') | list }}.
+          Rename them in the inventory, or set login_probe_targets explicitly.
+      when: login_probe_targets | length == 0
+      tags: [always]
+
+    - name: "Compute the probe targets (explicit list, or every host of login_probe_target_group by FreeIPA FQDN)"
+      ansible.builtin.set_fact:
+        login_probe_target_list: >-
+          {%- set out = [] -%}
+          {%- if login_probe_targets | length > 0 -%}
+            {%- for entry in login_probe_targets -%}
+              {%- set name, rest = entry.split('=', 1) -%}
+              {%- set parts = rest.split(':') -%}
+              {%- if name | lower not in login_probe_excluded_names and parts[0] | lower not in login_probe_excluded_names -%}
+                {%- set _ = out.append({'name': name, 'host': parts[0] | lower, 'port': (parts[1] | int) if parts | length > 1 else (login_probe_ssh_port | int)}) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- else -%}
+            {%- for h in groups.get(login_probe_target_group, []) | sort -%}
+              {%- set name = h | lower -%}
+              {#- An inventory name may already be the FQDN (the host
+                  decommission workflow keys FreeIPA clients that way). -#}
+              {%- set fqdn = name if name.endswith('.' ~ login_probe_domain) else name ~ '.' ~ login_probe_domain -%}
+              {%- set host = (hostvars[h].login_probe_host | default(fqdn, true)) | lower -%}
+              {%- if name not in login_probe_excluded_names and host not in login_probe_excluded_names -%}
+                {%- set _ = out.append({'name': name, 'host': host, 'port': login_probe_ssh_port | int}) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {{ out }}
+      tags: [always]
+
+    - name: "Gate: every target's FQDN resolves on this host (OpenSSH and sss_ssh_knownhostsproxy look the host key up by this name)"
+      ansible.builtin.command:
+        argv: [getent, ahosts, "{{ item.host }}"]
+      loop: "{{ login_probe_target_list }}"
+      loop_control: {label: "{{ item.name }} -> {{ item.host }}"}
+      register: login_probe_target_resolve
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    # One target that does not resolve stays in the config: the probe
+    # reports it as stage=transport (capture transport-unresolvable), so
+    # PilotLoginProbeTransportFailed names it, and it never blocks the
+    # deploy or a decommission re-render of every other target. No target
+    # resolving at all is a wrong login_probe_domain or broken DNS on this
+    # host, and is refused.
+    - name: "Gate: at least one target FQDN resolves"
+      ansible.builtin.assert:
+        that:
+          - (login_probe_target_list | length) == 0 or
+            (login_probe_target_resolve.results | selectattr('rc', 'equalto', 0) | list | length) > 0
+        fail_msg: >-
+          no probe target resolves on {{ inventory_hostname }}:
+          {{ login_probe_target_resolve.results | map(attribute='item') | map(attribute='host') | list }}.
+          Check login_probe_domain and this host's DNS / the /etc/hosts pin, or set
+          login_probe_targets explicitly — never fall back to an IP address silently.
+      tags: [always]
+
+    - name: "Warn: these targets do not resolve; the probe reports them as transport failures"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | map(attribute='host') | list }} do not resolve on
+          {{ inventory_hostname }}. They stay probe targets and raise
+          PilotLoginProbeTransportFailed until DNS / the /etc/hosts pin is fixed.
+      when: (login_probe_target_resolve.results | rejectattr('rc', 'equalto', 0) | list | length) > 0
+      tags: [always]
+
+    # HostMetricsMissing (prometheus-apply.yml's host-health rules) trusts
+    # a target only while this probe records a success of it inside every
+    # host_metrics_missing_success_window. prometheus-apply.yml checks that
+    # against every login-probe host; this checks the same bound
+    # (tasks/host-metrics-missing-probe-round-gate.yml) when only this
+    # probe's settings change, against every Prometheus host of the
+    # inventory whose host-health rules are on. Their defaults (150s,
+    # 15s, enabled) are prometheus-apply.yml's; kept equal by
+    # TestRegression_HostHealthTimingConstantsAgree.
+    - name: "Gate: this probe records a success inside every Prometheus host's host_metrics_missing_success_window"
+      ansible.builtin.include_tasks:
+        file: tasks/host-metrics-missing-probe-round-gate.yml
+        apply: {tags: [always]}
+      vars:
+        hmm_gate_windows: >-
+          {%- set out = [] -%}
+          {%- for h in groups.get('prometheus', []) if hostvars[h].prometheus_host_health_alert_rules_enabled | default(true) | bool -%}
+            {%- set _ = out.append({'name': h,
+                'window': hostvars[h].host_metrics_missing_success_window | default('150s', true) | string,
+                'scrape': hostvars[h].prometheus_scrape_interval | default('15s') | string}) -%}
+          {%- endfor -%}
+          {{ out }}
+        hmm_gate_probes:
+          - name: "{{ inventory_hostname }}"
+            interval: "{{ login_probe_interval }}"
+            timeout: "{{ login_probe_total_timeout }}"
+      when: groups.get('prometheus', []) | length > 0
+      tags: [always]
+
+    - name: "Gate: artifact path is supplied"
+      ansible.builtin.assert:
+        that:
+          - login_probe_artifact_path | length > 0
+        fail_msg: "login_probe_artifact_path is required (pilot-cli default: dist/pilot-login-probe-linux-amd64)."
+      tags: [always]
+
+    - name: "Resolve login_probe_artifact_path to an absolute controller path (relative = repo-root relative)"
+      ansible.builtin.set_fact:
+        login_probe_artifact_abs_path: >-
+          {{ login_probe_artifact_path
+             if (login_probe_artifact_path is match('^/'))
+             else (playbook_dir ~ '/../../' ~ login_probe_artifact_path) }}
+      tags: [always]
+
+    - name: "Gate: artifact exists on the controller"
+      ansible.builtin.stat:
+        path: "{{ login_probe_artifact_abs_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: login_probe_artifact_stat
+      tags: [always]
+
+    - name: "Gate: inspect the packaged artifact checksum sidecar"
+      ansible.builtin.stat:
+        path: "{{ login_probe_artifact_abs_path }}.sha256"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: login_probe_artifact_checksum_stat
+      tags: [always]
+
+    - name: "Auto-resolve artifact SHA256 from the adjacent sidecar"
+      ansible.builtin.set_fact:
+        login_probe_artifact_sha256: >-
+          {{ lookup('ansible.builtin.file', login_probe_artifact_abs_path ~ '.sha256')
+             | trim | regex_search('^[a-f0-9]{64}') | default('', true) }}
+      when:
+        - login_probe_artifact_sha256 | default('') | length == 0
+        - login_probe_artifact_checksum_stat.stat.get('exists', false)
+      tags: [always]
+
+    - name: "Gate: controller-side artifact exists and its SHA256 is valid"
+      ansible.builtin.assert:
+        that:
+          - login_probe_artifact_stat.stat.get('exists', false)
+          - (login_probe_artifact_sha256 | default('')) is match('^[a-f0-9]{64}$')
+          - login_probe_artifact_stat.stat.get('checksum', '') == login_probe_artifact_sha256
+        fail_msg: >-
+          controller artifact {{ login_probe_artifact_abs_path }} is missing,
+          has no valid SHA256 pin, or its SHA256
+          ({{ login_probe_artifact_stat.stat.get('checksum', 'MISSING') }})
+          does not match login_probe_artifact_sha256.
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: controller artifact's own `version` subcommand succeeds"
+      ansible.builtin.command:
+        argv: ["{{ login_probe_artifact_abs_path }}", "version"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: login_probe_artifact_version
+      changed_when: false
+      # Read-only on the controller's own file; must really run under
+      # --check or the assert below would see an empty stdout.
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: version output matches the binary contract (`pilot-login-probe <version> (<commit>)`)"
+      ansible.builtin.assert:
+        that:
+          - login_probe_artifact_version.stdout is match('^pilot-login-probe \S+ \(\S+\)')
+        fail_msg: "unexpected version output: {{ login_probe_artifact_version.stdout }}"
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: a vault-supplied private key is an OpenSSH private key"
+      ansible.builtin.assert:
+        that:
+          - login_probe_ssh_private_key is match('^-----BEGIN OPENSSH PRIVATE KEY-----')
+        fail_msg: "login_probe_ssh_private_key must be an OpenSSH private key (PEM body), or left unset."
+      when: login_probe_ssh_private_key | default('', true) | length > 0
+      no_log: true
+      tags: [always]
+
+    - name: "Resolve node_exporter auth defaults for the textfile collector preflight"
+      ansible.builtin.set_fact:
+        node_exporter_basic_auth_user: "{{ node_exporter_basic_auth_user | default('prometheus', true) }}"
+        node_exporter_port: "{{ node_exporter_port | default(9100, true) }}"
+      tags: [always]
+
+    - name: "Gate: host-monitoring credentials are available for the textfile collector preflight"
+      ansible.builtin.assert:
+        that:
+          - node_exporter_basic_auth_password is defined
+          - node_exporter_basic_auth_password | string | length > 0
+        fail_msg: >-
+          login-probe must verify that node_exporter actually exposes its
+          textfile collector. Supply the same node_exporter_basic_auth_password
+          used by the same-host host-monitoring role (through the vault).
+      no_log: true
+      tags: [always]
+
+    # Snapshot every path this play can change before the block starts. The
+    # private key is included because an upgrade that fails after key rotation
+    # must restore the old credential together with its config and service.
+    - name: "Define login-probe rollback file and directory sets"
+      ansible.builtin.set_fact:
+        login_probe_rollback_paths:
+          - "{{ login_probe_bin_dest }}"
+          - "{{ login_probe_key_path }}"
+          - "{{ login_probe_key_path }}.pub"
+          - "{{ login_probe_ssh_config_path }}"
+          - "{{ login_probe_config_path }}"
+          - "{{ login_probe_unit_path }}"
+          - "{{ login_probe_runtime_marker_path }}"
+          - "{{ login_probe_textfile_path }}"
+        login_probe_rollback_directories:
+          - "{{ login_probe_config_dir }}"
+          - "{{ login_probe_state_dir }}"
+          - "{{ login_probe_backup_dir }}"
+      tags: [always]
+
+    - name: "Capture the previous login-probe service state"
+      ansible.builtin.service_facts:
+      tags: [always]
+
+    - name: "Capture the previous login-probe service account"
+      ansible.builtin.command:
+        argv: [getent, passwd, "{{ login_probe_service_user }}"]
+      register: login_probe_account_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Capture the previous login-probe group"
+      ansible.builtin.command:
+        argv: [getent, group, "{{ login_probe_service_user }}"]
+      register: login_probe_group_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Capture previous login-probe files and directories"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop: "{{ login_probe_rollback_paths + login_probe_rollback_directories }}"
+      register: login_probe_rollback_stat
+      tags: [always]
+
+    - name: "Record the immutable rollback snapshot location and previous state"
+      ansible.builtin.set_fact:
+        login_probe_rollback_dir: >-
+          {{ login_probe_backup_dir }}/apply-{{ ansible_date_time.epoch }}-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}
+        login_probe_previous_files: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', true)
+             | selectattr('item', 'in', login_probe_rollback_paths) | list }}
+        login_probe_absent_files: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', false)
+             | selectattr('item', 'in', login_probe_rollback_paths) | list }}
+        login_probe_previous_directories: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.isdir', 'defined')
+             | selectattr('stat.isdir', 'equalto', true)
+             | selectattr('item', 'in', login_probe_rollback_directories) | list }}
+        login_probe_absent_directories: >-
+          {{ login_probe_rollback_stat.results
+             | selectattr('stat.exists', 'equalto', false)
+             | selectattr('item', 'in', login_probe_rollback_directories) | list }}
+        login_probe_previous_service: "{{ ansible_facts.services.get('pilot-login-probe.service', {}) }}"
+        login_probe_previous_user_exists: "{{ login_probe_account_before.rc == 0 }}"
+        login_probe_previous_group_exists: "{{ login_probe_group_before.rc == 0 }}"
+      tags: [always]
+
+    # --check mutates nothing, so it takes no snapshot: the directory would
+    # not be created in check mode, and copying an existing managed file
+    # into it failed every --check --diff of an already-deployed probe host
+    # (a fresh host has no file to copy, which is why L3 never saw it).
+    - name: "Create the private rollback snapshot directory"
+      ansible.builtin.file:
+        path: "{{ login_probe_rollback_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: "Snapshot every existing managed file before mutation"
+      ansible.builtin.copy:
+        src: "{{ item.item }}"
+        dest: "{{ login_probe_rollback_dir }}/{{ item.item | basename }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "preserve"
+      loop: "{{ login_probe_previous_files }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [always]
+
+  tasks:
+    - name: "Login probe install + systemd service"
+      block:
+        - name: "Step 1: create the dedicated system account"
+          tags: [C2]
+          ansible.builtin.user:
+            name: "{{ login_probe_service_user }}"
+            system: true
+            shell: /usr/sbin/nologin
+            home: "{{ login_probe_state_dir }}"
+            create_home: false
+
+        - name: "Step 2: ensure config/state/backup directories exist"
+          tags: [C3, C4]
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: directory
+            owner: "{{ item.owner }}"
+            group: "{{ item.group }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - {path: "{{ login_probe_config_dir }}", owner: root, group: "{{ login_probe_service_user }}", mode: "0750"}
+            - {path: "{{ login_probe_state_dir }}", owner: "{{ login_probe_service_user }}", group: "{{ login_probe_service_user }}", mode: "0750"}
+
+        - name: "Step 4: copy the pinned binary to the probe host"
+          tags: [C1]
+          ansible.builtin.copy:
+            src: "{{ login_probe_artifact_abs_path }}"
+            dest: "{{ login_probe_bin_dest }}"
+            mode: "0755"
+            owner: root
+            group: root
+          register: login_probe_binary_result
+
+        - name: "Step 5: verify the target-side binary SHA256 (again after the copy)"
+          tags: [C1]
+          ansible.builtin.stat:
+            path: "{{ login_probe_bin_dest }}"
+            checksum_algorithm: sha256
+          register: login_probe_target_binary_stat
+
+        - name: "Step 5: assert target-side SHA256 matches"
+          tags: [C1]
+          ansible.builtin.assert:
+            that:
+              - login_probe_target_binary_stat.stat.get('checksum', '') == login_probe_artifact_sha256
+            fail_msg: >-
+              target binary SHA256
+              ({{ login_probe_target_binary_stat.stat.get('checksum', 'MISSING') }})
+              does not match login_probe_artifact_sha256 ({{ login_probe_artifact_sha256 }}).
+          when: not ansible_check_mode
+
+        - name: "Step 6: install the vault-supplied canary private key"
+          tags: [C4, C8]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_key_path }}"
+            content: "{{ login_probe_ssh_private_key | trim }}\n"
+            owner: "{{ login_probe_service_user }}"
+            group: "{{ login_probe_service_user }}"
+            mode: "0600"
+          no_log: true
+          when: login_probe_ssh_private_key | default('', true) | length > 0
+          register: login_probe_vault_key_result
+
+        - name: "Step 6b: generate the canary key pair on the probe host (no vault key supplied; the private key never leaves this host)"
+          tags: [C4, C8]
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -q
+              - -t
+              - ed25519
+              - -N
+              - ""
+              - -C
+              - "pilot-login-probe@{{ inventory_hostname | lower }}"
+              - -f
+              - "{{ login_probe_key_path }}"
+            creates: "{{ login_probe_key_path }}"
+          when: login_probe_ssh_private_key | default('', true) | length == 0
+          register: login_probe_generated_key_result
+
+        - name: "Step 6c: enforce the private key's owner and mode"
+          tags: [C4, C8]
+          ansible.builtin.file:
+            path: "{{ login_probe_key_path }}"
+            owner: "{{ login_probe_service_user }}"
+            group: "{{ login_probe_service_user }}"
+            mode: "0600"
+          when: not ansible_check_mode
+
+        - name: "Step 6d: derive the public key from the installed private key"
+          tags: [C4]
+          ansible.builtin.command:
+            argv: [ssh-keygen, -y, -f, "{{ login_probe_key_path }}"]
+          register: login_probe_pubkey_derived
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+
+        - name: "Step 6e: publish the public key beside it for the canary account"
+          tags: [C4]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_key_path }}.pub"
+            content: "{{ (login_probe_pubkey_derived.stdout | trim).split(' ')[0:2] | join(' ') }} pilot-login-probe@{{ inventory_hostname | lower }}\n"
+            owner: root
+            group: root
+            mode: "0644"
+          when: not ansible_check_mode
+
+        - name: "Step 7: render the pinned ssh_config (SSSD/FreeIPA host-key trust, publickey only, no forwarding/TTY)"
+          tags: [C5]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_ssh_config_path }}"
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by login-probe-apply.yml — do not edit by hand.
+              # pilot-login-probe passes this file with -F, so no system or
+              # user ssh_config applies. Host-key trust comes from SSSD,
+              # which serves the keys FreeIPA recorded at enrollment
+              # (never an ssh-keyscan snapshot, AGENTS.md §5.9).
+              Host *
+                  IdentityFile {{ login_probe_key_path }}
+                  IdentitiesOnly yes
+                  PubkeyAuthentication yes
+                  PreferredAuthentications publickey
+                  PasswordAuthentication no
+                  KbdInteractiveAuthentication no
+                  GSSAPIAuthentication no
+                  HostbasedAuthentication no
+                  BatchMode yes
+                  ConnectionAttempts 1
+                  ServerAliveInterval 5
+                  ServerAliveCountMax 2
+
+                  ProxyCommand /usr/bin/sss_ssh_knownhostsproxy -p %p %h
+                  StrictHostKeyChecking yes
+                  UserKnownHostsFile /dev/null
+                  GlobalKnownHostsFile /var/lib/sss/pubconf/known_hosts
+                  UpdateHostKeys no
+
+                  ForwardAgent no
+                  ForwardX11 no
+                  ClearAllForwardings yes
+                  PermitLocalCommand no
+                  RequestTTY no
+                  EscapeChar none
+          register: login_probe_ssh_config_result
+
+        - name: "Step 8: render config.yml"
+          tags: [C3]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_config_path }}"
+            # No secret in here (targets, timings, account name); root-owned
+            # and world-readable so a fresh-host --check never needs the
+            # service group to exist yet.
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by login-probe-apply.yml — do not edit by hand.
+              interval: {{ login_probe_interval }}
+              connect_timeout: {{ login_probe_connect_timeout }}
+              total_timeout: {{ login_probe_total_timeout }}
+              concurrency: {{ login_probe_concurrency }}
+              user: {{ login_probe_user }}
+              command: {{ login_probe_command | to_json }}
+              ssh_binary: /usr/bin/ssh
+              ssh_config: {{ login_probe_ssh_config_path }}
+              textfile: {{ login_probe_textfile_path }}
+              targets:
+              {% for t in login_probe_target_list %}
+                - {name: {{ t.name | to_json }}, host: {{ t.host | to_json }}, port: {{ t.port }}}
+              {% else %}
+                []
+              {% endfor %}
+          register: login_probe_config_result
+
+        - name: "Step 9: validate the rendered config before any restart"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: ["{{ login_probe_bin_dest }}", "config", "validate", "--config", "{{ login_probe_config_path }}"]
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 10: render pilot-login-probe.service (dedicated account, read-only system, no listener)"
+          tags: [C6, C12]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_unit_path }}"
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Pilot login probe (synthetic SSH/PAM login canary)
+              Wants=network-online.target sssd.service
+              After=network-online.target sssd.service
+
+              [Service]
+              User={{ login_probe_service_user }}
+              Group={{ login_probe_service_user }}
+              Type=simple
+              ExecStart={{ login_probe_bin_dest }} serve --config {{ login_probe_config_path }}
+              Restart=on-failure
+              RestartSec=5
+              StateDirectory=pilot-login-probe
+              StateDirectoryMode=0750
+              NoNewPrivileges=yes
+              PrivateTmp=yes
+              ProtectHome=yes
+              ProtectSystem=strict
+              ProtectKernelTunables=yes
+              ProtectKernelModules=yes
+              ProtectControlGroups=yes
+              RestrictSUIDSGID=yes
+              CapabilityBoundingSet=
+              AmbientCapabilities=
+              ReadWritePaths={{ login_probe_textfile_dir }}
+
+              [Install]
+              WantedBy=multi-user.target
+          register: login_probe_unit_result
+
+        # Do not rely on this run's changed flags: a tagged apply or an
+        # interrupted run may already have written the desired files while
+        # the daemon still uses its old config. Missing proof is also stale.
+        - name: "Runtime: inspect the root-owned activation record without following links"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.stat:
+            path: "{{ login_probe_runtime_marker_path }}"
+            follow: false
+            get_checksum: false
+          register: login_probe_runtime_marker_stat
+          when: not ansible_check_mode
+
+        - name: "Runtime: reject an unsafe activation record"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.assert:
+            that:
+              - not login_probe_runtime_marker_stat.stat.exists or (login_probe_runtime_marker_stat.stat.isreg | default(false) and login_probe_runtime_marker_stat.stat.uid == 0 and login_probe_runtime_marker_stat.stat.mode == '0600')
+            fail_msg: "login-probe activation record must be a root-owned regular file with mode 0600"
+          when: not ansible_check_mode
+
+        - name: "Runtime: read the prior healthy activation record"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.slurp:
+            src: "{{ login_probe_runtime_marker_path }}"
+          register: login_probe_runtime_marker
+          when: not ansible_check_mode and login_probe_runtime_marker_stat.stat.exists
+
+        - name: "Runtime: fingerprint the binary, loaded configuration and unit"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.stat:
+            path: "{{ item }}"
+            checksum_algorithm: sha256
+          loop:
+            - "{{ login_probe_bin_dest }}"
+            - "{{ login_probe_config_path }}"
+            - "{{ login_probe_unit_path }}"
+          register: login_probe_runtime_files
+          when: not ansible_check_mode
+
+        - name: "Step 11: reload systemd to recover interrupted unit updates too"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.systemd:
+            daemon_reload: true
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 12: ensure pilot-login-probe.service is enabled and started"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: started
+            enabled: true
+          when: not ansible_check_mode
+
+        - name: "Runtime: read the running service invocation"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation_before
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Runtime: decide whether this process has proven the current files healthy"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.set_fact:
+            login_probe_runtime_fingerprint: "{{ login_probe_runtime_files.results | map(attribute='stat.checksum') | join(' ') }}"
+            login_probe_runtime_restart_needed: >-
+              {{ (login_probe_runtime_marker.content | default('') | b64decode | trim)
+                 != ((login_probe_runtime_files.results | map(attribute='stat.checksum') | join(' '))
+                     ~ ' ' ~ (login_probe_runtime_invocation_before.stdout | trim))
+                 or (login_probe_runtime_invocation_before.stdout | trim | length == 0) }}
+          when: not ansible_check_mode
+
+        - name: "Step 13: restart when runtime differs from the last healthy activation"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: restarted
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: remember the textfile generation after restart"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - 'import os,sys; p=sys.argv[1]; print(os.stat(p).st_mtime_ns if os.path.exists(p) else -1)'
+              - "{{ login_probe_textfile_path }}"
+          register: login_probe_runtime_textfile_before
+          changed_when: false
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: read the service invocation to validate"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation
+          changed_when: false
+          failed_when: >-
+            login_probe_runtime_invocation.rc != 0
+            or (not (login_probe_runtime_restart_needed | bool)
+                and login_probe_runtime_invocation.stdout != login_probe_runtime_invocation_before.stdout)
+          when: not ansible_check_mode
+
+        - name: "Step 14: wait for the service to report active"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, is-active, pilot-login-probe.service]
+          register: login_probe_active_check
+          changed_when: false
+          retries: 10
+          delay: 2
+          until: login_probe_active_check.rc == 0
+          when: not ansible_check_mode
+
+        - name: "Step 15: wait for this daemon to rewrite the metrics textfile"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - >-
+                import os,sys; p=sys.argv[1];
+                sys.exit(0 if os.path.exists(p) and os.stat(p).st_mtime_ns > int(sys.argv[2])
+                and 'pilot_login_probe_metrics_last_write_timestamp_seconds ' in open(p).read() else 1)
+              - "{{ login_probe_textfile_path }}"
+              - "{{ login_probe_runtime_textfile_before.stdout }}"
+          register: login_probe_runtime_fresh_metrics
+          changed_when: false
+          retries: 30
+          delay: 2
+          until: login_probe_runtime_fresh_metrics.rc == 0
+          when: not ansible_check_mode and login_probe_runtime_restart_needed | bool
+
+        - name: "Runtime: confirm health belongs to the same service invocation"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=InvocationID, --value, pilot-login-probe.service]
+          register: login_probe_runtime_invocation_after
+          changed_when: false
+          failed_when: >-
+            login_probe_runtime_invocation_after.rc != 0
+            or login_probe_runtime_invocation_after.stdout | trim | length == 0
+            or login_probe_runtime_invocation_after.stdout != login_probe_runtime_invocation.stdout
+          when: not ansible_check_mode
+
+        - name: "Runtime: require the metrics textfile on an unchanged activation too"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.wait_for:
+            path: "{{ login_probe_textfile_path }}"
+            search_regex: '^pilot_login_probe_metrics_last_write_timestamp_seconds '
+            timeout: 60
+          when: not ansible_check_mode and not (login_probe_runtime_restart_needed | bool)
+
+        - name: "Runtime: record the proven activation for idempotent retries"
+          tags: [C1, C2, C3, C6, C7, C12]
+          ansible.builtin.copy:
+            dest: "{{ login_probe_runtime_marker_path }}"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "{{ login_probe_runtime_fingerprint }} {{ login_probe_runtime_invocation_after.stdout | trim }}\n"
+          when: not ansible_check_mode
+
+        - name: "Step 15b: prove node_exporter serves the textfile collector output (spec C7)"
+          tags: [C7]
+          when: not ansible_check_mode
+          block:
+            - name: "Write a temporary collector preflight metric"
+              ansible.builtin.copy:
+                dest: "{{ login_probe_textfile_dir }}/pilot_login_probe_preflight.prom"
+                owner: root
+                group: root
+                mode: "0644"
+                content: |
+                  # HELP pilot_login_probe_textfile_preflight Temporary collector visibility check.
+                  # TYPE pilot_login_probe_textfile_preflight gauge
+                  pilot_login_probe_textfile_preflight{pilot_host="{{ inventory_hostname }}"} 1
+              changed_when: false
+
+            - name: "Read node_exporter metrics with the same-host host-monitoring credential"
+              ansible.builtin.uri:
+                url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+                method: GET
+                user: "{{ node_exporter_basic_auth_user }}"
+                password: "{{ node_exporter_basic_auth_password }}"
+                force_basic_auth: true
+                status_code: 200
+                return_content: true
+                timeout: 10
+              register: login_probe_exporter_metrics
+              changed_when: false
+              check_mode: false
+              retries: 10
+              delay: 1
+              until: >-
+                login_probe_exporter_metrics.status | default(0) == 200
+                and (login_probe_exporter_metrics.content | default(''))
+                    is search('(?m)^pilot_login_probe_textfile_preflight\{pilot_host="'
+                    ~ inventory_hostname
+                    ~ '"\} 1$')
+              no_log: true
+
+            - name: "Assert node_exporter actually exposes the temporary textfile metric"
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    login_probe_exporter_metrics.content
+                    is search('(?m)^pilot_login_probe_textfile_preflight\{pilot_host="'
+                    ~ inventory_hostname
+                    ~ '"\} 1$')
+                fail_msg: >-
+                  node_exporter answered, but did not expose the temporary
+                  login-probe textfile metric. Ensure the host-monitoring
+                  exporter on port {{ node_exporter_port }} uses
+                  --collector.textfile.directory={{ login_probe_textfile_dir }}.
+              no_log: true
+
+          always:
+            - name: "Remove the temporary collector preflight metric"
+              ansible.builtin.file:
+                path: "{{ login_probe_textfile_dir }}/pilot_login_probe_preflight.prom"
+                state: absent
+              changed_when: false
+
+        - name: "Step 16: one health round — every target must be classified into a known stage (stage ok needs the canary key published, so it is not required here)"
+          tags: [C10, C11]
+          ansible.builtin.command:
+            argv: ["{{ login_probe_bin_dest }}", "probe", "--config", "{{ login_probe_config_path }}", "--json"]
+          become: true
+          become_user: "{{ login_probe_service_user }}"
+          register: login_probe_health_round
+          changed_when: false
+          failed_when: login_probe_health_round.rc not in [0, 2]
+          when: not ansible_check_mode
+
+        - name: "Step 16: summarize the health round"
+          tags: [C10, C11]
+          ansible.builtin.set_fact:
+            login_probe_health_reported: "{{ login_probe_health_round.stdout | from_json | length }}"
+            login_probe_health_unknown: >-
+              {{ login_probe_health_round.stdout | from_json | map(attribute='stage')
+                 | reject('in', ['ok', 'transport', 'hostkey', 'auth', 'account', 'session', 'timeout']) | list }}
+          when: not ansible_check_mode
+
+        - name: "Step 16: assert the health round reported every target from the fixed enum"
+          tags: [C10, C11]
+          ansible.builtin.assert:
+            that:
+              - (login_probe_health_reported | int) == (login_probe_target_list | length)
+              - login_probe_health_unknown | length == 0
+            fail_msg: "unexpected health round output: {{ login_probe_health_round.stdout }}"
+          when: not ansible_check_mode
+
+        - name: "Step 16: report the health round"
+          tags: [C10, C11]
+          ansible.builtin.debug:
+            msg: >-
+              {{ login_probe_health_round.stdout | from_json
+                 | map(attribute='target') | zip(login_probe_health_round.stdout | from_json | map(attribute='stage'))
+                 | map('join', '=') | list }}
+              — publish {{ login_probe_key_path }}.pub on the canary user
+              ({{ login_probe_user }}) in the freeipa-identity roster if a
+              target reports auth.
+          when: not ansible_check_mode
+
+        - name: "Step 17: inspect the canary account's sudo rights on this host"
+          tags: [C9]
+          ansible.builtin.command:
+            argv: [sudo, -n, -l, -U, "{{ login_probe_user }}"]
+          register: login_probe_canary_sudo
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: "Step 17: the canary must never have sudo (issue #11 R1)"
+          tags: [C9]
+          ansible.builtin.assert:
+            that:
+              - "'may run the following commands' not in login_probe_canary_sudo.stdout"
+            fail_msg: >-
+              the canary account {{ login_probe_user }} has sudo rights on
+              {{ inventory_hostname }}: remove it from every sudo rule — the
+              login probe's key is a standing credential and must only ever
+              be able to run {{ login_probe_command }}.
+
+      rescue:
+        - name: "ROLLBACK — stop login-probe before restoring its managed state"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: stopped
+          register: login_probe_rollback_stop
+          ignore_errors: true
+
+        - name: "ROLLBACK — disable a service that did not exist before this first install"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: stopped
+            enabled: false
+          when: login_probe_previous_service | length == 0
+          register: login_probe_rollback_new_service_disable
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore every managed file that existed before apply"
+          tags: [always]
+          ansible.builtin.copy:
+            src: "{{ login_probe_rollback_dir }}/{{ item.item | basename }}"
+            dest: "{{ item.item }}"
+            remote_src: true
+            owner: "{{ item.stat.pw_name }}"
+            group: "{{ item.stat.gr_name }}"
+            mode: "{{ item.stat.mode }}"
+          loop: "{{ login_probe_previous_files }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_file_restore
+          no_log: true
+          ignore_errors: true
+          # --check took no snapshot and changed no file.
+          when: not ansible_check_mode
+
+        - name: "ROLLBACK — remove managed files created by this failed first install"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: absent
+          loop: "{{ login_probe_absent_files }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_file_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore pre-existing directory ownership and mode"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: directory
+            owner: "{{ item.stat.pw_name }}"
+            group: "{{ item.stat.gr_name }}"
+            mode: "{{ item.stat.mode }}"
+          loop: "{{ login_probe_previous_directories }}"
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_directory_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove config/state directories created by this failed first install"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item }}"
+            state: absent
+          loop: >-
+            {{ login_probe_absent_directories
+               | rejectattr('item', 'equalto', login_probe_backup_dir) | list }}
+          loop_control:
+            label: "{{ item.item }}"
+          register: login_probe_rollback_directory_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — reload systemd after restoring or removing the unit"
+          tags: [always]
+          ansible.builtin.systemd:
+            daemon_reload: true
+          register: login_probe_rollback_daemon_reload
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore whether the service was enabled and active before apply"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-login-probe.service
+            state: "{{ 'started' if login_probe_previous_service.get('state', '') == 'running' else 'stopped' }}"
+            enabled: "{{ login_probe_previous_service.get('status', '') == 'enabled' }}"
+          when: login_probe_previous_service | length > 0
+          register: login_probe_rollback_service_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore the pre-existing service group"
+          tags: [always]
+          ansible.builtin.group:
+            name: "{{ login_probe_service_user }}"
+            state: present
+            gid: "{{ login_probe_group_before.stdout.split(':')[2] }}"
+          when: login_probe_previous_group_exists | bool
+          register: login_probe_rollback_group_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — restore the pre-existing service account attributes"
+          tags: [always]
+          ansible.builtin.user:
+            name: "{{ login_probe_service_user }}"
+            state: present
+            uid: "{{ login_probe_account_before.stdout.split(':')[2] }}"
+            group: "{{ login_probe_account_before.stdout.split(':')[3] }}"
+            home: "{{ login_probe_account_before.stdout.split(':')[5] }}"
+            shell: "{{ login_probe_account_before.stdout.split(':')[6] }}"
+            create_home: false
+          when: login_probe_previous_user_exists | bool
+          register: login_probe_rollback_user_restore
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a service account created by this failed first install"
+          tags: [always]
+          ansible.builtin.user:
+            name: "{{ login_probe_service_user }}"
+            state: absent
+            force: true
+            remove: false
+          when: not (login_probe_previous_user_exists | bool)
+          register: login_probe_rollback_user_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a service group created by this failed first install"
+          tags: [always]
+          ansible.builtin.group:
+            name: "{{ login_probe_service_user }}"
+            state: absent
+          when: not (login_probe_previous_group_exists | bool)
+          register: login_probe_rollback_group_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — discard the private snapshot only when state restoration succeeded"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ login_probe_rollback_dir }}"
+            state: absent
+          when: >-
+            login_probe_rollback_stop is not failed
+            and login_probe_rollback_new_service_disable is not failed
+            and login_probe_rollback_file_restore is not failed
+            and login_probe_rollback_file_remove is not failed
+            and login_probe_rollback_directory_restore is not failed
+            and login_probe_rollback_directory_remove is not failed
+            and login_probe_rollback_daemon_reload is not failed
+            and login_probe_rollback_service_restore is not failed
+            and login_probe_rollback_group_restore is not failed
+            and login_probe_rollback_user_restore is not failed
+            and login_probe_rollback_user_remove is not failed
+            and login_probe_rollback_group_remove is not failed
+          register: login_probe_rollback_snapshot_cleanup
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove a backup directory created only for this apply"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ login_probe_backup_dir }}"
+            state: absent
+          when:
+            - login_probe_rollback_snapshot_cleanup is succeeded
+            - login_probe_absent_directories | selectattr('item', 'equalto', login_probe_backup_dir) | list | length > 0
+          register: login_probe_rollback_backup_dir_remove
+          ignore_errors: true
+
+        - name: "ROLLBACK — surface the original failure and restoration result"
+          tags: [always]
+          ansible.builtin.fail:
+            msg: >-
+              login-probe apply FAILED (see task output above). Rollback
+              service stop={{ 'ok' if login_probe_rollback_stop is succeeded else 'failed' }};
+              file restore={{ 'ok' if login_probe_rollback_file_restore is succeeded else 'failed' }};
+              service state restore={{ 'ok' if login_probe_rollback_service_restore is not failed else 'failed' }}.
+              {% if login_probe_rollback_snapshot_cleanup is skipped or login_probe_rollback_snapshot_cleanup is failed %}
+              Private rollback snapshot retained at {{ login_probe_rollback_dir }} for recovery.
+              {% endif %}
+
+    - name: "Remove the private rollback snapshot after a successful apply"
+      tags: [always]
+      ansible.builtin.file:
+        path: "{{ login_probe_rollback_dir }}"
+        state: absent
+      changed_when: false
+
+    - name: "Remove the backup directory if this apply created it"
+      tags: [always]
+      ansible.builtin.file:
+        path: "{{ login_probe_backup_dir }}"
+        state: absent
+      when: login_probe_absent_directories | selectattr('item', 'equalto', login_probe_backup_dir) | list | length > 0
+      changed_when: false

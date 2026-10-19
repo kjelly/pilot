@@ -243,19 +243,55 @@
       when: stage == 'prod'
       tags: [always]
 
-    # The same normalization as freeipa-server-apply.yml (issue #68); read
-    # by ipa_dns_forwarder_argv above. ipa_dns_forwarders, when given (it
-    # used to be this play's own var, so -e ipa_dns_forwarders=... overrode
-    # it), still wins, as on the primary. Neither set means no
-    # server-specific forwarders: the replica's named still uses the global
-    # list the primary sets with ipa dnsconfig-mod.
+    # The same inputs, precedence and normalization as
+    # freeipa-server-apply.yml (issue #68); read by ipa_dns_forwarder_argv
+    # above. ipa_dns_forwarders (from -e or the inventory) wins over
+    # freeipa_dns_forwarders. Neither set means no server-specific
+    # forwarders: the replica's named then uses the global list the primary
+    # sets with ipa dnsconfig-mod.
     - name: "Normalize DNS forwarders to a list"
       ansible.builtin.include_tasks:
         file: tasks/freeipa-dns-forwarders.yml
         apply:
           tags: [always]
       vars:
-        freeipa_dns_forwarders_input: "{{ ipa_dns_forwarders | default(freeipa_dns_forwarders | default([])) }}"
+        freeipa_dns_forwarders_default: []
+      tags: [always]
+
+    # ipa-replica-install's and ipa-dns-install's --forwarder take plain
+    # addresses only (ipaserver/install/dns.py: List[CheckedIPAddressLoopback]);
+    # "<address> port <n>" is valid only for ipa dnsconfig-mod and
+    # ipa dnsserver-mod. Stop before any change when this run would call one
+    # of them: not promoted yet (step 2/2), or named not active (Day-2 DNS
+    # below uses the same probe).
+    - name: "FreeIPA replica — promoted already? (for the forwarder gate)"
+      ansible.builtin.stat:
+        path: "{{ ipa_replica_config_marker }}"
+      register: ipa_replica_precheck_cfg
+      tags: [always]
+
+    - name: "FreeIPA replica — named active? (for the forwarder gate)"
+      ansible.builtin.command:
+        argv: [systemctl, is-active, named.service]
+      register: ipa_replica_precheck_named
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: install-time forwarders are plain addresses"
+      ansible.builtin.assert:
+        that:
+          - ipa_dns_forwarders_normalized | select('search', ' port ') | list | length == 0
+        fail_msg: >-
+          ipa-replica-install and ipa-dns-install accept only plain addresses as --forwarder,
+          not {{ ipa_dns_forwarders_normalized | select('search', ' port ') | list }}, and this
+          run would call one of them. Nothing was changed. Install with plain addresses first
+          (or an empty list), then re-run with the port form: on an installed server this
+          playbook sets it with `ipa dnsserver-mod`.
+      when:
+        - ipa_setup_dns | bool
+        - not ipa_replica_precheck_cfg.stat.exists or ipa_replica_precheck_named.rc != 0
       tags: [always]
 
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
@@ -379,12 +415,14 @@
           changed_when: false
           check_mode: false
 
+        # argv + stdin: the password never passes through a shell, so `$`,
+        # backticks and quotes in it reach kinit unchanged.
         - name: "FreeIPA replica DNS self-register — kinit admin into the dedicated ccache"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_replica_dns_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ ipa_enroll_password }}"
+          environment:
+            KRB5CCNAME: "{{ ipa_replica_dns_ccache_file.path }}"
           changed_when: false
           no_log: true
           check_mode: false
@@ -664,3 +702,59 @@
         - not (ipa_setup_dns | bool)
         - (ipa_replica_named_status.rc | default(1)) == 0
       tags: [freeipa-replica, R3, C16]
+
+    # This server's own forwarders follow the normalized list on every run,
+    # as the primary's do (freeipa-server-apply.yml): the install-time
+    # --forwarder only applies when DNS is first installed, so before
+    # 2026-10-15 a changed list never reached an existing replica's named.
+    # An empty list (the default) clears them, and named then uses the
+    # realm's global forwarders. Checked on FreeIPA 4.13.4: `--forwarder=`
+    # clears, an unchanged list is rc=1 "no modifications to be performed",
+    # and a name FreeIPA does not know is rc=2 "DNS server not found"
+    # (ipa_replica_fqdn must be the name FreeIPA has for this server).
+    - name: "FreeIPA replica DNS — this server's own forwarders"
+      when:
+        - not ansible_check_mode
+        - ipa_setup_dns | bool
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      tags: [freeipa-replica, R3, C16]
+      block:
+        - name: "FreeIPA replica DNS — private Kerberos cache for the admin ticket"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
+
+        # argv + stdin: the password never passes through a shell, so `$`,
+        # backticks and quotes in it reach kinit unchanged.
+        - name: "FreeIPA replica DNS — kinit admin (for dnsserver-mod)"
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+
+        - name: "FreeIPA replica DNS — set this server's own forwarders"
+          ansible.builtin.command:
+            argv: >-
+              {{ ['ipa', 'dnsserver-mod', ipa_replica_fqdn]
+                 + ((ipa_dns_forwarders_normalized | map('regex_replace', '^(.*)$', '--forwarder=\1') | list)
+                    if (ipa_dns_forwarders_normalized | length > 0) else ['--forwarder=']) }}
+          register: ipa_replica_dnsserver_forwarders
+          changed_when: >-
+            ipa_replica_dnsserver_forwarders.rc == 0 and
+            'no modifications to be performed' not in
+            (ipa_replica_dnsserver_forwarders.stderr | default('') ~ ipa_replica_dnsserver_forwarders.stdout | default(''))
+          failed_when: >-
+            ipa_replica_dnsserver_forwarders.rc != 0 and
+            'no modifications to be performed' not in
+            (ipa_replica_dnsserver_forwarders.stderr | default('') ~ ipa_replica_dnsserver_forwarders.stdout | default(''))
+      always:
+        - name: "FreeIPA replica DNS — destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
