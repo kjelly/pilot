@@ -2,9 +2,11 @@
 
 > 版本：v1.16（2026-10-16 重跑不再發出已知是 no-op 的呼叫：以 `ipa user-find`／`group-find --pkey-only`
 > 批次讀取，已存在的使用者與群組不再 `user-add`／`group-add`，已是宣告狀態的帳號不再
-> `user-enable`／`-disable`，成員查詢已列出的直接成員不再 `group-add-member`；讀取不完整時在任何
-> 變更前失敗。成員比較改為不分大小寫（FreeIPA 把 group、hostgroup、host、netgroup 名稱存成小寫）。
-> 外部可觀察的結果不變。見 §8 v1.16）
+> `user-enable`／`-disable`，成員查詢已列出的直接成員不再 `group-add-member`；讀取不完整時在
+> 該清單所保護的使用者或群組變更前失敗。成員比較改為不分大小寫（FreeIPA 把 group、hostgroup、host、netgroup 名稱存成小寫）。
+> 外部可觀察的結果不變。candidate `d874c3f`（tree `a82fe75e`）在 2026-10-16 對拋棄式
+> vm-target 重跑 no-op／混合大小寫情境，2026-10-19 補驗；範圍與結果見
+> [evidence](../evidence/freeipa-identity/2026-10-19-d874c3f.md) 與 §8 v1.16）
 > 上一版：v1.15（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
 > 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。candidate `b27e3ab`（接上 #106 後）在拋棄式
 > vm-target 實跑 PASS，見 `docs/evidence/host-decommission/2026-10-16-b27e3ab.md` 與 §8 v1.15）

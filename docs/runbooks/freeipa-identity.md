@@ -18,14 +18,16 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-15，candidate `decc613`，tree `65bc3c93473fe70575df026767a0e1985e0c2eda`，PR #89）：
-  `docs/verification/freeipa-identity.md` v1.12。單台全新的 `freeipa-server` vm-target（AlmaLinux 9.8，
-  ipa-server 4.13.4-1.el9_8），依序套用 `freeipa-identity-v2-fixtures.yml`、`freeipa-identity-fixtures.yml`、
-  `freeipa-identity-canonical-fixtures.yml` 後，C1–C24 經 ldapi 以 root 執行，
-  SSH 使用者是 root 或非 root 都是 **24/24 PASS**（`main` 的 binary 以非 root 執行為 2/24）；§7.1a 的 netgroup
-  pruning SOP 步驟 1–3 照文件原樣執行：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user
-  membership"），步驟 3 只剩宣告的成員；每一步之後 root 與非 root 使用者都沒有 Kerberos ticket。摘要：
-  [`2026-10-15-decc613-rerun.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-rerun.md)。
+- 最新驗證（2026-10-16 實跑、2026-10-19 補驗，PR #119）：candidate `d874c3f`，
+  tree `a82fe75e4839ee0275651701ee20028fa33e55e7`，spec v1.16。
+  目標是既有拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 vm-target；實際 inventory 只有一台
+  `all` host，依單一 host 例外使用 `target_group=all`。外部 vault 已確認有
+  `ipa_admin_password` key，只記 key、不顯示值。
+  120 users／40 groups 穩態兩輪 `changed=0 failed=0`、各 642 次 API 呼叫；混合大小寫的
+  nested-group 關係保留，重跑 `changed=0`；被移出名冊的成員仍可撤銷。
+  2026-10-19 正式 race suite 為 57 packages **PASS**。
+  本輪涵蓋 no-op 與大小寫回歸情境，沒有重新宣稱 C1–C24 全表驗收。
+  摘要：[`2026-10-19-d874c3f.md`](../evidence/freeipa-identity/2026-10-19-d874c3f.md)。
   下面是 2026-08-11 roster schema v2 交付時的快照。
 
 - Roster schema v2 delivery：schema v1/v2 版本判定與自動升級
@@ -317,14 +319,16 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 成員比較不分大小寫：名冊寫 `team-Child`，FreeIPA 存成 `team-child`，兩者視為同一個成員，不會被撤銷再加回。sudo 指令路徑例外：FreeIPA 保留它的大小寫、也只認原本的寫法，所以名冊與 FreeIPA 的寫法要一致。
 
-讀不完整時，apply 在改動之前就失敗：查詢被截斷，或
+讀不完整時，apply 會在該清單所保護的使用者或群組變更前失敗：查詢被截斷，或
 `Gate: the user listings were parsed completely`／`Gate: the group listing was parsed completely`
 讀不懂輸出。後者通常是 `ipa` 輸出被翻成其他語言：ssh session 的 `LANG` 來自 server
 的系統語系（`/etc/locale.conf`），不是英文且裝了該語言時，`ipa` 就印那個語言。這支
 playbook 只認英文輸出。
 
-120 位使用者的穩態重跑從 1,189 次 API 呼叫降到 642 次，約 845 秒降到 480–520 秒
-（candidate `01fcc5d`，`docs/evidence/freeipa-identity/2026-10-16-01fcc5d.md`）。
+120 位使用者、40 個群組的穩態重跑從 1,189 次 API 呼叫降到 642 次；交錯實測 base
+為 812.0 秒，candidate 兩輪為 524.3／554.7 秒。混合大小寫的 nested-group 關係不再
+被移除或重加；首次可能新增該 roster 寫法的 group-history marker，第二輪 `changed=0`。
+見 candidate `d874c3f` 的[實跑摘要](../evidence/freeipa-identity/2026-10-19-d874c3f.md)。
 
 ---
 
