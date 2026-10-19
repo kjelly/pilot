@@ -541,8 +541,8 @@ func TestBatchReportsEachItem(t *testing.T) {
 	if items[2].Err == nil || items[2].Err.Name != "EmptyModlist" {
 		t.Fatalf("item 2 = %+v", items[2].Err)
 	}
-	if s := c.Stats(); s.Writes != 3 || s.Reads != 0 {
-		t.Fatalf("a batch with a write counts as writes: %+v", s)
+	if s := c.Stats(); s.Writes != 1 || s.Reads != 2 {
+		t.Fatalf("a batch counts each command by kind: %+v", s)
 	}
 	if _, err := c.Batch(context.Background(), []Command{{Method: "user_show"}}); err == nil {
 		t.Fatal("a batch answered with the wrong number of results must fail")

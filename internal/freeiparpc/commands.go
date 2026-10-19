@@ -50,15 +50,29 @@ func (c *Client) Ping(ctx context.Context) (ServerInfo, error) {
 	if err != nil {
 		return ServerInfo{}, err
 	}
+	return decodePing(raw)
+}
+
+// validateCommandResult applies the same success contract to single calls
+// and batch items. Ping has a summary instead of an inner result.
+func validateCommandResult(method string, raw json.RawMessage) error {
+	if method == "ping" {
+		_, err := decodePing(raw)
+		return err
+	}
+	return requireField(raw, "result")
+}
+
+func decodePing(raw json.RawMessage) (ServerInfo, error) {
 	var r struct {
 		Summary string `json:"summary"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return ServerInfo{}, fmt.Errorf("freeiparpc: decode ping: %w", err)
+		return ServerInfo{}, fmt.Errorf("freeiparpc: decode ping: %w", ErrIncompleteResponse)
 	}
 	m := pingSummaryRe.FindStringSubmatch(r.Summary)
 	if m == nil {
-		return ServerInfo{}, fmt.Errorf("freeiparpc: unexpected ping summary %q", r.Summary)
+		return ServerInfo{}, fmt.Errorf("freeiparpc: invalid ping summary: %w", ErrIncompleteResponse)
 	}
 	return ServerInfo{ServerVersion: m[1], APIVersion: m[2]}, nil
 }
@@ -130,29 +144,33 @@ type BatchItem struct {
 // Batch sends commands in one request. It is not a transaction: each item
 // succeeds or fails on its own, in order. A batch with any write is a write.
 func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error) {
-	isWrite := false
+	reads, writes := 0, 0
 	items := make([]map[string]any, 0, len(cmds))
 	for _, cmd := range cmds {
 		k, ok := allowlist[cmd.Method]
 		if !ok {
 			return nil, &ErrMethodNotAllowed{Method: cmd.Method}
 		}
-		isWrite = isWrite || k == write
+		if k == write {
+			writes++
+		} else {
+			reads++
+		}
 		items = append(items, map[string]any{"method": cmd.Method, "params": cmd.params()})
 	}
 	body, err := json.Marshal(request{Method: "batch", Params: [2]any{items, map[string]any{"version": apiVersion}}})
 	if err != nil {
 		return nil, err
 	}
-	raw, err := c.do(ctx, "batch", isWrite, len(cmds), body)
+	raw, err := c.do(ctx, "batch", reads, writes, body)
 	if err != nil {
 		return nil, err
 	}
-	out, err := decodeBatch(raw, len(cmds))
+	out, err := decodeBatch(raw, cmds)
 	if err != nil {
 		// The batch was sent and answered, but the answer does not say
 		// what each write did: some may have been applied.
-		if isWrite {
+		if writes > 0 {
 			return nil, c.unknown("batch", err)
 		}
 		return nil, err
@@ -160,8 +178,9 @@ func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error)
 	return out, nil
 }
 
-// decodeBatch reads a batch answer that must account for want commands.
-func decodeBatch(raw json.RawMessage, want int) ([]BatchItem, error) {
+// decodeBatch reads a batch answer that must account for each command.
+func decodeBatch(raw json.RawMessage, cmds []Command) ([]BatchItem, error) {
+	want := len(cmds)
 	var r struct {
 		Count   *int               `json:"count"`
 		Results *[]json.RawMessage `json:"results"`
@@ -180,6 +199,13 @@ func decodeBatch(raw json.RawMessage, want int) ([]BatchItem, error) {
 		// A failed item carries the message in "error" and the name and
 		// code beside it, unlike the top-level error object (captured). A
 		// succeeded item has "error": null and a non-null "result".
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
+			return nil, fmt.Errorf("freeiparpc: batch item %d is not an object: %w", i, ErrIncompleteResponse)
+		}
+		if _, ok := fields["error"]; !ok {
+			return nil, fmt.Errorf("freeiparpc: batch item %d lacks error field: %w", i, ErrIncompleteResponse)
+		}
 		var e struct {
 			Error     *string `json:"error"`
 			ErrorName string  `json:"error_name"`
@@ -195,7 +221,7 @@ func decodeBatch(raw json.RawMessage, want int) ([]BatchItem, error) {
 			out[i].Err = &RPCError{Code: e.ErrorCode, Name: e.ErrorName, Message: *e.Error}
 			continue
 		}
-		if err := requireField(item, "result"); err != nil {
+		if err := validateCommandResult(cmds[i].Method, item); err != nil {
 			return nil, fmt.Errorf("freeiparpc: batch item %d: %w", i, err)
 		}
 		out[i].Result = item

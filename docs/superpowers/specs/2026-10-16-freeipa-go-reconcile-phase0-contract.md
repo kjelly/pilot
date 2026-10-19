@@ -38,7 +38,7 @@ Phase 0 交付：
 | API 版本 | `version: 2.999` 與 `2.100` 都被接受，不回錯誤；不帶 `version` 只回 `VersionMissing` warning | server 不會擋不相容的 client，**由 client 檢查**：登入後 `ping`，解析 `API version`，不在支援清單時在任何寫入前失敗。支援清單目前只有實測過的 `2.257` |
 | 應用層錯誤 | HTTP 200，`error` 物件帶 `name` 與 `code`，例如 `NotFound` 4001、`DuplicateEntry` 4002、`EmptyModlist` 4202、`AlreadyActive` 4009、`AlreadyInactive` 4010、`ACIError` 2100、`CommandError` 905 | `RPCError{Name, Code}`；呼叫端以 name 判斷 |
 | membership | 已是成員、找不到成員時仍為 HTTP 200、`error: null`；`result.completed` 為 0，`result.failed.member.<type>` 列出 `[名稱, 原因]` | `MemberResult` 逐成員解析；`completed` 與 `failed` 必須和要求的成員數一致 |
-| batch | `batch` 回 `count` 與 `results[]`；單項失敗不影響其他項。失敗項的格式與最外層不同：`error` 是訊息字串，另有 `error_name`、`error_code`、`error_kw` | 逐項判讀，兩種錯誤格式分別解析；batch 不是交易 |
+| batch | `batch` 回 `count` 與 `results[]`；單項失敗不影響其他項。失敗項的格式與最外層不同：`error` 是訊息字串，另有 `error_name`、`error_code`、`error_kw` | 逐項按命令判讀；每項必須有 `error`，`ping` 的成功項只有合法的 `summary`，其他命令必須有非 null 的 `result`；兩種錯誤格式分別解析；batch 不是交易 |
 | 截斷 | `*_find` 結果帶 `truncated: true`（`sizelimit` 不足時） | 呼叫端一律帶 `sizelimit=0`、`timelimit=0`，`truncated` 為 true 即失敗 |
 | 回應的必要欄位 | 每個回應都有 `error`（成功時為 null）與 `result` 物件；除 `ping`（只有 `summary`）外，每個允許的命令在 `result` 內都有非 null 的 `result`；`*_find` 一定有 `count`、`truncated`、`result`，沒有命中時是 `count: 0`、`truncated: false`、`result: []`；membership 結果一定有 `completed` 與 `failed.member` | 缺欄位、欄位為 null 或型別不對的回應**不算成功**，是 `ErrIncompleteResponse`：寫入（含有寫入的 batch）視為結果未知，讀取直接失敗；只有真實的空結果才是空集合（PR #120 review 後修正） |
 | keep-alive | 一條連線約 100 個請求後被 httpd 關閉，Transport 會重新 dial（每次一個新的 `ssh -W`，約 0.8 秒） | 接受；大量讀取用 `*_find --all` 或 `batch` 降低請求數 |
@@ -86,6 +86,7 @@ Phase 1 起轉成可執行的檢查：
   - argv、環境變數、錯誤訊息、log、plan、journal；
   - `ssh` 的 remote command。
   - 單元測試對每種錯誤路徑檢查；live 測試對整個輸出比對。
+- **不跟隨 HTTP redirect。** 登入、RPC 與登出均拒絕 redirect（含同 origin）；請求只可送至 pin 的 HTTPS origin，沒有 HTTP 直連 fallback。307/308 不得重送密碼或 cookie。此邊界以故障注入驗證，不宣稱真實 FreeIPA 曾回 redirect。
 - **TLS 與 API 版本 fail closed。** CA 或 hostname 不符時，在送出任何 HTTP 請求（含密碼）之前失敗。API 版本不在支援清單時，在任何寫入前失敗。
 - **401 只重登一次。** 401 重新登入一次後重送（§2 已證明 401 發生於執行前）；連續兩次 401 即失敗。
 - **結果未知要明說。** 寫入在送出後遇到傳輸中斷、逾時或取消時回報 unknown，不自動重送；讀取可重試一次。
@@ -102,7 +103,7 @@ Phase 1 起轉成可執行的檢查：
 - 單元測試：
   - `internal/sshdial`：在 PATH 放假的 `ssh`，鎖定 argv 與錯誤分類；鎖以本機 `flock` 實測。
   - `internal/freeiparpc`：以 `httptest` TLS server 回放 §2 的真實擷取。
-- live 測試：`internal/freeiparpc/live_test.go`，只在設定 `PILOT_FREEIPARPC_LIVE_SSH` 時執行，對拋棄式 vm-target：
+- live 測試：`internal/freeiparpc/live_test.go`，只在設定 `PILOT_FREEIPA_LIVE_SSH` 時執行，對拋棄式 vm-target：
   - 建立 tunnel、登入、檢查 API 版本；
   - 對單一測試帳號建立、改一個欄位、重跑零寫入；
   - batch 逐項錯誤；

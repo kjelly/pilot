@@ -110,10 +110,17 @@ func New(cfg Config) (*Client, error) {
 	tlsConfig := &tls.Config{RootCAs: cfg.CA, ServerName: cfg.FQDN, MinVersion: tls.VersionTLS12}
 	transport := &http.Transport{
 		Proxy: nil, // never HTTP(S)_PROXY: the dialer decides the path
+		// No direct TCP fallback, even if a future caller builds an HTTP URL.
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, &notSentError{errors.New("freeiparpc: plaintext transport forbidden")}
+		},
 		// The handshake happens here, before any request is written, so a
 		// failure to open the tunnel or to verify the server is marked as
 		// not sent: a write that meets it did not happen.
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if addr != cfg.FQDN+":443" {
+				return nil, &notSentError{errors.New("freeiparpc: foreign TLS destination forbidden")}
+			}
 			raw, err := dial(ctx, network, addr)
 			if err != nil {
 				return nil, &notSentError{err}
@@ -134,8 +141,31 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		cfg:  cfg,
 		base: "https://" + cfg.FQDN,
-		http: &http.Client{Jar: jar, Transport: transport, Timeout: cfg.RequestTimeout},
+		http: &http.Client{
+			Jar: jar, Transport: &originTransport{host: cfg.FQDN, transport: transport}, Timeout: cfg.RequestTimeout,
+			// Return the original status without following any Location. Using
+			// ErrUseLastResponse also keeps untrusted Location values out of errors.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}, nil
+}
+
+// originTransport keeps every session request on the pinned HTTPS origin.
+// This is independent of redirect policy and prevents a future URL caller from
+// reaching the network through an unintended transport path.
+type originTransport struct {
+	host      string
+	transport *http.Transport
+}
+
+// CloseIdleConnections preserves http.Client's connection-lifecycle contract.
+func (t *originTransport) CloseIdleConnections() { t.transport.CloseIdleConnections() }
+
+func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != "https" || req.URL.Host != t.host || req.URL.User != nil || (req.Host != "" && req.Host != t.host) {
+		return nil, &notSentError{errors.New("freeiparpc: request outside pinned HTTPS origin")}
+	}
+	return t.transport.RoundTrip(req)
 }
 
 // Stats returns the counters so far.
@@ -268,20 +298,16 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 	if err != nil {
 		return nil, err
 	}
-	res, err := c.do(ctx, cmd.Method, kind == write, 1, body)
+	res, err := c.do(ctx, cmd.Method, boolCount(kind == read), boolCount(kind == write), body)
 	if err != nil {
 		return nil, err
 	}
-	// Every allowlisted command but ping answers with a non-null "result"
-	// inside the result object (captured); ping has only a summary.
-	if cmd.Method != "ping" {
-		if err := requireField(res, "result"); err != nil {
-			err = fmt.Errorf("freeiparpc: %s: %w", cmd.Method, err)
-			if kind == write {
-				return nil, c.unknown(cmd.Method, err)
-			}
-			return nil, err
+	if err := validateCommandResult(cmd.Method, res); err != nil {
+		err = fmt.Errorf("freeiparpc: %s: %w", cmd.Method, err)
+		if kind == write {
+			return nil, c.unknown(cmd.Method, err)
 		}
+		return nil, err
 	}
 	return res, nil
 }
@@ -299,15 +325,13 @@ func (c *Client) unknown(method string, err error) error {
 // write sent after session_logout got 401 and changed nothing), so it is
 // re-sent after the new login, write or not. Any other failure after a
 // write may have reached the server is an *OutcomeUnknownError.
-func (c *Client) do(ctx context.Context, method string, isWrite bool, items int, body []byte) (json.RawMessage, error) {
+func (c *Client) do(ctx context.Context, method string, reads, writes int, body []byte) (json.RawMessage, error) {
+	isWrite := writes > 0
 	relogged, retried := false, false
 	for {
 		c.count(func(s *Stats) {
-			if isWrite {
-				s.Writes += items
-			} else {
-				s.Reads += items
-			}
+			s.Reads += reads
+			s.Writes += writes
 		})
 		resp, raw, err := c.post(ctx, "/ipa/session/json", "application/json", "application/json", body)
 		if err != nil {
@@ -367,7 +391,11 @@ func decodeEnvelope(raw []byte) (json.RawMessage, error) {
 	if err := json.Unmarshal(raw, &env); err != nil || env == nil {
 		return nil, fmt.Errorf("freeiparpc: decode response: %w", ErrIncompleteResponse)
 	}
-	if e, ok := env["error"]; ok && !isNull(e) {
+	e, ok := env["error"]
+	if !ok {
+		return nil, fmt.Errorf("freeiparpc: missing error field: %w", ErrIncompleteResponse)
+	}
+	if !isNull(e) {
 		var rpcErr RPCError
 		if err := json.Unmarshal(e, &rpcErr); err != nil || rpcErr.Name == "" {
 			return nil, fmt.Errorf("freeiparpc: error object without a name: %w", ErrIncompleteResponse)
@@ -401,4 +429,11 @@ func requireField(obj json.RawMessage, key string) error {
 		return fmt.Errorf("result has no %q: %w", key, ErrIncompleteResponse)
 	}
 	return nil
+}
+
+func boolCount(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

@@ -255,6 +255,28 @@ func TestLiveFreeIPAThroughTheTunnel(t *testing.T) {
 		}
 	})
 
+	t.Run("batch accepts summary-only ping beside a write", func(t *testing.T) {
+		before := c.Stats()
+		items, err := c.Batch(ctx, []Command{
+			{Method: "ping"},
+			{Method: "user_mod", Args: []any{"p0-live"}, Options: map[string]any{"title": "batch ping write"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 2 || items[0].Err != nil || items[1].Err != nil {
+			t.Fatalf("batch item errors: %+v", items)
+		}
+		info, err := decodePing(items[0].Result)
+		if err != nil || info.APIVersion != apiVersion {
+			t.Fatalf("batch ping: %+v, %v", info, err)
+		}
+		if c.Stats().Unknown != before.Unknown || userTitle(ctx, t, c, "p0-live") != "batch ping write" {
+			t.Fatal("mixed batch outcome was not confirmed")
+		}
+		t.Log("summary-only ping and user_mod confirmed in one real FreeIPA batch")
+	})
+
 	t.Run("a session the server ended is renewed once and the write applied once", func(t *testing.T) {
 		// End the session on the server without the client knowing.
 		body := []byte(`{"method":"session_logout","params":[[],{"version":"2.257"}],"id":0}`)
