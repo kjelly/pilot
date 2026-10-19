@@ -207,7 +207,9 @@ drill）。
 
 > 舊版本這裡的 replica 預設 `ipa_setup_dns=false`，跟 primary 的 `true` 不一致，形成「只有
 > primary 一台 DNS provider」的 SPOF——**已在 2026-09-17 修掉**，不用再自己記得帶
-> `-e freeipa_setup_dns=true`。
+> `-e freeipa_setup_dns=true`。dns tier 與 consumer 也把未設 `freeipa_setup_dns` 的 replica
+> 當成 DNS provider（issue #67），但只在 FreeIPA 的 NS 紀錄列出它之後；promote 之前會被略過
+> 並警告，promote 之後重跑 `dns-apply.yml` 與 `freeipa-dns-client-apply.yml` 才會加入。
 
 ---
 

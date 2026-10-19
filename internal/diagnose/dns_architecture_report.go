@@ -55,7 +55,10 @@ type DNSArchKerberos struct {
 
 // DNSArchObservedProvider is one FreeIPA DNS provider's live state.
 type DNSArchObservedProvider struct {
-	Host        string      `json:"host"`
+	Host string `json:"host"`
+	// LeftOut says why the playbooks leave this replica out (FreeIPA does
+	// not list it as a DNS server yet); its failing probes are expected.
+	LeftOut     string      `json:"left_out,omitempty"`
 	IP          string      `json:"ip"`
 	Reachable   DNSArchFact `json:"reachable"`
 	RemoteUser  string      `json:"remote_user,omitempty"`
@@ -580,6 +583,41 @@ func BuildDNSArchObservedClient(host string, r StepResult, tierAddrs []string) D
 	return out
 }
 
+// DNSArchUnregisteredReplicas mirrors tasks/freeipa-dns-providers-live.yml:
+// the NS set FreeIPA answers authoritatively (from any provider's NS
+// probe), and the replicas that leave freeipa_setup_dns unset, did not
+// answer for the zone authoritatively themselves (their own NS probe,
+// +norec, as tasks/freeipa-dns-providers-live.yml asks) and are not in
+// that set. Nothing is left out when
+// no provider answered.
+func DNSArchUnregisteredReplicas(m DNSArchModel, observed []DNSArchObservedProvider) (leftOut, registered []string) {
+	seen := map[string]bool{}
+	selfAnswered := map[string]bool{}
+	for _, op := range observed {
+		if q, ok := dnsAnswered(op.NS); ok && q.Status == "NOERROR" && q.Authoritative {
+			selfAnswered[op.Host] = true
+		}
+		if q, ok := dnsAnswered(op.NS); ok && q.Authoritative {
+			for _, a := range q.Answers {
+				n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(a)), ".")
+				if !seen[n] {
+					seen[n] = true
+					registered = append(registered, n)
+				}
+			}
+		}
+	}
+	if len(registered) == 0 {
+		return nil, nil
+	}
+	for _, p := range m.Providers {
+		if p.Kind == "replica" && p.DNSProvider && !p.DNSProviderExplicit && !selfAnswered[p.InventoryHost] && !seen[strings.TrimSuffix(strings.ToLower(p.FQDN), ".")] {
+			leftOut = append(leftOut, p.InventoryHost)
+		}
+	}
+	return leftOut, registered
+}
+
 // ---- differences -----------------------------------------------------------------
 
 func sortedCopy(in []string) []string {
@@ -715,7 +753,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		d := DNSArchDifference{Subject: "FreeIPA " + op.Host + " authoritative for " + m.FreeIPADomain, Expected: true, Evidence: append([]string{dnsArchVarRef(op.Host, "freeipa_setup_dns")}, op.SOA.Evidence...)}
 		q, isQuery := op.SOA.Value.(DNSQueryResult)
 		switch {
-		case !p.DNSProvider:
+		case !p.DNSProvider || p.LeftOut:
 			continue
 		case (op.SOA.State == FactObserved || op.SOA.State == FactError) && isQuery:
 			d.Observed = q.Authoritative
@@ -745,21 +783,24 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		case "unknown":
 			diffs = append(diffs, DNSArchDifference{Subject: "FreeIPA global forwarders", Status: FactUnknown, Detail: "the declared forwarders are Jinja templates the model cannot evaluate", Evidence: m.Forwarding.Unevaluated})
 		}
-		// Each DNS server keeps the --forwarder list it was installed
-		// with as its own setting; a later freeipa_dns_forwarders change
-		// only reaches the global list.
+		// Each DNS server has its own forwarder setting, which its named
+		// prefers over the global list: set by the installer's
+		// --forwarder, and on every apply since 2026-10-15 by
+		// freeipa-server-apply.yml / freeipa-server-replica-apply.yml
+		// (ipa dnsserver-mod), so a mismatch means no apply since the
+		// inventory changed.
 		servers, _ := o.FreeIPA.ServerForwarders.Value.([]DNSArchServerForwarders)
 		for _, sf := range m.Forwarding.ServerInstallForwarders {
-			if sf.Error != "" {
+			p, _ := m.Provider(sf.Host)
+			if sf.Error != "" || p.LeftOut {
 				continue
 			}
-			p, _ := m.Provider(sf.Host)
 			f := o.FreeIPA.ServerForwarders
 			var ev []string
 			if strings.HasPrefix(sf.Source, "inventory:") {
 				ev = []string{sf.Source}
 			}
-			subject := "FreeIPA " + sf.Host + " server forwarders (install-time --forwarder)"
+			subject := "FreeIPA " + sf.Host + " server forwarders (ipa dnsserver-mod)"
 			var observed []string
 			if f.State == FactObserved {
 				found := false
@@ -778,7 +819,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 			}
 			d := compareFact(subject, sf.Forwarders, f, observed, false, ev)
 			if d.Status == "mismatch" {
-				d.Detail = "the server's own forwarder setting differs from what the inventory would install it with; pilot only updates the global list after installation (ipa dnsserver-mod is not pilot-managed)"
+				d.Detail = "the server's own forwarder setting differs from the inventory's; re-apply freeipa-server-apply.yml (primary) or freeipa-server-replica-apply.yml (replica), which set it with ipa dnsserver-mod on every run"
 			}
 			diffs = append(diffs, d)
 		}
@@ -826,7 +867,7 @@ func BuildDNSArchDifferences(m DNSArchModel, o DNSArchObserved) []DNSArchDiffere
 		refQ := authoritative.Internal.Value.(DNSQueryResult)
 		for _, op := range o.Providers {
 			p, _ := m.Provider(op.Host)
-			if op.Host == authoritative.Host || !p.DNSProvider || op.Internal.State == FactNotApplicable {
+			if op.Host == authoritative.Host || !p.DNSProvider || p.LeftOut || op.Internal.State == FactNotApplicable {
 				continue
 			}
 			q, isQuery := op.Internal.Value.(DNSQueryResult)
@@ -950,6 +991,12 @@ func BuildDNSArchStatus(m DNSArchModel, o DNSArchObserved, diffs []DNSArchDiffer
 		}
 	}
 	for _, p := range o.Providers {
+		if p.LeftOut != "" {
+			// Its failing probes are expected: FreeIPA does not list it
+			// as a DNS server, and the playbooks leave it out.
+			findings = append(findings, "freeipa_replica_not_dns_server: "+p.LeftOut)
+			continue
+		}
 		if p.Reachable.State == FactNotApplicable {
 			continue // not probed: named in probe_skipped
 		}
@@ -1124,6 +1171,10 @@ func BuildDNSArchPaths(m DNSArchModel, o DNSArchObserved) []string {
 	for _, p := range m.Providers {
 		if !p.DNSProvider {
 			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): no DNS (freeipa_setup_dns false)", p.Kind, p.FQDN, p.IP))
+			continue
+		}
+		if p.LeftOut {
+			paths = append(paths, fmt.Sprintf("FreeIPA %s %s (%s): left out of the DNS paths (freeipa_setup_dns unset, and FreeIPA does not list it as a DNS server)", p.Kind, p.FQDN, p.IP))
 			continue
 		}
 		line := fmt.Sprintf("FreeIPA DNS %s %s (%s): authoritative for %s", p.Kind, p.FQDN, p.IP, m.FreeIPADomain)

@@ -39,7 +39,7 @@ ip=$2
 iname=$3
 q() {
   echo "@@pilot-dnsarch $1 begin"
-  dig +norec +time=2 +tries=1 +noall +comments +answer "@$ip" "$2" "$3" 2>&1
+  dig +norec +time=2 +tries=2 +noall +comments +answer "@$ip" "$2" "$3" 2>&1
   echo "@@pilot-dnsarch $1 end rc=$?"
 }
 echo "@@pilot-dnsarch whoami begin"
