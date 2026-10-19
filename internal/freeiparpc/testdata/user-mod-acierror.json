@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 2100,
+    "message": "Insufficient access: not allowed to perform this operation",
+    "data": {
+      "info": "not allowed to perform this operation"
+    },
+    "name": "ACIError"
+  },
+  "id": 0,
+  "principal": "p0-alice@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

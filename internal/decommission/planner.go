@@ -182,6 +182,16 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 		}
 	}
 
+	// login-probe targets (spec.md §19, GitHub issue #11): every login-probe
+	// host renders the retiring host into its probe target list; re-render
+	// them without it before finalization, without touching hosts.yml.
+	if cp := planLoginProbeTargets(ctx, in.Providers, *target, providerFQDN(*target)); cp != nil {
+		plan.Components = append(plan.Components, *cp)
+		if cp.ComponentID != "" {
+			componentIDs = append(componentIDs, cp.ComponentID)
+		}
+	}
+
 	// Dependency ordering (spec.md §13, HD8): consumers before providers;
 	// a cycle fails planning closed.
 	depResult := resolveTeardownOrder(dedupeSortedStrings(componentIDs), in.Catalog)

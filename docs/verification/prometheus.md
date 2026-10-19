@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.7
+> 版本：v1.15
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -56,7 +56,7 @@
 | `thanos_s3_endpoint` | 完整覆寫 S3 endpoint（`host:port`），跳過 `thanos_s3_alias` 的 `/etc/hosts` pin，改指向外部/獨立 S3 | 否 | `"{{ thanos_s3_alias }}:{{ thanos_s3_port }}"` |
 | `thanos_aws_access_key_id` | S3 access key；一律用 vault 帶入，不進版控（拋棄式沙盒測試除外） | 是 | 無 |
 | `thanos_aws_secret_access_key` | S3 secret key | 是 | 無 |
-| `prometheus_scrape_interval` | 全域 scrape 間隔 | 否 | `15s` |
+| `prometheus_scrape_interval` | 全域 scrape 間隔。host-health 規則啟用時必須是單一 Prometheus duration（例如 `15s`，不接受 `1m30s`），且 `login_probe_stale_seconds` ≥ 3 × 此值，playbook 會擋 | 否 | `15s` |
 | `prometheus_retention_time` | 本機 TSDB 保留時間。長期保存在 S3（保留期限由 `thanos-query.md` 的 Compactor 決定），本機這份只是 Thanos Sidecar 的上傳緩衝：S3 中斷超過這個時間，中斷期間的資料就會遺失 | 否 | `24h` |
 | `prometheus_scrape_configs` | 完整覆寫 `scrape_configs:` 區塊內容（多行字串，可依主機覆寫成不同的 scrape job） | 否 | 只 scrape 自己（`localhost:9090`） |
 | `alertmanager_target_host` | 中央 Alertmanager 主機的 IP/FQDN；套用時 pin 進 `/etc/hosts` 的 `alertmanager_alias` 別名，並把 `alerting.alertmanagers` 區塊寫進 `prometheus.yml` | 否（見下方 escape hatch） | 空字串 |
@@ -69,6 +69,19 @@
 | `dcgm_exporter_targets` | 要 scrape 的 dcgm-exporter target 清單（`host:port` 字串陣列）；留空時自動展開這份 inventory 的 `dcgm-exporter` group（見 `docs/verification/dcgm-exporter.md`）所有主機的 9400 port | 否 | 空陣列（自動偵測） |
 | `dcgm_exporter_basic_auth_user` | 抓 dcgm-exporter 用的 HTTP Basic Auth 使用者名稱（非機密） | 否 | `prometheus` |
 | `dcgm_exporter_basic_auth_password` | 抓 dcgm-exporter 用的 HTTP Basic Auth 密碼；**必須跟 `dcgm-exporter.md` 的 `dcgm_exporter_basic_auth_password` 用同一個值**，否則會被 401 擋下，`up{job="dcgm"}` 永遠是 0（見下方 escape hatch）；跟 `node_exporter_basic_auth_password` 是獨立的一組，不需要相同 | 僅在有 dcgm-exporter target 時必填 | 無 |
+| `prometheus_host_health_alert_rules_enabled` | 是否渲染並載入 `host-health-alert-rules.yml`（GitHub issue #11 的確定性主機 I/O / 監控缺口 / login probe 告警，`playbooks/apply/templates/pilot-host-health-alert-rules.yml.j2`）；`false` 時檔案被移除、`rule_files` 不再引用 | 否 | `true` |
+| `host_io_stall_ratio_threshold` | `HostIOStall`：PSI `io full` stall 比例（5 分鐘 rate，0–1）超過此值 | 否 | `0.25` |
+| `host_io_stall_for` | `HostIOStall` 的 `for:` | 否 | `10m` |
+| `host_disk_latency_seconds_threshold` | `HostDiskLatencyHigh`：每次 block I/O 平均完成時間（秒，與 detection-engine `linux-host-v1` 的 `disk_io_latency_seconds` 同一段 PromQL / device filter）超過此值 | 否 | `0.1` |
+| `host_disk_latency_min_ops_per_second` | `HostDiskLatencyHigh` 只看每秒完成 I/O 數高於此值的裝置（避免極少量 I/O 的單次慢操作誤報） | 否 | `1` |
+| `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
+| `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
+| `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但這台主機在 `host_metrics_missing_success_window` 內有一次成功登入＝監控資料缺口，與 `HostDown` 分開）的 `for:`。最多 9m（seed `HostDown` 是 10m，兩個 rule group 的評估時間點最多差 1m；playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
+| `host_metrics_missing_success_window` | `HostMetricsMissing` 只採信 target 自己的 last-success 時間戳在這段時間內有變化（`changes()`）。playbook 會擋：時間窗 + 15s（probe 的 textfile 寫出間隔）不得超過 `host_metrics_missing_for`（否則掛掉的主機可能觸發它），且每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout` + 15s + 2 × `prometheus_scrape_interval` 不得超過時間窗（否則資料缺口期間會中斷；`prometheus-apply.yml` 與 `login-probe-apply.yml` 都檢查，`alertmanager.md` §1.7）；至少涵蓋兩次 scrape | 否 | `150s` |
+| `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
+| `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
+| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動。沒有上限；它也決定資料缺口變成主機掛掉後，`HostDown` 還被抑制多久（預設約 8m，見 `alertmanager.md` §1.7） | 否 | `5m` |
+| `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe textfile 的寫入時間戳在此秒數內沒有變化（`changes()`，不依賴探測主機時鐘；daemon 每 15 秒寫一次）。必須 ≥ 3 × `prometheus_scrape_interval`（playbook 會擋），否則健康的 probe 會被當成停擺 | 否 | `180` |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
 > `wazuh_manager_host`/`siem_forward_host` 空著時還有「純本機」意義（本機
@@ -142,6 +155,8 @@
 
 ## 2. Checklist
 
+C23/C24 的 tagged apply 必須讓執行中的 Prometheus 載入目前的規則與啟用狀態。除了檔案語法，驗收還須比較 API 中的實際 threshold、停用後規則消失、重新啟用，以及磁碟已更新但記憶體仍舊時的重試；未變更 render 的重跑仍須完成一次成功 reload，PLAY RECAP 保持 changed=0。
+
 | ID  | Category      | Check                                                     | Expected | Command |
 |-----|---------------|------------------------------------------------------------|----------|---------|
 | C1  | docker        | `pilot-prometheus` container 存在且 running                  | ~pilot-prometheus | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-prometheus' | head -n1 |
@@ -166,6 +181,8 @@
 | C20 | config        | 執行中的 `pilot-prometheus` 讀到的 `prometheus.yml` 與主機上的檔案內容相同（不是 bind mount 留下的舊檔） | 0 | sh -c 'h=$(sha256sum < /etc/pilot/prometheus/prometheus.yml) && c=$(docker exec pilot-prometheus cat /etc/prometheus/prometheus.yml | sha256sum) && [ "$h" = "$c" ]' |
 | C21 | object-storage | Thanos Sidecar 以自己的執行身分能在 `/prometheus` 建立目錄（上傳前要建 `thanos/upload/<ulid>`） | 0 | docker exec pilot-thanos-sidecar sh -c 'd=/prometheus/.pilot-write-probe.$$ && mkdir "$d" && rmdir "$d"' |
 | C22 | object-storage | object storage 裡有這一站（`global.external_labels.site`）6 小時內的 block（Sidecar 真的在上傳，不只是讀得到 bucket） | 0 | sh -c 'site=$(awk "/^global:/{g=1;next} /^[^[:space:]]/{g=0} g&&/^  external_labels:/{e=1;next} g&&/^  [^[:space:]]/{e=0} g&&e&&/^    site:/{sub(/^    site:[[:space:]]*/,\"\");print;exit}" /etc/pilot/prometheus/prometheus.yml); case $site in \"?*\") ;; *) exit 1;; esac; since=$(date -u -d "-6 hours" +%Y-%m-%dT%H:%M:%SZ); docker exec pilot-thanos-sidecar thanos tools bucket inspect --objstore.config-file=/etc/thanos/objstore.yml --output=tsv --selector="site=$site" 2>/dev/null | awk -F "\t" -v since="$since" "NR>1 && \$3 >= since {f=1} END {exit !f}"' |
+| C23 | config        | `host-health-alert-rules.yml`（issue #11：I/O stall、磁碟延遲、監控資料缺口、login probe 告警，門檻由 §1.5 變數渲染）存在且語法有效（`promtool check rules`）；`prometheus_host_health_alert_rules_enabled=false` 時檔案不存在且 `prometheus.yml` 不引用它也算通過 | 0 | sh -c 'if [ -f /etc/pilot/prometheus/host-health-alert-rules.yml ]; then docker exec pilot-prometheus promtool check rules /etc/prometheus/host-health-alert-rules.yml >/dev/null 2>&1; elif grep -q host-health-alert-rules /etc/pilot/prometheus/prometheus.yml; then exit 1; fi' |
+| C24 | http          | Prometheus 已載入 host-health 與 login probe 規則（`/api/v1/rules` 含 `HostIOStall`、`HostDiskLatencyHigh`、`HostMetricsMissing`、`PilotLoginProbeAccountDenied`、`PilotLoginProbeStale`）；停用時同 C23 判斷 | 0 | sh -c 'if [ ! -f /etc/pilot/prometheus/host-health-alert-rules.yml ]; then exit 0; fi; r=$(curl -fsS http://127.0.0.1:9090/api/v1/rules) || exit 1; for n in HostIOStall HostDiskLatencyHigh HostMetricsMissing PilotLoginProbeAccountDenied PilotLoginProbeStale; do case "$r" in *"\"name\":\"$n\""*) ;; *) exit 1;; esac; done' |
 
 > C7 只驗證「Prometheus 有沒有成功 scrape 到至少一個 target」，不綁定
 > 特定 job 名稱字面值以外的東西——`up` 查詢不加 label matcher，因為
@@ -244,8 +261,12 @@
 
 - 工具：`pilot verify docs/verification/prometheus.md -i <inventory> -l prometheus`
 - 輸出格式：`.verification/prometheus-<UTC>.{ndjson,md}`
-- 預期 row 數：22
-- Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
+- 預期 row 數：24
+- 最新 actual-run evidence：login-probe topology 的 candidate run（有 seaweedfs-s3、Alertmanager 與
+  login probe），candidate、run ID 與 row 結果見 `docs/runbooks/login-probe.md` §0.5，目前有效的
+  evidence record 由那裡連結。這裡刻意不寫 candidate 與 run ID：evidence-only commit 不改 spec，
+  提交 evidence 之後 manifest 裡 spec 的 hash 仍然相符。
+- 歷史 Sanitized 摘要：`docs/evidence/thanos-long-term-retention/2026-10-12-1660889.md`
   （2026-10-12，candidate `f4d4db9` 全新安裝、`1660889` 升級，tree 見該檔；真實
   vm-target，站台設了 `kind: snmp` profile，有 seaweedfs-s3 與中央 thanos-query；
   兩個 candidate 都 `pass=14 fail=8`，C8/C21/C22 PASS，C11/C13–C19 因該次
@@ -259,7 +280,7 @@
 
 ## 4. PASS / FAIL 規則
 
-- C1–C22 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路（C21/C22 證明 block 真的進了 object storage）、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 都通
+- C1–C24 全部 `status=pass` → **PASS**：這一站的 Prometheus + Thanos Sidecar 已就緒，本機監控、上傳鏈路（C21/C22 證明 block 真的進了 object storage）、alerting 評估鏈路、node-exporter/dcgm-exporter scrape 鏈路、pilot_host canonical identity 與 host-health/login-probe 規則都通
 - 任一 fail → **FAIL**，常見修法：
   - C1/C2 fail → container 沒起；`docker ps -a` / `docker logs pilot-prometheus` / `docker logs pilot-thanos-sidecar`
   - C3/C4 fail → Prometheus 還沒 ready 或設定檔有誤；`docker logs pilot-prometheus`
@@ -311,3 +332,11 @@
 | 2026-10-12 | v1.5 | 新增 C20：執行中的 container 讀到的 `prometheus.yml` 必須與主機檔案相同。正式環境的 dcgm-exporter target 已寫進主機檔案卻一直沒被 scrape：apply playbook 用 `combine()` 合併兩個互斥的 prometheus.yml render 結果，有 Alertmanager 時被跳過的那個帶著 `changed: false` 蓋掉另一個的 `changed: true`，container 從未因設定變更重啟，單檔 bind mount 一直指向舊 inode。playbook 改成分別檢查兩個結果，並在 container task 前比對 container 實際看到的單檔 bind mount（`tasks/container-file-mount-drift.yml`），內容不同就重啟，已經卡住的部署重跑 apply 即可恢復 | pilot |
 | 2026-10-12 | v1.6 | 新增 C21/C22，`prometheus_retention_time` 預設由 `6h` 改為 `24h`。正式環境的 Thanos Sidecar 從來沒有上傳成功：`/prometheus` 以 `:ro` 掛載，上傳前建立 `thanos/upload` 目錄失敗，Store Gateway 載入 0 個 block，歷史資料只剩本機 6 小時。只拿掉 `:ro` 仍會因 uid 不同被拒（本機實測），所以 Sidecar 改以 `65534:65534` 執行並可寫入。C9 只檢查讀得到 bucket，抓不到這個問題；C21 檢查 Sidecar 的實際寫入權限，C22 檢查 bucket 裡有這一站 6 小時內的 block。本地緩衝改為 24 小時，S3 中斷不超過一天不會掉資料；長期保留期限見 `thanos-query.md` v1.3 | pilot |
 | 2026-10-12 | v1.7 | C8/C22 只讀 `global.external_labels.site`，`prometheus.yml` 的 site 改以 JSON 字串渲染。PR #39 review 在 vm-target 上發現：設了 `kind: snmp` profile 時 snmp-exporter job 的 `site` label 也被抓進 C22 的 selector，Thanos 拒絕解析，C22 永遠 FAIL；同一個寫法讓 C8 在沒有 external_labels 時仍然 PASS。新增 `prometheus_site_selector_behavior_test.go` 用 SNMP 渲染結果實際跑這兩行 | pilot |
+| 2026-10-14 | v1.8 | 保留主線新增的 C20–C22（執行中 container 的設定掛載、Sidecar 寫入權限與實際上傳），將 issue #11 的 host-health rule file 驗收改編為 C23–C24；container traceability 同時覆蓋設定掛載漂移與載入的告警規則 | pilot |
+| 2026-10-15 | v1.9 | PR #80 review（GitHub issue #11）：login-probe 告警都帶 `probe_host`，配合 `alertmanager.md` §1.7 的新 inhibit；`PilotLoginProbeTransportFailed` 排除 node scrape 也失敗的主機；`HostMetricsMissing` 只採信仍在寫 textfile 的 probe；`HostMetricsMissing` 與 `PilotLoginProbeStale` 加上 `action_required="true"`；`host_metrics_missing_for` 必須短於 10m。row 未變 | sre |
+| 2026-10-15 | v1.10 | PR #80 第三輪 review：`HostMetricsMissing` 加 `keep_firing_for`（probe 單輪失敗或重啟時不中斷，否則被它抑制的 `HostDown` 會送出）；probe 新鮮度與 `PilotLoginProbeStale` 改用寫入時間戳的 `changes()`，不再依賴探測主機時鐘；標頭版本對齊變更紀錄。row 未變 | sre |
+| 2026-10-15 | v1.11 | PR #80 第四輪 review：`prometheus-apply.yml` 新增兩道 gate——`login_probe_stale_seconds` ≥ 3 × `prometheus_scrape_interval`（`prometheus_scrape_interval` 必須是單一 duration），`host_metrics_missing_for` ≥ `login_probe_stale_seconds`；promtool 證明兩者各自防止的誤報。row 未變 | sre |
+| 2026-10-15 | v1.12 | PR #80 第五輪 review：`prometheus_scrape_interval` 一列寫明單一 duration 與 3 倍的限制。row 未變 | sre |
+| 2026-10-15 | v1.13 | PR #80 第六輪 review：新增 `host_metrics_missing_success_window`（預設 2m）；`HostMetricsMissing` 改看 target 自己的 last-success 時間戳，取代 `host_metrics_missing_for` ≥ `login_probe_stale_seconds` 的 gate。row 未變 | sre |
+| 2026-10-16 | v1.14 | PR #80 第七輪 review：`host_metrics_missing_success_window` 預設改為 140s，兩道 gate 改為「時間窗 + 15s ≤ `host_metrics_missing_for`」與「probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗」。row 未變 | sre |
+| 2026-10-16 | v1.15 | PR #80 第八輪 review：`host_metrics_missing_success_window` 預設改為 150s，probe 間隔 gate 改為 interval + timeout + 15s + 2 × scrape，`login-probe-apply.yml` 也檢查；`host_metrics_missing_for` 上限改為 9m；§3 改為指向 runbook §0.5 | sre |

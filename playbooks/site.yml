@@ -222,6 +222,13 @@
   tags: [observability, thanos-query]
 - import_playbook: apply/detection-engine-apply.yml
   tags: [observability, detection-engine]
+# login-probe (GitHub issue #11): opt-in like detection-engine/snmp-exporter
+# — only hosts an operator put in the login-probe group run it, and it needs
+# freeipa-client + host-monitoring on the same host (both earlier in this
+# file). Imported so a site-wide deploy that sweeps the opt-in role in
+# actually applies it.
+- import_playbook: apply/login-probe-apply.yml
+  tags: [observability, login-probe]
 - import_playbook: apply/dashboard-apply.yml
   tags: [observability, dashboard]
 

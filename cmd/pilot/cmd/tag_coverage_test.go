@@ -52,6 +52,7 @@ var specTagMap = []specTagMapping{
 	{spec: "audit-log-forwarding.md", playbook: "audit-log-forwarding-apply.yml",
 		exemptRows: map[string]string{
 			"C11": "functional probe (run sudo, assert audit.log recorded it) — verify-only outcome of the C1..C10 auditd config",
+			"C22": "functional probe (send a local6 message, assert rsyslogd's TCP connection to the forward port) — verify-only outcome of C15..C17 and the SELinux port label",
 		}},
 	{spec: "core-infra-provider.md", playbook: "core-infra-provider-apply.yml",
 		prefixes: []string{"ntp"}},
@@ -284,6 +285,11 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"C11": "idempotent-reapply probe — verify-only outcome of the real second-apply changed=0 evidence recorded in the spec, not a single tagged task",
 			"C12": "prod version-policy scenario probe — verify-only outcome of the pre_tasks assert gate (Go-level: no dedicated apply task, checked via --check with prod/exception scenarios in the spec's actual-run evidence)",
+		}},
+	{spec: "login-probe.md", playbook: "login-probe-apply.yml",
+		exemptRows: map[string]string{
+			"C13": "failure-stage scenario probe (account/auth/transport/stall/stale drills) — verify-only outcome of the login-probe topology drills recorded in docs/evidence/login-probe, not a single tagged task; the host-side probe only confirms every stage series is published",
+			"C14": "idempotent-reapply probe — verify-only outcome of the real second-apply changed=0 evidence recorded in the spec, not a single tagged task",
 		}},
 	{spec: "thanos-query.md", playbook: "thanos-query-apply.yml"},
 	{spec: "wazuh-fim.md", playbook: "wazuh-fim-apply.yml"},

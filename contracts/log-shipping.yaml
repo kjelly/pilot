@@ -29,6 +29,11 @@ resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
   - {name: loki_target_host, type: string, required: true, secret: false}
   - {name: siem_log_root, type: string, required: false, default: /var/log/siem, secret: false}
+  - {name: loki_alias, type: string, required: false, default: pilot-loki-backend, secret: false}
+  - {name: loki_port, type: integer, required: false, default: 3100, secret: false}
+  - {name: loki_endpoint, type: string, required: false, secret: false}
+  - {name: promtail_job_label, type: string, required: false, default: pilot-siem, secret: false}
+  - {name: promtail_wazuh_job_label, type: string, required: false, secret: false}
 inputRules: []
 endpoints:
   - {name: promtailReady, scheme: http, port: 9080}

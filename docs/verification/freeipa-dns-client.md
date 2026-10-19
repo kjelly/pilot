@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-dns-client（目標主機把 DNS resolver 指向 FreeIPA DNS）
 
-> 版本：v1.3（2026-10-02 C7 的數值照 glibc 的 `strtol` 解析，見 §8）；v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
+> 版本：v1.4（2026-10-15 寫入前的 nameserver 檢查只擋必要的情況，見 §1.5 與 §8）；v1.3（2026-10-02 C7 的數值照 glibc 的 `strtol` 解析，見 §8）；v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
 > `freeipa-dns-server`（FreeIPA server 自身，`--setup-dns`，自我指向案例，
 > NetworkManager 路徑）與 Ubuntu 24.04 `freeipa-dns-ubuntu`（一般未納管
 > client，systemd-resolved 路徑），C1-C6 兩台皆 6/6 PASS，含 idempotent
@@ -108,6 +108,22 @@ FreeIPA server/replica 自己用得到。
 > `tasks/dns-tier-endpoints.yml` 推導），不足 3 筆時再補 FreeIPA DNS 提供者當
 > fallback，總數最多 3 筆。DNS 提供者自己仍然 self-first；`freeipa_dns_client_servers`
 > 仍然優先於一切。本檔 C1–C6 的檢查內容不變（C6 經由 tier 一樣解析得到）。
+>
+> **寫入前的 nameserver 檢查**（`tasks/freeipa-dns-client-nameserver-check.yml`，v1.4）：
+> 寫入前先問每一台要寫進去的 nameserver FreeIPA server 的 FQDN（A 與 AAAA；FreeIPA
+> DNS server，含本機自己的 `127.0.0.1`，用 `+norec`；dns tier 與明確指定的
+> `freeipa_dns_client_servers` 用遞迴查詢，`+tries=2`），依回答分三種：
+> - 有 A 或 AAAA 位址：正常。
+> - 有回答但沒有位址（NXDOMAIN、SERVFAIL、REFUSED，或 NOERROR 但沒有 A／AAAA）：它不服務
+>   FreeIPA 的 zone，**擋下**，`resolv.conf` 不變。
+> - 完全沒回答（逾時、connection refused）：**不擋**，印出 `WARNING` 與做法並照樣寫進清單
+>   （`resolv.conf` 會換下一台）。例外：FreeIPA 有回答、但 NS 紀錄沒有列出、自己也沒有權威
+>   回答的 FreeIPA server（例如明確設 `freeipa_setup_dns: true` 卻還沒 promote 的 replica）
+>   **擋下**，訊息說明先 promote 或改設 `freeipa_setup_dns: false`。
+>
+> 另外，清單裡沒有任何一台回答出位址時**擋下**。所以已登記的 FreeIPA server 維護停機、
+> 或某一台 dns tier 停機，都不會讓 `freeipa-dns-client` 的 apply（以及會呼叫同一個 task
+> 的 `internal-endpoint`）失敗，只會出現 WARNING。
 >
 > **resolver 逾時（C7）**：最後算出的 nameserver 有 2 筆以上時，resolver 改用
 > `options timeout:1 attempts:2`（Debian 寫進 `/etc/resolv.conf`；EL 設在該
@@ -307,3 +323,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-02 | v1.2 | Checklist 不變。candidate `6224982` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 的漂移案例（同一行覆寫、後面另一行覆寫、EL profile 重複值）中，glibc 實際值與新 C7 印出的值一致，舊 C7 對其中三個案例判 PASS；EL 單一 nameserver 路徑 C7 PASS、重跑 `changed=0`。§4 補上 EL 手動改過 `/etc/resolv.conf` 時的修法（`docs/evidence/freeipa-dns-client/2026-10-02-6224982.md`） | sre |
 | 2026-10-02 | v1.3 | 修正 C7 的數值解析（PR #37 review）：v1.2 用 awk 的 `int()`，`10e-1` 被當成浮點數 1，所以 `timeout:10e-1`（glibc 生效 10）與 `attempts:20e-1`（glibc 生效 5）都會 PASS。改成照 glibc 2.39 `res_setoptions` 的 `strtol(…, 10)`：只取開頭的十進位整數（可帶正負號），值是空的時讀下一個欄位，timeout 上限 30、attempts 上限 5；有效位數超過 9 位（glibc 會溢位截斷）一律 `invalid` 判 FAIL。`TestRegression_FreeipaDNSClientC7MatchesGlibc` 加上這兩個例子與正負號、空白、小數、十六進位、上限、溢位等案例 | sre |
 | 2026-10-02 | v1.3 | Checklist 不變。candidate `065a1c6` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`、`attempts:20e-1` 新的 C7 判 FAIL（v1.2 判 PASS），`timeout: 1` 判 PASS（v1.2 誤判 FAIL），溢位值判 `invalid`；與 VM 上 glibc 的 `res_init()` 一致（`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`） | sre |
+| 2026-10-15 | v1.4 | Checklist 不變。寫入前的 nameserver 檢查（PR #73 follow-up 加入）改成只擋必要的情況：有回答但沒有 A／AAAA 位址、FreeIPA 不承認也不回答的 FreeIPA server、或沒有任何一台可用；只是暫時沒回答（維護停機的已登記 FreeIPA server、停掉的 dns tier、明確指定的 server）改成 WARNING 並照樣寫入。AAAA 也算位址；只有 FreeIPA DNS server 用 `+norec`，明確指定的 `127.0.0.1` 本機 cache 用遞迴查詢；`+tries=2` | pilot |

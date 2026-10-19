@@ -20,3 +20,6 @@
 # dcgm_exporter_basic_auth_user: prometheus
 # dcgm_exporter_version: "3.3.9-3.6.1-ubuntu22.04"
 # dcgm_exporter_port: 9400
+#  改了 dcgm_exporter_port 的話,Prometheus 自動展開 dcgm-exporter group 時
+#  仍固定 scrape 9400(docs/verification/prometheus.md §1.5),要在 Prometheus
+#  端另外設 dcgm_exporter_targets。

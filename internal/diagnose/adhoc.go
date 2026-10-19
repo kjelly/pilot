@@ -11,8 +11,12 @@ import (
 // informative signal itself, not a probe failure, so callers should branch
 // on RC/Stdout rather than treat Failed as "this step didn't work."
 type AdHocResult struct {
-	RC          int
-	Stdout      string
+	RC     int
+	Stdout string
+	// Stderr is the module's stderr. Some tools put their verdict there
+	// (sssctl user-checks prints "pam_acct_mgmt: <result>" on stderr and
+	// exits 0 even on a denial — captured 2026-10-13).
+	Stderr      string
 	Failed      bool
 	Unreachable bool
 	// RunErr is set when the step itself could not be run or its output
@@ -32,6 +36,7 @@ type adHocCallbackDoc struct {
 		Tasks []struct {
 			Hosts map[string]struct {
 				Stdout      string `json:"stdout"`
+				Stderr      string `json:"stderr"`
 				RC          int    `json:"rc"`
 				Failed      bool   `json:"failed"`
 				Unreachable bool   `json:"unreachable"`
@@ -66,6 +71,7 @@ func DecodeAdHocResult(rawJSON, host string) (AdHocResult, error) {
 			return AdHocResult{
 				RC:          result.RC,
 				Stdout:      stdout,
+				Stderr:      result.Stderr,
 				Failed:      result.Failed,
 				Unreachable: result.Unreachable,
 			}, nil

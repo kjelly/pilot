@@ -1,7 +1,7 @@
 # Runbook — log-server（rsyslog 中央日誌接收端）
 
 > 撰寫日期：2026-07-06 (UTC)
-> 對齊：`docs/verification/log-server.md`（v1.0）、`playbooks/apply/log-server-apply.yml`
+> 對齊：`docs/verification/log-server.md`（v1.9）、`playbooks/apply/log-server-apply.yml`
 > 維護者：sre
 
 ---
@@ -9,7 +9,7 @@
 ## 0. 目標與範圍
 
 在一台獨立的 Ubuntu 24.04 vm-target 上部署 **rsyslog 中央 SIEM 接收端**：
-監聽 UDP/TCP 514，收其他主機（如 `audit-log-forwarding.md` 的 client）轉送的
+監聽 TCP 514，收其他主機（如 `audit-log-forwarding.md` 的 client）轉送的
 `auth,authpriv.*`（一般認證日誌）與 `local6.*`（auditd 稽核，經 audisp-syslog）
 ，依來源 `%HOSTNAME%` 分檔落地到 `/var/log/siem/<hostname>/{audit,auth}.log`。
 
@@ -18,31 +18,45 @@
 
 ---
 
-## 1. §0.5 事實快照（AGENTS.md §2）
+## 1. §0.5 目前有效的事實快照（AGENTS.md §2）
 
-```
-$ go run ./cmd/pilot vm-target list
-log-server   running  192.168.122.6  2  2048  20  2026-07-06
+> **2026-10-19 target 驗證及完整 repo race gate PASS。**
+> Target candidate `ea9200923ce54b2c3b0dd1169d89252508a02708`，tree
+> `74a148a0cdf4b3af4c1a96aad810e2f0cd46aad7`。兩台專用 vm-target：Ubuntu 24.04
+> （rsyslogd AppArmor enforce）及 AlmaLinux 9.8（SELinux Enforcing）。實際 inventory 各只有一個 host，
+> 均在 `all`，以 `target_group=all` 對齊單機測試；不是從 spec 群組推定 host。
+> 根目錄 `/srv/pr79-base`，TCP 514；checkout 外的 loopback forwarding fixture 提供
+> C7/C8 的本機轉送前置，沒有 vault 或秘密值。Image digest、inventory／外部狀態指紋與 run IDs
+> 見 [本輪 evidence](../evidence/play-vars-inventory-precedence/2026-10-19-ea92009.md)。兩台 VM 已拆除。
+>
+> - Ubuntu：fresh check/apply `failed=0`，log-server v1.9 **11/11**，第一次重跑 `changed=0`。
+> - EL：fresh check/apply 通過、第一次重跑 `changed=0`；spec **10/11**，只有限定 Ubuntu 的
+>   `dpkg` C1 失敗。SELinux recovery 的三條路徑均有真實訊息寫入驗證。
+> - Step 6a 重啟後失敗：rescue 能重啟時，先切回還原設定才撤新 root 的 mapping/relabel；
+>   rescue 無法重啟時保留新 grant。兩者各送 24 則唯一訊息，**24/24** 送達。
+> - 既有目錄的手動 `var_log_t` label 沒有 persistent mapping 時，failed apply/rescue 仍保留
+>   新增 mapping 與既有 label；**24/24** 送達，後續完整 apply `changed=0`。
+>
+> **目前 recovery 契約：** AppArmor 只在已確認 active 的還原設定、或兩次成功且非空的
+> InvocationID 相同時還原舊規則。SELinux 撤 grant 更保守：只處理本輪開始前不存在的 root，
+> 且必須成功 rescue restart、確認 active、嚴格辨識還原 receiver 指向新 grant subtree 外。
+> 既有 root、相同/subtree root、辨識不出的格式或不確定的 runtime 均保留 grant。
+> 這些保留的 SELinux 規則與舊 root 規則一樣刻意留存，後續 run 不保證自動刪除。
+>
+> 較早的三機 topology、client/Loki、2514 deploy 與持續流量結果，見
+> [71ec617 歷史 evidence](../evidence/play-vars-inventory-precedence/2026-10-16-71ec617.md)；
+> 本輪沒有重跑那些入口，不將其標成新 candidate 的完整驗證。
+> 接收端重啟期間的 client queue 缺口與 EL 連線拒絕窗口仍見該紀錄。
 
-$ go run ./cmd/pilot vm-target show-inventory --name log-server
-all:
-  hosts:
-    log-server:
-      ansible_connection: ssh
-      ansible_host: 192.168.122.6
-      ansible_user: ubuntu
-      ...
-```
+### 輸入限制
 
-**對齊決定**：vm-target 的 inventory 只有單一 host key（即 VM 名稱本身，
-`vm-target-basics.md` 有記載），playbook `hosts: "{{ target_group |
-default('log-server') }}"` 直接用 host 名稱當 pattern 命中，**不需要**
-`-e target_group=` override（跟 freeipa-server/freeipa-client 用 `all` 的例外
-情形不同——這裡 spec §1 宣告的 group 名稱本來就跟 vm-target host key 同名）。
-
-無 vault 依賴（本 spec 不含任何機密）。
-
----
+- `siem_receiver_tcp_port` 是 1–65535 的整數。字串／extra vars 使用十進位，不帶前導 0；
+  YAML 未加引號的 `02514`、`0x9C4` 已先被轉為另一個數字，gate 無法還原原始寫法。
+- `siem_log_root` 及解析後路徑須為專用目錄，不能是系統或共用目錄，字元限英數字、`.`、`_`、`-`、`/`。
+  既有目錄須符合該平台 rsyslog owner/group 與 0755（Ubuntu 為 syslog:syslog，EL 為 root:root）；
+  只有 `lost+found` 的新掛載檔案系統根目錄例外。父目錄須可供 daemon 穿越；Step 2 不跟隨 symlink。
+- 先安裝 logrotate；設定檔 validate 只在 logrotate 回報該檔案本身錯誤時拒絕，避免發行版其他 policy 干擾。
+  變數表及完整 acceptance 見 [spec §1.5](../verification/log-server.md)。
 
 ## 2. 部署（apply）
 
@@ -221,14 +235,22 @@ matcher 真正檢驗過。
 
 ## 6. 常見問題
 
-- **C6/C7 fail（埠沒監聽）**：確認 rsyslog 真的 active（`systemctl status
+- **C5 fail（埠沒監聽）**：確認 rsyslog 真的 active（`systemctl status
   rsyslog`）且設定檔語法正確（`sudo rsyslogd -N1 -f /etc/rsyslog.conf`）。
-- **C9/C10 fail（selftest 訊息沒落地）**：先確認 §5.1 的權限問題沒有重演
-  （`ls -la /var/log/siem`，owner 應為 `syslog`，Ubuntu）。
+- **C7/C8 fail（selftest 訊息沒落地）**：先確認 §5.1 的權限問題沒有重演
+  （`ls -la <siem_log_root>`，owner 應為 `syslog`，Ubuntu）。根目錄不在 `/var/log`
+  底下時，再看 `journalctl -u rsyslog` 有沒有 `Permission denied`：Ubuntu 看
+  `/etc/apparmor.d/local/usr.sbin.rsyslogd` 的 pilot 區塊是不是這個目錄；EL 看
+  `ls -Zd <siem_log_root>` 是不是 `var_log_t`。重跑 log-server apply 會補上並重啟 rsyslog。
 - **跨主機轉送收不到（§4 cross-check 失敗）**：先在 client 端確認
   `siem-log-server` 別名解析到正確 IP（`getent hosts siem-log-server`），
   再確認 log-server 這邊防火牆沒擋（拋棄式 vm-target 預設沒開防火牆，
   真實主機才需要檢查 `ufw`/`firewalld`）。
-- **想換落地目錄/埠**：`-e siem_log_root=... -e siem_receiver_udp_port=...
-  -e siem_receiver_tcp_port=...`，spec 的 hardcoded `514`/`/var/log/siem`
-  字串要跟著改（見 spec §1.5）。
+- **想換落地目錄/埠**：在 inventory 設 `siem_log_root`、`siem_receiver_tcp_port`
+  （見 spec §1.5），重跑 log-server 與 log-shipping（`--tags` 任一列都會跑完整的
+  log-server 步驟）。spec 的 C5–C8 從接收設定讀出實際的 port 與目錄，不用改 spec；
+  client 端的 `siem_forward_port` 要改成同一個 port。
+- **換掉非預設根目錄之後（EL）**：舊目錄的 SELinux file-context 規則不會自動移除。
+  `semanage fcontext -l -C` 只列本機加的規則（目錄名裡的 `.` 會顯示成 `\.`，例如
+  `/srv/siem\.el2(/.*)?`），再用 `semanage fcontext -d '<該行第一欄>'` 移除；`semanage` 在
+  `policycoreutils-python-utils` 套件裡。Ubuntu 的 AppArmor 規則只保留目前的目錄，不用手動清。
