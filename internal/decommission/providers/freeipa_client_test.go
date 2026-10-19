@@ -91,7 +91,26 @@ const hostShowWithMembership = `
 
 func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error)) (*FreeIPAClientProvider, *fakeAnsibleExecutor) {
 	t.Helper()
-	exec := &fakeAnsibleExecutor{fn: fn}
+	// Legacy field fixtures contain the IPA body alone. The production
+	// boundary now requires the playbook's envelope too; already-captured
+	// Ansible output keeps its original bytes and target markers.
+	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
+		res, err := fn(args)
+		if err == nil && res != nil && queryKind(args) != "" && !hostInspectMarkerPattern.MatchString(res.Stdout) {
+			copy := *res
+			body := copy.Stdout
+			if strings.TrimSpace(body) == "" {
+				body = "Number of entries returned 0"
+			}
+			for _, arg := range args {
+				if fqdn, ok := strings.CutPrefix(arg, "pilot_decommission_target_fqdn="); ok {
+					copy.Stdout = "HOST_INSPECT[" + fqdn + "]: " + body
+				}
+			}
+			res = &copy
+		}
+		return res, err
+	}}
 	p := NewFreeIPAClientProvider(FreeIPAClientProviderConfig{
 		Executor:              exec,
 		ClientInventory:       "inventory.yml",
@@ -254,7 +273,7 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 			fqdn:          "gone-host.ipa.pilot.internal",
 			hostStdout:    hostShowNotFound,
 			hbacStdout:    ruleReferencesFixture(t, "hbac-none"),
-			sudoStdout:    ruleReferencesFixture(t, "sudo-no-rules"),
+			sudoStdout:    inspectionFor(ruleReferencesFixture(t, "sudo-no-rules"), "pwr-host3.ipa.pilot.internal"),
 			wantHostgroup: "pass", wantNetgroup: "pass", wantHBAC: "pass", wantSudo: "pass",
 		},
 	}
@@ -570,10 +589,16 @@ func TestFreeIPAProvider_TombstoneDoesNotHideTheTarget(t *testing.T) {
 	exec := func(args []string) (*ansible.Result, error) {
 		switch queryKind(args) {
 		case "host_dns":
+			if argsContain(args, "pilot_decommission_target_fqdn=pwr-host3.") {
+				return &ansible.Result{Stdout: "ipa: ERROR: DNS record not found"}, nil
+			}
 			return &ansible.Result{Stdout: hostDNS}, nil
 		case "hbac_references", "sudo_references":
-			return &ansible.Result{Stdout: ruleReferencesFixture(t, "sudo-no-rules")}, nil
+			return &ansible.Result{Stdout: inspectionFor(ruleReferencesFixture(t, "sudo-no-rules"), "pwr-host3.ipa.pilot.internal")}, nil
 		default:
+			if argsContain(args, "pilot_decommission_target_fqdn=pwr-host.") {
+				return &ansible.Result{Stdout: hostShowNotFound}, nil
+			}
 			return &ansible.Result{Stdout: hostObject}, nil
 		}
 	}

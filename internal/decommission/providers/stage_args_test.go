@@ -43,6 +43,9 @@ func hasAnyStage(call []string) bool {
 // none.
 func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
+		if queryKind(args) != "" {
+			return &ansible.Result{Stdout: "HOST_INSPECT[c1.ipa.pilot.internal]: host not found"}, nil
+		}
 		return &ansible.Result{Stdout: "IPA_CLIENT_ENROLLED=true"}, nil
 	}}
 	p := NewFreeIPAClientProvider(FreeIPAClientProviderConfig{
