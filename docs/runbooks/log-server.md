@@ -1,7 +1,7 @@
 # Runbook — log-server（rsyslog 中央日誌接收端）
 
 > 撰寫日期：2026-07-06 (UTC)
-> 對齊：`docs/verification/log-server.md`（v1.0）、`playbooks/apply/log-server-apply.yml`
+> 對齊：`docs/verification/log-server.md`（v1.9）、`playbooks/apply/log-server-apply.yml`
 > 維護者：sre
 
 ---
@@ -9,7 +9,7 @@
 ## 0. 目標與範圍
 
 在一台獨立的 Ubuntu 24.04 vm-target 上部署 **rsyslog 中央 SIEM 接收端**：
-監聽 UDP/TCP 514，收其他主機（如 `audit-log-forwarding.md` 的 client）轉送的
+監聽 TCP 514，收其他主機（如 `audit-log-forwarding.md` 的 client）轉送的
 `auth,authpriv.*`（一般認證日誌）與 `local6.*`（auditd 稽核，經 audisp-syslog）
 ，依來源 `%HOSTNAME%` 分檔落地到 `/var/log/siem/<hostname>/{audit,auth}.log`。
 
@@ -18,91 +18,45 @@
 
 ---
 
-## 1. §0.5 事實快照（AGENTS.md §2）
+## 1. §0.5 目前有效的事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-16）**：candidate `71ec617`（PR #79），3 台全新 vm-target
-> （Ubuntu log-server、Ubuntu 與 AlmaLinux 9.8 SELinux Enforcing 兩台 client）。`siem_log_root: /srv/siem`
-> 放在 checkout 外的 inventory group_vars。`topology test` L3/L4 failed=0、L5 log-server 11/11（v1.9）、
-> log-shipping 9/9（v1.5）、L6 changed=0；兩台 client 的訊息落在 `/srv/siem/<host>/` 並進到 Loki。
-> - C6–C8 從接收設定的 `SiemAuditPath` 讀出實際生效的根目錄，C7/C8 只認這次送出的 nonce 訊息：
->   rsyslog 停掉、兩個目錄都留有舊的固定字串時 C7/C8 FAIL，重新啟動後 11/11；拿掉 `siem_log_root`
->   重套後回到 `/var/log/siem`，11/11。
-> - playbook 每個 task 都帶全部 row tag：`--tags C6`、`--tags C3,C5`、`--tags C7` 改根目錄時，
->   接收設定、logrotate、AppArmor 規則都換到新目錄、訊息送達，11/11。反過來，`--skip-tags` 任一列
->   會跳過整個 log-server 的步驟。
-> - 根目錄不在 `/var/log` 底下時，apply 先讓受限的 rsyslogd 能寫入，權限有變時重啟 rsyslog；
->   沒有這一步時 rsyslog 回報 `Permission denied`、訊息全部丟失，apply 卻成功。
->   - Ubuntu：在 AppArmor 的 `local/usr.sbin.rsyslogd` 加規則。是否重新載入看已載入 profile 的
->     sha256，不看這次 run 有沒有改規則（unit 沒有 `ExecStartPre` 時實測）；沒載入的 profile 不載入，
->     complain mode 用 `-C` 載入。Ubuntu 24.04 的 `rsyslog.service` 每次啟動也會自己重新載入 profile
->     （`ExecStartPre=/usr/lib/rsyslog/reload-apparmor-profile`），所以在原本的 unit 上，complain mode 的
->     profile 在 Step 6a 重啟後變回 enforce；`/etc/apparmor.d/disable/` 停用、沒載入的 profile 重啟後
->     仍沒載入（兩者都實測）。
->   - EL：`var_log_t` file context，看目錄實際的 type 決定要不要 `restorecon`。AlmaLinux 上
->     `--check --diff`（全新主機）、套用、`--tags C7`、目錄重建後重跑都實測過；`pilot verify` 10/11，
->     只有 C1 失敗：它用 `dpkg`，spec §1 目標是 Ubuntu。
->   - 換根目錄（Ubuntu）：Step 2a 保留 AppArmor 區塊裡現有的規則、再加上新根目錄的規則；Step 7 確認 rsyslog
->     在跑、啟動時間晚於接收設定、rsyslogd 在接收 port 監聽之後，Step 7a 才只留新根目錄的規則。rsyslog 啟動時間
->     早於接收設定（上次 run 中斷，或 rescue 還原設定卻無法重啟）時，Step 6a 也重啟。舊根目錄的 SELinux 規則刻意保留。
->   - 換根目錄時持續送訊息實測（`pr79-client` 每 0.1 秒一筆、20 個 HOSTNAME 直送接收端）：`56c7582` 成功的 run
->     掉 30/299 筆、在重新載入後重啟前失敗的 run 掉 41/300 筆（接收端記錄 62、156 筆 `Permission denied`）；
->     `71ec617` 在成功、重啟前失敗、重啟後失敗（rescue 能重啟或不能重啟）四種 run 都沒有掉、沒有 `Permission denied`。
->     EL 兩個版本都沒有因 SELinux 掉訊息。
-> - apply 失敗時 rescue 把兩個 drop-in 還原成這次 run 之前的內容（這次才建的就移除），移除這次加的 SELinux 規則；
->   AppArmor local 檔先同時授權這次 run 之前與這次 run 的規則並重新載入，`rsyslogd -N1` 接受還原後的設定才重啟
->   rsyslog；rsyslog 跑的是舊規則涵蓋的設定時才把 local 檔還原，接收設定也回到原本的修改時間（之後重跑 changed=0）。
->   - 失敗原因是別的無效 drop-in 時，rescue 不重啟，原本的 rsyslog 繼續正常運作（11/11）。Ubuntu 上實測了
->     語法錯誤、不認得的指令、找不到的 template、`omfwd` 不合法的 protocol；AlmaLinux 上實測了語法錯誤、
->     不認得的指令、`omfwd`。
->   - 失敗訊息引用 `rsyslogd -N1` stderr 裡第一個既不是版本行（`config validation run`）、也不是
->     「warnings occurred in file」摘要的行；沒有這種行時（rsyslogd 不存在、檢查沒執行）引用 Ansible 的訊息。
->     在 rsyslog 8.2312.0 與 8.2510.0 擷取的 18 種拒絕情況裡，那一行都是 rsyslogd 回報的第一個錯誤：
->     例如 `input()` 的 module 沒載入時是「input module name … is unknown」，不是後面的 `parameter … not known`；
->     未結束的區塊會被算在 `/etc/rsyslog.conf` 上。
->   - 失敗原因在這次 run 自己（`siem_logrotate_maxage=abc` 讓 Step 4 失敗）時，還原後的設定通過檢查，rescue 重啟 rsyslog（11/11）。
-> - 已知缺口（兩個版本、`main` 都有）：接收端 rsyslog 重啟時，client 的轉送若剛好在重啟中重連，會暫停 30 秒、
->   這段時間的訊息丟掉（實測 130–138 筆，四次重啟中三次發生）；EL 的 rsyslog 重啟約 3.7–3.9 秒拒絕連線。
-> - `pilot deploy` 以 workspace inventory 設定 `siem_receiver_tcp_port: 2514`、`siem_logrotate_rotate: 30`
->   （沒加引號）：preflight 通過、rsyslog 在 2514 監聽、兩台 client 的訊息都送達，重跑 changed=0，
->   log-server.md 11/11。修正前的 `31f97a6` 用同樣的輸入在套用前就以 `must be string` 拒絕。
+> **2026-10-19 target 驗證 PASS；完整 repo race gate 尚待完成。**
+> Target candidate `5d9f468a516b842b44c4a66021b4a3b6ba6853ab`，tree
+> `58d69f8d518e4cc189ca52d5710719938eb6a312`。兩台專用 vm-target：Ubuntu 24.04
+> （AppArmor）及 AlmaLinux 9.8（SELinux Enforcing）。實際 inventory 各只有一個 host，
+> 均在 `all`，以 `target_group=all` 對齊單機測試；不是從 spec 群組推定 host。
+> 根目錄 `/srv/pr79-base`，TCP 514；checkout 外的 loopback forwarding fixture 提供
+> C7/C8 的本機轉送前置，沒有 vault 或秘密值。Image digest、inventory／外部狀態指紋與 run IDs
+> 見 [本輪 evidence](../evidence/play-vars-inventory-precedence/2026-10-19-5d9f468.md)。兩台 VM 已拆除。
 >
-> 輸入限制：
-> - `siem_receiver_tcp_port` 必須是 1–65535 的整數。字串或 `-e` 值要寫成十進位、不帶前導 0。
->   YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成 1356、2500，gate 看不出來，請寫成 `"2514"` 或 `2514`。
-> - `siem_log_root` 與它解析到的真實路徑不能是系統或共用目錄，兩者都只能用英數字與 `.`、`_`、`-`、`/`
->   （真實路徑會寫進 AppArmor 規則）。
-> - 既有目錄必須已是本角色建立的 `syslog:syslog 0755`；只有 `lost+found` 的新掛載檔案系統根目錄例外，
->   權限被改過時會給出還原指令。Step 2 只對解析後的真實路徑操作、不跟隨 symlink。
-> - logrotate 會先安裝，設定檔的 `validate` 只在 logrotate 回報這個檔案本身的錯誤時失敗。
+> - Ubuntu：fresh check/apply `failed=0`，log-server v1.9 **11/11**，第一次重跑 `changed=0`。
+> - EL：fresh check/apply 通過、第一次重跑 `changed=0`；spec **10/11**，只有限定 Ubuntu 的
+>   `dpkg` C1 失敗。SELinux recovery 的三條路徑均有真實訊息寫入驗證。
+> - Step 6a 重啟後失敗：rescue 能重啟時，先切回還原設定才撤新 root 的 mapping/relabel；
+>   rescue 無法重啟時保留新 grant。兩者各送 24 則唯一訊息，**24/24** 送達。
+> - 既有目錄的手動 `var_log_t` label 沒有 persistent mapping 時，failed apply/rescue 仍保留
+>   新增 mapping 與既有 label；**24/24** 送達，後續完整 apply `changed=0`。
 >
-> 這些 gate 由 Ansible 實跑的 regression test 鎖住；VM 上的逐項實測只在較早的 candidate 做過，
-> 不算這個 candidate 的證據。
-> 紀錄：[`2026-10-16-71ec617.md`](../evidence/play-vars-inventory-precedence/2026-10-16-71ec617.md)。
-> 下面的 2026-07-06 快照是初版的事實紀錄。
+> **目前 recovery 契約：** AppArmor 只在已確認 active 的還原設定、或兩次成功且非空的
+> InvocationID 相同時還原舊規則。SELinux 撤 grant 更保守：只處理本輪開始前不存在的 root，
+> 且必須成功 rescue restart、確認 active、嚴格辨識還原 receiver 指向新 grant subtree 外。
+> 既有 root、相同/subtree root、辨識不出的格式或不確定的 runtime 均保留 grant。
+> 這些保留的 SELinux 規則與舊 root 規則一樣刻意留存，後續 run 不保證自動刪除。
+>
+> 較早的三機 topology、client/Loki、2514 deploy 與持續流量結果，見
+> [71ec617 歷史 evidence](../evidence/play-vars-inventory-precedence/2026-10-16-71ec617.md)；
+> 本輪沒有重跑那些入口，不將其標成新 candidate 的完整驗證。
+> 接收端重啟期間的 client queue 缺口與 EL 連線拒絕窗口仍見該紀錄。
 
-```
-$ go run ./cmd/pilot vm-target list
-log-server   running  192.168.122.6  2  2048  20  2026-07-06
+### 輸入限制
 
-$ go run ./cmd/pilot vm-target show-inventory --name log-server
-all:
-  hosts:
-    log-server:
-      ansible_connection: ssh
-      ansible_host: 192.168.122.6
-      ansible_user: ubuntu
-      ...
-```
-
-**對齊決定**：vm-target 的 inventory 只有單一 host key（即 VM 名稱本身，
-`vm-target-basics.md` 有記載），playbook `hosts: "{{ target_group |
-default('log-server') }}"` 直接用 host 名稱當 pattern 命中，**不需要**
-`-e target_group=` override（跟 freeipa-server/freeipa-client 用 `all` 的例外
-情形不同——這裡 spec §1 宣告的 group 名稱本來就跟 vm-target host key 同名）。
-
-無 vault 依賴（本 spec 不含任何機密）。
-
----
+- `siem_receiver_tcp_port` 是 1–65535 的整數。字串／extra vars 使用十進位，不帶前導 0；
+  YAML 未加引號的 `02514`、`0x9C4` 已先被轉為另一個數字，gate 無法還原原始寫法。
+- `siem_log_root` 及解析後路徑須為專用目錄，不能是系統或共用目錄，字元限英數字、`.`、`_`、`-`、`/`。
+  既有目錄須符合該平台 rsyslog owner/group 與 0755（Ubuntu 為 syslog:syslog，EL 為 root:root）；
+  只有 `lost+found` 的新掛載檔案系統根目錄例外。父目錄須可供 daemon 穿越；Step 2 不跟隨 symlink。
+- 先安裝 logrotate；設定檔 validate 只在 logrotate 回報該檔案本身錯誤時拒絕，避免發行版其他 policy 干擾。
+  變數表及完整 acceptance 見 [spec §1.5](../verification/log-server.md)。
 
 ## 2. 部署（apply）
 
