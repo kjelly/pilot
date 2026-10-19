@@ -4,9 +4,12 @@
 > 批次讀取，已存在的使用者與群組不再 `user-add`／`group-add`，已是宣告狀態的帳號不再
 > `user-enable`／`-disable`，成員查詢已列出的直接成員不再 `group-add-member`；讀取不完整時在
 > 該清單所保護的使用者或群組變更前失敗。成員比較改為不分大小寫（FreeIPA 把 group、hostgroup、host、netgroup 名稱存成小寫）。
-> 外部可觀察的結果不變。candidate `d874c3f`（tree `a82fe75e`）在 2026-10-16 對拋棄式
-> vm-target 重跑 no-op／混合大小寫情境，2026-10-19 補驗；範圍與結果見
-> [evidence](../evidence/freeipa-identity/2026-10-19-d874c3f.md) 與 §8 v1.16）
+> 外部可觀察的結果不變。2026-10-19 candidate `747d84c8e9ee959f6634b4d175253b33a286985e`
+> （tree `afc92c07efb21a4dd90f90523ea9fe4e55d724dd`）整合 main 與 #109 後，在專屬 native
+> vm-target 驗證小型 roster 的新增、啟停、大小寫成員增撤與四輪冪等，LDAP 讀回正確；
+> image digest、external-state fingerprint、UTC、run IDs、CI 與範圍見
+> [目前有效 evidence](../evidence/freeipa-identity/2026-10-19-747d84c.md) 與 §8 v1.16。
+> 歷史 120-user 效能數據只屬原 candidate/date，本輪不是 C1–C24 全表重驗）
 > 上一版：v1.15（2026-10-15 host decommission 的 HBAC／sudo 直接引用查詢改成列出全部規則再比對主機（issue #104）；
 > 原本的 `--host=` 被 FreeIPA 當成 `--hostcat`，永遠回 0 筆。2026-10-19 candidate `e64cd44`（tree
 > `554e4d1ed66b819c87ee4bb160eef7783fd949ba`）在隔離 native EL9 vm-target 完成 provider 矩陣與 identity

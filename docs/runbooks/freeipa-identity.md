@@ -18,16 +18,18 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-16 實跑、2026-10-19 補驗，PR #119）：candidate `d874c3f`，
-  tree `a82fe75e4839ee0275651701ee20028fa33e55e7`，spec v1.16。
+- 最新驗證（2026-10-19，PR #119）：candidate `747d84c8e9ee959f6634b4d175253b33a286985e`，
+  tree `afc92c07efb21a4dd90f90523ea9fe4e55d724dd`，spec v1.16。
   目標是既有拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 vm-target；實際 inventory 只有一台
-  `all` host，依單一 host 例外使用 `target_group=all`。外部 vault 已確認有
-  `ipa_admin_password` key，只記 key、不顯示值。
-  120 users／40 groups 穩態兩輪 `changed=0 failed=0`、各 642 次 API 呼叫；混合大小寫的
-  nested-group 關係保留，重跑 `changed=0`；被移出名冊的成員仍可撤銷。
-  2026-10-19 正式 race suite 為 57 packages **PASS**。
-  本輪涵蓋 no-op 與大小寫回歸情境，沒有重新宣稱 C1–C24 全表驗收。
-  摘要：[`2026-10-19-d874c3f.md`](../evidence/freeipa-identity/2026-10-19-d874c3f.md)。
+  `all` host，依單一 host 例外使用 `target_group=all`。外部測試變數已確認有
+  `ipa_admin_password` key，只記 key、不顯示值。小型 schema-2 roster 完成新增使用者／群組、
+  啟停帳號、直接／間接成員區分、混合大小寫保持、撤銷與加回；LDAP 獨立讀回正確，
+  四輪立即重跑皆 `changed=0 failed=0`。反向宣告的 check mode 也沒有改動即時狀態。
+  六個真實清單查詢 gate 個案接受英文、拒絕德文與無票據錯誤；這是選取原 task 的 gate
+  驗證，使用者 gate 不承諾整個 transaction 零變更。正式 race 與必跑 Ansible CI 結果見 evidence。
+  本輪沒有重新宣稱 C1–C24 全表或 120-user 效能驗收；舊效能數據只屬原 candidate/date。
+  image digest、external-state fingerprint、run IDs、UTC 與結果：
+  [`2026-10-19-747d84c.md`](../evidence/freeipa-identity/2026-10-19-747d84c.md)。
   下面是 2026-08-11 roster schema v2 交付時的快照。
 
 - Roster schema v2 delivery：schema v1/v2 版本判定與自動升級
