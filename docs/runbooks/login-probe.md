@@ -17,14 +17,14 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-19；login-probe 三 VM candidate `121ee4b`（tree `9ede0f3b7f0a5952cb4ef6756428f90315bf8c90`）；Prometheus tagged runtime candidate `0294b1a`（tree `2d3dc96f0ef9cd401a144c626810b3fa04182f59`），最終 test-only `5adeec0`（tree `0909aa87fba58960a66f472500e78f900caad39d`）。各自使用乾淨隔離 checkout，範圍與檔案指紋見 evidence。 |
-| 目標與 inventory | `r80-ipa`（AlmaLinux 9.8）屬 freeipa-server；`r80-mon`、`r80-target`（Ubuntu 24.04）屬 freeipa-client/host-monitoring；login-probe={r80-mon}。由 vm-target topology inventory 讀實際集合，對齊決定 A。此輪三機沒有 Prometheus/Alertmanager group；新 Prometheus 修正另由 pinned container 有效態測試驗證。 |
-| 外部狀態 | 既有 dev-lite cache 保持 running/healthy；一次性 vault 僅含 `ipa_admin_password`、`node_exporter_basic_auth_password`，parent 0700/file 0600。node_exporter 1.12.1、IPA 4.13.4；base image、binary、topology 指紋見 evidence。三台專用 VM 已清除，未動其他 session 的 VM。 |
-| Fresh chain | 121ee4b 的 L1–L6 rc=0：L3/L4 三機 failed=0；login-probe 14 PASS/0 FAIL/0 SKIP；L6 三機 changed=0；tagged scenarios 完成後再次 14/14 PASS。 |
-| Tagged activation | 真實 systemd 驗證 C3 target 增刪/user/interval、90s interval、磁碟新但 daemon 舊的無 changed 修復、中斷重試、health 失敗 rollback/retry、C1 loaded binary version、C6/C12 live executable/hardening；full apply 與重跑 changed=0。 |
-| Prometheus | C23/C24 真 Ansible selection + pinned Prometheus API 驗證 threshold 更新、各自停用/重新啟用、磁碟新但記憶體舊的修復、無 restart 的 changed=0 reload 與 data mount 保留；這是本次新修正的 container 範圍，並非重新跑完整 Thanos/告警拓樸。 |
-| Repository checks | aa1e69b 全庫 race 59 packages、rc=0；0294b1a mandatory suite 27 PASS/0 SKIP、rc=0；5adeec0 focused race PASS、pinned lint 0 issues、build/spec/shell/tag/secret/prerequisite/rescue guards PASS。最終 CI 另作 ready gate。 |
-| Evidence | [本次修正與驗證](../evidence/login-probe/2026-10-19-5adeec0.md)。[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md) 僅屬其原 candidate，本次未重跑；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md) 保留獨立追溯。 |
+| 最新驗證 | 2026-10-19；candidate `5dac1b68b68a8bdd76be162b3d9ba9e2ad395157`，tree `1e509829c341fd5dcf3940e5783f68004602f931`，乾淨隔離 checkout。 |
+| 目標與 inventory | `r80q-ipa`（AlmaLinux 9.8）屬 freeipa-server；`r80q-mon`、`r80q-target`（Ubuntu 24.04）屬 freeipa-client/host-monitoring；login-probe={r80q-mon}。由 topology CLI 讀取實際集合，對齊決定 A。 |
+| 外部狀態 | 一次性 vault 僅含 `ipa_admin_password`、`node_exporter_basic_auth_password`，parent 0700/file 0600；IPA 4.13.4、node_exporter 1.12.1。三台專用 VM 已移除，其他 VM 保留；11 個 dev-lite cache containers 保持 healthy，未 stop/purge。image、inventory、binary 指紋見 evidence。 |
+| Fresh chain | L1–L6 rc=0；fresh L3/L4 三機 failed=0；14 PASS/0 FAIL/0 SKIP；L6 三機 changed=0。10s interval 下原子建立 canary+key，IPA/兩 client SSSD key 指紋一致，兩個真 SSH probe stage=ok。 |
+| 退役有效態 | 原 head query 在真實「磁碟新/runtime 舊」狀態回 false，新 query 回 true；production Inspect→executor→full apply→Verify 修復。35s 視窗內 retired 接受的 canary 登入由 4 降為 0、retained 由 3 為 4；retired SSH service 仍 active。兩輪修復重跑均 changed=0，最後再驗 14/14。 |
+| Repository checks | 本 candidate 全庫 race 59 packages、rc=0；mandatory 30 PASS/0 SKIP；pinned lint 0 issues；build/spec/shell/tag/secret/activation guards PASS。playbook syntax/252 YAML duplicate check PASS；ansible-lint 仍為 advisory findings。 |
+| 覆蓋範圍 | C1/C3/C6/C12 activation 與 Prometheus C23/C24 的既有行為 regression 本輪重跑。更廣 native tagged/rollback 與 pinned container 細節保留各原 revision 證據；本輪未重跑 EL client 或完整四機告警演練。 |
+| Evidence | [本次 runtime-proof 退役與 fresh 驗證](../evidence/login-probe/2026-10-19-5dac1b6.md)；[前輪 tagged activation/Prometheus](../evidence/login-probe/2026-10-19-5adeec0.md)；[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md)；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md)。 |
 
 ## 1. 為什麼
 
@@ -66,6 +66,8 @@ HBAC 規則（範例見 `playbooks/apply/freeipa-identity.roster.example.yaml` �
 `pilot-login-canary` 使用者與 `login-probe-canary` 規則）；canary 不可掛任何 sudo 規則（spec C9，apply 的 Step 17 也會擋）。測試環境用
 `playbooks/test/fixtures/login-probe-fixtures.yml`。公鑰還沒登記前，所有 target 都會是
 `stage=auth`——apply 不會因此失敗，Step 16 的 health round 會把每台的 stage 印出來。
+測試 fixture 會在首次建立 canary 使用者的同一個交易帶入公鑰，避免已啟動的 daemon
+先讀到空 key 清單而被 SSSD 快取；既有使用者的金鑰輪替仍遵守 §4 的快取契約。
 
 驗收：
 
@@ -125,8 +127,12 @@ spec §19 的「仍會連線到退役主機的告警目標」）：在每台 log
 `-e login_probe_exclude_targets=[<退役主機>]` 重新套用 `login-probe-apply.yml`，用的是 login-probe
 主機自己的 stage（staging/prod 需要對應的 `--confirm-*`），不需要退役主機本身還連得上；
 `hosts.yml` 不會被提早修改。plan 只列步驟，不跑任何 playbook；apply 時先用唯讀的
-`playbooks/decommission/login-probe-target-query.yml` 確認是否還列在清單上，已經不在就跳過，
+`playbooks/decommission/login-probe-target-query.yml` 查目標與有效 runtime。只有目標不在清單，
+且穩定 active 的 InvocationID 與 root-owned 0600 activation record、目前 binary/config/unit
+hash 一致，才會跳過重套用；完整未安裝的狀態也可證明沒有殘留。只刪除磁碟 target、
+中斷於 restart 前，或缺少可信 runtime proof，都需要 reconcile。讀取或解析失敗會報錯。
 最後 verify 再查一次，任何一台 login-probe 主機沒有回報都算失敗，不會當成已清除。
+不安全的 activation record 會使 full apply 明確失敗，可能需要 operator 先修復。
 
 這個 step 會像 `pilot deploy` 一樣帶 workspace 的 `.vault/main.yaml`（`-e @<path>`，只傳檔案路徑），
 因為 `login-probe-apply.yml` 的 gate 需要 `node_exporter_basic_auth_password`。
