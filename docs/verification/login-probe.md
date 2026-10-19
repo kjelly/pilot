@@ -21,6 +21,17 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — login-probe
 
+Decommission acceptance: absence from the rendered target list alone does
+not prove that a running daemon stopped contacting a retired host. A clean
+query must either observe a never-installed service with no managed runtime
+files, or prove that an active, stable service invocation matches the
+root-owned activation record and current binary/config/unit hashes. Missing,
+unsafe, unreadable or inconsistent proof must request reconciliation or fail
+explicitly. After an interrupted render, the production provider's
+Inspect → Execute → Verify path must activate the new config, stop retired
+SSH attempts, retain healthy targets, and converge without another mutation.
+The query itself must remain read-only.
+
 Acceptance for the per-site login probe (`pilot-login-probe` binary,
 `playbooks/apply/login-probe-apply.yml`). The probe host is itself a
 `freeipa-client` and a `host-monitoring` host (both `sameHosts`

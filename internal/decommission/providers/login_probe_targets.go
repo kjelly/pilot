@@ -116,8 +116,9 @@ func targetNames(hostName, fqdn string) []string {
 	return out
 }
 
-// Inspect reports whether any login-probe host still lists the host as a
-// target. Read-only.
+// Inspect reports whether a login-probe host lists the target or cannot
+// prove its running daemon has loaded the current target-free config.
+// Read-only; uncertainty requires reconciliation, never false convergence.
 func (p *LoginProbeTargetsProvider) Inspect(ctx context.Context, in InspectInput) (Inspection, error) {
 	probes := p.probeHostsFor(in.HostName, in.FQDN)
 	if len(probes) == 0 {
@@ -129,9 +130,9 @@ func (p *LoginProbeTargetsProvider) Inspect(ctx context.Context, in InspectInput
 	}
 	still := presentOn(present)
 	if len(still) == 0 {
-		return Inspection{Provider: LoginProbeTargetsProviderID, Detail: "no login-probe host lists " + in.HostName + " as a target"}, nil
+		return Inspection{Provider: LoginProbeTargetsProviderID, Detail: "login-probe target absence proven for " + in.HostName}, nil
 	}
-	return Inspection{Provider: LoginProbeTargetsProviderID, Found: true, Detail: in.HostName + " is still a probe target on: " + strings.Join(still, ", ")}, nil
+	return Inspection{Provider: LoginProbeTargetsProviderID, Found: true, Detail: in.HostName + " is listed or runtime absence is unproven; reconcile: " + strings.Join(still, ", ")}, nil
 }
 
 // Plan returns one central step when at least one other host carries the
@@ -169,8 +170,8 @@ type loginProbeTargetRemoveStep struct {
 	fqdn     string
 }
 
-// Inspect re-queries live state: converged when no login-probe host lists
-// the retiring host any more.
+// Inspect re-queries live state: convergence requires proven runtime
+// absence, including activation identity, rather than just disk absence.
 func (e *loginProbeTargetRemoveStep) Inspect(ctx context.Context) (bool, error) {
 	insp, err := e.provider.Inspect(ctx, InspectInput{HostName: e.hostName, FQDN: e.fqdn})
 	if err != nil {
@@ -229,10 +230,14 @@ func (p *LoginProbeTargetsProvider) Verify(ctx context.Context, in VerifyInput) 
 	out := make([]Verification, 0, len(probes))
 	for _, probe := range probes {
 		listed := present[probe]
+		detail := "target absence proven by current runtime state on " + probe
+		if listed {
+			detail = "target listed or runtime absence unproven; reconciliation required on " + probe
+		}
 		out = append(out, Verification{
 			Provider: LoginProbeTargetsProviderID, Kind: "login_probe_target", Identity: in.HostName + "@" + probe,
 			Status: statusForAbsence(!listed), Active: listed,
-			Detail: "/etc/pilot/login-probe/config.yml targets on " + probe,
+			Detail: detail,
 		})
 	}
 	return out, nil
@@ -246,7 +251,7 @@ func (p *LoginProbeTargetsProvider) Verify(ctx context.Context, in VerifyInput) 
 var loginProbeTargetPresentPattern = regexp.MustCompile(`LOGIN_PROBE_TARGET_PRESENT\[([^\]\s"]+)\]=(true|false)`)
 
 // query runs the read-only query playbook and returns, per probe host,
-// whether it still lists one of names. A probe host that did not report
+// whether it lists one of names or needs runtime reconciliation. A host that did not report
 // is an error, never "absent" (AGENTS.md §5.12): an unreachable probe host
 // must not let the decommission conclude there is nothing to clean up.
 func (p *LoginProbeTargetsProvider) query(ctx context.Context, probes, names []string) (map[string]bool, error) {
