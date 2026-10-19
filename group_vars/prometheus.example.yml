@@ -171,3 +171,23 @@ thanos_s3_target_host: ""
 #           for: 5m
 #           labels: { severity: warning }
 #           annotations: { summary: "Disk space low on {{ $labels.instance }}" }
+
+# ----------------------------------------------------------------------
+#  Host-health + login-probe 告警（GitHub issue #11，docs/verification/
+#  prometheus.md §1.5 / C20 / C21）。下面全是預設值，只在要調整門檻或
+#  持續時間時才取消註解；規則由 playbooks/apply/templates/
+#  pilot-host-health-alert-rules.yml.j2 渲染成 host-health-alert-rules.yml。
+# ----------------------------------------------------------------------
+# prometheus_host_health_alert_rules_enabled: true
+# host_io_stall_ratio_threshold: "0.25"        # PSI io full stall 比例（5m rate）
+# host_io_stall_for: 10m
+# host_disk_latency_seconds_threshold: "0.1"   # 每次 block I/O 平均完成秒數
+# host_disk_latency_min_ops_per_second: "1"    # 低於此 IOPS 的裝置不判斷延遲
+# host_disk_queue_depth_threshold: "10"        # 平均 in-flight request 數
+# host_disk_latency_for: 10m
+# host_metrics_missing_for: 3m                 # node_exporter 抓不到但 SSH 探測成功；最多 9m
+# host_metrics_missing_success_window: 150s    # 這段時間內要有一次成功登入才算 SSH 連得上；加 15s 不得超過 host_metrics_missing_for，且要容得下 probe 一輪間隔 + total_timeout + 15s + 2 × scrape
+# login_probe_alert_for: 3m                    # account/auth/stall/hostkey/session
+# login_probe_transport_alert_for: 5m
+# login_probe_alert_keep_firing_for: 5m
+# login_probe_stale_seconds: 180

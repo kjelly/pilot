@@ -7,7 +7,7 @@ import (
 )
 
 // TestRegression_PrometheusSpec locks the structure of
-// docs/verification/prometheus.md (v1.2 — per-site Prometheus + Thanos
+// docs/verification/prometheus.md (v1.8 — per-site Prometheus + Thanos
 // Sidecar + Alertmanager forwarding, container-backed trio mirroring
 // seaweedfs-s3.md/keycloak.md; plus node-exporter scrape auto-discovery):
 //
@@ -50,6 +50,8 @@ import (
 //	C20    the running pilot-prometheus reads the same prometheus.yml as
 //	       the host — a single-file bind mount keeps the inode the
 //	       container started with, so the host file alone proves nothing
+//	C21-C22 Thanos Sidecar can write the TSDB and has uploaded a recent block
+//	C23-C24 host-health rules parse and are loaded by Prometheus
 //
 // Cross-row invariants locked below:
 //
@@ -94,7 +96,7 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22", "C23", "C24"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -199,6 +201,31 @@ func TestRegression_PrometheusSpec(t *testing.T) {
 		}
 		if r.Expected != "0" {
 			t.Errorf("C12 expected must be rc-based \"0\"; got %q", r.Expected)
+		}
+	}
+
+	// C23/C24 (issue #11): the host-health rule file is syntax-checked with
+	// promtool and its alerts are actually loaded — by name, not just "some
+	// rule exists" (C12 already covers that).
+	for _, r := range s.Rows {
+		switch r.ID {
+		case "C23":
+			for _, want := range []string{"promtool check rules", "/etc/prometheus/host-health-alert-rules.yml"} {
+				if !strings.Contains(r.Command, want) {
+					t.Errorf("C23 must contain %q; got %q", want, r.Command)
+				}
+			}
+		case "C24":
+			for _, want := range []string{"/api/v1/rules", "HostIOStall", "HostDiskLatencyHigh", "HostMetricsMissing", "PilotLoginProbeAccountDenied", "PilotLoginProbeStale"} {
+				if !strings.Contains(r.Command, want) {
+					t.Errorf("C24 must contain %q; got %q", want, r.Command)
+				}
+			}
+		default:
+			continue
+		}
+		if r.Expected != "0" {
+			t.Errorf("%s expected must be rc-based \"0\"; got %q", r.ID, r.Expected)
 		}
 	}
 

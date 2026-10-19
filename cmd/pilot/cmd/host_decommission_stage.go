@@ -20,6 +20,7 @@ import (
 const (
 	stageRoleFreeIPAServer = "freeipa-server" // freeipa-identity-apply.yml's default hosts
 	stageRoleWazuhManager  = "wazuh-manager"  // wazuh-manager-agent-deregister.yml's default hosts
+	stageRoleLoginProbe    = "login-probe"    // login-probe-apply.yml's default hosts (target re-render)
 )
 
 // hostDecommissionStageFlags holds the stage confirmation flags that apply
@@ -92,6 +93,8 @@ func hostDecommissionStageTargets(plan *decommission.Plan, scope *decommission.S
 			targets = append(targets, hostDecommissionStageTarget{Label: "FreeIPA identity reconcile on the " + stageRoleFreeIPAServer + " hosts", Hosts: scope.RoleHosts(stageRoleFreeIPAServer)})
 		case providers.WazuhAgentProviderID:
 			targets = append(targets, hostDecommissionStageTarget{Label: "Wazuh agent deregistration on the " + stageRoleWazuhManager + " hosts", Hosts: scope.RoleHosts(stageRoleWazuhManager)})
+		case providers.LoginProbeTargetsProviderID:
+			targets = append(targets, hostDecommissionStageTarget{Label: "login-probe target list re-render on the " + stageRoleLoginProbe + " hosts", Hosts: scope.RoleHosts(stageRoleLoginProbe)})
 		case providers.InternalEndpointProviderID:
 			for _, s := range c.Steps {
 				if s.Action == providers.ActionInternalEndpointApplyConverge {

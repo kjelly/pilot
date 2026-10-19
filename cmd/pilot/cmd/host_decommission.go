@@ -633,11 +633,30 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		StageArgs:            hostStage,
 	})
 
+	// login-probe targets (spec.md §19, GitHub issue #11) — reference-driven
+	// like internal-endpoint: every login-probe host renders the retiring
+	// host into its probe target list, so the step re-renders those hosts
+	// (with their own stage) without it. The probe hosts are resolved here,
+	// server-side, from hosts.yml — never from caller input. The re-render
+	// is a full login-probe-apply.yml run, whose always-tagged gates read
+	// node_exporter_basic_auth_password from the vault, so it gets the
+	// workspace's main vault exactly as `pilot deploy` passes it.
+	loginProbeTargets := providers.NewLoginProbeTargetsProvider(providers.LoginProbeTargetsProviderConfig{
+		Executor:       runner,
+		Inventory:      invPath,
+		QueryPlaybook:  "playbooks/decommission/login-probe-target-query.yml",
+		ApplyPlaybook:  "playbooks/apply/login-probe-apply.yml",
+		ProbeHosts:     scope.RoleHosts(stageRoleLoginProbe),
+		ExtraArgs:      hostDecommissionVaultArgs(invPath),
+		ApplyStageArgs: scope.ArgsFunc(scope.RoleHosts(stageRoleLoginProbe)),
+	})
+
 	result := map[string]providers.Provider{
-		providers.FreeIPAClientProviderID:    freeipaClient,
-		providers.WazuhAgentProviderID:       wazuhAgent,
-		providers.InternalEndpointProviderID: internalEndpoint,
-		providers.FreeIPANFSServerProviderID: freeipaNFSServer,
+		providers.FreeIPAClientProviderID:     freeipaClient,
+		providers.WazuhAgentProviderID:        wazuhAgent,
+		providers.InternalEndpointProviderID:  internalEndpoint,
+		providers.FreeIPANFSServerProviderID:  freeipaNFSServer,
+		providers.LoginProbeTargetsProviderID: loginProbeTargets,
 	}
 
 	// Generic contract-driven components (spec.md §37 Phase 5, §15): every
@@ -685,10 +704,17 @@ func hostDecommissionFreeIPAExtraArgs(inventoryPath, rosterPath string) []string
 	// already only ever pass simple, space-free values. A roster path with
 	// whitespace is a pre-existing workspace-authoring constraint.
 	extraArgs = append(extraArgs, "-e", "freeipa_roster_file="+rosterPath)
+	return append(extraArgs, hostDecommissionVaultArgs(inventoryPath)...)
+}
+
+// hostDecommissionVaultArgs references the workspace's main vault (the file
+// `pilot deploy` passes, never its values) when it exists, for decommission
+// steps that re-run an apply playbook whose gates read vault keys.
+func hostDecommissionVaultArgs(inventoryPath string) []string {
 	if vaultPath := defaultVaultFile(inventoryPath); vaultPath != "" {
-		extraArgs = append(extraArgs, "-e", "@"+vaultPath)
+		return []string{"-e", "@" + vaultPath}
 	}
-	return extraArgs
+	return nil
 }
 
 func reportHostDecommissionResult(out io.Writer, result *decommission.FinalizeResult, asJSON bool) error {

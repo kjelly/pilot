@@ -1,0 +1,197 @@
+# Login probe — is a retiring host still one of the probe's targets?
+#
+# Read-only central query for host decommission (spec
+# docs/superpowers/specs/2026-09-02-host-decommission-spec.md §19: an
+# active alert-target mapping that keeps contacting a retired host is
+# active residue). The login probe renders its target list at apply time
+# from the inventory, so a host being decommissioned stays a probe target
+# — and keeps raising PilotLoginProbe* alerts — until the probe hosts are
+# re-rendered without it. internal/decommission/providers.LoginProbeTargetsProvider
+# uses this playbook to find out whether that re-render is still needed and
+# to verify it afterwards; the re-render itself is
+# playbooks/apply/login-probe-apply.yml with -e login_probe_exclude_targets.
+#
+# Invoked ONLY by that provider — never directly by an operator:
+#   ansible-playbook -i inventory.yml \
+#       playbooks/decommission/login-probe-target-query.yml \
+#       --limit <probe hosts> --tags target_query \
+#       -e '{"pilot_decommission_target_names": ["<inventory name>", "<fqdn>"]}'
+#
+# Output contract (parsed by the provider), one line per probe host:
+#   LOGIN_PROBE_TARGET_PRESENT[<probe host>]=true|false
+# true means the target is listed OR runtime absence is not proven, so a
+# reconciliation is required. false is a proof of absence, not a disk grep.
+#
+# No stage gate: this playbook only reads files/service state and reports — it
+# never mutates anything (AGENTS.md §4.3 point 4's read-only exception,
+# same posture as wazuh-manager-agent-deregister.yml's agent_query mode).
+---
+- name: Login probe — report whether a retiring host is still a probe target (read-only)
+  hosts: "{{ target_group | default('login-probe') }}"
+  become: true
+  gather_facts: false
+  vars:
+    # Same paths and binary/config/unit ordering as the activation writer.
+    # Canonical apply inputs win; retain the old query-only config override
+    # for callers that do not supply login_probe_config_path.
+    login_probe_query_paths:
+      - "{{ login_probe_bin_dest | default('/usr/local/bin/pilot-login-probe') }}"
+      - "{{ login_probe_config_path | default(login_probe_query_config_path | default('/etc/pilot/login-probe/config.yml')) }}"
+      - "{{ login_probe_unit_path | default('/etc/systemd/system/pilot-login-probe.service') }}"
+      - "{{ login_probe_runtime_marker_path | default('/etc/pilot/login-probe/.applied-runtime') }}"
+  tasks:
+    - name: "Gate: the names to look for are supplied as a list"
+      ansible.builtin.assert:
+        that:
+          - pilot_decommission_target_names is defined
+          - pilot_decommission_target_names is not string
+          - pilot_decommission_target_names | length > 0
+        fail_msg: >-
+          pilot_decommission_target_names must be a non-empty list of the
+          retiring host's names (inventory name and FQDN), passed as JSON.
+      tags: [target_query]
+
+    - name: "Read the service state before inspecting its files (read-only)"
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - --property=LoadState,ActiveState,SubState,MainPID,InvocationID,UnitFileState
+          - pilot-login-probe.service
+      register: login_probe_query_service_before
+      changed_when: false
+      check_mode: false
+      tags: [target_query]
+
+    - name: "Fingerprint managed files without following links (read-only)"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        checksum_algorithm: sha256
+      loop: "{{ login_probe_query_paths }}"
+      register: login_probe_query_files
+      tags: [target_query]
+
+    - name: "Require an existing config to be a readable regular file (read-only)"
+      ansible.builtin.assert:
+        that:
+          - not login_probe_query_files.results[1].stat.exists or login_probe_query_files.results[1].stat.isreg | default(false)
+      tags: [target_query]
+
+    - name: "Check activation record ownership and permissions (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_marker_safe: >-
+          {{ login_probe_query_files.results[3].stat.isreg | default(false)
+             and login_probe_query_files.results[3].stat.uid | default(-1) == 0
+             and login_probe_query_files.results[3].stat.mode | default('') == '0600' }}
+      tags: [target_query]
+
+    - name: "Read the rendered probe configuration (read-only)"
+      ansible.builtin.slurp:
+        src: "{{ login_probe_query_paths[1] }}"
+      register: login_probe_query_config
+      when: login_probe_query_files.results[1].stat.exists
+      tags: [target_query]
+
+    - name: "Read only a safe activation record (read-only)"
+      ansible.builtin.slurp:
+        src: "{{ login_probe_query_paths[3] }}"
+      register: login_probe_query_marker
+      when: login_probe_query_marker_safe | bool
+      tags: [target_query]
+
+    - name: "Compute whether the retiring host is still listed (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_listed: >-
+          {%- set wanted = pilot_decommission_target_names | map('lower') | list -%}
+          {%- set found = [] -%}
+          {%- if login_probe_query_files.results[1].stat.exists -%}
+            {%- for t in ((login_probe_query_config.content | b64decode | from_yaml).targets | default([], true)) -%}
+              {%- if (t.name | default('') | lower) in wanted or (t.host | default('') | lower) in wanted -%}
+                {%- set _ = found.append(t.name) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {{ found | length > 0 }}
+      tags: [target_query]
+
+    # Bracket both the service identity and file contents. No comparison of
+    # atime: reading a config must not itself make a healthy process stale.
+    - name: "Fingerprint managed files again (read-only)"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+        checksum_algorithm: sha256
+      loop: "{{ login_probe_query_paths }}"
+      register: login_probe_query_files_after
+      tags: [target_query]
+
+    - name: "Read the service state after inspecting its files (read-only)"
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - --property=LoadState,ActiveState,SubState,MainPID,InvocationID,UnitFileState
+          - pilot-login-probe.service
+      register: login_probe_query_service_after
+      changed_when: false
+      check_mode: false
+      tags: [target_query]
+
+    - name: "Decode the observed service and content identities (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_before: "{{ dict(login_probe_query_service_before.stdout_lines | map('split', '=')) }}"
+        login_probe_query_after: "{{ dict(login_probe_query_service_after.stdout_lines | map('split', '=')) }}"
+        login_probe_query_hashes: "{{ login_probe_query_files.results | map(attribute='stat.checksum', default='-') | list }}"
+        login_probe_query_hashes_after: "{{ login_probe_query_files_after.results | map(attribute='stat.checksum', default='-') | list }}"
+      tags: [target_query]
+
+    - name: "Require complete systemd observations rather than guessing from rc (read-only)"
+      ansible.builtin.assert:
+        that:
+          - "['LoadState', 'ActiveState', 'SubState', 'MainPID', 'InvocationID', 'UnitFileState'] | difference(login_probe_query_before.keys() | list) | length == 0"
+          - "['LoadState', 'ActiveState', 'SubState', 'MainPID', 'InvocationID', 'UnitFileState'] | difference(login_probe_query_after.keys() | list) | length == 0"
+      tags: [target_query]
+
+    - name: "Prove either a stable healthy activation or a never-installed service (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_never_installed: >-
+          {{ login_probe_query_before == login_probe_query_after
+             and login_probe_query_after.LoadState == 'not-found'
+             and login_probe_query_after.ActiveState == 'inactive'
+             and login_probe_query_after.SubState == 'dead'
+             and login_probe_query_after.MainPID == '0'
+             and login_probe_query_after.InvocationID == ''
+             and login_probe_query_after.UnitFileState == ''
+             and login_probe_query_files.results | selectattr('stat.exists') | list | length == 0
+             and login_probe_query_files_after.results | selectattr('stat.exists') | list | length == 0 }}
+        login_probe_query_runtime_proven: >-
+          {{ login_probe_query_before == login_probe_query_after
+             and login_probe_query_after.LoadState == 'loaded'
+             and login_probe_query_after.ActiveState == 'active'
+             and login_probe_query_after.SubState == 'running'
+             and login_probe_query_after.MainPID | int > 0
+             and login_probe_query_after.InvocationID is match('^[0-9a-f]{32}$')
+             and login_probe_query_hashes == login_probe_query_hashes_after
+             and login_probe_query_marker_safe | bool
+             and login_probe_query_files_after.results[3].stat.isreg | default(false)
+             and login_probe_query_files_after.results[3].stat.uid | default(-1) == 0
+             and login_probe_query_files_after.results[3].stat.mode | default('') == '0600'
+             and '-' not in login_probe_query_hashes
+             and (login_probe_query_config.content | default('') | b64decode | hash('sha256')) == login_probe_query_hashes[1]
+             and (login_probe_query_marker.content | default('') | b64decode | hash('sha256')) == login_probe_query_hashes[3]
+             and (login_probe_query_marker.content | default('') | b64decode | trim)
+                 == ((login_probe_query_hashes[:3] | join(' ')) ~ ' ' ~ login_probe_query_after.InvocationID) }}
+      tags: [target_query]
+
+    - name: "Compute whether reconciliation is required (read-only)"
+      ansible.builtin.set_fact:
+        login_probe_query_present: >-
+          {{ login_probe_query_listed | bool
+             or not (login_probe_query_never_installed | bool or login_probe_query_runtime_proven | bool) }}
+      tags: [target_query]
+
+    - name: "Report for the decommission provider (read-only)"
+      ansible.builtin.debug:
+        msg: "LOGIN_PROBE_TARGET_PRESENT[{{ inventory_hostname }}]={{ login_probe_query_present | bool | lower }}"
+      tags: [target_query]

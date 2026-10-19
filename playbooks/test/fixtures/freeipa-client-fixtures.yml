@@ -50,6 +50,10 @@
     ipa_fixture_user: pilotuser
     ipa_fixture_user_first: Pilot
     ipa_fixture_user_last: User
+    # Optional creation-time key. Publish atomically with the identity so
+    # concurrent SSSD lookups cannot cache a newly visible keyless user.
+    # Empty preserves the existing user-only creation contract.
+    ipa_fixture_user_ssh_public_key: ""
     ipa_fixture_sudorule: pilot-all
     # false = create/ensure the user only; skip all sudo-rule tasks. Used by
     # importing fixtures that manage their own (more restrictive) rules.
@@ -92,12 +96,12 @@
 
         - name: "Fixtures — ensure IPA user {{ ipa_fixture_user }} exists"
           ansible.builtin.command:
-            argv:
-              - ipa
-              - user-add
-              - "{{ ipa_fixture_user }}"
-              - "--first={{ ipa_fixture_user_first }}"
-              - "--last={{ ipa_fixture_user_last }}"
+            argv: >-
+              {{ ['ipa', 'user-add', ipa_fixture_user,
+                  '--first=' ~ ipa_fixture_user_first,
+                  '--last=' ~ ipa_fixture_user_last]
+                 + (['--sshpubkey=' ~ ipa_fixture_user_ssh_public_key]
+                    if ipa_fixture_user_ssh_public_key | length > 0 else []) }}
           register: ipa_user_add
           changed_when: "'Added user' in (ipa_user_add.stdout | default(''))"
           failed_when:

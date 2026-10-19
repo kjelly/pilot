@@ -109,6 +109,21 @@ func diagnoseOKDoc(t *testing.T, host string, rc int, stdout string) string {
 	return string(data)
 }
 
+// diagnoseDocWithStderr is diagnoseOKDoc plus the module's stderr.
+func diagnoseDocWithStderr(t *testing.T, host string, rc int, stdout, stderr string) string {
+	t.Helper()
+	doc := map[string]any{
+		"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{
+			host: map[string]any{"stdout": stdout, "stderr": stderr, "rc": rc, "failed": rc != 0, "unreachable": false},
+		}}}}},
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func baseDiagnoseOpts(t *testing.T, inventory string, runner diagnose.AdHocRunner) diagnoseMCPToolsOptions {
 	t.Helper()
 	runtime, err := prepareDeployAnsibleRuntime(t.TempDir())
@@ -964,6 +979,10 @@ sudo:
 				return diagnoseOKDoc(t, "web1", 0, "alice:x:1000:1000::/home/alice:/bin/bash"), 0, nil
 			},
 			"sudo -l -U alice": func() (string, int, error) { return diagnoseOKDoc(t, "web1", 1, "not allowed"), 0, nil },
+			// sssctl prints its verdict on stderr and exits 0 (real capture, 2026-10-13).
+			"sudo sssctl user-checks -a acct -s sshd alice": func() (string, int, error) {
+				return diagnoseDocWithStderr(t, "web1", 0, "testing pam_acct_mgmt", "pam_acct_mgmt: Success"), 0, nil
+			},
 			// bob: roster declares a sudo rule but live sudo -l already
 			// grants it too (consistent), while roster declares no HBAC rule
 			// for bob at all.
@@ -1003,6 +1022,12 @@ sudo:
 	if !strings.Contains(alice.Verdict, "no config/live drift") {
 		t.Fatalf("alice.Verdict = %q, want no drift reported", alice.Verdict)
 	}
+	if !alice.PamAccountChecked || !alice.PamAccountAllowed || alice.PamAccountResult != "Success" {
+		t.Fatalf("alice PAM account = checked %v allowed %v result %q, want the stderr verdict Success", alice.PamAccountChecked, alice.PamAccountAllowed, alice.PamAccountResult)
+	}
+	if bob.PamAccountChecked {
+		t.Fatalf("bob has no sssctl response configured, so PamAccountChecked must stay false: %+v", bob)
+	}
 	if bob.RosterHBACAuthorized {
 		t.Fatalf("bob = %+v, want RosterHBACAuthorized=false (roster declares no HBAC rule for bob)", bob)
 	}
@@ -1024,9 +1049,10 @@ sudo:
 	if rec.Check != "login" || rec.Host != "web1" || rec.Params["users"] != "alice,bob" {
 		t.Fatalf("audit record = %+v, want check=login host=web1 params.users=alice,bob", rec)
 	}
-	// Host-level (3 login-specific + 6 from DNSSteps(host)) + 2 users * 2 + 1 security-logs step.
-	if len(rec.Steps) != 9+4+1 {
-		t.Fatalf("audit record has %d steps, want %d", len(rec.Steps), 9+4+1)
+	// Host-level (3 login-specific + 6 from DNSSteps(host)) + 2 users * 3
+	// (getent, sudo -l, sssctl user-checks) + 1 security-logs step.
+	if len(rec.Steps) != 9+6+1 {
+		t.Fatalf("audit record has %d steps, want %d", len(rec.Steps), 9+6+1)
 	}
 }
 

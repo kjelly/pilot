@@ -1,0 +1,10 @@
+OpenSSH_9.6p1 Ubuntu-3ubuntu13.16, OpenSSL 3.0.13 30 Jan 2024
+debug1: Reading configuration data /etc/pilot/login-probe/ssh_config
+debug1: /etc/pilot/login-probe/ssh_config line 2: Applying options for *
+debug1: Executing proxy command: exec /usr/bin/sss_ssh_knownhostsproxy -p 22 nosuch.ipa.pilot.internal
+debug1: identity file /etc/pilot/login-probe/id_ed25519 type 3
+debug1: identity file /etc/pilot/login-probe/id_ed25519-cert type -1
+debug1: Local version string SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16
+sss_ssh_knownhostsproxy: Could not resolve hostname nosuch.ipa.pilot.internal
+kex_exchange_identification: Connection closed by remote host
+Connection closed by UNKNOWN port 65535
