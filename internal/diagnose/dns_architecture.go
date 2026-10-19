@@ -2,8 +2,10 @@ package diagnose
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/networkcheck"
@@ -63,6 +65,13 @@ type DNSArchProvider struct {
 	FQDN          string `json:"fqdn"`
 	IP            string `json:"ip"`
 	DNSProvider   bool   `json:"dns_provider"`
+	// DNSProviderExplicit is whether freeipa_setup_dns is set on the host.
+	DNSProviderExplicit bool `json:"dns_provider_explicit"`
+	// LeftOut marks a replica that leaves freeipa_setup_dns unset and
+	// that FreeIPA's own NS records do not list as a DNS server: dns-apply
+	// and the resolver task leave it out (tasks/freeipa-dns-providers-live.yml),
+	// so the model does too.
+	LeftOut bool `json:"left_out,omitempty"`
 }
 
 // DNSArchZone is one stub zone a tier host sends to an authoritative server.
@@ -146,11 +155,12 @@ type DNSArchModel struct {
 	Declared           []DNSArchVar      `json:"-"`
 }
 
-// DNSProviderIPs returns the addresses of every DNS-providing pool member.
+// DNSProviderIPs returns the addresses of every DNS-providing pool member
+// that is not left out.
 func (m DNSArchModel) DNSProviderIPs() []string {
 	var out []string
 	for _, p := range m.Providers {
-		if p.DNSProvider && p.IP != "" {
+		if p.DNSProvider && !p.LeftOut && p.IP != "" {
 			out = append(out, p.IP)
 		}
 	}
@@ -402,6 +412,14 @@ func stringIn(list []string, s string) bool {
 // though they are not in the freeipa-dns-client group (the diagnosis's
 // client_host).
 func BuildDNSArchitectureModel(inv networkcheck.ResolvedInventory, extraResolverHosts ...string) DNSArchModel {
+	return BuildDNSArchitectureModelLeavingOut(inv, nil, extraResolverHosts...)
+}
+
+// BuildDNSArchitectureModelLeavingOut is BuildDNSArchitectureModel with
+// the replicas in leftOut (inventory hosts, from DNSArchUnregisteredReplicas)
+// left out of the tier's stubs and the resolver lists, as the playbooks
+// leave them out once FreeIPA's NS records show they serve no DNS.
+func BuildDNSArchitectureModelLeavingOut(inv networkcheck.ResolvedInventory, leftOut []string, extraResolverHosts ...string) DNSArchModel {
 	r := newVarReader(inv)
 	m := DNSArchModel{}
 
@@ -415,6 +433,9 @@ func BuildDNSArchitectureModel(inv networkcheck.ResolvedInventory, extraResolver
 		// | default('ipa.pilot.internal', true), lowered, trailing dot dropped.
 		m.FreeIPADomain = normalizeZoneName(jinjaString(r.defTrue(primary, "freeipa_domain", dnsArchDefaultDomain)))
 		m.Providers, m.ProviderErrors = buildProviderPool(r, primaries, replicas)
+		for i := range m.Providers {
+			m.Providers[i].LeftOut = m.Providers[i].Kind == "replica" && stringIn(leftOut, m.Providers[i].InventoryHost)
+		}
 		m.Forwarding = buildForwarding(r, primary, replicas)
 	} else {
 		m.Forwarding = DNSArchForwarding{State: "not_applicable", ForwardPolicy: "not_applicable", ForwardZones: "not_applicable"}
@@ -440,7 +461,7 @@ func BuildDNSArchitectureModel(inv networkcheck.ResolvedInventory, extraResolver
 	}
 	clientGroup := inv.GroupHosts[FreeIPADNSClientGroup]
 	for _, host := range resolverHosts {
-		res := buildResolver(r, inv, host, tierHosts)
+		res := buildResolver(r, inv, host, tierHosts, leftOut)
 		if stringIn(clientGroup, host) {
 			res.ManagedBy = []string{"freeipa-dns-client"}
 		}
@@ -474,6 +495,7 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 		IP:            jinjaString(r.def(primary, "ansible_host", "")),
 		DNSProvider:   ansibleBool(r.def(primary, "freeipa_setup_dns", true)),
 	}}
+	_, pool[0].DNSProviderExplicit = r.get(primary, "freeipa_setup_dns")
 	for _, host := range replicas {
 		replicaDomain := jinjaString(r.def(host, "freeipa_domain", dnsArchDefaultDomain))
 		if _, ok := r.get(host, "freeipa_replica_fqdn"); !ok && len(replicas) > 1 {
@@ -486,6 +508,7 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 			IP:            jinjaString(r.def(host, "ansible_host", "")),
 			DNSProvider:   ansibleBool(r.def(host, "freeipa_setup_dns", true)),
 		})
+		_, pool[len(pool)-1].DNSProviderExplicit = r.get(host, "freeipa_setup_dns")
 	}
 	// The FQDNs are already normalised, so this duplicate check is
 	// deliberately stricter than the playbook gate in
@@ -509,31 +532,104 @@ func buildProviderPool(r *varReader, primaries, replicas []string) ([]DNSArchPro
 	return pool, errs
 }
 
+// forwarderItemRe is one forwarder in FreeIPA's syntax: an address,
+// optionally followed by " port N".
+var forwarderItemRe = regexp.MustCompile(`^(\S+)(?: port ([0-9]{1,5}))?$`)
+
 // normalizeForwarders mirrors tasks/freeipa-dns-forwarders.yml, which both
-// install playbooks use: null is no forwarders, a string starting with '['
-// is YAML, any other string is split on whitespace, a list is kept.
+// install playbooks use (it runs the same rules in Python on the
+// controller): null is no forwarders; a string starting with '[' must end
+// with ']' and its items are the comma-separated parts between the
+// brackets, trimmed and unquoted (not YAML, whose 1.1 rules read
+// "1:2:3:4:5:6:7:8" as a base-60 integer); any other string is split on
+// whitespace, with "<addr> port <n>" kept as one forwarder; a list is kept.
+// Every item must be an IPv4 or IPv6 address that is neither unspecified
+// nor multicast and has no zone, optionally with " port 1..65535".
+// Anything else is the error the playbook's gate fails with.
 func normalizeForwarders(raw any) ([]string, error) {
-	if raw == nil {
+	var items []any
+	switch v := raw.(type) {
+	case nil:
 		return nil, nil
-	}
-	if s, ok := raw.(string); ok {
-		if strings.HasPrefix(strings.TrimSpace(s), "[") {
-			inner := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(s), "["), "]")
-			var out []string
-			for _, item := range strings.Split(inner, ",") {
-				item = strings.Trim(strings.TrimSpace(item), `"'`)
-				if item != "" {
-					out = append(out, item)
+	case string:
+		t := strings.TrimSpace(v)
+		if strings.HasPrefix(t, "[") {
+			if !strings.HasSuffix(t, "]") {
+				return nil, fmt.Errorf("forwarders %q: a string that starts with [ must end with ]", v)
+			}
+			for _, p := range strings.Split(t[1:len(t)-1], ",") {
+				p = strings.TrimSpace(p)
+				if len(p) >= 2 && p[0] == p[len(p)-1] && (p[0] == '\'' || p[0] == '"') {
+					p = p[1 : len(p)-1]
+				}
+				if p != "" {
+					items = append(items, p)
 				}
 			}
-			return out, nil
+			break
 		}
-		return strings.Fields(s), nil
+		toks := strings.Fields(t)
+		for i := 0; i < len(toks); i++ {
+			if toks[i] == "port" && len(items) > 0 && i+1 < len(toks) {
+				items[len(items)-1] = items[len(items)-1].(string) + " port " + toks[i+1]
+				i++
+				continue
+			}
+			items = append(items, toks[i])
+		}
+	case []any:
+		items = v
+	default:
+		return nil, fmt.Errorf("forwarders value %v is neither a list nor a string", raw)
 	}
-	if list, ok := raw.([]any); ok {
-		return stringItems(list), nil
+	out := make([]string, 0, len(items))
+	var bad []string
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok || !validForwarder(s) {
+			bad = append(bad, fmt.Sprint(item))
+			continue
+		}
+		out = append(out, s)
 	}
-	return nil, fmt.Errorf("forwarders value %v is neither a list nor a string", raw)
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("forwarders %q are not IPv4 or IPv6 addresses, optionally with \" port N\" (separate several with spaces or write a YAML list)", bad)
+	}
+	return out, nil
+}
+
+// validForwarder is the playbook's per-item check: an address that
+// netip parses, without a zone, neither unspecified nor multicast, and an
+// optional port 1..65535.
+func validForwarder(s string) bool {
+	m := forwarderItemRe.FindStringSubmatch(s)
+	if m == nil || strings.Contains(m[1], "%") {
+		return false
+	}
+	if m[2] != "" {
+		n, err := strconv.Atoi(m[2])
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	addr, err := netip.ParseAddr(m[1])
+	// An IPv4-mapped address is judged as the IPv4 address it maps, as
+	// the playbook's Python check does.
+	addr = addr.Unmap()
+	return err == nil && !addr.IsUnspecified() && !addr.IsMulticast()
+}
+
+// forwarderInput mirrors the shared task's choice: ipa_dns_forwarders if
+// defined (empty included), else freeipa_dns_forwarders if defined, else
+// the caller's default.
+func forwarderInput(r *varReader, host string, fallback []any, fallbackSource string) (any, string) {
+	if v, ok := r.get(host, "ipa_dns_forwarders"); ok {
+		return v, dnsArchVarRef(host, "ipa_dns_forwarders")
+	}
+	if v, ok := r.get(host, "freeipa_dns_forwarders"); ok {
+		return v, dnsArchVarRef(host, "freeipa_dns_forwarders")
+	}
+	return fallback, fallbackSource
 }
 
 func buildForwarding(r *varReader, primary string, replicas []string) DNSArchForwarding {
@@ -542,18 +638,8 @@ func buildForwarding(r *varReader, primary string, replicas []string) DNSArchFor
 		f.State = "not_applicable"
 		f.Source = dnsArchVarRef(primary, "freeipa_setup_dns") + " is false: the primary runs no named"
 	} else {
-		// ipa_dns_forwarders | default(freeipa_dns_forwarders |
-		// default(['8.8.8.8'], true), true)
-		raw := r.defTrue(primary, "ipa_dns_forwarders", nil)
-		f.Source = dnsArchVarRef(primary, "ipa_dns_forwarders")
-		if raw == nil {
-			raw = r.defTrue(primary, "freeipa_dns_forwarders", nil)
-			f.Source = dnsArchVarRef(primary, "freeipa_dns_forwarders")
-		}
-		if raw == nil {
-			raw = []any{"8.8.8.8"}
-			f.Source = "default ['8.8.8.8'] in playbooks/apply/freeipa-server-apply.yml"
-		}
+		var raw any
+		raw, f.Source = forwarderInput(r, primary, []any{"8.8.8.8"}, "default ['8.8.8.8'] in playbooks/apply/freeipa-server-apply.yml")
 		list, err := normalizeForwarders(raw)
 		switch {
 		case err != nil:
@@ -573,21 +659,17 @@ func buildForwarding(r *varReader, primary string, replicas []string) DNSArchFor
 	}
 	for _, host := range replicas {
 		// freeipa-server-replica-apply.yml: ipa_setup_dns =
-		// freeipa_setup_dns | default(true); the forwarders are
-		// ipa_dns_forwarders | default(freeipa_dns_forwarders |
-		// default([])) through the same tasks/freeipa-dns-forwarders.yml
-		// normalization as the primary, passed as one --forwarder per item
-		// (or --no-forwarders when empty) to ipa-replica-install and
+		// freeipa_setup_dns | default(true); the forwarders go through the
+		// same tasks/freeipa-dns-forwarders.yml as the primary's, with []
+		// as the default, and are passed as one --forwarder per item (or
+		// --no-forwarders when empty) to ipa-replica-install and
 		// ipa-dns-install.
 		if !ansibleBool(r.def(host, "freeipa_setup_dns", true)) {
 			continue
 		}
-		install := DNSArchServerInstallFwd{Host: host, Source: dnsArchVarRef(host, "ipa_dns_forwarders")}
-		raw, ok := r.get(host, "ipa_dns_forwarders")
-		if !ok {
-			raw = r.def(host, "freeipa_dns_forwarders", []any{})
-			install.Source = dnsArchVarRef(host, "freeipa_dns_forwarders")
-		}
+		install := DNSArchServerInstallFwd{Host: host}
+		raw, source := forwarderInput(r, host, []any{}, "default [] in playbooks/apply/freeipa-server-replica-apply.yml")
+		install.Source = source
 		list, err := normalizeForwarders(raw)
 		if err != nil {
 			install.Error = err.Error()
@@ -691,7 +773,7 @@ func buildTierHost(r *varReader, m DNSArchModel, host, addr string, endpointsUne
 
 // buildResolver mirrors tasks/freeipa-dns-client-resolver.yml's provider
 // detection and "compute effective nameserver list for THIS host".
-func buildResolver(r *varReader, inv networkcheck.ResolvedInventory, host string, tierHosts []string) DNSArchResolver {
+func buildResolver(r *varReader, inv networkcheck.ResolvedInventory, host string, tierHosts, leftOut []string) DNSArchResolver {
 	res := DNSArchResolver{Host: host, State: "computed"}
 
 	type provider struct{ host, ip string }
@@ -702,7 +784,7 @@ func buildResolver(r *varReader, inv networkcheck.ResolvedInventory, host string
 		}
 	}
 	for _, p := range inv.OrderedGroupHosts(FreeIPAReplicaGroup) {
-		if ansibleBool(r.def(p, "freeipa_setup_dns", true)) {
+		if ansibleBool(r.def(p, "freeipa_setup_dns", true)) && !stringIn(leftOut, p) {
 			providers = append(providers, provider{p, jinjaString(r.defTrue(p, "ansible_host", p))})
 		}
 	}

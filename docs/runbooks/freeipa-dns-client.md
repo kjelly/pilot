@@ -65,6 +65,11 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   提供者，issue #67）：4 台新 VM（primary、replica、dns tier、consumer）`vm-target topology test`
   L3 check mode→L6 PASS，本檔 7/7、重跑 `changed=0`；consumer 的 `/etc/resolv.conf` 依序是 tier、
   primary、replica。見 [evidence](../evidence/freeipa-replica-dns-provider/2026-10-14-6522b94.md)。
+- 最新實跑（2026-10-16，candidate `b82a0c9`，tree `b733b150`，PR #92：沒被 FreeIPA 列為 DNS server 的 replica 排除、
+  nameserver 寫入前逐一檢查）：6 台與 4 台新 VM 的 `vm-target topology test` L3→L6 PASS，本檔 7/7（`023cd719`、`d3ace139`）、
+  重跑 `changed=0`；沒 promote 的 replica 不寫進 `resolv.conf`（`main` 會寫）、`freeipa_setup_dns: true` 時在任何變更前擋下、
+  promote 之後納入；FreeIPA 列出的 replica named 停掉時只印 WARNING。見
+  [evidence](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
@@ -73,6 +78,19 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 
 - 前置：inventory 至少要有一台 `freeipa-server`（或 `freeipa_setup_dns` 不是
   `false` 的 `freeipa-server-replica`）已完成安裝並健康。
+- 未設 `freeipa_setup_dns` 的 replica，自己沒有權威回答 FreeIPA 的 zone、FreeIPA 的 NS 紀錄也
+  沒列出它（通常是還沒 promote）時會被略過，並印出 `WARNING: <host> … did not answer <domain>
+  authoritatively and FreeIPA's NS records list only …`，列出 promote、改 `freeipa_replica_fqdn`、
+  啟動 named、改設 `freeipa_setup_dns: false` 四個做法。自己權威回答 zone 的 replica（例如用
+  另一個名稱安裝的）一律保留。明確設 `freeipa_setup_dns: true` 的 replica 不會被略過。
+- 寫入前會逐一問每個要寫入的 nameserver（FreeIPA server 用 `+norec`，dns tier 與
+  `freeipa_dns_client_servers` 用遞迴查詢）FreeIPA server 的 FQDN 的 A 與 AAAA
+  （`+time=2 +tries=2`，`tasks/freeipa-dns-client-nameserver-check.yml`）。只有三種情況會在改
+  任何檔案前失敗：有一台回答了卻沒有位址（NXDOMAIN、SERVFAIL、REFUSED，或 A/AAAA 都沒有，
+  代表它不服務 FreeIPA 的 zone）；明確設 `freeipa_setup_dns: true`、FreeIPA 卻沒列為 DNS
+  server 的 replica 沒有回答；沒有任何一台回答位址。此刻沒有回答（timeout、connection
+  refused）但本來就該在清單裡的（FreeIPA 列出的 DNS server、dns tier、明確寫的項目）只印
+  `WARNING`，依角色列出要檢查的地方，仍寫進 resolv.conf，由 resolver 換下一台。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，

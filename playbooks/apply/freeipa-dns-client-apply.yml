@@ -10,10 +10,13 @@
 # to use this playbook, and vice versa.
 #
 # Auto-detection (no -e required in the common case): walks
-# groups['freeipa-server'] (freeipa_setup_dns defaults true there) and
-# groups['freeipa-server-replica'] (freeipa_setup_dns defaults false
-# there — opt-in per replica), collecting each DNS-providing host's own
-# ansible_host. If THIS host is itself one of those providers, its own
+# groups['freeipa-server'] and groups['freeipa-server-replica']
+# (freeipa_setup_dns defaults to true on both, as the install playbooks
+# do; false means the host runs no named), collecting each DNS-providing
+# host's own ansible_host. A replica that leaves freeipa_setup_dns unset
+# but that FreeIPA's NS records do not list yet (not promoted) is left out
+# with a warning, and every nameserver is asked before anything is written
+# (tasks/freeipa-dns-client-resolver.yml). If THIS host is itself one of those providers, its own
 # resolver is pointed at itself (127.0.0.1) first, with the remaining
 # providers as fallback — the same outcome ipa-server-install/
 # ipa-replica-install already establish on that host, so this playbook

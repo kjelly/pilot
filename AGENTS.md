@@ -848,6 +848,22 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
      `internal/spec/spec_probe_split_args_regression_test.go::TestRegression_SpecProbesSplitInAnsible`
      檢查 spec row 能通過 Ansible 的 `split_args`(row 的註解裡有 `'` 會讓 `pilot verify`
      在 shell 執行前就失敗)。
+15. **密碼插進 shell 或 free-form `command:` 字串,會被 shell 展開或斷詞改寫**:
+   Ansible 先把值代入指令字串,shell 才解析,所以密碼裡的 `$`、反引號、`$(...)`
+   會被展開,甚至被執行;引號則會讓整行解析失敗。free-form `command:` 會先斷詞,
+   空白和引號一樣會改變內容。`no_log: true` 只隱藏輸出,擋不住這些。
+   2026-10-16 PR #92 review:replica forwarder 的
+   `printf %s "{{ ipa_admin_password }}" | kinit` 在既有 DNS replica 上重跑時,
+   `demo$x` 讓 kinit 收到 `demo`;實跑時密碼裡的 `$(touch …)` 在 replica 上以 root
+   執行。同一支 playbook 的 self-register kinit 與 primary 的 dnsconfig-mod kinit
+   也是同樣寫法。**規則**:密碼用 `ansible.builtin.command` 的 `stdin` 傳入
+   (`argv: [kinit, …]` 加 `stdin:`)。argv 元素雖然不會被改寫,但任何本機使用者都能從
+   `/proc/<pid>/cmdline` 讀到,只能用在沒有其他輸入方式的程式(FreeIPA installer)。
+   `internal/spec/secret_command_text_regression_test.go::TestRegression_NoSecretInCommandText`
+   對全部 `playbooks/**` 檢查。main 上原本就有的 33 處列在 allowlist,記錄每個
+   `<檔案>::<task 名稱>` 的 task 數:同名 task 被複製一份也會失敗,遷移後不調低數字
+   也會失敗;遷移由 #118 追蹤。`TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`
+   用真實 `ansible-playbook` 與 fake kinit 確認密碼原樣送達。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
@@ -1309,6 +1325,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 呼叫 `internal/ansible.Runner` 時不要只檢查 `err`；playbook 失敗記在 `Result.ExitCode`（見 §5.8）
 - ❌ 授權、信任、mutation 的判斷不要讀快取或 apply 當下抓的快照（見 §5.9）；要清快取才會正確的結果是 bug，不是可以寫進 evidence 的 workaround
 - ❌ shell task 用了 `pipefail` 或其他 bash 語法時，不要漏掉 `args: {executable: /bin/bash}`（見 §4.5 第 7 點）——Debian/Ubuntu 的 `/bin/sh` 是 dash，會以 rc=2 直接結束
+- ❌ 不要把密碼、token 這類秘密值插進 shell 或 free-form `command:` 字串（見 §4.5 第 15 點）——用 `stdin` 傳入；`no_log` 只隱藏輸出，擋不住 shell 展開
 - ❌ 修 bug 時不要只修發現的那一處；先 `git grep` 同類寫法，會在新程式碼重犯的要做成全 repo lint（見 §5.10）
 - ❌ 不要讓預設值、validator、實際載入各自 join 同一個路徑，也不要把 repo-relative 路徑交給 Ansible `lookup('file')`（見 §5.11）
 - ❌ 新增 gate、matcher、`changed_when` 時，不要只寫「應該通過」的測試；也要有用真實輸出證明它會觸發的案例（見 §5.12）
@@ -1487,3 +1504,4 @@ git status --short
 | 2026-10-14 | v1.49 | §4.5 新增第 14 點：`kinit` 一律寫進私有 credential cache（`tasks/freeipa-private-ccache-open.yml`/`-close.yml`），不准寫進預設 cache 後留著。修正 issue #69 列出的 10 個檔案（freeipa-server、gateway-scope、internal-endpoint、4 支 `playbooks/check/*`、NFS server decommission、dns fixture），新增全 repo lint `TestRegression_KinitUsesAPrivateCredentialCache`（已會 `kdestroy` 的 13 個檔案列入 ratchet allowlist）；被中斷的 run 留下的 cache 只由同一個執行帳號清除，別的帳號的 cache 不碰（`TestRegression_PrivateCcacheOpenLeavesOtherUsersCaches`） | pilot |
 | 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |
 | 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |
+| 2026-10-16 | v1.53 | §4.5 新增第 15 點：密碼不得插進 shell 或 free-form `command:` 字串。PR #92 的 3 個 FreeIPA kinit task（replica forwarder、replica self-register、primary dnsconfig-mod）改用 `argv` + `stdin`；新增全 repo lint `TestRegression_NoSecretInCommandText`（既有 33 處列入以 task 數計算的 ratchet allowlist，#118 追蹤）與行為測試 `TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`。#79（v1.50）、#80（v1.52）也新增列，後合併者重新編號 | pilot |

@@ -1,0 +1,9 @@
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 63307
+;; flags: qr aa ra; QUERY: 1, ANSWER: 1, AUTHORITY: 3, ADDITIONAL: 4
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 6c0c2aa38a7478c8010000006acfbcc3c9984bc7e97332da (good)
+;; ANSWER SECTION:
+v6only.ipa.pilot.internal. 86400 IN	AAAA	2001:db8::1

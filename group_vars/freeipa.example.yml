@@ -45,11 +45,31 @@ freeipa_domain: ipa.pilot.internal
 # freeipa_setup_ntp: true
 
 # FreeIPA 自己的 named 用的上游 DNS forwarder(--forwarder=...),讓 FreeIPA
-# host 的 DNS 仍能解析公網(例如自己 yum/dnf 裝套件用)。primary 預設 8.8.8.8
-# (同時設成全域 forwarders);replica 沒設時不帶 server 自己的 forwarders,沿用
-# 全域清單。單一位址、空白分隔的字串或清單都可以,primary 與 replica 解讀方式
-# 相同(tasks/freeipa-dns-forwarders.yml)。不想要任何 forwarder(改用
-# --no-forwarders)才需要覆寫成空字串或空陣列。
+# host 的 DNS 仍能解析公網(例如自己 yum/dnf 裝套件用)。primary 與 replica 用
+# 同一支 tasks/freeipa-dns-forwarders.yml,規則完全相同:
+#   - 優先順序:ipa_dns_forwarders(-e 或 inventory,有定義就用,空值也算)
+#     > freeipa_dns_forwarders > 預設值。
+#   - 預設值(兩者都沒設):primary 是 8.8.8.8(同時設成 realm 的全域
+#     forwarders);replica 是不帶 server 自己的 forwarders(--no-forwarders),
+#     沿用全域清單。
+#   - 寫法:單一位址、空白分隔的字串、"[a, b]" 字串或 YAML 清單。null、""、
+#     [] 或只有空白都代表「這台不帶 forwarder」(安裝時 --no-forwarders)。
+#   - **破壞性變更(2026-10-15)**:每次 apply 都讓 realm 的全域 forwarders
+#     (`ipa dnsconfig-mod`)與每台 FreeIPA DNS server 自己的 forwarders
+#     (`ipa dnsserver-mod <fqdn>`,named 優先用這個)等於設定值。primary
+#     明確給空值時兩者都清掉,既有 realm 也會收斂成「沒有 forwarder」;之前
+#     空值會跳過這一步,改了清單也只更新全域 forwarders,安裝時寫進 server
+#     的值(例如 8.8.8.8)一直留著。replica 沒設時清掉它自己的 forwarders,
+#     沿用全域的。清空後 FreeIPA 的 named
+#     只回答自己的 zone,其他名稱都查不到;要保留對外解析就填位址,或不要
+#     設這個變數(預設 8.8.8.8)。
+#   - 每一項都要是 IPv4/IPv6 位址(不可是 0.0.0.0、::、multicast 或帶 %zone),
+#     可以接 FreeIPA 的 " port N"(例如 "1.1.1.1 port 5353";空白分隔的字串裡
+#     "1.1.1.1 port 53" 算一項)。逗號或分號分隔、mapping、數字等寫法在安裝前
+#     就被擋下。
+#   - ipa-server-install、ipa-replica-install、ipa-dns-install 的 --forwarder
+#     只接受純位址,所以全新安裝時清單裡不能有 " port N"(會在安裝前擋下);
+#     既有 realm 的全域 forwarders 用 ipa dnsconfig-mod 套用,可以帶 port。
 # freeipa_dns_forwarders: 8.8.8.8
 
 # 是否讓任意 client(不限本機子網路)都能把這台 FreeIPA 當一般 DNS resolver
