@@ -13,11 +13,10 @@
 #   -> docker + seaweedfs-s3 (Thanos object storage) -> alertmanager ->
 #      prometheus (host-health + login-probe alert rules)
 #
-# The canary must not be looked up on a target before the fixtures publish
-# its key: SSSD serves authorized keys from its user cache, so a key that
-# changes after the first lookup only reaches a target when SSSD refreshes
-# that entry (observed 2026-10-13: up to half of entry_cache_timeout, i.e.
-# about 45 minutes with the default 90).
+# Canary creation publishes its key atomically: the already-running daemon
+# must never see a newly created identity with an empty key list. SSSD serves
+# authorized keys from its user cache, so later changes to an existing user's
+# keys still follow the rotation/cache contract documented in the runbook.
 #
 # Every value below is only a DEFAULT: -e extra vars always win. Secrets come
 # only from the vault file (ipa_admin_password,

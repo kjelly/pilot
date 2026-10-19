@@ -63,6 +63,13 @@
     ipa_fixture_user: "{{ login_probe_user | default('pilot-login-canary') }}"
     ipa_fixture_user_first: Pilot
     ipa_fixture_user_last: LoginCanary
+    # The running daemon can query this identity immediately. Its first
+    # visible directory entry must already contain the key; publishing it
+    # only in the later user-mod leaves an SSSD empty-key cache race.
+    ipa_fixture_user_ssh_public_key: >-
+      {%- set key = hostvars[groups[login_probe_fixture_probe_group | default('login-probe')][0]].login_probe_fixture_pubkey_line | default('') | trim -%}
+      {{ '' if ansible_check_mode else
+         (key if key | length > 0 else undef(hint='The probe public key must be populated before canary creation')) }}
     # The canary must never get sudo (issue #11 R1): user only.
     ipa_fixture_manage_sudorule: false
 
