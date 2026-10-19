@@ -121,7 +121,7 @@ func TestRegression_PrometheusTaggedRuntime(t *testing.T) {
 	for k, v := range map[string]any{
 		"prometheus_config_dir":                      dir,
 		"prometheus_host_data_dir":                   filepath.Join(dir, "data"),
-		"prometheus_version":                         "v2.53.0",
+		"prometheus_version":                         strings.TrimPrefix(hostHealthPromImage, "prom/prometheus:"),
 		"prometheus_retention_time":                  "1h",
 		"prometheus_scrape_interval":                 "15s",
 		"prometheus_site_label":                      "tagged-test",
