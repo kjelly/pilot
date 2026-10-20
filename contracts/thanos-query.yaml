@@ -22,6 +22,18 @@ bindings:
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
+  - {name: docker_network_name, type: string, required: false}
+  - {name: thanos_aws_access_key_id, type: string, required: true, secret: true}
+  - {name: thanos_aws_secret_access_key, type: string, required: true, secret: true}
+  - {name: thanos_compact_retention_1h, type: string, required: false}
+  - {name: thanos_compact_retention_5m, type: string, required: false}
+  - {name: thanos_compact_retention_raw, type: string, required: false}
+  - {name: thanos_query_store_group, type: string, required: false}
+  - {name: thanos_s3_alias, type: string, required: false}
+  - {name: thanos_s3_bucket, type: string, required: false}
+  - {name: thanos_s3_endpoint, type: string, required: false}
+  - {name: thanos_query_sidecar_grpc_port, type: integer, required: false}
+  - {name: thanos_s3_port, type: integer, required: false}
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
   - {name: thanos_query_alias, type: string, required: false, secret: false}
 endpoints:

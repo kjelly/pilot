@@ -64,9 +64,17 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 | `pilot_access_gateway_recording_session_store_url` | `pilot-session-store` 的 ingest URL，必須是 `https://`；未設定時 gateway 不簽發任何 ingest token，effective mode 為 terminal 的連線一律 deny `recording_backend_unavailable` | 否 |
 | `pilot_access_gateway_recording_session_store_ca_file` | 驗證 store TLS 憑證用的 CA | 否，預設 `/etc/ipa/ca.crt` |
 | `pilot_access_gateway_recording_allow_downgrade` | `true` 才允許把已安裝的錄影等級或 session store 設定調低（captive-transport spec §12.2 的降級守門） | 否，預設 `false` |
-| `pilot_access_gateway_recording_session_store_ingest_token_file` | **已不再使用**（舊版靜態 bearer token 檔的路徑）。仍設定時，AG82 把這個路徑也一併刪除並印出提示，請從 inventory 移除 | 否 |
 | `pilot_session_store_ingest_signing_key` | PIT1 ingest token 的 HMAC signing key（64 個 hex 字元），必須與 `pilot-session-store` 的同名變數相同；只能來自 vault，安裝成 `/etc/pilot/session-store-ingest-signing.key`（0400） | 設定 `pilot_access_gateway_recording_session_store_url` 時必填 |
 | `pilot_access_gateway_transport_enabled` | captive opaque SSH transport（`pilot-transport-v1`）；見 captive-transport spec §12.3 | 否，預設 `false` |
+
+
+## 1.6 單次操作與相容設定
+
+下列舊設定只供遷移清理；不再是可設定的 recording backend 輸入。
+
+| 變數 | 說明 | 用途 |
+|---|---|---|
+| `pilot_access_gateway_recording_session_store_ingest_token_file` | **已不再使用**（舊版靜態 bearer token 檔的路徑）。仍設定時，AG82 把這個路徑也一併刪除並印出提示，請從 inventory 移除 | 否 |
 
 ## Checks
 

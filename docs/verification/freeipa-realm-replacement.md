@@ -26,6 +26,14 @@
 | `freeipa_realm_replacement_new_server_ip` | 從 client 可路由的新 server IP | 是 |
 | `freeipa_realm_replacement_client_fqdn` | client 在新 domain 的 FQDN | 是 |
 | `freeipa_realm_replacement_verify_user` | 新 realm 中用於 SSSD 查詢的帳號；預設 `admin` | 否 |
+
+
+## 1.6 單次操作與相容設定
+
+下列核准只由本次 `-e` 提供，不是可持久化的 inventory 輸入；預設拒絕執行 realm replacement。
+
+| 變數 | 說明 | 用途 |
+|---|---|---|
 | `freeipa_realm_replacement_ticket` | 變更單／核准識別；寫入本機 migration marker | 是 |
 | `freeipa_realm_replacement_confirm` | 必須明確為 `true` 才允許 un-enroll | 是 |
 

@@ -47,7 +47,6 @@
     thanos_store_data_dir: /var/lib/pilot/thanos-store
     thanos_compact_data_dir: /var/lib/pilot/thanos-compact
     thanos_config_dir: /etc/pilot/thanos
-    docker_network_name: pilot-metrics
     # thanos_s3_target_host is DELIBERATELY NOT declared here (not even as
     # `default('')`) — a play-level `vars:` entry outranks group_vars/
     # host_vars, so a hardcoded "" would silently shadow any value set via
@@ -56,8 +55,6 @@
     # below that references it uses `| default('', true)` at the point of
     # use instead, so an unset value still resolves to "" rather than an
     # undefined-variable error.
-    thanos_s3_alias: thanos-s3-backend
-    thanos_s3_port: 8333
     # Host-published port for Thanos Query's own HTTP API (what
     # dashboard-apply.yml's thanos_query_port talks to). Defaults to 10912,
     # NOT the container's internal 10902 listen port: a per-site
@@ -101,6 +98,13 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
+        thanos_s3_alias: "{{ thanos_s3_alias | default('thanos-s3-backend') }}"
+        thanos_s3_port: "{{ thanos_s3_port | default(8333) }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

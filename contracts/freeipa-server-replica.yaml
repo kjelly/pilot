@@ -21,6 +21,17 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
 groupVars:
+  - {name: ipa_enroll_principal, type: string, required: false}
+  - {name: freeipa_domain, type: string, required: false}
+  - {name: freeipa_realm, type: string, required: false}
+  - {name: freeipa_server_fqdn, type: string, required: false}
+  - {name: freeipa_replica_ip, type: string, required: false}
+  - {name: freeipa_replica_fqdn, type: string, required: false}
+  - {name: freeipa_replica_setup_ca, type: boolean, required: false}
+  - {name: freeipa_setup_dns, type: boolean, required: false}
+  - {name: freeipa_setup_ntp, type: boolean, required: false}
+  - {name: freeipa_dns_forwarders, type: stringOrStringList, required: false}
+  - {name: ipa_dns_forwarders, type: stringOrStringList, required: false}
   - {name: freeipa_server_ip, type: string, required: true, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
 stagePolicy: {variable: stage, default: sandbox}

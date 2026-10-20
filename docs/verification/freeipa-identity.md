@@ -126,19 +126,29 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | 變數名稱 | 說明/用途 | 是否必填 |
 |---------|----------|---------|
 | `freeipa_roster_file` | canonical roster 檔路徑；以 `include_vars: name=freeipa_roster` 載入，避免 `groups`/`hosts` magic-variable collision | canonical 必填 |
-| `freeipa.admin.principal` / `freeipa.admin.password` | canonical kinit principal/密碼；密碼由 vault 保護，禁止 hard-code | canonical 必填 |
-| `schema_version` / `users` / `groups` | canonical identity primitives，`1` 或 `2`；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |
-| `hostgroups[].membership.hostgroups` | 巢狀 hostgroup 成員（v1/v2 皆支援，authoritative，雙向 diff）；本檔 C19 驗證 | 否 |
-| `netgroups` | schema-v2-only：可含 users/groups/hosts/hostgroups/nested netgroups，命名須符合 `^ng-[a-z0-9][a-z0-9_.-]*$`；`internal/inventory/roster_netgroup.go` 驗證 unique/collision/reference/cycle | 否（v1 roster 宣告此欄位會在 top-level-keys gate fail closed）|
-| `ipa_admin_password` | kinit admin 用密碼；由 vault file 注入，禁止 hard-code | 是 |
-| `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
-| `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
+| `ipa_admin_password` | vault 的 kinit 密碼；canonical roster 的 `freeipa.admin.password` 可作 fallback | legacy 必填；canonical 可從 roster 取得 |
+| `freeipa_domain` / `freeipa_realm` | inventory 的 domain/realm；realm 預設由 domain 轉大寫 | 否 |
 
 > Checklist §2 查的是 fixture（`playbooks/test/fixtures/freeipa-identity-fixtures.yml`）
 > 套用後的 LDAP 狀態，走 **root 透過 ldapi unix socket 的 SASL EXTERNAL autobind**——
 > 跟 `freeipa-server.md` 的 `dsconf`（走 ldapi、免 Directory Manager 密碼）同一個機制，
 > 而不是 `ipa` CLI（那需要一張 Kerberos ticket，checklist 指令不能內嵌管理密碼）。
 > Socket 路徑固定為 `/run/slapd-IPA-PILOT-INTERNAL.socket`（與 realm 對應）。
+
+Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
+
+## 1.6 衍生值與檔案資料（非 inventory 輸入）
+
+下列欄位屬於 canonical roster，或僅供 legacy `-e @roster` 相容；不宣告成 inventory `groupVars`。`ipa_domain` / `ipa_realm` 是 `freeipa_domain` / `freeipa_realm` 的內部別名。
+
+| 欄位 | 說明 | 來源 |
+|---|---|---|
+| `freeipa.admin.principal` / `freeipa.admin.password` | canonical kinit principal/密碼；密碼由 vault 保護，禁止 hard-code | canonical 必填 |
+| `schema_version` / `users` / `groups` | canonical identity primitives，`1` 或 `2`；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |
+| `hostgroups[].membership.hostgroups` | 巢狀 hostgroup 成員（v1/v2 皆支援，authoritative，雙向 diff）；本檔 C19 驗證 | 否 |
+| `netgroups` | schema-v2-only：可含 users/groups/hosts/hostgroups/nested netgroups，命名須符合 `^ng-[a-z0-9][a-z0-9_.-]*$`；`internal/inventory/roster_netgroup.go` 驗證 unique/collision/reference/cycle | 否（v1 roster 宣告此欄位會在 top-level-keys gate fail closed）|
+| `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
+| `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
 
 ## 2. Checklist
 

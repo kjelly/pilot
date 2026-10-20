@@ -57,10 +57,6 @@
     staging_attested_within_hours: 168
     grafana_version: "11.1.0"
     loki_version: "2.9.8"
-    grafana_host_data_dir: /var/lib/pilot/grafana
-    loki_host_data_dir: /var/lib/pilot/loki
-    dashboard_config_dir: /etc/pilot/dashboard
-    docker_network_name: pilot-metrics
     # thanos_query_target_host is DELIBERATELY NOT declared here (not even
     # as `default('')`) — a play-level `vars:` entry outranks group_vars/
     # host_vars, so a hardcoded "" would silently shadow any value set via
@@ -101,6 +97,14 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        grafana_host_data_dir: "{{ grafana_host_data_dir | default('/var/lib/pilot/grafana') }}"
+        loki_host_data_dir: "{{ loki_host_data_dir | default('/var/lib/pilot/loki') }}"
+        dashboard_config_dir: "{{ dashboard_config_dir | default('/etc/pilot/dashboard') }}"
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
       tags: [always]
 
     # Auto-fallback for the common single-inventory case: if the caller left

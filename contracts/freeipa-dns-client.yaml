@@ -28,6 +28,7 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
 groupVars:
+  - {name: freeipa_setup_dns, type: boolean, required: false}
   - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
   # Explicit override; empty (the default) means "auto-detect from
   # groups['freeipa-server']/groups['freeipa-server-replica']" — see the

@@ -27,6 +27,8 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
+  - {name: wazuh_fim_directories, type: stringList, required: false}
+  - {name: wazuh_repo_channel, type: string, required: false}
   - {name: wazuh_manager_host, type: string, required: true, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}

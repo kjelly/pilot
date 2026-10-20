@@ -751,7 +751,7 @@ func validateGroupVars(groupVars []GroupVar, rules []InputRule) error {
 			return fmt.Errorf("duplicate group var %q", groupVar.Name)
 		}
 		switch groupVar.Type {
-		case "string", "stringList", "stringOrStringList", "integer", "boolean", "duration":
+		case "string", "stringList", "stringOrStringList", "objectList", "integer", "boolean", "duration":
 		default:
 			return fmt.Errorf("group var %s has invalid type %q", groupVar.Name, groupVar.Type)
 		}
@@ -773,6 +773,10 @@ func validateDefault(groupVar GroupVar) error {
 		return nil
 	}
 	switch groupVar.Type {
+	case "objectList":
+		if !ValueMatchesType(groupVar.Type, groupVar.Default) {
+			return fmt.Errorf("group var %s default must be objectList", groupVar.Name)
+		}
 	case "stringOrStringList":
 		if !ValueMatchesType(groupVar.Type, groupVar.Default) {
 			return fmt.Errorf("group var %s default must be stringOrStringList", groupVar.Name)

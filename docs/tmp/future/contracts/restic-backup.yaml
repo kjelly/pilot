@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/restic-backup.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: restic-backup
 role: restic-backup
@@ -27,6 +27,9 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
+  - {name: restic_backup_randomized_delay, type: string, required: false}
+  - {name: restic_lock_retry, type: string, required: false}
+  - {name: restic_backup_timer_persistent, type: boolean, required: false}
   - {name: restic_s3_target_host, type: string, required: false, default: "", secret: false}
   - {name: restic_repository, type: string, required: false, default: "s3:http://s3-backup-server:8333/pilot-restic-backup", secret: false}
   - {name: restic_s3_port, type: integer, required: false, default: 8333, secret: false}

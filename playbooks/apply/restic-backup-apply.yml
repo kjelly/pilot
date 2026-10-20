@@ -44,14 +44,6 @@
     confirm_prod: false
     staging_attested_within_hours: 168
     restic_s3_alias: s3-backup-server
-    # Do not catch up a missed timer invocation as soon as the playbook enables
-    # it: that would run a real snapshot while apply is still configuring every
-    # host in this shared repository.  Normal runs are spread over this window.
-    restic_backup_timer_persistent: false
-    restic_backup_randomized_delay: 1h
-    # Every repository-writing command waits for a concurrent host instead of
-    # treating its live restic lock as an apply failure.
-    restic_lock_retry: 120s
     restic_env_path: /etc/pilot/restic-env
     restic_script_path: /usr/local/bin/pilot-restic-backup.sh
 
@@ -84,6 +76,15 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        # Apply must not catch up a missed timer and start an immediate backup.
+        restic_backup_timer_persistent: "{{ restic_backup_timer_persistent | default(false) }}"
+        restic_backup_randomized_delay: "{{ restic_backup_randomized_delay | default('1h') }}"
+        # Wait for another writer rather than treating its lock as a failure.
+        restic_lock_retry: "{{ restic_lock_retry | default('120s') }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

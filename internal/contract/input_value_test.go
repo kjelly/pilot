@@ -38,6 +38,14 @@ func TestValueMatchesType(t *testing.T) {
 		{"stringList", []any{"a"}, true},
 		{"stringList", []string{"a"}, true},
 		{"stringList", "a", false},
+		{"objectList", []any{}, true},
+		{"objectList", []any{map[string]any{"name": "example.test", "stub_addr": []any{"192.0.2.1"}}}, true},
+		{"objectList", []map[string]any{{"name": "example.test"}}, true},
+		{"objectList", []any{"example.test"}, false},
+		{"objectList", []any{nil}, false},
+		{"objectList", map[string]any{"name": "example.test"}, false},
+		{"objectList", "[]", false},
+		{"objectList", nil, false},
 		{"stringOrStringList", "1.1.1.1 port 53 9.9.9.9", true},
 		{"stringOrStringList", "", true},
 		{"stringOrStringList", nil, true},
@@ -54,6 +62,21 @@ func TestValueMatchesType(t *testing.T) {
 	for _, tc := range cases {
 		if got := ValueMatchesType(tc.typ, tc.value); got != tc.want {
 			t.Errorf("ValueMatchesType(%q, %#v) = %v, want %v", tc.typ, tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestObjectListDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		valid bool
+	}{
+		{nil, true}, {[]any{}, true}, {[]any{map[string]any{"name": "example.test"}}, true},
+		{[]any{"example.test"}, false}, {"[]", false}, {map[string]any{}, false},
+	} {
+		err := validateGroupVars([]GroupVar{{Name: "zones", Type: "objectList", Default: tc.value}}, nil)
+		if (err == nil) != tc.valid {
+			t.Errorf("default %#v: error=%v, want valid=%v", tc.value, err, tc.valid)
 		}
 	}
 }

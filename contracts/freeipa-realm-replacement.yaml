@@ -16,6 +16,13 @@ dependencies:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
+  - {name: freeipa_realm_replacement_client_fqdn, type: string, required: true}
+  - {name: freeipa_realm_replacement_new_domain, type: string, required: true}
+  - {name: freeipa_realm_replacement_new_realm, type: string, required: true}
+  - {name: freeipa_realm_replacement_new_server_fqdn, type: string, required: true}
+  - {name: freeipa_realm_replacement_new_server_ip, type: string, required: true}
+  - {name: freeipa_realm_replacement_old_realm, type: string, required: true}
+  - {name: freeipa_realm_replacement_verify_user, type: string, required: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}

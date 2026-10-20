@@ -91,20 +91,22 @@ pilot vm-target test --name ipa-replica \
 | 變數名稱 | 說明/用途 | 是否必填 |
 |---------|----------|---------|
 | `ipa_admin_password` | FreeIPA `admin` 帳號密碼；由 vault file 注入，禁止 hard-code | 是 |
-| `ipa_server_ip` | **既有 primary** 的 LAN IP（沿用 `freeipa-client-apply.yml` 的同名同義，指「要對它 enroll 的既有伺服器」，不是這台自己）| 是 |
-| `ipa_replica_ip` | **這台自己**對其他主機可路由的 LAN IP；寫進 `/etc/hosts` 讓自己的 FQDN 解析到非 loopback | 是 |
-| `ipa_domain` | Kerberos/DNS domain，**必須跟 primary 完全一致**，預設 `ipa.pilot.internal` | 否（有預設）|
-| `ipa_realm` | Kerberos realm，**必須跟 primary 完全一致**，預設 `IPA.PILOT.INTERNAL` | 否（有預設）|
-| `ipa_server_fqdn` | **既有 primary** 的 FQDN，預設 `ipa1.{{ ipa_domain }}` | 否（有預設）|
-| `ipa_replica_fqdn` | **這台自己**的 FQDN，預設 `ipa2.{{ ipa_domain }}`（**不可**與 `ipa_server_fqdn` 或既有其它 replica 相同）| 否（有預設）|
-| `ipa_replica_setup_ca` | 這台是否同時擔任 CA replica，預設 `true`（HA 建議至少 2 台有 CA；但 CA **renewal master** 角色不會跟著轉移，見 §5）| 否（有預設）|
-| `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`）。預設 `true`，跟 primary 的預設值一致（docs/tmp/now/freeipa-client-ha-spec.md §10：replica 繼承 realm 的 effective DNS policy，避免只有一台 DNS provider 的 SPOF）；讀的是同一個 `freeipa_setup_dns` 來源變數，不是「即時讀 primary 的活體狀態」，兩邊各自覆寫仍會分歧 | 否（有預設）|
+| `freeipa_server_ip` | **既有 primary** 的 LAN IP（沿用 `freeipa-client-apply.yml` 的同名同義，指「要對它 enroll 的既有伺服器」，不是這台自己）| 是 |
+| `freeipa_replica_ip` | **這台自己**對其他主機可路由的 LAN IP；寫進 `/etc/hosts` 讓自己的 FQDN 解析到非 loopback | 是 |
+| `freeipa_domain` | Kerberos/DNS domain，**必須跟 primary 完全一致**，預設 `ipa.pilot.internal` | 否（有預設）|
+| `freeipa_realm` | Kerberos realm，**必須跟 primary 完全一致**，預設 `IPA.PILOT.INTERNAL` | 否（有預設）|
+| `freeipa_server_fqdn` | **既有 primary** 的 FQDN，預設 `ipa1.{{ ipa_domain }}` | 否（有預設）|
+| `freeipa_replica_fqdn` | **這台自己**的 FQDN，預設 `ipa2.{{ ipa_domain }}`（**不可**與 `freeipa_server_fqdn` 或既有其它 replica 相同）| 否（有預設）|
+| `freeipa_replica_setup_ca` | 這台是否同時擔任 CA replica，預設 `true`（HA 建議至少 2 台有 CA；但 CA **renewal master** 角色不會跟著轉移，見 §5）| 否（有預設）|
+| `freeipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務（語意同 `freeipa-server.md`）。預設 `true`，跟 primary 的預設值一致（docs/tmp/now/freeipa-client-ha-spec.md §10：replica 繼承 realm 的 effective DNS policy，避免只有一台 DNS provider 的 SPOF）；讀的是同一個 `freeipa_setup_dns` 來源變數，不是「即時讀 primary 的活體狀態」，兩邊各自覆寫仍會分歧 | 否（有預設）|
 | `freeipa_dns_forwarders`（`ipa_dns_forwarders` 有定義時優先，空值也算） | 當啟用 DNS 時，這台 replica 自己的上游 DNS 轉發器（install 的 `--forwarder`）。清單、單一位址或空白分隔字串皆可，每一項都要是 IPv4/IPv6 位址；FreeIPA 的 `<位址> port <N>` 寫法 `ipa-replica-install`／`ipa-dns-install` 不接受，安裝前就擋下（裝好之後再帶 port 重跑即可）；null、`""`、`[]` 是不帶 forwarder。DNS 裝好之後，每次 apply 都用 `ipa dnsserver-mod <ipa_replica_fqdn>` 讓這台 server 自己的 forwarders 等於設定值（空值就清掉，沿用全域 forwarders；2026-10-15 起，之前只有安裝時會設）。與 primary 共用 `tasks/freeipa-dns-forwarders.yml`，優先順序與寫法完全相同（issue #68），只有兩者都沒設時的預設不同：replica 是 `[]`（`--no-forwarders`，沿用 primary 設定的全域 forwarders），primary 是 8.8.8.8 | 否（有預設）|
-| `ipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步（語意同 `freeipa-server.md`），預設 `false` | 否（有預設）|
+| `freeipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步（語意同 `freeipa-server.md`），預設 `false` | 否（有預設）|
 
 > Realm 後綴 DN 與 389-ds instance 名的推導規則與 `freeipa-server.md` §1.5 相同（同一個 realm）。
 > 換 domain/realm 時，本檔與 `freeipa-server.md` 要**一起換**——兩份 spec 描述的是同一個 realm 的不同節點。
 
+
+Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_*` realm/server/DNS 別名由上述 `freeipa_*` 輸入推導；既有單次 `-e` 別名覆寫仍相容，不是 inventory 的設定介面。
 ## 2. Checklist
 
 > 指令以 target 上的 **SSH 使用者**身分執行（`pilot verify` 走 ansible ad-hoc）。

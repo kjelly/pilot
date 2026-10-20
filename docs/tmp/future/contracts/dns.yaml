@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/dns.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: dns
 role: dns
@@ -21,7 +21,14 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
-  - {name: dns_upstream, type: stringList, required: false, default: [1.1.1.1], secret: false}
+  - {name: dns_listen_addr, type: string, required: false}
+  - {name: dns_provider, type: string, required: false}
+  - {name: freeipa_client_topology_mode, type: string, required: false}
+  - {name: freeipa_domain, type: string, required: false}
+  - {name: freeipa_server_fqdn, type: string, required: false}
+  - {name: freeipa_setup_dns, type: boolean, required: false}
+  - {name: dns_zones, type: objectList, required: false}
+  - {name: dns_upstream, type: stringOrStringList, required: false, default: [1.1.1.1], secret: false}
   - {name: dns_freeipa_zones, type: stringList, required: false, default: [], secret: false}
   - {name: dns_stub_zones, type: stringList, required: false, default: [], secret: false}
   - {name: dns_access_control, type: stringList, required: false, default: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16], secret: false}

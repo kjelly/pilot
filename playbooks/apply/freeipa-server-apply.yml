@@ -131,16 +131,12 @@
     # consume one of the four single-threaded IPA WSGI workers.
     ipa_httpd_wsgi_socket_timeout: 300
 
-    # DM password defaults to the admin password unless explicitly given
-    ipa_dm_password: "{{ ipa_admin_password }}"
-
     # 389-ds (Directory Server) audit log — records every LDAP write op (and,
     # via auditfaillog, denied writes) so directory mutations are attributable.
     # Off by default in 389-ds; enabled below unless ipa_enable_audit_log=false.
     # The instance name derives from the realm (IPA.PILOT.INTERNAL ->
     # slapd-IPA-PILOT-INTERNAL); audit file lands in
     # /var/log/dirsrv/<instance>/audit. Spec rows C14–C16.
-    ipa_enable_audit_log: true
     ipa_ds_instance: "slapd-{{ ipa_realm | replace('.', '-') }}"
     # systemd's dirsrv@<instance>.service does NOT take the "slapd-" prefix
     # (that prefix only applies to filesystem paths under /etc|var/lib|var/log
@@ -201,6 +197,14 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        # Keep the credential out of output, including the resolved fact.
+        ipa_dm_password: "{{ ipa_dm_password | default(ipa_admin_password) }}"
+        ipa_enable_audit_log: "{{ ipa_enable_audit_log | default(true) }}"
+      no_log: true
       tags: [always]
 
     # noqa command-instead-of-module - systemctl is used only for a read-only health probe

@@ -37,6 +37,16 @@ remediation:
       requiresApproval: true
       verification: {spec: docs/verification/alertmanager.md}
       preflight: {requireIdempotencyEvidence: true, requireDependencyHealth: true}
+groupVars:
+  - {name: alertmanager_config, type: string, required: false}
+  - {name: alertmanager_config_dir, type: string, required: false}
+  - {name: alertmanager_host_data_dir, type: string, required: false}
+  - {name: alertmanager_receiver_mode, type: string, required: false}
+  - {name: alertmanager_teams_proxy_image, type: string, required: false}
+  - {name: alertmanager_teams_webhook_url, type: string, required: false, secret: true}
+  - {name: alertmanager_version, type: string, required: false}
+  - {name: docker_network_name, type: string, required: false}
+  - {name: alertmanager_teams_proxy_port, type: integer, required: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

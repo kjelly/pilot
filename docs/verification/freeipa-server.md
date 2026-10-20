@@ -60,22 +60,30 @@ httpd 的 mod_auth_gssapi 取不到自己的 `HTTP/…` acceptor 憑證（SPNEGO
 | 變數名稱 | 說明/用途 | 是否必填 |
 |---------|----------|---------|
 | `ipa_admin_password` | FreeIPA `admin` 帳號密碼（首次安裝時同時設為 Directory Manager 密碼，除非另給 `ipa_dm_password`）；由 vault file 注入，禁止 hard-code | 是 |
-| `ipa_server_ip` | 本 host 對其他主機可路由的 LAN IP；寫進 `/etc/hosts` 讓 FQDN 解析到非 loopback（FreeIPA 安裝硬性要求）| 是 |
-| `ipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal` | 否（有預設）|
-| `ipa_realm` | Kerberos realm，預設 `IPA.PILOT.INTERNAL`（= `ipa_domain` 全大寫）| 否（有預設）|
-| `ipa_server_fqdn` | server FQDN，預設 `ipa1.{{ ipa_domain }}`（**不可** == `ipa_domain`）| 否（有預設）|
+| `freeipa_server_ip` | 本 host 對其他主機可路由的 LAN IP；寫進 `/etc/hosts` 讓 FQDN 解析到非 loopback（FreeIPA 安裝硬性要求）| 是 |
+| `freeipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal` | 否（有預設）|
+| `freeipa_realm` | Kerberos realm，預設 `IPA.PILOT.INTERNAL`（= `freeipa_domain` 全大寫）| 否（有預設）|
+| `freeipa_server_fqdn` | server FQDN，預設 `ipa1.{{ ipa_domain }}`（**不可** == `freeipa_domain`）| 否（有預設）|
 | `ipa_dm_password` | Directory Manager 密碼；不給則沿用 `ipa_admin_password` | 否 |
 | `ipa_enable_audit_log` | 是否開啟 389-ds 目錄服務稽核日誌（寫入 + 失敗寫入），預設 `true`；checklist C14–C16 依賴此為 `true` | 否（有預設）|
-| `ipa_ds_instance` | 389-ds instance 名，預設 `slapd-{{ ipa_realm | replace('.', '-') }}`（= `slapd-IPA-PILOT-INTERNAL`）| 否（有預設）|
-| `ipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務，預設 `true` | 否（有預設）|
+| `freeipa_setup_dns` | 是否啟用 FreeIPA 內建 DNS 服務，預設 `true` | 否（有預設）|
 | `ipa_dns_forwarders`（有定義時優先，空值也算）、否則 `freeipa_dns_forwarders` | 當啟用 DNS 時的上游 DNS 轉發器，安裝時的 `--forwarder`，也是 realm 的全域 forwarders 與這台 server 自己的 forwarders（每次 apply 用 `ipa dnsconfig-mod` 與 `ipa dnsserver-mod <fqdn>` 套用，既有 realm 也會收斂；server 自己的 forwarders 對它的 named 優先於全域）。兩者都沒設時預設 `['8.8.8.8']`（不給任何值仍要有可用的公網解析，見 §8 v1.6）。寫法與檢查見 `tasks/freeipa-dns-forwarders.yml`：每一項是 IPv4／IPv6 位址，可接 ` port N`。**明確給空值**（`""`、`[]`、null）代表沒有 forwarder：安裝時 `--no-forwarders`，既有 realm 用 `--forwarder=` 清掉全域與這台 server 的 forwarders（v1.9 起；之前會跳過，留著舊值）| 否（有預設）|
-| `ipa_dns_allow_any_recursion` | 當啟用 DNS 時，是否把 named.conf 的 `allow-recursion`/`allow-query-cache` 從 FreeIPA 預設的 `trusted_clients`（僅 localhost/localnets）開放成 `any`，讓任意 client 都能把此host當一般 forwarding resolver 使用，預設 `true`（見 §8 2026-08-18 的 open-resolver 風險評估）| 否（有預設）|
-| `ipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步，預設 `true` | 否（有預設）|
+| `freeipa_dns_allow_any_recursion` | 當啟用 DNS 時，是否把 named.conf 的 `allow-recursion`/`allow-query-cache` 從 FreeIPA 預設的 `trusted_clients`（僅 localhost/localnets）開放成 `any`，讓任意 client 都能把此host當一般 forwarding resolver 使用，預設 `true`（見 §8 2026-08-18 的 open-resolver 風險評估）| 否（有預設）|
+| `freeipa_setup_ntp` | 是否由 FreeIPA 管理/啟用 NTP 同步，預設 `true` | 否（有預設）|
 
 > Realm 後綴 DN：`ipa.pilot.internal` → `dc=ipa,dc=pilot,dc=internal`（checklist C11/C13 用到）。
 > 換 domain 時，C11/C13 的 base DN 也要跟著換。
 > 389-ds instance 名由 realm 推導：`IPA.PILOT.INTERNAL` → `slapd-IPA-PILOT-INTERNAL`（`.`→`-`），
 > 稽核日誌落在 `/var/log/dirsrv/slapd-IPA-PILOT-INTERNAL/audit`（C14–C16 用到）。換 realm 時也要跟著換。
+
+
+Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_*` realm/server/DNS 別名由上述 `freeipa_*` 輸入推導；既有單次 `-e` 別名覆寫仍相容，不是 inventory 的設定介面。
+
+## 1.6 衍生值與檔案資料（非 inventory 輸入）
+
+| 欄位 | 說明 | 來源 |
+|---|---|---|
+| `ipa_ds_instance` | 389-ds instance 名，預設 `slapd-{{ ipa_realm | replace('.', '-') }}`（= `slapd-IPA-PILOT-INTERNAL`）| 否（有預設）|
 
 ## 2. Checklist
 

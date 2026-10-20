@@ -79,7 +79,6 @@
     prometheus_host_data_dir: /var/lib/pilot/prometheus
     prometheus_config_dir: /etc/pilot/prometheus
     thanos_config_dir: /etc/pilot/thanos
-    docker_network_name: pilot-metrics
     # prometheus_site_label / thanos_s3_target_host / alertmanager_target_host
     # / node_exporter_targets are DELIBERATELY NOT declared here (not even as
     # `default('')`). Ansible
@@ -100,12 +99,10 @@
     # documents it as an inventory override, and a play-level default
     # would silently shadow that value (AGENTS.md §4.5 item 3). The
     # Prometheus container task reads it with `| default('24h', true)`.
-    prometheus_scrape_configs: |
+    prometheus_default_scrape_configs: |
       - job_name: prometheus
         static_configs:
           - targets: ["localhost:9090"]
-    thanos_s3_alias: thanos-s3-backend
-    thanos_s3_port: 8333
     # node_exporter_basic_auth_password is DELIBERATELY NOT
     # declared here, same undeclared-secret convention as
     # thanos_aws_access_key_id below — it must be the SAME value given to
@@ -136,7 +133,6 @@
     # why the contract is a file path, not an inline string (mirroring
     # the trade-off taken for `prometheus_scrape_configs` would clash
     # with Jinja on the `{{ ... }}` inside alert annotations).
-    prometheus_alert_rules_file: files/pilot-alert-rules-seed.yml
     # SNMPTargetDown/SNMPExporterDown seed (SNMP monitoring integration
     # spec §8.4) — a second, independently overridable rule_files entry so
     # it never has to be hand-merged into prometheus_alert_rules_file.
@@ -228,6 +224,15 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
+        thanos_s3_alias: "{{ thanos_s3_alias | default('thanos-s3-backend') }}"
+        thanos_s3_port: "{{ thanos_s3_port | default(8333) }}"
+        prometheus_alert_rules_file: "{{ prometheus_alert_rules_file | default('files/pilot-alert-rules-seed.yml') }}"
+        prometheus_scrape_configs: "{{ prometheus_scrape_configs | default(prometheus_default_scrape_configs) }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

@@ -45,10 +45,6 @@
     confirm_staging: false
     confirm_prod: false
     staging_attested_within_hours: 168
-    alertmanager_version: "v0.27.0"
-    alertmanager_host_data_dir: /var/lib/pilot/alertmanager
-    alertmanager_config_dir: /etc/pilot/alertmanager
-    docker_network_name: pilot-metrics
     # Keep the safe stub separate from the operator-supplied
     # alertmanager_config. A value in group_vars or the vault must be able to
     # override this default; defining both under play vars makes the inventory
@@ -124,8 +120,6 @@
           webhook_configs:
             - url: "http://pilot-alertmanager-teams-proxy:8095/webhook"
               send_resolved: true
-    alertmanager_teams_proxy_port: 8095
-    alertmanager_teams_proxy_image: "python:3.12-alpine"
 
   pre_tasks:
     - name: Resolve the requested Alertmanager receiver mode
@@ -265,6 +259,16 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        alertmanager_version: "{{ alertmanager_version | default('v0.27.0') }}"
+        alertmanager_host_data_dir: "{{ alertmanager_host_data_dir | default('/var/lib/pilot/alertmanager') }}"
+        alertmanager_config_dir: "{{ alertmanager_config_dir | default('/etc/pilot/alertmanager') }}"
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
+        alertmanager_teams_proxy_port: "{{ alertmanager_teams_proxy_port | default(8095) }}"
+        alertmanager_teams_proxy_image: "{{ alertmanager_teams_proxy_image | default('python:3.12-alpine') }}"
       tags: [always]
 
     - name: "Gate: effective Alertmanager configuration is non-empty"
