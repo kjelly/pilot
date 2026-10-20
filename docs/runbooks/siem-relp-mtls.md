@@ -6,21 +6,22 @@
 
 ## 0.5 目前有效的事實快照
 
-2026-10-20，候選 `be23874ca4153ed009671b96ae21c239b6061267`，
-tree `b92729e5be05fa98cef56f0ef1ca6c2c1014ad96`，由乾淨隔離 checkout 執行。
+2026-10-20，候選 `34cfabea416eb9645aaa323e541198ae39bbbe96`，
+tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`，正式 target run 由乾淨隔離 checkout 執行。
 實際 inventory：`log-server = aq-log`；
-`audit-log-forwarding = aq-log, aq-ubuntu, aq-el`。前兩台 Ubuntu 24.04、後者 AlmaLinux 9
+`audit-log-forwarding = aq-log, aq-ubuntu, aq-el`。前兩台 Ubuntu 24.04.4、後者 AlmaLinux 9.8
 （SELinux Enforcing）；對齊採 A，中央主機也部署 forwarding 以提供本機 selftest。
-測試使用獨立 CA 與每台私密 PEM（`siem_relp_ca_pem`、`siem_relp_cert_pem`、
+使用獨立測試 CA 與私密 PEM 輸入（`siem_relp_ca_pem`、`siem_relp_cert_pem`、
 `siem_relp_key_pem`），未使用正式 vault／PKI。
 
-Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed=0**；
-整庫 build、vet、race 及阻擋性 playbook 檢查通過。重啟及停機補送各 **1,440/1,440**，
-落盤後重啟 client **72,000/72,000**、重複 **4**。mTLS 負例、輪替、rollback、peer 撤除、
-TCP 私密材料退役及重新啟用均通過。decommission 保留 **6,000/6,000** 待送 ID 與
-9 個 spool 檔案的原 SHA256。測試 VM 已全部清理，共用 cache services 維持運行。
+Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed=0**。
+三台 × 四種 TLS 狀態的 **12 項** rollback 負例、兩種 OS 的 C19 程序保留均通過；
+負例後再次 **77/77**、全鏈三台 **changed=0**。整庫普通 Go、race、build、vet、
+golangci-lint 與阻擋性 playbook／CI 同等檢查通過；L2 ansible-lint 仍有 advisory findings。
+測試 VM 已清理，共用 cache services 保留運行。
 
-完整版本、image／source 指紋與驗收範圍見 [本輪證據摘要](../evidence/siem-relp-mtls/2026-10-20-be23874c.md)。
+本輪未重跑大流量、輪替與 decommission；歷史結果保留原候選歸屬。
+完整版本、指紋與驗證範圍見 [本輪證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 部署契約
 

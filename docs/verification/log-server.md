@@ -6,11 +6,11 @@
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `be23874ca4153ed009671b96ae21c239b6061267`，
-> tree `b92729e5be05fa98cef56f0ef1ca6c2c1014ad96`。全新三機 L3/L4 通過，
-> receiver 11/11、sender 66/66、L6 三台 changed=0。RELP/classic 的重啟與停機補送
-> 各 1,440/1,440；落盤重啟 72,000/72,000，另有 4 筆重複。輪替、撤除及 decommission 通過。
-> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-be23874c.md)。
+> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
+> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
+> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
+> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
+> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 目標系統
 
