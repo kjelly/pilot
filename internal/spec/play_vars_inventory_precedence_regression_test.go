@@ -405,9 +405,9 @@ var playVarsCases = []playVarsCase{
 
 // overrideFor returns a value of def's type that differs from def.
 func overrideFor(name string, def any) any {
-	switch def.(type) {
+	switch value := def.(type) {
 	case bool:
-		return !def.(bool)
+		return !value
 	case int:
 		return 4242
 	case []any:
