@@ -559,13 +559,13 @@
             - siem_forward_transport == 'relp'
             - ansible_os_family == 'RedHat'
 
-        - name: "Step 7: Check installed RELP authentication-retry capability"
+        - name: "Step 7: Preserve the queue engine and check RELP authentication-retry capability"
           tags: [C16, C17]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-relp-capability.yml
             apply:
               tags: [C16, C17]
-          when: siem_forward_transport == 'relp'
+          when: siem_forwarding_enabled | bool
 
         - name: "Step 7: Provision the sender TLS profile and snapshot its material"
           tags: [C16, C17]
@@ -666,10 +666,12 @@
                 tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
                 timeout="5" conn.timeout="3"
                 tls.permanentFailureDisablesAction="off"
-                queue.diskQueueType="disk"
                 queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
               {% else %}
                 protocol="tcp" ResendLastMSGOnReconnect="on"
+              {% endif %}
+              {% if siem_forward_queue_engine | default('auto') == 'disk' %}
+                queue.diskQueueType="disk"
               {% endif %}
                 action.resumeRetryCount="-1" action.resumeInterval="1"
                 action.resumeIntervalMax="10"
@@ -690,10 +692,12 @@
                 tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
                 timeout="5" conn.timeout="3"
                 tls.permanentFailureDisablesAction="off"
-                queue.diskQueueType="disk"
                 queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
               {% else %}
                 protocol="tcp" ResendLastMSGOnReconnect="on"
+              {% endif %}
+              {% if siem_forward_queue_engine | default('auto') == 'disk' %}
+                queue.diskQueueType="disk"
               {% endif %}
                 action.resumeRetryCount="-1" action.resumeInterval="1"
                 action.resumeIntervalMax="10"

@@ -43,6 +43,12 @@ pilot 不簽發 CA、不自動續期；正式 PKI 的簽發、期限監控與更
 即上游 rsyslog 8.2608.0+ 或具有相同能力的 vendor backport。apply 會以實際模組解析檢查能力，失敗時在替換 live
 憑證與轉送設定前停止。僅設定無限重試，無法避免舊模組在 TLS 認證錯誤後永久停用 action。
 正式套件來源與升級由部署方管理，production apply 不會新增第三方 repository。
+
+RELP 切回 TCP 時保留兩個 action 的 classic engine pin，再啟用 RELP 時不會改變
+spool 格式。既有 TCP 若未明確固定 classic，且兩個 queue 都沒有可確認的 classic
+格式證據，apply 會在變更 TLS／轉送設定或重啟服務前拒絕啟用 RELP。空 spool 不能
+證明安全：auto engine 可能直到停機保存記憶體佇列時才首次寫出 segmented 資料。
+這種既有狀態須由操作者完成遷移規劃；pilot 不會自動轉換或刪除 backlog。
 簽章驗證且固定版本的上游套件前置只存在於限定 `aq-*` VM 的測試 fixture。
 選項語意見 [rsyslog 官方文件](https://docs.rsyslog.com/doc/reference/parameters/omrelp-tls-permanentfailuredisablesaction.html)。
 

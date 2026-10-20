@@ -59,6 +59,14 @@
 
 ## 2. Checklist
 
+Queue-engine acceptance: RELP → TCP → RELP must retain an explicit classic
+engine for both actions, including when the TCP receiver is unavailable and
+shutdown must spool in-memory messages. Enabling RELP from an existing unpinned
+TCP configuration must refuse before changing TLS/config or restarting rsyslog
+unless both queues have positive classic-format evidence. An empty spool is not
+proof: an auto-selected engine can first materialize during shutdown. Existing
+legacy TCP configuration remains compatible; queue migration is operator-managed.
+
 RELP/mTLS acceptance contract: both OS families must
 reject untrusted/expired certificates, missing client certificates and incorrect
 peer names; a TCP listener without RELP ACK must not pass C22. Normal receiver
