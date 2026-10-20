@@ -6,6 +6,12 @@
 > 一組 Shape 3（client+server）。
 > 維護者：sre
 
+> 最後驗證：2026-10-20，candidate `b9a583329cc3bac118c019b2ae52861643a62155`，
+> tree `1f372535edaf07a6b0392480be7e0b352f955caa`。三台全新 VM 的 L3/L4 通過、
+> 本 spec 66/66、L6 changed=0。停機補送與落盤重啟復原無遺失；持續送訊息時重啟
+> receiver 仍遺失 3/1,440 筆在途訊息，保留為純 TCP 的已知限制。
+> [完整驗證摘要](../evidence/audit-forward-queue/2026-10-20-b9a58332.md)。
+
 ## 1. 目標系統
 
 | 項目 | 值 |
