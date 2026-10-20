@@ -1,0 +1,10 @@
+  dn: cn=p0case-hg,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  Host-group: p0case-hg
+  Description: x
+  Member hosts: p0case-host.ipa.pilot.internal
+  Member host-groups: p0case-hg2
+  Member of netgroups: p0case-ng
+  Member of Sudo rule: P0Case-Sudo
+  ipauniqueid: 3462bb8c-c94b-11f1-9178-5254001b059e
+  mepmanagedentry: cn=p0case-hg,cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal
+  objectclass: ipaobject, ipahostgroup, nestedGroup, groupOfNames, top, mepOriginEntry

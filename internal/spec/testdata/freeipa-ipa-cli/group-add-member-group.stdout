@@ -1,0 +1,8 @@
+  Group name: access-pwb-01
+  Description: Bench access 1
+  GID: 1927600043
+  Member groups: team-pwb-01, team-pwb-02
+  Indirect Member users: pwb-u101, pwb-u012, pwb-u071, pwb-u091, pwb-u112, pwb-u051, pwb-u081, pwb-u022, pwb-u111, pwb-u052, pwb-u092, pwb-u032, uf-enabled, pwb-u062, pwb-u042, pwb-u061, pwb-u021, pwb-u041, pwb-u002, pwb-u001, pwb-u082, pwb-u031, pwb-u011, pwb-u072, pwb-u102
+-------------------------
+Number of members added 1
+-------------------------

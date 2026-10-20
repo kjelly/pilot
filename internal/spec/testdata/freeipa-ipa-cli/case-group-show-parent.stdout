@@ -1,0 +1,9 @@
+  dn: cn=p0case-parent,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  Group name: p0case-parent
+  Description: x
+  GID: 1927600214
+  Member users: p0case-user
+  Member groups: p0case-child
+  ipantsecurityidentifier: S-1-5-21-3998632271-3893472475-798555519-1214
+  ipauniqueid: 3340ff66-c94b-11f1-a4d4-5254001b059e
+  objectclass: top, groupofnames, nestedgroup, ipausergroup, ipaobject, posixgroup, ipantgroupattrs

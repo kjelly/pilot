@@ -132,6 +132,9 @@ func runGatewayAG82(t *testing.T, dir string, extra map[string]any, args ...stri
 func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[string]any, args ...string) ag82Run {
 	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("required ansible-playbook not installed: %v", err)
+		}
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	merged := map[string]any{}

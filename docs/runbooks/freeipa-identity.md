@@ -18,62 +18,23 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-15，candidate `decc613`，tree `65bc3c93473fe70575df026767a0e1985e0c2eda`，PR #89）：
-  `docs/verification/freeipa-identity.md` v1.12。單台全新的 `freeipa-server` vm-target（AlmaLinux 9.8，
-  ipa-server 4.13.4-1.el9_8），依序套用 `freeipa-identity-v2-fixtures.yml`、`freeipa-identity-fixtures.yml`、
-  `freeipa-identity-canonical-fixtures.yml` 後，C1–C24 經 ldapi 以 root 執行，
-  SSH 使用者是 root 或非 root 都是 **24/24 PASS**（`main` 的 binary 以非 root 執行為 2/24）；§7.1a 的 netgroup
-  pruning SOP 步驟 1–3 照文件原樣執行：步驟 2 `changed=1`（只有 "Remove stale netgroup direct user
-  membership"），步驟 3 只剩宣告的成員；每一步之後 root 與非 root 使用者都沒有 Kerberos ticket。摘要：
-  [`2026-10-15-decc613-rerun.md`](../evidence/freeipa-private-ccache/2026-10-15-decc613-rerun.md)。
-  下面是 2026-08-11 roster schema v2 交付時的快照。
-
-- Roster schema v2 delivery：schema v1/v2 版本判定與自動升級
-  （`pilot roster migrate`、`EnsureRosterCurrent`——`pilot edit`/MCP roster
-  driver/`pilot deploy`/`pilot reconcile` preflight 開啟 roster 時自動觸發，
-  含加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀
-  membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、
-  NFS export selector 新增 hostgroup/netgroup 型別。完整技術細節、LDAP
-  schema gotcha 與逐項 checklist 見
-  `docs/verification/freeipa-identity.md` v1.6（§8 changelog）。
-- Target：`freeipa-server` vm-target（AlmaLinux 9 native `ipa-server-install`）。
-- 結果：`playbooks/test/fixtures/freeipa-identity-v2-fixtures.yml` 首次套用
-  `changed=13 failed=0`，立刻重跑 `changed=0 failed=0`；手動注入一個 roster
-  未宣告的 netgroup 成員後重新 apply，`changed=1`（只有 pruning 那個 task
-  變動），LDAP 查證該成員已移除；`docs/verification/freeipa-identity.md`
-  依序套用 legacy/canonical v1/schema-v2 三份 fixture 後 `pilot vm-target
-  verify` 為 **24/24 PASS**。`go test ./...`（1626 tests）、
-  `ansible-playbook --syntax-check`、`go vet`、`gofmt`、`-race` 全綠。
-
-<details>
-<summary>先前快照（2026-07-22，delivery batch 1）</summary>
-
-- Tested candidate/tree：`070d618a322f86b3cb638920a4a4e528728d2eb4` /
-  `667573a8c8a491656d2181e4188177eeaaf41798`
-- Target：AlmaLinux 9 vm-target `freeipa-identity-v2`；inventory 內
-  `freeipa-identity-v2` 與 `freeipa-server` 是同一台 VM 的兩個 alias。
-- 對齊決定：使用單一 host + `target_group` 例外；正式 run 一律指定
-  `fixtures_target_group=freeipa-identity-v2`，不可用 `all`，否則同一 play 會平行執行兩次。
-- Vault 外部 state：`~/.vault/main.yaml` 已確認含 `ipa_admin_password` key；只檢查 key name，
-  未擷取值。
-- 結果：canonical check `changed=0 failed=0`；legacy apply `changed=0 failed=0`；
-  canonical apply/idempotency 皆 `changed=0 failed=0`；spec `12/12 PASS`。
-- Evidence：[2026-07-22 candidate 070d618](../evidence/freeipa-identity/2026-07-22-070d618.md)
-
-當時只完成 delivery batch 1：canonical users/groups 與 legacy compatibility；
-canonical hosts/hostgroups/HBAC/sudo/NFS/migration 尚未交付——**這個限制已在
-2026-08-11 的 roster-schema-v2 delivery 中解除**（hosts/hostgroups/HBAC/sudo
-其實在 2026-07-22 之後、2026-08-11 之前的某次未記錄變更中就已交付，見
-`docs/verification/freeipa-identity.md` C9–C18；本次新增的是 netgroups 與
-hostgroup 巢狀 membership）。`migration`（roster 內宣告式批次改名/刪除）仍是
-唯一尚未交付的部分。
-
-</details>
+- 最新驗證（2026-10-19，PR #119）：candidate `747d84c8e9ee959f6634b4d175253b33a286985e`，
+  tree `afc92c07efb21a4dd90f90523ea9fe4e55d724dd`，spec v1.16。
+  目標是既有拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 vm-target；實際 inventory 只有一台
+  `all` host，依單一 host 例外使用 `target_group=all`。外部測試變數已確認有
+  `ipa_admin_password` key，只記 key、不顯示值。小型 schema-2 roster 完成新增使用者／群組、
+  啟停帳號、直接／間接成員區分、混合大小寫保持、撤銷與加回；LDAP 獨立讀回正確，
+  四輪立即重跑皆 `changed=0 failed=0`。反向宣告的 check mode 也沒有改動即時狀態。
+  六個真實清單查詢 gate 個案接受英文、拒絕德文與無票據錯誤；這是選取原 task 的 gate
+  驗證，使用者 gate 不承諾整個 transaction 零變更。正式 race 與必跑 Ansible CI 結果見 evidence。
+  本輪沒有重新宣稱 C1–C24 全表或 120-user 效能驗收；舊效能數據只屬原 candidate/date。
+  image digest、external-state fingerprint、run IDs、UTC 與結果：
+  [`2026-10-19-747d84c.md`](../evidence/freeipa-identity/2026-10-19-747d84c.md)。
 
 已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
 deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
-contract-backed 的 day-2 reconciler。此版本已實機跑過 canonical/legacy/schema-v2
-apply、24-row verify 與 idempotency；目前結果見 §0.5。未來 Nginx config 之類的
+contract-backed 的 day-2 reconciler。本輪驗證小型 schema-2 roster 的新增、帳號啟停、
+成員增撤、check mode 與冪等，並以 LDAP 獨立讀回；驗證範圍與結果見 §0.5。未來 Nginx config 之類的
 設定型角色，必須先具備自己的 contract、apply playbook、schema 與 verification
 evidence，才可加入這個入口。
 
@@ -309,6 +270,24 @@ ansible-playbook -i inventory-freeipa.yaml \
 與 `ipa: ERROR:` 訊息（不含密碼）；其他使用者的密碼仍會先處理完。（2026-10-15 之前，`force_password: true` 的使用者每
 次 apply 都會被重設，即使已經自己改過密碼；還沒完成首次改密碼的使用者也每次
 都會被重設。）
+
+2026-10-16 起，apply 不再發出已知是 no-op 的呼叫：
+- 先用 `ipa user-find --pkey-only` 讀出全部使用者與停用的使用者。已存在的不再 `user-add`；已是名冊狀態的不再 `user-enable`／`user-disable`。
+- 先用 `ipa group-find --pkey-only` 讀出全部群組，已存在的不再 `group-add`。
+- 成員查詢已列出的直接成員不再 `group-add-member`。
+
+成員比較不分大小寫：名冊寫 `team-Child`，FreeIPA 存成 `team-child`，兩者視為同一個成員，不會被撤銷再加回。sudo 指令路徑例外：FreeIPA 保留它的大小寫、也只認原本的寫法，所以名冊與 FreeIPA 的寫法要一致。
+
+讀不完整時，apply 會在該清單所保護的使用者或群組變更前失敗：查詢被截斷，或
+`Gate: the user listings were parsed completely`／`Gate: the group listing was parsed completely`
+讀不懂輸出。後者通常是 `ipa` 輸出被翻成其他語言：ssh session 的 `LANG` 來自 server
+的系統語系（`/etc/locale.conf`），不是英文且裝了該語言時，`ipa` 就印那個語言。這支
+playbook 只認英文輸出。
+
+120 位使用者、40 個群組的穩態重跑從 1,189 次 API 呼叫降到 642 次；交錯實測 base
+為 812.0 秒，candidate 兩輪為 524.3／554.7 秒。混合大小寫的 nested-group 關係不再
+被移除或重加；首次可能新增該 roster 寫法的 group-history marker，第二輪 `changed=0`。
+見 candidate `d874c3f` 的[實跑摘要](../evidence/freeipa-identity/2026-10-19-d874c3f.md)。
 
 ---
 

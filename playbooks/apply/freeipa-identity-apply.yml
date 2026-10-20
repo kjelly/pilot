@@ -799,6 +799,40 @@
           tags: [always, identity, groups, freeipa_host_absent_inspect]
 
         # ── Groups ─────────────────────────────────────────────────────────
+        # One listing replaces a `group-add` per group on reruns, the same way
+        # and for the same reasons as the user listings below. Groups missing
+        # from it still get `group-add`; private user groups are not listed and
+        # get it too, as before.
+        - name: "List existing IPA groups"
+          ansible.builtin.command:
+            argv: [ipa, group-find, --pkey-only, --sizelimit=0, --timelimit=0]
+          register: ipa_group_find_all
+          changed_when: false
+          failed_when: >-
+            ipa_group_find_all.rc != 0
+            or 'Search result has been truncated' in (ipa_group_find_all.stderr | default(''))
+          check_mode: false
+          tags: [identity, groups, C11, C12]
+
+        - name: "Index the existing IPA groups"
+          ansible.builtin.set_fact:
+            ipa_existing_groups: >-
+              {{ ipa_group_find_all.stdout_lines | select('match', '^  Group name: ')
+                 | map('regex_replace', '^  Group name: ', '') | map('trim') | map('lower') | list }}
+          tags: [identity, groups, C11, C12]
+
+        - name: "Gate: the group listing was parsed completely"
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ipa_group_find_all.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+                == ['Number of entries returned ' ~ (ipa_existing_groups | length)]
+            fail_msg: >-
+              `ipa group-find` printed a listing this playbook cannot parse: it parsed
+              {{ ipa_existing_groups | length }} groups, but the listing ends with
+              {{ ipa_group_find_all.stdout_lines[-2:] }}.
+          tags: [identity, groups, C11, C12]
+
         - name: "Ensure IPA groups exist"
           ansible.builtin.command:
             argv: >-
@@ -816,6 +850,7 @@
           failed_when:
             - ipa_group_add.rc != 0
             - "'already exists' not in (ipa_group_add.stderr | default(''))"
+          when: (item.name | lower) not in ipa_existing_groups
           tags: [identity, groups, C11, C12]
 
         # `group-add` above no-ops on "already exists" — an already-created
@@ -859,6 +894,68 @@
           tags: [identity, groups]
 
         # ── Users ──────────────────────────────────────────────────────────
+        # Two listings replace a `user-add` and a `user-enable`/`-disable` per
+        # user on reruns: without them every rerun spends one call per user on
+        # "already exists" and one on "already enabled" (238 of 1,189 calls in
+        # the 2026-10-15 120-user baseline). Both are `--pkey-only`: the default
+        # output also prints names users can edit themselves, and a name holding
+        # line breaks could pass for another user's "Account disabled:" line.
+        # Logins cannot hold line breaks. Users missing from the listing (new,
+        # or created between the read and the add) still get both calls.
+        # Preserved users are not listed, which is today's behaviour too.
+        - name: "List existing IPA users"
+          ansible.builtin.command:
+            argv: [ipa, user-find, --pkey-only, --sizelimit=0, --timelimit=0]
+          register: ipa_user_find_all
+          changed_when: false
+          failed_when: >-
+            ipa_user_find_all.rc != 0
+            or 'Search result has been truncated' in (ipa_user_find_all.stderr | default(''))
+          check_mode: false
+          tags: [identity, users, C9, C10]
+
+        - name: "List disabled IPA users"
+          ansible.builtin.command:
+            argv: [ipa, user-find, --disabled=True, --pkey-only, --sizelimit=0, --timelimit=0]
+          register: ipa_user_find_disabled
+          changed_when: false
+          failed_when: >-
+            (ipa_user_find_disabled.rc != 0
+             and 'Number of entries returned 0' not in (ipa_user_find_disabled.stdout | default('')))
+            or 'Search result has been truncated' in (ipa_user_find_disabled.stderr | default(''))
+          check_mode: false
+          tags: [identity, users, C9, C10]
+
+        - name: "Index the existing and the disabled IPA users"
+          ansible.builtin.set_fact:
+            ipa_existing_users: >-
+              {{ ipa_user_find_all.stdout_lines | select('match', '^  User login: ')
+                 | map('regex_replace', '^  User login: ', '') | map('trim') | map('lower') | list }}
+            ipa_disabled_users: >-
+              {{ ipa_user_find_disabled.stdout_lines | select('match', '^  User login: ')
+                 | map('regex_replace', '^  User login: ', '') | map('trim') | map('lower') | list }}
+          tags: [identity, users, C9, C10]
+
+        # A listing the parser does not understand (another output format or
+        # language) would read as "no users" or "no disabled users"; the
+        # second skips enabling users that are disabled. Each listing must end
+        # with FreeIPA's own count, and it must equal the logins parsed.
+        - name: "Gate: the user listings were parsed completely"
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ipa_user_find_all.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+                == ['Number of entries returned ' ~ (ipa_existing_users | length)]
+              - >-
+                (ipa_user_find_disabled.stdout_lines | select('match', '^Number of entries returned [0-9]+$') | list)
+                == ['Number of entries returned ' ~ (ipa_disabled_users | length)]
+            fail_msg: >-
+              `ipa user-find` printed a listing this playbook cannot parse: it parsed
+              {{ ipa_existing_users | length }} users and {{ ipa_disabled_users | length }}
+              disabled users, but the listings end with
+              {{ ipa_user_find_all.stdout_lines[-2:] }} and {{ ipa_user_find_disabled.stdout_lines[-2:] }}.
+          tags: [identity, users, C9, C10]
+
         - name: "Ensure IPA users exist"
           ansible.builtin.command:
             argv: >-
@@ -885,6 +982,7 @@
           failed_when:
             - ipa_user_add.rc != 0
             - "'already exists' not in (ipa_user_add.stderr | default(''))"
+          when: (item.name | lower) not in ipa_existing_users
           tags: [identity, users, C9, C10]
 
         # `user-add` above no-ops on "already exists" — an already-created
@@ -1109,11 +1207,12 @@
         - name: "Compute stale group memberships to remove"
           ansible.builtin.set_fact:
             ipa_group_membership_removals: "{{ (ipa_group_membership_removals | default([])) + [{'name': item.item.name, 'groups': stale_groups}] }}"
+          # Group names compared in lower case, as FreeIPA stores them.
           vars:
-            managed_groups: "{{ ipa_active_groups | map(attribute='name') | list }}"
+            managed_groups: "{{ ipa_active_groups | map(attribute='name') | map('lower') | list }}"
             live_line: "{{ ((item.stdout | default('') | regex_findall('^  Member of groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
-            live_groups: "{{ [] if live_line == '' else live_line.split(', ') }}"
-            stale_groups: "{{ live_groups | intersect(managed_groups) | difference(item.item.groups | default([])) }}"
+            live_groups: "{{ [] if live_line == '' else live_line.split(', ') | map('lower') | list }}"
+            stale_groups: "{{ live_groups | intersect(managed_groups) | difference(item.item.groups | default([]) | map('lower') | list) }}"
           loop: "{{ ipa_user_show.results }}"
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
@@ -1156,9 +1255,47 @@
             canonical_group_removals: >-
               {{ (canonical_group_removals | default([])) + [{
                 'name': item.item.name,
-                'users': live_users | difference(item.item.membership.users | default([])),
-                'groups': live_groups | difference(item.item.membership.groups | default([]))
+                'users': live_users | difference(item.item.membership.users | default([]) | map('lower') | list),
+                'groups': live_groups | difference(item.item.membership.groups | default([]) | map('lower') | list)
               }] }}
+          # FreeIPA stores user and group names in lower case (a roster may
+          # say team-Child; FreeIPA lists team-child), so both sides are
+          # compared in lower case. A case-sensitive difference removed
+          # team-child every run, and with the adds below skipping members
+          # the lookup listed, it was never added back (PR #119 review).
+          vars:
+            stdout: "{{ item.stdout | default('') }}"
+            users_line: "{{ ((stdout | regex_findall('^  Member users: (.*)$', multiline=True)) + ['']) | first | trim }}"
+            groups_line: "{{ ((stdout | regex_findall('^  Member groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
+            live_users: "{{ [] if users_line == '' else users_line.split(', ') | map('lower') | list }}"
+            live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') | map('lower') | list }}"
+          loop: "{{ canonical_group_show.results }}"
+          loop_control:
+            label: "{{ item.item.name | default('n/a') }}"
+          when:
+            - freeipa_roster.schema_version is defined
+            - not (item.skipped | default(false))
+            - (item.item.membership | default({})).authoritative | default(true) | bool
+          tags: [identity, users, groups]
+
+        # The direct members the lookup above read, so the adds below skip
+        # users and groups that are members already (on a rerun, nearly all of
+        # them). The removals in between only take away members the roster
+        # does not list, compared in lower case like here, so they never
+        # make a skip wrong. A lookup skipped in
+        # check mode leaves no entry, and every add is attempted.
+        - name: "Start the canonical group member index"
+          ansible.builtin.set_fact:
+            canonical_group_live_members: {}
+          when: freeipa_roster.schema_version is defined
+          tags: [identity, users, groups]
+
+        - name: "Index canonical group direct members"
+          ansible.builtin.set_fact:
+            canonical_group_live_members: >-
+              {{ canonical_group_live_members | combine({(item.item.name | lower): {
+                   'users': live_users | map('lower') | list,
+                   'groups': live_groups | map('lower') | list}}) }}
           vars:
             stdout: "{{ item.stdout | default('') }}"
             users_line: "{{ ((stdout | regex_findall('^  Member users: (.*)$', multiline=True)) + ['']) | first | trim }}"
@@ -1171,7 +1308,6 @@
           when:
             - freeipa_roster.schema_version is defined
             - not (item.skipped | default(false))
-            - (item.item.membership | default({})).authoritative | default(true) | bool
           tags: [identity, users, groups]
 
         - name: "Remove stale canonical direct users"
@@ -1209,7 +1345,11 @@
           failed_when:
             - canonical_group_user_add.rc != 0
             - "'already a member' not in (canonical_group_user_add.stdout | default('') + canonical_group_user_add.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          when:
+            - freeipa_roster.schema_version is defined
+            - >-
+              (item.1 | lower) not in
+              canonical_group_live_members.get(item.0.name | lower, {}).get('users', [])
           tags: [identity, users, groups]
 
         - name: "Ensure canonical direct nested-group membership"
@@ -1223,7 +1363,11 @@
           failed_when:
             - canonical_nested_group_add.rc != 0
             - "'already a member' not in (canonical_nested_group_add.stdout | default('') + canonical_nested_group_add.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          when:
+            - freeipa_roster.schema_version is defined
+            - >-
+              (item.1 | lower) not in
+              canonical_group_live_members.get(item.0.name | lower, {}).get('groups', [])
           tags: [identity, groups]
 
         - name: "Reconcile canonical account enabled state"
@@ -1240,7 +1384,13 @@
             - canonical_user_enabled.rc != 0
             - "'already enabled' not in (canonical_user_enabled.stderr | default(''))"
             - "'already disabled' not in (canonical_user_enabled.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          # Skipped when the listings above show the account already in the
+          # declared state; users missing from them are always reconciled.
+          when:
+            - freeipa_roster.schema_version is defined
+            - >-
+              (item.name | lower) not in ipa_existing_users
+              or ((item.name | lower) in ipa_disabled_users) == (item.enabled | default(true) | bool)
           tags: [identity, users, C10]
 
         - name: "Delete canonical users explicitly marked absent"
@@ -1469,15 +1619,17 @@
                 'hosts': stale_hosts,
                 'hostgroups': stale_hostgroups
               }] }}
+          # Host and hostgroup names compared in lower case, as FreeIPA
+          # stores them (a roster may spell them in another case).
           vars:
             hosts_line: "{{ ((item.stdout | default('') | regex_findall('^  Member hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
             live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
-            live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
-            roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
+            live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+            roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
             stale_hosts: "{{ live_hosts | difference(roster_hosts) }}"
             hostgroups_line: "{{ ((item.stdout | default('') | regex_findall('^  Member host-groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
-            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
-            stale_hostgroups: "{{ live_hostgroups | difference(item.item.hostgroups | default([])) }}"
+            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') | map('lower') | list }}"
+            stale_hostgroups: "{{ live_hostgroups | difference(item.item.hostgroups | default([]) | map('lower') | list) }}"
           loop: "{{ ipa_hostgroup_show.results }}"
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
@@ -1658,12 +1810,15 @@
             ipa_netgroup_membership_removals: >-
               {{ (ipa_netgroup_membership_removals | default([])) + [{
                 'name': item.item.name,
-                'users': live_users | difference(item.item.membership.users | default([])),
-                'groups': live_groups | difference(item.item.membership.groups | default([])),
-                'hosts': live_hosts | difference(item.item.membership.hosts | default([])),
-                'hostgroups': live_hostgroups | difference(item.item.membership.hostgroups | default([])),
-                'netgroups': live_netgroups | difference(item.item.membership.netgroups | default([]))
+                'users': live_users | difference(item.item.membership.users | default([]) | map('lower') | list),
+                'groups': live_groups | difference(item.item.membership.groups | default([]) | map('lower') | list),
+                'hosts': live_hosts | difference(item.item.membership.hosts | default([]) | map('lower') | list),
+                'hostgroups': live_hostgroups | difference(item.item.membership.hostgroups | default([]) | map('lower') | list),
+                'netgroups': live_netgroups | difference(item.item.membership.netgroups | default([]) | map('lower') | list)
               }] }}
+          # All five member kinds compared in lower case: FreeIPA stores
+          # user, group, host, hostgroup and netgroup names that way
+          # (checked on 4.13.4 by adding mixed-case ones).
           vars:
             stdout: "{{ item.stdout | default('') }}"
             users_line: "{{ ((stdout | regex_findall('^  Member User: (.*)$', multiline=True)) + ['']) | first | trim }}"
@@ -1671,11 +1826,11 @@
             hosts_line: "{{ ((stdout | regex_findall('^  Member Host: (.*)$', multiline=True)) + ['']) | first | trim }}"
             hostgroups_line: "{{ ((stdout | regex_findall('^  Member Hostgroup: (.*)$', multiline=True)) + ['']) | first | trim }}"
             netgroups_line: "{{ ((stdout | regex_findall('^  Member netgroups: (.*)$', multiline=True)) + ['']) | first | trim }}"
-            live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
-            live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
-            live_hosts: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
-            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
-            live_netgroups: "{{ [] if netgroups_line == '' else netgroups_line.split(', ') }}"
+            live_users: "{{ [] if users_line == '' else users_line.split(', ') | map('lower') | list }}"
+            live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') | map('lower') | list }}"
+            live_hosts: "{{ [] if hosts_line == '' else hosts_line.split(', ') | map('lower') | list }}"
+            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') | map('lower') | list }}"
+            live_netgroups: "{{ [] if netgroups_line == '' else netgroups_line.split(', ') | map('lower') | list }}"
           loop: "{{ ipa_netgroup_show.results }}"
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
@@ -2308,11 +2463,16 @@
               {{ (ipa_sudo_removals | default([])) + [{
                    'name': item.item.name,
                    'hosts': (live_hosts | difference(roster_hosts)),
-                   'hostgroups': (live_hostgroups | difference(item.item.hostgroups | default([]))),
+                   'hostgroups': (live_hostgroups | difference(item.item.hostgroups | default([]) | map('lower') | list)),
                    'allow_commands': (live_cmds | difference(item.item.allow_commands | default([]))),
-                   'users': (live_users | difference(item.item.users | default([]))),
-                   'groups': (live_groups | difference(item.item.groups | default([]))),
+                   'users': (live_users | difference(item.item.users | default([]) | map('lower') | list)),
+                   'groups': (live_groups | difference(item.item.groups | default([]) | map('lower') | list)),
               }] }}
+          # Hosts, hostgroups, users and groups compared in lower case, as
+          # FreeIPA stores them and as the HBAC task does. Commands are not:
+          # FreeIPA keeps a sudo command's case and finds it only by it
+          # (checked on 4.13.4: /usr/bin/P0CaseCmd is not found as
+          # /usr/bin/p0casecmd).
           vars:
             stdout: "{{ item.stdout | default('') }}"
             hosts_line: "{{ ((stdout | regex_findall('^  Hosts: (.*)$', multiline=True)) + ['']) | first | trim }}"
@@ -2321,12 +2481,12 @@
             users_line: "{{ ((stdout | regex_findall('^  Users: (.*)$', multiline=True)) + ['']) | first | trim }}"
             groups_line: "{{ ((stdout | regex_findall('^  User Groups: (.*)$', multiline=True)) + ['']) | first | trim }}"
             live_hosts_fqdn: "{{ [] if hosts_line == '' else hosts_line.split(', ') }}"
-            live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | list }}"
-            roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | list }}"
-            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') }}"
+            live_hosts: "{{ live_hosts_fqdn | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+            roster_hosts: "{{ (item.item.hosts | default([])) | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+            live_hostgroups: "{{ [] if hostgroups_line == '' else hostgroups_line.split(', ') | map('lower') | list }}"
             live_cmds: "{{ [] if cmds_line == '' else cmds_line.split(', ') }}"
-            live_users: "{{ [] if users_line == '' else users_line.split(', ') }}"
-            live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') }}"
+            live_users: "{{ [] if users_line == '' else users_line.split(', ') | map('lower') | list }}"
+            live_groups: "{{ [] if groups_line == '' else groups_line.split(', ') | map('lower') | list }}"
           loop: "{{ ipa_sudorule_show.results }}"
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"

@@ -1,0 +1,11 @@
+  dn: ipaUniqueID=35df8012-c94b-11f1-8260-5254001b059e,cn=ng,cn=alt,dc=ipa,dc=pilot,dc=internal
+  Netgroup name: p0case-ng
+  Description: x
+  NIS domain name: ipa.pilot.internal
+  IPA unique ID: 35df8012-c94b-11f1-8260-5254001b059e
+  Member netgroups: p0case-ng2
+  Member User: p0case-user
+  Member Group: p0case-child
+  Member Host: p0case-host.ipa.pilot.internal
+  Member Hostgroup: p0case-hg
+  objectclass: ipaobject, ipaassociation, ipanisnetgroup
