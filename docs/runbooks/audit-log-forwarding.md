@@ -30,17 +30,19 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-20）**：candidate `b9a583329cc3bac118c019b2ae52861643a62155`，
-> tree `1f372535edaf07a6b0392480be7e0b352f955caa`，由乾淨隔離 checkout 執行。
+> **目前有效的驗證摘要（2026-10-20）**：candidate `b34e98dbc80c5328cae29a47bcbc48e13b488ba7`，
+> tree `e1975f819da5413859ecb9d187006118c8af4e1d`，由乾淨隔離 checkout 執行。
 > `audit-forward-queue-topology.yaml` 的實際 inventory：`log-server` = `aq-log`，
 > `audit-log-forwarding` = `aq-log, aq-ubuntu, aq-el`；前兩台 Ubuntu 24.04、後者 AlmaLinux 9
 > （SELinux Enforcing）。對齊採 A：receiver 同時加入 forwarding group，符合 log-server
 > C7/C8 的本機訊息驗收前提。無 vault 依賴，接收端使用預設 TCP/514 與 `/var/log/siem`。
 > 全新 ephemeral topology：L3/L4 failed=0、L5 log-server 11/11 + audit-log-forwarding 66/66、
-> L6 三台 changed=0。另建全新拓樸完成訊息流、probe 反例、rollback 與正式 decommission 演練後，
-> 測試 VM 均已移除。
+> L6 三台 changed=0。另建全新拓樸確認兩種 OS 的 C19 fatal config 不重啟原服務；
+> 故障後再次驗證 77/77、全鏈 changed=0，測試 VM 均已移除。
+> [本輪 recovery 證據](../evidence/audit-forward-queue/2026-10-20-b34e98d-review.md)。
 >
-> **TCP 佇列已補上，仍有在途訊息限制**：確認停機後送出的 1,440 筆全部補送；
+> **TCP 佇列已補上，仍有在途訊息限制**：以下為先前 candidate `b9a58332` 的訊息流結果，
+> 本輪未重跑。確認停機後送出的 1,440 筆全部補送；
 > 72,000 筆落盤並在 receiver 停機期間乾淨重啟 client 後全部送達，另有 2 筆重複。
 > 持續送訊息時重啟 receiver 的正式演練為 1,437/1,440，遺失 3 筆在途訊息。
 > 本次保留 TCP 相容性；沒有接收端持久化 ACK，不能宣稱端到端零遺失。

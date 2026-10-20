@@ -6,11 +6,12 @@
 > 一組 Shape 3（client+server）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `b9a583329cc3bac118c019b2ae52861643a62155`，
-> tree `1f372535edaf07a6b0392480be7e0b352f955caa`。三台全新 VM 的 L3/L4 通過、
-> 本 spec 66/66、L6 changed=0。停機補送與落盤重啟復原無遺失；持續送訊息時重啟
-> receiver 仍遺失 3/1,440 筆在途訊息，保留為純 TCP 的已知限制。
-> [完整驗證摘要](../evidence/audit-forward-queue/2026-10-20-b9a58332.md)。
+> 最後驗證：2026-10-20，candidate `b34e98dbc80c5328cae29a47bcbc48e13b488ba7`，
+> tree `e1975f819da5413859ecb9d187006118c8af4e1d`。全新 VM 的 L3/L4 通過、本 spec 66/66、
+> L6 三台 changed=0。兩種 OS 的 C19 fatal config 演練維持原 runtime，故障後再次驗證 77/77。
+> [本輪 recovery 驗證](../evidence/audit-forward-queue/2026-10-20-b34e98d-review.md)。
+> [先前訊息流演練](../evidence/audit-forward-queue/2026-10-20-b9a58332.md) 的 TCP 在途限制仍適用：
+> 持續送訊息時重啟 receiver 曾遺失 3/1,440 筆；本輪未重跑大流量演練。
 
 ## 1. 目標系統
 
