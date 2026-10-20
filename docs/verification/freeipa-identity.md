@@ -1,5 +1,8 @@
 # Verification Spec — freeipa-identity（canonical identity primitives + legacy authorization reconciler）
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：v1.16（2026-10-16 重跑不再發出已知是 no-op 的呼叫：以 `ipa user-find`／`group-find --pkey-only`
 > 批次讀取，已存在的使用者與群組不再 `user-add`／`group-add`，已是宣告狀態的帳號不再
 > `user-enable`／`-disable`，成員查詢已列出的直接成員不再 `group-add-member`；讀取不完整時在
@@ -141,7 +144,7 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 
 下列欄位屬於 canonical roster，或僅供 legacy `-e @roster` 相容；不宣告成 inventory `groupVars`。`ipa_domain` / `ipa_realm` 是 `freeipa_domain` / `freeipa_realm` 的內部別名。
 
-| 欄位 | 說明 | 來源 |
+| 欄位 | 說明 | 是否必填 |
 |---|---|---|
 | `freeipa.admin.principal` / `freeipa.admin.password` | canonical kinit principal/密碼；密碼由 vault 保護，禁止 hard-code | canonical 必填 |
 | `schema_version` / `users` / `groups` | canonical identity primitives，`1` 或 `2`；支援 attributes、state、authoritative direct/nested membership | canonical 必填 |

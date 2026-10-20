@@ -1,5 +1,8 @@
 # Verification Spec — freeipa-server-replica (native EL9, HA 第二/後續台)
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：v1.2（2026-10-15 這台 server 自己的 DNS forwarders 每次 apply 都收斂，見 §8）；v1.0（**已實跑**——三台 vm-target 全鏈路 apply + verify + HA failover 實測，見 §0/§3/§9）
 > 對齊規範：pilot 通用基礎設施**服務端**規範；本 host 是加入既有 FreeIPA realm 的
 > 第二台（或後續台）multi-master replica，不是全新 realm 的第一台

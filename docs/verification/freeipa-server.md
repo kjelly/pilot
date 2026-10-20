@@ -1,5 +1,8 @@
 # Verification Spec — freeipa-server (native EL9, 帳號 + sudo 中央管理端)
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：v1.9（2026-10-15 **破壞性變更**：每次 apply 讓 realm 的全域 forwarders 與這台 server 自己的 forwarders 都等於設定值，明確給空值時兩者都清掉，見 §1.5 與 §8）；v1.8（2026-10-12，見 §8）；v1.7（v1.0 的 13 條已在 pilot vm-target `almalinux-9` 上實跑 `ipa-server-install` + `pilot verify`；v1.1 新增稽核日誌 C14–C16；v1.2 將 DNS 與 NTP 服務改為可選啟用，並新增相容性檢測列 C17–C18；v1.3 修正 §0/§1/§1.5 對 `ipa_setup_dns`/`ipa_setup_ntp` 預設值的文件描述；v1.4 讓 C3/C12 驗證實際 configured FQDN，見 §0 / §3 / §8；v1.5 補上 kpasswd 464/tcp 的 C19，見 §8；v1.6 新增 C20，將 allow-recursion/allow-query-cache 從 FreeIPA 預設的 `trusted_clients` 開放給任意 client，見 §8；v1.7 修正 C16 的說明與排錯：389-ds audit log 有緩衝，apply 會等到檔案非空，見 §8）
 > 對齊規範：pilot 通用基礎設施**服務端**規範；本 host 是提供 LDAP + Kerberos + sudo 中央目錄的那台（identity provider / directory），不是使用端
 > 維護者：sre
@@ -81,7 +84,7 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_
 
 ## 1.6 衍生值與檔案資料（非 inventory 輸入）
 
-| 欄位 | 說明 | 來源 |
+| 欄位 | 說明 | 是否必填 |
 |---|---|---|
 | `ipa_ds_instance` | 389-ds instance 名，預設 `slapd-{{ ipa_realm | replace('.', '-') }}`（= `slapd-IPA-PILOT-INTERNAL`）| 否（有預設）|
 

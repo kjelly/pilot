@@ -27,6 +27,9 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 # Verification Spec — Pilot Access Gateway
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：DRAFT v1.0（2026-09-24：改為 Spec v2，AG01 以 inputs `gateway_id`/`gateway_scope` 比對實際部署值，不再寫死 `gpu-01`/`gpu`；與 captive transport 合併：transport 的 AG41–AG73 保留原編號，per-host SSH session recording 的 rows 重新編號為 AG81–AG96（原 AG42–AG57），原 AG41 併入 AG41，見 §Checks；合併後的最新活體證據（candidate `fcd3c03`）見 [`docs/evidence/pilot-access-gateway/2026-09-24-fcd3c03.md`](../evidence/pilot-access-gateway/2026-09-24-fcd3c03.md)；合併前 per-host recording 的 L1–L22 見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-recording-follow-up.md)）
 > 以下為 v0.7 之前的紀錄：DRAFT v0.7（vm-target 已對 AG01-AG30 實測；AG31 為站台網路層需求，非本 repo 範圍，見 §5；AG32-AG33 的 Portal session-scoped `kinit` / GSSAPI-only Connect 已於 2026-09-16 完成 vm-target + trec E2E，見 [`docs/evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md`](../evidence/pilot-access-gateway/2026-09-16-portal-session-ticket.md)；2026-09-14 追加：`pilot_access_gateway_install_forcecommand` 預設改為 `true`；2026-09-15 追加：`site.include` 改為 `true`，不再是 single-component-only，見 §5；2026-09-16 追加：`pilot_access_gateway_portal_automember` 預設也改為 `true`——兩者相加，FreeIPA 帳號登入這台 gateway 預設就是「只能進 portal，拿不到 shell」，不需要額外傳參數，見 §5；2026-09-18 追加：每次 apply 現在也會把這台 gateway 自己發布進 `pilot-gateway-<gateway_scope>`，供 `pilot-access-directory` 路由用，見 §5；2026-09-18 再追加：ForceCommand wrapper 改 exec `pilot portal-session`，新增 `pilot-connect <session-id> <fqdn>` one-shot handoff dispatcher，AG34-AG40；同日稍後已完成真實 vm-target 活體驗證——`alice` 經 Directory（`ag-directory01`）分別 handoff 到 GPU Gateway（`ag-gw01`→`ag-target01`，`whoami`=alice）與 DMZ Gateway（`ag-gw02`→新建的 `ag-target02`，`whoami`=alice），以及把 dmz target 的 `pilot-connect` 直接送去 GPU gateway 被正確 deny（wrong-scope injection），見 [`docs/evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md`](../evidence/pilot-access-directory/2026-09-18-phase5-gateway-handoff.md)；2026-09-23 追加：captive SSH transport（AG41–AG73），全新 VM 拓樸實跑見 [`docs/evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md`](../evidence/pilot-access-gateway/2026-09-23-0f1a5c1.md)）
 > 2026-09-23 追加（captive-transport spec `docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` Phase 1）：`gateway.recording` 改由 `pilot_access_gateway_recording_*` group vars 渲染，不再在每次 apply 時被整份覆寫而靜默降回 metadata；會降低已安裝錄影政策的 apply 在寫檔前失敗，除非明確帶 `pilot_access_gateway_recording_allow_downgrade=true`（AG41）。AG35–AG40 的 Command 欄從來不是可執行指令，已移出 §2 checklist，改列在 §6。
@@ -72,7 +75,7 @@ evidencePolicy: {captureStdout: true, retention: retain-all}
 
 下列舊設定只供遷移清理；不再是可設定的 recording backend 輸入。
 
-| 變數 | 說明 | 用途 |
+| 變數 | 說明 | 是否必填 |
 |---|---|---|
 | `pilot_access_gateway_recording_session_store_ingest_token_file` | **已不再使用**（舊版靜態 bearer token 檔的路徑）。仍設定時，AG82 把這個路徑也一併刪除並印出提示，請從 inventory 移除 | 否 |
 

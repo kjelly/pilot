@@ -1,5 +1,8 @@
 # Verification Spec — freeipa-client (Ubuntu 客戶端，接上 FreeIPA 的 認證/授權/稽核)
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：v1.8（v1.0 已在 pilot vm-target `ubuntu-24.04` 上實跑 `ipa-client-install` enroll 進
 > `alma-vm` 的 FreeIPA realm + `pilot verify`；v1.1 修正 canonical HBAC lockdown 下的 C8 false-negative，見 §0 / §3 / §8；
 > v1.3 新增 C11 host DNS 自動註冊，見 §0 / §8；v1.5 新增 Day-2 IP 遷移/DNS replacement，
@@ -121,7 +124,7 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_
 
 ## 1.6 衍生值與檔案資料（非 inventory 輸入）
 
-| 欄位 | 說明 | 來源 |
+| 欄位 | 說明 | 是否必填 |
 |---|---|---|
 | `pilot_annotations` | 描述性、非機密的 host metadata（`location`/`project`/`owner`/…），由 `hosts.yml` 的 `annotations:` 經 `pilot inventory generate` 投影而來；enrollment/health 成功後投影到 FreeIPA `userClass`（`pilot.annotation.<key>=<value>`）與（`location` 專用）`nshostlocation`；**沒有對應的 checklist row**——投影結果需要已認證的 `ipa` 查詢才能讀到，這份 spec 既有的 C1–C11 刻意全部只讀本機檔案/服務，不需要 Kerberos ticket，annotations 因此改由 apply 本身的 Phase F 內建讀回驗證取代（見 §6/§9 v1.6）| 否（未設 = 空 dict，等同不使用此功能）|
 
