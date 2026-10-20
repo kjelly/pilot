@@ -3,6 +3,8 @@
 - name: "RELP: reset per-play rollback state"
   ansible.builtin.set_fact:
     siem_tls_snapshot_role: ""
+    siem_tls_restore_result: {}
+    siem_tls_remove_result: {}
     rsyslog_selinux_any_port_changed: false
   tags: [always]
 

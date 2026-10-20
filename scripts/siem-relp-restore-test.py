@@ -70,11 +70,12 @@ for name in ['ca.pem','cert.pem','key.pem','profile.json']:
 print(saved)
 """.replace('ROLE', role)).strip()
         try:
-            for scenario in ('fresh', 'tcp-profile', 'partial'):
+            for scenario in ('existing-relp', 'fresh', 'tcp-profile', 'partial'):
                 name = host + '-' + scenario
                 tcp = dict(base, siem_forward_transport='tcp', siem_receiver_relp_enabled=False)
-                apply(host, role, name + '-tcp', tcp)
-                remote(host, """
+                if scenario != 'existing-relp':
+                    apply(host, role, name + '-tcp', tcp)
+                    remote(host, """
 import pathlib,shutil
 directory=pathlib.Path('/etc/rsyslog.d/pilot-relp-ROLE')
 assert not any((directory/n).exists() for n in ['ca.pem','cert.pem','key.pem'])
@@ -87,6 +88,8 @@ if SCENARIO=='partial':
                 bad = dict(base, siem_relp_key_pem=base['relp_test_identities']['unauthorized']['key'])
                 apply(host, role, name + '-bad-key', bad, failure=True)
                 assert snapshot(host, role) == before, name + ' did not restore the exact original files/modes'
+                if scenario == 'existing-relp':
+                    remote(host, "import subprocess;subprocess.run(['/usr/local/libexec/pilot-siem-relp-check','" + role + "'],check=True,timeout=35)")
                 print(name + ' material_and_profile_restored unrelated_basenames_preserved=PASS', flush=True)
                 apply(host, role, name + '-recover', base)
                 remote(host, "import subprocess;subprocess.run(['/usr/local/libexec/pilot-siem-relp-check','" + role + "'],check=True,timeout=35)")

@@ -98,6 +98,7 @@ elif name!='augenrules':raise RuntimeError(name)
 				plays = append(plays, map[string]any{"hosts": "all", "gather_facts": false, "tasks": []any{map[string]any{"tags": []string{"always"}, "ansible.builtin.set_fact": map[string]any{
 					"audit_rules_result": map[string]any{"changed": true, "backup_file": audit + ".old"}, "siem_forward_conf_result": map[string]any{"changed": true}, "rsyslog_selinux_port_label": map[string]any{"changed": true},
 					"siem_forward_rsyslog_start_result": map[string]any{"changed": true}, "siem_forward_rsyslog_restart_result": map[string]any{"changed": true, "failed": true},
+					"siem_tls_snapshot_role": "sender", "siem_tls_restore_result": map[string]any{"changed": true}, "siem_tls_remove_result": map[string]any{"changed": true},
 				}}}})
 			}
 			plays = append(plays, play)

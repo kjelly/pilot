@@ -907,9 +907,9 @@
             - not siem_forward_snapshot.stat.exists
             - not ansible_check_mode
 
-        # A validation failure before any service operation must leave the
-        # loaded daemon alone. A failed restart may already have stopped it,
-        # so recovery also covers that result, after validating the restore.
+        # Keep an untouched loaded daemon on validation failure. TLS rollback
+        # can rewrite old material with new mtimes, requiring a reload for the
+        # loaded-state checks. Validate the restored global config first.
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
@@ -925,6 +925,9 @@
               or (siem_forward_rsyslog_start_result is failed)
               or (siem_forward_rsyslog_restart_result is changed)
               or (siem_forward_rsyslog_restart_result is failed)
+              or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'sender' and
+                  ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
+                   or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)))
 
         - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]
@@ -941,6 +944,6 @@
             msg: >-
               audit-log-forwarding apply failed (see task output above); the
               audit rules and siem forward config were reverted. Runtime recovery
-              is attempted only after a service operation changed or failed and
-              the restored global configuration passes validation. Otherwise the
+              is attempted after a service operation changed or failed, or TLS rollback
+              changed files, and only when the restored global configuration passes validation. Otherwise the
               current rsyslog process is left untouched. Fix the failing task and re-run.
