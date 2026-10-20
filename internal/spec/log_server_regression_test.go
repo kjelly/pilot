@@ -251,7 +251,7 @@ func TestRegression_LogServerReceiverUsesDedicatedRuleset(t *testing.T) {
 	if !strings.Contains(s, `ruleset(name="siemReceiver")`) {
 		t.Error(`log-server-apply.yml must define ruleset(name="siemReceiver") to isolate received messages from the default ruleset`)
 	}
-	if !strings.Contains(s, `input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver")`) {
+	if !strings.Contains(s, `input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver"`) {
 		t.Error(`log-server-apply.yml's imtcp input must bind ruleset="siemReceiver" — otherwise a host that is both log-server and an audit-log-forwarding client self-forwards in an infinite loop`)
 	}
 	// The dynaFile actions must live inside the dedicated ruleset, not

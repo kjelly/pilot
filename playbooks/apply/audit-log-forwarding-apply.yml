@@ -130,8 +130,20 @@
         audit_logrotate_maxage: "{{ audit_logrotate_maxage | default(90, true) }}"
         audit_logrotate_rotate: "{{ audit_logrotate_rotate | default(14, true) }}"
         siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
+        siem_forward_transport: "{{ siem_forward_transport | default('tcp') }}"
+        siem_relp_port: "{{ siem_relp_port | default(20514) }}"
         syslog_logrotate_maxage: "{{ syslog_logrotate_maxage | default(90, true) }}"
         syslog_logrotate_rotate: "{{ syslog_logrotate_rotate | default(14, true) }}"
+      tags: [always]
+
+    - name: "Gate: RELP mTLS inputs"
+      ansible.builtin.include_tasks:
+        file: tasks/rsyslog-relp-inputs.yml
+        apply:
+          tags: [always]
+      vars:
+        siem_tls_role: sender
+        siem_tls_enabled: "{{ siem_forward_transport == 'relp' }}"
       tags: [always]
 
     # siem_forward_port (these clients) and siem_receiver_tcp_port
@@ -149,15 +161,21 @@
     - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
       ansible.builtin.assert:
         that:
-          - (siem_forward_port | string) == (siem_forward_receiver_port | string)
+          - >-
+            ((siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port) | string)
+            == (siem_forward_receiver_port | string)
+          - >-
+            siem_forward_transport != 'relp' or
+            (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
         fail_msg: >-
-          {{ inventory_hostname }} would forward to {{ siem_forward_effective_host }}:{{ siem_forward_port }}
-          (siem_forward_port), but log-server {{ siem_forward_log_server }} listens on
-          {{ siem_forward_receiver_port }} (siem_receiver_tcp_port). Set both to the same port.
+          {{ inventory_hostname }} requires {{ siem_forward_transport }} to
+          {{ siem_forward_effective_host }}:{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }},
+          but log-server {{ siem_forward_log_server }} has port {{ siem_forward_receiver_port }}.
+          Match the selected transport's port on both sides and enable the receiver's RELP listener for RELP.
       vars:
         siem_forward_target_name: "{{ (siem_forward_effective_host | string | lower).rstrip('.') }}"
         siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
-        siem_forward_receiver_port: "{{ hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true) if siem_forward_log_server else '' }}"
+        siem_forward_receiver_port: "{{ (hostvars[siem_forward_log_server].siem_relp_port | default(20514) if siem_forward_transport == 'relp' else hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true)) if siem_forward_log_server else '' }}"
       when:
         - siem_forwarding_enabled | bool
         # An empty for-loop renders as None, not "", in ansible-core 2.19.
@@ -507,6 +525,62 @@
             rsyslog_selinux_tcp_port: "{{ siem_forward_port }}"
           when: siem_forwarding_enabled | bool
 
+        - name: "Step 7: Install RELP and certificate validation tools (Debian)"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/apt-package-install.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            pilot_apt_packages: [rsyslog-relp, openssl]
+            pilot_apt_policy: tolerant
+            pilot_apt_component: audit-relp
+            pilot_apt_required_sources:
+              - {id: ubuntu-os, class: os}
+          when:
+            - siem_forward_transport == 'relp'
+            - ansible_os_family == 'Debian'
+
+        - name: "Step 7: Install RELP and certificate validation tools (EL)"
+          tags: [C16, C17]
+          ansible.builtin.dnf:
+            name: [rsyslog-relp, openssl]
+            state: present
+          when:
+            - siem_forward_transport == 'relp'
+            - ansible_os_family == 'RedHat'
+
+        - name: "Step 7: Check installed RELP authentication-retry capability"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-capability.yml
+            apply:
+              tags: [C16, C17]
+          when: siem_forward_transport == 'relp'
+
+        - name: "Step 7: Provision the sender TLS profile and snapshot its material"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-tls.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            siem_tls_role: sender
+            siem_tls_enabled: "{{ siem_forward_transport == 'relp' }}"
+            siem_tls_config: "{{ siem_forward_conf }}"
+            siem_tls_owner: "{{ audit_syslog_group }}"
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 7: Label the RELP destination port under SELinux"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-selinux-tcp-port.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            rsyslog_selinux_tcp_port: "{{ siem_relp_port }}"
+          when: siem_forward_transport == 'relp'
+
         - name: "Step 7: Create the private disk-assisted queue spool"
           tags: [C16, C17]
           ansible.builtin.file:
@@ -569,11 +643,26 @@
               # Keep these stable filenames: they hold unsent audit history.
               # Plain TCP has no durable acknowledgement; queued delivery does
               # not guarantee that messages in flight at disconnect are stored.
+              {% if siem_forward_transport == 'relp' %}
+              module(load="omrelp" tls.tlsLib="gnutls")
+              {% endif %}
               local6.* action(
-                name="siem_audit" type="omfwd" target="{{ siem_forward_alias }}"
-                port="{{ siem_forward_port }}" protocol="tcp"
+                name="siem_audit" type="{{ 'omrelp' if siem_forward_transport == 'relp' else 'omfwd' }}" target="{{ siem_forward_alias }}"
+                port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
+              {% if siem_forward_transport == 'relp' %}
+                tls="on" tls.authMode="name" tls.permittedPeer="{{ siem_relp_server_name }}"
+                tls.caCert="/etc/rsyslog.d/pilot-relp-sender/ca.pem"
+                tls.myCert="/etc/rsyslog.d/pilot-relp-sender/cert.pem"
+                tls.myPrivKey="/etc/rsyslog.d/pilot-relp-sender/key.pem"
+                tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
+                timeout="5" conn.timeout="3"
+                tls.permanentFailureDisablesAction="off"
+                queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
+              {% else %}
+                protocol="tcp" ResendLastMSGOnReconnect="on"
+              {% endif %}
                 action.resumeRetryCount="-1" action.resumeInterval="1"
-                action.resumeIntervalMax="10" ResendLastMSGOnReconnect="on"
+                action.resumeIntervalMax="10"
                 queue.type="LinkedList" queue.filename="siem_audit"
                 queue.spoolDirectory="{{ siem_queue_spool }}"
                 queue.size="10000" queue.highWatermark="8000" queue.lowWatermark="2000"
@@ -581,10 +670,22 @@
                 queue.saveOnShutdown="on" queue.discardSeverity="8"
               )
               auth,authpriv.* action(
-                name="siem_auth" type="omfwd" target="{{ siem_forward_alias }}"
-                port="{{ siem_forward_port }}" protocol="tcp"
+                name="siem_auth" type="{{ 'omrelp' if siem_forward_transport == 'relp' else 'omfwd' }}" target="{{ siem_forward_alias }}"
+                port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
+              {% if siem_forward_transport == 'relp' %}
+                tls="on" tls.authMode="name" tls.permittedPeer="{{ siem_relp_server_name }}"
+                tls.caCert="/etc/rsyslog.d/pilot-relp-sender/ca.pem"
+                tls.myCert="/etc/rsyslog.d/pilot-relp-sender/cert.pem"
+                tls.myPrivKey="/etc/rsyslog.d/pilot-relp-sender/key.pem"
+                tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
+                timeout="5" conn.timeout="3"
+                tls.permanentFailureDisablesAction="off"
+                queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
+              {% else %}
+                protocol="tcp" ResendLastMSGOnReconnect="on"
+              {% endif %}
                 action.resumeRetryCount="-1" action.resumeInterval="1"
-                action.resumeIntervalMax="10" ResendLastMSGOnReconnect="on"
+                action.resumeIntervalMax="10"
                 queue.type="LinkedList" queue.filename="siem_auth"
                 queue.spoolDirectory="{{ siem_queue_spool }}"
                 queue.size="10000" queue.highWatermark="8000" queue.lowWatermark="2000"
@@ -687,6 +788,10 @@
             executable: /bin/sh
             cmd: |
               test -f {{ siem_forward_conf | quote }} || exit 0
+              if test -f /etc/rsyslog.d/pilot-relp-sender/profile.json; then
+                /usr/local/libexec/pilot-siem-relp-check pending sender
+                exit $?
+              fi
               started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || exit 1
               written=$(date -r {{ siem_forward_conf | quote }} +%s.%N) || exit 1
               awk -v s="$started" -v w="$written" 'BEGIN { exit !(s < w) }' && echo pending
@@ -704,10 +809,35 @@
             - not ansible_check_mode
             - >-
               ((siem_forward_conf_result | default({})) is changed)
+              or ((siem_tls_material_result | default({})) is changed)
+              or ((siem_tls_profile_result | default({})) is changed)
               or ((rsyslog_selinux_port_label | default({})) is changed)
+              or (rsyslog_selinux_any_port_changed | default(false) | bool)
               or (siem_forward_restart_pending.stdout | default('') == 'pending')
 
+        - name: "Step 9b: Retire sender TLS material after returning to TCP"
+          tags: [C16, C17]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-retire.yml
+            apply:
+              tags: [C16, C17]
+          vars:
+            siem_tls_role: sender
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_transport == 'tcp'
+
       rescue:
+        - name: "ROLLBACK — restore sender TLS material before restoring the service"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-restore.yml
+            apply:
+              tags: [always]
+          when:
+            - siem_tls_snapshot_role is defined
+            - siem_tls_snapshot_role == 'sender'
+
         - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"
           tags: [always]
           ansible.builtin.copy:

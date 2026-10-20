@@ -1,0 +1,46 @@
+---
+- name: "RELP: probe installed module support before replacing live TLS/config"
+  tags: [always]
+  when: not ansible_check_mode
+  block:
+    - name: "RELP: create a non-secret temporary module probe"
+      ansible.builtin.tempfile:
+        state: file
+        path: /etc/rsyslog.d
+        prefix: pilot-relp-capability-
+        suffix: .probe
+      register: siem_relp_capability_file
+      changed_when: false
+    - name: "RELP: prepare the module capability probe"
+      ansible.builtin.copy:
+        dest: "{{ siem_relp_capability_file.path }}"
+        mode: "0644"
+        setype: _default
+        content: |
+          module(load="omrelp")
+          *.* action(type="omrelp" target="127.0.0.1" port="20514"
+            tls.permanentFailureDisablesAction="off"
+            queue.type="LinkedList" queue.filename="pilot_capability"
+            queue.maxDiskSpace="1m" queue.saveOnShutdown="on"
+            action.resumeRetryCount="-1" action.resumeInterval="1" action.resumeIntervalMax="10")
+      changed_when: false
+    - name: "RELP: check the real module parser"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1, -f, "{{ siem_relp_capability_file.path }}"]
+      register: siem_relp_capability
+      changed_when: false
+      failed_when: false
+    - name: "RELP: reject modules that permanently disable audit forwarding on TLS errors"
+      ansible.builtin.assert:
+        that: siem_relp_capability.rc == 0
+        fail_msg: >-
+          RELP/mTLS requires omrelp tls.permanentFailureDisablesAction=off
+          (upstream rsyslog 8.2606.0+ or a vendor backport). Install a supported
+          rsyslog/rsyslog-relp pair before enabling RELP; pilot does not add repositories.
+  always:
+    - name: "RELP: remove the non-secret temporary capability probe"
+      ansible.builtin.file:
+        path: "{{ siem_relp_capability_file.path }}"
+        state: absent
+      changed_when: false
+      when: siem_relp_capability_file is defined and siem_relp_capability_file.path is defined

@@ -1,0 +1,34 @@
+---
+- name: Stage disposable mTLS negative identities (never production PKI)
+  hosts: "audit-log-forwarding:log-server"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse any target outside the disposable RELP test topology
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in ['aq-log', 'aq-ubuntu', 'aq-el']
+          - (stage | default('sandbox')) == 'sandbox'
+    - name: Create private test-only staging
+      ansible.builtin.file:
+        path: /run/pilot-relp-test
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+    - name: Stage negative certificates
+      ansible.builtin.copy:
+        dest: "/run/pilot-relp-test/{{ item.key }}.pem"
+        content: "{{ item.value.cert }}"
+        mode: "0600"
+      loop: "{{ relp_test_identities | dict2items }}"
+      no_log: true
+      diff: false
+    - name: Stage negative private keys
+      ansible.builtin.copy:
+        dest: "/run/pilot-relp-test/{{ item.key }}.key"
+        content: "{{ item.value.key }}"
+        mode: "0600"
+      loop: "{{ relp_test_identities | dict2items }}"
+      no_log: true
+      diff: false

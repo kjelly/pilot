@@ -1,0 +1,67 @@
+---
+# Disposable test prerequisite only. Production apply never adds repositories.
+- name: Install the pinned, signed RELP test runtime
+  hosts: "audit-log-forwarding:log-server"
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Refuse targets outside the disposable RELP topology
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in ['aq-log', 'aq-ubuntu', 'aq-el']
+          - (stage | default('sandbox')) == 'sandbox'
+          - ansible_architecture == 'x86_64'
+          - >-
+            (ansible_distribution == 'Ubuntu' and ansible_distribution_release == 'noble') or
+            (ansible_os_family == 'RedHat' and ansible_distribution_major_version == '9')
+    # Repository creation and package resolution require an actual run. L3
+    # still checks the real apply chain; L4 probes module capability before TLS.
+    - name: Prepare Ubuntu's signed upstream test packages
+      when: ansible_os_family == 'Debian' and not ansible_check_mode
+      block:
+        - name: Fetch the fingerprint-verified PPA public key
+          ansible.builtin.get_url:
+            url: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xE6373CEF14AB1E84033628FEB9EFD12FBD347BD0
+            dest: /usr/share/keyrings/pilot-relp-test.asc
+            checksum: sha256:dde15f3e20410baebb603d5b73b11bc5e1ac341dc7345c85939b1cacbc090ad7
+            mode: "0644"
+        - name: Configure only the disposable PPA source
+          ansible.builtin.copy:
+            dest: /etc/apt/sources.list.d/pilot-relp-test.list
+            mode: "0644"
+            content: "deb [arch=amd64 signed-by=/usr/share/keyrings/pilot-relp-test.asc] https://ppa.launchpadcontent.net/adiscon/v8-stable/ubuntu noble main\n"
+          register: relp_test_apt_source
+        - name: Install the exact Ubuntu runtime
+          ansible.builtin.apt:
+            name:
+              - rsyslog=8.2608.0-0adiscon1noble2
+              - rsyslog-relp=8.2608.0-0adiscon1noble2
+            update_cache: "{{ relp_test_apt_source is changed }}"
+            state: present
+    - name: Prepare EL9's signed upstream test packages
+      when: ansible_os_family == 'RedHat' and not ansible_check_mode
+      block:
+        - name: Fetch the fingerprint-verified RPM public key
+          ansible.builtin.get_url:
+            url: https://rpms.adiscon.com/RPM-GPG-KEY-Adiscon
+            dest: /etc/pki/rpm-gpg/PILOT-RELP-TEST
+            checksum: sha256:16615f165d0bc572a9cb3546f4aa2f0b01ce22897b7fd852fed7789c293d765e
+            mode: "0644"
+        - name: Import only the expected signing key
+          ansible.builtin.rpm_key:
+            key: /etc/pki/rpm-gpg/PILOT-RELP-TEST
+            fingerprint: 3148D134973ABF515B2F9E316B11D5C78F67EF64
+            state: present
+        - name: Configure the HTTPS test repository with package signature checks
+          ansible.builtin.yum_repository:
+            name: pilot-relp-test
+            description: Disposable signed rsyslog test packages
+            baseurl: https://rpms.adiscon.com/v8-stable/epel-9/x86_64/
+            gpgcheck: true
+            gpgkey: file:///etc/pki/rpm-gpg/PILOT-RELP-TEST
+            includepkgs: [rsyslog*, librelp*, libfastjson4*]
+            enabled: true
+        - name: Install the exact EL9 runtime
+          ansible.builtin.dnf:
+            name: [rsyslog-8.2608.0-2.el9, rsyslog-relp-8.2608.0-2.el9, librelp-1.13.0-1.el9, libfastjson4-1.2304.0-1.el9]
+            state: present

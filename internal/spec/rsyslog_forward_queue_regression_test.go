@@ -48,7 +48,7 @@ func TestRegression_SyslogForwardersHaveRetryQueues(t *testing.T) {
 	}
 	legacy := regexp.MustCompile(`(?m)^\s*[^#\s][^\n]*\s+@@[^\s]+`)
 	actions := regexp.MustCompile(`(?s)action\(([^)]*)\)`)
-	omfwd := regexp.MustCompile(`\btype\s*=\s*"omfwd"`)
+	omfwd := regexp.MustCompile(`\btype\s*=\s*"[^"\n]*\bom(?:fwd|relp)\b[^"\n]*"`)
 	for _, file := range files {
 		data, err := os.ReadFile(file)
 		if err != nil {

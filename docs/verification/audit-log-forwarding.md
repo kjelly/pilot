@@ -1,6 +1,6 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v1.9
+> 版本：v2.0 DRAFT — RELP/mTLS commands TODO: VERIFY on fresh targets
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
@@ -30,6 +30,12 @@
 |---------|----------|---------|--------|
 | `siem_forward_host` | 中央 SIEM（`log-server`）的 IP 或 FQDN；套用時會被 pin 進 `/etc/hosts` 的 `siem-log-server` 別名 | 否 | 空字串（不轉送） |
 | `siem_forward_port` | rsyslog `omfwd` 轉送目的埠（TCP） | 否 | `514` |
+| `siem_forward_transport` | `tcp` 或 `relp`；RELP 強制 mTLS，連線失敗不得降回 TCP | 否 | `tcp` |
+| `siem_relp_port` | RELP 專用 TCP 埠；不改變共用的 `siem_forward_port` | 否 | `20514` |
+| `siem_relp_ca_pem` | 信任 CA 的 PEM；由部署端提供，不自動簽發或信任未知 CA | RELP 必填 | — |
+| `siem_relp_cert_pem` | 本機 client 憑證 PEM（同機兼 receiver 時須有雙用途） | RELP 必填 | — |
+| `siem_relp_key_pem` | 對應的未加密私鑰 PEM；只從 vault/私密變數提供，禁止提交 | RELP 必填 | — |
+| `siem_relp_server_name` | 接收端憑證的精確小寫 DNS 名稱，不接受 wildcard | RELP 必填 | — |
 | `audit_logrotate_rotate` | `/etc/logrotate.d/auditd` 保留檔案數 | 否 | `14` |
 | `audit_logrotate_maxage` | `/etc/logrotate.d/auditd` `maxage`（天） | 否 | `90` |
 | `syslog_logrotate_rotate` | `/etc/logrotate.d/syslog` 保留檔案數 | 否 | `14` |
@@ -53,6 +59,35 @@
 
 ## 2. Checklist
 
+RELP/mTLS acceptance contract (DRAFT, TODO: VERIFY): both OS families must
+reject untrusted/expired certificates, missing client certificates and incorrect
+peer names; a TCP listener without RELP ACK must not pass C22. Normal receiver
+restart, confirmed outage, and disk-spill followed by a clean client restart must
+recover every numbered ID, with duplicates counted separately. Existing TCP
+configuration remains supported. TLS material changes must reload the daemon;
+failed validation must restore the previous keys and configuration. Removing the
+role removes its private TLS material and helper, while pending audit spool stays.
+After a real daemon rejects an incorrect server certificate, correcting the peer
+must drain the numbered backlog without restarting the sender. Removing a client
+from the permitted-name list must deny it; restoring the name must resume it.
+Rotating same-name leaf certificates/keys must take effect and remain idempotent.
+Explicitly switching back to TCP retires private RELP keys after loading TCP.
+Sudden power loss, exhausted storage and downstream Loki durability are outside
+this transport contract; RELP ACK does not imply final-file fsync. Production PKI
+issuance/renewal is operator-managed; tests use an isolated disposable CA.
+The contract starts at accepted client rsyslog messages. mTLS authenticates the
+transport peer; existing `%HOSTNAME%` payload-based routing is preserved and is
+not a cryptographic binding between a certificate and every message's hostname.
+RELP session/connection timeouts are 5/3 seconds; its action queues allow
+1 second of shutdown drain and 10 seconds for the current action to finish,
+so self-forwarding must not inherit the module's 90-second session wait.
+RELP senders must support `tls.permanentFailureDisablesAction="off"` (upstream
+8.2606.0+ or an equivalent vendor backport). Otherwise TLS authentication errors
+can permanently disable forwarding and discard later messages despite unlimited
+retries. Unsupported modules must fail before TLS/config replacement. Production
+repository selection/upgrades are operator-managed; pilot does not silently add
+upstream repositories. Check mode defers this installed-module capability check.
+
 C16/C17 的 probe 會驗證兩個 action 的目標、TCP 埠、完整 queue/retry 參數，
 比對設定檔寫入時間與服務啟動時間，並在注入對應 facility 訊息後讀取服務
 process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在。
@@ -66,7 +101,7 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 最長 10 秒。不因低 severity 主動丟棄，但有限容量用盡時仍會受 enqueue timeout
 限制；應監控該檔案系統的可用空間。decommission 保留 spool 中的稽核歷史。
 
-這是純 TCP 的斷線補送，沒有接收端持久化 ACK；`ResendLastMSGOnReconnect` 可重送
+預設 TCP 模式沒有接收端持久化 ACK；`ResendLastMSGOnReconnect` 可重送
 最後一筆，也可能造成重複。不能保證斷線瞬間在途訊息、斷電或長到耗盡容量的中斷
 零遺失。跨主機驗收需分別統計 unique ID、遺失與重複，並涵蓋持續送訊息時重啟
 接收端、確認停機後送訊息，以及落盤後在接收端仍停機時乾淨重啟 client。
@@ -94,7 +129,7 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 | C19 | service   | `rsyslog.service` 為 active                                            | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
 | C20 | logrotate | `/etc/logrotate.d/` 下沒有任何 log path 被兩份以上的 policy 檔重複宣告（不限於本模組管理的 auditd/syslog 兩個檔案，涵蓋 distro 內建的 `rsyslog` 等所有檔案） | 0        | sh -c 'test -z "$(grep -rhoE "^/[^ {]+" /etc/logrotate.d/ 2>/dev/null | sort | uniq -d)" && echo 0 || echo 1' |
 | C21 | rule      | audisp-syslog plugin 已啟用且 facility 釘死 local6（沒有這條，local6 永遠不會有任何流量，跟轉送/接收設定是否正確無關） | 0        | sh -c 'grep -q "^active = yes" /etc/audit/plugins.d/syslog.conf && grep -q "^args = LOG_INFO LOG_LOCAL6" /etc/audit/plugins.d/syslog.conf && echo 0 || echo 1' |
-| C22 | functional| 送出 local6 測試訊息後 12 秒內，`rsyslogd` 對 `siem-log-server` 解析出的位址、omfwd action 的埠有 ESTABLISHED TCP 連線 | 0 | sh -c 'p=$(sed -n "s/^[[:space:]]*port=\"\([0-9][0-9]*\)\".*/\1/p" /etc/rsyslog.d/99-siem-forward.conf 2>/dev/null | sed -n 1p); a=$(getent hosts siem-log-server | awk "NR==1{print \$1}"); [ -n "$p" ] && [ -n "$a" ] || { echo 1; exit 0; }; case $a in *:*) a="[$a]";; esac; i=0; while [ $i -lt 6 ]; do logger -p local6.info "PILOT-AUDIT-FWD-$$-$i"; sleep 2; if ss -Htnp state established "( dport = :$p and dst $a )" 2>/dev/null | grep -q "\"rsyslogd\""; then echo 0; exit 0; fi; i=$((i+1)); done; echo 1' |
+| C22 | functional| 驗證實際 daemon 連線；RELP 模式另外驗證 mTLS peer 與 RELP open/syslog ACK | 0 | sudo /usr/local/libexec/pilot-siem-relp-check sender; echo $? |
 
 > C1–C20 全部用**正邏輯 rc**（`; echo $?` 或原生 rc，C11 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0），不用反邏輯 grep + 數字

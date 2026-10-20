@@ -1,0 +1,41 @@
+---
+# Caller supplies siem_tls_role and siem_tls_enabled. No TLS-off RELP mode.
+- name: "RELP: reset per-play rollback state"
+  ansible.builtin.set_fact:
+    siem_tls_snapshot_role: ""
+    rsyslog_selinux_any_port_changed: false
+  tags: [always]
+
+- name: "RELP: validate transport, port and peer names"
+  ansible.builtin.assert:
+    that:
+      - (siem_forward_transport | default('tcp')) in ['tcp', 'relp']
+      - (siem_receiver_relp_enabled | default(false) | string | lower) in ['true', 'false']
+      - (siem_relp_port | default(20514) | string) is match('^[1-9][0-9]{0,4}\Z')
+      - (siem_relp_port | default(20514) | int) <= 65535
+      - >-
+        not (siem_tls_enabled | bool) or
+        (siem_relp_port | default(20514) | string) !=
+        ((siem_receiver_tcp_port if siem_tls_role == 'receiver' else siem_forward_port) | string)
+      - >-
+        not (siem_tls_enabled | bool) or siem_tls_role != 'sender' or
+        (siem_relp_server_name | default('')) is match('^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\Z')
+      - >-
+        not (siem_tls_enabled | bool) or siem_tls_role != 'receiver' or
+        ((siem_relp_client_names | default([])) is sequence and
+         (siem_relp_client_names | default([])) is not string and
+         (siem_relp_client_names | default([]) | length) > 0 and
+         (siem_relp_client_names | default([]) | reject('match', '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\Z') | list | length) == 0)
+    fail_msg: "RELP requires a distinct decimal port and explicit lowercase DNS peer names (no wildcards)."
+  tags: [always]
+
+- name: "RELP: certificate, CA and private key must all be supplied"
+  ansible.builtin.assert:
+    that:
+      - (siem_relp_ca_pem | default('') | length) > 0
+      - (siem_relp_cert_pem | default('') | length) > 0
+      - (siem_relp_key_pem | default('') | length) > 0
+    fail_msg: "RELP mTLS requires CA, certificate and key PEM variables from the deployment's private inputs."
+  no_log: true
+  when: siem_tls_enabled | bool
+  tags: [always]

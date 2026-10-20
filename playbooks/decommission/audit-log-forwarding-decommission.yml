@@ -108,6 +108,7 @@
         - "{{ audit_logrotate_conf }}"
         - "{{ syslog_logrotate_conf }}"
         - /usr/local/libexec/pilot-siem-queue-check
+        - /etc/rsyslog.d/pilot-relp-sender
         - "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
       register: audit_log_forwarding_decom_stat
       tags: [inspect]
@@ -129,8 +130,22 @@
             state: absent
           loop:
             - /usr/local/libexec/pilot-siem-queue-check
+            - /etc/rsyslog.d/pilot-relp-sender
             - "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
           when: not ansible_check_mode
+
+        - name: "Check whether the receiver still owns the shared transport helper"
+          ansible.builtin.stat:
+            path: /etc/rsyslog.d/pilot-relp-receiver/profile.json
+          register: siem_decom_receiver_profile
+
+        - name: "Remove the transport helper when no receiver owns it"
+          ansible.builtin.file:
+            path: /usr/local/libexec/pilot-siem-relp-check
+            state: absent
+          when:
+            - not ansible_check_mode
+            - not siem_decom_receiver_profile.stat.exists
 
         - name: "Remove 99-siem-forward.conf"
           ansible.builtin.file:

@@ -252,7 +252,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// It must also require the connection to go to the address
 	// siem-log-server resolves to, and retry for a few seconds within the
 	// default 15 s row timeout.
-	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 6 ]", "sleep 2"} {
+	for _, want := range []string{"pilot-siem-relp-check sender", "; echo $?"} {
 		if !strings.Contains(cmd["C22"], want) {
 			t.Errorf("C22 must contain %q, got %q", want, cmd["C22"])
 		}

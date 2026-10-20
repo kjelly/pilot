@@ -11,6 +11,7 @@ lifecycle:
   decommission: {class: stateless, scope: local, externalState: false, requiresReachableHost: true, retention: none}
 regressionTests:
   - internal/spec/audit_log_forwarding_regression_test.go
+  - internal/spec/siem_relp_mtls_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 # A SIEM receiver is optional.  The apply playbook resolves it from
 # log-server first, then wazuh-manager; with neither present it still applies
@@ -22,6 +23,12 @@ resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
   - {name: siem_forward_port, type: integer, required: false, default: 514, secret: false}
+  - {name: siem_forward_transport, type: string, required: false, default: tcp, secret: false}
+  - {name: siem_relp_port, type: integer, required: false, default: 20514, secret: false}
+  - {name: siem_relp_ca_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_cert_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_key_pem, type: string, required: false, secret: true}
+  - {name: siem_relp_server_name, type: string, required: false, secret: false}
   - {name: audit_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
   - {name: audit_logrotate_maxage, type: integer, required: false, default: 90, secret: false}
   - {name: syslog_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
@@ -33,6 +40,6 @@ traceability:
   tag: {kind: bare}
   exemptions:
     "docs/verification/audit-log-forwarding.md#C11": {kind: verifyOnly, reason: functional audit probe}
-    "docs/verification/audit-log-forwarding.md#C22": {kind: verifyOnly, reason: functional forwarding connection probe}
+    "docs/verification/audit-log-forwarding.md#C22": {kind: verifyOnly, reason: functional TCP connection or mTLS RELP ACK probe}
 verification: {autoDeploy: false}
 site: {include: true, order: 90, vars: {}, tags: [security, audit-log-forwarding], optIn: false}

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import runpy
 
 CONFIG = pathlib.Path('/etc/rsyslog.d/99-siem-forward.conf')
 ACTIONS = {'local6': 'siem_audit', 'auth': 'siem_auth', 'authpriv': 'siem_auth'}
@@ -21,6 +22,8 @@ def output(*args):
 
 
 def check(facilities):
+    transport = runpy.run_path('/usr/local/libexec/pilot-siem-relp-check')
+    profile = transport['read_profile']('sender')
     text = CONFIG.read_text()
     for facility in facilities:
         name = ACTIONS[facility]
@@ -31,16 +34,21 @@ def check(facilities):
         pairs = re.findall(r'([\w.]+)\s*=\s*"([^"]*)"', match[1])
         params = dict(pairs)
         required = {
-            'name': name, 'type': 'omfwd', 'target': 'siem-log-server',
-            'protocol': 'tcp', 'queue.type': 'LinkedList',
+            'name': name, 'type': 'omrelp' if profile['enabled'] else 'omfwd', 'target': 'siem-log-server',
+            'queue.type': 'LinkedList',
             'queue.filename': name, 'queue.saveOnShutdown': 'on',
             'queue.size': '10000', 'queue.highWatermark': '8000',
             'queue.lowWatermark': '2000', 'queue.maxDiskSpace': '256m',
             'queue.maxFileSize': '1m', 'queue.discardSeverity': '8',
             'action.resumeRetryCount': '-1', 'action.resumeInterval': '1',
             'action.resumeIntervalMax': '10',
-            'ResendLastMSGOnReconnect': 'on',
         }
+        if not profile['enabled']:
+            required.update(protocol='tcp', ResendLastMSGOnReconnect='on')
+        else:
+            required.update(timeout='5', **{'conn.timeout': '3', 'queue.timeoutShutdown': '1000',
+                                           'queue.timeoutActionCompletion': '10000',
+                                           'tls.permanentFailureDisablesAction': 'off'})
         if len(pairs) != len(params) or any(params.get(k) != v for k, v in required.items()):
             raise ValueError('invalid queue/retry contract: ' + name)
         if not 1 <= int(params['port']) <= 65535:
@@ -53,6 +61,7 @@ def check(facilities):
 
     # Apply validates the full configuration with rsyslogd -N1 before loading it.
     # Do not repeat that potentially slow DNS-dependent check in each spec row.
+    transport['check_config'](profile)
     pid = output('systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog')
     if int(pid) <= 0:
         raise ValueError('rsyslog is not running')

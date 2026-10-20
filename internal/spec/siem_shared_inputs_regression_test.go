@@ -330,6 +330,12 @@ func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
 			map[string]any{"siem_forward_host": "siem-1"}, true},
 		{"external receiver is not checked", map[string]any{"siem_receiver_tcp_port": 2514},
 			map[string]any{"siem_forward_host": "198.51.100.7"}, false},
+		{"RELP uses its independent port", map[string]any{"siem_receiver_relp_enabled": true, "siem_relp_port": 20514},
+			map[string]any{"siem_forward_transport": "relp", "siem_forward_port": 2514}, false},
+		{"RELP requires receiver opt-in", map[string]any{},
+			map[string]any{"siem_forward_transport": "relp"}, true},
+		{"RELP rejects a mismatched port", map[string]any{"siem_receiver_relp_enabled": true, "siem_relp_port": 20515},
+			map[string]any{"siem_forward_transport": "relp", "siem_relp_port": 20514}, true},
 		// AGENTS.md §5.13: a name for the log-server written with other
 		// case, as its FQDN, or with a trailing dot is still the log-server.
 		{"explicit siem_forward_host is the inventory name in upper case", map[string]any{"siem_receiver_tcp_port": 2514},

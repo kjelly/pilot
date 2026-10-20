@@ -5,6 +5,14 @@
   hosts: "audit-log-forwarding:!log-server"
   become: true
   tasks:
+    - name: Detect a receiver independently of optional inventory group labels
+      ansible.builtin.stat:
+        path: /etc/rsyslog.d/10-siem-receiver.conf
+      register: queue_fixture_receiver
+    - name: Refuse to overwrite a receiver's loopback port or reload imtcp
+      ansible.builtin.assert:
+        that: not queue_fixture_receiver.stat.exists
+        fail_msg: "This is a receiver; include its log-server group when running the client-only fixture."
     - name: Configure the test-only loopback input on the standard syslog port
       ansible.builtin.copy:
         dest: /etc/rsyslog.d/09-pilot-queue-test-input.conf
