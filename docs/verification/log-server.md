@@ -1,10 +1,16 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v2.0 DRAFT — RELP/mTLS commands TODO: VERIFY on fresh targets
+> 版本：v2.0
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
 > 維護者：sre
+
+> 最後驗證：2026-10-20，candidate `be23874ca4153ed009671b96ae21c239b6061267`，
+> tree `b92729e5be05fa98cef56f0ef1ca6c2c1014ad96`。全新三機 L3/L4 通過，
+> receiver 11/11、sender 66/66、L6 三台 changed=0。RELP/classic 的重啟與停機補送
+> 各 1,440/1,440；落盤重啟 72,000/72,000，另有 4 筆重複。輪替、撤除及 decommission 通過。
+> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-be23874c.md)。
 
 ## 1. 目標系統
 
@@ -167,3 +173,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.7 | 只改說明，row 不變：§6 的說明移到表格下面（原本插在表格中間，C9/C10 那列因此沒有算在表格裡），並註明 `--skip-tags` 任一列會跳過整個 log-server 的步驟。§1 的 rescue 說明補上：rescue 先用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog | pilot |
 | 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |
 | 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔與接收設定修改時間的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |
+| 2026-10-20 | v2.0 | RELP/mTLS 接收與 loopback-only legacy TCP；C4 驗證已載入的實際 transport，C11 允許 ruleset 後的 input 屬性。驗收見本輪 evidence 摘要 | pilot |

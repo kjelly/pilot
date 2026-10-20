@@ -29,6 +29,7 @@
 | **DNS 快取層：FreeIPA 前的第一層 unbound，內部網域自動導向 FreeIPA、外部導向自訂 upstream；設定用 `pilot edit`** | [`runbooks/dns.md`](./runbooks/dns.md)（規格：[`verification/dns.md`](./verification/dns.md)） |
 | **部署中央 SIEM 日誌接收端（rsyslog）** | [`runbooks/log-server.md`](./runbooks/log-server.md) |
 | **主機 auditd 稽核規則 + 轉送日誌到 SIEM** | [`runbooks/audit-log-forwarding.md`](./runbooks/audit-log-forwarding.md) |
+| **SIEM RELP 雙向 TLS、輪替與補送邊界** | [`runbooks/siem-relp-mtls.md`](./runbooks/siem-relp-mtls.md) |
 | **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
 | **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
 | **S3 相容物件儲存（SeaweedFS）** | [`runbooks/seaweedfs-s3.md`](./runbooks/seaweedfs-s3.md) |

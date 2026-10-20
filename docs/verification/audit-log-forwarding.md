@@ -1,16 +1,16 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v2.0 DRAFT — RELP/mTLS commands TODO: VERIFY on fresh targets
+> 版本：v2.0
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `b9a583329cc3bac118c019b2ae52861643a62155`，
-> tree `1f372535edaf07a6b0392480be7e0b352f955caa`。三台全新 VM 的 L3/L4 通過、
-> 本 spec 66/66、L6 changed=0。停機補送與落盤重啟復原無遺失；持續送訊息時重啟
-> receiver 仍遺失 3/1,440 筆在途訊息，保留為純 TCP 的已知限制。
-> [完整驗證摘要](../evidence/audit-forward-queue/2026-10-20-b9a58332.md)。
+> 最後驗證：2026-10-20，candidate `be23874ca4153ed009671b96ae21c239b6061267`，
+> tree `b92729e5be05fa98cef56f0ef1ca6c2c1014ad96`。全新三機 L3/L4 通過，
+> receiver 11/11、sender 66/66、L6 三台 changed=0。RELP/classic 的重啟與停機補送
+> 各 1,440/1,440；落盤重啟 72,000/72,000，另有 4 筆重複。輪替、撤除及 decommission 通過。
+> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-be23874c.md)。
 
 ## 1. 目標系統
 
@@ -59,7 +59,7 @@
 
 ## 2. Checklist
 
-RELP/mTLS acceptance contract (DRAFT, TODO: VERIFY): both OS families must
+RELP/mTLS acceptance contract: both OS families must
 reject untrusted/expired certificates, missing client certificates and incorrect
 peer names; a TCP listener without RELP ACK must not pass C22. Normal receiver
 restart, confirmed outage, and disk-spill followed by a clean client restart must
@@ -315,3 +315,4 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 | 2026-10-14 | v1.7 | 新增 C22：送出 local6 測試訊息後，`rsyslogd` 對轉送埠必須有 ESTABLISHED 的 TCP 連線。起因：PR #79 讓 inventory 的 `siem_forward_port` 生效後，AlmaLinux 9.8（SELinux Enforcing）上 `siem_forward_port: 2514` 的 client 設定完全正確（C16/C17 pass），但 `syslogd_t` 不能連 `unreserved_port_t`，rsyslog 回報 `cannot connect ... Permission denied`、所有訊息丟失、apply 成功；C22 在該狀態實測 FAIL，標成 `syslogd_port_t` 之後 PASS。apply 端的修正在 `tasks/rsyslog-selinux-tcp-port.yml`（Step 6g） | pilot |
 | 2026-10-14 | v1.8 | C22 改成送出訊息後每 2 秒檢查一次、最多 8 秒，並只承認目的地是 `siem-log-server` 解析出之位址的連線。v1.7 只等 3 秒且不看目的地：log-server 剛重啟時 client 的轉送暫停中會誤判 FAIL，連到別台主機的同一個埠則會誤判 PASS（PR #79 複審）。仍在 15 秒預設的單列逾時內；log-server 重啟後 30 秒內 rsyslog 的轉送暫停重試，這段時間內 C22 仍可能 FAIL | pilot |
 | 2026-10-20 | v1.9 | #122：C16/C17 驗證有界磁碟輔助 action queue、持續重試與已載入的獨立 queue worker；C22 改讀 omfwd 埠並等待最多 12 秒。明列 TCP 在途訊息與有限容量邊界 | pilot |
+| 2026-10-20 | v2.0 | RELP/mTLS opt-in：精確 peer 名稱、CA/cert/key、TLS 失敗保留 queue、固定 classic engine 並拒絕格式自動轉換；C22 驗證真實 daemon 與 RELP ACK。驗收見本輪 evidence 摘要 | pilot |
