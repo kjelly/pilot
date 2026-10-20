@@ -1,0 +1,13 @@
+# Deliberate L4 failure for vm-target topology auto-rollback tests. The
+# check-mode pass lets the pipeline capture its pre-test memory snapshots.
+# Inject clock skew before invoking topology test to exercise clock recovery
+# from those snapshots. This playbook makes no guest changes itself.
+---
+- name: Exercise topology auto-rollback after a successful check-mode pass
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Fail only during the real apply
+      ansible.builtin.fail:
+        msg: Intentional failure for vm-target rollback clock recovery
+      when: not ansible_check_mode
