@@ -19,11 +19,13 @@
     - name: Prepare Ubuntu's signed upstream test packages
       when: ansible_os_family == 'Debian' and not ansible_check_mode
       block:
-        - name: Fetch the fingerprint-verified PPA public key
-          ansible.builtin.get_url:
-            url: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xE6373CEF14AB1E84033628FEB9EFD12FBD347BD0
+        # Primary fingerprint from Launchpad's official PPA metadata:
+        # E6373CEF14AB1E84033628FEB9EFD12FBD347BD0. Vendor the public
+        # key because keyserver armor comments vary between responses.
+        - name: Copy the fingerprint-verified PPA public key
+          ansible.builtin.copy:
+            src: ../files/adiscon-v8-stable.asc
             dest: /usr/share/keyrings/pilot-relp-test.asc
-            checksum: sha256:dde15f3e20410baebb603d5b73b11bc5e1ac341dc7345c85939b1cacbc090ad7
             mode: "0644"
         - name: Configure only the disposable PPA source
           ansible.builtin.copy:

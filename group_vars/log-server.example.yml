@@ -1,4 +1,4 @@
-# RELP is an additional listener; existing TCP remains available for migration.
+# RELP requires mTLS; enabling it restricts legacy TCP to loopback.
 # siem_receiver_relp_enabled: true
 # siem_relp_port: 20514
 # siem_relp_client_names:
