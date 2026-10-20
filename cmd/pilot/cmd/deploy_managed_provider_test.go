@@ -253,9 +253,9 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 					}
 				}
 				varsFile := filepath.Join(t.TempDir(), "vars.yml")
-				// Production contracts now preflight these credentials instead of
-				// deferring the missing-input error until the provider play runs.
-				const input = "target_group: dashboard\ngrafana_admin_password: fixture-password\nthanos_aws_access_key_id: fixture-access\nthanos_aws_secret_access_key: fixture-secret\n"
+				// Credentials are supplied as CLI strings below, so both entry
+				// points exercise canonical input preflight before any apply.
+				const input = "target_group: dashboard\n"
 				if err := os.WriteFile(varsFile, []byte(input), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -269,7 +269,7 @@ func TestManagedProviderWorkflowExecutionAndFailures(t *testing.T) {
 				}}
 				t.Cleanup(func() { activePromptAutomation = old })
 				stubDeploymentAvailabilityAllReachable(t)
-				request := catalogDeploymentRequest{playbook: "playbooks/apply/dashboard-apply.yml", inv: inv, limit: "consumer-a", tags: "C8", extraVars: []string{"target_group=consumer-a", "stage=sandbox"}, vault: vaultInput{ExtraVarsFile: varsFile}, stage: "sandbox", componentHints: []string{"dashboard"}}
+				request := catalogDeploymentRequest{playbook: "playbooks/apply/dashboard-apply.yml", inv: inv, limit: "consumer-a", tags: "C8", extraVars: []string{"target_group=consumer-a", "stage=sandbox", "grafana_admin_password=12345678", "thanos_aws_access_key_id=false", "thanos_aws_secret_access_key=null"}, vault: vaultInput{ExtraVarsFile: varsFile}, stage: "sandbox", componentHints: []string{"dashboard"}}
 				var out bytes.Buffer
 				// Bound the whole workflow, including several real Ansible
 				// inventory/list-hosts startups on slower CI hosts. This is a
