@@ -17,14 +17,13 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-19；candidate `5dac1b68b68a8bdd76be162b3d9ba9e2ad395157`，tree `1e509829c341fd5dcf3940e5783f68004602f931`，乾淨隔離 checkout。 |
-| 目標與 inventory | `r80q-ipa`（AlmaLinux 9.8）屬 freeipa-server；`r80q-mon`、`r80q-target`（Ubuntu 24.04）屬 freeipa-client/host-monitoring；login-probe={r80q-mon}。由 topology CLI 讀取實際集合，對齊決定 A。 |
-| 外部狀態 | 一次性 vault 僅含 `ipa_admin_password`、`node_exporter_basic_auth_password`，parent 0700/file 0600；IPA 4.13.4、node_exporter 1.12.1。三台專用 VM 已移除，其他 VM 保留；11 個 dev-lite cache containers 保持 healthy，未 stop/purge。image、inventory、binary 指紋見 evidence。 |
-| Fresh chain | L1–L6 rc=0；fresh L3/L4 三機 failed=0；14 PASS/0 FAIL/0 SKIP；L6 三機 changed=0。10s interval 下原子建立 canary+key，IPA/兩 client SSSD key 指紋一致，兩個真 SSH probe stage=ok。 |
-| 退役有效態 | 原 head query 在真實「磁碟新/runtime 舊」狀態回 false，新 query 回 true；production Inspect→executor→full apply→Verify 修復。35s 視窗內 retired 接受的 canary 登入由 4 降為 0、retained 由 3 為 4；retired SSH service 仍 active。兩輪修復重跑均 changed=0，最後再驗 14/14。 |
-| Repository checks | 本 candidate 全庫 race 59 packages、rc=0；mandatory 30 PASS/0 SKIP；pinned lint 0 issues；build/spec/shell/tag/secret/activation guards PASS。playbook syntax/252 YAML duplicate check PASS；ansible-lint 仍為 advisory findings。 |
-| 覆蓋範圍 | C1/C3/C6/C12 activation 與 Prometheus C23/C24 的既有行為 regression 本輪重跑。更廣 native tagged/rollback 與 pinned container 細節保留各原 revision 證據；本輪未重跑 EL client 或完整四機告警演練。 |
-| Evidence | [本次 runtime-proof 退役與 fresh 驗證](../evidence/login-probe/2026-10-19-5dac1b6.md)；[前輪 tagged activation/Prometheus](../evidence/login-probe/2026-10-19-5adeec0.md)；[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md)；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md)。 |
+| 最新時間 gate 驗證 | 2026-10-20；candidate `11e8ab7dbc37c0143c0e39f4215cefb86a16397e`，tree `bc7d730eea0ccc74d68e0e706e15daf42bb4e28f`，乾淨隔離 checkout。 |
+| 目標與 inventory | 本輪為 localhost 的實際 Ansible gate 測試；inventory graph 另含 login-probe peer `probe` 與 Prometheus peer `prom`，只提供跨主機設定。兩個 production caller 都實跑；此範圍不是完整 VM 登入鏈。 |
+| 外部狀態 | 不需要秘密；Ansible 2.19.2、Go 1.26.8、Prometheus v2.53.0、Alertmanager v0.27.0。實際 image digest 與工具範圍見 evidence。 |
+| 時間 gate 結果 | 兩個 caller 的 check/diff/C1、apply、重跑皆 `ok=4 changed=0 failed=0`；等號邊界皆在 mutation 前拒絕（`changed=0 failed=1`）。duration、5m 上限與 promtool 時序正反案例 PASS。 |
+| Repository checks | build/vet、完整 Go suite 與 race 各 61 個有測試的套件 PASS；mandatory 35 PASS/0 SKIP；golangci-lint 0 issues；spec lint、playbook syntax/tags、252 YAML duplicate-key 與 secret scan PASS。race 的選用工具範圍見 evidence；ansible-lint 保留 advisory findings。 |
+| 覆蓋範圍 | 本輪也重跑 tagged activation、Prometheus C23/C24 與退役 runtime regression。完整 VM 登入鏈保留原 revision 的歷史證據：14/14 PASS、L6 三機 changed=0；最新 gate 的範圍與本機 logrotate 相容性限制見本次 evidence。 |
+| Evidence | [本次時間 gate 驗證](../evidence/login-probe/2026-10-20-11e8ab7.md)；[先前完整登入鏈與退役驗證](../evidence/login-probe/2026-10-19-5dac1b6.md)；[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md)；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md)。 |
 
 ## 1. 為什麼
 
