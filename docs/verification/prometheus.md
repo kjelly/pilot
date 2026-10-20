@@ -1,6 +1,6 @@
 # Verification Spec — prometheus (per-site Prometheus + Thanos Sidecar)
 
-> 版本：v1.15
+> 版本：v1.16
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `seaweedfs-s3.md`/
 > `keycloak.md` 的 docker container 模式）
 > 維護者：sre
@@ -77,10 +77,10 @@
 | `host_disk_queue_depth_threshold` | `HostDiskQueueDeep`：平均 in-flight request 數超過此值 | 否 | `10` |
 | `host_disk_latency_for` | `HostDiskLatencyHigh` / `HostDiskQueueDeep` 的 `for:` | 否 | `10m` |
 | `host_metrics_missing_for` | `HostMetricsMissing`（`up{job="node"}==0`，但這台主機在 `host_metrics_missing_success_window` 內有一次成功登入＝監控資料缺口，與 `HostDown` 分開）的 `for:`。最多 9m（seed `HostDown` 是 10m，兩個 rule group 的評估時間點最多差 1m；playbook 會擋），它才能在 Alertmanager 抑制同主機的 `HostDown{job="node"}`（`alertmanager.md` §1.7） | 否 | `3m` |
-| `host_metrics_missing_success_window` | `HostMetricsMissing` 只採信 target 自己的 last-success 時間戳在這段時間內有變化（`changes()`）。playbook 會擋：時間窗 + 15s（probe 的 textfile 寫出間隔）不得超過 `host_metrics_missing_for`（否則掛掉的主機可能觸發它），且每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout` + 15s + 2 × `prometheus_scrape_interval` 不得超過時間窗（否則資料缺口期間會中斷；`prometheus-apply.yml` 與 `login-probe-apply.yml` 都檢查，`alertmanager.md` §1.7）；至少涵蓋兩次 scrape | 否 | `150s` |
+| `host_metrics_missing_success_window` | `HostMetricsMissing` 只採信 target 自己的 last-success 時間戳在這段時間內有變化（`changes()`）。playbook 會擋：時間窗 + 15s（probe 的 textfile 寫出間隔）不得超過 `host_metrics_missing_for`（否則掛掉的主機可能觸發它），且每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout` + 15s + 2 × `prometheus_scrape_interval` 必須嚴格小於時間窗（否則資料缺口期間會中斷；`prometheus-apply.yml` 與 `login-probe-apply.yml` 都檢查，`alertmanager.md` §1.7）；至少涵蓋兩次 scrape。時間參數必須寫在 inventory，修改後套用兩個角色，不可只用一次 apply 的 `-e` 覆寫（runbook §6） | 否 | `150s` |
 | `login_probe_alert_for` | `PilotLoginProbeAccountDenied`/`AuthFailed`/`LoginStalled`/`HostKeyMismatch`/`SessionFailed` 的 `for:`（probe 預設 60 秒一輪，3m ≈ 連續 3 輪） | 否 | `3m` |
 | `login_probe_transport_alert_for` | `PilotLoginProbeTransportFailed` 的 `for:`（規則本身排除 `up{job="node"}==0` 的主機：整台掛掉的主機只產生 `HostDown`） | 否 | `5m` |
-| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動。沒有上限；它也決定資料缺口變成主機掛掉後，`HostDown` 還被抑制多久（預設約 8m，見 `alertmanager.md` §1.7） | 否 | `5m` |
+| `login_probe_alert_keep_firing_for` | 所有 login-probe 告警與 `HostMetricsMissing` 的 `keep_firing_for:`，避免單輪恢復（或 probe 單輪失敗、重啟）造成 resolve/re-fire 抖動。啟用 host-health 規則時最多 5m，playbook 會擋；它也決定資料缺口變成主機掛掉後，`HostDown` 還被抑制多久（預設約 8m，見 `alertmanager.md` §1.7） | 否 | `5m` |
 | `login_probe_stale_seconds` | `PilotLoginProbeStale`：probe textfile 的寫入時間戳在此秒數內沒有變化（`changes()`，不依賴探測主機時鐘；daemon 每 15 秒寫一次）。必須 ≥ 3 × `prometheus_scrape_interval`（playbook 會擋），否則健康的 probe 會被當成停擺 | 否 | `180` |
 
 > **為何 `prometheus_site_label` 是必填、跟 `wazuh_manager_host` 不一樣**：
@@ -340,3 +340,4 @@ C23/C24 的 tagged apply 必須讓執行中的 Prometheus 載入目前的規則�
 | 2026-10-15 | v1.13 | PR #80 第六輪 review：新增 `host_metrics_missing_success_window`（預設 2m）；`HostMetricsMissing` 改看 target 自己的 last-success 時間戳，取代 `host_metrics_missing_for` ≥ `login_probe_stale_seconds` 的 gate。row 未變 | sre |
 | 2026-10-16 | v1.14 | PR #80 第七輪 review：`host_metrics_missing_success_window` 預設改為 140s，兩道 gate 改為「時間窗 + 15s ≤ `host_metrics_missing_for`」與「probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗」。row 未變 | sre |
 | 2026-10-16 | v1.15 | PR #80 第八輪 review：`host_metrics_missing_success_window` 預設改為 150s，probe 間隔 gate 改為 interval + timeout + 15s + 2 × scrape，`login-probe-apply.yml` 也檢查；`host_metrics_missing_for` 上限改為 9m；§3 改為指向 runbook §0.5 | sre |
+| 2026-10-20 | v1.16 | #123：probe-round bound 改為嚴格小於時間窗，keep_firing_for 上限 5m；時間參數必須持久化於 inventory。row 未變 | sre |

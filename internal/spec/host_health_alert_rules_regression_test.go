@@ -593,7 +593,7 @@ tests:
 		window, want string
 	}{
 		{"120s", " []"}, // seen gap + one scrape: the old bound accepted it, and it drops out
-		{"180s", holds}, // seen gap + two scrapes: the gate's bound now
+		{"180s", holds}, // ideal instantaneous scrapes; equality is now refused
 	} {
 		vars := map[string]string{}
 		for k, v := range hostHealthContractDefaults(t) {
@@ -603,6 +603,81 @@ tests:
 		vars["host_metrics_missing_success_window"] = c.window
 		if out, ok := hostHealthPromtest(t, vars, roundBoundary(c.want)); !ok {
 			t.Errorf("window %s, changes seen 120 s apart at a 1m scrape: unexpected HostMetricsMissing outcome:\n%s", c.window, out)
+		}
+	}
+}
+
+// A one-second variation in scrape completion leaves a hole at equality.
+// The stricter gate refuses 180s and accepts 181s for a 60s round + 60s scrape.
+func TestRegression_HostHealthProbeRoundScrapeMargin(t *testing.T) {
+	series := func(value func(int) string) string {
+		var samples []string
+		for sec := 0; sec <= 310; sec++ {
+			v := "_"
+			for j, stamp := range []int{7, 67, 128, 189, 249, 310} {
+				if sec == stamp {
+					v = value(j)
+				}
+			}
+			samples = append(samples, v)
+		}
+		return strings.Join(samples, " ")
+	}
+	for _, c := range []struct{ window, want string }{
+		{"180s", " []"},
+		{"181s", "\n          - exp_labels: {pilot_host: gap, severity: warning, action_required: \"true\", pilot_alert_source: host-health}"},
+	} {
+		vars := hostHealthContractDefaults(t)
+		vars["host_metrics_missing_success_window"] = c.window
+		vars["host_metrics_missing_for"] = "1s" // expose any brief condition gap
+		vars["login_probe_alert_keep_firing_for"] = "0s"
+		unit := `rule_files: [host-health-alert-rules.yml]
+evaluation_interval: 1s
+tests:
+  - interval: 1s
+    input_series:
+      - series: 'up{job="node",instance="gap:9100",pilot_host="gap"}'
+        values: '0x310'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",probe_target="gap"}'
+        values: '` + series(func(int) string { return "1" }) + `'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon:9100",probe_target="gap"}'
+        values: '` + series(func(j int) string { return strconv.Itoa(120 * ((j + 1) / 2)) }) + `'
+    alert_rule_test:
+      - eval_time: 188s
+        alertname: HostMetricsMissing
+        exp_alerts:` + c.want + `
+`
+		if out, ok := hostHealthPromtest(t, vars, unit); !ok {
+			t.Errorf("window %s scrape margin: %s", c.window, out)
+		}
+	}
+}
+
+func TestRegression_HostHealthKeepFiringCapReleasesDeadHost(t *testing.T) {
+	for _, c := range []struct{ keep, want string }{
+		{"5m", " []"},
+		{"30m", "\n          - exp_labels: {pilot_host: dead, severity: warning, action_required: \"true\", pilot_alert_source: host-health}"},
+	} {
+		vars := hostHealthContractDefaults(t)
+		vars["login_probe_alert_keep_firing_for"] = c.keep
+		unit := `rule_files: [host-health-alert-rules.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="node",instance="dead:9100",pilot_host="dead"}'
+        values: '0x120'
+      - series: 'pilot_login_probe_success{job="node",instance="mon:9100",probe_target="dead"}'
+        values: '1x40 0x80'
+      - series: 'pilot_login_probe_last_success_timestamp_seconds{job="node",instance="mon:9100",probe_target="dead"}'
+        values: '0+15x40 600x80'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HostMetricsMissing
+        exp_alerts:` + c.want + `
+`
+		if out, ok := hostHealthPromtest(t, vars, unit); !ok {
+			t.Errorf("keep_firing_for %s after host dies: %s", c.keep, out)
 		}
 	}
 }
@@ -1023,7 +1098,8 @@ func TestRegression_HostHealthTimingGates(t *testing.T) {
 		{"window + 15 s past a 9m for (dead host mutes HostDown)", "9m", "530s", "15s", "180", "", "", false},
 		{"window longer than the for", "3m", "6m", "15s", "180", "", "", false},
 		{"window shorter than two scrapes", "3m", "20s", "15s", "180", "5s", "2s", false},
-		{"window exactly the default probe round", "3m", "135s", "15s", "180", "", "", true}, // 60+30+15+2x15 = 135
+		{"window exactly the default probe round", "3m", "135s", "15s", "180", "", "", false}, // equality leaves a scrape-duration gap
+		{"window one second above the default probe round", "3m", "136s", "15s", "180", "", "", true},
 		{"window one second short of the default probe round", "3m", "134s", "15s", "180", "", "", false},
 		{"the old one-scrape bound at a 15s scrape", "3m", "120s", "15s", "180", "", "", false}, // 60+30+15+15
 		{"the old one-scrape bound at a 30s scrape", "3m", "135s", "30s", "180", "", "", false}, // 60+30+15+30
@@ -1031,7 +1107,7 @@ func TestRegression_HostHealthTimingGates(t *testing.T) {
 		{"short for, shorter window, default probe", "1m", "45s", "15s", "60", "", "", false},
 		{"3m probe interval", "9m", "8m", "15s", "180", "3m", "30s", true},
 		{"3m probe interval, default window", "3m", "150s", "15s", "180", "3m", "30s", false},
-		{"fast second probe, window at the first probe's round", "150s", "135s", "15s", "180", "30s", "20s", true},
+		{"fast second probe, window at the first probe's round", "150s", "135s", "15s", "180", "30s", "20s", false},
 		{"compound Go duration probe interval", "3m", "150s", "15s", "180", "1m0s", "30s", true},
 		{"fractional Go duration probe interval", "3m", "150s", "15s", "180", "0.75m", "30s", true}, // 45+30+15+30 = 120
 		{"compound Go duration over the window", "3m", "150s", "15s", "180", "1m30s", "30s", false}, // 90+30+15+30 = 165
@@ -1061,13 +1137,71 @@ func TestRegression_HostHealthTimingGates(t *testing.T) {
 	}
 }
 
+// The HostMetricsMissing inhibition lifetime must stay bounded even in tagged runs.
+func TestRegression_HostHealthKeepFiringCap(t *testing.T) {
+	tasks := playbookPreTasks(t, hostHealthApply, "Gate: login_probe_alert_keep_firing_for is at most 5m")
+	for _, c := range []struct {
+		value string
+		ok    bool
+	}{
+		{"5m", true}, {"300s", true}, {"300000ms", true}, {"0s", true}, {"299s", true},
+		{"301s", false}, {"300001ms", false}, {"30m", false}, {"1h", false}, {"5m\n", false}, {"1m30s", false},
+	} {
+		out, ok := runLocalPlay(t, map[string]any{"prometheus_host_health_alert_rules_enabled": true,
+			"login_probe_alert_keep_firing_for": c.value}, tasks, "--tags", "C1")
+		if ok != c.ok {
+			t.Errorf("%q: gate passed = %v, want %v\n%s", c.value, ok, c.ok, out)
+		}
+		if !ok && !strings.Contains(out, "inventory") {
+			t.Errorf("%q: missing inventory-only guidance\n%s", c.value, out)
+		}
+	}
+}
+
+// Exercise both callers with real Ansible tag/check-mode selection and
+// repeat them without persistent state: these pre-tasks must change nothing.
+func TestRegression_HostHealthTimingGatesCheckMode(t *testing.T) {
+	inv := "all:\n  hosts:\n    localhost: {ansible_connection: local}\n  children:\n    login-probe:\n      hosts:\n        probe: {}\n    prometheus:\n      hosts:\n        prom: {}\n"
+	facts := filepath.Join(t.TempDir(), "inventory.yml")
+	if err := os.WriteFile(facts, []byte(inv), 0600); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := exec.Command("ansible-inventory", "-i", facts, "--graph").CombinedOutput()
+	if err != nil {
+		if _, missing := exec.LookPath("ansible-inventory"); missing != nil && os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") != "1" {
+			t.Skip(missing)
+		}
+		t.Fatalf("inventory facts: %v\n%s", err, graph)
+	}
+	t.Logf("Local gate target; peer hosts supply inventory settings only:\n%s", graph)
+	for _, side := range []struct{ path, name string }{
+		{hostHealthApply, "Gate: every login-probe host records a success inside host_metrics_missing_success_window"},
+		{loginProbeApply, "Gate: this probe records a success inside every Prometheus host's host_metrics_missing_success_window"},
+	} {
+		tasks := runnableTasks(t, playbookPreTasks(t, side.path, side.name))
+		vars := map[string]any{"prometheus_host_health_alert_rules_enabled": true,
+			"host_metrics_missing_success_window": "150s", "prometheus_scrape_interval": "15s",
+			"login_probe_interval": "60s", "login_probe_total_timeout": "30s"}
+		for _, args := range [][]string{{"--check", "--diff", "--tags", "C1"}, {"--tags", "C1"}, {"--tags", "C1"}} {
+			out, ok := runLocalPlayInventory(t, inv, vars, tasks, args...)
+			t.Logf("%s %v:\n%s", side.path, args, out)
+			if !ok || !strings.Contains(out, "changed=0") || !strings.Contains(out, "included:") {
+				t.Errorf("%s %v: expected gate execution and changed=0\n%s", side.path, args, out)
+			}
+		}
+		vars["host_metrics_missing_success_window"] = "135s"
+		badInv := strings.Replace(inv, "prom: {}", "prom: {host_metrics_missing_success_window: 135s}", 1)
+		out, ok := runLocalPlayInventory(t, badInv, vars, tasks, "--check", "--tags", "C1")
+		t.Logf("%s equality refused:\n%s", side.path, out)
+		if ok || !strings.Contains(out, "strictly greater") || !strings.Contains(out, "MUST be stored in inventory") || !strings.Contains(out, "changed=0") {
+			t.Errorf("%s: expected equality rejection and inventory-only guidance\n%s", side.path, out)
+		}
+	}
+}
+
 // TestRegression_LoginProbeChecksTheHostMetricsMissingWindow runs
-// login-probe-apply.yml's copy of the probe-round gate (the same task file
-// prometheus-apply.yml runs): a probe whose interval no longer fits a
-// Prometheus host's window is refused by the login-probe apply itself, so
-// `pilot deploy` of login-probe alone cannot silently disable
-// HostMetricsMissing (PR #80 review). The second Prometheus host is the
-// short one, and one with the host-health rules off is ignored.
+// login-probe-apply.yml's copy of the probe-round gate against every
+// Prometheus host. The second host is the short one; a disabled host is ignored.
 func TestRegression_LoginProbeChecksTheHostMetricsMissingWindow(t *testing.T) {
 	tasks := runnableTasks(t, playbookPreTasks(t, loginProbeApply,
 		"Gate: this probe records a success inside every Prometheus host's host_metrics_missing_success_window"))
@@ -1084,6 +1218,8 @@ func TestRegression_LoginProbeChecksTheHostMetricsMissingWindow(t *testing.T) {
 		{"a short window on the second Prometheus", "{host_metrics_missing_success_window: 120s}", "60s", "30s", false},
 		{"a 1m scrape on the second Prometheus", "{prometheus_scrape_interval: 1m}", "60s", "30s", false},
 		{"a compound Go duration", "{}", "1m0s", "30s", true},
+		{"equal window on the second Prometheus", "{host_metrics_missing_success_window: 135s}", "60s", "30s", false},
+		{"window above bound on the second Prometheus", "{host_metrics_missing_success_window: 136s}", "60s", "30s", true},
 	} {
 		vars := map[string]any{"login_probe_interval": c.interval, "login_probe_total_timeout": c.timeout}
 		out, ok := runLocalPlayInventory(t, inventory(c.prom2), vars, tasks)
@@ -1100,31 +1236,15 @@ func TestRegression_LoginProbeChecksTheHostMetricsMissingWindow(t *testing.T) {
 // parser to the format contracts/login-probe.yaml allows (AGENTS.md §5.7):
 // the login-probe durations are Go durations, so every value
 // time.ParseDuration accepts with a positive result must parse to the same
-// number of seconds, and every other value must be refused — with two
-// known exceptions, locked at their actual outcome below and tracked as gate
-// hardening in GitHub issue #123:
-//
-//   - "60s\n": the gate's `$` also matches before a trailing newline, so it
-//     parses as 60 s, which time.ParseDuration rejects. An inventory value
-//     reaches the gate without it (a plain YAML scalar has no trailing
-//     newline);
-//   - "2562048h": time.ParseDuration rejects the overflow, while the gate
-//     parses it and then refuses it, because it needs a window far longer
-//     than any Prometheus host has.
+// number of seconds, and every other value must be refused. Overflow is
+// checked in integer nanoseconds, including values one ns past MaxInt64.
 func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 	values := []string{"60s", "1m", "1m30s", "1.5m", "0.75m", "90s", "1h", "500ms", "2m0s", "1m30.5s", ".5h", "1.s",
 		"100us", "100µs", "1h2m3s4ms", "60", "1d", "-1s", "+1s", "1m30", "0s", "0", "s", "1 m", "1M", "",
-		"60s\n", "2562048h"}
-	// The exceptions: what the gate does with them (parsed, seconds, pair ok).
-	type outcome struct {
-		parsed  bool
-		seconds float64
-		ok      bool
-	}
-	known := map[string]outcome{
-		"60s\n":    {true, 60, true},
-		"2562048h": {true, 2562048 * 3600, false},
-	}
+		"60s\n", "60s\n\n", "60s\r\n", "2562048h", "100μs", "0.1ns", "0.9ns0.9ns", "1.9ns",
+		"9223372036854775807ns", "9223372036854775808ns", "9223372036854775807ns1ns",
+		"2562047h47m16.854775807s", "2562047h47m16.854775808s", "9223372036.854775807s", "9223372036.854775808s",
+		"9223372036.854775807999999999999999s", "9223372036.8547758071s", "0.000000000999999999999999999999s"}
 	gate, err := filepath.Abs(hostMetricsMissingRoundGate)
 	if err != nil {
 		t.Fatal(err)
@@ -1133,6 +1253,7 @@ func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 	probes := []map[string]any{}
 	for i, v := range values {
 		probes = append(probes, map[string]any{"name": "p" + strconv.Itoa(i), "interval": v, "timeout": "1s"})
+		probes = append(probes, map[string]any{"name": "t" + strconv.Itoa(i), "interval": "1s", "timeout": v})
 	}
 	tasks := []map[string]any{
 		{"ansible.builtin.include_tasks": gate, "vars": map[string]any{
@@ -1150,34 +1271,31 @@ func TestRegression_HostHealthProbeRoundGateParsesGoDurations(t *testing.T) {
 	var pairs []struct {
 		Probe           string  `json:"probe"`
 		IntervalSeconds float64 `json:"interval_seconds"`
+		TimeoutSeconds  float64 `json:"timeout_seconds"`
 		Parsed          bool    `json:"parsed"`
 		OK              bool    `json:"ok"`
 	}
 	if err := json.Unmarshal(data, &pairs); err != nil {
 		t.Fatal(err)
 	}
-	if len(pairs) != len(values) {
-		t.Fatalf("got %d pairs, want %d", len(pairs), len(values))
+	if len(pairs) != 2*len(values) {
+		t.Fatalf("got %d pairs, want %d", len(pairs), 2*len(values))
 	}
 	for i, v := range values {
-		if want, ok := known[v]; ok {
-			if _, err := time.ParseDuration(v); err == nil {
-				t.Errorf("%q: time.ParseDuration now accepts it; it is no longer an exception", v)
-			}
-			got := outcome{pairs[i].Parsed, pairs[i].IntervalSeconds, pairs[i].OK}
-			if got.parsed != want.parsed || math.Abs(got.seconds-want.seconds) > 1e-3 || got.ok != want.ok {
-				t.Errorf("%q: gate gave parsed=%v seconds=%v ok=%v, want %+v", v, got.parsed, got.seconds, got.ok, want)
-			}
-			continue
-		}
 		d, err := time.ParseDuration(v)
 		goOK := err == nil && d > 0
-		if pairs[i].Parsed != goOK {
-			t.Errorf("%q: gate parsed = %v, time.ParseDuration ok and > 0 = %v", v, pairs[i].Parsed, goOK)
-			continue
-		}
-		if goOK && math.Abs(pairs[i].IntervalSeconds-d.Seconds()) > 1e-6 {
-			t.Errorf("%q: gate = %v s, time.ParseDuration = %v s", v, pairs[i].IntervalSeconds, d.Seconds())
+		for j, field := range []string{"interval", "timeout"} {
+			p := pairs[2*i+j]
+			if p.Parsed != goOK || (!goOK && p.OK) {
+				t.Errorf("%s %q: parsed=%v ok=%v, time.ParseDuration ok and > 0=%v", field, v, p.Parsed, p.OK, goOK)
+			}
+			seconds := p.IntervalSeconds
+			if j == 1 {
+				seconds = p.TimeoutSeconds
+			}
+			if goOK && math.Abs(seconds-d.Seconds()) > 1e-6 {
+				t.Errorf("%s %q: gate = %v s, time.ParseDuration = %v s", field, v, seconds, d.Seconds())
+			}
 		}
 	}
 }

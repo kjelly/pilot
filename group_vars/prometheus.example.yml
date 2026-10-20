@@ -186,8 +186,9 @@ thanos_s3_target_host: ""
 # host_disk_queue_depth_threshold: "10"        # 平均 in-flight request 數
 # host_disk_latency_for: 10m
 # host_metrics_missing_for: 3m                 # node_exporter 抓不到但 SSH 探測成功；最多 9m
-# host_metrics_missing_success_window: 150s    # 這段時間內要有一次成功登入才算 SSH 連得上；加 15s 不得超過 host_metrics_missing_for，且要容得下 probe 一輪間隔 + total_timeout + 15s + 2 × scrape
+# Cross-host timing inputs belong in inventory, not one apply's -e; apply both roles after editing.
+# host_metrics_missing_success_window: 150s    # 加 15s 不得超過 host_metrics_missing_for；必須嚴格大於 probe interval + total_timeout + 15s + 2 × scrape
 # login_probe_alert_for: 3m                    # account/auth/stall/hostkey/session
 # login_probe_transport_alert_for: 5m
-# login_probe_alert_keep_firing_for: 5m
+# login_probe_alert_keep_firing_for: 5m       # host-health 規則啟用時最多 5m
 # login_probe_stale_seconds: 180

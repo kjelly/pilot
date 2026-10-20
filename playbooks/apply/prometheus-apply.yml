@@ -871,6 +871,23 @@
       when: prometheus_host_health_alert_rules_enabled | bool
       tags: [always]
 
+    - name: "Gate: login_probe_alert_keep_firing_for is at most 5m"
+      ansible.builtin.assert:
+        that:
+          - login_probe_alert_keep_firing_for is match('^[0-9]+(ms|s|m|h|d)\Z')
+          - (_keep_count | int) * (_duration_seconds[_keep_unit] | float) <= 300
+        fail_msg: >-
+          login_probe_alert_keep_firing_for={{ login_probe_alert_keep_firing_for }} must be at most
+          5m: HostMetricsMissing inhibits HostDown, so a longer keep_firing_for hides a dead host
+          after a monitoring data gap. Store cross-host timing settings in inventory
+          (group_vars/host_vars), not only in -e, and apply both roles after changing them.
+      vars:
+        _keep_count: "{{ login_probe_alert_keep_firing_for | regex_search('^[0-9]+') }}"
+        _keep_unit: "{{ login_probe_alert_keep_firing_for | regex_search('[a-z]+$') }}"
+        _duration_seconds: {ms: 0.001, s: 1, m: 60, h: 3600, d: 86400}
+      when: prometheus_host_health_alert_rules_enabled | bool
+      tags: [always]
+
     # PilotLoginProbeStale is changes() of the probe's write timestamp over
     # login_probe_stale_seconds (pilot-host-health-alert-rules.yml.j2). The
     # window must hold several scrapes of a healthy probe: with fewer, a
