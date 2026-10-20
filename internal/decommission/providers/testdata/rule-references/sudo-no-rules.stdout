@@ -1,0 +1,224 @@
+
+PLAY [FreeIPA identity & authorization apply] **********************************
+
+TASK [Load canonical roster under a namespace] *********************************
+ok: [pwfix-ipa]
+
+TASK [Detect FreeIPA server FQDN when roster omits freeipa.server] *************
+ok: [pwfix-ipa]
+
+TASK [Fill canonical roster freeipa.server for this reconcile] *****************
+ok: [pwfix-ipa]
+
+TASK [Gate: canonical roster version and legacy fields are mutually exclusive] ***
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical roster declares the FreeIPA server] **********************
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical top-level and FreeIPA keys are known] ********************
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical migration remains a dedicated fail-closed workflow] ******
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical user objects are structurally valid] *********************
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+
+TASK [Gate: canonical group objects and category prefixes are valid] ***********
+ok: [pwfix-ipa] => (item=team-pwc-gone) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": {
+        "category": "team",
+        "description": "never created",
+        "membership": {
+            "authoritative": true,
+            "groups": [],
+            "users": []
+        },
+        "name": "team-pwc-gone",
+        "state": "absent",
+        "type": "posix"
+    },
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical host objects use FQDN and valid state] *******************
+ok: [pwfix-ipa] => (item={'name': 'pwc-host2.ipa.pilot.internal', 'state': 'absent', 'ip_address': '192.168.122.252', 'description': 'pwc-host2'}) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": {
+        "description": "pwc-host2",
+        "ip_address": "192.168.122.252",
+        "name": "pwc-host2.ipa.pilot.internal",
+        "state": "absent"
+    },
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical names and direct references are unique and resolvable] ***
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical netgroup objects are structurally valid] *****************
+skipping: [pwfix-ipa]
+
+TASK [Gate: canonical netgroup names are unique and don't collide with hostgroups] ***
+skipping: [pwfix-ipa]
+
+TASK [Gate: canonical netgroup membership references are resolvable] ***********
+skipping: [pwfix-ipa]
+
+TASK [Gate: canonical HBAC rules are safe and references are resolvable] *******
+skipping: [pwfix-ipa]
+
+TASK [Gate: canonical sudo rules and commands are safe] ************************
+skipping: [pwfix-ipa]
+
+TASK [Gate: canonical sudo commands exclude shell escape primitives] ***********
+skipping: [pwfix-ipa]
+
+TASK [Normalize canonical FreeIPA settings] ************************************
+ok: [pwfix-ipa]
+
+TASK [Normalize canonical users for the compatibility reconciler] **************
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+ok: [pwfix-ipa] => (item=(censored due to no_log))
+
+TASK [Normalize canonical groups for the compatibility reconciler] *************
+ok: [pwfix-ipa] => (item=team-pwc-gone)
+
+TASK [Normalize canonical hostgroups for the compatibility reconciler] *********
+skipping: [pwfix-ipa]
+
+TASK [Normalize canonical netgroups for the compatibility reconciler] **********
+skipping: [pwfix-ipa]
+
+TASK [Normalize canonical HBAC rules for the compatibility reconciler] *********
+skipping: [pwfix-ipa]
+
+TASK [Normalize absent static HBAC rules for deletion (spec 2026-09-07 §6.1)] ***
+skipping: [pwfix-ipa]
+
+TASK [Normalize canonical sudo rules for the compatibility reconciler] *********
+skipping: [pwfix-ipa]
+
+TASK [Append v3.0 compiled grant HBAC rules (spec.md §9)] **********************
+ok: [pwfix-ipa]
+
+TASK [Append v3.0 compiled grant sudo rules (spec.md §10)] *********************
+ok: [pwfix-ipa]
+
+TASK [Select legacy admin settings] ********************************************
+skipping: [pwfix-ipa]
+
+TASK [Select active identity objects] ******************************************
+ok: [pwfix-ipa]
+
+TASK [Gate: admin credential present (fail early, before any mutation)] ********
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: roster supplies at least one data list (catches the wrong -e file)] ***
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+skipping: [pwfix-ipa]
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [pwfix-ipa]
+
+TASK [Kinit admin] *************************************************************
+ok: [pwfix-ipa]
+
+TASK [Gate: refuse to delete allow_all via the static HBAC rule lifecycle (spec 2026-09-07 §7)] ***
+ok: [pwfix-ipa] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: sudo rule category vs specific-list fields are mutually exclusive] ***
+skipping: [pwfix-ipa]
+
+TASK [Compute the roster's absent host list] ***********************************
+ok: [pwfix-ipa]
+
+TASK [Look up the current live host object for each absent roster host (spec.md §16.6/§16.7)] ***
+ok: [pwfix-ipa] => (item=pwc-host2.ipa.pilot.internal)
+
+TASK [Look up services managed by each absent host (spec.md §16.6) — separate from host-show, which never lists them] ***
+ok: [pwfix-ipa] => (item=pwc-host2.ipa.pilot.internal)
+
+TASK [Print live host inspection for external tooling (read-only)] *************
+ok: [pwfix-ipa] => (item=pwc-host2.ipa.pilot.internal) => {
+    "msg": "HOST_INSPECT[pwc-host2.ipa.pilot.internal]:  ipa: ERROR: pwc-host2.ipa.pilot.internal: host not found ------------------\n0 services matched\n------------------\n----------------------------\nNumber of entries returned 0\n---------------------------- "
+}
+
+TASK [Look up the current live host object for the query target host (read-only, decommission verify)] ***
+skipping: [pwfix-ipa]
+
+TASK [Look up services managed by the query target host (read-only, decommission verify)] ***
+skipping: [pwfix-ipa]
+
+TASK [Print host_object query inspection for external tooling (read-only)] *****
+skipping: [pwfix-ipa]
+
+TASK [Look up the current live DNS A record for the query target host (read-only, decommission verify)] ***
+skipping: [pwfix-ipa]
+
+TASK [Print DNS inspection for external tooling (read-only)] *******************
+skipping: [pwfix-ipa]
+
+TASK [Look up direct HBAC rules referencing the query target host (read-only, decommission verify)] ***
+skipping: [pwfix-ipa]
+
+TASK [Print HBAC reference inspection for external tooling (read-only)] ********
+skipping: [pwfix-ipa]
+
+TASK [Look up direct sudo rules referencing the query target host (read-only, decommission verify)] ***
+ok: [pwfix-ipa]
+
+TASK [Print sudo reference inspection for external tooling (read-only)] ********
+ok: [pwfix-ipa] => {
+    "msg": "HOST_INSPECT[pwr-host3.ipa.pilot.internal]: --------------------\n0 Sudo Rules matched\n--------------------\n----------------------------\nNumber of entries returned 0\n----------------------------"
+}
+
+TASK [Release the Kerberos ticket] *********************************************
+ok: [pwfix-ipa]
+
+PLAY RECAP *********************************************************************
+pwfix-ipa                  : ok=29   changed=0    unreachable=0    failed=0    skipped=22   rescued=0    ignored=0   
+

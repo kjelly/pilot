@@ -878,6 +878,15 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    也會失敗;遷移由 #118 追蹤。`TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`
    用真實 `ansible-playbook` 與 fake kinit 確認密碼原樣送達。
 
+16. **`ipa` 的長選項接受唯一前綴**:`ipa` CLI 用 Python optparse,一個不存在的選項只要是
+   另一個選項的唯一前綴,就被靜默當成那個選項。`hbacrule-find`/`sudorule-find` 沒有 host 篩選,
+   host decommission 查詢用的 `--host=<fqdn>` 一直被當成 `--hostcat`,永遠查到 0 筆,HBAC/sudo
+   直接引用的檢查因此永遠 pass(issue #104,2026-10-15)。**規則**:playbook 裡每個
+   `ipa <子指令> --選項` 都要是該子指令 `--help` 列出的完整選項名稱;
+   `internal/spec/ipa_cli_options_regression_test.go::TestRegression_PlaybookIPAOptionsExistInIPAHelp`
+   對全部 `playbooks/**` 檢查,選項清單在 `internal/spec/testdata/freeipa-cli-options.txt`
+   (FreeIPA 4.13.4 擷取)。新增子指令時,在 FreeIPA server 跑 `ipa <cmd> --help` 補進清單。
+
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
 from-scratch install 之後。
@@ -1523,3 +1532,4 @@ git status --short
 | 2026-10-14 | v1.51 | §4.5 第 14 點改寫（#72 合併後的 follow-up）：原本列在 allowlist、宣稱「已會 `kdestroy`」的 13 個檔案其實在失敗、`--tags`、`KCM:`/`KEYRING:` collection 時留下 ticket，pilot-access-gateway 根本沒有 `kdestroy`——全部改用私有 cache，lint 不再有 allowlist，並且也接受 tempfile/`MEMORY:` cache；close 重設 `pilot_krb5ccname`、`--check` 不刪過期 cache；`ipa` lint 檢查 cache 一致；`pilot-gateway-scope.md` C1–C3 與 `internal-endpoint.md` 六列改用 ldapi 讀 LDAP（原本靠洩漏的 ticket 才通過）；新增 `TestRegression_SpecProbesSplitInAnsible`；`vm-target run --sandbox` 複製整個 `playbooks/`; `spec.NeedsBecome` 把 `ldapi://`、`-Y EXTERNAL` 視為需要 root:`pilot-gateway-scope.md` C1–C3、`freeipa-identity.md` C1–C24、`freeipa-server-replica.md` C14/C15、`freeipa-dns.md` C1 原本以 SSH 使用者身分執行,只因 vm-target 的 SSH 使用者是 root 才通過(`TestRegression_LdapiExternalRowsRunAsRoot`);`freeipa-identity.md` netgroup 撤銷 SOP 的手動加成員改用 ldapi `ldapmodify`。#79 也新增 v1.50,後合併者重新編號 | pilot |
 | 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |
 | 2026-10-16 | v1.53 | §4.5 新增第 15 點：密碼不得插進 shell 或 free-form `command:` 字串。PR #92 的 3 個 FreeIPA kinit task（replica forwarder、replica self-register、primary dnsconfig-mod）改用 `argv` + `stdin`；新增全 repo lint `TestRegression_NoSecretInCommandText`（既有 33 處列入以 task 數計算的 ratchet allowlist，#118 追蹤）與行為測試 `TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`。#79（v1.50）、#80（v1.52）也新增列，後合併者重新編號 | pilot |
+| 2026-10-15 | v1.54 | §4.5 新增第 16 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |

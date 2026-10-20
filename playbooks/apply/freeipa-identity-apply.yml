@@ -3163,6 +3163,15 @@
         # keyed off pilot_decommission_target_fqdn directly (not the roster's
         # freeipa_absent_hosts list), so Verify can run standalone against any
         # host regardless of that host's current roster state.
+        #
+        # The HBAC and sudo queries list every rule (`--all` prints "Hosts:" and
+        # "External host:"; the default output does not) and Verify picks the
+        # rules naming the target. `hbacrule-find`/`sudorule-find` have no host
+        # filter: the `--host=` these used before was read as `--hostcat` and
+        # never matched (issue #104). host-del removes the host from "Hosts:",
+        # but a sudo rule can still name it as an external host. `find` exits 1
+        # when there is no rule at all and 0 with a stderr warning when the
+        # result is truncated, so both are checked (captured, FreeIPA 4.13.4).
         - name: "Look up the current live DNS A record for the query target host (read-only, decommission verify)"
           ansible.builtin.command:
             argv:
@@ -3190,10 +3199,13 @@
 
         - name: "Look up direct HBAC rules referencing the query target host (read-only, decommission verify)"
           ansible.builtin.command:
-            argv: [ipa, hbacrule-find, "--host={{ pilot_decommission_target_fqdn | default('') }}"]
+            argv: [ipa, hbacrule-find, --all, --sizelimit=0]
           register: freeipa_decom_query_hbac
           changed_when: false
-          failed_when: false
+          failed_when: >-
+            (freeipa_decom_query_hbac.rc != 0 and
+             'Number of entries returned 0' not in (freeipa_decom_query_hbac.stdout | default('')))
+            or 'Search result has been truncated' in (freeipa_decom_query_hbac.stderr | default(''))
           when:
             - pilot_decommission_query | default('') == 'hbac_references'
             - pilot_decommission_target_fqdn | default('') | length > 0
@@ -3209,10 +3221,13 @@
 
         - name: "Look up direct sudo rules referencing the query target host (read-only, decommission verify)"
           ansible.builtin.command:
-            argv: [ipa, sudorule-find, "--host={{ pilot_decommission_target_fqdn | default('') }}"]
+            argv: [ipa, sudorule-find, --all, --sizelimit=0]
           register: freeipa_decom_query_sudo
           changed_when: false
-          failed_when: false
+          failed_when: >-
+            (freeipa_decom_query_sudo.rc != 0 and
+             'Number of entries returned 0' not in (freeipa_decom_query_sudo.stdout | default('')))
+            or 'Search result has been truncated' in (freeipa_decom_query_sudo.stderr | default(''))
           when:
             - pilot_decommission_query | default('') == 'sudo_references'
             - pilot_decommission_target_fqdn | default('') | length > 0
