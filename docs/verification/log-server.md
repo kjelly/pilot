@@ -62,7 +62,7 @@
 | C8  | functional| 本機注入這次唯一的 `authpriv` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `auth.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUTH-$$-$(date +%s%N)"; logger -p authpriv.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/auth.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 | C9  | file      | logrotate 策略檔存在                                                  | present  | test -f /etc/logrotate.d/siem-incoming |
 | C10 | logrotate | logrotate 策略檔語法正確（dry-run 不出錯）                            | 0        | logrotate -d /etc/logrotate.d/siem-incoming >/dev/null 2>&1; echo $? |
-| C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
+| C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"[^)]*\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
 
 > C1/C2/C4/C5/C10 用**正邏輯 rc**（`; echo $?` 或原生 rc），不用反邏輯
 > grep + 數字 expected；C5 用 `sh -c '... && echo 0 || echo 1'` 讓外層指令
