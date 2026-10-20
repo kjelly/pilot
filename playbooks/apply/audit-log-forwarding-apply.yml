@@ -136,6 +136,15 @@
         syslog_logrotate_rotate: "{{ syslog_logrotate_rotate | default(14, true) }}"
       tags: [always]
 
+    - name: "Reset this run's audit and rsyslog recovery results"
+      ansible.builtin.set_fact:
+        audit_rules_result: {}
+        siem_forward_conf_result: {}
+        rsyslog_selinux_port_label: {}
+        siem_forward_rsyslog_start_result: {}
+        siem_forward_rsyslog_restart_result: {}
+      tags: [always]
+
     - name: "Gate: RELP mTLS inputs"
       ansible.builtin.include_tasks:
         file: tasks/rsyslog-relp-inputs.yml
@@ -782,6 +791,7 @@
             name: rsyslog
             state: started
             enabled: true
+          register: siem_forward_rsyslog_start_result
           when: not ansible_check_mode
 
         - name: "Step 9a: Detect a forward config written after rsyslog started"
@@ -807,6 +817,7 @@
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
+          register: siem_forward_rsyslog_restart_result
           when:
             - not ansible_check_mode
             - >-
@@ -892,17 +903,40 @@
             - not siem_forward_snapshot.stat.exists
             - not ansible_check_mode
 
-        - name: "ROLLBACK — restart rsyslog with the forward config removed"
+        # A validation failure before any service operation must leave the
+        # loaded daemon alone. A failed restart may already have stopped it,
+        # so recovery also covers that result, after validating the restore.
+        - name: "ROLLBACK — validate the restored rsyslog configuration"
+          tags: [always]
+          ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
+          register: siem_forward_rescue_syntax
+          changed_when: false
+          failed_when: false
+          when:
+            - not ansible_check_mode
+            - siem_forward_rsyslog_start_result is defined
+            - siem_forward_rsyslog_restart_result is defined
+            - >-
+              (siem_forward_rsyslog_start_result is changed)
+              or (siem_forward_rsyslog_start_result is failed)
+              or (siem_forward_rsyslog_restart_result is changed)
+              or (siem_forward_rsyslog_restart_result is failed)
+
+        - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: not ansible_check_mode
+          when:
+            - not ansible_check_mode
+            - (siem_forward_rescue_syntax.rc | default(1)) == 0
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
               audit-log-forwarding apply failed (see task output above); the
-              audit rules and siem forward config were reverted. Fix the
-              failing task and re-run.
+              audit rules and siem forward config were reverted. Runtime recovery
+              is attempted only after a service operation changed or failed and
+              the restored global configuration passes validation. Otherwise the
+              current rsyslog process is left untouched. Fix the failing task and re-run.

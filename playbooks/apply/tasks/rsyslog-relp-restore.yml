@@ -13,7 +13,7 @@
 
 - name: "RELP rollback: remove only files created by this run"
   ansible.builtin.file:
-    path: "{{ item.item }}"
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_snapshot_role }}/{{ item.item }}"
     state: absent
   loop: "{{ siem_tls_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
   no_log: true
