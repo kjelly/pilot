@@ -49,6 +49,7 @@ def check(facilities):
             required.update(timeout='5', **{'conn.timeout': '3', 'queue.timeoutShutdown': '1000',
                                            'queue.timeoutActionCompletion': '10000',
                                            'tls.permanentFailureDisablesAction': 'off'})
+            required['queue.diskQueueType'] = 'disk'
         if len(pairs) != len(params) or any(params.get(k) != v for k, v in required.items()):
             raise ValueError('invalid queue/retry contract: ' + name)
         if not 1 <= int(params['port']) <= 65535:

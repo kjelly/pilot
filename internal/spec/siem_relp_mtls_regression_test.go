@@ -3,9 +3,74 @@ package spec
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
+
+func TestRegression_SIEMRelpNeverConvertsOrDeletesDiskBacklog(t *testing.T) {
+	data, err := os.ReadFile("../../playbooks/apply/tasks/rsyslog-relp-capability.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tasks []map[string]any
+	if err := yaml.Unmarshal(data, &tasks); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, task := range tasks {
+		if cmd, ok := task["ansible.builtin.command"].(map[string]any); ok {
+			script = cmd["argv"].([]any)[2].(string)
+		}
+	}
+	if script == "" {
+		t.Fatal("missing read-only disk-format guard")
+	}
+	for _, tc := range []struct {
+		name, marker                string
+		segmented, symlink, refused bool
+	}{
+		{name: "legacy classic backlog"},
+		{name: "pinned classic marker", marker: "RSYSLOG-DA-ENGINE-V1 Disk\n"},
+		{name: "segmented store", segmented: true, refused: true},
+		{name: "segmented marker", marker: "RSYSLOG-DA-ENGINE-V1 segmentedDisk\n", refused: true},
+		{name: "unknown format", marker: "future-format\n", refused: true},
+		{name: "symlink marker", symlink: true, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			backlog := filepath.Join(root, "siem_audit.00000001")
+			if err := os.WriteFile(backlog, []byte("pending audit history"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "siem_audit.da-engine")
+			if tc.marker != "" {
+				if err := os.WriteFile(marker, []byte(tc.marker), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.segmented {
+				if err := os.Mkdir(filepath.Join(root, "siem_audit.segq"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.symlink {
+				if err := os.Symlink(backlog, marker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := exec.Command("python3", "-c", script, root).CombinedOutput()
+			if (err != nil) != tc.refused {
+				t.Fatalf("refused=%v, want %v: %s", err != nil, tc.refused, out)
+			}
+			if got, err := os.ReadFile(backlog); err != nil || string(got) != "pending audit history" {
+				t.Fatalf("existing backlog changed: %q, %v", got, err)
+			}
+		})
+	}
+}
 
 // A trusted TLS socket is insufficient: the probe must wait for a positive
 // RELP reply, tolerate a fragmented reply, and fail on a wrong server name.
@@ -96,6 +161,9 @@ func TestRegression_SIEMRelpUsesDedicatedRulesetAndVaultInputs(t *testing.T) {
 	}
 	if strings.Count(string(data), `tls.permanentFailureDisablesAction="off"`) != 2 {
 		t.Fatal("both actions must retain queued messages across TLS authentication errors")
+	}
+	if strings.Count(string(data), `queue.diskQueueType="disk"`) != 2 {
+		t.Fatal("RELP must pin the established classic disk engine rather than experimental auto selection")
 	}
 	capability := strings.Index(string(data), "file: tasks/rsyslog-relp-capability.yml")
 	material := strings.Index(string(data), "file: tasks/rsyslog-relp-tls.yml")

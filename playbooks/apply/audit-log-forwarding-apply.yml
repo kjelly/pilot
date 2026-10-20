@@ -657,6 +657,7 @@
                 tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
                 timeout="5" conn.timeout="3"
                 tls.permanentFailureDisablesAction="off"
+                queue.diskQueueType="disk"
                 queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
               {% else %}
                 protocol="tcp" ResendLastMSGOnReconnect="on"
@@ -680,6 +681,7 @@
                 tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
                 timeout="5" conn.timeout="3"
                 tls.permanentFailureDisablesAction="off"
+                queue.diskQueueType="disk"
                 queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
               {% else %}
                 protocol="tcp" ResendLastMSGOnReconnect="on"

@@ -79,6 +79,7 @@ def check_config(profile):
             if enabled:
                 required.update(tls_parameters(profile))
                 required['tls.permanentfailuredisablesaction'] = 'off'
+                required['queue.diskqueuetype'] = 'disk'
             else:
                 required['protocol'] = 'tcp'
             if any(action.get(key) != value for key, value in required.items()):

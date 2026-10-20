@@ -20,6 +20,7 @@
           module(load="omrelp")
           *.* action(type="omrelp" target="127.0.0.1" port="20514"
             tls.permanentFailureDisablesAction="off"
+            queue.diskQueueType="disk"
             queue.type="LinkedList" queue.filename="pilot_capability"
             queue.maxDiskSpace="1m" queue.saveOnShutdown="on"
             action.resumeRetryCount="-1" action.resumeInterval="1" action.resumeIntervalMax="10")
@@ -35,7 +36,7 @@
         that: siem_relp_capability.rc == 0
         fail_msg: >-
           RELP/mTLS requires omrelp tls.permanentFailureDisablesAction=off
-          (upstream rsyslog 8.2606.0+ or a vendor backport). Install a supported
+          and queue.diskQueueType=disk (upstream rsyslog 8.2608.0+ or a vendor backport). Install a supported
           rsyslog/rsyslog-relp pair before enabling RELP; pilot does not add repositories.
   always:
     - name: "RELP: remove the non-secret temporary capability probe"
@@ -44,3 +45,26 @@
         state: absent
       changed_when: false
       when: siem_relp_capability_file is defined and siem_relp_capability_file.path is defined
+
+- name: "RELP: refuse automatic conversion of existing segmented or unknown disk queues"
+  tags: [always]
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import pathlib,sys
+        root=pathlib.Path(sys.argv[1])
+        for name in ['siem_audit','siem_auth']:
+            store=root/(name+'.segq')
+            marker=root/(name+'.da-engine')
+            if store.exists() or store.is_symlink():
+                sys.exit('Existing segmented spool: drain and retire it through an operator-approved '
+                         'migration before enabling classic RELP queues; no automatic conversion or deletion.')
+            if marker.exists() or marker.is_symlink():
+                if marker.is_symlink() or marker.read_text().split() not in [['RSYSLOG-DA-ENGINE-V1','Disk'],['RSYSLOG-DA-ENGINE-V1','disk']]:
+                    sys.exit('Existing non-classic or unknown disk-engine marker: preserve the backlog '
+                             'and plan an operator-approved migration; no automatic conversion or deletion.')
+      - "{{ siem_queue_spool }}"
+  changed_when: false
+  check_mode: false

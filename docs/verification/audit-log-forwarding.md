@@ -81,8 +81,12 @@ not a cryptographic binding between a certificate and every message's hostname.
 RELP session/connection timeouts are 5/3 seconds; its action queues allow
 1 second of shutdown drain and 10 seconds for the current action to finish,
 so self-forwarding must not inherit the module's 90-second session wait.
-RELP senders must support `tls.permanentFailureDisablesAction="off"` (upstream
-8.2606.0+ or an equivalent vendor backport). Otherwise TLS authentication errors
+RELP senders must support `tls.permanentFailureDisablesAction="off"` and
+`queue.diskQueueType="disk"` (upstream 8.2608.0+ or an equivalent vendor backport).
+The established classic disk engine is explicit; experimental segmented auto
+selection is outside this contract. Existing segmented stores or unknown engine
+markers must fail before replacing TLS/config, preserving all backlog for an
+operator-approved migration. Otherwise TLS authentication errors
 can permanently disable forwarding and discard later messages despite unlimited
 retries. Unsupported modules must fail before TLS/config replacement. Production
 repository selection/upgrades are operator-managed; pilot does not silently add
