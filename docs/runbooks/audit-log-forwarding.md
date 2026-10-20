@@ -20,7 +20,7 @@
    `/etc/sudoers` 異動。
 2. **Logrotate**：`/etc/logrotate.d/{auditd,syslog}` 限制本機空間。
 3. **轉送**：`/etc/rsyslog.d/99-siem-forward.conf` 把 `auth,authpriv.*` 與
-   `local6.*`（auditd）用 TCP（`@@`）轉送到中央 SIEM（見 `log-server.md`）。
+   `local6.*`（auditd）透過各自的磁碟輔助 `omfwd` TCP 佇列轉送到中央 SIEM（見 `log-server.md`）。
 
 本 runbook 是 Shape 3（client+server）：client 端本機規則/服務用單機
 `pilot verify` 驗證，跨主機「訊息真的送到了」在 §4 用 client→server 的
@@ -266,7 +266,7 @@ apply→verify→cross-check，2026-07-06T03:48Z）：
 
 `local6.*`（模擬 auditd 轉送）與 `authpriv.*` 都正確依來源 hostname
 （`audit-log-forwarding`）分檔落地在 log-server 上，證明整條轉送鏈路
-（client `lineinfile` pin 別名 → `@@` TCP 轉送 → server `imtcp` 接收 →
+（client `lineinfile` pin 別名 → `omfwd` TCP 佇列轉送 → server `imtcp` 接收 →
 `%HOSTNAME%` dynaFile 路由）端到端是通的。
 
 ---

@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/audit-log-forwarding.md v1.8
+# Apply playbook for docs/verification/audit-log-forwarding.md v1.9
 # auditd custom rules (setuid/setgid change+exec, sudo, /etc/passwd,
 # /etc/sudoers) + logrotate + rsyslog forwarding to a central SIEM receiver
 # (docs/verification/log-server.md).
@@ -47,6 +47,7 @@
     audit_rules_dest: /etc/audit/rules.d/99-custom.rules
     siem_forward_conf: /etc/rsyslog.d/99-siem-forward.conf
     siem_forward_alias: siem-log-server
+    siem_queue_spool: "{{ '/var/lib/rsyslog/pilot-siem' if ansible_os_family == 'RedHat' else '/var/spool/rsyslog/pilot-siem' }}"
     audit_syslog_plugin_conf: /etc/audit/plugins.d/syslog.conf
     # Prefer an explicit -e/group_vars/host_vars value; otherwise resolve the
     # central SIEM receiver from the actual inventory: the log-server group
@@ -102,7 +103,7 @@
     # (log-server-apply.yml); both fall back to 514 for an empty or null
     # value. The logrotate counts fall back too: an empty count would render
     # `rotate ` and logrotate would skip that whole policy.
-    # siem_forward_port is rendered into the @@host:port forwarding rules and
+    # siem_forward_port is rendered into the omfwd actions and
     # compared, as a string, with log-server's siem_receiver_tcp_port:
     # 2514.0, 0x9C4, 02514 or 70000 would be read differently by rsyslog or
     # not at all. Checked before the fallback below so that 0 is refused
@@ -506,6 +507,53 @@
             rsyslog_selinux_tcp_port: "{{ siem_forward_port }}"
           when: siem_forwarding_enabled | bool
 
+        - name: "Step 7: Create the private disk-assisted queue spool"
+          tags: [C16, C17]
+          ansible.builtin.file:
+            path: "{{ siem_queue_spool }}"
+            state: directory
+            owner: "{{ audit_syslog_group }}"
+            group: "{{ audit_syslog_group }}"
+            mode: "0700"
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 7: Create the queue probe directory"
+          tags: [C16, C17]
+          ansible.builtin.file:
+            path: /usr/local/libexec
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: "Step 7: Install the loaded-queue probe"
+          tags: [C16, C17]
+          ansible.builtin.copy:
+            src: ../files/pilot-siem-queue-check
+            dest: /usr/local/libexec/pilot-siem-queue-check
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: "Step 7: Snapshot the existing forward config"
+          tags: [always]
+          ansible.builtin.stat:
+            path: "{{ siem_forward_conf }}"
+          register: siem_forward_snapshot
+
+        - name: "Step 7: Keep the existing forward config for rollback"
+          tags: [C16, C17]
+          ansible.builtin.copy:
+            src: "{{ siem_forward_conf }}"
+            dest: "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
+            remote_src: true
+            mode: "0644"
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_snapshot.stat.exists
+          # A backup is recovery metadata, not a managed-state change.
+          changed_when: false
+
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]
           ansible.builtin.copy:
@@ -517,10 +565,40 @@
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               # Forward local6.* (auditd, via audisp-syslog) and auth,authpriv.*
               # to the central SIEM receiver (docs/verification/log-server.md).
-              local6.*                       @@{{ siem_forward_alias }}:{{ siem_forward_port }}
-              auth,authpriv.*                @@{{ siem_forward_alias }}:{{ siem_forward_port }}
+              # Queues are independent, capped at 256 MiB each (plus a record).
+              # Keep these stable filenames: they hold unsent audit history.
+              # Plain TCP has no durable acknowledgement; queued delivery does
+              # not guarantee that messages in flight at disconnect are stored.
+              local6.* action(
+                name="siem_audit" type="omfwd" target="{{ siem_forward_alias }}"
+                port="{{ siem_forward_port }}" protocol="tcp"
+                action.resumeRetryCount="-1" action.resumeInterval="1"
+                action.resumeIntervalMax="10" ResendLastMSGOnReconnect="on"
+                queue.type="LinkedList" queue.filename="siem_audit"
+                queue.spoolDirectory="{{ siem_queue_spool }}"
+                queue.size="10000" queue.highWatermark="8000" queue.lowWatermark="2000"
+                queue.maxDiskSpace="256m" queue.maxFileSize="1m"
+                queue.saveOnShutdown="on" queue.discardSeverity="8"
+              )
+              auth,authpriv.* action(
+                name="siem_auth" type="omfwd" target="{{ siem_forward_alias }}"
+                port="{{ siem_forward_port }}" protocol="tcp"
+                action.resumeRetryCount="-1" action.resumeInterval="1"
+                action.resumeIntervalMax="10" ResendLastMSGOnReconnect="on"
+                queue.type="LinkedList" queue.filename="siem_auth"
+                queue.spoolDirectory="{{ siem_queue_spool }}"
+                queue.size="10000" queue.highWatermark="8000" queue.lowWatermark="2000"
+                queue.maxDiskSpace="256m" queue.maxFileSize="1m"
+                queue.saveOnShutdown="on" queue.discardSeverity="8"
+              )
           register: siem_forward_conf_result
           when: siem_forwarding_enabled | bool
+
+        - name: "Step 7: Validate the effective rsyslog configuration before restart"
+          tags: [C16, C17, C19]
+          ansible.builtin.command: rsyslogd -N1
+          changed_when: false
+          when: not ansible_check_mode
 
         - name: "Step 8: Ensure auditd enabled + started (spec C18)"
           tags: [C18]
@@ -596,20 +674,38 @@
             - (audisp_syslog_active_result is changed) or (audisp_syslog_args_result is changed) or (audisp_syslog_process.rc | default(1) != 0)
 
         - name: "Step 9: Ensure rsyslog enabled + started (spec C19)"
-          tags: [C19]
+          tags: [C16, C17, C19]
           ansible.builtin.systemd:
             name: rsyslog
             state: started
             enabled: true
+          when: not ansible_check_mode
+
+        - name: "Step 9a: Detect a forward config written after rsyslog started"
+          tags: [C16, C17, C19]
+          ansible.builtin.shell:
+            executable: /bin/sh
+            cmd: |
+              test -f {{ siem_forward_conf | quote }} || exit 0
+              started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || exit 1
+              written=$(date -r {{ siem_forward_conf | quote }} +%s.%N) || exit 1
+              awk -v s="$started" -v w="$written" 'BEGIN { exit !(s < w) }' && echo pending
+              exit 0
+          register: siem_forward_restart_pending
+          changed_when: false
+          when: not ansible_check_mode
 
         - name: "Step 9a: Restart rsyslog only if the forward config or its SELinux port label changed"
-          tags: [C19]
+          tags: [C16, C17, C19]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: >-
-            ((siem_forward_conf_result | default({})) is changed)
-            or ((rsyslog_selinux_port_label | default({})) is changed)
+          when:
+            - not ansible_check_mode
+            - >-
+              ((siem_forward_conf_result | default({})) is changed)
+              or ((rsyslog_selinux_port_label | default({})) is changed)
+              or (siem_forward_restart_pending.stdout | default('') == 'pending')
 
       rescue:
         - name: "ROLLBACK — restore audit.rules.j2 backup (or remove if this was the first apply)"
@@ -621,6 +717,7 @@
             force: true
           when:
             - audit_rules_result is defined
+            - audit_rules_result is changed
             - audit_rules_result.backup_file is defined
 
         - name: "ROLLBACK — remove audit.rules.j2 if this was the first apply (no backup exists)"
@@ -630,6 +727,7 @@
             state: absent
           when:
             - audit_rules_result is defined
+            - audit_rules_result is changed
             - audit_rules_result.backup_file is not defined
 
         - name: "ROLLBACK — reload kernel audit rules back to the restored state"
@@ -638,17 +736,36 @@
           changed_when: false
           failed_when: false
 
-        - name: "ROLLBACK — remove siem forward config"
+        - name: "ROLLBACK — restore the previous siem forward config"
+          tags: [always]
+          ansible.builtin.copy:
+            src: "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
+            dest: "{{ siem_forward_conf }}"
+            remote_src: true
+            mode: "0644"
+          when:
+            - siem_forward_conf_result is defined
+            - siem_forward_conf_result is changed
+            - siem_forward_snapshot.stat.exists
+            - not ansible_check_mode
+
+        - name: "ROLLBACK — remove siem forward config only on first apply"
           tags: [always]
           ansible.builtin.file:
             path: "{{ siem_forward_conf }}"
             state: absent
+          when:
+            - siem_forward_conf_result is defined
+            - siem_forward_conf_result is changed
+            - not siem_forward_snapshot.stat.exists
+            - not ansible_check_mode
 
         - name: "ROLLBACK — restart rsyslog with the forward config removed"
           tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
+          when: not ansible_check_mode
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]

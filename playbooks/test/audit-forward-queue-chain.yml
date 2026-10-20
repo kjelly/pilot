@@ -1,0 +1,5 @@
+---
+- name: Set up the real SIEM receiver
+  ansible.builtin.import_playbook: ../apply/log-server-apply.yml
+- name: Configure both audit forwarding clients
+  ansible.builtin.import_playbook: ../apply/audit-log-forwarding-apply.yml

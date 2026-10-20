@@ -6,7 +6,7 @@
 # host-monitoring-decommission.yml.
 #
 # There is no registration handshake with the SIEM receiver (plain rsyslog
-# `@@host:port` forwarding, no client identity/cert) — nothing central to
+# TCP omfwd forwarding, no client identity/cert) — nothing central to
 # deregister. The receiver's per-source-hostname log files
 # (/var/log/siem/<this-host>/{audit,auth}.log, log-server-apply.yml's own
 # %HOSTNAME% dynaFile templating) are historical audit-trail records, not
@@ -24,6 +24,8 @@
 # left for decommission to restore there. Also deliberately leaves
 # `auditd`/`rsyslog` themselves installed and running — they are shared OS
 # services, not owned exclusively by this component.
+# The private pilot-siem spool holds unsent audit history: retain it, just
+# like receiver logs. Removing config must never silently erase that history.
 #
 # Invoked ONLY by internal/decommission/providers.GenericComponentProvider
 # — never directly by an operator.
@@ -105,6 +107,8 @@
         - "{{ siem_forward_conf }}"
         - "{{ audit_logrotate_conf }}"
         - "{{ syslog_logrotate_conf }}"
+        - /usr/local/libexec/pilot-siem-queue-check
+        - "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
       register: audit_log_forwarding_decom_stat
       tags: [inspect]
 
@@ -119,6 +123,15 @@
   tasks:
     - name: "Audit-log-forwarding decommission — local removal, with diagnostics on failure"
       block:
+        - name: "Remove the queue verification helper and recovery config"
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /usr/local/libexec/pilot-siem-queue-check
+            - "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
+          when: not ansible_check_mode
+
         - name: "Remove 99-siem-forward.conf"
           ansible.builtin.file:
             path: "{{ siem_forward_conf }}"

@@ -1,0 +1,6 @@
+rsyslogd
+in:imuxsock
+in:imklog
+rs:main Q:Reg
+rs:siem_audit q
+rs:siem_auth qu

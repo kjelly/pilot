@@ -1,0 +1,23 @@
+# Test-only, loopback TCP input: numbered load bypasses journald/imuxsock
+# rate limits without changing the production forwarding selectors/actions.
+---
+- name: Add a local numbered-message injection point to disposable clients
+  hosts: audit-log-forwarding
+  become: true
+  tasks:
+    - name: Configure the test-only loopback input on the standard syslog port
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/09-pilot-queue-test-input.conf
+        mode: "0644"
+        content: |
+          module(load="imtcp")
+          input(type="imtcp" address="127.0.0.1" port="514")
+      register: queue_test_input
+    - name: Validate the complete test config
+      ansible.builtin.command: rsyslogd -N1
+      changed_when: false
+    - name: Load the test input
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+      when: queue_test_input is changed
