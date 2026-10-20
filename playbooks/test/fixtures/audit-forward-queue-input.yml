@@ -2,7 +2,7 @@
 # rate limits without changing the production forwarding selectors/actions.
 ---
 - name: Add a local numbered-message injection point to disposable clients
-  hosts: audit-log-forwarding
+  hosts: "audit-log-forwarding:!log-server"
   become: true
   tasks:
     - name: Configure the test-only loopback input on the standard syslog port

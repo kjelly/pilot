@@ -9,7 +9,9 @@ nodes:
     ssh_user: root
     ssh_timeout: 5m
     boot_timeout: 8m
-    groups: [log-server]
+    # log-server C7/C8 inject locally and require this host to forward to
+    # its own dedicated receiver ruleset, as in the supported deployment.
+    groups: [log-server, audit-log-forwarding]
   - name: aq-ubuntu
     base_image: ubuntu-24.04
     memory: 2048
