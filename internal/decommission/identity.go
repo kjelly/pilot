@@ -7,11 +7,11 @@ import (
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
-// freeIPAPlanFQDN reads only the FreeIPA host cleanup actions, whose
+// freeIPAPlanIdentity reads only the FreeIPA host cleanup actions, whose
 // target comes from resolveAuthoritativeFQDN. Other providers may target
 // referenced endpoints rather than the retiring host. After host deletion
 // these actions fall back to the inventory name, which can itself be FQDN.
-func freeIPAPlanFQDN(plan *Plan) string {
+func freeIPAPlanIdentity(plan *Plan) (string, providers.HostIdentitySource) {
 	for _, component := range plan.Components {
 		if component.ComponentID != providers.FreeIPAClientProviderID {
 			continue
@@ -22,11 +22,11 @@ func freeIPAPlanFQDN(plan *Plan) string {
 				continue
 			}
 			if identity := normalizeFQDN(step.TargetIdentity); identity != "" {
-				return identity
+				return identity, step.HostIdentitySource
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // planFQDN also handles legacy PlanJSON without FQDN: its original
@@ -35,7 +35,7 @@ func planFQDN(plan *Plan) string {
 	if saved := normalizeFQDN(plan.FQDN); saved != "" {
 		return saved
 	}
-	if resolved := freeIPAPlanFQDN(plan); resolved != "" {
+	if resolved, _ := freeIPAPlanIdentity(plan); resolved != "" {
 		return resolved
 	}
 	return normalizeFQDN(providerFQDN(inventory.Host{Name: plan.Host.Name, AnsibleHost: plan.Host.AnsibleHost}))
@@ -45,12 +45,20 @@ func planFQDN(plan *Plan) string {
 // descriptive metadata across cleanup/replans after IPA deletes the host;
 // it never copies execution steps, changes plan hashes, or bypasses gates.
 func retainPlanFQDN(fresh, previous *Plan) {
-	identity := planFQDN(previous)
-	fallback := normalizeFQDN(providerFQDN(inventory.Host{Name: previous.Host.Name, AnsibleHost: previous.Host.AnsibleHost}))
-	if identity != fallback {
-		// Once the provider resolves an inventory alias, keep that identity
-		// even when a subsequent lookup falls back to an FQDN-shaped alias.
+	identity, source := freeIPAPlanIdentity(fresh)
+	if source == providers.HostIdentityAuthoritative {
 		fresh.FQDN = identity
+		return
+	}
+	if source == providers.HostIdentityFallback {
+		fresh.FQDN = planFQDN(previous)
+		return
+	}
+	// Legacy steps lack provenance; preserve their previous identity only
+	// when the current metadata is indistinguishable from the fallback.
+	fallback := normalizeFQDN(providerFQDN(inventory.Host{Name: fresh.Host.Name, AnsibleHost: fresh.Host.AnsibleHost}))
+	if planFQDN(fresh) == fallback {
+		fresh.FQDN = planFQDN(previous)
 	}
 }
 

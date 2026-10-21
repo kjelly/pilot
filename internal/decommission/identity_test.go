@@ -17,6 +17,7 @@ import (
 // the host object disappearing when its central cleanup step runs.
 type identityIPAExecutor struct {
 	present bool
+	fqdn    string
 }
 
 func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.Result, error) {
@@ -28,7 +29,11 @@ func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.R
 	}
 	body := "ipa: ERROR: host not found"
 	if e.present {
-		body = "Host name: CLIENT.Example.TEST\nPrincipal name: host/client.example.test@EXAMPLE.TEST\n0 services matched"
+		fqdn := e.fqdn
+		if fqdn == "" {
+			fqdn = "CLIENT.Example.TEST"
+		}
+		body = "Host name: " + fqdn + "\nPrincipal name: host/" + fqdn + "@EXAMPLE.TEST\n0 services matched"
 	}
 	return &ansible.Result{Stdout: "HOST_INSPECT[" + target + "]: " + body}, nil
 }
@@ -37,6 +42,7 @@ type identityIPAProvider struct {
 	*providers.FreeIPAClientProvider
 	executor            *identityIPAExecutor
 	verificationBlocked bool
+	cleanupTarget       string
 }
 
 func (p *identityIPAProvider) Verify(_ context.Context, in providers.VerifyInput) ([]providers.Verification, error) {
@@ -59,6 +65,7 @@ type identityIPAStep struct {
 func (s identityIPAStep) Inspect(context.Context) (bool, error) { return !s.p.executor.present, nil }
 func (s identityIPAStep) Execute(context.Context) error {
 	if s.step.Action == providers.ActionFreeIPAIdentityApplyConverge {
+		s.p.cleanupTarget = s.step.TargetIdentity
 		s.p.executor.present = false
 	}
 	return nil
@@ -102,11 +109,16 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					var legacy map[string]json.RawMessage
+					var legacy Plan
 					if err := json.Unmarshal([]byte(record.PlanJSON), &legacy); err != nil {
 						t.Fatal(err)
 					}
-					delete(legacy, "FQDN")
+					legacy.FQDN = ""
+					for i := range legacy.Components {
+						for j := range legacy.Components[i].Steps {
+							legacy.Components[i].Steps[j].HostIdentitySource = ""
+						}
+					}
 					payload, err := json.Marshal(legacy)
 					if err != nil {
 						t.Fatal(err)
@@ -173,6 +185,84 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hostName   string
+		freshName  string
+		present    bool
+		want       string
+		wantSource providers.HostIdentitySource
+	}{
+		{"fresh name differs from alias", "Client", "NEW.Example.TEST", true, "new.example.test", providers.HostIdentityAuthoritative},
+		{"authoritative name equals alias", "ALIAS.example.test", "ALIAS.Example.TEST", true, "alias.example.test", providers.HostIdentityAuthoritative},
+		{"fallback name equals alias", "ALIAS.example.test", "", false, "old.example.test", providers.HostIdentityFallback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostName, want := tc.hostName, tc.want
+			dir := t.TempDir()
+			writeWorkspaceFile(t, dir, "hosts.yml", simpleHostsYAML(hostName, "10.0.0.9", []string{"freeipa-client"}, ""))
+			exec := &identityIPAExecutor{present: true, fqdn: "OLD.Example.TEST"}
+			provider := &identityIPAProvider{
+				FreeIPAClientProvider: providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{Executor: exec}),
+				executor:              exec,
+			}
+			input := PlanInput{WorkspaceDir: dir, HostName: hostName, Now: fixedNow,
+				Catalog:   newCatalog(t, fakeComponentContract("freeipa-client", "freeipa-client")),
+				Providers: map[string]providers.Provider{"freeipa-client": provider},
+			}
+			plan, err := PlanHost(context.Background(), input)
+			if err != nil || plan.Blocked() {
+				t.Fatalf("PlanHost = %+v, %v", plan, err)
+			}
+			path := filepath.Join(t.TempDir(), "identity-change.db")
+			db, err := pstore.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store := NewStore(db)
+			if err := store.SavePlan(plan); err != nil {
+				t.Fatal(err)
+			}
+			assertPlanIdentity(t, db, plan.ID, "old.example.test")
+
+			// Step targets are already outside the plan hash. A fresh authoritative
+			// resolution can therefore change without invalidating this plan, and
+			// metadata must follow the fresh steps that Apply actually executes.
+			exec.fqdn, exec.present = tc.freshName, tc.present
+			fresh, err := CheckFreshness(context.Background(), input, plan.PlanHash)
+			if err != nil || fresh.InventoryRevision != plan.InventoryRevision || fresh.PlanHash != plan.PlanHash {
+				t.Fatalf("fresh plan = %+v, %v; expected unchanged inventory and hash", fresh, err)
+			}
+			if _, source := freeIPAPlanIdentity(fresh); source != tc.wantSource {
+				t.Fatalf("fresh identity source = %q, want %q", source, tc.wantSource)
+			}
+			result, err := Apply(context.Background(), ApplyInput{Plan: plan, PlanInputForFreshness: input,
+				DecommissionID: "identity-change", StartedAt: fixedNow(), Now: fixedNow, Store: store})
+			if err != nil || result.Status != "completed" {
+				t.Fatalf("Apply = %+v, %v", result, err)
+			}
+			if tc.present && !strings.EqualFold(provider.cleanupTarget, want) {
+				t.Fatalf("cleanup target = %q, want %q", provider.cleanupTarget, want)
+			}
+			if result.Receipt.FQDN != want {
+				t.Fatalf("receipt FQDN = %q, want actual cleanup identity %q", result.Receipt.FQDN, want)
+			}
+			assertPlanIdentity(t, db, plan.ID, want)
+			reader, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			var retired string
+			if err := reader.QueryRow("SELECT fqdn FROM retired_hosts WHERE host = ?", hostName).Scan(&retired); err != nil || retired != want {
+				t.Fatalf("retired fqdn = %q, %v, want actual cleanup identity %q", retired, err, want)
+			}
+		})
 	}
 }
 

@@ -211,7 +211,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 	if plan.Blocked() {
 		plan.Status = PlanStatusBlocked
 	}
-	if resolved := freeIPAPlanFQDN(plan); resolved != "" {
+	if resolved, _ := freeIPAPlanIdentity(plan); resolved != "" {
 		plan.FQDN = resolved
 	}
 	plan.PlanHash = computePlanHash(plan)
