@@ -78,7 +78,7 @@ type diagnoseHostHealthOutput struct {
 }
 
 func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseHostHealthInput, diagnoseHostHealthOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseHostHealthInput) (*mcp.CallToolResult, diagnoseHostHealthOutput, error) {
+	return withDiagnoseEvidence(opts, "HostHealth", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseHostHealthInput) (*mcp.CallToolResult, diagnoseHostHealthOutput, error) {
 		lookback := in.Lookback
 		if lookback == "" {
 			lookback = "30m"
@@ -201,7 +201,7 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 		out.diagnoseAuditStatus = auditState
 		out.Steps = stepEvidenceList(allResults)
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_component --------------------------------------------
@@ -289,7 +289,7 @@ func artifactOutputs(specs []contract.DiagnosticArtifact, results []diagnose.Ste
 }
 
 func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseComponentInput, diagnoseComponentOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseComponentInput) (*mcp.CallToolResult, diagnoseComponentOutput, error) {
+	return withDiagnoseEvidence(opts, "Component", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseComponentInput) (*mcp.CallToolResult, diagnoseComponentOutput, error) {
 		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
@@ -378,7 +378,7 @@ func diagnoseComponentHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			out.Artifacts = artifactOutputs(comp.Diagnostics.Artifacts, results[artifactStart:])
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 func artifactPaths(specs []contract.DiagnosticArtifact) []string {
@@ -411,7 +411,7 @@ type diagnoseNetworkPathOutput struct {
 }
 
 func diagnoseNetworkPathHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseNetworkPathInput, diagnoseNetworkPathOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseNetworkPathInput) (*mcp.CallToolResult, diagnoseNetworkPathOutput, error) {
+	return withDiagnoseEvidence(opts, "NetworkPath", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseNetworkPathInput) (*mcp.CallToolResult, diagnoseNetworkPathOutput, error) {
 		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventory(ctx, opts)
 		if err != nil {
@@ -507,7 +507,7 @@ func diagnoseNetworkPathHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor
 			Layers: pathOut.Layers, Verdict: pathOut.Verdict, Steps: stepEvidenceList(results), AuditDirectory: auditDir,
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_recent_changes ----------------------------------------
@@ -561,7 +561,7 @@ func (a storeDeployRunSource) ListRuns(filter changejournal.DeployRunFilter) ([]
 }
 
 func diagnoseRecentChangesHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseRecentChangesInput, diagnoseRecentChangesOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseRecentChangesInput) (*mcp.CallToolResult, diagnoseRecentChangesOutput, error) {
+	return withDiagnoseEvidence(opts, "RecentChanges", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseRecentChangesInput) (*mcp.CallToolResult, diagnoseRecentChangesOutput, error) {
 		startTime, err := time.Parse(time.RFC3339, in.Start)
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("start: %v", err)}), diagnoseRecentChangesOutput{}, nil
@@ -619,7 +619,7 @@ func diagnoseRecentChangesHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerF
 			})
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 func formatIfNonZero(t time.Time) string {

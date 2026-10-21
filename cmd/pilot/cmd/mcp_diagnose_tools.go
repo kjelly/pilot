@@ -56,6 +56,8 @@ type diagnoseMCPToolsOptions struct {
 	StepTimeout    time.Duration
 	AnsibleRuntime deployAnsibleRuntime
 	AdHocRunner    diagnose.AdHocRunner
+	// IdentityRunner is an optional test adapter for the separate effective-user probe.
+	IdentityRunner diagnose.AdHocRunner
 	// FreeIPAReader is the read-only principal the operator approved for
 	// pilot_diagnose_dns_architecture's authenticated FreeIPA reads.
 	FreeIPAReader diagnoseFreeIPAReader
@@ -106,7 +108,11 @@ func resolveDiagnoseInventory(ctx context.Context, opts diagnoseMCPToolsOptions)
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
 	defer cancel()
-	return resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
+	resolved, err := resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
+	if err == nil {
+		captureDiagnoseInventory(ctx, opts, resolved)
+	}
+	return resolved, err
 }
 
 // resolveDiagnoseInventoryReadOnly is used by the structured delivery and
@@ -122,10 +128,15 @@ func resolveDiagnoseInventoryReadOnly(ctx context.Context, opts diagnoseMCPTools
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, opts.StepTimeout)
 	defer cancel()
-	return resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
+	resolved, err := resolveNetworkCheckInventory(resolveCtx, opts.Inventory)
+	if err == nil {
+		captureDiagnoseInventory(ctx, opts, resolved)
+	}
+	return resolved, err
 }
 
 func registerDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
+	registerDiagnoseEvidenceTool(server, opts)
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_sudo",
 		Description: "run fixed, read-only ansible ad-hoc commands against one real inventory host to diagnose why a specific user can/cannot sudo there: sssd status, kerberos machine identity, account resolution, sssd access_provider, nsswitch sudoers routing, and whether a central FreeIPA sudo rule grants access (`sudo -l -U <user>`). Cross-reference the username against pilot://roster/effective-access's effective_sudo_access for the config-level (not live) view.",
@@ -419,22 +430,24 @@ func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
 // run and its outcome, distinct from diagnoseStepEvidence (the MCP
 // response shape) so the audit file's schema can evolve independently.
 type diagnoseStepAudit struct {
-	ID      string `json:"id"`
-	Command string `json:"command"`
-	RC      int    `json:"rc,omitempty"`
-	Error   string `json:"error,omitempty"`
+	diagnoseStepEvidence
+	Command      string    `json:"command"`
+	Module       string    `json:"module"`
+	Host         string    `json:"host"`
+	ResolvedAddr string    `json:"resolved_addr,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at"`
+	EvidenceRef  string    `json:"evidence_ref,omitempty"`
 }
 
 func stepAuditList(results []diagnose.StepResult) []diagnoseStepAudit {
 	out := make([]diagnoseStepAudit, len(results))
 	for i, r := range results {
-		a := diagnoseStepAudit{ID: r.Step.ID, Command: r.Step.Command}
-		if r.Result.RunErr != nil {
-			a.Error = r.Result.RunErr.Error()
-		} else {
-			a.RC = r.Result.RC
-		}
-		out[i] = a
+		ev := commandEvidence(r.Result)
+		ev.ID, ev.Description = r.Step.ID, r.Step.Description
+		command, redacted, truncated := sanitizeDiagnosticText(r.Step.Command)
+		ev.Redacted, ev.Truncated = ev.Redacted || redacted, ev.Truncated || truncated
+		out[i] = diagnoseStepAudit{diagnoseStepEvidence: ev, Command: command, Module: r.Step.Module, Host: r.Host, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt}
 	}
 	return out
 }
@@ -446,39 +459,68 @@ func stepAuditList(results []diagnose.StepResult) []diagnoseStepAudit {
 // real, tool-triggered action against a live host, generating real
 // auditd/PAM/journald events on the *target* itself.
 type diagnoseAuditRecord struct {
-	SessionID    string              `json:"session_id"`
-	Check        string              `json:"check"`
-	PilotVersion string              `json:"pilot_version"`
-	GitRevision  string              `json:"git_revision,omitempty"`
-	MCPClient    string              `json:"mcp_client,omitempty"`
-	Inventory    string              `json:"inventory"`
-	Host         string              `json:"host"`
-	Params       map[string]string   `json:"params,omitempty"`
-	Start        time.Time           `json:"start"`
-	Finish       time.Time           `json:"finish"`
-	Steps        []diagnoseStepAudit `json:"steps"`
+	SchemaVersion        int                         `json:"schema_version"`
+	EvidenceID           string                      `json:"evidence_id"`
+	Finalized            bool                        `json:"finalized"`
+	EvidenceCompleteness string                      `json:"evidence_completeness"`
+	IncompleteReasons    []string                    `json:"incomplete_reasons,omitempty"`
+	Redacted             bool                        `json:"redacted"`
+	Truncated            bool                        `json:"truncated"`
+	Diagnosis            json.RawMessage             `json:"diagnosis,omitempty"`
+	Verdict              string                      `json:"verdict,omitempty"`
+	EvidenceReferences   []string                    `json:"evidence_references,omitempty"`
+	Provenance           diagnoseProvenance          `json:"provenance"`
+	Identities           []diagnoseExecutionIdentity `json:"identities,omitempty"`
+	SessionID            string                      `json:"session_id"`
+	Check                string                      `json:"check"`
+	PilotVersion         string                      `json:"pilot_version"`
+	GitRevision          string                      `json:"git_revision,omitempty"`
+	MCPClient            string                      `json:"mcp_client,omitempty"`
+	Inventory            string                      `json:"inventory"`
+	Host                 string                      `json:"host"`
+	Params               map[string]string           `json:"params,omitempty"`
+	Start                time.Time                   `json:"start"`
+	Finish               time.Time                   `json:"finish"`
+	Steps                []diagnoseStepAudit         `json:"steps"`
 }
 
 // prepareDiagnoseAuditDir creates and returns
 // <opts.AuditDir>/diagnose/<timestamp>-<sessionID>-<check> — the audit
 // directory for one diagnose call.
 func prepareDiagnoseAuditDir(opts diagnoseMCPToolsOptions, check, sessionID string, start time.Time) (string, error) {
-	dir := filepath.Join(opts.AuditDir, "diagnose", fmt.Sprintf("%s-%s-%s", start.UTC().Format("20060102T150405Z"), sessionID, check))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	parent := filepath.Join(diagnoseAuditRoot(opts), "diagnose")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(parent, fmt.Sprintf("%s-%s-%s", start.UTC().Format("20060102T150405Z"), sessionID, check))
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
 func writeDiagnoseAudit(auditDir string, rec diagnoseAuditRecord) error {
-	return writeJSONFile(filepath.Join(auditDir, "record.json"), rec)
+	rec.SchemaVersion = diagnoseEvidenceSchemaVersion
+	rec.EvidenceID = filepath.Base(auditDir)
+	if !rec.Finalized {
+		rec.EvidenceCompleteness = "incomplete"
+		rec.IncompleteReasons = []string{"diagnosis_not_finalized"}
+	}
+	safe, err := sanitizeDiagnoseOutput(rec)
+	if err != nil {
+		return err
+	}
+	return publishDiagnoseArtifact(auditDir, safe)
 }
 
 type diagnoseAuditStatus struct {
-	Redacted    bool   `json:"redacted"`
-	Truncated   bool   `json:"truncated"`
-	AuditStatus string `json:"audit_status"`
-	AuditError  string `json:"audit_error,omitempty"`
+	EvidenceID           string   `json:"evidence_id,omitempty"`
+	EvidenceCompleteness string   `json:"evidence_completeness,omitempty"`
+	EvidenceReferences   []string `json:"evidence_references,omitempty"`
+	Redacted             bool     `json:"redacted"`
+	Truncated            bool     `json:"truncated"`
+	AuditStatus          string   `json:"audit_status"`
+	AuditError           string   `json:"audit_error,omitempty"`
 }
 
 func auditStatusFor(err error) diagnoseAuditStatus {
@@ -489,6 +531,9 @@ func auditStatusFor(err error) diagnoseAuditStatus {
 }
 
 func mcpClientString(req *mcp.CallToolRequest) string {
+	if req == nil {
+		return ""
+	}
 	if client := req.ClientInfo(); client != nil {
 		return fmt.Sprintf("%s/%s", client.Name, client.Version)
 	}
@@ -519,7 +564,7 @@ type diagnoseSudoOutput struct {
 }
 
 func diagnoseSudoHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSudoInput, diagnoseSudoOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSudoInput) (*mcp.CallToolResult, diagnoseSudoOutput, error) {
+	return withDiagnoseEvidence(opts, "Sudo", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSudoInput) (*mcp.CallToolResult, diagnoseSudoOutput, error) {
 		if !inventory.ValidRosterUserName(in.User) {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("user %q is not a valid username", in.User)}), diagnoseSudoOutput{}, nil
 		}
@@ -573,7 +618,7 @@ func diagnoseSudoHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			AuditDirectory:              auditDir,
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_dns ------------------------------------------------
@@ -601,7 +646,7 @@ type diagnoseDNSOutput struct {
 }
 
 func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDNSInput, diagnoseDNSOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDNSInput) (*mcp.CallToolResult, diagnoseDNSOutput, error) {
+	return withDiagnoseEvidence(opts, "DNS", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDNSInput) (*mcp.CallToolResult, diagnoseDNSOutput, error) {
 		if in.Name != "" && !inventory.ValidDNSRecordName(in.Name) {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: fmt.Sprintf("name %q is not a valid DNS record name", in.Name)}), diagnoseDNSOutput{}, nil
 		}
@@ -660,7 +705,7 @@ func diagnoseDNSHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			AuditDirectory:         auditDir,
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_logs --------------------------------------------------
@@ -692,7 +737,7 @@ type diagnoseLogsOutput struct {
 // taking a host parameter — unlike pilot_diagnose_sudo/dns/run, there is
 // no arbitrary target here; Loki always lives on the one dashboard host.
 func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseLogsInput, diagnoseLogsOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLogsInput) (*mcp.CallToolResult, diagnoseLogsOutput, error) {
+	return withDiagnoseEvidence(opts, "Logs", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLogsInput) (*mcp.CallToolResult, diagnoseLogsOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseLogsOutput{}, nil
 		}
@@ -772,7 +817,7 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			}
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_security_logs ------------------------------------------
@@ -807,7 +852,7 @@ type diagnoseSecurityLogsOutput struct {
 // verbatim from the caller — so, unlike pilot_diagnose_logs, there is no
 // required/non-empty input to validate: every field is optional.
 func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSecurityLogsInput, diagnoseSecurityLogsOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSecurityLogsInput) (*mcp.CallToolResult, diagnoseSecurityLogsOutput, error) {
+	return withDiagnoseEvidence(opts, "SecurityLogs", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSecurityLogsInput) (*mcp.CallToolResult, diagnoseSecurityLogsOutput, error) {
 		queryStart, queryEnd, err := normalizeLokiRange(in.Start, in.End, time.Now())
 		if err != nil {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: err.Error()}), diagnoseSecurityLogsOutput{}, nil
@@ -886,7 +931,7 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 			}
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_login ------------------------------------------------
@@ -1004,7 +1049,7 @@ func rosterRuleNamesFor(user, host string, hbac []inventory.EffectiveHBACAccess,
 }
 
 func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseLoginInput, diagnoseLoginOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLoginInput) (*mcp.CallToolResult, diagnoseLoginOutput, error) {
+	return withDiagnoseEvidence(opts, "Login", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseLoginInput) (*mcp.CallToolResult, diagnoseLoginOutput, error) {
 		if len(in.Users) == 0 {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "users must contain at least one username"}), diagnoseLoginOutput{}, nil
 		}
@@ -1148,7 +1193,7 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 			AuditDirectory: auditDir,
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_metrics ------------------------------------------------
@@ -1177,7 +1222,7 @@ type diagnoseMetricsOutput struct {
 // diagnoseMetricsHandler auto-resolves diagnose.ThanosQueryGroup's
 // singleton host, same reasoning as diagnoseLogsHandler.
 func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseMetricsInput, diagnoseMetricsOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMetricsInput) (*mcp.CallToolResult, diagnoseMetricsOutput, error) {
+	return withDiagnoseEvidence(opts, "Metrics", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMetricsInput) (*mcp.CallToolResult, diagnoseMetricsOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "query must not be empty"}), diagnoseMetricsOutput{}, nil
 		}
@@ -1247,7 +1292,7 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 			}
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_monitoring_target ---------------------------------------
@@ -1279,7 +1324,7 @@ const (
 // never a direct HTTP client, never the snmp_exporter /snmp endpoint,
 // never vault.
 func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseMonitoringTargetInput, diagnoseMonitoringTargetOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMonitoringTargetInput) (*mcp.CallToolResult, diagnoseMonitoringTargetOutput, error) {
+	return withDiagnoseEvidence(opts, "MonitoringTarget", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseMonitoringTargetInput) (*mcp.CallToolResult, diagnoseMonitoringTargetOutput, error) {
 		target := strings.TrimSpace(in.Target)
 		if target == "" {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "target must not be empty"}), diagnoseMonitoringTargetOutput{}, nil
@@ -1408,7 +1453,7 @@ func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandl
 		auditState := auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 
 		return nil, diagnoseMonitoringTargetOutput{diagnoseAuditStatus: auditState, Diagnosis: diagnosis, AuditDirectory: auditDir}, nil
-	}
+	})
 }
 
 // applyMonitoringTargetSample folds one query's parsed samples into the
@@ -1509,7 +1554,7 @@ func runDetectionSteps(ctx context.Context, runner diagnose.AdHocRunner, invento
 // diagnoseDetectionHandler auto-resolves diagnose.DetectionEngineGroup's
 // singleton host, same reasoning as diagnoseMetricsHandler.
 func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDetectionInput, diagnoseDetectionOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDetectionInput) (*mcp.CallToolResult, diagnoseDetectionOutput, error) {
+	return withDiagnoseEvidence(opts, "Detection", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDetectionInput) (*mcp.CallToolResult, diagnoseDetectionOutput, error) {
 		signalID := strings.TrimSpace(in.SignalID)
 		pilotHost := strings.TrimSpace(in.PilotHost)
 		if signalID == "" && pilotHost == "" {
@@ -1588,7 +1633,7 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			}
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 // ---- pilot_diagnose_run --------------------------------------------------
@@ -1598,6 +1643,7 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 // tool is not a fixed allow-list: it runs whatever command string the
 // caller supplies.
 func registerDiagnoseRunTool(server *mcp.Server, opts diagnoseMCPToolsOptions) {
+	registerDiagnoseEvidenceTool(server, opts)
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_run",
 		Description: "run a caller-supplied command against one real inventory host via ansible's `command` module (argv is exec'd directly — no shell, so pipes/redirects/chaining/expansion are not interpreted). UNLIKE pilot_diagnose_sudo/pilot_diagnose_dns this is NOT a fixed read-only allow-list: it runs anything the connecting ansible_user (and become, if the inventory configures it) is permitted to run, including commands that mutate the target. Only registered when the server was started with --enable-diagnose-raw. Every call is logged to the audit directory. Prefer pilot_diagnose_sudo/pilot_diagnose_dns when they already answer the question.",
@@ -1627,7 +1673,7 @@ type diagnoseRunOutput struct {
 }
 
 func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseRunInput, diagnoseRunOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseRunInput) (*mcp.CallToolResult, diagnoseRunOutput, error) {
+	return withDiagnoseEvidence(opts, "Run", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseRunInput) (*mcp.CallToolResult, diagnoseRunOutput, error) {
 		if strings.TrimSpace(in.Command) == "" {
 			return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "command must not be empty"}), diagnoseRunOutput{}, nil
 		}
@@ -1678,5 +1724,5 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 		out.Redacted, out.Truncated = ev.Redacted, ev.Truncated
 
 		return nil, out, nil
-	}
+	})
 }

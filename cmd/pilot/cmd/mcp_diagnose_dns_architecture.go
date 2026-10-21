@@ -153,7 +153,7 @@ func registerDiagnoseDNSArchitectureTool(server *mcp.Server, opts diagnoseMCPToo
 }
 
 func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDNSArchitectureInput, diagnoseDNSArchitectureOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDNSArchitectureInput) (*mcp.CallToolResult, diagnoseDNSArchitectureOutput, error) {
+	return withDiagnoseEvidence(opts, "DNSArchitecture", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseDNSArchitectureInput) (*mcp.CallToolResult, diagnoseDNSArchitectureOutput, error) {
 		fail := func(code, msg string) (*mcp.CallToolResult, diagnoseDNSArchitectureOutput, error) {
 			return toolErrorResult(mcpToolError{Code: code, Message: msg}), diagnoseDNSArchitectureOutput{}, nil
 		}
@@ -394,7 +394,7 @@ func diagnoseDNSArchitectureHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandle
 		}
 		out.diagnoseAuditStatus = auditStatusFor(writeDiagnoseAudit(auditDir, rec))
 		return nil, out, nil
-	}
+	})
 }
 
 // dnsArchProbe is one planned probe step and, after runDNSArchProbes, its

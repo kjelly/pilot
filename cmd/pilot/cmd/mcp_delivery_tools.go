@@ -22,9 +22,8 @@ type diagnoseDeliveryInput struct {
 	InvestigationID string `json:"investigation_id,omitempty" jsonschema:"optional diagnosis session id returned by pilot_workspace_integrity or pilot_diagnose_session_start"`
 }
 type diagnoseDeliveryOutput struct {
+	diagnoseAuditStatus
 	InvestigationID string            `json:"investigation_id,omitempty"`
-	AuditStatus     string            `json:"audit_status,omitempty"`
-	AuditError      string            `json:"audit_error,omitempty"`
 	Host            string            `json:"host"`
 	Component       string            `json:"component"`
 	Desired         deliveryDesired   `json:"desired"`
@@ -69,7 +68,7 @@ func registerDeliveryTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
 }
 
 func diagnoseDeliveryHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseDeliveryInput, diagnoseDeliveryOutput] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in diagnoseDeliveryInput) (*mcp.CallToolResult, diagnoseDeliveryOutput, error) {
+	return withDiagnoseEvidence(opts, "Delivery", func(ctx context.Context, _ *mcp.CallToolRequest, in diagnoseDeliveryInput) (*mcp.CallToolResult, diagnoseDeliveryOutput, error) {
 		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		resolved, err := resolveDiagnoseInventoryReadOnly(ctx, opts)
 		if err != nil {
@@ -138,7 +137,7 @@ func diagnoseDeliveryHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[di
 		}
 		out.InvestigationID, out.AuditStatus, out.AuditError = appendDeliveryInvestigation(opts, in.InvestigationID, fmt.Sprintf("delivery host=%s component=%s verdict=%s selected=%t", in.Host, in.Component, out.Verdict, out.Selection.Selected))
 		return nil, out, nil
-	}
+	})
 }
 
 func appendDeliveryInvestigation(opts diagnoseMCPToolsOptions, id, summary string) (string, string, string) {
@@ -227,9 +226,8 @@ type monitoringPipelineInput struct {
 	InvestigationID string `json:"investigation_id,omitempty" jsonschema:"optional diagnosis session id returned by pilot_workspace_integrity or pilot_diagnose_session_start"`
 }
 type monitoringPipelineOutput struct {
+	diagnoseAuditStatus
 	InvestigationID string                    `json:"investigation_id,omitempty"`
-	AuditStatus     string                    `json:"audit_status,omitempty"`
-	AuditError      string                    `json:"audit_error,omitempty"`
 	Target          string                    `json:"target"`
 	Verdict         string                    `json:"verdict"`
 	Stages          map[string]string         `json:"stages"`
@@ -238,7 +236,7 @@ type monitoringPipelineOutput struct {
 }
 
 func diagnoseMonitoringPipelineHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[monitoringPipelineInput, monitoringPipelineOutput] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in monitoringPipelineInput) (result *mcp.CallToolResult, out monitoringPipelineOutput, err error) {
+	return withDiagnoseEvidence(opts, "MonitoringPipeline", func(ctx context.Context, _ *mcp.CallToolRequest, in monitoringPipelineInput) (result *mcp.CallToolResult, out monitoringPipelineOutput, err error) {
 		defer func() {
 			out.InvestigationID, out.AuditStatus, out.AuditError = appendPipelineInvestigation(opts, in.InvestigationID, out)
 		}()
@@ -339,13 +337,14 @@ func diagnoseMonitoringPipelineHandler(opts diagnoseMCPToolsOptions) mcp.ToolHan
 			out.RootCause = "snmp-exporter contract is missing"
 			return nil, out, nil
 		}
-		groups, err := resolveInventoryGroups(ctx, opts.Inventory)
+		resolved, err := resolveDiagnoseInventoryReadOnly(ctx, opts)
 		if err != nil {
 			out.Stages["component_assignment"] = "unknown"
 			out.Verdict = "insufficient_evidence"
 			out.RootCause = err.Error()
 			return nil, out, nil
 		}
+		groups := resolved.GroupHosts
 		assigned := exporter.Role == "all" || len(groups[exporter.Role]) > 0
 		if !assigned {
 			out.Stages["component_assignment"] = "not_assigned"
@@ -485,7 +484,7 @@ func diagnoseMonitoringPipelineHandler(opts diagnoseMCPToolsOptions) mcp.ToolHan
 			out.RootCause = "delivery is applied, but downstream scrape and series evidence is unavailable"
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 func appendPipelineInvestigation(opts diagnoseMCPToolsOptions, id string, out monitoringPipelineOutput) (string, string, string) {

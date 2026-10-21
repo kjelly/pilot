@@ -37,6 +37,7 @@ type diagnoseSNMPProbeOutput struct {
 }
 
 func registerActiveDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOptions) {
+	registerDiagnoseEvidenceTool(server, opts)
 	addRecoveredTool(server, &mcp.Tool{
 		Name:        "pilot_diagnose_snmp_probe",
 		Description: "bounded read-only SNMP target probe using the exact registry target; credentials are resolved server-side and are never accepted or returned",
@@ -44,7 +45,8 @@ func registerActiveDiagnoseTools(server *mcp.Server, opts diagnoseMCPToolsOption
 }
 
 func diagnoseSNMPProbeHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseSNMPProbeInput, diagnoseSNMPProbeOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSNMPProbeInput) (result *mcp.CallToolResult, out diagnoseSNMPProbeOutput, err error) {
+	return withDiagnoseEvidence(opts, "SNMPProbe", func(ctx context.Context, req *mcp.CallToolRequest, in diagnoseSNMPProbeInput) (result *mcp.CallToolResult, out diagnoseSNMPProbeOutput, err error) {
+		ctx = withDeployAnsibleRuntime(ctx, scopedDiagnoseAnsibleRuntime(opts.AnsibleRuntime))
 		root := diagnoseWorkspaceRoot(opts)
 		out = diagnoseSNMPProbeOutput{Target: in.Target, ProbeOID: "1.3.6.1.2.1.1.3.0", Transport: "not_attempted", Verdict: "insufficient_evidence", Workspace: workspaceintegrity.Monitoring(root), InvestigationID: in.InvestigationID}
 		start := time.Now()
@@ -163,7 +165,7 @@ func diagnoseSNMPProbeHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			out.Verdict = "insufficient_evidence"
 		}
 		return nil, out, nil
-	}
+	})
 }
 
 func minDiagnoseTimeout(configured, maximum time.Duration) time.Duration {

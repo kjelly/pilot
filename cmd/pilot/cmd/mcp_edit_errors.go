@@ -22,15 +22,19 @@ import (
 // roster/DNS phases and aren't produced yet, but the type is shared so
 // those phases reuse it rather than inventing another.
 type mcpToolError struct {
-	Redacted       bool   `json:"redacted,omitempty"`
-	Truncated      bool   `json:"truncated,omitempty"`
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	Step           int    `json:"step,omitempty"`
-	Action         string `json:"action,omitempty"`
-	ScreenID       string `json:"screen_id,omitempty"`
-	RolledBack     bool   `json:"rolled_back"`
-	AuditDirectory string `json:"audit_directory,omitempty"`
+	AuditError           string `json:"audit_error,omitempty"`
+	EvidenceID           string `json:"evidence_id,omitempty"`
+	AuditStatus          string `json:"audit_status,omitempty"`
+	EvidenceCompleteness string `json:"evidence_completeness,omitempty"`
+	Redacted             bool   `json:"redacted,omitempty"`
+	Truncated            bool   `json:"truncated,omitempty"`
+	Code                 string `json:"code"`
+	Message              string `json:"message"`
+	Step                 int    `json:"step,omitempty"`
+	Action               string `json:"action,omitempty"`
+	ScreenID             string `json:"screen_id,omitempty"`
+	RolledBack           bool   `json:"rolled_back"`
+	AuditDirectory       string `json:"audit_directory,omitempty"`
 }
 
 func (e mcpToolError) Error() string { return e.Code + ": " + e.Message }
