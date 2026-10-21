@@ -32,7 +32,7 @@
 
         - name: Configure isolated unbound instances
           ansible.builtin.copy:
-            dest: "{{ issue98_root }}/{{ item.role }}.conf"
+            dest: "/etc/unbound/issue98-{{ item.role }}.conf"
             mode: '0600'
             content: |
               server:
@@ -40,8 +40,8 @@
                 do-daemonize: no
                 username: ""
                 chroot: ""
-                directory: "{{ issue98_root }}"
-                pidfile: "{{ issue98_root }}/{{ item.role }}.pid"
+                directory: /etc/unbound
+                pidfile: ""
                 use-syslog: yes
                 do-not-query-localhost: no
                 module-config: "iterator"
@@ -67,7 +67,7 @@
               [Unit]
               Description=Disposable issue98 {{ item.role }} DNS fixture
               [Service]
-              ExecStart=/usr/sbin/unbound -d -c {{ issue98_root }}/{{ item.role }}.conf
+              ExecStart=/usr/sbin/unbound -d -c /etc/unbound/issue98-{{ item.role }}.conf
           loop: "{{ issue98_servers }}"
           register: issue98_units
 
@@ -86,6 +86,9 @@
           loop: "{{ issue98_servers | product(['A', 'AAAA']) | list }}"
           register: issue98_results
           changed_when: false
+          until: issue98_results.rc == 0
+          retries: 5
+          delay: 1
 
         - name: Assert the intended fault and healthy fallback actually exist
           ansible.builtin.assert:
