@@ -168,3 +168,135 @@ func TestSynthesis_UnavailableResultNeverBecomesSuccess(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeAdHocResult_ExecutionLayerCaptures(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		launcherRC                int
+		moduleFailed, startFailed bool
+	}{
+		{"bad-interpreter", 127, true, false},
+		{"missing-executable", 2, false, true},
+		{"not-executable", 13, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := os.ReadFile("testdata/adhoc/" + tc.name + ".json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DecodeAdHocResult(string(raw), "localhost")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RCKnown || got.RC != 0 || got.HasCommandResult() || got.CommandSucceeded() || !got.LauncherRCKnown || got.LauncherRC != tc.launcherRC || got.ModuleFailed != tc.moduleFailed || got.CommandStartFailed != tc.startFailed || got.Message == "" {
+				t.Fatalf("execution-layer result=%+v", got)
+			}
+			if tc.moduleFailed && got.ModuleStderr == "" {
+				t.Fatal("module stderr lost")
+			}
+			component := BuildComponentOutput("systemd", "", nil, true, []StepResult{{Step: Step{ID: "runtime-state"}, Result: got}})
+			if component.RuntimePresent || component.RuntimeRunning || component.Verdict != "insufficient_evidence" {
+				t.Fatalf("component=%+v", component)
+			}
+		})
+	}
+	for _, control := range []struct {
+		name           string
+		rc             int
+		stdout, stderr string
+	}{
+		{"command-rc7", 7, "out", "err"}, {"command-rc127", 127, "", ""},
+	} {
+		raw, err := os.ReadFile("testdata/adhoc/" + control.name + ".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeAdHocResult(string(raw), "localhost")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.RCKnown || got.RC != control.rc || !got.HasCommandResult() || got.LauncherRCKnown || got.ModuleFailed || got.CommandStartFailed || got.Stdout != control.stdout || got.Stderr != control.stderr {
+			t.Fatalf("genuine command exit lost=%+v", got)
+		}
+	}
+}
+
+func TestDecodeAdHocResult_ExecutionFailureFieldPresence(t *testing.T) {
+	raw, err := os.ReadFile("testdata/adhoc/bad-interpreter.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	host := wrapper["plays"].([]any)[0].(map[string]any)["tasks"].([]any)[0].(map[string]any)["hosts"].(map[string]any)["localhost"].(map[string]any)
+	host["module_stdout"], host["module_stderr"] = "", ""
+	host["stdout"], host["stderr"] = "out", "err"
+	// Even a mixed envelope with normal timing cannot turn a wrapper status
+	// into the requested command's exit. Streams keep their own identity.
+	host["start"], host["end"] = "2026-10-21 13:14:09.404941", "2026-10-21 13:14:09.422917"
+	data, err := json.Marshal(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeAdHocResult(string(data), "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ModuleFailed || got.CommandStartFailed || got.RCKnown || !got.LauncherRCKnown || got.LauncherRC != 127 || got.Stdout != "out" || got.Stderr != "err" {
+		t.Fatalf("mixed/empty wrapper result=%+v", got)
+	}
+
+	// Explicit null streams are also present wrapper fields.
+	host["module_stdout"], host["module_stderr"] = nil, nil
+	data, err = json.Marshal(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = DecodeAdHocResult(string(data), "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ModuleFailed || got.RCKnown {
+		t.Fatalf("null wrapper fields lost: %+v", got)
+	}
+
+	// A known start timestamp prevents the spawn-error classification even
+	// when the callback lacks end. Do not infer that execution never began.
+	delete(host, "module_stdout")
+	delete(host, "module_stderr")
+	delete(host, "end")
+	host["cmd"] = "/nonexistent/pilot-review-command"
+	data, err = json.Marshal(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = DecodeAdHocResult(string(data), "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CommandStartFailed || !got.RCKnown {
+		t.Fatalf("start evidence ignored=%+v", got)
+	}
+	host["start"], host["end"] = nil, nil
+	data, err = json.Marshal(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = DecodeAdHocResult(string(data), "localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CommandStartFailed || got.RCKnown {
+		t.Fatalf("null timing not recognized=%+v", got)
+	}
+}
+
+func TestAdHocResult_ExplicitExecutionFailureRejectsKnownRC(t *testing.T) {
+	for _, result := range []AdHocResult{{RC: 7, RCKnown: true, ModuleFailed: true}, {RC: 7, RCKnown: true, CommandStartFailed: true}} {
+		if result.HasCommandResult() || result.CommandSucceeded() {
+			t.Fatalf("explicit execution failure accepted=%+v", result)
+		}
+	}
+}

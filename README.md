@@ -257,6 +257,14 @@ inventory host:
 - Diagnostic MCP results preserve `stdout`, `stderr` and Ansible `message`
   separately. A nonzero remote command is diagnostic data (`isError: false`),
   with its actual `rc`, `rc_known`, `failed`, `unreachable` and `outcome`.
+  Ansible wrapper/module failures and requested-executable launch errors keep
+  the requested-command `rc_known: false` and `outcome: unknown`.
+  `module_stdout`/`module_stderr` preserve launcher diagnostics separately from
+  command streams; `module_failed` and `command_start_failed` identify those
+  execution failures. `launcher_rc` with `launcher_rc_known` is Ansible's
+  execution-layer status (wrapper exit status or spawn errno), never the
+  requested command's exit code. These streams use the same redaction,
+  size limits and flags as command output.
   `outcome` distinguishes `completed`, `command_nonzero`, `auth_required`,
   `unreachable` and `unknown`; runner/decoder failures are `unknown`, retain
   any decoded facts and include `error`. An unknown or absent RC must never

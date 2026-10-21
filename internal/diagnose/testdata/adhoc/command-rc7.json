@@ -1,0 +1,27 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "stdout": "out",
+              "stderr": "err",
+              "rc": 7,
+              "failed": true,
+              "msg": "non-zero return code",
+              "cmd": [
+                "python3",
+                "-c",
+                "import sys; print(\"out\"); print(\"err\", file=sys.stderr); sys.exit(7)"
+              ],
+              "start": "2026-10-21 13:14:09.404941",
+              "end": "2026-10-21 13:14:09.422917",
+              "delta": "0:00:00.017976"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

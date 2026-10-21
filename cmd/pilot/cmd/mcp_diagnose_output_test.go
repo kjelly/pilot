@@ -296,3 +296,162 @@ func TestRealDiagnoseAdHocRunner_WaitDelayRetainsCallback(t *testing.T) {
 		t.Fatalf("wait-delay discarded complete callback: %+v", got)
 	}
 }
+
+func TestDiagnoseCommandEvidence_ExecutionFailuresStayUnknown(t *testing.T) {
+	for _, result := range []diagnose.AdHocResult{
+		{RC: 7, RCKnown: true, ModuleFailed: true, Failed: true, Message: "did not receive Kerberos credentials"},
+		{RC: 7, RCKnown: true, CommandStartFailed: true, Failed: true},
+	} {
+		evidence := commandEvidence(result)
+		if evidence.OK || evidence.RCKnown || evidence.RC != 0 || evidence.Outcome != "unknown" || evidence.Error == "" {
+			t.Fatalf("execution failure classified as command result=%+v", evidence)
+		}
+	}
+	evidence := commandEvidence(diagnose.AdHocResult{ModuleFailed: true, ModuleStdout: "password=module-secret " + strings.Repeat("界", maxDiagnosticResponseBytes), ModuleStderr: "token=module-token", LauncherRC: 127, LauncherRCKnown: true})
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.Redacted || !evidence.Truncated || len(evidence.ModuleStdout) > maxDiagnosticResponseBytes || !utf8.ValidString(evidence.ModuleStdout) || strings.Contains(string(data), "module-secret") || strings.Contains(string(data), "module-token") || evidence.LauncherRC != 127 || !evidence.LauncherRCKnown {
+		t.Fatalf("module diagnostics not safely preserved=%+v", evidence)
+	}
+}
+
+func TestDiagnoseRunWire_ActualExecutionLayerFailures(t *testing.T) {
+	requireRealAnsible(t)
+	for _, tc := range []struct {
+		name                      string
+		launcherRC                int
+		moduleFailed, startFailed bool
+		commandRC                 int
+	}{
+		{"bad-interpreter", 127, true, false, 0},
+		{"missing-executable", 2, false, true, 0},
+		{"not-executable", 13, false, true, 0},
+		{"command-rc7", 0, false, false, 7},
+		{"command-rc127", 0, false, false, 127},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := writeDiagnoseFixtureInventory(t)
+			interpreter := "/usr/bin/python3"
+			command := "/bin/true"
+			switch tc.name {
+			case "bad-interpreter":
+				interpreter = "/nonexistent/pilot-review-python"
+			case "missing-executable":
+				command = "/nonexistent/pilot-review-command"
+			case "not-executable":
+				path := filepath.Join(t.TempDir(), "not-executable")
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command = path
+			case "command-rc127":
+				command = `/bin/sh -c 'exit 127'`
+			case "command-rc7":
+				command = `python3 -c 'import sys; print("out"); print("err", file=sys.stderr); sys.exit(7)'`
+			}
+			inventory := fmt.Sprintf("all:\n  hosts:\n    web1: {ansible_connection: local, ansible_host: 127.0.0.1, ansible_python_interpreter: %s}\n", interpreter)
+			if err := os.WriteFile(inv, []byte(inventory), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := baseDiagnoseOpts(t, inv, nil)
+			opts.StepTimeout = 20 * time.Second
+			opts.AnsibleRuntime.Env = append(opts.AnsibleRuntime.Env, "ANSIBLE_REMOTE_TEMP="+t.TempDir())
+			callbacks := make(chan string, 1)
+			runner := realDiagnoseAdHocRunner()
+			opts.AdHocRunner = func(ctx context.Context, args []string, timeout int) (string, int, error) {
+				raw, rc, err := runner(ctx, args, timeout)
+				callbacks <- raw
+				return raw, rc, err
+			}
+			server := mcp.NewServer(&mcp.Implementation{Name: "execution-layer-test", Version: "1"}, nil)
+			registerDiagnoseRunTool(server, opts)
+			session := connectDiagnoseTestServer(t, server)
+			wire, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "pilot_diagnose_run", Arguments: map[string]any{"host": "web1", "command": command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wire.IsError {
+				t.Fatalf("diagnostic data became MCP error=%+v", wire)
+			}
+			raw := <-callbacks
+			// Read callback fields independently of the production decoder.
+			var callback struct {
+				Plays []struct {
+					Tasks []struct {
+						Hosts map[string]struct {
+							Message      string `json:"msg"`
+							ModuleStdout string `json:"module_stdout"`
+							ModuleStderr string `json:"module_stderr"`
+						} `json:"hosts"`
+					} `json:"tasks"`
+				} `json:"plays"`
+			}
+			if err := json.Unmarshal([]byte(raw), &callback); err != nil {
+				t.Fatal(err)
+			}
+			original := callback.Plays[0].Tasks[0].Hosts["web1"]
+			out := decodeStructured[diagnoseRunOutput](t, wire)
+			if out.Message != original.Message || out.ModuleStdout != original.ModuleStdout || out.ModuleStderr != original.ModuleStderr || out.ModuleFailed != tc.moduleFailed || out.CommandStartFailed != tc.startFailed {
+				t.Fatalf("wire dropped execution-layer diagnostics=%+v", out)
+			}
+			auditData, err := os.ReadFile(filepath.Join(out.AuditDirectory, "record.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record diagnoseAuditRecord
+			if err := json.Unmarshal(auditData, &record); err != nil {
+				t.Fatal(err)
+			}
+			if len(record.Steps) != 1 {
+				t.Fatalf("audit steps=%+v", record.Steps)
+			}
+			audit := record.Steps[0]
+			if audit.RCKnown != out.RCKnown || audit.RC != out.RC || audit.LauncherRC != out.LauncherRC || audit.LauncherRCKnown != out.LauncherRCKnown || audit.ModuleFailed != out.ModuleFailed || audit.CommandStartFailed != out.CommandStartFailed || audit.Error != out.Error {
+				t.Fatalf("audit lost execution outcome: %+v output=%+v", audit, out)
+			}
+			decoded, err := diagnose.DecodeAdHocResult(raw, "web1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.commandRC != 0 {
+				stdout, stderr := "", ""
+				if tc.commandRC == 7 {
+					stdout, stderr = "out", "err"
+				}
+				if !out.RCKnown || out.RC != tc.commandRC || out.Outcome != "command_nonzero" || out.Stdout != stdout || out.Stderr != stderr || out.LauncherRCKnown || out.Error != "" {
+					t.Fatalf("real command result changed=%+v", out)
+				}
+				return
+			}
+			if out.RCKnown || out.RC != 0 || out.Outcome != "unknown" || out.LauncherRC != tc.launcherRC || !out.LauncherRCKnown || out.Error == "" || out.Stdout != "" || out.Stderr != "" {
+				t.Fatalf("launcher status mistaken for command exit=%+v", out)
+			}
+			component := diagnose.BuildComponentOutput("systemd", "", nil, true, []diagnose.StepResult{{Step: diagnose.Step{ID: "runtime-state"}, Result: decoded}})
+			if component.RuntimePresent || component.RuntimeRunning || component.Verdict != "insufficient_evidence" {
+				t.Fatalf("live module failure became component state=%+v", component)
+			}
+		})
+	}
+}
+
+func TestDiagnoseStepAudit_ExecutionFailureErrorIsSanitized(t *testing.T) {
+	record := diagnoseAuditRecord{Steps: stepAuditList([]diagnose.StepResult{{Step: diagnose.Step{ID: "wrapper", Command: "/bin/true"}, Result: diagnose.AdHocResult{ModuleFailed: true, LauncherRC: 127, LauncherRCKnown: true, Message: "password=module-audit-secret " + strings.Repeat("界", maxDiagnosticResponseBytes), ModuleStderr: "token=module-stderr-secret"}}})}
+	dir := t.TempDir()
+	if err := writeDiagnoseAudit(dir, record); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "record.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved diagnoseAuditRecord
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	step := saved.Steps[0]
+	if step.RCKnown || !step.ModuleFailed || !step.LauncherRCKnown || step.LauncherRC != 127 || step.Error == "" || len(step.Error) > maxDiagnosticResponseBytes || strings.Contains(string(data), "module-audit-secret") || strings.Contains(string(data), "module-stderr-secret") || !strings.Contains(step.Error, "[REDACTED]") {
+		t.Fatalf("unsafe or misleading stage-failure audit=%+v", step)
+	}
+}

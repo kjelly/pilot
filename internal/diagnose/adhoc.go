@@ -5,11 +5,9 @@ import (
 	"fmt"
 )
 
-// AdHocResult is one ad-hoc command's decoded, single-host outcome. RC and
-// Stdout are meaningful even when nonzero/Failed — for most checks here a
-// nonzero rc (e.g. "systemctl is-active sssd" on a stopped service) is the
-// informative signal itself, not a probe failure, so callers should branch
-// on RC/Stdout rather than treat Failed as "this step didn't work."
+// AdHocResult separates a requested command's observations from Ansible's
+// execution-layer diagnostics. RC is the command's exit only when RCKnown is
+// true; a known nonzero command exit remains informative diagnostic data.
 type AdHocResult struct {
 	RC     int
 	Stdout string
@@ -19,7 +17,20 @@ type AdHocResult struct {
 	Stderr string
 	// Message is Ansible's module/transport message, never command stdout.
 	Message string
-	// RCKnown distinguishes a real rc=0 from a module result without rc.
+	// ModuleStdout and ModuleStderr belong to Ansible's module launcher,
+	// not the requested command. Presence in a callback marks module failure.
+	ModuleStdout string
+	ModuleStderr string
+	// ModuleFailed marks Ansible's module-wrapper failure envelope.
+	ModuleFailed bool
+	// CommandStartFailed marks a launcher error before command execution.
+	CommandStartFailed bool
+	// LauncherRC is Ansible's execution-layer status: a wrapper exit status
+	// or a command-spawn errno. It is never the requested command's exit code.
+	LauncherRC int
+	// LauncherRCKnown says Ansible supplied an execution-layer status.
+	LauncherRCKnown bool
+	// RCKnown says RC belongs to the requested command, not its launcher.
 	RCKnown     bool
 	Failed      bool
 	Unreachable bool
@@ -27,6 +38,18 @@ type AdHocResult struct {
 	// could not be decoded (ansible missing/timeout/malformed callback
 	// JSON) — distinct from a clean nonzero RC, which is a normal result.
 	RunErr error
+}
+
+// callbackString retains field presence even when a wrapper emits null or an
+// empty diagnostic stream. Either still identifies the execution-layer envelope.
+type callbackString struct {
+	Value   string
+	Present bool
+}
+
+func (s *callbackString) UnmarshalJSON(data []byte) error {
+	s.Present = true
+	return json.Unmarshal(data, &s.Value)
 }
 
 // adHocCallbackDoc is the (partial) shape of the document
@@ -39,12 +62,17 @@ type adHocCallbackDoc struct {
 	Plays []struct {
 		Tasks []struct {
 			Hosts map[string]struct {
-				Stdout      string `json:"stdout"`
-				Stderr      string `json:"stderr"`
-				RC          *int   `json:"rc"`
-				Failed      bool   `json:"failed"`
-				Unreachable bool   `json:"unreachable"`
-				Msg         string `json:"msg"`
+				ModuleStdout callbackString  `json:"module_stdout"`
+				ModuleStderr callbackString  `json:"module_stderr"`
+				Command      json.RawMessage `json:"cmd"`
+				Start        *string         `json:"start"`
+				End          *string         `json:"end"`
+				Stdout       string          `json:"stdout"`
+				Stderr       string          `json:"stderr"`
+				RC           *int            `json:"rc"`
+				Failed       bool            `json:"failed"`
+				Unreachable  bool            `json:"unreachable"`
+				Msg          string          `json:"msg"`
 			} `json:"hosts"`
 		} `json:"tasks"`
 	} `json:"plays"`
@@ -72,15 +100,28 @@ func DecodeAdHocResult(rawJSON, host string) (AdHocResult, error) {
 			if result.RC != nil {
 				rc = *result.RC
 			}
-			return AdHocResult{
-				RC:          rc,
-				RCKnown:     result.RC != nil,
-				Stdout:      result.Stdout,
-				Message:     result.Msg,
-				Stderr:      result.Stderr,
-				Failed:      result.Failed,
-				Unreachable: result.Unreachable,
-			}, nil
+			moduleFailed := result.ModuleStdout.Present || result.ModuleStderr.Present
+			// run_command's spawn-error result contains cmd and errno but
+			// no execution timing. A genuine nonzero command retains timing.
+			commandPresent := len(result.Command) != 0 && string(result.Command) != "null"
+			commandStartFailed := !moduleFailed && result.Failed && commandPresent && result.Start == nil && result.End == nil
+			out := AdHocResult{
+				RC:                 rc,
+				RCKnown:            result.RC != nil,
+				ModuleFailed:       moduleFailed,
+				CommandStartFailed: commandStartFailed,
+				Stdout:             result.Stdout,
+				Message:            result.Msg,
+				Stderr:             result.Stderr,
+				Failed:             result.Failed,
+				Unreachable:        result.Unreachable,
+			}
+			out.ModuleStdout, out.ModuleStderr = result.ModuleStdout.Value, result.ModuleStderr.Value
+			if moduleFailed || commandStartFailed {
+				out.LauncherRC, out.LauncherRCKnown = rc, result.RC != nil
+				out.RC, out.RCKnown = 0, false
+			}
+			return out, nil
 		}
 	}
 	return AdHocResult{}, fmt.Errorf("no ansible callback result for host %s", host)
@@ -90,7 +131,7 @@ func DecodeAdHocResult(rawJSON, host string) (AdHocResult, error) {
 // failure, absent RC, runner error or failed module with zero RC proves nothing
 // about the requested command. A real nonzero command RC remains usable data.
 func (r AdHocResult) HasCommandResult() bool {
-	return r.RCKnown && r.RunErr == nil && !r.Unreachable && (!r.Failed || r.RC != 0)
+	return r.RCKnown && r.RunErr == nil && !r.Unreachable && !r.ModuleFailed && !r.CommandStartFailed && (!r.Failed || r.RC != 0)
 }
 
 // CommandSucceeded requires affirmative, known success rather than a zero value.
@@ -108,6 +149,12 @@ func (r AdHocResult) UnavailableReason() string {
 	}
 	if r.Unreachable {
 		return "host unreachable"
+	}
+	if r.ModuleFailed {
+		return "Ansible module execution failed; requested-command outcome is unknown"
+	}
+	if r.CommandStartFailed {
+		return "Ansible could not start the requested command; its outcome is unknown"
 	}
 	if !r.RCKnown {
 		return "Ansible result did not include a command return code"

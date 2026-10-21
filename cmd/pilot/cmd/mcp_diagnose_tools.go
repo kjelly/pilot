@@ -388,20 +388,26 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 // synthesized verdict so a caller is never solely dependent on trusting
 // the prose.
 type diagnoseStepEvidence struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	OK          bool   `json:"ok"`
-	RC          int    `json:"rc"`
-	Stdout      string `json:"stdout,omitempty"`
-	Stderr      string `json:"stderr,omitempty"`
-	Message     string `json:"message,omitempty"`
-	Failed      bool   `json:"failed,omitempty"`
-	Unreachable bool   `json:"unreachable,omitempty"`
-	Outcome     string `json:"outcome"`
-	RCKnown     bool   `json:"rc_known"`
-	Redacted    bool   `json:"redacted"`
-	Truncated   bool   `json:"truncated"`
-	Error       string `json:"error,omitempty"`
+	ID                 string `json:"id"`
+	Description        string `json:"description"`
+	OK                 bool   `json:"ok"`
+	RC                 int    `json:"rc"`
+	Stdout             string `json:"stdout,omitempty"`
+	Stderr             string `json:"stderr,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ModuleStdout       string `json:"module_stdout,omitempty"`
+	ModuleStderr       string `json:"module_stderr,omitempty"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	LauncherRC         int    `json:"launcher_rc"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	Failed             bool   `json:"failed,omitempty"`
+	Unreachable        bool   `json:"unreachable,omitempty"`
+	Outcome            string `json:"outcome"`
+	RCKnown            bool   `json:"rc_known"`
+	Redacted           bool   `json:"redacted"`
+	Truncated          bool   `json:"truncated"`
+	Error              string `json:"error,omitempty"`
 }
 
 func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
@@ -419,20 +425,26 @@ func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
 // run and its outcome, distinct from diagnoseStepEvidence (the MCP
 // response shape) so the audit file's schema can evolve independently.
 type diagnoseStepAudit struct {
-	ID      string `json:"id"`
-	Command string `json:"command"`
-	RC      int    `json:"rc,omitempty"`
-	Error   string `json:"error,omitempty"`
+	ID                 string `json:"id"`
+	Command            string `json:"command"`
+	RC                 int    `json:"rc,omitempty"`
+	RCKnown            bool   `json:"rc_known"`
+	LauncherRC         int    `json:"launcher_rc,omitempty"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 func stepAuditList(results []diagnose.StepResult) []diagnoseStepAudit {
 	out := make([]diagnoseStepAudit, len(results))
 	for i, r := range results {
-		a := diagnoseStepAudit{ID: r.Step.ID, Command: r.Step.Command}
-		if r.Result.RunErr != nil {
-			a.Error = r.Result.RunErr.Error()
-		} else {
-			a.RC = r.Result.RC
+		ev := commandEvidence(r.Result)
+		a := diagnoseStepAudit{ID: r.Step.ID, Command: r.Step.Command,
+			RC: ev.RC, RCKnown: ev.RCKnown, LauncherRC: ev.LauncherRC, LauncherRCKnown: ev.LauncherRCKnown,
+			ModuleFailed: ev.ModuleFailed, CommandStartFailed: ev.CommandStartFailed, Error: ev.Error}
+		if !r.Result.HasCommandResult() && a.Error == "" {
+			a.Error, _, _ = sanitizeDiagnosticText(r.Result.UnavailableReason())
 		}
 		out[i] = a
 	}
@@ -1611,19 +1623,25 @@ type diagnoseRunInput struct {
 
 type diagnoseRunOutput struct {
 	diagnoseAuditStatus
-	Host           string `json:"host"`
-	ResolvedAddr   string `json:"resolved_addr,omitempty"`
-	Command        string `json:"command"`
-	RC             int    `json:"rc"`
-	Stdout         string `json:"stdout,omitempty"`
-	Stderr         string `json:"stderr,omitempty"`
-	Message        string `json:"message,omitempty"`
-	Failed         bool   `json:"failed,omitempty"`
-	Outcome        string `json:"outcome"`
-	RCKnown        bool   `json:"rc_known"`
-	Unreachable    bool   `json:"unreachable,omitempty"`
-	Error          string `json:"error,omitempty"`
-	AuditDirectory string `json:"audit_directory"`
+	Host               string `json:"host"`
+	ResolvedAddr       string `json:"resolved_addr,omitempty"`
+	Command            string `json:"command"`
+	RC                 int    `json:"rc"`
+	Stdout             string `json:"stdout,omitempty"`
+	Stderr             string `json:"stderr,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ModuleStdout       string `json:"module_stdout,omitempty"`
+	ModuleStderr       string `json:"module_stderr,omitempty"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	LauncherRC         int    `json:"launcher_rc"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	Failed             bool   `json:"failed,omitempty"`
+	Outcome            string `json:"outcome"`
+	RCKnown            bool   `json:"rc_known"`
+	Unreachable        bool   `json:"unreachable,omitempty"`
+	Error              string `json:"error,omitempty"`
+	AuditDirectory     string `json:"audit_directory"`
 }
 
 func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseRunInput, diagnoseRunOutput] {
@@ -1674,6 +1692,9 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 		ev := commandEvidence(results[0].Result)
 		out.RC, out.RCKnown, out.Outcome = ev.RC, ev.RCKnown, ev.Outcome
 		out.Stdout, out.Stderr, out.Message = ev.Stdout, ev.Stderr, ev.Message
+		out.ModuleStdout, out.ModuleStderr = ev.ModuleStdout, ev.ModuleStderr
+		out.ModuleFailed, out.CommandStartFailed = ev.ModuleFailed, ev.CommandStartFailed
+		out.LauncherRC, out.LauncherRCKnown = ev.LauncherRC, ev.LauncherRCKnown
 		out.Failed, out.Unreachable, out.Error = ev.Failed, ev.Unreachable, ev.Error
 		out.Redacted, out.Truncated = ev.Redacted, ev.Truncated
 
