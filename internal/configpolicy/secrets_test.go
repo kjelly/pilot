@@ -47,6 +47,7 @@ func TestSecretStorageForms(t *testing.T) {
 		{"encrypted file", "$ANSIBLE_VAULT;1.1;AES256\nDUMMY130", true},
 		{"embedded YAML", "configuration: |\n  service:\n    token: DUMMY130", true},
 		{"private key", "public_input: '-----BEGIN PRIVATE KEY-----DUMMY130'", true},
+		{"PGP private key", "public_input: '-----BEGIN PGP PRIVATE KEY BLOCK-----DUMMY130'", true},
 		{"URI credentials", "url: https://user:DUMMY130@example.org", true},
 		{"parse error", "opaque_input: [DUMMY130", true},
 		{"alias cycle", "a: &a {password: *a}", true},

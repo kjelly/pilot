@@ -37,6 +37,9 @@ func minimalRosterBase(adminPrincipal, adminPassword string) map[string]any {
 }
 
 func writeRosterSkeleton(path string, roster map[string]any) error {
+	if err := validateSecretSourceFile(path); err != nil {
+		return err
+	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("roster %s already exists", path)
 	} else if !os.IsNotExist(err) {
@@ -49,7 +52,7 @@ func writeRosterSkeleton(path string, roster map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("mkdir roster directory: %w", err)
 	}
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil
@@ -99,6 +102,9 @@ func WriteMinimalRosterSkeleton(path, adminPrincipal, adminPassword string) erro
 // freeipa-client/freeipa-server when no workspace vault exists yet. It is
 // deliberately create-only, just like WriteMinimalNFSServerRoster.
 func WriteMinimalFreeIPAVault(path, adminPassword string) error {
+	if err := validateSecretSourceFile(path); err != nil {
+		return err
+	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("vault %s already exists", path)
 	} else if !os.IsNotExist(err) {
@@ -111,7 +117,7 @@ func WriteMinimalFreeIPAVault(path, adminPassword string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("mkdir vault directory: %w", err)
 	}
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
 		return fmt.Errorf("write vault %s: %w", path, err)
 	}
 	return nil
@@ -122,7 +128,7 @@ func WriteMinimalFreeIPAVault(path, adminPassword string) error {
 // encrypted file are left untouched, so edit cannot silently replace an
 // operator's credential.
 func FillFreeIPAAdminPassword(path, adminPassword string) (bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return false, err
 	}
@@ -144,13 +150,13 @@ func FillFreeIPAAdminPassword(path, adminPassword string) (bool, error) {
 			return false, nil
 		}
 		doc.Set("ipa_admin_password", adminPassword)
-		if err := os.WriteFile(path, doc.Bytes(), 0o600); err != nil {
+		if err := writeSecretSourceFile(path, doc.Bytes(), 0o600); err != nil {
 			return false, fmt.Errorf("write vault %s: %w", path, err)
 		}
 		return true, nil
 	}
 	doc.Set("ipa_admin_password", adminPassword)
-	if err := os.WriteFile(path, doc.Bytes(), 0o600); err != nil {
+	if err := writeSecretSourceFile(path, doc.Bytes(), 0o600); err != nil {
 		return false, fmt.Errorf("write vault %s: %w", path, err)
 	}
 	return true, nil

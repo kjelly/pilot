@@ -10,6 +10,9 @@ Component contracts identify secret inputs, including inputs whose names do not
 say “password”. Ansible connection credentials and undeclared credential names
 (including SNMP community/authentication/privacy passwords) are checked as well.
 Diagnostics identify the file, field path and line without printing its value.
+Vault, SNMP credential and roster editors also require their source files to be
+outside both vars trees, including paths reached through symlinks or file aliases.
+The destination is checked again when saving or launching an external editor.
 
 For example, a versioned `group_vars/dashboard.yml` may contain:
 

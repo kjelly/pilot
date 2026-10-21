@@ -20,7 +20,6 @@ package inventory
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -289,7 +288,7 @@ func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error
 	}
 	defer lock.release() //nolint:errcheck
 
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -338,7 +337,7 @@ func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }
 
 // RemoveRosterGroup is RemoveRosterUser's group counterpart. A blocked
@@ -351,7 +350,7 @@ func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) er
 	}
 	defer lock.release() //nolint:errcheck
 
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -406,7 +405,7 @@ func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) er
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }
 
 // findSequenceEntryFields locates the item named name within the

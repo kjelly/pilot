@@ -85,6 +85,11 @@ var inventoryGenerateCmd = &cobra.Command{
 			return err
 		}
 		vaultOut := resolveGenVaultPath(out, invGenVaultOut, cmd.Flags().Changed("vault-out"))
+		if !invGenNoVault {
+			if err := validateSecretSourcePath(groupVarsBaseDir(out), vaultOut); err != nil {
+				return err
+			}
+		}
 
 		data, err := os.ReadFile(in)
 		if err != nil {
@@ -262,6 +267,10 @@ func warnShadowedVarsFiles(w io.Writer, baseDir string) {
 }
 
 func writeMissingVaultSkeleton(w io.Writer, dst string, hf *inventory.HostsFile) {
+	if err := validateSecretSourcePath(filepath.Dir(dst), dst); err != nil {
+		fmt.Fprintln(w, err)
+		return
+	}
 	rendered := inventory.GenerateVaultSkeleton(hf)
 	if rendered == "" {
 		return

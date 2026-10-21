@@ -254,7 +254,7 @@ func (p Policy) Validate(file string, data []byte) []Violation {
 var safeKey = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 
 func containsCredentialMaterial(value string) bool {
-	if strings.Contains(value, "PRIVATE KEY-----") || strings.Contains(value, "$ANSIBLE_VAULT;") {
+	if strings.Contains(value, "PRIVATE KEY-----") || strings.Contains(value, "-----BEGIN PGP PRIVATE KEY BLOCK-----") || strings.Contains(value, "$ANSIBLE_VAULT;") {
 		return true
 	}
 	// URL userinfo is credential material even under an otherwise public key.

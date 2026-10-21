@@ -954,6 +954,12 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 // was obtained (typed fresh or reused via existingFreeIPAAdminPassword) —
 // the shared commit point for pushNFSRoleBootstrap's two branches.
 func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, rosterPath, password, extraNote string, beforeRoles []string) tea.Cmd {
+	for _, source := range []string{rosterPath, filepath.Join(dir, ".vault", "main.yaml")} {
+		if err := validateSecretSourcePath(dir, source); err != nil {
+			r.err = err
+			return nil
+		}
+	}
 	h := findHost(hf, name)
 	if h == nil {
 		return pushHostList(r, dir, path, hf, "")

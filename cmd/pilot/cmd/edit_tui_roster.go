@@ -51,6 +51,11 @@ func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
 }
 
 func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			// A missing roster on first visit to a fresh workspace is
@@ -200,6 +205,11 @@ func pushRosterCreateConfirm(r *editRouterModel, dir, path string) tea.Cmd {
 // role bootstrap or roster creation). Only prompts when no reusable value
 // exists — same widget/validation as pushNFSRoleBootstrap's own prompt.
 func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	if existing := existingFreeIPAAdminPassword(dir); existing != "" {
 		return pushRosterCreateWithPassword(r, dir, path, existing,
 			"（沿用 .vault/main.yaml 現有的 ipa_admin_password，不用重新輸入）")
@@ -230,6 +240,15 @@ func pushRosterCreatePrompt(r *editRouterModel, dir, path string) tea.Cmd {
 // was obtained (typed fresh or reused) — the shared commit point for
 // pushRosterCreatePrompt's two branches.
 func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extraNote string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, filepath.Join(dir, ".vault", "main.yaml")); err != nil {
+		r.err = err
+		return nil
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	if err := inventory.WriteMinimalRosterSkeleton(path, "admin", password); err != nil {
 		r.err = err
 		return nil
@@ -264,6 +283,9 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 // NFS role bootstrap) checks this first, since a workspace that already
 // went through one of those flows already has it on file.
 func existingFreeIPAAdminPassword(dir string) string {
+	if validateSecretSourcePath(dir, filepath.Join(dir, ".vault", "main.yaml")) != nil {
+		return ""
+	}
 	data, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
 	if err != nil || isAnsibleVaultEncrypted(data) {
 		return ""

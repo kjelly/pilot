@@ -12,7 +12,6 @@ package inventory
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -139,7 +138,7 @@ func SimulateSetRosterPrivilegedIdentity(path string, updated map[string]any) ([
 // had either. Callers should run SimulateSetRosterPrivilegedIdentity
 // first — this function does not validate anything itself.
 func SetRosterPrivilegedIdentity(path string, updated map[string]any) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -164,5 +163,5 @@ func SetRosterPrivilegedIdentity(path string, updated map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }

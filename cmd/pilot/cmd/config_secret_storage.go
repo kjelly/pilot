@@ -6,7 +6,12 @@ import (
 	"strings"
 
 	"github.com/kjelly/pilot/internal/configpolicy"
+	"github.com/kjelly/pilot/internal/secretpath"
 )
+
+func validateSecretSourcePath(dir, path string) error {
+	return secretpath.Validate(dir, path)
+}
 
 func inventorySecretPolicy() configpolicy.Policy {
 	catalog, _ := loadContractCatalogBestEffort()
@@ -25,6 +30,9 @@ func secretStorageError(violations []configpolicy.Violation) error {
 }
 
 func validateInventorySecretStorage(dir string) error {
+	if err := validateSecretSourcePath(dir, filepath.Join(dir, ".vault", "main.yaml")); err != nil {
+		return err
+	}
 	violations, err := inventorySecretPolicy().Workspace(dir)
 	if err != nil {
 		return err
