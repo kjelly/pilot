@@ -39,7 +39,19 @@ func addRecoveredTool[In, Out any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHa
 			return nil, output, typedToolError(result, diagnostic)
 		}
 		if diagnostic {
-			output, err = sanitizeDiagnoseOutput(output)
+			if page, ok := any(output).(diagnoseEvidenceGetOutput); ok {
+				// The retrieval handler validates canonical, sanitized stored bytes
+				// before encoding them. Treat only this concrete page's Data as
+				// opaque: base64 can resemble a secret assignment (TOKEnA==).
+				// Rewriting it corrupts decoded bytes and the record's SHA256.
+				data := page.Data
+				page.Data = ""
+				page, err = sanitizeDiagnoseOutput(page)
+				page.Data = data
+				output = any(page).(Out)
+			} else {
+				output, err = sanitizeDiagnoseOutput(output)
+			}
 		}
 		return result, output, err
 	})

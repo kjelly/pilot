@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -254,6 +256,134 @@ func marshalWireEvidence(t *testing.T, value any, target any) {
 	}
 	if err := json.Unmarshal(data, target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiagnoseEvidence_WirePreservesOpaqueBase64(t *testing.T) {
+	opts := diagnoseMCPToolsOptions{AuditDir: t.TempDir()}
+	dir, err := prepareDiagnoseAuditDir(opts, "test", "opaque", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDiagnoseAudit(dir, diagnoseAuditRecord{
+		Finalized: true, EvidenceCompleteness: "complete",
+		Steps: []diagnoseStepAudit{{diagnoseStepEvidence: diagnoseStepEvidence{Stdout: "Lℜ password=stored-secret"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := os.ReadFile(filepath.Join(dir, "record.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(disk, []byte("stored-secret")) {
+		t.Fatal("persisted record leaked secret")
+	}
+	offset := bytes.Index(disk, []byte("Lℜ"))
+	if offset < 0 {
+		t.Fatal("fixture is missing the UTF-8 page boundary trigger")
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "opaque-evidence-test", Version: "1"}, nil)
+	registerDiagnoseEvidenceTool(server, opts)
+	session := connectDiagnoseTestServer(t, server)
+	get := func(offset, limit int, digest string) diagnoseEvidenceGetOutput {
+		t.Helper()
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "pilot_diagnose_evidence_get", Arguments: map[string]any{
+				"evidence_id": filepath.Base(dir), "offset": offset, "limit": limit, "sha256": digest,
+			},
+		})
+		if err != nil || result.IsError {
+			t.Fatalf("get call: %v, %+v", err, result)
+		}
+		page := decodeStructured[diagnoseEvidenceGetOutput](t, result)
+		if len(result.Content) != 1 {
+			t.Fatalf("missing JSON text page: %+v", result.Content)
+		}
+		var textPage diagnoseEvidenceGetOutput
+		if err := json.Unmarshal([]byte(result.Content[0].(*mcp.TextContent).Text), &textPage); err != nil {
+			t.Fatal(err)
+		}
+		if textPage != page {
+			t.Fatal("text and structured pages differ")
+		}
+		return page
+	}
+	trigger := get(offset, 4, "")
+	if trigger.Data != "TOKEnA==" {
+		t.Fatalf("opaque base64 corrupted: got %q, want TOKEnA==", trigger.Data)
+	}
+	chunk, err := base64.StdEncoding.DecodeString(trigger.Data)
+	if err != nil || !bytes.Equal(chunk, []byte("Lℜ")) {
+		t.Fatalf("decoded trigger = %q, error = %v", chunk, err)
+	}
+	var reconstructed []byte
+	digest := trigger.SHA256
+	for offset := 0; ; {
+		page := get(offset, 127, digest)
+		chunk, err := base64.StdEncoding.DecodeString(page.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Offset != offset || page.NextOffset != offset+len(chunk) || len(chunk) > 127 || page.TotalBytes != len(disk) || page.SHA256 != digest || !page.Finalized || page.EvidenceCompleteness != "complete" || page.Encoding != "base64" {
+			t.Fatalf("invalid page: %+v", page)
+		}
+		reconstructed = append(reconstructed, chunk...)
+		if page.EOF {
+			break
+		}
+		if page.NextOffset <= offset {
+			t.Fatal("pagination did not advance")
+		}
+		offset = page.NextOffset
+	}
+	if !bytes.Equal(reconstructed, disk) || fmt.Sprintf("%x", sha256.Sum256(reconstructed)) != digest {
+		t.Fatal("wire evidence differs from persisted bytes or SHA256")
+	}
+}
+
+func TestDiagnoseEvidence_WireOpaqueExceptionRetainsRedaction(t *testing.T) {
+	for _, mode := range []string{"metadata", "ordinary_data", "returned_error", "tool_error", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			server := mcp.NewServer(&mcp.Implementation{Name: "opaque-redaction-test", Version: "1"}, nil)
+			const name = "pilot_diagnose_evidence_get"
+			if mode == "ordinary_data" {
+				// A JSON field named data is not an opaque evidence-page capability.
+				addRecoveredTool(server, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, map[string]any, error) {
+					return nil, map[string]any{"data": "password=ordinary-secret", "nested": map[string]any{"data": "token=nested-secret"}}, nil
+				})
+			} else {
+				addRecoveredTool(server, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, diagnoseEvidenceGetOutput, error) {
+					switch mode {
+					case "returned_error":
+						return nil, diagnoseEvidenceGetOutput{}, errors.New("password=error-secret")
+					case "tool_error":
+						return toolErrorResult(mcpToolError{Code: mcpErrInvalidParam, Message: "password=tool-secret"}), diagnoseEvidenceGetOutput{}, nil
+					case "panic":
+						panic("password=panic-secret")
+					}
+					return nil, diagnoseEvidenceGetOutput{Data: "TOKEnA==", EvidenceCompleteness: "password=metadata-secret", Encoding: "token=encoding-secret"}, nil
+				})
+			}
+			session := connectDiagnoseTestServer(t, server)
+			result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(wire, []byte("-secret")) || !bytes.Contains(wire, []byte("[REDACTED]")) {
+				t.Fatalf("wire redaction failed: %s", wire)
+			}
+			wantError := mode == "returned_error" || mode == "tool_error" || mode == "panic"
+			if result.IsError != wantError || (wantError && result.StructuredContent != nil) {
+				t.Fatalf("incorrect error result: %+v", result)
+			}
+			if mode == "metadata" && decodeStructured[diagnoseEvidenceGetOutput](t, result).Data != "TOKEnA==" {
+				t.Fatal("typed opaque page data was changed while sanitizing metadata")
+			}
+		})
 	}
 }
 
