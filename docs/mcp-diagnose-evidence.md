@@ -1,5 +1,9 @@
 # MCP diagnosis evidence
 
+Latest verification: [2026-10-21 candidate 84c3291](evidence/mcp-diagnose-evidence/2026-10-21-84c3291.md).
+Complete local normal/race suites and all four candidate CI jobs passed;
+independent technical review has no unresolved P0/P1/P2 findings.
+
 Live diagnosis responses include an opaque `evidence_id`, `audit_status`,
 `evidence_completeness`, and `evidence_references`. Each ID names one private,
 versioned `record.json` artifact under the server's configured audit directory.
