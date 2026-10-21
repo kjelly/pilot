@@ -39,8 +39,8 @@ release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
 	@echo "Built $(BIN) (stripped, no debug info)"
 
-test:          	## Run unit tests
-	go test ./...
+test:          	## Run all Go tests with the same per-package budget as CI
+	go test -count=1 -timeout 30m ./...
 
 vet:           	## Run go vet
 	go vet ./...
@@ -56,6 +56,13 @@ lint:          	## Run golangci-lint
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 test-race:     	## Run tests with the race detector (CI runs this target)
 	go test -race -count=1 -timeout 30m ./...
+
+# Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
+# must not run two complete subprocess-heavy suites against the same machine.
+# Stop after a failed normal suite; a successful validation requires both runs.
+test-all:      	## Run complete normal and race suites sequentially
+	$(MAKE) test
+	$(MAKE) test-race
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
@@ -135,7 +142,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test
+.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

@@ -513,16 +513,13 @@
             owner: root
             group: root
             mode: "0644"
-            # Fails when logrotate reports an error about this file
-            # ("error: <file>:<line> ..." or "error: <file>:prerotate,
-            # postrotate or preremove without endscript"), which makes it skip
-            # the whole policy. `logrotate -d` alone also exits 1 for a
-            # fragment that relies on /etc/logrotate.conf's global `su`
-            # (Ubuntu's distro rsyslog policy: "error: skipping ..."), so its
-            # rc is not used (captured on Ubuntu 24.04 and AlmaLinux 9.8,
-            # 2026-10-14). Without logrotate (Step 1b installs it) it fails.
+            # Reject parser errors and unknown-option warnings about this exact
+            # candidate file (logrotate 3.22 downgraded unknown options to warnings).
+            # Keep unrelated debug/global-su/state diagnostics valid; rc=1 alone
+            # does not mean a policy fragment is malformed. Missing/unreadable
+            # inputs or an abnormal validator process status fail closed.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
             content: |
               # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
               {{ siem_log_root }}/*/*.log {

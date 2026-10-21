@@ -62,8 +62,8 @@
 
 - name: "APT download probe ({{ pilot_apt_probe_stage }}) — set pilot_apt_download_probe_result"
   # Timeout exit codes as the command module reports them: 124 when TERM
-  # ended the command, -9 when the --kill-after KILL was needed (137 through
-  # a shell); see apt-cache-refresh.yml. apt-get itself never uses them.
+  # ended the command; forced KILL is -9 with GNU timeout or 137 with
+  # uutils timeout (also 137 through a shell). apt-get itself never uses them.
   ansible.builtin.set_fact:
     pilot_apt_download_probe_result:
       stage: "{{ pilot_apt_probe_stage }}"
