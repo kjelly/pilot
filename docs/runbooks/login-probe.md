@@ -17,14 +17,13 @@ SSH 登入每台 FreeIPA client，把「卡在哪一個 stage」寫成 metrics�
 
 | 項目 | 值 |
 |---|---|
-| 最新驗證 | 2026-10-19；candidate `5dac1b68b68a8bdd76be162b3d9ba9e2ad395157`，tree `1e509829c341fd5dcf3940e5783f68004602f931`，乾淨隔離 checkout。 |
-| 目標與 inventory | `r80q-ipa`（AlmaLinux 9.8）屬 freeipa-server；`r80q-mon`、`r80q-target`（Ubuntu 24.04）屬 freeipa-client/host-monitoring；login-probe={r80q-mon}。由 topology CLI 讀取實際集合，對齊決定 A。 |
-| 外部狀態 | 一次性 vault 僅含 `ipa_admin_password`、`node_exporter_basic_auth_password`，parent 0700/file 0600；IPA 4.13.4、node_exporter 1.12.1。三台專用 VM 已移除，其他 VM 保留；11 個 dev-lite cache containers 保持 healthy，未 stop/purge。image、inventory、binary 指紋見 evidence。 |
-| Fresh chain | L1–L6 rc=0；fresh L3/L4 三機 failed=0；14 PASS/0 FAIL/0 SKIP；L6 三機 changed=0。10s interval 下原子建立 canary+key，IPA/兩 client SSSD key 指紋一致，兩個真 SSH probe stage=ok。 |
-| 退役有效態 | 原 head query 在真實「磁碟新/runtime 舊」狀態回 false，新 query 回 true；production Inspect→executor→full apply→Verify 修復。35s 視窗內 retired 接受的 canary 登入由 4 降為 0、retained 由 3 為 4；retired SSH service 仍 active。兩輪修復重跑均 changed=0，最後再驗 14/14。 |
-| Repository checks | 本 candidate 全庫 race 59 packages、rc=0；mandatory 30 PASS/0 SKIP；pinned lint 0 issues；build/spec/shell/tag/secret/activation guards PASS。playbook syntax/252 YAML duplicate check PASS；ansible-lint 仍為 advisory findings。 |
-| 覆蓋範圍 | C1/C3/C6/C12 activation 與 Prometheus C23/C24 的既有行為 regression 本輪重跑。更廣 native tagged/rollback 與 pinned container 細節保留各原 revision 證據；本輪未重跑 EL client 或完整四機告警演練。 |
-| Evidence | [本次 runtime-proof 退役與 fresh 驗證](../evidence/login-probe/2026-10-19-5dac1b6.md)；[前輪 tagged activation/Prometheus](../evidence/login-probe/2026-10-19-5adeec0.md)；[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md)；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md)。 |
+| 最新時間 gate 驗證 | 2026-10-20；candidate `11e8ab7dbc37c0143c0e39f4215cefb86a16397e`，tree `bc7d730eea0ccc74d68e0e706e15daf42bb4e28f`，乾淨隔離 checkout。 |
+| 目標與 inventory | 本輪為 localhost 的實際 Ansible gate 測試；inventory graph 另含 login-probe peer `probe` 與 Prometheus peer `prom`，只提供跨主機設定。兩個 production caller 都實跑；此範圍不是完整 VM 登入鏈。 |
+| 外部狀態 | 不需要秘密；Ansible 2.19.2、Go 1.26.8、Prometheus v2.53.0、Alertmanager v0.27.0。實際 image digest 與工具範圍見 evidence。 |
+| 時間 gate 結果 | 兩個 caller 的 check/diff/C1、apply、重跑皆 `ok=4 changed=0 failed=0`；等號邊界皆在 mutation 前拒絕（`changed=0 failed=1`）。duration、5m 上限與 promtool 時序正反案例 PASS。 |
+| Repository checks | build/vet、完整 Go suite 與 race 各 61 個有測試的套件 PASS；mandatory 35 PASS/0 SKIP；golangci-lint 0 issues；spec lint、playbook syntax/tags、252 YAML duplicate-key 與 secret scan PASS。race 的選用工具範圍見 evidence；ansible-lint 保留 advisory findings。 |
+| 覆蓋範圍 | 本輪也重跑 tagged activation、Prometheus C23/C24 與退役 runtime regression。完整 VM 登入鏈保留原 revision 的歷史證據：14/14 PASS、L6 三機 changed=0；最新 gate 的範圍與本機 logrotate 相容性限制見本次 evidence。 |
+| Evidence | [本次時間 gate 驗證](../evidence/login-probe/2026-10-20-11e8ab7.md)；[先前完整登入鏈與退役驗證](../evidence/login-probe/2026-10-19-5dac1b6.md)；[歷史四 VM 告警演練](../evidence/login-probe/2026-10-16-8b9d3ca.md)；[classifier captures 來源](../evidence/login-probe/2026-10-13-phase0-ssh-capture.md)。 |
 
 ## 1. 為什麼
 
@@ -170,21 +169,21 @@ hash 一致，才會跳過重套用；完整未安裝的狀態也可證明沒有
 - `login_probe_stale_seconds` 至少要 3 × `prometheus_scrape_interval`，`host_metrics_missing_for` 最多 9m，
   `host_metrics_missing_success_window`（預設 150s）+ 15s 不得超過 `host_metrics_missing_for`：這三項由
   `prometheus-apply.yml` 檢查。每台 login-probe 主機的 `login_probe_interval` + `login_probe_total_timeout`
-  + 15s + 2 × `prometheus_scrape_interval` 不得超過時間窗：`prometheus-apply.yml`（對每台 login-probe 主機）與
+  + 15s + 2 × `prometheus_scrape_interval` 必須嚴格小於時間窗：`prometheus-apply.yml`（對每台 login-probe 主機）與
   `login-probe-apply.yml`（對每台 Prometheus 主機）都會擋，所以單獨部署 login-probe 改長 probe 間隔也會被
   擋下（`alertmanager.md` §1.7）。改 probe 間隔時要一起調整時間窗與 `host_metrics_missing_for`。
   這道 gate 沒有算進 `login_probe_concurrency` 的排隊：同時卡住的嘗試多到佔滿 concurrency 時（例如大量
   主機同時掛掉），健康主機的資料缺口告警可能中斷，改由 `HostDown` 送出（fail-safe）。
-  gate 目前還有幾個限制（強化項目見 GitHub issue #123）：
-  - 兩邊的交叉檢查只讀**對方 inventory 裡的 hostvars**。只在一邊用 `-e` 覆寫（例如
-    `prometheus-apply.yml -e host_metrics_missing_success_window=...`）時，另一邊下次 apply 時看不到這個值。
-    這些值請寫在 inventory，不要只用 `-e` 帶。
-  - gate 接受剛好相等（interval + timeout + 15s + 2 × scrape = 時間窗）。真實的 Prometheus 在等號邊界上，
-    會留下一段約等於 probe 主機那次 scrape 耗時的空隙；設定時請留餘裕（預設留 15s）。
-  - `login_probe_alert_keep_firing_for` 沒有上限。它也決定資料缺口變成主機掛掉之後，`HostDown` 還要被
-    抑制多久：預設 5m 約 8m，設成 30m 時主機掛掉 20m 後仍被抑制。
-  - duration 的 regex 會把 `60s` 後面帶換行的值、以及超過 Go duration 上限的值當成可解析；兩者目前都無害
-    （inventory 的值不會帶結尾換行，溢位的值會因為需要的時間窗太長而被擋下）。
+  時間設定必須存於 inventory 的 group_vars/host_vars，修改後套用兩個角色：
+  `login_probe_interval`、`login_probe_total_timeout`、`host_metrics_missing_success_window`、
+  `prometheus_scrape_interval`、`host_metrics_missing_for`、`login_probe_alert_keep_firing_for`，
+  以及 `prometheus_host_health_alert_rules_enabled`。兩邊只讀對方 inventory 的 hostvars，
+  不會讀取已部署的設定；禁止只在一次 apply 用 `-e` 覆寫，因為另一邊的後續 apply 看不到該值。
+  gate 訊息也會提醒這項契約，但不會自動辨識變數來源。
+  等號邊界會留下約一次 scrape 耗時的空隙，現在會被拒絕；仍應為實際 scrape 延遲留餘裕（預設 15s）。
+  `login_probe_alert_keep_firing_for` 最多 5m，由 Prometheus apply 檢查，避免資料缺口變成主機掛掉後
+  無限延長 `HostDown` 抑制（預設約 8m）。Go duration 必須完整匹配且不超過 9223372036854775807ns；
+  尾端換行、溢位與截斷後不大於零的值均拒絕。
 - login-probe 主機**自己**的 node_exporter 停掉時（SSH 正常），這台 probe 的 series 全部消失：它回報的
   登入告警都不見了，`PilotLoginProbeStale` 也不會觸發，只有它的 `HostDown` 在 10m 送出（GitHub issue #121，
   `alertmanager.md` §1.7）。看到 probe 主機的 `HostDown` 時，先確認它的 SSH 與 node_exporter，並當作
@@ -223,3 +222,4 @@ hash 一致，才會跳過重套用；完整未安裝的狀態也可證明沒有
 | 2026-10-16 | v0.9 | PR #80 第七輪 review：§6 寫明 `host_metrics_missing_success_window` 的兩道 gate（含讀 login-probe 主機設定的交叉檢查） | pilot |
 | 2026-10-16 | v0.10 | PR #80 第八輪 review：§6 的時間窗 gate 改為 interval + timeout + 15s + 2 × scrape，`login-probe-apply.yml` 也會擋；寫明 `host_metrics_missing_for` 最多 9m、concurrency 排隊不在 gate 內，以及 login-probe 主機自己的監控資料缺口（#121） | pilot |
 | 2026-10-16 | v0.11 | PR #80 第八輪 review 後續：§6 寫明 gate 的四個已知限制（只讀對方 inventory、等號邊界、`keep_firing_for` 沒有上限、duration regex 錨定），強化追蹤於 #123 | pilot |
+| 2026-10-20 | v0.12 | #123：收緊 duration 解析、probe-round 等號邊界與 keep_firing_for 上限；明訂跨主機時間參數只寫 inventory，修改後套用兩個角色 | pilot |

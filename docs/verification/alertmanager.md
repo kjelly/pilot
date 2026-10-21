@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.13
+> 版本：v1.14
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -69,15 +69,19 @@ host-health 規則（`playbooks/apply/templates/pilot-host-health-alert-rules.ym
      `success=0` 並被 scrape 到（`login_probe_interval` + `login_probe_total_timeout` + 15s +
      一次 scrape），或最後一次成功離開時間窗（時間窗 + 15s）。再經評估（≤1m）與
      `keep_firing_for`，`HostDown` 才不再被抑制；預設約 2m + 1m + 5m = 8m，之後 Alertmanager
-     依 `group_interval`（5m）送出。`login_probe_alert_keep_firing_for` 沒有上限：調長它，
-     這段 `HostDown` 被抑制的時間也跟著變長。
+     依 `group_interval`（5m）送出。啟用 host-health 規則時，`prometheus-apply.yml` 限制
+     `login_probe_alert_keep_firing_for` 最多 5m，避免延長這段抑制。
    - 資料缺口期間 probe 必須在每個時間窗內為這台主機記到一次成功登入。兩次成功最多相隔
      `login_probe_interval` + `login_probe_total_timeout`，各自最多晚 15s 寫出、再晚一次 scrape
      才被看見；而 `changes()` 只在變化前那個 sample 還在範圍內時才計數，看到的一次變化只讓條件
-     維持 時間窗 − scrape。所以 interval + timeout + 15s + 2 × scrape 不得超過時間窗（預設
-     60 + 30 + 15 + 30 = 135s ≤ 150s，多留 15s）。`prometheus-apply.yml` 對每台 login-probe 主機檢查，
+     維持 時間窗 − scrape。所以 interval + timeout + 15s + 2 × scrape 必須嚴格小於時間窗（預設
+     60 + 30 + 15 + 30 = 135s < 150s，多留 15s）。等號邊界會留下約一次 scrape 耗時的空隙；
+     仍須為實際 scrape 延遲留餘裕。`prometheus-apply.yml` 對每台 login-probe 主機檢查，
      `login-probe-apply.yml` 對每台 Prometheus 主機檢查，兩邊跑同一份
-     `playbooks/apply/tasks/host-metrics-missing-probe-round-gate.yml`，只改其中一邊也會被擋。
+     `playbooks/apply/tasks/host-metrics-missing-probe-round-gate.yml`。
+     **時間參數與規則啟用旗標必須寫在 inventory 的 group_vars/host_vars，修改後套用兩個角色，
+     禁止僅用一次 apply 的 `-e` 覆寫。** 兩邊只讀對方 inventory 的 hostvars，無法得知對方先前
+     用 `-e` 部署的值；gate 訊息會提醒，但不會辨識變數來源。完整參數清單見 runbook §6。
    - 這個上限假設 target 的嘗試在每一輪開始時就能執行。一輪最多同時跑
      `login_probe_concurrency`（預設 4）個嘗試；同時卡住（每個最多 `login_probe_total_timeout`）的
      嘗試達到這個數目時，例如大量主機同時掛掉，排在後面的 target 會晚開始，兩次成功的間隔可能
@@ -133,10 +137,11 @@ C10 讀的是執行中 Alertmanager 載入的設定（`amtool config show`），
 - `host_metrics_missing_success_window` 有兩道 gate：時間窗 + 15s（probe 的 textfile 寫出間隔）不得
   超過 `host_metrics_missing_for`，否則掛掉的主機可能觸發 `HostMetricsMissing` 並抑制它的
   `HostDown`（`prometheus-apply.yml`）；每台 login-probe 主機的 `login_probe_interval` +
-  `login_probe_total_timeout` + 15s + 2 × `prometheus_scrape_interval` 不得超過時間窗，否則資料缺口
+  `login_probe_total_timeout` + 15s + 2 × `prometheus_scrape_interval` 必須嚴格小於時間窗，否則資料缺口
   期間 `HostMetricsMissing` 會中斷（`prometheus-apply.yml` 與 `login-probe-apply.yml` 都會跑）。probe
   的值是 Go duration（與 `contracts/login-probe.yaml` 相同，例如 `1m30s`），時間窗與 scrape 間隔是
-  單一 Prometheus duration。預設 150s 兩邊各留 15s（60 + 30 + 15 + 2 × 15 = 135 ≤ 150，
+  單一 Prometheus duration；Go duration 拒絕尾端換行、溢位及截斷後不大於零的值。
+  預設 150s 兩邊各留 15s（60 + 30 + 15 + 2 × 15 = 135 < 150，
   150 + 15 = 165 ≤ 180）。
 
 `internal/spec/alertmanager_inhibit_regression_test.go::TestRegression_AlertmanagerInhibitBehaviour`
@@ -190,6 +195,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-10-20 | v1.14 | #123：probe-round bound 改為嚴格小於；Go duration 完整錨定與整數奈秒溢位檢查；keep_firing_for 上限 5m；時間參數必須持久化於 inventory。row 未變 | sre |
 | 2026-10-16 | v1.13 | PR #80 第八輪 review：第 2 點的 probe 間隔上限改為 interval + timeout + 15s + 2 × scrape（`changes()` 看到的一次變化只維持 時間窗 − scrape），預設時間窗 150s，兩個 apply 跑同一份 gate；寫明 `login_probe_concurrency` 排隊不在模型內與對應的訊號、`host_metrics_missing_for` 上限改為 9m、`keep_firing_for` 對 `HostDown` 放行時間的影響、15s 寫出假設；新增「login-probe 主機自己的監控資料缺口」未涵蓋（#121）；§3 改為指向 runbook §0.5，evidence-only commit 不再改 spec | sre |
 | 2026-10-16 | v1.12 | PR #80 第七輪 review：第 1 點寫明餘裕（時間窗 + 15s textfile 寫出 ≤ `host_metrics_missing_for`）；第 2 點補上 probe 太慢時的 fail-safe 行為；`host_metrics_missing_success_window` 預設改為 140s，`prometheus-apply.yml` 新增兩道 gate（時間窗 + 15s ≤ `for`；probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗），promtool 鎖住邊界 | sre |
 | 2026-10-15 | v1.11 | PR #80 第六輪 review：`HostMetricsMissing` 改看 target 自己的 last-success 時間戳在 `host_metrics_missing_success_window`（預設 2m，必須短於 `host_metrics_missing_for`）內有沒有變化，不再看 probe 的 textfile 心跳；掛掉的主機因此永遠不會觸發它（probe 停擺、晚一輪停擺、或大量主機同時掛掉讓一輪跑很久都一樣），第 1 點的例外刪除，promtool 鎖住三種情況 | sre |

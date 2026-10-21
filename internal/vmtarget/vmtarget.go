@@ -1248,7 +1248,8 @@ func (m *Manager) Snapshot(ctx context.Context, name, tag string) error {
 	return nil
 }
 
-// Rollback reverts the VM to a previously captured snapshot tag.
+// Rollback reverts the VM to a previously captured snapshot tag and, for a
+// running guest, restores its wall clock from the host before returning.
 func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 	if name == "" || tag == "" {
 		return errors.New("vmtarget: name and tag are required")
@@ -1264,6 +1265,20 @@ func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 	if res.ExitCode != 0 {
 		return fmt.Errorf("vmtarget: snapshot-revert failed: %s", res.Stderr)
 	}
+	// Memory snapshots restore the guest's old clock and time-daemon state.
+	// Every rollback caller (including Reset and topology auto-rollback) must
+	// wait for a usable clock, rather than leaving the next Kerberos operation
+	// to discover the skew. A stopped snapshot will get its clock at boot.
+	t, err = m.Get(ctx, name)
+	if err == nil && t.Status == StatusStopped {
+		return nil
+	}
+	if err == nil {
+		err = m.restoreGuestClock(ctx, t)
+	}
+	if err != nil {
+		return fmt.Errorf("vmtarget: snapshot %q restored for %q, but clock recovery failed: %w", tag, name, err)
+	}
 	return nil
 }
 
@@ -1273,7 +1288,7 @@ func (m *Manager) Rollback(ctx context.Context, name, tag string) error {
 // pristine post-boot state in seconds.
 func (m *Manager) Reset(ctx context.Context, name string) error {
 	if err := m.Rollback(ctx, name, CleanSnapshotTag); err != nil {
-		return fmt.Errorf("vmtarget: reset to %q snapshot failed — if the VM predates auto-snapshot, capture one with `vm-target snapshot --name %s --tag %s`: %w", CleanSnapshotTag, name, CleanSnapshotTag, err)
+		return fmt.Errorf("vmtarget: reset to %q snapshot failed: %w", CleanSnapshotTag, err)
 	}
 	return nil
 }

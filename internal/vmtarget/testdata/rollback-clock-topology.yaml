@@ -1,0 +1,19 @@
+# Disposable EL chronyd + non-root Ubuntu systemd-timesyncd targets for #111.
+# Reuse this topology for failure -> rollback -> FreeIPA server install.
+services: local
+nodes:
+  - name: i111-el
+    base_image: almalinux-9
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    groups: [freeipa-server]
+    wire: ["i111-ub=client.ipa.pilot.internal"]
+  - name: i111-ub
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: ubuntu
+    groups: [freeipa-client]

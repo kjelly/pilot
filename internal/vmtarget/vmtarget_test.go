@@ -471,6 +471,10 @@ func TestSnapshotRollback(t *testing.T) {
 	if err := m.Snapshot(context.Background(), "s", "baseline"); err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
+	// date-epoch.stdout captured on the issue-111 AlmaLinux 9.8 target.
+	m.now = func() time.Time { return time.Unix(1792468486, 0) }
+	writeShim(t, t.TempDir(), "ssh-clock", "PILOT_SSH_BIN", `
+case "$*" in *pilot-restore-clock*) echo 1792468486 ;; esac`)
 	if err := m.Rollback(context.Background(), "s", "baseline"); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
