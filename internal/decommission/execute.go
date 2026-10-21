@@ -81,6 +81,7 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 	if fresh.Blocked() {
 		return &FinalizeResult{Status: "blocked", Blockers: blockerDetails(fresh), Plan: fresh}, nil
 	}
+	retainPlanFQDN(fresh, in.Plan)
 
 	if err := executeComponents(ctx, fresh, in.PlanInputForFreshness.Providers); err != nil {
 		return nil, err
@@ -112,6 +113,7 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 		return nil, fmt.Errorf("decommission: re-derive plan after cleanup steps: %w", err)
 	}
 	postCleanup.ID = in.Plan.ID
+	retainPlanFQDN(postCleanup, fresh)
 	if in.Store != nil {
 		if err := in.Store.SavePlan(postCleanup); err != nil {
 			return nil, fmt.Errorf("decommission: persist post-cleanup plan: %w", err)

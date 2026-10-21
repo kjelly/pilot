@@ -110,6 +110,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 		ID:                 newPlanID(),
 		Status:             PlanStatusExecutable,
 		Host:               snapshotHost(*target),
+		FQDN:               normalizeFQDN(providerFQDN(*target)),
 		Environment:        target.Env,
 		Reachability:       in.Reachability,
 		OfflineDisposition: in.OfflineDisposition,
@@ -209,6 +210,9 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 
 	if plan.Blocked() {
 		plan.Status = PlanStatusBlocked
+	}
+	if resolved := freeIPAPlanFQDN(plan); resolved != "" {
+		plan.FQDN = resolved
 	}
 	plan.PlanHash = computePlanHash(plan)
 	return plan, nil
