@@ -126,6 +126,15 @@ func TestDiagnoseRunWire_ActualLocalAnsible(t *testing.T) {
 	opts := baseDiagnoseOpts(t, inv, nil)
 	opts.StepTimeout = 20 * time.Second
 	opts.AnsibleRuntime.Env = append(opts.AnsibleRuntime.Env, "ANSIBLE_REMOTE_TEMP="+t.TempDir())
+	// Ansible versions change msg wording. Compare with the actual callback,
+	// independently of Pilot's decoder, rather than pinning external prose.
+	callbacks := make(chan string, 1)
+	runner := realDiagnoseAdHocRunner()
+	opts.AdHocRunner = func(ctx context.Context, args []string, timeout int) (string, int, error) {
+		raw, rc, err := runner(ctx, args, timeout)
+		callbacks <- raw
+		return raw, rc, err
+	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "diagnose-test", Version: "1"}, nil)
 	registerDiagnoseRunTool(server, opts)
 	session := connectDiagnoseTestServer(t, server)
@@ -137,8 +146,31 @@ func TestDiagnoseRunWire_ActualLocalAnsible(t *testing.T) {
 	if got.IsError {
 		t.Fatalf("remote nonzero must remain diagnostic data: %+v", got)
 	}
+	var callback struct {
+		Plays []struct {
+			Tasks []struct {
+				Hosts map[string]struct {
+					Message string `json:"msg"`
+				} `json:"hosts"`
+			} `json:"tasks"`
+		} `json:"plays"`
+	}
+	if err := json.Unmarshal([]byte(<-callbacks), &callback); err != nil {
+		t.Fatalf("decode actual callback: %v", err)
+	}
+	var expectedMessage string
+	for _, play := range callback.Plays {
+		for _, task := range play.Tasks {
+			if host, ok := task.Hosts["web1"]; ok {
+				expectedMessage = host.Message
+			}
+		}
+	}
+	if expectedMessage == "" {
+		t.Fatal("actual failed-command callback is missing its message")
+	}
 	out := decodeStructured[diagnoseRunOutput](t, got)
-	if out.RC != 7 || !out.RCKnown || !out.Failed || out.Outcome != "command_nonzero" || out.Stderr != "diagnostic stderr" || out.Message != "non-zero return code" || !out.Redacted || out.Error != "" {
+	if out.RC != 7 || !out.RCKnown || !out.Failed || out.Outcome != "command_nonzero" || out.Stdout != "password= [REDACTED]" || out.Stderr != "diagnostic stderr" || out.Message != expectedMessage || !out.Redacted || out.Error != "" {
 		t.Fatalf("actual Ansible result = %+v", out)
 	}
 	data, err := json.Marshal(got)
