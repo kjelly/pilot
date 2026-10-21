@@ -130,6 +130,25 @@ Without `--allow-write` the server registers three read-only tools:
   TUI, without touching the real workspace. Returns a diff, validation
   result, and a `plan_id` for a later apply.
 
+For `pilot_edit_inspect`, `include_group_vars: true` returns
+`group_vars[filename][key]` strings plus `group_vars_metadata` with `present`,
+`is_set`, `source`, `redacted`, and a redaction `reason`. Known secret inputs
+and unknown keys return `[REDACTED]`. Only scalar values declared public in
+the component contracts are disclosed; collections, aliases, embedded
+configuration, and values with invalid types are conservatively redacted.
+URL userinfo is also redacted in public strings, including backend-prefixed
+repository URLs such as `rest:https://user:password@host/repo/`, with reason
+`uri_credentials`. URLs without userinfo retain their public scalar value.
+Any secret declaration wins when contracts share an input. If the contract
+catalog (`PILOT_ROOT`, otherwise the server's working directory) cannot be
+loaded, all values are redacted. Invalid YAML is reported only as
+`group_vars_status[filename]: invalid_yaml`, without parser diagnostics.
+Optional `group_vars_component` (exact contract ID), `group_vars_file`
+(exact filename, including extension), and `group_vars_key` (exact top-level
+key) filters combine using AND and never bypass redaction. For example,
+`{"include_group_vars":true,"group_vars_component":"dns","group_vars_file":"dns.yml"}`
+limits the returned group vars to DNS inputs in that file.
+
 `--allow-write` additionally registers:
 
 - `pilot_edit_apply` — apply a previously-created plan's exact scenario to

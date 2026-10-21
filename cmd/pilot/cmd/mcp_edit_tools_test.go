@@ -71,6 +71,7 @@ func TestCapabilitiesHandler_IncludesVaultActionsWithValueEnvOnlySchema(t *testi
 }
 
 func TestInspectHandler_ReadsHostsRolePresetsAndCompleteness(t *testing.T) {
+	t.Setenv("PILOT_ROOT", repoRootForTest(t))
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  web-01:\n    ansible_host: 10.0.0.1\n    roles: [docker]\n")
 	writeTestFile(t, filepath.Join(dir, "group_vars", "freeipa.yml"), "freeipa_realm: EXAMPLE.INTERNAL\n")

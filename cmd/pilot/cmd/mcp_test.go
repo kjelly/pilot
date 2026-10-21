@@ -18,8 +18,10 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +31,105 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// Exercise the registered schema and both MCP response encodings, not only
+// the Go handler. Dummy values also must never reach stderr or audit files.
+func TestMCPServe_Integration_GroupVarsRedaction(t *testing.T) {
+	t.Setenv("PILOT_ROOT", repoRootForTest(t))
+	binary := buildPilotBinary(t)
+	dir, auditDir := t.TempDir(), t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "group_vars", "dns.yml"), "dns_cache_max_ttl: 300\ncustom_setting: DUMMY_UNKNOWN_SECRET\n")
+	writeTestFile(t, filepath.Join(dir, "group_vars", "dashboard.yaml"), `grafana_admin_password: DUMMY_KNOWN_SECRET
+thanos_query_url: http://query.example:10902
+dashboard_config_dir: {password: DUMMY_NESTED_SECRET}
+`)
+	writeTestFile(t, filepath.Join(dir, "group_vars", "invalid.yml"), "thanos_query_url: [DUMMY_PARSE_SECRET\n")
+	writeTestFile(t, filepath.Join(dir, "group_vars", "restic-backup.yml"), "restic_repository: rest:https://backup:DUMMY_REST_PASSWORD@storage.example:8000/repo/\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stderr bytes.Buffer
+	command := exec.Command(binary, "mcp", "serve", "--dir", dir, "--audit-dir", auditDir)
+	command.Stderr = &stderr
+	client := mcp.NewClient(&mcp.Implementation{Name: "redaction-test", Version: "1"}, nil)
+	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: command}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close() //nolint:errcheck
+	for _, args := range []map[string]any{
+		{"include_group_vars": true},
+		{"include_group_vars": true, "group_vars_component": "dns", "group_vars_file": "dns.yml", "group_vars_key": "dns_cache_max_ttl"},
+		{"include_group_vars": true, "group_vars_key": "grafana_admin_password"},
+		{"include_group_vars": true, "group_vars_component": "restic-backup", "group_vars_file": "restic-backup.yml", "group_vars_key": "restic_repository"},
+	} {
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsError {
+			t.Fatalf("inspect returned error: %+v", result.Content)
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "DUMMY_") {
+			t.Fatal("MCP content/structured content exposed secret")
+		}
+		out := decodeStructured[inspectOutput](t, result)
+		if args["group_vars_component"] == "dns" {
+			if len(out.GroupVars) != 1 || len(out.GroupVars["dns.yml"]) != 1 || out.GroupVars["dns.yml"]["dns_cache_max_ttl"] != "300" {
+				t.Fatalf("MCP filters were not applied: %+v", out.GroupVars)
+			}
+		} else if args["group_vars_component"] == "restic-backup" {
+			meta := out.GroupVarsMetadata["restic-backup.yml"]["restic_repository"]
+			if len(out.GroupVars) != 1 || len(out.GroupVars["restic-backup.yml"]) != 1 ||
+				out.GroupVars["restic-backup.yml"]["restic_repository"] != inspectRedactedValue ||
+				!meta.Present || !meta.IsSet || !meta.Redacted || meta.Reason != "uri_credentials" || meta.Source != "group_vars/restic-backup.yml" {
+				t.Fatal("credential-bearing repository or its metadata was not safely returned on the MCP wire")
+			}
+		} else if !out.GroupVarsMetadata["dashboard.yaml"]["grafana_admin_password"].Redacted {
+			t.Fatal("secret metadata missing on MCP wire")
+		}
+	}
+	// No current resource exports group_vars. Check every registered read exit
+	// as well, so adding one that bypasses the safe builder is caught here.
+	resources, err := session.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range resources.Resources {
+		result, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: resource.URI})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(result)
+		if strings.Contains(string(data), "DUMMY_") {
+			t.Fatalf("resource %s exposed secret", resource.URI)
+		}
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr.String(), "DUMMY_") {
+		t.Fatal("stderr exposed secret")
+	}
+	if err := filepath.WalkDir(auditDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), "DUMMY_") {
+			t.Fatal("audit exposed secret")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // decodeStructured re-marshals a CallToolResult's StructuredContent
 // (typed as `any` on the wire) into a concrete Go type.
