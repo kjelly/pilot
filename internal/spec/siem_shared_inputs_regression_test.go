@@ -399,20 +399,14 @@ func TestRegression_SIEMCountsFallBackForEmptyValues(t *testing.T) {
 	}
 }
 
-// logrotateSyntaxCheck is the validate of every logrotate policy the apply
-// playbooks write. It fails when logrotate reports an error about the policy
-// file itself ("error: <file>:..."), which makes logrotate skip the whole
-// policy: with a line number ("error: x:3 argument expected after rotate
-// count", "error: x:3 bad rotation count 'abc'", "error: x:4 unknown option
-// 'bogusoption'") or without one ("error: x:prerotate, postrotate or
-// preremove without endscript"). Captured 2026-10-14 on Ubuntu 24.04
-// (logrotate 3.21.0) and AlmaLinux 9.8 (3.18.0). `logrotate -d`'s exit code
-// alone is not usable: it is also 1 for Ubuntu's distro rsyslog policy, which
-// relies on /etc/logrotate.conf's global `su root adm` ("error: skipping ...
-// because parent directory has insecure permissions"), and for an unreadable
-// state file; neither names the policy file. The playbooks install logrotate
-// first; without it the check fails.
-const logrotateSyntaxCheck = `/bin/sh -c 'command -v logrotate >/dev/null && ! logrotate -d "$0" 2>&1 | grep -F -e "error: $0:"' %s`
+// logrotateSyntaxCheck is shared by every logrotate policy writer. Reject
+// parser errors and unknown-option warnings naming the exact candidate file:
+// 3.21 logs an unknown option as error, while 3.22 warns and ignores the line.
+// Real captures are in testdata/logrotate-validation. Debug-mode/global-su/state
+// diagnostics do not invalidate an otherwise valid fragment. Capture the status
+// before filtering so missing/crashed validators cannot pass as empty output;
+// rc=1 alone can be caused by those unrelated runtime diagnostics.
+const logrotateSyntaxCheck = `/bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s`
 
 // TestRegression_LogrotatePoliciesAreValidated: every task that writes a
 // logrotate policy validates it with logrotateSyntaxCheck.
@@ -504,6 +498,23 @@ func TestRegression_LogrotateSyntaxCheckThroughAnsible(t *testing.T) {
 		case !tc.ok && (!strings.Contains(failed, "failed to validate") || statErr == nil):
 			t.Errorf("%s: want validation to fail and nothing written, got %q (stat: %v)", tc.name, failed, statErr)
 		}
+	}
+	// lineinfile also validates its proposed replacement before touching disk.
+	// Keep a real valid policy in place when deleting endscript makes it invalid.
+	dest := filepath.Join(dir, "lineinfile policy")
+	original := fmt.Sprintf("%s/*.log {\n daily\n missingok\n postrotate\n true\n endscript\n}\n", dir)
+	if err := os.WriteFile(dest, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tasks := []any{
+		map[string]any{"name": "reject an invalid edit", "ansible.builtin.lineinfile": map[string]any{
+			"path": dest, "regexp": "^ endscript$", "state": "absent", "validate": logrotateSyntaxCheck}},
+		showTask([]string{"inventory_hostname"}),
+	}
+	_, failed := tryInventoryPlay(t, "log-server", nil, tasks, nil)
+	remaining, err := os.ReadFile(dest)
+	if !strings.Contains(failed, "failed to validate") || err != nil || string(remaining) != original {
+		t.Fatalf("lineinfile must reject the candidate and retain the old policy: %q, read: %v", failed, err)
 	}
 }
 
@@ -808,13 +819,89 @@ func TestRegression_LogrotateValidateRefusesBrokenPolicies(t *testing.T) {
 		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		out, err := exec.Command("/bin/sh", "-c", strings.ReplaceAll(logrotateSyntaxCheck, "%s", path)).CombinedOutput()
+		out, err := runLogrotateValidate(path, nil)
 		switch {
 		case tc.ok && err != nil:
 			t.Errorf("%s: want the validate to pass, got %v\n%s", tc.name, err, out)
 		case !tc.ok && err == nil:
 			t.Errorf("%s: want the validate to fail, it passed", tc.name)
 		}
+	}
+	// The candidate is an argv value, never a regex or executable shell text.
+	for _, name := range []string{"spaces and [regex].policy", "quote' and $(false).policy"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(policy(" daily\n missingok\n")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runLogrotateValidate(path, nil); err != nil {
+			t.Errorf("valid policy at %q rejected: %v\n%s", path, err, out)
+		}
+		if err := os.WriteFile(path, []byte(policy(" daily\n bogusoption\n")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runLogrotateValidate(path, nil); err == nil {
+			t.Errorf("unknown option at %q passed", path)
+		}
+	}
+}
+
+func runLogrotateValidate(path string, env []string) ([]byte, error) {
+	// Match Ansible's %-formatting followed by its argv split. Quote the final
+	// shell argv here because this test launches the validate via another shell.
+	quoted := "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
+	cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf(logrotateSyntaxCheck, quoted))
+	if env != nil {
+		cmd.Env = env
+	}
+	return cmd.CombinedOutput()
+}
+
+func TestRegression_LogrotateValidatorFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	policy := filepath.Join(dir, "policy")
+	if err := os.WriteFile(policy, []byte("# policy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture, err := os.ReadFile("testdata/logrotate-validation/3.22.0-unknown-option.stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capturePath := filepath.Join(dir, "invalid-capture")
+	if err := os.WriteFile(capturePath, []byte(strings.ReplaceAll(string(capture), "POLICY_PATH", policy)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, script string
+		missingGrep  bool
+	}{
+		{name: "missing binary"},
+		{name: "process failure", script: "#!/bin/sh\nexit 42\n"},
+		{name: "process killed", script: "#!/bin/sh\nkill -KILL $$\n"},
+		{name: "missing grep", script: "#!/bin/sh\n/bin/cat \"$CAPTURE\" >&2\nexit 0\n", missingGrep: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if !tc.missingGrep {
+				if err := os.Symlink(grep, filepath.Join(bin, "grep")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.script != "" {
+				if err := os.WriteFile(filepath.Join(bin, "logrotate"), []byte(tc.script), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out, err := runLogrotateValidate(policy, []string{"PATH=" + bin, "CAPTURE=" + capturePath}); err == nil {
+				t.Errorf("validator unavailable but validation passed: %s", out)
+			}
+		})
+	}
+	if out, err := runLogrotateValidate(filepath.Join(dir, "missing"), nil); err == nil {
+		t.Errorf("missing policy passed: %s", out)
 	}
 }
 
