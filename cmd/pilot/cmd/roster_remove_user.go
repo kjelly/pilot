@@ -114,9 +114,17 @@ func runRosterRemoveUser(cmd *cobra.Command, args []string) error {
 		if probe2.EverApplied {
 			return fmt.Errorf("refusing to remove roster user %q: %w (detected on the pre-write recheck)", username, ErrRosterUserAlreadyApplied)
 		}
+		// Recheck after the last external probe, including the original
+		// encrypted destination rather than only its temporary plaintext.
+		if err := validateRosterRemoveSource(rosterPath, rosterRemoveUserInventory); err != nil {
+			return err
+		}
 		return inventory.RemoveRosterUser(plainPath, username, opts)
 	}
 	if encrypted {
+		if err := validateRosterRemoveSource(rosterPath, rosterRemoveUserInventory); err != nil {
+			return err
+		}
 		err = inventory.MutateEncryptedRosterFile(rosterPath, rosterRemoveUserVaultPasswordFile, mutate)
 	} else {
 		err = mutate(rosterPath)

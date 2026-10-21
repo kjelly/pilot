@@ -82,7 +82,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	// already have their own, less disruptive way of reporting exactly
 	// that (e.g. the ErrRosterEncrypted banner) once something actually
 	// tries to read it.
-	if notice := ensureRosterSchemaCurrentBanner(path); notice != "" {
+	if notice := ensureRosterSchemaCurrentBanner(dir, path); notice != "" {
 		if banner == "" {
 			banner = notice
 		} else {
@@ -142,8 +142,10 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 // vN detected. Automatically upgraded to schema vM. Backup: <path>" — no
 // confirmation prompt, since a deterministic, validated migration with a
 // successfully created backup doesn't need one.
-func ensureRosterSchemaCurrentBanner(path string) string {
-	result, err := inventory.EnsureRosterCurrent(path, inventory.RosterMigrationOptions{})
+func ensureRosterSchemaCurrentBanner(dir, path string) string {
+	result, err := mutateRosterSourceValue(dir, path, func() (inventory.RosterMigrationResult, error) {
+		return inventory.EnsureRosterCurrent(path, inventory.RosterMigrationOptions{})
+	})
 	if err != nil || !result.Changed {
 		return ""
 	}
@@ -161,7 +163,7 @@ func ensureRosterSchemaCurrentBanner(path string) string {
 // disruptive way of reporting that once something actually tries to read
 // the file.
 func autoFillFreeIPAClientRosterHostsBanner(dir, path string) string {
-	added, err := inventory.AutoFillFreeIPAClientRosterHosts(dir, path)
+	added, err := mutateRosterSourceValue(dir, path, func() ([]string, error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })
 	if err != nil || len(added) == 0 {
 		return ""
 	}
@@ -249,7 +251,7 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 		return nil
 	}
 
-	if err := inventory.WriteMinimalRosterSkeleton(path, "admin", password); err != nil {
+	if err := mutateRosterSource(dir, path, func() error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
 		r.err = err
 		return nil
 	}
@@ -257,13 +259,13 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
 	vaultNote := ""
 	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-		if vaultErr := inventory.WriteMinimalFreeIPAVault(vaultPath, password); vaultErr != nil {
+		if vaultErr := mutateRosterSource(dir, vaultPath, func() error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
 			r.err = vaultErr
 			return nil
 		}
 		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
 	} else if statErr == nil {
-		changed, vaultErr := inventory.FillFreeIPAAdminPassword(vaultPath, password)
+		changed, vaultErr := mutateRosterSourceValue(dir, vaultPath, func() (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
 		if vaultErr != nil {
 			r.err = vaultErr
 			return nil
@@ -379,7 +381,7 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		if len(violations) > 0 {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := inventory.AppendRosterUser(path, name); err != nil {
+		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterUser(path, name) }); err != nil {
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -497,7 +499,7 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 		if len(violations) > 0 {
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := inventory.AppendRosterGroup(path, name, category); err != nil {
+		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -636,6 +638,27 @@ func rosterSecretDisplay(pw map[string]any, key string) string {
 
 var rosterBoolChoices = []string{"true", "false"}
 
+// mutateRosterSource retains the selected workspace at the persistence
+// boundary. An external roster can become exposed through that workspace's
+// vars aliases while any of its editor screens is open; cwd alone cannot
+// identify that relationship.
+func mutateRosterSource(dir, path string, mutate func() error) error {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		return err
+	}
+	return mutate()
+}
+
+// mutateRosterSourceValue applies the same persistence guard to helpers
+// returning a migration or autofill result as well as an error.
+func mutateRosterSourceValue[T any](dir, path string, mutate func() (T, error)) (T, error) {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		var zero T
+		return zero, err
+	}
+	return mutate()
+}
+
 // rosterEnumChoices turns one of this file's fixed enum option slices
 // (rosterBoolChoices, rosterUserStateChoices, rosterGroupTypeChoices)
 // into tui.Choices whose stable IDs are the owning screen's ID plus the
@@ -669,7 +692,7 @@ func rosterIntValidator(s string) error {
 // gate chain (Simulate first, only write once it reports no violations).
 // ok=false means nothing was written — either a validation rejection
 // (banner explains why) or name no longer exists.
-func rosterApplyUserEdit(path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterUser(path, name)
 	if err != nil {
 		return "", false, err
@@ -686,7 +709,7 @@ func rosterApplyUserEdit(path, name string, mutate func(map[string]any)) (banner
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := inventory.SetRosterUser(path, name, updated); err != nil {
+	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil
@@ -696,7 +719,7 @@ func rosterApplyUserEdit(path, name string, mutate func(map[string]any)) (banner
 // (possibly changed) detail screen — the commit point every scalar/bool/
 // enum/password field widget below routes through.
 func pushRosterEditUser(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyUserEdit(path, name, mutate)
+	banner, _, err := rosterApplyUserEdit(dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil
@@ -1037,7 +1060,7 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 // (not the rejected newValues) on a validation failure, so the screen
 // always shows what's actually on disk.
 func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, oldValues, newValues []string) tea.Cmd {
-	banner, ok, err := rosterApplyUserEdit(path, name, func(f map[string]any) {
+	banner, ok, err := rosterApplyUserEdit(dir, path, name, func(f map[string]any) {
 		ssh := rosterSubmapClone(f, "ssh_keys")
 		ssh["authoritative"] = true
 		ssh["values"] = newValues
@@ -1056,7 +1079,7 @@ func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, old
 // ---- groups: full-detail preview + per-field edit -----------------------
 
 // rosterApplyGroupEdit is rosterApplyUserEdit's group counterpart.
-func rosterApplyGroupEdit(path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterGroup(path, name)
 	if err != nil {
 		return "", false, err
@@ -1073,14 +1096,14 @@ func rosterApplyGroupEdit(path, name string, mutate func(map[string]any)) (banne
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := inventory.SetRosterGroup(path, name, updated); err != nil {
+	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil
 }
 
 func pushRosterEditGroup(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyGroupEdit(path, name, mutate)
+	banner, _, err := rosterApplyGroupEdit(dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil

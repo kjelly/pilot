@@ -365,11 +365,13 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 		// AppendMissingNFSServerStub below reports that exactly as it
 		// always has, unmigrated or not — never a new reason to fail
 		// generation.
-		if result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{}); err == nil && result.Changed {
+		if result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+			return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+		}); err == nil && result.Changed {
 			fmt.Fprintf(w, "nfs roster: %s auto-upgraded schema v%d -> v%d (backup: %s)\n", rosterPath, result.FromVersion, result.ToVersion, result.BackupPath)
 		}
 
-		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
+		appended, err := mutateRosterSourceValue(dir, rosterPath, func() (bool, error) { return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain) })
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "nfs roster: skip %s for %s (%v)\n", rosterPath, h.Name, err)

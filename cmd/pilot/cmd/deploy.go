@@ -2586,7 +2586,10 @@ func autoFillFreeIPAClientHostsIntoRoster(ctx context.Context, out io.Writer, se
 		return nil
 	}
 
-	added, err := inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
+	dir := filepath.Dir(inv)
+	added, err := mutateRosterSourceValue(dir, rosterPath, func() ([]string, error) {
+		return inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
+	})
 	if err != nil {
 		fmt.Fprintf(out, "⚠ roster 自動補完主機失敗（不影響本次部署）: %v\n", err)
 		return nil

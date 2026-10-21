@@ -21,6 +21,47 @@ func TestSNMPCredentialDoc_MissingFileStartsEmpty(t *testing.T) {
 	}
 }
 
+func TestSNMPCredentialDoc_SaveRejectsReverseDirectoryAlias(t *testing.T) {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		t.Run(tree, func(t *testing.T) {
+			dir, external := t.TempDir(), t.TempDir()
+			t.Chdir(dir)
+			path := filepath.Join(external, "new", "all.yml")
+			doc, err := LoadSNMPCredentialDoc(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc.Set("switch", SNMPCredentialFields{"community": "DUMMY130_PASSWORD"})
+			if err := os.Symlink(external, filepath.Join(dir, tree)); err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteSNMPCredentialDoc(path, doc); err == nil {
+				t.Fatal("SNMP creation accepted reverse vars alias")
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("SNMP creation wrote forbidden destination")
+			}
+			if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+				t.Fatal("SNMP creation created forbidden parent directory")
+			}
+			const original = "port: 8080\n"
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := WriteSNMPCredentialDoc(path, doc); err == nil {
+				t.Fatal("SNMP save accepted reverse vars alias")
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != original {
+				t.Fatal("SNMP save changed forbidden destination")
+			}
+		})
+	}
+}
+
 func TestSNMPCredentialDoc_SetGetDeleteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".vault", "main.yaml")

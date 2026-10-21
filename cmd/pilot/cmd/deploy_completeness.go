@@ -261,7 +261,10 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 			}
 			seen[rosterPath] = true
 
-			result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+			dir := filepath.Dir(inv)
+			result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+				return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+			})
 			if err != nil {
 				if !errors.Is(err, inventory.ErrRosterEncrypted) {
 					fmt.Fprintf(out, "warning: could not auto-upgrade roster schema for %s: %v\n", rosterPath, err)

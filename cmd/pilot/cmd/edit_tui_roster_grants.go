@@ -331,7 +331,7 @@ func saveNewGrant(r *editRouterModel, dir, path string, grant map[string]any) te
 	if len(v) > 0 {
 		return pushRosterGrantsMenu(r, dir, path, formatRosterViolations(v))
 	}
-	if err := inventory.AppendRosterGrant(path, grant); err != nil {
+	if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterGrant(path, grant) }); err != nil {
 		r.err = err
 		return nil
 	}
@@ -635,7 +635,7 @@ func pushGrantEdit(r *editRouterModel, dir, path, name string, mutate func(map[s
 	if len(v) > 0 {
 		return pushGrantDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := inventory.SetRosterGrant(path, name, f); err != nil {
+	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterGrant(path, name, f) }); err != nil {
 		r.err = err
 		return nil
 	}
