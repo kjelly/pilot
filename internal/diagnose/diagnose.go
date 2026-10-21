@@ -30,8 +30,20 @@ type Step struct {
 
 // StepResult pairs a Step with what actually happened when it ran.
 type StepResult struct {
-	Step   Step
-	Result AdHocResult
+	Step       Step
+	Result     AdHocResult
+	Host       string
+	StartedAt  time.Time
+	FinishedAt time.Time
+}
+
+type stepObserverContextKey struct{}
+
+// WithStepObserver attaches a per-invocation evidence observer. The observer
+// receives executed results without changing command selection or result order;
+// callers must synchronize it if they run multiple RunSteps calls concurrently.
+func WithStepObserver(ctx context.Context, observer func([]StepResult)) context.Context {
+	return context.WithValue(ctx, stepObserverContextKey{}, observer)
 }
 
 // AdHocRunner runs one `ansible <args...>` invocation and returns its raw
@@ -63,6 +75,7 @@ func RunSteps(ctx context.Context, run AdHocRunner, inventory, host string, step
 		// alive after cancellation and make an MCP diagnose request appear to
 		// hang instead of returning evidence.
 		args := []string{host, "-i", inventory, "-T", strconv.Itoa(int(perStepTimeout.Seconds())), "-m", step.Module, "-a", step.Command}
+		startedAt := time.Now().UTC()
 		rawJSON, _, err := run(ctx, args, int(perStepTimeout.Seconds()))
 		// A timed-out runner may still have produced a complete callback. Keep
 		// those facts alongside its failure instead of replacing them with zeroes.
@@ -73,7 +86,10 @@ func RunSteps(ctx context.Context, run AdHocRunner, inventory, host string, step
 			result.RunErr = decodeErr
 		}
 
-		results[i] = StepResult{Step: step, Result: result}
+		results[i] = StepResult{Step: step, Result: result, Host: host, StartedAt: startedAt, FinishedAt: time.Now().UTC()}
+	}
+	if observer, ok := ctx.Value(stepObserverContextKey{}).(func([]StepResult)); ok {
+		observer(results)
 	}
 	return results
 }

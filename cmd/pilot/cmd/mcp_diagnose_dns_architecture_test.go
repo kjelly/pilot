@@ -156,6 +156,19 @@ func TestDiagnoseDNSArchitecture_MissingAuthKeepsOtherFacts(t *testing.T) {
 	opts := dnsArchOpts(t, writeDNSArchInventory(t, dnsArchLiveInventory), fake, diagnoseFreeIPAReader{})
 	out := callDNSArch(t, opts, diagnoseDNSArchitectureInput{ClientHost: "pr91-client"})
 
+	rec, _, err := readDiagnoseArtifact(out.AuditDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.EvidenceCompleteness != "incomplete" || out.EvidenceCompleteness != "incomplete" || rec.Verdict != "auth_required" {
+		t.Fatalf("missing authenticated observations claimed complete: %s %v", rec.EvidenceCompleteness, rec.IncompleteReasons)
+	}
+	for _, identity := range rec.Identities {
+		if identity.Observation != "observed" {
+			t.Fatal("fixture identity missing; auth contract must independently mark evidence incomplete")
+		}
+	}
+
 	if out.Status != "auth_required" || out.Execution.Kerberos.State != "not_configured" {
 		t.Fatalf("status=%s kerberos=%+v", out.Status, out.Execution.Kerberos)
 	}

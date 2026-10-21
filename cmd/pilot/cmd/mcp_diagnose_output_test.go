@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -356,6 +357,7 @@ func TestDiagnoseRunWire_ActualExecutionLayerFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			opts := baseDiagnoseOpts(t, inv, nil)
+			opts.IdentityRunner = evidenceIdentityRunner(t)
 			opts.StepTimeout = 20 * time.Second
 			opts.AnsibleRuntime.Env = append(opts.AnsibleRuntime.Env, "ANSIBLE_REMOTE_TEMP="+t.TempDir())
 			callbacks := make(chan string, 1)
@@ -367,6 +369,7 @@ func TestDiagnoseRunWire_ActualExecutionLayerFailures(t *testing.T) {
 			}
 			server := mcp.NewServer(&mcp.Implementation{Name: "execution-layer-test", Version: "1"}, nil)
 			registerDiagnoseRunTool(server, opts)
+			registerDiagnoseEvidenceTool(server, opts)
 			session := connectDiagnoseTestServer(t, server)
 			wire, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "pilot_diagnose_run", Arguments: map[string]any{"host": "web1", "command": command}})
 			if err != nil {
@@ -410,6 +413,52 @@ func TestDiagnoseRunWire_ActualExecutionLayerFailures(t *testing.T) {
 			audit := record.Steps[0]
 			if audit.RCKnown != out.RCKnown || audit.RC != out.RC || audit.LauncherRC != out.LauncherRC || audit.LauncherRCKnown != out.LauncherRCKnown || audit.ModuleFailed != out.ModuleFailed || audit.CommandStartFailed != out.CommandStartFailed || audit.Error != out.Error {
 				t.Fatalf("audit lost execution outcome: %+v output=%+v", audit, out)
+			}
+			if audit.ModuleStdout != out.ModuleStdout || audit.ModuleStderr != out.ModuleStderr || audit.Outcome != out.Outcome || audit.EvidenceRef == "" {
+				t.Fatalf("audit dropped module streams or outcome: %+v output=%+v", audit, out)
+			}
+			wantCompleteness := "incomplete"
+			if tc.commandRC != 0 {
+				wantCompleteness = "complete"
+			}
+			if !record.Finalized || record.EvidenceCompleteness != wantCompleteness || out.EvidenceCompleteness != wantCompleteness || out.AuditStatus != "persisted" {
+				t.Fatalf("execution status confused with persistence: record=%+v output=%+v", record, out)
+			}
+			var replay diagnoseRunOutput
+			if err := json.Unmarshal(record.Diagnosis, &replay); err != nil {
+				t.Fatal(err)
+			}
+			if replay.RCKnown != out.RCKnown || replay.RC != out.RC || replay.Outcome != out.Outcome || replay.LauncherRC != out.LauncherRC || replay.LauncherRCKnown != out.LauncherRCKnown || replay.ModuleStdout != out.ModuleStdout || replay.ModuleStderr != out.ModuleStderr || replay.ModuleFailed != out.ModuleFailed || replay.CommandStartFailed != out.CommandStartFailed || replay.Error != out.Error {
+				t.Fatalf("persisted diagnosis lost execution status: replay=%+v output=%+v", replay, out)
+			}
+			// Retrieve the real callback's persisted record through the public MCP
+			// surface, in multiple pages, and compare every byte with disk.
+			var retrieved []byte
+			offset, digest := 0, ""
+			for {
+				pageResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "pilot_diagnose_evidence_get", Arguments: map[string]any{"evidence_id": out.EvidenceID, "offset": offset, "limit": 1024, "sha256": digest}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if pageResult.IsError {
+					t.Fatalf("execution-layer evidence could not be retrieved: %+v", pageResult)
+				}
+				page := decodeStructured[diagnoseEvidenceGetOutput](t, pageResult)
+				chunk, err := base64.StdEncoding.DecodeString(page.Data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retrieved = append(retrieved, chunk...)
+				if page.EvidenceCompleteness != wantCompleteness || !page.Finalized || page.NextOffset <= offset || (digest != "" && page.SHA256 != digest) {
+					t.Fatalf("retrieved execution evidence metadata changed: %+v", page)
+				}
+				if page.EOF {
+					break
+				}
+				offset, digest = page.NextOffset, page.SHA256
+			}
+			if string(retrieved) != string(auditData) {
+				t.Fatal("retrieval changed persisted execution-layer evidence")
 			}
 			decoded, err := diagnose.DecodeAdHocResult(raw, "web1")
 			if err != nil {
