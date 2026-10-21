@@ -15,6 +15,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -24,7 +25,24 @@ import (
 // internal_error CallToolResult on that one call, instead of an
 // unrecovered panic that crashes the process.
 func addRecoveredTool[In, Out any](server *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
-	mcp.AddTool(server, t, recoverToolPanic(t.Name, h))
+	recovered := recoverToolPanic(t.Name, h)
+	mcp.AddTool(server, t, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		result, output, err := recovered(ctx, req, in)
+		diagnostic := strings.HasPrefix(t.Name, "pilot_diagnose_")
+		if err != nil {
+			if diagnostic {
+				return nil, output, typedToolError(toolErrorResult(mcpToolError{Code: mcpErrInternal, Message: err.Error()}), true)
+			}
+			return result, output, err
+		}
+		if diagnostic && result != nil && result.IsError {
+			return nil, output, typedToolError(result, diagnostic)
+		}
+		if diagnostic {
+			output, err = sanitizeDiagnoseOutput(output)
+		}
+		return result, output, err
+	})
 }
 
 func recoverToolPanic[In, Out any](name string, h mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {

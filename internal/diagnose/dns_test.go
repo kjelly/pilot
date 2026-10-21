@@ -40,17 +40,17 @@ func TestBuildDNSOutput_DirectQueryRealCaptures(t *testing.T) {
 		result AdHocResult
 		want   bool
 	}{
-		{"valid answer", AdHocResult{RC: 0, Stdout: tier["internal"].Output}, true},
-		{"connection refused", AdHocResult{RC: 9, Stdout: stopped["internal"].Output}, false},
-		{"diagnostic with zero exit", AdHocResult{RC: 0, Stdout: stopped["internal"].Output}, false},
-		{"nxdomain", AdHocResult{RC: 0, Stdout: nx["internal"].Output}, false},
-		{"servfail", AdHocResult{RC: 0, Stdout: servfail["external"].Output}, false},
-		{"cname without address", AdHocResult{RC: 0, Stdout: noAddress["external"].Output}, false},
-		{"no answer", AdHocResult{RC: 0, Stdout: noData["first_hop"].Output}, false},
+		{"valid answer", AdHocResult{RCKnown: true, RC: 0, Stdout: tier["internal"].Output}, true},
+		{"connection refused", AdHocResult{RCKnown: true, RC: 9, Stdout: stopped["internal"].Output}, false},
+		{"diagnostic with zero exit", AdHocResult{RCKnown: true, RC: 0, Stdout: stopped["internal"].Output}, false},
+		{"nxdomain", AdHocResult{RCKnown: true, RC: 0, Stdout: nx["internal"].Output}, false},
+		{"servfail", AdHocResult{RCKnown: true, RC: 0, Stdout: servfail["external"].Output}, false},
+		{"cname without address", AdHocResult{RCKnown: true, RC: 0, Stdout: noAddress["external"].Output}, false},
+		{"no answer", AdHocResult{RCKnown: true, RC: 0, Stdout: noData["first_hop"].Output}, false},
 		{"empty", AdHocResult{}, false},
-		{"nonzero with answer", AdHocResult{RC: 9, Stdout: tier["internal"].Output}, false},
+		{"nonzero with answer", AdHocResult{RCKnown: true, RC: 9, Stdout: tier["internal"].Output}, false},
 		{"runner error with answer", AdHocResult{RunErr: errors.New("timeout"), Stdout: tier["internal"].Output}, false},
-		{"unreachable", AdHocResult{Unreachable: true, Stdout: tier["internal"].Output}, false},
+		{"unreachable", AdHocResult{Unreachable: true, Message: tier["internal"].Output}, false},
 		{"failed", AdHocResult{Failed: true, Stdout: tier["internal"].Output}, false},
 	} {
 		for _, nssOK := range []bool{false, true} {
@@ -68,6 +68,8 @@ func TestBuildDNSOutput_DirectQueryRealCaptures(t *testing.T) {
 				}
 				var wantVerdict string
 				switch {
+				case !tc.result.HasCommandResult():
+					wantVerdict = "insufficient evidence"
 				case nssOK && tc.want:
 					wantVerdict = "resolves both"
 				case nssOK:

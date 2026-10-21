@@ -1,0 +1,19 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "stdout": "out",
+              "stderr": "err",
+              "rc": 7,
+              "failed": true,
+              "msg": "non-zero return code"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

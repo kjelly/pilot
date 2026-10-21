@@ -1,0 +1,20 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "stdout": "",
+              "stderr": "",
+              "rc": 13,
+              "failed": true,
+              "msg": "Error executing command.",
+              "cmd": "/tmp/pilot-capture/not-executable"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

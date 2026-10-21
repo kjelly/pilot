@@ -161,7 +161,9 @@ func unreachableFact(r StepResult) (DNSArchFact, bool) {
 	case r.Result.RunErr != nil:
 		return DNSArchFact{State: FactUnknown, Detail: r.Result.RunErr.Error(), Evidence: evidence}, false
 	case r.Result.Unreachable:
-		return DNSArchFact{State: FactUnreachable, Detail: firstLine(r.Result.Stdout), Evidence: evidence}, false
+		return DNSArchFact{State: FactUnreachable, Detail: firstLine(r.Result.Message), Evidence: evidence}, false
+	case !r.Result.HasCommandResult():
+		return DNSArchFact{State: FactUnknown, Detail: r.Result.UnavailableReason(), Evidence: evidence}, false
 	}
 	return DNSArchFact{State: FactObserved, Value: true, Evidence: evidence}, true
 }
@@ -277,7 +279,7 @@ func BuildDNSArchObservedFreeIPA(host, principal, keytab string, r StepResult) (
 		out.GlobalForwarders, out.ForwardPolicy, out.ServerForwarders, out.ForwardZones, out.Zones = f, f, f, f, f
 	}
 	if !ok {
-		k.State, k.Detail, k.Evidence = FactUnreachable, reach.Detail, reach.Evidence
+		k.State, k.Detail, k.Evidence = reach.State, reach.Detail, reach.Evidence
 		gate(reach.State, reach.Detail)
 		return out, k
 	}

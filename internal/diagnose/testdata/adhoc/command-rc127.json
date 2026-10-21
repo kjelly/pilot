@@ -1,0 +1,27 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "stdout": "",
+              "stderr": "",
+              "rc": 127,
+              "failed": true,
+              "msg": "non-zero return code",
+              "cmd": [
+                "/bin/sh",
+                "-c",
+                "exit 127"
+              ],
+              "start": "2026-10-21 13:20:06.906983",
+              "end": "2026-10-21 13:20:06.909307",
+              "delta": "0:00:00.002324"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

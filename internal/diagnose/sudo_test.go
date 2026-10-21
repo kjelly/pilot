@@ -20,7 +20,7 @@ func TestSudoSteps_TemplatesUserIntoIDAndSudoL(t *testing.T) {
 }
 
 func stepResult(id string, rc int, stdout string) StepResult {
-	return StepResult{Step: Step{ID: id}, Result: AdHocResult{RC: rc, Stdout: stdout}}
+	return StepResult{Step: Step{ID: id}, Result: AdHocResult{RCKnown: true, RC: rc, Stdout: stdout}}
 }
 
 func TestBuildSudoOutput_VerdictBranches(t *testing.T) {

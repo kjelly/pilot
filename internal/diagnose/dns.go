@@ -63,7 +63,7 @@ func BuildDNSOutput(name string, results []StepResult) DNSOutput {
 	out := DNSOutput{Steps: results, NameQueried: name != ""}
 
 	succeeded := func(r StepResult) bool {
-		return r.Result.RunErr == nil && !r.Result.Failed && !r.Result.Unreachable && r.Result.RC == 0
+		return r.Result.CommandSucceeded()
 	}
 	ns, nsFound := find("resolv-nameserver")
 	if nsFound && succeeded(ns) {
@@ -106,6 +106,15 @@ func BuildDNSOutput(name string, results []StepResult) DNSOutput {
 		out.Verdict = fmt.Sprintf("%q: neither the NSS lookup nor the direct A query against 127.0.0.1 succeeded — inspect each step's evidence and the configured nameserver; the loopback result alone does not establish remote resolver health", name)
 	default:
 		out.Verdict = "facts only — supply a name to test actual resolution via NSS and a direct loopback query"
+	}
+	for _, r := range results {
+		switch r.Step.ID {
+		case "resolv-nameserver", "resolved-active", "daemon-listening", "daemon-installed", "nss-resolve", "direct-resolve":
+			if !r.Result.HasCommandResult() {
+				out.Verdict = "insufficient evidence to diagnose DNS: " + r.Result.UnavailableReason()
+				return out
+			}
+		}
 	}
 	if nsFound && succeeded(ns) && out.Nameserver == "" {
 		out.Verdict += "; /etc/resolv.conf has no nameserver directive"

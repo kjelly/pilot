@@ -148,6 +148,8 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 					out.ThanosNote = r.RunErr.Error()
 				case r.Unreachable:
 					out.ThanosNote = "thanos-query host unreachable"
+				case !r.HasCommandResult():
+					out.ThanosNote = r.UnavailableReason()
 				default:
 					if body, _, split := diagnose.SplitHTTPStatus(r.Stdout); split {
 						out.ThanosCPUTrendJSON, _ = boundDiagnosticResponse(body)
@@ -179,6 +181,8 @@ func diagnoseHostHealthHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[
 					out.DetectionNote = r.Result.RunErr.Error()
 				case r.Result.Unreachable:
 					out.DetectionNote = "detection-engine host unreachable"
+				case !r.Result.HasCommandResult():
+					out.DetectionNote = r.Result.UnavailableReason()
 				case strings.Contains(r.Result.Stdout, in.Host):
 					out.DetectionSignalsJSON, _ = boundDiagnosticResponse(r.Result.Stdout)
 				default:
@@ -248,7 +252,7 @@ func artifactOutputs(specs []contract.DiagnosticArtifact, results []diagnose.Ste
 			continue
 		}
 		stat := results[base].Result
-		if stat.RC != 0 || stat.RunErr != nil || stat.Unreachable {
+		if !stat.CommandSucceeded() {
 			continue
 		}
 		fields := strings.Split(strings.TrimSpace(stat.Stdout), "\t")
@@ -268,12 +272,12 @@ func artifactOutputs(specs []contract.DiagnosticArtifact, results []diagnose.Ste
 		}
 		out[i].Mtime = time.Unix(seconds, 0).UTC().Format(time.RFC3339)
 		out[i].Size = size
-		if base+1 < len(results) && results[base+1].Result.RC == 0 {
+		if base+1 < len(results) && results[base+1].Result.CommandSucceeded() {
 			if fields := strings.Fields(results[base+1].Result.Stdout); len(fields) > 0 {
 				out[i].SHA256 = fields[0]
 			}
 		}
-		if base+2 < len(results) && results[base+2].Result.RC == 0 {
+		if base+2 < len(results) && results[base+2].Result.CommandSucceeded() {
 			for _, entry := range strings.Split(strings.TrimSpace(results[base+2].Result.Stdout), "\n") {
 				if entry != "" && len(out[i].Entries) < 20 {
 					out[i].Entries = append(out[i].Entries, entry)

@@ -273,6 +273,31 @@ inventory host:
     pilot's own activity specifically). This is a best-effort content
     filter, not a precise scope — see
     `internal/diagnose.ExcludeAnsibleNoise`.
+- Diagnostic MCP results preserve `stdout`, `stderr` and Ansible `message`
+  separately. A nonzero remote command is diagnostic data (`isError: false`),
+  with its actual `rc`, `rc_known`, `failed`, `unreachable` and `outcome`.
+  Ansible wrapper/module failures and requested-executable launch errors keep
+  the requested-command `rc_known: false` and `outcome: unknown`.
+  `module_stdout`/`module_stderr` preserve launcher diagnostics separately from
+  command streams; `module_failed` and `command_start_failed` identify those
+  execution failures. `launcher_rc` with `launcher_rc_known` is Ansible's
+  execution-layer status (wrapper exit status or spawn errno), never the
+  requested command's exit code. These streams use the same redaction,
+  size limits and flags as command output.
+  `outcome` distinguishes `completed`, `command_nonzero`, `auth_required`,
+  `unreachable` and `unknown`; runner/decoder failures are `unknown`, retain
+  any decoded facts and include `error`. An unknown or absent RC must never
+  be interpreted as successful execution. Missing approved Kerberos credentials
+  leave authenticated facts `auth_required` while retaining other observations.
+  Every diagnostic response string, including nested reports, query payloads
+  and errors, passes the common structured-secret filter and a 65,536-byte
+  per-string limit; `redacted`/`truncated` flags identify filtered evidence.
+  Command stream whitespace is preserved. These filters recognize common
+  secret assignments and flags; operators must still avoid commands that print
+  unlabelled credentials. Invalid input, pre-execution failures and internal
+  tool failures use `isError: true` with a JSON error in `content`, without a
+  zero-valued structured result. Successful tool calls provide structured data
+  and its JSON text fallback in `content`.
 - `--enable-diagnose-raw` (also requires `--diagnose-inventory`,
   independent of `--enable-diagnose`) registers `pilot_diagnose_run`,
   which runs a **caller-supplied** command via ansible's `command` module

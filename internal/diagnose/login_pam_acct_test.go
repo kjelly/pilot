@@ -37,11 +37,11 @@ func TestParsePamAcctResult_RealCaptures(t *testing.T) {
 		wantFound     bool
 		wantAllowedOK bool
 	}{
-		{"allowed", AdHocResult{RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: sssctlStderrAllowed}, "Success", true, true},
-		{"hbac denied (rc 0!)", AdHocResult{RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: sssctlStderrDenied}, "Permission denied", true, false},
-		{"unknown user", AdHocResult{RC: 0, Stdout: sssctlStdoutUnknown, Stderr: sssctlStderrUnknown}, "Authentication failure", true, false},
+		{"allowed", AdHocResult{RCKnown: true, RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: sssctlStderrAllowed}, "Success", true, true},
+		{"hbac denied (rc 0!)", AdHocResult{RCKnown: true, RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: sssctlStderrDenied}, "Permission denied", true, false},
+		{"unknown user", AdHocResult{RCKnown: true, RC: 0, Stdout: sssctlStdoutUnknown, Stderr: sssctlStderrUnknown}, "Authentication failure", true, false},
 		// The "testing pam_acct_mgmt" banner on stdout must not count as a result.
-		{"stdout only, no verdict", AdHocResult{RC: 0, Stdout: sssctlStdoutKnownUser}, "", false, false},
+		{"stdout only, no verdict", AdHocResult{RCKnown: true, RC: 0, Stdout: sssctlStdoutKnownUser}, "", false, false},
 	}
 	for _, c := range cases {
 		got, found := parsePamAcctResult(c.res)
@@ -60,7 +60,7 @@ func TestBuildLoginUserOutput_PamAccountDenialVerdict(t *testing.T) {
 		return []StepResult{
 			stepResult("getent-passwd:canary", 0, "pilot-login-canary:*:273800003:273800003::/home/pilot-login-canary:/bin/sh"),
 			stepResult("sudo-l:canary", 1, "User pilot-login-canary is not allowed to run sudo on web1."),
-			{Step: Step{ID: "pam-acct-sshd:canary"}, Result: AdHocResult{RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: stderr}},
+			{Step: Step{ID: "pam-acct-sshd:canary"}, Result: AdHocResult{RCKnown: true, RC: 0, Stdout: sssctlStdoutKnownUser, Stderr: stderr}},
 		}
 	}
 	denied := BuildLoginUserOutput("canary", "web1", hostOK, base(sssctlStderrDenied), false, nil, nil)

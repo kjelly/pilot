@@ -1,0 +1,20 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "stdout": "",
+              "stderr": "",
+              "rc": 2,
+              "failed": true,
+              "msg": "Error executing command.",
+              "cmd": "/nonexistent/pilot-review-command"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

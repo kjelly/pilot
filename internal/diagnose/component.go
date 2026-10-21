@@ -167,7 +167,7 @@ func BuildComponentOutput(runtimeKind, verifySpec string, dependencyChecks []Dep
 		}
 		return StepResult{}, false
 	}
-	ok := func(r StepResult) bool { return r.Result.RunErr == nil && !r.Result.Unreachable }
+	ok := func(r StepResult) bool { return r.Result.HasCommandResult() }
 
 	out.RuntimeConfigured = runtimeKind == "docker" || runtimeKind == "systemd"
 	if out.RuntimeConfigured {
@@ -176,10 +176,10 @@ func BuildComponentOutput(runtimeKind, verifySpec string, dependencyChecks []Dep
 			switch runtimeKind {
 			case "docker":
 				out.RuntimePresent = state != "absent" && state != ""
-				out.RuntimeRunning = state == "running"
+				out.RuntimeRunning = r.Result.CommandSucceeded() && state == "running"
 			case "systemd":
 				out.RuntimePresent = true // a systemd unit always "exists" enough to query is-active
-				out.RuntimeRunning = r.Result.RC == 0
+				out.RuntimeRunning = r.Result.CommandSucceeded()
 			}
 		}
 	}
@@ -188,7 +188,7 @@ func BuildComponentOutput(runtimeKind, verifySpec string, dependencyChecks []Dep
 		out.ReadinessConfigured = true
 		if _, status, split := SplitHTTPStatus(r.Result.Stdout); split {
 			out.ReadinessHTTPStatus = status
-			out.ReadinessOK = status >= 200 && status < 300
+			out.ReadinessOK = r.Result.CommandSucceeded() && status >= 200 && status < 300
 		}
 	}
 
@@ -199,12 +199,21 @@ func BuildComponentOutput(runtimeKind, verifySpec string, dependencyChecks []Dep
 	for i, dep := range dependencyChecks {
 		res := DependencyEndpointResult{Component: dep.Component, Host: dep.Host, Port: dep.Port}
 		if r, found := find(fmt.Sprintf("dependency-%d", i)); found && ok(r) {
-			res.Reachable = strings.TrimSpace(r.Result.Stdout) == "reachable"
+			res.Reachable = r.Result.CommandSucceeded() && strings.TrimSpace(r.Result.Stdout) == "reachable"
 		}
 		out.DependencyResults = append(out.DependencyResults, res)
 	}
 
 	out.Verdict = classifyComponentHealth(out)
+	if out.RuntimeConfigured && unavailableStepReason(results, "runtime-state") != "" {
+		out.Verdict = "insufficient_evidence"
+	}
+	for _, r := range results {
+		if !r.Result.HasCommandResult() {
+			out.Verdict = "insufficient_evidence"
+			break
+		}
+	}
 	return out
 }
 

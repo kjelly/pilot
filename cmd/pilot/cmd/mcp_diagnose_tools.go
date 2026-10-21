@@ -26,6 +26,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -262,13 +263,8 @@ func boundedLokiLimit(value string) (string, error) {
 // MCP response-size escape hatch. The caller receives an explicit truncation
 // marker instead of an apparently complete but silently clipped document.
 func boundDiagnosticResponse(value string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if len(value) <= maxDiagnosticResponseBytes {
-		return value, false
-	}
-	marker := "\n[response truncated by pilot after 65536 bytes]"
-	limit := maxDiagnosticResponseBytes - len(marker)
-	return value[:limit] + marker, true
+	safe, _, truncated := sanitizeDiagnosticText(value)
+	return safe, truncated
 }
 
 func enforceQueryRange(start, end string, max time.Duration) error {
@@ -376,10 +372,13 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 			err = nil
 		}
 		if cctx.Err() != nil {
-			return stdout.String(), exitCode, fmt.Errorf("ansible diagnose step timed out after %ds: %w", timeoutSeconds, cctx.Err())
+			return stdout.String(), exitCode, fmt.Errorf("ansible diagnose step timed out after %ds: %w: %s", timeoutSeconds, cctx.Err(), strings.TrimSpace(stderr.String()))
 		}
 		if err != nil {
-			return "", exitCode, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+			return stdout.String(), exitCode, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		if !json.Valid([]byte(stdout.String())) && strings.TrimSpace(stderr.String()) != "" {
+			return stdout.String(), exitCode, fmt.Errorf("ansible produced no valid callback (exit %d): %s", exitCode, strings.TrimSpace(stderr.String()))
 		}
 		return stdout.String(), exitCode, nil
 	}
@@ -389,25 +388,34 @@ func realDiagnoseAdHocRunner() diagnose.AdHocRunner {
 // synthesized verdict so a caller is never solely dependent on trusting
 // the prose.
 type diagnoseStepEvidence struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	OK          bool   `json:"ok"`
-	RC          int    `json:"rc"`
-	Stdout      string `json:"stdout,omitempty"`
-	Error       string `json:"error,omitempty"`
+	ID                 string `json:"id"`
+	Description        string `json:"description"`
+	OK                 bool   `json:"ok"`
+	RC                 int    `json:"rc"`
+	Stdout             string `json:"stdout,omitempty"`
+	Stderr             string `json:"stderr,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ModuleStdout       string `json:"module_stdout,omitempty"`
+	ModuleStderr       string `json:"module_stderr,omitempty"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	LauncherRC         int    `json:"launcher_rc"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	Failed             bool   `json:"failed,omitempty"`
+	Unreachable        bool   `json:"unreachable,omitempty"`
+	Outcome            string `json:"outcome"`
+	RCKnown            bool   `json:"rc_known"`
+	Redacted           bool   `json:"redacted"`
+	Truncated          bool   `json:"truncated"`
+	Error              string `json:"error,omitempty"`
 }
 
 func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
 	out := make([]diagnoseStepEvidence, len(results))
 	for i, r := range results {
-		ev := diagnoseStepEvidence{ID: r.Step.ID, Description: r.Step.Description}
-		if r.Result.RunErr != nil {
-			ev.Error = r.Result.RunErr.Error()
-		} else {
-			ev.RC = r.Result.RC
-			ev.OK = r.Result.RC == 0 && !r.Result.Failed && !r.Result.Unreachable
-			ev.Stdout, _ = boundDiagnosticResponse(r.Result.Stdout)
-		}
+		ev := commandEvidence(r.Result)
+		ev.ID, ev.Description = r.Step.ID, r.Step.Description
+
 		out[i] = ev
 	}
 	return out
@@ -417,20 +425,26 @@ func stepEvidenceList(results []diagnose.StepResult) []diagnoseStepEvidence {
 // run and its outcome, distinct from diagnoseStepEvidence (the MCP
 // response shape) so the audit file's schema can evolve independently.
 type diagnoseStepAudit struct {
-	ID      string `json:"id"`
-	Command string `json:"command"`
-	RC      int    `json:"rc,omitempty"`
-	Error   string `json:"error,omitempty"`
+	ID                 string `json:"id"`
+	Command            string `json:"command"`
+	RC                 int    `json:"rc,omitempty"`
+	RCKnown            bool   `json:"rc_known"`
+	LauncherRC         int    `json:"launcher_rc,omitempty"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 func stepAuditList(results []diagnose.StepResult) []diagnoseStepAudit {
 	out := make([]diagnoseStepAudit, len(results))
 	for i, r := range results {
-		a := diagnoseStepAudit{ID: r.Step.ID, Command: r.Step.Command}
-		if r.Result.RunErr != nil {
-			a.Error = r.Result.RunErr.Error()
-		} else {
-			a.RC = r.Result.RC
+		ev := commandEvidence(r.Result)
+		a := diagnoseStepAudit{ID: r.Step.ID, Command: r.Step.Command,
+			RC: ev.RC, RCKnown: ev.RCKnown, LauncherRC: ev.LauncherRC, LauncherRCKnown: ev.LauncherRCKnown,
+			ModuleFailed: ev.ModuleFailed, CommandStartFailed: ev.CommandStartFailed, Error: ev.Error}
+		if !r.Result.HasCommandResult() && a.Error == "" {
+			a.Error, _, _ = sanitizeDiagnosticText(r.Result.UnavailableReason())
 		}
 		out[i] = a
 	}
@@ -473,6 +487,8 @@ func writeDiagnoseAudit(auditDir string, rec diagnoseAuditRecord) error {
 }
 
 type diagnoseAuditStatus struct {
+	Redacted    bool   `json:"redacted"`
+	Truncated   bool   `json:"truncated"`
 	AuditStatus string `json:"audit_status"`
 	AuditError  string `json:"audit_error,omitempty"`
 }
@@ -756,6 +772,9 @@ func diagnoseLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagno
 			out.Error = result.RunErr.Error()
 		case result.Unreachable:
 			out.Unreachable = true
+			out.Error = result.UnavailableReason()
+		case !result.HasCommandResult():
+			out.Error = result.UnavailableReason()
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
 				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
@@ -867,6 +886,9 @@ func diagnoseSecurityLogsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFo
 			out.Error = result.RunErr.Error()
 		case result.Unreachable:
 			out.Unreachable = true
+			out.Error = result.UnavailableReason()
+		case !result.HasCommandResult():
+			out.Error = result.UnavailableReason()
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
 				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
@@ -1100,6 +1122,9 @@ func diagnoseLoginHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagn
 				secLogs.Error = result.RunErr.Error()
 			case result.Unreachable:
 				secLogs.Unreachable = true
+				secLogs.Error = result.UnavailableReason()
+			case !result.HasCommandResult():
+				secLogs.Error = result.UnavailableReason()
 			default:
 				if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
 					secLogs.ResultJSON, secLogs.ResultTruncated = boundDiagnosticResponse(body)
@@ -1222,6 +1247,9 @@ func diagnoseMetricsHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[dia
 			out.Error = result.RunErr.Error()
 		case result.Unreachable:
 			out.Unreachable = true
+			out.Error = result.UnavailableReason()
+		case !result.HasCommandResult():
+			out.Error = result.UnavailableReason()
 		default:
 			if body, status, ok := diagnose.SplitHTTPStatus(result.Stdout); ok {
 				out.ResultJSON, out.ResultTruncated = boundDiagnosticResponse(body)
@@ -1362,6 +1390,9 @@ func diagnoseMonitoringTargetHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandl
 			case sr.Result.Unreachable:
 				ev.Summary = "thanos-query host unreachable"
 				diagnosis.Warnings = append(diagnosis.Warnings, sr.Step.ID+": thanos-query host unreachable")
+			case !sr.Result.HasCommandResult():
+				ev.Summary = sr.Result.UnavailableReason()
+				diagnosis.Warnings = append(diagnosis.Warnings, sr.Step.ID+": "+ev.Summary)
 			default:
 				body, _, _ := diagnose.SplitHTTPStatus(sr.Result.Stdout)
 				if body == "" {
@@ -1475,6 +1506,8 @@ func runDetectionSteps(ctx context.Context, runner diagnose.AdHocRunner, invento
 		pathErr = fmt.Errorf("read configured Detection Engine dbPath: %w", pathResult.RunErr)
 	case pathResult.Unreachable:
 		pathErr = fmt.Errorf("the Detection Engine host was unreachable while reading configured dbPath")
+	case !pathResult.HasCommandResult():
+		pathErr = fmt.Errorf("read configured Detection Engine dbPath: %s", pathResult.UnavailableReason())
 	case pathResult.RC != 0:
 		pathErr = fmt.Errorf("read configured Detection Engine dbPath exited with rc %d", pathResult.RC)
 	default:
@@ -1545,6 +1578,13 @@ func diagnoseDetectionHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 				}
 			case sr.Result.Unreachable:
 				out.Unreachable = true
+				if out.Error == "" {
+					out.Error = sr.Result.UnavailableReason()
+				}
+			case !sr.Result.HasCommandResult():
+				if out.Error == "" {
+					out.Error = sr.Result.UnavailableReason()
+				}
 			default:
 				text := strings.TrimSpace(sr.Result.Stdout)
 				switch sr.Step.ID {
@@ -1583,14 +1623,25 @@ type diagnoseRunInput struct {
 
 type diagnoseRunOutput struct {
 	diagnoseAuditStatus
-	Host           string `json:"host"`
-	ResolvedAddr   string `json:"resolved_addr,omitempty"`
-	Command        string `json:"command"`
-	RC             int    `json:"rc"`
-	Stdout         string `json:"stdout,omitempty"`
-	Unreachable    bool   `json:"unreachable,omitempty"`
-	Error          string `json:"error,omitempty"`
-	AuditDirectory string `json:"audit_directory"`
+	Host               string `json:"host"`
+	ResolvedAddr       string `json:"resolved_addr,omitempty"`
+	Command            string `json:"command"`
+	RC                 int    `json:"rc"`
+	Stdout             string `json:"stdout,omitempty"`
+	Stderr             string `json:"stderr,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ModuleStdout       string `json:"module_stdout,omitempty"`
+	ModuleStderr       string `json:"module_stderr,omitempty"`
+	ModuleFailed       bool   `json:"module_failed,omitempty"`
+	CommandStartFailed bool   `json:"command_start_failed,omitempty"`
+	LauncherRC         int    `json:"launcher_rc"`
+	LauncherRCKnown    bool   `json:"launcher_rc_known"`
+	Failed             bool   `json:"failed,omitempty"`
+	Outcome            string `json:"outcome"`
+	RCKnown            bool   `json:"rc_known"`
+	Unreachable        bool   `json:"unreachable,omitempty"`
+	Error              string `json:"error,omitempty"`
+	AuditDirectory     string `json:"audit_directory"`
 }
 
 func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnoseRunInput, diagnoseRunOutput] {
@@ -1638,14 +1689,15 @@ func diagnoseRunHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[diagnos
 			Host:                in.Host, ResolvedAddr: resolved.HostAddr(in.Host), Command: in.Command,
 			AuditDirectory: auditDir,
 		}
-		result := results[0].Result
-		if result.RunErr != nil {
-			out.Error = result.RunErr.Error()
-		} else {
-			out.RC = result.RC
-			out.Stdout = strings.TrimSpace(result.Stdout)
-			out.Unreachable = result.Unreachable
-		}
+		ev := commandEvidence(results[0].Result)
+		out.RC, out.RCKnown, out.Outcome = ev.RC, ev.RCKnown, ev.Outcome
+		out.Stdout, out.Stderr, out.Message = ev.Stdout, ev.Stderr, ev.Message
+		out.ModuleStdout, out.ModuleStderr = ev.ModuleStdout, ev.ModuleStderr
+		out.ModuleFailed, out.CommandStartFailed = ev.ModuleFailed, ev.CommandStartFailed
+		out.LauncherRC, out.LauncherRCKnown = ev.LauncherRC, ev.LauncherRCKnown
+		out.Failed, out.Unreachable, out.Error = ev.Failed, ev.Unreachable, ev.Error
+		out.Redacted, out.Truncated = ev.Redacted, ev.Truncated
+
 		return nil, out, nil
 	}
 }

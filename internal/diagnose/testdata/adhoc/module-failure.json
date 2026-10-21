@@ -1,0 +1,16 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "failed": true,
+              "msg": "Unsupported parameters for (ansible.legacy.command) module: unsupported. Supported parameters include: _raw_params, _uses_shell, argv, chdir, cmd, creates, executable, expand_argument_vars, removes, stdin, stdin_add_newline, strip_empty_ends."
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
