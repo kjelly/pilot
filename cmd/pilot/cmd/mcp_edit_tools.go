@@ -196,13 +196,16 @@ func capabilitiesHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[capabiliti
 // one required, and a client sending only {"include_roster": true}
 // gets rejected with "missing properties" instead of a result.
 type inspectInput struct {
-	IncludeGroupVars         bool `json:"include_group_vars,omitempty" jsonschema:"also return each group_vars/*.yml file's top-level keys and values"`
-	IncludeVaultMetadata     bool `json:"include_vault_metadata,omitempty" jsonschema:"also return .vault/ file metadata (filename, encrypted, key names — never key values)"`
-	IncludeRoster            bool `json:"include_roster,omitempty" jsonschema:"also return the FreeIPA roster: users, groups, hostgroups, HBAC rules, sudo command groups and rules, plus effective_hbac_access/effective_sudo_access — per-rule lists of concrete usernames and host FQDNs with nested group/hostgroup membership already expanded, answering 'which users can log in to / run sudo on which hosts'"`
-	IncludeDNS               bool `json:"include_dns,omitempty" jsonschema:"also return FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)"`
-	IncludeInternalEndpoints bool `json:"include_internal_endpoints,omitempty" jsonschema:"also return internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)"`
-	IncludeMonitoring        bool `json:"include_monitoring,omitempty" jsonschema:"also return external Prometheus monitoring targets and their scrape profiles (spec.md §7-11) — endpoints Pilot does not manage via Ansible/SSH"`
-	IncludeBreakglass        bool `json:"include_breakglass,omitempty" jsonschema:"also return every kind: breakglass grant's activation history (local runtime state, spec.md §14) — independent of include_roster, which returns the grant definitions themselves"`
+	IncludeGroupVars         bool   `json:"include_group_vars,omitempty" jsonschema:"return group_vars values and metadata; secrets, unknown inputs and untyped nested values are redacted"`
+	GroupVarsComponent       string `json:"group_vars_component,omitempty" jsonschema:"exact component contract ID; restrict group_vars to its declared inputs (requires include_group_vars)"`
+	GroupVarsFile            string `json:"group_vars_file,omitempty" jsonschema:"exact group_vars filename, e.g. dns.yml; combined with component and key filters using AND"`
+	GroupVarsKey             string `json:"group_vars_key,omitempty" jsonschema:"exact top-level group_vars key; filtering never bypasses redaction"`
+	IncludeVaultMetadata     bool   `json:"include_vault_metadata,omitempty" jsonschema:"also return .vault/ file metadata (filename, encrypted, key names — never key values)"`
+	IncludeRoster            bool   `json:"include_roster,omitempty" jsonschema:"also return the FreeIPA roster: users, groups, hostgroups, HBAC rules, sudo command groups and rules, plus effective_hbac_access/effective_sudo_access — per-rule lists of concrete usernames and host FQDNs with nested group/hostgroup membership already expanded, answering 'which users can log in to / run sudo on which hosts'"`
+	IncludeDNS               bool   `json:"include_dns,omitempty" jsonschema:"also return FreeIPA DNS zones and records, each record's target_host cross-resolved to its inventory IP (resolved_ip)"`
+	IncludeInternalEndpoints bool   `json:"include_internal_endpoints,omitempty" jsonschema:"also return internal-endpoint manifest entries (dns/route/tls), every inventory_host reference cross-resolved to its inventory IP (resolved_ip)"`
+	IncludeMonitoring        bool   `json:"include_monitoring,omitempty" jsonschema:"also return external Prometheus monitoring targets and their scrape profiles (spec.md §7-11) — endpoints Pilot does not manage via Ansible/SSH"`
+	IncludeBreakglass        bool   `json:"include_breakglass,omitempty" jsonschema:"also return every kind: breakglass grant's activation history (local runtime state, spec.md §14) — independent of include_roster, which returns the grant definitions themselves"`
 
 	// ExplainUser/ExplainHost/ExplainService together drive spec.md §16's
 	// access explain — all three MUST be set for a query to run; any
@@ -335,32 +338,34 @@ type inspectDNSZone struct {
 }
 
 type inspectOutput struct {
-	WorkspaceRevision      string                          `json:"workspace_revision"`
-	Hosts                  []inspectHost                   `json:"hosts"`
-	RolePresets            []inspectRolePreset             `json:"role_presets"`
-	GroupVars              map[string]map[string]string    `json:"group_vars,omitempty"`
-	VaultFiles             []inspectVaultFile              `json:"vault_files,omitempty"`
-	RosterUsers            []inspectRosterUser             `json:"roster_users,omitempty"`
-	RosterGroups           []inspectRosterGroup            `json:"roster_groups,omitempty"`
-	RosterHostgroups       []inspectRosterHostgroup        `json:"roster_hostgroups,omitempty"`
-	HBACRules              []inspectHBACRule               `json:"hbac_rules,omitempty"`
-	SudoCommandGroups      []inspectSudoCommandGroup       `json:"sudo_command_groups,omitempty"`
-	SudoRules              []inspectSudoRule               `json:"sudo_rules,omitempty"`
-	Grants                 []inspectRosterGrant            `json:"grants,omitempty"`
-	PasswordPolicies       []inspectPasswordPolicy         `json:"password_policies,omitempty"`
-	CredentialPolicies     []inspectCredentialPolicy       `json:"credential_policies,omitempty"`
-	PrivilegedIdentity     *inspectPrivilegedIdentity      `json:"privileged_identity,omitempty"`
-	EffectiveHBACAccess    []inventory.EffectiveHBACAccess `json:"effective_hbac_access,omitempty"`
-	EffectiveSudoAccess    []inventory.EffectiveSudoAccess `json:"effective_sudo_access,omitempty"`
-	DNSZones               []inspectDNSZone                `json:"dns_zones,omitempty"`
-	InternalEndpoints      []inspectInternalEndpoint       `json:"internal_endpoints,omitempty"`
-	MonitoringTargets      []inspectMonitoringTarget       `json:"monitoring_targets,omitempty"`
-	MonitoringProfiles     []inspectMonitoringProfile      `json:"monitoring_profiles,omitempty"`
-	MonitoringSourceStatus map[string]string               `json:"monitoring_source_status,omitempty"`
-	MonitoringSourceErrors map[string]string               `json:"monitoring_source_errors,omitempty"`
-	BreakglassStatus       []inspectBreakglassStatus       `json:"breakglass_status,omitempty"`
-	ExplainAccess          []inspectExplainSource          `json:"explain_access,omitempty"`
-	Completeness           validationSummary               `json:"completeness"`
+	WorkspaceRevision      string                                        `json:"workspace_revision"`
+	Hosts                  []inspectHost                                 `json:"hosts"`
+	RolePresets            []inspectRolePreset                           `json:"role_presets"`
+	GroupVars              map[string]map[string]string                  `json:"group_vars,omitempty"`
+	GroupVarsMetadata      map[string]map[string]inspectGroupVarMetadata `json:"group_vars_metadata,omitempty"`
+	GroupVarsStatus        map[string]string                             `json:"group_vars_status,omitempty"`
+	VaultFiles             []inspectVaultFile                            `json:"vault_files,omitempty"`
+	RosterUsers            []inspectRosterUser                           `json:"roster_users,omitempty"`
+	RosterGroups           []inspectRosterGroup                          `json:"roster_groups,omitempty"`
+	RosterHostgroups       []inspectRosterHostgroup                      `json:"roster_hostgroups,omitempty"`
+	HBACRules              []inspectHBACRule                             `json:"hbac_rules,omitempty"`
+	SudoCommandGroups      []inspectSudoCommandGroup                     `json:"sudo_command_groups,omitempty"`
+	SudoRules              []inspectSudoRule                             `json:"sudo_rules,omitempty"`
+	Grants                 []inspectRosterGrant                          `json:"grants,omitempty"`
+	PasswordPolicies       []inspectPasswordPolicy                       `json:"password_policies,omitempty"`
+	CredentialPolicies     []inspectCredentialPolicy                     `json:"credential_policies,omitempty"`
+	PrivilegedIdentity     *inspectPrivilegedIdentity                    `json:"privileged_identity,omitempty"`
+	EffectiveHBACAccess    []inventory.EffectiveHBACAccess               `json:"effective_hbac_access,omitempty"`
+	EffectiveSudoAccess    []inventory.EffectiveSudoAccess               `json:"effective_sudo_access,omitempty"`
+	DNSZones               []inspectDNSZone                              `json:"dns_zones,omitempty"`
+	InternalEndpoints      []inspectInternalEndpoint                     `json:"internal_endpoints,omitempty"`
+	MonitoringTargets      []inspectMonitoringTarget                     `json:"monitoring_targets,omitempty"`
+	MonitoringProfiles     []inspectMonitoringProfile                    `json:"monitoring_profiles,omitempty"`
+	MonitoringSourceStatus map[string]string                             `json:"monitoring_source_status,omitempty"`
+	MonitoringSourceErrors map[string]string                             `json:"monitoring_source_errors,omitempty"`
+	BreakglassStatus       []inspectBreakglassStatus                     `json:"breakglass_status,omitempty"`
+	ExplainAccess          []inspectExplainSource                        `json:"explain_access,omitempty"`
+	Completeness           validationSummary                             `json:"completeness"`
 }
 
 // looksLikeRosterFile distinguishes the roster file from other
@@ -400,9 +405,9 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			}
 		}
 
-		var groupVars map[string]map[string]string
+		var groupVars inspectGroupVars
 		if in.IncludeGroupVars {
-			groupVars = buildInspectGroupVars(opts.Dir)
+			groupVars = buildInspectGroupVars(opts.Dir, in)
 		}
 
 		var vaultFiles []inspectVaultFile
@@ -476,7 +481,9 @@ func inspectHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[inspectInput, i
 			WorkspaceRevision:      revision,
 			Hosts:                  hosts,
 			RolePresets:            presets,
-			GroupVars:              groupVars,
+			GroupVars:              groupVars.Values,
+			GroupVarsMetadata:      groupVars.Metadata,
+			GroupVarsStatus:        groupVars.Status,
 			VaultFiles:             vaultFiles,
 			RosterUsers:            roster.Users,
 			RosterGroups:           roster.Groups,

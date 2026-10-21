@@ -1,0 +1,19 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "rc": 127,
+              "failed": true,
+              "msg": "The module interpreter '/nonexistent/pilot-review-python' was not found.",
+              "module_stdout": "",
+              "module_stderr": "/bin/sh: 1: /nonexistent/pilot-review-python: not found\n"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

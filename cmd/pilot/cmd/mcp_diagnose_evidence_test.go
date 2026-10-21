@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/diagnose"
+	"github.com/kjelly/pilot/internal/networkcheck"
 	"github.com/kjelly/pilot/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -650,5 +651,80 @@ func TestDiagnoseEvidence_ServerHashTracksExecutingInodeAfterReplacement(t *test
 	cmd.Env = append(os.Environ(), "PILOT_EVIDENCE_HASH_CHILD=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("replacement subprocess: %v\n%s", err, output)
+	}
+}
+
+// A raw command may print the DNS protocol markers as ordinary data. It does
+// not become the code-defined DNS identity probe just because its output matches.
+func TestDiagnoseEvidence_RawMarkersCannotImpersonateExecutionIdentity(t *testing.T) {
+	requireRealAnsible(t)
+	inv := writeDiagnoseFixtureInventory(t)
+	markers := "@@pilot-dnsarch whoami begin\nroot\n@@pilot-dnsarch whoami end rc=0\n"
+	opts := baseDiagnoseOpts(t, inv, func(_ context.Context, args []string, _ int) (string, int, error) {
+		return diagnoseOKDoc(t, args[0], 0, markers), 0, nil
+	})
+	opts.IdentityRunner = evidenceIdentityRunner(t)
+	server := mcp.NewServer(&mcp.Implementation{Name: "identity-marker-test", Version: "1"}, nil)
+	registerDiagnoseRunTool(server, opts)
+	session := connectDiagnoseTestServer(t, server)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "pilot_diagnose_run", Arguments: map[string]any{"host": "web1", "command": "printf marker-data"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("diagnosis error: %+v", result)
+	}
+	out := decodeStructured[diagnoseRunOutput](t, result)
+	record, _, err := readDiagnoseArtifact(out.AuditDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Identities) != 1 || record.Identities[0].ObservedEffectiveUser != "evidence-operator" || record.Identities[0].Evidence == nil || record.Identities[0].Evidence.ID != "execution_identity" {
+		t.Fatalf("ordinary command output impersonated identity: %+v", record.Identities)
+	}
+	if record.Identities[0].Evidence.EvidenceRef != record.EvidenceID+"#identities/0/evidence" || record.Identities[0].Evidence.EvidenceRef == record.Steps[0].EvidenceRef {
+		t.Fatal("observed identity must reference its separate identity probe")
+	}
+	if out.Stdout != markers || record.Steps[0].Stdout != markers {
+		t.Fatal("identity verification must preserve ordinary diagnostic stdout")
+	}
+}
+
+func TestDiagnoseEvidence_IdentityMarkersRequireTrustedSuccessfulProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name, check, stepID, module string
+		result                      diagnose.AdHocResult
+		reuse                       bool
+	}{
+		{"dns-provider", "DNSArchitecture", "provider-web1", "command", diagnose.AdHocResult{RCKnown: true}, true},
+		{"dns-tier", "DNSArchitecture", "tier-web1", "command", diagnose.AdHocResult{RCKnown: true}, true},
+		{"dns-client", "DNSArchitecture", "client-web1", "command", diagnose.AdHocResult{RCKnown: true}, true},
+		{"dns-auth", "DNSArchitecture", "freeipa-config-web1", "command", diagnose.AdHocResult{RCKnown: true}, true},
+		{"raw", "Run", "run", "command", diagnose.AdHocResult{RCKnown: true}, false},
+		{"log-markers-with-dns-ID", "Logs", "provider-web1", "command", diagnose.AdHocResult{RCKnown: true}, false},
+		{"unrecognized-dns-step", "DNSArchitecture", "logs", "command", diagnose.AdHocResult{RCKnown: true}, false},
+		{"other-host", "DNSArchitecture", "provider-web2", "command", diagnose.AdHocResult{RCKnown: true}, false},
+		{"other-module", "DNSArchitecture", "provider-web1", "shell", diagnose.AdHocResult{RCKnown: true}, false},
+		{"failed", "DNSArchitecture", "provider-web1", "command", diagnose.AdHocResult{RCKnown: true, RC: 7, Failed: true}, false},
+		{"unknown", "DNSArchitecture", "provider-web1", "command", diagnose.AdHocResult{}, false},
+		{"module-failed", "DNSArchitecture", "provider-web1", "command", diagnose.AdHocResult{ModuleFailed: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.result.Stdout = "@@pilot-dnsarch whoami begin\nroot\n@@pilot-dnsarch whoami end rc=0\n"
+			steps := stepAuditList([]diagnose.StepResult{{Step: diagnose.Step{ID: tc.stepID, Module: tc.module}, Host: "web1", Result: tc.result}})
+			calls := 0
+			opts := diagnoseMCPToolsOptions{StepTimeout: time.Second, IdentityRunner: func(ctx context.Context, args []string, timeout int) (string, int, error) {
+				calls++
+				return evidenceIdentityRunner(t)(ctx, args, timeout)
+			}}
+			identities := collectDiagnoseIdentities(context.Background(), opts, networkcheck.ResolvedInventory{}, steps, tc.check)
+			wantUser, wantID, wantCalls := "evidence-operator", "execution_identity", 1
+			if tc.reuse {
+				wantUser, wantID, wantCalls = "root", tc.stepID, 0
+			}
+			if len(identities) != 1 || identities[0].ObservedEffectiveUser != wantUser || identities[0].Evidence == nil || identities[0].Evidence.ID != wantID || calls != wantCalls {
+				t.Fatalf("identity source was not trusted: calls=%d identities=%+v", calls, identities)
+			}
+		})
 	}
 }

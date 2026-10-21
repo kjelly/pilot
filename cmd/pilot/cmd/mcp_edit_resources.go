@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/accessgrants"
-	"github.com/kjelly/pilot/internal/groupvars"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/monitoring"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -838,29 +837,6 @@ func buildInspectInternalEndpoints(dir string, hosts []inspectHost) []inspectInt
 		break // only one internal-endpoints manifest is expected per workspace
 	}
 	return endpoints
-}
-
-// buildInspectGroupVars reads each group_vars/*.yml file's active
-// (non-commented) top-level key/value pairs.
-func buildInspectGroupVars(dir string) map[string]map[string]string {
-	groupVars := map[string]map[string]string{}
-	entries, err := managedFileEntries(dir)
-	if err != nil {
-		return groupVars
-	}
-	for _, e := range entries {
-		if filepath.Dir(e.RelPath) != "group_vars" {
-			continue
-		}
-		values := map[string]string{}
-		for _, entry := range groupvars.Parse(e.Content).Entries() {
-			if entry.Active {
-				values[entry.Key] = entry.Value
-			}
-		}
-		groupVars[filepath.Base(e.RelPath)] = values
-	}
-	return groupVars
 }
 
 // ---- pilot:// resources ------------------------------------------------

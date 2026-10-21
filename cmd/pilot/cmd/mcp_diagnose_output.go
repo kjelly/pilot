@@ -30,10 +30,17 @@ func sanitizeDiagnosticText(value string) (safe string, redacted, truncated bool
 }
 
 func commandEvidence(r diagnose.AdHocResult) diagnoseStepEvidence {
-	ev := diagnoseStepEvidence{RC: r.RC, RCKnown: r.RCKnown, Failed: r.Failed, Unreachable: r.Unreachable, Outcome: "completed"}
+	ev := diagnoseStepEvidence{RC: r.RC, RCKnown: r.RCKnown, Failed: r.Failed, Unreachable: r.Unreachable, Outcome: "completed",
+		ModuleFailed: r.ModuleFailed, CommandStartFailed: r.CommandStartFailed,
+		LauncherRC: r.LauncherRC, LauncherRCKnown: r.LauncherRCKnown}
+	if r.ModuleFailed || r.CommandStartFailed {
+		ev.RC, ev.RCKnown = 0, false
+	}
 	switch {
 	case r.RunErr != nil:
 		ev.Outcome, ev.Error = "unknown", r.RunErr.Error()
+	case r.ModuleFailed || r.CommandStartFailed:
+		ev.Outcome, ev.Error = "unknown", r.UnavailableReason()
 	case r.Unreachable:
 		ev.Outcome = "unreachable"
 	case diagnosticAuthRequired(r):
@@ -46,8 +53,8 @@ func commandEvidence(r diagnose.AdHocResult) diagnoseStepEvidence {
 		ev.Outcome, ev.Error = "unknown", "Ansible reported failure despite a zero command return code"
 	}
 	ev.OK = ev.Outcome == "completed"
-	fields := []*string{&ev.Stdout, &ev.Stderr, &ev.Message, &ev.Error}
-	values := []string{r.Stdout, r.Stderr, r.Message, ev.Error}
+	fields := []*string{&ev.Stdout, &ev.Stderr, &ev.Message, &ev.ModuleStdout, &ev.ModuleStderr, &ev.Error}
+	values := []string{r.Stdout, r.Stderr, r.Message, r.ModuleStdout, r.ModuleStderr, ev.Error}
 	for i, field := range fields {
 		safe, redacted, truncated := sanitizeDiagnosticText(values[i])
 		*field = safe

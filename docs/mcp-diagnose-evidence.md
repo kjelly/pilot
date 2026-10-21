@@ -20,6 +20,11 @@ truncation removes observations and therefore makes evidence incomplete.
 The schema version 2 record preserves the sanitized structured diagnosis and
 verdict, its command evidence, return-code availability, stdout, stderr, module
 message, failed/unreachable flags, outcome classification, and safety flags.
+Ansible module and process-launch failures preserve `module_stdout`,
+`module_stderr`, `launcher_rc`/`launcher_rc_known`, and
+`module_failed`/`command_start_failed` flags separately. In these cases the requested command has no observed exit code (`rc_known: false`),
+the outcome remains `unknown`, and the persisted diagnosis and retrieval report
+incomplete evidence. A real command exiting 127 remains a known command result.
 References use the evidence ID and a JSON-pointer fragment such as `#steps/0`.
 References remain distinct when different hosts execute steps with the same ID.
 The observer captures every actual step, including central service queries in
@@ -27,9 +32,11 @@ composite tools and exporter probes in the monitoring pipeline and SNMP tool.
 
 Each step records its inventory host, resolved address, and execution interval.
 Execution identities distinguish configured connection/become users from an
-observed effective user. DNS architecture reuses its existing identity probe;
-other live tools collect a separate bounded `id -un` observation using the same
-Ansible inventory privilege settings. The identity probe has its own execution
+observed effective user. DNS architecture reuses only a successful, fixed
+probe with the matching handler family, host, module and generated step ID;
+ordinary command or log output containing its marker text is never identity
+evidence. Other live tools collect a separate bounded `id -un` observation using
+the same Ansible inventory privilege settings. The identity probe has its own execution
 time and evidence. An unavailable identity is explicitly unknown and makes the
 record incomplete. An injected command adapter must also provide an identity
 adapter to produce observed identity evidence.

@@ -245,7 +245,7 @@ func withDiagnoseEvidence[In, Out any](opts diagnoseMCPToolsOptions, check strin
 				incompleteDiagnose(&rec, "step_output_truncated")
 			}
 		}
-		rec.Identities = collectDiagnoseIdentities(ctx, opts, resolved, rec.Steps)
+		rec.Identities = collectDiagnoseIdentities(ctx, opts, resolved, rec.Steps, check)
 		for i := range rec.Identities {
 			identity := &rec.Identities[i]
 			if identity.Observation != "observed" {
@@ -424,7 +424,7 @@ func diagnosticJSONIncomplete(fields map[string]json.RawMessage) bool {
 	return false
 }
 
-func collectDiagnoseIdentities(ctx context.Context, opts diagnoseMCPToolsOptions, resolved networkcheck.ResolvedInventory, steps []diagnoseStepAudit) []diagnoseExecutionIdentity {
+func collectDiagnoseIdentities(ctx context.Context, opts diagnoseMCPToolsOptions, resolved networkcheck.ResolvedInventory, steps []diagnoseStepAudit, check string) []diagnoseExecutionIdentity {
 	hosts := map[string]bool{}
 	for _, step := range steps {
 		if step.Host != "" {
@@ -445,10 +445,11 @@ func collectDiagnoseIdentities(ctx context.Context, opts diagnoseMCPToolsOptions
 		if value, ok := resolved.HostVars[host]["ansible_become"]; ok {
 			identity.ConfiguredBecome = fmt.Sprint(value)
 		}
-		// DNS architecture already probes id -un using the same execution
-		// context. Reuse this observed evidence rather than add another call.
+		// Only the fixed DNS architecture scripts embed a trusted id -un
+		// section. Raw commands and log data may print identical marker text;
+		// their output must never substitute for the separate identity probe.
 		for _, step := range steps {
-			if step.Host != host {
+			if step.Host != host || !trustedDNSArchIdentityStep(check, step) {
 				continue
 			}
 			section, ok := diagnose.ParseDNSArchSections(step.Stdout)["whoami"]
@@ -478,6 +479,20 @@ func collectDiagnoseIdentities(ctx context.Context, opts diagnoseMCPToolsOptions
 		identities = append(identities, identity)
 	}
 	return identities
+}
+
+// The handler family and exact generated ID bind the marker format to its
+// producer. Content alone is not proof of which command produced a section.
+func trustedDNSArchIdentityStep(check string, step diagnoseStepAudit) bool {
+	if check != "DNSArchitecture" || step.Module != "command" || !step.OK {
+		return false
+	}
+	for _, prefix := range []string{"provider-", "tier-", "client-", "freeipa-config-"} {
+		if step.ID == prefix+step.Host {
+			return true
+		}
+	}
+	return false
 }
 
 func validObservedDiagnoseUser(value string) bool {
