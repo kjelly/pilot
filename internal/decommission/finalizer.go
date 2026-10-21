@@ -153,6 +153,7 @@ func Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult, error) {
 	if fresh.Blocked() {
 		return &FinalizeResult{Status: "blocked", Blockers: blockerDetails(fresh), Plan: fresh}, nil
 	}
+	retainPlanFQDN(fresh, in.Plan)
 
 	outcome := EvaluateVerifications(in.Verifications)
 	if !outcome.Passed {
@@ -197,7 +198,7 @@ func Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult, error) {
 	receipt := &Receipt{
 		DecommissionID:            in.DecommissionID,
 		Host:                      fresh.Host.Name,
-		FQDN:                      fresh.Host.AnsibleHost,
+		FQDN:                      planFQDN(fresh),
 		Environment:               fresh.Environment,
 		Reason:                    in.Reason,
 		StartedAt:                 in.StartedAt.Format(time.RFC3339Nano),
@@ -222,7 +223,7 @@ func Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult, error) {
 		if err := in.Store.SavePlan(&completed); err != nil {
 			return nil, fmt.Errorf("finalize: persist completed plan: %w", err)
 		}
-		if err := in.Store.SaveRetiredHost(fresh.Host.Name, fresh.Host.AnsibleHost, in.DecommissionID, in.Reason, now, finalInventoryRevision); err != nil {
+		if err := in.Store.SaveRetiredHost(fresh.Host.Name, receipt.FQDN, in.DecommissionID, in.Reason, now, finalInventoryRevision); err != nil {
 			return nil, fmt.Errorf("finalize: persist retired_hosts record: %w", err)
 		}
 	}
