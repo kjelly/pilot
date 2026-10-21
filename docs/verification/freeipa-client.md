@@ -1,5 +1,8 @@
 # Verification Spec — freeipa-client (Ubuntu 客戶端，接上 FreeIPA 的 認證/授權/稽核)
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：v1.8（v1.0 已在 pilot vm-target `ubuntu-24.04` 上實跑 `ipa-client-install` enroll 進
 > `alma-vm` 的 FreeIPA realm + `pilot verify`；v1.1 修正 canonical HBAC lockdown 下的 C8 false-negative，見 §0 / §3 / §8；
 > v1.3 新增 C11 host DNS 自動註冊，見 §0 / §8；v1.5 新增 Day-2 IP 遷移/DNS replacement，
@@ -102,20 +105,28 @@ sssd + krb5）；EL client 走 `dnf install ipa-client`，只有裝套件那一�
 | 變數名稱 | 說明/用途 | 是否必填 |
 |---------|----------|---------|
 | `ipa_admin_password` | enroll 用的 principal（預設 `admin`）密碼；由 vault file 注入，禁止 hard-code | 是 |
-| `ipa_server_ip` | FreeIPA server 對本 client 可路由的 IP；寫進 `/etc/hosts` 讓 server FQDN 可解析 | 是 |
-| `ipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal`（**必須**與 server 一致）| 否（有預設）|
-| `ipa_realm` | Kerberos realm，預設 `IPA.PILOT.INTERNAL`（= `ipa_domain` 全大寫）| 否（有預設）|
-| `ipa_server_fqdn` | FreeIPA server FQDN，預設 `ipa1.{{ ipa_domain }}`（與 freeipa-server spec 對齊）| 否（有預設）|
+| `freeipa_server_ip` | FreeIPA server 對本 client 可路由的 IP；寫進 `/etc/hosts` 讓 server FQDN 可解析 | 是 |
+| `freeipa_domain` | Kerberos/DNS domain，預設 `ipa.pilot.internal`（**必須**與 server 一致）| 否（有預設）|
+| `freeipa_realm` | Kerberos realm，預設 `IPA.PILOT.INTERNAL`（= `freeipa_domain` 全大寫）| 否（有預設）|
+| `freeipa_server_fqdn` | FreeIPA server FQDN，預設 `ipa1.{{ ipa_domain }}`（與 freeipa-server spec 對齊）| 否（有預設）|
 | `ipa_enroll_principal` | enroll 用的 IPA principal，預設 `admin` | 否（有預設）|
 | `ipa_client_fqdn` | 本 client 自身 FQDN，預設 `{{ ansible_hostname }}.{{ ipa_domain }}` | 否（有預設）|
 | `ipa_verify_user` | 驗證 SSSD 身分解析用的 IPA 帳號（apply health check + C5/C8）；預設 `admin`，本 spec 用 `pilotuser` | 否（有預設）|
 | `freeipa_client_register_dns` | 是否在 enrollment 時建立本 client 的 authoritative DNS A/AAAA record（C11）；未設時 effective 值繼承 selected FreeIPA server 的 `freeipa_setup_dns` | 否（有 effective default）|
 | `freeipa_client_dns_addresses` | 明確指定要寫入 DNS 的 address list（IPv4/IPv6 皆可）；未設時 fallback 為 `ansible_default_ipv4.address` | 否（有 fallback）|
 | `freeipa_client_dns_replace_from_address` | Day-2 IP 遷移的 expected-old CAS token（單次授權，非永久 allow-flag）；未設時任何 authoritative extra 依然 fail-closed（見 §0 v1.5 / §9）| 否（不設 = 無 replacement 授權）|
-| `pilot_annotations` | 描述性、非機密的 host metadata（`location`/`project`/`owner`/…），由 `hosts.yml` 的 `annotations:` 經 `pilot inventory generate` 投影而來；enrollment/health 成功後投影到 FreeIPA `userClass`（`pilot.annotation.<key>=<value>`）與（`location` 專用）`nshostlocation`；**沒有對應的 checklist row**——投影結果需要已認證的 `ipa` 查詢才能讀到，這份 spec 既有的 C1–C11 刻意全部只讀本機檔案/服務，不需要 Kerberos ticket，annotations 因此改由 apply 本身的 Phase F 內建讀回驗證取代（見 §6/§9 v1.6）| 否（未設 = 空 dict，等同不使用此功能）|
 
 > Realm 後綴 DN：`ipa.pilot.internal` → `dc=ipa,dc=pilot,dc=internal`。
 > `ipa_domain` / `ipa_realm` / `ipa_server_fqdn` **必須**與 `freeipa-server.md` §1.5 完全一致，否則 enroll 失敗。
+
+
+Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_*` realm/server/DNS 別名由上述 `freeipa_*` 輸入推導；既有單次 `-e` 別名覆寫仍相容，不是 inventory 的設定介面。
+
+## 1.6 衍生值與檔案資料（非 inventory 輸入）
+
+| 欄位 | 說明 | 是否必填 |
+|---|---|---|
+| `pilot_annotations` | 描述性、非機密的 host metadata（`location`/`project`/`owner`/…），由 `hosts.yml` 的 `annotations:` 經 `pilot inventory generate` 投影而來；enrollment/health 成功後投影到 FreeIPA `userClass`（`pilot.annotation.<key>=<value>`）與（`location` 專用）`nshostlocation`；**沒有對應的 checklist row**——投影結果需要已認證的 `ipa` 查詢才能讀到，這份 spec 既有的 C1–C11 刻意全部只讀本機檔案/服務，不需要 Kerberos ticket，annotations 因此改由 apply 本身的 Phase F 內建讀回驗證取代（見 §6/§9 v1.6）| 否（未設 = 空 dict，等同不使用此功能）|
 
 ## 2. Checklist
 

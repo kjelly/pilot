@@ -235,31 +235,6 @@ func specInputs(t *testing.T, c inventoryInputContract) map[string]bool {
 	return out
 }
 
-// undeclaredSpecInputsAllowlist lists, per contract, the variables its
-// specs list as inputs (see specInputs) that its contract's groupVars does
-// not declare (issue #81). Some are play vars that shadow inventory, some
-// are only in a group_vars example (which `pilot deploy`'s preflight does
-// not read), some are derived from other inputs or are roster/manifest
-// fields and should leave the table. The list may only shrink: the test
-// fails for an entry that is declared or no longer listed.
-var undeclaredSpecInputsAllowlist = map[string][]string{
-	"alertmanager":              {"alertmanager_config", "alertmanager_config_dir", "alertmanager_host_data_dir", "alertmanager_receiver_mode", "alertmanager_teams_proxy_image", "alertmanager_teams_proxy_port", "alertmanager_teams_webhook_url", "alertmanager_version", "docker_network_name"},
-	"dashboard":                 {"dashboard_config_dir", "grafana_admin_password", "grafana_host_data_dir", "loki_host_data_dir"},
-	"dns":                       {"dns_listen_addr", "dns_provider", "dns_zones", "freeipa_client_topology_mode", "freeipa_domain", "freeipa_server_fqdn", "freeipa_setup_dns"},
-	"freeipa-client":            {"ipa_client_fqdn", "ipa_domain", "ipa_enroll_principal", "ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_verify_user", "pilot_annotations"},
-	"freeipa-dns-client":        {"freeipa_setup_dns"},
-	"freeipa-dns":               {"freeipa_domain", "freeipa_realm", "freeipa_server_fqdn", "freeipa_setup_dns"},
-	"freeipa-identity":          {"freeipa_roster_file", "groups", "ipa_domain", "ipa_groups", "ipa_hbac_rules", "ipa_hostgroups", "ipa_realm", "ipa_sudo_rules", "ipa_users", "netgroups", "schema_version", "users"},
-	"freeipa-realm-replacement": {"freeipa_realm_replacement_client_fqdn", "freeipa_realm_replacement_confirm", "freeipa_realm_replacement_new_domain", "freeipa_realm_replacement_new_realm", "freeipa_realm_replacement_new_server_fqdn", "freeipa_realm_replacement_new_server_ip", "freeipa_realm_replacement_old_realm", "freeipa_realm_replacement_ticket", "freeipa_realm_replacement_verify_user"},
-	"freeipa-server-replica":    {"freeipa_dns_forwarders", "ipa_dns_forwarders", "ipa_domain", "ipa_realm", "ipa_replica_fqdn", "ipa_replica_ip", "ipa_replica_setup_ca", "ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
-	"freeipa-server":            {"ipa_dm_password", "ipa_dns_allow_any_recursion", "ipa_dns_forwarders", "ipa_domain", "ipa_ds_instance", "ipa_enable_audit_log", "ipa_realm", "ipa_server_fqdn", "ipa_server_ip", "ipa_setup_dns", "ipa_setup_ntp"},
-	"pilot-access-gateway":      {"pilot_access_gateway_recording_session_store_ingest_token_file"},
-	"prometheus":                {"alertmanager_alias", "alertmanager_port", "prometheus_alert_rules_file", "prometheus_retention_time", "prometheus_scrape_configs", "prometheus_scrape_interval", "thanos_aws_access_key_id", "thanos_aws_secret_access_key", "thanos_s3_alias", "thanos_s3_bucket", "thanos_s3_endpoint", "thanos_s3_port"},
-	"restic-backup":             {"restic_backup_randomized_delay", "restic_backup_timer_persistent", "restic_lock_retry"},
-	"thanos-query":              {"thanos_aws_access_key_id", "thanos_aws_secret_access_key", "thanos_compact_retention_1h", "thanos_compact_retention_5m", "thanos_compact_retention_raw", "thanos_query_sidecar_grpc_port", "thanos_query_store_group", "thanos_s3_alias", "thanos_s3_bucket", "thanos_s3_endpoint", "thanos_s3_port"},
-	"wazuh-fim":                 {"wazuh_fim_directories", "wazuh_repo_channel"},
-}
-
 // TestRegression_SpecInputsAreDeclaredContractInputs closes the gap between
 // a spec's variable table and the inputs `pilot deploy`'s preflight and the
 // play-vars lint know about. log-server's §1.5 named siem_receiver_tcp_port,
@@ -269,7 +244,6 @@ var undeclaredSpecInputsAllowlist = map[string][]string{
 // while rsyslog still listened on 514. A variable a spec lists as an input
 // (see specInputs) must be declared in its contract's groupVars; a group_vars
 // example key alone does not count, because preflight reads only groupVars.
-// undeclaredSpecInputsAllowlist holds the ones not done yet.
 func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
 	contracts, _ := inventoryInputs(t)
 	ids := make([]string, 0, len(contracts))
@@ -279,10 +253,6 @@ func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
 	sort.Strings(ids)
 	listed := 0
 	for _, id := range ids {
-		pending := map[string]bool{}
-		for _, name := range undeclaredSpecInputsAllowlist[id] {
-			pending[name] = true
-		}
 		spec := specInputs(t, contracts[id])
 		listed += len(spec)
 		names := make([]string, 0, len(spec))
@@ -296,22 +266,9 @@ func TestRegression_SpecInputsAreDeclaredContractInputs(t *testing.T) {
 			}) bool {
 				return gv.Name == name
 			})
-			switch {
-			case declared && pending[name]:
-				t.Errorf("%s: %s is declared now; remove it from undeclaredSpecInputsAllowlist", id, name)
-			case !declared && !pending[name]:
+			if !declared {
 				t.Errorf("%s: its spec lists %s as an input, but contracts/%s.yaml groupVars does not declare it", id, name, id)
 			}
-		}
-		for name := range pending {
-			if !spec[name] {
-				t.Errorf("%s: undeclaredSpecInputsAllowlist entry %s is no longer listed in its spec", id, name)
-			}
-		}
-	}
-	for id := range undeclaredSpecInputsAllowlist {
-		if _, ok := contracts[id]; !ok {
-			t.Errorf("undeclaredSpecInputsAllowlist names unknown contract %s", id)
 		}
 	}
 	// The tables named 227 variables on 2026-10-14; far fewer means the
@@ -368,6 +325,15 @@ type playVarsCase struct {
 }
 
 var playVarsCases = []playVarsCase{
+	{"alertmanager-apply.yml", "alertmanager", map[string]any{
+		"alertmanager_version": "v0.27.0", "alertmanager_config_dir": "/etc/pilot/alertmanager",
+		"alertmanager_host_data_dir": "/var/lib/pilot/alertmanager", "docker_network_name": "pilot-metrics",
+		"alertmanager_teams_proxy_image": "python:3.12-alpine", "alertmanager_teams_proxy_port": 8095}},
+	{"freeipa-server-apply.yml", "freeipa-server", map[string]any{
+		"ipa_dm_password": "test-admin-password", "ipa_enable_audit_log": true}},
+	{"freeipa-server-replica-apply.yml", "freeipa-server-replica", map[string]any{"ipa_enroll_principal": "admin"}},
+	{"freeipa-realm-replacement-apply.yml", "freeipa-realm-replacement", map[string]any{
+		"freeipa_realm_replacement_verify_user": "admin"}},
 	{"audit-log-forwarding-apply.yml", "audit-log-forwarding", map[string]any{
 		"siem_forward_port": "514", "audit_logrotate_rotate": 14, "audit_logrotate_maxage": 90,
 		"syslog_logrotate_rotate": 14, "syslog_logrotate_maxage": 90}},
@@ -376,7 +342,10 @@ var playVarsCases = []playVarsCase{
 		"agent_controller_max_runs_per_host": 1, "agent_controller_max_body_bytes": 1048576,
 		"agent_controller_dispatcher_kind": "fake", "agent_controller_dispatcher_endpoint": "",
 		"agent_controller_dispatcher_timeout_seconds": 30}},
-	{"dashboard-apply.yml", "dashboard", map[string]any{"grafana_admin_password": nil}},
+	{"dashboard-apply.yml", "dashboard", map[string]any{
+		"grafana_admin_password": nil, "grafana_host_data_dir": "/var/lib/pilot/grafana",
+		"loki_host_data_dir": "/var/lib/pilot/loki", "dashboard_config_dir": "/etc/pilot/dashboard",
+		"docker_network_name": "pilot-metrics"}},
 	{"dcgm-exporter-apply.yml", "dcgm-exporter", map[string]any{
 		"dcgm_exporter_version": "3.3.9-3.6.1-ubuntu22.04", "dcgm_exporter_port": 9400,
 		"dcgm_exporter_basic_auth_user": "prometheus"}},
@@ -385,13 +354,16 @@ var playVarsCases = []playVarsCase{
 		"detection_log_source_enabled": false, "detection_log_source_base_url": "",
 		"detection_log_source_query": "", "detection_log_source_current_window": "10m",
 		"detection_log_source_baseline_window": "6h"}},
-	{"freeipa-client-apply.yml", "freeipa-client", map[string]any{"freeipa_client_dns_addresses": []any{}}},
+	{"freeipa-client-apply.yml", "freeipa-client", map[string]any{
+		"freeipa_client_dns_addresses": []any{}, "ipa_enroll_principal": "admin",
+		"ipa_client_fqdn": "test-node.ipa.pilot.internal"}},
 	{"gateway-scope-apply.yml", "freeipa-server", map[string]any{"gateway_scope_plan_only": false}},
 	{"host-monitoring-apply.yml", "host-monitoring", map[string]any{
 		"node_exporter_version": "1.12.1", "node_exporter_port": 9100,
 		"node_exporter_user": "node_exporter", "node_exporter_basic_auth_user": "prometheus"}},
 	{"log-shipping-apply.yml", "log-server", map[string]any{
-		"loki_target_host": nil, "siem_log_root": nil,
+		"docker_network_name": "pilot-metrics",
+		"loki_target_host":    nil, "siem_log_root": nil,
 		"loki_alias": "pilot-loki-backend", "loki_port": 3100, "loki_endpoint": "pilot-loki-backend:3100",
 		"promtail_job_label": "pilot-siem", "promtail_wazuh_job_label": "pilot-siem-wazuh-alerts"}},
 	{"log-server-apply.yml", "log-server", map[string]any{
@@ -399,17 +371,22 @@ var playVarsCases = []playVarsCase{
 		"siem_logrotate_rotate": 14, "siem_logrotate_maxage": 90}},
 	{"pilot-session-store-apply.yml", "pilot-session-store", map[string]any{"pilot_session_store_ingest_port": 8443}},
 	{"prometheus-apply.yml", "prometheus", map[string]any{
-		"prometheus_scrape_interval": "15s", "thanos_s3_bucket": "pilot-thanos-metrics",
+		"docker_network_name": "pilot-metrics", "thanos_s3_alias": "thanos-s3-backend", "thanos_s3_port": 8333,
+		"prometheus_alert_rules_file": "files/pilot-alert-rules-seed.yml",
+		"prometheus_scrape_configs":   "- job_name: prometheus\n  static_configs:\n    - targets: [\"localhost:9090\"]\n",
+		"prometheus_scrape_interval":  "15s", "thanos_s3_bucket": "pilot-thanos-metrics",
 		"thanos_s3_endpoint": "thanos-s3-backend:8333", "alertmanager_alias": "alertmanager-backend",
 		"alertmanager_port": 9093, "node_exporter_basic_auth_user": "prometheus",
 		"dcgm_exporter_basic_auth_user": "prometheus"}},
 	{"restic-backup-apply.yml", "restic-backup", map[string]any{
+		"restic_backup_timer_persistent": false, "restic_backup_randomized_delay": "1h", "restic_lock_retry": "120s",
 		"restic_s3_port": 8333, "restic_s3_bucket": "pilot-restic-backup",
 		"restic_repository":   "s3:http://s3-backup-server:8333/pilot-restic-backup",
 		"restic_backup_paths": []any{"/etc"}, "restic_backup_pre_hook": "",
 		"restic_backup_schedule": "*-*-* 02:00:00", "restic_retention_daily": 7,
 		"restic_retention_weekly": 4, "restic_retention_monthly": 6}},
 	{"snmp-exporter-apply.yml", "snmp-exporter", map[string]any{
+		"docker_network_name":   "pilot-metrics",
 		"snmp_exporter_version": "v0.30.1", "snmp_exporter_image": "quay.io/prometheus/snmp-exporter",
 		"snmp_exporter_container_name": "pilot-snmp-exporter", "snmp_exporter_port": "9116",
 		"snmp_exporter_listen_address": "127.0.0.1", "snmp_exporter_module_concurrency": "1",
@@ -417,6 +394,7 @@ var playVarsCases = []playVarsCase{
 		"snmp_catalog_file": "", "snmp_exporter_credentials": map[string]any{},
 		"snmp_insecure_auth_profile_exceptions": map[string]any{}}},
 	{"thanos-query-apply.yml", "thanos-query", map[string]any{
+		"docker_network_name": "pilot-metrics", "thanos_s3_alias": "thanos-s3-backend", "thanos_s3_port": 8333,
 		"thanos_s3_bucket": "pilot-thanos-metrics", "thanos_s3_endpoint": "thanos-s3-backend:8333",
 		"thanos_query_store_group": "prometheus", "thanos_query_sidecar_grpc_port": 10901}},
 	{"wazuh-fim-apply.yml", "wazuh-fim", map[string]any{
@@ -427,9 +405,9 @@ var playVarsCases = []playVarsCase{
 
 // overrideFor returns a value of def's type that differs from def.
 func overrideFor(name string, def any) any {
-	switch def.(type) {
+	switch value := def.(type) {
 	case bool:
-		return true
+		return !value
 	case int:
 		return 4242
 	case []any:
@@ -529,6 +507,11 @@ func TestRegression_InventoryInputsReachThePlay(t *testing.T) {
 				t.Fatal(err)
 			}
 			play := plays[0]
+			// Deterministic facts/credential for the defaults that normally run
+			// after setup or use a vault credential. These are test-only values.
+			vars := play["vars"].(map[string]any)
+			vars["ansible_hostname"] = "test-node"
+			vars["ipa_admin_password"] = "test-admin-password"
 			resolve := pickTasks(play, isDefaultsTask)
 			names := make([]string, 0, len(tc.defaults))
 			for name := range tc.defaults {

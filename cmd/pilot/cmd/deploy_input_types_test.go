@@ -42,7 +42,7 @@ func typedInputsInventory(t *testing.T, logrotate string) string {
 }
 
 // typedInputsPreflight resolves the selected components' inputs the way
-// `pilot deploy` does (ansible-inventory --list JSON, then -e values) and
+// `pilot deploy` does (ansible-inventory --list with the same -e arguments) and
 // runs the contract preflight on them.
 func typedInputsPreflight(t *testing.T, inv string, extraVars []string) error {
 	t.Helper()
@@ -77,8 +77,8 @@ func typedInputsPreflight(t *testing.T, inv string, extraVars []string) error {
 
 // TestDeployPreflightAcceptsInventoryNumbers covers integer and port inputs
 // from both entry points `pilot deploy` reads them from. `ansible-inventory
-// --list` JSON turns every number into a float64 and a YAML-decoded
-// `-e siem_receiver_tcp_port=2514` is an int, while preflight used to accept
+// --list` JSON turns inventory numbers into float64 and preserves
+// `-e siem_receiver_tcp_port=2514` as a string, while preflight used to accept
 // only an int for "integer" and only a string for the ports: an unquoted
 // siem_logrotate_rotate: 30 or siem_forward_port: 2514 in group_vars, which
 // Ansible applies as written, failed preflight. dns_cache_max_ttl was
@@ -104,19 +104,16 @@ func TestDeployPreflightAcceptsInventoryNumbers(t *testing.T) {
 			t.Fatalf("preflight rejected inventory numbers: %v", err)
 		}
 	})
-	t.Run("captured output with extra vars", func(t *testing.T) {
-		fake(t)
-		extra := []string{"siem_receiver_tcp_port=2514", "siem_forward_port=2514", "dns_cache_max_ttl=900", "siem_logrotate_rotate=\"21\""}
-		if err := typedInputsPreflight(t, "unused.yml", extra); err != nil {
-			t.Fatalf("preflight rejected -e numbers: %v", err)
-		}
-	})
 	t.Run("real ansible-inventory", func(t *testing.T) {
 		if _, err := exec.LookPath("ansible-inventory"); err != nil {
 			t.Skipf("ansible-inventory not installed: %v", err)
 		}
 		if err := typedInputsPreflight(t, typedInputsInventory(t, "30"), nil); err != nil {
 			t.Fatalf("preflight rejected inventory numbers: %v", err)
+		}
+		extra := []string{"siem_receiver_tcp_port=2514", "siem_forward_port=2514", "dns_cache_max_ttl=900", "siem_logrotate_rotate=\"21\""}
+		if err := typedInputsPreflight(t, typedInputsInventory(t, "30"), extra); err != nil {
+			t.Fatalf("preflight rejected -e numbers: %v", err)
 		}
 		for _, bad := range []string{"14.5", "fourteen", "[14]"} {
 			err := typedInputsPreflight(t, typedInputsInventory(t, bad), nil)

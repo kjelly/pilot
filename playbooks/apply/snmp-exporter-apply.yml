@@ -62,7 +62,6 @@
     # loopback port publish is kept too, for host-level tools/tests
     # (`pilot monitoring target test`, manual curl) — this network
     # membership is additive, not a replacement.
-    docker_network_name: pilot-metrics
 
     # snmp_catalog_file (defaulted to "" in pre_tasks): absolute path to
     # the workspace's non-secret catalog (spec §6.4),
@@ -109,6 +108,11 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

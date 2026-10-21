@@ -1,5 +1,8 @@
 # Verification Spec — FreeIPA realm replacement client wave
 
+> 本次變數契約修改（issue #81）的 tested revision、測試範圍與結果，見
+> [2026-10-20 evidence](../evidence/spec-inventory-inputs/2026-10-20-e11fb44.md)。
+
 > 版本：DRAFT v0.1（尚未完成實機 evidence run；不得作為正式 SOP）
 > 對齊規範：FreeIPA client re-enrollment；新 FreeIPA server 必須先獨立驗證完成
 > 維護者：sre
@@ -26,6 +29,14 @@
 | `freeipa_realm_replacement_new_server_ip` | 從 client 可路由的新 server IP | 是 |
 | `freeipa_realm_replacement_client_fqdn` | client 在新 domain 的 FQDN | 是 |
 | `freeipa_realm_replacement_verify_user` | 新 realm 中用於 SSSD 查詢的帳號；預設 `admin` | 否 |
+
+
+## 1.6 單次操作與相容設定
+
+下列核准只由本次 `-e` 提供，不是可持久化的 inventory 輸入；預設拒絕執行 realm replacement。
+
+| 變數 | 說明 | 是否必填 |
+|---|---|---|
 | `freeipa_realm_replacement_ticket` | 變更單／核准識別；寫入本機 migration marker | 是 |
 | `freeipa_realm_replacement_confirm` | 必須明確為 `true` 才允許 un-enroll | 是 |
 

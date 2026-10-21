@@ -39,6 +39,19 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
 groupVars:
+  - {name: docker_network_name, type: string, required: false}
+  - {name: alertmanager_alias, type: string, required: false}
+  - {name: prometheus_alert_rules_file, type: string, required: false}
+  - {name: prometheus_retention_time, type: string, required: false}
+  - {name: prometheus_scrape_configs, type: string, required: false}
+  - {name: prometheus_scrape_interval, type: string, required: false}
+  - {name: thanos_aws_access_key_id, type: string, required: true, secret: true}
+  - {name: thanos_aws_secret_access_key, type: string, required: true, secret: true}
+  - {name: thanos_s3_alias, type: string, required: false}
+  - {name: thanos_s3_bucket, type: string, required: false}
+  - {name: thanos_s3_endpoint, type: string, required: false}
+  - {name: alertmanager_port, type: integer, required: false}
+  - {name: thanos_s3_port, type: integer, required: false}
   - {name: thanos_s3_target_host, type: string, required: true, secret: false}
   - {name: alertmanager_target_host, type: string, required: true, secret: false}
   - {name: prometheus_site_label, type: string, required: true, secret: false}

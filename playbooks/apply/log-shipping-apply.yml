@@ -52,7 +52,6 @@
     promtail_version: "2.9.8"
     promtail_config_dir: /etc/pilot/promtail
     promtail_positions_dir: /var/lib/pilot/promtail
-    docker_network_name: pilot-metrics
     # Prefer an explicit value; otherwise resolve the first dashboard host from the
     # actual inventory. Use ansible_host when present, then inventory hostname.
     loki_inventory_target_host: >-
@@ -112,6 +111,11 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        docker_network_name: "{{ docker_network_name | default('pilot-metrics') }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

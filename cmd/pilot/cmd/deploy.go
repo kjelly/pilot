@@ -2698,32 +2698,30 @@ func persistAcceptedAutoHostVars(out io.Writer, workspaceDir string, accepted []
 }
 
 func resolveDeploymentInputs(ctx context.Context, selected []contract.Contract, scope delivery.Scope, inventory string, extraVars []string, vault vaultInput) (map[string]map[string]any, error) {
-	values := make(map[string]any)
 	hostVars, err := resolveInventoryVariables(ctx, inventory, extraVars, vault)
 	if err != nil {
 		return nil, err
 	}
-	for _, raw := range extraVars {
-		key, value, ok := strings.Cut(raw, "=")
-		if !ok || key == "" {
-			continue
-		}
-		var typed any
-		if err := yaml.Unmarshal([]byte(value), &typed); err != nil {
-			return nil, fmt.Errorf("decode extra var %q: %w", key, err)
-		}
-		values[key] = typed
-	}
+	// Ansible has already merged inventory, key=value, JSON and vars files in
+	// execution order. Reparsing key=value as YAML changes strings such as
+	// numeric passwords and can override a later JSON or vars-file value.
 	resolved := make(map[string]map[string]any, len(selected))
 	for _, component := range selected {
 		componentValues := make(map[string]any)
 		for _, input := range component.GroupVars {
-			if value, ok := values[input.Name]; ok {
-				componentValues[input.Name] = value
-				continue
-			}
 			for _, host := range scope.HostsByRole[component.Role] {
 				if value, ok := hostVars[host][input.Name]; ok {
+					// Preserve the existing -e flag=true/false interface, but
+					// only for declared booleans. Strings must remain strings;
+					// malformed booleans still fail contract validation.
+					if text, ok := value.(string); ok && input.Type == "boolean" {
+						switch strings.ToLower(text) {
+						case "true":
+							value = true
+						case "false":
+							value = false
+						}
+					}
 					componentValues[input.Name] = value
 					break
 				}

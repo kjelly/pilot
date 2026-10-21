@@ -23,7 +23,12 @@ dependencies:
 hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
 groupVars:
-  - {name: ipa_admin_password, type: string, required: true, secret: true}
+  - {name: freeipa_roster_file, type: string, required: false}
+  - {name: freeipa_domain, type: string, required: false}
+  - {name: freeipa_realm, type: string, required: false}
+  # Canonical rosters may supply freeipa.admin.password instead; the playbook
+  # validates the resolved credential before kinit. Legacy input still works.
+  - {name: ipa_admin_password, type: string, required: false, secret: true}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:

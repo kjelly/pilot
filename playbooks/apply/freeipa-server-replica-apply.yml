@@ -121,7 +121,6 @@
     ipa_replica_fqdn: "{{ freeipa_replica_fqdn | default('ipa2.' ~ ipa_domain) }}"
 
     # Enrollment principal — reuses the same admin creds as the server vault.
-    ipa_enroll_principal: admin
     ipa_enroll_password: "{{ ipa_admin_password }}"
 
     # Replica-side options. ipa_setup_dns/ipa_setup_ntp reuse the EXACT same
@@ -241,6 +240,11 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        ipa_enroll_principal: "{{ ipa_enroll_principal | default('admin') }}"
       tags: [always]
 
     # The same inputs, precedence and normalization as

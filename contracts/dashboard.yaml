@@ -23,6 +23,11 @@ bindings:
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
 groupVars:
+  - {name: docker_network_name, type: string, required: false}
+  - {name: dashboard_config_dir, type: string, required: false}
+  - {name: grafana_admin_password, type: string, required: true, secret: true}
+  - {name: grafana_host_data_dir, type: string, required: false}
+  - {name: loki_host_data_dir, type: string, required: false}
   - {name: thanos_query_target_host, type: string, required: true, secret: false}
   - {name: thanos_query_url, type: string, required: false, secret: false}
   - {name: thanos_query_alias, type: string, required: false, secret: false}

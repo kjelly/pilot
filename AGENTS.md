@@ -680,8 +680,9 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    該測試的 `playVarsInputAllowlist` 並寫明理由。spec 變數契約表(標題含「變數契約」
    的 `##` 段落,例如 §1.5 依賴變數契約、dns.md §3 Apply 變數契約)第一欄列出的變數
    也必須宣告在 contract `groupVars`:只寫在 group_vars example 不算,因為 preflight
-   只讀 `groupVars`(`TestRegression_SpecInputsAreDeclaredContractInputs`;還沒處理的
-   列在 `undeclaredSpecInputsAllowlist`,見 issue #81,只准縮小)。log-server 的
+   只讀 `groupVars`(`TestRegression_SpecInputsAreDeclaredContractInputs`;issue #81
+   的待處理清單已清空,不再接受 allowlist)。衍生別名、單次 `-e` 授權與 roster 欄位
+   另列非 inventory 的段落,不得冒充 inventory 輸入。log-server 的
    `siem_receiver_tcp_port` 只寫在 spec,play vars 一直蓋掉 inventory,client 改送
    2514 時 rsyslog 仍聽 514。宣告成 `integer` 的 input,preflight 與 repair 都接受
    整數、整數值的 float(`ansible-inventory --list` JSON 的數字)與十進位字串

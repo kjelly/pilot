@@ -18,7 +18,6 @@
     freeipa_realm_replacement_confirm: false
     freeipa_realm_replacement_finalize_only: false
     freeipa_realm_replacement_ticket: ""
-    freeipa_realm_replacement_verify_user: admin
     freeipa_realm_replacement_state_dir: /etc/pilot
     freeipa_realm_replacement_state_file: /etc/pilot/freeipa-realm-replacement.env
     freeipa_realm_replacement_expected_realm_file: /etc/pilot/freeipa-realm-replacement.expected-realm
@@ -79,6 +78,11 @@
         that:
           - (staging_attested_within_hours | int) <= 168
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        freeipa_realm_replacement_verify_user: "{{ freeipa_realm_replacement_verify_user | default('admin') }}"
       tags: [always]
 
     - name: "Gate: reject a second migration without explicit recovery review"

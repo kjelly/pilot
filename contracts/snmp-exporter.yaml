@@ -22,6 +22,7 @@ os:
 hostCardinality: zero-or-more
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 2}
 groupVars:
+  - {name: docker_network_name, type: string, required: false}
   - {name: snmp_exporter_version, type: string, required: false, default: "v0.30.1", secret: false}
   - {name: snmp_exporter_image, type: string, required: false, default: "quay.io/prometheus/snmp-exporter", secret: false}
   - {name: snmp_exporter_container_name, type: string, required: false, default: "pilot-snmp-exporter", secret: false}

@@ -104,12 +104,7 @@
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
     # Enrollment principal — reuses the same admin creds as the server vault.
-    ipa_enroll_principal: admin
     ipa_enroll_password: "{{ ipa_admin_password }}"
-
-    # This client's own FQDN (must be a resolvable, non-loopback name). Default
-    # derives from the host's short name under the realm domain.
-    ipa_client_fqdn: "{{ ansible_hostname | lower }}.{{ ipa_domain }}"
 
     ipa_config_marker: /etc/ipa/default.conf   # created iff already enrolled
     ipa_enroll_timeout_s: 300
@@ -256,6 +251,13 @@
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: staging attestation missing or older than 168h."
       when: stage == 'prod'
+      tags: [always]
+
+    - name: "Resolve inventory-overridable defaults added to the input contract"
+      ansible.builtin.set_fact:
+        ipa_enroll_principal: "{{ ipa_enroll_principal | default('admin') }}"
+        # This client's FQDN defaults to its short name under the realm domain.
+        ipa_client_fqdn: "{{ ipa_client_fqdn | default((ansible_hostname | lower) ~ '.' ~ ipa_domain) }}"
       tags: [always]
 
     # Values an operator may set in group_vars/host_vars (contract groupVars,

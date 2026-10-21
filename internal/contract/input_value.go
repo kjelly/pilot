@@ -29,6 +29,20 @@ func ValueMatchesType(typ string, value any) bool {
 			return true
 		}
 		return false
+	case "objectList":
+		// Components validate nested field names and semantics before mutation.
+		switch values := value.(type) {
+		case []map[string]any:
+			return true
+		case []any:
+			for _, item := range values {
+				if _, ok := item.(map[string]any); !ok {
+					return false
+				}
+			}
+			return true
+		}
+		return false
 	case "stringOrStringList":
 		switch v := value.(type) {
 		case nil, string, []string:

@@ -1,4 +1,4 @@
-# REVIEW MIRROR of contracts/freeipa-server.yaml — exact content is regression-checked.
+# ComponentContract v1 — canonical production source; deploy/TUI wiring pending.
 schemaVersion: 1
 id: freeipa-server
 role: freeipa-server
@@ -26,10 +26,20 @@ os:
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 4096, minDiskGiB: 20}
 groupVars:
+  - {name: freeipa_realm, type: string, required: false}
+  - {name: freeipa_server_fqdn, type: string, required: false}
+  - {name: ipa_dm_password, type: string, required: false, secret: true}
+  - {name: freeipa_setup_dns, type: boolean, required: false}
+  - {name: freeipa_setup_ntp, type: boolean, required: false}
+  - {name: ipa_enable_audit_log, type: boolean, required: false}
+  - {name: ipa_dns_forwarders, type: stringOrStringList, required: false}
   - {name: freeipa_domain, type: string, required: false, default: ipa.pilot.internal, secret: false}
+  # freeipa-server-apply.yml defaults this to the target host's ansible_host.
   - {name: freeipa_server_ip, type: string, required: false, secret: false, validation: "^[0-9a-fA-F:.]+$"}
   - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
   - {name: freeipa_dns_allow_any_recursion, type: boolean, required: false, default: true, secret: false}
+  # Scalar/list/null forms are part of the existing forwarder contract. No
+  # default here: unset keeps the playbook default; explicit empty clears it.
   - {name: freeipa_dns_forwarders, type: stringOrStringList, required: false, secret: false}
 inputRules: []
 endpoints:

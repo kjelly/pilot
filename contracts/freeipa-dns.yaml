@@ -17,6 +17,10 @@ dependencies:
 hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 1}
 groupVars:
+  - {name: freeipa_domain, type: string, required: false}
+  - {name: freeipa_realm, type: string, required: false}
+  - {name: freeipa_server_fqdn, type: string, required: false}
+  - {name: freeipa_setup_dns, type: boolean, required: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true, validation: "^.{8,}$"}
   - {name: freeipa_dns_manifest_file, type: string, required: true, secret: false}
 stagePolicy: {variable: stage, default: sandbox}

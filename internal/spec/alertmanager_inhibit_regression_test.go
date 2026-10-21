@@ -45,7 +45,7 @@ func builtinAlertmanagerConfigs(t *testing.T) map[string]string {
 		}
 		out[name] = v
 	}
-	if !strings.Contains(string(data), `alertmanager_version: "`+strings.TrimPrefix(alertmanagerImage, "prom/alertmanager:")+`"`) {
+	if !strings.Contains(string(data), `alertmanager_version | default('`+strings.TrimPrefix(alertmanagerImage, "prom/alertmanager:")+`')`) {
 		t.Fatalf("alertmanagerImage %s no longer matches alertmanager-apply.yml", alertmanagerImage)
 	}
 	return out

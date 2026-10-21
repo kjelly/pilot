@@ -27,6 +27,7 @@ os:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
+  - {name: docker_network_name, type: string, required: false}
   - {name: loki_target_host, type: string, required: true, secret: false}
   - {name: siem_log_root, type: string, required: false, default: /var/log/siem, secret: false}
   - {name: loki_alias, type: string, required: false, default: pilot-loki-backend, secret: false}

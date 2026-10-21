@@ -28,6 +28,12 @@ bindings:
 hostCardinality: one-or-more
 resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 5}
 groupVars:
+  - {name: freeipa_domain, type: string, required: false}
+  - {name: freeipa_realm, type: string, required: false}
+  - {name: freeipa_server_fqdn, type: string, required: false}
+  - {name: ipa_client_fqdn, type: string, required: false}
+  - {name: ipa_enroll_principal, type: string, required: false}
+  - {name: ipa_verify_user, type: string, required: false}
   # HA/single-node state machine (docs/tmp/now/freeipa-client-ha-spec.md
   # §2.2/§3). auto (default): >1 freeipa-server-pool member -> ha, else
   # single. Forcing single/ha is a staged-rollout / troubleshooting escape
