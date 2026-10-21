@@ -69,7 +69,7 @@ func TestFreeIPAQuery_RequiresTheTargetsObservation(t *testing.T) {
 					t.Errorf("%s accepted missing/empty target observation", kind)
 				}
 			}
-			if _, _, err := p.discoverUnknownServicePrincipals(context.Background(), "web1.example.test"); err == nil {
+			if _, _, _, err := p.discoverUnknownServicePrincipals(context.Background(), "web1.example.test"); err == nil {
 				t.Error("service ownership discovery accepted missing target")
 			}
 			step := &freeipaIdentityConvergeStep{provider: p, fqdn: "web1.example.test"}

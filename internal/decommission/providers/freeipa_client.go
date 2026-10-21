@@ -198,11 +198,15 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 	// more than a short inventory name (hosts.yml key), and both the
 	// roster mutation below and the ownership check need the real one to
 	// ever actually match anything.
-	unknown, resolvedFQDN, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
+	unknown, resolvedFQDN, authoritative, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client plan %s: service principal discovery: %w", hostName, err)
 	}
 	fqdn = resolvedFQDN
+	identitySource := HostIdentityFallback
+	if authoritative {
+		identitySource = HostIdentityAuthoritative
+	}
 
 	if p.RosterPathSet(in) {
 		violations, found, err := inventory.SimulateRemoveRosterHost(in.RosterPath, fqdn)
@@ -230,8 +234,8 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 
 	return []Step{
 		{Provider: FreeIPAClientProviderID, Phase: "local_cleanup", Action: ActionFreeIPAClientUninstall, TargetIdentity: hostName},
-		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: fqdn, Params: rosterStepParams},
-		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn, Params: rosterStepParams},
+		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: fqdn, HostIdentitySource: identitySource, Params: rosterStepParams},
+		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn, HostIdentitySource: identitySource, Params: rosterStepParams},
 	}, nil
 }
 
@@ -660,16 +664,19 @@ func unescapedQuote(s string) int {
 // fqdn input may be no more than a short inventory name, and every other
 // step Plan builds downstream (roster mutation, identity-apply
 // convergence) needs the real one, not that possibly-short guess.
-func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) (unknown []string, resolvedFQDN string, err error) {
+// authoritative records whether the existing host-name parser found a
+// live identity, distinguishing an equal-valued inventory fallback.
+func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) (unknown []string, resolvedFQDN string, authoritative bool, err error) {
 	res, err := p.queryHostObject(ctx, fqdn)
 	if err != nil {
-		return nil, fqdn, err
+		return nil, fqdn, false, err
 	}
 	host := inspectionFor(res.Stdout, fqdn)
 	if notFoundPattern.MatchString(host) {
-		return nil, fqdn, nil // host object already gone -- nothing to check, nothing to resolve
+		return nil, fqdn, false, nil // host object already gone -- nothing to check, nothing to resolve
 	}
-	return unknownServicePrincipals(host, fqdn), resolveAuthoritativeFQDN(host, fqdn), nil
+	resolved := authoritativeFQDN(host)
+	return unknownServicePrincipals(host, fqdn), resolveAuthoritativeFQDN(host, fqdn), resolved != "", nil
 }
 
 // resolveAuthoritativeFQDN prefers `ipa host-show`'s own "Host name:"
@@ -690,12 +697,19 @@ func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Con
 // permanently un-converged). Falls back to fallback when the field is
 // absent (e.g. the host object is already gone).
 func resolveAuthoritativeFQDN(stdout, fallback string) string {
+	if real := authoritativeFQDN(stdout); real != "" {
+		return real
+	}
+	return fallback
+}
+
+func authoritativeFQDN(stdout string) string {
 	if m := hostObjectNamePattern.FindStringSubmatch(stdout); len(m) > 1 {
 		if real := strings.TrimSpace(m[1]); real != "" {
 			return real
 		}
 	}
-	return fallback
+	return ""
 }
 
 func unknownServicePrincipals(stdout, fqdn string) []string {

@@ -80,8 +80,8 @@ func TestValidateReverseDirectoryAliases(t *testing.T) {
 					if Validate(dir, path) == nil {
 						t.Fatal("external destination exposed through vars directory was accepted")
 					}
-					if err := Validate(dir, external+"-sibling/all.yml"); err != nil {
-						t.Fatalf("unrelated external sibling rejected: %v", err)
+					if Validate(dir, external+"-sibling/all.yml") == nil {
+						t.Fatal("uninspectable vars alias accepted for an unrelated external sibling")
 					}
 				})
 			}
@@ -143,7 +143,146 @@ func TestValidateDirectoryBacklinkTerminates(t *testing.T) {
 	if err := os.Symlink(vars, filepath.Join(vars, "back")); err != nil {
 		t.Fatal(err)
 	}
-	if err := Validate(dir, filepath.Join(t.TempDir(), "safe.yml")); err != nil {
-		t.Fatal(err)
+	if Validate(dir, filepath.Join(t.TempDir(), "safe.yml")) == nil {
+		t.Fatal("vars directory backlink must be rejected without traversing it")
+	}
+}
+
+func TestValidateChecksSourceAncestorsBeforeFileExists(t *testing.T) {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		for _, nested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/nested=%t", tree, nested), func(t *testing.T) {
+				workspace, sourceRoot, unrelated := t.TempDir(), t.TempDir(), t.TempDir()
+				path := filepath.Join(sourceRoot, "not-created", "secret.yml")
+				if err := Validate(workspace, path); err != nil {
+					t.Fatalf("safe external destination rejected: %v", err)
+				}
+				alias := filepath.Join(sourceRoot, tree)
+				if nested {
+					alias = filepath.Join(alias, "nested")
+				}
+				if err := os.MkdirAll(filepath.Dir(alias), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(unrelated, alias); err != nil {
+					t.Fatal(err)
+				}
+				// The stricter storage policy rejects any vars directory
+				// alias, even when it exposes a different external directory.
+				if Validate(workspace, path) == nil {
+					t.Fatal("missing destination skipped its source-ancestor vars tree")
+				}
+				if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+					t.Fatal("validation created the missing destination directory")
+				}
+			})
+		}
+	}
+}
+
+func TestValidateRejectsVarsDirectoryAliases(t *testing.T) {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		for _, nested := range []bool{false, true} {
+			for _, existing := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/nested=%t/existing=%t", tree, nested, existing), func(t *testing.T) {
+					dir, external := t.TempDir(), t.TempDir()
+					path := filepath.Join(external, "all.yml")
+					if existing {
+						if err := os.WriteFile(path, []byte("port: 8080\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					alias := filepath.Join(dir, tree)
+					if nested {
+						alias = filepath.Join(alias, "nested")
+					}
+					if err := os.MkdirAll(filepath.Dir(alias), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(external, alias); err != nil {
+						t.Fatal(err)
+					}
+					if err := Validate(dir, path); err == nil {
+						t.Fatal("vars directory alias accepted")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestValidateRejectsUninspectableVarsTrees(t *testing.T) {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		for _, problem := range []string{"dangling", "cyclic", "unreadable"} {
+			t.Run(tree+"/"+problem, func(t *testing.T) {
+				dir := t.TempDir()
+				base := filepath.Join(dir, tree)
+				if err := os.Mkdir(base, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				bad := filepath.Join(base, "nested")
+				switch problem {
+				case "dangling":
+					if err := os.Symlink(filepath.Join(dir, "missing"), bad); err != nil {
+						t.Fatal(err)
+					}
+				case "cyclic":
+					if err := os.Symlink(bad, bad); err != nil {
+						t.Fatal(err)
+					}
+				case "unreadable":
+					if err := os.Mkdir(bad, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(bad, 0); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(bad, 0o700) })
+					// Assert the fixture really exercises a traversal error.
+					if _, err := os.ReadDir(bad); !os.IsPermission(err) {
+						t.Fatalf("fixture is readable: %v", err)
+					}
+				}
+				for _, existing := range []bool{false, true} {
+					path := filepath.Join(dir, fmt.Sprintf("secret-%t.yml", existing))
+					if existing {
+						if err := os.WriteFile(path, []byte("port: 8080\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if Validate(dir, path) == nil {
+						t.Errorf("uninspectable tree accepted, existing=%t", existing)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestValidateRejectsVarsFileAliases(t *testing.T) {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		for _, kind := range []string{"symlink", "hardlink"} {
+			t.Run(tree+"/"+kind, func(t *testing.T) {
+				dir, external := t.TempDir(), t.TempDir()
+				source := filepath.Join(external, "source.yml")
+				if err := os.WriteFile(source, []byte("port: 8080\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				base := filepath.Join(dir, tree)
+				if err := os.Mkdir(base, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				link := os.Symlink
+				if kind == "hardlink" {
+					link = os.Link
+				}
+				if err := link(source, filepath.Join(base, "all.yml")); err != nil {
+					t.Fatal(err)
+				}
+				if Validate(dir, source) == nil {
+					t.Fatal("vars file alias accepted")
+				}
+			})
+		}
 	}
 }

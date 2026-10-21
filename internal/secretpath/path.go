@@ -3,6 +3,7 @@ package secretpath
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,19 +37,13 @@ func Validate(dir, path string) error {
 			}
 		}
 	}
-	for _, tree := range []string{"group_vars", "host_vars"} {
-		// Check the lexical path as well: a vars-tree symlink pointing out
-		// of the workspace must not become a credential storage escape.
-		for _, pair := range [][2]string{{filepath.Join(absDir, tree), absPath}, {filepath.Join(workspace, tree), destination}} {
-			rel, err := filepath.Rel(pair[0], pair[1])
-			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return forbidden()
-			}
-		}
+	// Inspect the selected workspace and every source ancestor, including
+	// destinations that have not been created. Any vars directory alias or
+	// inspection failure makes the storage boundary uncertain and is rejected.
+	source, statErr := os.Stat(destination)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("cannot inspect secret source path")
 	}
-	// Resolve the vars side of the boundary too: an external destination may
-	// be exposed by a root or nested directory alias, even before it exists.
-	// Include ancestor vars trees when a caller selects an external source.
 	roots := []string{workspace}
 	for root := filepath.Dir(destination); ; root = filepath.Dir(root) {
 		roots = append(roots, root)
@@ -56,21 +51,23 @@ func Validate(dir, path string) error {
 			break
 		}
 	}
-	source, err := os.Stat(destination)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot inspect secret source path")
-	}
-	visited := make(map[string]bool)
+	seen := make(map[string]bool)
 	for _, root := range roots {
-		for _, tree := range []string{"group_vars", "host_vars"} {
-			base := filepath.Join(root, tree)
-			if _, err := os.Lstat(base); os.IsNotExist(err) {
-				continue
-			} else if err != nil {
-				return fmt.Errorf("cannot inspect inventory vars tree")
-			}
-			if err := validateVarsAlias(base, destination, source, visited); err != nil {
-				return err
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		if err := inspectVarsFiles(root, source); err != nil {
+			return err
+		}
+	}
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		// Check the lexical path as well: a vars-tree symlink pointing out
+		// of the workspace must not become a credential storage escape.
+		for _, pair := range [][2]string{{filepath.Join(absDir, tree), absPath}, {filepath.Join(workspace, tree), destination}} {
+			rel, err := filepath.Rel(pair[0], pair[1])
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return forbidden()
 			}
 		}
 	}
@@ -117,41 +114,33 @@ func forbidden() error {
 	return fmt.Errorf("secret source must be outside group_vars/ and host_vars/ and must not alias an inventory vars file; use an external Vault vars file (docs/config-secret-storage.md)")
 }
 
-// validateVarsAlias follows directory aliases only within the selected vars
-// trees. Resolved containment also protects files that have not been created;
-// inode comparison catches existing hardlinks. Unresolvable aliases fail closed.
-func validateVarsAlias(path, destination string, source os.FileInfo, visited map[string]bool) error {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("cannot resolve inventory vars alias")
-	}
-	rel, err := filepath.Rel(resolved, destination)
-	if err != nil {
-		return fmt.Errorf("cannot compare inventory vars alias")
-	}
-	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return forbidden()
-	}
-	if visited[resolved] {
-		return nil
-	}
-	visited[resolved] = true
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return fmt.Errorf("cannot inspect inventory vars alias")
-	}
-	if source != nil && os.SameFile(source, info) {
-		return forbidden()
-	}
-	if !info.IsDir() {
-		return nil
-	}
-	entries, err := os.ReadDir(resolved)
-	if err != nil {
-		return fmt.Errorf("cannot inspect inventory vars directory")
-	}
-	for _, entry := range entries {
-		if err := validateVarsAlias(filepath.Join(resolved, entry.Name()), destination, source, visited); err != nil {
+// inspectVarsFiles only inspects the two relevant vars trees; it never scans
+// unrelated external secret stores or exposes file contents. Directory symlinks
+// and inspection failures are rejected because WalkDir cannot safely inspect
+// their contents. A missing tree is the only traversal error we can ignore.
+func inspectVarsFiles(root string, source os.FileInfo) error {
+	for _, tree := range []string{"group_vars", "host_vars"} {
+		base := filepath.Join(root, tree)
+		err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+			if os.IsNotExist(walkErr) && path == base {
+				return nil
+			}
+			if walkErr != nil {
+				return fmt.Errorf("cannot inspect inventory vars tree %s", tree)
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("cannot inspect inventory vars tree %s", tree)
+			}
+			if info.IsDir() || (source != nil && os.SameFile(source, info)) {
+				return forbidden()
+			}
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 	}

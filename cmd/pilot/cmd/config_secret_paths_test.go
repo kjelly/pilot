@@ -407,7 +407,10 @@ func TestConfigSecretPaths_ExternalVaultAndSNMPSavesStillWork(t *testing.T) {
 	for _, kind := range []string{"vault", "snmp"} {
 		t.Run(kind, func(t *testing.T) {
 			dir, external := t.TempDir(), t.TempDir()
-			path := filepath.Join(external, "secrets.yml")
+			if err := os.Symlink(external, filepath.Join(dir, ".vault")); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".vault", "secrets.yml")
 			r := newEditRouterModel(dir)
 			d := automationDriver{dir: dir}
 			var err error
@@ -497,5 +500,137 @@ func TestConfigSecretPaths_VaultCreationRechecksDestination(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, "new.yml")); !os.IsNotExist(err) {
 		t.Fatal("vault creation callback wrote vars file")
+	}
+}
+
+// Exercise the actual save callbacks with an initially safe path. A different
+// process adding a directory alias while a form is open must stop persistence.
+func TestConfigSecretPaths_SaveRejectsVarsDirectoryAliasIntroducedWhileOpen(t *testing.T) {
+	for _, kind := range []string{"vault", "snmp", "roster"} {
+		for _, tree := range []string{"group_vars", "host_vars"} {
+			for _, nested := range []bool{false, true} {
+				for _, existing := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%s/nested=%t/existing=%t", kind, tree, nested, existing), func(t *testing.T) {
+						dir, external := t.TempDir(), t.TempDir()
+						path := filepath.Join(external, "all.yml")
+						original := "port: 8080\n"
+						if kind == "roster" {
+							_, fixture := writeHBACPolicyRosterFixture(t)
+							data, err := os.ReadFile(fixture)
+							if err != nil {
+								t.Fatal(err)
+							}
+							original = string(data)
+						}
+						if existing {
+							writeTestFile(t, path, original)
+						}
+						r := newEditRouterModel(dir)
+						d := automationDriver{dir: dir}
+						var save func() error
+						switch kind {
+						case "vault":
+							doc, err := vaultfile.Parse([]byte("password: DUMMY130_PASSWORD\n"))
+							if err != nil {
+								t.Fatal(err)
+							}
+							pushVaultEditorScreen(&r, dir, path, doc, true, "")
+							save = func() error { return d.choose(&r, "存檔並離開") }
+						case "snmp":
+							doc, err := monitoring.LoadSNMPCredentialDoc(path)
+							if err != nil {
+								t.Fatal(err)
+							}
+							doc.Set("switch", monitoring.SNMPCredentialFields{"community": "DUMMY130_PASSWORD"})
+							pushSNMPCredentialsEditor(&r, dir, path, doc, "")
+							save = func() error { return d.chooseByID(&r, "mon.snmp.cred.editor", "mon.snmp.cred.editor.save") }
+						case "roster":
+							if existing {
+								pushRosterUserPasswordInitial(&r, dir, path, "alice")
+							} else {
+								pushRosterCreatePrompt(&r, dir, path)
+							}
+							save = func() error {
+								if err := d.typeText(&r, "DUMMY130_PASSWORD", true); err != nil {
+									return err
+								}
+								return d.enter(&r)
+							}
+						}
+						if r.err != nil {
+							t.Fatalf("open safe editor: %v", r.err)
+						}
+						alias := filepath.Join(dir, tree)
+						if nested {
+							alias = filepath.Join(alias, "nested")
+						}
+						if err := os.MkdirAll(filepath.Dir(alias), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(external, alias); err != nil {
+							t.Fatal(err)
+						}
+						_ = save()
+						if r.err == nil {
+							t.Error("save accepted vars directory alias")
+						}
+						data, err := os.ReadFile(path)
+						if existing {
+							if err != nil {
+								t.Fatal(err)
+							}
+							if string(data) != original {
+								t.Error("save changed aliased external file")
+							}
+						} else if !os.IsNotExist(err) {
+							t.Error("save created aliased external file")
+						}
+						if r.err != nil && strings.Contains(r.err.Error(), "DUMMY130_PASSWORD") {
+							t.Error("error leaked credential")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestConfigSecretPaths_ExternalRosterPasswordSavesStillWork(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			dir, external := t.TempDir(), t.TempDir()
+			if err := os.Symlink(external, filepath.Join(dir, ".vault")); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".vault", "roster.yml")
+			if existing {
+				_, fixture := writeHBACPolicyRosterFixture(t)
+				data, err := os.ReadFile(fixture)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, path, string(data))
+			}
+			r := newEditRouterModel(dir)
+			d := automationDriver{dir: dir}
+			if existing {
+				pushRosterUserPasswordInitial(&r, dir, path, "alice")
+			} else {
+				pushRosterCreatePrompt(&r, dir, path)
+			}
+			if err := d.typeText(&r, "DUMMY130_PASSWORD", true); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.enter(&r); err != nil {
+				t.Fatal(err)
+			}
+			if r.err != nil {
+				t.Fatalf("save: %v", r.err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !strings.Contains(string(data), "DUMMY130_PASSWORD") {
+				t.Fatal("external roster credential was not saved")
+			}
+		})
 	}
 }

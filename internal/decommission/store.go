@@ -45,7 +45,11 @@ func EncodePlanJSON(plan *Plan) (string, error) {
 			return "", fmt.Errorf("%w: host Extra key %q", ErrSecretLikeField, k)
 		}
 	}
-	b, err := json.Marshal(plan)
+	// Canonicalize a copy so callers and persisted execution inputs stay
+	// untouched, including when saving a legacy plan without FQDN metadata.
+	canonical := *plan
+	canonical.FQDN = planFQDN(plan)
+	b, err := json.Marshal(&canonical)
 	if err != nil {
 		return "", fmt.Errorf("encode plan %s: %w", plan.ID, err)
 	}
@@ -60,7 +64,7 @@ func (s *Store) SavePlan(plan *Plan) error {
 		return err
 	}
 	return s.db.SaveDecommissionPlan(store.DecommissionPlanRecord{
-		ID: plan.ID, Host: plan.Host.Name, FQDN: plan.Host.AnsibleHost, Environment: plan.Environment,
+		ID: plan.ID, Host: plan.Host.Name, FQDN: planFQDN(plan), Environment: plan.Environment,
 		Status: string(plan.Status), PlanHash: plan.PlanHash, InventoryRevision: plan.InventoryRevision,
 		PlanJSON: payload, CreatedAt: plan.CreatedAt, ExpiresAt: plan.ExpiresAt,
 	})
@@ -76,6 +80,7 @@ func (s *Store) LoadPlan(id string) (*Plan, error) {
 	if err := json.Unmarshal([]byte(rec.PlanJSON), &plan); err != nil {
 		return nil, fmt.Errorf("decode persisted plan %s: %w", id, err)
 	}
+	plan.FQDN = planFQDN(&plan)
 	return &plan, nil
 }
 

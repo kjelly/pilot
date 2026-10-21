@@ -13,6 +13,10 @@ Diagnostics identify the file, field path and line without printing its value.
 Vault, SNMP credential and roster editors also require their source files to be
 outside both vars trees, including paths reached through symlinks or file aliases.
 The destination is checked again when saving or launching an external editor.
+Directory symlinks anywhere inside either vars tree make secret-source writes
+fail closed, even when the selected source is otherwise external. Keep these
+vars trees as real directories. Symlinks to external `.vault` sources remain
+supported when they do not expose the source through a vars tree.
 
 For example, a versioned `group_vars/dashboard.yml` may contain:
 
