@@ -28,6 +28,7 @@ type Violation struct {
 	Line int
 }
 
+// String formats the violation without including its input value.
 func (v Violation) String() string {
 	return fmt.Sprintf("%s:%d: %s: forbidden secret storage; %s", v.File, v.Line, v.Path, guidance)
 }
@@ -39,6 +40,7 @@ type Policy struct {
 	public map[string]bool
 }
 
+// New combines shipped and custom contract metadata into a storage policy.
 func New(catalog contract.Catalog) Policy {
 	p := Policy{secret: map[string]bool{}, public: map[string]bool{}}
 	components := append([]contract.Contract(nil), shippedInputs()...)
@@ -84,6 +86,7 @@ var shippedInputs = sync.OnceValue(func() []contract.Contract {
 // lookups belong in the external vars source; inventory keeps only its variable.
 var pureReference = regexp.MustCompile(`^\{\{\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\}\}$`)
 
+// PureReference reports whether value contains only a variable reference.
 func PureReference(value string) bool { return pureReference.MatchString(strings.TrimSpace(value)) }
 
 func normalizedKey(key string) string {
@@ -113,6 +116,7 @@ func referenceKey(key string) bool {
 	return false
 }
 
+// SensitiveKey reports whether a field names credential material.
 func (p Policy) SensitiveKey(key string) bool {
 	k := normalizedKey(key)
 	// This contract input explicitly names an external roster file, rather
