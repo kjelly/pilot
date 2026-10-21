@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,6 +24,8 @@ import (
 // access-control refusing it, 1.1.1.1 for an explicit public resolver, and
 // 192.0.2.1 (TEST-NET-1, nothing answers) for a timeout. v6only is a name
 // with only an AAAA record added to the FreeIPA zone for the capture.
+// The SERVFAIL pair was captured from local unbound 1.24.2 forwarding to
+// an unavailable FreeIPA upstream endpoint; see testdata/dig-nscheck/README.md.
 
 type nsCheckServer struct {
 	Addr, Role, Host string
@@ -44,7 +47,25 @@ func runNSCheck(t *testing.T, freeipaAnswered bool, servers ...nsCheckServer) (i
 			if err != nil {
 				t.Fatal(err)
 			}
-			results = append(results, map[string]any{"item": []any{role, qtype}, "stdout": strings.TrimRight(string(out), "\n"), "rc": 0})
+			result := map[string]any{"item": []any{role, qtype}, "stdout": strings.TrimRight(string(out), "\n"), "stderr": "", "rc": 0}
+			// New captures retain both streams and rc. Older fixtures predate
+			// sidecars and retain their original stdout-only convention.
+			stem := filepath.Join("testdata", "dig-nscheck", strings.TrimSuffix(name, ".txt"))
+			if stderr, err := os.ReadFile(stem + ".stderr"); err == nil {
+				result["stderr"] = strings.TrimRight(string(stderr), "\n")
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if rc, err := os.ReadFile(stem + ".rc"); err == nil {
+				code, err := strconv.Atoi(strings.TrimSpace(string(rc)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result["rc"] = code
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			results = append(results, result)
 		}
 	}
 	task, err := filepath.Abs(filepath.Join("..", "..", "playbooks", "apply", "tasks", "freeipa-dns-client-nameserver-check.yml"))
@@ -87,6 +108,7 @@ func TestRegression_ResolverNameserverCheck(t *testing.T) {
 	ipv6Only := nsCheckServer{Addr: "192.168.122.4", Role: "freeipa", Host: "pr92-ipa", Registered: true, A: "freeipa_v6only_a_nodata.txt", AAAA: "freeipa_v6only_aaaa_ok.txt"}
 	publicResolver := nsCheckServer{Addr: "1.1.1.1", Role: "explicit", A: "explicit_a_nxdomain.txt", AAAA: "explicit_aaaa_nxdomain.txt"}
 	tierRefusing := nsCheckServer{Addr: "192.168.122.2", Role: "tier", Host: "pr92-dns", A: "tier_a_refused.txt", AAAA: "tier_aaaa_refused.txt"}
+	tierServfail := nsCheckServer{Addr: "127.0.0.1", Role: "tier", Host: "issue98-unbound", A: "tier_a_servfail.txt", AAAA: "tier_aaaa_servfail.txt"}
 	gone := nsCheckServer{Addr: "192.0.2.1", Role: "explicit", A: "unreachable_a_timeout.txt", AAAA: "unreachable_aaaa_timeout.txt"}
 
 	for _, c := range []struct {
@@ -107,7 +129,22 @@ func TestRegression_ResolverNameserverCheck(t *testing.T) {
 			[]string{"WARNING: localhost: nameserver 192.168.122.8", "whether FreeIPA lists it is unknown: check named on pr92-r2"}, []string{"FreeIPA lists it as"}},
 		{"an explicit server that does not answer only warns", true, []nsCheckServer{ipa, gone}, 0,
 			[]string{"WARNING: localhost: nameserver 192.0.2.1 (explicit) did not answer", "explicit freeipa_dns_client_servers entry"}, nil},
+		{"tier SERVFAIL permits failover to a healthy FreeIPA server", true, []nsCheckServer{tierServfail, ipa}, 0,
+			[]string{"returned SERVFAIL", "FreeIPA forwarding upstreams", "resolv.conf fails over to a nameserver that returned an address"},
+			[]string{"apply playbooks/apply/dns-apply.yml", "so it does not serve the FreeIPA zone"}},
+		{"an address is enough when the other query returns SERVFAIL", true,
+			[]nsCheckServer{{Addr: "127.0.0.1", Role: "tier", A: "tier_a_ok.txt", AAAA: "tier_aaaa_servfail.txt"}}, 0,
+			nil, []string{"WARNING: localhost"}},
 		// Should trigger.
+		{"SERVFAIL without a healthy fallback fails accurately", false, []nsCheckServer{tierServfail}, 2,
+			[]string{"the resolver was not changed", "returned SERVFAIL", "No nameserver returned an address"},
+			[]string{"apply playbooks/apply/dns-apply.yml", "so it does not serve the FreeIPA zone"}},
+		{"SERVFAIL must not hide REFUSED from the other query", true,
+			[]nsCheckServer{ipa, {Addr: "127.0.0.1", Role: "tier", A: "tier_a_servfail.txt", AAAA: "tier_aaaa_refused.txt"}}, 2,
+			[]string{"the resolver was not changed", "so it does not serve the FreeIPA zone"}, nil},
+		{"an address must not hide NXDOMAIN from the other query", true,
+			[]nsCheckServer{ipa, {Addr: "127.0.0.1", Role: "tier", A: "tier_a_ok.txt", AAAA: "explicit_aaaa_nxdomain.txt"}}, 2,
+			[]string{"the resolver was not changed", "so it does not serve the FreeIPA zone"}, nil},
 		{"an explicit server answers NXDOMAIN", true, []nsCheckServer{ipa, publicResolver}, 2,
 			[]string{"the resolver was not changed", "1.1.1.1 (explicit)", "answers, but with no A or AAAA record for ipa1.ipa.pilot.internal", "fix or remove this freeipa_dns_client_servers entry"}, nil},
 		{"the tier refuses the client", true, []nsCheckServer{tierRefusing, ipa}, 2,

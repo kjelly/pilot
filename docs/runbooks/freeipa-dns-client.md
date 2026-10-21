@@ -86,11 +86,16 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
 - 寫入前會逐一問每個要寫入的 nameserver（FreeIPA server 用 `+norec`，dns tier 與
   `freeipa_dns_client_servers` 用遞迴查詢）FreeIPA server 的 FQDN 的 A 與 AAAA
   （`+time=2 +tries=2`，`tasks/freeipa-dns-client-nameserver-check.yml`）。只有三種情況會在改
-  任何檔案前失敗：有一台回答了卻沒有位址（NXDOMAIN、SERVFAIL、REFUSED，或 A/AAAA 都沒有，
+  任何檔案前失敗：有一台回答了卻沒有位址（NXDOMAIN、REFUSED，或 NOERROR 但 A/AAAA 都沒有，
   代表它不服務 FreeIPA 的 zone）；明確設 `freeipa_setup_dns: true`、FreeIPA 卻沒列為 DNS
   server 的 replica 沒有回答；沒有任何一台回答位址。此刻沒有回答（timeout、connection
   refused）但本來就該在清單裡的（FreeIPA 列出的 DNS server、dns tier、明確寫的項目）只印
   `WARNING`，依角色列出要檢查的地方，仍寫進 resolv.conf，由 resolver 換下一台。
+  SERVFAIL 另外分類為暫時解析失敗：有健康備援時只警告並保留，否則仍擋下；dns tier 的
+  診斷指向 FreeIPA upstream、named 與網路，不會要求重套 tier 的 dns-apply。另一個查詢的
+  NXDOMAIN／REFUSED 等硬錯誤仍擋下。獨立 classifier harness 的實測結果見
+  [2026-10-21 evidence](../evidence/freeipa-dns-client/2026-10-21-56dc024.md)，不代表整份
+  resolver spec 在本輪重新驗證。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，

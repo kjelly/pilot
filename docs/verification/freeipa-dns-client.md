@@ -112,10 +112,13 @@ FreeIPA server/replica 自己用得到。
 > **寫入前的 nameserver 檢查**（`tasks/freeipa-dns-client-nameserver-check.yml`，v1.4）：
 > 寫入前先問每一台要寫進去的 nameserver FreeIPA server 的 FQDN（A 與 AAAA；FreeIPA
 > DNS server，含本機自己的 `127.0.0.1`，用 `+norec`；dns tier 與明確指定的
-> `freeipa_dns_client_servers` 用遞迴查詢，`+tries=2`），依回答分三種：
+> `freeipa_dns_client_servers` 用遞迴查詢，`+tries=2`），依回答分類：
 > - 有 A 或 AAAA 位址：正常。
-> - 有回答但沒有位址（NXDOMAIN、SERVFAIL、REFUSED，或 NOERROR 但沒有 A／AAAA）：它不服務
+> - 有回答但沒有位址（NXDOMAIN、REFUSED，或 NOERROR 但沒有 A／AAAA）：它不服務
 >   FreeIPA 的 zone，**擋下**，`resolv.conf` 不變。
+> - SERVFAIL：目前解析失敗，不能據此認定 zone 不存在。dns tier 的訊息會提醒檢查 FreeIPA
+>   forwarding upstream、named 與網路；有其他 nameserver 回答位址時只印 `WARNING` 並保留，
+>   沒有可用備援時仍**擋下**。同一台的另一個查詢若有 NXDOMAIN／REFUSED 等硬錯誤仍擋下。
 > - 完全沒回答（逾時、connection refused）：**不擋**，印出 `WARNING` 與做法並照樣寫進清單
 >   （`resolv.conf` 會換下一台）。例外：FreeIPA 有回答、但 NS 紀錄沒有列出、自己也沒有權威
 >   回答的 FreeIPA server（例如明確設 `freeipa_setup_dns: true` 卻還沒 promote 的 replica）
@@ -124,6 +127,8 @@ FreeIPA server/replica 自己用得到。
 > 另外，清單裡沒有任何一台回答出位址時**擋下**。所以已登記的 FreeIPA server 維護停機、
 > 或某一台 dns tier 停機，都不會讓 `freeipa-dns-client` 的 apply（以及會呼叫同一個 task
 > 的 `internal-endpoint`）失敗，只會出現 WARNING。
+> SERVFAIL 分類的實測範圍是獨立 nameserver classifier harness，非整份 resolver spec：
+> [2026-10-21 evidence](../evidence/freeipa-dns-client/2026-10-21-56dc024.md)。
 >
 > **resolver 逾時（C7）**：最後算出的 nameserver 有 2 筆以上時，resolver 改用
 > `options timeout:1 attempts:2`（Debian 寫進 `/etc/resolv.conf`；EL 設在該
