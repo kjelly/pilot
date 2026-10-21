@@ -1,0 +1,32 @@
+# Disposable receiver and two OS families for issue #122.
+services: local
+nodes:
+  - name: aq-log
+    base_image: ubuntu-24.04
+    memory: 2560
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    # log-server C7/C8 inject locally and require this host to forward to
+    # its own dedicated receiver ruleset, as in the supported deployment.
+    groups: [log-server, audit-log-forwarding]
+  - name: aq-ubuntu
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [audit-log-forwarding]
+  - name: aq-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [audit-log-forwarding]

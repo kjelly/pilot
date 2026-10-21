@@ -1,10 +1,17 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v1.8
+> 版本：v1.9
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
 > 維護者：sre
+
+> 最後驗證：2026-10-20，candidate `b34e98dbc80c5328cae29a47bcbc48e13b488ba7`，
+> tree `e1975f819da5413859ecb9d187006118c8af4e1d`。全新 VM 的 L3/L4 通過、本 spec 66/66、
+> L6 三台 changed=0。兩種 OS 的 C19 fatal config 演練維持原 runtime，故障後再次驗證 77/77。
+> [本輪 recovery 驗證](../evidence/audit-forward-queue/2026-10-20-b34e98d-review.md)。
+> [先前訊息流演練](../evidence/audit-forward-queue/2026-10-20-b9a58332.md) 的 TCP 在途限制仍適用：
+> 持續送訊息時重啟 receiver 曾遺失 3/1,440 筆；本輪未重跑大流量演練。
 
 ## 1. 目標系統
 
@@ -14,7 +21,7 @@
 | OS / version | Ubuntu 24.04 LTS / AlmaLinux 9 |
 | 角色 | 一般受管主機：本機 auditd 稽核（setuid/setgid、sudo、`/etc/passwd`、`/etc/sudoers`）+ rsyslog 轉送 `auth,authpriv.*`/`local6.*` 到中央 SIEM |
 | 套用範圍 | `/etc/audit/rules.d/99-custom.rules`、`/etc/logrotate.d/{auditd,syslog}`（Debian 與 RedHat family 上都會另外從 distro 內建的 `/etc/logrotate.d/rsyslog` 移除重複的 `{{ audit_syslog_path }}` 宣告，見 C20）、`/etc/rsyslog.d/99-siem-forward.conf`、`/etc/hosts`（`siem-log-server` 別名） |
-| 風險等級 | High（auditd 規則寫錯可能導致稽核死鎖或漏記；rsyslog 轉送設定錯誤只會漏送，不影響本機既有日誌） |
+| 風險等級 | High（auditd 規則寫錯可能導致稽核死鎖或漏記；rsyslog 轉送設定錯誤或佇列耗盡可能漏送，佇列滿時的 backpressure 也可能延遲本機日誌） |
 
 ## 1.5 依賴變數契約
 
@@ -23,7 +30,7 @@
 | 變數名稱 | 說明/用途 | 是否必填 | 預設值 |
 |---------|----------|---------|--------|
 | `siem_forward_host` | 中央 SIEM（`log-server`）的 IP 或 FQDN；套用時會被 pin 進 `/etc/hosts` 的 `siem-log-server` 別名 | 否 | 空字串（不轉送） |
-| `siem_forward_port` | rsyslog 轉送目的埠（TCP，`@@`） | 否 | `514` |
+| `siem_forward_port` | rsyslog `omfwd` 轉送目的埠（TCP） | 否 | `514` |
 | `audit_logrotate_rotate` | `/etc/logrotate.d/auditd` 保留檔案數 | 否 | `14` |
 | `audit_logrotate_maxage` | `/etc/logrotate.d/auditd` `maxage`（天） | 否 | `90` |
 | `syslog_logrotate_rotate` | `/etc/logrotate.d/syslog` 保留檔案數 | 否 | `14` |
@@ -47,6 +54,24 @@
 
 ## 2. Checklist
 
+C16/C17 的 probe 會驗證兩個 action 的目標、TCP 埠、完整 queue/retry 參數，
+比對設定檔寫入時間與服務啟動時間，並在注入對應 facility 訊息後讀取服務
+process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在。
+全域語法檢查由 apply 的 `rsyslogd -N1` 在重啟前執行；verify 不會重啟服務。
+
+每個 action 的記憶體佇列上限為 10,000 筆，達 8,000 筆開始落盤、降至 2,000 筆
+回到記憶體；各有固定且互不相同的檔名前綴，磁碟預算各 256 MiB（rsyslog 可超出
+一筆完整記錄），單檔 1 MiB。spool 位於 Ubuntu 的
+`/var/spool/rsyslog/pilot-siem`、EL 的 `/var/lib/rsyslog/pilot-siem`，由 rsyslog
+執行帳號擁有、權限 0700。乾淨關機保存待送訊息；重試次數不限，間隔從 1 秒開始、
+最長 10 秒。不因低 severity 主動丟棄，但有限容量用盡時仍會受 enqueue timeout
+限制；應監控該檔案系統的可用空間。decommission 保留 spool 中的稽核歷史。
+
+這是純 TCP 的斷線補送，沒有接收端持久化 ACK；`ResendLastMSGOnReconnect` 可重送
+最後一筆，也可能造成重複。不能保證斷線瞬間在途訊息、斷電或長到耗盡容量的中斷
+零遺失。跨主機驗收需分別統計 unique ID、遺失與重複，並涵蓋持續送訊息時重啟
+接收端、確認停機後送訊息，以及落盤後在接收端仍停機時乾淨重啟 client。
+
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
 | C1  | package   | Ubuntu `auditd`／EL `audit` 已安裝                                     | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
@@ -64,13 +89,13 @@
 | C13 | file      | `/etc/logrotate.d/syslog` 存在                                         | present  | test -f /etc/logrotate.d/syslog |
 | C14 | logrotate | 兩份 logrotate 策略檔語法正確（dry-run 不出錯）                         | 0        | logrotate -d /etc/logrotate.d/auditd /etc/logrotate.d/syslog >/dev/null 2>&1; echo $? |
 | C15 | forward   | `/etc/hosts` 已 pin `siem-log-server` 別名                             | 0        | getent hosts siem-log-server >/dev/null 2>&1; echo $? |
-| C16 | forward   | 轉送設定含 `local6.*` → `siem-log-server` 的 TCP 轉送規則                | 0        | grep -qE '^local6\.\*[[:space:]]+@@siem-log-server:' /etc/rsyslog.d/99-siem-forward.conf; echo $? |
-| C17 | forward   | 轉送設定含 `auth,authpriv.*` → `siem-log-server` 的 TCP 轉送規則         | 0        | grep -qE '^auth,authpriv\.\*[[:space:]]+@@siem-log-server:' /etc/rsyslog.d/99-siem-forward.conf; echo $? |
+| C16 | forward   | `local6.*` 的有界磁碟輔助佇列與持續重試設定正確；設定已載入，注入訊息後服務內有對應的獨立 queue worker | 0 | sudo /usr/local/libexec/pilot-siem-queue-check local6; echo $? |
+| C17 | forward   | `auth,authpriv.*` 使用另一個有界磁碟輔助佇列；設定已載入，注入兩種 facility 後服務內有對應的獨立 queue worker | 0 | sudo /usr/local/libexec/pilot-siem-queue-check auth authpriv; echo $? |
 | C18 | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
 | C19 | service   | `rsyslog.service` 為 active                                            | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
 | C20 | logrotate | `/etc/logrotate.d/` 下沒有任何 log path 被兩份以上的 policy 檔重複宣告（不限於本模組管理的 auditd/syslog 兩個檔案，涵蓋 distro 內建的 `rsyslog` 等所有檔案） | 0        | sh -c 'test -z "$(grep -rhoE "^/[^ {]+" /etc/logrotate.d/ 2>/dev/null | sort | uniq -d)" && echo 0 || echo 1' |
 | C21 | rule      | audisp-syslog plugin 已啟用且 facility 釘死 local6（沒有這條，local6 永遠不會有任何流量，跟轉送/接收設定是否正確無關） | 0        | sh -c 'grep -q "^active = yes" /etc/audit/plugins.d/syslog.conf && grep -q "^args = LOG_INFO LOG_LOCAL6" /etc/audit/plugins.d/syslog.conf && echo 0 || echo 1' |
-| C22 | functional| 送出 local6 測試訊息後 8 秒內，`rsyslogd` 對 `siem-log-server` 解析出的位址、轉送設定裡的埠有 ESTABLISHED 的 TCP 連線（C16/C17 只看設定；SELinux 等擋下連線時設定仍正確，訊息卻全部丟失）。log-server 重啟後 30 秒內 client 的轉送會暫停重試，這段時間內跑 verify 可能 FAIL | 0        | sh -c 'p=$(sed -n "s/^local6\.\*[[:space:]]*@@siem-log-server:\([0-9][0-9]*\).*/\1/p" /etc/rsyslog.d/99-siem-forward.conf 2>/dev/null); a=$(getent hosts siem-log-server | awk "NR==1{print \$1}"); [ -n "$p" ] && [ -n "$a" ] || { echo 1; exit 0; }; case $a in *:*) a="[$a]";; esac; i=0; while [ $i -lt 4 ]; do logger -p local6.info "PILOT-AUDIT-FWD-$$-$i"; sleep 2; if ss -Htnp state established "( dport = :$p and dst $a )" 2>/dev/null | grep -q "\"rsyslogd\""; then echo 0; exit 0; fi; i=$((i+1)); done; echo 1' |
+| C22 | functional| 送出 local6 測試訊息後 12 秒內，`rsyslogd` 對 `siem-log-server` 解析出的位址、omfwd action 的埠有 ESTABLISHED TCP 連線 | 0 | sh -c 'p=$(sed -n "s/^[[:space:]]*port=\"\([0-9][0-9]*\)\".*/\1/p" /etc/rsyslog.d/99-siem-forward.conf 2>/dev/null | sed -n 1p); a=$(getent hosts siem-log-server | awk "NR==1{print \$1}"); [ -n "$p" ] && [ -n "$a" ] || { echo 1; exit 0; }; case $a in *:*) a="[$a]";; esac; i=0; while [ $i -lt 6 ]; do logger -p local6.info "PILOT-AUDIT-FWD-$$-$i"; sleep 2; if ss -Htnp state established "( dport = :$p and dst $a )" 2>/dev/null | grep -q "\"rsyslogd\""; then echo 0; exit 0; fi; i=$((i+1)); done; echo 1' |
 
 > C1–C20 全部用**正邏輯 rc**（`; echo $?` 或原生 rc，C11 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0），不用反邏輯 grep + 數字
@@ -171,7 +196,7 @@
 | C11 | 無獨立 apply task（規則生效後的功能性自證，verify 時才觸發 `sudo -n true`） | — |
 | C12, C13, C14 | `template /etc/logrotate.d/{auditd,syslog}` | `rotate`/`maxage` 走 `audit_logrotate_*`/`syslog_logrotate_*` 變數 |
 | C15 | `lineinfile /etc/hosts` pin `siem-log-server` | 必須在轉送設定 render 之前（同 freeipa-client `/etc/hosts` 先於 enroll 的教訓） |
-| C16, C17 | `template 99-siem-forward.conf` | `auth,authpriv.*` + `local6.*` 都用 `@@`（TCP）轉送 |
+| C16, C17 | 建立私有 spool、安裝 runtime probe、render `99-siem-forward.conf`、驗證並載入設定 | 兩個獨立的 `omfwd` TCP action；單獨 `--tags C16` 或 `C17` 也會驗證與重啟；中斷後重跑會依寫入/啟動時間修復未載入的設定 |
 | C18, C19 | `ensure auditd + rsyslog enabled+restarted` | rsyslog 只在轉送設定真的變更時才 restart |
 | C20 | `stat` + `shell`（計算 distro rsyslog 檔還剩幾個其他路徑）+ `lineinfile`/`file`（Step 5a–5d，Debian 與 RedHat family 都跑，只看 `/etc/logrotate.d/rsyslog` 是否存在，不再用 `ansible_os_family` 額外過濾） | 只移除 `{{ audit_syslog_path }}` 這一行，其他路徑（Debian：`mail.log`/`kern.log`/`auth.log`...；RHEL：`cron`/`maillog`/`secure`/`spooler`...）留給 distro 自己的檔案繼續管；如果那份檔案原本就只列這一個路徑，改成整份移除，避免留下沒有檔名的空 block 讓 logrotate 解析失敗 |
 | C21 | `lineinfile`（Step 6e/6f，打開 `active` + 釘死 `args` facility，兩者都在 `--check` 模式下跳過）+ `command`（Step 8c 用 `pgrep` 確認 plugin process 是否真的在跑）+ Step 8a（Debian，`systemd: state: restarted`）/ Step 8b（RedHat，`pkill -HUP -x auditd`，見上方 v1.5 說明為何不能用 `systemctl restart` 或 `service`） | RedHat family 的 Step 1a 同步補裝 `audispd-plugins`（EL9 上這是 `audit` 套件以外的獨立 RPM）；Step 8a/8b 的觸發條件同時看「這次有沒有改到檔案」跟「plugin process 是否真的在跑」，避免前一輪失敗的 apply 留下「檔案已對、但從未 reload」的殘留狀態 |
@@ -251,3 +276,4 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 | 2026-08-07 | v1.5 | 新增 C21：啟用 audisp-syslog plugin（EL9 補裝 `audispd-plugins`，Step 6e/6f 把 `/etc/audit/plugins.d/syslog.conf` 的 `active` 打開、`args` facility 釘死 `LOG_LOCAL6`，Step 8a/8b 條件式 restart auditd）。real incident：minimal-poc round 20 對一個全新 clean-room 拓樸做深入 Loki 查核時，即使接收端（`log-server.md`）與轉送規則（C15–C17）都已正確部署，三台主機的 `/var/log/siem/<host>/audit.log` 仍完全不存在——因為這個 plugin 出貨時預設停用，auditd 從未真的產生任何 local6 流量。修的過程中連續踩到四個子問題，都在同一組 3 台主機（AlmaLinux 9 + 2×Ubuntu 24.04）現場實測確認：(1) Step 6e/6f 一開始沒有 `when: not ansible_check_mode`，在套件真的還沒裝的主機上 `--check` 預覽會直接失敗（同檔案 Step 8 的 auditd 啟動早就有這個 guard，這次沒套用到新任務上）；(2) AlmaLinux/RHEL 的 `auditd.service` 出貨 `RefuseManualStop=yes`，`ansible.builtin.systemd: state: restarted`（本質是 stop 再 start）的 stop 那一半會被系統拒絕，錯誤訊息是 `Operation refused, unit auditd.service may be requested by dependency only`；(3) 原本想改用 RHEL 傳統的 `service auditd restart` SysV wrapper 繞過限制，但 minimal EL9 image 根本沒裝 `initscripts`/`chkconfig`，`service` 這支指令完全不存在（`command not found`）；改成直接送 `SIGHUP` 給 auditd（`man auditd(8)` SIGNALS 明載「SIGHUP causes auditd to reconfigure」，訊號直接送給 process，完全不經過 systemd 的 stop 路徑，`RefuseManualStop` 對它沒有作用），實測送出後 audisp-syslog plugin process 確實重新起來、一筆真實 audit 事件（SSH session open）立刻被轉送到中央 SIEM；(4) 光靠「這次 apply 有沒有改到檔案」判斷要不要 reload 不夠：上一輪失敗的 apply 已經把 `active`/`args` 改好、但在真正 reload 之前就因為問題 (2) 而 rescue 中止，導致下一輪重跑時 lineinfile 兩個 task 都回報 unchanged（檔案本來就對了），Step 8a/8b 的 reload 就永遠不會觸發——即使 apply 回報 `failed=0`、看起來全綠，auditd 實際上仍在用舊設定跑，plugin 從未真的生效。新增 Step 8c 直接檢查 `audisp-syslog` process 是否真的在跑（`pgrep -x audisp-syslog`），跟檔案是否改變並列進 Step 8a/8b 的觸發條件，讓 reload 判斷不再只依賴這次 run 自己的異動旗標 | sre |
 | 2026-10-14 | v1.7 | 新增 C22：送出 local6 測試訊息後，`rsyslogd` 對轉送埠必須有 ESTABLISHED 的 TCP 連線。起因：PR #79 讓 inventory 的 `siem_forward_port` 生效後，AlmaLinux 9.8（SELinux Enforcing）上 `siem_forward_port: 2514` 的 client 設定完全正確（C16/C17 pass），但 `syslogd_t` 不能連 `unreserved_port_t`，rsyslog 回報 `cannot connect ... Permission denied`、所有訊息丟失、apply 成功；C22 在該狀態實測 FAIL，標成 `syslogd_port_t` 之後 PASS。apply 端的修正在 `tasks/rsyslog-selinux-tcp-port.yml`（Step 6g） | pilot |
 | 2026-10-14 | v1.8 | C22 改成送出訊息後每 2 秒檢查一次、最多 8 秒，並只承認目的地是 `siem-log-server` 解析出之位址的連線。v1.7 只等 3 秒且不看目的地：log-server 剛重啟時 client 的轉送暫停中會誤判 FAIL，連到別台主機的同一個埠則會誤判 PASS（PR #79 複審）。仍在 15 秒預設的單列逾時內；log-server 重啟後 30 秒內 rsyslog 的轉送暫停重試，這段時間內 C22 仍可能 FAIL | pilot |
+| 2026-10-20 | v1.9 | #122：C16/C17 驗證有界磁碟輔助 action queue、持續重試與已載入的獨立 queue worker；C22 改讀 omfwd 埠並等待最多 12 秒。明列 TCP 在途訊息與有限容量邊界 | pilot |

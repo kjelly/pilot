@@ -1,0 +1,88 @@
+#!/usr/bin/python3
+"""Verify the loaded SIEM action queues, including their live worker threads."""
+
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+CONFIG = pathlib.Path('/etc/rsyslog.d/99-siem-forward.conf')
+ACTIONS = {'local6': 'siem_audit', 'auth': 'siem_auth', 'authpriv': 'siem_auth'}
+
+
+def worker_name(action):
+    # Linux comm is capped at 15 bytes; captured on rsyslog 8.2312 / 8.2510.
+    return ('rs:' + action + ' queue')[:15]
+
+
+def output(*args):
+    return subprocess.check_output(args, text=True, timeout=3).strip()
+
+
+def check(facilities):
+    text = CONFIG.read_text()
+    for facility in facilities:
+        name = ACTIONS[facility]
+        selector = 'local6.*' if facility == 'local6' else 'auth,authpriv.*'
+        match = re.search(re.escape(selector) + r'\s+action\(([^)]*)\)', text)
+        if not match:
+            raise ValueError('missing forwarding action: ' + selector)
+        pairs = re.findall(r'([\w.]+)\s*=\s*"([^"]*)"', match[1])
+        params = dict(pairs)
+        required = {
+            'name': name, 'type': 'omfwd', 'target': 'siem-log-server',
+            'protocol': 'tcp', 'queue.type': 'LinkedList',
+            'queue.filename': name, 'queue.saveOnShutdown': 'on',
+            'queue.size': '10000', 'queue.highWatermark': '8000',
+            'queue.lowWatermark': '2000', 'queue.maxDiskSpace': '256m',
+            'queue.maxFileSize': '1m', 'queue.discardSeverity': '8',
+            'action.resumeRetryCount': '-1', 'action.resumeInterval': '1',
+            'action.resumeIntervalMax': '10',
+            'ResendLastMSGOnReconnect': 'on',
+        }
+        if len(pairs) != len(params) or any(params.get(k) != v for k, v in required.items()):
+            raise ValueError('invalid queue/retry contract: ' + name)
+        if not 1 <= int(params['port']) <= 65535:
+            raise ValueError('invalid forwarding port')
+        spool = pathlib.Path(params['queue.spoolDirectory'])
+        if str(spool) not in ('/var/spool/rsyslog/pilot-siem', '/var/lib/rsyslog/pilot-siem'):
+            raise ValueError('unexpected spool directory')
+        if not spool.is_dir():
+            raise ValueError('missing spool directory')
+
+    # Apply validates the full configuration with rsyslogd -N1 before loading it.
+    # Do not repeat that potentially slow DNS-dependent check in each spec row.
+    pid = output('systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog')
+    if int(pid) <= 0:
+        raise ValueError('rsyslog is not running')
+    started = float(output('date', '-d', output('systemctl', 'show', '--timestamp=us',
+                                             '-p', 'ActiveEnterTimestamp', '--value',
+                                             'rsyslog'), '+%s.%N'))
+    if started < CONFIG.stat().st_mtime:
+        raise ValueError('rsyslog has not loaded the current forwarding config')
+
+    # A direct queue has no dedicated worker. Exercise each facility and wait
+    # for the actual named action queue workers in the service process. This
+    # also fails if the forwarding fragment is not included by rsyslog.conf.
+    for facility in facilities:
+        subprocess.run(['logger', '--socket-errors=on', '-p', facility + '.info',
+                        'PILOT-SIEM-QUEUE-CHECK-' + facility], check=True, timeout=2)
+    deadline = time.monotonic() + 3
+    wanted = {worker_name(ACTIONS[f]) for f in facilities}
+    while time.monotonic() < deadline:
+        names = {p.read_text().strip() for p in pathlib.Path('/proc/' + pid + '/task').glob('*/comm')}
+        if wanted <= names:
+            return
+        time.sleep(0.1)
+    raise ValueError('forwarding queue workers absent: ' + ', '.join(sorted(wanted - names)))
+
+
+if __name__ == '__main__':
+    try:
+        if not sys.argv[1:] or any(f not in ACTIONS for f in sys.argv[1:]):
+            raise ValueError('usage: pilot-siem-queue-check local6|auth|authpriv [...]')
+        check(sys.argv[1:])
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

@@ -21,7 +21,7 @@ import (
 //	C12/C13 logrotate policy files for auditd + syslog exist
 //	C14     both logrotate policies pass a dry-run
 //	C15     /etc/hosts pins the siem-log-server alias
-//	C16/C17 rsyslog forward directives for local6.* and auth,authpriv.*
+//	C16/C17 parsed disk-assisted actions and live queue workers for local6/auth
 //	C18/C19 auditd + rsyslog active
 //	C20     no log path is declared by more than one policy file anywhere
 //	        under /etc/logrotate.d/ (catches cross-file duplicates that
@@ -184,9 +184,14 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 
 	// C16/C17 must reference the site-independent siem-log-server alias,
 	// never a raw IP (which would make the spec non-portable).
-	for _, id := range []string{"C15", "C16", "C17"} {
+	for _, id := range []string{"C15"} {
 		if !strings.Contains(cmd[id], "siem-log-server") {
 			t.Errorf("%s must reference the siem-log-server alias, got %q", id, cmd[id])
+		}
+	}
+	for _, id := range []string{"C16", "C17"} {
+		if !strings.Contains(cmd[id], "sudo /usr/local/libexec/pilot-siem-queue-check") {
+			t.Errorf("%s must verify the loaded action queue with the runtime probe, got %q", id, cmd[id])
 		}
 	}
 	if !strings.Contains(cmd["C16"], "local6") {
@@ -247,7 +252,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// It must also require the connection to go to the address
 	// siem-log-server resolves to, and retry for a few seconds within the
 	// default 15 s row timeout.
-	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 4 ]", "sleep 2"} {
+	for _, want := range []string{"logger -p local6.info", "99-siem-forward.conf", "ss -Htnp state established", "dport = :$p", "dst $a", "getent hosts siem-log-server", "rsyslogd", "while [ $i -lt 6 ]", "sleep 2"} {
 		if !strings.Contains(cmd["C22"], want) {
 			t.Errorf("C22 must contain %q, got %q", want, cmd["C22"])
 		}

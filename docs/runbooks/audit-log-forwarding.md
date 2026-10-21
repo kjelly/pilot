@@ -2,7 +2,7 @@
 
 > 撰寫日期：2026-07-06 (UTC)（v1.1 修訂：`siem_forward_host` 改選填 + §5.3 記錄
 > `pilot verify` matcher 引擎本身的一個真實 bug）
-> 對齊：`docs/verification/audit-log-forwarding.md`（v1.1）、
+> 對齊：`docs/verification/audit-log-forwarding.md`（v1.9）、
 > `playbooks/apply/audit-log-forwarding-apply.yml`、
 > `playbooks/templates/audit.rules.j2`
 > 前置依賴：`docs/runbooks/log-server.md`（若要驗證轉送，須先 apply 完成；
@@ -20,7 +20,7 @@
    `/etc/sudoers` 異動。
 2. **Logrotate**：`/etc/logrotate.d/{auditd,syslog}` 限制本機空間。
 3. **轉送**：`/etc/rsyslog.d/99-siem-forward.conf` 把 `auth,authpriv.*` 與
-   `local6.*`（auditd）用 TCP（`@@`）轉送到中央 SIEM（見 `log-server.md`）。
+   `local6.*`（auditd）透過各自的磁碟輔助 `omfwd` TCP 佇列轉送到中央 SIEM（見 `log-server.md`）。
 
 本 runbook 是 Shape 3（client+server）：client 端本機規則/服務用單機
 `pilot verify` 驗證，跨主機「訊息真的送到了」在 §4 用 client→server 的
@@ -30,19 +30,23 @@
 
 ## 1. §0.5 事實快照（AGENTS.md §2）
 
-> **目前有效的驗證摘要（2026-10-16）**：candidate `71ec617`（PR #79），3 台全新 vm-target
-> （Ubuntu log-server 兼 client、Ubuntu client、AlmaLinux 9.8 SELinux Enforcing client），
-> log-server 的 `siem_log_root: /srv/siem` 放在 checkout 外的 inventory group_vars。`topology test`
-> L3/L4 failed=0、L5 audit-log-forwarding 66/66（v1.8，含 C22 轉送連線檢查）、L6 changed=0；
-> 兩台 client 的訊息落在 `/srv/siem/<host>/`。log-server 的 rsyslog 停掉時，兩台 client 的 C22 FAIL
-> （其他列都 PASS）；啟動 30 秒後 44/44。
-> 已知缺口：接收端 rsyslog 重啟時，client 的轉送若剛好在重啟中重連，會暫停 30 秒（`99-siem-forward.conf` 的 `@@`
-> 規則沒有 action queue，rsyslog 預設 30 秒後才重試），這段時間的訊息丟掉；PR #79 的 run 中四次接收端重啟有三次
-> 各掉 130–138 筆（每 0.1 秒一筆）。`main` 也一樣，任何會重啟接收端的 log-server run 都可能發生。
-> `pilot deploy` 以 workspace inventory 設定 `siem_forward_port: 2514`（沒加引號）：preflight 通過，
-> 三台都轉送到 `siem-log-server:2514`，AlmaLinux client 的 tcp/2514 被標成 `syslogd_port_t`（沒有這個
-> 標籤時 rsyslog 回報 `Permission denied`、訊息全部丟失），兩台 client 的訊息都送達 log-server 與 Loki，
-> 重跑 changed=0，audit-log-forwarding.md 66/66。
+> **目前有效的驗證摘要（2026-10-20）**：candidate `b34e98dbc80c5328cae29a47bcbc48e13b488ba7`，
+> tree `e1975f819da5413859ecb9d187006118c8af4e1d`，由乾淨隔離 checkout 執行。
+> `audit-forward-queue-topology.yaml` 的實際 inventory：`log-server` = `aq-log`，
+> `audit-log-forwarding` = `aq-log, aq-ubuntu, aq-el`；前兩台 Ubuntu 24.04、後者 AlmaLinux 9
+> （SELinux Enforcing）。對齊採 A：receiver 同時加入 forwarding group，符合 log-server
+> C7/C8 的本機訊息驗收前提。無 vault 依賴，接收端使用預設 TCP/514 與 `/var/log/siem`。
+> 全新 ephemeral topology：L3/L4 failed=0、L5 log-server 11/11 + audit-log-forwarding 66/66、
+> L6 三台 changed=0。另建全新拓樸確認兩種 OS 的 C19 fatal config 不重啟原服務；
+> 故障後再次驗證 77/77、全鏈 changed=0，測試 VM 均已移除。
+> [本輪 recovery 證據](../evidence/audit-forward-queue/2026-10-20-b34e98d-review.md)。
+>
+> **TCP 佇列已補上，仍有在途訊息限制**：以下為先前 candidate `b9a58332` 的訊息流結果，
+> 本輪未重跑。確認停機後送出的 1,440 筆全部補送；
+> 72,000 筆落盤並在 receiver 停機期間乾淨重啟 client 後全部送達，另有 2 筆重複。
+> 持續送訊息時重啟 receiver 的正式演練為 1,437/1,440，遺失 3 筆在途訊息。
+> 本次保留 TCP 相容性；沒有接收端持久化 ACK，不能宣稱端到端零遺失。
+> 各 action 的 256 MiB 磁碟預算也不保證無限停機期間不漏送。
 >
 > 輸入限制：
 > - `siem_forward_port` 必須是 1–65535 的整數。YAML 裡沒加引號的 `02514`、`0x9C4` 會先被讀成
@@ -54,7 +58,7 @@
 > - 換回其他 port 時，舊 port 的 SELinux 標籤會保留（`semanage port -d -t syslogd_port_t -p tcp <port>`
 >   可移除）。
 >
-> 紀錄：[`2026-10-16-71ec617.md`](../evidence/play-vars-inventory-precedence/2026-10-16-71ec617.md)。
+> 紀錄：[`2026-10-20-b9a58332.md`](../evidence/audit-forward-queue/2026-10-20-b9a58332.md)。
 > 下面的 2026-07-06 快照是初版的事實紀錄。
 
 ```
@@ -266,7 +270,7 @@ apply→verify→cross-check，2026-07-06T03:48Z）：
 
 `local6.*`（模擬 auditd 轉送）與 `authpriv.*` 都正確依來源 hostname
 （`audit-log-forwarding`）分檔落地在 log-server 上，證明整條轉送鏈路
-（client `lineinfile` pin 別名 → `@@` TCP 轉送 → server `imtcp` 接收 →
+（client `lineinfile` pin 別名 → `omfwd` TCP 佇列轉送 → server `imtcp` 接收 →
 `%HOSTNAME%` dynaFile 路由）端到端是通的。
 
 ---
