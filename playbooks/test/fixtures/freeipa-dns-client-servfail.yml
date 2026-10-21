@@ -1,0 +1,134 @@
+---
+# Disposable-target regression for issue #98. Never changes the OS resolver.
+- name: Exercise the nameserver gate with a real unavailable forwarding upstream
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    issue98_root: /var/tmp/pilot-issue98
+    issue98_servers:
+      - {addr: 127.0.0.2, role: tier, host: unavailable-upstream, registered: false}
+      - {addr: 127.0.0.3, role: freeipa, host: healthy-dns, registered: true}
+  tasks:
+    - name: Install the real DNS tools through the apt framework
+      ansible.builtin.include_tasks:
+        file: ../../apply/tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [unbound, bind9-dnsutils]
+        pilot_apt_policy: tolerant
+        pilot_apt_component: issue98-dns-regression
+        pilot_apt_required_sources:
+          - {id: distro-os, class: os}
+      when: not ansible_check_mode
+
+    - name: Run the disposable DNS fixture and exercise the production task
+      when: not ansible_check_mode
+      block:
+        - name: Create private fixture directory
+          ansible.builtin.file:
+            path: "{{ issue98_root }}"
+            state: directory
+            mode: '0700'
+
+        - name: Configure isolated unbound instances
+          ansible.builtin.copy:
+            dest: "{{ issue98_root }}/{{ item.role }}.conf"
+            mode: '0600'
+            content: |
+              server:
+                interface: {{ item.addr }}@15353
+                do-daemonize: no
+                username: ""
+                chroot: ""
+                directory: "{{ issue98_root }}"
+                pidfile: "{{ issue98_root }}/{{ item.role }}.pid"
+                use-syslog: yes
+                do-not-query-localhost: no
+                module-config: "iterator"
+                infra-cache-min-rtt: 50
+                infra-cache-max-rtt: 250
+              {% if item.role == 'tier' %}
+              forward-zone:
+                name: "ipa.pilot.internal."
+                forward-addr: 127.0.0.4@15354
+                forward-first: no
+              {% else %}
+                local-zone: "ipa.pilot.internal." static
+                local-data: "ipa1.ipa.pilot.internal. 60 IN A 192.0.2.10"
+              {% endif %}
+          loop: "{{ issue98_servers }}"
+          register: issue98_configs
+
+        - name: Configure fixture service units
+          ansible.builtin.copy:
+            dest: "/etc/systemd/system/pilot-issue98-{{ item.role }}.service"
+            mode: '0644'
+            content: |
+              [Unit]
+              Description=Disposable issue98 {{ item.role }} DNS fixture
+              [Service]
+              ExecStart=/usr/sbin/unbound -d -c {{ issue98_root }}/{{ item.role }}.conf
+          loop: "{{ issue98_servers }}"
+          register: issue98_units
+
+        - name: Start the isolated DNS services
+          ansible.builtin.systemd_service:
+            name: "pilot-issue98-{{ item.role }}"
+            state: "{{ 'restarted' if (issue98_configs is changed or issue98_units is changed) else 'started' }}"
+            daemon_reload: "{{ issue98_units is changed }}"
+          loop: "{{ issue98_servers }}"
+
+        - name: Query both real nameservers using the resolver probe options
+          ansible.builtin.command:
+            argv: "{{ ['dig', '+time=2', '+tries=2', '+noall', '+comments', '+answer', '-p', '15353', '@' ~ item.0.addr, 'ipa1.ipa.pilot.internal.', item.1] }}"
+          loop: "{{ issue98_servers | product(['A', 'AAAA']) | list }}"
+          register: issue98_results
+          changed_when: false
+
+        - name: Assert the intended fault and healthy fallback actually exist
+          ansible.builtin.assert:
+            that:
+              - issue98_results.results[0].stdout is search('status: SERVFAIL')
+              - issue98_results.results[1].stdout is search('status: SERVFAIL')
+              - issue98_results.results[2].stdout is search('192.0.2.10')
+
+        - name: Confirm the SERVFAIL tier permits a healthy fallback
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-dns-client-nameserver-check.yml
+          vars:
+            freeipa_dns_ns_roles: "{{ issue98_servers }}"
+            freeipa_dns_ns_results: "{{ issue98_results }}"
+            freeipa_dns_ns_name: ipa1.ipa.pilot.internal
+            freeipa_dns_ns_freeipa_answered: true
+
+        - name: Confirm SERVFAIL alone is rejected
+          block:
+            - name: Exercise the same production gate with no healthy fallback
+              ansible.builtin.include_tasks:
+                file: ../../apply/tasks/freeipa-dns-client-nameserver-check.yml
+              vars:
+                freeipa_dns_ns_roles: "{{ issue98_servers[:1] }}"
+                freeipa_dns_ns_results: "{{ issue98_results }}"
+                freeipa_dns_ns_name: ipa1.ipa.pilot.internal
+                freeipa_dns_ns_freeipa_answered: false
+          rescue:
+            - name: Assert the expected gate rejected an all-SERVFAIL list
+              ansible.builtin.assert:
+                that:
+                  - ansible_failed_task.name == 'FreeIPA DNS client — nameserver check: Gate'
+                  - freeipa_dns_ns_working | length == 0
+                  - freeipa_dns_ns_servfail | length == 1
+                  - freeipa_dns_ns_no_address | length == 0
+            - name: Record successful negative-path assertion
+              ansible.builtin.set_fact:
+                issue98_negative_passed: true
+
+        - name: Require the negative path to have triggered
+          ansible.builtin.assert:
+            that: issue98_negative_passed | default(false) | bool
+
+        - name: Record the completed pair of runtime gate assertions
+          ansible.builtin.copy:
+            dest: "{{ issue98_root }}/result"
+            content: "healthy-fallback=pass all-servfail=blocked\n"
+            mode: '0600'
