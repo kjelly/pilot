@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // aptStaleProbeSearchRe extracts the regex apt-download-probe.yml passes
@@ -101,8 +104,8 @@ func readAptTask(t *testing.T, name string) string {
 // TestAptNetworkStepsHaveWallClock locks the 2026-09-23 fix for a hung
 // refresh: apt-get update sat on a half-closed connection to a caching
 // proxy with no end, blocking the whole play. Every apt-get network step in
-// the shared framework must run under coreutils `timeout` with its
-// documented default, and a timeout (rc 124/-9) must never read as a
+// the shared framework must run under `timeout` with its
+// documented default, and a timeout (rc 124/137/-9) must never read as a
 // healthy refresh.
 func TestAptNetworkStepsHaveWallClock(t *testing.T) {
 	for _, tc := range []struct {
@@ -137,33 +140,69 @@ func TestAptNetworkStepsHaveWallClock(t *testing.T) {
 	}
 }
 
-// TestAptTimeoutExitCodes checks the rc values the playbooks treat as a
-// timeout against the real coreutils `timeout` on this machine, run through
-// Python's subprocess the way Ansible's command module runs it (AGENTS.md
-// §5.6: real behavior, not a remembered convention): 124 when TERM ends the
-// command, -9 when --kill-after has to KILL it — `timeout` KILLs its whole
-// process group, itself included, so there is no exit status 137 to see.
+// TestAptTimeoutExitCodes checks real timeout behavior through Python's
+// subprocess, as used by Ansible. TERM reports 124; forced KILL reports
+// either -9 (GNU timeout kills itself) or 137 (uutils reports the child).
+// The child keeps stdout open while sleeping, so receiving EOF within the
+// bound also proves the requested process stopped, rather than just its wrapper.
 func TestAptTimeoutExitCodes(t *testing.T) {
 	if _, err := exec.LookPath("timeout"); err != nil {
-		t.Skip("coreutils timeout not installed")
+		t.Skip("timeout not installed")
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
-	const script = `import subprocess
-for s in ["sleep 5", "trap '' TERM; sleep 5"]:
-    print(subprocess.run(["timeout", "--kill-after=1", "1", "sh", "-c", s]).returncode)
+	const script = `import json, os, signal, subprocess, sys, time
+child = "import os, signal, sys, time; signal.signal(signal.SIGTERM, %s); print(os.getpid(), flush=True); time.sleep(30)"
+for handler in ["signal.SIG_DFL", "signal.SIG_IGN"]:
+    started = time.monotonic()
+    p = subprocess.Popen(["timeout", "--kill-after=1", "1", sys.executable, "-c", child % handler],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = p.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
+        raise
+    print(json.dumps({"rc": p.returncode, "elapsed": time.monotonic() - started,
+                      "child_pid": int(stdout.strip()), "stderr": stderr}), flush=True)
 `
-	out, err := exec.Command("python3", "-c", script).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "python3", "-c", script)
+	command.WaitDelay = time.Second
+	out, err := command.Output()
 	if err != nil {
-		t.Fatalf("python3: %v", err)
+		t.Fatalf("real timeout probe: %v\n%s", err, out)
 	}
-	if got := strings.Fields(string(out)); len(got) != 2 || got[0] != "124" || got[1] != "-9" {
-		t.Fatalf("timeout rc as Python sees it = %q, want [124 -9]", got)
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("timeout probe returned %d records, want 2: %s", len(lines), out)
+	}
+	for i, line := range lines {
+		var result struct {
+			RC       int     `json:"rc"`
+			Elapsed  float64 `json:"elapsed"`
+			ChildPID int     `json:"child_pid"`
+			Stderr   string  `json:"stderr"`
+		}
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("decode timeout probe: %v: %s", err, line)
+		}
+		if result.ChildPID <= 0 || result.Elapsed >= 8 {
+			t.Errorf("child did not start and terminate within its bound: %+v", result)
+		}
+		if i == 0 && result.RC != 124 {
+			t.Errorf("TERM timeout rc = %d, want 124: %+v", result.RC, result)
+		}
+		if i == 1 && result.RC != -9 && result.RC != 137 {
+			t.Errorf("KILL timeout rc = %d, want -9 or 137: %+v", result.RC, result)
+		}
+		t.Logf("real timeout case %d: rc=%d child=%d elapsed=%.3fs", i, result.RC, result.ChildPID, result.Elapsed)
 	}
 	for _, file := range []string{"apt-cache-refresh.yml", "apt-scoped-refresh.yml", "apt-download-probe.yml"} {
 		if !strings.Contains(readAptTask(t, file), "in [124, 137, -9]") {
-			t.Errorf("%s must treat rc 124 and -9 (and 137 via a shell) as a timeout", file)
+			t.Errorf("%s must classify TERM rc 124 and KILL rc 137/-9 as timeouts", file)
 		}
 	}
 }
