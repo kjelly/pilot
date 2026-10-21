@@ -37,6 +37,10 @@ func pushRosterHostAccessMenu(r *editRouterModel, dir, path, banner string) tea.
 		case 1:
 			return pushRosterHBACMenu(r, dir, path, "")
 		case 2:
+			if err := validateSecretSourcePath(dir, path); err != nil {
+				r.err = err
+				return nil
+			}
 			if err := inventory.SetRosterHBACDisableAllowAll(path, !disabled); err != nil {
 				r.err = err
 				return nil
@@ -92,6 +96,10 @@ func pushRosterAddHostgroup(r *editRouterModel, dir, path string) tea.Cmd {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
 		}
 		name := strings.TrimSpace(m.Value())
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterHostgroup(path, name); err != nil {
 			r.err = err
 			return nil
@@ -210,6 +218,10 @@ func pushRosterHostgroupEdit(r *editRouterModel, dir, path, name string, mutate 
 	}
 	if len(v) > 0 {
 		return pushRosterHostgroupDetail(r, dir, path, name, formatRosterViolations(v))
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
 	}
 	if err := inventory.SetRosterHostgroup(path, name, f); err != nil {
 		r.err = err
@@ -453,6 +465,10 @@ func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, group
 		if len(v) > 0 {
 			return pushRosterHBACMenu(r, dir, path, formatRosterViolations(v))
 		}
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterHBACRule(path, rule); err != nil {
 			r.err = err
 			return nil
@@ -645,6 +661,10 @@ func pushRosterHBACEdit(r *editRouterModel, dir, path, name, banner string, muta
 	}
 	if len(v) > 0 {
 		return pushRosterHBACDetail(r, dir, path, name, formatRosterViolations(v))
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
 	}
 	if err := inventory.SetRosterHBACRule(path, name, f); err != nil {
 		r.err = err

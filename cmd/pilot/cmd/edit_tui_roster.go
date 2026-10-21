@@ -379,6 +379,10 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		if len(violations) > 0 {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterUser(path, name); err != nil {
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
@@ -496,6 +500,10 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 		}
 		if len(violations) > 0 {
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
+		}
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
 		}
 		if err := inventory.AppendRosterGroup(path, name, category); err != nil {
 			r.err = fmt.Errorf("write %s: %w", path, err)
@@ -669,7 +677,10 @@ func rosterIntValidator(s string) error {
 // gate chain (Simulate first, only write once it reports no violations).
 // ok=false means nothing was written — either a validation rejection
 // (banner explains why) or name no longer exists.
-func rosterApplyUserEdit(path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		return "", false, err
+	}
 	fields, found, err := inventory.RosterUser(path, name)
 	if err != nil {
 		return "", false, err
@@ -696,7 +707,7 @@ func rosterApplyUserEdit(path, name string, mutate func(map[string]any)) (banner
 // (possibly changed) detail screen — the commit point every scalar/bool/
 // enum/password field widget below routes through.
 func pushRosterEditUser(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyUserEdit(path, name, mutate)
+	banner, _, err := rosterApplyUserEdit(dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil
@@ -1037,7 +1048,7 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 // (not the rejected newValues) on a validation failure, so the screen
 // always shows what's actually on disk.
 func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, oldValues, newValues []string) tea.Cmd {
-	banner, ok, err := rosterApplyUserEdit(path, name, func(f map[string]any) {
+	banner, ok, err := rosterApplyUserEdit(dir, path, name, func(f map[string]any) {
 		ssh := rosterSubmapClone(f, "ssh_keys")
 		ssh["authoritative"] = true
 		ssh["values"] = newValues
@@ -1056,7 +1067,10 @@ func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, old
 // ---- groups: full-detail preview + per-field edit -----------------------
 
 // rosterApplyGroupEdit is rosterApplyUserEdit's group counterpart.
-func rosterApplyGroupEdit(path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		return "", false, err
+	}
 	fields, found, err := inventory.RosterGroup(path, name)
 	if err != nil {
 		return "", false, err
@@ -1080,7 +1094,7 @@ func rosterApplyGroupEdit(path, name string, mutate func(map[string]any)) (banne
 }
 
 func pushRosterEditGroup(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyGroupEdit(path, name, mutate)
+	banner, _, err := rosterApplyGroupEdit(dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil

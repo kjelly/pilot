@@ -88,6 +88,10 @@ func pushRosterAddSudoCommandGroupCommands(r *editRouterModel, dir, path, name s
 		if len(v) > 0 {
 			return pushRosterSudoCommandGroupsMenu(r, dir, path, formatRosterViolations(v))
 		}
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterSudoCommandGroup(path, entry); err != nil {
 			r.err = err
 			return nil
@@ -156,6 +160,10 @@ func pushRosterSudoCommandGroupEdit(r *editRouterModel, dir, path, name string, 
 	}
 	if len(v) > 0 {
 		return pushRosterSudoCommandGroupDetail(r, dir, path, name, formatRosterViolations(v))
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
 	}
 	if err := inventory.SetRosterSudoCommandGroup(path, name, f); err != nil {
 		r.err = err
@@ -258,6 +266,10 @@ func pushRosterAddSudoRuleCommands(r *editRouterModel, dir, path, name string, g
 		}
 		if len(v) > 0 {
 			return pushRosterSudoRulesMenu(r, dir, path, formatRosterViolations(v))
+		}
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
 		}
 		if err := inventory.AppendRosterSudoRule(path, entry); err != nil {
 			r.err = err
@@ -456,6 +468,10 @@ func pushRosterSudoRuleEdit(r *editRouterModel, dir, path, name string, mutate f
 	}
 	if len(v) > 0 {
 		return pushRosterSudoRuleDetail(r, dir, path, name, formatRosterViolations(v))
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
 	}
 	if err := inventory.SetRosterSudoRule(path, name, f); err != nil {
 		r.err = err

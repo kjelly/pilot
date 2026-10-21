@@ -157,6 +157,10 @@ func pushRosterAddPasswordPolicyPriority(r *editRouterModel, dir, path, name, gr
 			return pushRosterPasswordPoliciesMenu(r, dir, path, "")
 		}
 		priority, _ := strconv.Atoi(strings.TrimSpace(m.Value()))
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterPasswordPolicy(path, name); err != nil {
 			r.err = err
 			return nil
@@ -276,6 +280,10 @@ func pushRosterPasswordPolicyEdit(r *editRouterModel, dir, path, name string, mu
 	if len(v) > 0 {
 		return pushRosterPasswordPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
 	if err := inventory.SetRosterPasswordPolicy(path, name, f); err != nil {
 		r.err = err
 		return nil
@@ -328,6 +336,10 @@ func pushRosterAddCredentialPolicy(r *editRouterModel, dir, path string) tea.Cmd
 			return pushRosterCredentialPoliciesMenu(r, dir, path, "")
 		}
 		name := strings.TrimSpace(m.Value())
+		if err := validateSecretSourcePath(dir, path); err != nil {
+			r.err = err
+			return nil
+		}
 		if err := inventory.AppendRosterCredentialPolicy(path, name); err != nil {
 			r.err = err
 			return nil
@@ -458,6 +470,10 @@ func pushRosterCredentialPolicyEdit(r *editRouterModel, dir, path, name string, 
 	if len(v) > 0 {
 		return pushRosterCredentialPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
 	if err := inventory.SetRosterCredentialPolicy(path, name, f); err != nil {
 		r.err = err
 		return nil
@@ -550,6 +566,10 @@ func pushPrivilegedIdentityEdit(r *editRouterModel, dir, path string, mutate fun
 	}
 	if len(v) > 0 {
 		return pushPrivilegedIdentityDetail(r, dir, path, formatRosterViolations(v))
+	}
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
 	}
 	if err := inventory.SetRosterPrivilegedIdentity(path, f); err != nil {
 		r.err = err
