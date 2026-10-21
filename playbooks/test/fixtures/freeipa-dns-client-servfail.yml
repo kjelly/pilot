@@ -93,8 +93,8 @@
         - name: Assert the intended fault and healthy fallback actually exist
           ansible.builtin.assert:
             that:
-              - issue98_results.results[0].stdout is search('status: SERVFAIL')
-              - issue98_results.results[1].stdout is search('status: SERVFAIL')
+              - "issue98_results.results[0].stdout is search('status: SERVFAIL')"
+              - "issue98_results.results[1].stdout is search('status: SERVFAIL')"
               - issue98_results.results[2].stdout is search('192.0.2.10')
 
         - name: Confirm the SERVFAIL tier permits a healthy fallback
@@ -120,7 +120,7 @@
             - name: Assert the expected gate rejected an all-SERVFAIL list
               ansible.builtin.assert:
                 that:
-                  - ansible_failed_task.name == 'FreeIPA DNS client — nameserver check: Gate'
+                  - "ansible_failed_task.name == 'FreeIPA DNS client — nameserver check: Gate'"
                   - freeipa_dns_ns_working | length == 0
                   - freeipa_dns_ns_servfail | length == 1
                   - freeipa_dns_ns_no_address | length == 0
