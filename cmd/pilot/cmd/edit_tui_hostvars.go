@@ -166,7 +166,7 @@ func pushForcedHostVarsPromptChain(r *editRouterModel, dir, path string, hf *inv
 		}
 		prompt := strings.TrimSpace(banner + "\n" + e.Description)
 		label := fmt.Sprintf("角色需要新設定：%s 的新值", e.Key)
-		spec := tui.InputSpec{ScreenID: forcedHostVarsPromptScreenID(e.Key), Title: label, Default: e.Value}
+		spec := tui.InputSpec{ScreenID: forcedHostVarsPromptScreenID(e.Key), Title: label, Default: e.Value, Secret: inventorySecretPolicy().SensitiveKey(e.Key), Validate: func(value string) error { return validateVarsValue(hvPath, e.Key, value) }}
 		return r.transitionTo(r.uiFactory().Input(spec), prompt, func(r *editRouterModel, s screen) tea.Cmd {
 			m := s.(tui.InputScreen)
 			if !m.Canceled() {
@@ -201,6 +201,10 @@ func pushHostVarsEditor(r *editRouterModel, dir, path string, hf *inventory.Host
 }
 
 func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, dirty bool, banner string) tea.Cmd {
+	if err := validateVarsDocument(hvPath, doc.Bytes()); err != nil {
+		r.err = err
+		return nil
+	}
 	entries := doc.Entries()
 	// A host_vars key is its own stable identity (it is the YAML key this row
 	// edits — the same key forcedHostVarsPromptScreenID already keys off), so
@@ -241,6 +245,10 @@ func pushHostVarsEditorScreen(r *editRouterModel, dir, path string, hf *inventor
 		idx := m.Selected()
 		switch {
 		case idx == len(choices)-2:
+			if err := validateVarsDocument(hvPath, doc.Bytes()); err != nil {
+				r.err = err
+				return nil
+			}
 			if err := os.WriteFile(hvPath, doc.Bytes(), 0o644); err != nil {
 				r.err = fmt.Errorf("write %s: %w", hvPath, err)
 				return nil
@@ -297,7 +305,7 @@ func pushHostVarsEntryMenu(r *editRouterModel, dir, path string, hf *inventory.H
 
 func pushHostVarsEditValue(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name, hvPath string, doc *groupvars.Doc, e groupvars.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值", e.Key)
-	spec := tui.InputSpec{Title: label, Default: e.Value}
+	spec := tui.InputSpec{Title: label, Default: e.Value, Secret: inventorySecretPolicy().SensitiveKey(e.Key), Validate: func(value string) error { return validateVarsValue(hvPath, e.Key, value) }}
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {

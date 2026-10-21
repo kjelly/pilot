@@ -178,6 +178,10 @@ func (r editRouterModel) View() tea.View {
 func newEditRouterModel(dir string) editRouterModel {
 	var r editRouterModel
 	r.factory = tui.NewHuhFactory()
+	if err := validateInventorySecretStorage(dir); err != nil {
+		r.err = err
+		return r
+	}
 	pushTopMenu(&r, dir, "")
 	return r
 }
@@ -214,6 +218,9 @@ func init() {
 }
 
 func runEdit(cmd *cobra.Command, args []string) error {
+	if err := validateInventorySecretStorage(editDir); err != nil {
+		return err
+	}
 	out := cmd.OutOrStdout()
 
 	// Check --actions flag FIRST: structured path does not require TTY

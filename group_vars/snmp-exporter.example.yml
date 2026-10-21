@@ -28,9 +28,6 @@
 
 # SNMP 認證密碼一律用 ansible-vault 加密檔帶入,依
 # monitoring/snmp/catalog.yml authProfile 的 credentialRef 動態鍵值,不要明文寫在這裡
-# (除了拋棄式沙盒測試)。範例骨架見 vault 產生器的 "snmp-exporter" 區塊。
-# snmp_exporter_credentials:
-#   core-switch-v3:
-#     username: ""
-#     authPassword: ""
-#     privPassword: ""
+# (Vault 檔必須放在 group_vars/、host_vars/ 以外)。範例骨架見 vault 產生器的 "snmp-exporter" 區塊。
+# snmp_exporter_credentials: "{{ vault_snmp_exporter_credentials }}"
+# vault_snmp_exporter_credentials 的 map 請放在外部加密 Vault vars。

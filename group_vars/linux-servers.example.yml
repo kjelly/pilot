@@ -24,4 +24,4 @@ keycloak_client_id: ssh-pam-client
 
 # client secret —— 若你的 client 是 confidential,填在這;否則留空。
 # 機密建議放 ansible-vault 加密檔、用 -e @vault 帶入,不要明文寫這裡。
-# keycloak_client_secret: ""
+# keycloak_client_secret: "{{ vault_keycloak_client_secret }}"

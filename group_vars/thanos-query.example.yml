@@ -22,8 +22,8 @@ thanos_s3_target_host: ""
 
 # S3 credentials —— 必須跟每一站 prometheus.example.yml 用同一組,一律用
 # ansible-vault 加密檔帶入(拋棄式沙盒測試除外)。
-# thanos_aws_access_key_id: ""
-# thanos_aws_secret_access_key: ""
+# thanos_aws_access_key_id: "{{ vault_thanos_aws_access_key_id }}"
+# thanos_aws_secret_access_key: "{{ vault_thanos_aws_secret_access_key }}"
 
 # bucket 名稱 —— 必須跟每一站 prometheus.example.yml 用同一個值。
 # thanos_s3_bucket: pilot-thanos-metrics

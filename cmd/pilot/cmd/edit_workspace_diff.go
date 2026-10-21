@@ -58,12 +58,12 @@ func diffEntries(before, after []managedFileEntry) (patch string, affected []str
 	for _, e := range before {
 		info := get(e.RelPath)
 		info.before, info.haveBefore = e.Content, true
-		info.isSecret = info.isSecret || e.IsSecret
+		info.isSecret = info.isSecret || e.IsSecret || varsContentNeedsRedaction(e.RelPath, e.Content)
 	}
 	for _, e := range after {
 		info := get(e.RelPath)
 		info.after, info.haveAfter = e.Content, true
-		info.isSecret = info.isSecret || e.IsSecret
+		info.isSecret = info.isSecret || e.IsSecret || varsContentNeedsRedaction(e.RelPath, e.Content)
 	}
 
 	sortedPaths := make([]string, 0, len(byPath))

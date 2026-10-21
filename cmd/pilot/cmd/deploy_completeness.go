@@ -64,6 +64,9 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 // hard gate. It shares the same resolved inventory with topology previews and
 // auto-host prompts instead of starting further ansible-inventory processes.
 func validateDeploymentCompletenessSnapshot(inv string, snapshot deployInventorySnapshot) ([]completenessViolation, error) {
+	if err := validateInventorySecretStorage(filepath.Dir(inv)); err != nil {
+		return nil, err
+	}
 	groups := snapshot.Groups
 	hostVars := snapshot.HostVars
 

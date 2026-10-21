@@ -330,7 +330,9 @@ func TestCopyMissingGroupVars_AutofillsCrossRoleHostVarsForFreshFile(t *testing.
 	}}
 
 	var buf bytes.Buffer
-	copyMissingGroupVars(&buf, ".", []string{"freeipa"}, hf)
+	if err := copyMissingGroupVars(&buf, ".", []string{"freeipa"}, hf); err != nil {
+		t.Fatal(err)
+	}
 
 	assertFileContent(t, "group_vars/freeipa.yml", "freeipa_server_ip: 10.1.58.11\nfreeipa_domain: ipa.pilot.internal\n")
 }

@@ -14,6 +14,9 @@ import (
 // unambiguous cross-role host defaults. Existing user files and active values
 // remain authoritative.
 func prepareMinimalWorkspace(dir string) error {
+	if err := validateInventorySecretStorage(dir); err != nil {
+		return err
+	}
 	hostsPath := filepath.Join(dir, "hosts.yml")
 	data, err := os.ReadFile(hostsPath)
 	if err != nil {
@@ -24,7 +27,9 @@ func prepareMinimalWorkspace(dir string) error {
 		return fmt.Errorf("parse %s: %w", hostsPath, err)
 	}
 
-	copyMissingGroupVars(io.Discard, dir, inventory.GroupVarsStems(hf), hf)
+	if err := copyMissingGroupVars(io.Discard, dir, inventory.GroupVarsStems(hf), hf); err != nil {
+		return err
+	}
 	writeMissingVaultSkeleton(io.Discard, filepath.Join(dir, ".vault", "main.yaml"), hf)
 	writeMissingHostVarsSkeleton(io.Discard, dir, hf)
 	writeMissingNFSRosterEntries(io.Discard, dir, hf)
@@ -56,6 +61,9 @@ func autofillMinimalWorkspaceGroupVars(dir string, hf *inventory.HostsFile) erro
 		updated := autofillCrossRoleHostVars(dir, hf, data)
 		if string(updated) == string(data) {
 			continue
+		}
+		if err := validateVarsDocument(path, updated); err != nil {
+			return err
 		}
 		if err := os.WriteFile(path, updated, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)

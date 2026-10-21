@@ -107,6 +107,10 @@ func pushGroupVarsFilePicker(r *editRouterModel, dir, banner string) tea.Cmd {
 				return nil
 			}
 			data = autofillCrossRoleHostVars(dir, hf, data)
+			if err := validateVarsDocument(dst, data); err != nil {
+				r.err = err
+				return nil
+			}
 			if merr := os.MkdirAll(targetDir, 0o755); merr != nil {
 				r.err = fmt.Errorf("mkdir %s: %w", targetDir, merr)
 				return nil
@@ -389,6 +393,10 @@ func pushGroupVarsEditor(r *editRouterModel, dir, path, banner string) tea.Cmd {
 }
 
 func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupvars.Doc, dirty bool, banner string) tea.Cmd {
+	if err := validateVarsDocument(path, doc.Bytes()); err != nil {
+		r.err = err
+		return nil
+	}
 	entries := doc.Entries()
 	listEntries := doc.ListEntries()
 	// A group_vars key is its own stable identity (it is the YAML key this row
@@ -486,6 +494,10 @@ func pushGroupVarsEditorScreen(r *editRouterModel, dir, path string, doc *groupv
 		idx := m.Selected()
 		switch choices[idx].ID {
 		case "group_vars.entries.save":
+			if err := validateVarsDocument(path, doc.Bytes()); err != nil {
+				r.err = err
+				return nil
+			}
 			if err := os.WriteFile(path, doc.Bytes(), 0o644); err != nil {
 				r.err = fmt.Errorf("write %s: %w", path, err)
 				return nil
@@ -577,7 +589,7 @@ func pushGroupVarsEntryMenu(r *editRouterModel, dir, path string, doc *groupvars
 
 func pushGroupVarsEditValue(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.Entry, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 的新值", e.Key)
-	spec := tui.InputSpec{Title: label, Default: e.Value}
+	spec := tui.InputSpec{Title: label, Default: e.Value, Secret: inventorySecretPolicy().SensitiveKey(e.Key), Validate: func(value string) error { return validateVarsValue(path, e.Key, value) }}
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
@@ -669,7 +681,7 @@ func pushGroupVarsListItemsMenu(r *editRouterModel, dir, path string, doc *group
 }
 
 func pushGroupVarsAddListItem(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, dirty bool) tea.Cmd {
-	spec := tui.InputSpec{Title: "新項目的值"}
+	spec := tui.InputSpec{Title: "新項目的值", Secret: inventorySecretPolicy().SensitiveKey(e.Key), Validate: func(value string) error { return validateVarsValue(path, e.Key, value) }}
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {
@@ -717,7 +729,7 @@ func pushGroupVarsListItemAction(r *editRouterModel, dir, path string, doc *grou
 
 func pushGroupVarsEditListItemValue(r *editRouterModel, dir, path string, doc *groupvars.Doc, e groupvars.ListEntry, itemIdx int, dirty bool) tea.Cmd {
 	label := fmt.Sprintf("%s 第 %d 項的新值", e.Key, itemIdx+1)
-	spec := tui.InputSpec{Title: label, Default: e.Values[itemIdx]}
+	spec := tui.InputSpec{Title: label, Default: e.Values[itemIdx], Secret: inventorySecretPolicy().SensitiveKey(e.Key), Validate: func(value string) error { return validateVarsValue(path, e.Key, value) }}
 	return r.transitionTo(r.uiFactory().Input(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
 		m := s.(tui.InputScreen)
 		if m.Canceled() {

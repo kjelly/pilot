@@ -27,10 +27,10 @@ restic_s3_target_host: ""
 # restic_repository: "s3:https://s3.amazonaws.com/my-real-bucket"
 
 # S3 credentials 與 repository 加密密碼 —— 全部必填、沒有預設值,一律用
-# ansible-vault 加密檔帶入,不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
-# restic_aws_access_key_id: ""
-# restic_aws_secret_access_key: ""
-# restic_password: ""
+# ansible-vault 加密檔帶入,不要明文寫在這裡或用 -e 帶(Vault 檔必須放在 group_vars/、host_vars/ 以外)。
+# restic_aws_access_key_id: "{{ vault_restic_aws_access_key_id }}"
+# restic_aws_secret_access_key: "{{ vault_restic_aws_secret_access_key }}"
+# restic_password: "{{ vault_restic_password }}"
 #
 # 注意:若 SeaweedFS S3 gateway 是預設的匿名模式(seaweedfs-s3.md 沒帶
 # seaweedfs_s3_config_path),restic 會直接失敗 —— restic 一律送簽章請求,

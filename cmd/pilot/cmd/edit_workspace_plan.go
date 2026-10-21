@@ -38,6 +38,9 @@ type editPlanResult struct {
 // tool) sets opts.Trace/opts.Recorder; the zero value behaves exactly
 // like a bare recorder-less session (every field defaults to a no-op).
 func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOptions) (*editPlanResult, error) {
+	if err := validateInventorySecretStorage(dir); err != nil {
+		return nil, err
+	}
 	if err := validateEditScenario(scenario); err != nil {
 		return nil, err
 	}
@@ -91,6 +94,10 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 // inventory.Lint — see saveHosts) against dir, splitting results into
 // blocking vs. warning by severity.
 func collectWorkspaceValidation(dir string) (blocking, warnings []string) {
+	if err := validateInventorySecretStorage(dir); err != nil {
+		blocking = append(blocking, err.Error())
+		return blocking, warnings
+	}
 	for _, c := range checkWorkspaceCompleteness(dir) {
 		if c.OK {
 			continue
