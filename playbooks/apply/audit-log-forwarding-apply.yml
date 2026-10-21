@@ -319,7 +319,10 @@
             # does not mean a policy fragment is malformed. Missing/unreadable
             # inputs or an abnormal validator process status fail closed.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
+              output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
+              if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
+              ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               /var/log/audit/audit.log {
@@ -344,7 +347,10 @@
             mode: "0644"
             # See Step 4.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
+              output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
+              if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
+              ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
             content: |
               # Managed by ansible (audit-log-forwarding-apply.yml) — DO NOT EDIT BY HAND
               {{ audit_syslog_path }} {
@@ -401,7 +407,10 @@
             state: absent
             # See Step 4: this distro policy relies on the global `su`.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
+              output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
+              if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
+              ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
             - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0

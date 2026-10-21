@@ -519,7 +519,10 @@
             # does not mean a policy fragment is malformed. Missing/unreadable
             # inputs or an abnormal validator process status fail closed.
             validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1; output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac; if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi; ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
+              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
+              output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
+              if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
+              ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
             content: |
               # Managed by ansible (log-server-apply.yml) — DO NOT EDIT BY HAND
               {{ siem_log_root }}/*/*.log {
