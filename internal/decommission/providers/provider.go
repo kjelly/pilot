@@ -70,6 +70,11 @@ type Step struct {
 	Phase          string // local_cleanup | central_cleanup
 	Action         string
 	TargetIdentity string
+	// HostIdentitySource records whether a host cleanup target was resolved
+	// by live discovery or fell back to the supplied inventory identity.
+	// It is descriptive metadata only; the empty value identifies legacy
+	// steps that did not retain provenance.
+	HostIdentitySource HostIdentitySource `json:",omitempty"`
 	// Params carries small, provider-defined, non-secret key/value data a
 	// later ExecutorForStep call needs to actually run this step for real
 	// (e.g. a resolved roster file path) — never executable content
@@ -79,6 +84,14 @@ type Step struct {
 	// supplied value.
 	Params map[string]string `json:",omitempty"`
 }
+
+// HostIdentitySource is the provenance of a host cleanup target identity.
+type HostIdentitySource string
+
+const (
+	HostIdentityAuthoritative HostIdentitySource = "authoritative"
+	HostIdentityFallback      HostIdentitySource = "inventory_fallback"
+)
 
 // StepExecutor is one planned Step's real Inspect-then-Execute contract
 // (spec.md §27.1/§27.2, INV-9/HD18, Phase 3b). Its method set is

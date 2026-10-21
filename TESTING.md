@@ -40,8 +40,8 @@ rm -rf .verification/ ~/.local/share/pilot/history.db
 ## 1. 測試分層
 
 ```bash
-# L1 — Go 單元/整合測試（TUI 的 PTY 測試必須帶 CI=1）
-CI=1 go test ./...
+# L1 — Go 單元/整合測試（PTY subprocess 的 CI=1 由測試自行設定）
+make test
 
 # L2 — 靜態分析
 go vet ./...
@@ -57,9 +57,15 @@ go run ./cmd/pilot vm-target test --name <vm> \
 ```
 
 - **TUI 測試**：`edit`/`deploy` 的 Bubble Tea 流程有三層——model 單元測試、
-  teatest 整合測試、真實 binary PTY E2E。PTY 測試在互動 shell 下會誤判,
-  一律 `CI=1 go test ./cmd/pilot/cmd/`。
-- **race detector**：`make test-race`（= `go test -race -count=1 -timeout 30m ./...`，CI 跑的就是這個 target）。
+  teatest 整合測試、真實 binary PTY E2E。PTY 測試自行為 subprocess 設定
+  `CI=1`，完整測試入口保留呼叫者的環境。
+- **完整 normal + race**：`make test-all` 依序執行兩份完整測試，即使帶 `-j`
+  也不會重疊；normal 失敗會立即停止。請勿另外同時啟動完整測試或其他大量
+  Ansible 測試，以免 subprocess 與 CPU 互相爭用耗盡每套測試的時間預算。
+- **時間預算**：`make test` 與 `make test-race` 均使用 `-count=1 -timeout 30m`，
+  normal 的預設 10 分鐘不足以完成安裝了 Ansible 的本機整合測試；race 保留
+  原有的 30 分鐘上限。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
+- **race detector**：`make test-race` 執行完整 race suite，CI 跑的就是這個 target。
 - **Python callback**：`make test-callback`。
 - **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /
   `mcp_test.go` 用真的 MCP client（非 mock handler）對編譯出的 `pilot` binary
@@ -81,8 +87,7 @@ make test-prereq     # go / docker / ansible 一鍵檢查
 ```bash
 go build ./...                      # 1) 編譯
 go vet ./...                        # 2) 靜態分析
-CI=1 go test ./... -count=1         # 3) 全部測試
-make test-race                      # 3b) race detector（碰共用/並行 state 的改動必跑）
+make test-all                      # 3) 依序跑完整 normal 與 race，任一失敗即停止
 make playbook-lint                  # 4) playbook 有動的話
 # 5) spec/playbook 有動的話：vm-target test 真跑一輪（見 AGENTS.md §1.4）
 ```

@@ -228,6 +228,8 @@
 # that answers without an address, a FreeIPA server that does not answer
 # and that FreeIPA does not list, or no working server at all; a server
 # that is merely not answering now gets a WARNING and stays in the list
+# when another server works; SERVFAIL also warns about DNS/upstream
+# availability rather than claiming that the FreeIPA zone is absent
 # (docs/verification/freeipa-dns-client.md §1). Without this check a server
 # that does not serve the zone was written silently: the post-write check
 # below resolves through the system resolver, which falls through to the
