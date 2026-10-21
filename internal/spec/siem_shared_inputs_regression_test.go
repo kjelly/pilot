@@ -330,6 +330,12 @@ func TestRegression_AuditForwardPortMatchesTheLogServerReceiver(t *testing.T) {
 			map[string]any{"siem_forward_host": "siem-1"}, true},
 		{"external receiver is not checked", map[string]any{"siem_receiver_tcp_port": 2514},
 			map[string]any{"siem_forward_host": "198.51.100.7"}, false},
+		{"RELP uses its independent port", map[string]any{"siem_receiver_relp_enabled": true, "siem_relp_port": 20514},
+			map[string]any{"siem_forward_transport": "relp", "siem_forward_port": 2514}, false},
+		{"RELP requires receiver opt-in", map[string]any{},
+			map[string]any{"siem_forward_transport": "relp"}, true},
+		{"RELP rejects a mismatched port", map[string]any{"siem_receiver_relp_enabled": true, "siem_relp_port": 20515},
+			map[string]any{"siem_forward_transport": "relp", "siem_relp_port": 20514}, true},
 		// AGENTS.md §5.13: a name for the log-server written with other
 		// case, as its FQDN, or with a trailing dot is still the log-server.
 		{"explicit siem_forward_host is the inventory name in upper case", map[string]any{"siem_receiver_tcp_port": 2514},
@@ -554,16 +560,17 @@ func selinuxPortTasks(t *testing.T) []any {
 		if _, ok := task["community.general.seport"]; ok {
 			delete(task, "community.general.seport")
 			task["ansible.builtin.debug"] = map[string]any{"msg": "label"}
+			task["changed_when"] = true // model a label actually being added
 			sawSeport = true
 		}
 		out = append(out, task)
 	}
-	if !sawSeport || len(out) != 3 {
-		t.Fatalf("expected the query, the assert and seport in the task file; got %d tasks (seport %v)", len(out), sawSeport)
+	if !sawSeport || len(out) != 4 {
+		t.Fatalf("expected query, assert, seport and accumulated restart state; got %d tasks (seport %v)", len(out), sawSeport)
 	}
 	return append(out, map[string]any{
 		"name":                  "show",
-		"ansible.builtin.debug": map[string]any{"msg": "{{ {'type': rsyslog_selinux_port_type.stdout, 'labelled': not (rsyslog_selinux_port_label.skipped | default(false))} | to_json }}"},
+		"ansible.builtin.debug": map[string]any{"msg": "{{ {'type': rsyslog_selinux_port_type.stdout, 'labelled': not (rsyslog_selinux_port_label.skipped | default(false)), 'any_changed': rsyslog_selinux_any_port_changed} | to_json }}"},
 	})
 }
 
@@ -589,18 +596,21 @@ func TestRegression_RsyslogSELinuxPortDecision(t *testing.T) {
 		check         bool
 		labelled      bool
 		fail          string
+		priorChanged  bool
 	}{
-		{"no record of its own", `[[514, "rsh_port_t"]]`, false, true, ""},
-		{"already syslogd_port_t", `[[2514, "syslogd_port_t"]]`, false, false, ""},
-		{"rsh_port_t", `[[2514, "rsh_port_t"]]`, false, false, ""},
-		{"another service's port", `[[2514, "http_port_t"]]`, false, false, gate},
-		{"another service's port, check mode", `[[2514, "http_port_t"]]`, true, false, gate},
-		{"no bindings, check mode", "missing", true, false, ""},
-		{"no bindings", "missing", false, false, gate},
+		{"no record of its own", `[[514, "rsh_port_t"]]`, false, true, "", false},
+		{"already syslogd_port_t", `[[2514, "syslogd_port_t"]]`, false, false, "", false},
+		{"earlier listener changed", `[[2514, "syslogd_port_t"]]`, false, false, "", true},
+		{"rsh_port_t", `[[2514, "rsh_port_t"]]`, false, false, "", false},
+		{"another service's port", `[[2514, "http_port_t"]]`, false, false, gate, false},
+		{"another service's port, check mode", `[[2514, "http_port_t"]]`, true, false, gate, false},
+		{"no bindings, check mode", "missing", true, false, "", false},
+		{"no bindings", "missing", false, false, gate, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vars := map[string]any{"rsyslog_selinux_tcp_port": 2514, "fake_seports": tc.records}
+			vars := map[string]any{"rsyslog_selinux_tcp_port": 2514, "fake_seports": tc.records,
+				"rsyslog_selinux_any_port_changed": tc.priorChanged}
 			var args []string
 			if tc.check {
 				args = append(args, "--check")
@@ -615,6 +625,8 @@ func TestRegression_RsyslogSELinuxPortDecision(t *testing.T) {
 				t.Errorf("want success, got %q", failed)
 			case got["labelled"] != tc.labelled:
 				t.Errorf("labelled = %v, want %v (port type %v)", got["labelled"], tc.labelled, got["type"])
+			case got["any_changed"] != (tc.priorChanged || tc.labelled):
+				t.Errorf("accumulated changed = %v; prior=%v, current=%v", got["any_changed"], tc.priorChanged, tc.labelled)
 			}
 		})
 	}
@@ -645,13 +657,16 @@ func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
 		}
 		walk(play["tasks"].([]any))
 		include, writer, restart := -1, -1, -1
+		ports := map[string]int{}
 		for i, task := range flat {
 			name, _ := task["name"].(string)
 			if inc, ok := task["ansible.builtin.include_tasks"].(map[string]any); ok && inc["file"] == "tasks/rsyslog-selinux-tcp-port.yml" {
 				include = i
 				vars, _ := task["vars"].(map[string]any)
-				if vars["rsyslog_selinux_tcp_port"] != c.port {
-					t.Errorf("%s: the SELinux include must pass rsyslog_selinux_tcp_port=%s, got %v", c.playbook, c.port, vars["rsyslog_selinux_tcp_port"])
+				port := fmt.Sprint(vars["rsyslog_selinux_tcp_port"])
+				ports[port]++
+				if port != c.port && port != "{{ siem_relp_port }}" {
+					t.Errorf("%s: unexpected SELinux port input %s", c.playbook, port)
 				}
 				apply, _ := inc["apply"].(map[string]any)
 				if fmt.Sprint(apply["tags"]) != fmt.Sprint(task["tags"]) {
@@ -666,10 +681,14 @@ func TestRegression_RsyslogPortsAreLabelledBeforeRsyslogUsesThem(t *testing.T) {
 			}
 			if strings.HasPrefix(name, c.restart) {
 				restart = i
-				if !strings.Contains(fmt.Sprint(task["when"]), "rsyslog_selinux_port_label") {
+				if !strings.Contains(fmt.Sprint(task["when"]), "rsyslog_selinux_port_label") ||
+					!strings.Contains(fmt.Sprint(task["when"]), "rsyslog_selinux_any_port_changed") {
 					t.Errorf("%s: %q must also restart when the SELinux port label changed, got when %v", c.playbook, name, task["when"])
 				}
 			}
+		}
+		if ports[c.port] != 1 || ports["{{ siem_relp_port }}"] != 1 {
+			t.Errorf("%s: need one legacy and one RELP port include, got %v", c.playbook, ports)
 		}
 		if include < 0 || writer < 0 || restart < 0 || include >= writer || writer >= restart {
 			t.Errorf("%s: want the SELinux include before %q before %q; got indexes %d, %d, %d", c.playbook, c.writer, c.restart, include, writer, restart)

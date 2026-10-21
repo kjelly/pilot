@@ -1,0 +1,108 @@
+---
+# Runs inside the caller's block/rescue. Reset every per-include register;
+# a receiver and a sender may share a host in the same Ansible process.
+- name: "RELP: inspect the private directory without following symlinks"
+  ansible.builtin.stat:
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}"
+    follow: false
+  register: siem_tls_directory_stat
+  tags: [always]
+
+- name: "RELP: refuse a private directory that redirects into another tree"
+  ansible.builtin.assert:
+    that:
+      - not (siem_tls_directory_stat.stat.islnk | default(false))
+      - not siem_tls_directory_stat.stat.exists or siem_tls_directory_stat.stat.isdir
+  tags: [always]
+
+- name: "RELP: inspect the role's TLS files and desired profile"
+  ansible.builtin.stat:
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}/{{ item }}"
+    follow: false
+  loop: [ca.pem, cert.pem, key.pem, profile.json]
+  register: siem_tls_snapshot_stat
+  no_log: true
+  tags: [always]
+
+- name: "RELP: refuse symlinks and non-regular certificate files"
+  ansible.builtin.assert:
+    that:
+      - not (item.stat.islnk | default(false))
+      - not item.stat.exists or item.stat.isreg
+  loop: "{{ siem_tls_snapshot_stat.results }}"
+  no_log: true
+  tags: [always]
+
+- name: "RELP: snapshot existing TLS files for rollback"
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ siem_tls_snapshot_stat.results | selectattr('stat.exists') | list }}"
+  register: siem_tls_snapshot
+  no_log: true
+  tags: [always]
+
+- name: "RELP: record this snapshot's role"
+  ansible.builtin.set_fact:
+    siem_tls_snapshot_role: "{{ siem_tls_role }}"
+  tags: [always]
+
+- name: "RELP: create the private configuration directory"
+  ansible.builtin.file:
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}"
+    state: directory
+    owner: root
+    group: "{{ siem_tls_owner }}"
+    mode: "0750"
+
+- name: "RELP: install certificate material without logging private inputs"
+  ansible.builtin.copy:
+    dest: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}/{{ item.name }}"
+    content: "{{ item.value }}"
+    owner: root
+    group: "{{ siem_tls_owner }}"
+    mode: "0640"
+  loop:
+    - {name: ca.pem, value: "{{ siem_relp_ca_pem | default('') }}"}
+    - {name: cert.pem, value: "{{ siem_relp_cert_pem | default('') }}"}
+    - {name: key.pem, value: "{{ siem_relp_key_pem | default('') }}"}
+  register: siem_tls_material_result
+  no_log: true
+  diff: false
+  when: siem_tls_enabled | bool
+
+- name: "RELP: install the service verification helper"
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: "0755"
+
+- name: "RELP: copy the service verification helper"
+  ansible.builtin.copy:
+    src: ../files/pilot-siem-relp-check
+    dest: /usr/local/libexec/pilot-siem-relp-check
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "RELP: record the desired transport independently of the live fragment"
+  ansible.builtin.copy:
+    dest: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}/profile.json"
+    content: >-
+      {{ {'role': siem_tls_role, 'enabled': (siem_tls_enabled | bool),
+          'config': siem_tls_config,
+          'port': ((siem_relp_port | default(20514) if siem_tls_enabled | bool else
+                   (siem_receiver_tcp_port if siem_tls_role == 'receiver' else siem_forward_port)) | int),
+          'peers': (siem_relp_client_names | default([]) if siem_tls_role == 'receiver' else
+                    [siem_relp_server_name | default('')])} | to_nice_json }}
+    owner: root
+    group: "{{ siem_tls_owner }}"
+    mode: "0640"
+  register: siem_tls_profile_result
+
+- name: "RELP: verify certificate validity, purpose and private-key match"
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/pilot-siem-relp-check, material, "{{ siem_tls_role }}"]
+  changed_when: false
+  when:
+    - siem_tls_enabled | bool
+    - not ansible_check_mode

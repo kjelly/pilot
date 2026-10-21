@@ -2,9 +2,43 @@ package spec
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRegression_LogServerC11AllowsAttributesAfterRuleset(t *testing.T) {
+	s, err := Parse("../../docs/verification/log-server.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var command string
+	for _, row := range s.Rows {
+		if row.ID == "C11" {
+			command = row.Command
+		}
+	}
+	if command == "" {
+		t.Fatal("missing C11")
+	}
+	path := filepath.Join(t.TempDir(), "receiver.conf")
+	command = strings.ReplaceAll(command, "/etc/rsyslog.d/10-siem-receiver.conf", `"$1"`)
+	for _, tc := range []struct{ input, want string }{
+		{`input(type="imtcp" port="514" ruleset="siemReceiver")`, "0"},
+		{`input(type="imtcp" port="514" ruleset="siemReceiver" address="127.0.0.1")`, "0"},
+		{`input(type="imtcp" port="514" ruleset="wrong" address="127.0.0.1")`, "1"},
+		{`input(type="imtcp" port="514" address="127.0.0.1")`, "1"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.input+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("sh", "-c", command, "c11", path).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != tc.want {
+			t.Fatalf("C11(%s) = %q, %v; want %s", tc.input, out, err, tc.want)
+		}
+	}
+}
 
 // TestRegression_LogServerSpec locks the structure of
 // docs/verification/log-server.md (v1.2 — rsyslog central SIEM receiver,
@@ -251,7 +285,7 @@ func TestRegression_LogServerReceiverUsesDedicatedRuleset(t *testing.T) {
 	if !strings.Contains(s, `ruleset(name="siemReceiver")`) {
 		t.Error(`log-server-apply.yml must define ruleset(name="siemReceiver") to isolate received messages from the default ruleset`)
 	}
-	if !strings.Contains(s, `input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver")`) {
+	if !strings.Contains(s, `input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver"`) {
 		t.Error(`log-server-apply.yml's imtcp input must bind ruleset="siemReceiver" — otherwise a host that is both log-server and an audit-log-forwarding client self-forwards in an infinite loop`)
 	}
 	// The dynaFile actions must live inside the dedicated ruleset, not

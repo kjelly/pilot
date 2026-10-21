@@ -40,6 +40,15 @@ func TestRegression_AuditForwardRescuePreservesUnchangedRuntime(t *testing.T) {
 			if err := os.Mkdir(bin, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			// RELP adds an always-tagged relative include before C19.
+			// Keep that production include intact in the local play fixture.
+			sourceTasks, err := filepath.Abs("../../playbooks/apply/tasks")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(sourceTasks, filepath.Join(dir, "tasks")); err != nil {
+				t.Fatal(err)
+			}
 			write := func(path, body string, mode os.FileMode) {
 				t.Helper()
 				if err := os.WriteFile(path, []byte(body), mode); err != nil {
@@ -89,6 +98,7 @@ elif name!='augenrules':raise RuntimeError(name)
 				plays = append(plays, map[string]any{"hosts": "all", "gather_facts": false, "tasks": []any{map[string]any{"tags": []string{"always"}, "ansible.builtin.set_fact": map[string]any{
 					"audit_rules_result": map[string]any{"changed": true, "backup_file": audit + ".old"}, "siem_forward_conf_result": map[string]any{"changed": true}, "rsyslog_selinux_port_label": map[string]any{"changed": true},
 					"siem_forward_rsyslog_start_result": map[string]any{"changed": true}, "siem_forward_rsyslog_restart_result": map[string]any{"changed": true, "failed": true},
+					"siem_tls_snapshot_role": "sender", "siem_tls_restore_result": map[string]any{"changed": true}, "siem_tls_remove_result": map[string]any{"changed": true},
 				}}}})
 			}
 			plays = append(plays, play)
@@ -104,6 +114,10 @@ elif name!='augenrules':raise RuntimeError(name)
 			if tc.failed != (runErr != nil) {
 				t.Fatalf("error=%v, want failed=%t\n%s", runErr, tc.failed, out)
 			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if !strings.Contains(string(calls), "rsyslogd -N1") {
+				t.Fatalf("C19 never reached its real validation command\n%s", out)
+			}
 			count := "0"
 			if b, err := os.ReadFile(filepath.Join(dir, "restarts")); err == nil {
 				count = string(b)
@@ -112,7 +126,6 @@ elif name!='augenrules':raise RuntimeError(name)
 			current, _ := os.ReadFile(conf)
 			currentAudit, _ := os.ReadFile(audit)
 			if count != fmt.Sprint(tc.restarts) || (string(state) == "active") != tc.active || string(current) != original || string(currentAudit) != "# current audit rules\n" {
-				calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
 				t.Fatalf("restarts=%s, state=%s, config unchanged=%t\n%s\n%s", count, state, string(current) == original, calls, out)
 			}
 		})

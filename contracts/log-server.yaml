@@ -8,6 +8,7 @@ playbooks:
   apply: playbooks/apply/log-server-apply.yml
 regressionTests:
   - internal/spec/log_server_regression_test.go
+  - internal/spec/siem_relp_mtls_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
@@ -19,6 +20,12 @@ resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
 # for clients that forward to this inventory's log-server.
 groupVars:
   - {name: siem_receiver_tcp_port, type: integer, required: false, default: 514, secret: false}
+  - {name: siem_receiver_relp_enabled, type: boolean, required: false, default: false, secret: false}
+  - {name: siem_relp_port, type: integer, required: false, default: 20514, secret: false}
+  - {name: siem_relp_ca_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_cert_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_key_pem, type: string, required: false, secret: true}
+  - {name: siem_relp_client_names, type: stringList, required: false, secret: false}
   - {name: siem_log_root, type: string, required: false, default: /var/log/siem, secret: false}
   - {name: siem_logrotate_rotate, type: integer, required: false, default: 14, secret: false}
   - {name: siem_logrotate_maxage, type: integer, required: false, default: 90, secret: false}

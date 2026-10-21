@@ -84,3 +84,11 @@
   when:
     - rsyslog_selinux_enforce.stat.exists
     - rsyslog_selinux_port_type.stdout == ''
+
+# A caller can manage legacy TCP and RELP ports in one play. Preserve an
+# earlier change when a later include is already correct.
+- name: "SELinux: accumulate changes across this play's listener ports"
+  ansible.builtin.set_fact:
+    rsyslog_selinux_any_port_changed: >-
+      {{ (rsyslog_selinux_any_port_changed | default(false) | bool)
+         or ((rsyslog_selinux_port_label | default({})) is changed) }}

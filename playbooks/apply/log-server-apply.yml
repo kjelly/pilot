@@ -1,5 +1,5 @@
 # Apply playbook for docs/verification/log-server.md v1.9
-# rsyslog central receiver (SIEM forward target) for audit-log-forwarding.md
+# rsyslog central receiver (TCP plus optional RELP with mandatory mTLS)
 # client hosts. It writes two drop-ins (10-siem-receiver.conf,
 # siem-incoming) and, for a siem_log_root outside /var/log, a block in the
 # existing /etc/apparmor.d/local/usr.sbin.rsyslogd (Ubuntu) or an SELinux
@@ -135,6 +135,18 @@
         siem_logrotate_maxage: "{{ siem_logrotate_maxage | default(90, true) }}"
         siem_logrotate_rotate: "{{ siem_logrotate_rotate | default(14, true) }}"
         siem_receiver_tcp_port: "{{ siem_receiver_tcp_port | default('514', true) }}"
+        siem_receiver_relp_enabled: "{{ siem_receiver_relp_enabled | default(false) }}"
+        siem_relp_port: "{{ siem_relp_port | default(20514) }}"
+      tags: [always]
+
+    - name: "Gate: RELP mTLS inputs"
+      ansible.builtin.include_tasks:
+        file: tasks/rsyslog-relp-inputs.yml
+        apply:
+          tags: [always]
+      vars:
+        siem_tls_role: receiver
+        siem_tls_enabled: "{{ siem_receiver_relp_enabled | bool }}"
       tags: [always]
 
     # Step 2 makes siem_log_root owned by the rsyslog user (file:
@@ -280,7 +292,7 @@
         apply:
           tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       vars:
-        pilot_apt_packages: [rsyslog]
+        pilot_apt_packages: "{{ ['rsyslog', 'rsyslog-relp', 'openssl'] if siem_receiver_relp_enabled | bool else ['rsyslog'] }}"
         pilot_apt_policy: tolerant
         pilot_apt_component: log-server-rsyslog
         pilot_apt_required_sources:
@@ -291,7 +303,7 @@
     - name: "Step 1a: Install rsyslog (RedHat family)"
       tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
       ansible.builtin.dnf:
-        name: rsyslog
+        name: "{{ ['rsyslog', 'rsyslog-relp', 'openssl'] if siem_receiver_relp_enabled | bool else ['rsyslog'] }}"
         state: present
       when: ansible_os_family == "RedHat"
 
@@ -322,6 +334,18 @@
       when: ansible_os_family == "RedHat"
 
     - block:
+        - name: "Step 1d: Provision the receiver TLS profile and snapshot its material"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-tls.yml
+            apply:
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          vars:
+            siem_tls_role: receiver
+            siem_tls_enabled: "{{ siem_receiver_relp_enabled | bool }}"
+            siem_tls_config: "{{ siem_receiver_conf }}"
+            siem_tls_owner: "{{ siem_log_owner }}"
+
         # Read before anything changes, for the rescue. Read-only, so
         # `always`: the rescue runs under every --tags.
         - name: "Snapshot: is each file this apply may change there"
@@ -411,6 +435,16 @@
           vars:
             rsyslog_selinux_tcp_port: "{{ siem_receiver_tcp_port }}"
 
+        - name: "Step 2b: Label the RELP receiver port under SELinux"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-selinux-tcp-port.yml
+            apply:
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          vars:
+            rsyslog_selinux_tcp_port: "{{ siem_relp_port }}"
+          when: siem_receiver_relp_enabled | bool
+
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
           tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.copy:
@@ -424,8 +458,8 @@
               # Central SIEM receiver: accepts rsyslog forwarding from
               # audit-log-forwarding.md client hosts (auth,authpriv.* + local6.*)
               # and routes each by source %HOSTNAME% into {{ siem_log_root }}.
-              # TCP only (v1.2) — audit-log-forwarding-apply.yml only ever
-              # forwards over TCP; see this file's own header comment.
+              # RELP mode restricts legacy TCP to loopback; remote clients
+              # must authenticate through the RELP/mTLS listener.
               #
               # v1.3: the imtcp input is bound to its own dedicated ruleset
               # rather than falling into rsyslog's default ruleset. This
@@ -443,6 +477,9 @@
               # a network-received message is written to the per-host
               # dynaFile exactly once and never reaches the forwarding rule.
               module(load="imtcp")
+              {% if siem_receiver_relp_enabled | bool %}
+              module(load="imrelp" tls.tlsLib="gnutls")
+              {% endif %}
 
               template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/audit.log")
               template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/auth.log")
@@ -457,7 +494,16 @@
                   stop
               }
 
-              input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver")
+              input(type="imtcp" port="{{ siem_receiver_tcp_port }}" ruleset="siemReceiver"{% if siem_receiver_relp_enabled | bool %} address="127.0.0.1"{% endif %})
+              {% if siem_receiver_relp_enabled | bool %}
+              input(type="imrelp" port="{{ siem_relp_port }}" ruleset="siemReceiver"
+                tls="on" tls.authMode="name"
+                tls.permittedPeer={{ siem_relp_client_names | to_json }}
+                tls.caCert="/etc/rsyslog.d/pilot-relp-receiver/ca.pem"
+                tls.myCert="/etc/rsyslog.d/pilot-relp-receiver/cert.pem"
+                tls.myPrivKey="/etc/rsyslog.d/pilot-relp-receiver/key.pem"
+                tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1")
+              {% endif %}
           register: siem_receiver_conf_result
 
         - name: "Step 4: Render /etc/logrotate.d/siem-incoming"
@@ -517,6 +563,10 @@
           ansible.builtin.shell:
             executable: /bin/sh
             cmd: |
+              if test -f /etc/rsyslog.d/pilot-relp-receiver/profile.json; then
+                /usr/local/libexec/pilot-siem-relp-check pending receiver
+                exit $?
+              fi
               started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || exit 0
               written=$(date -r {{ siem_receiver_conf | quote }} +%s.%N) || exit 0
               awk -v s="$started" -v w="$written" 'BEGIN { exit !(s < w) }' && echo pending
@@ -537,7 +587,10 @@
             state: restarted
           when: >-
             ((siem_receiver_conf_result | default({})) is changed)
+            or ((siem_tls_material_result | default({})) is changed)
+            or ((siem_tls_profile_result | default({})) is changed)
             or ((rsyslog_selinux_port_label | default({})) is changed)
+            or (rsyslog_selinux_any_port_changed | default(false) | bool)
             or ((rsyslog_apparmor_reload | default({})) is changed)
             or ((rsyslog_selinux_relabel | default({})) is changed)
             or ((log_server_restart_pending.stdout | default('')) == 'pending')
@@ -553,7 +606,8 @@
               failed_when: false
 
             - name: "Open 514/tcp (only if ufw is active)"
-              ansible.builtin.command: "ufw allow {{ siem_receiver_tcp_port }}/tcp"
+              ansible.builtin.command: "ufw allow {{ item }}/tcp"
+              loop: "{{ [siem_relp_port] if siem_receiver_relp_enabled | bool else [siem_receiver_tcp_port] }}"
               when: "'Status: active' in ufw_status.stdout"
 
         - name: "Step 6b: Best-effort firewall opening — firewalld (RedHat)"
@@ -568,10 +622,11 @@
 
             - name: "Open 514/tcp (only if firewalld is running)"
               ansible.posix.firewalld:
-                port: "{{ siem_receiver_tcp_port }}/tcp"
+                port: "{{ item }}/tcp"
                 permanent: true
                 immediate: true
                 state: enabled
+              loop: "{{ [siem_relp_port] if siem_receiver_relp_enabled | bool else [siem_receiver_tcp_port] }}"
               when: firewalld_state.stdout == "running"
 
         # Step 2a kept the AppArmor rules for the root rsyslog wrote before
@@ -589,6 +644,9 @@
               written=$(date -r {{ siem_receiver_conf | quote }} +%s.%N) || { echo unknown; exit 0; }
               awk -v s="$started" -v w="$written" 'BEGIN { exit !(s >= w) }' || { echo pending-restart; exit 0; }
               ss -Hlntp "( sport = :{{ siem_receiver_tcp_port | int }} )" | grep -qF '"rsyslogd"' || { echo not-listening; exit 0; }
+              if test -f /etc/rsyslog.d/pilot-relp-receiver/profile.json; then
+                /usr/local/libexec/pilot-siem-relp-check receiver || { echo not-listening; exit 0; }
+              fi
               echo ok
           register: log_server_receiver_state
           changed_when: false
@@ -608,6 +666,16 @@
                  if log_server_receiver_state.stdout == 'not-listening' else '' }}.
           when: not ansible_check_mode
 
+        - name: "Step 7a: Retire receiver TLS material after disabling RELP"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-retire.yml
+            apply:
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          vars:
+            siem_tls_role: receiver
+          when: not (siem_receiver_relp_enabled | bool)
+
         - name: "Step 7a: Drop the AppArmor rules for roots rsyslog no longer writes"
           tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.include_tasks:
@@ -622,6 +690,16 @@
             - log_server_receiver_state.stdout == 'ok'
 
       rescue:
+        - name: "ROLLBACK — restore receiver TLS material before restoring the service"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-restore.yml
+            apply:
+              tags: [always]
+          when:
+            - siem_tls_snapshot_role is defined
+            - siem_tls_snapshot_role == 'receiver'
+
         # The AppArmor local file is handled below: the running rsyslogd may
         # still write the root this run moved to.
         - name: "ROLLBACK — put back the content of the files this apply changed"

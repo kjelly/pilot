@@ -1,0 +1,226 @@
+#!/usr/bin/python3
+"""Check desired SIEM transport, loaded TLS state and an actual RELP ACK."""
+
+import datetime
+import json
+import pathlib
+import re
+import socket
+import ssl
+import subprocess
+import sys
+import time
+import uuid
+
+
+def output(*args):
+    result = subprocess.run(args, capture_output=True, timeout=5, check=True)
+    return result.stdout
+
+
+def read_profile(role):
+    directory = pathlib.Path('/etc/rsyslog.d/pilot-relp-' + role)
+    profile = json.loads((directory / 'profile.json').read_text())
+    if profile['role'] != role or type(profile['enabled']) is not bool:
+        raise ValueError('invalid transport profile')
+    if type(profile['port']) is not int or not 1 <= profile['port'] <= 65535:
+        raise ValueError('invalid transport port')
+    profile['directory'] = directory
+    return profile
+
+
+def check_material(profile):
+    directory = profile['directory']
+    paths = {name: str(directory / (name + '.pem')) for name in ('ca', 'cert', 'key')}
+    key = directory / 'key.pem'
+    if key.is_symlink() or key.stat().st_mode & 0o027:
+        raise ValueError('private key permissions must exclude group write and all other access')
+    purpose = 'sslserver' if profile['role'] == 'receiver' else 'sslclient'
+    output('openssl', 'verify', '-CAfile', paths['ca'], '-untrusted', paths['cert'],
+           '-purpose', purpose, paths['cert'])
+    cert_public = output('openssl', 'x509', '-in', paths['cert'], '-pubkey', '-noout')
+    key_public = output('openssl', 'pkey', '-in', paths['key'], '-pubout', '-passin', 'pass:')
+    if cert_public != key_public:
+        raise ValueError('certificate and private key do not match')
+
+
+def service_state(profile):
+    pid = output('systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog').decode().strip()
+    if int(pid) <= 0:
+        raise ValueError('rsyslog is not running')
+    stamp = output('systemctl', 'show', '--timestamp=us', '-p',
+                   'ActiveEnterTimestamp', '--value', 'rsyslog').decode().strip()
+    started = float(output('date', '-d', stamp, '+%s.%N'))
+    files = [pathlib.Path(profile['config']), profile['directory'] / 'profile.json']
+    if profile['enabled']:
+        files += [profile['directory'] / (name + '.pem') for name in ('ca', 'cert', 'key')]
+    return pid, started < max(path.stat().st_mtime for path in files)
+
+
+def params(body):
+    pairs = re.findall(r'([\w.]+)\s*=\s*("[^"]*"|\[[^\]]*\])', body)
+    result = {key.lower(): json.loads(value) for key, value in pairs}
+    if len(result) != len(pairs):
+        raise ValueError('duplicate RainerScript parameter')
+    return result
+
+
+def check_config(profile):
+    text = pathlib.Path(profile['config']).read_text()
+    enabled, role = profile['enabled'], profile['role']
+    if role == 'sender':
+        actions = [params(body) for body in re.findall(r'action\(([^)]*)\)', text)]
+        actions = [p for p in actions if p.get('name') in ('siem_audit', 'siem_auth')]
+        if {p['name'] for p in actions} != {'siem_audit', 'siem_auth'} or len(actions) != 2:
+            raise ValueError('both forwarding actions must exist')
+        for action in actions:
+            required = {'type': 'omrelp' if enabled else 'omfwd',
+                        'target': 'siem-log-server', 'port': str(profile['port'])}
+            if enabled:
+                required.update(tls_parameters(profile))
+                required['tls.permanentfailuredisablesaction'] = 'off'
+                required['queue.diskqueuetype'] = 'disk'
+            else:
+                required['protocol'] = 'tcp'
+            if any(action.get(key) != value for key, value in required.items()):
+                raise ValueError('forwarding transport does not match desired profile')
+    elif enabled:
+        inputs = [params(body) for body in re.findall(r'input\(([^)]*)\)', text)]
+        relp = [p for p in inputs if p.get('type') == 'imrelp']
+        required = {'port': str(profile['port']), 'ruleset': 'siemReceiver'}
+        required.update(tls_parameters(profile))
+        if len(relp) != 1 or any(relp[0].get(k) != v for k, v in required.items()):
+            raise ValueError('receiver must enforce mTLS and explicit client names')
+        legacy = [p for p in inputs if p.get('type') == 'imtcp']
+        if len(legacy) != 1 or legacy[0].get('address') != '127.0.0.1':
+            raise ValueError('legacy TCP must be loopback-only when mTLS is enabled')
+    elif 'type="imrelp"' in text:
+        raise ValueError('disabled RELP listener remains configured')
+    if enabled:
+        check_material(profile)
+    pid, pending = service_state(profile)
+    if pending:
+        raise ValueError('rsyslog has not loaded the current transport/TLS files')
+    if role == 'receiver':
+        module = 'imrelp.so' if enabled else 'imtcp.so'
+        if module not in pathlib.Path('/proc/' + pid + '/maps').read_text():
+            raise ValueError('receiver module is not loaded in the service')
+        listeners = output('ss', '-Hlntp', '( sport = :' + str(profile['port']) + ' )')
+        if b'"rsyslogd"' not in listeners:
+            raise ValueError('rsyslog does not own the receiver listener')
+        if enabled:
+            legacy_listeners = output('ss', '-Hlntp', '( sport = :' + legacy[0]['port'] + ' )')
+            if not legacy_listeners or any('127.0.0.1:' not in line for line in legacy_listeners.decode().splitlines()):
+                raise ValueError('legacy TCP is reachable outside loopback')
+
+
+def tls_parameters(profile):
+    directory = str(profile['directory'])
+    peers = profile['peers'] if profile['role'] == 'receiver' else profile['peers'][0]
+    return {'tls': 'on', 'tls.authmode': 'name', 'tls.permittedpeer': peers,
+            'tls.cacert': directory + '/ca.pem', 'tls.mycert': directory + '/cert.pem',
+            'tls.myprivkey': directory + '/key.pem'}
+
+
+def read_token(stream):
+    token = b''
+    while len(token) < 64:
+        char = stream.read(1)
+        if not char:
+            raise ValueError('RELP peer closed without ACK')
+        if char == b'\n' and not token:
+            continue
+        if char == b' ':
+            return token
+        token += char
+    raise ValueError('invalid RELP response header')
+
+
+def exchange(stream, transaction, command, data):
+    stream.write(('%d %s %d ' % (transaction, command, len(data))).encode() + data + b'\n')
+    stream.flush()
+    number, kind, size = read_token(stream), read_token(stream), int(read_token(stream))
+    if number != str(transaction).encode() or kind != b'rsp' or not 0 < size <= 65536:
+        raise ValueError('invalid RELP ACK')
+    response = b''
+    while len(response) < size:
+        chunk = stream.read(size - len(response))
+        if not chunk:
+            break
+        response += chunk
+    if len(response) != size or not response.startswith(b'200 '):
+        raise ValueError('RELP transaction was not accepted')
+
+
+def relp_probe(profile):
+    directory = profile['directory']
+    context = ssl.create_default_context(cafile=str(directory / 'ca.pem'))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(str(directory / 'cert.pem'), str(directory / 'key.pem'))
+    with socket.create_connection(('siem-log-server', profile['port']), timeout=5) as raw:
+        with context.wrap_socket(raw, server_hostname=profile['peers'][0]) as connection:
+            with connection.makefile('rwb', buffering=0) as stream:
+                exchange(stream, 1, 'open', b'relp_version=0\nrelp_software=pilot\ncommands=syslog')
+                stamp = datetime.datetime.now().strftime('%b %d %H:%M:%S')
+                message = ('<182>%s %s pilot-relp-probe: %s' %
+                           (stamp, socket.gethostname(), uuid.uuid4().hex)).encode()
+                exchange(stream, 2, 'syslog', message)
+                # The log ACK above determines success. Close the RELP/TLS
+                # session politely so a healthy probe does not emit TLS-EOF
+                # warnings at the receiver; cleanup is best effort.
+                connection.settimeout(1)
+                try:
+                    exchange(stream, 3, 'close', b'')
+                except (OSError, ValueError):
+                    pass
+            try:
+                connection.unwrap().close()
+            except OSError:
+                pass
+
+
+def tcp_probe(profile):
+    addresses = {(item[0], item[4][0]) for item in
+                 socket.getaddrinfo('siem-log-server', profile['port'], type=socket.SOCK_STREAM)}
+    for _ in range(6):
+        output('logger', '-p', 'local6.info', 'PILOT-AUDIT-FWD-' + uuid.uuid4().hex)
+        time.sleep(2)
+        for family, address in addresses:
+            destination = '[' + address + ']' if family == socket.AF_INET6 else address
+            connections = output('ss', '-Htnp', 'state', 'established',
+                                 '( dport = :%d and dst %s )' % (profile['port'], destination))
+            if b'"rsyslogd"' in connections:
+                return
+    raise ValueError('no established forwarding connection')
+
+
+def main():
+    mode = sys.argv[1]
+    if mode not in ('material', 'pending', 'sender', 'receiver', 'sender-config'):
+        raise ValueError('unknown check mode')
+    role = sys.argv[2] if mode in ('material', 'pending') else ('receiver' if mode == 'receiver' else 'sender')
+    if role not in ('sender', 'receiver'):
+        raise ValueError('unknown role')
+    profile = read_profile(role)
+    if mode == 'material':
+        check_material(profile)
+    elif mode == 'pending':
+        if service_state(profile)[1]:
+            print('pending')
+    else:
+        check_config(profile)
+        if mode == 'sender':
+            if profile['enabled']:
+                relp_probe(profile)
+            # The protocol probe above is a separate connection. Also require
+            # the configured daemon itself to connect after facility injection.
+            tcp_probe(profile)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as exc:
+        # Never print certificate/key PEM or subprocess stdout/stderr.
+        print('SIEM transport check failed: ' + type(exc).__name__, file=sys.stderr)
+        sys.exit(1)

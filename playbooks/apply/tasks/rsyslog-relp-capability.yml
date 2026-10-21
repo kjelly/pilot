@@ -1,0 +1,114 @@
+---
+- name: "Queue: preserve an explicit classic engine across transport changes"
+  tags: [always]
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import pathlib,re,sys
+        config,root=map(pathlib.Path,sys.argv[1:3])
+        transport=sys.argv[3]
+        names=['siem_audit','siem_auth']
+        text=config.read_text() if config.exists() else ''
+        actions=re.findall(r'action\(([^)]*)\)',text)
+        def pinned_action(name):
+            bodies=[b for b in actions if re.search(r'\bname\s*=\s*"'+name+r'"',b)]
+            return len(bodies)==1 and re.search(r'\bqueue\.diskQueueType\s*=\s*"disk"',bodies[0],re.I)
+        pinned=all(map(pinned_action,names))
+        def classic_state(name):
+            marker=root/(name+'.da-engine')
+            if marker.exists() or marker.is_symlink():
+                return not marker.is_symlink() and marker.read_text().split() in (
+                    ['RSYSLOG-DA-ENGINE-V1','Disk'],['RSYSLOG-DA-ENGINE-V1','disk'])
+            return any(not p.is_symlink() and p.is_file() and
+                       (p.name==name+'.qi' or re.fullmatch(re.escape(name)+r'\.[0-9]+',p.name))
+                       for p in root.glob(name+'.*'))
+        if transport=='relp' and config.exists() and not pinned and not all(map(classic_state,names)):
+            sys.exit('The current forwarding queues are not provably classic. An auto-selected '
+                     'TCP queue can first write segmented data during shutdown. Preserve the '
+                     'running service/backlog and complete an operator-approved migration '
+                     'before enabling RELP; no automatic conversion or deletion.')
+        print('disk' if transport=='relp' or pinned else 'auto')
+      - "{{ siem_forward_conf }}"
+      - "{{ siem_queue_spool }}"
+      - "{{ siem_forward_transport }}"
+  register: siem_forward_engine_result
+  changed_when: false
+  check_mode: false
+
+- name: "Queue: remember the selected engine for both forwarding actions"
+  tags: [always]
+  ansible.builtin.set_fact:
+    siem_forward_queue_engine: "{{ siem_forward_engine_result.stdout | trim }}"
+
+- name: "RELP: probe installed module support before replacing live TLS/config"
+  tags: [always]
+  when: siem_forward_transport == 'relp' and not ansible_check_mode
+  block:
+    - name: "RELP: create a non-secret temporary module probe"
+      ansible.builtin.tempfile:
+        state: file
+        path: /etc/rsyslog.d
+        prefix: pilot-relp-capability-
+        suffix: .probe
+      register: siem_relp_capability_file
+      changed_when: false
+    - name: "RELP: prepare the module capability probe"
+      ansible.builtin.copy:
+        dest: "{{ siem_relp_capability_file.path }}"
+        mode: "0644"
+        setype: _default
+        content: |
+          module(load="omrelp")
+          *.* action(type="omrelp" target="127.0.0.1" port="20514"
+            tls.permanentFailureDisablesAction="off"
+            queue.diskQueueType="disk"
+            queue.type="LinkedList" queue.filename="pilot_capability"
+            queue.maxDiskSpace="1m" queue.saveOnShutdown="on"
+            action.resumeRetryCount="-1" action.resumeInterval="1" action.resumeIntervalMax="10")
+      changed_when: false
+    - name: "RELP: check the real module parser"
+      ansible.builtin.command:
+        argv: [rsyslogd, -N1, -f, "{{ siem_relp_capability_file.path }}"]
+      register: siem_relp_capability
+      changed_when: false
+      failed_when: false
+    - name: "RELP: reject modules that permanently disable audit forwarding on TLS errors"
+      ansible.builtin.assert:
+        that: siem_relp_capability.rc == 0
+        fail_msg: >-
+          RELP/mTLS requires omrelp tls.permanentFailureDisablesAction=off
+          and queue.diskQueueType=disk (upstream rsyslog 8.2608.0+ or a vendor backport). Install a supported
+          rsyslog/rsyslog-relp pair before enabling RELP; pilot does not add repositories.
+  always:
+    - name: "RELP: remove the non-secret temporary capability probe"
+      ansible.builtin.file:
+        path: "{{ siem_relp_capability_file.path }}"
+        state: absent
+      changed_when: false
+      when: siem_relp_capability_file is defined and siem_relp_capability_file.path is defined
+
+- name: "RELP: refuse automatic conversion of existing segmented or unknown disk queues"
+  tags: [always]
+  when: siem_forward_queue_engine == 'disk'
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import pathlib,sys
+        root=pathlib.Path(sys.argv[1])
+        for name in ['siem_audit','siem_auth']:
+            store=root/(name+'.segq')
+            marker=root/(name+'.da-engine')
+            if store.exists() or store.is_symlink():
+                sys.exit('Existing segmented spool: drain and retire it through an operator-approved '
+                         'migration before enabling classic RELP queues; no automatic conversion or deletion.')
+            if marker.exists() or marker.is_symlink():
+                if marker.is_symlink() or marker.read_text().split() not in [['RSYSLOG-DA-ENGINE-V1','Disk'],['RSYSLOG-DA-ENGINE-V1','disk']]:
+                    sys.exit('Existing non-classic or unknown disk-engine marker: preserve the backlog '
+                             'and plan an operator-approved migration; no automatic conversion or deletion.')
+      - "{{ siem_queue_spool }}"
+  changed_when: false
+  check_mode: false

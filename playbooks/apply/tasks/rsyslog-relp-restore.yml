@@ -1,0 +1,22 @@
+---
+- name: "RELP rollback: restore the previous TLS files and profile"
+  ansible.builtin.copy:
+    dest: "{{ item.item.stat.path }}"
+    content: "{{ item.content | b64decode }}"
+    owner: "{{ item.item.stat.uid }}"
+    group: "{{ item.item.stat.gid }}"
+    mode: "{{ item.item.stat.mode }}"
+  loop: "{{ siem_tls_snapshot.results | default([]) }}"
+  register: siem_tls_restore_result
+  no_log: true
+  diff: false
+  when: not ansible_check_mode
+
+- name: "RELP rollback: remove only files created by this run"
+  ansible.builtin.file:
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_snapshot_role }}/{{ item.item }}"
+    state: absent
+  loop: "{{ siem_tls_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+  register: siem_tls_remove_result
+  no_log: true
+  when: not ansible_check_mode

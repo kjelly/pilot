@@ -1,0 +1,15 @@
+---
+# Remove private material only after the daemon demonstrably uses the new
+# non-RELP config. In check mode a fresh target has no helper yet.
+- name: "RELP: verify the non-TLS configuration is loaded before key removal"
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/pilot-siem-relp-check, "{{ 'receiver' if siem_tls_role == 'receiver' else 'sender-config' }}"]
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: "RELP: retire only the role's unused private material"
+  ansible.builtin.file:
+    path: "/etc/rsyslog.d/pilot-relp-{{ siem_tls_role }}/{{ item }}.pem"
+    state: absent
+  loop: [ca, cert, key]
+  when: not ansible_check_mode

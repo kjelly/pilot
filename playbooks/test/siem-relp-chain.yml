@@ -1,0 +1,5 @@
+---
+- name: Install disposable supported runtimes
+  ansible.builtin.import_playbook: fixtures/siem-relp-runtime.yml
+- name: Apply the real receiver and sender chain
+  ansible.builtin.import_playbook: audit-forward-queue-chain.yml

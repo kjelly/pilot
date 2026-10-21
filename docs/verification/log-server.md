@@ -1,10 +1,16 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v1.9
+> 版本：v2.0
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
 > 維護者：sre
+
+> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
+> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
+> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
+> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
+> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 目標系統
 
@@ -22,8 +28,8 @@
 > （比照 `seaweedfs-s3.md`）。查詢/dashboard 需求可日後在此之上疊
 > Promtail→Loki（見 `log-shipping.md`），不影響本 spec。
 >
-> **只收 TCP，不收 UDP**（v1.2 起）：`audit-log-forwarding-apply.yml` 只用
-> `@@`（TCP）轉送，本 repo也沒有任何其他角色會轉送 syslog——v1.0/v1.1 的
+> **不收 UDP**：預設是 `imtcp` TCP；選用 RELP 時另開強制 mTLS 的 `imrelp`。
+> v1.0/v1.1 的
 > `imudp` 接收能力是為了「假設未來有台只會講 UDP syslog 的網路設備」預留的
 > 推測性容量，從沒被實際用過。拿掉整條 UDP 支援，換掉原本用來避開
 > 514/udp 跟官方 wazuh-docker compose 撞埠的 `siem_receiver_udp_enabled`
@@ -38,6 +44,12 @@
 | 變數名稱 | 說明/用途 | 是否必填 | 預設值 |
 |---------|----------|---------|--------|
 | `siem_receiver_tcp_port` | rsyslog `imtcp` 監聽埠 | 否 | `514` |
+| `siem_receiver_relp_enabled` | 加開強制 mTLS 的 RELP listener；原 TCP listener 限制在 loopback，遠端無法繞過 mTLS | 否 | `false` |
+| `siem_relp_port` | RELP listener 的獨立 TCP 埠，不得等於原 TCP 埠 | 否 | `20514` |
+| `siem_relp_ca_pem` | 驗證 client 的信任 CA PEM；部署端管理簽發及更新 | RELP 必填 | — |
+| `siem_relp_cert_pem` | 本機 server 憑證 PEM（同機兼 sender 時須有雙用途） | RELP 必填 | — |
+| `siem_relp_key_pem` | 對應的未加密私鑰 PEM；由 vault/私密變數提供 | RELP 必填 | — |
+| `siem_relp_client_names` | 允許的 client 憑證精確小寫 DNS 名稱清單，不接受 wildcard | RELP 必填 | — |
 | `siem_log_root` | 依來源 hostname 分檔落地的根目錄 | 否 | `/var/log/siem` |
 | `siem_logrotate_rotate` | logrotate 保留檔案數 | 否 | `14` |
 | `siem_logrotate_maxage` | logrotate `maxage`（天） | 否 | `90` |
@@ -49,14 +61,14 @@
 | C1  | package   | `rsyslog` 已安裝                                                     | 0        | dpkg -s rsyslog >/dev/null 2>&1; echo $? |
 | C2  | service   | `rsyslog.service` 為 active                                          | 0        | systemctl is-active rsyslog >/dev/null 2>&1; echo $? |
 | C3  | file      | 接收端 drop-in 設定檔存在                                             | present  | test -f /etc/rsyslog.d/10-siem-receiver.conf |
-| C4  | config    | 設定檔含 `imtcp` module + input                                       | 0        | grep -qE 'module\(load="imtcp"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
+| C4  | config    | TCP listener 已載入；啟用 RELP 時另驗證 mTLS 契約、有效憑證、載入時間與 daemon listener | 0 | sudo /usr/local/libexec/pilot-siem-relp-check receiver; echo $? |
 | C5  | network   | 接收設定裡 `imtcp` 的 TCP port（`siem_receiver_tcp_port`，預設 514）確實在監聽 | 0        | sh -c 'p=$(grep -o "imtcp\" port=\"[0-9]*" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null | grep -o "[0-9]*$"); [ -n "$p" ] && ss -Hlnt "( sport = :$p )" | grep -q . && echo 0 || echo 1' |
 | C6  | dir       | 接收設定裡 `SiemAuditPath` 的落地根目錄（`siem_log_root`，預設 `/var/log/siem`）存在 | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] && echo 0 || echo 1' |
 | C7  | functional| 本機注入這次唯一的 `local6` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `audit.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUDIT-$$-$(date +%s%N)"; logger -p local6.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/audit.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 | C8  | functional| 本機注入這次唯一的 `authpriv` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `auth.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUTH-$$-$(date +%s%N)"; logger -p authpriv.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/auth.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 | C9  | file      | logrotate 策略檔存在                                                  | present  | test -f /etc/logrotate.d/siem-incoming |
 | C10 | logrotate | logrotate 策略檔語法正確（dry-run 不出錯）                            | 0        | logrotate -d /etc/logrotate.d/siem-incoming >/dev/null 2>&1; echo $? |
-| C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
+| C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"[^)]*\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
 
 > C1/C2/C4/C5/C10 用**正邏輯 rc**（`; echo $?` 或原生 rc），不用反邏輯
 > grep + 數字 expected；C5 用 `sh -c '... && echo 0 || echo 1'` 讓外層指令
@@ -67,7 +79,7 @@
 > `date +%s%N`），最多等 6 秒，只認這一則（`grep -qsF "$n"`），用 `sh -c '… echo 0 … echo 1'`
 > 讓外層恆回 rc=0、expected `0`：先前留在任何目錄裡的舊 selftest 字串都不會讓它們 PASS。
 > C7/C8 只驗證**本機注入**：訊息走 `/dev/log` 進 default ruleset，由同機的
-> `audit-log-forwarding` 轉送規則以 TCP 送回本機的 `imtcp`，再由 `siemReceiver` 依
+> `audit-log-forwarding` 轉送規則以所選的 TCP 或 RELP/mTLS 送回本機，再由 `siemReceiver` 依
 > `%HOSTNAME%`（log-server 自己的 hostname）落地，所以需要同機也部署 `audit-log-forwarding`
 > （本專案的 topology 一律如此，見 C11 的由來）；驗證**跨主機**轉送有沒有真的
 > 送到（client 端 `@@` 轉送 → 這台收到），屬於 Shape 3 cross-check，做法見
@@ -161,3 +173,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.7 | 只改說明，row 不變：§6 的說明移到表格下面（原本插在表格中間，C9/C10 那列因此沒有算在表格裡），並註明 `--skip-tags` 任一列會跳過整個 log-server 的步驟。§1 的 rescue 說明補上：rescue 先用 `rsyslogd -N1` 檢查還原後的設定，通過才重啟 rsyslog | pilot |
 | 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |
 | 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔與接收設定修改時間的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |
+| 2026-10-20 | v2.0 | RELP/mTLS 接收與 loopback-only legacy TCP；C4 驗證已載入的實際 transport，C11 允許 ruleset 後的 input 屬性。驗收見本輪 evidence 摘要 | pilot |

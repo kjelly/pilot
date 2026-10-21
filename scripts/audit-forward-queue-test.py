@@ -27,6 +27,7 @@ def remote(pilot, host, code):
 
 
 def service(pilot, state, host='aq-log'):
+    started = time.monotonic()
     # SSH/audit traffic otherwise reactivates rsyslog via syslog.socket while
     # the test believes the receiver is stopped. A runtime mask is removed
     # by every start, including the finally block. Only disposable VMs are used.
@@ -37,6 +38,7 @@ def service(pilot, state, host='aq-log'):
     commands.append(['systemctl', state, 'rsyslog'])
     remote(pilot, host, 'import subprocess\nfor argv in ' + repr(commands)
            + ':\n    subprocess.run(argv,check=True,timeout=45)')
+    print('service', host, state, 'seconds=%.3f' % (time.monotonic() - started), flush=True)
 
 
 def send(pilot, host, token, count, delay):
@@ -106,6 +108,7 @@ def main():
     p.add_argument('--pilot', required=True)
     p.add_argument('--scenario', choices=['outage', 'restart', 'spill', 'probe'], required=True)
     p.add_argument('--expect-loss', action='store_true', help='baseline: assert loss is reproduced')
+    p.add_argument('--forward-port', type=int, default=514, help='actual forwarding listener port (20514 for RELP)')
     args = p.parse_args()
     if args.scenario == 'probe':
         probe_failures(args.pilot)
@@ -134,14 +137,14 @@ with socket.create_connection(('127.0.0.1',514),timeout=5) as s:
         s.sendall(('<%d>Oct 20 00:00:00 queue-primer pilot-queue: disconnect-primer\\n' % pri).encode())
 address=socket.gethostbyname('siem-log-server')
 for i in range(50):
-    out=subprocess.check_output(['ss','-Htnp','state','established','( dst '+address+' and dport = :514 )'],text=True)
+    out=subprocess.check_output(['ss','-Htnp','state','established','( dst '+address+' and dport = :FORWARDPORT )'],text=True)
     if not out.strip():
         break
     time.sleep(0.1)
 else:
     raise RuntimeError('forwarding connection still established')
 time.sleep(1)
-""")
+""".replace('FORWARDPORT', str(args.forward_port)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(send, args.pilot, host, token, count, delay) for host in clients]
             if args.scenario == 'restart':

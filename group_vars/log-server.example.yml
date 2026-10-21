@@ -1,0 +1,11 @@
+# RELP requires mTLS; enabling it restricts legacy TCP to loopback.
+# siem_receiver_relp_enabled: true
+# siem_relp_port: 20514
+# siem_relp_client_names:
+#   - client1.example.test
+#   - client2.example.test
+# Exact lowercase certificate DNS names only; no wildcard trust.
+# Supply siem_relp_ca_pem, siem_relp_cert_pem and siem_relp_key_pem using
+# private per-host/vault variables. The receiver certificate needs serverAuth;
+# a host also forwarding its own logs needs clientAuth too.
+# Certificates are operator-issued; pilot neither creates a CA nor renews them.
