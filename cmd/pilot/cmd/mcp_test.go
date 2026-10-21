@@ -44,6 +44,7 @@ thanos_query_url: http://query.example:10902
 dashboard_config_dir: {password: DUMMY_NESTED_SECRET}
 `)
 	writeTestFile(t, filepath.Join(dir, "group_vars", "invalid.yml"), "thanos_query_url: [DUMMY_PARSE_SECRET\n")
+	writeTestFile(t, filepath.Join(dir, "group_vars", "restic-backup.yml"), "restic_repository: rest:https://backup:DUMMY_REST_PASSWORD@storage.example:8000/repo/\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var stderr bytes.Buffer
@@ -59,6 +60,7 @@ dashboard_config_dir: {password: DUMMY_NESTED_SECRET}
 		{"include_group_vars": true},
 		{"include_group_vars": true, "group_vars_component": "dns", "group_vars_file": "dns.yml", "group_vars_key": "dns_cache_max_ttl"},
 		{"include_group_vars": true, "group_vars_key": "grafana_admin_password"},
+		{"include_group_vars": true, "group_vars_component": "restic-backup", "group_vars_file": "restic-backup.yml", "group_vars_key": "restic_repository"},
 	} {
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "pilot_edit_inspect", Arguments: args})
 		if err != nil {
@@ -78,6 +80,13 @@ dashboard_config_dir: {password: DUMMY_NESTED_SECRET}
 		if args["group_vars_component"] == "dns" {
 			if len(out.GroupVars) != 1 || len(out.GroupVars["dns.yml"]) != 1 || out.GroupVars["dns.yml"]["dns_cache_max_ttl"] != "300" {
 				t.Fatalf("MCP filters were not applied: %+v", out.GroupVars)
+			}
+		} else if args["group_vars_component"] == "restic-backup" {
+			meta := out.GroupVarsMetadata["restic-backup.yml"]["restic_repository"]
+			if len(out.GroupVars) != 1 || len(out.GroupVars["restic-backup.yml"]) != 1 ||
+				out.GroupVars["restic-backup.yml"]["restic_repository"] != inspectRedactedValue ||
+				!meta.Present || !meta.IsSet || !meta.Redacted || meta.Reason != "uri_credentials" || meta.Source != "group_vars/restic-backup.yml" {
+				t.Fatal("credential-bearing repository or its metadata was not safely returned on the MCP wire")
 			}
 		} else if !out.GroupVarsMetadata["dashboard.yaml"]["grafana_admin_password"].Redacted {
 			t.Fatal("secret metadata missing on MCP wire")

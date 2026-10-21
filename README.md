@@ -136,6 +136,9 @@ For `pilot_edit_inspect`, `include_group_vars: true` returns
 and unknown keys return `[REDACTED]`. Only scalar values declared public in
 the component contracts are disclosed; collections, aliases, embedded
 configuration, and values with invalid types are conservatively redacted.
+URL userinfo is also redacted in public strings, including backend-prefixed
+repository URLs such as `rest:https://user:password@host/repo/`, with reason
+`uri_credentials`. URLs without userinfo retain their public scalar value.
 Any secret declaration wins when contracts share an input. If the contract
 catalog (`PILOT_ROOT`, otherwise the server's working directory) cannot be
 loaded, all values are redacted. Invalid YAML is reported only as

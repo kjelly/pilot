@@ -142,6 +142,9 @@ func inspectGroupVarRedaction(p inspectGroupVarPolicy, node *yaml.Node) string {
 	if node.Kind != yaml.ScalarNode || node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
 		return "unclassified_structure"
 	}
+	if node.Tag == "!!str" && inspectGroupVarContainsURICredentials(node.Value) {
+		return "uri_credentials"
+	}
 	if node.Tag == "!!str" && inspectGroupVarContainsConfiguration(node.Value) {
 		return "unclassified_structure"
 	}
@@ -158,6 +161,32 @@ func inspectGroupVarRedaction(p inspectGroupVarPolicy, node *yaml.Node) string {
 		}
 	}
 	return ""
+}
+
+// Contract-public strings can still contain URL userinfo, including restic's
+// nested backend syntax (rest:https://user:password@host/repo). Inspect each
+// authority without decoding or logging the URL: malformed/escaped userinfo
+// must not bypass redaction through a URL parser error. Path/query/fragment @
+// characters alone are not userinfo.
+func inspectGroupVarContainsURICredentials(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "//") {
+		value = "uri:" + value // scheme-relative authority
+	}
+	for {
+		_, remaining, found := strings.Cut(value, "://")
+		if !found {
+			return false
+		}
+		authority := remaining
+		if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+			authority = authority[:end]
+		}
+		if strings.Contains(authority, "@") {
+			return true
+		}
+		value = remaining
+	}
 }
 
 // A public string input can carry an entire configuration (for example

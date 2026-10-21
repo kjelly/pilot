@@ -168,3 +168,64 @@ func TestInspectGroupVarPolicy_SecretWins(t *testing.T) {
 		}
 	}
 }
+
+func TestInspectGroupVars_PublicURICredentials(t *testing.T) {
+	t.Setenv("PILOT_ROOT", repoRootForTest(t))
+	for _, tc := range []struct {
+		name, key, value string
+		redacted         bool
+	}{
+		{"restic REST", "restic_repository", "rest:https://backup:DUMMY_REST_PASSWORD@storage.example:8000/repo/", true},
+		{"direct URL", "thanos_query_url", "https://reader:DUMMY_HTTP_PASSWORD@query.example:10902/", true},
+		{"encoded password", "restic_repository", "rest:https://backup:DUMMY%40PASSWORD%3Aencoded@storage.example/repo/", true},
+		{"IPv6", "restic_repository", "rest:https://backup:DUMMY_IPV6_PASSWORD@[::1]:8000/repo/", true},
+		{"empty username", "restic_repository", "rest:https://:DUMMY_PASSWORD@storage.example/repo/", true},
+		{"username only", "thanos_query_url", "https://DUMMY_AUTH_IDENTITY@query.example/", true},
+		{"invalid escape", "restic_repository", "rest:https://backup:DUMMY%zz@storage.example/repo/", true},
+		{"scheme relative", "thanos_query_url", "//reader:DUMMY_PASSWORD@query.example/path", true},
+		{"embedded URL", "thanos_query_url", "https://query.example/path?next=https://reader:DUMMY_PASSWORD@other.example/", true},
+		{"public REST", "restic_repository", "rest:https://storage.example:8000/repo/", false},
+		{"public S3", "restic_repository", "s3:http://storage.example:8333/bucket", false},
+		{"local repository", "restic_repository", "/srv/backups/restic", false},
+		{"public URL", "thanos_query_url", "http://query.example:10902/", false},
+		{"at sign in path", "restic_repository", "rest:https://storage.example/repo/public@name", false},
+		{"at sign in query", "thanos_query_url", "https://query.example/path?contact=public@example.com", false},
+		{"at sign in fragment", "thanos_query_url", "https://query.example/path#public@example.com", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			data, err := yaml.Marshal(map[string]string{tc.key: tc.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(dir, "group_vars", "all.yml"), string(data))
+			_, out, err := inspectHandler(editMCPToolsOptions{Dir: dir})(context.Background(), &mcp.CallToolRequest{}, inspectInput{IncludeGroupVars: true, GroupVarsFile: "all.yml", GroupVarsKey: tc.key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta := out.GroupVarsMetadata["all.yml"][tc.key]
+			if !meta.Present || !meta.IsSet || meta.Redacted != tc.redacted || meta.Source != "group_vars/all.yml" {
+				t.Fatalf("metadata = %+v", meta)
+			}
+			want := tc.value
+			if tc.redacted {
+				want = inspectRedactedValue
+				if meta.Reason != "uri_credentials" {
+					t.Fatalf("reason = %q, want URI credential classification", meta.Reason)
+				}
+			} else if meta.Reason != "" {
+				t.Fatalf("public URI reason = %q", meta.Reason)
+			}
+			if out.GroupVars["all.yml"][tc.key] != want {
+				t.Fatal("unexpected URI disclosure/redaction")
+			}
+			encoded, err := json.Marshal(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "DUMMY") {
+				t.Fatal("inspect output leaked a URI credential")
+			}
+		})
+	}
+}
