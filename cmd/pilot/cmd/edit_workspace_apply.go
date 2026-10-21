@@ -39,6 +39,9 @@ type editApplyResult struct {
 // (restoreManagedFiles) and the failure is reported as a rolled-back
 // result rather than a bare error.
 func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAgentSessionOptions) (*editApplyResult, error) {
+	if err := validateInventorySecretStorage(dir); err != nil {
+		return nil, err
+	}
 	if err := validateEditScenario(scenario); err != nil {
 		return nil, err
 	}
@@ -60,6 +63,9 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 
 	session := newEditAgentSession(dir, opts)
 	runErr := session.Run(scenario)
+	if runErr == nil {
+		runErr = validateInventorySecretStorage(dir)
+	}
 
 	if runErr != nil {
 		if restoreErr := restoreManagedFiles(dir, snapshot); restoreErr != nil {

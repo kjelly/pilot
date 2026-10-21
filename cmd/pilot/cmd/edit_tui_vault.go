@@ -83,6 +83,11 @@ func pushVaultPathPrompt(r *editRouterModel, dir, targetDir string) tea.Cmd {
 // ansible-vault-encrypted file suspends the Program and shells out to
 // the real editor; a plaintext skeleton opens the key-list editor.
 func pushVaultOpen(r *editRouterModel, dir, path string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -95,6 +100,10 @@ func pushVaultOpen(r *editRouterModel, dir, path string) tea.Cmd {
 			m := s.(tui.ConfirmScreen)
 			if !m.Value() {
 				return pushVaultFilePicker(r, dir, "")
+			}
+			if err := validateSecretSourcePath(dir, path); err != nil {
+				r.err = err
+				return nil
 			}
 			if merr := os.MkdirAll(filepath.Dir(path), 0o700); merr != nil {
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
@@ -112,6 +121,11 @@ func pushVaultOpen(r *editRouterModel, dir, path string) tea.Cmd {
 }
 
 func pushVaultEditorFromData(r *editRouterModel, dir, path string, data []byte, banner string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	if isAnsibleVaultEncrypted(data) {
 		return pushAnsibleVaultShellout(r, dir, path)
 	}
@@ -248,6 +262,11 @@ type vaultShelloutDoneMsg struct {
 // matching the pre-rewrite behavior, where this entirely bypassed the
 // wizard's own key-list UI.
 func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	r.banner = fmt.Sprintf("偵測到 %s 是 ansible-vault 加密檔，改用 `ansible-vault edit`。", path)
 	bin, lookErr := exec.LookPath("ansible-vault")
 	if lookErr != nil {
@@ -264,6 +283,11 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 }
 
 func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.Doc, dirty bool, banner string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	entries := doc.ScalarEntries()
 	// A vault key's own name is its stable identity — it's exactly what
 	// doc.Add/Set/Delete already key on, so it doubles as the row's
@@ -297,6 +321,10 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 		case idx == len(choices)-3:
 			return pushVaultAddKey(r, dir, path, doc, dirty)
 		case idx == len(choices)-2:
+			if err := validateSecretSourcePath(dir, path); err != nil {
+				r.err = err
+				return nil
+			}
 			if merr := os.MkdirAll(filepath.Dir(path), 0o700); merr != nil {
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
 				return nil

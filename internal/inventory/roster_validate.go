@@ -2,7 +2,6 @@ package inventory
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -28,7 +27,7 @@ func (v RosterViolation) String() string {
 // ErrRosterEncrypted unchanged (same detection as RosterDomain) if the
 // file can't be inspected without a vault password.
 func ValidateRosterFile(path string) ([]RosterViolation, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return nil, err
 	}

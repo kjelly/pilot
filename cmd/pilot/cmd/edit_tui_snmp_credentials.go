@@ -80,6 +80,11 @@ func pushSNMPCredentialFilePathPrompt(r *editRouterModel, dir, targetDir string)
 // SNMPCredentialDoc — every other screen in this file receives doc as a
 // parameter instead of reloading it.
 func pushSNMPCredentialOpen(r *editRouterModel, dir, path string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	doc, err := monitoring.LoadSNMPCredentialDoc(path)
 	if err != nil {
 		return pushSNMPCredentialFilePicker(r, dir, fmt.Sprintf("⚠️  %s 讀取失敗：%v", path, err))
@@ -93,6 +98,11 @@ func pushSNMPCredentialOpen(r *editRouterModel, dir, path string) tea.Cmd {
 }
 
 func pushSNMPCredentialsEditor(r *editRouterModel, dir, path string, doc *monitoring.SNMPCredentialDoc, banner string) tea.Cmd {
+	if err := validateSecretSourcePath(dir, path); err != nil {
+		r.err = err
+		return nil
+	}
+
 	refs := doc.Refs()
 	note := "選一個查看/編輯，或新增一個。密碼值不會顯示在畫面上。"
 	if len(refs) == 0 {
@@ -126,6 +136,10 @@ func pushSNMPCredentialsEditor(r *editRouterModel, dir, path string, doc *monito
 		case idx == len(choices)-3:
 			return pushSNMPCredentialAddRefID(r, dir, path, doc)
 		case idx == len(choices)-2:
+			if err := validateSecretSourcePath(dir, path); err != nil {
+				r.err = err
+				return nil
+			}
 			if err := monitoring.WriteSNMPCredentialDoc(path, doc); err != nil {
 				return pushSNMPCredentialsEditor(r, dir, path, doc, fmt.Sprintf("⚠️  存檔失敗：%v", err))
 			}

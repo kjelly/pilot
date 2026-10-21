@@ -41,12 +41,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/secretpath"
 )
 
 // FreeIPAClientProviderID is this provider's stable ID — matches the
@@ -183,6 +185,11 @@ func (p *FreeIPAClientProvider) Inspect(ctx context.Context, in InspectInput) (I
 // (internal/decommission's planner) turns that into a hard plan blocker,
 // never a step that later fails.
 func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step, error) {
+	if p.RosterPathSet(in) {
+		if err := validateDecommissionRosterSource(in.RosterPath, p.cfg.ClientInventory, p.cfg.ServerInventory); err != nil {
+			return nil, err
+		}
+	}
 	hostName := in.HostName
 	fqdn := firstNonEmpty(in.FQDN, hostName)
 
@@ -243,7 +250,7 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 	case ActionFreeIPAClientUninstall:
 		return &freeipaUninstallStep{provider: p, hostName: step.TargetIdentity}, nil
 	case ActionFreeIPARosterHostAbsent:
-		return &freeipaRosterAbsentStep{fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
+		return &freeipaRosterAbsentStep{provider: p, fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPAIdentityApplyConverge:
 		return &freeipaIdentityConvergeStep{provider: p, fqdn: step.TargetIdentity}, nil
 	default:
@@ -297,6 +304,7 @@ func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
 // ---- step: roster host absent + reference pruning (pure Go, no ansible) ----
 
 type freeipaRosterAbsentStep struct {
+	provider   *FreeIPAClientProvider
 	fqdn       string
 	rosterPath string
 }
@@ -322,11 +330,29 @@ func (e *freeipaRosterAbsentStep) Execute(ctx context.Context) error {
 	if strings.TrimSpace(e.rosterPath) == "" {
 		return nil
 	}
+	if err := validateDecommissionRosterSource(e.rosterPath, e.provider.cfg.ClientInventory, e.provider.cfg.ServerInventory); err != nil {
+		return err
+	}
 	if err := inventory.RemoveRosterHostReferences(e.rosterPath, e.fqdn); err != nil {
 		return fmt.Errorf("freeipa-client roster-absent %s: prune references: %w", e.fqdn, err)
 	}
+	if err := validateDecommissionRosterSource(e.rosterPath, e.provider.cfg.ClientInventory, e.provider.cfg.ServerInventory); err != nil {
+		return err
+	}
 	if err := inventory.SetRosterHostAbsent(e.rosterPath, e.fqdn); err != nil {
 		return fmt.Errorf("freeipa-client roster-absent %s: converge host entry: %w", e.fqdn, err)
+	}
+	return nil
+}
+
+// validateDecommissionRosterSource keeps local roster mutations tied to the
+// inventory workspaces configured by the trusted caller. Step Params persist
+// only the roster path; they cannot supply or override this guard context.
+func validateDecommissionRosterSource(rosterPath string, inventoryPaths ...string) error {
+	for _, inventoryPath := range inventoryPaths {
+		if err := secretpath.Validate(filepath.Dir(inventoryPath), rosterPath); err != nil {
+			return fmt.Errorf("decommission roster source: %w", err)
+		}
 	}
 	return nil
 }

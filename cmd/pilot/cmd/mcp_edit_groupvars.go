@@ -86,6 +86,12 @@ func buildInspectGroupVars(dir string, in inspectInput) inspectGroupVars {
 				continue
 			}
 			reason := inspectGroupVarRedaction(p, node)
+			if reason == "" {
+				var decoded any
+				if node.Decode(&decoded) != nil || validateVarsValue(e.RelPath, key, decoded) != nil {
+					reason = "secret_storage"
+				}
+			}
 			value := inspectRedactedValue
 			if reason == "" {
 				value = node.Value

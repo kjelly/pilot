@@ -64,6 +64,9 @@ func validateDeploymentCompleteness(ctx context.Context, inv string) ([]complete
 // hard gate. It shares the same resolved inventory with topology previews and
 // auto-host prompts instead of starting further ansible-inventory processes.
 func validateDeploymentCompletenessSnapshot(inv string, snapshot deployInventorySnapshot) ([]completenessViolation, error) {
+	if err := validateInventorySecretStorage(filepath.Dir(inv)); err != nil {
+		return nil, err
+	}
 	groups := snapshot.Groups
 	hostVars := snapshot.HostVars
 
@@ -258,7 +261,10 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 			}
 			seen[rosterPath] = true
 
-			result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+			dir := filepath.Dir(inv)
+			result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+				return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+			})
 			if err != nil {
 				if !errors.Is(err, inventory.ErrRosterEncrypted) {
 					fmt.Fprintf(out, "warning: could not auto-upgrade roster schema for %s: %v\n", rosterPath, err)

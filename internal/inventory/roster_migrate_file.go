@@ -178,6 +178,9 @@ type RosterMigrationResult struct {
 // untouched. A failure after backup creation is rolled back to the exact
 // original bytes before returning an error.
 func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigrationResult, error) {
+	if err := validateSecretSourceFile(path); err != nil {
+		return RosterMigrationResult{}, err
+	}
 	targetVersion := opts.TargetVersion
 	if targetVersion == 0 {
 		targetVersion = int(CurrentRosterSchemaVersion)
@@ -189,7 +192,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	}
 	defer lock.release() //nolint:errcheck
 
-	original, err := os.ReadFile(path)
+	original, err := readSecretSourceFile(path)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("read roster %s: %w", path, err)
 	}
@@ -280,7 +283,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 	}
 
-	reopened, err := os.ReadFile(path)
+	reopened, err := readSecretSourceFile(path)
 	var reopenedRoot map[string]any
 	if err == nil {
 		err = yaml.Unmarshal(reopened, &reopenedRoot)
@@ -427,7 +430,7 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 	}
 
-	reopened, err := os.ReadFile(path)
+	reopened, err := readSecretSourceFile(path)
 	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(reopened)), "$ANSIBLE_VAULT") {
 		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
@@ -523,6 +526,9 @@ func createRosterBackup(path string, original []byte, fromVersion RosterSchemaVe
 // replaced — MigrateRosterFile's own rollback covers that by re-invoking
 // this function with the original bytes.
 func atomicReplaceFile(path string, data []byte, finalMode os.FileMode) error {
+	if err := validateSecretSourceFile(path); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".migrate-*")
 	if err != nil {

@@ -13,8 +13,8 @@
 
 # HTTP Basic Auth 密碼 —— 必填,沒有預設值(dcgm-exporter 不允許匿名讀取
 # GPU 硬體使用細節,見 spec §1.5)。一律用 ansible-vault 加密檔帶入,不要明文
-# 寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
-# dcgm_exporter_basic_auth_password: ""
+# 寫在這裡或用 -e 帶(Vault 檔必須放在 group_vars/、host_vars/ 以外)。
+# dcgm_exporter_basic_auth_password: "{{ vault_dcgm_exporter_basic_auth_password }}"
 
 # 以下通常不用填,會沿用 playbook 內建預設:
 # dcgm_exporter_basic_auth_user: prometheus

@@ -25,6 +25,9 @@ import (
 // in-memory pipe that is never logged, never written to a Writer, and
 // never touches disk. Callers must not print or log the returned bytes.
 func ansibleVaultView(path, vaultPasswordFile string) ([]byte, error) {
+	if err := validateSecretSourceFile(path); err != nil {
+		return nil, err
+	}
 	bin, err := exec.LookPath("ansible-vault")
 	if err != nil {
 		return nil, fmt.Errorf("ansible-vault not found on PATH: %w", err)

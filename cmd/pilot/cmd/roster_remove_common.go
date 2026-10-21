@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/freeipa"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/secretpath"
 )
 
 // ErrRosterUserAlreadyApplied/ErrRosterGroupAlreadyApplied are returned
@@ -39,6 +41,9 @@ func isRosterFileEncrypted(path string) (bool, error) {
 // common to remove-user and remove-group, and reports whether the
 // roster is encrypted (requiring --vault-password-file).
 func resolveRosterRemoveInputs(rosterPath, inventoryPath, vaultPasswordFile string) (encrypted bool, err error) {
+	if err := validateRosterRemoveSource(rosterPath, inventoryPath); err != nil {
+		return false, err
+	}
 	if _, err := os.Stat(inventoryPath); err != nil {
 		return false, fmt.Errorf("inventory %s: %w", inventoryPath, err)
 	}
@@ -53,6 +58,16 @@ func resolveRosterRemoveInputs(rosterPath, inventoryPath, vaultPasswordFile stri
 		return false, fmt.Errorf("roster %s is ansible-vault encrypted; rerun with --vault-password-file", rosterPath)
 	}
 	return encrypted, nil
+}
+
+// validateRosterRemoveSource retains the selected inventory's workspace when
+// checking an external roster. Persistence helpers only know cwd and the
+// destination, which cannot discover reverse aliases in a different workspace.
+func validateRosterRemoveSource(rosterPath, inventoryPath string) error {
+	if err := secretpath.Validate(filepath.Dir(inventoryPath), rosterPath); err != nil {
+		return fmt.Errorf("roster source: %w", err)
+	}
+	return nil
 }
 
 // printRosterReferences renders a reference list in the shape spec.md

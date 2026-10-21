@@ -84,7 +84,7 @@ func FreeIPAServerFQDN(workspaceDir string) (string, error) {
 }
 
 func readRosterHead(path string) (rosterHead, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return rosterHead{}, err
 	}
@@ -172,7 +172,7 @@ func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, e
 		return false, nil
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return false, err
 	}
@@ -209,7 +209,7 @@ func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, e
 	if err != nil {
 		return false, fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
 		return false, fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return true, nil
@@ -254,7 +254,7 @@ func findMappingChild(mapNode *yaml.Node, key string) *yaml.Node {
 // ValidateRosterFile, just decoded as a plain map instead of a fixed
 // struct or yaml.Node tree, for the append-simulation helpers below.
 func readRosterAsMap(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +440,7 @@ func RosterHBACDisableAllowAll(path string) (bool, error) {
 }
 
 func SetRosterHBACDisableAllowAll(path string, value bool) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -469,7 +469,7 @@ render:
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }
 
 func SimulateSetRosterHostgroup(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
@@ -514,7 +514,7 @@ func AppendRosterNFSClient(path string, entry map[string]any) error {
 }
 
 func AppendRosterHBACRule(path string, rule map[string]any) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -540,7 +540,7 @@ func AppendRosterHBACRule(path string, rule map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }
 
 func SimulateAddRosterHBACRule(path string, rule map[string]any) ([]RosterViolation, error) {
@@ -566,7 +566,7 @@ func SetRosterHostgroup(path, name string, updated map[string]any) error {
 }
 
 func SetRosterHBACRule(path, name string, updated map[string]any) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -614,7 +614,7 @@ func SetRosterHBACRule(path, name string, updated map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }
 
 func simulateSetRosterNested(path, listKey, name string, updated map[string]any, kind string) ([]RosterViolation, bool, error) {
@@ -816,7 +816,7 @@ func AppendRosterHost(path, name, ipAddress string) error {
 }
 
 func appendTopLevelRosterEntry(path, listKey string, stub any) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -843,7 +843,7 @@ func appendTopLevelRosterEntry(path, listKey string, stub any) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil
@@ -873,7 +873,7 @@ func SetRosterGroup(path, name string, updated map[string]any) error {
 }
 
 func replaceTopLevelRosterEntry(path, listKey, name string, updated map[string]any) error {
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -922,7 +922,7 @@ func replaceTopLevelRosterEntry(path, listKey, name string, updated map[string]a
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil

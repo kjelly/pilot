@@ -19,7 +19,6 @@ package inventory
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -116,7 +115,7 @@ func SetRosterNFSServerAbsent(path, fqdn string) error {
 	}
 	defer lock.release() //nolint:errcheck
 
-	data, err := os.ReadFile(path)
+	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return err
 	}
@@ -178,5 +177,5 @@ func SetRosterNFSServerAbsent(path, fqdn string) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return os.WriteFile(path, rendered, 0o600)
+	return writeSecretSourceFile(path, rendered, 0o600)
 }

@@ -41,10 +41,10 @@ thanos_s3_target_host: ""
 # thanos_s3_endpoint: "s3.internal.example.com:443"
 
 # S3 credentials —— 全部必填、沒有預設值,一律用 ansible-vault 加密檔帶入,
-# 不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。必須跟
+# 不要明文寫在這裡或用 -e 帶(Vault 檔必須放在 group_vars/、host_vars/ 以外)。必須跟
 # thanos-query.example.yml 用同一組憑證。
-# thanos_aws_access_key_id: ""
-# thanos_aws_secret_access_key: ""
+# thanos_aws_access_key_id: "{{ vault_thanos_aws_access_key_id }}"
+# thanos_aws_secret_access_key: "{{ vault_thanos_aws_secret_access_key }}"
 #
 # 注意:走本專案自建 SeaweedFS 目的地時,首次套用前要先手動建好
 # thanos_s3_bucket(預設 pilot-thanos-metrics)這個 bucket、且 SeaweedFS S3
@@ -80,7 +80,7 @@ thanos_s3_target_host: ""
 # node_exporter_basic_auth_password 用同一個值**,否則會被 401 擋下,
 # `up{job="node"}` 永遠是 0。一律用 ansible-vault 加密檔帶入。
 # node_exporter_basic_auth_user: prometheus
-# node_exporter_basic_auth_password: ""
+# node_exporter_basic_auth_password: "{{ vault_node_exporter_basic_auth_password }}"
 
 # ---- hosts.yml annotations -> managed-host target labels(opt-in)----
 # 將 hosts.yml annotations 中「穩定、適合 Grafana grouping」的欄位 promotion
@@ -122,7 +122,7 @@ thanos_s3_target_host: ""
 # `up{job="dcgm"}` 永遠是 0。跟 node_exporter 的密碼是完全獨立的一組,
 # 不需要相同。一律用 ansible-vault 加密檔帶入。
 # dcgm_exporter_basic_auth_user: prometheus
-# dcgm_exporter_basic_auth_password: ""
+# dcgm_exporter_basic_auth_password: "{{ vault_dcgm_exporter_basic_auth_password }}"
 
 # 本機 TSDB 保留時間、scrape 間隔,通常不用改,會沿用 playbook 內建預設。
 # 長期資料存在 S3(保留期限見 thanos-query.example.yml 的

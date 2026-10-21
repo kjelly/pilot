@@ -56,7 +56,7 @@
 # 只在**安裝當下**用來建立 reader service principal + keytab;執行期完全
 # 不用。一律走 Vault,不要直接寫在這個檔案裡:
 #   vault key: ipa_admin_password(跟 freeipa-identity/freeipa-dns 共用同一份 vault 檔)
-# ipa_admin_password: ""
+# ipa_admin_password: "{{ vault_ipa_admin_password }}"
 
 # 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
 # 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。
@@ -129,7 +129,7 @@ pilot_access_gateway_binary_path: "dist/pilot-access-gateway-linux-amd64"
 # PIT1 ingest token 的 HMAC signing key,必須跟 pilot-session-store 用同一個
 # vault 值。一律走 Vault,64 個 hex 字元(openssl rand -hex 32):
 #   vault key: pilot_session_store_ingest_signing_key
-# pilot_session_store_ingest_signing_key: ""
+# pilot_session_store_ingest_signing_key: "{{ vault_pilot_session_store_ingest_signing_key }}"
 
 # Metrics(per-host recording spec §31):不需要設定變數。這台主機上已有
 # node_exporter 的 textfile 目錄(/var/lib/node_exporter/textfile,由

@@ -29,7 +29,7 @@
 # 用。一律走 Vault,不要直接寫在這個檔案裡:
 #   vault key: ipa_admin_password(跟 freeipa-identity/pilot-access-gateway/
 #   pilot-access-directory 共用同一份 vault 檔)
-# ipa_admin_password: ""
+# ipa_admin_password: "{{ vault_ipa_admin_password }}"
 
 # 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
 # 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。
@@ -49,7 +49,7 @@ pilot_session_store_key_id: "v1"
 # 寫在這個檔案裡——產生方式例如:
 #   openssl rand -hex 32
 # vault key: pilot_session_store_master_key
-# pilot_session_store_master_key: ""
+# pilot_session_store_master_key: "{{ vault_pilot_session_store_master_key }}"
 
 # Ingest per-session token 的 HMAC signing key(per-host recording spec
 # §16)。pilot-access-gateway 用這把 key 為每個錄影 session 簽發只能寫入該
@@ -58,7 +58,7 @@ pilot_session_store_key_id: "v1"
 # 已不再使用,apply 時會刪除舊的 token 檔)。一律走 Vault,64 個 hex 字元:
 #   openssl rand -hex 32
 # vault key: pilot_session_store_ingest_signing_key
-# pilot_session_store_ingest_signing_key: ""
+# pilot_session_store_ingest_signing_key: "{{ vault_pilot_session_store_ingest_signing_key }}"
 #
 # 升級時請先保留 vault 裡舊的 pilot_session_store_ingest_token,確認升級成功
 # 後再移除——回滾到舊版需要它(見 per-host recording spec §21.3)。

@@ -122,6 +122,11 @@ func (p *FreeIPANFSServerProvider) Inspect(ctx context.Context, in InspectInput)
 // simulation itself (a dry-run roster check, never mutates) — matching
 // FreeIPAClientProvider's own posture.
 func (p *FreeIPANFSServerProvider) Plan(ctx context.Context, in PlanInput) ([]Step, error) {
+	if p.RosterPathSet(in) {
+		if err := validateDecommissionRosterSource(in.RosterPath, p.cfg.Inventory); err != nil {
+			return nil, err
+		}
+	}
 	hostName := in.HostName
 	fqdn := firstNonEmpty(in.FQDN, hostName)
 
@@ -158,7 +163,7 @@ func (p *FreeIPANFSServerProvider) RosterPathSet(in PlanInput) bool {
 func (p *FreeIPANFSServerProvider) ExecutorForStep(step Step) (StepExecutor, error) {
 	switch step.Action {
 	case ActionFreeIPANFSRosterAbsent:
-		return &freeipaNFSRosterAbsentStep{fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
+		return &freeipaNFSRosterAbsentStep{provider: p, fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPANFSDecommission:
 		return &freeipaNFSDecommissionStep{provider: p, fqdn: step.TargetIdentity}, nil
 	default:
@@ -169,6 +174,7 @@ func (p *FreeIPANFSServerProvider) ExecutorForStep(step Step) (StepExecutor, err
 // ---- step: roster nfs.servers[] convergence (pure Go, no ansible) --------
 
 type freeipaNFSRosterAbsentStep struct {
+	provider   *FreeIPANFSServerProvider
 	fqdn       string
 	rosterPath string
 }
@@ -183,6 +189,9 @@ func (e *freeipaNFSRosterAbsentStep) Inspect(ctx context.Context) (bool, error) 
 func (e *freeipaNFSRosterAbsentStep) Execute(ctx context.Context) error {
 	if strings.TrimSpace(e.rosterPath) == "" {
 		return nil
+	}
+	if err := validateDecommissionRosterSource(e.rosterPath, e.provider.cfg.Inventory); err != nil {
+		return err
 	}
 	if err := inventory.SetRosterNFSServerAbsent(e.rosterPath, e.fqdn); err != nil {
 		return fmt.Errorf("freeipa-nfs-server roster-absent %s: %w", e.fqdn, err)

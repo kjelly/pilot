@@ -78,7 +78,18 @@ var inventoryGenerateCmd = &cobra.Command{
 	Short: "Render a simple hosts source file into a full Ansible inventory.yml",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in, out := resolveGenPaths(invGenDir, invGenIn, invGenOut, cmd.Flags().Changed("in"), cmd.Flags().Changed("out"))
+		if err := validateInventorySecretStorage(filepath.Dir(in)); err != nil {
+			return err
+		}
+		if err := validateInventorySecretStorage(groupVarsBaseDir(out)); err != nil {
+			return err
+		}
 		vaultOut := resolveGenVaultPath(out, invGenVaultOut, cmd.Flags().Changed("vault-out"))
+		if !invGenNoVault {
+			if err := validateSecretSourcePath(groupVarsBaseDir(out), vaultOut); err != nil {
+				return err
+			}
+		}
 
 		data, err := os.ReadFile(in)
 		if err != nil {
@@ -98,7 +109,9 @@ var inventoryGenerateCmd = &cobra.Command{
 			// on the host) regardless of call order, but doing it first
 			// also means a group_vars write failure surfaces before we've
 			// claimed success on the inventory itself.
-			copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf), hf)
+			if err := copyMissingGroupVars(cmd.ErrOrStderr(), groupVarsBaseDir(out), inventory.GroupVarsStems(hf), hf); err != nil {
+				return err
+			}
 		}
 		if !invGenNoVault {
 			writeMissingVaultSkeleton(cmd.ErrOrStderr(), vaultOut, hf)
@@ -190,7 +203,7 @@ func groupVarsBaseDir(out string) string {
 // generated with `--out envs/staging/inventory.yml` gets its
 // group_vars written to envs/staging/group_vars/, not scattered back
 // into the shipped example directory.
-func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inventory.HostsFile) {
+func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inventory.HostsFile) error {
 	for _, stem := range stems {
 		src := filepath.Join("group_vars", stem+".example.yml")
 		dst := filepath.Join(baseDir, "group_vars", stem+".yml")
@@ -224,12 +237,17 @@ func copyMissingGroupVars(w io.Writer, baseDir string, stems []string, hf *inven
 		// commented out even when it resolves unambiguously, which is why
 		// `pilot deploy`'s auto-detect prompt for it fired on every single
 		// run of a workspace built this way.
-		if err := os.WriteFile(dst, autofillCrossRoleHostVars(baseDir, hf, data), 0o644); err != nil {
+		data = autofillCrossRoleHostVars(baseDir, hf, data)
+		if err := validateVarsDocument(dst, data); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
 			fmt.Fprintf(w, "group_vars: skip %s (%v)\n", dst, err)
 			continue
 		}
 		fmt.Fprintf(w, "group_vars: copied %s -> %s\n", src, dst)
 	}
+	return nil
 }
 
 // warnShadowedVarsFiles prints one warning per group_vars/host_vars file
@@ -249,6 +267,10 @@ func warnShadowedVarsFiles(w io.Writer, baseDir string) {
 }
 
 func writeMissingVaultSkeleton(w io.Writer, dst string, hf *inventory.HostsFile) {
+	if err := validateSecretSourcePath(filepath.Dir(dst), dst); err != nil {
+		fmt.Fprintln(w, err)
+		return
+	}
 	rendered := inventory.GenerateVaultSkeleton(hf)
 	if rendered == "" {
 		return
@@ -343,11 +365,13 @@ func writeMissingNFSRosterEntries(w io.Writer, dir string, hf *inventory.HostsFi
 		// AppendMissingNFSServerStub below reports that exactly as it
 		// always has, unmigrated or not — never a new reason to fail
 		// generation.
-		if result, err := inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{}); err == nil && result.Changed {
+		if result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+			return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
+		}); err == nil && result.Changed {
 			fmt.Fprintf(w, "nfs roster: %s auto-upgraded schema v%d -> v%d (backup: %s)\n", rosterPath, result.FromVersion, result.ToVersion, result.BackupPath)
 		}
 
-		appended, err := inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
+		appended, err := mutateRosterSourceValue(dir, rosterPath, func() (bool, error) { return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain) })
 		switch {
 		case err != nil:
 			fmt.Fprintf(w, "nfs roster: skip %s for %s (%v)\n", rosterPath, h.Name, err)
@@ -433,6 +457,9 @@ func loadContractCatalogBestEffort() (contract.Catalog, bool) {
 // hosts.yml-shaped file) — regenerating "from itself" would overwrite the
 // source with rendered inventory content.
 func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regenerated bool, err error) {
+	if err := validateInventorySecretStorage(filepath.Dir(invPath)); err != nil {
+		return false, err
+	}
 	dir, err := filepath.Abs(filepath.Dir(invPath))
 	if err != nil {
 		return false, err
@@ -461,7 +488,9 @@ func autoRegenerateInventoryFromHosts(stderr io.Writer, invPath string) (regener
 	if err != nil {
 		return false, err
 	}
-	copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf), hf)
+	if err := copyMissingGroupVars(stderr, groupVarsBaseDir(invPath), inventory.GroupVarsStems(hf), hf); err != nil {
+		return false, err
+	}
 	writeMissingVaultSkeleton(stderr, resolveGenVaultPath(invPath, "", false), hf)
 	writeMissingHostVarsSkeleton(stderr, groupVarsBaseDir(invPath), hf)
 	writeMissingNFSRosterEntries(stderr, groupVarsBaseDir(invPath), hf)
@@ -476,6 +505,9 @@ var inventoryLintCmd = &cobra.Command{
 	Use:   "lint",
 	Short: "Validate a simple hosts source file without generating anything",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateInventorySecretStorage(filepath.Dir(invLintIn)); err != nil {
+			return err
+		}
 		data, err := os.ReadFile(invLintIn)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", invLintIn, err)

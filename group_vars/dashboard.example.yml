@@ -23,9 +23,11 @@ thanos_query_target_host: ""
 # thanos_query_url: "http://metrics.example.internal:10912"
 
 # Grafana admin 密碼。**必填、沒有預設值**,一律用 ansible-vault 加密檔帶
-# 入,不要明文寫在這裡或用 -e 帶(除了拋棄式沙盒測試)。
-# grafana_admin_password: ""
+# 入,不要明文寫在這裡或用 -e 帶(Vault 檔必須放在 group_vars/、host_vars/ 以外)。
+# grafana_admin_password: "{{ vault_grafana_admin_password }}"
 
 # 通常不用改；自訂 alias 要在 thanos-query provider 使用相同值:
 # thanos_query_alias: thanos-query-backend
 # thanos_query_port: 10902  # 同機；跨主機預設 10912
+
+# Secret storage 與既有設定遷移：docs/config-secret-storage.md

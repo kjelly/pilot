@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/kjelly/pilot/internal/secretpath"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -38,6 +39,9 @@ type SNMPCredentialDoc struct {
 // fresh empty document, matching LoadSNMPCatalog/vaultfile's
 // missing-file-is-empty convention.
 func LoadSNMPCredentialDoc(path string) (*SNMPCredentialDoc, error) {
+	if err := secretpath.Validate(".", path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -177,6 +181,9 @@ func (d *SNMPCredentialDoc) Bytes() []byte {
 // WriteSNMPCredentialDoc writes d to path with vault-file permissions
 // (0600), creating parent directories as needed.
 func WriteSNMPCredentialDoc(path string, d *SNMPCredentialDoc) error {
+	if err := secretpath.Validate(".", path); err != nil {
+		return err
+	}
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)

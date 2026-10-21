@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -3157,6 +3158,9 @@ func validateGroupVarsFileKeyAction(name string) func(editAction) error {
 }
 
 func validateSetGroupVar(step editAction) error {
+	if err := validateVarsValue("group_vars/"+filepath.Base(step.File), step.Key, step.Value); err != nil {
+		return err
+	}
 	if strings.TrimSpace(step.File) == "" {
 		return fmt.Errorf("set_group_var requires file")
 	}
@@ -3170,6 +3174,9 @@ func validateSetGroupVar(step editAction) error {
 }
 
 func validateSetGroupVarList(step editAction) error {
+	if err := validateVarsValue("group_vars/"+filepath.Base(step.File), step.Key, step.Values); err != nil {
+		return err
+	}
 	if strings.TrimSpace(step.File) == "" {
 		return fmt.Errorf("set_group_var_list requires file")
 	}

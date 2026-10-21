@@ -46,7 +46,7 @@
 # 不用。一律走 Vault,不要直接寫在這個檔案裡:
 #   vault key: ipa_admin_password(跟 freeipa-identity/freeipa-dns/
 #   pilot-access-gateway 共用同一份 vault 檔)
-# ipa_admin_password: ""
+# ipa_admin_password: "{{ vault_ipa_admin_password }}"
 
 # 控制端已建置好的兩個 binary 路徑(相對於 repo root,或絕對路徑)。必填——
 # 套用前會先在控制端驗證這兩個檔案存在、能正常執行 version 子指令。

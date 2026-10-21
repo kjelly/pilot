@@ -63,5 +63,14 @@ func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
 // calling automationDriver.run directly would — this indirection exists
 // solely so a caller never needs to know automationDriver exists.
 func (s *editAgentSession) Run(scenario editScenario) error {
+	if s.router.err != nil {
+		return s.router.err
+	}
+	if err := validateEditScenario(scenario); err != nil {
+		return err
+	}
+	if err := validateInventorySecretStorage(s.dir); err != nil {
+		return err
+	}
 	return s.driver.run(&s.router, scenario)
 }

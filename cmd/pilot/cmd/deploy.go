@@ -1644,6 +1644,9 @@ func applyDeploymentDependencyChain(ctx context.Context, runner *ansible.Runner,
 // run changes appears in the PLAY RECAP (dependency runs); otherwise one is
 // enough (see checkAppliedHosts).
 func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, stage string, componentHints []string, authorization *deploymentAuthorization, requireEveryHost bool, resultOut *ComponentDeliveryResult) error {
+	if err := validateInventorySecretStorage(filepath.Dir(inv)); err != nil {
+		return err
+	}
 	root, err := resolveContractRoot("")
 	if err != nil {
 		return err
@@ -2295,6 +2298,9 @@ type deployInventorySnapshot struct {
 }
 
 func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployInventorySnapshot, error) {
+	if err := validateInventorySecretStorage(filepath.Dir(inventory)); err != nil {
+		return deployInventorySnapshot{}, err
+	}
 	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
@@ -2580,7 +2586,10 @@ func autoFillFreeIPAClientHostsIntoRoster(ctx context.Context, out io.Writer, se
 		return nil
 	}
 
-	added, err := inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
+	dir := filepath.Dir(inv)
+	added, err := mutateRosterSourceValue(dir, rosterPath, func() ([]string, error) {
+		return inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
+	})
 	if err != nil {
 		fmt.Fprintf(out, "⚠ roster 自動補完主機失敗（不影響本次部署）: %v\n", err)
 		return nil
