@@ -80,7 +80,9 @@
 
         - name: Query both real nameservers using the resolver probe options
           ansible.builtin.command:
-            argv: "{{ ['dig', '+time=2', '+tries=2', '+noall', '+comments', '+answer', '-p', '15353', '@' ~ item.0.addr, 'ipa1.ipa.pilot.internal.', item.1] }}"
+            argv: >-
+              {{ ['dig', '+time=2', '+tries=2', '+noall', '+comments', '+answer', '-p', '15353',
+                  '@' ~ item.0.addr, 'ipa1.ipa.pilot.internal.', item.1] }}
           loop: "{{ issue98_servers | product(['A', 'AAAA']) | list }}"
           register: issue98_results
           changed_when: false
