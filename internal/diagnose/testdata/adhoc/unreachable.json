@@ -1,0 +1,16 @@
+{
+  "plays": [
+    {
+      "tasks": [
+        {
+          "hosts": {
+            "localhost": {
+              "unreachable": true,
+              "msg": "Task failed: Failed to create temporary directory. In some cases, you may have been able to authenticate and did not have permissions on the target directory. Consider changing the remote tmp path in ansible.cfg to a path rooted in \"/tmp\", for more error information use -vvv. Failed command was: _ShellCommand(command='( umask 77 && mkdir -p \"` echo /home/operator/.ansible/tmp `\"&& mkdir \"` echo /home/operator/.ansible/tmp/ansible-tmp-1792548625.4826434-73-123144239863461 `\" && echo ansible-tmp-1792548625.4826434-73-123144239863461=\"` echo /home/operator/.ansible/tmp/ansible-tmp-1792548625.4826434-73-123144239863461 `\" )', input_data=None), exited with result 1"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

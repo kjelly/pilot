@@ -79,7 +79,7 @@ func BuildHostHealthOutput(reachable bool, results []StepResult) HostHealthOutpu
 		}
 		return StepResult{}, false
 	}
-	ok := func(r StepResult) bool { return r.Result.RunErr == nil && !r.Result.Unreachable }
+	ok := func(r StepResult) bool { return r.Result.CommandSucceeded() }
 
 	if r, found := find("uptime"); found && ok(r) {
 		fields := strings.Fields(r.Result.Stdout)
@@ -119,6 +119,12 @@ func BuildHostHealthOutput(reachable bool, results []StepResult) HostHealthOutpu
 	}
 
 	out.Verdict = classifyHostHealth(out)
+	for _, r := range results {
+		if !r.Result.HasCommandResult() {
+			out.Verdict = "insufficient_evidence"
+			break
+		}
+	}
 	return out
 }
 

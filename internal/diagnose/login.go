@@ -67,7 +67,7 @@ type LoginHostOutput struct {
 func BuildLoginHostOutput(host string, results []StepResult) LoginHostOutput {
 	rc := func(id string) (int, bool) {
 		for _, r := range results {
-			if r.Step.ID == id && r.Result.RunErr == nil {
+			if r.Step.ID == id && r.Result.HasCommandResult() {
 				return r.Result.RC, true
 			}
 		}
@@ -80,7 +80,7 @@ func BuildLoginHostOutput(host string, results []StepResult) LoginHostOutput {
 	out.HasKerberosMachineIdentity = kOK && kRC == 0
 
 	for _, r := range results {
-		if r.Step.ID != "sssd-domain-status" || r.Result.RunErr != nil {
+		if r.Step.ID != "sssd-domain-status" || !r.Result.CommandSucceeded() {
 			continue
 		}
 		raw := strings.TrimSpace(r.Result.Stdout)
@@ -96,10 +96,16 @@ func BuildLoginHostOutput(host string, results []StepResult) LoginHostOutput {
 	out.DNS = BuildDNSOutput(host, results)
 
 	switch {
+	case unavailableStepReason(results, "sssd-active", "kerberos-keytab", "sssd-domain-status") != "":
+		out.Verdict = "insufficient evidence to diagnose login: " + unavailableStepReason(results, "sssd-active", "kerberos-keytab", "sssd-domain-status")
 	case !out.SssdActive:
 		out.Verdict = "sssd is not active on this host — no FreeIPA-backed login/sudo can work until it's running (check `systemctl status sssd` / `journalctl -u sssd`)"
 	case !out.HasKerberosMachineIdentity:
 		out.Verdict = "host has no Kerberos machine identity (keytab missing/invalid) — enrollment is broken or incomplete"
+	case !out.SssdDomainStatusChecked:
+		out.Verdict = "insufficient evidence: the SSSD domain step did not report an online/offline state"
+	case strings.HasPrefix(out.DNS.Verdict, "insufficient evidence"):
+		out.Verdict = out.DNS.Verdict
 	case out.SssdDomainStatusChecked && !out.SssdDomainOnline:
 		out.Verdict = "sssd's domain backend is offline — this host cannot reach the FreeIPA server (check network/DNS/firewall to the IPA server)"
 	case out.DNS.NameQueried && !out.DNS.ResolvesViaNSS && !out.DNS.ResolvesViaDirectQuery:
@@ -181,14 +187,14 @@ func BuildLoginUserOutput(user, host string, hostOut LoginHostOutput, results []
 		out.RosterSudoAuthorized = len(rosterSudoRules) > 0
 	}
 
-	if r, ok := find("getent-passwd:" + user); ok && r.Result.RunErr == nil {
+	if r, ok := find("getent-passwd:" + user); ok && r.Result.HasCommandResult() {
 		out.AccountResolvesViaSSSD = r.Result.RC == 0
 		out.PasswdEntry = strings.TrimSpace(r.Result.Stdout)
 	}
-	if r, ok := find("sudo-l:" + user); ok && r.Result.RunErr == nil {
+	if r, ok := find("sudo-l:" + user); ok && r.Result.HasCommandResult() {
 		out.CentralSudoRuleGrantsAccess = r.Result.RC == 0
 	}
-	if r, ok := find("pam-acct-sshd:" + user); ok && r.Result.RunErr == nil {
+	if r, ok := find("pam-acct-sshd:" + user); ok && r.Result.HasCommandResult() {
 		if result, found := parsePamAcctResult(r.Result); found {
 			out.PamAccountChecked = true
 			out.PamAccountResult = result
@@ -197,8 +203,12 @@ func BuildLoginUserOutput(user, host string, hostOut LoginHostOutput, results []
 	}
 
 	switch {
+	case strings.HasPrefix(hostOut.Verdict, "insufficient evidence"):
+		out.Verdict = "insufficient evidence at host level: " + hostOut.Verdict
 	case !hostOut.SssdActive || !hostOut.HasKerberosMachineIdentity:
 		out.Verdict = fmt.Sprintf("a host-level failure blocks every user, including %q — see the host verdict", user)
+	case unavailableStepReason(results, "getent-passwd:"+user, "sudo-l:"+user) != "":
+		out.Verdict = "insufficient evidence to diagnose this user: " + unavailableStepReason(results, "getent-passwd:"+user, "sudo-l:"+user)
 	case !out.AccountResolvesViaSSSD:
 		out.Verdict = fmt.Sprintf("sssd cannot resolve user %q on this host (getent passwd found nothing) — the account doesn't exist here or sssd's cache is stale", user)
 	case out.PamAccountChecked && !out.PamAccountAllowed:

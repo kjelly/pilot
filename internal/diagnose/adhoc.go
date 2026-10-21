@@ -16,7 +16,11 @@ type AdHocResult struct {
 	// Stderr is the module's stderr. Some tools put their verdict there
 	// (sssctl user-checks prints "pam_acct_mgmt: <result>" on stderr and
 	// exits 0 even on a denial — captured 2026-10-13).
-	Stderr      string
+	Stderr string
+	// Message is Ansible's module/transport message, never command stdout.
+	Message string
+	// RCKnown distinguishes a real rc=0 from a module result without rc.
+	RCKnown     bool
 	Failed      bool
 	Unreachable bool
 	// RunErr is set when the step itself could not be run or its output
@@ -37,7 +41,7 @@ type adHocCallbackDoc struct {
 			Hosts map[string]struct {
 				Stdout      string `json:"stdout"`
 				Stderr      string `json:"stderr"`
-				RC          int    `json:"rc"`
+				RC          *int   `json:"rc"`
 				Failed      bool   `json:"failed"`
 				Unreachable bool   `json:"unreachable"`
 				Msg         string `json:"msg"`
@@ -64,13 +68,15 @@ func DecodeAdHocResult(rawJSON, host string) (AdHocResult, error) {
 			if !ok {
 				continue
 			}
-			stdout := result.Stdout
-			if stdout == "" {
-				stdout = result.Msg
+			rc := 0
+			if result.RC != nil {
+				rc = *result.RC
 			}
 			return AdHocResult{
-				RC:          result.RC,
-				Stdout:      stdout,
+				RC:          rc,
+				RCKnown:     result.RC != nil,
+				Stdout:      result.Stdout,
+				Message:     result.Msg,
 				Stderr:      result.Stderr,
 				Failed:      result.Failed,
 				Unreachable: result.Unreachable,
@@ -78,4 +84,53 @@ func DecodeAdHocResult(rawJSON, host string) (AdHocResult, error) {
 		}
 	}
 	return AdHocResult{}, fmt.Errorf("no ansible callback result for host %s", host)
+}
+
+// HasCommandResult reports whether RC is usable command evidence. A transport
+// failure, absent RC, runner error or failed module with zero RC proves nothing
+// about the requested command. A real nonzero command RC remains usable data.
+func (r AdHocResult) HasCommandResult() bool {
+	return r.RCKnown && r.RunErr == nil && !r.Unreachable && (!r.Failed || r.RC != 0)
+}
+
+// CommandSucceeded requires affirmative, known success rather than a zero value.
+func (r AdHocResult) CommandSucceeded() bool {
+	return r.HasCommandResult() && r.RC == 0 && !r.Failed
+}
+
+// UnavailableReason explains why the command did not produce usable evidence.
+func (r AdHocResult) UnavailableReason() string {
+	if r.RunErr != nil {
+		return r.RunErr.Error()
+	}
+	if r.Message != "" {
+		return r.Message
+	}
+	if r.Unreachable {
+		return "host unreachable"
+	}
+	if !r.RCKnown {
+		return "Ansible result did not include a command return code"
+	}
+	return "Ansible module reported failure without a usable command result"
+}
+
+func unavailableStepReason(results []StepResult, ids ...string) string {
+	for _, id := range ids {
+		found := false
+		for _, r := range results {
+			if r.Step.ID != id {
+				continue
+			}
+			found = true
+			if !r.Result.HasCommandResult() {
+				return fmt.Sprintf("%s: %s", id, r.Result.UnavailableReason())
+			}
+			break
+		}
+		if !found {
+			return id + ": no result was returned"
+		}
+	}
+	return ""
 }

@@ -38,7 +38,7 @@ type SudoOutput struct {
 func BuildSudoOutput(user string, results []StepResult) SudoOutput {
 	rc := func(id string) (int, bool) {
 		for _, r := range results {
-			if r.Step.ID == id && r.Result.RunErr == nil {
+			if r.Step.ID == id && r.Result.HasCommandResult() {
 				return r.Result.RC, true
 			}
 		}
@@ -59,6 +59,8 @@ func BuildSudoOutput(user string, results []StepResult) SudoOutput {
 	out.CentralSudoRuleGrantsAccess = c8OK && c8RC == 0
 
 	switch {
+	case unavailableStepReason(results, "C2", "C4", "C5", "C6", "C7", "C8") != "":
+		out.Verdict = "insufficient evidence to diagnose sudo: " + unavailableStepReason(results, "C2", "C4", "C5", "C6", "C7", "C8")
 	case !out.SssdActive:
 		out.Verdict = "sssd is not active — no FreeIPA-backed login/sudo can work on this host until it's running (check `systemctl status sssd` / `journalctl -u sssd`)"
 	case !out.HasKerberosMachineIdentity:

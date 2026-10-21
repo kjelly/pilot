@@ -64,17 +64,15 @@ func RunSteps(ctx context.Context, run AdHocRunner, inventory, host string, step
 		// hang instead of returning evidence.
 		args := []string{host, "-i", inventory, "-T", strconv.Itoa(int(perStepTimeout.Seconds())), "-m", step.Module, "-a", step.Command}
 		rawJSON, _, err := run(ctx, args, int(perStepTimeout.Seconds()))
-		var result AdHocResult
+		// A timed-out runner may still have produced a complete callback. Keep
+		// those facts alongside its failure instead of replacing them with zeroes.
+		result, decodeErr := DecodeAdHocResult(rawJSON, host)
 		if err != nil {
-			result = AdHocResult{RunErr: err}
-		} else {
-			decoded, decodeErr := DecodeAdHocResult(rawJSON, host)
-			if decodeErr != nil {
-				result = AdHocResult{RunErr: decodeErr}
-			} else {
-				result = decoded
-			}
+			result.RunErr = err
+		} else if decodeErr != nil {
+			result.RunErr = decodeErr
 		}
+
 		results[i] = StepResult{Step: step, Result: result}
 	}
 	return results

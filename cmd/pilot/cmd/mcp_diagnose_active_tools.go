@@ -28,6 +28,8 @@ type diagnoseSNMPProbeOutput struct {
 	ProbeOID           string                    `json:"probe_oid"`
 	CredentialResolved bool                      `json:"credential_resolved"`
 	Transport          string                    `json:"transport"`
+	Error              string                    `json:"error,omitempty"`
+	Steps              []diagnoseStepEvidence    `json:"steps,omitempty"`
 	Verdict            string                    `json:"verdict"`
 	Workspace          workspaceintegrity.Report `json:"workspace"`
 	AuditDirectory     string                    `json:"audit_directory,omitempty"`
@@ -136,9 +138,17 @@ func diagnoseSNMPProbeHandler(opts diagnoseMCPToolsOptions) mcp.ToolHandlerFor[d
 			runner = realDiagnoseAdHocRunner()
 		}
 		results := diagnose.RunSteps(ctx, runner, opts.Inventory, exporterHost, steps, minDiagnoseTimeout(opts.StepTimeout, 5*time.Second))
-		if len(results) == 0 || results[0].Result.RunErr != nil || results[0].Result.Unreachable {
-			out.Verdict = "exporter_down"
-			out.Transport = "unreachable"
+		out.Steps = stepEvidenceList(results)
+		if len(results) == 0 {
+			out.Verdict, out.Transport, out.Error = "insufficient_evidence", "unknown", "probe returned no result"
+			return nil, out, nil
+		}
+		if !results[0].Result.HasCommandResult() {
+			out.Verdict, out.Transport = "insufficient_evidence", "unknown"
+			out.Error = results[0].Result.UnavailableReason()
+			if results[0].Result.Unreachable {
+				out.Transport = "unreachable"
+			}
 			return nil, out, nil
 		}
 		body, status, hasStatus := diagnose.SplitHTTPStatus(results[0].Result.Stdout)

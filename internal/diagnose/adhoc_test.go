@@ -1,8 +1,12 @@
 package diagnose
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"testing"
+	"time"
 )
 
 // callbackDoc builds a minimal single-task ansible.posix.json callback
@@ -78,5 +82,89 @@ func TestDecodeAdHocResult_MissingHostIsAnError(t *testing.T) {
 func TestDecodeAdHocResult_MalformedJSONIsAnError(t *testing.T) {
 	if _, err := DecodeAdHocResult("not json", "web1"); err == nil {
 		t.Fatal("DecodeAdHocResult() error = nil, want an error for malformed JSON")
+	}
+}
+
+// These decoder cases consume actual Ansible captures, not invented CLI output.
+func TestDecodeAdHocResult_CapturedStreams(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdout, stderr string
+		rc                   int
+		unreachable          bool
+	}{
+		{"both", "out", "err", 7, false},
+		{"stderr", "", "stderr only", 9, false},
+		{"unreachable", "", "", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := os.ReadFile("testdata/adhoc/" + tc.name + ".json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DecodeAdHocResult(string(data), "localhost")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Stdout != tc.stdout || got.Stderr != tc.stderr || got.RC != tc.rc || got.Unreachable != tc.unreachable || got.Message == "" || got.RCKnown == tc.unreachable {
+				t.Fatalf("decoded = %+v", got)
+			}
+		})
+	}
+}
+
+func TestRunSteps_TimeoutRetainsDecodedFacts(t *testing.T) {
+	raw, err := os.ReadFile("testdata/adhoc/both.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := func(context.Context, []string, int) (string, int, error) {
+		return string(raw), 2, context.DeadlineExceeded
+	}
+	got := RunSteps(context.Background(), runner, "unused", "localhost", []Step{{ID: "partial"}}, time.Second)[0].Result
+	if !errors.Is(got.RunErr, context.DeadlineExceeded) || got.Stdout != "out" || got.Stderr != "err" || got.RC != 7 || !got.RCKnown {
+		t.Fatalf("timeout facts = %+v", got)
+	}
+}
+
+func TestDNSArchKerberos_RunnerFailureIsUnknown(t *testing.T) {
+	result := StepResult{Step: Step{ID: "auth"}, Result: AdHocResult{RunErr: context.DeadlineExceeded}}
+	facts, kerberos := BuildDNSArchObservedFreeIPA("ipa", "reader@EXAMPLE.TEST", "/reader.keytab", result)
+	if kerberos.State != FactUnknown || facts.GlobalForwarders.State != FactUnknown {
+		t.Fatalf("runner failure mislabeled as unreachable: kerberos=%+v facts=%+v", kerberos, facts)
+	}
+	result.Result = AdHocResult{Unreachable: true, Message: "transport unavailable"}
+	facts, kerberos = BuildDNSArchObservedFreeIPA("ipa", "reader@EXAMPLE.TEST", "/reader.keytab", result)
+	if kerberos.State != FactUnreachable || facts.GlobalForwarders.Detail != "transport unavailable" {
+		t.Fatalf("unreachable message was lost: kerberos=%+v facts=%+v", kerberos, facts)
+	}
+}
+
+func TestSynthesis_UnavailableResultNeverBecomesSuccess(t *testing.T) {
+	for _, name := range []string{"unreachable", "module-failure"} {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile("testdata/adhoc/" + name + ".json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := DecodeAdHocResult(string(data), "localhost")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.HasCommandResult() || result.CommandSucceeded() {
+				t.Fatalf("unavailable result accepted: %+v", result)
+			}
+			component := BuildComponentOutput("systemd", "", nil, true, []StepResult{{Step: Step{ID: "runtime-state"}, Result: result}})
+			if component.RuntimePresent || component.RuntimeRunning || component.Verdict != "insufficient_evidence" {
+				t.Fatalf("component=%+v", component)
+			}
+			health := BuildHostHealthOutput(true, []StepResult{{Step: Step{ID: "node-exporter"}, Result: result}})
+			if health.NodeExporterActive || health.Verdict != "insufficient_evidence" {
+				t.Fatalf("health=%+v", health)
+			}
+			path := BuildNetworkPathOutput("example.test", 80, "http", false, false, true, []StepResult{{Step: Step{ID: "name_resolution"}, Result: result}})
+			if path.Verdict != "insufficient_evidence" || path.Layers[0].Passed || path.Layers[0].Evidence == "" {
+				t.Fatalf("path=%+v", path)
+			}
+		})
 	}
 }

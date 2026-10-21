@@ -73,11 +73,11 @@ func preflightSameHostDependency(ctx context.Context, runner diagnose.AdHocRunne
 	}
 	results := diagnose.RunSteps(ctx, runner, inventory, host, []diagnose.Step{*step}, timeout)
 	r := results[0].Result
-	if r.RunErr != nil || r.Unreachable {
+	if !r.HasCommandResult() {
 		return DependencyStatus{Component: dep.Component, Required: dep.Required, Healthy: false, Detail: "runtime-state check did not run: " + errString(r)}
 	}
 	state := strings.TrimSpace(r.Stdout)
-	healthy := state == "running" || state == "active"
+	healthy := r.CommandSucceeded() && (state == "running" || state == "active")
 	return DependencyStatus{Component: dep.Component, Required: dep.Required, Healthy: healthy, Detail: "runtime state: " + state}
 }
 
@@ -93,11 +93,11 @@ func preflightProviderEndpointDependency(ctx context.Context, runner diagnose.Ad
 		steps := diagnose.ComponentSteps("", "", "", "", "", []diagnose.DependencyEndpointCheck{c})
 		results := diagnose.RunSteps(ctx, runner, inventory, host, steps, timeout)
 		r := results[0].Result
-		healthy := r.RunErr == nil && !r.Unreachable && strings.TrimSpace(r.Stdout) == "reachable"
+		healthy := r.CommandSucceeded() && strings.TrimSpace(r.Stdout) == "reachable"
 		detail := fmt.Sprintf("%s:%d", c.Host, c.Port)
 		if !healthy {
 			detail += " unreachable"
-			if r.RunErr != nil || r.Unreachable {
+			if !r.HasCommandResult() {
 				detail += ": " + errString(r)
 			}
 		}
@@ -111,13 +111,7 @@ func preflightProviderEndpointDependency(ctx context.Context, runner diagnose.Ad
 }
 
 func errString(r diagnose.AdHocResult) string {
-	if r.RunErr != nil {
-		return r.RunErr.Error()
-	}
-	if r.Unreachable {
-		return "host unreachable"
-	}
-	return ""
+	return r.UnavailableReason()
 }
 
 // AllRequiredHealthy reports whether every REQUIRED dependency in

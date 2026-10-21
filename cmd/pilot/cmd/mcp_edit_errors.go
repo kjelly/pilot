@@ -22,6 +22,8 @@ import (
 // roster/DNS phases and aren't produced yet, but the type is shared so
 // those phases reuse it rather than inventing another.
 type mcpToolError struct {
+	Redacted       bool   `json:"redacted,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
 	Code           string `json:"code"`
 	Message        string `json:"message"`
 	Step           int    `json:"step,omitempty"`

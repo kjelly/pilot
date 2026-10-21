@@ -85,8 +85,9 @@ func BuildNetworkPathOutput(destHost string, destPort int, scheme string, hasTLS
 		}
 		return StepResult{}, false
 	}
-	ok := func(r StepResult) bool { return r.Result.RunErr == nil && !r.Result.Unreachable }
+	ok := func(r StepResult) bool { return r.Result.HasCommandResult() }
 
+	unknownLayers := map[string]bool{}
 	layer := func(id, name string, configured bool, passed func(rawStdout string) bool) NetworkPathLayerResult {
 		res := NetworkPathLayerResult{Layer: name, Configured: configured}
 		if !configured {
@@ -99,8 +100,14 @@ func BuildNetworkPathOutput(destHost string, destPort int, scheme string, hasTLS
 			// HTTP_STATUS marker; trimming it first would silently
 			// break that match. Evidence (for display) is trimmed
 			// separately, after the pass/fail decision is already made.
-			res.Passed = passed(r.Result.Stdout)
+			res.Passed = r.Result.CommandSucceeded() && passed(r.Result.Stdout)
 			res.Evidence = strings.TrimSpace(r.Result.Stdout)
+			if res.Evidence == "" && r.Result.RC != 0 {
+				res.Evidence = fmt.Sprintf("command exited %d", r.Result.RC)
+			}
+		} else {
+			unknownLayers[name] = true
+			res.Evidence = unavailableStepReason(results, id)
 		}
 		return res
 	}
@@ -122,7 +129,7 @@ func BuildNetworkPathOutput(destHost string, destPort int, scheme string, hasTLS
 		if !l.Configured {
 			continue
 		}
-		if !l.Passed && l.Evidence == "" {
+		if unknownLayers[l.Layer] || (!l.Passed && l.Evidence == "") {
 			// The step never produced usable evidence (ansible/decode
 			// error, not an affirmative "closed"/failed result) — that's
 			// a gap in evidence, not confirmed proof this layer blocks
