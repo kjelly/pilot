@@ -1371,6 +1371,7 @@
           loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
           when:
             - not ansible_check_mode
+            - ipa_ssh_cache_plan is defined
             - ansible_run_tags | intersect(['all', 'identity', 'users', 'sshkeys', 'client-cache']) | length > 0
           tags: [always, identity, users, sshkeys, client-cache]
 
@@ -1384,6 +1385,7 @@
           loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
           when:
             - not ansible_check_mode
+            - ipa_ssh_cache_plan is defined
             - ansible_run_tags | intersect(['all', 'identity', 'users', 'sshkeys', 'client-cache']) | length > 0
           tags: [always, identity, users, sshkeys, client-cache]
 
