@@ -18,6 +18,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/availability"
+	"github.com/kjelly/pilot/internal/contract"
 )
 
 func TestReconcileRejectsFlagMisuse(t *testing.T) {
@@ -268,13 +269,15 @@ func TestExecuteCatalogReconcileBatch_PreviewOnly(t *testing.T) {
 }
 
 // TestPreviewOnlySummary pins the summary contract: deferred hosts of a
-// previewed playbook are named, and a playbook that never previewed fails.
+// previewed playbook are named, and a playbook that never previewed, or one
+// that left no record at all, fails the plan.
 func TestPreviewOnlySummary(t *testing.T) {
 	var out bytes.Buffer
-	err := previewOnlySummary(&out, []previewOnlyRecord{
+	previewed := []previewOnlyRecord{
 		{Playbook: "leaf-apply.yml", Previewed: true},
 		{Playbook: "consumer-apply.yml", Previewed: true, Deferred: []string{"host-b"}},
-	})
+	}
+	err := previewOnlySummary(&out, previewed, 2)
 	if err != nil || !strings.Contains(out.String(), "consumer-apply.yml 已預覽，但 optional 主機 host-b") || !strings.Contains(out.String(), "2 支 playbook 的預覽都通過") {
 		t.Fatalf("all previewed: error = %v, output %q", err, out.String())
 	}
@@ -283,12 +286,269 @@ func TestPreviewOnlySummary(t *testing.T) {
 	err = previewOnlySummary(&out, []previewOnlyRecord{
 		{Playbook: "leaf-apply.yml", Previewed: true},
 		{Playbook: "consumer-apply.yml", Deferred: []string{"host-a"}},
-	})
+	}, 2)
 	if err == nil || !strings.Contains(err.Error(), "consumer-apply.yml(延後：host-a)") || strings.Contains(out.String(), "預覽都通過") {
 		t.Fatalf("one never previewed: error = %v, output %q", err, out.String())
 	}
 
-	if err := previewOnlySummary(&bytes.Buffer{}, nil); err == nil {
+	out.Reset()
+	if err := previewOnlySummary(&out, previewed, 3); err == nil || !strings.Contains(err.Error(), "計畫有 3 支 playbook，但只有 2 支") || strings.Contains(out.String(), "預覽都通過") {
+		t.Fatalf("a planned playbook left no record: error = %v, output %q", err, out.String())
+	}
+
+	if err := previewOnlySummary(&bytes.Buffer{}, nil, 0); err == nil {
 		t.Fatal("no records: error = nil, want a failure")
+	}
+}
+
+func TestReconcileExit(t *testing.T) {
+	failure := errors.New("preview failed")
+	for _, tt := range []struct {
+		name        string
+		err         error
+		previewOnly bool
+		wantErr     string
+	}{
+		{name: "interactive cancel is clean", err: errDeployAborted},
+		{name: "preview-only abort fails", err: errDeployAborted, previewOnly: true, wantErr: "在預覽完成之前就停止了"},
+		{name: "preview-only success", previewOnly: true},
+		{name: "failures pass through", err: failure, previewOnly: true, wantErr: "preview failed"},
+	} {
+		err := reconcileExit(tt.err, tt.previewOnly)
+		if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+			t.Errorf("%s: reconcileExit() = %v, want %q", tt.name, err, tt.wantErr)
+		}
+	}
+}
+
+// writeReconcileBatchFixture fakes ansible-inventory/ansible for the
+// leaf/consumer cascade fixture with the given hosts in both groups, and
+// returns the inventory path.
+func writeReconcileBatchFixture(t *testing.T, hostvars map[string]string) string {
+	t.Helper()
+	root := writeSameHostsCascadeFixture(t)
+	t.Chdir(root)
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = "" })
+	var hosts []string
+	for host := range hostvars {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	var vars, quoted, listed []string
+	invYAML := "all:\n  hosts:\n"
+	for _, host := range hosts {
+		v := "{}"
+		if policy := hostvars[host]; policy != "" {
+			v = `{"deployment_availability":"` + policy + `"}`
+		}
+		vars = append(vars, `"`+host+`":`+v)
+		quoted = append(quoted, `"`+host+`"`)
+		listed = append(listed, "'    "+host+"'")
+		invYAML += "    " + host + ": {}\n"
+	}
+	group := `{"hosts":[` + strings.Join(quoted, ",") + `]}`
+	invJSON := `{"_meta":{"hostvars":{` + strings.Join(vars, ",") + `}},"leaf":` + group + `,"consumer":` + group + `}`
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ansibleFixture := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *--list-hosts*) printf '%s\\n' '  hosts (" + strconv.Itoa(len(hosts)) + "):' " + strings.Join(listed, " ") + "; exit 0 ;;\n" +
+		"  *) printf '{\"plays\":[{\"tasks\":[{\"hosts\":{\"host-a\":{\"stdout\":\"unknown\",\"rc\":0}}}]}]}\\n' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	inv := filepath.Join(t.TempDir(), "inventory.yml")
+	if err := os.WriteFile(inv, []byte(invYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return inv
+}
+
+// TestExecuteCatalogReconcileBatch_PreviewOnlyPersistsNothing: an accepted auto
+// host var must not reach group_vars from a preview-only run, including the
+// case where the main playbook was deferred (its core returns nil, not
+// errPreviewOnlyStop).
+func TestExecuteCatalogReconcileBatch_PreviewOnlyPersistsNothing(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		down map[string]bool
+	}{
+		{name: "previewed", down: map[string]bool{}},
+		{name: "every host deferred", down: map[string]bool{"host-a": true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			inv := writeReconcileBatchFixture(t, map[string]string{"host-a": "optional"})
+			workspace := t.TempDir()
+			groupVars := filepath.Join(workspace, "group_vars", "all.yml")
+			if err := os.MkdirAll(filepath.Dir(groupVars), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const original = "# thanos_s3_target_host: 192.0.2.1\n"
+			if err := os.WriteFile(groupVars, []byte(original), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runner := ansible.NewRunner()
+			runner.Binary = writeArgsFixture(t, filepath.Join(t.TempDir(), "args"))
+			runner.Timeout = 5 * time.Second
+
+			oldPrompt := activePromptAutomation
+			activePromptAutomation = &promptAutomation{useDefaults: true, previewOnly: true}
+			t.Cleanup(func() { activePromptAutomation = oldPrompt })
+			oldProber := deployAvailabilityProber
+			deployAvailabilityProber = fakeDownHostsProber(tt.down)
+			t.Cleanup(func() { deployAvailabilityProber = oldProber })
+
+			request := catalogDeploymentRequest{
+				playbook: "consumer-apply.yml", inv: inv, extraVars: []string{"stage=sandbox"}, stage: "sandbox",
+				componentHints: []string{"consumer"}, workspaceDir: workspace,
+				acceptedAutoHostVars: []acceptedAutoHostVar{{Var: "thanos_s3_target_host", Value: "10.9.9.9"}},
+			}
+			var out bytes.Buffer
+			_ = executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request})
+			if data, err := os.ReadFile(groupVars); err != nil || string(data) != original {
+				t.Fatalf("group_vars = %q (err %v), want it untouched by a preview-only run\n%s", data, err, out.String())
+			}
+		})
+	}
+}
+
+// TestExecuteCatalogReconcileBatch_Force: reconcile --force previews and then
+// applies each playbook in plan order, and persists accepted auto host vars.
+func TestExecuteCatalogReconcileBatch_Force(t *testing.T) {
+	inv := writeReconcileBatchFixture(t, map[string]string{"host-a": ""})
+	workspace := t.TempDir()
+	groupVars := filepath.Join(workspace, "group_vars", "all.yml")
+	if err := os.MkdirAll(filepath.Dir(groupVars), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(groupVars, []byte("# thanos_s3_target_host: 192.0.2.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	argsPath := filepath.Join(t.TempDir(), "args")
+	runner := ansible.NewRunner()
+	runner.Binary = writeArgsFixture(t, argsPath)
+	runner.Timeout = 5 * time.Second
+
+	oldPrompt := activePromptAutomation
+	activePromptAutomation = &promptAutomation{useDefaults: true, forceApply: true}
+	t.Cleanup(func() { activePromptAutomation = oldPrompt })
+	stubDeploymentAvailabilityAllReachable(t)
+
+	request := catalogDeploymentRequest{
+		playbook: "consumer-apply.yml", inv: inv, extraVars: []string{"stage=sandbox"}, stage: "sandbox",
+		componentHints: []string{"consumer"}, workspaceDir: workspace,
+		acceptedAutoHostVars: []acceptedAutoHostVar{{Var: "thanos_s3_target_host", Value: "10.9.9.9"}},
+	}
+	var out bytes.Buffer
+	if err := executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request}); err != nil {
+		t.Fatalf("executeCatalogReconcileBatch() error = %v\n%s", err, out.String())
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs []string
+	for _, run := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if !strings.HasPrefix(run, "playbooks/preflight.yml ") {
+			runs = append(runs, run)
+		}
+	}
+	want := []struct {
+		check    bool
+		playbook string
+	}{{true, "leaf-apply.yml"}, {false, "leaf-apply.yml"}, {true, "consumer-apply.yml"}, {false, "consumer-apply.yml"}}
+	if len(runs) != len(want) {
+		t.Fatalf("ansible-playbook runs = %q, want preview then apply of leaf, then consumer", runs)
+	}
+	for i, w := range want {
+		if strings.HasPrefix(runs[i], "--check --diff ") != w.check || !strings.Contains(runs[i], w.playbook) {
+			t.Fatalf("run %d = %q, want check=%v of %s", i, runs[i], w.check, w.playbook)
+		}
+	}
+	if data, err := os.ReadFile(groupVars); err != nil || !strings.Contains(string(data), "thanos_s3_target_host: 10.9.9.9") {
+		t.Fatalf("group_vars = %q (err %v), want the accepted auto host var persisted after apply", data, err)
+	}
+}
+
+// TestRunCatalogPlaybookDeployEntry_DefaultsRefuseAmbiguousExactlyOne: with
+// two hosts in an exactly-one component's group, the defaults driver must not
+// pick one; it fails and names the candidates.
+func TestRunCatalogPlaybookDeployEntry_DefaultsRefuseAmbiguousExactlyOne(t *testing.T) {
+	inv := writeReconcileBatchFixture(t, map[string]string{"host-a": "", "host-b": ""})
+	root, err := resolveContractRoot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, driver := range []*promptAutomation{
+		{useDefaults: true, forceApply: true},
+		{useDefaults: true, previewOnly: true},
+	} {
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = driver
+		var requests []catalogDeploymentRequest
+		entry := deployPlaybook{Key: "consumer", Playbook: "consumer-apply.yml", StageVar: "stage", DefaultGroup: "consumer", Reconcile: true}
+		err := runCatalogPlaybookDeployEntry(context.Background(), ansible.NewRunner(), &bytes.Buffer{}, inv, "apply", catalog, entry, nil, deployInventorySnapshot{}, true, &requests)
+		activePromptAutomation = oldPrompt
+		if err == nil || !strings.Contains(err.Error(), "exactly-one") || !strings.Contains(err.Error(), "host-a, host-b") || len(requests) != 0 {
+			t.Fatalf("forceApply=%v previewOnly=%v: error = %v, requests = %d; want a refusal naming both hosts", driver.forceApply, driver.previewOnly, err, len(requests))
+		}
+	}
+}
+
+// TestRunReconcileInteractive_RelativeDirResolvesInventoryOnce: under the
+// defaults driver a relative --dir must not be joined twice onto the default
+// inventory path (the interactive validator used to catch that).
+func TestRunReconcileInteractive_RelativeDirResolvesInventoryOnce(t *testing.T) {
+	prev := []any{reconcileStdinIsTerminal, reconcilePreviewOnlyFlag, reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag, activePromptAutomation}
+	t.Cleanup(func() {
+		reconcileStdinIsTerminal = prev[0].(func() bool)
+		reconcilePreviewOnlyFlag = prev[1].(bool)
+		reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag = prev[2].(string), prev[3].(string), prev[4].(string)
+		activePromptAutomation, _ = prev[5].(*promptAutomation)
+	})
+	work := t.TempDir()
+	t.Chdir(work)
+	if err := os.MkdirAll("sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("sub", "inventory.yml"), []byte("all: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = "" })
+	argsPath := filepath.Join(t.TempDir(), "inventory-args")
+	binDir := t.TempDir()
+	// Record the -i argument, then fail: the test only needs the resolved path.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + argsPath + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	reconcileStdinIsTerminal = func() bool { return false }
+	activePromptAutomation = nil
+	reconcilePreviewOnlyFlag = true
+	reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag = "sub", "inventory.yml", "30m"
+	command := &cobra.Command{}
+	command.SetContext(context.Background())
+	_ = runReconcileInteractive(command)
+
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("ansible-inventory never ran: %v", err)
+	}
+	if !strings.Contains(string(data), "-i sub/inventory.yml") || strings.Contains(string(data), "sub/sub/") {
+		t.Fatalf("ansible-inventory args = %q, want -i sub/inventory.yml", data)
 	}
 }

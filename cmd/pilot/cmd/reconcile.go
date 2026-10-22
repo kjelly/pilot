@@ -48,7 +48,7 @@ func init() {
 	reconcileCmd.Flags().BoolVar(&reconcilePresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	reconcileCmd.Flags().StringVar(&reconcileTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	reconcileCmd.Flags().StringArrayVar(&reconcileComponentFlags, "component", nil, "要調和的 day-2 元件 key(可重複，例如 --component freeipa-identity)；指定後不再顯示勾選清單")
-	reconcileCmd.Flags().BoolVar(&reconcileForceFlag, "force", false, "不顯示互動提示：各欄位採用預設值，計畫中所有 playbook 預覽成功後直接正式套用；需要 --component")
+	reconcileCmd.Flags().BoolVar(&reconcileForceFlag, "force", false, "不顯示互動提示：各欄位採用預設值，依計畫順序逐支 playbook 先預覽、成功後隨即正式套用(後面的預覽失敗時，前面已套用的不會還原)；需要 --component")
 	reconcileCmd.Flags().BoolVar(&reconcilePreviewOnlyFlag, "preview-only", false, "不顯示互動提示：各欄位採用預設值，只預覽(--check --diff)計畫中的每一支 playbook，全部不套用；每一支都實際預覽通過才以結束碼 0 結束(目標主機全部是無法連線的 optional 主機而延後的 playbook 算沒有預覽)；需要 --component")
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
@@ -107,7 +107,11 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	fmt.Fprintln(out, "═══ pilot reconcile — 互動式 day-2 設定調和精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
-	inventoryDefault := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
+	// Workspace-relative, not pre-joined with --dir: the validator and inv below
+	// apply workspacePath to the answer, so joining here too doubled a relative
+	// --dir (see runDeployInteractive), and the defaults driver skips the
+	// validator that used to catch it.
+	inventoryDefault := reconcileInventoryFlag
 	invInput, err := runTextPrompt(promptInventory, "Inventory 檔路徑", inventoryDefault, func(path string) error {
 		return validateFileExists(workspacePath(reconcileDirFlag, path))
 	})
@@ -148,10 +152,15 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}
-	err = runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot)
-	if reconcilePreviewOnlyFlag && errors.Is(err, errDeployAborted) {
-		// A preview-only plan that previewed everything returns nil; an abort
-		// means it stopped first, which CI must not read as a clean preview.
+	return reconcileExit(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot), reconcilePreviewOnlyFlag)
+}
+
+// reconcileExit maps the wizard's result to the command's. A preview-only plan
+// that previewed everything returns nil; an abort means it stopped first,
+// which CI must not read as a clean preview. Otherwise an abort is the
+// operator's clean cancellation.
+func reconcileExit(err error, previewOnly bool) error {
+	if previewOnly && errors.Is(err, errDeployAborted) {
 		return fmt.Errorf("--preview-only：reconcile 在預覽完成之前就停止了")
 	}
 	return abortOrErr(err)

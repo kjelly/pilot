@@ -620,8 +620,13 @@ var errPreviewOnlyStop = fmt.Errorf("預覽通過(--preview-only)，略過正式
 // previewOnlySummary reports what a PreviewOnly plan covered. Deferred hosts
 // of a previewed playbook are listed because the preview did not cover them.
 // A playbook whose every target was deferred was not previewed at all, so the
-// plan fails rather than pass unverified, matching deploy --preview-only.
-func previewOnlySummary(out io.Writer, records []previewOnlyRecord) error {
+// plan fails rather than pass unverified, matching deploy --preview-only. So
+// does a plan with fewer records than planned playbooks, so that a path that
+// skips a playbook without recording it cannot pass silently.
+func previewOnlySummary(out io.Writer, records []previewOnlyRecord, planned int) error {
+	if len(records) != planned {
+		return fmt.Errorf("--preview-only：計畫有 %d 支 playbook，但只有 %d 支留下預覽結果", planned, len(records))
+	}
 	var previewed int
 	var notPreviewed []string
 	for _, r := range records {
@@ -3601,6 +3606,12 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 			return groupErr
 		}
 		candidates := groups[selectedContract.Role]
+		if len(candidates) > 1 && activePromptAutomation != nil && activePromptAutomation.useDefaults {
+			// This choice has no safe default: the defaults driver would take the
+			// first host in inventory order.
+			return fmt.Errorf("%s 要求 exactly-one，但 %s group 有 %d 台主機(%s)；--force/--preview-only 不會代為選擇，請讓該 group 只剩一台主機，或以互動模式執行",
+				selectedContract.ID, selectedContract.Role, len(candidates), strings.Join(candidates, ", "))
+		}
 		if len(candidates) > 1 {
 			hostIndex, selectErr := runSelectPrompt("target_host", "此元件要求 exactly-one；請明確選擇目標主機", candidates)
 			if selectErr != nil {
@@ -3808,13 +3819,14 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		}
 		requestResult, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, &plans[i])
 		agg = agg.merge(requestResult)
-		if errors.Is(err, errPreviewOnlyStop) {
-			// Previewed, not applied: nothing to persist from this request.
-			continue
-		}
-		if err != nil {
+		if err != nil && !errors.Is(err, errPreviewOnlyStop) {
 			execErr = err
 			break
+		}
+		// A PreviewOnly request applied nothing, whether its main playbook
+		// previewed (errPreviewOnlyStop) or was deferred (nil): persist nothing.
+		if authorization.PreviewOnly {
+			continue
 		}
 		persistAcceptedAutoHostVars(out, request.workspaceDir, request.acceptedAutoHostVars)
 	}
@@ -3852,7 +3864,7 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 	if execErr == nil && authorization.PreviewOnly {
 		// Count what actually previewed: availability can turn a planned
 		// playbook into a no-op that never reaches its preview.
-		execErr = previewOnlySummary(out, authorization.previewOnlyRecords)
+		execErr = previewOnlySummary(out, authorization.previewOnlyRecords, plannedPlaybooks)
 	}
 	return execErr
 }
