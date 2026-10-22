@@ -373,11 +373,12 @@ func writeReconcileBatchFixture(t *testing.T, hostvars map[string]string) string
 // errPreviewOnlyStop).
 func TestExecuteCatalogReconcileBatch_PreviewOnlyPersistsNothing(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		down map[string]bool
+		name    string
+		down    map[string]bool
+		wantErr string // "" = the preview passes
 	}{
 		{name: "previewed", down: map[string]bool{}},
-		{name: "every host deferred", down: map[string]bool{"host-a": true}},
+		{name: "every host deferred", down: map[string]bool{"host-a": true}, wantErr: "沒有預覽"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			inv := writeReconcileBatchFixture(t, map[string]string{"host-a": "optional"})
@@ -407,7 +408,11 @@ func TestExecuteCatalogReconcileBatch_PreviewOnlyPersistsNothing(t *testing.T) {
 				acceptedAutoHostVars: []acceptedAutoHostVar{{Var: "thanos_s3_target_host", Value: "10.9.9.9"}},
 			}
 			var out bytes.Buffer
-			_ = executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request})
+			// Assert the outcome too, so a fixture that broke early cannot pass vacuously.
+			err := executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request})
+			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("executeCatalogReconcileBatch() error = %v, want %q\n%s", err, tt.wantErr, out.String())
+			}
 			if data, err := os.ReadFile(groupVars); err != nil || string(data) != original {
 				t.Fatalf("group_vars = %q (err %v), want it untouched by a preview-only run\n%s", data, err, out.String())
 			}
@@ -475,7 +480,8 @@ func TestExecuteCatalogReconcileBatch_Force(t *testing.T) {
 
 // TestRunCatalogPlaybookDeployEntry_DefaultsRefuseAmbiguousExactlyOne: with
 // two hosts in an exactly-one component's group, the defaults driver must not
-// pick one; it fails and names the candidates.
+// pick one; it fails and names the candidates. A scripted --actions driver
+// still answers the host select.
 func TestRunCatalogPlaybookDeployEntry_DefaultsRefuseAmbiguousExactlyOne(t *testing.T) {
 	inv := writeReconcileBatchFixture(t, map[string]string{"host-a": "", "host-b": ""})
 	root, err := resolveContractRoot("")
@@ -503,6 +509,26 @@ func TestRunCatalogPlaybookDeployEntry_DefaultsRefuseAmbiguousExactlyOne(t *test
 		if err == nil || !strings.Contains(err.Error(), "exactly-one") || !strings.Contains(err.Error(), "host-a, host-b") || len(requests) != 0 {
 			t.Fatalf("forceApply=%v previewOnly=%v: error = %v, requests = %d; want a refusal naming both hosts", driver.forceApply, driver.previewOnly, err, len(requests))
 		}
+	}
+
+	oldPrompt := activePromptAutomation
+	activePromptAutomation = &promptAutomation{action: "reconcile", answers: []promptAnswer{
+		{Prompt: "此元件要求 exactly-one", Select: "host-b"},
+		{Prompt: "[consumer] 要套用到哪個 stage", Select: "sandbox"},
+		{Prompt: "要限定只套用到某台主機嗎", Text: ""},
+		{Prompt: "要只跑某幾個檢查項目嗎", Text: ""},
+		{Prompt: "這次佈署需要密碼變數嗎", Select: "不需要"},
+		{Prompt: "這次套用要手動輸入 sudo", Confirm: new(bool)},
+		{Prompt: "還有其他 -e 變數要帶嗎", Text: ""},
+	}}
+	t.Cleanup(func() { activePromptAutomation = oldPrompt })
+	var requests []catalogDeploymentRequest
+	entry := deployPlaybook{Key: "consumer", Label: "consumer", Playbook: "consumer-apply.yml", StageVar: "stage", DefaultGroup: "consumer", Reconcile: true}
+	if err := runCatalogPlaybookDeployEntry(context.Background(), ansible.NewRunner(), &bytes.Buffer{}, inv, "apply", catalog, entry, nil, deployInventorySnapshot{}, true, &requests); err != nil {
+		t.Fatalf("scripted driver: error = %v", err)
+	}
+	if len(requests) != 1 || !slices.Contains(requests[0].extraVars, "target_group=host-b") {
+		t.Fatalf("scripted driver: requests = %+v, want target_group=host-b", requests)
 	}
 }
 
