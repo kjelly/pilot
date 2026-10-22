@@ -153,6 +153,21 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 | `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
 | `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
 
+## 1.7 密碼傳輸契約（Issue #118）
+
+- 管理員及使用者密碼中的 `$`、反引號、`$(...)`、引號、反斜線及空白須原樣保留，不能成為指令。
+- 密碼僅透過 stdin 傳入，不得插入 shell、free-form command 或 process argv；敏感 task 保留 `no_log`。
+- `ipa passwd` 的非 TTY prompt 會 `.strip()`，因此使用者密碼透過 stdin JSON 交給本機 FreeIPA Python API 的 `passwd`，沿用 admin reset 與必須變更密碼的語意。
+- 密碼設定失敗須讓 run 失敗，診斷只包含使用者、退出碼及錯誤種類，不回傳可能含秘密的例外內容。
+- 沿用 §7.4 的初始化／保留／要求重設條件；重跑不得重設已收斂的密碼。
+- 成功、失敗及 tag-scoped 執行後均清除私有 Kerberos cache；不建立額外密碼暫存檔。
+
+此契約的本機回歸使用真實 Ansible 與替代 KDC/API，不能代替 FreeIPA VM 的 apply／verify／idempotency 證據。
+
+上游介面依據：[非 TTY password prompt](https://github.com/freeipa/freeipa/blob/master/ipalib/cli.py)、
+[passwd RPC 的 admin-reset 語意](https://github.com/freeipa/freeipa/blob/master/ipaserver/plugins/passwd.py)、
+[Python API 連線範例](https://github.com/freeipa/freeipa/blob/master/doc/examples/python-api.py)。
+
 ## 2. Checklist
 
 > 指令直接在 FreeIPA server 本機以 root 執行（`pilot verify` 走 ansible ad-hoc，

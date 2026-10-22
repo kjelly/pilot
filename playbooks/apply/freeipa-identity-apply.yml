@@ -783,11 +783,9 @@
 
         # ── Admin authentication ───────────────────────────────────────────
         - name: "Kinit admin"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ identity_admin_password }}" | kinit {{ identity_admin_principal }}@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ identity_admin_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ identity_admin_password }}"
           changed_when: false
           no_log: true
           # `pilot reconcile` previews this playbook with --check --diff, while
@@ -1104,12 +1102,39 @@
           tags: [identity, users, passwords]
 
         - name: "Set password for users that need one (first-time onboard, or requested reset)"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
-                | ipa passwd {{ item.name }}
-            executable: /bin/bash
+          # The ipa CLI's non-TTY password prompt strips leading/trailing
+          # whitespace. Call the same passwd RPC with stdin JSON instead, so
+          # even those passwords reach FreeIPA unchanged (issue #118).
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -c
+              - |
+                import json
+                import sys
+
+                def reset_password():
+                    from ipalib import api
+                    payload = json.load(sys.stdin)
+                    api.bootstrap(context='cli', in_server=False)
+                    api.finalize()
+                    try:
+                        api.Backend.rpcclient.connect()
+                        api.Command.passwd(
+                            payload['principal'], payload['password'],
+                            current_password='CHANGING_PASSWORD_FOR_ANOTHER_USER')
+                    finally:
+                        if api.Backend.rpcclient.isconnected():
+                            api.Backend.rpcclient.disconnect()
+
+                try:
+                    reset_password()
+                except Exception as error:
+                    # Exception messages may contain the supplied secret.
+                    print('ipa: ERROR: password reset failed (' +
+                          type(error).__name__ + ')', file=sys.stderr)
+                    sys.exit(1)
+            stdin: "{{ {'principal': item.name, 'password': item.password} | to_json }}"
           loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
           loop_control:
             label: "{{ item.name }}"
@@ -1122,8 +1147,8 @@
           no_log: true
           tags: [identity, users, passwords]
 
-        # Names the users whose `ipa passwd` failed, with ipa's "ipa: ERROR:"
-        # lines only (they never contain the password). Until issue #102 a
+        # Names the users whose password RPC failed, with the adapter's
+        # sanitized error type only. Until issue #102 a
         # failure here was reported as ok and the account kept no password.
         - name: "Gate: every password this run set was accepted"
           ansible.builtin.assert:
