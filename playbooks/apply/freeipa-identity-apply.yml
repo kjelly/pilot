@@ -1369,8 +1369,10 @@
             that: item in hostvars
             fail_msg: "Pending SSH cache target {{ item }} is absent from this inventory; recovery remains pending"
           loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
-          when: not ansible_check_mode
-          tags: [identity, users, sshkeys, client-cache]
+          when:
+            - not ansible_check_mode
+            - ansible_run_tags | intersect(['all', 'identity', 'users', 'sshkeys', 'client-cache']) | length > 0
+          tags: [always, identity, users, sshkeys, client-cache]
 
         - name: "Gate: pending SSH cache targets match the authorized stage"
           ansible.builtin.assert:
@@ -1380,8 +1382,10 @@
               - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
             fail_msg: "Pending SSH cache target {{ item }} is outside the authorized stage={{ stage }}; recovery remains pending"
           loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
-          when: not ansible_check_mode
-          tags: [identity, users, sshkeys, client-cache]
+          when:
+            - not ansible_check_mode
+            - ansible_run_tags | intersect(['all', 'identity', 'users', 'sshkeys', 'client-cache']) | length > 0
+          tags: [always, identity, users, sshkeys, client-cache]
 
         - name: "Invalidate and verify the named user's SSSD SSH keys"
           ansible.builtin.command:

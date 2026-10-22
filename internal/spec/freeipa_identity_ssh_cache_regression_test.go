@@ -29,33 +29,53 @@ func TestRegression_IdentitySSHCacheStageScope(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
-	tasks := []any{map[string]any{
-		"name": "cross-stage inventory fixture", "tags": []string{"always"},
-		"ansible.builtin.add_host": map[string]any{"name": "client-prod", "groups": []string{"prod", "freeipa-client"}},
-	}}
+	var production []any
 	for _, value := range plays[0]["tasks"].([]any) {
 		block := value.(map[string]any)
 		for _, inner := range block["block"].([]any) {
 			task := inner.(map[string]any)
-			if task["name"] == "Resolve enrolled SSH key cache targets" || task["name"] == "Gate: SSH cache targets must match the authorized stage" {
-				tasks = append(tasks, task)
+			switch task["name"] {
+			case "Resolve enrolled SSH key cache targets", "Gate: SSH cache targets must match the authorized stage",
+				"Gate: pending SSH cache targets exist in this inventory", "Gate: pending SSH cache targets match the authorized stage":
+				production = append(production, task)
 			}
 		}
 	}
-	if len(tasks) != 3 {
+	if len(production) != 4 {
 		t.Fatal("production stage-scope tasks not found")
 	}
-	// An empty managed-user list must not bypass the scope gate: the journal
-	// may still contain pending work for a user omitted from this roster.
-	vars := map[string]any{"stage": "sandbox", "ipa_active_users": []any{}}
-	for _, tag := range []string{"sshkeys", "client-cache", "users", "hbac", "freeipa_host_absent_inspect"} {
-		t.Run(tag, func(t *testing.T) {
-			res := runGatewayTasks(t, t.TempDir(), tasks, vars, nil, "--tags", tag)
-			mustFail := tag == "sshkeys" || tag == "client-cache" || tag == "users"
-			if (res.rc != 0) != mustFail {
-				t.Fatalf("tag=%s rc=%d failures=%v\n%s", tag, res.rc, res.failures, res.raw)
-			}
-		})
+	for _, scenario := range []string{"current enrollment", "undefined plan", "retained cross-stage work", "retained missing target"} {
+		for _, tag := range []string{"all", "identity", "sshkeys", "client-cache", "users", "hbac", "freeipa_host_absent_inspect"} {
+			t.Run(scenario+"/"+tag, func(t *testing.T) {
+				groups := []string{"prod"}
+				if scenario == "current enrollment" {
+					groups = append(groups, "freeipa-client")
+				}
+				tasks := []any{map[string]any{
+					"name": "cross-stage inventory fixture", "tags": []string{"always"},
+					"ansible.builtin.add_host": map[string]any{"name": "client-prod", "groups": groups},
+				}}
+				tasks = append(tasks, production...)
+				// Empty current users cannot suppress durable work for omitted users.
+				vars := map[string]any{"stage": "sandbox", "ipa_active_users": []any{}}
+				if scenario == "retained cross-stage work" || scenario == "retained missing target" {
+					host := "client-prod"
+					if scenario == "retained missing target" {
+						host = "client-missing"
+					}
+					vars["ipa_ssh_cache_plan"] = map[string]any{"stdout": fmt.Sprintf(`{"work":[{"host":%q,"user":"omitted-user"}]}`, host)}
+				}
+				res := runGatewayTasks(t, t.TempDir(), tasks, vars, nil, "--tags", tag)
+				mutation := tag != "hbac" && tag != "freeipa_host_absent_inspect"
+				mustFail := mutation && scenario != "undefined plan"
+				if (res.rc != 0) != mustFail {
+					t.Fatalf("tag=%s rc=%d failures=%v\n%s", tag, res.rc, res.failures, res.raw)
+				}
+				if mustFail && scenario != "current enrollment" && !strings.Contains(fmt.Sprint(res.failures), "Gate: pending SSH cache targets") {
+					t.Fatalf("retained work failed outside its actual-plan authorization gate: %v", res.failures)
+				}
+			})
+		}
 	}
 }
 
@@ -342,7 +362,7 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	// tasks execute; rejected plans may never call either SSSD process.
 	for _, omitted := range []bool{false, true} {
 		for _, host := range []string{"old-client", "missing-client"} {
-			for _, tag := range []string{"all", "sshkeys", "users", "client-cache"} {
+			for _, tag := range []string{"all", "identity", "sshkeys", "users", "client-cache"} {
 				raw, err := os.ReadFile(statePath)
 				if err != nil {
 					t.Fatal(err)

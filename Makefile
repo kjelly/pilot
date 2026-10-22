@@ -130,7 +130,7 @@ identity-noop-test: ## Run the bulk-listing and membership reconciliation regres
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_Identity(GroupListingSkipsExistingGroups|GroupMembershipSkipsCurrentMembers|GroupMembershipIgnoresCase|MixedCaseMemberSurvivesTwoRuns|RemovalsIgnoreCaseEverywhere|UserListingSkipsNoOpCalls|UserListingFailsClosed)$$' ./internal/spec/
 
 identity-ssh-cache-test: ## Exercise durable SSH-key propagation, per-user delegation and partial retry with mandatory real Ansible.
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_IdentitySSHCache' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySSHCache.*|StageGatesAlwaysRunInTaggedPlays|ApplyPlaysWithConfirmGateHaveCrossCheck|PreTaskGatesRunUnderApplyTags|NoUntaggedChecksInTaggedPlays|TaggedTasksReadOnlyWhatTheirTagsSet|AlwaysTaggedTasksHaveAllPrerequisitesAlways|TaggedIncludeTasksUseApply|RescueRunsWheneverItsBlockDoes|IpaCommandsHaveAKinitForTheirTags)$$' ./internal/spec/
 
 identity-ssh-cache-live-test: ## Require an external private fixture config for real multi-host FreeIPA/SSSD/SSH acceptance.
 	PILOT_REQUIRE_SSH_CACHE_LIVE=1 go test -count=1 -v -timeout 20m -run '^TestRegression_IdentitySSHCacheLiveSSH$$' ./internal/spec/
