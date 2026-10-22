@@ -50,8 +50,12 @@ var deployPresentation bool
 var deployTracePath string
 var deployForceFlag bool
 var deployPreviewOnlyFlag bool
-var deployStageFlag string
-var deployStagingAttestedHoursFlag string
+
+// stageFlag and stagingAttestedHoursFlag back --stage and
+// --staging-attested-within-hours on both deploy and reconcile, which share
+// promptStageDecision.
+var stageFlag string
+var stagingAttestedHoursFlag string
 
 // deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
 var deployStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
@@ -188,8 +192,8 @@ func init() {
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示：各欄位採用精靈顯示的預設值，但預覽成功後會直接執行正式套用(略過預設為 No 的「要接著套用真正的變更嗎？」與正式套用確認)")
 	deployCmd.Flags().BoolVar(&deployPreviewOnlyFlag, "preview-only", false, "不顯示互動提示：跟 --force 一樣採用精靈顯示的預設值，但只跑預覽(--check --diff)，不做正式套用；預覽通過才以結束碼 0 結束")
-	deployCmd.Flags().StringVar(&deployStageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認(等同 -e confirm_staging=true / confirm_prod=true)；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
-	deployCmd.Flags().StringVar(&deployStagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
+	deployCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認(等同 -e confirm_staging=true / confirm_prod=true)；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
+	deployCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVar(&deployGraphDirFlag, "dir", ".", "workspace directory containing inventory.yml (default: current directory)")
@@ -316,7 +320,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if deployForceFlag && deployPreviewOnlyFlag {
 		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
 	}
-	if err := validateDeployStageFlags(deployStageFlag, deployStagingAttestedHoursFlag); err != nil {
+	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
 		return err
 	}
 	if deployActionsPath != "" {
@@ -326,7 +330,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if deployPreviewOnlyFlag {
 			return fmt.Errorf("--preview-only 不能與 --actions 同時使用")
 		}
-		if deployStageFlag != "" {
+		if stageFlag != "" {
 			return fmt.Errorf("--stage 不能與 --actions 同時使用(scenario 自己回答 stage)")
 		}
 		return runStandalonePromptWorkflow(cmd, "deploy", deployActionsPath, deployPresentation, deployTracePath)
@@ -582,7 +586,16 @@ const (
 type deploymentAuthorization struct {
 	Preflight preflightMode
 	Preview   bool
+	// PreviewOnly (reconcile --preview-only) previews every playbook in the
+	// plan and applies none: each transaction ends in errPreviewOnlyStop once
+	// its preview passes, and the plan moves on to the next playbook.
+	PreviewOnly bool
 }
+
+// errPreviewOnlyStop ends a transaction whose preview passed under a
+// PreviewOnly authorization. It wraps delivery.ErrCancelled, so the skipped
+// apply is recorded as cancelled and never rolled back.
+var errPreviewOnlyStop = fmt.Errorf("預覽通過(--preview-only)，略過正式套用：%w", delivery.ErrCancelled)
 
 func promptPreflightMode() (preflightMode, error) {
 	idx, err := runSelectPrompt(promptPreflight, "要先跑前置檢查(preflight)嗎？", []string{
@@ -648,9 +661,9 @@ type stageDecision struct {
 	ConfirmVars []string // e.g. []string{"confirm_staging=true"}
 }
 
-// validateDeployStageFlags rejects a bad --stage/--staging-attested-within-hours
+// validateStageFlags rejects a bad --stage/--staging-attested-within-hours
 // pair before the wizard touches anything.
-func validateDeployStageFlags(stage, attestedHours string) error {
+func validateStageFlags(stage, attestedHours string) error {
 	switch stage {
 	case "", "sandbox", "staging":
 		if attestedHours != "" {
@@ -690,8 +703,8 @@ func stageDecisionFromFlag(out io.Writer, context, stage, attestedHours string) 
 }
 
 func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
-	if deployStageFlag != "" {
-		return stageDecisionFromFlag(out, context, deployStageFlag, deployStagingAttestedHoursFlag), nil
+	if stageFlag != "" {
+		return stageDecisionFromFlag(out, context, stageFlag, stagingAttestedHoursFlag), nil
 	}
 	idx, err := runSelectPrompt(promptStage, fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
 		"sandbox（預設；沙盒/測試機，不需要額外確認）",
@@ -1312,7 +1325,11 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		}
 	}
 	apply := func(ctx context.Context) error {
-		if options.Authorization != nil {
+		if options.Authorization != nil && options.Authorization.PreviewOnly {
+			// Reached only after this transaction's preview passed.
+			fmt.Fprintln(out, "✅ 預覽通過(--preview-only)，略過正式套用。")
+			return errPreviewOnlyStop
+		} else if options.Authorization != nil {
 			// The parent reconcile plan already received one explicit approval
 			// for every dependency and the selected component.
 		} else if dryRunFirst {
@@ -1388,6 +1405,9 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	result, err := txn.RunResult(ctx)
 	if options.ResultOut != nil {
 		*options.ResultOut = result
+	}
+	if errors.Is(err, errPreviewOnlyStop) {
+		return errPreviewOnlyStop
 	}
 	if errors.Is(err, delivery.ErrCancelled) {
 		return errDeployAborted
@@ -1506,6 +1526,10 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 	preflight, err := promptPreflightMode()
 	if err != nil {
 		return nil, err
+	}
+	if activePromptAutomation != nil && activePromptAutomation.previewOnly {
+		// Nothing will be applied, so there is no apply authorization to ask for.
+		return &deploymentAuthorization{Preflight: preflight, Preview: true, PreviewOnly: true}, nil
 	}
 	preview := runConfirmPrompt(promptExecutionPreview, "要先對此計畫中的所有 playbook 預覽(--check --diff)嗎？", true)
 	question := fmt.Sprintf("確認：若所有前置檢查與預覽都成功，將不再詢問並依序正式套用計畫中的 %d 支 playbook。", plannedPlaybooks)
@@ -1701,6 +1725,10 @@ func applyDeploymentDependencyChain(ctx context.Context, runner *ansible.Runner,
 		err := executeRecordedDeploymentCore(ctx, runner, out, dep.Playbooks.Apply, inv, dependencyLimit, "", vars, vault, stage, []string{dep.ID}, authorization, true, &depResult)
 		if len(depResult.ComponentIDs) > 0 {
 			results = append(results, depResult)
+		}
+		if errors.Is(err, errPreviewOnlyStop) {
+			// The dependency previewed cleanly; go on to preview the rest of the plan.
+			continue
 		}
 		if err != nil {
 			return results, fmt.Errorf("apply required dependency %q: %w", dep.ID, err)
@@ -3314,7 +3342,13 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		return fmt.Errorf("no contract components are available; use --show-experimental only after reviewing their evidence requirements")
 	}
 	var selectedIndexes []int
-	if reconcileOnly {
+	if reconcileOnly && len(reconcileComponentFlags) > 0 {
+		selectedIndexes, err = reconcileComponentIndexes(entries, reconcileComponentFlags)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "已由 --component 選擇 %d 個 day-2 reconcile 元件，將依序執行。\n", len(selectedIndexes))
+	} else if reconcileOnly {
 		selectedIndexes, err = runMultiSelectProgram("挑選要調和的 day-2 設定元件", labels)
 		if err != nil {
 			return err
@@ -3361,6 +3395,30 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		return executeCatalogReconcileBatch(ctx, runner, out, reconcileRequests)
 	}
 	return nil
+}
+
+// reconcileComponentIndexes answers the reconcile checklist from --component
+// keys. Indexes come back in menu order, as the checklist returns them.
+func reconcileComponentIndexes(entries []deployPlaybook, keys []string) ([]int, error) {
+	selected := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		selected[key] = true
+	}
+	var indexes []int
+	available := make([]string, 0, len(entries))
+	for i, entry := range entries {
+		available = append(available, entry.Key)
+		if selected[entry.Key] {
+			indexes = append(indexes, i)
+			delete(selected, entry.Key)
+		}
+	}
+	for _, key := range keys {
+		if selected[key] {
+			return nil, fmt.Errorf("--component %q 不是可用的 day-2 reconcile 元件(可用：%s)", key, strings.Join(available, ", "))
+		}
+	}
+	return indexes, nil
 }
 
 // catalogBatchInputs contains prompts whose answer applies to every selected
@@ -3695,6 +3753,10 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		}
 		requestResult, err := executeRecordedDeploymentWithAuthorizationResult(ctx, runner, out, request.playbook, request.inv, request.limit, request.tags, request.extraVars, request.vault, request.stage, request.componentHints, authorization, &plans[i])
 		agg = agg.merge(requestResult)
+		if errors.Is(err, errPreviewOnlyStop) {
+			// Previewed, not applied: nothing to persist from this request.
+			continue
+		}
 		if err != nil {
 			execErr = err
 			break
@@ -3732,6 +3794,9 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		StartedAt:              startedAt,
 		FinishedAt:             time.Now(),
 	})
+	if execErr == nil && authorization.PreviewOnly {
+		fmt.Fprintf(out, "✅ --preview-only：計畫中 %d 支 playbook 的預覽都通過，沒有套用任何變更。\n", plannedPlaybooks)
+	}
 	return execErr
 }
 
