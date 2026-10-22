@@ -117,31 +117,33 @@ func TestRegression_IdentityPasswdFailureFailsTheRun(t *testing.T) {
 	answers := map[string]string{
 		"user-show ok-user --all --raw":   noKey,
 		"user-show gone-user --all --raw": noKey,
-		"passwd ok-user":                  "passwd-ok",
-		"passwd gone-user":                "passwd-no-matching-entry",
 	}
 
 	t.Run("a failed passwd stops the run and names the user", func(t *testing.T) {
-		calls := fakeIPA(t, answers)
+		fakeIPA(t, answers)
+		dir := t.TempDir()
+		fakeIdentityPasswordAPI(t, dir)
+		t.Setenv("IDENTITY_API_FAIL_USER", "gone-user")
 		res := runIdentityTasks(t, names, map[string]any{"ipa_active_users": users})
 		if res.rc == 0 {
 			t.Fatalf("expected the run to fail\n%s", res.raw)
 		}
 		msg := failureOf(res, identityPasswdGateTask)
-		if !strings.Contains(msg, "gone-user (rc=2: ipa: ERROR: no matching entry found)") {
-			t.Fatalf("gate failure does not name the user and ipa's error: %q\nfailures: %v", msg, res.failures)
+		if !strings.Contains(msg, "gone-user (rc=1: ipa: ERROR: password reset failed (NotFound))") {
+			t.Fatalf("gate failure does not name the user and sanitized error: %q\nfailures: %v", msg, res.failures)
 		}
 		if strings.Contains(msg, "ok-user") || strings.Contains(msg, "Roster-Initial-1") {
 			t.Fatalf("gate failure names a user that succeeded or shows the password: %q", msg)
 		}
-		if got := calls(); !slices.Contains(got, "passwd ok-user") || !slices.Contains(got, "passwd gone-user") {
-			t.Fatalf("every password must still be attempted, calls: %v", got)
+		got := identityPasswordCalls(t, dir)
+		if len(got) != 2 || got[0].Principal != "ok-user" || got[1].Principal != "gone-user" {
+			t.Fatal("every password must still be attempted")
 		}
 	})
 
 	t.Run("all passwords accepted", func(t *testing.T) {
-		ok := maps(answers, "passwd gone-user", "passwd-ok")
-		fakeIPA(t, ok)
+		fakeIPA(t, answers)
+		fakeIdentityPasswordAPI(t, t.TempDir())
 		if res := runIdentityTasks(t, names, map[string]any{"ipa_active_users": users}); res.rc != 0 {
 			t.Fatalf("rc=%d failures=%v\n%s", res.rc, res.failures, res.raw)
 		}

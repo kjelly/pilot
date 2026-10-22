@@ -34,8 +34,6 @@ import (
 var secretCommandTextAllowlist = map[string]int{
 	"playbooks/apply/dcgm-exporter-apply.yml::Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)":             1,
 	"playbooks/apply/freeipa-dns-apply.yml::Kinit admin into the dedicated ccache":                                                                 1,
-	"playbooks/apply/freeipa-identity-apply.yml::Kinit admin":                                                                                      1,
-	"playbooks/apply/freeipa-identity-apply.yml::Set password for users that need one (first-time onboard, or requested reset)":                    1,
 	"playbooks/apply/freeipa-server-apply.yml::FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)":                1,
 	"playbooks/apply/gateway-scope-apply.yml::Kinit admin":                                                                                         1,
 	"playbooks/apply/host-monitoring-apply.yml::Step 8: Generate bcrypt hash for basic auth (spec C10; only when the credential changed)":          1,
@@ -277,6 +275,9 @@ func findNamedTask(t *testing.T, doc any, name string) map[string]any {
 // or $(...) in the password ran as a command.
 func TestRegression_FreeIPAKinitTasksPassPasswordUnchanged(t *testing.T) {
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("required ansible-playbook not installed: %v", err)
+		}
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	const realm = "IPA.PILOT.INTERNAL"
@@ -291,6 +292,8 @@ func TestRegression_FreeIPAKinitTasksPassPasswordUnchanged(t *testing.T) {
 		{playbook: "freeipa-server-replica-apply.yml", task: "FreeIPA replica DNS self-register — kinit admin into the dedicated ccache", secretVar: "ipa_enroll_password",
 			vars: map[string]any{"ipa_enroll_principal": "admin"}, ccache: true},
 		{playbook: "freeipa-server-apply.yml", task: "Kinit admin (for dnsconfig-mod)", secretVar: "ipa_admin_password"},
+		{playbook: "freeipa-identity-apply.yml", task: "Kinit admin", secretVar: "identity_admin_password",
+			vars: map[string]any{"identity_admin_principal": "admin"}},
 	} {
 		task := findNamedTask(t, loadYAML(t, filepath.Join("..", "..", "playbooks", "apply", tc.playbook)), tc.task)
 		if task["no_log"] != true {
