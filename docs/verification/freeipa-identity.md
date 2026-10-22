@@ -164,6 +164,8 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 
 此契約的本機回歸使用真實 Ansible 與替代 KDC/API，不能代替 FreeIPA VM 的 apply／verify／idempotency 證據。
 
+目前 live 驗收：2026-10-22，candidate `0a2e361`（tree `a4c60f0`），全新 AlmaLinux 9 FreeIPA provider；identity verify **24/24 PASS**，literal-secret、reset/preserve、check-mode、冪等、tagged 與失敗清理均通過。完整 revision、hash 與結果見 [live evidence](../evidence/freeipa-identity-secret-input/2026-10-22-0a2e361-live.md)。
+
 上游介面依據：[非 TTY password prompt](https://github.com/freeipa/freeipa/blob/master/ipalib/cli.py)、
 [passwd RPC 的 admin-reset 語意](https://github.com/freeipa/freeipa/blob/master/ipaserver/plugins/passwd.py)、
 [Python API 連線範例](https://github.com/freeipa/freeipa/blob/master/doc/examples/python-api.py)。
