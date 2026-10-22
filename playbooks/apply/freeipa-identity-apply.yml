@@ -1261,7 +1261,7 @@
                   + groups.get('freeipa-server', [])
                   + groups.get('freeipa-server-replica', [])
                   + [inventory_hostname]) | unique | sort }}
-          tags: [identity, users, sshkeys, client-cache]
+          tags: [always, identity, users, sshkeys, client-cache]
 
         - name: "Gate: SSH cache targets must match the authorized stage"
           ansible.builtin.assert:
@@ -1271,8 +1271,11 @@
               - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
             fail_msg: "SSH cache target {{ item }} is outside the authorized stage={{ stage }}"
           loop: "{{ ipa_ssh_cache_hosts }}"
-          when: ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list | length > 0
-          tags: [identity, users, sshkeys, client-cache]
+          # Includes pending work for users omitted from the current roster.
+          # A read-only inspection or an unrelated tagged workflow must not
+          # acquire this cross-host mutation scope.
+          when: ansible_run_tags | intersect(['all', 'identity', 'users', 'sshkeys', 'client-cache']) | length > 0
+          tags: [always, identity, users, sshkeys, client-cache]
 
         # Persist BEFORE mutation, including all hosts that may cache a key.
         # A failed/crashed IPA loop leaves pending work for the next apply.

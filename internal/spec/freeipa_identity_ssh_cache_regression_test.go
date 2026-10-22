@@ -19,6 +19,45 @@ func TestRegression_IdentitySSHCacheJournal(t *testing.T) {
 	}
 }
 
+func TestRegression_IdentitySSHCacheStageScope(t *testing.T) {
+	raw, err := os.ReadFile(sshKeysPlaybook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []map[string]any
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		t.Fatal(err)
+	}
+	tasks := []any{map[string]any{
+		"name": "cross-stage inventory fixture", "tags": []string{"always"},
+		"ansible.builtin.add_host": map[string]any{"name": "client-prod", "groups": []string{"prod", "freeipa-client"}},
+	}}
+	for _, value := range plays[0]["tasks"].([]any) {
+		block := value.(map[string]any)
+		for _, inner := range block["block"].([]any) {
+			task := inner.(map[string]any)
+			if task["name"] == "Resolve enrolled SSH key cache targets" || task["name"] == "Gate: SSH cache targets must match the authorized stage" {
+				tasks = append(tasks, task)
+			}
+		}
+	}
+	if len(tasks) != 3 {
+		t.Fatal("production stage-scope tasks not found")
+	}
+	// An empty managed-user list must not bypass the scope gate: the journal
+	// may still contain pending work for a user omitted from this roster.
+	vars := map[string]any{"stage": "sandbox", "ipa_active_users": []any{}}
+	for _, tag := range []string{"sshkeys", "client-cache", "users", "hbac", "freeipa_host_absent_inspect"} {
+		t.Run(tag, func(t *testing.T) {
+			res := runGatewayTasks(t, t.TempDir(), tasks, vars, nil, "--tags", tag)
+			mustFail := tag == "sshkeys" || tag == "client-cache" || tag == "users"
+			if (res.rc != 0) != mustFail {
+				t.Fatalf("tag=%s rc=%d failures=%v\n%s", tag, res.rc, res.failures, res.raw)
+			}
+		})
+	}
+}
+
 // Keep the legacy non-key refresh predicate complete, without letting SSH-only
 // changes or journal writes cause a fleet-wide cache flush.
 func TestRegression_IdentitySSHCacheNonKeyMutationCoverage(t *testing.T) {
@@ -141,14 +180,22 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
-	var tasks []any
+	// Delegation resolves connection settings from host variables. Declare
+	// the provider explicitly instead of relying only on play connection=local.
+	tasks := []any{map[string]any{"name": "test inventory provider",
+		"ansible.builtin.add_host": map[string]any{"name": "localhost", "ansible_connection": "local", "ansible_host": "127.0.0.1", "ansible_port": 22}}}
 	for _, host := range []string{"client-a", "client-b"} {
 		connection := "local"
+		address := "127.0.0.3"
 		if host == "client-b" {
 			connection = "{{ 'ssh' if cache_test_unreachable | default(false) else 'local' }}"
+			address = "127.0.0.2"
 		}
+		// Keep the deliberately unreachable SSH alias distinct from implicit
+		// localhost/127.0.0.1. Otherwise Ansible can reuse its connection state
+		// for the provider and the failure fixture also breaks localhost.
 		tasks = append(tasks, map[string]any{"name": "test inventory " + host,
-			"ansible.builtin.add_host": map[string]any{"name": host, "groups": "freeipa-client", "ansible_connection": connection, "ansible_host": "127.0.0.1", "ansible_port": 1}})
+			"ansible.builtin.add_host": map[string]any{"name": host, "groups": "freeipa-client", "ansible_connection": connection, "ansible_host": address, "ansible_port": 1}})
 	}
 	var collect func([]any)
 	collect = func(all []any) {
@@ -200,7 +247,7 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 		slices.Sort(lines)
 		slices.Sort(hosts)
 		if !slices.Equal(lines, hosts) {
-			t.Fatalf("cache calls=%v; want %v", lines, hosts)
+			t.Fatalf("cache calls=%v; want %v; failures=%v\n%s", lines, hosts, result.failures, result.raw)
 		}
 	}
 	all := []string{"client-a/alice", "client-a/bob", "client-b/alice", "client-b/bob", "localhost/alice", "localhost/bob"}
