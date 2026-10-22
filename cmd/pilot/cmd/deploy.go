@@ -49,6 +49,7 @@ var deployActionsPath string
 var deployPresentation bool
 var deployTracePath string
 var deployForceFlag bool
+var deployPreviewOnlyFlag bool
 
 // deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
 var deployStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
@@ -184,6 +185,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployPresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示：各欄位採用精靈顯示的預設值，但預覽成功後會直接執行正式套用(略過預設為 No 的「要接著套用真正的變更嗎？」與正式套用確認)")
+	deployCmd.Flags().BoolVar(&deployPreviewOnlyFlag, "preview-only", false, "不顯示互動提示：跟 --force 一樣採用精靈顯示的預設值，但只跑預覽(--check --diff)，不做正式套用；預覽通過才以結束碼 0 結束")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVar(&deployGraphDirFlag, "dir", ".", "workspace directory containing inventory.yml (default: current directory)")
@@ -307,9 +309,15 @@ var errDeployAborted = errors.New("已取消")
 var errPreflightRejected = errors.New("前置檢查失敗，已停止部署")
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if deployForceFlag && deployPreviewOnlyFlag {
+		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
+	}
 	if deployActionsPath != "" {
 		if deployForceFlag {
 			return fmt.Errorf("--force 不能與 --actions 同時使用")
+		}
+		if deployPreviewOnlyFlag {
+			return fmt.Errorf("--preview-only 不能與 --actions 同時使用")
 		}
 		return runStandalonePromptWorkflow(cmd, "deploy", deployActionsPath, deployPresentation, deployTracePath)
 	}
@@ -319,18 +327,21 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	// --force answers every prompt through the automation driver, so it must
-	// be installed before the TTY gate: that is what lets `pilot deploy
-	// --force` run from CI, cron, or `ssh host pilot deploy --force`.
-	if deployForceFlag {
-		defaults := &promptAutomation{useDefaults: true, forceApply: true}
+	// --force and --preview-only answer every prompt through the automation
+	// driver, so it must be installed before the TTY gate: that is what lets
+	// `pilot deploy --force` run from CI, cron, or `ssh host pilot deploy --force`.
+	// --preview-only differs only in leaving forceApply off, so the
+	// after-preview apply question keeps its default No.
+	var defaults *promptAutomation
+	if deployForceFlag || deployPreviewOnlyFlag {
+		defaults = &promptAutomation{useDefaults: true, forceApply: deployForceFlag}
 		oldPrompt := activePromptAutomation
 		activePromptAutomation = defaults
 		defer func() { activePromptAutomation = oldPrompt }()
 	}
 
 	if !promptWorkflowAllowsNonTTY(deployStdinIsTerminal()) {
-		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請加 --force（全部採用預設值並直接套用）、用 --actions 指定 JSON scenario 檔，或直接用 ansible-playbook（見 DELIVERY.md）")
+		return fmt.Errorf("pilot deploy 需要互動式終端機(TTY)才能問問題；非互動場景請加 --force（全部採用預設值並直接套用）或 --preview-only（全部採用預設值、只預覽不套用）、用 --actions 指定 JSON scenario 檔，或直接用 ansible-playbook（見 DELIVERY.md）")
 	}
 
 	timeout, err := parseDeployTimeout(deployTimeoutFlag)
@@ -417,7 +428,25 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	} else {
 		err = runCatalogPlaybookDeploy(ctx, runner, out, inv, deployActionFlag, false, snapshot)
 	}
+	if deployPreviewOnlyFlag {
+		return previewOnlyResult(out, err, defaults.previewPassed)
+	}
 	return abortOrErr(err)
+}
+
+// previewOnlyResult maps a --preview-only run to its exit status. Declining
+// the after-preview apply question ends every successful run as
+// errDeployAborted, but so would a cancellation before any preview ran, and
+// CI must not read that as a passing preview.
+func previewOnlyResult(out io.Writer, err error, previewPassed bool) error {
+	if err != nil && !errors.Is(err, errDeployAborted) {
+		return err
+	}
+	if !previewPassed {
+		return fmt.Errorf("--preview-only：部署在預覽通過之前就停止了，沒有完成任何預覽")
+	}
+	fmt.Fprintln(out, "✅ --preview-only：預覽通過，沒有套用任何變更。")
+	return nil
 }
 
 // parseDeployTimeout validates the --timeout flag value used as
