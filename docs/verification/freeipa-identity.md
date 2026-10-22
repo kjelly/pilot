@@ -171,6 +171,8 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 [passwd RPC 的 admin-reset 語意](https://github.com/freeipa/freeipa/blob/master/ipaserver/plugins/passwd.py)、
 [Python API 連線範例](https://github.com/freeipa/freeipa/blob/master/doc/examples/python-api.py)。
 
+SSH key cache 最新 live 驗收：2026-10-22，candidate `e42f50c`（tree `a226935`），一台 enrolled provider 與兩台 enrolled AlmaLinux 9 clients；完整新增／撤銷、warm-cache SSH allow/deny、timeout／unreachable／deferred retry、interruption／ABA、20 組 historical stage／missing-host gates 與非 key 授權快取 recovery 均通過，最後 topology test **24/24 PASS**、changed=0。完整 hashes、逐段 driver、真實失敗與恢復見 [live evidence](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
+
 ## 2. Checklist
 
 > 指令直接在 FreeIPA server 本機以 root 執行（`pilot verify` 走 ansible ad-hoc，

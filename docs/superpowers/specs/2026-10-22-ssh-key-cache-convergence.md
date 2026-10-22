@@ -1,6 +1,6 @@
 # SSH key cache convergence — issue #114
 
-Status: candidate contract; live multi-host acceptance is required before ready.
+Status: live multi-host acceptance passed on candidate `e42f50c96a763272cbdfcc720e10eeb598dca87e` (tree `a226935f9d323934af85506d31cbac4c77457690`); see [accepted evidence](../../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md).
 
 ## Decision
 
