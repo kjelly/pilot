@@ -97,11 +97,103 @@
     # every user login to every host regardless of the rules above.
     ipa_hbac_disable_allow_all: false
 
-    # SSSD clients cache identity, HBAC, and sudo data.  Refresh every
-    # inventory-declared FreeIPA client after a successful identity reconcile
-    # so authorization changes become observable without waiting for cache
-    # expiry.  This is intentionally inventory-driven; never hard-code hosts.
+    # Legacy non-key authorization refresh. SSH keys use the durable,
+    # per-user journal below; a no-op apply must not contact clients.
     ipa_identity_refresh_sssd_cache: true
+    # Kept in sync with mutating command registers by the regression suite.
+    ipa_identity_cache_mutation_registers:
+      - ipa_group_add
+      - ipa_group_mod
+      - ipa_user_add
+      - ipa_user_mod
+      - ipa_passwd
+      - ipa_grp_member
+      - ipa_grp_removal
+      - canonical_group_user_remove
+      - canonical_nested_group_remove
+      - canonical_group_user_add
+      - canonical_nested_group_add
+      - canonical_user_enabled
+      - canonical_user_delete
+      - canonical_group_delete
+      - ipa_canonical_host_add
+      - ipa_canonical_host_dns
+      - ipa_hostgroup_add
+      - ipa_hostgroup_mod
+      - ipa_hostgroup_member
+      - ipa_hostgroup_nested_member
+      - ipa_hostgroup_removal
+      - ipa_hostgroup_nested_removal
+      - ipa_netgroup_add
+      - ipa_netgroup_mod
+      - ipa_netgroup_user_add
+      - ipa_netgroup_group_add
+      - ipa_netgroup_host_add
+      - ipa_netgroup_hostgroup_add
+      - ipa_netgroup_nested_add
+      - ipa_netgroup_user_remove
+      - ipa_netgroup_group_remove
+      - ipa_netgroup_host_remove
+      - ipa_netgroup_hostgroup_remove
+      - ipa_netgroup_nested_remove
+      - ipa_netgroup_delete
+      - ipa_hbacsvc_add
+      - ipa_hbac_add
+      - ipa_hbac_rm_host
+      - ipa_hbac_rm_hostgroup
+      - ipa_hbac_rm_service
+      - ipa_hbac_rm_user
+      - ipa_hbac_rm_group
+      - ipa_hbacrule_mod
+      - ipa_hbac_hostgroup
+      - ipa_hbac_host
+      - ipa_hbac_service
+      - ipa_hbac_user
+      - ipa_hbac_group
+      - ipa_hbac_enabled
+      - ipa_hbac_rule_delete
+      - ipa_grant_hbac_prune
+      - ipa_hbac_disable
+      - ipa_hbac_rollback
+      - ipa_canonical_sudocmd_add
+      - ipa_sudocmdgroup_add
+      - ipa_sudocmdgroup_member
+      - ipa_rule_add
+      - ipa_sudo_rm_host
+      - ipa_sudo_rm_hostgroup
+      - ipa_sudo_rm_cmd
+      - ipa_sudo_rm_user
+      - ipa_sudo_rm_group
+      - ipa_sudorule_mod
+      - ipa_sudocmd_add
+      - ipa_allow_cmd
+      - ipa_allow_cmdgroup
+      - ipa_deny_cmd
+      - ipa_deny_cmdgroup
+      - ipa_runas_user
+      - ipa_runas_group
+      - ipa_sudo_option
+      - ipa_rule_user
+      - ipa_rule_group
+      - ipa_rule_hostgroup
+      - ipa_rule_host
+      - ipa_sudo_enabled
+      - ipa_grant_sudo_timed
+      - ipa_grant_sudo_prune
+      - ipa_auth_policy_host
+      - ipa_account_expiration
+      - pilot_pwpolicy_add
+      - pilot_pwpolicy_mod
+      - pilot_pwpolicy_remove
+      - pilot_user_auth_type
+      - ipa_automount_location
+      - ipa_automount_map
+      - ipa_automount_master_key
+      - ipa_automount_share_key
+      - ipa_automount_share_mod
+      - freeipa_absent_host_dns_del
+      - freeipa_absent_host_del
+    ipa_ssh_cache_program: "{{ lookup('file', playbook_dir ~ '/files/freeipa-ssh-key-cache.py') }}"
 
   pre_tasks:
     - name: "Load canonical roster under a namespace"
@@ -798,6 +890,20 @@
           check_mode: false
           tags: [always, identity, groups, freeipa_host_absent_inspect]
 
+        # Preserve the legacy non-key failure/retry behavior without touching
+        # clients on every no-op apply. A crash before settlement stays dirty.
+        - name: "Prepare legacy authorization cache recovery"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_prepare, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain} | to_json }}"
+          become: true
+          register: ipa_auth_cache_prepare
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+          tags: [identity, client-cache]
+
         # ── Groups ─────────────────────────────────────────────────────────
         # One listing replaces a `group-add` per group on reruns, the same way
         # and for the same reasons as the user listings below. Groups missing
@@ -1148,6 +1254,39 @@
         # performed"), so removing a user's last key never revoked it (issue
         # #113). Clearing a user with no key answers the same "no
         # modifications" (captured, FreeIPA 4.13.4), so it stays a no-op.
+        - name: "Resolve enrolled SSH key cache targets"
+          ansible.builtin.set_fact:
+            ipa_ssh_cache_hosts: >-
+              {{ (groups.get('freeipa-client', [])
+                  + groups.get('freeipa-server', [])
+                  + groups.get('freeipa-server-replica', [])
+                  + [inventory_hostname]) | unique | sort }}
+          tags: [identity, users, sshkeys, client-cache]
+
+        - name: "Gate: SSH cache targets must match the authorized stage"
+          ansible.builtin.assert:
+            that:
+              - not ('prod' in hostvars[item].group_names and stage != 'prod')
+              - not ('staging' in hostvars[item].group_names and stage != 'staging')
+              - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
+            fail_msg: "SSH cache target {{ item }} is outside the authorized stage={{ stage }}"
+          loop: "{{ ipa_ssh_cache_hosts }}"
+          when: ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list | length > 0
+          tags: [identity, users, sshkeys, client-cache]
+
+        # Persist BEFORE mutation, including all hosts that may cache a key.
+        # A failed/crashed IPA loop leaves pending work for the next apply.
+        - name: "Prepare durable SSH key cache work"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", prepare, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain, 'hosts': ipa_ssh_cache_hosts, 'users': ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list} | to_json }}"
+          become: true
+          register: ipa_ssh_cache_prepare
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
+
         - name: "Set SSH public keys for users (declarative replace)"
           ansible.builtin.command:
             argv: >-
@@ -1162,7 +1301,57 @@
           failed_when:
             - ipa_sshkey.rc != 0
             - "'no modifications to be performed' not in (ipa_sshkey.stderr | default(''))"
-          tags: [identity, users, sshkeys]
+          tags: [identity, users, sshkeys, client-cache]
+
+        - name: "Settle SSH key cache work after IPA reconciliation"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", settle, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: >-
+              {{ {'domain': ipa_domain,
+                  'prepared': (ipa_ssh_cache_prepare.stdout | from_json).prepared,
+                  'changed_users': ipa_sshkey.results | default([]) | selectattr('changed') | map(attribute='item.name') | list} | to_json }}
+          become: true
+          register: ipa_ssh_cache_plan
+          changed_when: false
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
+
+        - name: "Invalidate and verify the named user's SSSD SSH keys"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", refresh]
+            stdin: "{{ item | combine({'domain': ipa_domain}) | to_json }}"
+          delegate_to: "{{ item.host }}"
+          become: true
+          vars:
+            ansible_connect_timeout: 5
+            ansible_ssh_timeout: 5
+          timeout: 45
+          loop: >-
+            {{ (ipa_ssh_cache_plan.stdout | default('{"work": []}') | from_json).work }}
+          loop_control:
+            label: "{{ item.host }} / {{ item.user }}"
+          register: ipa_ssh_cache_results
+          changed_when: false
+          ignore_errors: true
+          ignore_unreachable: true
+          when:
+            - not ansible_check_mode
+            - item.host not in (pilot_deferred_hosts | default([]))
+          tags: [identity, users, sshkeys, client-cache]
+
+        - name: "Acknowledge verified SSH key cache pairs"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", ack, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: >-
+              {{ {'domain': ipa_domain, 'verified': ipa_ssh_cache_results.results | default([])
+                  | rejectattr('skipped', 'defined') | rejectattr('unreachable', 'defined')
+                  | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+                  | map(attribute='item') | list} | to_json }}
+          become: true
+          register: ipa_ssh_cache_ack
+          changed_when: false
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
 
         - name: "Ensure user group membership"
           ansible.builtin.command:
@@ -3576,6 +3765,23 @@
             - freeipa_absent_host_verify.rc == 0
           tags: [identity, hosts]
 
+        - name: "Settle legacy authorization cache recovery"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_settle, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: >-
+              {{ {'domain': ipa_domain,
+                  'previous': (ipa_auth_cache_prepare.stdout | from_json).previous,
+                  'changed': vars | dict2items | selectattr('key', 'in', ipa_identity_cache_mutation_registers)
+                    | map(attribute='value') | selectattr('changed', 'defined')
+                    | selectattr('changed') | list | length > 0} | to_json }}
+          become: true
+          register: ipa_auth_cache_settle
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+          tags: [identity, client-cache]
+
         # ── Release ticket ─────────────────────────────────────────────────
         - name: "Refresh SSSD caches on enrolled FreeIPA clients"
           ansible.builtin.command: sss_cache -E
@@ -3594,7 +3800,29 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            - (ipa_auth_cache_settle.stdout | from_json).dirty
           tags: [identity, client-cache]
+
+        - name: "Acknowledge legacy authorization cache recovery"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_ack, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain} | to_json }}"
+          become: true
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+          tags: [identity, client-cache]
+
+        - name: "Gate: every SSH key cache pair converged"
+          ansible.builtin.assert:
+            that: (ipa_ssh_cache_ack.stdout | from_json).pending | length == 0
+            fail_msg: >-
+              SSH key propagation PARTIAL; FreeIPA changes are retained.
+              Retry this roster. Pending host/user pairs:
+              {{ (ipa_ssh_cache_ack.stdout | from_json).pending | to_json }}
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
       always:
         - name: "Destroy the private Kerberos cache"
           ansible.builtin.include_tasks:

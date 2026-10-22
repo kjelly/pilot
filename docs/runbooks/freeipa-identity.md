@@ -306,10 +306,18 @@ playbook 只認英文輸出。
     （`ssh_keys: []`；canonical roster 是 `ssh_keys: {authoritative: true, values: []}`），
     playbook 會送 `--sshpubkey=` 清空。2026-10-15 之前空 list 不會清除任何金鑰
     （issue #113）。整個省略 `ssh_keys` 則表示不管理該帳號的金鑰，既有金鑰保持不變。
-  - **主機端的生效時間**：apply 只改 FreeIPA。已 enroll 的主機從 SSSD 快取讀金鑰，
-    撤銷或新增要等該主機的 SSSD 更新該使用者的快取才生效。2026-10-15 實測從 1 分鐘內到
-    超過 16 分鐘都有（預設 `entry_cache_timeout` 為 5400 秒）。要立即生效，在主機上執行
-    `sss_cache -u <user>`（issue #114 追蹤）。
+  - **主機端的生效時間（#114 候選修正，尚待多主機 VM 驗收）**：apply 在變更前
+    將待辦寫入 provider 的 `/var/lib/pilot-identity/ssh-cache.json`，針對 inventory
+    的 enrolled client/server/replica 與 provider 本身逐使用者失效快取，再比對
+    SSSD 回傳的完整 key set。每個配對最多 45 秒；N 個待辦循序執行，不能承諾
+    整個 fleet 固定 60 秒內完成。成功 apply 才表示全部 scope 已收斂；SSH 登入
+    驗收要求完成後 10 秒內新連線拒絕舊 key。既有 session 不會被終止。
+    失敗、離線或 deferred 主機保留待辦，apply 非零回報 PARTIAL；重跑同一份 roster
+    僅重試待辦。首次採用會驗證所有 managed 配對，完成後無變更 apply 不操作 clients。
+    勿刪除 journal，也勿平行對同一 provider 執行 identity apply。完整邊界與驗收矩陣見
+    [候選契約](../superpowers/specs/2026-10-22-ssh-key-cache-convergence.md)。
+    `ipa_identity_refresh_sssd_cache` 僅控制既有非金鑰授權更新；SSH 流程不受它停用。
+    原 #115 實測的約 60 秒至超過 16 分鐘延遲仍是歷史基線，不能當成本候選的驗收證據。
   - 一次多把金鑰 → list 放多行即可。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
