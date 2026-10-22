@@ -131,6 +131,7 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | `freeipa_roster_file` | canonical roster 檔路徑；以 `include_vars: name=freeipa_roster` 載入，避免 `groups`/`hosts` magic-variable collision | canonical 必填 |
 | `ipa_admin_password` | vault 的 kinit 密碼；canonical roster 的 `freeipa.admin.password` 可作 fallback | legacy 必填；canonical 可從 roster 取得 |
 | `freeipa_domain` / `freeipa_realm` | inventory 的 domain/realm；realm 預設由 domain 轉大寫 | 否 |
+| `ipa_identity_ssh_cache_state_file` | provider 上持久化 SSH key 傳播待辦的 root 私有 JSON；預設 `/var/lib/pilot-identity/ssh-cache.json`，不可用暫存路徑或在各次 apply 間刪除 | 否 |
 
 > Checklist §2 查的是 fixture（`playbooks/test/fixtures/freeipa-identity-fixtures.yml`）
 > 套用後的 LDAP 狀態，走 **root 透過 ldapi unix socket 的 SASL EXTERNAL autobind**——
@@ -152,6 +153,25 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 | `netgroups` | schema-v2-only：可含 users/groups/hosts/hostgroups/nested netgroups，命名須符合 `^ng-[a-z0-9][a-z0-9_.-]*$`；`internal/inventory/roster_netgroup.go` 驗證 unique/collision/reference/cycle | 否（v1 roster 宣告此欄位會在 top-level-keys gate fail closed）|
 | `ipa_domain` / `ipa_realm` | Kerberos/DNS domain/realm，預設 `ipa.pilot.internal` / `IPA.PILOT.INTERNAL` | 否（有預設）|
 | `ipa_users` / `ipa_groups` / `ipa_hostgroups` / `ipa_hbac_rules` / `ipa_sudo_rules` | 五份資料清單，見 roster schema 檔 | 否（皆預設 `[]`，可只給其中幾份）|
+
+## 1.7 密碼傳輸契約（Issue #118）
+
+- 管理員及使用者密碼中的 `$`、反引號、`$(...)`、引號、反斜線及空白須原樣保留，不能成為指令。
+- 密碼僅透過 stdin 傳入，不得插入 shell、free-form command 或 process argv；敏感 task 保留 `no_log`。
+- `ipa passwd` 的非 TTY prompt 會 `.strip()`，因此使用者密碼透過 stdin JSON 交給本機 FreeIPA Python API 的 `passwd`，沿用 admin reset 與必須變更密碼的語意。
+- 密碼設定失敗須讓 run 失敗，診斷只包含使用者、退出碼及錯誤種類，不回傳可能含秘密的例外內容。
+- 沿用 §7.4 的初始化／保留／要求重設條件；重跑不得重設已收斂的密碼。
+- 成功、失敗及 tag-scoped 執行後均清除私有 Kerberos cache；不建立額外密碼暫存檔。
+
+此契約的本機回歸使用真實 Ansible 與替代 KDC/API，不能代替 FreeIPA VM 的 apply／verify／idempotency 證據。
+
+目前 live 驗收：2026-10-22，candidate `0a2e361`（tree `a4c60f0`），全新 AlmaLinux 9 FreeIPA provider；identity verify **24/24 PASS**，literal-secret、reset/preserve、check-mode、冪等、tagged 與失敗清理均通過。完整 revision、hash 與結果見 [live evidence](../evidence/freeipa-identity-secret-input/2026-10-22-0a2e361-live.md)。
+
+上游介面依據：[非 TTY password prompt](https://github.com/freeipa/freeipa/blob/master/ipalib/cli.py)、
+[passwd RPC 的 admin-reset 語意](https://github.com/freeipa/freeipa/blob/master/ipaserver/plugins/passwd.py)、
+[Python API 連線範例](https://github.com/freeipa/freeipa/blob/master/doc/examples/python-api.py)。
+
+SSH key cache 最新 live 驗收：2026-10-22，candidate `e42f50c`（tree `a226935`），一台 enrolled provider 與兩台 enrolled AlmaLinux 9 clients；完整新增／撤銷、warm-cache SSH allow/deny、timeout／unreachable／deferred retry、interruption／ABA、20 組 historical stage／missing-host gates 與非 key 授權快取 recovery 均通過，最後 topology test **24/24 PASS**、changed=0。完整 hashes、逐段 driver、真實失敗與恢復見 [live evidence](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
 
 ## 2. Checklist
 

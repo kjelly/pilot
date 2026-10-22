@@ -18,6 +18,7 @@ playbooks:
 regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
   - internal/spec/freeipa_identity_regression_test.go
+  - internal/spec/freeipa_identity_ssh_cache_regression_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: sameHosts}
 hostCardinality: exactly-one
@@ -26,6 +27,7 @@ groupVars:
   - {name: freeipa_roster_file, type: string, required: false}
   - {name: freeipa_domain, type: string, required: false}
   - {name: freeipa_realm, type: string, required: false}
+  - {name: ipa_identity_ssh_cache_state_file, type: string, required: false}
   # Canonical rosters may supply freeipa.admin.password instead; the playbook
   # validates the resolved credential before kinit. Legacy input still works.
   - {name: ipa_admin_password, type: string, required: false, secret: true}

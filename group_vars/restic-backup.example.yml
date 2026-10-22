@@ -62,7 +62,9 @@ restic_s3_target_host: ""
 #   # host_vars/ipa-1.yml(FreeIPA server:設定 + 官方 ipa-backup 產生的資料;
 #   # 已實測——刪 /etc/dirsrv/<instance> 整個目錄模擬 server 故障、restic
 #   # restore 救回後 ipactl/client 登入皆恢復正常,見 runbook §6)
-#   restic_backup_paths: ["/etc", "/var/lib/ipa/backup"]
+#   restic_backup_paths: ["/etc", "/var/lib/ipa/backup", "/var/lib/pilot-identity"]
+#   # #114 的 SSH key 傳播 journal 也需持久保存；還原舊備份後必須重新驗證
+#   # enrolled hosts，不可把舊 receipt 當成目前快取已收斂的證據。
 #   restic_backup_pre_hook: "ipa-backup --data --logs"
 #
 #   # host_vars/nfs-1.yml (managed NFS shares: data and ACL/export config).
