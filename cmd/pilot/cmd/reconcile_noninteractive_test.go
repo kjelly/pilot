@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/availability"
 )
 
 func TestReconcileRejectsFlagMisuse(t *testing.T) {
@@ -85,20 +89,56 @@ func TestReconcileComponentIndexes(t *testing.T) {
 	}
 }
 
+// fakeDownHostsProber reports the named hosts unreachable and every other
+// host reachable.
+type fakeDownHostsProber map[string]bool
+
+func (down fakeDownHostsProber) Probe(_ context.Context, ep availability.Endpoint) availability.ProbeResult {
+	if down[ep.Host] {
+		return availability.ProbeResult{Host: ep.Host, Endpoint: ep.Addr, State: availability.ProbeUnreachable, Err: errors.New("test: simulated unreachable")}
+	}
+	return availability.ProbeResult{Host: ep.Host, Endpoint: ep.Addr, State: availability.ProbeReachable}
+}
+
 // TestExecuteCatalogReconcileBatch_PreviewOnly runs the real reconcile batch
 // (two requests, each with a sameHosts dependency) under the --preview-only
-// driver: every playbook in the plan is previewed, none is applied, and a
-// failing preview stops the plan.
+// driver: every playbook in the plan is previewed and none is applied, a
+// failing preview stops the plan, and availability deferrals are reported as
+// what they are instead of as passed previews.
 func TestExecuteCatalogReconcileBatch_PreviewOnly(t *testing.T) {
+	withDependency := []string{"leaf-apply.yml", "consumer-apply.yml", "leaf-apply.yml", "consumer-apply.yml"}
 	for _, tt := range []struct {
-		name          string
-		previewExit   string
-		wantRuns      int
-		wantErr       bool
-		wantSummaryIn string
+		name        string
+		component   string            // each of the two requests reconciles this component
+		hostvars    map[string]string // host -> deployment_availability ("" = unset)
+		down        []string
+		previewExit string
+		wantRuns    []string // playbooks previewed, in order
+		wantErr     string   // "" = success; "preview failure" = a failed preview
+		wantOut     []string
+		wantNotOut  []string
 	}{
-		{name: "previews pass", previewExit: "0", wantRuns: 4, wantSummaryIn: "4 支 playbook 的預覽都通過"},
-		{name: "first preview fails", previewExit: "2", wantRuns: 1, wantErr: true},
+		{
+			name: "previews pass", component: "consumer", hostvars: map[string]string{"host-a": ""}, previewExit: "0", wantRuns: withDependency,
+			wantOut: []string{"4 支 playbook 的預覽都通過"},
+		},
+		{
+			name: "first preview fails", component: "consumer", hostvars: map[string]string{"host-a": ""}, previewExit: "2", wantRuns: withDependency[:1],
+			wantErr: "preview failure", wantNotOut: []string{"預覽都通過"},
+		},
+		{
+			// Every target is an unreachable optional host: availability turns
+			// each playbook into a no-op, so nothing was previewed.
+			name: "every host deferred", component: "consumer", hostvars: map[string]string{"host-a": "optional"}, down: []string{"host-a"}, previewExit: "0", wantRuns: nil,
+			wantErr: "4 支 playbook 的目標主機全部無法連線而延後，沒有預覽", wantNotOut: []string{"預覽都通過"},
+		},
+		{
+			// host-b is deferred, host-a is previewed: a pass that names host-b.
+			// leaf (one-or-more, no dependency) can span both hosts.
+			name: "some hosts deferred", component: "leaf", hostvars: map[string]string{"host-a": "", "host-b": "optional"}, down: []string{"host-b"}, previewExit: "0",
+			wantRuns: []string{"leaf-apply.yml", "leaf-apply.yml"},
+			wantOut:  []string{"leaf-apply.yml 已預覽，但 optional 主機 host-b 無法連線而延後", "2 支 playbook 的預覽都通過"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := writeSameHostsCascadeFixture(t)
@@ -106,24 +146,40 @@ func TestExecuteCatalogReconcileBatch_PreviewOnly(t *testing.T) {
 			dataDir = t.TempDir()
 			t.Cleanup(func() { dataDir = "" })
 
+			var hosts []string
+			for host := range tt.hostvars {
+				hosts = append(hosts, host)
+			}
+			sort.Strings(hosts)
+			var hostvars, quoted, listed []string
+			invYAML := "all:\n  hosts:\n"
+			for _, host := range hosts {
+				vars := "{}"
+				if policy := tt.hostvars[host]; policy != "" {
+					vars = `{"deployment_availability":"` + policy + `"}`
+				}
+				hostvars = append(hostvars, `"`+host+`":`+vars)
+				quoted = append(quoted, `"`+host+`"`)
+				listed = append(listed, "'    "+host+"'")
+				invYAML += "    " + host + ": {}\n"
+			}
+			group := `{"hosts":[` + strings.Join(quoted, ",") + `]}`
+			invJSON := `{"_meta":{"hostvars":{` + strings.Join(hostvars, ",") + `}},"leaf":` + group + `,"consumer":` + group + `}`
+
 			binDir := t.TempDir()
-			invJSON := `{"_meta":{"hostvars":{"host-a":{}}},"leaf":{"hosts":["host-a"]},"consumer":{"hosts":["host-a"]}}`
 			if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '"+invJSON+"'\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			ansibleFixture := `#!/bin/sh
-case "$*" in
-  *--list-hosts*) printf '%s\n' '  hosts (1):' '    host-a'; exit 0 ;;
-  *) printf '{"plays":[{"tasks":[{"hosts":{"host-a":{"stdout":"unknown","rc":0}}}]}]}\n' ;;
-esac
-`
+			ansibleFixture := "#!/bin/sh\ncase \"$*\" in\n" +
+				"  *--list-hosts*) printf '%s\\n' '  hosts (" + strconv.Itoa(len(hosts)) + "):' " + strings.Join(listed, " ") + "; exit 0 ;;\n" +
+				"  *) printf '{\"plays\":[{\"tasks\":[{\"hosts\":{\"host-a\":{\"stdout\":\"unknown\",\"rc\":0}}}]}]}\\n' ;;\nesac\n"
 			if err := os.WriteFile(filepath.Join(binDir, "ansible"), []byte(ansibleFixture), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			inv := filepath.Join(t.TempDir(), "inventory.yml")
-			if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    host-a: {}\n"), 0o600); err != nil {
+			if err := os.WriteFile(inv, []byte(invYAML), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			argsPath := filepath.Join(t.TempDir(), "ansible-playbook-args")
@@ -140,48 +196,99 @@ esac
 			oldPrompt := activePromptAutomation
 			activePromptAutomation = &promptAutomation{useDefaults: true, previewOnly: true}
 			t.Cleanup(func() { activePromptAutomation = oldPrompt })
-			stubDeploymentAvailabilityAllReachable(t)
+			down := fakeDownHostsProber{}
+			for _, host := range tt.down {
+				down[host] = true
+			}
+			oldProber := deployAvailabilityProber
+			deployAvailabilityProber = down
+			t.Cleanup(func() { deployAvailabilityProber = oldProber })
 
 			var out bytes.Buffer
 			request := catalogDeploymentRequest{
-				playbook:       "consumer-apply.yml",
+				playbook:       tt.component + "-apply.yml",
 				inv:            inv,
 				extraVars:      []string{"stage=sandbox"},
 				stage:          "sandbox",
-				componentHints: []string{"consumer"},
+				componentHints: []string{tt.component},
 			}
 			err := executeCatalogReconcileBatch(context.Background(), runner, &out, []catalogDeploymentRequest{request, request})
-			if tt.wantErr {
+			switch tt.wantErr {
+			case "":
+				if err != nil {
+					t.Fatalf("executeCatalogReconcileBatch() error = %v\n%s", err, out.String())
+				}
+			case "preview failure":
 				if err == nil || errors.Is(err, errPreviewOnlyStop) || errors.Is(err, errDeployAborted) {
 					t.Fatalf("executeCatalogReconcileBatch() error = %v, want the preview failure", err)
 				}
-			} else if err != nil {
-				t.Fatalf("executeCatalogReconcileBatch() error = %v\n%s", err, out.String())
+			default:
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("executeCatalogReconcileBatch() error = %v, want %q\n%s", err, tt.wantErr, out.String())
+				}
 			}
 
 			data, readErr := os.ReadFile(argsPath)
-			if readErr != nil {
+			if readErr != nil && !os.IsNotExist(readErr) {
 				t.Fatal(readErr)
 			}
 			// The defaults choose the full preflight, which runs before each preview.
 			var runs []string
 			for _, run := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if !strings.HasPrefix(run, "playbooks/preflight.yml ") {
+				if run != "" && !strings.HasPrefix(run, "playbooks/preflight.yml ") {
 					runs = append(runs, run)
 				}
 			}
-			if len(runs) != tt.wantRuns {
-				t.Fatalf("ansible-playbook runs = %q, want %d", runs, tt.wantRuns)
+			if len(runs) != len(tt.wantRuns) {
+				t.Fatalf("ansible-playbook runs = %q, want previews of %q\n%s", runs, tt.wantRuns, out.String())
 			}
-			order := []string{"leaf-apply.yml", "consumer-apply.yml", "leaf-apply.yml", "consumer-apply.yml"}
 			for i, run := range runs {
-				if !strings.HasPrefix(run, "--check --diff ") || !strings.Contains(run, order[i]) {
-					t.Fatalf("run %d = %q, want a --check --diff preview of %s and no apply", i, run, order[i])
+				if !strings.HasPrefix(run, "--check --diff ") || !strings.Contains(run, tt.wantRuns[i]) {
+					t.Fatalf("run %d = %q, want a --check --diff preview of %s and no apply", i, run, tt.wantRuns[i])
+				}
+				limit := strings.Fields(strings.SplitN(run, "--limit ", 2)[1])[0]
+				for _, host := range tt.down {
+					if slices.Contains(strings.Split(limit, ","), host) {
+						t.Fatalf("run %d = %q previews deferred host %s", i, run, host)
+					}
 				}
 			}
-			if tt.wantSummaryIn != "" && !strings.Contains(out.String(), tt.wantSummaryIn) {
-				t.Fatalf("output lacks %q:\n%s", tt.wantSummaryIn, out.String())
+			for _, want := range tt.wantOut {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+			for _, notWant := range tt.wantNotOut {
+				if strings.Contains(out.String(), notWant) {
+					t.Fatalf("output claims %q:\n%s", notWant, out.String())
+				}
 			}
 		})
+	}
+}
+
+// TestPreviewOnlySummary pins the summary contract: deferred hosts of a
+// previewed playbook are named, and a playbook that never previewed fails.
+func TestPreviewOnlySummary(t *testing.T) {
+	var out bytes.Buffer
+	err := previewOnlySummary(&out, []previewOnlyRecord{
+		{Playbook: "leaf-apply.yml", Previewed: true},
+		{Playbook: "consumer-apply.yml", Previewed: true, Deferred: []string{"host-b"}},
+	})
+	if err != nil || !strings.Contains(out.String(), "consumer-apply.yml 已預覽，但 optional 主機 host-b") || !strings.Contains(out.String(), "2 支 playbook 的預覽都通過") {
+		t.Fatalf("all previewed: error = %v, output %q", err, out.String())
+	}
+
+	out.Reset()
+	err = previewOnlySummary(&out, []previewOnlyRecord{
+		{Playbook: "leaf-apply.yml", Previewed: true},
+		{Playbook: "consumer-apply.yml", Deferred: []string{"host-a"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "consumer-apply.yml(延後：host-a)") || strings.Contains(out.String(), "預覽都通過") {
+		t.Fatalf("one never previewed: error = %v, output %q", err, out.String())
+	}
+
+	if err := previewOnlySummary(&bytes.Buffer{}, nil); err == nil {
+		t.Fatal("no records: error = nil, want a failure")
 	}
 }

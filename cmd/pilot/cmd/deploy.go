@@ -590,12 +590,60 @@ type deploymentAuthorization struct {
 	// plan and applies none: each transaction ends in errPreviewOnlyStop once
 	// its preview passes, and the plan moves on to the next playbook.
 	PreviewOnly bool
+	// previewOnlyRecords is what a PreviewOnly plan actually covered, one
+	// entry per playbook, for its summary and exit status.
+	previewOnlyRecords []previewOnlyRecord
+}
+
+// previewOnlyRecord is one playbook of a PreviewOnly plan. Deferred lists the
+// unreachable optional hosts availability left out of its scope; when every
+// target was deferred nothing ran and Previewed is false.
+type previewOnlyRecord struct {
+	Playbook  string
+	Previewed bool
+	Deferred  []string
+}
+
+func (a *deploymentAuthorization) recordPreviewOnly(playbook string, previewed bool, deferred []delivery.DeferredHost) {
+	hosts := make([]string, 0, len(deferred))
+	for _, d := range deferred {
+		hosts = append(hosts, d.Host)
+	}
+	a.previewOnlyRecords = append(a.previewOnlyRecords, previewOnlyRecord{Playbook: playbook, Previewed: previewed, Deferred: hosts})
 }
 
 // errPreviewOnlyStop ends a transaction whose preview passed under a
 // PreviewOnly authorization. It wraps delivery.ErrCancelled, so the skipped
 // apply is recorded as cancelled and never rolled back.
 var errPreviewOnlyStop = fmt.Errorf("預覽通過(--preview-only)，略過正式套用：%w", delivery.ErrCancelled)
+
+// previewOnlySummary reports what a PreviewOnly plan covered. Deferred hosts
+// of a previewed playbook are listed because the preview did not cover them.
+// A playbook whose every target was deferred was not previewed at all, so the
+// plan fails rather than pass unverified, matching deploy --preview-only.
+func previewOnlySummary(out io.Writer, records []previewOnlyRecord) error {
+	var previewed int
+	var notPreviewed []string
+	for _, r := range records {
+		switch {
+		case !r.Previewed:
+			notPreviewed = append(notPreviewed, fmt.Sprintf("%s(延後：%s)", r.Playbook, strings.Join(r.Deferred, ", ")))
+		case len(r.Deferred) > 0:
+			previewed++
+			fmt.Fprintf(out, "⚠️  %s 已預覽，但 optional 主機 %s 無法連線而延後，不在這次預覽範圍內。\n", r.Playbook, strings.Join(r.Deferred, ", "))
+		default:
+			previewed++
+		}
+	}
+	if len(notPreviewed) > 0 {
+		return fmt.Errorf("--preview-only：%d 支 playbook 的目標主機全部無法連線而延後，沒有預覽：%s", len(notPreviewed), strings.Join(notPreviewed, "；"))
+	}
+	if previewed == 0 {
+		return fmt.Errorf("--preview-only：計畫中沒有任何 playbook 完成預覽")
+	}
+	fmt.Fprintf(out, "✅ --preview-only：%d 支 playbook 的預覽都通過，沒有套用任何變更。\n", previewed)
+	return nil
+}
 
 func promptPreflightMode() (preflightMode, error) {
 	idx, err := runSelectPrompt(promptPreflight, "要先跑前置檢查(preflight)嗎？", []string{
@@ -1800,6 +1848,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 	if !execScope.HasManagedHosts() {
 		printAvailabilityNoOp(out, execScope.Deferred)
+		if authorization != nil && authorization.PreviewOnly {
+			// Nothing ran, so this playbook was not previewed.
+			authorization.recordPreviewOnly(playbook, false, execScope.Deferred)
+		}
 		return nil
 	}
 	printAvailabilitySummary(out, execScope)
@@ -1931,6 +1983,9 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	})
 	if resultOut != nil {
 		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}
+	}
+	if errors.Is(err, errPreviewOnlyStop) {
+		authorization.recordPreviewOnly(playbook, true, execScope.Deferred)
 	}
 	closeErr := st.Close()
 	if err != nil {
@@ -3795,7 +3850,9 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		FinishedAt:             time.Now(),
 	})
 	if execErr == nil && authorization.PreviewOnly {
-		fmt.Fprintf(out, "✅ --preview-only：計畫中 %d 支 playbook 的預覽都通過，沒有套用任何變更。\n", plannedPlaybooks)
+		// Count what actually previewed: availability can turn a planned
+		// playbook into a no-op that never reaches its preview.
+		execErr = previewOnlySummary(out, authorization.previewOnlyRecords)
 	}
 	return execErr
 }
