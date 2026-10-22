@@ -50,6 +50,8 @@ var deployPresentation bool
 var deployTracePath string
 var deployForceFlag bool
 var deployPreviewOnlyFlag bool
+var deployStageFlag string
+var deployStagingAttestedHoursFlag string
 
 // deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
 var deployStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
@@ -186,6 +188,8 @@ func init() {
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示：各欄位採用精靈顯示的預設值，但預覽成功後會直接執行正式套用(略過預設為 No 的「要接著套用真正的變更嗎？」與正式套用確認)")
 	deployCmd.Flags().BoolVar(&deployPreviewOnlyFlag, "preview-only", false, "不顯示互動提示：跟 --force 一樣採用精靈顯示的預設值，但只跑預覽(--check --diff)，不做正式套用；預覽通過才以結束碼 0 結束")
+	deployCmd.Flags().StringVar(&deployStageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認(等同 -e confirm_staging=true / confirm_prod=true)；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
+	deployCmd.Flags().StringVar(&deployStagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
 	deployCmd.AddCommand(deployPlanCmd)
 	deployGraphCmd.Flags().StringVar(&deployGraphDirFlag, "dir", ".", "workspace directory containing inventory.yml (default: current directory)")
@@ -312,12 +316,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if deployForceFlag && deployPreviewOnlyFlag {
 		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
 	}
+	if err := validateDeployStageFlags(deployStageFlag, deployStagingAttestedHoursFlag); err != nil {
+		return err
+	}
 	if deployActionsPath != "" {
 		if deployForceFlag {
 			return fmt.Errorf("--force 不能與 --actions 同時使用")
 		}
 		if deployPreviewOnlyFlag {
 			return fmt.Errorf("--preview-only 不能與 --actions 同時使用")
+		}
+		if deployStageFlag != "" {
+			return fmt.Errorf("--stage 不能與 --actions 同時使用(scenario 自己回答 stage)")
 		}
 		return runStandalonePromptWorkflow(cmd, "deploy", deployActionsPath, deployPresentation, deployTracePath)
 	}
@@ -638,7 +648,51 @@ type stageDecision struct {
 	ConfirmVars []string // e.g. []string{"confirm_staging=true"}
 }
 
+// validateDeployStageFlags rejects a bad --stage/--staging-attested-within-hours
+// pair before the wizard touches anything.
+func validateDeployStageFlags(stage, attestedHours string) error {
+	switch stage {
+	case "", "sandbox", "staging":
+		if attestedHours != "" {
+			return fmt.Errorf("--staging-attested-within-hours 只能搭配 --stage prod")
+		}
+	case "prod":
+		if attestedHours == "" {
+			return fmt.Errorf("--stage prod 需要 --staging-attested-within-hours(上次 staging 驗證距今幾小時，0-168)")
+		}
+		if err := validateHoursWithinWeek(attestedHours); err != nil {
+			return fmt.Errorf("--staging-attested-within-hours：%w", err)
+		}
+	default:
+		return fmt.Errorf("--stage 只能是 sandbox、staging 或 prod：%q", stage)
+	}
+	return nil
+}
+
+// stageDecisionFromFlag answers promptStageDecision from --stage. Naming
+// staging or prod on the command line is the operator's confirmation, so the
+// confirm prompts are skipped; the playbooks' stage-vs-environment-group
+// assert still guards every host.
+func stageDecisionFromFlag(out io.Writer, context, stage, attestedHours string) stageDecision {
+	fmt.Fprintf(out, "[%s] stage 由 --stage 指定：%s\n", context, stage)
+	switch stage {
+	case "staging":
+		fmt.Fprintln(out, "⚠️  即將對已歸類進 staging 的機器套用真正的變更。")
+		return stageDecision{Stage: "staging", ConfirmVars: []string{"confirm_staging=true"}}
+	case "prod":
+		fmt.Fprintln(out, "⚠️  即將對已歸類進 prod 的機器套用真正的變更。")
+		return stageDecision{
+			Stage:       "prod",
+			ConfirmVars: []string{"confirm_prod=true", "staging_attested_within_hours=" + strings.TrimSpace(attestedHours)},
+		}
+	}
+	return stageDecision{Stage: "sandbox"}
+}
+
 func promptStageDecision(out io.Writer, context string) (stageDecision, error) {
+	if deployStageFlag != "" {
+		return stageDecisionFromFlag(out, context, deployStageFlag, deployStagingAttestedHoursFlag), nil
+	}
 	idx, err := runSelectPrompt(promptStage, fmt.Sprintf("[%s] 要套用到哪個 stage？", context), []string{
 		"sandbox（預設；沙盒/測試機，不需要額外確認）",
 		"staging（測試環境，需要額外確認）",
