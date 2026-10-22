@@ -875,11 +875,9 @@
 
         # ── Admin authentication ───────────────────────────────────────────
         - name: "Kinit admin"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ identity_admin_password }}" | kinit {{ identity_admin_principal }}@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ identity_admin_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ identity_admin_password }}"
           changed_when: false
           no_log: true
           # `pilot reconcile` previews this playbook with --check --diff, while
@@ -894,7 +892,12 @@
         # clients on every no-op apply. A crash before settlement stays dirty.
         - name: "Prepare legacy authorization cache recovery"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_prepare, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - auth_prepare
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: "{{ {'domain': ipa_domain} | to_json }}"
           become: true
           register: ipa_auth_cache_prepare
@@ -1210,12 +1213,39 @@
           tags: [identity, users, passwords]
 
         - name: "Set password for users that need one (first-time onboard, or requested reset)"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf '%s\n%s\n' "{{ item.password }}" "{{ item.password }}" \
-                | ipa passwd {{ item.name }}
-            executable: /bin/bash
+          # The ipa CLI's non-TTY password prompt strips leading/trailing
+          # whitespace. Call the same passwd RPC with stdin JSON instead, so
+          # even those passwords reach FreeIPA unchanged (issue #118).
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - -c
+              - |
+                import json
+                import sys
+
+                def reset_password():
+                    from ipalib import api
+                    payload = json.load(sys.stdin)
+                    api.bootstrap(context='cli', in_server=False)
+                    api.finalize()
+                    try:
+                        api.Backend.rpcclient.connect()
+                        api.Command.passwd(
+                            payload['principal'], payload['password'],
+                            current_password='CHANGING_PASSWORD_FOR_ANOTHER_USER')
+                    finally:
+                        if api.Backend.rpcclient.isconnected():
+                            api.Backend.rpcclient.disconnect()
+
+                try:
+                    reset_password()
+                except Exception as error:
+                    # Exception messages may contain the supplied secret.
+                    print('ipa: ERROR: password reset failed (' +
+                          type(error).__name__ + ')', file=sys.stderr)
+                    sys.exit(1)
+            stdin: "{{ {'principal': item.name, 'password': item.password} | to_json }}"
           loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
           loop_control:
             label: "{{ item.name }}"
@@ -1228,8 +1258,8 @@
           no_log: true
           tags: [identity, users, passwords]
 
-        # Names the users whose `ipa passwd` failed, with ipa's "ipa: ERROR:"
-        # lines only (they never contain the password). Until issue #102 a
+        # Names the users whose password RPC failed, with the adapter's
+        # sanitized error type only. Until issue #102 a
         # failure here was reported as ok and the account kept no password.
         - name: "Gate: every password this run set was accepted"
           ansible.builtin.assert:
@@ -1281,8 +1311,15 @@
         # A failed/crashed IPA loop leaves pending work for the next apply.
         - name: "Prepare durable SSH key cache work"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", prepare, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
-            stdin: "{{ {'domain': ipa_domain, 'hosts': ipa_ssh_cache_hosts, 'users': ipa_active_users | selectattr('ssh_keys', 'defined') | rejectattr('ssh_keys', 'none') | list} | to_json }}"
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - prepare
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
+            stdin: >-
+              {{ {'domain': ipa_domain, 'hosts': ipa_ssh_cache_hosts, 'users': ipa_active_users | selectattr('ssh_keys', 'defined') |
+              rejectattr('ssh_keys', 'none') | list} | to_json }}
           become: true
           register: ipa_ssh_cache_prepare
           changed_when: false
@@ -1308,7 +1345,12 @@
 
         - name: "Settle SSH key cache work after IPA reconciliation"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", settle, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - settle
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: >-
               {{ {'domain': ipa_domain,
                   'prepared': (ipa_ssh_cache_prepare.stdout | from_json).prepared,
@@ -1316,6 +1358,28 @@
           become: true
           register: ipa_ssh_cache_plan
           changed_when: false
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
+
+        # Journal work survives roster/enrollment changes. Validate the actual
+        # durable delegation plan, including omitted users and removed aliases.
+        # Never discard unfinished work to satisfy this authorization boundary.
+        - name: "Gate: pending SSH cache targets exist in this inventory"
+          ansible.builtin.assert:
+            that: item in hostvars
+            fail_msg: "Pending SSH cache target {{ item }} is absent from this inventory; recovery remains pending"
+          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
+
+        - name: "Gate: pending SSH cache targets match the authorized stage"
+          ansible.builtin.assert:
+            that:
+              - not ('prod' in hostvars[item].group_names and stage != 'prod')
+              - not ('staging' in hostvars[item].group_names and stage != 'staging')
+              - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
+            fail_msg: "Pending SSH cache target {{ item }} is outside the authorized stage={{ stage }}; recovery remains pending"
+          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
           when: not ansible_check_mode
           tags: [identity, users, sshkeys, client-cache]
 
@@ -1344,7 +1408,12 @@
 
         - name: "Acknowledge verified SSH key cache pairs"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", ack, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - ack
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: >-
               {{ {'domain': ipa_domain, 'verified': ipa_ssh_cache_results.results | default([])
                   | rejectattr('skipped', 'defined') | rejectattr('unreachable', 'defined')
@@ -3543,7 +3612,9 @@
 
         - name: "Print DNS inspection for external tooling (read-only)"
           ansible.builtin.debug:
-            msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: {{ (freeipa_decom_query_dns.stdout | default('')) ~ ' ' ~ (freeipa_decom_query_dns.stderr | default('')) }}"
+            msg: >-
+              HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: {{ (freeipa_decom_query_dns.stdout | default('')) ~ ' ' ~
+              (freeipa_decom_query_dns.stderr | default('')) }}
           when:
             - pilot_decommission_query | default('') == 'host_dns'
             - pilot_decommission_target_fqdn | default('') | length > 0
@@ -3770,7 +3841,12 @@
 
         - name: "Settle legacy authorization cache recovery"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_settle, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - auth_settle
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: >-
               {{ {'domain': ipa_domain,
                   'previous': (ipa_auth_cache_prepare.stdout | from_json).previous,
@@ -3790,7 +3866,7 @@
           ansible.builtin.command: sss_cache -E
           delegate_to: "{{ item }}"
           become: true
-          become_method: sudo
+          become_method: ansible.builtin.sudo
           # `--limit` does not constrain delegated connections.  pilot passes
           # pilot_deferred_hosts after availability resolution so intentionally
           # offline optional clients are not re-contacted by this cross-host task.
@@ -3808,13 +3884,22 @@
 
         - name: "Acknowledge legacy authorization cache recovery"
           ansible.builtin.command:
-            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", auth_ack, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_ssh_cache_program }}"
+              - auth_ack
+              - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: "{{ {'domain': ipa_domain} | to_json }}"
           become: true
           changed_when: false
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            # The global receipt covers every enrolled client. A deferred
+            # client has not received it; retain the dirty bit until a retry
+            # delivers to all clients (failures already abort before this task).
+            - groups.get('freeipa-client', []) | intersect(pilot_deferred_hosts | default([])) | length == 0
           tags: [identity, client-cache]
 
         - name: "Gate: every SSH key cache pair converged"

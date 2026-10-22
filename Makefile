@@ -137,6 +137,9 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 
 .PHONY: identity-ssh-cache-test identity-ssh-cache-live-test
 
+identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText)$$' ./internal/spec/
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"

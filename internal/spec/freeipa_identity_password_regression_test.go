@@ -64,7 +64,7 @@ func identityTasks(t *testing.T, names []string) []any {
 		case identityPwLookupTask:
 			c["ansible.builtin.command"] = map[string]any{"argv": []any{"cat", "{{ pw_fixture_dir }}/{{ item.name }}.txt"}}
 		case identityPwSetTask:
-			for _, k := range []string{"ansible.builtin.shell", "register", "changed_when", "failed_when"} {
+			for _, k := range []string{"ansible.builtin.shell", "ansible.builtin.command", "register", "changed_when", "failed_when"} {
 				delete(c, k)
 			}
 			c["ansible.builtin.debug"] = map[string]any{"msg": "PASSWD {{ item.name }}"}

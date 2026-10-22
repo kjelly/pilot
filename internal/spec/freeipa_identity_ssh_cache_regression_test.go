@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -182,7 +183,7 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	}
 	// Delegation resolves connection settings from host variables. Declare
 	// the provider explicitly instead of relying only on play connection=local.
-	tasks := []any{map[string]any{"name": "test inventory provider",
+	tasks := []any{map[string]any{"name": "test inventory provider", "tags": []string{"always"},
 		"ansible.builtin.add_host": map[string]any{"name": "localhost", "ansible_connection": "local", "ansible_host": "127.0.0.1", "ansible_port": 22}}}
 	for _, host := range []string{"client-a", "client-b"} {
 		connection := "local"
@@ -194,9 +195,11 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 		// Keep the deliberately unreachable SSH alias distinct from implicit
 		// localhost/127.0.0.1. Otherwise Ansible can reuse its connection state
 		// for the provider and the failure fixture also breaks localhost.
-		tasks = append(tasks, map[string]any{"name": "test inventory " + host,
+		tasks = append(tasks, map[string]any{"name": "test inventory " + host, "tags": []string{"always"},
 			"ansible.builtin.add_host": map[string]any{"name": host, "groups": "freeipa-client", "ansible_connection": connection, "ansible_host": address, "ansible_port": 1}})
 	}
+	tasks = append(tasks, map[string]any{"name": "historical inventory alias", "tags": []string{"always"},
+		"ansible.builtin.add_host": map[string]any{"name": "old-client", "groups": "{{ cache_test_old_groups | default('sandbox') }}", "ansible_connection": "local"}})
 	var collect func([]any)
 	collect = func(all []any) {
 		for _, value := range all {
@@ -226,11 +229,17 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	run := func(keys []any, deferred []string, check bool) ag82Run {
 		t.Helper()
 		vars["ipa_active_users"] = []any{map[string]any{"name": "alice", "ssh_keys": keys}, map[string]any{"name": "bob", "ssh_keys": []any{}}, map[string]any{"name": "unmanaged"}}
+		if vars["cache_test_omit_users"] == true {
+			vars["ipa_active_users"] = []any{}
+		}
 		vars["pilot_deferred_hosts"] = deferred
 		write("calls", "")
 		var args []string
 		if check {
 			args = []string{"--check", "--diff"}
+		}
+		if tag, ok := vars["cache_test_tag"].(string); ok && tag != "all" {
+			args = append(args, "--tags", tag)
 		}
 		return runGatewayTasks(t, dir, tasks, vars, nil, args...)
 	}
@@ -310,4 +319,63 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	vars["ipa_user_mod"] = map[string]any{"changed": false}
 	assertRun(run([]any{key}, nil, false), true, "client-a/*", "client-b/*")
 	assertRun(run([]any{key}, nil, false), true)
+	// A non-key mutation must remain recoverable while any client is deferred.
+	vars["ipa_user_mod"] = map[string]any{"changed": true}
+	assertRun(run([]any{key}, []string{"client-b"}, false), true, "client-a/*")
+	vars["ipa_user_mod"] = map[string]any{"changed": false}
+	assertRun(run([]any{key}, nil, false), true, "client-a/*", "client-b/*")
+	assertRun(run([]any{key}, nil, false), true)
+	// Crash after prepare, before settle/refresh: recovery is conservative even
+	// when the next reconciliation finds no additional authorization changes.
+	statePath := filepath.Join(dir, "journal.json")
+	crash := exec.Command("python3", "-c", string(helper), "auth_prepare", statePath)
+	crash.Stdin = strings.NewReader(`{"domain":"ipa.test"}`)
+	if out, err := crash.CombinedOutput(); err != nil {
+		t.Fatalf("crash prepare: %v %s", err, out)
+	}
+	assertRun(run([]any{key}, nil, false), true, "client-a/*", "client-b/*")
+	assertRun(run([]any{key}, nil, false), true)
+
+	// Retained work must be authorized from the current inventory, regardless
+	// of whether the current roster still manages that user and under every
+	// supported mutation tag. Actual production prepare/settle/gate/delegate
+	// tasks execute; rejected plans may never call either SSSD process.
+	for _, omitted := range []bool{false, true} {
+		for _, host := range []string{"old-client", "missing-client"} {
+			for _, tag := range []string{"all", "sshkeys", "users", "client-cache"} {
+				raw, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var state map[string]any
+				if err := json.Unmarshal(raw, &state); err != nil {
+					t.Fatal(err)
+				}
+				users := state["users"].(map[string]any)
+				users["alice"].(map[string]any)["pending"] = []string{host}
+				raw, err = json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(statePath, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				vars["cache_test_omit_users"] = omitted
+				vars["cache_test_old_groups"] = "prod"
+				vars["cache_test_tag"] = tag
+				result := run([]any{key}, nil, false)
+				assertRun(result, false)
+				if !strings.Contains(fmt.Sprint(result.failures), "Gate: pending SSH cache targets") {
+					t.Fatalf("wrong failure: %v", result.failures)
+				}
+				raw, err = os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(raw), host) {
+					t.Fatalf("lost unfinished work for %s", host)
+				}
+			}
+		}
+	}
 }

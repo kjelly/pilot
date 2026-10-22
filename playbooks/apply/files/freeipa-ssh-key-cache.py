@@ -97,15 +97,15 @@ def update(state, action, data):
             if name in prepared:
                 raise ValueError("duplicate managed user")
             previous = users.get(name)
-            required = hosts
+            required = sorted(set(hosts) | set(previous["pending"] if previous else []))
             if previous and previous["keys"] == keys:
                 # Pending from an interrupted prepare is intentionally retained.
                 required = sorted(set(previous["pending"]) |
                                   (set(hosts) - set(previous["hosts"])))
-                required = [h for h in required if h in hosts]
             epoch = uuid.uuid4().hex
             users[name] = {"keys": keys, "epoch": epoch,
-                           "hosts": hosts, "pending": hosts}
+                           "hosts": hosts, "pending": sorted(set(hosts) |
+                           set(previous["pending"] if previous else []))}
             prepared[name] = {"epoch": epoch, "required": required}
         return {"prepared": prepared}
     if action == "settle":

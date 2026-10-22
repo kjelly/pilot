@@ -106,6 +106,9 @@ jobs:
       - name: make identity-ssh-cache-test
         run: make identity-ssh-cache-test
 
+      - name: make identity-secret-test
+        run: make identity-secret-test
+
   thanos-retention:
     # Runs the Thanos Compactor (the image version the playbooks deploy)
     # with thanos-query-apply.yml's retention defaults against synthetic

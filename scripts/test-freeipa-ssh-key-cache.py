@@ -88,6 +88,14 @@ class JournalTest(unittest.TestCase):
             "domain": "ipa.test", "hosts": ["a", "b"], "users": []})
         self.assertEqual(2, len(self.settle(planned["prepared"])))
 
+    def test_removed_enrollment_host_remains_pending_for_authorization(self):
+        self.settle(self.prepare([key()], ["a", "old-prod"]), True)
+        retry = self.settle(self.prepare([key()], ["a"]))
+        self.assertEqual(["a", "old-prod"], [p["host"] for p in retry])
+        # Changing desired keys also cannot silently acknowledge the old host.
+        retry = self.settle(self.prepare([], ["a"]), True)
+        self.assertEqual(["a", "old-prod"], [p["host"] for p in retry])
+
     def test_concurrent_prepare_cannot_settle_older_run(self):
         first = self.prepare([key()])
         self.prepare([])
