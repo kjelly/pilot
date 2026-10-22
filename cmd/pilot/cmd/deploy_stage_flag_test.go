@@ -28,15 +28,15 @@ func TestValidateDeployStageFlags(t *testing.T) {
 		{stage: "staging", hours: "24", wantErr: "只能搭配 --stage prod"},
 		{stage: "", hours: "24", wantErr: "只能搭配 --stage prod"},
 	} {
-		err := validateDeployStageFlags(tt.stage, tt.hours)
+		err := validateStageFlags(tt.stage, tt.hours)
 		if tt.wantErr == "" {
 			if err != nil {
-				t.Errorf("validateDeployStageFlags(%q, %q) = %v, want nil", tt.stage, tt.hours, err)
+				t.Errorf("validateStageFlags(%q, %q) = %v, want nil", tt.stage, tt.hours, err)
 			}
 			continue
 		}
 		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-			t.Errorf("validateDeployStageFlags(%q, %q) = %v, want %q", tt.stage, tt.hours, err, tt.wantErr)
+			t.Errorf("validateStageFlags(%q, %q) = %v, want %q", tt.stage, tt.hours, err, tt.wantErr)
 		}
 	}
 }
@@ -44,9 +44,9 @@ func TestValidateDeployStageFlags(t *testing.T) {
 // TestPromptStageDecisionUsesStageFlag runs under a driver with no answers,
 // so any stage, confirm or attestation prompt that still fired would fail.
 func TestPromptStageDecisionUsesStageFlag(t *testing.T) {
-	prevStage, prevHours, prevPrompt := deployStageFlag, deployStagingAttestedHoursFlag, activePromptAutomation
+	prevStage, prevHours, prevPrompt := stageFlag, stagingAttestedHoursFlag, activePromptAutomation
 	t.Cleanup(func() {
-		deployStageFlag, deployStagingAttestedHoursFlag, activePromptAutomation = prevStage, prevHours, prevPrompt
+		stageFlag, stagingAttestedHoursFlag, activePromptAutomation = prevStage, prevHours, prevPrompt
 	})
 	for _, tt := range []struct {
 		stage, hours string
@@ -58,7 +58,7 @@ func TestPromptStageDecisionUsesStageFlag(t *testing.T) {
 	} {
 		driver := &promptAutomation{action: "deploy"}
 		activePromptAutomation = driver
-		deployStageFlag, deployStagingAttestedHoursFlag = tt.stage, tt.hours
+		stageFlag, stagingAttestedHoursFlag = tt.stage, tt.hours
 
 		got, err := promptStageDecision(&bytes.Buffer{}, "site.yml")
 		if err != nil || driver.err != nil {
@@ -71,16 +71,16 @@ func TestPromptStageDecisionUsesStageFlag(t *testing.T) {
 }
 
 func TestDeployRejectsStageFlagMisuse(t *testing.T) {
-	prevStage, prevHours, prevActions := deployStageFlag, deployStagingAttestedHoursFlag, deployActionsPath
+	prevStage, prevHours, prevActions := stageFlag, stagingAttestedHoursFlag, deployActionsPath
 	t.Cleanup(func() {
-		deployStageFlag, deployStagingAttestedHoursFlag, deployActionsPath = prevStage, prevHours, prevActions
+		stageFlag, stagingAttestedHoursFlag, deployActionsPath = prevStage, prevHours, prevActions
 	})
 
-	deployStageFlag, deployStagingAttestedHoursFlag, deployActionsPath = "staging", "", filepath.Join(t.TempDir(), "scenario.json")
+	stageFlag, stagingAttestedHoursFlag, deployActionsPath = "staging", "", filepath.Join(t.TempDir(), "scenario.json")
 	if err := runDeploy(&cobra.Command{}, nil); err == nil || !strings.Contains(err.Error(), "--stage 不能與 --actions") {
 		t.Fatalf("--stage --actions: error = %v", err)
 	}
-	deployStageFlag, deployActionsPath = "prod", ""
+	stageFlag, deployActionsPath = "prod", ""
 	if err := runDeploy(&cobra.Command{}, nil); err == nil || !strings.Contains(err.Error(), "--staging-attested-within-hours") {
 		t.Fatalf("--stage prod without hours: error = %v", err)
 	}

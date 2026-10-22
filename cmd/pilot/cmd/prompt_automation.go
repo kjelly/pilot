@@ -32,6 +32,9 @@ type promptAutomation struct {
 	out          io.Writer
 	useDefaults  bool
 	forceApply   bool
+	// previewOnly (reconcile --preview-only) makes the reconcile plan
+	// authorization preview every playbook and apply none.
+	previewOnly bool
 	// previewPassed records that a defaults-mode run reached the
 	// after-preview apply question, which is only asked once a
 	// --check --diff preview has succeeded (deploy --preview-only).

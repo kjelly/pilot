@@ -684,6 +684,8 @@ playbook 在 `pre_tasks` 就有 confirm gate，沒帶對應旗標會直接 `asse
 非互動跑 `pilot deploy --force` / `--preview-only`（CI、cron）時 stage 一律是
 `sandbox`；要套到 staging / prod 改加 `--stage staging` 或
 `--stage prod --staging-attested-within-hours <實際小時數>`，效果等同上表的旗標。
+`pilot reconcile` 也接受同樣的旗標，另外要用 `--component <key>`（可重複）
+指定要調和的元件。
 
 ```bash
 # 全站套到 staging
