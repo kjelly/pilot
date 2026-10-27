@@ -660,9 +660,10 @@ migration:
   delete_old_groups: false
 ```
 
-`freeipa.admin.password` 必須是跟 vault 的 `ipa_admin_password` 相同的字串（全數字的密碼要加引號，
-否則 Ansible 會當成數字比對而不相等）：`pilot access`、`pilot identity drift`、
-`pilot roster remove-*` 只載入名冊，用它登入 FreeIPA。`pilot edit` 只在改變 `.vault/main.yaml` 的
+`freeipa.admin.password` 必須是跟 vault 的 `ipa_admin_password` 相同的字串：`pilot access`、
+`pilot identity drift`、`pilot roster remove-*` 只載入名冊，用它登入 FreeIPA。兩邊都加上引號：沒加引號時，
+YAML 可能把 `12345678`、`012345678`、`1e10`、`190:20:30`、`2024-01-01`、`yes` 這類值讀成數字、日期或
+布林值，比對就會不相等。`pilot edit` 只在改變 `.vault/main.yaml` 的
 `ipa_admin_password` 那次存檔，把新值帶進這個 workspace `.vault/` 目錄裡的明文名冊；其餘情況（加密名冊、
 `.vault/` 以外的名冊、vault 值含 `{{`、`{%`、`{#` 等）要手動修改，之後再存一次 vault 也不會補同步。
 細節見 `docs/runbooks/freeipa-identity.md` §4.5。

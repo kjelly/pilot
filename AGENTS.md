@@ -1218,18 +1218,34 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
    symlink 的路徑上,`pilot roster remove-*` 以真實路徑持有的鎖擋不住它;同一類問題
    遍及所有名冊 writer(各自鎖自己拿到的路徑、migrate 與 remove 互不排斥、十幾個
    writer 完全沒鎖)。
-   - lock 檔本身不跟隨 symlink:以 `O_NOFOLLOW` 開啟,必須是只有一個名字的一般檔案,
-     chown 一律對 fd 做(以 root 執行時,跟隨 symlink 會截斷並 chown 別的檔案);
-     只能讀的既有 lock 檔照樣可以 flock(例如舊版 root 留下的),完全打不開時回傳
-     `ErrRosterLockFile` 並說明要修什麼,跟「被持有」(`ErrMutationLocked`)分開。
-     不需要寫入的情況(schema 已是最新、沒有缺的 host)不取鎖。
+   - lock 檔本身不跟隨 symlink:以 `O_NOFOLLOW|O_NONBLOCK` 開啟(FIFO 不會卡住
+     open),必須是只有一個名字的一般檔案,chown 一律對 fd 做(以 root 執行時,跟隨
+     symlink 會截斷並 chown 別的檔案);只能讀的既有 lock 檔照樣可以 flock(例如舊版
+     root 留下的),完全打不開時回傳 `ErrRosterLockFile` 並說明要修什麼,跟「被持有」
+     (`ErrMutationLocked`)分開。不需要寫入的情況(schema 已是最新、沒有缺的 host)不取鎖。
+   - 持有鎖之後一律用 `writeLockedRoster` 寫:暫存檔加 rename 的原子替換,保留權限與
+     擁有者,不取鎖的讀者(同步的預查、唯讀指令、playbook)不會讀到寫到一半的檔案;
+     預查讀到空檔時改在鎖內重讀。`TestRosterWritersRefuseALockedRoster` 檢查每個 writer
+     都換了 inode。
    - package 以外寫名冊的地方也要經過這個鎖:`pilot edit` apply 失敗的 rollback 用
      `inventory.RestoreRosterFile`/`RemoveRosterFile`,只在名冊仍是這個 session 寫入的
      內容時才還原,否則留下並在錯誤裡列出路徑(`cmd/pilot/cmd/edit_tui_vault_roster_scope_test.go::TestEditApplyRollbackLeavesARosterAnotherProcessTouched`);
      `pilot edit` 對 `.vault/main.yaml` 以外的加密檔執行 `ansible-vault edit` 時以
      `inventory.HoldRosterLock` 持有鎖(`edit_tui_vault_roster_lock_test.go::TestAnsibleVaultEditHoldsTheRosterLock`)。
-     `pilot edit` 遇到被持有或 lock 檔不能用的名冊時顯示 banner、不結束 session
-     (`edit_tui_roster_busy_guard_test.go::TestRegression_EditRosterWritesReportABusyRoster`)。
+     `ansible-vault edit` 的鎖只在 editor 執行期間持有(`rosterEditCommand.Run`),
+     自動化丟掉這個指令時不會留下鎖(`::TestEditApplyLeavesNoRosterLockAfterAnEncryptedFileStep`)。
+     rollback 對同一個檔案的多個名字只還原一次,已回到原內容的算完成,這個 session
+     沒寫過、被別人改過的名冊不算失敗(`::TestEditApplyRollbackRestoresARosterWithTwoNames`、
+     `::TestEditApplyRollbackKeepsARosterTheSessionNeverWrote`)。
+   - 名冊被持有或 lock 檔不能用時,`pilot edit` 在終端機顯示 banner、不結束 session;
+     自動化／MCP 則讓那一步失敗(錯誤列出名冊路徑與原因)、整個 apply rollback,MCP 回傳
+     錯誤而不是 "applied"——banner 只是給人看的,不能讓自動化把沒寫入當成功(§5.8)。
+     兩者都經過 `rosterBusyBanner`,它把拒絕記在 router 上,driver 每一步檢查
+     (`edit_tui_vault_roster_lock_test.go::TestEditApplyFailsOnABusyRoster`、
+     `::TestApplyHandler_BusyRosterIsAnErrorNotApplied`、`::TestEditTUIBusyRosterKeepsTheSessionOpen`);
+     `edit_tui_roster_busy_guard_test.go::TestRegression_EditRosterWritesReportABusyRoster`
+     要求每個名冊寫入的失敗分支呼叫它,`::TestRegression_BusyRosterErrorsGoThroughRosterBusyBanner`
+     禁止其他函式自行處理這兩個錯誤(只豁免把結果放進 warnings 的 vault 同步與 rollback)。
    `internal/inventory/roster_lock_guard_test.go::TestRegression_RosterWritersLockCanonicalTarget`
    對 `internal/inventory` 鎖住:`acquireMutationLock` 只能出現在 `roster_lock.go`;會寫檔
    (含 `os.OpenFile` 寫入／建立、`os.Create`)的函式與 method 必須呼叫
@@ -1563,4 +1579,4 @@ git status --short
 | 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |
 | 2026-10-16 | v1.53 | §4.5 新增第 15 點：密碼不得插進 shell 或 free-form `command:` 字串。PR #92 的 3 個 FreeIPA kinit task（replica forwarder、replica self-register、primary dnsconfig-mod）改用 `argv` + `stdin`；新增全 repo lint `TestRegression_NoSecretInCommandText`（既有 33 處列入以 task 數計算的 ratchet allowlist，#118 追蹤）與行為測試 `TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`。#79（v1.50）、#80（v1.52）也新增列，後合併者重新編號 | pilot |
 | 2026-10-15 | v1.54 | §4.5 新增第 16 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |
-| 2026-10-27 | v1.55 | §5.7 一致性表新增「名冊 `freeipa.admin.password` ↔ vault `ipa_admin_password`」(issue #146):只改 vault 會讓 freeipa-nfs-server 的 no_log gate 失敗且看不出原因。`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步 workspace 名冊(只認 deploy 預設載入的這份、只寫這個 workspace `.vault/` 目錄裡的名冊,plan 不碰真實檔且與 apply 預覽相同的寫入、失敗的 apply 會一併 rollback、原子寫入)、未同步的名冊列在 banner 與 plan/apply 的 warnings、deploy/reconcile preflight 對不一致發 warning、nfs-server 的密碼一致性拆成不加 no_log、排在 stage gate 之後的獨立 gate;三者都指向唯一有效的修正:手動改名冊(pilot edit 只在密碼改變的那次存檔同步,再存不會補)。名冊不能改成 `{{ ipa_admin_password }}`:`pilot access`/`identity drift`/`roster remove-*` 只載入名冊。同一 PR 的 review 修正:§5.11 新增第 5 點,所有名冊 writer 改用 `lockRosterFile` 鎖 canonical 檔案(`secretpath.Canonical`),修掉 symlink 繞過鎖、migrate/remove 互不排斥、migrate 把 symlink 換成一般檔案、十幾個 writer 沒鎖的問題,新增全 package lint `TestRegression_RosterWritersLockCanonicalTarget`。Re-review 第二輪:lock 檔以 `O_NOFOLLOW` 開啟並對 fd chown(root 執行時不會截斷或 chown symlink 指向的檔案)、只能讀的 lock 檔照樣上鎖、打不開時回傳說明修法的 `ErrRosterLockFile`、不需寫入時不取鎖,`pilot edit` 對被持有的名冊顯示 banner 而不結束 session;名冊密碼只認 YAML 字串(沒加引號的數字跟 Ansible 一樣視為不一致);plan 透過被複製的 workspace 辨識名冊;apply rollback 只還原仍是本 session 寫入內容的名冊;guard 涵蓋 `os.OpenFile`/`os.Create` 寫入、method 與真正的 lock target,`ansible-vault edit` 執行期間持有名冊鎖 | pilot |
+| 2026-10-27 | v1.55 | §5.7 一致性表新增「名冊 `freeipa.admin.password` ↔ vault `ipa_admin_password`」(issue #146):只改 vault 會讓 freeipa-nfs-server 的 no_log gate 失敗且看不出原因。`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步 workspace 名冊(只認 deploy 預設載入的這份、只寫這個 workspace `.vault/` 目錄裡的名冊,plan 不碰真實檔且與 apply 預覽相同的寫入、失敗的 apply 會一併 rollback、原子寫入)、未同步的名冊列在 banner 與 plan/apply 的 warnings、deploy/reconcile preflight 對不一致發 warning、nfs-server 的密碼一致性拆成不加 no_log、排在 stage gate 之後的獨立 gate;三者都指向唯一有效的修正:手動改名冊(pilot edit 只在密碼改變的那次存檔同步,再存不會補)。名冊不能改成 `{{ ipa_admin_password }}`:`pilot access`/`identity drift`/`roster remove-*` 只載入名冊。同一 PR 的 review 修正:§5.11 新增第 5 點,所有名冊 writer 改用 `lockRosterFile` 鎖 canonical 檔案(`secretpath.Canonical`),修掉 symlink 繞過鎖、migrate/remove 互不排斥、migrate 把 symlink 換成一般檔案、十幾個 writer 沒鎖的問題,新增全 package lint `TestRegression_RosterWritersLockCanonicalTarget`。Re-review 第二輪:lock 檔以 `O_NOFOLLOW` 開啟並對 fd chown(root 執行時不會截斷或 chown symlink 指向的檔案)、只能讀的 lock 檔照樣上鎖、打不開時回傳說明修法的 `ErrRosterLockFile`、不需寫入時不取鎖,`pilot edit` 對被持有的名冊顯示 banner 而不結束 session;名冊密碼只認 YAML 字串(沒加引號的數字跟 Ansible 一樣視為不一致);plan 透過被複製的 workspace 辨識名冊;apply rollback 只還原仍是本 session 寫入內容的名冊;guard 涵蓋 `os.OpenFile`/`os.Create` 寫入、method 與真正的 lock target,`ansible-vault edit` 執行期間持有名冊鎖。第三輪:自動化／MCP 遇到被持有或 lock 檔不能用的名冊時該步失敗並 rollback(MCP 回傳錯誤),終端機仍只顯示 banner;`ansible-vault edit` 的鎖只在 editor 執行期間持有;名冊寫入改為原子替換;lock 檔以 `O_NONBLOCK` 開啟;rollback 對同一檔案只還原一次、不把別人改過的名冊算成失敗;沒加引號、YAML 1.1 或 1.2 可能讀成非字串的密碼(名冊與 vault 兩邊)一律提示加引號,YAML 1.1 的判斷以 `make identity-secret-test` 對真實 Ansible loader 驗證 | pilot |
