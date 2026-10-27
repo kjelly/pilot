@@ -131,6 +131,7 @@ checklist 驗證的是「套用 fixture 後的最終狀態」（單次快照，`
 | `freeipa_roster_file` | canonical roster 檔路徑；以 `include_vars: name=freeipa_roster` 載入，避免 `groups`/`hosts` magic-variable collision | canonical 必填 |
 | `ipa_admin_password` | vault 的 kinit 密碼；canonical roster 的 `freeipa.admin.password` 可作 fallback | legacy 必填；canonical 可從 roster 取得 |
 | `freeipa_domain` / `freeipa_realm` | inventory 的 domain/realm；realm 預設由 domain 轉大寫 | 否 |
+| `ipa_identity_ssh_cache_state_file` | provider 上持久化 SSH key 傳播待辦的 root 私有 JSON；預設 `/var/lib/pilot-identity/ssh-cache.json`，不可用暫存路徑或在各次 apply 間刪除 | 否 |
 
 > Checklist §2 查的是 fixture（`playbooks/test/fixtures/freeipa-identity-fixtures.yml`）
 > 套用後的 LDAP 狀態，走 **root 透過 ldapi unix socket 的 SASL EXTERNAL autobind**——
@@ -169,6 +170,8 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。
 上游介面依據：[非 TTY password prompt](https://github.com/freeipa/freeipa/blob/master/ipalib/cli.py)、
 [passwd RPC 的 admin-reset 語意](https://github.com/freeipa/freeipa/blob/master/ipaserver/plugins/passwd.py)、
 [Python API 連線範例](https://github.com/freeipa/freeipa/blob/master/doc/examples/python-api.py)。
+
+SSH key cache 最新 live 驗收：2026-10-27，candidate `2c35804`（tree `eba8be2`），一台 enrolled provider 與兩台 enrolled AlmaLinux 9 clients；tagged／中斷／skip-tags／option-off 的非 key 授權快取 recovery（16/16）、live SSH 新增／撤銷與 deferred 重試均通過，最後 topology test **24/24 PASS**、changed=0。完整 hashes、真實失敗與恢復見 [live evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)；未在此 candidate 重跑的 SSH 失敗個案見 [e42f50c 紀錄](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
 
 ## 2. Checklist
 

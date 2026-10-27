@@ -187,7 +187,7 @@ func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
 		"pilot_deferred_hosts",
 		"reject('in', pilot_deferred_hosts | default([]))",
 		"become: true",
-		"become_method: sudo",
+		"become_method: ansible.builtin.sudo",
 		"- not ansible_check_mode",
 		"- ipa_identity_refresh_sssd_cache | bool",
 		"changed_when: false",

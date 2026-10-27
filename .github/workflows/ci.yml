@@ -65,8 +65,8 @@ jobs:
     # delivery image.
     name: Playbook lint
     runs-on: ubuntu-latest
-    # Identity no-op/password regressions have 5m/10m Go budgets; leave room
-    # for syntax/tool setup and the alert-rules behavior suite too.
+    # The identity Ansible regressions have their own 5m Go timeout; leave
+    # room after syntax/tool setup and the alert-rules behavior suite.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +102,9 @@ jobs:
 
       - name: make identity-noop-test
         run: make identity-noop-test
+
+      - name: make identity-ssh-cache-test
+        run: make identity-ssh-cache-test
 
       - name: make identity-secret-test
         run: make identity-secret-test
