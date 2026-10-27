@@ -27,7 +27,7 @@ dependencies:
   - {component: freeipa-client, required: true, relation: sameHosts}
 conflicts: []
 hostCardinality: one-or-more
-resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 20}
+resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 20, diskPaths: [/var/lib/pilot-session-store]}
 groupVars:
   - {name: session_store_fqdn, type: string, required: false, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}

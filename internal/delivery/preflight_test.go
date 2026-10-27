@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -99,5 +100,94 @@ func TestValidateContractPreflightWarnsWhenFactsUnavailable(t *testing.T) {
 	})
 	if err != nil || len(result.Warnings) != 1 {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestValidateContractPreflightMeasuresDiskPathsInsteadOfRoot(t *testing.T) {
+	component := contract.Contract{
+		ID: "wazuh-manager", Role: "wazuh-manager", HostCardinality: "one-or-more",
+		Resources: contract.Resources{MinDiskGiB: 50, DiskPaths: []string{"/var/lib/docker"}},
+	}
+	request := PreflightRequest{
+		Selected: []contract.Contract{component},
+		Scope:    Scope{HostsByRole: map[string][]string{"wazuh-manager": {"nexus"}}},
+	}
+
+	// / is short, but the data directory sits on a larger filesystem.
+	request.Facts = map[string]HostFacts{"nexus": {Available: true, DiskGiB: 38, DiskGiBByPath: map[string]int{"/var/lib/docker": 467}}}
+	if result, err := ValidateContractPreflight(request); err != nil || len(result.Warnings) != 0 {
+		t.Fatalf("data directory with room: result=%+v err=%v", result, err)
+	}
+
+	// / has room, but the data directory's filesystem does not.
+	request.Facts = map[string]HostFacts{"nexus": {Available: true, DiskGiB: 400, DiskGiBByPath: map[string]int{"/var/lib/docker": 10}}}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "diskGiB=10 (available on /var/lib/docker) are below minimum") {
+		t.Fatalf("full data directory: err=%v", err)
+	}
+
+	// Without diskPaths the minimum still applies to /.
+	request.Selected[0].Resources.DiskPaths = nil
+	request.Facts = map[string]HostFacts{"nexus": {Available: true, DiskGiB: 38, DiskGiBByPath: map[string]int{"/var/lib/docker": 467}}}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "diskGiB=38 (available on /) are below minimum") {
+		t.Fatalf("no diskPaths: err=%v", err)
+	}
+}
+
+func TestValidateContractPreflightChecksEveryDiskPath(t *testing.T) {
+	component := contract.Contract{
+		ID: "thanos", Role: "thanos", HostCardinality: "one-or-more",
+		Resources: contract.Resources{MinDiskGiB: 10, DiskPaths: []string{"/srv/store", "/srv/compact"}},
+	}
+	request := PreflightRequest{
+		Selected: []contract.Contract{component},
+		Scope:    Scope{HostsByRole: map[string][]string{"thanos": {"h"}}},
+		Facts:    map[string]HostFacts{"h": {Available: true, DiskGiB: 100, DiskGiBByPath: map[string]int{"/srv/store": 50, "/srv/compact": 5}}},
+	}
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "diskGiB=5 (available on /srv/compact)") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateContractPreflightWarnsWhenDiskPathUnmeasured(t *testing.T) {
+	component := contract.Contract{
+		ID: "a", Role: "a", HostCardinality: "one-or-more",
+		Resources: contract.Resources{MinDiskGiB: 50, DiskPaths: []string{"/var/lib/docker"}},
+	}
+	request := PreflightRequest{
+		Selected: []contract.Contract{component},
+		Scope:    Scope{HostsByRole: map[string][]string{"a": {"h"}}},
+		Facts:    map[string]HostFacts{"h": {Available: true, DiskGiB: 1}},
+	}
+	result, err := ValidateContractPreflight(request)
+	if err != nil || len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "disk space on /var/lib/docker not measured") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+
+	// An unmeasured disk does not hide a known CPU deficit.
+	request.Selected[0].Resources.MinCPU = 4
+	if _, err := ValidateContractPreflight(request); err == nil || !strings.Contains(err.Error(), "diskGiB=not measured") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDiskPathsByHost(t *testing.T) {
+	selected := []contract.Contract{
+		{ID: "wazuh-manager", Role: "wazuh-manager", Resources: contract.Resources{MinDiskGiB: 50, DiskPaths: []string{"/var/lib/docker"}}},
+		{ID: "prometheus", Role: "prometheus", Resources: contract.Resources{MinDiskGiB: 20, DiskPaths: []string{"/var/lib/pilot/prometheus"}}},
+		{ID: "docker", Role: "docker", Resources: contract.Resources{MinDiskGiB: 10, DiskPaths: []string{"/var/lib/docker"}}},
+		{ID: "host-monitoring", Role: "host-monitoring", Resources: contract.Resources{MinDiskGiB: 1}},
+	}
+	scope := Scope{HostsByRole: map[string][]string{
+		"wazuh-manager":   {"nexus"},
+		"prometheus":      {"nexus"},
+		"docker":          {"nexus", "nexus", "edge"},
+		"host-monitoring": {"nexus", "edge", "ipa"},
+	}}
+	want := map[string][]string{
+		"nexus": {"/var/lib/docker", "/var/lib/pilot/prometheus"},
+		"edge":  {"/var/lib/docker"},
+	}
+	if got := DiskPathsByHost(selected, scope); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiskPathsByHost = %v, want %v", got, want)
 	}
 }

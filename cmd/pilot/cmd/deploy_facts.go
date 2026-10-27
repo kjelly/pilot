@@ -19,11 +19,30 @@ import (
 	"github.com/kjelly/pilot/internal/delivery"
 )
 
-// hostFactsProbeCommand is a read-only shell one-liner run per host via an
+// hostFactsBaseProbe is a read-only shell one-liner run per host via an
 // ad-hoc `ansible -m shell` call. It never mutates the target and needs no
 // privilege escalation, so it is safe to run unconditionally before every
 // deploy's preflight step.
-const hostFactsProbeCommand = `. /etc/os-release 2>/dev/null; printf '%s;%s;%s;%s;%s\n' "$ID" "$VERSION_ID" "$(nproc 2>/dev/null)" "$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"`
+const hostFactsBaseProbe = `. /etc/os-release 2>/dev/null; printf '%s;%s;%s;%s;%s\n' "$ID" "$VERSION_ID" "$(nproc 2>/dev/null)" "$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')" "$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"`
+
+// hostFactsDiskPathProbe prints one "disk;<path>;<GiB>" line per contract
+// diskPaths entry ($p), measuring the filesystem of its nearest existing
+// ancestor: before the first apply the directory does not exist yet, while a
+// mount or bind mount prepared for it already does. A path below a directory
+// the probe's user cannot search reads as missing, so that directory is
+// measured, which is the same filesystem unless something is mounted between.
+const hostFactsDiskPathProbe = `q="$p"; while [ ! -e "$q" ]; do q=$(dirname "$q"); done; printf 'disk;%s;%s\n' "$p" "$(df -BG --output=avail "$q" 2>/dev/null | tail -1 | tr -dc '0-9')"`
+
+// hostFactsProbeCommand returns the probe for one host: hostFactsBaseProbe,
+// then hostFactsDiskPathProbe for each diskPaths entry. The contract loader
+// only accepts entries made of characters that need no shell quoting, so
+// single quotes keep them literal.
+func hostFactsProbeCommand(diskPaths []string) string {
+	if len(diskPaths) == 0 {
+		return hostFactsBaseProbe
+	}
+	return hostFactsBaseProbe + "; for p in '" + strings.Join(diskPaths, "' '") + "'; do " + hostFactsDiskPathProbe + "; done"
+}
 
 const hostFactsProbeTimeout = 20 * time.Second
 const hostFactsProbeConcurrency = 8
@@ -39,8 +58,9 @@ var rpmMajorOnlyDistros = map[string]bool{"almalinux": true, "rocky": true, "rhe
 // it could collect. A host that is unreachable, times out, or returns
 // unparsable output is simply absent from the result — ValidateContractPreflight
 // already treats a missing entry as a non-fatal warning, so a partial result
-// is always safe to hand it.
-func gatherHostFacts(ctx context.Context, inventory string, hosts []string) map[string]delivery.HostFacts {
+// is always safe to hand it. diskPaths names, per host, the contract
+// diskPaths to measure besides /.
+func gatherHostFacts(ctx context.Context, inventory string, hosts []string, diskPaths map[string][]string) map[string]delivery.HostFacts {
 	facts := make(map[string]delivery.HostFacts, len(hosts))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -51,7 +71,7 @@ func gatherHostFacts(ctx context.Context, inventory string, hosts []string) map[
 		go func(host string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			f, err := probeHostFacts(ctx, inventory, host)
+			f, err := probeHostFacts(ctx, inventory, host, diskPaths[host])
 			if err != nil {
 				return
 			}
@@ -64,10 +84,10 @@ func gatherHostFacts(ctx context.Context, inventory string, hosts []string) map[
 	return facts
 }
 
-func probeHostFacts(ctx context.Context, inventory, host string) (delivery.HostFacts, error) {
+func probeHostFacts(ctx context.Context, inventory, host string, diskPaths []string) (delivery.HostFacts, error) {
 	cctx, cancel := context.WithTimeout(ctx, hostFactsProbeTimeout)
 	defer cancel()
-	command := deployAnsibleCommand(cctx, "ansible", host, "-i", inventory, "-m", "shell", "-a", hostFactsProbeCommand)
+	command := deployAnsibleCommand(cctx, "ansible", host, "-i", inventory, "-m", "shell", "-a", hostFactsProbeCommand(diskPaths))
 	if command.Env == nil {
 		command.Env = os.Environ()
 	}
@@ -83,11 +103,11 @@ func probeHostFacts(ctx context.Context, inventory, host string) (delivery.HostF
 	if err != nil {
 		return delivery.HostFacts{}, fmt.Errorf("probe %s: %w: %s", host, err, strings.TrimSpace(stderr.String()))
 	}
-	line, err := extractAdHocStdout(stdout.String(), host)
+	output, err := extractAdHocStdout(stdout.String(), host)
 	if err != nil {
 		return delivery.HostFacts{}, err
 	}
-	return parseHostFactsLine(line)
+	return parseHostFactsOutput(output)
 }
 
 // adHocCallbackDoc is the (partial) shape of the document
@@ -129,7 +149,36 @@ func extractAdHocStdout(rawJSON, host string) (string, error) {
 	return "", fmt.Errorf("no ansible callback result for host %s", host)
 }
 
-// parseHostFactsLine parses the ";"-delimited line hostFactsProbeCommand
+// parseHostFactsOutput parses hostFactsProbeCommand's output: the
+// hostFactsBaseProbe line, then one "disk;<path>;<GiB>" line per diskPaths
+// entry. A disk line with no number (df failed) leaves its path unmeasured.
+func parseHostFactsOutput(output string) (delivery.HostFacts, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	facts, err := parseHostFactsLine(lines[0])
+	if err != nil {
+		return delivery.HostFacts{}, err
+	}
+	for _, line := range lines[1:] {
+		fields := strings.Split(strings.TrimSpace(line), ";")
+		if len(fields) != 3 || fields[0] != "disk" || fields[1] == "" {
+			return delivery.HostFacts{}, fmt.Errorf("unexpected disk path probe output %q", line)
+		}
+		if fields[2] == "" {
+			continue
+		}
+		disk, err := strconv.Atoi(fields[2])
+		if err != nil {
+			return delivery.HostFacts{}, fmt.Errorf("parse disk GiB from %q: %w", line, err)
+		}
+		if facts.DiskGiBByPath == nil {
+			facts.DiskGiBByPath = map[string]int{}
+		}
+		facts.DiskGiBByPath[fields[1]] = disk
+	}
+	return facts, nil
+}
+
+// parseHostFactsLine parses the ";"-delimited line hostFactsBaseProbe
 // prints: distro id;version id;cpu count;ram MiB;disk GiB available on /.
 func parseHostFactsLine(line string) (delivery.HostFacts, error) {
 	fields := strings.Split(strings.TrimSpace(line), ";")

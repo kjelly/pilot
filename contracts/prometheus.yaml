@@ -37,7 +37,7 @@ bindings:
     sourceSelection: all
     from: {component: dcgm-exporter, endpoint: metrics}
 hostCardinality: one-or-more
-resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20, diskPaths: [/var/lib/pilot/prometheus]}
 groupVars:
   - {name: docker_network_name, type: string, required: false}
   - {name: alertmanager_alias, type: string, required: false}

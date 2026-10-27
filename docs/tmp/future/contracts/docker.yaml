@@ -20,7 +20,7 @@ os:
   - distro: ubuntu
     versions: ["22.04", "24.04"]
 hostCardinality: one-or-more
-resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 10}
+resources: {minCPU: 1, minRAMMiB: 1024, minDiskGiB: 10, diskPaths: [/var/lib/docker]}
 groupVars: []
 inputRules: []
 endpoints:

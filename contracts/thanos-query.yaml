@@ -20,7 +20,7 @@ bindings:
     sourceSelection: exactlyOne
     from: {component: seaweedfs-s3, endpoint: s3}
 hostCardinality: exactly-one
-resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10}
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 10, diskPaths: [/var/lib/pilot/thanos-store, /var/lib/pilot/thanos-compact]}
 groupVars:
   - {name: docker_network_name, type: string, required: false}
   - {name: thanos_aws_access_key_id, type: string, required: true, secret: true}
