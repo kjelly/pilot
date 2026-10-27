@@ -218,7 +218,13 @@ tombstone block ("host not found") sits next to its DNS block, and
 hid an A record that was still there. Since issue #102 the host-object and
 service-principal lookups fail the run on any error other than "host not
 found" / "0 services matched", so Plan and Verify stop instead of reading
-an error as "absent".
+an error as "absent". Last verified for #105: 2026-10-27 candidate
+`d3fa410`, tree `83e9cc548d355839b8e97463b6450b55e28e8b78`, on two isolated
+AlmaLinux 9.8 / FreeIPA 4.13.4 vm-targets, one with integrated DNS and one
+without. Verify reports the tombstone-hidden record as active_residue
+(pass before the fix), a DNS lookup error fails the run, and cleanup,
+rerun (changed=0) and Verify pass on both servers. Details are in the
+[evidence record](../evidence/host-decommission/2026-10-27-d3fa410.md).
 
 ## Checks
 
