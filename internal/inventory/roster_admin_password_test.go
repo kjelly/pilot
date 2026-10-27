@@ -304,3 +304,25 @@ func TestVaultAdminPassword(t *testing.T) {
 		})
 	}
 }
+
+// A vault value Ansible would template is returned for comparison, so
+// pilot edit can report it; anything else is not a template.
+func TestVaultAdminPasswordTemplate(t *testing.T) {
+	for name, tt := range map[string]struct{ data, want string }{
+		"expression":    {"ipa_admin_password: \"{{ lookup('env', 'X') }}\"\n", "{{ lookup('env', 'X') }}"},
+		"statement":     {"ipa_admin_password: \"pre{% raw %}x\"\n", "pre{% raw %}x"},
+		"comment":       {"ipa_admin_password: \"a{#b\"\n", "a{#b"},
+		"literal":       {"ipa_admin_password: \"Vault-pass_1\"\n", ""},
+		"lone brace":    {"ipa_admin_password: \"pa{ss}\"\n", ""},
+		"encrypted":     {"$ANSIBLE_VAULT;1.1;AES256\n6162636465\n", ""},
+		"inline !vault": {"ipa_admin_password: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465\n", ""},
+		"missing":       {"grafana_admin_password: \"{{ x }}\"\n", ""},
+		"not yaml":      {"ipa_admin_password: [\n", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := VaultAdminPasswordTemplate([]byte(tt.data)); got != tt.want {
+				t.Fatalf("VaultAdminPasswordTemplate() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

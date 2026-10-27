@@ -50,25 +50,6 @@
       no_log: true
       tags: [always]
 
-    # `pilot deploy` normally loads main.yaml as well as the canonical roster,
-    # and the kinit below uses the roster's copy. Do not let a stale duplicate
-    # admin secret surface much later as a no_log kinit failure, nor hide
-    # behind the gate above: a rotation that changed one file but not the
-    # other must be named (issue #146). No no_log: the assertion text and
-    # fail_msg hold no value, and Ansible prints only those.
-    - name: "Gate: roster admin password matches the vault's ipa_admin_password"
-      ansible.builtin.assert:
-        that:
-          - (ipa_admin_password is not defined) or
-            (ipa_admin_password == freeipa_roster.freeipa.admin.password)
-        fail_msg: >-
-          freeipa.admin.password in {{ freeipa_roster_file }} differs from
-          ipa_admin_password in the vault vars file. Change ipa_admin_password
-          with pilot edit (.vault/), which updates the roster too, or set both
-          to the same value.
-        quiet: true
-      tags: [always]
-
     - name: "Gate: stage must match this host's inventory environment group"
       ansible.builtin.assert:
         that:
@@ -76,6 +57,30 @@
           - not ('staging' in group_names and stage != 'staging')
           - not (stage in ['staging', 'prod'] and stage not in group_names)
         fail_msg: "stage={{ stage }} does not match inventory groups {{ group_names }}."
+      tags: [always]
+
+    # `pilot deploy` normally loads main.yaml as well as the canonical roster,
+    # and the kinit below uses the roster's copy. Do not let a stale duplicate
+    # admin secret surface much later as a no_log kinit failure, nor hide
+    # behind the roster gate: a rotation that changed one file but not the
+    # other must be named (issue #146). It runs after the stage gates
+    # (AGENTS.md §4.3). No no_log: the assertion text and fail_msg hold no
+    # value, and Ansible prints only those. pilot edit carries a new password
+    # into the roster only on the save that changes it, so the fix for an
+    # existing difference is a hand edit of the roster.
+    - name: "Gate: roster admin password matches the vault's ipa_admin_password"
+      ansible.builtin.assert:
+        that:
+          - (ipa_admin_password is not defined) or
+            (ipa_admin_password == freeipa_roster.freeipa.admin.password)
+        fail_msg: >-
+          freeipa.admin.password in {{ freeipa_roster_file }} differs from
+          ipa_admin_password in the vault vars file. Set the roster's
+          freeipa.admin.password to the vault's ipa_admin_password by hand
+          (ansible-vault edit for an encrypted roster). pilot edit copies the
+          password into the roster only when a save changes
+          ipa_admin_password, so saving the vault again does not fix this.
+        quiet: true
       tags: [always]
 
     - name: "Inspect FreeIPA client enrollment marker"

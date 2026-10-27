@@ -116,7 +116,7 @@ func TestEditAutomationDriverVaultAdminPasswordSyncsRosters(t *testing.T) {
 	for _, want := range []string{
 		"🔁 已同步 .vault/ipa-identity.yaml 的 freeipa.admin.password",
 		"🔁 已同步 .vault/nfs-roster.yaml 的 freeipa.admin.password",
-		"⚠️  未同步 .vault/diverged.yaml：freeipa.admin.password 原本就跟 ipa_admin_password 不同",
+		"⚠️  未同步 .vault/diverged.yaml：freeipa.admin.password 原本就跟舊的 ipa_admin_password 不同",
 		"⚠️  未同步 .vault/encrypted.yaml：ansible-vault 加密",
 	} {
 		if !strings.Contains(r.banner, want) {

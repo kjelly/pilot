@@ -1,0 +1,267 @@
+package cmd
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// guidanceWorkspace has one roster per way the sync can leave a roster to
+// the operator, plus one it updates: the default roster (synced), one
+// already diverged, one encrypted, one another pilot process holds, one
+// in a .vault/ subdirectory and one outside the workspace. hosts.yml
+// references them the way pilot edit writes freeipa_roster_file: as
+// absolute paths.
+func guidanceWorkspace(t *testing.T) (dir string, rosters map[string]string) {
+	t.Helper()
+	dir = t.TempDir()
+	quotedOld := `"Old\"pass#1"`
+	rosters = map[string]string{
+		"default":   filepath.Join(dir, ".vault", "ipa-identity.yaml"),
+		"diverged":  filepath.Join(dir, ".vault", "diverged.yaml"),
+		"encrypted": filepath.Join(dir, ".vault", "encrypted.yaml"),
+		"locked":    filepath.Join(dir, ".vault", "locked.yaml"),
+		"nested":    filepath.Join(dir, ".vault", "sub", "nested.yaml"),
+		"external":  filepath.Join(t.TempDir(), "ipa-identity.yaml"),
+	}
+	for name, path := range rosters {
+		switch name {
+		case "diverged":
+			writeSyncFile(t, path, syncTestRoster(`"Other-pass_3"`))
+		case "encrypted":
+			writeSyncFile(t, path, "$ANSIBLE_VAULT;1.1;AES256\n6162636465\n")
+		default:
+			writeSyncFile(t, path, syncTestRoster(quotedOld))
+		}
+	}
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: "+quotedOld+"\n")
+	hosts := "hosts:\n"
+	for i, name := range []string{"diverged", "encrypted", "locked", "nested", "external"} {
+		n := string(rune('1' + i))
+		hosts += "  h" + n + ":\n    ansible_host: 10.0.0." + n + "\n    roles: [freeipa-client]\n    freeipa_roster_file: " + rosters[name] + "\n"
+	}
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), hosts)
+	return dir, rosters
+}
+
+// Every roster the sync does not update is named with the one fix that
+// works — a hand edit, ansible-vault edit for an encrypted one — and the
+// report says why saving again does not help: pilot edit carries a
+// password forward only on the save that changes it (PR #148 review,
+// Finding B). A roster in a .vault/ subdirectory is not called "outside
+// .vault/" (Finding E). The same lines, without a password, are what a
+// plan or apply returns as warnings.
+func TestEditAutomationDriverNamesTheHandFixForEveryUnsyncedRoster(t *testing.T) {
+	dir, rosters := guidanceWorkspace(t)
+	holdRosterFlock(t, rosters["locked"]+".pilot-remove.lock")
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	if got := syncRosterPassword(t, rosters["default"]); got != syncNewPassword {
+		t.Fatalf("default roster not synced:\n%s", r.banner)
+	}
+	if !strings.Contains(r.banner, "🔁 已同步 .vault/ipa-identity.yaml 的 freeipa.admin.password") {
+		t.Errorf("banner does not report the synced roster:\n%s", r.banner)
+	}
+	for name, reason := range map[string]string{
+		".vault/diverged.yaml":   "原本就跟舊的 ipa_admin_password 不同",
+		".vault/encrypted.yaml":  "ansible-vault 加密（用 ansible-vault edit）",
+		".vault/locked.yaml":     "另一個 pilot 名冊操作正鎖住它",
+		".vault/sub/nested.yaml": "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）",
+		rosters["external"]:      "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）",
+	} {
+		line := bannerLine(r.banner, "⚠️  未同步 "+name+"：")
+		if !strings.Contains(line, reason) || !strings.HasSuffix(line, "；"+rosterManualFix) {
+			t.Errorf("%s: line %q lacks %q or the hand fix", name, line, reason)
+		}
+		if !slices.Contains(r.rosterSyncWarnings, strings.TrimPrefix(line, "⚠️  ")) {
+			t.Errorf("%s is not among the warnings: %q", name, r.rosterSyncWarnings)
+		}
+	}
+	if strings.Contains(r.banner, "不在這個 workspace 的 .vault/ 下") {
+		t.Errorf("banner calls a .vault/ subdirectory outside .vault/:\n%s", r.banner)
+	}
+	if !strings.Contains(r.banner, rosterSyncOnlyOnChange.icon+rosterSyncOnlyOnChange.text) ||
+		!slices.Contains(r.rosterSyncWarnings, rosterSyncOnlyOnChange.text) {
+		t.Errorf("report does not say a later save will not sync:\n%s", r.banner)
+	}
+	if strings.Contains(r.banner, "再存一次即可") || slices.Contains(r.rosterSyncWarnings, "已同步 .vault/ipa-identity.yaml 的 freeipa.admin.password") {
+		t.Errorf("banner promises a re-save fix or warns about a synced roster:\n%s\n%q", r.banner, r.rosterSyncWarnings)
+	}
+	for _, secret := range []string{syncOldPassword, syncNewPassword, "Other-pass_3"} {
+		if strings.Contains(r.banner, secret) || strings.Contains(strings.Join(r.rosterSyncWarnings, "\n"), secret) {
+			t.Fatal("banner or warnings leak a password")
+		}
+	}
+}
+
+func bannerLine(banner, prefix string) string {
+	for _, line := range strings.Split(banner, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
+// The recovery the runbook (§4.5), the deploy warning and the NFS gate give
+// for a roster already apart from the vault is a hand edit, and it works:
+// saving the vault again through pilot edit leaves the roster stale and
+// the warning in place, and editing the roster's password to the vault's
+// clears it (PR #148 review, Finding B).
+func TestFreeIPARosterDriftRecoveryIsAHandEdit(t *testing.T) {
+	dir := t.TempDir()
+	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`"Stale-pass_1"`))
+	// A rotation that reached only the vault.
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"Vault-pass_2\"\ngrafana_admin_password: \"Grafana-pass_1\"\n")
+	preflight := func() string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+
+	warning := preflight()
+	if !strings.Contains(warning, "warning: "+roster+" ") ||
+		!strings.Contains(warning, "請手動把名冊的 freeipa.admin.password 改成 vault 的 ipa_admin_password（加密名冊用 ansible-vault edit）") ||
+		!strings.Contains(warning, "之後再存不會修正") || strings.Contains(warning, "會一併同步") {
+		t.Fatalf("drift warning does not give the hand fix:\n%s", warning)
+	}
+
+	// Saving the vault again, with or without touching the password's key,
+	// is no change to carry forward.
+	stale, _ := os.ReadFile(roster)
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "grafana_admin_password", Value: "Grafana-pass_2"},
+		{Action: "save_vault", File: "main.yaml"},
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: "Vault-pass_2"},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	if after, _ := os.ReadFile(roster); !bytes.Equal(after, stale) {
+		t.Fatalf("a save without a password change rewrote the roster:\n%s", after)
+	}
+	if !strings.Contains(preflight(), "warning: "+roster+" ") {
+		t.Fatal("the drift warning went away without a fix")
+	}
+
+	// The documented fix: the roster's password line, by hand.
+	fixed := strings.Replace(string(stale), `password: "Stale-pass_1"`, `password: "Vault-pass_2"`, 1)
+	if fixed == string(stale) {
+		t.Fatal("fixture has no password line to edit")
+	}
+	writeSyncFile(t, roster, fixed)
+	if out := preflight(); out != "" {
+		t.Fatalf("warning after the hand fix:\n%s", out)
+	}
+}
+
+// A new ipa_admin_password Ansible would template is not silently
+// accepted: the save says the rosters were not synced and why, and the
+// deploy preflight says it cannot compare — neither shows the value
+// (PR #148 review, Finding C).
+func TestTemplatedVaultAdminPasswordIsReported(t *testing.T) {
+	const template = "{{ lookup('env', 'IPA_ADMIN_PASSWORD') }}"
+	dir, rosters := syncWorkspace(t)
+	before := map[string][]byte{}
+	for name, path := range rosters {
+		before[name], _ = os.ReadFile(path)
+	}
+	result, err := applyEditScenario(dir, "issue-146-template", editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: template},
+		{Action: "save_vault", File: "main.yaml"},
+	}}, editAgentSessionOptions{})
+	if err != nil || result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v", result, err)
+	}
+	for name, path := range rosters {
+		if after, _ := os.ReadFile(path); !bytes.Equal(after, before[name]) {
+			t.Errorf("%s roster changed:\n%s", name, after)
+		}
+	}
+	if !slices.ContainsFunc(result.Warnings, func(w string) bool {
+		return strings.HasPrefix(w, "未同步名冊：新的 ipa_admin_password 含 {{、{% 或 {#")
+	}) {
+		t.Errorf("apply warnings do not report the templated password: %q", result.Warnings)
+	}
+
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "pilot 無法比對它跟名冊的 freeipa.admin.password") || !strings.Contains(out.String(), rosters["default"]) {
+		t.Errorf("preflight does not say it cannot compare:\n%s", out.String())
+	}
+	for _, leak := range []string{"lookup", "IPA_ADMIN_PASSWORD", syncOldPassword} {
+		if strings.Contains(out.String(), leak) || strings.Contains(strings.Join(result.Warnings, "\n"), leak) {
+			t.Fatalf("output shows a vault value (%q)", leak)
+		}
+	}
+}
+
+// A plan previews every roster write the apply makes — pilot edit stores
+// freeipa_roster_file as an absolute path into the real workspace's
+// .vault/, which the plan maps onto its scratch copy — and both return the
+// rosters left for a manual update as warnings, so an MCP caller sees
+// them (PR #148 review, Finding D).
+func TestEditPlanAndApplyAgreeOnRosterWrites(t *testing.T) {
+	dir, rosters := guidanceWorkspace(t)
+	nfs := filepath.Join(dir, ".vault", "nfs-roster.yaml")
+	writeSyncFile(t, nfs, syncTestRoster(`"Old\"pass#1"`))
+	hosts, _ := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), string(hosts)+
+		"  h9:\n    ansible_host: 10.0.0.9\n    roles: [freeipa-nfs-server]\n    freeipa_roster_file: "+nfs+"\n")
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	real := []string{nfs, filepath.Join(dir, ".vault", "main.yaml")}
+	for _, path := range rosters {
+		real = append(real, path)
+	}
+	before := snapshotFiles(t, real...)
+
+	plan, err := planEditScenario(dir, rotationScenario(), editAgentSessionOptions{})
+	if err != nil {
+		t.Fatalf("planEditScenario() error = %v", err)
+	}
+	assertUnchanged(t, before)
+	apply, err := applyEditScenario(dir, "issue-146-plan-apply", rotationScenario(), editAgentSessionOptions{})
+	if err != nil || apply.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v", apply, err)
+	}
+	if got := syncRosterPassword(t, nfs); got != syncNewPassword {
+		t.Fatalf("apply did not sync %s", nfs)
+	}
+	if !slices.Equal(plan.AffectedFiles, apply.AffectedFiles) || !slices.Contains(plan.AffectedFiles, ".vault/nfs-roster.yaml") {
+		t.Errorf("plan AffectedFiles %v, apply %v; want the same, with .vault/nfs-roster.yaml", plan.AffectedFiles, apply.AffectedFiles)
+	}
+	if !slices.Equal(plan.Warnings, apply.Warnings) {
+		t.Errorf("plan warnings %q differ from apply warnings %q", plan.Warnings, apply.Warnings)
+	}
+	for _, name := range []string{".vault/diverged.yaml", ".vault/encrypted.yaml", ".vault/sub/nested.yaml", rosters["external"]} {
+		if !slices.ContainsFunc(apply.Warnings, func(w string) bool { return strings.HasPrefix(w, "未同步 "+name+"：") }) {
+			t.Errorf("warnings do not name %s: %q", name, apply.Warnings)
+		}
+	}
+	if slices.ContainsFunc(plan.Warnings, func(w string) bool { return strings.Contains(w, "nfs-roster.yaml") }) {
+		t.Errorf("plan reports the workspace's own roster as not synced: %q", plan.Warnings)
+	}
+	for _, secret := range []string{syncOldPassword, syncNewPassword, "Other-pass_3"} {
+		if strings.Contains(strings.Join(append(plan.Warnings, apply.Warnings...), "\n"), secret) {
+			t.Fatal("warnings leak a password")
+		}
+	}
+}

@@ -25,6 +25,9 @@ type editAgentSessionOptions struct {
 	Marker            io.Writer
 	PausePresentation func(time.Duration)
 	Recorder          AuditRecorder
+	// PlanSource is the real workspace when the session runs on a plan's
+	// scratch copy of it (planEditScenario), "" otherwise.
+	PlanSource string
 }
 
 // editAgentSession is a single pilot-edit automation run against dir.
@@ -38,9 +41,11 @@ type editAgentSession struct {
 }
 
 func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSession {
+	router := newEditRouterModel(dir)
+	router.planSource = opts.PlanSource
 	return &editAgentSession{
 		dir:    dir,
-		router: newEditRouterModel(dir),
+		router: router,
 		driver: automationDriver{
 			trace:             opts.Trace,
 			presentation:      opts.Presentation,
@@ -58,6 +63,10 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 // runAutomatedEditWorkflow already printed before this file existed) or
 // after a failed Run to inspect where the router stopped.
 func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
+
+// RosterSyncWarnings are the rosters a vault save in this session left
+// for the operator to update by hand, as text without any password.
+func (s *editAgentSession) RosterSyncWarnings() []string { return s.router.rosterSyncWarnings }
 
 // Run drives scenario's steps against the session's router, exactly as
 // calling automationDriver.run directly would — this indirection exists

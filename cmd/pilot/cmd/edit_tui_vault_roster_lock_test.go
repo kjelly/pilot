@@ -70,7 +70,7 @@ func TestEditAutomationDriverVaultSyncRespectsTheLinkedRostersLock(t *testing.T)
 			if after, _ := os.ReadFile(shared); !bytes.Equal(after, before) {
 				t.Fatalf("locked roster rewritten through its link:\n%s", after)
 			}
-			if !strings.Contains(banner, "⚠️  未同步 .vault/ipa-identity.yaml") || strings.Contains(banner, "已同步") {
+			if !strings.Contains(banner, "⚠️  未同步 .vault/ipa-identity.yaml：另一個 pilot 名冊操作正鎖住它") || strings.Contains(banner, "已同步") {
 				t.Errorf("banner does not report the locked roster as not synced:\n%s", banner)
 			}
 			assertLinkTo(t, link, shared)

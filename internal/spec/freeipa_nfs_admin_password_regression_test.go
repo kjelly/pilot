@@ -12,6 +12,7 @@ const (
 	nfsRosterLoadTask         = "Load canonical roster under a namespace"
 	nfsRosterAndStageGate     = "Gate: required roster and stage authorization"
 	nfsAdminPasswordDriftGate = "Gate: roster admin password matches the vault's ipa_admin_password"
+	nfsStageCrossCheckGate    = "Gate: stage must match this host's inventory environment group"
 )
 
 func nfsServerPreTasks(t *testing.T, names ...string) []map[string]any {
@@ -27,10 +28,19 @@ func nfsServerPreTasks(t *testing.T, names ...string) []map[string]any {
 
 // The credential check is its own gate, outside the no_log one, so a
 // rotation that changed only one of the two files is named instead of
-// hidden (issue #146).
+// hidden (issue #146). It follows the stage gates (AGENTS.md §4.3), and its
+// message gives the fix that works: pilot edit only carries a password
+// change forward on the save that makes it, so saving again fixes nothing.
 func TestRegression_FreeIPANFSServerAdminPasswordGateIsVisible(t *testing.T) {
-	tasks := nfsServerPreTasks(t, nfsRosterAndStageGate, nfsAdminPasswordDriftGate)
-	gate, drift := tasks[0], tasks[1]
+	tasks := nfsServerPreTasks(t, nfsRosterAndStageGate, nfsStageCrossCheckGate, nfsAdminPasswordDriftGate)
+	gate, drift := tasks[0], tasks[2]
+	if tasks[1]["name"] != nfsStageCrossCheckGate {
+		t.Errorf("the admin password gate must come after %q", nfsStageCrossCheckGate)
+	}
+	msg, _ := drift["ansible.builtin.assert"].(map[string]any)["fail_msg"].(string)
+	if !strings.Contains(msg, "by hand") || strings.Contains(msg, "updates the roster too") {
+		t.Errorf("fail_msg must ask for a hand edit of the roster, not a pilot edit save: %q", msg)
+	}
 	for _, condition := range gate["ansible.builtin.assert"].(map[string]any)["that"].([]any) {
 		if strings.Contains(condition.(string), "ipa_admin_password") {
 			t.Errorf("the no_log roster gate still checks the vault password: %q", condition)
@@ -45,7 +55,9 @@ func TestRegression_FreeIPANFSServerAdminPasswordGateIsVisible(t *testing.T) {
 }
 
 // Run from the real playbook: a drifted roster fails naming the field and
-// printing neither value; a matching, referencing or vault-less run passes.
+// printing neither value; a matching, referencing or vault-less run passes;
+// and the recovery the fail_msg and runbook §4.5 give — set the roster's
+// password to the vault's by hand — makes a drifted roster pass.
 func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 	const vaultPassword, stalePassword = `Vault"pass#2 密碼`, `Stale'pass\1`
 	for name, tt := range map[string]struct {
@@ -93,6 +105,32 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("drifted, then fixed by hand", func(t *testing.T) {
+		dir := t.TempDir()
+		roster := filepath.Join(dir, "ipa-identity.yaml")
+		line := func(password string) string { return "    password: " + yamlDoubleQuoted(password) + "\n" }
+		drifted := "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n" + line(stalePassword)
+		if err := os.WriteFile(roster, []byte(drifted), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		vars := map[string]any{"freeipa_roster_file": roster, "ipa_admin_password": vaultPassword}
+		var tasks []any
+		for _, task := range nfsServerPreTasks(t, nfsRosterLoadTask, nfsAdminPasswordDriftGate) {
+			tasks = append(tasks, task)
+		}
+		if res := runGatewayTasks(t, dir, tasks, vars, nil); res.rc == 0 {
+			t.Fatalf("a drifted roster passed the gate:\n%s", res.raw)
+		}
+		// The operator's edit: the password line, and nothing else.
+		fixed := strings.Replace(drifted, line(stalePassword), line(vaultPassword), 1)
+		if err := os.WriteFile(roster, []byte(fixed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if res := runGatewayTasks(t, dir, tasks, vars, nil); res.rc != 0 {
+			t.Fatalf("the documented hand fix did not pass the gate: rc=%d failures=%v", res.rc, res.failures)
+		}
+	})
 }
 
 func yamlDoubleQuoted(s string) string {

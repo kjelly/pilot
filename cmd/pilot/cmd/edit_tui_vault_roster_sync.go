@@ -99,35 +99,90 @@ func isManagedVaultFile(dir, path string) bool {
 	return err == nil && parent == vaultDir && hasManagedFileExtension(filepath.Base(path))
 }
 
-// syncRosterAdminPasswords carries an ipa_admin_password change saved to
-// vaultPath into every workspace roster that still holds the old password
-// as its freeipa.admin.password (issue #146): `pilot access`, `pilot
-// identity drift` and `pilot roster remove-*` authenticate with the
-// roster's copy, and freeipa-nfs-server-apply.yml refuses a roster that
-// disagrees with the vault. It returns one banner line per roster it
-// updated or that needs the operator, and never prints a password.
-//
-// Only the workspace's default vault is a source: .vault/main.yaml is the
-// file deploy loads (defaultVaultFile) and so the one the rosters must
-// match. A roster holding the same old password as some other vault file
-// is no proof that it uses that file, so such a save only says so.
-func syncRosterAdminPasswords(dir, vaultPath, oldPassword, newPassword string) []string {
-	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
-		return []string{"ℹ️  只有 .vault/main.yaml 會自動同步名冊；若名冊用這份 vault 的密碼，請手動更新 freeipa.admin.password"}
+// planScratchPath maps a freeipa_roster_file a plan's scratch copy
+// inherited from source, the real workspace, onto the copy: pilot edit
+// stores the reference as an absolute path into source's .vault/, so the
+// copy's hosts.yml still names the real file, which a plan must leave
+// alone while the apply writes it. Mapped onto the copy's own .vault/, a
+// plan previews the roster writes the apply makes (PR #148 review). Any
+// other path, and every path outside a plan (source ""), is kept.
+func planScratchPath(dir, source, path string) string {
+	resolved := resolveRosterPath(dir, strings.TrimSpace(path))
+	if source == "" || resolved == "" || !isManagedVaultFile(source, resolved) {
+		return path
 	}
-	var lines []string
-	for _, path := range rosterCandidates(dir, referencedRosterFiles(dir)) {
-		// Banners are not wrapped: lead with the outcome and the shortest path.
-		shown := path
-		if rel, err := filepath.Rel(dir, path); err == nil && !strings.HasPrefix(rel, "..") {
-			shown = rel
-		}
+	return filepath.Join(dir, ".vault", filepath.Base(resolved))
+}
+
+// rosterSyncLine is one line pilot edit reports after a vault save: in the
+// editor's banner as icon+text and, when manual (the operator must fix a
+// roster pilot edit did not update), as a plan's or apply's warning.
+type rosterSyncLine struct {
+	icon, text string
+	manual     bool
+}
+
+// rosterManualFix is the fix for a roster the sync did not update. pilot
+// edit carries a password forward only on the save that changes it — a
+// later save finds no change and syncs nothing — so it is a hand edit.
+const rosterManualFix = "請手動把它的 freeipa.admin.password 改成 .vault/main.yaml 的 ipa_admin_password"
+
+// rosterSyncOnlyOnChange closes a report with any manual line.
+var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
+	text: "pilot edit 只在改變 ipa_admin_password 的這次存檔同步名冊，之後再存不會補；上面未同步的名冊請手動修改（加密名冊用 ansible-vault edit）"}
+
+// rosterSyncAfterVaultSave is what pilot edit reports about the rosters
+// after saving vaultPath from previous to saved: nothing unless the save
+// changed ipa_admin_password. Only the workspace's default vault is a
+// source: .vault/main.yaml is the file deploy loads (defaultVaultFile) and
+// so the one the rosters must match. A roster holding the same old
+// password as some other vault file is no proof that it uses that file,
+// so such a save only says so; so does a new value Ansible would template
+// (issue #146), since pilot cannot tell which password it resolves to.
+// Lines never hold a password.
+func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved []byte) []rosterSyncLine {
+	oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(saved)
+	newTemplate := inventory.VaultAdminPasswordTemplate(saved)
+	templated := newTemplate != "" && newTemplate != inventory.VaultAdminPasswordTemplate(previous)
+	if !templated && (oldPassword == "" || newPassword == "" || oldPassword == newPassword) {
+		return nil
+	}
+	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
+		return []rosterSyncLine{{icon: "ℹ️  ", manual: true,
+			text: "只有 .vault/main.yaml 會自動同步名冊；若名冊用這份 vault 的密碼，請手動把名冊的 freeipa.admin.password 改成新值"}}
+	}
+	if templated {
+		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
+			text: "未同步名冊：新的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會當成模板展開，pilot 無法得知實際的密碼；請自行確認名冊的 freeipa.admin.password 跟它展開後的值相同"}}
+	}
+	return syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword)
+}
+
+// syncRosterAdminPasswords carries an ipa_admin_password change saved to
+// .vault/main.yaml into every workspace roster that still holds the old
+// password as its freeipa.admin.password (issue #146): `pilot access`,
+// `pilot identity drift` and `pilot roster remove-*` authenticate with the
+// roster's copy, and freeipa-nfs-server-apply.yml refuses a roster that
+// disagrees with the vault. It returns one line per roster it updated or
+// that needs the operator, and never prints a password.
+func syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword string) []rosterSyncLine {
+	referenced := referencedRosterFiles(dir)
+	for i, path := range referenced {
+		referenced[i] = planScratchPath(dir, planSource, path)
+	}
+	var lines []rosterSyncLine
+	manual := func(shown, reason string) {
+		lines = append(lines, rosterSyncLine{icon: "⚠️  ", manual: true,
+			text: fmt.Sprintf("未同步 %s：%s；%s", shown, reason, rosterManualFix)})
+	}
+	for _, path := range rosterCandidates(dir, referenced) {
+		shown := shownRosterPath(path, dir, planSource)
 		if !isManagedVaultFile(dir, path) {
 			stale, err := mutateRosterSourceValue(dir, path, func() (bool, error) {
 				return inventory.RosterAdminPasswordDiffers(path, newPassword)
 			})
 			if stale || errors.Is(err, inventory.ErrRosterEncrypted) {
-				lines = append(lines, fmt.Sprintf("⚠️  未同步 %s：不在這個 workspace 的 .vault/ 下，請手動更新 freeipa.admin.password", shown))
+				manual(shown, "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）")
 			}
 			continue
 		}
@@ -136,16 +191,51 @@ func syncRosterAdminPasswords(dir, vaultPath, oldPassword, newPassword string) [
 		})
 		switch {
 		case errors.Is(err, inventory.ErrRosterEncrypted):
-			lines = append(lines, fmt.Sprintf("⚠️  未同步 %s：ansible-vault 加密，請用 ansible-vault 手動更新 freeipa.admin.password", shown))
+			manual(shown, "ansible-vault 加密（用 ansible-vault edit）")
+		case errors.Is(err, inventory.ErrMutationLocked):
+			manual(shown, "另一個 pilot 名冊操作正鎖住它（等它結束）")
 		case err != nil:
-			lines = append(lines, fmt.Sprintf("⚠️  未同步 %s：%v", shown, err))
+			manual(shown, rosterSyncReason(err, path, shown))
 		case result == inventory.RosterAdminUpdated:
-			lines = append(lines, fmt.Sprintf("🔁 已同步 %s 的 freeipa.admin.password", shown))
+			lines = append(lines, rosterSyncLine{icon: "🔁 ", text: fmt.Sprintf("已同步 %s 的 freeipa.admin.password", shown)})
 		case result == inventory.RosterAdminDiffers:
-			lines = append(lines, fmt.Sprintf("⚠️  未同步 %s：freeipa.admin.password 原本就跟 ipa_admin_password 不同，請手動確認", shown))
+			manual(shown, "freeipa.admin.password 原本就跟舊的 ipa_admin_password 不同，pilot 不知道它該用哪一個（請先確認）")
+		}
+	}
+	for _, line := range lines {
+		if line.manual {
+			return append(lines, rosterSyncOnlyOnChange)
 		}
 	}
 	return lines
+}
+
+// shownRosterPath is path relative to the workspace when it is inside it
+// — the real workspace too, for a plan's scratch copy, so a plan and an
+// apply name a roster alike — and absolute otherwise. Banners are not
+// wrapped: they lead with the outcome and the shortest path.
+func shownRosterPath(path string, workspaces ...string) string {
+	for _, dir := range workspaces {
+		if dir == "" {
+			continue
+		}
+		if rel, err := filepath.Rel(dir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	return path
+}
+
+// rosterSyncReason is SyncRosterAdminPassword's refusal as a banner reason:
+// the roster under its shown name, without the path prefix and the closing
+// "update ... by hand" the banner's own fix replaces.
+func rosterSyncReason(err error, path, shown string) string {
+	reason := strings.ReplaceAll(err.Error(), path, shown)
+	reason = strings.TrimPrefix(reason, "roster "+shown+": ")
+	for _, suffix := range []string{"; update freeipa.admin.password by hand", "; update it by hand"} {
+		reason = strings.TrimSuffix(reason, suffix)
+	}
+	return reason
 }
 
 // encryptedVaultSyncHint is the banner after `ansible-vault edit` of the
@@ -155,7 +245,7 @@ func encryptedVaultSyncHint(dir, path string) string {
 	if !sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
 		return ""
 	}
-	return "ℹ️  加密的 .vault/main.yaml 不會自動同步名冊；若改了 ipa_admin_password，請手動更新名冊的 freeipa.admin.password"
+	return "ℹ️  加密的 .vault/main.yaml 不會自動同步名冊；若改了 ipa_admin_password，請手動把名冊的 freeipa.admin.password 改成新值（加密名冊用 ansible-vault edit）"
 }
 
 // sameExistingFile reports whether a and b name the same existing file,

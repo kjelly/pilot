@@ -81,7 +81,7 @@ func TestEditAutomationDriverVaultSyncStaysInsideVault(t *testing.T) {
 		}
 	}
 	assertUnchanged(t, external)
-	if !strings.Contains(r.banner, "⚠️  未同步 "+rosters["external"]+"：不在這個 workspace 的 .vault/ 下") {
+	if !strings.Contains(r.banner, "⚠️  未同步 "+rosters["external"]+"：pilot edit 只改這個 workspace .vault/ 目錄裡的") {
 		t.Errorf("banner does not report the external roster:\n%s", r.banner)
 	}
 }

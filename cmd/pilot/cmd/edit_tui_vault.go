@@ -337,10 +337,10 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				return nil
 			}
 			banner := fmt.Sprintf("✅ 已存檔 %s", path)
-			oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(doc.Bytes())
-			if oldPassword != "" && newPassword != "" && oldPassword != newPassword {
-				for _, line := range syncRosterAdminPasswords(dir, path, oldPassword, newPassword) {
-					banner += "\n" + line
+			for _, line := range rosterSyncAfterVaultSave(dir, r.planSource, path, previous, doc.Bytes()) {
+				banner += "\n" + line.icon + line.text
+				if line.manual {
+					r.rosterSyncWarnings = append(r.rosterSyncWarnings, line.text)
 				}
 			}
 			return pushVaultFilePicker(r, dir, banner)

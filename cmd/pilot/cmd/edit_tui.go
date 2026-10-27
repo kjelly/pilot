@@ -71,6 +71,15 @@ type editRouterModel struct {
 
 	banner string // shown above the current screen; explicitly set (or cleared to "") by every transition
 
+	// planSource is the real workspace a plan's scratch copy was made
+	// from, "" outside a plan; the vault save's roster sync maps the
+	// copy's references to it onto the copy (planScratchPath).
+	planSource string
+	// rosterSyncWarnings are the vault save's roster lines that need the
+	// operator (rosterSyncLine.manual), which a plan or apply returns as
+	// warnings: an MCP caller sees no banner.
+	rosterSyncWarnings []string
+
 	lastWidth, lastHeight int
 
 	quit bool

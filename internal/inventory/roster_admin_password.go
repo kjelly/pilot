@@ -56,6 +56,26 @@ func VaultAdminPassword(data []byte) string {
 	return value.Value
 }
 
+// VaultAdminPasswordTemplate returns a plaintext vault vars file's
+// ipa_admin_password when it is a string holding a Jinja delimiter ({{, {%
+// or {#), "" otherwise. Ansible templates such a value, so pilot cannot
+// tell which password it resolves to, nor keep a roster in step with it.
+// The value may be a password: callers compare it and never show it.
+func VaultAdminPasswordTemplate(data []byte) string {
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return ""
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil {
+		return ""
+	}
+	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
+	if value == nil || value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" || !jinjaDelimited(value.Value) {
+		return ""
+	}
+	return value.Value
+}
+
 // RosterAdminPasswordDiffers reports whether the plaintext roster at path
 // stores a literal freeipa.admin.password, wherever YAML aliases or merge
 // keys put it, other than vaultPassword. A roster without a literal

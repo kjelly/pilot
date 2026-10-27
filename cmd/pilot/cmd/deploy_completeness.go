@@ -294,7 +294,8 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 // violation: deploy and reconcile themselves use the vault's value, and an
 // encrypted or unreadable file is left to the playbooks' own gates. It
 // checks the same rosters pilot edit keeps in step (rosterCandidates),
-// with every host's resolved freeipa_roster_file as the references.
+// with every host's resolved freeipa_roster_file as the references. A
+// vault value Ansible templates cannot be compared, and says so.
 func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]map[string]any) {
 	vaultPath := defaultVaultFile(inv)
 	if vaultPath == "" {
@@ -305,7 +306,8 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 		return
 	}
 	password := inventory.VaultAdminPassword(data)
-	if password == "" {
+	templated := inventory.VaultAdminPasswordTemplate(data) != ""
+	if password == "" && !templated {
 		return
 	}
 	dir := filepath.Dir(inv)
@@ -319,16 +321,28 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 		rosterPath, _ := hostVars[host]["freeipa_roster_file"].(string)
 		referenced = append(referenced, rosterPath)
 	}
+	var uncompared []string
 	for _, rosterPath := range rosterCandidates(dir, referenced) {
 		if validateSecretSourcePath(dir, rosterPath) != nil {
 			continue
 		}
+		// Every literal password differs from "", so a templated vault
+		// value lists each roster that holds one.
 		if differs, err := inventory.RosterAdminPasswordDiffers(rosterPath, password); err != nil || !differs {
+			continue
+		}
+		if templated {
+			uncompared = append(uncompared, rosterPath)
 			continue
 		}
 		fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 跟 %s 的 ipa_admin_password 不同。"+
 			"freeipa-nfs-server 會在 gate 擋下，pilot access／identity drift／roster remove 也會用名冊裡的舊值登入 FreeIPA。"+
-			"用 pilot edit 修改 .vault/main.yaml 的 ipa_admin_password 會一併同步 .vault/ 下的名冊；或手動把名冊改成同一個值。\n\n", rosterPath, vaultPath)
+			"請手動把名冊的 freeipa.admin.password 改成 vault 的 ipa_admin_password（加密名冊用 ansible-vault edit）；"+
+			"pilot edit 只在改變 ipa_admin_password 的那次存檔同步名冊，之後再存不會修正。\n\n", rosterPath, vaultPath)
+	}
+	if len(uncompared) > 0 {
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 含 {{、{%% 或 {#，Ansible 會當成模板展開，pilot 無法比對它跟名冊的 freeipa.admin.password。"+
+			"請自行確認這些名冊的值跟它展開後相同：%s\n\n", vaultPath, strings.Join(uncompared, "、"))
 	}
 }
 

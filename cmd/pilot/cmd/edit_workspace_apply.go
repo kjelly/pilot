@@ -94,6 +94,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 	diff, affected, redacted := diffEntries(snapshot, after)
 	blocking, warnings := collectWorkspaceValidation(dir)
+	warnings = append(warnings, session.RosterSyncWarnings()...)
 	revisionAfter, err := computeWorkspaceRevision(dir)
 	if err != nil {
 		return nil, err
