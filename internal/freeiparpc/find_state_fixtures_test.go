@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"testing"
 )
@@ -48,9 +49,14 @@ func entryByName(t *testing.T, entries []map[string]any, key, name string) map[s
 	return nil
 }
 
+// stampFormat is the generalized-time form FreeIPA returns; string
+// comparison orders it correctly, which the playbook's password decision
+// relies on.
+var stampFormat = regexp.MustCompile(`^[0-9]{14}Z$`)
+
 // stamp returns the FreeIPA timestamp of a datetime attribute, or "" when
 // absent. Non-raw finds wrap it as {"__datetime__": ...}; raw finds return
-// the bare string.
+// the bare string. Either way it must be YYYYMMDDHHMMSSZ.
 func stamp(t *testing.T, e map[string]any, attr string) string {
 	t.Helper()
 	vals, ok := e[attr].([]any)
@@ -60,14 +66,19 @@ func stamp(t *testing.T, e map[string]any, attr string) string {
 	if len(vals) != 1 {
 		t.Fatalf("%s = %v", attr, vals)
 	}
+	var s string
 	switch v := vals[0].(type) {
 	case map[string]any:
-		return fmt.Sprint(v["__datetime__"])
+		s = fmt.Sprint(v["__datetime__"])
 	case string:
-		return v
+		s = v
+	default:
+		t.Fatalf("%s = %v is not a timestamp", attr, vals[0])
 	}
-	t.Fatalf("%s = %v is not a timestamp", attr, vals[0])
-	return ""
+	if !stampFormat.MatchString(s) {
+		t.Fatalf("%s = %q is not YYYYMMDDHHMMSSZ", attr, s)
+	}
+	return s
 }
 
 func strs(e map[string]any, attr string) []string {
@@ -260,6 +271,9 @@ func TestClearingTheLastKeyRemovesTheAttribute(t *testing.T) {
 	}
 	if got := len(strs(before[0], "ipasshpubkey")); got != 1 {
 		t.Fatalf("before clearing: %d keys, want 1", got)
+	}
+	if got := len(strs(before[0], "sshpubkeyfp")); got != 1 {
+		t.Fatalf("before clearing: %d fingerprints, want 1", got)
 	}
 	for _, attr := range []string{"ipasshpubkey", "sshpubkeyfp"} {
 		if _, ok := after[0][attr]; ok {
