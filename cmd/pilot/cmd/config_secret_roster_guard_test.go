@@ -456,7 +456,7 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 			})
 		}
 	}
-	mutates := map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "createRosterBackup": true}
+	mutates := map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "writeLockedRoster": true, "createRosterBackup": true}
 	for sink := range mutates {
 		if declarations[sink] == nil {
 			t.Fatalf("credential source sink %s disappeared; update the mutation audit", sink)

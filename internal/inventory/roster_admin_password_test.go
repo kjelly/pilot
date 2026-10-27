@@ -362,3 +362,25 @@ func TestRosterAdminPasswordNonStringNeverMatchesTheVault(t *testing.T) {
 		t.Fatalf("quoted number: CompareRosterAdminPassword() = %v, %v; want RosterAdminCurrent", got, err)
 	}
 }
+
+// A first look that catches another writer between truncating the roster
+// and writing it reads an empty file; the sync must not take that for a
+// roster without a password and skip it, but decide under the lock
+// (PR #148 re-review). The hook plays the writer finishing before the lock
+// is taken.
+func TestSyncRosterAdminPasswordDecidesAnEmptyReadUnderTheLock(t *testing.T) {
+	path := writeRoster(t, "")
+	full := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+	afterRosterLockHook = func() {
+		if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterRosterLockHook = nil })
+	if got, err := SyncRosterAdminPassword(path, "Old-pass_1", "New-pass_2"); err != nil || got != RosterAdminUpdated {
+		t.Fatalf("SyncRosterAdminPassword(empty first read) = %v, %v; want RosterAdminUpdated", got, err)
+	}
+	if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != "New-pass_2" {
+		t.Fatalf("roster not synced:\n%s", after)
+	}
+}

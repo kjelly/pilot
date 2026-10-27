@@ -150,7 +150,7 @@ func appendRosterSudoEntry(path, listKey string, entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func setRosterSudoEntry(path, listKey, name string, entry map[string]any, kind string) error {
@@ -206,5 +206,5 @@ func setRosterSudoEntry(path, listKey, name string, entry map[string]any, kind s
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }

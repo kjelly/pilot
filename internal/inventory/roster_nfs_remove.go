@@ -177,5 +177,5 @@ func SetRosterNFSServerAbsent(path, fqdn string) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }

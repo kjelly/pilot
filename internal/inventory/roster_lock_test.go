@@ -312,6 +312,10 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Run("unlocked", func(t *testing.T) {
 				l := newLockTestLayout(t, tc)
+				var inode uint64
+				if info, err := os.Stat(l.target); err == nil {
+					inode = info.Sys().(*syscall.Stat_t).Ino
+				}
 				if err := tc.call(t, l.link); err != nil {
 					t.Fatalf("unlocked call through the link: %v", err)
 				}
@@ -320,6 +324,11 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 					t.Fatalf("unlocked call through the link did not write the roster (err %v)", err)
 				}
 				l.assertStillALink(t)
+				// Replaced, not rewritten in place: a reader without the lock
+				// never sees a truncated roster.
+				if info, err := os.Stat(l.target); err == nil && l.exists && info.Sys().(*syscall.Stat_t).Ino == inode {
+					t.Errorf("the roster was rewritten in place (same inode), not replaced atomically")
+				}
 			})
 			for holder, suffixes := range holders {
 				for spelling, pick := range map[string]func(lockTestLayout) string{

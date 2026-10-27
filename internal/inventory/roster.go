@@ -216,7 +216,7 @@ func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, e
 	if err != nil {
 		return false, fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(lk.target, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return false, fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return true, nil
@@ -481,7 +481,7 @@ render:
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func SimulateSetRosterHostgroup(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
@@ -557,7 +557,7 @@ func AppendRosterHBACRule(path string, rule map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func SimulateAddRosterHBACRule(path string, rule map[string]any) ([]RosterViolation, error) {
@@ -636,7 +636,7 @@ func SetRosterHBACRule(path, name string, updated map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func simulateSetRosterNested(path, listKey, name string, updated map[string]any, kind string) ([]RosterViolation, bool, error) {
@@ -878,7 +878,7 @@ func appendTopLevelRosterEntryLocked(lk *rosterLock, listKey string, stub any) e
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(lk.target, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil
@@ -970,7 +970,7 @@ func replaceTopLevelRosterEntryLocked(lk *rosterLock, listKey, name string, upda
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(lk.target, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil

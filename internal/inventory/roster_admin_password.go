@@ -130,9 +130,12 @@ func CompareRosterAdminPassword(path, vaultPassword string) (RosterAdminSync, er
 func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdminSync, error) {
 	// A first look without the lock, so a roster that will not change gets
 	// no lock files. It decides nothing: the plan below does, on a fresh
-	// read under the lock.
+	// read under the lock. An empty read is a writer caught between
+	// truncating and writing the file (an editor, an older pilot), not a
+	// roster without a password: that is decided under the lock too.
 	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
-	if err != nil || result != RosterAdminUpdated {
+	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
+	if err != nil || (result != RosterAdminUpdated && !emptyRead) {
 		return result, err
 	}
 	lk, err := lockRosterFile(path)
@@ -152,6 +155,13 @@ func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdmin
 		return 0, fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return RosterAdminUpdated, nil
+}
+
+// rosterFileEmpty reports whether the roster at path reads as nothing but
+// whitespace.
+func rosterFileEmpty(path string) bool {
+	data, err := readSecretSourceFile(path)
+	return err == nil && len(bytes.TrimSpace(data)) == 0
 }
 
 // planRosterAdminSync decides what SyncRosterAdminPassword does to the roster

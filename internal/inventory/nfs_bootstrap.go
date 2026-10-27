@@ -62,7 +62,7 @@ func writeRosterSkeleton(path string, roster map[string]any) error {
 	if _, err := os.Stat(lk.target); err == nil {
 		return fmt.Errorf("roster %s already exists", path)
 	}
-	if err := writeSecretSourceFile(lk.target, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil

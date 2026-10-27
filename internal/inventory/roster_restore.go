@@ -36,7 +36,7 @@ func RestoreRosterFile(path string, expected, original []byte) error {
 	if err := rosterStillHolds(lk, expected); err != nil {
 		return err
 	}
-	return writeSecretSourceFile(lk.target, original, 0o600)
+	return writeLockedRoster(lk, original)
 }
 
 // RemoveRosterFile is RestoreRosterFile for a roster the session created:

@@ -14,7 +14,7 @@ import (
 // package: the secret-source write primitives and the os calls they are
 // built on. os.OpenFile counts when its flags open for writing or creating
 // (isRosterWriteCall), so does os.Create.
-var rosterWriteCalls = map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
+var rosterWriteCalls = map[string]bool{"writeLockedRoster": true, "writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
 
 // rosterWriterExemptions are the only functions here that may write a file
 // without a roster lock. Each must still exist and still write.
@@ -300,14 +300,15 @@ func lockTargetVars(fn *ast.FuncDecl, locks map[string]bool) map[string]bool {
 }
 
 // isLockTarget reports whether expr is a lock's target: <lock>.target for
-// one of locks, or one of targets.
+// one of locks, one of targets, or the lock itself (writeLockedRoster
+// takes the lock and writes its target).
 func isLockTarget(expr ast.Expr, locks, targets map[string]bool) bool {
 	switch expr := expr.(type) {
 	case *ast.SelectorExpr:
 		x, ok := expr.X.(*ast.Ident)
 		return ok && locks[x.Name] && expr.Sel.Name == "target"
 	case *ast.Ident:
-		return targets[expr.Name]
+		return targets[expr.Name] || locks[expr.Name]
 	}
 	return false
 }

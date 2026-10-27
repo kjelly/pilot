@@ -337,7 +337,7 @@ func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 // RemoveRosterGroup is RemoveRosterUser's group counterpart. A blocked
@@ -405,7 +405,7 @@ func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) er
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(lk.target, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 // findSequenceEntryFields locates the item named name within the
