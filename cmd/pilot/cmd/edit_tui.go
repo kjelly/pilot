@@ -75,6 +75,9 @@ type editRouterModel struct {
 	// from, "" outside a plan; the vault save's roster sync maps the
 	// copy's references to it onto the copy (planScratchPath).
 	planSource string
+	// releaseVaultEdit drops the roster lock pushAnsibleVaultShellout holds
+	// while `ansible-vault edit` runs on a possible roster; nil otherwise.
+	releaseVaultEdit func() error
 	// rosterSyncWarnings are the vault save's roster lines that need the
 	// operator (rosterSyncLine.manual), which a plan or apply returns as
 	// warnings: an MCP caller sees no banner.
@@ -142,6 +145,10 @@ func (r editRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// happens to be "current" (there is none — the Program was
 	// suspended, not showing any screen, while that subprocess ran).
 	if m, ok := msg.(vaultShelloutDoneMsg); ok {
+		if r.releaseVaultEdit != nil {
+			_ = r.releaseVaultEdit()
+			r.releaseVaultEdit = nil
+		}
 		if m.err != nil {
 			r.err = m.err
 			return r, tea.Quit

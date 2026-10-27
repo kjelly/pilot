@@ -49,6 +49,19 @@ func RemoveRosterFile(path string, expected []byte) error {
 	return os.Remove(lk.path)
 }
 
+// HoldRosterLock takes the roster lock on the file path names, for a writer
+// outside this package that hands the roster to another program — pilot
+// edit's `ansible-vault edit` of an encrypted .vault/ file — and returns
+// the release to call once that program is done. The errors are
+// lockRosterFile's: ErrMutationLocked, ErrRosterLockFile.
+func HoldRosterLock(path string) (release func() error, err error) {
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return lk.release, nil
+}
+
 func rosterStillHolds(lk *rosterLock, expected []byte) error {
 	current, err := readSecretSourceFile(lk.target)
 	if err != nil {

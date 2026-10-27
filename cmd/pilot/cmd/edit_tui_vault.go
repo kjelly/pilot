@@ -274,6 +274,21 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 		r.err = fmt.Errorf("ansible-vault 不在 PATH 上: %w", lookErr)
 		return nil
 	}
+	// Any encrypted .vault/ file but the deploy vault may be a roster, and
+	// ansible-vault writes it back: hold the roster lock while it runs so
+	// no other roster writer saves in between. Released once it exits
+	// (vaultShelloutDoneMsg, editRouterModel.Update).
+	if !sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
+		release, err := inventory.HoldRosterLock(path)
+		if err != nil {
+			if banner, ok := rosterBusyBanner(path, err); ok {
+				return pushVaultFilePicker(r, dir, banner)
+			}
+			r.err = err
+			return nil
+		}
+		r.releaseVaultEdit = release
+	}
 	cmd := exec.Command(bin, "edit", path)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {

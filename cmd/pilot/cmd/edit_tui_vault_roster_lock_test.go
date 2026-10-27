@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // linkedRosterWorkspace is a workspace whose default roster is a symlink
@@ -181,5 +184,51 @@ func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
 				t.Fatalf("roster after retry:\n%s", after)
 			}
 		})
+	}
+}
+
+// `ansible-vault edit` of an encrypted .vault/ file that may be a roster
+// runs under the roster lock, so no other roster writer saves while it is
+// open; a held roster is a banner, not an editor; the deploy vault itself
+// is not locked (PR #148 re-review, F6).
+func TestAnsibleVaultEditHoldsTheRosterLock(t *testing.T) {
+	bin := t.TempDir()
+	writeSyncFile(t, filepath.Join(bin, "ansible-vault"), "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(bin, "ansible-vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	mainVault := filepath.Join(dir, ".vault", "main.yaml")
+	for _, path := range []string{roster, mainVault} {
+		writeSyncFile(t, path, "$ANSIBLE_VAULT;1.1;AES256\n6162636465\n")
+	}
+
+	r := newEditRouterModel(dir)
+	if cmd := pushAnsibleVaultShellout(&r, dir, roster); cmd == nil || r.err != nil {
+		t.Fatalf("shell-out not started: err=%v", r.err)
+	}
+	if _, err := inventory.HoldRosterLock(roster); !errors.Is(err, inventory.ErrMutationLocked) {
+		t.Fatalf("roster lock while ansible-vault edit runs: error = %v, want ErrMutationLocked", err)
+	}
+	model, _ := r.Update(vaultShelloutDoneMsg{dir: dir, path: roster})
+	r = model.(editRouterModel)
+	release, err := inventory.HoldRosterLock(roster)
+	if err != nil {
+		t.Fatalf("roster lock still held after ansible-vault edit exited: %v", err)
+	}
+
+	busy := newEditRouterModel(dir)
+	pushAnsibleVaultShellout(&busy, dir, roster)
+	if busy.err != nil || busy.releaseVaultEdit != nil || !strings.Contains(busy.banner, "⚠️  未寫入 "+roster+"：另一個 pilot 名冊操作正鎖住它") {
+		t.Fatalf("held roster: err=%v holding=%v banner=%q", busy.err, busy.releaseVaultEdit != nil, busy.banner)
+	}
+	release() //nolint:errcheck
+
+	deploy := newEditRouterModel(dir)
+	pushAnsibleVaultShellout(&deploy, dir, mainVault)
+	if deploy.releaseVaultEdit != nil {
+		t.Fatal("the deploy vault was locked as a roster")
 	}
 }

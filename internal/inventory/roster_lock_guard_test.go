@@ -11,9 +11,10 @@ import (
 )
 
 // rosterWriteCalls are the calls that put bytes into a file in this
-// package: the two secret-source write primitives and the os calls they
-// are built on.
-var rosterWriteCalls = map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true}
+// package: the secret-source write primitives and the os calls they are
+// built on. os.OpenFile counts when its flags open for writing or creating
+// (isRosterWriteCall), so does os.Create.
+var rosterWriteCalls = map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
 
 // rosterWriterExemptions are the only functions here that may write a file
 // without a roster lock. Each must still exist and still write.
@@ -21,6 +22,7 @@ var rosterWriterExemptions = map[string]string{
 	"writeSecretSourceFile":                 "the write primitive itself; its callers hold the lock",
 	"atomicReplaceFile":                     "the write primitive itself; its callers hold the lock",
 	"atomicReplaceFileOwned":                "the write primitive itself; its callers hold the lock",
+	"acquireMutationLock":                   "creates a roster's lock file, never the roster; only lockRosterFile calls it (rule 1)",
 	"WriteMinimalFreeIPAVault":              "writes the vault vars file (.vault/main.yaml), not a roster",
 	"FillFreeIPAAdminPassword":              "writes the vault vars file (.vault/main.yaml), not a roster",
 	"CreateMinimalDNSManifest":              "writes the freeipa-dns manifest, not a roster",
@@ -36,9 +38,11 @@ var rosterWriterExemptions = map[string]string{
 //
 //  1. acquireMutationLock is called only by roster_lock.go: a writer that
 //     took its own sidecar lock would lock its caller's spelling again.
-//  2. A function that writes a file calls lockRosterFile or receives the
-//     *rosterLock of a caller that did, and writes that lock's target —
-//     never the path it was given, which may be a link. The exemptions
+//  2. A function or method that writes a file (rosterWriteCalls, an
+//     os.OpenFile for writing) calls lockRosterFile or receives the
+//     *rosterLock of a caller that did, and writes that lock's target, or
+//     a path built from it — never the path it was given, which may be a
+//     link, nor any other value's field named target. The exemptions
 //     above are the write primitives and files that are not rosters.
 //  3. A function holding a roster lock never reaches another lockRosterFile
 //     through this package's calls: the lock is not reentrant, so the
@@ -65,8 +69,8 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			return true
 		})
 		for _, decl := range file.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Body != nil {
-				funcs[fn.Name.Name] = fn
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				funcs[funcName(fn)] = fn
 			}
 		}
 	}
@@ -95,14 +99,14 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			continue
 		}
 		writers++
-		lockVar := rosterLockParam(fn)
-		if lockVar == "" && !lockers[name] {
+		locks := lockVars(fn)
+		if len(locks) == 0 {
 			t.Errorf("%s writes a file without lockRosterFile or a *rosterLock parameter", name)
 			continue
 		}
-		targets := lockTargetVars(fn)
+		targets := lockTargetVars(fn, locks)
 		for _, call := range writes {
-			if len(call.Args) == 0 || !isLockTarget(call.Args[0], targets) {
+			if len(call.Args) == 0 || !isLockTarget(call.Args[0], locks, targets) {
 				t.Errorf("%s: %s in %s must write the lock's target (lk.target), not the path it was given", fset.Position(call.Pos()), callName(call), name)
 			}
 		}
@@ -187,7 +191,7 @@ func calleesOf(fn *ast.FuncDecl) []string {
 func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
 	var out []*ast.CallExpr
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
-		if call, ok := node.(*ast.CallExpr); ok && rosterWriteCalls[callName(call)] {
+		if call, ok := node.(*ast.CallExpr); ok && isRosterWriteCall(call) {
 			out = append(out, call)
 		}
 		return true
@@ -195,34 +199,65 @@ func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
 	return out
 }
 
-// rosterLockParam returns the name of fn's *rosterLock parameter, if any.
-func rosterLockParam(fn *ast.FuncDecl) string {
-	for _, field := range fn.Type.Params.List {
-		star, ok := field.Type.(*ast.StarExpr)
-		if !ok {
-			continue
-		}
-		if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "rosterLock" && len(field.Names) == 1 {
-			return field.Names[0].Name
-		}
+// isRosterWriteCall reports whether call writes a file: one of
+// rosterWriteCalls, or os.OpenFile with a flag that writes or creates.
+func isRosterWriteCall(call *ast.CallExpr) bool {
+	name := callName(call)
+	if rosterWriteCalls[name] {
+		return true
 	}
-	return ""
+	if name != "os.OpenFile" || len(call.Args) < 2 {
+		return false
+	}
+	writes := false
+	ast.Inspect(call.Args[1], func(node ast.Node) bool {
+		if sel, ok := node.(*ast.SelectorExpr); ok {
+			switch sel.Sel.Name {
+			case "O_WRONLY", "O_RDWR", "O_CREATE", "O_CREAT", "O_APPEND", "O_TRUNC":
+				writes = true
+			}
+		}
+		return true
+	})
+	return writes
 }
 
-// lockTargetVars returns the local names fn assigns a lock's target to,
-// as in `target := lk.target` or `path, target := lk.path, lk.target`.
-func lockTargetVars(fn *ast.FuncDecl) map[string]bool {
+// funcName is fn's name, Type.Method for a method.
+func funcName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	recv := fn.Recv.List[0].Type
+	if star, ok := recv.(*ast.StarExpr); ok {
+		recv = star.X
+	}
+	if ident, ok := recv.(*ast.Ident); ok {
+		return ident.Name + "." + fn.Name.Name
+	}
+	return fn.Name.Name
+}
+
+// lockVars returns the names in fn that hold a roster lock: a *rosterLock
+// parameter, or a variable assigned lockRosterFile's result.
+func lockVars(fn *ast.FuncDecl) map[string]bool {
 	out := map[string]bool{}
+	for _, field := range fn.Type.Params.List {
+		if star, ok := field.Type.(*ast.StarExpr); ok {
+			if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "rosterLock" {
+				for _, name := range field.Names {
+					out[name.Name] = true
+				}
+			}
+		}
+	}
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		assign, ok := node.(*ast.AssignStmt)
-		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+		if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) == 0 {
 			return true
 		}
-		for i, rhs := range assign.Rhs {
-			if sel, ok := rhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "target" {
-				if ident, ok := assign.Lhs[i].(*ast.Ident); ok {
-					out[ident.Name] = true
-				}
+		if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && callName(call) == "lockRosterFile" {
+			if ident, ok := assign.Lhs[0].(*ast.Ident); ok {
+				out[ident.Name] = true
 			}
 		}
 		return true
@@ -230,11 +265,47 @@ func lockTargetVars(fn *ast.FuncDecl) map[string]bool {
 	return out
 }
 
-func isLockTarget(expr ast.Expr, targets map[string]bool) bool {
+// lockTargetVars returns the local names fn assigns from a lock's target —
+// `target := lk.target`, `path, target := lk.path, lk.target`, or a path
+// built from it such as a backup name — for locks.
+func lockTargetVars(fn *ast.FuncDecl, locks map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			assign, ok := node.(*ast.AssignStmt)
+			if !ok || len(assign.Lhs) != len(assign.Rhs) {
+				return true
+			}
+			for i, rhs := range assign.Rhs {
+				ident, ok := assign.Lhs[i].(*ast.Ident)
+				if !ok || out[ident.Name] {
+					continue
+				}
+				derived := false
+				ast.Inspect(rhs, func(inner ast.Node) bool {
+					if expr, ok := inner.(ast.Expr); ok && isLockTarget(expr, locks, out) {
+						derived = true
+					}
+					return !derived
+				})
+				if derived {
+					out[ident.Name], changed = true, true
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// isLockTarget reports whether expr is a lock's target: <lock>.target for
+// one of locks, or one of targets.
+func isLockTarget(expr ast.Expr, locks, targets map[string]bool) bool {
 	switch expr := expr.(type) {
 	case *ast.SelectorExpr:
-		_, ok := expr.X.(*ast.Ident)
-		return ok && expr.Sel.Name == "target"
+		x, ok := expr.X.(*ast.Ident)
+		return ok && locks[x.Name] && expr.Sel.Name == "target"
 	case *ast.Ident:
 		return targets[expr.Name]
 	}

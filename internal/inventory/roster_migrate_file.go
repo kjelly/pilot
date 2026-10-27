@@ -288,7 +288,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		}, nil
 	}
 
-	backupPath, err := createRosterBackup(target, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+	backupPath, err := createRosterBackup(lk, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
@@ -435,7 +435,7 @@ func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, ori
 		}, nil
 	}
 
-	backupPath, err := createRosterBackup(target, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+	backupPath, err := createRosterBackup(lk, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
@@ -531,7 +531,9 @@ func EnsureRosterCurrent(path string, opts RosterMigrationOptions) (RosterMigrat
 }
 
 // createRosterBackup writes original's exact bytes to
-// "<path>.v<fromVersion>.<timestamp>.<sha256 prefix>.bak", refusing to
+// "<roster>.v<fromVersion>.<timestamp>.<sha256 prefix>.bak" beside the
+// roster lk holds (so only a migration holding the lock can call it),
+// refusing to
 // overwrite an existing backup (O_EXCL) and mode 0600 throughout — a
 // roster can contain credentials, so this must never be more permissive
 // than that, unlike cmd/edit_workspace_apply.go's restoreManagedFiles
@@ -539,9 +541,9 @@ func EnsureRosterCurrent(path string, opts RosterMigrationOptions) (RosterMigrat
 // deliberately not reused here. timestamp is a parameter rather than
 // computed internally so callers (and tests) control the exact backup
 // filename instead of racing a clock.
-func createRosterBackup(path string, original []byte, fromVersion RosterSchemaVersion, timestamp string) (string, error) {
+func createRosterBackup(lk *rosterLock, original []byte, fromVersion RosterSchemaVersion, timestamp string) (string, error) {
 	sum := sha256.Sum256(original)
-	backupPath := fmt.Sprintf("%s.v%d.%s.%s.bak", path, fromVersion, timestamp, hex.EncodeToString(sum[:])[:8])
+	backupPath := fmt.Sprintf("%s.v%d.%s.%s.bak", lk.target, fromVersion, timestamp, hex.EncodeToString(sum[:])[:8])
 
 	f, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {

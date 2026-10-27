@@ -61,8 +61,13 @@ func TestAcquireMutationLock_StaleLockFileAloneDoesNotBlock(t *testing.T) {
 func TestCreateRosterBackup_ExactBytesAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	original := []byte("schema_version: 1\nsome: content\n")
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release() //nolint:errcheck
 
-	backupPath, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z")
+	backupPath, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z")
 	if err != nil {
 		t.Fatalf("createRosterBackup() error = %v", err)
 	}
@@ -82,11 +87,16 @@ func TestCreateRosterBackup_ExactBytesAndPermissions(t *testing.T) {
 func TestCreateRosterBackup_RefusesToOverwriteExistingBackup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	original := []byte("schema_version: 1\n")
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release() //nolint:errcheck
 
-	if _, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z"); err != nil {
+	if _, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z"); err != nil {
 		t.Fatalf("first createRosterBackup() error = %v", err)
 	}
-	if _, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z"); err == nil {
+	if _, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z"); err == nil {
 		t.Fatal("expected the second createRosterBackup() with identical timestamp+content to fail (O_EXCL)")
 	}
 }
