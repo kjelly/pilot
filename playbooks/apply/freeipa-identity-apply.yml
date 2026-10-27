@@ -928,7 +928,9 @@
         # clients on every no-op apply. A crash before settlement stays dirty.
         # `always` + the run-tag check instead of the tag list itself: with
         # tags, `--skip-tags users` would skip this while hbac/sudo still
-        # change IPA. Read-only selections (inspect) never reach it.
+        # change IPA. Read-only selections (inspect) never reach it. Recorded
+        # even with ipa_identity_refresh_sssd_cache off, so turning it back on
+        # delivers what changed meanwhile.
         - name: "Prepare legacy authorization cache recovery"
           ansible.builtin.command:
             argv:
@@ -943,7 +945,6 @@
           changed_when: false
           when:
             - not ansible_check_mode
-            - ipa_identity_refresh_sssd_cache | bool
             - ansible_run_tags | intersect(['all', 'tagged'] + ipa_identity_cache_recovery_tags) | length > 0
           tags: [always]
 
@@ -3904,7 +3905,6 @@
           changed_when: false
           when:
             - not ansible_check_mode
-            - ipa_identity_refresh_sssd_cache | bool
             - ansible_run_tags | intersect(['all', 'tagged'] + ipa_identity_cache_recovery_tags) | length > 0
           tags: [always]
 
@@ -3924,7 +3924,7 @@
             - (ipa_auth_cache_settle.stdout | from_json).dirty
             - >-
               ansible_run_tags | intersect(['all', 'tagged', 'identity', 'client-cache']) | length == 0
-              or ansible_skip_tags | intersect(['identity', 'client-cache']) | length > 0
+              or ansible_skip_tags | intersect(['all', 'tagged', 'identity', 'client-cache']) | length > 0
           tags: [always]
 
         # ── Release ticket ─────────────────────────────────────────────────

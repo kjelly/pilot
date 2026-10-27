@@ -277,15 +277,35 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 	noticed := func(result ag82Run) bool {
 		return strings.Contains(strings.Join(result.messages, "\n"), deferredNotice+":")
 	}
-	reset := func() {
+	removeJournal := func() {
 		t.Helper()
 		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
+	}
+	// A journal that already recorded a completed run. Starting from no
+	// journal would make every first run dirty (adoption) and hide whether
+	// the scenario's own run recorded its change.
+	reset := func() {
+		t.Helper()
+		write("journal.json", `{"version": 1, "domain": "ipa.test", "users": {}, "auth_pending": false}`)
 		if err := os.Remove(filepath.Join(dir, "interrupt")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 	}
+	pending := func() bool {
+		t.Helper()
+		state, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(state), `"auth_pending": true`)
+	}
+
+	// Adoption: no journal shows that earlier runs reached every client.
+	removeJournal()
+	step("adoption no-op", "no", true, refreshed)
+	step("completed no-op after adoption", "no", true, nil)
 
 	// The reviewer's reproduction, for every tag that selects the user-mod
 	// task: a tagged change, then an identical full roster that IPA reports
@@ -336,18 +356,32 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 	step("--tags tagged", "yes", true, refreshed, "--tags", "tagged")
 	step("completed no-op", "no", true, nil)
 
-	// A read-only selection neither records, settles nor delivers.
+	// A read-only selection neither records, settles nor delivers: it does
+	// not even create a journal, and keeps an existing obligation.
+	removeJournal()
+	step("read-only inspection without journal", "yes", true, nil, "--tags", "freeipa_host_absent_inspect")
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("read-only selection wrote the journal: %v", err)
+	}
 	reset()
 	step("pending change", "yes", true, nil, "--tags", "users")
 	step("read-only inspection", "yes", true, nil, "--tags", "freeipa_host_absent_inspect")
-	state, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(state), `"auth_pending": true`) {
-		t.Fatalf("read-only selection changed the pending refresh: %s", state)
+	if !pending() {
+		t.Fatal("read-only selection cleared the pending refresh")
 	}
 	step("full apply", "no", true, refreshed)
+
+	// With the refresh option off the change is still recorded, so turning
+	// the option back on delivers it.
+	reset()
+	if noticed(step("change with refresh disabled", "yes", true, nil, "-e", "ipa_identity_refresh_sssd_cache=false")) {
+		t.Fatal("refresh disabled: the notice reports a deferral the operator turned off")
+	}
+	if !pending() {
+		t.Fatal("refresh disabled: change not recorded")
+	}
+	step("refresh re-enabled", "no", true, refreshed)
+	step("completed no-op", "no", true, nil)
 }
 
 // installSSHCacheFakes puts fake ipa/sss_cache/sss_ssh_authorizedkeys first

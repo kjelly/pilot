@@ -59,8 +59,9 @@ process alone is insufficient evidence of revocation.
    (anything without `identity`/`client-cache`, or `--skip-tags client-cache`)
    leaves the obligation pending and says so; the next apply that runs the
    refresh delivers it even when IPA reports `no modifications`. Read-only
-   selections neither record nor clear it. A journal without authorization
-   state (first adoption) refreshes once.
+   selections neither record nor clear it. Turning the refresh option off
+   defers delivery the same way; it does not drop the obligation. A journal
+   without authorization state (first adoption) refreshes once.
 
 ## Required evidence matrix
 

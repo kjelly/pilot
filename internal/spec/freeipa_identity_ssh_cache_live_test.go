@@ -158,15 +158,20 @@ func TestRegression_IdentitySSHCacheLiveSSH(t *testing.T) {
 				"-o", "KbdInteractiveAuthentication=no", "-o", "GSSAPIAuthentication=no",
 				"-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=5",
 				cfg.User + "@" + client.Address, "id", "-un"}
-			out, err := exec.CommandContext(probeCtx, "ssh", args...).CombinedOutput()
+			// Compare stdout and stderr separately: OpenSSH 10 prints a
+			// post-quantum key-exchange warning to stderr on success.
+			var stdout, stderr strings.Builder
+			command := exec.CommandContext(probeCtx, "ssh", args...)
+			command.Stdout, command.Stderr = &stdout, &stderr
+			err := command.Run()
 			stop()
 			if allowed {
-				if err != nil || strings.TrimSpace(string(out)) != cfg.User {
+				if err != nil || strings.TrimSpace(stdout.String()) != cfg.User {
 					t.Fatalf("%s: new SSH key login did not succeed: %v", client.Alias, err)
 				}
 			} else {
 				exit, ok := err.(*exec.ExitError)
-				if !ok || exit.ExitCode() != 255 || !strings.Contains(string(out), "Permission denied (") || !strings.Contains(string(out), "publickey") {
+				if !ok || exit.ExitCode() != 255 || !strings.Contains(stderr.String(), "Permission denied (") || !strings.Contains(stderr.String(), "publickey") {
 					t.Fatalf("%s: expected explicit public-key denial, got %v", client.Alias, err)
 				}
 			}

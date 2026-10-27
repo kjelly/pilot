@@ -252,7 +252,10 @@ ansible-playbook -i inventory-freeipa.yaml \
 clients 執行 `sss_cache -E`。其他 tags（例如 `--tags sudo`、`--tags C9`）或
 `--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
 並印出 `Report deferred authorization cache refresh` 提示；下一次選到 `identity`/
-`client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。要立即生效：
+`client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。`-e
+ipa_identity_refresh_sssd_cache=false` 時同樣只記錄、不更新，改回 `true` 後的下一次 apply
+會補做。要立即生效（`client-cache` 也選到 SSH 金鑰 tasks，會一併以名冊調和金鑰並驗證
+各主機快取，因此仍要帶同一份名冊）：
 
 ```bash
 ... playbooks/apply/freeipa-identity-apply.yml --tags client-cache ...
