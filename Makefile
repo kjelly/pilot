@@ -129,6 +129,9 @@ alert-rules-test: ## Run the host-health/login-probe alert rules under the pinne
 identity-noop-test: ## Run the bulk-listing and membership reconciliation regressions with mandatory real Ansible.
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_Identity(GroupListingSkipsExistingGroups|GroupMembershipSkipsCurrentMembers|GroupMembershipIgnoresCase|MixedCaseMemberSurvivesTwoRuns|RemovalsIgnoreCaseEverywhere|UserListingSkipsNoOpCalls|UserListingFailsClosed)$$' ./internal/spec/
 
+identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText)$$' ./internal/spec/
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
@@ -142,7 +145,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test
+.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test identity-secret-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）
