@@ -53,6 +53,14 @@ process alone is insufficient evidence of revocation.
 9. Non-SSH authorization cache behavior is a separate compatibility concern:
    retain the existing global-refresh option only for actual non-key identity
    mutations; SSH-only changes and no-op applies must never invoke it.
+   Every tag selection that can run a non-key mutation, including component
+   and row tags, durably records the refresh obligation before mutating and
+   settles it afterwards. A selection that does not run the refresh
+   (anything without `identity`/`client-cache`, or `--skip-tags client-cache`)
+   leaves the obligation pending and says so; the next apply that runs the
+   refresh delivers it even when IPA reports `no modifications`. Read-only
+   selections neither record nor clear it. A journal without authorization
+   state (first adoption) refreshes once.
 
 ## Required evidence matrix
 

@@ -76,7 +76,10 @@ def update(state, action, data):
     if state["domain"] != data["domain"]:
         raise ValueError("journal domain mismatch")
     if action == "auth_prepare":
-        previous = state.get("auth_pending", False)
+        # A journal that never recorded authorization state cannot show that
+        # earlier runs (older playbooks, tagged runs, the refresh option off)
+        # reached every client, so the first run refreshes once.
+        previous = state.get("auth_pending", True)
         state["auth_pending"] = True
         return {"previous": previous}
     if action == "auth_settle":

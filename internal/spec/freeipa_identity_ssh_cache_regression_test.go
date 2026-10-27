@@ -45,7 +45,8 @@ func TestRegression_IdentitySSHCacheStageScope(t *testing.T) {
 		t.Fatal("production stage-scope tasks not found")
 	}
 	for _, scenario := range []string{"current enrollment", "undefined plan", "retained cross-stage work", "retained missing target"} {
-		for _, tag := range []string{"all", "identity", "sshkeys", "client-cache", "users", "hbac", "freeipa_host_absent_inspect"} {
+		// `--tags tagged` selects every tagged task, the SSH delegation too.
+		for _, tag := range []string{"all", "tagged", "identity", "sshkeys", "client-cache", "users", "hbac", "freeipa_host_absent_inspect"} {
 			t.Run(scenario+"/"+tag, func(t *testing.T) {
 				groups := []string{"prod"}
 				if scenario == "current enrollment" {
@@ -79,8 +80,15 @@ func TestRegression_IdentitySSHCacheStageScope(t *testing.T) {
 	}
 }
 
+// identityRecoveryGate is the run-tag condition that records the non-key
+// refresh obligation under every selection that can change IPA.
+const identityRecoveryGate = "ansible_run_tags | intersect(['all', 'tagged'] + ipa_identity_cache_recovery_tags) | length > 0"
+
 // Keep the legacy non-key refresh predicate complete, without letting SSH-only
-// changes or journal writes cause a fleet-wide cache flush.
+// changes or journal writes cause a fleet-wide cache flush. Every tag that
+// selects a mutation must also record its refresh obligation before the
+// mutation and settle it after: `--tags users` once changed IPA without
+// either, and the next full apply then skipped the refresh (#138 review).
 func TestRegression_IdentitySSHCacheNonKeyMutationCoverage(t *testing.T) {
 	raw, err := os.ReadFile(sshKeysPlaybook)
 	if err != nil {
@@ -90,26 +98,45 @@ func TestRegression_IdentitySSHCacheNonKeyMutationCoverage(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &plays); err != nil {
 		t.Fatal(err)
 	}
+	type entry struct {
+		task  map[string]any
+		order int
+		tags  []string // including tags inherited from enclosing blocks
+	}
 	var want []string
-	var walk func([]any)
-	walk = func(tasks []any) {
+	var mutations []entry
+	named := map[string]entry{}
+	var walk func([]any, []string)
+	walk = func(tasks []any, inherited []string) {
 		for _, v := range tasks {
 			task := v.(map[string]any)
+			tags := slices.Clone(inherited)
+			if own, ok := task["tags"].([]any); ok {
+				for _, tag := range own {
+					tags = append(tags, tag.(string))
+				}
+			}
+			e := entry{task, len(named), tags}
+			if name, ok := task["name"].(string); ok {
+				named[name] = e
+			}
 			if reg, ok := task["register"].(string); ok && reg != "ipa_sshkey" {
 				if changed, exists := task["changed_when"]; exists && changed != false {
 					want = append(want, reg)
+					mutations = append(mutations, e)
 				}
 			}
-			for _, section := range []string{"block", "rescue"} {
+			for _, section := range []string{"block", "rescue", "always"} {
 				if inner, ok := task[section].([]any); ok {
-					walk(inner)
+					walk(inner, tags)
 				}
 			}
 		}
 	}
-	walk(plays[0]["tasks"].([]any))
+	walk(plays[0]["tasks"].([]any), nil)
+	playVars := plays[0]["vars"].(map[string]any)
 	var got []string
-	for _, v := range plays[0]["vars"].(map[string]any)["ipa_identity_cache_mutation_registers"].([]any) {
+	for _, v := range playVars["ipa_identity_cache_mutation_registers"].([]any) {
 		got = append(got, v.(string))
 	}
 	slices.Sort(want)
@@ -117,26 +144,219 @@ func TestRegression_IdentitySSHCacheNonKeyMutationCoverage(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("non-key mutation registers = %v; want %v", got, want)
 	}
+
+	// The refresh and acknowledgement read the settlement, so their tags
+	// must record it too.
+	wantTags := map[string]bool{}
+	for _, name := range []string{"Refresh SSSD caches on enrolled FreeIPA clients", "Acknowledge legacy authorization cache recovery"} {
+		e, ok := named[name]
+		if !ok {
+			t.Fatalf("task %q not found", name)
+		}
+		for _, tag := range e.tags {
+			wantTags[tag] = true
+		}
+	}
+	prepare, settle := named["Prepare legacy authorization cache recovery"], named["Settle legacy authorization cache recovery"]
+	for _, m := range mutations {
+		if slices.Contains(m.tags, "always") || slices.Contains(m.tags, "never") {
+			t.Errorf("mutation %v is tagged %v; the recovery gate cannot follow it", m.task["register"], m.tags)
+		}
+		for _, tag := range m.tags {
+			wantTags[tag] = true
+		}
+		if m.order < prepare.order || m.order > settle.order {
+			t.Errorf("mutation %v runs outside prepare (#%d) … settle (#%d): #%d", m.task["register"], prepare.order, settle.order, m.order)
+		}
+	}
+	var recovery []string
+	for _, v := range playVars["ipa_identity_cache_recovery_tags"].([]any) {
+		recovery = append(recovery, v.(string))
+	}
+	var wantList []string
+	for tag := range wantTags {
+		wantList = append(wantList, tag)
+	}
+	slices.Sort(recovery)
+	slices.Sort(wantList)
+	if !slices.Equal(recovery, wantList) {
+		t.Errorf("ipa_identity_cache_recovery_tags = %v; want %v", recovery, wantList)
+	}
+	// Tagged prepare/settle would be skipped by `--skip-tags <one mutation
+	// tag>` while other mutations still run; `always` + the run-tag gate is
+	// selected exactly when some mutation is.
+	for _, name := range []string{"Prepare legacy authorization cache recovery", "Settle legacy authorization cache recovery", "Report deferred authorization cache refresh"} {
+		e, ok := named[name]
+		if !ok {
+			t.Fatalf("task %q not found", name)
+		}
+		if !slices.Equal(e.tags, []string{"always"}) || !strings.Contains(fmt.Sprint(e.task["when"]), identityRecoveryGate) {
+			t.Errorf("%s: tags=%v when=%v; want [always] gated by %q", name, e.tags, e.task["when"], identityRecoveryGate)
+		}
+	}
 }
 
-// Runs the production prepare → IPA → settle → delegate → ack → failure gate
-// tasks with named localhost aliases. Only the IPA/SSSD processes are fakes;
-// journal persistence, Ansible loops, tags, delegation and failure gates are real.
-func TestRegression_IdentitySSHCacheRuntime(t *testing.T) {
+// A non-key change made by a tagged run that does not refresh SSSD, or by a
+// run interrupted after IPA committed it, must be refreshed by the next apply
+// that does, even when that apply finds nothing left to change. Production
+// prepare → user-mod → settle → report → refresh → ack tasks run; only the
+// ipa/sss_cache processes are fakes (#138 review).
+func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 	dir := t.TempDir()
 	helper, err := os.ReadFile("../../playbooks/apply/files/freeipa-ssh-key-cache.py")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyfile := filepath.Join(dir, "key")
-	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyfile).CombinedOutput(); err != nil {
-		t.Fatalf("ssh-keygen: %v\n%s", err, out)
-	}
-	pub, err := os.ReadFile(keyfile + ".pub")
+	write := installSSHCacheFakes(t, dir)
+	raw, err := os.ReadFile(sshKeysPlaybook)
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := strings.TrimSpace(string(pub))
+	var plays []map[string]any
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		t.Fatal(err)
+	}
+	tasks := []any{}
+	for _, host := range []string{"client-a", "client-b"} {
+		tasks = append(tasks, map[string]any{"name": "test inventory " + host, "tags": []string{"always"},
+			"ansible.builtin.add_host": map[string]any{"name": host, "groups": "freeipa-client", "ansible_connection": "local"}})
+	}
+	const userMod = "Reconcile user first/last names"
+	var userModTags []string
+	var collect func([]any)
+	collect = func(all []any) {
+		for _, value := range all {
+			task := value.(map[string]any)
+			switch task["name"] {
+			case "Prepare legacy authorization cache recovery", userMod, "Settle legacy authorization cache recovery",
+				"Report deferred authorization cache refresh", "Refresh SSSD caches on enrolled FreeIPA clients",
+				"Acknowledge legacy authorization cache recovery":
+				delete(task, "become") // test runs unprivileged; production uses root
+				if task["name"] == "Refresh SSSD caches on enrolled FreeIPA clients" {
+					task["environment"] = map[string]any{"CACHE_TEST_HOST": "{{ item }}", "CACHE_TEST_DIR": dir}
+				}
+				if task["name"] == userMod {
+					for _, tag := range task["tags"].([]any) {
+						userModTags = append(userModTags, tag.(string))
+					}
+				}
+				tasks = append(tasks, task)
+			}
+			if inner, ok := task["block"].([]any); ok {
+				collect(inner)
+			}
+		}
+	}
+	collect(plays[0]["tasks"].([]any))
+	if len(tasks) != 8 || len(userModTags) == 0 {
+		t.Fatalf("production recovery tasks not found: %d tasks, user-mod tags %v", len(tasks), userModTags)
+	}
+	statePath := filepath.Join(dir, "journal.json")
+	playVars := plays[0]["vars"].(map[string]any)
+	vars := map[string]any{"ipa_domain": "ipa.test", "ipa_ssh_cache_program": string(helper),
+		"ipa_identity_ssh_cache_state_file":     statePath,
+		"ipa_identity_refresh_sssd_cache":       true,
+		"ipa_identity_cache_mutation_registers": playVars["ipa_identity_cache_mutation_registers"],
+		"ipa_identity_cache_recovery_tags":      playVars["ipa_identity_cache_recovery_tags"],
+		"ipa_active_users":                      []any{map[string]any{"name": "alice", "first": "Alice", "last": "Example", "login_shell": "/bin/zsh"}}}
+	refreshed := []string{"client-a/*", "client-b/*"}
+	const deferredNotice = "Report deferred authorization cache refresh"
+	step := func(label, modified string, success bool, want []string, args ...string) ag82Run {
+		t.Helper()
+		write("modified", modified)
+		write("calls", "")
+		result := runGatewayTasks(t, dir, tasks, vars, nil, args...)
+		if (result.rc == 0) != success {
+			t.Fatalf("%s %v: rc=%d failures=%v\n%s", label, args, result.rc, result.failures, result.raw)
+		}
+		if got := readSSHCacheCalls(t, dir); !slices.Equal(got, want) {
+			t.Fatalf("%s %v: cache calls=%v; want %v; failures=%v\n%s", label, args, got, want, result.failures, result.raw)
+		}
+		return result
+	}
+	noticed := func(result ag82Run) bool {
+		return strings.Contains(strings.Join(result.messages, "\n"), deferredNotice+":")
+	}
+	reset := func() {
+		t.Helper()
+		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(dir, "interrupt")); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+
+	// The reviewer's reproduction, for every tag that selects the user-mod
+	// task: a tagged change, then an identical full roster that IPA reports
+	// as "no modifications".
+	for _, tag := range userModTags {
+		reset()
+		var want []string
+		if tag == "identity" {
+			want = refreshed // the refresh's own tag delivers in the same run
+		}
+		tagged := step("tagged change", "yes", true, want, "--tags", tag)
+		if noticed(tagged) == (tag == "identity") {
+			t.Fatalf("--tags %s: deferred-refresh notice=%v\n%s", tag, noticed(tagged), tagged.raw)
+		}
+		if tag != "identity" {
+			step("identical full apply after --tags "+tag, "no", true, refreshed)
+		}
+		step("completed no-op after --tags "+tag, "no", true, nil)
+	}
+
+	// Interrupted after IPA committed: no settlement, so the retry (tagged
+	// or full) still owes the refresh even though IPA now has nothing to do.
+	for _, retry := range [][]string{{"--tags", "users"}, nil} {
+		reset()
+		write("interrupt", "yes")
+		step("interrupted tagged change", "yes", false, nil, "--tags", "users")
+		if err := os.Remove(filepath.Join(dir, "interrupt")); err != nil {
+			t.Fatal(err)
+		}
+		if retry != nil {
+			if !noticed(step("tagged retry", "no", true, nil, retry...)) {
+				t.Fatal("tagged retry did not report the deferred refresh")
+			}
+		}
+		step("full retry", "no", true, refreshed)
+		step("completed no-op after retry", "no", true, nil)
+	}
+
+	// Skipping the refresh defers it; skipping the mutation's own tag still
+	// delivers an earlier obligation; `--tags tagged` selects everything.
+	reset()
+	if !noticed(step("change with refresh skipped", "yes", true, nil, "--skip-tags", "client-cache")) {
+		t.Fatal("--skip-tags client-cache did not report the deferred refresh")
+	}
+	step("skip the mutation tag", "no", true, refreshed, "--skip-tags", "users")
+	step("completed no-op", "no", true, nil)
+	reset()
+	step("--tags tagged", "yes", true, refreshed, "--tags", "tagged")
+	step("completed no-op", "no", true, nil)
+
+	// A read-only selection neither records, settles nor delivers.
+	reset()
+	step("pending change", "yes", true, nil, "--tags", "users")
+	step("read-only inspection", "yes", true, nil, "--tags", "freeipa_host_absent_inspect")
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), `"auth_pending": true`) {
+		t.Fatalf("read-only selection changed the pending refresh: %s", state)
+	}
+	step("full apply", "no", true, refreshed)
+}
+
+// installSSHCacheFakes puts fake ipa/sss_cache/sss_ssh_authorizedkeys first
+// on PATH. `ipa` prints #115's real user-mod captures: "Modified user" while
+// dir/modified is "yes", otherwise "no modifications". Every sss_cache call
+// is appended to dir/calls as host/user (host/* for a global -E). The
+// returned function writes a control file under dir.
+func installSSHCacheFakes(t *testing.T, dir string) func(name, value string) {
+	t.Helper()
 	for _, sub := range []string{"source", "cache"} {
 		if err := os.Mkdir(filepath.Join(dir, sub), 0o700); err != nil {
 			t.Fatal(err)
@@ -148,13 +368,15 @@ func TestRegression_IdentitySSHCacheRuntime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("source/alice", key+"\n")
-	write("source/bob", "")
-	write("modified", "yes")
+	// dir/interrupt: IPA commits the change, then the run dies before the
+	// result reaches Ansible (the next call reports no modifications).
 	write("ipa", `#!/usr/bin/env python3
 import os,sys
 from pathlib import Path
 d=Path(os.environ['CACHE_TEST_DIR'])
+if d.joinpath('interrupt').exists():
+ d.joinpath('modified').write_text('no')
+ sys.exit(137)
 if d.joinpath('modified').read_text() == 'yes':
  print(d.joinpath('modified.stdout').read_text(), end='')
  sys.exit(0)
@@ -193,6 +415,44 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CACHE_TEST_DIR", dir)
+	return write
+}
+
+// readSSHCacheCalls returns the sorted sss_cache calls recorded since the
+// last reset of dir/calls.
+func readSSHCacheCalls(t *testing.T, dir string) []string {
+	t.Helper()
+	calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(calls))
+	slices.Sort(lines)
+	return lines
+}
+
+// Runs the production prepare → IPA → settle → delegate → ack → failure gate
+// tasks with named localhost aliases. Only the IPA/SSSD processes are fakes;
+// journal persistence, Ansible loops, tags, delegation and failure gates are real.
+func TestRegression_IdentitySSHCacheRuntime(t *testing.T) {
+	dir := t.TempDir()
+	helper, err := os.ReadFile("../../playbooks/apply/files/freeipa-ssh-key-cache.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyfile := filepath.Join(dir, "key")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyfile).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	pub, err := os.ReadFile(keyfile + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := strings.TrimSpace(string(pub))
+	write := installSSHCacheFakes(t, dir)
+	write("source/alice", key+"\n")
+	write("source/bob", "")
+	write("modified", "yes")
 	raw, err := os.ReadFile(sshKeysPlaybook)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +505,8 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	vars := map[string]any{"ipa_domain": "ipa.test", "stage": "sandbox", "ipa_ssh_cache_program": string(helper),
 		"ipa_identity_ssh_cache_state_file":     filepath.Join(dir, "journal.json"),
 		"ipa_identity_refresh_sssd_cache":       true,
-		"ipa_identity_cache_mutation_registers": plays[0]["vars"].(map[string]any)["ipa_identity_cache_mutation_registers"]}
+		"ipa_identity_cache_mutation_registers": plays[0]["vars"].(map[string]any)["ipa_identity_cache_mutation_registers"],
+		"ipa_identity_cache_recovery_tags":      plays[0]["vars"].(map[string]any)["ipa_identity_cache_recovery_tags"]}
 	run := func(keys []any, deferred []string, check bool) ag82Run {
 		t.Helper()
 		vars["ipa_active_users"] = []any{map[string]any{"name": "alice", "ssh_keys": keys}, map[string]any{"name": "bob", "ssh_keys": []any{}}, map[string]any{"name": "unmanaged"}}
@@ -268,12 +529,7 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 		if (result.rc == 0) != success {
 			t.Fatalf("rc=%d failures=%v\n%s", result.rc, result.failures, result.raw)
 		}
-		calls, err := os.ReadFile(filepath.Join(dir, "calls"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		lines := strings.Fields(string(calls))
-		slices.Sort(lines)
+		lines := readSSHCacheCalls(t, dir)
 		slices.Sort(hosts)
 		if !slices.Equal(lines, hosts) {
 			t.Fatalf("cache calls=%v; want %v; failures=%v\n%s", lines, hosts, result.failures, result.raw)
@@ -284,7 +540,9 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	if _, err := os.Stat(filepath.Join(dir, "journal.json")); !os.IsNotExist(err) {
 		t.Fatal("check mode wrote journal")
 	}
-	assertRun(run([]any{key}, nil, false), true, all...)
+	// Adoption: every managed pair, plus one global refresh because no
+	// journal shows that earlier runs reached every client.
+	assertRun(run([]any{key}, nil, false), true, append(slices.Clone(all), "client-a/*", "client-b/*")...)
 	write("modified", "no")
 	assertRun(run([]any{key}, nil, false), true)
 	write("source/alice", "")

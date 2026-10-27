@@ -247,6 +247,17 @@ ansible-playbook -i inventory-freeipa.yaml \
 # 可用 tags：identity(全部)、groups、users、passwords、sshkeys、hostgroups、hbac、sudo
 ```
 
+非金鑰的授權變更（使用者資料、群組、HBAC、sudo…）要等 client 的 SSSD 快取更新才生效。
+只有選到 `identity` 或 `client-cache` 的 run（含不帶 tags 的完整 apply）會對 enrolled
+clients 執行 `sss_cache -E`。其他 tags（例如 `--tags sudo`、`--tags C9`）或
+`--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
+並印出 `Report deferred authorization cache refresh` 提示；下一次選到 `identity`/
+`client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。要立即生效：
+
+```bash
+... playbooks/apply/freeipa-identity-apply.yml --tags client-cache ...
+```
+
 ---
 
 ## 5. 冪等性
@@ -315,7 +326,9 @@ playbook 只認英文輸出。
     整個 fleet 固定 60 秒內完成。成功 apply 才表示全部 scope 已收斂；SSH 登入
     驗收要求完成後 10 秒內新連線拒絕舊 key。既有 session 不會被終止。
     失敗、離線或 deferred 主機保留待辦，apply 非零回報 PARTIAL；重跑同一份 roster
-    僅重試待辦。首次採用會驗證所有 managed 配對，完成後無變更 apply 不操作 clients。
+    僅重試待辦。首次採用會驗證所有 managed 配對，並對 enrolled clients 做一次非金鑰
+    授權快取更新（journal 還沒有紀錄可證明先前的 run 已更新全部 clients）；完成後
+    無變更 apply 不操作 clients。
     勿刪除 journal，也勿平行對同一 provider 執行 identity apply。完整邊界與驗收矩陣見
     [已驗收契約](../superpowers/specs/2026-10-22-ssh-key-cache-convergence.md) 與
     [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。

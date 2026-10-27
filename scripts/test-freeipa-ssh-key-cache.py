@@ -104,6 +104,33 @@ class JournalTest(unittest.TestCase):
             self.settle(first)
         self.assertEqual(before, self.state)
 
+    def auth(self, action, **data):
+        return cache.update(self.state, action, dict(data, domain="ipa.test"))
+
+    def test_authorization_refresh_obligation(self):
+        # Adoption cannot prove earlier runs refreshed every client.
+        self.assertTrue(self.auth("auth_prepare")["previous"])
+        self.assertTrue(self.auth("auth_settle", previous=True, changed=False)["dirty"])
+        self.auth("auth_ack")
+        # Completed no-op: nothing owed, nothing refreshed.
+        previous = self.auth("auth_prepare")["previous"]
+        self.assertFalse(previous)
+        self.assertFalse(self.auth("auth_settle", previous=previous, changed=False)["dirty"])
+        # A change settled without a refresh (tagged run) stays owed.
+        self.auth("auth_prepare")
+        self.assertTrue(self.auth("auth_settle", previous=False, changed=True)["dirty"])
+        previous = self.auth("auth_prepare")["previous"]
+        self.assertTrue(previous)
+        self.assertTrue(self.auth("auth_settle", previous=previous, changed=False)["dirty"])
+        # Interrupted before settle: prepare alone leaves it owed.
+        self.auth("auth_ack")
+        self.auth("auth_prepare")
+        self.assertTrue(self.auth("auth_prepare")["previous"])
+        # SSH-key journal entries alone do not record authorization state.
+        self.state = {"version": 1, "domain": "ipa.test", "users": {}}
+        self.prepare([key()])
+        self.assertTrue(self.auth("auth_prepare")["previous"])
+
     def test_atomic_private_journal_and_corruption_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "state", "cache.json")
