@@ -543,8 +543,8 @@ func assertCoversEveryRosterWriter(t *testing.T, cases map[string]rosterWriterCa
 			t.Fatal(err)
 		}
 		for _, decl := range file.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Body != nil {
-				funcs[fn.Name.Name] = fn
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				funcs[funcName(fn)] = fn
 			}
 		}
 	}
@@ -561,7 +561,7 @@ func assertCoversEveryRosterWriter(t *testing.T, cases map[string]rosterWriterCa
 				continue
 			}
 			for _, callee := range calleesOf(fn) {
-				if writes[callee] {
+				if inSet(writes, callee) {
 					writes[name], changed = true, true
 					break
 				}
@@ -570,7 +570,7 @@ func assertCoversEveryRosterWriter(t *testing.T, cases map[string]rosterWriterCa
 	}
 	var missing []string
 	for name := range writes {
-		if _, ok := cases[name]; !ok && ast.IsExported(name) {
+		if _, ok := cases[name]; !ok && ast.IsExported(name) && !strings.Contains(name, ".") {
 			missing = append(missing, name)
 		}
 	}

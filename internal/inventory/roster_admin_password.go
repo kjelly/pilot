@@ -150,39 +150,81 @@ func CompareRosterAdminPassword(path, vaultPassword string) (RosterAdminSync, er
 
 // SyncRosterAdminPassword replaces the plaintext roster's literal
 // freeipa.admin.password with newPassword when it still holds
-// oldPassword. Only that one scalar is rewritten; every other byte of the
-// file, comments included, is kept. A symlinked roster is updated where it
-// points, and the file is replaced atomically with its mode and, where the
-// process may set it, its owner. It never writes a roster that is
-// encrypted, inline !vault included (ErrRosterEncrypted), held by another
-// roster writer (ErrMutationLocked), or whose password it cannot rewrite
-// on one line by itself (an alias, a merge key, a flow mapping, a block or
-// multi-line scalar, a new password Ansible would template): those return
+// oldPassword: PrepareRosterAdminSync, then Commit. Only that one scalar
+// is rewritten; every other byte of the file, comments included, is kept.
+// A symlinked roster is updated where it points, through writeLockedRoster.
+// It never writes a roster that is encrypted, inline !vault included
+// (ErrRosterEncrypted), held by another roster writer (ErrMutationLocked),
+// or whose password it cannot rewrite on one line by itself (an alias, a
+// merge key, a flow mapping, a block or multi-line scalar): those return
 // an error asking for a manual update.
 func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdminSync, error) {
-	// A first look without the lock, so a roster that will not change gets
-	// no lock files. It decides nothing: the plan below does, on a fresh
-	// read under the lock. An empty read is a writer caught between
-	// truncating and writing the file (an editor, an older pilot), not a
-	// roster without a password: that is decided under the lock too.
-	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
-	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
-	if err != nil || (result != RosterAdminUpdated && !emptyRead) {
-		return result, err
-	}
-	lk, err := lockRosterFile(path)
+	prepared, err := PrepareRosterAdminSync(path, oldPassword, newPassword)
 	if err != nil {
 		return 0, err
 	}
-	defer lk.release() //nolint:errcheck
-	result, updated, err := planRosterAdminSync(lk.target, oldPassword, newPassword)
-	if err != nil || result != RosterAdminUpdated {
-		return result, err
-	}
-	if err := writeLockedRoster(lk, updated); err != nil {
+	if err := prepared.Commit(); err != nil {
 		return 0, err
 	}
-	return RosterAdminUpdated, nil
+	return prepared.Result, nil
+}
+
+// PreparedRosterAdminSync is one roster's admin password change, decided
+// on a read under the roster's lock when it would write, and holding that
+// lock until Commit writes it or Release drops it. A caller that must
+// change several files together — pilot edit's vault save, which writes
+// the vault only once every roster it must follow can follow — prepares
+// all of them first.
+type PreparedRosterAdminSync struct {
+	// Result is what the sync found: RosterAdminUpdated when Commit will
+	// write the roster.
+	Result  RosterAdminSync
+	lk      *rosterLock
+	updated []byte
+}
+
+// PrepareRosterAdminSync decides SyncRosterAdminPassword's change to the
+// roster at path. A first look without the lock keeps a roster that will
+// not change free of lock files; it decides nothing. A roster that will
+// change — or that read empty, a writer caught between truncating and
+// writing it — is locked and decided again on a fresh read, and stays
+// locked: the caller must Commit or Release it. Errors are
+// SyncRosterAdminPassword's, ErrMutationLocked and ErrRosterLockFile
+// among them, and leave nothing locked.
+func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRosterAdminSync, error) {
+	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
+	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
+	if err != nil || (result != RosterAdminUpdated && !emptyRead) {
+		return &PreparedRosterAdminSync{Result: result}, err
+	}
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return nil, err
+	}
+	result, updated, err := planRosterAdminSync(lk.target, oldPassword, newPassword)
+	if err != nil || result != RosterAdminUpdated {
+		lk.release() //nolint:errcheck
+		return &PreparedRosterAdminSync{Result: result}, err
+	}
+	return &PreparedRosterAdminSync{Result: RosterAdminUpdated, lk: lk, updated: updated}, nil
+}
+
+// Commit writes the prepared change, if any, and releases the lock.
+func (p *PreparedRosterAdminSync) Commit() error {
+	if p.lk == nil {
+		return nil
+	}
+	defer p.Release()
+	return writeLockedRoster(p.lk, p.updated)
+}
+
+// Release drops the lock without writing. Safe to call more than once,
+// and after Commit.
+func (p *PreparedRosterAdminSync) Release() {
+	if p.lk != nil {
+		p.lk.release() //nolint:errcheck
+		p.lk = nil
+	}
 }
 
 // rosterFileEmpty reports whether the roster at path reads as nothing but

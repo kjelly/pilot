@@ -56,6 +56,7 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	funcs := map[string]*ast.FuncDecl{}
+	lockFields := map[string][]string{}
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -80,6 +81,9 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
 				funcs[funcName(fn)] = fn
+			}
+			for name, fields := range rosterLockFields(decl) {
+				lockFields[name] = fields
 			}
 		}
 	}
@@ -108,7 +112,7 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			continue
 		}
 		writers++
-		locks := lockVars(fn)
+		locks := lockVars(fn, lockFields)
 		if len(locks) == 0 {
 			t.Errorf("%s writes a file without lockRosterFile or a *rosterLock parameter", name)
 			continue
@@ -143,7 +147,7 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 				continue
 			}
 			for _, callee := range calleesOf(fn) {
-				if reaches[callee] {
+				if inSet(reaches, callee) {
 					reaches[name], changed = true, true
 					break
 				}
@@ -155,7 +159,7 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			continue
 		}
 		for _, callee := range calleesOf(funcs[name]) {
-			if callee != name && reaches[callee] {
+			if callee != name && inSet(reaches, callee) {
 				t.Errorf("%s holds a roster lock and calls %s, which takes one too; pass the *rosterLock to a *Locked helper instead", name, callee)
 			}
 		}
@@ -189,17 +193,37 @@ func callsFunc(fn *ast.FuncDecl, name string) bool {
 	return found
 }
 
+// calleesOf lists what fn calls: a function by name, and a method as
+// ".Name" (any method of that name, see inSet), since a receiver's type is
+// not known without type checking.
 func calleesOf(fn *ast.FuncDecl) []string {
 	var out []string
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		if call, ok := node.(*ast.CallExpr); ok {
-			if ident, ok := call.Fun.(*ast.Ident); ok {
-				out = append(out, ident.Name)
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				out = append(out, fun.Name)
+			case *ast.SelectorExpr:
+				out = append(out, "."+fun.Sel.Name)
 			}
 		}
 		return true
 	})
 	return out
+}
+
+// inSet reports whether callee — a function name, or ".Name" for a method
+// call — is in set, whose methods are keyed "Type.Name".
+func inSet(set map[string]bool, callee string) bool {
+	if !strings.HasPrefix(callee, ".") {
+		return set[callee]
+	}
+	for key, ok := range set {
+		if ok && strings.HasSuffix(key, callee) {
+			return true
+		}
+	}
+	return false
 }
 
 func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
@@ -263,10 +287,53 @@ func funcName(fn *ast.FuncDecl) string {
 	return fn.Name.Name
 }
 
-// lockVars returns the names in fn that hold a roster lock: a *rosterLock
-// parameter, or a variable assigned lockRosterFile's result.
-func lockVars(fn *ast.FuncDecl) map[string]bool {
+// rosterLockFields returns, for a type declaration, each struct type's
+// fields of type *rosterLock.
+func rosterLockFields(decl ast.Decl) map[string][]string {
+	out := map[string][]string{}
+	gen, ok := decl.(*ast.GenDecl)
+	if !ok {
+		return out
+	}
+	for _, spec := range gen.Specs {
+		ts, ok := spec.(*ast.TypeSpec)
+		if !ok {
+			continue
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			continue
+		}
+		for _, field := range st.Fields.List {
+			if star, ok := field.Type.(*ast.StarExpr); ok {
+				if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "rosterLock" {
+					for _, name := range field.Names {
+						out[ts.Name.Name] = append(out[ts.Name.Name], name.Name)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// lockVars returns the expressions in fn that hold a roster lock: a
+// *rosterLock parameter, a variable assigned lockRosterFile's result, or —
+// in a method — the receiver's *rosterLock field ("p.lk").
+func lockVars(fn *ast.FuncDecl, lockFields map[string][]string) map[string]bool {
 	out := map[string]bool{}
+	if fn.Recv != nil && len(fn.Recv.List) == 1 && len(fn.Recv.List[0].Names) == 1 {
+		recv := fn.Recv.List[0]
+		typ := recv.Type
+		if star, ok := typ.(*ast.StarExpr); ok {
+			typ = star.X
+		}
+		if ident, ok := typ.(*ast.Ident); ok {
+			for _, field := range lockFields[ident.Name] {
+				out[recv.Names[0].Name+"."+field] = true
+			}
+		}
+	}
 	for _, field := range fn.Type.Params.List {
 		if star, ok := field.Type.(*ast.StarExpr); ok {
 			if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "rosterLock" {
@@ -329,12 +396,28 @@ func lockTargetVars(fn *ast.FuncDecl, locks map[string]bool) map[string]bool {
 // one of locks, one of targets, or the lock itself (writeLockedRoster
 // takes the lock and writes its target).
 func isLockTarget(expr ast.Expr, locks, targets map[string]bool) bool {
+	if locks[lockExprKey(expr)] {
+		return true
+	}
 	switch expr := expr.(type) {
 	case *ast.SelectorExpr:
-		x, ok := expr.X.(*ast.Ident)
-		return ok && locks[x.Name] && expr.Sel.Name == "target"
+		return expr.Sel.Name == "target" && locks[lockExprKey(expr.X)]
 	case *ast.Ident:
-		return targets[expr.Name] || locks[expr.Name]
+		return targets[expr.Name]
 	}
 	return false
+}
+
+// lockExprKey names an identifier or a one-level selector ("p.lk"), the
+// two forms a lock is held in; "" otherwise.
+func lockExprKey(expr ast.Expr) string {
+	switch expr := expr.(type) {
+	case *ast.Ident:
+		return expr.Name
+	case *ast.SelectorExpr:
+		if x, ok := expr.X.(*ast.Ident); ok {
+			return x.Name + "." + expr.Sel.Name
+		}
+	}
+	return ""
 }

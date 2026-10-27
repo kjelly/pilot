@@ -487,3 +487,40 @@ func TestFillFreeIPAAdminPasswordEmptyKeyWritesAString(t *testing.T) {
 		}
 	}
 }
+
+// A prepared sync holds the roster's lock until Commit or Release: no other
+// roster writer gets in between the decision and the write, and Release
+// leaves the roster as it was (PR #148 re-review, round 4: pilot edit's
+// vault save prepares every roster before it writes the vault).
+func TestPreparedRosterAdminSyncHoldsTheLockUntilCommit(t *testing.T) {
+	for _, commit := range []bool{true, false} {
+		body := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+		path := writeRoster(t, body)
+		prepared, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+		if err != nil || prepared.Result != RosterAdminUpdated {
+			t.Fatalf("PrepareRosterAdminSync() = %+v, %v", prepared, err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("another writer between Prepare and Commit: error = %v, want ErrMutationLocked", err)
+		}
+		if after, _ := os.ReadFile(path); string(after) != body {
+			t.Fatalf("Prepare wrote the roster:\n%s", after)
+		}
+		want := "Old-pass_1"
+		if commit {
+			if err := prepared.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			want = "New-pass_2"
+		} else {
+			prepared.Release()
+		}
+		prepared.Release() // safe again
+		if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != want {
+			t.Fatalf("commit=%v: freeipa.admin.password = %v, want %s", commit, decodedAdminPassword(t, after), want)
+		}
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatalf("commit=%v: the lock was not released: %v", commit, err)
+		}
+	}
+}
