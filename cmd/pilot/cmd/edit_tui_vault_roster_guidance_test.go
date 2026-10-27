@@ -265,3 +265,47 @@ func TestEditPlanAndApplyAgreeOnRosterWrites(t *testing.T) {
 		}
 	}
 }
+
+// A roster password written as an unquoted number never equals the vault's
+// string in Ansible's typed comparison, so the deploy preflight warns and
+// a rotation reports it with the quoting fix — both say the same, and
+// neither rewrites it (PR #148 re-review, F5).
+func TestNonStringRosterPasswordIsReported(t *testing.T) {
+	dir := t.TempDir()
+	rosters := map[string]string{
+		"int":   filepath.Join(dir, ".vault", "ipa-identity.yaml"),
+		"float": filepath.Join(dir, ".vault", "nfs-roster.yaml"),
+	}
+	writeSyncFile(t, rosters["int"], syncTestRoster(`12345678`))
+	writeSyncFile(t, rosters["float"], syncTestRoster(`1234.5678`))
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"12345678\"\n")
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  h1:\n    ansible_host: 10.0.0.1\n    roles: [freeipa-client]\n    freeipa_roster_file: .vault/nfs-roster.yaml\n")
+	before := snapshotFiles(t, rosters["int"], rosters["float"])
+
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{
+		HostVars: map[string]map[string]any{"h1": {"freeipa_roster_file": ".vault/nfs-roster.yaml"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range rosters {
+		if !strings.Contains(out.String(), "warning: "+path+" 的 freeipa.admin.password 不是字串") || !strings.Contains(out.String(), "加上引號") {
+			t.Errorf("preflight does not warn about %s:\n%s", path, out.String())
+		}
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	for _, shown := range []string{".vault/ipa-identity.yaml", ".vault/nfs-roster.yaml"} {
+		if line := bannerLine(r.banner, "⚠️  未同步 "+shown+"："); !strings.Contains(line, rosterNotStringReason) {
+			t.Errorf("banner does not report %s as not a string:\n%s", shown, r.banner)
+		}
+	}
+	assertUnchanged(t, before)
+}

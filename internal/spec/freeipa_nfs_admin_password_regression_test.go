@@ -62,24 +62,36 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 	const vaultPassword, stalePassword = `Vault"pass#2 密碼`, `Stale'pass\1`
 	for name, tt := range map[string]struct {
 		roster   string
+		raw      string // the roster's password scalar as written, unquoted
 		vault    bool
 		wantFail bool
 	}{
-		"drifted":   {roster: stalePassword, vault: true, wantFail: true},
-		"matching":  {roster: vaultPassword, vault: true},
-		"reference": {roster: "{{ ipa_admin_password }}", vault: true},
-		"no vault":  {roster: stalePassword},
+		"drifted": {roster: stalePassword, vault: true, wantFail: true},
+		// Ansible compares typed values: a number never equals the vault's
+		// string, whatever it reads. pilot's preflight and sync judge it the
+		// same way (inventory.CompareRosterAdminPassword, RosterAdminNotString).
+		"unquoted number": {raw: "12345678", vault: true, wantFail: true},
+		"matching":        {roster: vaultPassword, vault: true},
+		"reference":       {roster: "{{ ipa_admin_password }}", vault: true},
+		"no vault":        {roster: stalePassword},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			roster := filepath.Join(dir, "ipa-identity.yaml")
-			body := "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n    password: " + yamlDoubleQuoted(tt.roster) + "\n"
+			scalar := yamlDoubleQuoted(tt.roster)
+			if tt.raw != "" {
+				scalar = tt.raw
+			}
+			body := "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n    password: " + scalar + "\n"
 			if err := os.WriteFile(roster, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			vars := map[string]any{"freeipa_roster_file": roster}
 			if tt.vault {
 				vars["ipa_admin_password"] = vaultPassword
+				if tt.raw != "" {
+					vars["ipa_admin_password"] = tt.raw
+				}
 			}
 			var tasks []any
 			for _, task := range nfsServerPreTasks(t, nfsRosterLoadTask, nfsAdminPasswordDriftGate) {

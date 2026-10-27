@@ -18,8 +18,9 @@ import (
 // to their playbooks (issue #146). The helpers below keep the second in
 // step with the first instead of letting a rotation leave it stale.
 
-// RosterAdminSync is what SyncRosterAdminPassword found in one roster. The
-// zero value is not a result.
+// RosterAdminSync is what SyncRosterAdminPassword (or
+// CompareRosterAdminPassword) found in one roster. The zero value is not a
+// result.
 type RosterAdminSync int
 
 const (
@@ -32,9 +33,14 @@ const (
 	// alone; only the operator knows which one it should carry.
 	RosterAdminDiffers
 	// RosterAdminNotLiteral: there is no literal password to keep in step —
-	// the field is absent, empty, not a string or a template such as
+	// the field is absent, empty, null or a template such as
 	// "{{ ipa_admin_password }}".
 	RosterAdminNotLiteral
+	// RosterAdminNotString: the password is a YAML number or boolean (an
+	// unquoted 12345678, say). Ansible compares typed values, so it never
+	// equals the vault's string password however it reads: the operator
+	// must quote it. pilot reports it and never rewrites it.
+	RosterAdminNotString
 )
 
 // VaultAdminPassword returns a plaintext vault vars file's
@@ -50,7 +56,7 @@ func VaultAdminPassword(data []byte) string {
 		return ""
 	}
 	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
-	if !literalAdminPassword(value) || value.ShortTag() != "!!str" {
+	if !literalAdminPassword(value) {
 		return ""
 	}
 	return value.Value
@@ -77,20 +83,37 @@ func VaultAdminPasswordTemplate(data []byte) string {
 }
 
 // RosterAdminPasswordDiffers reports whether the plaintext roster at path
-// stores a literal freeipa.admin.password, wherever YAML aliases or merge
-// keys put it, other than vaultPassword. A roster without a literal
-// password, an inline !vault one included, never differs; an encrypted
-// file returns ErrRosterEncrypted.
+// stores a freeipa.admin.password, wherever YAML aliases or merge keys put
+// it, that Ansible would not find equal to the vault's string
+// vaultPassword: another literal string, or a number or boolean
+// (RosterAdminNotString). A roster without a literal password, an inline
+// !vault one included, never differs; an encrypted file returns
+// ErrRosterEncrypted.
 func RosterAdminPasswordDiffers(path, vaultPassword string) (bool, error) {
+	result, err := CompareRosterAdminPassword(path, vaultPassword)
+	return result == RosterAdminDiffers || result == RosterAdminNotString, err
+}
+
+// CompareRosterAdminPassword is what the plaintext roster at path holds
+// against the vault's string vaultPassword, the way Ansible compares them
+// (freeipa-nfs-server-apply.yml's drift gate): RosterAdminCurrent,
+// RosterAdminDiffers, RosterAdminNotString or RosterAdminNotLiteral. An
+// encrypted file returns ErrRosterEncrypted.
+func CompareRosterAdminPassword(path, vaultPassword string) (RosterAdminSync, error) {
 	_, doc, err := readRosterNode(path)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	_, value, _ := rosterAdminPassword(doc)
-	if !literalAdminPassword(value) {
-		return false, nil
+	switch {
+	case notStringAdminPassword(value):
+		return RosterAdminNotString, nil
+	case !literalAdminPassword(value):
+		return RosterAdminNotLiteral, nil
+	case value.Value == vaultPassword:
+		return RosterAdminCurrent, nil
 	}
-	return value.Value != vaultPassword, nil
+	return RosterAdminDiffers, nil
 }
 
 // SyncRosterAdminPassword replaces the plaintext roster's literal
@@ -143,6 +166,8 @@ func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync
 		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
 	}
 	switch {
+	case notStringAdminPassword(value):
+		return RosterAdminNotString, nil, nil
 	case !literalAdminPassword(value):
 		return RosterAdminNotLiteral, nil, nil
 	case value.Value == newPassword:
@@ -246,13 +271,22 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 }
 
 // literalAdminPassword reports whether value is a password Ansible reads as
-// written: a non-empty plain scalar that is no template.
+// written: a non-empty string that is no template. Only a string: Ansible
+// compares typed values, so an unquoted 12345678 is a number that never
+// equals the vault's "12345678" (notStringAdminPassword).
 func literalAdminPassword(value *yaml.Node) bool {
-	if value == nil || value.Kind != yaml.ScalarNode || value.Value == "" || jinjaDelimited(value.Value) {
+	return value != nil && value.Kind == yaml.ScalarNode && value.ShortTag() == "!!str" &&
+		value.Value != "" && !jinjaDelimited(value.Value)
+}
+
+// notStringAdminPassword reports whether value is a YAML number or boolean,
+// which Ansible never finds equal to a string password.
+func notStringAdminPassword(value *yaml.Node) bool {
+	if value == nil || value.Kind != yaml.ScalarNode {
 		return false
 	}
 	switch value.ShortTag() {
-	case "!!str", "!!int", "!!float":
+	case "!!int", "!!float", "!!bool":
 		return true
 	}
 	return false

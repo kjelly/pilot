@@ -127,6 +127,11 @@ type rosterSyncLine struct {
 // later save finds no change and syncs nothing — so it is a hand edit.
 const rosterManualFix = "請手動把它的 freeipa.admin.password 改成 .vault/main.yaml 的 ipa_admin_password"
 
+// rosterNotStringReason is why a roster whose password is a YAML number or
+// boolean is left alone: Ansible compares typed values, so it never equals
+// the vault's string, and only quoting it fixes that.
+const rosterNotStringReason = "freeipa.admin.password 不是字串（例如沒加引號的數字），Ansible 比對時永遠不等於 vault 的字串，改的時候要加上引號"
+
 // rosterSyncOnlyOnChange closes a report with any manual line.
 var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
 	text: "pilot edit 只在改變 ipa_admin_password 的這次存檔同步名冊，之後再存不會補；上面未同步的名冊請手動修改（加密名冊用 ansible-vault edit）"}
@@ -198,6 +203,8 @@ func syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword string) 
 			manual(shown, rosterSyncReason(err, path, shown))
 		case result == inventory.RosterAdminUpdated:
 			lines = append(lines, rosterSyncLine{icon: "🔁 ", text: fmt.Sprintf("已同步 %s 的 freeipa.admin.password", shown)})
+		case result == inventory.RosterAdminNotString:
+			manual(shown, rosterNotStringReason)
 		case result == inventory.RosterAdminDiffers:
 			manual(shown, "freeipa.admin.password 原本就跟舊的 ipa_admin_password 不同，pilot 不知道它該用哪一個（請先確認）")
 		}

@@ -326,3 +326,39 @@ func TestVaultAdminPasswordTemplate(t *testing.T) {
 		})
 	}
 }
+
+// Ansible compares typed values: an unquoted number or boolean roster
+// password never equals the vault's string, even "12345678" against
+// 12345678. Go judges it the same way — it differs, the sync reports it
+// and writes nothing (PR #148 re-review, F5).
+func TestRosterAdminPasswordNonStringNeverMatchesTheVault(t *testing.T) {
+	for name, scalar := range map[string]string{
+		"int":   `12345678`,
+		"float": `1234.5678`,
+		"bool":  `true`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(rosterAdminFixture, "%s", scalar, 1)
+			path := writeRoster(t, body)
+			if got, err := CompareRosterAdminPassword(path, scalar); err != nil || got != RosterAdminNotString {
+				t.Fatalf("CompareRosterAdminPassword() = %v, %v; want RosterAdminNotString", got, err)
+			}
+			if differs, err := RosterAdminPasswordDiffers(path, scalar); err != nil || !differs {
+				t.Fatalf("RosterAdminPasswordDiffers(same text) = %v, %v; want true", differs, err)
+			}
+			if got, err := SyncRosterAdminPassword(path, scalar, "New-pass_2"); err != nil || got != RosterAdminNotString {
+				t.Fatalf("SyncRosterAdminPassword() = %v, %v; want RosterAdminNotString", got, err)
+			}
+			if after, _ := os.ReadFile(path); string(after) != body {
+				t.Fatalf("roster changed:\n%s", after)
+			}
+			if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+				t.Fatalf("left %d files beside the roster", len(entries)-1)
+			}
+		})
+	}
+	quoted := writeRoster(t, strings.Replace(rosterAdminFixture, "%s", `"12345678"`, 1))
+	if got, err := CompareRosterAdminPassword(quoted, "12345678"); err != nil || got != RosterAdminCurrent {
+		t.Fatalf("quoted number: CompareRosterAdminPassword() = %v, %v; want RosterAdminCurrent", got, err)
+	}
+}
