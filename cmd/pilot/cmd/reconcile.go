@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -10,13 +11,19 @@ import (
 )
 
 var (
-	reconcileDirFlag       string
-	reconcileInventoryFlag string
-	reconcileTimeoutFlag   string
-	reconcileActionsPath   string
-	reconcilePresentation  bool
-	reconcileTracePath     string
+	reconcileDirFlag         string
+	reconcileInventoryFlag   string
+	reconcileTimeoutFlag     string
+	reconcileActionsPath     string
+	reconcilePresentation    bool
+	reconcileTracePath       string
+	reconcileComponentFlags  []string
+	reconcileForceFlag       bool
+	reconcilePreviewOnlyFlag bool
 )
+
+// reconcileStdinIsTerminal is a variable so tests can simulate a missing TTY.
+var reconcileStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
 // reconcileCmd is the day-2 counterpart to deploy: it intentionally lists
 // only catalog entries whose apply playbook declares a declarative reconcile
@@ -40,19 +47,45 @@ func init() {
 	reconcileCmd.Flags().StringVar(&reconcileActionsPath, "actions", "", "以 JSON scenario 自動回答 reconcile TUI prompts")
 	reconcileCmd.Flags().BoolVar(&reconcilePresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	reconcileCmd.Flags().StringVar(&reconcileTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
+	reconcileCmd.Flags().StringArrayVar(&reconcileComponentFlags, "component", nil, "要調和的 day-2 元件 key(可重複，例如 --component freeipa-identity)；指定後不再顯示勾選清單")
+	reconcileCmd.Flags().BoolVar(&reconcileForceFlag, "force", false, "不顯示互動提示：各欄位採用預設值，依計畫順序逐支 playbook 先預覽、成功後隨即正式套用(後面的預覽失敗時，前面已套用的不會還原)；需要 --component")
+	reconcileCmd.Flags().BoolVar(&reconcilePreviewOnlyFlag, "preview-only", false, "不顯示互動提示：各欄位採用預設值，只預覽(--check --diff)計畫中的每一支 playbook，全部不套用；每一支都實際預覽通過才以結束碼 0 結束(目標主機全部是無法連線的 optional 主機而延後的 playbook 算沒有預覽)；需要 --component")
+	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
+	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
 }
 
 func runReconcile(cmd *cobra.Command, _ []string) error {
+	if reconcileForceFlag && reconcilePreviewOnlyFlag {
+		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
+	}
+	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
+		return err
+	}
 	if reconcileActionsPath != "" {
+		if reconcileForceFlag || reconcilePreviewOnlyFlag || stageFlag != "" || len(reconcileComponentFlags) > 0 {
+			return fmt.Errorf("--actions 不能與 --force、--preview-only、--stage 或 --component 同時使用(scenario 自己回答這些問題)")
+		}
 		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath)
+	}
+	if (reconcileForceFlag || reconcilePreviewOnlyFlag) && len(reconcileComponentFlags) == 0 {
+		// The defaults driver would otherwise tick only the checklist's first entry.
+		return fmt.Errorf("--force/--preview-only 需要用 --component 指定要調和的元件")
 	}
 	return runReconcileInteractive(cmd)
 }
 
 func runReconcileInteractive(cmd *cobra.Command) error {
-	if !promptWorkflowAllowsNonTTY(term.IsTerminal(int(os.Stdin.Fd()))) {
-		return fmt.Errorf("pilot reconcile 需要互動式終端機(TTY)才能問問題")
+	// Same defaults driver as deploy --force/--preview-only, installed before
+	// the TTY gate so CI can run it.
+	if reconcileForceFlag || reconcilePreviewOnlyFlag {
+		defaults := &promptAutomation{useDefaults: true, forceApply: reconcileForceFlag, previewOnly: reconcilePreviewOnlyFlag}
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = defaults
+		defer func() { activePromptAutomation = oldPrompt }()
+	}
+	if !promptWorkflowAllowsNonTTY(reconcileStdinIsTerminal()) {
+		return fmt.Errorf("pilot reconcile 需要互動式終端機(TTY)才能問問題；非互動場景請加 --component 與 --force 或 --preview-only，或用 --actions 指定 JSON scenario 檔")
 	}
 	timeout, err := parseDeployTimeout(reconcileTimeoutFlag)
 	if err != nil {
@@ -74,7 +107,11 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	fmt.Fprintln(out, "═══ pilot reconcile — 互動式 day-2 設定調和精靈 ═══")
 	fmt.Fprintln(out, "每一步都可以直接按 Enter 採用預設值；Ctrl-C 隨時可以取消。")
 	fmt.Fprintln(out)
-	inventoryDefault := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
+	// Workspace-relative, not pre-joined with --dir: the validator and inv below
+	// apply workspacePath to the answer, so joining here too doubled a relative
+	// --dir (see runDeployInteractive), and the defaults driver skips the
+	// validator that used to catch it.
+	inventoryDefault := reconcileInventoryFlag
 	invInput, err := runTextPrompt(promptInventory, "Inventory 檔路徑", inventoryDefault, func(path string) error {
 		return validateFileExists(workspacePath(reconcileDirFlag, path))
 	})
@@ -115,5 +152,16 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 		previewInventoryGraph(out, inv, snapshot)
 		fmt.Fprintln(out)
 	}
-	return abortOrErr(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot))
+	return reconcileExit(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot), reconcilePreviewOnlyFlag)
+}
+
+// reconcileExit maps the wizard's result to the command's. A preview-only plan
+// that previewed everything returns nil; an abort means it stopped first,
+// which CI must not read as a clean preview. Otherwise an abort is the
+// operator's clean cancellation.
+func reconcileExit(err error, previewOnly bool) error {
+	if previewOnly && errors.Is(err, errDeployAborted) {
+		return fmt.Errorf("--preview-only：reconcile 在預覽完成之前就停止了")
+	}
+	return abortOrErr(err)
 }

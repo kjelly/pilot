@@ -66,6 +66,7 @@ RUN go mod download
 
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY contracts/ contracts/
 COPY images/ images/
 COPY monitoring/ monitoring/
 

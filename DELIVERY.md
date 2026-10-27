@@ -681,6 +681,12 @@ playbook 在 `pre_tasks` 就有 confirm gate，沒帶對應旗標會直接 `asse
 | `staging` | `-e stage=staging -e confirm_staging=true` |
 | `prod` | `-e stage=prod -e confirm_prod=true -e staging_attested_within_hours=<實際小時數>`（需 ≤168，即近 7 天內做過 staging 驗證） |
 
+非互動跑 `pilot deploy --force` / `--preview-only`（CI、cron）時 stage 一律是
+`sandbox`；要套到 staging / prod 改加 `--stage staging` 或
+`--stage prod --staging-attested-within-hours <實際小時數>`，效果等同上表的旗標。
+`pilot reconcile` 也接受同樣的旗標，另外要用 `--component <key>`（可重複）
+指定要調和的元件。
+
 ```bash
 # 全站套到 staging
 docker run --rm -it -v "$HOME/.ssh:/root/.ssh:ro" -v "$(pwd)/inventory.yml:/pilot/inventory.yml:ro" \

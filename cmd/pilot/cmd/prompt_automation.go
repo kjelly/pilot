@@ -32,6 +32,13 @@ type promptAutomation struct {
 	out          io.Writer
 	useDefaults  bool
 	forceApply   bool
+	// previewOnly (reconcile --preview-only) makes the reconcile plan
+	// authorization preview every playbook and apply none.
+	previewOnly bool
+	// previewPassed records that a defaults-mode run reached the
+	// after-preview apply question, which is only asked once a
+	// --check --diff preview has succeeded (deploy --preview-only).
+	previewPassed bool
 	// reuseAnswers permits a deploy action to use the same explicit approval
 	// for repeated same-host dependency transactions. Reconcile multi-select
 	// workflows use it for the same reason.
@@ -332,6 +339,9 @@ func (p *promptAutomation) confirmPrompt(id, prompt string, defaultYes bool) boo
 		return true
 	}
 	if p.useDefaults {
+		if id == promptExecutionApplyAfterPreview {
+			p.previewPassed = true
+		}
 		return defaultYes
 	}
 	answer, ok := p.answer("confirm", id, prompt)
