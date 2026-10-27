@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/secretpath"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
@@ -34,20 +35,27 @@ import (
 // written, the session's writes as noteSessionWrites recorded them
 // (inventory.RestoreRosterFile). One that changed since, or is held, is
 // left as it is and returned in left (relative paths) for the operator to
-// check by hand; a roster the session never wrote is never touched.
-func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[string][]byte) (left []string, err error) {
+// check by hand. A roster the session never wrote is never touched and is
+// no rollback failure: whoever changed it meant to. Each file is restored
+// once, however many managed names it has (a .vault/ symlink and its
+// target), and one already back to its pre-session bytes counts as done.
+//
+// kept lists the rosters left as another writer changed them (not this
+// session's), so the caller can tell their change from a failed restore.
+func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[string][]byte) (left, kept []string, err error) {
 	wanted := make(map[string]managedFileEntry, len(snapshot))
 	for _, e := range snapshot {
 		wanted[e.RelPath] = e
 	}
 	current, err := managedFileEntries(dir)
 	if err != nil {
-		return nil, fmt.Errorf("rollback: scan managed files: %w", err)
+		return nil, nil, fmt.Errorf("rollback: scan managed files: %w", err)
 	}
 	now := make(map[string]managedFileEntry, len(current))
 	for _, e := range current {
 		now[e.RelPath] = e
 	}
+	restored := map[string]bool{}
 	// restoreRoster reports whether rel was a roster, handled here.
 	restoreRoster := func(rel string, before, after *managedFileEntry) (bool, error) {
 		if !rosterEntry(before) && !rosterEntry(after) {
@@ -56,13 +64,23 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[st
 		if before != nil && after != nil && bytes.Equal(before.Content, after.Content) {
 			return true, nil
 		}
-		full := filepath.Join(dir, filepath.FromSlash(rel))
 		expected, wrote := written[rel]
+		if !wrote {
+			// Changed by someone else, not this session: theirs to keep.
+			kept = append(kept, rel)
+			return true, nil
+		}
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		if file, err := secretpath.Canonical(full); err == nil {
+			if restored[file] {
+				return true, nil
+			}
+			restored[file] = true
+		}
 		var restoreErr error
 		switch {
-		case !wrote || after == nil:
-			// Changed, but not by this session — or gone: not this
-			// rollback's to decide.
+		case after == nil:
+			// This session wrote it and someone has removed it since.
 			restoreErr = inventory.ErrRosterChanged
 		case before == nil:
 			restoreErr = mutateRosterSource(dir, full, func() error { return inventory.RemoveRosterFile(full, expected) })
@@ -86,16 +104,16 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[st
 			afterPtr = &after
 		}
 		if handled, err := restoreRoster(e.RelPath, &e, afterPtr); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if handled {
 			continue
 		}
 		full := filepath.Join(dir, filepath.FromSlash(e.RelPath))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return nil, fmt.Errorf("rollback: mkdir for %s: %w", e.RelPath, err)
+			return nil, nil, fmt.Errorf("rollback: mkdir for %s: %w", e.RelPath, err)
 		}
 		if err := os.WriteFile(full, e.Content, 0o644); err != nil {
-			return nil, fmt.Errorf("rollback: restore %s: %w", e.RelPath, err)
+			return nil, nil, fmt.Errorf("rollback: restore %s: %w", e.RelPath, err)
 		}
 	}
 
@@ -104,16 +122,16 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[st
 			continue
 		}
 		if handled, err := restoreRoster(e.RelPath, nil, &e); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if handled {
 			continue
 		}
 		full := filepath.Join(dir, filepath.FromSlash(e.RelPath))
 		if err := os.Remove(full); err != nil {
-			return nil, fmt.Errorf("rollback: remove %s (created by the failed scenario): %w", e.RelPath, err)
+			return nil, nil, fmt.Errorf("rollback: remove %s (created by the failed scenario): %w", e.RelPath, err)
 		}
 	}
-	return left, nil
+	return left, kept, nil
 }
 
 // rosterEntry reports whether e, a managed file, is a roster under .vault/

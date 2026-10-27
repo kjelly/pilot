@@ -206,3 +206,53 @@ func TestEditApplyRollbackLeavesARosterAnotherProcessTouched(t *testing.T) {
 		})
 	}
 }
+
+// A roster with two managed names — .vault/alias.yaml linking to
+// .vault/ipa-identity.yaml — is restored once, and the rollback is
+// complete, not a partial failure naming the second name (PR #148
+// re-review).
+func TestEditApplyRollbackRestoresARosterWithTwoNames(t *testing.T) {
+	dir, rosters := scopeWorkspace(t)
+	alias := filepath.Join(dir, ".vault", "alias.yaml")
+	if err := os.Symlink("ipa-identity.yaml", alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	before := snapshotFiles(t, rosters["default"], rosters["group_vars"], filepath.Join(dir, ".vault", "main.yaml"))
+
+	result, err := applyEditScenario(dir, "issue-146-rollback-alias", rotationScenario(
+		editAction{Action: "delete_vault_key", File: "main.yaml", Key: "no_such_key"},
+	), editAgentSessionOptions{})
+	if err != nil || result == nil || !result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want a complete rollback", result, err)
+	}
+	assertUnchanged(t, before)
+	assertLinkTo(t, alias, "ipa-identity.yaml")
+}
+
+// A roster this session never wrote, which another pilot process changed
+// meanwhile, is that process's change: the rollback leaves it and is no
+// partial failure (PR #148 re-review).
+func TestEditApplyRollbackKeepsARosterTheSessionNeverWrote(t *testing.T) {
+	dir, _ := scopeWorkspace(t)
+	other := filepath.Join(dir, ".vault", "team.yaml")
+	writeSyncFile(t, other, syncTestRoster(`"Team-pass_9"`))
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	var changed []byte
+	opts := editAgentSessionOptions{Trace: func(event automationTraceEvent) {
+		if event.Action == "save_vault" {
+			data, _ := os.ReadFile(other)
+			writeSyncFile(t, other, string(data)+"# saved by pilot roster\n")
+			changed, _ = os.ReadFile(other)
+		}
+	}}
+	result, err := applyEditScenario(dir, "issue-146-rollback-other", rotationScenario(
+		editAction{Action: "delete_vault_key", File: "main.yaml", Key: "no_such_key"},
+	), opts)
+	if err != nil || result == nil || !result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want a complete rollback", result, err)
+	}
+	if after, _ := os.ReadFile(other); !bytes.Equal(after, changed) {
+		t.Fatalf("rollback undid another process's change:\n%s", after)
+	}
+}

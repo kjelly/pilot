@@ -20,15 +20,19 @@ var ErrRosterChanged = errors.New("inventory: roster changed since this session 
 // without pilot edit's workspace lock, so between the session's write and
 // the rollback one of them may have read the session's roster and saved
 // on top of it; restoring then would undo their change (PR #148
-// re-review). Held (ErrMutationLocked), unusable lock file
-// (ErrRosterLockFile) or changed (ErrRosterChanged): nothing is written,
-// and the caller reports the roster for a hand check.
+// re-review). A roster already holding original — restored through
+// another of its names, say — is done. Held (ErrMutationLocked), unusable
+// lock file (ErrRosterLockFile) or changed (ErrRosterChanged): nothing is
+// written, and the caller reports the roster for a hand check.
 func RestoreRosterFile(path string, expected, original []byte) error {
 	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
 	defer lk.release() //nolint:errcheck
+	if current, err := readSecretSourceFile(lk.target); err == nil && bytes.Equal(current, original) {
+		return nil
+	}
 	if err := rosterStillHolds(lk, expected); err != nil {
 		return err
 	}

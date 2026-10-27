@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -33,6 +34,31 @@ type editApplyResult struct {
 	// restored to.
 	Before []managedFileEntry
 	After  []managedFileEntry
+}
+
+// revisionWith is the revision of snapshot with the files named in kept as
+// they are in now — what a rollback that kept those must produce.
+func revisionWith(snapshot, now []managedFileEntry, kept []string) string {
+	if len(kept) == 0 {
+		return revisionOfEntries(snapshot)
+	}
+	keep := map[string]bool{}
+	for _, rel := range kept {
+		keep[rel] = true
+	}
+	var want []managedFileEntry
+	for _, e := range snapshot {
+		if !keep[e.RelPath] {
+			want = append(want, e)
+		}
+	}
+	for _, e := range now {
+		if keep[e.RelPath] {
+			want = append(want, e)
+		}
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i].RelPath < want[j].RelPath })
+	return revisionOfEntries(want)
 }
 
 // applyEditScenario validates scenario, then runs it against dir for
@@ -91,18 +117,21 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 
 	if runErr != nil {
-		left, restoreErr := restoreManagedFiles(dir, snapshot, written)
+		left, kept, restoreErr := restoreManagedFiles(dir, snapshot, written)
 		if restoreErr != nil {
 			return nil, fmt.Errorf("apply failed (%v) and rollback also failed: %w", runErr, restoreErr)
 		}
 		if len(left) > 0 {
 			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s: another pilot process changed or holds it since this session wrote it, so check it by hand (the roster's freeipa.admin.password must equal .vault/main.yaml's ipa_admin_password)", runErr, strings.Join(left, ", "))
 		}
-		revisionAfterRollback, err := computeWorkspaceRevision(dir)
+		afterRollback, err := managedFileEntries(dir)
 		if err != nil {
 			return nil, fmt.Errorf("apply failed (%v); rollback revision verification failed: %w", runErr, err)
 		}
-		if revisionAfterRollback != revisionBefore {
+		revisionAfterRollback := revisionOfEntries(afterRollback)
+		// The rosters another writer changed meanwhile are theirs: the
+		// rollback must have restored everything else exactly.
+		if revisionAfterRollback != revisionWith(snapshot, afterRollback, kept) {
 			return nil, fmt.Errorf("apply failed (%v); rollback did not restore the original revision (before=%s, after=%s)", runErr, revisionBefore, revisionAfterRollback)
 		}
 		return &editApplyResult{
