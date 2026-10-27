@@ -89,6 +89,15 @@ const hostShowWithMembership = `
 ----------------------
 `
 
+// Bodies of a host_dns HOST_INSPECT message (dnsrecord-show stdout, a
+// space, stderr, with the debug callback's literal `\n`), transcribed from
+// FreeIPA 4.13.4 captures on 2026-10-27; the full playbook runs they come
+// from are in testdata/host-dns.
+const (
+	dnsShowRecord   = `  dn: idnsname=i105-cap,idnsname=ipa.pilot.internal.,cn=dns,dc=ipa,dc=pilot,dc=internal\n  idnsname: i105-cap\n  arecord: 192.168.122.251\n  objectClass: top\n  objectClass: idnsrecord `
+	dnsShowNotFound = ` ipa: ERROR: i105-missing: DNS resource record not found`
+)
+
 func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error)) (*FreeIPAClientProvider, *fakeAnsibleExecutor) {
 	t.Helper()
 	// Legacy field fixtures contain the IPA body alone. The production
@@ -186,21 +195,21 @@ func TestFreeIPAProvider_HostObjectAndDNSAbsent(t *testing.T) {
 		{
 			name:           "clean after cleanup",
 			hostStdout:     hostShowNotFound,
-			dnsStdout:      "ipa: ERROR: web1: DNS record not found",
+			dnsStdout:      dnsShowNotFound,
 			wantHostStatus: "pass",
 			wantDNSStatus:  "pass",
 		},
 		{
 			name:           "host object still present blocks",
 			hostStdout:     hostShowClean,
-			dnsStdout:      "ipa: ERROR: web1: DNS record not found",
+			dnsStdout:      dnsShowNotFound,
 			wantHostStatus: "active_residue",
 			wantDNSStatus:  "pass",
 		},
 		{
 			name:           "DNS A record still present blocks (never a broad cascade — presence alone is residue)",
 			hostStdout:     hostShowNotFound,
-			dnsStdout:      "  arecord: 10.0.0.5",
+			dnsStdout:      dnsShowRecord,
 			wantHostStatus: "pass",
 			wantDNSStatus:  "active_residue",
 		},
@@ -287,7 +296,7 @@ func TestFreeIPAProvider_DirectReferencesAbsent(t *testing.T) {
 				case "sudo_references":
 					return &ansible.Result{Stdout: tc.sudoStdout}, nil
 				case "host_dns":
-					return &ansible.Result{Stdout: "ipa: ERROR: not found"}, nil
+					return &ansible.Result{Stdout: dnsShowNotFound}, nil
 				default:
 					return &ansible.Result{Stdout: tc.hostStdout}, nil
 				}
@@ -377,7 +386,7 @@ func TestFreeIPAProvider_UnknownServicePrincipalBlocks(t *testing.T) {
 		p, _ := testProvider(t, func(args []string) (*ansible.Result, error) {
 			switch queryKind(args) {
 			case "host_dns":
-				return &ansible.Result{Stdout: "ipa: ERROR: not found"}, nil
+				return &ansible.Result{Stdout: dnsShowNotFound}, nil
 			case "hbac_references", "sudo_references":
 				return &ansible.Result{Stdout: ""}, nil
 			default:
@@ -590,7 +599,7 @@ func TestFreeIPAProvider_TombstoneDoesNotHideTheTarget(t *testing.T) {
 		switch queryKind(args) {
 		case "host_dns":
 			if argsContain(args, "pilot_decommission_target_fqdn=pwr-host3.") {
-				return &ansible.Result{Stdout: "ipa: ERROR: DNS record not found"}, nil
+				return &ansible.Result{Stdout: dnsShowNotFound}, nil
 			}
 			return &ansible.Result{Stdout: hostDNS}, nil
 		case "hbac_references", "sudo_references":

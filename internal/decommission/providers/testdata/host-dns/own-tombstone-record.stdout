@@ -1,0 +1,274 @@
+PLAY [FreeIPA identity & authorization apply] **********************************
+
+TASK [Load canonical roster under a namespace] *********************************
+ok: [i105-dns]
+
+TASK [Detect FreeIPA server FQDN when roster omits freeipa.server] *************
+ok: [i105-dns]
+
+TASK [Fill canonical roster freeipa.server for this reconcile] *****************
+ok: [i105-dns]
+
+TASK [Gate: canonical roster version and legacy fields are mutually exclusive] ***
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical roster declares the FreeIPA server] **********************
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical top-level and FreeIPA keys are known] ********************
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical migration remains a dedicated fail-closed workflow] ******
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical user objects are structurally valid] *********************
+skipping: [i105-dns]
+
+TASK [Gate: canonical group objects and category prefixes are valid] ***********
+ok: [i105-dns] => (item=team-i105-gone) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": {
+        "category": "team",
+        "description": "never created",
+        "membership": {
+            "authoritative": true,
+            "groups": [],
+            "users": []
+        },
+        "name": "team-i105-gone",
+        "state": "absent",
+        "type": "posix"
+    },
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical host objects use FQDN and valid state] *******************
+ok: [i105-dns] => (item={'name': 'i105-host.ipa.pilot.internal', 'state': 'present', 'ip_address': '192.168.122.251', 'description': 'i105-host'}) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": {
+        "description": "i105-host",
+        "ip_address": "192.168.122.251",
+        "name": "i105-host.ipa.pilot.internal",
+        "state": "present"
+    },
+    "msg": "All assertions passed"
+}
+ok: [i105-dns] => (item={'name': 'i105-resid.ipa.pilot.internal', 'state': 'absent', 'ip_address': '192.168.122.252', 'description': 'i105-resid'}) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": {
+        "description": "i105-resid",
+        "ip_address": "192.168.122.252",
+        "name": "i105-resid.ipa.pilot.internal",
+        "state": "absent"
+    },
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical names and direct references are unique and resolvable] ***
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical netgroup objects are structurally valid] *****************
+skipping: [i105-dns]
+
+TASK [Gate: canonical netgroup names are unique and don't collide with hostgroups] ***
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: canonical netgroup membership references are resolvable] ***********
+skipping: [i105-dns]
+
+TASK [Gate: canonical HBAC rules are safe and references are resolvable] *******
+skipping: [i105-dns]
+
+TASK [Gate: canonical sudo rules and commands are safe] ************************
+skipping: [i105-dns]
+
+TASK [Gate: canonical sudo commands exclude shell escape primitives] ***********
+skipping: [i105-dns]
+
+TASK [Normalize canonical FreeIPA settings] ************************************
+ok: [i105-dns]
+
+TASK [Normalize canonical users for the compatibility reconciler] **************
+skipping: [i105-dns]
+
+TASK [Normalize canonical groups for the compatibility reconciler] *************
+ok: [i105-dns] => (item=team-i105-gone)
+
+TASK [Normalize canonical hostgroups for the compatibility reconciler] *********
+skipping: [i105-dns]
+
+TASK [Normalize canonical netgroups for the compatibility reconciler] **********
+skipping: [i105-dns]
+
+TASK [Normalize canonical HBAC rules for the compatibility reconciler] *********
+skipping: [i105-dns]
+
+TASK [Normalize absent static HBAC rules for deletion (spec 2026-09-07 §6.1)] ***
+skipping: [i105-dns]
+
+TASK [Normalize canonical sudo rules for the compatibility reconciler] *********
+skipping: [i105-dns]
+
+TASK [Append v3.0 compiled grant HBAC rules (spec.md §9)] **********************
+ok: [i105-dns]
+
+TASK [Append v3.0 compiled grant sudo rules (spec.md §10)] *********************
+ok: [i105-dns]
+
+TASK [Select legacy admin settings] ********************************************
+skipping: [i105-dns]
+
+TASK [Select active identity objects] ******************************************
+ok: [i105-dns]
+
+TASK [Gate: admin credential present (fail early, before any mutation)] ********
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: roster supplies at least one data list (catches the wrong -e file)] ***
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+skipping: [i105-dns]
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [i105-dns]
+
+TASK [Private Kerberos cache for the tickets below (issue #69)] ****************
+included: playbooks/apply/tasks/freeipa-private-ccache-open.yml for i105-dns
+
+TASK [Private Kerberos cache — create the cache file] **************************
+ok: [i105-dns]
+
+TASK [Private Kerberos cache — point KRB5CCNAME at it] *************************
+ok: [i105-dns]
+
+TASK [Private Kerberos cache — find caches a killed run left behind] ***********
+ok: [i105-dns]
+
+TASK [Private Kerberos cache — remove them] ************************************
+skipping: [i105-dns]
+
+TASK [Kinit admin] *************************************************************
+ok: [i105-dns]
+
+TASK [Prepare legacy authorization cache recovery] *****************************
+skipping: [i105-dns]
+
+TASK [Resolve enrolled SSH key cache targets] **********************************
+ok: [i105-dns]
+
+TASK [Gate: SSH cache targets must match the authorized stage] *****************
+skipping: [i105-dns] => (item=i105-dns) 
+skipping: [i105-dns]
+
+TASK [Gate: pending SSH cache targets exist in this inventory] *****************
+skipping: [i105-dns]
+
+TASK [Gate: pending SSH cache targets match the authorized stage] **************
+skipping: [i105-dns]
+
+TASK [Gate: refuse to delete allow_all via the static HBAC rule lifecycle (spec 2026-09-07 §7)] ***
+ok: [i105-dns] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: sudo rule category vs specific-list fields are mutually exclusive] ***
+skipping: [i105-dns]
+
+TASK [Compute the roster's absent host list] ***********************************
+ok: [i105-dns]
+
+TASK [Look up the current live host object for each absent roster host (spec.md §16.6/§16.7)] ***
+ok: [i105-dns] => (item=i105-resid.ipa.pilot.internal)
+
+TASK [Look up services managed by each absent host (spec.md §16.6) — separate from host-show, which never lists them] ***
+ok: [i105-dns] => (item=i105-resid.ipa.pilot.internal)
+
+TASK [Print live host inspection for external tooling (read-only)] *************
+ok: [i105-dns] => (item=i105-resid.ipa.pilot.internal) => {
+    "msg": "HOST_INSPECT[i105-resid.ipa.pilot.internal]:  ipa: ERROR: i105-resid.ipa.pilot.internal: host not found ------------------\n0 services matched\n------------------\n----------------------------\nNumber of entries returned 0\n---------------------------- "
+}
+
+TASK [Look up the current live host object for the query target host (read-only, decommission verify)] ***
+skipping: [i105-dns]
+
+TASK [Look up services managed by the query target host (read-only, decommission verify)] ***
+skipping: [i105-dns]
+
+TASK [Print host_object query inspection for external tooling (read-only)] *****
+skipping: [i105-dns]
+
+TASK [Look up the current live DNS A record for the query target host (read-only, decommission verify)] ***
+ok: [i105-dns]
+
+TASK [Print DNS inspection for external tooling (read-only)] *******************
+ok: [i105-dns] => {
+    "msg": "HOST_INSPECT[i105-resid.ipa.pilot.internal]:   dn: idnsname=i105-resid,idnsname=ipa.pilot.internal.,cn=dns,dc=ipa,dc=pilot,dc=internal\n  idnsname: i105-resid\n  arecord: 192.168.122.252\n  objectClass: top\n  objectClass: idnsrecord "
+}
+
+TASK [Look up direct HBAC rules referencing the query target host (read-only, decommission verify)] ***
+skipping: [i105-dns]
+
+TASK [Print HBAC reference inspection for external tooling (read-only)] ********
+skipping: [i105-dns]
+
+TASK [Look up direct sudo rules referencing the query target host (read-only, decommission verify)] ***
+skipping: [i105-dns]
+
+TASK [Print sudo reference inspection for external tooling (read-only)] ********
+skipping: [i105-dns]
+
+TASK [Settle legacy authorization cache recovery] ******************************
+skipping: [i105-dns]
+
+TASK [Report deferred authorization cache refresh] *****************************
+skipping: [i105-dns]
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: playbooks/apply/tasks/freeipa-private-ccache-close.yml for i105-dns
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+ok: [i105-dns]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+ok: [i105-dns]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [i105-dns]
+
+PLAY RECAP *********************************************************************
+i105-dns                   : ok=36   changed=0    unreachable=0    failed=0    skipped=30   rescued=0    ignored=0   

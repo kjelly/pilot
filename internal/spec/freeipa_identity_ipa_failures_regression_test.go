@@ -306,9 +306,6 @@ var identityFailedWhenFalse = map[string]string{
 	"Look up password state for users with a declared password":                     `"Gate: the password state of every declared password was read" fails the run`,
 	"Set password for users that need one (first-time onboard, or requested reset)": `"Gate: every password this run set was accepted" fails the run; no_log would hide the user here`,
 	"Rollback HBAC lockdown by re-enabling allow_all":                               `rescue; the next task always fails and reports whether the rollback worked`,
-	// Known gaps with their own issues:
-	"Look up the current live DNS A record for the query target host (read-only, decommission verify)": "issue #105: the error text of a FreeIPA without integrated DNS is not captured yet, so errors cannot be told apart",
-	"Check the current DNS A record value for each absent host's owner (surgical delete step 1)":       "issue #105: same as the verify DNS query",
 }
 
 func TestRegression_IdentityFailedWhenFalseIsAllowlisted(t *testing.T) {
@@ -427,5 +424,89 @@ func TestRegression_IdentityRuleReferenceQueriesStopOnErrors(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Issue #105: host decommission's DNS lookups read every `ipa
+// dnsrecord-show` failure as "no record". The cleanup then skipped the
+// surgical delete while host-del (no --updatedns) went ahead, leaving the
+// roster-owned A record, and Verify passed. Only the outcomes captured from
+// FreeIPA 4.13.4 that prove there is no record may pass: record not found,
+// zone not found, and DNS not configured (freeipa_setup_dns: false). The
+// record and IP are the capture's (testdata/freeipa-ipa-cli/dnsrecord-*).
+const (
+	dnsShowArgs = "dnsrecord-show ipa.pilot.internal i105-cap --all --raw"
+	dnsDelArgs  = "dnsrecord-del ipa.pilot.internal i105-cap --a-rec=192.168.122.251"
+)
+
+// dnsShowOutcomes are the dnsrecord-show answers both lookups must handle:
+// the fixture, and whether the lookup must fail the run.
+var dnsShowOutcomes = []struct {
+	name, fixture string
+	wantFail      bool
+}{
+	{"record exists", "dnsrecord-show-record", false},
+	{"record not found", "dnsrecord-show-record-not-found", false},
+	{"zone not found", "dnsrecord-show-zone-not-found", false},
+	{"DNS not configured", "dnsrecord-show-dns-not-configured", false},
+	{"no Kerberos ticket", "no-kerberos-ticket", true},
+	{"IPA API unreachable", "dnsrecord-show-api-unreachable", true},
+}
+
+func TestRegression_IdentityDecommissionDNSQueryStopsOnErrors(t *testing.T) {
+	const lookup = "Look up the current live DNS A record for the query target host (read-only, decommission verify)"
+	const print = "Print DNS inspection for external tooling (read-only)"
+	vars := map[string]any{
+		"ipa_domain":                     "ipa.pilot.internal",
+		"pilot_decommission_query":       "host_dns",
+		"pilot_decommission_target_fqdn": "i105-cap.ipa.pilot.internal",
+	}
+	for _, tc := range dnsShowOutcomes {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeIPA(t, map[string]string{dnsShowArgs: tc.fixture})
+			res := runIdentityTasks(t, []string{lookup, print}, vars)
+			if failed := res.rc != 0; failed != tc.wantFail || (tc.wantFail && failureOf(res, lookup) == "") {
+				t.Fatalf("rc=%d failures=%v, want failure at the lookup: %v", res.rc, res.failures, tc.wantFail)
+			}
+			printed := slices.ContainsFunc(res.messages, func(m string) bool {
+				return strings.HasPrefix(m, print+": ") && strings.Contains(m, "HOST_INSPECT[i105-cap.ipa.pilot.internal]")
+			})
+			if printed == tc.wantFail {
+				t.Fatalf("HOST_INSPECT printed: %v, want %v; messages %v", printed, !tc.wantFail, res.messages)
+			}
+		})
+	}
+}
+
+func TestRegression_IdentityAbsentHostDNSCheckStopsOnErrors(t *testing.T) {
+	const check = "Check the current DNS A record value for each absent host's owner (surgical delete step 1)"
+	const hostDel = "host-del i105-cap.ipa.pilot.internal"
+	names := []string{
+		check,
+		"Gate: refuse to delete an absent host's DNS record if the live value is foreign/ambiguous (spec.md §16.5)",
+		"Remove only the Pilot-owned A record value for each absent host (spec.md §16.5, INV-14 — never a broad cascade)",
+		"Delete the FreeIPA host object for each roster host marked absent (spec.md §16.3 step 5)",
+	}
+	vars := map[string]any{
+		"ipa_domain": "ipa.pilot.internal",
+		"freeipa_absent_hosts": []any{
+			map[string]any{"name": "i105-cap.ipa.pilot.internal", "state": "absent", "ip_address": "192.168.122.251"},
+		},
+	}
+	for _, tc := range dnsShowOutcomes {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := fakeIPA(t, map[string]string{dnsShowArgs: tc.fixture, dnsDelArgs: "dnsrecord-del", hostDel: "host-del"})
+			res := runIdentityTasks(t, names, vars)
+			if failed := res.rc != 0; failed != tc.wantFail || (tc.wantFail && failureOf(res, check) == "") {
+				t.Fatalf("rc=%d failures=%v, want failure at the check: %v", res.rc, res.failures, tc.wantFail)
+			}
+			wantDel := tc.fixture == "dnsrecord-show-record"
+			if got := slices.Contains(calls(), dnsDelArgs); got != wantDel {
+				t.Fatalf("dnsrecord-del ran: %v, want %v; calls %v", got, wantDel, calls())
+			}
+			if got := slices.Contains(calls(), hostDel); got == tc.wantFail {
+				t.Fatalf("host-del ran: %v, want %v; calls %v", got, !tc.wantFail, calls())
+			}
+		})
 	}
 }

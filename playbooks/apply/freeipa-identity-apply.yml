@@ -3640,6 +3640,13 @@
         # but a sudo rule can still name it as an external host. `find` exits 1
         # when there is no rule at all and 0 with a stderr warning when the
         # result is truncated, so both are checked (captured, FreeIPA 4.13.4).
+        #
+        # The DNS lookup (issue #105) fails on any error except the three
+        # outcomes that prove there is no record, captured from FreeIPA
+        # 4.13.4 (exit 2): "<name>: DNS resource record not found",
+        # "<zone>.: DNS zone not found", and "DNS is not configured" from a
+        # server installed with freeipa_setup_dns: false. A Kerberos, LDAP or
+        # connection error used to read as "no record" and pass HD10.
         - name: "Look up the current live DNS A record for the query target host (read-only, decommission verify)"
           ansible.builtin.command:
             argv:
@@ -3651,7 +3658,11 @@
               - --raw
           register: freeipa_decom_query_dns
           changed_when: false
-          failed_when: false
+          vars:
+            freeipa_dns_absent_error: '(?m)^ipa: ERROR: (.+: DNS (resource record|zone) not found|DNS is not configured)$'
+          failed_when:
+            - freeipa_decom_query_dns.rc != 0
+            - not (freeipa_decom_query_dns.rc == 2 and (freeipa_decom_query_dns.stderr | default('')) is search(freeipa_dns_absent_error))
           when:
             - pilot_decommission_query | default('') == 'host_dns'
             - pilot_decommission_target_fqdn | default('') | length > 0
@@ -3794,6 +3805,10 @@
         # cascade, and never a foreign value at the same owner. Mirrors
         # playbooks/apply/tasks/internal-endpoint-delete.yml's own
         # check-then-exact-delete idiom (spec.md §17 reference design).
+        # Only the captured "no record" outcomes pass (issue #105, same
+        # allowlist as the decommission verify DNS lookup above); any other
+        # error stops the run here, before host-del (which has no
+        # --updatedns) could leave the roster-owned A record behind.
         - name: "Check the current DNS A record value for each absent host's owner (surgical delete step 1)"
           ansible.builtin.command:
             argv:
@@ -3808,7 +3823,11 @@
             label: "{{ item.name }}"
           register: freeipa_absent_host_dns_show
           changed_when: false
-          failed_when: false
+          vars:
+            freeipa_dns_absent_error: '(?m)^ipa: ERROR: (.+: DNS (resource record|zone) not found|DNS is not configured)$'
+          failed_when:
+            - freeipa_absent_host_dns_show.rc != 0
+            - not (freeipa_absent_host_dns_show.rc == 2 and (freeipa_absent_host_dns_show.stderr | default('')) is search(freeipa_dns_absent_error))
           tags: [identity, hosts]
 
         - name: "Gate: refuse to delete an absent host's DNS record if the live value is foreign/ambiguous (spec.md §16.5)"
