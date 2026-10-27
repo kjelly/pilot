@@ -56,6 +56,11 @@
       - "{{ hosts_alias_target_host | default('') }}"
   register: hosts_alias_dns_lookup
   changed_when: false
+  # Read-only (an IP literal check or a resolver lookup), so it must also run
+  # under --check: skipped there, stdout is empty, "Consolidate" below sets
+  # hosts_alias_resolved_ip to "" and every caller's `lineinfile` previews its
+  # /etc/hosts pin as "\t<alias>" (the IP removed) — a false "changed".
+  check_mode: false
   when:
     - hosts_alias_target_host | default('') | length > 0
     - hosts_alias_resolved_ip | default('') | length == 0
