@@ -78,9 +78,7 @@ func TestRosterLockFileIsNeverFollowed(t *testing.T) {
 // As root, a symlinked lock file is refused before anything is chowned:
 // the link's target keeps its owner (PR #148 re-review, F3).
 func TestRosterLockFileSymlinkIsNotChowned(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("only root can chown another user's file")
-	}
+	requireRoot(t)
 	const uid, gid = 12345, 12346
 	path := writeLockTestRoster(t)
 	if err := os.Chown(path, uid, gid); err != nil {
@@ -235,9 +233,7 @@ func TestNoOpRosterUpdatesNeedNoLock(t *testing.T) {
 // Run as root, the admin password sync's atomic replace hands the new file
 // to the roster's owner through its descriptor (PR #148 re-review, F3).
 func TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("only root can give a file away")
-	}
+	requireRoot(t)
 	const uid, gid = 12345, 12346
 	path := writeLockTestRoster(t)
 	if err := os.Chown(path, uid, gid); err != nil {

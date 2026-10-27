@@ -818,9 +818,7 @@ func TestDecryptRosterToTempFileCleanupRemovesLockFiles(t *testing.T) {
 // roster's owner — its directory's owner for a roster about to be created
 // — so the owner can still work on it without root.
 func TestLockRosterFileKeepsTheOwner(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("only root can give a lock file away")
-	}
+	requireRoot(t)
 	const uid, gid = 12345, 12346
 	dir := t.TempDir()
 	if err := os.Chown(dir, uid, gid); err != nil {

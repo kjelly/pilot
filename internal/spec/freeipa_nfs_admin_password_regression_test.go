@@ -113,7 +113,7 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 			// The JSON callback escapes quotes, backslashes and non-ASCII, so
 			// also look for a fragment of each that it prints verbatim.
 			for _, secret := range []string{vaultPassword, stalePassword, "pass#2", "Stale'pass"} {
-				if strings.Contains(res.raw, secret) {
+				if strings.Contains(res.raw, secret) || strings.Contains(res.stderr, secret) {
 					t.Fatal("Ansible output leaked an admin password")
 				}
 			}
@@ -150,4 +150,20 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 
 func yamlDoubleQuoted(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// The leak scan above reads what Ansible writes to stderr too: warnings
+// and errors go there, not into the JSON callback's stdout. An unmatched
+// --limit pattern is one: Ansible prints it in a [WARNING] on stderr.
+func TestRegression_GatewayTaskHarnessCapturesStderr(t *testing.T) {
+	t.Parallel()
+	const marker = "pilot-stderr-marker-7c1f"
+	task := map[string]any{"name": "noop", "ansible.builtin.debug": map[string]any{"msg": "ok"}}
+	res := runGatewayTasks(t, t.TempDir(), []any{task}, nil, nil, "--limit", "localhost:"+marker)
+	if res.rc != 0 {
+		t.Fatalf("rc=%d\nstdout:\n%s\nstderr:\n%s", res.rc, res.raw, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "[WARNING]") || !strings.Contains(res.stderr, marker) {
+		t.Fatalf("stderr does not hold the unmatched-pattern warning naming %s:\n%s", marker, res.stderr)
+	}
 }

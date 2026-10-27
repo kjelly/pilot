@@ -109,6 +109,26 @@ jobs:
       - name: make identity-secret-test
         run: make identity-secret-test
 
+  root-tests:
+    # The roster ownership tests need root: pilot-cli runs pilot as root
+    # under `docker run`, and only root can give a file to another user.
+    # They skip as the runner user in the Go test job; `make root-test`
+    # runs them through sudo -n, failing any that would skip.
+    name: Root-only ownership tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make root-test
+        run: make root-test
+
   thanos-retention:
     # Runs the Thanos Compactor (the image version the playbooks deploy)
     # with thanos-query-apply.yml's retention defaults against synthetic

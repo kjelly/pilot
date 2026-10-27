@@ -141,6 +141,19 @@ identity-secret-test: ## Require real Ansible for password transport, failure, c
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)$$' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
 
+# ROOT_TESTS are the internal/inventory tests that call requireRoot: what a
+# roster write keeps when pilot runs as root (pilot-cli under `docker run`).
+# They skip as a normal user; root-test compiles them as this user and runs
+# them as root, where PILOT_REQUIRE_ROOT_TESTS=1 turns a skip into a
+# failure. TestRootOnlyTestsRunInCI keeps this list complete.
+ROOT_TESTS := TestLockRosterFileKeepsTheOwner|TestMigrationBackupKeepsTheRosterOwner|TestRosterLockFileSymlinkIsNotChowned|TestRosterWritersRefuseALockedRoster|TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot
+
+root-test: ## Run the root-only roster ownership tests as root (needs passwordless sudo; CI job "Root-only ownership tests")
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	go test -c -o "$$tmp/inventory.test" ./internal/inventory/ && \
+	cd internal/inventory && \
+	sudo -n env PILOT_REQUIRE_ROOT_TESTS=1 "$$tmp/inventory.test" -test.run '^($(ROOT_TESTS))$$' -test.count=1 -test.timeout 5m -test.v
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
@@ -154,7 +167,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test identity-secret-test
+.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test identity-secret-test root-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -96,7 +97,10 @@ type ag82Run struct {
 	items map[string][]string
 	// changed lists the tasks that reported a change.
 	changed map[string]bool
-	raw     string
+	// raw is ansible-playbook's stdout (the JSON callback) and stderr
+	// its stderr, where warnings and errors go: a leak scan reads both.
+	raw    string
+	stderr string
 }
 
 // gatewayHealthy and gatewayUnhealthy are ag82_test_health_cmd values: a
@@ -160,8 +164,10 @@ func runGatewayTasks(t *testing.T, dir string, tasks []any, vars, extra map[stri
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1",
 		"ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, runErr := cmd.Output()
-	res := ag82Run{raw: string(out), items: map[string][]string{}, changed: map[string]bool{}}
+	res := ag82Run{raw: string(out), stderr: stderr.String(), items: map[string][]string{}, changed: map[string]bool{}}
 	if ee, ok := runErr.(*exec.ExitError); ok {
 		res.rc = ee.ExitCode()
 	} else if runErr != nil {

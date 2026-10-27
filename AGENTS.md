@@ -1235,7 +1235,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
      `ansible-vault edit` 的鎖只在 editor 執行期間持有(`rosterEditCommand.Run`),
      自動化丟掉這個指令時不會留下鎖(`::TestEditApplyLeavesNoRosterLockAfterAnEncryptedFileStep`)。
      rollback 對同一個檔案的多個名字只還原一次,已回到原內容的算完成,這個 session
-     沒寫過、被別人改過的名冊不算失敗(`::TestEditApplyRollbackRestoresARosterWithTwoNames`、
+     沒寫過、被別人改過的名冊不算失敗(`edit_tui_vault_roster_scope_test.go::TestEditApplyRollbackRestoresARosterWithTwoNames`、
      `::TestEditApplyRollbackKeepsARosterTheSessionNeverWrote`)。
    - 名冊被持有或 lock 檔不能用時,`pilot edit` 在終端機顯示 banner、不結束 session;
      自動化／MCP 則讓那一步失敗(錯誤列出名冊路徑與原因)、整個 apply rollback,MCP 回傳

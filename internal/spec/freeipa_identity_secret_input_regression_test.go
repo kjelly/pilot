@@ -287,7 +287,7 @@ else cat "$IDENTITY_TEST_DIR/new"; fi
 					t.Fatalf("password failure did not reach the sanitized gate: %v", res.failures)
 				}
 				for _, secret := range append(slices.Clone(passwords), adminPassword) {
-					if strings.Contains(res.raw, secret) {
+					if strings.Contains(res.raw, secret) || strings.Contains(res.stderr, secret) {
 						t.Fatal("Ansible output leaked a password")
 					}
 				}
