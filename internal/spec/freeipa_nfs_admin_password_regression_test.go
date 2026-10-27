@@ -76,6 +76,8 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 		"no vault":        {roster: stalePassword},
 	} {
 		t.Run(name, func(t *testing.T) {
+			// Each case runs its own playbook in its own directory.
+			t.Parallel()
 			dir := t.TempDir()
 			roster := filepath.Join(dir, "ipa-identity.yaml")
 			scalar := yamlDoubleQuoted(tt.roster)
@@ -119,6 +121,7 @@ func TestRegression_FreeIPANFSServerAdminPasswordDriftGate(t *testing.T) {
 	}
 
 	t.Run("drifted, then fixed by hand", func(t *testing.T) {
+		t.Parallel()
 		dir := t.TempDir()
 		roster := filepath.Join(dir, "ipa-identity.yaml")
 		line := func(password string) string { return "    password: " + yamlDoubleQuoted(password) + "\n" }
