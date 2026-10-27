@@ -1,0 +1,5 @@
+  dn: idnsname=i105-cap,idnsname=ipa.pilot.internal.,cn=dns,dc=ipa,dc=pilot,dc=internal
+  idnsname: i105-cap
+  arecord: 192.168.122.251
+  objectClass: top
+  objectClass: idnsrecord

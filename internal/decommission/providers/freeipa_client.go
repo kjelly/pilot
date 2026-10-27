@@ -464,13 +464,11 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client verify %s: dns query: %w", fqdn, err)
 	}
-	dns := inspectionFor(dnsRes.Stdout, fqdn)
-	dnsAbsent := notFoundPattern.MatchString(dns) || len(aRecordPattern.FindAllStringSubmatch(dns, -1)) == 0
-	out = append(out, Verification{
-		Provider: FreeIPAClientProviderID, Kind: "host_dns", Identity: fqdn,
-		Status: statusForAbsence(dnsAbsent), Active: !dnsAbsent,
-		Detail: "ipa dnsrecord-show for " + fqdn,
-	})
+	dnsCheck, err := hostDNSVerification(fqdn, inspectionFor(dnsRes.Stdout, fqdn))
+	if err != nil {
+		return nil, fmt.Errorf("freeipa-client verify %s: dns query: %w", fqdn, err)
+	}
+	out = append(out, dnsCheck)
 
 	for _, q := range []struct{ query, kind string }{
 		{"hbac_references", "hbac_direct"},
@@ -774,8 +772,8 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	// then interpreted as "nothing found" — i.e. a false PASS for HD10-
 	// HD12/INV-6/INV-10's zero-residue checks. Fail closed instead. The
 	// playbook's own lookups also fail the run on an `ipa` error other than
-	// "not found"/"no match" (issues #102, #104); only the DNS lookup still
-	// reads every error as absence (issue #105).
+	// "not found"/"no match"/"DNS is not configured" (issues #102, #104,
+	// #105).
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
 	}
@@ -815,6 +813,58 @@ func membershipVerification(kind, fqdn string, matches [][]string) Verification 
 		Status: statusForAbsence(len(live) == 0), Active: len(live) > 0,
 		Detail: fmt.Sprintf("%d live membership(s): %s", len(live), strings.Join(live, ", ")),
 	}
+}
+
+// The outcomes of `ipa dnsrecord-show <zone> <name> --all --raw` that prove
+// the target has no record, as captured from FreeIPA 4.13.4 (stderr, exit
+// 2; testdata/host-dns). A server without integrated DNS
+// (freeipa_setup_dns: false) cannot hold the record at all. Each message
+// must sit on one line: the HOST_INSPECT text joins lines with a literal
+// `\n`, so the name part stops at a backslash.
+var (
+	dnsRecordNotFoundPattern = regexp.MustCompile(`ipa: ERROR: [^"\\\n]+: DNS resource record not found`)
+	dnsZoneNotFoundPattern   = regexp.MustCompile(`ipa: ERROR: [^"\\\n]+: DNS zone not found`)
+	dnsNotConfiguredPattern  = regexp.MustCompile(`ipa: ERROR: DNS is not configured`)
+	// A successful --all --raw show names the record as "idnsname: <name>"
+	// (the "dn: idnsname=..." line uses "=").
+	dnsRecordShownPattern = regexp.MustCompile(`(?:^|\s|\\n)idnsname:`)
+)
+
+// hostDNSVerification reads the target's host_dns HOST_INSPECT text (issue
+// #105). Only a record shown without an A value, one of the captured
+// "absent" errors, or "DNS is not configured" count as no record: anything
+// else is an error, never a pass. A shown record is checked first, so the
+// target's own roster tombstone in the same output ("host not found")
+// cannot hide a record that is still there.
+func hostDNSVerification(fqdn, text string) (Verification, error) {
+	v := Verification{Provider: FreeIPAClientProviderID, Kind: "host_dns", Identity: fqdn}
+	switch {
+	case dnsRecordShownPattern.MatchString(text):
+		values := extractCSVValues(aRecordPattern.FindAllStringSubmatch(text, -1))
+		v.Status, v.Active = statusForAbsence(len(values) == 0), len(values) > 0
+		v.Detail = fmt.Sprintf("ipa dnsrecord-show for %s: %d A record value(s) live", fqdn, len(values))
+		if len(values) > 0 {
+			v.Detail += ": " + strings.Join(values, ", ")
+		}
+	case dnsRecordNotFoundPattern.MatchString(text), dnsZoneNotFoundPattern.MatchString(text):
+		v.Status = "pass"
+		v.Detail = "ipa dnsrecord-show for " + fqdn + ": no DNS record"
+	case dnsNotConfiguredPattern.MatchString(text):
+		v.Status = "pass"
+		v.Detail = "FreeIPA DNS is not configured on the server, so it holds no DNS record for " + fqdn
+	default:
+		return Verification{}, fmt.Errorf("unrecognized ipa dnsrecord-show result for %s: %q", fqdn, excerpt(text, 300))
+	}
+	return v, nil
+}
+
+// excerpt returns s trimmed and cut to at most n bytes.
+func excerpt(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }
 
 func servicePrincipalVerification(fqdn string, unknown []string) Verification {

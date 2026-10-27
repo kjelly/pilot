@@ -200,12 +200,25 @@ matrices PASS; identity preview/apply/idempotency PASS, final changed=0;
 fingerprint and run IDs are in the
 [current evidence record](../evidence/host-decommission/2026-10-19-e64cd44.md).
 
-**Known gap (2026-10-15).** The DNS part of HD10 reports pass when
-`ipa dnsrecord-show` fails for any reason, and the cleanup step skips the
-surgical DNS delete on such a failure (issue #105). Since issue #102 the
-host-object and service-principal lookups fail the run on any error other
-than "host not found" / "0 services matched", so Plan and Verify stop
-instead of reading an error as "absent".
+**DNS lookups (issue #105, 2026-10-27).** Both `ipa dnsrecord-show`
+lookups — HD10's `host_dns` query and the surgical-delete check before
+host-del — used to read any failure as "no record": the roster-owned A
+record was then never deleted (host-del has no `--updatedns`) and HD10
+passed. They now fail the run on every error except the three outcomes
+captured from FreeIPA 4.13.4 that prove there is no record (all exit 2):
+`ipa: ERROR: <name>: DNS resource record not found`,
+`ipa: ERROR: <zone>.: DNS zone not found`, and
+`ipa: ERROR: DNS is not configured` from a server installed with
+`freeipa_setup_dns: false`, where decommission therefore still works.
+Verify classifies the `host_dns` observation by those messages or by a
+shown record (`idnsname:`) and its `arecord:` values; anything else is an
+error, not a pass. That also fixes a false pass the generic "not found"
+match allowed: once the target is `state: absent` in the roster its own
+tombstone block ("host not found") sits next to its DNS block, and
+hid an A record that was still there. Since issue #102 the host-object and
+service-principal lookups fail the run on any error other than "host not
+found" / "0 services matched", so Plan and Verify stop instead of reading
+an error as "absent".
 
 ## Checks
 
