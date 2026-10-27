@@ -315,7 +315,7 @@ func TestConfigSecretPaths_ExternalRosterAutofixRechecksWorkspace(t *testing.T) 
 				case "nfs_bootstrap":
 					pushNFSRoleBootstrap(&r, dir, filepath.Join(dir, "hosts.yml"), hf, h.Name, nil)
 				case "nfs_autofix":
-					autofixNFSRosterEntry(dir, h)
+					autofixNFSRosterEntry(&r, dir, h)
 				case "inventory_generate":
 					writeMissingNFSRosterEntries(io.Discard, dir, hf)
 				case "migration_banner":

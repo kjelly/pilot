@@ -10,6 +10,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,28 +275,69 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 		r.err = fmt.Errorf("ansible-vault 不在 PATH 上: %w", lookErr)
 		return nil
 	}
-	// Any encrypted .vault/ file but the deploy vault may be a roster, and
-	// ansible-vault writes it back: hold the roster lock while it runs so
-	// no other roster writer saves in between. Released once it exits
-	// (vaultShelloutDoneMsg, editRouterModel.Update).
-	if !sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
-		release, err := inventory.HoldRosterLock(path)
-		if err != nil {
-			if banner, ok := rosterBusyBanner(path, err); ok {
-				return pushVaultFilePicker(r, dir, banner)
-			}
-			r.err = err
-			return nil
-		}
-		r.releaseVaultEdit = release
-	}
-	cmd := exec.Command(bin, "edit", path)
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+	return tea.Exec(newVaultEditCommand(dir, bin, path), func(err error) tea.Msg {
 		if err != nil {
 			err = fmt.Errorf("ansible-vault edit %s: %w", path, err)
 		}
 		return vaultShelloutDoneMsg{dir: dir, path: path, err: err}
 	})
+}
+
+// newVaultEditCommand is `bin edit path`. Any encrypted .vault/ file but
+// the deploy vault may be a roster, and ansible-vault writes it back: for
+// those the roster lock is held while it runs (rosterEditCommand.Run), so
+// no other roster writer saves in between.
+func newVaultEditCommand(dir, bin, path string) *rosterEditCommand {
+	edit := &rosterEditCommand{Cmd: exec.Command(bin, "edit", path)}
+	if !sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
+		edit.roster = path
+	}
+	return edit
+}
+
+// rosterEditCommand is `ansible-vault edit` as tea.Exec runs it. For a
+// file that may be a roster it holds the roster lock for exactly as long
+// as the editor runs: taken in Run and released when Run returns, so a
+// command nothing runs — the automation driver discards it — holds
+// nothing, and a held roster never opens the editor (Run returns the lock
+// error, which vaultShelloutDoneMsg turns into a banner).
+type rosterEditCommand struct {
+	*exec.Cmd
+	roster string // the file to lock; "" for the deploy vault
+}
+
+// Run takes the roster lock, if any, and runs the editor under it.
+func (c *rosterEditCommand) Run() error {
+	if c.roster != "" {
+		release, err := inventory.HoldRosterLock(c.roster)
+		if err != nil {
+			return err
+		}
+		defer release() //nolint:errcheck
+	}
+	return c.Cmd.Run()
+}
+
+// SetStdin, SetStdout and SetStderr wire the editor to the terminal, as
+// tea.ExecProcess does for an *exec.Cmd, unless already set.
+func (c *rosterEditCommand) SetStdin(r io.Reader) {
+	if c.Stdin == nil {
+		c.Stdin = r
+	}
+}
+
+// SetStdout is SetStdin's stdout counterpart.
+func (c *rosterEditCommand) SetStdout(w io.Writer) {
+	if c.Stdout == nil {
+		c.Stdout = w
+	}
+}
+
+// SetStderr is SetStdin's stderr counterpart.
+func (c *rosterEditCommand) SetStderr(w io.Writer) {
+	if c.Stderr == nil {
+		c.Stderr = w
+	}
 }
 
 func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.Doc, dirty bool, banner string) tea.Cmd {

@@ -252,7 +252,7 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 	}
 
 	if err := mutateRosterSource(dir, path, func() error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushTopMenu(r, dir, banner)
 		}
 		r.err = err
@@ -385,7 +385,7 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterUser(path, name) }); err != nil {
-			if banner, ok := rosterBusyBanner(path, err); ok {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterUsersMenu(r, dir, path, banner)
 			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
@@ -506,7 +506,7 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
 		}
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
-			if banner, ok := rosterBusyBanner(path, err); ok {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterGroupsMenu(r, dir, path, banner)
 			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
@@ -661,16 +661,25 @@ func mutateRosterSource(dir, path string, mutate func() error) error {
 // rosterBusyBanner is the banner for a roster write refused because
 // another pilot process holds the roster (inventory.ErrMutationLocked) or
 // its lock file cannot be used (inventory.ErrRosterLockFile). Nothing was
-// written and the operator can retry once that is over or fixed, so pilot
-// edit reports it and stays open instead of ending the session (r.err).
-func rosterBusyBanner(path string, err error) (string, bool) {
+// written. At the terminal the operator can retry once that is over or
+// fixed, so pilot edit shows the banner and stays open instead of ending
+// the session (r.err). The refusal is also recorded on r (writeRefused):
+// the automation driver fails the step with it, so a scenario — and an
+// MCP apply — rolls back instead of reporting a write that never happened.
+func rosterBusyBanner(r *editRouterModel, path string, err error) (string, bool) {
+	var banner string
 	switch {
 	case errors.Is(err, inventory.ErrMutationLocked):
-		return fmt.Sprintf("⚠️  未寫入 %s：另一個 pilot 名冊操作正鎖住它，等它結束後再試一次", path), true
+		banner = fmt.Sprintf("⚠️  未寫入 %s：另一個 pilot 名冊操作正鎖住它，等它結束後再試一次", path)
+		err = fmt.Errorf("roster %s was not written: another pilot process holds its lock: %w", path, inventory.ErrMutationLocked)
 	case errors.Is(err, inventory.ErrRosterLockFile):
-		return fmt.Sprintf("⚠️  未寫入 %s：%v", path, err), true
+		banner = fmt.Sprintf("⚠️  未寫入 %s：%v", path, err)
+		err = fmt.Errorf("roster %s was not written: %w", path, err)
+	default:
+		return "", false
 	}
-	return "", false
+	r.writeRefused = err
+	return banner, true
 }
 
 // mutateRosterSourceValue applies the same persistence guard to helpers
@@ -716,7 +725,7 @@ func rosterIntValidator(s string) error {
 // gate chain (Simulate first, only write once it reports no violations).
 // ok=false means nothing was written — either a validation rejection
 // (banner explains why) or name no longer exists.
-func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyUserEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterUser(path, name)
 	if err != nil {
 		return "", false, err
@@ -734,7 +743,7 @@ func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (b
 		return formatRosterViolations(violations), false, nil
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return banner, false, nil
 		}
 		return "", false, err
@@ -746,7 +755,7 @@ func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (b
 // (possibly changed) detail screen — the commit point every scalar/bool/
 // enum/password field widget below routes through.
 func pushRosterEditUser(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyUserEdit(dir, path, name, mutate)
+	banner, _, err := rosterApplyUserEdit(r, dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil
@@ -1087,7 +1096,7 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 // (not the rejected newValues) on a validation failure, so the screen
 // always shows what's actually on disk.
 func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, oldValues, newValues []string) tea.Cmd {
-	banner, ok, err := rosterApplyUserEdit(dir, path, name, func(f map[string]any) {
+	banner, ok, err := rosterApplyUserEdit(r, dir, path, name, func(f map[string]any) {
 		ssh := rosterSubmapClone(f, "ssh_keys")
 		ssh["authoritative"] = true
 		ssh["values"] = newValues
@@ -1106,7 +1115,7 @@ func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, old
 // ---- groups: full-detail preview + per-field edit -----------------------
 
 // rosterApplyGroupEdit is rosterApplyUserEdit's group counterpart.
-func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyGroupEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterGroup(path, name)
 	if err != nil {
 		return "", false, err
@@ -1124,7 +1133,7 @@ func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (
 		return formatRosterViolations(violations), false, nil
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return banner, false, nil
 		}
 		return "", false, err
@@ -1133,7 +1142,7 @@ func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (
 }
 
 func pushRosterEditGroup(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyGroupEdit(dir, path, name, mutate)
+	banner, _, err := rosterApplyGroupEdit(r, dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil

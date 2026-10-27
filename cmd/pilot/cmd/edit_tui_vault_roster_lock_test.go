@@ -2,12 +2,19 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -127,12 +134,12 @@ func TestRosterCandidatesListEachFileOnce(t *testing.T) {
 	}
 }
 
-// A roster another pilot process holds, or whose lock file this user
-// cannot open (a root-run pilot left it 0000), is a banner in pilot edit,
-// not the end of the session: nothing is written, and once the lock is
-// gone the same session writes (PR #148 re-review, F4).
-func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
-	for name, block := range map[string]func(t *testing.T, roster string) (want string, unblock func()){
+// busyRosterCases block a roster's writes two ways: another pilot process
+// holds its lock, or its lock file is one this user cannot open (a
+// root-run pilot left it 0000). Each returns the reason an error or banner
+// must name, and how to unblock.
+func busyRosterCases() map[string]func(t *testing.T, roster string) (reason string, unblock func()) {
+	return map[string]func(t *testing.T, roster string) (string, func()){
 		"held": func(t *testing.T, roster string) (string, func()) {
 			f, err := os.OpenFile(roster+".pilot-remove.lock", os.O_CREATE|os.O_RDWR, 0o600)
 			if err != nil {
@@ -141,7 +148,8 @@ func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
 			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 				t.Fatal(err)
 			}
-			return "另一個 pilot 名冊操作正鎖住它", func() { f.Close() }
+			t.Cleanup(func() { f.Close() })
+			return "another pilot process holds its lock", func() { f.Close() }
 		},
 		"lock file not openable": func(t *testing.T, roster string) (string, func()) {
 			if os.Geteuid() == 0 {
@@ -153,21 +161,140 @@ func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
 			}
 			return "exists but this user cannot open it", func() { os.Remove(lock) }
 		},
-	} {
+	}
+}
+
+func busyRosterWorkspace(t *testing.T) (dir, roster string) {
+	t.Helper()
+	dir = t.TempDir()
+	roster = filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`"Admin-pass_1"`))
+	return dir, roster
+}
+
+// Under automation a busy roster fails the step, naming the roster and the
+// reason, and the apply rolls back: a scenario never reports a roster
+// write that did not happen (PR #148 re-review, P1).
+func TestEditApplyFailsOnABusyRoster(t *testing.T) {
+	for name, block := range busyRosterCases() {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
-			writeSyncFile(t, roster, syncTestRoster(`"Admin-pass_1"`))
-			want, unblock := block(t, roster)
+			dir, roster := busyRosterWorkspace(t)
+			reason, _ := block(t, roster)
 			before, _ := os.ReadFile(roster)
 
-			r := newEditRouterModel(dir)
-			d := automationDriver{dir: dir}
-			if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{{Action: "create_user", User: "alice"}}}); err != nil {
-				t.Fatalf("driver.run() error = %v; the session must survive a busy roster", err)
+			result, err := applyEditScenario(dir, "issue-146-busy", editScenario{Version: 1, Steps: []editAction{
+				{Action: "create_user", User: "alice"},
+			}}, editAgentSessionOptions{})
+			if err != nil {
+				t.Fatalf("applyEditScenario() error = %v", err)
 			}
-			if r.err != nil || r.quit {
-				t.Fatalf("session ended: err=%v quit=%v", r.err, r.quit)
+			if !result.RolledBack || result.ScenarioErr == nil {
+				t.Fatalf("result = %+v; want the busy roster to fail the step and roll back", result)
+			}
+			if msg := result.ScenarioErr.Error(); !strings.Contains(msg, "roster "+roster+" was not written") || !strings.Contains(msg, reason) {
+				t.Fatalf("step error %q does not name the roster and %q", msg, reason)
+			}
+			if after, _ := os.ReadFile(roster); !bytes.Equal(after, before) {
+				t.Fatalf("busy roster written:\n%s", after)
+			}
+		})
+	}
+}
+
+// Enabling freeipa-nfs-server appends the host's nfs.servers entry to the
+// roster; on a busy roster that step fails under automation, instead of
+// enabling the role without the entry its playbook needs (PR #148
+// re-review, P1 §5.10 scan).
+func TestEditApplyFailsWhenEnablingNFSOnABusyRoster(t *testing.T) {
+	dir, roster := busyRosterWorkspace(t)
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"Admin-pass_1\"\n")
+	reason, _ := busyRosterCases()["held"](t, roster)
+	before, _ := os.ReadFile(roster)
+	result, err := applyEditScenario(dir, "issue-146-busy-nfs", editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_host", Host: "nexus"},
+		{Action: "enable_role", Host: "nexus", Role: "freeipa-nfs-server"},
+		{Action: "save_hosts"},
+	}}, editAgentSessionOptions{})
+	if err != nil || result == nil || !result.RolledBack || result.ScenarioErr == nil {
+		t.Fatalf("applyEditScenario() = %+v, %v; want the busy roster to fail enable_role and roll back", result, err)
+	}
+	if msg := result.ScenarioErr.Error(); !strings.Contains(msg, "roster "+roster+" was not written") || !strings.Contains(msg, reason) {
+		t.Fatalf("step error %q does not name the roster and %q", msg, reason)
+	}
+	if after, _ := os.ReadFile(roster); !bytes.Equal(after, before) {
+		t.Fatalf("busy roster written:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); !os.IsNotExist(err) {
+		t.Fatalf("hosts.yml left behind by the rolled-back apply (stat err=%v)", err)
+	}
+}
+
+// Through the MCP apply tool, a busy roster is an apply_failed error that
+// rolled back, never Result "applied" (PR #148 re-review, P1).
+func TestApplyHandler_BusyRosterIsAnErrorNotApplied(t *testing.T) {
+	dir, roster := busyRosterWorkspace(t)
+	auditDir := t.TempDir()
+	rev, err := computeWorkspaceRevision(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario := editScenario{Version: 1, Steps: []editAction{{Action: "create_user", User: "alice"}}}
+	_, planOut, err := planHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir})(context.Background(), &mcp.CallToolRequest{}, planInput{BaseRevision: rev, Scenario: scenario})
+	if err != nil || planOut.PlanID == "" {
+		t.Fatalf("planHandler() = %+v, %v", planOut, err)
+	}
+	busyRosterCases()["held"](t, roster)
+	before, _ := os.ReadFile(roster)
+
+	result, out, err := applyHandler(editMCPToolsOptions{Dir: dir, AuditDir: auditDir, WriteEnabled: true})(context.Background(), &mcp.CallToolRequest{}, applyInput{PlanID: planOut.PlanID, ExpectedRevision: rev})
+	if err != nil {
+		t.Fatalf("applyHandler() error = %v", err)
+	}
+	if result == nil || !result.IsError || out.Result == "applied" {
+		t.Fatalf("busy roster reported as %+v / %+v; want an error result", result, out)
+	}
+	toolErr := decodeToolError(t, result)
+	if toolErr.Code != mcpErrApplyFailed || !toolErr.RolledBack || !strings.Contains(toolErr.Message, "roster "+roster+" was not written") {
+		t.Fatalf("toolErr = %+v; want apply_failed, rolled back, naming the roster", toolErr)
+	}
+	if after, _ := os.ReadFile(roster); !bytes.Equal(after, before) {
+		t.Fatalf("busy roster written:\n%s", after)
+	}
+}
+
+// At the terminal a busy roster is a banner and the session goes on: the
+// router, driven with key presses, shows it, keeps running, and writes the
+// same user once the roster is free (PR #148 re-review, F4).
+func TestEditTUIBusyRosterKeepsTheSessionOpen(t *testing.T) {
+	for name, block := range busyRosterCases() {
+		t.Run(name, func(t *testing.T) {
+			dir, roster := busyRosterWorkspace(t)
+			reason, unblock := block(t, roster)
+			before, _ := os.ReadFile(roster)
+			r := newEditRouterModel(dir)
+			addUser := func(user string) tea.Cmd {
+				t.Helper()
+				pushRosterAddUser(&r, dir, roster)
+				var cmd tea.Cmd
+				for _, key := range append(strings.Split(user, ""), "enter") {
+					msg := keyTextMsg(key)
+					if key == "enter" {
+						msg = keyEnter()
+					}
+					var model tea.Model
+					model, cmd = r.Update(msg)
+					r = model.(editRouterModel)
+				}
+				return cmd
+			}
+
+			cmd := addUser("alice")
+			if r.err != nil || r.quit || isQuitCmd(cmd) {
+				t.Fatalf("session ended on a busy roster: err=%v quit=%v", r.err, r.quit)
+			}
+			want := "另一個 pilot 名冊操作正鎖住它"
+			if name != "held" {
+				want = reason
 			}
 			if !strings.Contains(r.banner, "⚠️  未寫入 "+roster+"：") || !strings.Contains(r.banner, want) {
 				t.Fatalf("banner does not report the busy roster (%q):\n%s", want, r.banner)
@@ -177,58 +304,126 @@ func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
 			}
 
 			unblock()
-			if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{{Action: "create_user", User: "bob"}}}); err != nil {
-				t.Fatalf("same session after the lock is gone: %v", err)
+			addUser("alice")
+			if r.err != nil {
+				t.Fatalf("retry in the same session: %v", r.err)
 			}
-			if after, _ := os.ReadFile(roster); !bytes.Contains(after, []byte("bob")) || bytes.Contains(after, []byte("alice")) {
-				t.Fatalf("roster after retry:\n%s", after)
+			if after, _ := os.ReadFile(roster); !bytes.Contains(after, []byte("alice")) {
+				t.Fatalf("roster after the retry:\n%s", after)
 			}
 		})
 	}
 }
 
-// `ansible-vault edit` of an encrypted .vault/ file that may be a roster
-// runs under the roster lock, so no other roster writer saves while it is
-// open; a held roster is a banner, not an editor; the deploy vault itself
-// is not locked (PR #148 re-review, F6).
-func TestAnsibleVaultEditHoldsTheRosterLock(t *testing.T) {
+// isQuitCmd reports whether cmd, run, quits the program.
+func isQuitCmd(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	_, quit := cmd().(tea.QuitMsg)
+	return quit
+}
+
+// fakeAnsibleVault puts an ansible-vault on PATH whose `edit` records that
+// it ran (ran) and waits for release to exist before exiting.
+func fakeAnsibleVault(t *testing.T) (ran, release string) {
+	t.Helper()
 	bin := t.TempDir()
-	writeSyncFile(t, filepath.Join(bin, "ansible-vault"), "#!/bin/sh\nexit 0\n")
+	ran, release = filepath.Join(bin, "ran"), filepath.Join(bin, "release")
+	script := "#!/bin/sh\ntouch '" + ran + "'\ni=0\nwhile [ ! -e '" + release + "' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\n"
+	writeSyncFile(t, filepath.Join(bin, "ansible-vault"), script)
 	if err := os.Chmod(filepath.Join(bin, "ansible-vault"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	dir := t.TempDir()
-	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
-	mainVault := filepath.Join(dir, ".vault", "main.yaml")
+	return ran, release
+}
+
+func encryptedVaultWorkspace(t *testing.T) (dir, roster, mainVault string) {
+	t.Helper()
+	dir = t.TempDir()
+	roster = filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	mainVault = filepath.Join(dir, ".vault", "main.yaml")
 	for _, path := range []string{roster, mainVault} {
 		writeSyncFile(t, path, "$ANSIBLE_VAULT;1.1;AES256\n6162636465\n")
 	}
+	return dir, roster, mainVault
+}
 
-	r := newEditRouterModel(dir)
-	if cmd := pushAnsibleVaultShellout(&r, dir, roster); cmd == nil || r.err != nil {
-		t.Fatalf("shell-out not started: err=%v", r.err)
+// `ansible-vault edit` of an encrypted .vault/ file that may be a roster
+// runs under the roster lock — held while the editor runs, released when
+// it exits — so no other roster writer saves while it is open; a held
+// roster never opens the editor; the deploy vault is not locked (PR #148
+// re-review, F6).
+func TestAnsibleVaultEditHoldsTheRosterLock(t *testing.T) {
+	ran, release := fakeAnsibleVault(t)
+	dir, roster, mainVault := encryptedVaultWorkspace(t)
+	bin, err := exec.LookPath("ansible-vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edit := newVaultEditCommand(dir, bin, mainVault); edit.roster != "" {
+		t.Fatal("the deploy vault would be locked as a roster")
+	}
+
+	edit := newVaultEditCommand(dir, bin, roster)
+	done := make(chan error, 1)
+	go func() { done <- edit.Run() }()
+	for i := 0; ; i++ {
+		if _, err := os.Stat(ran); err == nil {
+			break
+		}
+		if i > 200 {
+			t.Fatal("the editor never ran")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, err := inventory.HoldRosterLock(roster); !errors.Is(err, inventory.ErrMutationLocked) {
-		t.Fatalf("roster lock while ansible-vault edit runs: error = %v, want ErrMutationLocked", err)
+		t.Errorf("roster lock while the editor runs: error = %v, want ErrMutationLocked", err)
 	}
-	model, _ := r.Update(vaultShelloutDoneMsg{dir: dir, path: roster})
+	writeSyncFile(t, release, "")
+	if err := <-done; err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	unlock, err := inventory.HoldRosterLock(roster)
+	if err != nil {
+		t.Fatalf("roster lock still held after the editor exited: %v", err)
+	}
+
+	// Held by another process: the editor does not open, and the router
+	// reports a banner and stays.
+	os.Remove(ran)
+	if err := newVaultEditCommand(dir, bin, roster).Run(); !errors.Is(err, inventory.ErrMutationLocked) {
+		t.Fatalf("Run() on a held roster = %v, want ErrMutationLocked", err)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Fatal("the editor ran on a held roster")
+	}
+	unlock() //nolint:errcheck
+	r := newEditRouterModel(dir)
+	model, _ := r.Update(vaultShelloutDoneMsg{dir: dir, path: roster, err: fmt.Errorf("roster %s: %w", roster, inventory.ErrMutationLocked)})
 	r = model.(editRouterModel)
+	if r.err != nil || r.quit || !strings.Contains(r.banner, "⚠️  未寫入 "+roster+"：另一個 pilot 名冊操作正鎖住它") {
+		t.Fatalf("held roster after the shell-out: err=%v quit=%v banner=%q", r.err, r.quit, r.banner)
+	}
+}
+
+// Under automation the driver never runs the shell-out command; the roster
+// lock must not be left held by it — in the long-lived `pilot mcp` server
+// every other roster writer would fail until a GC finalized the file
+// (PR #148 re-review).
+func TestEditApplyLeavesNoRosterLockAfterAnEncryptedFileStep(t *testing.T) {
+	fakeAnsibleVault(t)
+	dir, roster, _ := encryptedVaultWorkspace(t)
+	result, err := applyEditScenario(dir, "issue-146-encrypted-step", editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "ipa-identity.yaml", Key: "x", Value: "y"},
+	}}, editAgentSessionOptions{})
+	if err != nil || result == nil || !result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want the encrypted file's step to fail and roll back", result, err)
+	}
 	release, err := inventory.HoldRosterLock(roster)
 	if err != nil {
-		t.Fatalf("roster lock still held after ansible-vault edit exited: %v", err)
-	}
-
-	busy := newEditRouterModel(dir)
-	pushAnsibleVaultShellout(&busy, dir, roster)
-	if busy.err != nil || busy.releaseVaultEdit != nil || !strings.Contains(busy.banner, "⚠️  未寫入 "+roster+"：另一個 pilot 名冊操作正鎖住它") {
-		t.Fatalf("held roster: err=%v holding=%v banner=%q", busy.err, busy.releaseVaultEdit != nil, busy.banner)
+		t.Fatalf("roster lock left held after the apply returned: %v", err)
 	}
 	release() //nolint:errcheck
-
-	deploy := newEditRouterModel(dir)
-	pushAnsibleVaultShellout(&deploy, dir, mainVault)
-	if deploy.releaseVaultEdit != nil {
-		t.Fatal("the deploy vault was locked as a roster")
-	}
 }

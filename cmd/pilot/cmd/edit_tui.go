@@ -75,9 +75,10 @@ type editRouterModel struct {
 	// from, "" outside a plan; the vault save's roster sync maps the
 	// copy's references to it onto the copy (planScratchPath).
 	planSource string
-	// releaseVaultEdit drops the roster lock pushAnsibleVaultShellout holds
-	// while `ansible-vault edit` runs on a possible roster; nil otherwise.
-	releaseVaultEdit func() error
+	// writeRefused is the last roster write refused as busy
+	// (rosterBusyBanner): shown as a banner at the terminal, it fails the
+	// automation driver's step (takeWriteRefused).
+	writeRefused error
 	// rosterSyncWarnings are the vault save's roster lines that need the
 	// operator (rosterSyncLine.manual), which a plan or apply returns as
 	// warnings: an MCP caller sees no banner.
@@ -87,6 +88,13 @@ type editRouterModel struct {
 
 	quit bool
 	err  error
+}
+
+// takeWriteRefused returns and clears r.writeRefused.
+func (r *editRouterModel) takeWriteRefused() error {
+	err := r.writeRefused
+	r.writeRefused = nil
+	return err
 }
 
 // uiFactory returns r's injected Factory, defaulting to the Huh v2
@@ -145,9 +153,9 @@ func (r editRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// happens to be "current" (there is none — the Program was
 	// suspended, not showing any screen, while that subprocess ran).
 	if m, ok := msg.(vaultShelloutDoneMsg); ok {
-		if r.releaseVaultEdit != nil {
-			_ = r.releaseVaultEdit()
-			r.releaseVaultEdit = nil
+		// The roster was busy, so the editor never opened: say so, stay.
+		if banner, busy := rosterBusyBanner(&r, m.path, m.err); busy {
+			return r, pushVaultFilePicker(&r, m.dir, banner)
 		}
 		if m.err != nil {
 			r.err = m.err
@@ -927,7 +935,7 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 	}
 	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
 	if _, err := os.Stat(rosterPath); err == nil {
-		return pushRolesMenuBanner(r, dir, path, hf, name, autofixNFSRosterEntry(dir, *h))
+		return pushRolesMenuBanner(r, dir, path, hf, name, autofixNFSRosterEntry(r, dir, *h))
 	} else if !os.IsNotExist(err) {
 		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法檢查 roster %s：%v", rosterPath, err))
 	}
@@ -984,7 +992,7 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 	if err := mutateRosterSource(dir, rosterPath, func() error {
 		return inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", password)
 	}); err != nil {
-		if banner, ok := rosterBusyBanner(rosterPath, err); ok {
+		if banner, ok := rosterBusyBanner(r, rosterPath, err); ok {
 			return pushRolesMenuBanner(r, dir, path, hf, name, banner)
 		}
 		r.err = err
@@ -1035,8 +1043,10 @@ func nfsBootstrapDomain(dir string) string {
 // happened — empty if there's nothing worth telling the user (no roster
 // path set yet, or an entry already existed). A relative freeipa_roster_file
 // is resolved against dir (the workspace `pilot edit --dir` is pointed at),
-// matching writeMissingNFSRosterEntries' convention (inventory.go).
-func autofixNFSRosterEntry(dir string, h inventory.Host) string {
+// matching writeMissingNFSRosterEntries' convention (inventory.go). A busy
+// roster is reported through rosterBusyBanner, so automation fails the
+// step instead of enabling the role without its nfs.servers entry.
+func autofixNFSRosterEntry(r *editRouterModel, dir string, h inventory.Host) string {
 	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
 	if rosterPath == "" {
 		return ""
@@ -1060,6 +1070,9 @@ func autofixNFSRosterEntry(dir string, h inventory.Host) string {
 	}
 	domain := nfsBootstrapDomain(dir)
 	appended, err := mutateRosterSourceValue(dir, rosterPath, func() (bool, error) { return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain) })
+	if banner, busy := rosterBusyBanner(r, rosterPath, err); busy {
+		return prefixNote(banner)
+	}
 	switch {
 	case err != nil:
 		return prefixNote(fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err))

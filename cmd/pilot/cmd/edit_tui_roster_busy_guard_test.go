@@ -81,3 +81,61 @@ func TestRegression_EditRosterWritesReportABusyRoster(t *testing.T) {
 	}
 	t.Logf("checked %d roster writes", checked)
 }
+
+// busyErrorHandlers are the only functions in this package, besides
+// rosterBusyBanner, that may act on a busy roster error themselves. A new
+// one would report a refused write some other way, which the automation
+// driver cannot see.
+var busyErrorHandlers = map[string]string{
+	"rosterBusyBanner":         "the one place a busy roster becomes a banner and a step error",
+	"syncRosterAdminPasswords": "a roster the vault sync could not update is a plan/apply warning (rosterSyncWarnings), not a refused step",
+	"restoreManagedFiles":      "a roster a rollback cannot put back is named in the apply error",
+}
+
+// A busy roster error is turned into a banner only by rosterBusyBanner,
+// which also fails the automation step (PR #148 re-review, P1: a banner
+// alone let an MCP apply report "applied" for a write that never
+// happened).
+func TestRegression_BusyRosterErrorsGoThroughRosterBusyBanner(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	used := map[string]bool{}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				sel, ok := node.(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "ErrMutationLocked" && sel.Sel.Name != "ErrRosterLockFile") {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "inventory" {
+					return true
+				}
+				if _, ok := busyErrorHandlers[fn.Name.Name]; ok {
+					used[fn.Name.Name] = true
+					return true
+				}
+				t.Errorf("%s: %s handles inventory.%s itself; report a busy roster with rosterBusyBanner so automation fails the step", fset.Position(sel.Pos()), fn.Name.Name, sel.Sel.Name)
+				return true
+			})
+		}
+	}
+	for name, reason := range busyErrorHandlers {
+		if !used[name] {
+			t.Errorf("busyErrorHandlers lists %s (%s), which no longer handles a busy roster error; remove it", name, reason)
+		}
+	}
+}

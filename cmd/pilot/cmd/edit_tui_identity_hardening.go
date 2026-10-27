@@ -158,7 +158,7 @@ func pushRosterAddPasswordPolicyPriority(r *editRouterModel, dir, path, name, gr
 		}
 		priority, _ := strconv.Atoi(strings.TrimSpace(m.Value()))
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterPasswordPolicy(path, name) }); err != nil {
-			if banner, ok := rosterBusyBanner(path, err); ok {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterPasswordPoliciesMenu(r, dir, path, banner)
 			}
 			r.err = err
@@ -280,7 +280,7 @@ func pushRosterPasswordPolicyEdit(r *editRouterModel, dir, path, name string, mu
 		return pushRosterPasswordPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterPasswordPolicy(path, name, f) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterPasswordPolicyDetail(r, dir, path, name, banner)
 		}
 		r.err = err
@@ -335,7 +335,7 @@ func pushRosterAddCredentialPolicy(r *editRouterModel, dir, path string) tea.Cmd
 		}
 		name := strings.TrimSpace(m.Value())
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterCredentialPolicy(path, name) }); err != nil {
-			if banner, ok := rosterBusyBanner(path, err); ok {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterCredentialPoliciesMenu(r, dir, path, banner)
 			}
 			r.err = err
@@ -468,7 +468,7 @@ func pushRosterCredentialPolicyEdit(r *editRouterModel, dir, path, name string, 
 		return pushRosterCredentialPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterCredentialPolicy(path, name, f) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterCredentialPolicyDetail(r, dir, path, name, banner)
 		}
 		r.err = err
@@ -564,7 +564,7 @@ func pushPrivilegedIdentityEdit(r *editRouterModel, dir, path string, mutate fun
 		return pushPrivilegedIdentityDetail(r, dir, path, formatRosterViolations(v))
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterPrivilegedIdentity(path, f) }); err != nil {
-		if banner, ok := rosterBusyBanner(path, err); ok {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushPrivilegedIdentityDetail(r, dir, path, banner)
 		}
 		r.err = err
