@@ -106,7 +106,7 @@ func TestRosterCandidatesListEachFileOnce(t *testing.T) {
 	if err := os.Symlink("ipa-identity.yaml", relLink); err != nil {
 		t.Fatal(err)
 	}
-	got := rosterCandidates(dir, []string{shared, ".vault/alias.yaml", link})
+	got := rosterCandidates(dir, "", []string{shared, ".vault/alias.yaml", link})
 	if len(got) != 1 || got[0] != link {
 		t.Fatalf("rosterCandidates() = %v, want only %s", got, link)
 	}
@@ -119,7 +119,7 @@ func TestRosterCandidatesListEachFileOnce(t *testing.T) {
 	if err := os.Symlink(shared, vaultLink); err != nil {
 		t.Fatal(err)
 	}
-	if got := rosterCandidates(other, []string{shared, ".vault/nfs.yaml"}); len(got) != 1 || got[0] != vaultLink {
+	if got := rosterCandidates(other, "", []string{shared, ".vault/nfs.yaml"}); len(got) != 1 || got[0] != vaultLink {
 		t.Fatalf("rosterCandidates() = %v, want only %s", got, vaultLink)
 	}
 }

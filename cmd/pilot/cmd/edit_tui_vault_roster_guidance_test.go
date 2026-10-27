@@ -309,3 +309,46 @@ func TestNonStringRosterPasswordIsReported(t *testing.T) {
 	}
 	assertUnchanged(t, before)
 }
+
+// The default roster is a link to a roster outside the workspace, which
+// hosts.yml also references by its real path. The apply sees one roster
+// and syncs it through the link; the plan's copy holds the link as a plain
+// file, and must still see one roster, not report the real path as
+// unsynced (PR #148 re-review, F1).
+func TestEditPlanAndApplyAgreeWhenTheDefaultRosterLinksOutside(t *testing.T) {
+	dir := t.TempDir()
+	external, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(external, "r.yaml")
+	writeSyncFile(t, shared, syncTestRoster(`"Old\"pass#1"`))
+	link := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"Old\\\"pass#1\"\n")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  h1:\n    ansible_host: 10.0.0.1\n    roles: [freeipa-client]\n    freeipa_roster_file: "+shared+"\n")
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	before := snapshotFiles(t, shared, filepath.Join(dir, ".vault", "main.yaml"))
+
+	plan, err := planEditScenario(dir, rotationScenario(), editAgentSessionOptions{})
+	if err != nil {
+		t.Fatalf("planEditScenario() error = %v", err)
+	}
+	assertUnchanged(t, before)
+	apply, err := applyEditScenario(dir, "issue-146-linked-default", rotationScenario(), editAgentSessionOptions{})
+	if err != nil || apply.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v", apply, err)
+	}
+	if got := syncRosterPassword(t, shared); got != syncNewPassword {
+		t.Fatalf("apply did not sync the shared roster through the link")
+	}
+	assertLinkTo(t, link, shared)
+	if !slices.Equal(plan.AffectedFiles, apply.AffectedFiles) {
+		t.Errorf("plan AffectedFiles %v, apply %v", plan.AffectedFiles, apply.AffectedFiles)
+	}
+	if !slices.Equal(plan.Warnings, apply.Warnings) || len(apply.Warnings) != 0 {
+		t.Errorf("plan warnings %q, apply warnings %q; want none from either", plan.Warnings, apply.Warnings)
+	}
+}

@@ -322,7 +322,7 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 		referenced = append(referenced, rosterPath)
 	}
 	var uncompared []string
-	for _, rosterPath := range rosterCandidates(dir, referenced) {
+	for _, rosterPath := range rosterCandidates(dir, "", referenced) {
 		if validateSecretSourcePath(dir, rosterPath) != nil {
 			continue
 		}

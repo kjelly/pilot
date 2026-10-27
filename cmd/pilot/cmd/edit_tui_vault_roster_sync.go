@@ -22,7 +22,13 @@ import (
 // spelling inside dir's own .vault/ if there is one, so pilot edit's sync
 // may write it. pilot edit's sync and the deploy preflight's drift warning
 // both start from it, so they consider the same rosters.
-func rosterCandidates(dir string, referenced []string) []string {
+//
+// source is the real workspace when dir is a plan's scratch copy of it, ""
+// otherwise. The copy holds every symlink as a plain file, so a file is
+// identified by what its counterpart in source names (rosterIdentity): a
+// .vault/ link and a reference to the file it points at are still one
+// roster, as the apply sees them (PR #148 re-review).
+func rosterCandidates(dir, source string, referenced []string) []string {
 	index := map[string]int{}
 	var out []string
 	for _, path := range append([]string{filepath.Join(dir, ".vault", "ipa-identity.yaml")}, referenced...) {
@@ -37,7 +43,7 @@ func rosterCandidates(dir string, referenced []string) []string {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		file, err := secretpath.Canonical(path)
+		file, err := rosterIdentity(dir, source, path)
 		if err != nil {
 			continue
 		}
@@ -51,6 +57,17 @@ func rosterCandidates(dir string, referenced []string) []string {
 		out = append(out, path)
 	}
 	return out
+}
+
+// rosterIdentity is the canonical file path names, read through source for
+// a path inside dir when dir is source's plan copy (rosterCandidates).
+func rosterIdentity(dir, source, path string) (string, error) {
+	if source != "" {
+		if rel, err := filepath.Rel(dir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return secretpath.Canonical(filepath.Join(source, rel))
+		}
+	}
+	return secretpath.Canonical(path)
 }
 
 // referencedRosterFiles returns every freeipa_roster_file dir sets, read
@@ -180,7 +197,7 @@ func syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword string) 
 		lines = append(lines, rosterSyncLine{icon: "⚠️  ", manual: true,
 			text: fmt.Sprintf("未同步 %s：%s；%s", shown, reason, rosterManualFix)})
 	}
-	for _, path := range rosterCandidates(dir, referenced) {
+	for _, path := range rosterCandidates(dir, planSource, referenced) {
 		shown := shownRosterPath(path, dir, planSource)
 		if !isManagedVaultFile(dir, path) {
 			stale, err := mutateRosterSourceValue(dir, path, func() (bool, error) {
