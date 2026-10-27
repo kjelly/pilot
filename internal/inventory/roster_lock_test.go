@@ -324,11 +324,16 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 					t.Fatalf("unlocked call through the link did not write the roster (err %v)", err)
 				}
 				l.assertStillALink(t)
-				// Replaced, not rewritten in place: a reader without the lock
+				// A roster with one name whose owner this process can keep is
+				// replaced, not rewritten in place: a reader without the lock
 				// never sees a truncated roster.
 				if info, err := os.Stat(l.target); err == nil && l.exists && info.Sys().(*syscall.Stat_t).Ino == inode {
-					t.Errorf("the roster was rewritten in place (same inode), not replaced atomically")
+					t.Errorf("a roster with one name and this process's owner was rewritten in place (same inode), not replaced")
 				}
+				assertNoRosterTemps(t, l.target)
+			})
+			t.Run("write policy", func(t *testing.T) {
+				assertRosterWritePolicy(t, tc)
 			})
 			for holder, suffixes := range holders {
 				for spelling, pick := range map[string]func(lockTestLayout) string{
@@ -346,6 +351,176 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// assertNoRosterTemps fails when a temp file is left beside target.
+func assertNoRosterTemps(t *testing.T, target string) {
+	t.Helper()
+	entries, _ := os.ReadDir(filepath.Dir(target))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "."+filepath.Base(target)+rosterTempInfix) {
+			t.Errorf("temp file %s left beside the roster", e.Name())
+		}
+	}
+}
+
+// assertRosterWritePolicy holds one writer to writeLockedRoster's policy
+// (PR #148 re-review, round 4): a roster this user may not write is
+// refused, as an in-place write always refused it; a roster with another
+// hard link is written in place, so every name sees the new content; a
+// temp file a killed pilot left is swept once stale, and one still fresh is
+// kept; run as root, the owner and group survive, and a new roster gets
+// its directory's owner.
+func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
+	if !tc.create {
+		t.Run("read-only roster", func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root writes a 0400 roster, as an in-place write always did")
+			}
+			l := newLockTestLayout(t, tc)
+			if err := os.Chmod(l.target, 0o400); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.call(t, l.link); err == nil {
+				t.Fatal("a 0400 roster was written")
+			}
+			l.assertUntouched(t)
+		})
+		t.Run("hard link", func(t *testing.T) {
+			l := newLockTestLayout(t, tc)
+			other := filepath.Join(t.TempDir(), "other-name.yaml")
+			if err := os.Link(l.target, other); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(l.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.call(t, l.link); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Stat(l.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(before, after) || !bytes.Equal(mustRead(t, other), mustRead(t, l.target)) || bytes.Equal(mustRead(t, l.target), l.before) {
+				t.Fatal("a roster with another hard link was replaced instead of written in place")
+			}
+			assertNoRosterTemps(t, l.target)
+		})
+	}
+	t.Run("stale temp files", func(t *testing.T) {
+		l := newLockTestLayout(t, tc)
+		dir, base := filepath.Dir(l.target), filepath.Base(l.target)
+		stale := []string{filepath.Join(dir, "."+base+rosterTempInfix+"stale"), filepath.Join(dir, "."+base+".migrate-stale")}
+		fresh := filepath.Join(dir, "."+base+rosterTempInfix+"fresh")
+		old := time.Now().Add(-10 * time.Minute)
+		for _, path := range append(stale, fresh) {
+			if err := os.WriteFile(path, []byte("plaintext left by a killed pilot"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, path := range stale {
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tc.call(t, l.link); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range stale {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Errorf("stale temp %s not swept (lstat err=%v)", filepath.Base(path), err)
+			}
+		}
+		if _, err := os.Lstat(fresh); err != nil {
+			t.Errorf("a fresh temp file was swept: %v", err)
+		}
+	})
+	t.Run("owner kept as root", func(t *testing.T) {
+		requireRoot(t)
+		const uid, gid = 12345, 12346
+		l := newLockTestLayout(t, tc)
+		owned := l.target
+		if tc.create {
+			owned = filepath.Dir(l.target)
+		}
+		if err := os.Chown(owned, uid, gid); err != nil {
+			t.Fatal(err)
+		}
+		if err := tc.call(t, l.link); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(l.target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
+			t.Fatalf("roster owned by %d:%d after the write, want %d:%d", st.Uid, st.Gid, uid, gid)
+		}
+	})
+}
+
+// requireRoot skips t unless it runs as root, and fails it instead when
+// PILOT_REQUIRE_ROOT_TESTS=1 (`make root-test`), so a run meant to
+// exercise these cannot pass by skipping them.
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		return
+	}
+	if os.Getenv("PILOT_REQUIRE_ROOT_TESTS") == "1" {
+		t.Fatal("PILOT_REQUIRE_ROOT_TESTS=1 but this test is not running as root")
+	}
+	t.Skip("needs root")
+}
+
+// A non-root writer cannot give a replacement file another user's
+// ownership; then the roster is written in place, so it keeps its owner
+// rather than becoming the writer's (PR #148 re-review, round 4).
+func TestWriteLockedRosterWritesInPlaceWhenTheOwnerCannotBeKept(t *testing.T) {
+	path := writeLockTestRoster(t)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fchownRosterTemp = func(*os.File, int, int) error { return syscall.EPERM }
+	t.Cleanup(func() { fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) } })
+	if err := AppendRosterUser(path, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !bytes.Contains(mustRead(t, path), []byte("erin")) {
+		t.Fatal("the roster was replaced although its owner could not be kept")
+	}
+	assertNoRosterTemps(t, path)
+}
+
+// Run as root, a migration's backup belongs to the roster's owner, like the
+// roster it copies (PR #148 re-review, round 4).
+func TestMigrationBackupKeepsTheRosterOwner(t *testing.T) {
+	requireRoot(t)
+	const uid, gid = 12345, 12346
+	path := writeRoster(t, minimalValidRoster)
+	if err := os.Chown(path, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateRosterFile(path, RosterMigrationOptions{})
+	if err != nil || !result.Changed {
+		t.Fatalf("MigrateRosterFile() = %+v, %v", result, err)
+	}
+	for _, file := range []string{path, result.BackupPath} {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
+			t.Errorf("%s owned by %d:%d, want %d:%d", filepath.Base(file), st.Uid, st.Gid, uid, gid)
+		}
 	}
 }
 

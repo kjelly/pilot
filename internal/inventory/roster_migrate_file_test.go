@@ -101,18 +101,24 @@ func TestCreateRosterBackup_RefusesToOverwriteExistingBackup(t *testing.T) {
 	}
 }
 
-// ---- atomic replace -----------------------------------------------------
+// ---- roster writes ------------------------------------------------------
 
-func TestAtomicReplaceFile_WritesContentAndRestoresMode(t *testing.T) {
+// writeLockedRoster's replace path (roster_write.go) keeps the roster's
+// mode and leaves no temp file behind.
+func TestWriteLockedRoster_WritesContentAndKeepsMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := atomicReplaceFile(path, []byte("new"), 0o640); err != nil {
-		t.Fatalf("atomicReplaceFile() error = %v", err)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := writeLockedRoster(lk, []byte("new")); err != nil {
+		t.Fatalf("writeLockedRoster() error = %v", err)
+	}
+	lk.release() //nolint:errcheck
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != "new" {
 		t.Fatalf("content = %q, err = %v, want %q", got, err, "new")
@@ -121,16 +127,17 @@ func TestAtomicReplaceFile_WritesContentAndRestoresMode(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("mode = %v, err = %v, want 0640", info.Mode().Perm(), err)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("dir entries = %v, err = %v, want exactly the roster file (no leftover temp)", entries, err)
+	for _, e := range direntNames(t, dir) {
+		if strings.Contains(e, rosterTempInfix) {
+			t.Fatalf("leftover temp file %s", e)
+		}
 	}
 }
 
-func TestAtomicReplaceFile_FailsCleanlyIntoNonexistentDirectory(t *testing.T) {
+func TestWriteLockedRoster_FailsCleanlyIntoNonexistentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-subdir", "roster.yaml")
-	if err := atomicReplaceFile(path, []byte("data"), 0o600); err == nil {
-		t.Fatal("expected an error writing into a nonexistent directory")
+	if _, err := lockRosterFile(path); err == nil {
+		t.Fatal("expected an error locking a roster in a nonexistent directory")
 	}
 }
 

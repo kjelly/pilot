@@ -76,27 +76,9 @@ func DecryptRosterToTempFile(path, vaultPasswordFile string) (tempPath string, c
 	if err != nil {
 		return "", func() {}, fmt.Errorf("decrypt roster %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp("", ".pilot-roster-decrypt-*.yaml")
+	tmpPath, cleanup, err := decryptedScratchFile(plaintext)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("roster %s: create temp file: %w", path, err)
-	}
-	tmpPath := tmp.Name()
-	cleanup = func() {
-		os.Remove(tmpPath)
-		// A roster writer run on the plaintext leaves its lock files
-		// beside it; nothing else can know their names.
-		for _, suffix := range rosterLockSuffixes {
-			os.Remove(tmpPath + suffix)
-		}
-	}
-	if _, err := tmp.Write(plaintext); err != nil {
-		tmp.Close()
-		cleanup()
 		return "", func() {}, fmt.Errorf("roster %s: write temp file: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("roster %s: close temp file: %w", path, err)
 	}
 	return tmpPath, cleanup, nil
 }
@@ -159,10 +141,6 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 		return err
 	}
 	defer lk.release() //nolint:errcheck
-	info, err := os.Stat(lk.target)
-	if err != nil {
-		return err
-	}
 
 	tmpPath, cleanup, err := DecryptRosterToTempFile(lk.target, vaultPasswordFile)
 	if err != nil {
@@ -181,7 +159,7 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 	if err != nil {
 		return fmt.Errorf("roster %s: read encrypted candidate: %w (original untouched)", path, err)
 	}
-	if err := atomicReplaceFile(lk.target, encrypted, info.Mode().Perm()); err != nil {
+	if err := writeLockedRoster(lk, encrypted); err != nil {
 		return fmt.Errorf("roster %s: write failed, original untouched: %w", path, err)
 	}
 	return nil

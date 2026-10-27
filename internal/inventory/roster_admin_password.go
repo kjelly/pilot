@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -174,12 +173,8 @@ func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdmin
 	if err != nil || result != RosterAdminUpdated {
 		return result, err
 	}
-	info, err := os.Stat(lk.target)
-	if err != nil {
+	if err := writeLockedRoster(lk, updated); err != nil {
 		return 0, err
-	}
-	if err := atomicReplaceFileOwned(lk.target, updated, info.Mode().Perm(), info); err != nil {
-		return 0, fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return RosterAdminUpdated, nil
 }

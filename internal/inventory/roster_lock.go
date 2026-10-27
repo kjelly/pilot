@@ -1,7 +1,6 @@
 package inventory
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -89,10 +88,7 @@ func acquireMutationLock(path string) (*mutationLock, error) {
 	}
 
 	if writable {
-		info := mutationLockInfo{PID: os.Getpid(), Start: time.Now()}
-		data, _ := json.MarshalIndent(info, "", "  ")
-		_ = f.Truncate(0)
-		_, _ = f.WriteAt(data, 0)
+		stampLockFile(f)
 	}
 
 	return &mutationLock{file: f}, nil
@@ -168,6 +164,9 @@ func lockRosterFile(path string) (*rosterLock, error) {
 		lk.locks = append(lk.locks, lock)
 		keepOwner(lock.file, owner)
 	}
+	// Temp files a killed pilot left beside the roster: the lock is held,
+	// so no write of ours is in progress.
+	sweepRosterTemps(target)
 	if afterRosterLockHook != nil {
 		afterRosterLockHook()
 	}
@@ -186,23 +185,6 @@ func (lk *rosterLock) release() error {
 	}
 	lk.locks = nil
 	return errors.Join(errs...)
-}
-
-// writeLockedRoster replaces the roster lk holds with data atomically —
-// a same-directory temp file renamed over it (atomicReplaceFileOwned) —
-// keeping its mode and, where the process may set it, its owner; a roster
-// not created yet gets mode 0600. A reader that takes no lock — the admin
-// password sync's first look, pilot's read-only commands, a playbook —
-// then sees the old roster or the new one, never a truncated file.
-func writeLockedRoster(lk *rosterLock, data []byte) error {
-	info, err := os.Stat(lk.target)
-	switch {
-	case err == nil:
-		return atomicReplaceFileOwned(lk.target, data, info.Mode().Perm(), info)
-	case errors.Is(err, fs.ErrNotExist):
-		return atomicReplaceFileOwned(lk.target, data, 0o600, nil)
-	}
-	return err
 }
 
 // keepOwner gives the open file f the owner recorded in info after this

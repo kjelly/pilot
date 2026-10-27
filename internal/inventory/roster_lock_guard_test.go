@@ -14,14 +14,12 @@ import (
 // package: the secret-source write primitives and the os calls they are
 // built on. os.OpenFile counts when its flags open for writing or creating
 // (isRosterWriteCall), so does os.Create.
-var rosterWriteCalls = map[string]bool{"writeLockedRoster": true, "writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
+var rosterWriteCalls = map[string]bool{"writeLockedRoster": true, "writeSecretSourceFile": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
 
 // rosterWriterExemptions are the only functions here that may write a file
 // without a roster lock. Each must still exist and still write.
 var rosterWriterExemptions = map[string]string{
 	"writeSecretSourceFile":                 "the write primitive itself; its callers hold the lock",
-	"atomicReplaceFile":                     "the write primitive itself; its callers hold the lock",
-	"atomicReplaceFileOwned":                "the write primitive itself; its callers hold the lock",
 	"acquireMutationLock":                   "creates a roster's lock file, never the roster; only lockRosterFile calls it (rule 1)",
 	"WriteMinimalFreeIPAVault":              "writes the vault vars file (.vault/main.yaml), not a roster",
 	"FillFreeIPAAdminPassword":              "writes the vault vars file (.vault/main.yaml), not a roster",
@@ -47,6 +45,10 @@ var rosterWriterExemptions = map[string]string{
 //  3. A function holding a roster lock never reaches another lockRosterFile
 //     through this package's calls: the lock is not reentrant, so the
 //     inner call would fail with ErrMutationLocked.
+//  4. The raw write primitives — os.Rename, os.CreateTemp, and the WriteAt
+//     and Truncate methods — appear only in roster_write.go, so
+//     writeLockedRoster's policy (replace or write in place, keep the
+//     owner, sweep temp files) is the only one.
 func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -63,8 +65,15 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
-			if call, ok := node.(*ast.CallExpr); ok && callName(call) == "acquireMutationLock" && path != "roster_lock.go" {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if callName(call) == "acquireMutationLock" && path != "roster_lock.go" {
 				t.Errorf("%s: acquireMutationLock outside roster_lock.go; lock a roster with lockRosterFile", fset.Position(call.Pos()))
+			}
+			if path != "roster_write.go" && isRawWritePrimitive(call) {
+				t.Errorf("%s: raw file write outside roster_write.go; write a roster with writeLockedRoster", fset.Position(call.Pos()))
 			}
 			return true
 		})
@@ -106,7 +115,12 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 		}
 		targets := lockTargetVars(fn, locks)
 		for _, call := range writes {
-			if len(call.Args) == 0 || !isLockTarget(call.Args[0], locks, targets) {
+			// os.Rename writes its second argument; every other call its first.
+			arg := 0
+			if callName(call) == "os.Rename" {
+				arg = 1
+			}
+			if len(call.Args) <= arg || !isLockTarget(call.Args[arg], locks, targets) {
 				t.Errorf("%s: %s in %s must write the lock's target (lk.target), not the path it was given", fset.Position(call.Pos()), callName(call), name)
 			}
 		}
@@ -197,6 +211,18 @@ func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
 		return true
 	})
 	return out
+}
+
+// isRawWritePrimitive reports whether call is one of the primitives only
+// roster_write.go may use: os.Rename, os.CreateTemp, an atomicReplaceFile*
+// helper, or a WriteAt or Truncate method.
+func isRawWritePrimitive(call *ast.CallExpr) bool {
+	switch name := callName(call); {
+	case name == "os.Rename", name == "os.CreateTemp", strings.HasPrefix(name, "atomicReplaceFile"):
+		return true
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && (sel.Sel.Name == "WriteAt" || sel.Sel.Name == "Truncate")
 }
 
 // isRosterWriteCall reports whether call writes a file: one of
