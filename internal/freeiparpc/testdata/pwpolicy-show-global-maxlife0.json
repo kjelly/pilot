@@ -1,0 +1,49 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "nsContainer",
+        "krbPwdPolicy",
+        "ipaPwdPolicy"
+      ],
+      "krbpwdhistorylength": [
+        "0"
+      ],
+      "passwordgracelimit": [
+        "-1"
+      ],
+      "krbpwdmaxfailure": [
+        "6"
+      ],
+      "cn": [
+        "global_policy"
+      ],
+      "krbpwdminlength": [
+        "8"
+      ],
+      "krbpwdfailurecountinterval": [
+        "60"
+      ],
+      "krbmaxpwdlife": [
+        "0"
+      ],
+      "krbminpwdlife": [
+        "1"
+      ],
+      "krbpwdmindiffchars": [
+        "0"
+      ],
+      "krbpwdlockoutduration": [
+        "600"
+      ],
+      "dn": "cn=global_policy,cn=IPA.PILOT.INTERNAL,cn=kerberos,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": null,
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

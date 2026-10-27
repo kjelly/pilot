@@ -1,0 +1,523 @@
+{
+  "result": {
+    "result": [
+      {
+        "cn": [
+          "P1 Keys"
+        ],
+        "displayname": [
+          "P1 Keys"
+        ],
+        "initials": [
+          "PK"
+        ],
+        "gecos": [
+          "P1 Keys"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1d92c3de-d1d4-11f1-997a-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-keys,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1224"
+        ],
+        "ipasshpubkey": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINZ9+QE2iKNtS+LFb/lqfS8SSnYDXllLjMScjupDeT8Y p1-key1",
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPH5VIHQuqomvZQJGVVNi9FsMRQPptPuUp7U3I/yWLHl p1-key2"
+        ],
+        "uidnumber": [
+          "1927600224"
+        ],
+        "mail": [
+          "p1-keys@ipa.pilot.internal"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "gidnumber": [
+          "1927600224"
+        ],
+        "homedirectory": [
+          "/home/p1-keys"
+        ],
+        "uid": [
+          "p1-keys"
+        ],
+        "krbcanonicalname": [
+          "p1-keys@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "Keys"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "krbprincipalname": [
+          "p1-keys@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "sshpubkeyfp": [
+          "SHA256:XS+2GOeXQnIlXOikVVYpU8wNkCTaeMHb2Sos8lQbZnE p1-key1 (ssh-ed25519)",
+          "SHA256:thCuqWgO25E+6qJ8nTlg1oaWWZIRnBOlm2Cko0UsG+s p1-key2 (ssh-ed25519)"
+        ],
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "p1-team",
+          "p1-parent"
+        ],
+        "dn": "uid=p1-keys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "P1 NoKeys"
+        ],
+        "displayname": [
+          "P1 NoKeys"
+        ],
+        "initials": [
+          "PN"
+        ],
+        "gecos": [
+          "P1 NoKeys"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1dc653f2-d1d4-11f1-8f9b-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-nokeys,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1225"
+        ],
+        "uidnumber": [
+          "1927600225"
+        ],
+        "mail": [
+          "p1-nokeys@ipa.pilot.internal"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "gidnumber": [
+          "1927600225"
+        ],
+        "homedirectory": [
+          "/home/p1-nokeys"
+        ],
+        "uid": [
+          "p1-nokeys"
+        ],
+        "krbcanonicalname": [
+          "p1-nokeys@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "NoKeys"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "krbprincipalname": [
+          "p1-nokeys@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=p1-nokeys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "P1 NoPw"
+        ],
+        "displayname": [
+          "P1 NoPw"
+        ],
+        "initials": [
+          "PN"
+        ],
+        "gecos": [
+          "P1 NoPw"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1cb09b30-d1d4-11f1-997a-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-nopw,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1220"
+        ],
+        "uidnumber": [
+          "1927600220"
+        ],
+        "mail": [
+          "p1-nopw@example.test",
+          "p1-nopw-2@example.test"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "gidnumber": [
+          "1927600220"
+        ],
+        "homedirectory": [
+          "/home/p1-nopw"
+        ],
+        "uid": [
+          "p1-nopw"
+        ],
+        "krbcanonicalname": [
+          "p1-nopw@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "NoPw"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "title": [
+          "t"
+        ],
+        "krbprincipalname": [
+          "p1-nopw@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "p1-team",
+          "p1-parent"
+        ],
+        "dn": "uid=p1-nopw,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "P1 Off"
+        ],
+        "displayname": [
+          "P1 Off"
+        ],
+        "initials": [
+          "PO"
+        ],
+        "gecos": [
+          "P1 Off"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1d5ad668-d1d4-11f1-8f9b-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-off,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1223"
+        ],
+        "uidnumber": [
+          "1927600223"
+        ],
+        "mail": [
+          "p1-off@ipa.pilot.internal"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "nsaccountlock": true,
+        "gidnumber": [
+          "1927600223"
+        ],
+        "homedirectory": [
+          "/home/p1-off"
+        ],
+        "uid": [
+          "p1-off"
+        ],
+        "krbcanonicalname": [
+          "p1-off@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "Off"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "krbprincipalname": [
+          "p1-off@IPA.PILOT.INTERNAL"
+        ],
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "p1-parent"
+        ],
+        "dn": "uid=p1-off,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "P1 Reset"
+        ],
+        "displayname": [
+          "P1 Reset"
+        ],
+        "initials": [
+          "PR"
+        ],
+        "gecos": [
+          "P1 Reset"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1ceb4ce4-d1d4-11f1-8f9b-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-reset,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1221"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261027070037Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261027070037Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261027070037Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAIVTOBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "uidnumber": [
+          "1927600221"
+        ],
+        "mail": [
+          "p1-reset@ipa.pilot.internal"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "gidnumber": [
+          "1927600221"
+        ],
+        "homedirectory": [
+          "/home/p1-reset"
+        ],
+        "uid": [
+          "p1-reset"
+        ],
+        "krbcanonicalname": [
+          "p1-reset@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "Reset"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "krbprincipalname": [
+          "p1-reset@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "p1-nonposix"
+        ],
+        "dn": "uid=p1-reset,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "P1 Self"
+        ],
+        "displayname": [
+          "P1 Self"
+        ],
+        "initials": [
+          "PS"
+        ],
+        "gecos": [
+          "P1 Self"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "1d264bc8-d1d4-11f1-997a-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-self,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1222"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261027070039Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270125070039Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261027070038Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAIXTOBqcDEtc2VsZkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "uidnumber": [
+          "1927600222"
+        ],
+        "mail": [
+          "p1-self@ipa.pilot.internal"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "gidnumber": [
+          "1927600222"
+        ],
+        "homedirectory": [
+          "/home/p1-self"
+        ],
+        "uid": [
+          "p1-self"
+        ],
+        "krbcanonicalname": [
+          "p1-self@IPA.PILOT.INTERNAL"
+        ],
+        "sn": [
+          "Self"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "krbprincipalname": [
+          "p1-self@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "p1-team",
+          "p1-parent"
+        ],
+        "dn": "uid=p1-self,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 6,
+    "truncated": false,
+    "summary": "6 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

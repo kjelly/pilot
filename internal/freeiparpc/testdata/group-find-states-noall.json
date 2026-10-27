@@ -1,0 +1,46 @@
+{
+  "result": {
+    "result": [
+      {
+        "cn": [
+          "p1-nonposix"
+        ],
+        "description": [
+          "P1 non-posix"
+        ],
+        "dn": "cn=p1-nonposix,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "p1-parent"
+        ],
+        "description": [
+          "P1 parent"
+        ],
+        "gidnumber": [
+          "1927600227"
+        ],
+        "dn": "cn=p1-parent,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "p1-team"
+        ],
+        "description": [
+          "P1 team"
+        ],
+        "gidnumber": [
+          "1927600226"
+        ],
+        "dn": "cn=p1-team,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": false,
+    "summary": "3 groups matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
