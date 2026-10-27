@@ -159,3 +159,50 @@ func TestWarnFreeIPARosterAdminDriftChecksTheDefaultRoster(t *testing.T) {
 		t.Fatalf("no warning for the unreferenced default roster:\n%s", out.String())
 	}
 }
+
+// A failed apply puts a synced roster back only while it still holds what
+// the session wrote: one that another pilot process changed after reading
+// the synced roster, or holds, is left as it is and named in the error so
+// the operator checks it by hand — the rest of the workspace is still
+// rolled back (PR #148 re-review, F2).
+func TestEditApplyRollbackLeavesARosterAnotherProcessTouched(t *testing.T) {
+	for name, touch := range map[string]func(t *testing.T, roster string){
+		"changed since": func(t *testing.T, roster string) {
+			data, _ := os.ReadFile(roster)
+			writeSyncFile(t, roster, string(data)+"# saved by pilot roster after reading the synced roster\n")
+		},
+		"held": func(t *testing.T, roster string) {
+			holdRosterFlock(t, roster+".pilot-remove.lock")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, rosters := scopeWorkspace(t)
+			t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+			mainVault := filepath.Join(dir, ".vault", "main.yaml")
+			before := snapshotFiles(t, rosters["group_vars"], rosters["external"], mainVault)
+			var touched []byte
+			opts := editAgentSessionOptions{Trace: func(event automationTraceEvent) {
+				if event.Action == "save_vault" {
+					touch(t, rosters["default"])
+					touched, _ = os.ReadFile(rosters["default"])
+				}
+			}}
+
+			_, err := applyEditScenario(dir, "issue-146-rollback-touched", rotationScenario(
+				editAction{Action: "delete_vault_key", File: "main.yaml", Key: "no_such_key"},
+			), opts)
+			if err == nil || !strings.Contains(err.Error(), "rolled back everything except .vault/ipa-identity.yaml") || !strings.Contains(err.Error(), "by hand") {
+				t.Fatalf("applyEditScenario() error = %v, want the touched roster named for a hand check", err)
+			}
+			if after, _ := os.ReadFile(rosters["default"]); !bytes.Equal(after, touched) {
+				t.Fatalf("rollback overwrote the touched roster:\n%s", after)
+			}
+			assertUnchanged(t, before)
+			for _, secret := range []string{syncOldPassword, syncNewPassword} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("rollback error leaks a password")
+				}
+			}
+		})
+	}
+}

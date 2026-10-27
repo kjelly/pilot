@@ -181,6 +181,9 @@ func rosterWriterCases() map[string]rosterWriterCase {
 				return RemoveRosterUser(plaintextPath, "dave", RemoveRosterUserOptions{})
 			})
 		}},
+		"RestoreRosterFile": plain(func(path string) error {
+			return RestoreRosterFile(path, []byte(lockTestRoster), []byte(lockTestRoster+"# restored\n"))
+		}),
 		"WriteMinimalNFSServerRoster": {create: true, call: func(_ *testing.T, path string) error {
 			return WriteMinimalNFSServerRoster(path, "nfs1", "ipa.pilot.internal", "admin", "Admin-pass_1")
 		}},

@@ -11,43 +11,159 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 // restoreManagedFiles rewrites dir's managed files to exactly match
 // snapshot: every snapshot entry is written back verbatim, and any
 // managed file present in dir now but absent from snapshot (created by
 // the scenario that's being rolled back) is removed.
-func restoreManagedFiles(dir string, snapshot []managedFileEntry) error {
+//
+// A roster under .vault/ is the exception (rosterEntry): `pilot roster`,
+// `pilot access` and decommission write rosters without this session's
+// workspace lock, so one of them may have read the roster this session
+// wrote and saved on top of it. A roster is put back only under its roster
+// lock and only while it still holds what the session left there —
+// written, the session's writes as noteSessionWrites recorded them
+// (inventory.RestoreRosterFile). One that changed since, or is held, is
+// left as it is and returned in left (relative paths) for the operator to
+// check by hand; a roster the session never wrote is never touched.
+func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[string][]byte) (left []string, err error) {
 	wanted := make(map[string]managedFileEntry, len(snapshot))
 	for _, e := range snapshot {
 		wanted[e.RelPath] = e
 	}
-
-	for _, e := range snapshot {
-		full := filepath.Join(dir, filepath.FromSlash(e.RelPath))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return fmt.Errorf("rollback: mkdir for %s: %w", e.RelPath, err)
-		}
-		if err := os.WriteFile(full, e.Content, 0o644); err != nil {
-			return fmt.Errorf("rollback: restore %s: %w", e.RelPath, err)
-		}
-	}
-
 	current, err := managedFileEntries(dir)
 	if err != nil {
-		return fmt.Errorf("rollback: re-scan managed files: %w", err)
+		return nil, fmt.Errorf("rollback: scan managed files: %w", err)
 	}
+	now := make(map[string]managedFileEntry, len(current))
+	for _, e := range current {
+		now[e.RelPath] = e
+	}
+	// restoreRoster reports whether rel was a roster, handled here.
+	restoreRoster := func(rel string, before, after *managedFileEntry) (bool, error) {
+		if !rosterEntry(before) && !rosterEntry(after) {
+			return false, nil
+		}
+		if before != nil && after != nil && bytes.Equal(before.Content, after.Content) {
+			return true, nil
+		}
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		expected, wrote := written[rel]
+		var restoreErr error
+		switch {
+		case !wrote || after == nil:
+			// Changed, but not by this session — or gone: not this
+			// rollback's to decide.
+			restoreErr = inventory.ErrRosterChanged
+		case before == nil:
+			restoreErr = mutateRosterSource(dir, full, func() error { return inventory.RemoveRosterFile(full, expected) })
+		default:
+			restoreErr = mutateRosterSource(dir, full, func() error { return inventory.RestoreRosterFile(full, expected, before.Content) })
+		}
+		switch {
+		case restoreErr == nil:
+		case errors.Is(restoreErr, inventory.ErrRosterChanged), errors.Is(restoreErr, inventory.ErrMutationLocked), errors.Is(restoreErr, inventory.ErrRosterLockFile):
+			left = append(left, rel)
+		default:
+			return true, fmt.Errorf("rollback: restore %s: %w", rel, restoreErr)
+		}
+		return true, nil
+	}
+
+	for _, e := range snapshot {
+		after, ok := now[e.RelPath]
+		var afterPtr *managedFileEntry
+		if ok {
+			afterPtr = &after
+		}
+		if handled, err := restoreRoster(e.RelPath, &e, afterPtr); err != nil {
+			return nil, err
+		} else if handled {
+			continue
+		}
+		full := filepath.Join(dir, filepath.FromSlash(e.RelPath))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return nil, fmt.Errorf("rollback: mkdir for %s: %w", e.RelPath, err)
+		}
+		if err := os.WriteFile(full, e.Content, 0o644); err != nil {
+			return nil, fmt.Errorf("rollback: restore %s: %w", e.RelPath, err)
+		}
+	}
+
 	for _, e := range current {
 		if _, ok := wanted[e.RelPath]; ok {
 			continue
 		}
+		if handled, err := restoreRoster(e.RelPath, nil, &e); err != nil {
+			return nil, err
+		} else if handled {
+			continue
+		}
 		full := filepath.Join(dir, filepath.FromSlash(e.RelPath))
 		if err := os.Remove(full); err != nil {
-			return fmt.Errorf("rollback: remove %s (created by the failed scenario): %w", e.RelPath, err)
+			return nil, fmt.Errorf("rollback: remove %s (created by the failed scenario): %w", e.RelPath, err)
 		}
 	}
-	return nil
+	return left, nil
+}
+
+// rosterEntry reports whether e, a managed file, is a roster under .vault/
+// by its content: roster-shaped top-level keys (looksLikeRoster), or
+// ansible-vault encrypted, which a session's automation never writes. nil
+// (the file is absent on that side) is not.
+func rosterEntry(e *managedFileEntry) bool {
+	if e == nil || !e.IsSecret {
+		return false
+	}
+	if isAnsibleVaultEncrypted(e.Content) {
+		return true
+	}
+	doc, err := vaultfile.Parse(e.Content)
+	return err == nil && looksLikeRoster(doc)
+}
+
+// secretFileContents is every managed .vault/ file's bytes, by RelPath.
+func secretFileContents(dir string) map[string][]byte {
+	out := map[string][]byte{}
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.IsSecret {
+			out[e.RelPath] = e.Content
+		}
+	}
+	return out
+}
+
+// noteSessionWrites records in written every managed .vault/ file whose
+// bytes differ from last (secretFileContents as the step began), with its
+// new bytes: what a session wrote, as a rollback must find it to undo it
+// (restoreManagedFiles). Called after each scenario step; a roster another
+// process saves while that same step runs counts as the session's, one it
+// saves between steps does not.
+func noteSessionWrites(dir string, last, written map[string][]byte) {
+	entries, err := managedFileEntries(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsSecret {
+			continue
+		}
+		if before, ok := last[e.RelPath]; !ok || !bytes.Equal(before, e.Content) {
+			written[e.RelPath] = e.Content
+			last[e.RelPath] = e.Content
+		}
+	}
 }

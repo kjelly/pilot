@@ -253,3 +253,57 @@ func TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot(t *testing.T) {
 		t.Fatalf("roster owned by %d:%d, want %d:%d", st.Uid, st.Gid, uid, gid)
 	}
 }
+
+// pilot edit's rollback puts a roster back only while it holds what the
+// session left: changed by another writer since, or held, it is left
+// alone; a roster the session created is removed on the same terms
+// (PR #148 re-review, F2).
+func TestRestoreRosterFileOnlyUndoesTheSessionsOwnWrite(t *testing.T) {
+	original, session := []byte(lockTestRoster), []byte(lockTestRoster+"# session\n")
+	for name, tt := range map[string]struct {
+		current []byte
+		hold    bool
+		want    error
+		after   []byte
+	}{
+		"unchanged since":  {current: session, after: original},
+		"changed since":    {current: append(append([]byte{}, session...), "# another writer\n"...), want: ErrRosterChanged},
+		"held by a writer": {current: session, hold: true, want: ErrMutationLocked},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "roster.yaml")
+			if err := os.WriteFile(path, tt.current, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.hold {
+				holdRawLocks(t, path, ".pilot-remove.lock")
+			}
+			err := RestoreRosterFile(path, session, original)
+			if tt.want == nil && err != nil || tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("RestoreRosterFile() error = %v, want %v", err, tt.want)
+			}
+			want := tt.after
+			if want == nil {
+				want = tt.current
+			}
+			if got := mustRead(t, path); !bytes.Equal(got, want) {
+				t.Fatalf("roster =\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+	t.Run("created by the session", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "roster.yaml")
+		if err := os.WriteFile(path, session, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveRosterFile(path, []byte("something else")); !errors.Is(err, ErrRosterChanged) {
+			t.Fatalf("RemoveRosterFile(changed) error = %v, want ErrRosterChanged", err)
+		}
+		if err := RemoveRosterFile(path, session); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("roster still there (lstat err=%v)", err)
+		}
+	})
+}

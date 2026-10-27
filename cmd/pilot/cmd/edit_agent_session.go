@@ -28,6 +28,8 @@ type editAgentSessionOptions struct {
 	// PlanSource is the real workspace when the session runs on a plan's
 	// scratch copy of it (planEditScenario), "" otherwise.
 	PlanSource string
+	// BeforeStep runs before each step, as Trace runs after it.
+	BeforeStep func()
 }
 
 // editAgentSession is a single pilot-edit automation run against dir.
@@ -54,6 +56,7 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 			marker:            opts.Marker,
 			pausePresentation: opts.PausePresentation,
 			recorder:          opts.Recorder,
+			beforeStep:        opts.BeforeStep,
 		},
 	}
 }

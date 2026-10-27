@@ -57,6 +57,9 @@ type automationDriver struct {
 	// fallback makes this field's addition behavior-neutral.
 	recorder AuditRecorder
 	frameSeq int
+	// beforeStep, when set, runs before each step, as trace runs after
+	// it: applyEditScenario records what each step itself writes.
+	beforeStep func()
 }
 
 // recorderOrNoop is every recorder-calling site's entry point — never
@@ -78,6 +81,9 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 		d.keys = nil
 		if err := d.recorderOrNoop().RecordActionStart(step); err != nil {
 			return fmt.Errorf("step %d (%s): record action start: %w", i+1, step.Action, err)
+		}
+		if d.beforeStep != nil {
+			d.beforeStep()
 		}
 		err := d.runStep(r, step)
 		if recErr := d.recorderOrNoop().RecordActionResult(step, err); recErr != nil && err == nil {

@@ -4,7 +4,10 @@
 // before-snapshot that a mid-scenario failure rolls back to.
 package cmd
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // editApplyResult is what an apply attempt produces — success or a
 // clean rollback are both represented here (rollback is a well-defined
@@ -61,6 +64,26 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		return nil, err
 	}
 
+	// What each step itself wrote to .vault/ — compared with the files as
+	// the step found them, so a roster another process changes between
+	// steps is not taken for the session's — so a rollback undoes only
+	// that (restoreManagedFiles): rosters have writers outside this lock.
+	written, last := map[string][]byte{}, map[string][]byte{}
+	before := opts.BeforeStep
+	opts.BeforeStep = func() {
+		last = secretFileContents(dir)
+		if before != nil {
+			before()
+		}
+	}
+	trace := opts.Trace
+	opts.Trace = func(event automationTraceEvent) {
+		noteSessionWrites(dir, last, written)
+		if trace != nil {
+			trace(event)
+		}
+	}
+
 	session := newEditAgentSession(dir, opts)
 	runErr := session.Run(scenario)
 	if runErr == nil {
@@ -68,8 +91,12 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 
 	if runErr != nil {
-		if restoreErr := restoreManagedFiles(dir, snapshot); restoreErr != nil {
+		left, restoreErr := restoreManagedFiles(dir, snapshot, written)
+		if restoreErr != nil {
 			return nil, fmt.Errorf("apply failed (%v) and rollback also failed: %w", runErr, restoreErr)
+		}
+		if len(left) > 0 {
+			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s: another pilot process changed or holds it since this session wrote it, so check it by hand (the roster's freeipa.admin.password must equal .vault/main.yaml's ipa_admin_password)", runErr, strings.Join(left, ", "))
 		}
 		revisionAfterRollback, err := computeWorkspaceRevision(dir)
 		if err != nil {
