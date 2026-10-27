@@ -1,0 +1,225 @@
+{
+  "result": {
+    "result": [
+      {
+        "uid": [
+          "p1-keys"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/p1-keys"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "krbcanonicalname": [
+          "p1-keys@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-keys@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600224"
+        ],
+        "gidnumber": [
+          "1927600224"
+        ],
+        "sn": [
+          "Keys"
+        ],
+        "krbprincipalname": [
+          "p1-keys@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "sshpubkeyfp": [
+          "SHA256:XS+2GOeXQnIlXOikVVYpU8wNkCTaeMHb2Sos8lQbZnE p1-key1 (ssh-ed25519)",
+          "SHA256:thCuqWgO25E+6qJ8nTlg1oaWWZIRnBOlm2Cko0UsG+s p1-key2 (ssh-ed25519)"
+        ],
+        "dn": "uid=p1-keys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-nokeys"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/p1-nokeys"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "krbcanonicalname": [
+          "p1-nokeys@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-nokeys@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600225"
+        ],
+        "gidnumber": [
+          "1927600225"
+        ],
+        "sn": [
+          "NoKeys"
+        ],
+        "krbprincipalname": [
+          "p1-nokeys@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=p1-nokeys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-nopw"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "title": [
+          "t"
+        ],
+        "homedirectory": [
+          "/home/p1-nopw"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "krbcanonicalname": [
+          "p1-nopw@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-nopw@example.test",
+          "p1-nopw-2@example.test"
+        ],
+        "uidnumber": [
+          "1927600220"
+        ],
+        "gidnumber": [
+          "1927600220"
+        ],
+        "sn": [
+          "NoPw"
+        ],
+        "krbprincipalname": [
+          "p1-nopw@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=p1-nopw,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-off"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/p1-off"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "nsaccountlock": true,
+        "krbcanonicalname": [
+          "p1-off@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-off@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600223"
+        ],
+        "gidnumber": [
+          "1927600223"
+        ],
+        "sn": [
+          "Off"
+        ],
+        "krbprincipalname": [
+          "p1-off@IPA.PILOT.INTERNAL"
+        ],
+        "dn": "uid=p1-off,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-reset"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/p1-reset"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "krbcanonicalname": [
+          "p1-reset@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-reset@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600221"
+        ],
+        "gidnumber": [
+          "1927600221"
+        ],
+        "sn": [
+          "Reset"
+        ],
+        "krbprincipalname": [
+          "p1-reset@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=p1-reset,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-self"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/p1-self"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "krbcanonicalname": [
+          "p1-self@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "p1-self@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600222"
+        ],
+        "gidnumber": [
+          "1927600222"
+        ],
+        "sn": [
+          "Self"
+        ],
+        "krbprincipalname": [
+          "p1-self@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "dn": "uid=p1-self,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 6,
+    "truncated": false,
+    "summary": "6 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -62,20 +62,23 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 | 使用者預設值：first/last 預設為名稱、shell `/bin/bash`、home `/home/<name>`、`enabled` 預設依 `state != disabled` | `Normalize canonical users…` | — | 同一套預設；以表格測試對照 playbook 的 normalize |
 | 建立使用者 | `Ensure IPA users exist` | C9 | 只對不存在者 `user_add` |
 | 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位；未宣告的欄位不碰。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
-| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 時沒有後者）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
-| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | 以 key 本體比較集合；清除時送空值 |
+| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 下自行改密碼後沒有後者；admin 重設後兩者相等，2026-10-27 擷取）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
+| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | **Phase 2 只讀不寫**：變更與 client SSSD 收斂留在舊 playbook（PR #138 的 journal 協定要求先持久化待辦再改 key），見計畫 Phase 1「與 PR #138 的關係」。Go 以 key 本體比較集合，只在 plan 中報告差異，不以此判定成敗；live 端清空後屬性不存在（2026-10-27 擷取）。Phase 3 搬移時的寫入要求：清除時送空值 |
 | 啟用／停用 | `Reconcile canonical account enabled state` | C10 | 只在 `nsaccountlock` 與宣告不同時呼叫 |
 | 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位；type 不同時拒絕（FreeIPA 不能就地轉換） |
 | 每個套用過的群組有 history marker（`pilot-internal-history-g-<sha256>`，description `pilot.group-history/v1 name=<name>`）；刪除群組前 marker 必須存在 | `Ensure durable history marker…`（`tasks/freeipa-group-history-marker.yml`） | §9 | 相同命名與描述；marker 查詢失敗或碰撞時 fail closed |
-| 直接成員：`membership.authoritative`（預設 true）時撤銷名冊外的直接成員；false 時只新增 | `Look up canonical group direct membership`、`Remove stale…`、`Ensure canonical direct …` | C11、C12 | 直接與間接成員分開；新增與撤銷依集合差合併呼叫，逐成員檢查 `MemberResult`；成員查詢失敗不能當成空集合 |
+| 直接成員：`membership.authoritative`（預設 true）時撤銷名冊外的直接成員；false 時只新增 | `Look up canonical group direct membership`、`Remove stale…`、`Ensure canonical direct …` | C11、C12 | 直接與間接成員分開：直接成員只從 `group_find --all` 的 `member_user`／`member_group` 讀取，`user_find` 的 `memberof_group` 含間接群組，不得使用（2026-10-27 擷取）；新增與撤銷依集合差合併呼叫，逐成員檢查 `MemberResult`；成員查詢失敗不能當成空集合 |
 | 刪除 `state: absent` 的使用者與群組 | `Delete canonical users…`、`Look up actual FreeIPA group…`、`Delete canonical groups…` | §9 | 刪除前即時重讀；not found 視為已完成；其他錯誤停止 |
 | 不完整讀取時不得撤銷 | #102、#119 的 gate | v1.13、v1.15 | `*_find` 帶 `sizelimit=0`；`truncated` 或缺欄位時禁止 authoritative 撤銷 |
 
 不在 Phase 2 範圍：
+- SSH key 的寫入與 client SSSD 收斂（Go 只讀取，見上表 SSH key 列）；
 - host、hostgroup、netgroup、HBAC、sudo；
 - password policy、per-user authentication types、NFS。
 
 混合執行時，這些項目仍由舊 playbook 處理（計畫 §5 混合執行模型）。per-user authentication types 雖然是使用者屬性，仍留在舊 playbook，直到 Phase 3 搬移該 section。
+
+Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形；做法尚待使用者決定，是 Phase 2 的進入條件（計畫 Phase 1「與 PR #138 的關係」）。
 
 ## 4 engine 專屬驗收條件
 
