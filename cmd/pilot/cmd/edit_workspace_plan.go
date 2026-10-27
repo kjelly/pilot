@@ -58,12 +58,13 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 
 	opts.PlanSource = dir
 	session := newEditAgentSession(tempDir, opts)
-	if err := session.Run(scenario); err != nil {
+	run, err := session.Run(scenario)
+	if err != nil {
 		return nil, fmt.Errorf("plan scenario: %w", err)
 	}
 
 	blocking, warnings := collectWorkspaceValidation(tempDir)
-	warnings = append(warnings, session.RosterSyncWarnings()...)
+	warnings = append(warnings, run.Warnings...)
 
 	patch, affected, redacted, err := diffManagedFiles(dir, tempDir)
 	if err != nil {

@@ -452,6 +452,9 @@ func sameRosterGuardExpression(a, b ast.Expr) bool {
 // than API spelling. Read-only, validation and simulation helpers cannot
 // reach these sinks. Migration backup creation counts because it copies
 // secrets; decrypt scratch files and lock files do not mutate the source.
+// A function that hands out a value whose method writes (the prepared
+// sync PrepareRosterAdminSync returns, written by its Commit) is a writer
+// too: the write is decided, and the roster locked, when it is called.
 func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(repoRootForTest(t), "internal", "inventory", "*.go"))
@@ -460,6 +463,7 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 	}
 	graph := make(map[string][]string)
 	declarations := make(map[string]*ast.FuncDecl)
+	returnsType := make(map[string][]string)
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -470,14 +474,27 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 		}
 		for _, declaration := range file.Decls {
 			fn, ok := declaration.(*ast.FuncDecl)
-			if !ok || fn.Recv != nil {
+			if !ok {
 				continue
 			}
-			declarations[fn.Name.Name] = fn
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok {
+			node := fn.Name.Name
+			if fn.Recv != nil {
+				// A method is "<receiver type>.<name>" in the graph.
+				node = receiverTypeName(fn.Recv.List[0].Type) + "." + fn.Name.Name
+			} else {
+				declarations[node] = fn
+				// A function returning a type points at its methods
+				// ("<type>.") through returnsType.
+				if fn.Type.Results != nil {
+					for _, result := range fn.Type.Results.List {
+						returnsType[node] = append(returnsType[node], receiverTypeName(result.Type))
+					}
+				}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
 					if name, ok := call.Fun.(*ast.Ident); ok {
-						graph[fn.Name.Name] = append(graph[fn.Name.Name], name.Name)
+						graph[node] = append(graph[node], name.Name)
 					}
 				}
 				return true
@@ -504,9 +521,18 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 			}
 		}
 	}
+	for name, types := range returnsType {
+		for method := range mutates {
+			for _, typ := range types {
+				if typ != "" && strings.HasPrefix(method, typ+".") {
+					mutates[name] = true
+				}
+			}
+		}
+	}
 	writers := make(map[string]int)
 	for name := range mutates {
-		if !ast.IsExported(name) {
+		if declarations[name] == nil || !ast.IsExported(name) {
 			continue
 		}
 		index, found := 0, false
@@ -522,15 +548,27 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 			t.Fatalf("writer %s needs an explicit source-path parameter audit", name)
 		}
 	}
-	for _, name := range []string{"EnsureRosterCurrent", "AppendMissingNFSServerStub", "AutoFillFreeIPAClientRosterHosts", "FillFreeIPAAdminPassword", "WriteMinimalFreeIPAVault"} {
+	for _, name := range []string{"EnsureRosterCurrent", "AppendMissingNFSServerStub", "AutoFillFreeIPAClientRosterHosts", "FillFreeIPAAdminPassword", "WriteMinimalFreeIPAVault", "PrepareRosterAdminSync"} {
 		if _, ok := writers[name]; !ok {
 			t.Errorf("source call graph missed writer %s", name)
 		}
 	}
-	for _, name := range []string{"RosterUser", "SimulateSetRosterUser", "ValidateRosterFile", "DecryptRosterToTempFile"} {
+	for _, name := range []string{"RosterUser", "SimulateSetRosterUser", "ValidateRosterFile", "DecryptRosterToTempFile", "ProbeRosterLock", "RosterAdminPasswordDiffers"} {
 		if _, ok := writers[name]; ok {
 			t.Errorf("read-only source operation %s classified as an original-source mutation", name)
 		}
 	}
 	return writers
+}
+
+// receiverTypeName is the type name in a receiver or result type, pointer
+// or not: "PreparedRosterAdminSync" for *PreparedRosterAdminSync.
+func receiverTypeName(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
 }

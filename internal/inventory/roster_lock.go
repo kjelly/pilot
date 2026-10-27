@@ -57,34 +57,19 @@ func acquireMutationLock(path string) (*mutationLock, error) {
 	writable := err == nil
 	if errors.Is(err, fs.ErrPermission) {
 		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
-			return nil, fmt.Errorf("cannot create lock file %s; its directory must be writable by this user: %w: %w", path, ErrRosterLockFile, err)
+			return nil, errLockFileNotCreatable(path, err)
 		}
 		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 		if errors.Is(err, fs.ErrPermission) {
-			return nil, fmt.Errorf("lock file %s exists but this user cannot open it (left by another user, e.g. a root-run pilot); remove it or give it to this user: %w: %w", path, ErrRosterLockFile, err)
+			return nil, errLockFileNotOpenable(path, err)
 		}
 	}
-	if errors.Is(err, syscall.ELOOP) {
-		return nil, fmt.Errorf("lock file %s is a symlink; refusing to follow it (remove it): %w", path, ErrRosterLockFile)
+	if err := checkLockFileOpen(path, f, err); err != nil {
+		return nil, err
 	}
-	if err != nil {
-		return nil, fmt.Errorf("open lock file %s: %w", path, err)
-	}
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+	if err := flockMutationLock(path, f, syscall.LOCK_EX); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("stat lock file %s: %w", path, err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		f.Close()
-		return nil, fmt.Errorf("lock file %s is not a plain file of its own (a device, FIFO or hard link); remove it: %w", path, ErrRosterLockFile)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, ErrMutationLocked
-		}
-		return nil, fmt.Errorf("lock %s: %w", path, err)
+		return nil, err
 	}
 
 	if writable {
@@ -92,6 +77,87 @@ func acquireMutationLock(path string) (*mutationLock, error) {
 	}
 
 	return &mutationLock{file: f}, nil
+}
+
+func errLockFileNotCreatable(path string, err error) error {
+	return fmt.Errorf("cannot create lock file %s; its directory must be writable by this user: %w: %w", path, ErrRosterLockFile, err)
+}
+
+func errLockFileNotOpenable(path string, err error) error {
+	return fmt.Errorf("lock file %s exists but this user cannot open it (left by another user, e.g. a root-run pilot); remove it or give it to this user: %w: %w", path, ErrRosterLockFile, err)
+}
+
+// checkLockFileOpen vets the result of opening the lock file path: f must
+// be a plain file of its own. It closes f when it refuses it.
+func checkLockFileOpen(path string, f *os.File, err error) error {
+	if errors.Is(err, syscall.ELOOP) {
+		return fmt.Errorf("lock file %s is a symlink; refusing to follow it (remove it): %w", path, ErrRosterLockFile)
+	}
+	if err != nil {
+		return fmt.Errorf("open lock file %s: %w", path, err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		f.Close()
+		return fmt.Errorf("stat lock file %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		f.Close()
+		return fmt.Errorf("lock file %s is not a plain file of its own (a device, FIFO or hard link); remove it: %w", path, ErrRosterLockFile)
+	}
+	return nil
+}
+
+// flockMutationLock takes how (LOCK_EX or LOCK_SH) on the open lock file
+// f without waiting: ErrMutationLocked when another process holds it.
+func flockMutationLock(path string, f *os.File, how int) error {
+	if err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return ErrMutationLocked
+		}
+		return fmt.Errorf("lock %s: %w", path, err)
+	}
+	return nil
+}
+
+// ProbeRosterLock reports what lockRosterFile would find on the roster at
+// path now, without creating a lock file or holding one past the call:
+// nil when the lock files are absent or free, ErrMutationLocked when
+// another process holds one, ErrRosterLockFile when one could not be used.
+// A plan probes the real roster its scratch copy stands in for, so it
+// fails where the apply would. The probe takes each existing lock file's
+// flock shared for an instant; a writer starting in that instant finds
+// the roster busy, as with any other holder, and can retry.
+func ProbeRosterLock(path string) error {
+	target, err := secretpath.Canonical(path)
+	if err != nil {
+		return fmt.Errorf("resolve roster %s: %w", path, err)
+	}
+	for _, suffix := range rosterLockSuffixes {
+		if err := probeMutationLock(target + suffix); err != nil {
+			return fmt.Errorf("roster %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func probeMutationLock(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// acquireMutationLock would create it.
+		if err := syscall.Access(filepath.Dir(path), 2 /* W_OK */); err != nil {
+			return errLockFileNotCreatable(path, err)
+		}
+		return nil
+	case errors.Is(err, fs.ErrPermission):
+		return errLockFileNotOpenable(path, err)
+	}
+	if err := checkLockFileOpen(path, f, err); err != nil {
+		return err
+	}
+	defer f.Close() // drops the shared flock
+	return flockMutationLock(path, f, syscall.LOCK_SH)
 }
 
 // release closes the lock file, dropping the flock. Safe to call exactly

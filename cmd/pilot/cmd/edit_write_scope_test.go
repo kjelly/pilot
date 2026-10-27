@@ -176,7 +176,8 @@ func TestEditTerminalAndActionsStillWriteExternalRosters(t *testing.T) {
 			return d.run(&r, enableNFSScenario())
 		},
 		"--actions session": func(t *testing.T, dir string) error {
-			return newEditAgentSession(dir, editAgentSessionOptions{}).Run(enableNFSScenario())
+			_, err := newEditAgentSession(dir, editAgentSessionOptions{}).Run(enableNFSScenario())
+			return err
 		},
 	}
 	for name, do := range run {

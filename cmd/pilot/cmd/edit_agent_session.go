@@ -72,22 +72,29 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 // after a failed Run to inspect where the router stopped.
 func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
 
-// RosterSyncWarnings are the rosters a vault save in this session left
-// for the operator to update by hand, as text without any password.
-func (s *editAgentSession) RosterSyncWarnings() []string { return s.router.rosterSyncWarnings }
+// editRunResult is what a session's Run reports besides its error.
+type editRunResult struct {
+	// Warnings are the rosters a vault save left for the operator to
+	// update by hand, as text without any password. Every front-end
+	// reports them: --actions on stderr, a plan or apply in its result.
+	Warnings []string
+}
 
 // Run drives scenario's steps against the session's router, exactly as
 // calling automationDriver.run directly would — this indirection exists
-// solely so a caller never needs to know automationDriver exists.
-func (s *editAgentSession) Run(scenario editScenario) error {
+// solely so a caller never needs to know automationDriver exists. The
+// result comes back with an error too: it covers the steps before the
+// failing one, which --actions keeps.
+func (s *editAgentSession) Run(scenario editScenario) (editRunResult, error) {
 	if s.router.err != nil {
-		return s.router.err
+		return editRunResult{}, s.router.err
 	}
 	if err := validateEditScenario(scenario); err != nil {
-		return err
+		return editRunResult{}, err
 	}
 	if err := validateInventorySecretStorage(s.dir); err != nil {
-		return err
+		return editRunResult{}, err
 	}
-	return s.driver.run(&s.router, scenario)
+	err := s.driver.run(&s.router, scenario)
+	return editRunResult{Warnings: append([]string(nil), s.router.rosterSyncWarnings...)}, err
 }

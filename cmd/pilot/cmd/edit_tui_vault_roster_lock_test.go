@@ -56,33 +56,42 @@ func rotateMainVault(t *testing.T, dir string) string {
 	t.Helper()
 	r := newEditRouterModel(dir)
 	d := automationDriver{dir: dir}
-	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
-		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
-		{Action: "save_vault", File: "main.yaml"},
-	}}); err != nil {
+	if err := d.run(&r, rotationSteps(syncNewPassword)); err != nil {
 		t.Fatalf("driver.run() error = %v", err)
 	}
 	return r.banner
 }
 
+// rotationSteps sets .vault/main.yaml's ipa_admin_password to password and
+// saves it.
+func rotationSteps(password string) editScenario {
+	return editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: password},
+		{Action: "save_vault", File: "main.yaml"},
+	}}
+}
+
 // Through the real save path: a workspace roster that links to a roster
-// another pilot process holds on its real path is reported as not synced
-// and left alone, the link included (PR #148 review). Unlocked, the same
-// save updates the shared file and keeps the link.
+// another pilot process holds on its real path refuses the vault save —
+// the vault, the shared roster and the link are left as they were — since
+// a save that went ahead would leave the roster on the old password with
+// no later save to carry it forward (PR #148 round 4, R8). Unlocked, the
+// same save updates the shared file and keeps the link.
 func TestEditAutomationDriverVaultSyncRespectsTheLinkedRostersLock(t *testing.T) {
 	for _, suffix := range []string{".pilot-remove.lock", ".pilot-migrate.lock"} {
 		t.Run(suffix, func(t *testing.T) {
 			dir, link, shared := linkedRosterWorkspace(t)
-			before, _ := os.ReadFile(shared)
+			mainVault := filepath.Join(dir, ".vault", "main.yaml")
+			before := snapshotFiles(t, shared, mainVault)
 			holdRosterFlock(t, shared+suffix)
 
-			banner := rotateMainVault(t, dir)
-			if after, _ := os.ReadFile(shared); !bytes.Equal(after, before) {
-				t.Fatalf("locked roster rewritten through its link:\n%s", after)
+			r := newEditRouterModel(dir)
+			d := automationDriver{dir: dir}
+			err := d.run(&r, rotationSteps(syncNewPassword))
+			if !errors.Is(err, inventory.ErrMutationLocked) || !strings.Contains(err.Error(), mainVault+" was not saved") {
+				t.Fatalf("driver.run() error = %v; want the save refused on the locked roster", err)
 			}
-			if !strings.Contains(banner, "⚠️  未同步 .vault/ipa-identity.yaml：另一個 pilot 名冊操作正鎖住它") || strings.Contains(banner, "已同步") {
-				t.Errorf("banner does not report the locked roster as not synced:\n%s", banner)
-			}
+			assertUnchanged(t, before)
 			assertLinkTo(t, link, shared)
 		})
 	}

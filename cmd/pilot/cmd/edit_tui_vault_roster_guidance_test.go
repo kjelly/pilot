@@ -13,8 +13,9 @@ import (
 
 // guidanceWorkspace has one roster per way the sync can leave a roster to
 // the operator, plus one it updates: the default roster (synced), one
-// already diverged, one encrypted, one another pilot process holds, one
-// in a .vault/ subdirectory and one outside the workspace. hosts.yml
+// already diverged, one encrypted, one in a .vault/ subdirectory and one
+// outside the workspace. (A roster another pilot process holds refuses
+// the save instead: TestVaultSaveRosterSyncParity.) hosts.yml
 // references them the way pilot edit writes freeipa_roster_file: as
 // absolute paths.
 func guidanceWorkspace(t *testing.T) (dir string, rosters map[string]string) {
@@ -25,7 +26,6 @@ func guidanceWorkspace(t *testing.T) (dir string, rosters map[string]string) {
 		"default":   filepath.Join(dir, ".vault", "ipa-identity.yaml"),
 		"diverged":  filepath.Join(dir, ".vault", "diverged.yaml"),
 		"encrypted": filepath.Join(dir, ".vault", "encrypted.yaml"),
-		"locked":    filepath.Join(dir, ".vault", "locked.yaml"),
 		"nested":    filepath.Join(dir, ".vault", "sub", "nested.yaml"),
 		"external":  filepath.Join(t.TempDir(), "ipa-identity.yaml"),
 	}
@@ -41,7 +41,7 @@ func guidanceWorkspace(t *testing.T) (dir string, rosters map[string]string) {
 	}
 	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: "+quotedOld+"\n")
 	hosts := "hosts:\n"
-	for i, name := range []string{"diverged", "encrypted", "locked", "nested", "external"} {
+	for i, name := range []string{"diverged", "encrypted", "nested", "external"} {
 		n := string(rune('1' + i))
 		hosts += "  h" + n + ":\n    ansible_host: 10.0.0." + n + "\n    roles: [freeipa-client]\n    freeipa_roster_file: " + rosters[name] + "\n"
 	}
@@ -58,7 +58,6 @@ func guidanceWorkspace(t *testing.T) (dir string, rosters map[string]string) {
 // plan or apply returns as warnings.
 func TestEditAutomationDriverNamesTheHandFixForEveryUnsyncedRoster(t *testing.T) {
 	dir, rosters := guidanceWorkspace(t)
-	holdRosterFlock(t, rosters["locked"]+".pilot-remove.lock")
 	r := newEditRouterModel(dir)
 	d := automationDriver{dir: dir}
 	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
@@ -77,7 +76,6 @@ func TestEditAutomationDriverNamesTheHandFixForEveryUnsyncedRoster(t *testing.T)
 	for name, reason := range map[string]string{
 		".vault/diverged.yaml":   "原本就跟舊的 ipa_admin_password 不同",
 		".vault/encrypted.yaml":  "ansible-vault 加密（用 ansible-vault edit）",
-		".vault/locked.yaml":     "另一個 pilot 名冊操作正鎖住它",
 		".vault/sub/nested.yaml": "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）",
 		rosters["external"]:      "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）",
 	} {

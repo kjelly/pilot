@@ -112,7 +112,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 
 	opts.Transaction = true
 	session := newEditAgentSession(dir, opts)
-	runErr := session.Run(scenario)
+	run, runErr := session.Run(scenario)
 	if runErr == nil {
 		runErr = validateInventorySecretStorage(dir)
 	}
@@ -151,7 +151,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 	diff, affected, redacted := diffEntries(snapshot, after)
 	blocking, warnings := collectWorkspaceValidation(dir)
-	warnings = append(warnings, session.RosterSyncWarnings()...)
+	warnings = append(warnings, run.Warnings...)
 	revisionAfter, err := computeWorkspaceRevision(dir)
 	if err != nil {
 		return nil, err

@@ -387,14 +387,23 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
 				return nil
 			}
-			// The password this save replaces, so the rosters holding it can follow.
+			// The password this save replaces, so the rosters holding it can
+			// follow: prepared (locked) before the vault is written, so a
+			// busy roster refuses the save instead of being left behind.
 			previous, _ := os.ReadFile(path)
+			sync, refused := prepareVaultRosterSync(r, dir, path, previous, doc.Bytes())
+			if refused != "" {
+				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", path, r.writeRefused)
+				return pushVaultEditorScreen(r, dir, path, doc, true,
+					fmt.Sprintf("⚠️  未存檔 %s（修改還在）：名冊要跟著改 ipa_admin_password，但它現在不能寫入\n%s", path, refused))
+			}
 			if werr := os.WriteFile(path, doc.Bytes(), 0o600); werr != nil {
+				sync.release()
 				r.err = fmt.Errorf("write %s: %w", path, werr)
 				return nil
 			}
 			banner := fmt.Sprintf("✅ 已存檔 %s", path)
-			for _, line := range rosterSyncAfterVaultSave(r.writeScope(dir), path, previous, doc.Bytes()) {
+			for _, line := range sync.commit() {
 				banner += "\n" + line.icon + line.text
 				if line.manual {
 					r.rosterSyncWarnings = append(r.rosterSyncWarnings, line.text)

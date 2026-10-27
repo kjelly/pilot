@@ -169,61 +169,127 @@ const rosterNotStringReason = "freeipa.admin.password 沒加引號，YAML 可能
 var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
 	text: "pilot edit 只在改變 ipa_admin_password 的這次存檔同步名冊，之後再存不會補；上面未同步的名冊請手動修改（加密名冊用 ansible-vault edit）"}
 
-// rosterSyncAfterVaultSave is what pilot edit reports about the rosters
-// after saving vaultPath from previous to saved: nothing unless the save
-// changed ipa_admin_password. Only the workspace's default vault is a
-// source: .vault/main.yaml is the file deploy loads (defaultVaultFile) and
-// so the one the rosters must match. A roster holding the same old
-// password as some other vault file is no proof that it uses that file,
-// so such a save only says so; so does a new value Ansible would template
-// (issue #146), since pilot cannot tell which password it resolves to.
-// Lines never hold a password.
-func rosterSyncAfterVaultSave(scope editWriteScope, vaultPath string, previous, saved []byte) []rosterSyncLine {
-	dir := scope.dir
+// vaultRosterSync is a vault save's roster sync, prepared before the save
+// writes the vault (prepareVaultRosterSync) and committed after it.
+type vaultRosterSync struct {
+	steps []vaultRosterStep
+	// onlyOnChange closes the report with rosterSyncOnlyOnChange when
+	// any of its lines needs the operator.
+	onlyOnChange bool
+}
+
+// vaultRosterStep is one line of the save's report: line as it stands, or
+// — for a roster the save will update — the prepared write, whose line
+// commit decides.
+type vaultRosterStep struct {
+	line        rosterSyncLine
+	path, shown string
+	prepared    *inventory.PreparedRosterAdminSync
+}
+
+// release drops every prepared roster's lock without writing.
+func (s *vaultRosterSync) release() {
+	for _, step := range s.steps {
+		if step.prepared != nil {
+			step.prepared.Release()
+		}
+	}
+}
+
+// commit writes every prepared roster, once the vault is saved, and
+// returns the report. A roster whose write fails now is a line for the
+// operator: the vault is already saved.
+func (s *vaultRosterSync) commit() []rosterSyncLine {
+	var lines []rosterSyncLine
+	manual := false
+	for _, step := range s.steps {
+		line := step.line
+		if step.prepared != nil {
+			if err := step.prepared.Commit(); err != nil {
+				line = manualRosterLine(step.shown, rosterSyncReason(err, step.path, step.shown))
+			} else {
+				line = rosterSyncLine{icon: "🔁 ", text: fmt.Sprintf("已同步 %s 的 freeipa.admin.password", step.shown)}
+			}
+		}
+		manual = manual || line.manual
+		lines = append(lines, line)
+	}
+	if manual && s.onlyOnChange {
+		lines = append(lines, rosterSyncOnlyOnChange)
+	}
+	return lines
+}
+
+func manualRosterLine(shown, reason string) rosterSyncLine {
+	return rosterSyncLine{icon: "⚠️  ", manual: true,
+		text: fmt.Sprintf("未同步 %s：%s；%s", shown, reason, rosterManualFix)}
+}
+
+// prepareVaultRosterSync prepares what saving vaultPath from previous to
+// saved does to the rosters, before the save writes anything: nothing
+// unless the save changes ipa_admin_password. Only the workspace's default
+// vault is a source: .vault/main.yaml is the file deploy loads
+// (defaultVaultFile) and so the one the rosters must match. A roster
+// holding the same old password as some other vault file is no proof that
+// it uses that file, so such a save only says so; so does a new value
+// Ansible would template (issue #146), since pilot cannot tell which
+// password it resolves to. Lines never hold a password.
+//
+// Every workspace roster that must follow the new password is locked and
+// its change decided (inventory.PrepareRosterAdminSync), so the save
+// writes the vault only once all of them can follow, and then commits
+// them. A roster another pilot process holds, or whose lock file cannot be
+// used, refuses the save (refused): nothing is written, rosterBusyBanner
+// records the refusal on r — automation fails the step, plan and apply
+// included — and the terminal stays in the editor with the edit unsaved,
+// so saving again once the roster is free carries the password forward.
+func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous, saved []byte) (sync *vaultRosterSync, refused string) {
+	sync = &vaultRosterSync{}
+	fixed := func(icon, text string) *vaultRosterSync {
+		sync.steps = []vaultRosterStep{{line: rosterSyncLine{icon: icon, manual: true, text: text}}}
+		return sync
+	}
 	if inventory.VaultAdminPasswordText(previous) == inventory.VaultAdminPasswordText(saved) {
-		return nil
+		return sync, ""
 	}
 	oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(saved)
 	templated := inventory.VaultAdminPasswordTemplate(saved) != ""
 	notString := inventory.VaultAdminPasswordNotString(previous) || inventory.VaultAdminPasswordNotString(saved)
 	if !templated && !notString && (oldPassword == "" || newPassword == "") {
-		return nil
+		return sync, ""
 	}
 	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
-		return []rosterSyncLine{{icon: "ℹ️  ", manual: true,
-			text: "只有 .vault/main.yaml 會自動同步名冊；若名冊用這份 vault 的密碼，請手動把名冊的 freeipa.admin.password 改成新值"}}
+		return fixed("ℹ️  ", "只有 .vault/main.yaml 會自動同步名冊；若名冊用這份 vault 的密碼，請手動把名冊的 freeipa.admin.password 改成新值"), ""
 	}
 	if templated {
-		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
-			text: "未同步名冊：新的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會當成模板展開，pilot 無法得知實際的密碼；請自行確認名冊的 freeipa.admin.password 跟它展開後的值相同"}}
+		return fixed("⚠️  ", "未同步名冊：新的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會當成模板展開，pilot 無法得知實際的密碼；請自行確認名冊的 freeipa.admin.password 跟它展開後的值相同"), ""
 	}
 	if notString {
-		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
-			text: "未同步名冊：ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；請把它加上引號，並手動把名冊的 freeipa.admin.password 改成同一個加引號的值"}}
+		return fixed("⚠️  ", "未同步名冊：ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；請把它加上引號，並手動把名冊的 freeipa.admin.password 改成同一個加引號的值"), ""
 	}
-	return syncRosterAdminPasswords(scope, oldPassword, newPassword)
+	return prepareRosterAdminPasswords(r, dir, oldPassword, newPassword)
 }
 
-// syncRosterAdminPasswords carries an ipa_admin_password change saved to
-// .vault/main.yaml into every workspace roster that still holds the old
-// password as its freeipa.admin.password (issue #146): `pilot access`,
-// `pilot identity drift` and `pilot roster remove-*` authenticate with the
-// roster's copy, and freeipa-nfs-server-apply.yml refuses a roster that
-// disagrees with the vault. It returns one line per roster it updated or
-// that needs the operator, and never prints a password.
-func syncRosterAdminPasswords(scope editWriteScope, oldPassword, newPassword string) []rosterSyncLine {
-	dir, planSource := scope.dir, scope.planSource
+// prepareRosterAdminPasswords prepares carrying an ipa_admin_password
+// change saved to .vault/main.yaml into every workspace roster that still
+// holds the old password as its freeipa.admin.password (issue #146):
+// `pilot access`, `pilot identity drift` and `pilot roster remove-*`
+// authenticate with the roster's copy, and freeipa-nfs-server-apply.yml
+// refuses a roster that disagrees with the vault. It reports one line per
+// roster it will update or that needs the operator, and refuses the save
+// on a busy roster (prepareVaultRosterSync).
+func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPassword string) (*vaultRosterSync, string) {
+	scope := r.writeScope(dir)
 	referenced := referencedRosterFiles(dir)
 	for i, path := range referenced {
 		referenced[i] = scope.rosterWritePath(path)
 	}
-	var lines []rosterSyncLine
+	sync := &vaultRosterSync{onlyOnChange: true}
 	manual := func(shown, reason string) {
-		lines = append(lines, rosterSyncLine{icon: "⚠️  ", manual: true,
-			text: fmt.Sprintf("未同步 %s：%s；%s", shown, reason, rosterManualFix)})
+		sync.steps = append(sync.steps, vaultRosterStep{line: manualRosterLine(shown, reason)})
 	}
-	for _, path := range rosterCandidates(dir, planSource, referenced) {
-		shown := shownRosterPath(path, dir, planSource)
+	for _, path := range rosterCandidates(dir, scope.planSource, referenced) {
+		shown := shownRosterPath(path, dir, scope.planSource)
 		if !isManagedVaultFile(dir, path) {
 			// Only read: pilot edit's sync never writes a roster outside
 			// .vault/. A path the workspace may not use is skipped, as before.
@@ -236,30 +302,37 @@ func syncRosterAdminPasswords(scope editWriteScope, oldPassword, newPassword str
 			}
 			continue
 		}
-		result, err := mutateRosterSourceValue(scope, path, func() (inventory.RosterAdminSync, error) {
-			return inventory.SyncRosterAdminPassword(path, oldPassword, newPassword)
+		prepared, err := mutateRosterSourceValue(scope, path, func() (*inventory.PreparedRosterAdminSync, error) {
+			return inventory.PrepareRosterAdminSync(path, oldPassword, newPassword)
 		})
+		if err == nil && prepared.Result == inventory.RosterAdminUpdated && scope.planSource != "" {
+			// A plan writes its scratch copy, which no other process locks;
+			// the apply locks the real roster, so the plan probes it to fail
+			// where the apply would.
+			if real, rerr := rosterIdentity(dir, scope.planSource, path); rerr == nil {
+				if err = inventory.ProbeRosterLock(real); err != nil {
+					prepared.Release()
+				}
+			}
+		}
+		if banner, busy := rosterBusyBanner(r, shown, err); busy {
+			sync.release()
+			return nil, banner
+		}
 		switch {
 		case errors.Is(err, inventory.ErrRosterEncrypted):
 			manual(shown, "ansible-vault 加密（用 ansible-vault edit）")
-		case errors.Is(err, inventory.ErrMutationLocked):
-			manual(shown, "另一個 pilot 名冊操作正鎖住它（等它結束）")
 		case err != nil:
 			manual(shown, rosterSyncReason(err, path, shown))
-		case result == inventory.RosterAdminUpdated:
-			lines = append(lines, rosterSyncLine{icon: "🔁 ", text: fmt.Sprintf("已同步 %s 的 freeipa.admin.password", shown)})
-		case result == inventory.RosterAdminNotString:
+		case prepared.Result == inventory.RosterAdminUpdated:
+			sync.steps = append(sync.steps, vaultRosterStep{path: path, shown: shown, prepared: prepared})
+		case prepared.Result == inventory.RosterAdminNotString:
 			manual(shown, rosterNotStringReason)
-		case result == inventory.RosterAdminDiffers:
+		case prepared.Result == inventory.RosterAdminDiffers:
 			manual(shown, "freeipa.admin.password 原本就跟舊的 ipa_admin_password 不同，pilot 不知道它該用哪一個（請先確認）")
 		}
 	}
-	for _, line := range lines {
-		if line.manual {
-			return append(lines, rosterSyncOnlyOnChange)
-		}
-	}
-	return lines
+	return sync, ""
 }
 
 // shownRosterPath is path relative to the workspace when it is inside it

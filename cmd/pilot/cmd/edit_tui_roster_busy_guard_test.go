@@ -87,9 +87,8 @@ func TestRegression_EditRosterWritesReportABusyRoster(t *testing.T) {
 // one would report a refused write some other way, which the automation
 // driver cannot see.
 var busyErrorHandlers = map[string]string{
-	"rosterBusyBanner":         "the one place a busy roster becomes a banner and a step error",
-	"syncRosterAdminPasswords": "a roster the vault sync could not update is a plan/apply warning (rosterSyncWarnings), not a refused step",
-	"restoreManagedFiles":      "a roster a rollback cannot put back is named in the apply error",
+	"rosterBusyBanner":    "the one place a busy roster becomes a banner and a step error",
+	"restoreManagedFiles": "a roster a rollback cannot put back is named in the apply error",
 }
 
 // A busy roster error is turned into a banner only by rosterBusyBanner,
