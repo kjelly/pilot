@@ -359,3 +359,52 @@ func TestCIImageBuildArgsCheckCatchesDrift(t *testing.T) {
 		})
 	}
 }
+
+// checkCIImageTagTrigger reports a push tag filter that also matches tags
+// that are not v<digit>...: metadata-action makes no image tag for a tag
+// that is not semver (only a warning), and build-push-action then fails with
+// "tag is needed when pushing to registry" after the whole CI has run.
+func checkCIImageTagTrigger(ciYAML string) string {
+	var wf struct {
+		On struct {
+			Push struct{ Tags []string }
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal([]byte(ciYAML), &wf); err != nil {
+		return "parse ci.yml: " + err.Error()
+	}
+	if len(wf.On.Push.Tags) == 0 {
+		return "ci.yml runs on no tag pushes, so no release image is published"
+	}
+	for _, p := range wf.On.Push.Tags {
+		if !strings.HasPrefix(p, "v[0-9]") {
+			return "push tag filter " + strconv.Quote(p) + " also matches tags that are not releases (want v[0-9]...)"
+		}
+	}
+	return ""
+}
+
+func TestCIImageReleaseTagTriggerMatchesReleasesOnly(t *testing.T) {
+	if msg := checkCIImageTagTrigger(readCIYAML(t)); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+func TestCIImageReleaseTagTriggerCheckCatchesDrift(t *testing.T) {
+	cases := []struct{ name, ci, want string }{
+		{"release tags", "on:\n  push:\n    branches: [main]\n    tags: ['v[0-9]*']\n", ""},
+		{"any v tag", "on:\n  push:\n    branches: [main]\n    tags: ['v*']\n", "also matches tags that are not releases"},
+		{"no tag trigger", "on:\n  push:\n    branches: [main]\n", "no tag pushes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkCIImageTagTrigger(tc.ci)
+			if tc.want == "" && got != "" {
+				t.Fatalf("want no error, got %q", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("want error containing %q, got %q", tc.want, got)
+			}
+		})
+	}
+}

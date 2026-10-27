@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # Release tags only: the image job publishes a tag as :<semver>, and
+    # buildx fails a push with no tags, so a tag like vm-snapshot would run
+    # the full CI only to fail there
+    # (TestCIImageReleaseTagTriggerMatchesReleasesOnly).
+    tags: ['v[0-9]*']
   pull_request:
     branches: [main]
   workflow_dispatch:
