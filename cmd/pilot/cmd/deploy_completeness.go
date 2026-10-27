@@ -305,6 +305,11 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 	if err != nil {
 		return
 	}
+	if inventory.VaultAdminPasswordNotString(data) {
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；pilot 無法拿它跟名冊比對。"+
+			"請把它加上引號，名冊的 freeipa.admin.password 也寫成同一個加引號的值。\n\n", vaultPath)
+		return
+	}
 	password := inventory.VaultAdminPassword(data)
 	templated := inventory.VaultAdminPasswordTemplate(data) != ""
 	if password == "" && !templated {
@@ -337,8 +342,8 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 			continue
 		}
 		if result == inventory.RosterAdminNotString {
-			fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 不是字串（例如沒加引號的數字），Ansible 比對時永遠不等於 %s 的 ipa_admin_password。"+
-				"freeipa-nfs-server 會在 gate 擋下。請手動把它改成加上引號的 vault 值（加密名冊用 ansible-vault edit）。\n\n", rosterPath, vaultPath)
+			fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 沒加引號，YAML 可能把它讀成數字、日期或布林值而不是字串，跟 %s 的 ipa_admin_password 比對會不相等。"+
+				"請手動把它改成加上引號的 vault 值（加密名冊用 ansible-vault edit）。\n\n", rosterPath, vaultPath)
 			continue
 		}
 		fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 跟 %s 的 ipa_admin_password 不同。"+

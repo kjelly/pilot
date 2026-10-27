@@ -144,10 +144,11 @@ type rosterSyncLine struct {
 // later save finds no change and syncs nothing — so it is a hand edit.
 const rosterManualFix = "請手動把它的 freeipa.admin.password 改成 .vault/main.yaml 的 ipa_admin_password"
 
-// rosterNotStringReason is why a roster whose password is a YAML number or
-// boolean is left alone: Ansible compares typed values, so it never equals
-// the vault's string, and only quoting it fixes that.
-const rosterNotStringReason = "freeipa.admin.password 不是字串（例如沒加引號的數字），Ansible 比對時永遠不等於 vault 的字串，改的時候要加上引號"
+// rosterNotStringReason is why a roster whose password a YAML loader may
+// read as a number, date or boolean is left alone: a typed comparison
+// then never finds it equal to the vault's string, and only quoting it
+// settles that.
+const rosterNotStringReason = "freeipa.admin.password 沒加引號，YAML 可能把它讀成數字、日期或布林值而不是字串，跟 vault 的比對會不相等；改的時候要加上引號"
 
 // rosterSyncOnlyOnChange closes a report with any manual line.
 var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
@@ -163,10 +164,13 @@ var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
 // (issue #146), since pilot cannot tell which password it resolves to.
 // Lines never hold a password.
 func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved []byte) []rosterSyncLine {
+	if inventory.VaultAdminPasswordText(previous) == inventory.VaultAdminPasswordText(saved) {
+		return nil
+	}
 	oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(saved)
-	newTemplate := inventory.VaultAdminPasswordTemplate(saved)
-	templated := newTemplate != "" && newTemplate != inventory.VaultAdminPasswordTemplate(previous)
-	if !templated && (oldPassword == "" || newPassword == "" || oldPassword == newPassword) {
+	templated := inventory.VaultAdminPasswordTemplate(saved) != ""
+	notString := inventory.VaultAdminPasswordNotString(previous) || inventory.VaultAdminPasswordNotString(saved)
+	if !templated && !notString && (oldPassword == "" || newPassword == "") {
 		return nil
 	}
 	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
@@ -176,6 +180,10 @@ func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved
 	if templated {
 		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
 			text: "未同步名冊：新的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會當成模板展開，pilot 無法得知實際的密碼；請自行確認名冊的 freeipa.admin.password 跟它展開後的值相同"}}
+	}
+	if notString {
+		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
+			text: "未同步名冊：ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；請把它加上引號，並手動把名冊的 freeipa.admin.password 改成同一個加引號的值"}}
 	}
 	return syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword)
 }

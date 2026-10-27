@@ -289,7 +289,7 @@ func TestNonStringRosterPasswordIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range rosters {
-		if !strings.Contains(out.String(), "warning: "+path+" 的 freeipa.admin.password 不是字串") || !strings.Contains(out.String(), "加上引號") {
+		if !strings.Contains(out.String(), "warning: "+path+" 的 freeipa.admin.password 沒加引號") || !strings.Contains(out.String(), "加上引號") {
 			t.Errorf("preflight does not warn about %s:\n%s", path, out.String())
 		}
 	}
@@ -350,5 +350,60 @@ func TestEditPlanAndApplyAgreeWhenTheDefaultRosterLinksOutside(t *testing.T) {
 	}
 	if !slices.Equal(plan.Warnings, apply.Warnings) || len(apply.Warnings) != 0 {
 		t.Errorf("plan warnings %q, apply warnings %q; want none from either", plan.Warnings, apply.Warnings)
+	}
+}
+
+// An unquoted vault password a YAML loader may type (190:20:30 is a number
+// to Ansible's YAML 1.1 loader, 012345678 one to yaml.v3's YAML 1.2) is
+// never compared and never silently left out of a rotation: the preflight
+// and the save both say to quote it, and a roster password written as a
+// date is reported the same way (PR #148 re-review).
+func TestUnquotedVaultPasswordIsReported(t *testing.T) {
+	dir := t.TempDir()
+	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	dated := filepath.Join(dir, ".vault", "dated.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`"190:20:30"`))
+	writeSyncFile(t, dated, syncTestRoster(`2024-01-01`))
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: 190:20:30\n")
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  h1:\n    ansible_host: 10.0.0.1\n    roles: [freeipa-client]\n    freeipa_roster_file: .vault/dated.yaml\n")
+	before := snapshotFiles(t, roster, dated)
+
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "的 ipa_admin_password 沒加引號") || strings.Contains(out.String(), "190:20:30") {
+		t.Fatalf("preflight does not say to quote the vault password (or shows it):\n%s", out.String())
+	}
+
+	// A rotation away from an unquoted value cannot know the old password.
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: 012345678\n")
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	if !strings.Contains(r.banner, "⚠️  未同步名冊：ipa_admin_password 沒加引號") || !slices.ContainsFunc(r.rosterSyncWarnings, func(w string) bool {
+		return strings.HasPrefix(w, "未同步名冊：ipa_admin_password 沒加引號")
+	}) {
+		t.Fatalf("rotation from an unquoted password is not reported:\n%s", r.banner)
+	}
+	assertUnchanged(t, before)
+
+	// The roster written as a date is "quote it" on a rotation it would
+	// otherwise sit out.
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"Old-pass_1\"\n")
+	r = newEditRouterModel(dir)
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	if line := bannerLine(r.banner, "⚠️  未同步 .vault/dated.yaml："); !strings.Contains(line, rosterNotStringReason) {
+		t.Fatalf("the dated roster is not reported:\n%s", r.banner)
 	}
 }

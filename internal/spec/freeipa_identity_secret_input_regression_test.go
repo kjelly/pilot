@@ -126,6 +126,11 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 			t.Errorf("required-Ansible recipe omits %s", name)
 		}
 	}
+	// pilot's YAML 1.1 typing of admin passwords, checked against the real
+	// Ansible loader (internal/inventory).
+	if !regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '\^TestYAML11NonStringMatchesAnsible\$\$' ./internal/inventory/`).Match(body) {
+		t.Error("required-Ansible recipe omits internal/inventory's TestYAML11NonStringMatchesAnsible")
+	}
 	body, err = os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)

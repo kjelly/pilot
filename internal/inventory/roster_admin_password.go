@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -36,30 +37,56 @@ const (
 	// the field is absent, empty, null or a template such as
 	// "{{ ipa_admin_password }}".
 	RosterAdminNotLiteral
-	// RosterAdminNotString: the password is a YAML number or boolean (an
-	// unquoted 12345678, say). Ansible compares typed values, so it never
-	// equals the vault's string password however it reads: the operator
-	// must quote it. pilot reports it and never rewrites it.
+	// RosterAdminNotString: the password is written so a YAML loader may
+	// read it as something other than a string — a number, date or boolean
+	// (notStringAdminPassword) — and a typed comparison with the vault's
+	// string password would then fail: the operator must quote it. pilot
+	// reports it, never judges it current and never rewrites it.
 	RosterAdminNotString
 )
 
 // VaultAdminPassword returns a plaintext vault vars file's
 // ipa_admin_password, or "" when data is encrypted, unparseable, or holds
 // no plain string for that key (an inline !vault value, a template, a
-// number...).
+// value a YAML loader may read as a number or date...).
 func VaultAdminPassword(data []byte) string {
-	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
-		return ""
-	}
-	var doc yaml.Node
-	if yaml.Unmarshal(data, &doc) != nil {
-		return ""
-	}
-	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
+	value := vaultAdminValue(data)
 	if !literalAdminPassword(value) {
 		return ""
 	}
 	return value.Value
+}
+
+// VaultAdminPasswordNotString reports whether a plaintext vault vars
+// file's ipa_admin_password is written so a YAML loader may read it as
+// something other than a string (notStringAdminPassword): pilot can then
+// neither compare it with a roster nor carry it into one, and says to
+// quote it.
+func VaultAdminPasswordNotString(data []byte) bool {
+	return notStringAdminPassword(vaultAdminValue(data))
+}
+
+// VaultAdminPasswordText is a plaintext vault vars file's
+// ipa_admin_password as written, whatever it may be read as, "" when data
+// is encrypted or has none: for telling whether a save changed it, never
+// for showing — it may be a password.
+func VaultAdminPasswordText(data []byte) string {
+	if value := vaultAdminValue(data); value != nil && value.Kind == yaml.ScalarNode {
+		return value.Value
+	}
+	return ""
+}
+
+func vaultAdminValue(data []byte) *yaml.Node {
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return nil
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
+	return value
 }
 
 // VaultAdminPasswordTemplate returns a plaintext vault vars file's
@@ -280,27 +307,50 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 	return node
 }
 
-// literalAdminPassword reports whether value is a password Ansible reads as
-// written: a non-empty string that is no template. Only a string: Ansible
-// compares typed values, so an unquoted 12345678 is a number that never
-// equals the vault's "12345678" (notStringAdminPassword).
+// literalAdminPassword reports whether value is a password every YAML
+// loader reads as written: a non-empty string that is no template and
+// that no loader may read as anything else (notStringAdminPassword).
 func literalAdminPassword(value *yaml.Node) bool {
 	return value != nil && value.Kind == yaml.ScalarNode && value.ShortTag() == "!!str" &&
-		value.Value != "" && !jinjaDelimited(value.Value)
+		value.Value != "" && !jinjaDelimited(value.Value) && !notStringAdminPassword(value)
 }
 
-// notStringAdminPassword reports whether value is a YAML number or boolean,
-// which Ansible never finds equal to a string password.
+// notStringAdminPassword reports whether value is written so that a YAML
+// loader may read it as something other than a string — a number, date or
+// boolean — which a typed comparison never finds equal to a string
+// password. That is any such tag yaml.v3 (YAML 1.2) resolves, and any
+// unquoted scalar a YAML 1.1 loader such as Ansible's resolves to a
+// non-string (yaml11NonString): the two disagree on 012345678, 1e10,
+// 190:20:30 and yes, among others. Quoting it settles both. Null is no
+// password at all rather than a typed one (RosterAdminNotLiteral).
 func notStringAdminPassword(value *yaml.Node) bool {
 	if value == nil || value.Kind != yaml.ScalarNode {
 		return false
 	}
 	switch value.ShortTag() {
-	case "!!int", "!!float", "!!bool":
+	case "!!int", "!!float", "!!bool", "!!timestamp", "!!binary":
 		return true
+	case "!!str":
+		return value.Style == 0 && yaml11NonString.MatchString(value.Value)
 	}
 	return false
 }
+
+// yaml11NonString matches the plain scalars PyYAML's YAML 1.1 implicit
+// resolvers (yaml/resolver.py) — what Ansible loads vars files with — read
+// as something other than a string: booleans, null, ints (0-prefixed
+// octal, base 60), floats (base 60, .inf, .nan), timestamps, and the merge
+// and value indicators. TestYAML11NonStringMatchesAnsible checks it
+// against the real loader.
+var yaml11NonString = regexp.MustCompile(`^(?:` +
+	`yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF` +
+	`|~|null|Null|NULL|` +
+	`|[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+` +
+	`|[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)` +
+	`|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]` +
+	`|[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?(?:[Tt]|[ \t]+)[0-9][0-9]?:[0-9][0-9]:[0-9][0-9](?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?` +
+	`|<<|=` +
+	`)$`)
 
 func jinjaDelimited(s string) bool {
 	return strings.Contains(s, "{{") || strings.Contains(s, "{%") || strings.Contains(s, "{#")
