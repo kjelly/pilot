@@ -2,6 +2,7 @@ package freeiparpc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -22,7 +23,8 @@ import (
 // These tests pin what one *_find --all read does and does not carry, so the
 // Phase 1 observer is built on observed facts. The fake server answers by
 // method only (byMethod), so they do not prove which options a caller sends;
-// the observer's own tests must lock all=true.
+// the observer's own tests must lock all=true. The plan's Phase 1 "find 讀取
+// 契約" table lists each fact with the test that pins it, in
 // docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md.
 
 func findFixture(t *testing.T, method, fixture string, args []any) []map[string]any {
@@ -79,27 +81,21 @@ func strs(e map[string]any, attr string) []string {
 
 // The password decision of freeipa-identity-apply.yml reads only
 // krbLastPwdChange and krbPasswordExpiration, and one user_find --all
-// carries both. has_keytab and has_password exist only in user_show.
+// carries both.
 func TestUserFindCarriesThePasswordState(t *testing.T) {
 	users := findFixture(t, "user_find", "user-find-states", []any{"p1-"})
 	if len(users) != 6 {
 		t.Fatalf("users = %d, want 6", len(users))
 	}
-	for _, u := range users {
-		for _, computed := range []string{"has_keytab", "has_password", "memberofindirect_group"} {
-			if _, ok := u[computed]; ok {
-				t.Fatalf("user_find returned %s, which only user_show does: re-capture and revisit the observer", computed)
-			}
-		}
-	}
 	nopw := entryByName(t, users, "uid", "p1-nopw")
 	if stamp(t, nopw, "krblastpwdchange") != "" || stamp(t, nopw, "krbpasswordexpiration") != "" {
 		t.Fatalf("a user with no password must carry neither timestamp: %v", nopw)
 	}
+	// An admin reset sets the expiration to the moment of the reset.
 	reset := entryByName(t, users, "uid", "p1-reset")
 	last, exp := stamp(t, reset, "krblastpwdchange"), stamp(t, reset, "krbpasswordexpiration")
-	if last == "" || exp == "" || exp > last {
-		t.Fatalf("admin-reset: last=%q expiration=%q, want expiration <= last change (still on the reset password)", last, exp)
+	if last == "" || exp != last {
+		t.Fatalf("admin-reset: last=%q expiration=%q, want both set and equal (still on the reset password)", last, exp)
 	}
 	self := entryByName(t, users, "uid", "p1-self")
 	last, exp = stamp(t, self, "krblastpwdchange"), stamp(t, self, "krbpasswordexpiration")
@@ -170,8 +166,44 @@ func TestUserFindWithUnlimitedPasswordLife(t *testing.T) {
 		t.Fatalf("users = %d", len(reset))
 	}
 	last, exp := stamp(t, reset[0], "krblastpwdchange"), stamp(t, reset[0], "krbpasswordexpiration")
-	if last == "" || exp == "" || exp > last {
-		t.Fatalf("maxlife=0 admin reset: last=%q expiration=%q, want expiration <= last change", last, exp)
+	if last == "" || exp != last {
+		t.Fatalf("maxlife=0 admin reset: last=%q expiration=%q, want both set and equal", last, exp)
+	}
+}
+
+// has_keytab, has_password and memberofindirect_group are computed by
+// user_show only; no user_find capture carries them, with or without all,
+// raw or pkey_only.
+func TestComputedUserFieldsComeOnlyFromUserShow(t *testing.T) {
+	computed := []string{"has_keytab", "has_password", "memberofindirect_group"}
+	_, c := loggedIn(t, map[string]string{"user_show": "user-show-nested"})
+	raw, err := c.Call(context.Background(), Command{Method: "user_show", Args: []any{"p1-deep"}, Options: map[string]any{"all": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shown struct {
+		Result map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &shown); err != nil {
+		t.Fatal(err)
+	}
+	for _, attr := range computed {
+		if _, ok := shown.Result[attr]; !ok {
+			t.Fatalf("user_show --all did not return %s", attr)
+		}
+	}
+	for _, fixture := range []string{
+		"user-find-states", "user-find-states-raw", "user-find-states-noall", "user-find-states-pkey",
+		"user-find-self0", "user-find-self0-raw", "user-find-reset0", "user-find-reset0-raw",
+		"user-find-nokeys-before", "user-find-nokeys-after", "user-find-nested",
+	} {
+		for _, u := range findFixture(t, "user_find", fixture, []any{"p1-"}) {
+			for _, attr := range computed {
+				if _, ok := u[attr]; ok {
+					t.Fatalf("%s returned %s, which only user_show does: re-capture and revisit the observer", fixture, attr)
+				}
+			}
+		}
 	}
 }
 
@@ -236,12 +268,32 @@ func TestClearingTheLastKeyRemovesTheAttribute(t *testing.T) {
 	}
 }
 
-// pkey_only does not restrict a user_find to the login name.
+// pkey_only does not restrict a user_find to the login name: it still
+// returns the keys, encoded as {"__base64__": ...} of the same OpenSSH line
+// that --all returns as a plain string.
 func TestUserFindPkeyOnlyStillCarriesKeys(t *testing.T) {
 	users := findFixture(t, "user_find", "user-find-states-pkey", []any{"p1-"})
-	keys := entryByName(t, users, "uid", "p1-keys")
-	if got := len(strs(keys, "ipasshpubkey")); got != 2 {
-		t.Fatalf("pkey_only user_find returned %d keys for p1-keys, want 2", got)
+	vals, _ := entryByName(t, users, "uid", "p1-keys")["ipasshpubkey"].([]any)
+	if len(vals) != 2 {
+		t.Fatalf("pkey_only user_find returned %d keys for p1-keys, want 2", len(vals))
+	}
+	var decoded []string
+	for _, v := range vals {
+		m, ok := v.(map[string]any)
+		if !ok {
+			t.Fatalf("pkey_only key = %v, want {\"__base64__\": ...}", v)
+		}
+		b, err := base64.StdEncoding.DecodeString(fmt.Sprint(m["__base64__"]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded = append(decoded, string(b))
+	}
+	plain := strs(entryByName(t, findFixture(t, "user_find", "user-find-states", []any{"p1-"}), "uid", "p1-keys"), "ipasshpubkey")
+	slices.Sort(decoded)
+	slices.Sort(plain)
+	if !slices.Equal(decoded, plain) {
+		t.Fatalf("pkey_only keys decode to %v, --all keys are %v", decoded, plain)
 	}
 }
 
@@ -254,10 +306,19 @@ func TestUserFindWithoutAllHasNoPasswordState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(users) == 0 {
+		t.Fatal("no users")
+	}
 	for _, u := range users {
 		for _, attr := range []string{"krblastpwdchange", "krbpasswordexpiration", "krbextradata", "memberof_group"} {
 			if _, ok := u[attr]; ok {
 				t.Fatalf("user_find without all returned %s", attr)
+			}
+		}
+		// The principal names are still there: "no krb fields" would be wrong.
+		for _, attr := range []string{"krbprincipalname", "krbcanonicalname"} {
+			if _, ok := u[attr]; !ok {
+				t.Fatalf("user_find without all did not return %s", attr)
 			}
 		}
 	}
@@ -310,23 +371,37 @@ func TestNestedMembershipThreeLevels(t *testing.T) {
 		t.Fatalf("user_show memberof_group = %v, memberofindirect_group = %v", direct, indirect)
 	}
 
+	// group_find splits members and memberof into direct and indirect on
+	// every level. An attribute missing here means the capture had none.
 	groups := findFixture(t, "group_find", "group-find-nested", []any{"p1-"})
-	top := entryByName(t, groups, "cn", "p1-top")
-	for attr, want := range map[string][]string{
-		"member_group":         {"p1-mid"},
-		"memberindirect_group": {"p1-leaf"},
-		"memberindirect_user":  {"p1-deep"},
+	if len(groups) != 3 {
+		t.Fatalf("groups = %d, want 3", len(groups))
+	}
+	attrs := []string{"member_user", "member_group", "memberindirect_user", "memberindirect_group", "memberof_group", "memberofindirect_group"}
+	for cn, want := range map[string]map[string][]string{
+		"p1-top": {
+			"member_group":         {"p1-mid"},
+			"memberindirect_group": {"p1-leaf"},
+			"memberindirect_user":  {"p1-deep"},
+		},
+		"p1-mid": {
+			"member_group":        {"p1-leaf"},
+			"memberindirect_user": {"p1-deep"},
+			"memberof_group":      {"p1-top"},
+		},
+		"p1-leaf": {
+			"member_user":            {"p1-deep"},
+			"memberof_group":         {"p1-mid"},
+			"memberofindirect_group": {"p1-top"},
+		},
 	} {
-		if got := strs(top, attr); !slices.Equal(got, want) {
-			t.Fatalf("p1-top %s = %v, want %v", attr, got, want)
+		g := entryByName(t, groups, "cn", cn)
+		for _, attr := range attrs {
+			got := strs(g, attr)
+			if _, present := g[attr]; present != (want[attr] != nil) || !slices.Equal(got, want[attr]) {
+				t.Fatalf("%s %s = %v (present %v), want %v", cn, attr, got, present, want[attr])
+			}
 		}
-	}
-	if _, ok := top["member_user"]; ok {
-		t.Fatal("p1-top has no direct users")
-	}
-	leaf := entryByName(t, groups, "cn", "p1-leaf")
-	if got := strs(leaf, "member_user"); !slices.Equal(got, []string{"p1-deep"}) {
-		t.Fatalf("p1-leaf member_user = %v", got)
 	}
 }
 
@@ -347,12 +422,20 @@ func TestGroupFindSeparatesDirectAndIndirectMembers(t *testing.T) {
 	if !slices.Equal(indirect, []string{"p1-keys", "p1-nopw", "p1-self"}) {
 		t.Fatalf("p1-parent indirect users = %v", indirect)
 	}
+	if _, ok := parent["memberindirect_group"]; ok {
+		t.Fatal("p1-team has no subgroup, so p1-parent carries no memberindirect_group")
+	}
 	team := entryByName(t, groups, "cn", "p1-team")
 	if got := strs(team, "memberof_group"); !slices.Equal(got, []string{"p1-parent"}) {
 		t.Fatalf("p1-team memberof_group = %v", got)
 	}
-	if _, ok := team["memberindirect_user"]; ok {
-		t.Fatal("p1-team has no nested group, so it carries no memberindirect_user")
+	// No subgroup below p1-team or p1-nonposix: no indirect members at all.
+	for _, cn := range []string{"p1-team", "p1-nonposix"} {
+		for _, attr := range []string{"memberindirect_user", "memberindirect_group"} {
+			if _, ok := entryByName(t, groups, "cn", cn)[attr]; ok {
+				t.Fatalf("%s has no nested group, so it carries no %s", cn, attr)
+			}
+		}
 	}
 	if _, ok := entryByName(t, groups, "cn", "p1-nonposix")["gidnumber"]; ok {
 		t.Fatal("a non-posix group carries no gidnumber")
@@ -365,8 +448,11 @@ func TestGroupFindWithoutAllHasNoMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(groups) == 0 {
+		t.Fatal("no groups")
+	}
 	for _, g := range groups {
-		for _, attr := range []string{"member_user", "member_group", "memberindirect_user"} {
+		for _, attr := range []string{"member_user", "member_group", "memberindirect_user", "memberindirect_group", "memberof_group", "memberofindirect_group"} {
 			if _, ok := g[attr]; ok {
 				t.Fatalf("group_find without all returned %s", attr)
 			}
