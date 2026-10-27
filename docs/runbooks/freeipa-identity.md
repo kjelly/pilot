@@ -18,22 +18,26 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-22，PR #138）：candidate `e42f50c96a763272cbdfcc720e10eeb598dca87e`，
-  tree `a226935f9d323934af85506d31cbac4c77457690`；在乾淨、隔離 checkout 執行。
+- 最新驗證（2026-10-27，PR #138 review 修正）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
+  tree `eba8be23b181597da990e1517c35d28c525a464e`；在乾淨、隔離 checkout 執行。
 - 實際目標為三台拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 VM：`freeipa-server` group
-  一台 provider，`freeipa-client` group 兩台已 enroll clients；provider 本身也已 enroll。
-  每次執行前讀取 inventory，identity apply 的 target 是 provider；missing-host 負向個案的
-  實際 inventory 僅含 provider 與一台 client，沒有假借完整 topology 代替當次 facts。
-- 外部測試輸入已確認有 `ipa_admin_password`、`ipa_users`、`ipa_groups`、`ipa_hbac_rules`
-  與 `ipa_identity_ssh_cache_state_file` keys；只記 key，不顯示密碼、名冊或私鑰內容。
-- Warm-cache 金鑰新增／撤銷、兩台 client 新 SSH 連線 allow/deny、timeout／unreachable／
-  deferred retry、interruption／ABA、20 組 historical stage／missing-host gates，以及非 key
-  授權快取 recovery 與實際群組權限撤銷皆通過。最後 topology test 包含 syntax、dry-run、
-  三機 snapshot、apply、identity verify **24/24 PASS（fail=0 skip=0）** 與冪等；
-  apply／reapply 皆 `changed=0 failed=0`。這不重新宣稱舊版 120-user 效能結果。
-- 驗收後僅本次三台 disposable VM 已清理，非現存部署 inventory；原始證據保留。
-  Image digest、external-state 邊界、逐段 driver hashes、真實失敗與恢復見
-  [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
+  一台 provider，`freeipa-client` group 兩台已 enroll clients（`ansible-inventory --graph`
+  讀回）。identity apply 走 playbook 預設的 `freeipa-server` group，target 是 provider。
+- 外部輸入：vault 檔已確認有 `ipa_admin_password` key；測試名冊為 schema-v2 canonical
+  roster（`schema_version`、`freeipa`、`users`、`groups`），管理密碼以 template 引用 vault。
+  只記 key，不顯示密碼、名冊或私鑰內容。
+- 非 key 授權快取：`--tags users`、`--tags C9`（含 IPA 已變更後 SIGKILL）、
+  `--skip-tags client-cache` 與 `ipa_identity_refresh_sssd_cache=false` 的變更都留下待更新，
+  兩台 client 實際仍回傳舊快取；之後相同名冊的完整 apply 或 `--tags client-cache`
+  在 IPA 已無變更時仍更新兩台 clients，無變更 apply 不操作 clients（16/16 步驟）。
+  Live SSH 新增／撤銷（撤銷後 0.19 秒兩台皆拒絕）、相同名冊零操作，以及 deferred 配對
+  PARTIAL→重試皆通過。最後 topology test：syntax、dry-run、三機 snapshot、apply、
+  identity verify **24/24 PASS（fail=0 skip=0）** 與冪等，apply／reapply 皆 `changed=0 failed=0`。
+- 未在此 candidate 重跑的 SSH 失敗個案（timeout、unreachable、crash、ABA、historical scope）
+  見 [e42f50c 紀錄](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
+  驗收後本次三台 disposable VM 已清理，非現存部署 inventory。Image digest、執行輸入
+  hashes、真實失敗與恢復見
+  [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
 
 已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
 deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
@@ -334,7 +338,7 @@ playbook 只認英文輸出。
     無變更 apply 不操作 clients。
     勿刪除 journal，也勿平行對同一 provider 執行 identity apply。完整邊界與驗收矩陣見
     [已驗收契約](../superpowers/specs/2026-10-22-ssh-key-cache-convergence.md) 與
-    [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md)。
+    [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
     `ipa_identity_refresh_sssd_cache` 僅控制既有非金鑰授權更新；SSH 流程不受它停用。
     原 #115 實測的約 60 秒至超過 16 分鐘延遲仍是歷史基線，不能當作本次修正的驗收證據。
   - 一次多把金鑰 → list 放多行即可。

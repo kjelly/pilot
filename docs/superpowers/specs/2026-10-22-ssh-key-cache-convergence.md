@@ -1,6 +1,6 @@
 # SSH key cache convergence — issue #114
 
-Status: live multi-host acceptance passed on candidate `e42f50c96a763272cbdfcc720e10eeb598dca87e` (tree `a226935f9d323934af85506d31cbac4c77457690`); see [accepted evidence](../../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md).
+Status: live multi-host acceptance passed on candidate `2c35804fe552188f881496abe8ca4aeca1816f89` (tree `eba8be23b181597da990e1517c35d28c525a464e`), including tagged, interrupted, skip-tags and option-off non-key recovery; see [current evidence](../../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md). SSH failure cases that were not repeated on that candidate (real SSSD timeout, unreachable client, crash around key mutation, A→B→A, historical scope matrix) are in the [e42f50c record](../../evidence/freeipa-identity-ssh-cache/2026-10-22-e42f50c-live.md).
 
 ## Decision
 
