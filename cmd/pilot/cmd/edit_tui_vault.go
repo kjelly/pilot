@@ -394,7 +394,7 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				return nil
 			}
 			banner := fmt.Sprintf("✅ 已存檔 %s", path)
-			for _, line := range rosterSyncAfterVaultSave(dir, r.planSource, path, previous, doc.Bytes()) {
+			for _, line := range rosterSyncAfterVaultSave(r.writeScope(dir), path, previous, doc.Bytes()) {
 				banner += "\n" + line.icon + line.text
 				if line.manual {
 					r.rosterSyncWarnings = append(r.rosterSyncWarnings, line.text)

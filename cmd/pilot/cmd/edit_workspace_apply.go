@@ -110,6 +110,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		}
 	}
 
+	opts.Transaction = true
 	session := newEditAgentSession(dir, opts)
 	runErr := session.Run(scenario)
 	if runErr == nil {

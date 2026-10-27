@@ -28,6 +28,10 @@ type editAgentSessionOptions struct {
 	// PlanSource is the real workspace when the session runs on a plan's
 	// scratch copy of it (planEditScenario), "" otherwise.
 	PlanSource string
+	// Transaction is set by applyEditScenario: the session rolls back on
+	// failure, so it must not write a roster its rollback cannot restore
+	// (editWriteScope).
+	Transaction bool
 	// BeforeStep runs before each step, as Trace runs after it.
 	BeforeStep func()
 }
@@ -45,6 +49,7 @@ type editAgentSession struct {
 func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSession {
 	router := newEditRouterModel(dir)
 	router.planSource = opts.PlanSource
+	router.transaction = opts.Transaction
 	return &editAgentSession{
 		dir:    dir,
 		router: router,

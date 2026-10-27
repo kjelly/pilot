@@ -116,19 +116,34 @@ func isManagedVaultFile(dir, path string) bool {
 	return err == nil && parent == vaultDir && hasManagedFileExtension(filepath.Base(path))
 }
 
-// planScratchPath maps a freeipa_roster_file a plan's scratch copy
-// inherited from source, the real workspace, onto the copy: pilot edit
-// stores the reference as an absolute path into source's .vault/, so the
-// copy's hosts.yml still names the real file, which a plan must leave
-// alone while the apply writes it. Mapped onto the copy's own .vault/, a
-// plan previews the roster writes the apply makes (PR #148 review). Any
-// other path, and every path outside a plan (source ""), is kept.
-func planScratchPath(dir, source, path string) string {
-	resolved := resolveRosterPath(dir, strings.TrimSpace(path))
-	if source == "" || resolved == "" || !isManagedVaultFile(source, resolved) {
-		return path
+// rosterWritePath is the file a freeipa_roster_file reference ref names
+// for a write in scope: ref resolved against scope.dir, "" for an empty
+// ref. On a plan's scratch copy a reference into the real workspace's
+// .vault/ is mapped onto the copy's own .vault/: pilot edit stores the
+// reference as an absolute path, so the copy's hosts.yml still names the
+// real file, which a plan must leave alone while the apply writes it.
+// Mapped, a plan previews the roster writes the apply makes (PR #148
+// review). Any other path, and every path outside a plan, is kept; a
+// path outside the session's .vault/ is then refused under a plan or an
+// apply (checkRosterWriteScope).
+func (scope editWriteScope) rosterWritePath(ref string) string {
+	resolved := resolveRosterPath(scope.dir, strings.TrimSpace(ref))
+	if scope.planSource == "" || resolved == "" || !isManagedVaultFile(scope.planSource, resolved) {
+		return resolved
 	}
-	return filepath.Join(dir, ".vault", filepath.Base(resolved))
+	return filepath.Join(scope.dir, ".vault", filepath.Base(resolved))
+}
+
+// recordedPath is the absolute path pilot edit records in hosts.yml for
+// rel, a path inside the workspace: inside scope.dir, except on a plan's
+// scratch copy, where it is the real workspace's path, the one the apply
+// records (a plan's diff must not name its scratch directory).
+func (scope editWriteScope) recordedPath(rel string) (string, error) {
+	base := scope.dir
+	if scope.planSource != "" {
+		base = scope.planSource
+	}
+	return filepath.Abs(filepath.Join(base, rel))
 }
 
 // rosterSyncLine is one line pilot edit reports after a vault save: in the
@@ -163,7 +178,8 @@ var rosterSyncOnlyOnChange = rosterSyncLine{icon: "ℹ️  ", manual: true,
 // so such a save only says so; so does a new value Ansible would template
 // (issue #146), since pilot cannot tell which password it resolves to.
 // Lines never hold a password.
-func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved []byte) []rosterSyncLine {
+func rosterSyncAfterVaultSave(scope editWriteScope, vaultPath string, previous, saved []byte) []rosterSyncLine {
+	dir := scope.dir
 	if inventory.VaultAdminPasswordText(previous) == inventory.VaultAdminPasswordText(saved) {
 		return nil
 	}
@@ -185,7 +201,7 @@ func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved
 		return []rosterSyncLine{{icon: "⚠️  ", manual: true,
 			text: "未同步名冊：ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；請把它加上引號，並手動把名冊的 freeipa.admin.password 改成同一個加引號的值"}}
 	}
-	return syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword)
+	return syncRosterAdminPasswords(scope, oldPassword, newPassword)
 }
 
 // syncRosterAdminPasswords carries an ipa_admin_password change saved to
@@ -195,10 +211,11 @@ func rosterSyncAfterVaultSave(dir, planSource, vaultPath string, previous, saved
 // roster's copy, and freeipa-nfs-server-apply.yml refuses a roster that
 // disagrees with the vault. It returns one line per roster it updated or
 // that needs the operator, and never prints a password.
-func syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword string) []rosterSyncLine {
+func syncRosterAdminPasswords(scope editWriteScope, oldPassword, newPassword string) []rosterSyncLine {
+	dir, planSource := scope.dir, scope.planSource
 	referenced := referencedRosterFiles(dir)
 	for i, path := range referenced {
-		referenced[i] = planScratchPath(dir, planSource, path)
+		referenced[i] = scope.rosterWritePath(path)
 	}
 	var lines []rosterSyncLine
 	manual := func(shown, reason string) {
@@ -208,15 +225,18 @@ func syncRosterAdminPasswords(dir, planSource, oldPassword, newPassword string) 
 	for _, path := range rosterCandidates(dir, planSource, referenced) {
 		shown := shownRosterPath(path, dir, planSource)
 		if !isManagedVaultFile(dir, path) {
-			stale, err := mutateRosterSourceValue(dir, path, func() (bool, error) {
-				return inventory.RosterAdminPasswordDiffers(path, newPassword)
-			})
+			// Only read: pilot edit's sync never writes a roster outside
+			// .vault/. A path the workspace may not use is skipped, as before.
+			if validateSecretSourcePath(dir, path) != nil {
+				continue
+			}
+			stale, err := inventory.RosterAdminPasswordDiffers(path, newPassword)
 			if stale || errors.Is(err, inventory.ErrRosterEncrypted) {
 				manual(shown, "pilot edit 只改這個 workspace .vault/ 目錄裡的 *.yml、*.yaml（不含子目錄）")
 			}
 			continue
 		}
-		result, err := mutateRosterSourceValue(dir, path, func() (inventory.RosterAdminSync, error) {
+		result, err := mutateRosterSourceValue(scope, path, func() (inventory.RosterAdminSync, error) {
 			return inventory.SyncRosterAdminPassword(path, oldPassword, newPassword)
 		})
 		switch {

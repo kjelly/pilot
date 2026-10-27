@@ -2758,7 +2758,7 @@ func autoFillFreeIPAClientHostsIntoRoster(ctx context.Context, out io.Writer, se
 	}
 
 	dir := filepath.Dir(inv)
-	added, err := mutateRosterSourceValue(dir, rosterPath, func() ([]string, error) {
+	added, err := mutateRosterSourceValue(editWriteScope{dir: dir}, rosterPath, func() ([]string, error) {
 		return inventory.AutoFillFreeIPAClientRosterHosts(filepath.Dir(inv), rosterPath)
 	})
 	if err != nil {

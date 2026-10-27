@@ -83,9 +83,9 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, written map[st
 			// This session wrote it and someone has removed it since.
 			restoreErr = inventory.ErrRosterChanged
 		case before == nil:
-			restoreErr = mutateRosterSource(dir, full, func() error { return inventory.RemoveRosterFile(full, expected) })
+			restoreErr = mutateRosterSource(editWriteScope{dir: dir}, full, func() error { return inventory.RemoveRosterFile(full, expected) })
 		default:
-			restoreErr = mutateRosterSource(dir, full, func() error { return inventory.RestoreRosterFile(full, expected, before.Content) })
+			restoreErr = mutateRosterSource(editWriteScope{dir: dir}, full, func() error { return inventory.RestoreRosterFile(full, expected, before.Content) })
 		}
 		switch {
 		case restoreErr == nil:

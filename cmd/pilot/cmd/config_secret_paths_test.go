@@ -319,9 +319,9 @@ func TestConfigSecretPaths_ExternalRosterAutofixRechecksWorkspace(t *testing.T) 
 				case "inventory_generate":
 					writeMissingNFSRosterEntries(io.Discard, dir, hf)
 				case "migration_banner":
-					ensureRosterSchemaCurrentBanner(dir, path)
+					ensureRosterSchemaCurrentBanner(editWriteScope{dir: dir}, path)
 				case "client_autofill":
-					autoFillFreeIPAClientRosterHostsBanner(dir, path)
+					autoFillFreeIPAClientRosterHostsBanner(editWriteScope{dir: dir}, path)
 				case "deploy_migration":
 					err := ensureFreeIPARostersCurrentSnapshot(io.Discard, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{Groups: map[string][]string{"freeipa-server": {"ipa"}}, HostVars: map[string]map[string]any{"ipa": {"freeipa_roster_file": path}}})
 					if err != nil {
