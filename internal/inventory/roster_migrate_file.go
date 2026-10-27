@@ -155,7 +155,9 @@ type RosterMigrationResult struct {
 //  1. lock the file path names (lockRosterFile: fails fast if another
 //     roster writer holds it — no backup, no read past this point); every
 //     step below reads, backs up and replaces that file, so a symlinked
-//     roster stays a link
+//     roster stays a link. A roster already at the target version, or
+//     encrypted with no VaultPasswordFile, is reported before locking
+//     (migrationNeedsNoLock): neither writes anything
 //  2. read original bytes, record its mode, hash it
 //  3. an ansible-vault-encrypted roster with no VaultPasswordFile fails
 //     closed (ErrRosterEncrypted); with one, control passes to
@@ -186,6 +188,15 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 	targetVersion := opts.TargetVersion
 	if targetVersion == 0 {
 		targetVersion = int(CurrentRosterSchemaVersion)
+	}
+
+	// Nothing to write needs no lock: deploy, inventory generate and pilot
+	// edit call this on every run, and a roster already current — or
+	// encrypted with no vault password to open it — must not fail over a
+	// lock file another user left beside it. Anything else is decided
+	// again on a fresh read under the lock.
+	if result, done, err := migrationNeedsNoLock(path, opts, targetVersion); done {
+		return result, err
 	}
 
 	lk, err := lockRosterFile(path)
@@ -310,6 +321,29 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		NewSHA256:      newSHA,
 		Steps:          steps,
 	}, nil
+}
+
+// migrationNeedsNoLock is MigrateRosterFile's look before the lock: done
+// is true, with MigrateRosterFile's own result, when the roster is
+// already at targetVersion or is encrypted with no vault password file —
+// the two outcomes that write nothing.
+func migrationNeedsNoLock(path string, opts RosterMigrationOptions, targetVersion int) (RosterMigrationResult, bool, error) {
+	original, err := readSecretSourceFile(path)
+	if err != nil {
+		return RosterMigrationResult{}, false, nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(original)), "$ANSIBLE_VAULT") {
+		if opts.VaultPasswordFile == "" {
+			return RosterMigrationResult{}, true, ErrRosterEncrypted
+		}
+		return RosterMigrationResult{}, false, nil
+	}
+	detected, err := DetectRosterSchemaVersion(original)
+	if err != nil || int(detected) != targetVersion {
+		return RosterMigrationResult{}, false, nil
+	}
+	sha := sha256Hex(original)
+	return RosterMigrationResult{FromVersion: targetVersion, ToVersion: targetVersion, OriginalSHA256: sha, NewSHA256: sha}, true, nil
 }
 
 // migrateEncryptedRosterFile is MigrateRosterFile's branch for an
@@ -529,10 +563,18 @@ func createRosterBackup(path string, original []byte, fromVersion RosterSchemaVe
 // mode — the temp file's 0600 must not silently change what's actually
 // installed), and fsyncs the parent directory so the rename itself is
 // durable. Every failure path removes the temp file; a failure after the
-// rename (restoring finalMode, syncing the directory) leaves path already
-// replaced — MigrateRosterFile's own rollback covers that by re-invoking
-// this function with the original bytes.
+// rename (syncing the directory) leaves path already replaced —
+// MigrateRosterFile's own rollback covers that by re-invoking this
+// function with the original bytes.
 func atomicReplaceFile(path string, data []byte, finalMode os.FileMode) error {
+	return atomicReplaceFileOwned(path, data, finalMode, nil)
+}
+
+// atomicReplaceFileOwned is atomicReplaceFile that also gives the new file
+// owner's owner (keepOwner), when owner is not nil. The mode and owner are
+// set on the temp file before the rename, through its descriptor, so
+// nothing after the rename acts on a path someone could swap for a link.
+func atomicReplaceFileOwned(path string, data []byte, finalMode os.FileMode, owner os.FileInfo) error {
 	if err := validateSecretSourceFile(path); err != nil {
 		return err
 	}
@@ -553,6 +595,13 @@ func atomicReplaceFile(path string, data []byte, finalMode os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
+	if err := tmp.Chmod(finalMode); err != nil {
+		tmp.Close()
+		return fmt.Errorf("restore roster mode: %w", err)
+	}
+	if owner != nil {
+		keepOwner(tmp, owner)
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return fmt.Errorf("sync temp file: %w", err)
@@ -565,9 +614,6 @@ func atomicReplaceFile(path string, data []byte, finalMode os.FileMode) error {
 	}
 	cleanup = false
 
-	if err := os.Chmod(path, finalMode); err != nil {
-		return fmt.Errorf("restore roster mode: %w", err)
-	}
 	if dirFile, err := os.Open(dir); err == nil {
 		_ = dirFile.Sync()
 		dirFile.Close()

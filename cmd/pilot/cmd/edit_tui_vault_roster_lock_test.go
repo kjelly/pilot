@@ -123,3 +123,63 @@ func TestRosterCandidatesListEachFileOnce(t *testing.T) {
 		t.Fatalf("rosterCandidates() = %v, want only %s", got, vaultLink)
 	}
 }
+
+// A roster another pilot process holds, or whose lock file this user
+// cannot open (a root-run pilot left it 0000), is a banner in pilot edit,
+// not the end of the session: nothing is written, and once the lock is
+// gone the same session writes (PR #148 re-review, F4).
+func TestEditAutomationDriverBusyRosterKeepsTheSessionOpen(t *testing.T) {
+	for name, block := range map[string]func(t *testing.T, roster string) (want string, unblock func()){
+		"held": func(t *testing.T, roster string) (string, func()) {
+			f, err := os.OpenFile(roster+".pilot-remove.lock", os.O_CREATE|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			return "另一個 pilot 名冊操作正鎖住它", func() { f.Close() }
+		},
+		"lock file not openable": func(t *testing.T, roster string) (string, func()) {
+			if os.Geteuid() == 0 {
+				t.Skip("root opens any lock file")
+			}
+			lock := roster + ".pilot-migrate.lock"
+			if err := os.WriteFile(lock, nil, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			return "exists but this user cannot open it", func() { os.Remove(lock) }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+			writeSyncFile(t, roster, syncTestRoster(`"Admin-pass_1"`))
+			want, unblock := block(t, roster)
+			before, _ := os.ReadFile(roster)
+
+			r := newEditRouterModel(dir)
+			d := automationDriver{dir: dir}
+			if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{{Action: "create_user", User: "alice"}}}); err != nil {
+				t.Fatalf("driver.run() error = %v; the session must survive a busy roster", err)
+			}
+			if r.err != nil || r.quit {
+				t.Fatalf("session ended: err=%v quit=%v", r.err, r.quit)
+			}
+			if !strings.Contains(r.banner, "⚠️  未寫入 "+roster+"：") || !strings.Contains(r.banner, want) {
+				t.Fatalf("banner does not report the busy roster (%q):\n%s", want, r.banner)
+			}
+			if after, _ := os.ReadFile(roster); !bytes.Equal(after, before) {
+				t.Fatalf("busy roster written:\n%s", after)
+			}
+
+			unblock()
+			if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{{Action: "create_user", User: "bob"}}}); err != nil {
+				t.Fatalf("same session after the lock is gone: %v", err)
+			}
+			if after, _ := os.ReadFile(roster); !bytes.Contains(after, []byte("bob")) || bytes.Contains(after, []byte("alice")) {
+				t.Fatalf("roster after retry:\n%s", after)
+			}
+		})
+	}
+}

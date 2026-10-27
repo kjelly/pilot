@@ -977,6 +977,9 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 	if err := mutateRosterSource(dir, rosterPath, func() error {
 		return inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", password)
 	}); err != nil {
+		if banner, ok := rosterBusyBanner(rosterPath, err); ok {
+			return pushRolesMenuBanner(r, dir, path, hf, name, banner)
+		}
 		r.err = err
 		return nil
 	}

@@ -13,13 +13,14 @@ import (
 // rosterWriteCalls are the calls that put bytes into a file in this
 // package: the two secret-source write primitives and the os calls they
 // are built on.
-var rosterWriteCalls = map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "os.WriteFile": true, "os.Rename": true}
+var rosterWriteCalls = map[string]bool{"writeSecretSourceFile": true, "atomicReplaceFile": true, "atomicReplaceFileOwned": true, "os.WriteFile": true, "os.Rename": true}
 
 // rosterWriterExemptions are the only functions here that may write a file
 // without a roster lock. Each must still exist and still write.
 var rosterWriterExemptions = map[string]string{
 	"writeSecretSourceFile":                 "the write primitive itself; its callers hold the lock",
 	"atomicReplaceFile":                     "the write primitive itself; its callers hold the lock",
+	"atomicReplaceFileOwned":                "the write primitive itself; its callers hold the lock",
 	"WriteMinimalFreeIPAVault":              "writes the vault vars file (.vault/main.yaml), not a roster",
 	"FillFreeIPAAdminPassword":              "writes the vault vars file (.vault/main.yaml), not a roster",
 	"CreateMinimalDNSManifest":              "writes the freeipa-dns manifest, not a roster",

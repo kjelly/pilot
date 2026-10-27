@@ -252,6 +252,9 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 	}
 
 	if err := mutateRosterSource(dir, path, func() error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
+		if banner, ok := rosterBusyBanner(path, err); ok {
+			return pushTopMenu(r, dir, banner)
+		}
 		r.err = err
 		return nil
 	}
@@ -382,6 +385,9 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterUser(path, name) }); err != nil {
+			if banner, ok := rosterBusyBanner(path, err); ok {
+				return pushRosterUsersMenu(r, dir, path, banner)
+			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -500,6 +506,9 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
 		}
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
+			if banner, ok := rosterBusyBanner(path, err); ok {
+				return pushRosterGroupsMenu(r, dir, path, banner)
+			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -649,6 +658,21 @@ func mutateRosterSource(dir, path string, mutate func() error) error {
 	return mutate()
 }
 
+// rosterBusyBanner is the banner for a roster write refused because
+// another pilot process holds the roster (inventory.ErrMutationLocked) or
+// its lock file cannot be used (inventory.ErrRosterLockFile). Nothing was
+// written and the operator can retry once that is over or fixed, so pilot
+// edit reports it and stays open instead of ending the session (r.err).
+func rosterBusyBanner(path string, err error) (string, bool) {
+	switch {
+	case errors.Is(err, inventory.ErrMutationLocked):
+		return fmt.Sprintf("⚠️  未寫入 %s：另一個 pilot 名冊操作正鎖住它，等它結束後再試一次", path), true
+	case errors.Is(err, inventory.ErrRosterLockFile):
+		return fmt.Sprintf("⚠️  未寫入 %s：%v", path, err), true
+	}
+	return "", false
+}
+
 // mutateRosterSourceValue applies the same persistence guard to helpers
 // returning a migration or autofill result as well as an error.
 func mutateRosterSourceValue[T any](dir, path string, mutate func() (T, error)) (T, error) {
@@ -710,6 +734,9 @@ func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (b
 		return formatRosterViolations(violations), false, nil
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
+		if banner, ok := rosterBusyBanner(path, err); ok {
+			return banner, false, nil
+		}
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil
@@ -1097,6 +1124,9 @@ func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (
 		return formatRosterViolations(violations), false, nil
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
+		if banner, ok := rosterBusyBanner(path, err); ok {
+			return banner, false, nil
+		}
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil

@@ -38,6 +38,9 @@ func pushRosterHostAccessMenu(r *editRouterModel, dir, path, banner string) tea.
 			return pushRosterHBACMenu(r, dir, path, "")
 		case 2:
 			if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterHBACDisableAllowAll(path, !disabled) }); err != nil {
+				if banner, ok := rosterBusyBanner(path, err); ok {
+					return pushRosterHostAccessMenu(r, dir, path, banner)
+				}
 				r.err = err
 				return nil
 			}
@@ -93,6 +96,9 @@ func pushRosterAddHostgroup(r *editRouterModel, dir, path string) tea.Cmd {
 		}
 		name := strings.TrimSpace(m.Value())
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterHostgroup(path, name) }); err != nil {
+			if banner, ok := rosterBusyBanner(path, err); ok {
+				return pushRosterHostgroupsMenu(r, dir, path, banner)
+			}
 			r.err = err
 			return nil
 		}
@@ -212,6 +218,9 @@ func pushRosterHostgroupEdit(r *editRouterModel, dir, path, name string, mutate 
 		return pushRosterHostgroupDetail(r, dir, path, name, formatRosterViolations(v))
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterHostgroup(path, name, f) }); err != nil {
+		if banner, ok := rosterBusyBanner(path, err); ok {
+			return pushRosterHostgroupDetail(r, dir, path, name, banner)
+		}
 		r.err = err
 		return nil
 	}
@@ -454,6 +463,9 @@ func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, group
 			return pushRosterHBACMenu(r, dir, path, formatRosterViolations(v))
 		}
 		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterHBACRule(path, rule) }); err != nil {
+			if banner, ok := rosterBusyBanner(path, err); ok {
+				return pushRosterHBACMenu(r, dir, path, banner)
+			}
 			r.err = err
 			return nil
 		}
@@ -647,6 +659,9 @@ func pushRosterHBACEdit(r *editRouterModel, dir, path, name, banner string, muta
 		return pushRosterHBACDetail(r, dir, path, name, formatRosterViolations(v))
 	}
 	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterHBACRule(path, name, f) }); err != nil {
+		if banner, ok := rosterBusyBanner(path, err); ok {
+			return pushRosterHBACDetail(r, dir, path, name, banner)
+		}
 		r.err = err
 		return nil
 	}

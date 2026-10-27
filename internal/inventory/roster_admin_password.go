@@ -125,10 +125,9 @@ func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdmin
 	if err != nil {
 		return 0, err
 	}
-	if err := atomicReplaceFile(lk.target, updated, info.Mode().Perm()); err != nil {
+	if err := atomicReplaceFileOwned(lk.target, updated, info.Mode().Perm(), info); err != nil {
 		return 0, fmt.Errorf("write roster %s: %w", path, err)
 	}
-	keepOwner(lk.target, info)
 	return RosterAdminUpdated, nil
 }
 
