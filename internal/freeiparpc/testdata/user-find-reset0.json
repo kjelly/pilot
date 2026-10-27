@@ -1,0 +1,110 @@
+{
+  "result": {
+    "result": [
+      {
+        "cn": [
+          "P1 Reset0"
+        ],
+        "displayname": [
+          "P1 Reset0"
+        ],
+        "initials": [
+          "PR"
+        ],
+        "gecos": [
+          "P1 Reset0"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "6b96891c-d1e3-11f1-bc24-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-reset0,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1234"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261027085010Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261027085010Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261027085010Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AALCZeBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krbprincipalname": [
+          "p1-reset0@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/p1-reset0"
+        ],
+        "krbcanonicalname": [
+          "p1-reset0@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600234"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "uid": [
+          "p1-reset0"
+        ],
+        "mail": [
+          "p1-reset0@ipa.pilot.internal"
+        ],
+        "uidnumber": [
+          "1927600234"
+        ],
+        "sn": [
+          "Reset0"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=p1-reset0,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 user matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
