@@ -49,10 +49,20 @@ func writeRosterSkeleton(path string, roster map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("encode minimal roster: %w", err)
 	}
+	// The directory first: the roster's lock files go beside it.
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("mkdir roster directory: %w", err)
 	}
-	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	// Again under the lock: another writer may have created it meanwhile.
+	if _, err := os.Stat(lk.target); err == nil {
+		return fmt.Errorf("roster %s already exists", path)
+	}
+	if err := writeSecretSourceFile(lk.target, rendered, 0o600); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil

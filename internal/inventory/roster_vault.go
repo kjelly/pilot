@@ -81,7 +81,14 @@ func DecryptRosterToTempFile(path, vaultPasswordFile string) (tempPath string, c
 		return "", func() {}, fmt.Errorf("roster %s: create temp file: %w", path, err)
 	}
 	tmpPath := tmp.Name()
-	cleanup = func() { os.Remove(tmpPath) }
+	cleanup = func() {
+		os.Remove(tmpPath)
+		// A roster writer run on the plaintext leaves its lock files
+		// beside it; nothing else can know their names.
+		for _, suffix := range rosterLockSuffixes {
+			os.Remove(tmpPath + suffix)
+		}
+	}
 	if _, err := tmp.Write(plaintext); err != nil {
 		tmp.Close()
 		cleanup()
@@ -139,17 +146,25 @@ func ReadRosterAsMapWithVault(path, vaultPasswordFile string) (map[string]any, e
 // temp path, and — only if mutate returns nil — re-encrypts the temp
 // file in place and atomically installs it over the original. On any
 // failure (including mutate's own error) the original is left completely
-// untouched and nothing is re-encrypted. This is the "prefer reusing the
-// encrypted-roster mutation machinery already established by pilot
-// roster migrate instead of inventing a second vault implementation"
-// path spec.md §17 requires.
+// untouched and nothing is re-encrypted. The roster's lock is held from
+// the decrypt to the install, so no other roster writer's change is lost
+// in between, and the file path names is the one replaced: a symlinked
+// roster stays a link. mutate must write only plaintextPath. This is the
+// "prefer reusing the encrypted-roster mutation machinery already
+// established by pilot roster migrate instead of inventing a second vault
+// implementation" path spec.md §17 requires.
 func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plaintextPath string) error) error {
-	info, err := os.Stat(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	info, err := os.Stat(lk.target)
 	if err != nil {
 		return err
 	}
 
-	tmpPath, cleanup, err := DecryptRosterToTempFile(path, vaultPasswordFile)
+	tmpPath, cleanup, err := DecryptRosterToTempFile(lk.target, vaultPasswordFile)
 	if err != nil {
 		return err
 	}
@@ -166,7 +181,7 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 	if err != nil {
 		return fmt.Errorf("roster %s: read encrypted candidate: %w (original untouched)", path, err)
 	}
-	if err := atomicReplaceFile(path, encrypted, info.Mode().Perm()); err != nil {
+	if err := atomicReplaceFile(lk.target, encrypted, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("roster %s: write failed, original untouched: %w", path, err)
 	}
 	return nil

@@ -197,12 +197,12 @@ func TestMigrateRosterFile_DryRunDoesNotWriteAnything(t *testing.T) {
 	if err != nil || !bytes.Equal(got, original) {
 		t.Fatalf("dry-run modified the roster file (err=%v)", err)
 	}
-	// The mutation-lock sidecar file is an expected artifact of even a
-	// dry-run acquiring the lock; only a backup or a leftover temp file
-	// would indicate the dry run actually wrote something it shouldn't.
+	// The roster's lock files are an expected artifact of even a dry-run
+	// acquiring the lock; only a backup or a leftover temp file would
+	// indicate the dry run actually wrote something it shouldn't.
 	assertNoBackupFiles(t, dir)
 	for _, e := range direntNames(t, dir) {
-		if e != "roster.yaml" && e != "roster.yaml.pilot-migrate.lock" {
+		if e != "roster.yaml" && e != "roster.yaml.pilot-migrate.lock" && e != "roster.yaml.pilot-remove.lock" {
 			t.Fatalf("dry-run created an unexpected file: %s", e)
 		}
 	}

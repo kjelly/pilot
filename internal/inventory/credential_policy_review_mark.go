@@ -16,7 +16,12 @@ import (
 // markCredentialPolicyReviewedPlaintext is MarkCredentialPolicyReviewedFile's
 // non-vault half: path MUST already be plaintext YAML.
 func markCredentialPolicyReviewedPlaintext(path, name, reviewedBy string, now time.Time) error {
-	policy, found, err := RosterCredentialPolicy(path, name)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	policy, found, err := RosterCredentialPolicy(lk.target, name)
 	if err != nil {
 		return err
 	}
@@ -44,14 +49,14 @@ func markCredentialPolicyReviewedPlaintext(path, name, reviewedBy string, now ti
 	}
 	updated["review"] = updatedReview
 
-	violations, _, err := simulateSetRosterNested(path, "credential_policies", name, updated, "credential_policy")
+	violations, _, err := simulateSetRosterNested(lk.target, "credential_policies", name, updated, "credential_policy")
 	if err != nil {
 		return err
 	}
 	if len(violations) > 0 {
 		return fmt.Errorf("marking credential_policy %q as reviewed would fail roster validation: %v", name, violations)
 	}
-	return replaceTopLevelRosterEntry(path, "credential_policies", name, updated)
+	return replaceTopLevelRosterEntryLocked(lk, "credential_policies", name, updated)
 }
 
 // MarkCredentialPolicyReviewedFile updates the named credential_policies[]

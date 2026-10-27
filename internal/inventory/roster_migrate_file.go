@@ -152,8 +152,10 @@ type RosterMigrationResult struct {
 // MigrateRosterFile upgrades the roster at path to opts.TargetVersion
 // (CurrentRosterSchemaVersion if unset), as one transaction:
 //
-//  1. acquire the mutation lock (fails fast if another process holds it —
-//     no backup, no read past this point)
+//  1. lock the file path names (lockRosterFile: fails fast if another
+//     roster writer holds it — no backup, no read past this point); every
+//     step below reads, backs up and replaces that file, so a symlinked
+//     roster stays a link
 //  2. read original bytes, record its mode, hash it
 //  3. an ansible-vault-encrypted roster with no VaultPasswordFile fails
 //     closed (ErrRosterEncrypted); with one, control passes to
@@ -186,17 +188,21 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		targetVersion = int(CurrentRosterSchemaVersion)
 	}
 
-	lock, err := acquireMutationLock(path + ".pilot-migrate.lock")
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return RosterMigrationResult{}, err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
+	// Read, back up and replace the file path names, not path itself: a
+	// symlinked roster stays a link, its backup sits beside the real file,
+	// and every spelling of it shares the lock.
+	target := lk.target
 
-	original, err := readSecretSourceFile(path)
+	original, err := readSecretSourceFile(target)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("read roster %s: %w", path, err)
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(target)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("stat roster %s: %w", path, err)
 	}
@@ -207,7 +213,7 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		if opts.VaultPasswordFile == "" {
 			return RosterMigrationResult{}, ErrRosterEncrypted
 		}
-		return migrateEncryptedRosterFile(path, opts, original, originalMode, originalSHA, targetVersion)
+		return migrateEncryptedRosterFile(lk, opts, original, originalMode, originalSHA, targetVersion)
 	}
 
 	detected, err := DetectRosterSchemaVersion(original)
@@ -271,25 +277,25 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		}, nil
 	}
 
-	backupPath, err := createRosterBackup(path, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+	backupPath, err := createRosterBackup(target, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
 
-	if err := atomicReplaceFile(path, candidate, originalMode); err != nil {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+	if err := atomicReplaceFile(target, candidate, originalMode); err != nil {
+		if restoreErr := atomicReplaceFile(target, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 	}
 
-	reopened, err := readSecretSourceFile(path)
+	reopened, err := readSecretSourceFile(target)
 	var reopenedRoot map[string]any
 	if err == nil {
 		err = yaml.Unmarshal(reopened, &reopenedRoot)
 	}
 	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](reopenedRoot)) != 0 {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := atomicReplaceFile(target, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation, rolled back to the original (backup at %s)", path, backupPath)
@@ -326,8 +332,9 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 // into an error ever includes plaintext roster content or the vault
 // password itself — only paths, exit statuses, and ansible-vault's own
 // (non-secret) stderr text.
-func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, original []byte, originalMode os.FileMode, originalSHA string, targetVersion int) (RosterMigrationResult, error) {
-	plaintext, err := ansibleVaultView(path, opts.VaultPasswordFile)
+func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, original []byte, originalMode os.FileMode, originalSHA string, targetVersion int) (RosterMigrationResult, error) {
+	path, target := lk.path, lk.target
+	plaintext, err := ansibleVaultView(target, opts.VaultPasswordFile)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("decrypt roster %s: %w", path, err)
 	}
@@ -394,13 +401,13 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 		}, nil
 	}
 
-	backupPath, err := createRosterBackup(path, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+	backupPath, err := createRosterBackup(target, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".migrate-*")
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".migrate-*")
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: create temp file: %w", path, err)
 	}
@@ -423,23 +430,23 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 	}
 	newSHA := sha256Hex(encryptedCandidate)
 
-	if err := atomicReplaceFile(path, encryptedCandidate, originalMode); err != nil {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+	if err := atomicReplaceFile(target, encryptedCandidate, originalMode); err != nil {
+		if restoreErr := atomicReplaceFile(target, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 	}
 
-	reopened, err := readSecretSourceFile(path)
+	reopened, err := readSecretSourceFile(target)
 	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(reopened)), "$ANSIBLE_VAULT") {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := atomicReplaceFile(target, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation (not ansible-vault encrypted), rolled back to the original (backup at %s)", path, backupPath)
 	}
-	reopenedPlaintext, err := ansibleVaultView(path, opts.VaultPasswordFile)
+	reopenedPlaintext, err := ansibleVaultView(target, opts.VaultPasswordFile)
 	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](mustYAMLMapOrNil(reopenedPlaintext))) != 0 {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := atomicReplaceFile(target, original, originalMode); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed; restore manually from backup %s", path, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation, rolled back to the original (backup at %s)", path, backupPath)

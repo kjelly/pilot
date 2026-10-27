@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -38,10 +36,6 @@ const (
 	// "{{ ipa_admin_password }}".
 	RosterAdminNotLiteral
 )
-
-// rosterLockSuffixes are the sidecar locks roster migration
-// (MigrateRosterFile) and removal (RemoveRoster*) take.
-var rosterLockSuffixes = []string{".pilot-migrate.lock", ".pilot-remove.lock"}
 
 // VaultAdminPassword returns a plaintext vault vars file's
 // ipa_admin_password, or "" when data is encrypted, unparseable, or holds
@@ -86,58 +80,36 @@ func RosterAdminPasswordDiffers(path, vaultPassword string) (bool, error) {
 // points, and the file is replaced atomically with its mode and, where the
 // process may set it, its owner. It never writes a roster that is
 // encrypted, inline !vault included (ErrRosterEncrypted), held by another
-// roster mutation (ErrMutationLocked), or whose password it cannot rewrite
+// roster writer (ErrMutationLocked), or whose password it cannot rewrite
 // on one line by itself (an alias, a merge key, a flow mapping, a block or
 // multi-line scalar, a new password Ansible would template): those return
 // an error asking for a manual update.
 func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdminSync, error) {
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return 0, err
-	}
-	result, _, err := planRosterAdminSync(target, oldPassword, newPassword)
+	// A first look without the lock, so a roster that will not change gets
+	// no lock files. It decides nothing: the plan below does, on a fresh
+	// read under the lock.
+	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
 	if err != nil || result != RosterAdminUpdated {
 		return result, err
 	}
-	info, err := os.Stat(target)
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return 0, err
 	}
-	// Take the sidecar locks roster migration and removal take, then decide
-	// again on a fresh read, so none of them overwrites another's rewrite.
-	// Only a roster about to change gets lock files.
-	for _, suffix := range rosterLockSuffixes {
-		lock, err := acquireMutationLock(path + suffix)
-		if err != nil {
-			return 0, fmt.Errorf("roster %s: %w", path, err)
-		}
-		defer lock.release() //nolint:errcheck
-		keepOwner(path+suffix, info)
-	}
-	result, updated, err := planRosterAdminSync(target, oldPassword, newPassword)
+	defer lk.release() //nolint:errcheck
+	result, updated, err := planRosterAdminSync(lk.target, oldPassword, newPassword)
 	if err != nil || result != RosterAdminUpdated {
 		return result, err
 	}
-	if err := atomicReplaceFile(target, updated, info.Mode().Perm()); err != nil {
+	info, err := os.Stat(lk.target)
+	if err != nil {
+		return 0, err
+	}
+	if err := atomicReplaceFile(lk.target, updated, info.Mode().Perm()); err != nil {
 		return 0, fmt.Errorf("write roster %s: %w", path, err)
 	}
-	keepOwner(target, info)
+	keepOwner(lk.target, info)
 	return RosterAdminUpdated, nil
-}
-
-// keepOwner gives path the owner recorded in info after this process
-// created or replaced it: under `docker run` as root, a rename or a new
-// lock file would otherwise lock the host user out of their own roster.
-// Only root can give a file away, and only root needs to; failing that,
-// the group alone is kept where possible.
-func keepOwner(path string, info os.FileInfo) {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return
-	}
-	if os.Chown(path, int(st.Uid), int(st.Gid)) != nil {
-		_ = os.Chown(path, -1, int(st.Gid))
-	}
 }
 
 // planRosterAdminSync decides what SyncRosterAdminPassword does to the roster

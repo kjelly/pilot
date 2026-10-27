@@ -138,7 +138,12 @@ func SimulateSetRosterPrivilegedIdentity(path string, updated map[string]any) ([
 // had either. Callers should run SimulateSetRosterPrivilegedIdentity
 // first — this function does not validate anything itself.
 func SetRosterPrivilegedIdentity(path string, updated map[string]any) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -163,5 +168,5 @@ func SetRosterPrivilegedIdentity(path string, updated map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeSecretSourceFile(lk.target, rendered, 0o600)
 }

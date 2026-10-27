@@ -29,12 +29,19 @@ import (
 // (hosts.yml, and group_vars/freeipa.yml as the domain fallback); path
 // is the roster file.
 func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
-	root, err := readRosterAsMap(path)
+	// Held from the read of the existing hosts to the last append, so a
+	// host another writer adds meanwhile is not appended twice.
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer lk.release() //nolint:errcheck
+	root, err := readRosterAsMap(lk.target)
 	if err != nil {
 		return nil, err
 	}
 
-	domain, _ := RosterDomain(path)
+	domain, _ := RosterDomain(lk.target)
 	if strings.TrimSpace(domain) == "" {
 		domain, _ = FreeIPADomain(dir)
 	}
@@ -84,7 +91,7 @@ func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
 		if ip == "" {
 			continue
 		}
-		if err := AppendRosterHost(path, fqdn, ip); err != nil {
+		if err := appendTopLevelRosterEntryLocked(lk, "hosts", rosterHostStub{Name: fqdn, State: "present", IPAddress: ip}); err != nil {
 			return added, err
 		}
 		existing[fqdn] = true

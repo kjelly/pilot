@@ -11,15 +11,19 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/secretpath"
 )
 
 // rosterCandidates lists the canonical rosters dir's vault must agree
 // with: the roster editor's default .vault/ipa-identity.yaml plus every
 // referenced freeipa_roster_file, resolved against dir, existing files
-// only, each once. pilot edit's sync and the deploy preflight's drift
-// warning both start from it, so they consider the same rosters.
+// only. Each file is listed once however many spellings name it (a link
+// and its target, a relative and an absolute reference), under the first
+// spelling inside dir's own .vault/ if there is one, so pilot edit's sync
+// may write it. pilot edit's sync and the deploy preflight's drift warning
+// both start from it, so they consider the same rosters.
 func rosterCandidates(dir string, referenced []string) []string {
-	seen := map[string]bool{}
+	index := map[string]int{}
 	var out []string
 	for _, path := range append([]string{filepath.Join(dir, ".vault", "ipa-identity.yaml")}, referenced...) {
 		path = strings.TrimSpace(path)
@@ -30,13 +34,21 @@ func rosterCandidates(dir string, referenced []string) []string {
 		if abs, err := filepath.Abs(path); err == nil {
 			path = abs
 		}
-		if seen[path] {
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		seen[path] = true
-		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-			out = append(out, path)
+		file, err := secretpath.Canonical(path)
+		if err != nil {
+			continue
 		}
+		if i, seen := index[file]; seen {
+			if !isManagedVaultFile(dir, out[i]) && isManagedVaultFile(dir, path) {
+				out[i] = path
+			}
+			continue
+		}
+		index[file] = len(out)
+		out = append(out, path)
 	}
 	return out
 }
@@ -79,14 +91,11 @@ func referencedRosterFiles(dir string) []string {
 // change the real file and a rolled-back apply would leave it changed
 // (PR #148 review).
 func isManagedVaultFile(dir, path string) bool {
-	vaultDir, err := filepath.Abs(filepath.Join(dir, ".vault"))
+	vaultDir, err := secretpath.Canonical(filepath.Join(dir, ".vault"))
 	if err != nil {
 		return false
 	}
-	if vaultDir, err = filepath.EvalSymlinks(vaultDir); err != nil {
-		return false
-	}
-	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	parent, err := secretpath.Canonical(filepath.Dir(path))
 	return err == nil && parent == vaultDir && hasManagedFileExtension(filepath.Base(path))
 }
 

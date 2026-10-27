@@ -139,7 +139,12 @@ func EvaluateReviewStatusesFile(path string, now time.Time) ([]ReviewStatus, err
 // markGrantReviewedPlaintext is MarkGrantReviewedFile's non-vault half:
 // path MUST already be plaintext YAML.
 func markGrantReviewedPlaintext(path, name, reviewedBy string, now time.Time) error {
-	grant, found, err := RosterGrant(path, name)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	grant, found, err := RosterGrant(lk.target, name)
 	if err != nil {
 		return err
 	}
@@ -168,14 +173,14 @@ func markGrantReviewedPlaintext(path, name, reviewedBy string, now time.Time) er
 	}
 	updated["review"] = updatedReview
 
-	violations, _, err := SimulateSetRosterGrant(path, name, updated)
+	violations, _, err := SimulateSetRosterGrant(lk.target, name, updated)
 	if err != nil {
 		return err
 	}
 	if len(violations) > 0 {
 		return fmt.Errorf("marking grant %q as reviewed would fail roster validation: %v", name, violations)
 	}
-	return SetRosterGrant(path, name, updated)
+	return replaceTopLevelRosterEntryLocked(lk, "grants", name, updated)
 }
 
 // MarkGrantReviewedFile updates the named grant's review.last_reviewed_at

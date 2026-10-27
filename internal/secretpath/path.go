@@ -12,11 +12,11 @@ import (
 // Validate keeps editors of secret-bearing sources out of
 // inventory vars trees, including destinations reached through symlinks.
 func Validate(dir, path string) error {
-	workspace, err := canonicalPath(dir)
+	workspace, err := Canonical(dir)
 	if err != nil {
 		return fmt.Errorf("cannot resolve workspace for secret source")
 	}
-	destination, err := canonicalPath(path)
+	destination, err := Canonical(path)
 	if err != nil {
 		return fmt.Errorf("cannot resolve secret source path")
 	}
@@ -74,9 +74,14 @@ func Validate(dir, path string) error {
 	return nil
 }
 
-// Resolve the nearest existing ancestor so new files and directories receive
-// the same destination check as existing files. Broken links fail closed.
-func canonicalPath(path string) (string, error) {
+// Canonical returns the absolute path of the file path names, however it
+// is spelled: every symlink along it is resolved, relative targets and
+// chains included. A path that does not exist yet resolves its nearest
+// existing ancestor, so a new file gets the same answer it will have once
+// created. A dangling symlink fails closed rather than counting as a new
+// file. Validate checks a secret source's destination with it, and roster
+// writers lock the file it names (internal/inventory's lockRosterFile).
+func Canonical(path string) (string, error) {
 	abs := path
 	if !filepath.IsAbs(path) {
 		cwd, err := os.Getwd()
@@ -103,7 +108,7 @@ func canonicalPath(path string) (string, error) {
 	if parent == abs {
 		return "", err
 	}
-	resolved, err = canonicalPath(parent)
+	resolved, err = Canonical(parent)
 	if err != nil {
 		return "", err
 	}

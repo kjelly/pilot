@@ -1,0 +1,125 @@
+package cmd
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+)
+
+// linkedRosterWorkspace is a workspace whose default roster is a symlink
+// to a roster shared from outside it, both holding the old password.
+func linkedRosterWorkspace(t *testing.T) (dir, link, shared string) {
+	t.Helper()
+	dir = t.TempDir()
+	sharedDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared = filepath.Join(sharedDir, "ipa-identity.yaml")
+	writeSyncFile(t, shared, syncTestRoster(`"Old\"pass#1"`))
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: \"Old\\\"pass#1\"\n")
+	link = filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+	return dir, link, shared
+}
+
+// holdRosterFlock holds path's lock file as another pilot process would:
+// `pilot roster remove-*` on the shared roster's real path, say.
+func holdRosterFlock(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rotateMainVault(t *testing.T, dir string) string {
+	t.Helper()
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	return r.banner
+}
+
+// Through the real save path: a workspace roster that links to a roster
+// another pilot process holds on its real path is reported as not synced
+// and left alone, the link included (PR #148 review). Unlocked, the same
+// save updates the shared file and keeps the link.
+func TestEditAutomationDriverVaultSyncRespectsTheLinkedRostersLock(t *testing.T) {
+	for _, suffix := range []string{".pilot-remove.lock", ".pilot-migrate.lock"} {
+		t.Run(suffix, func(t *testing.T) {
+			dir, link, shared := linkedRosterWorkspace(t)
+			before, _ := os.ReadFile(shared)
+			holdRosterFlock(t, shared+suffix)
+
+			banner := rotateMainVault(t, dir)
+			if after, _ := os.ReadFile(shared); !bytes.Equal(after, before) {
+				t.Fatalf("locked roster rewritten through its link:\n%s", after)
+			}
+			if !strings.Contains(banner, "⚠️  未同步 .vault/ipa-identity.yaml") || strings.Contains(banner, "已同步") {
+				t.Errorf("banner does not report the locked roster as not synced:\n%s", banner)
+			}
+			assertLinkTo(t, link, shared)
+		})
+	}
+	t.Run("unlocked", func(t *testing.T) {
+		dir, link, shared := linkedRosterWorkspace(t)
+		banner := rotateMainVault(t, dir)
+		if got := syncRosterPassword(t, shared); got != syncNewPassword {
+			t.Fatalf("shared roster password = %q, want the new one; banner:\n%s", got, banner)
+		}
+		assertLinkTo(t, link, shared)
+	})
+}
+
+func assertLinkTo(t *testing.T, link, dest string) {
+	t.Helper()
+	info, err := os.Lstat(link)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a symlink (err %v)", link, err)
+	}
+	if got, _ := os.Readlink(link); got != dest {
+		t.Fatalf("%s points at %s, want %s", link, got, dest)
+	}
+}
+
+// A roster named twice — the default .vault/ipa-identity.yaml, a link, and
+// a hosts.yml reference to the file it links to — is considered once,
+// under its .vault/ spelling, so the sync writes and reports it once.
+func TestRosterCandidatesListEachFileOnce(t *testing.T) {
+	dir, link, shared := linkedRosterWorkspace(t)
+	relLink := filepath.Join(dir, ".vault", "alias.yaml")
+	if err := os.Symlink("ipa-identity.yaml", relLink); err != nil {
+		t.Fatal(err)
+	}
+	got := rosterCandidates(dir, []string{shared, ".vault/alias.yaml", link})
+	if len(got) != 1 || got[0] != link {
+		t.Fatalf("rosterCandidates() = %v, want only %s", got, link)
+	}
+	// Referenced from outside first, the file still gets its .vault/ name.
+	other := t.TempDir()
+	vaultLink := filepath.Join(other, ".vault", "nfs.yaml")
+	if err := os.MkdirAll(filepath.Dir(vaultLink), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shared, vaultLink); err != nil {
+		t.Fatal(err)
+	}
+	if got := rosterCandidates(other, []string{shared, ".vault/nfs.yaml"}); len(got) != 1 || got[0] != vaultLink {
+		t.Fatalf("rosterCandidates() = %v, want only %s", got, vaultLink)
+	}
+}

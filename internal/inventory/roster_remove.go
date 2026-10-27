@@ -282,13 +282,13 @@ func cascadeRemoveGroupReferences(root map[string]any, groupname string) []Roste
 // would not validate. It performs no FreeIPA probe — callers must have
 // already established the historical guard.
 func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error {
-	lock, err := acquireMutationLock(path + ".pilot-remove.lock")
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
 
-	data, err := readSecretSourceFile(path)
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -337,20 +337,20 @@ func RemoveRosterUser(path, username string, opts RemoveRosterUserOptions) error
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeSecretSourceFile(lk.target, rendered, 0o600)
 }
 
 // RemoveRosterGroup is RemoveRosterUser's group counterpart. A blocked
 // reference always aborts before any mutation, regardless of
 // opts.CascadeReferences (spec.md §18.1).
 func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) error {
-	lock, err := acquireMutationLock(path + ".pilot-remove.lock")
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
 
-	data, err := readSecretSourceFile(path)
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -405,7 +405,7 @@ func RemoveRosterGroup(path, groupname string, opts RemoveRosterGroupOptions) er
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeSecretSourceFile(lk.target, rendered, 0o600)
 }
 
 // findSequenceEntryFields locates the item named name within the

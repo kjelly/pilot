@@ -216,13 +216,13 @@ func removeHostReferencesFromNode(top *yaml.Node, hostName string) {
 // only hostName's membership/target entry within each. Refuses to write
 // (fail-closed) if the resulting roster would not validate.
 func RemoveRosterHostReferences(path, hostName string) error {
-	lock, err := acquireMutationLock(path + ".pilot-remove.lock")
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
 
-	data, err := readSecretSourceFile(path)
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -252,7 +252,7 @@ func RemoveRosterHostReferences(path, hostName string) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeSecretSourceFile(lk.target, rendered, 0o600)
 }
 
 // SetRosterHostAbsent converges hostName's canonical hosts[] entry to
@@ -266,7 +266,12 @@ func RemoveRosterHostReferences(path, hostName string) error {
 // RemoveRosterHostReferences — call that first). Errors rather than
 // guessing if hostName doesn't exist or is ambiguous.
 func SetRosterHostAbsent(path, hostName string) error {
-	root, err := readRosterAsMap(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	root, err := readRosterAsMap(lk.target)
 	if err != nil {
 		return err
 	}
@@ -284,5 +289,5 @@ func SetRosterHostAbsent(path, hostName string) error {
 		updated[k] = v
 	}
 	updated["state"] = "absent"
-	return replaceTopLevelRosterEntry(path, "hosts", hostName, updated)
+	return replaceTopLevelRosterEntryLocked(lk, "hosts", hostName, updated)
 }
