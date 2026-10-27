@@ -35,7 +35,6 @@ import (
 
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/tui"
-	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
@@ -292,24 +291,17 @@ func existingFreeIPAAdminPassword(dir string) string {
 		return ""
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
-	if err != nil || isAnsibleVaultEncrypted(data) {
-		return ""
-	}
-	doc, err := vaultfile.Parse(data)
 	if err != nil {
 		return ""
 	}
-	for _, e := range doc.Entries() {
-		if e.Key != "ipa_admin_password" {
-			continue
-		}
-		v := e.Value.Value
-		if v == "" || v == "CHANGE-ME" || v == "CHANGE-ME-min-8-chars" {
-			return ""
-		}
-		return v
+	// Only a literal password written as a plain string is reused: not an
+	// inline !vault value, a template or a value YAML may type, which would
+	// otherwise go into the new roster as its raw text.
+	v := inventory.VaultAdminPasswordReusable(data)
+	if v == "CHANGE-ME" || v == "CHANGE-ME-min-8-chars" {
+		return ""
 	}
-	return ""
+	return v
 }
 
 func pushRosterUsersMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {

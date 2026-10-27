@@ -182,7 +182,12 @@ func (d *Doc) Add(key, value string) {
 }
 
 // Set updates key's value in place (adding it if not already present),
-// preserving the entry's position among its siblings.
+// preserving the entry's position among its siblings. The value is
+// written as a string: whatever tag the old value had or resolved to —
+// !!int for an unquoted number, !!null for an empty key, an inline !vault —
+// is dropped, or the new value would be written under it (!!int
+// "NewPass-1") and read as that type or as nothing. !unsafe is kept: it
+// still marks a string, one Ansible never templates.
 func (d *Doc) Set(key, value string) {
 	for _, e := range d.entries {
 		if e.Key == key {
@@ -193,6 +198,9 @@ func (d *Doc) Set(key, value string) {
 				return
 			}
 			e.Value.Value = value
+			if e.Value.ShortTag() != "!unsafe" {
+				e.Value.Tag = "!!str"
+			}
 			if strings.Contains(value, "\n") {
 				e.Value.Style = yaml.LiteralStyle
 			} else {

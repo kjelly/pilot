@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // guidanceWorkspace has one roster per way the sync can leave a roster to
@@ -405,5 +407,89 @@ func TestUnquotedVaultPasswordIsReported(t *testing.T) {
 	}
 	if line := bannerLine(r.banner, "⚠️  未同步 .vault/dated.yaml："); !strings.Contains(line, rosterNotStringReason) {
 		t.Fatalf("the dated roster is not reported:\n%s", r.banner)
+	}
+}
+
+// The NFS bootstrap reuses .vault/main.yaml's password only when it is a
+// literal written as a plain string. A template, an inline !vault value or
+// an unquoted value YAML may type would go into the new roster as raw
+// text, so the bootstrap asks for the password instead (PR #148
+// re-review, round 4).
+func TestNFSBootstrapDoesNotReuseANonLiteralVaultPassword(t *testing.T) {
+	for name, value := range map[string]string{
+		"template":      `"{{ lookup('env', 'IPA_PW') }}"`,
+		"inline !vault": "!vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465",
+		"unquoted int":  "12345678",
+		"literal":       `"Admin-pass_1"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: "+value+"\n")
+			writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  nexus:\n    ansible_host: 10.0.0.9\n    roles: []\n")
+			data, _ := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+			hf, err := inventory.Parse(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := newEditRouterModel(dir)
+			pushNFSRoleBootstrap(&r, dir, filepath.Join(dir, "hosts.yml"), hf, "nexus", nil)
+			roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+			if name == "literal" {
+				if got := syncRosterPassword(t, roster); got != "Admin-pass_1" {
+					t.Fatalf("literal password not reused: %q", got)
+				}
+				return
+			}
+			if automationScreenID(&r) != nfsRosterBootstrapPasswordScreenID {
+				t.Fatalf("bootstrap did not ask for the password (screen %s, banner %q)", automationScreenID(&r), r.banner)
+			}
+			if _, err := os.Stat(roster); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(roster)
+				t.Fatalf("a roster was written from a %s vault value:\n%s", name, data)
+			}
+		})
+	}
+}
+
+// An !unsafe password is a literal string to Ansible, on either side: the
+// preflight compares it, and a rotation syncs it and keeps the tag. Both
+// were silent before (PR #148 re-review, round 4).
+func TestUnsafePasswordsAreComparedAndSynced(t *testing.T) {
+	dir := t.TempDir()
+	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	stale := filepath.Join(dir, ".vault", "stale.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`!unsafe "Old-pass_1"`))
+	writeSyncFile(t, stale, syncTestRoster(`!unsafe "Stale-pass_9"`))
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: !unsafe \"Old-pass_1\"\n")
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n  h1:\n    ansible_host: 10.0.0.1\n    roles: [freeipa-client]\n    freeipa_roster_file: .vault/stale.yaml\n")
+
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{
+		HostVars: map[string]map[string]any{"h1": {"freeipa_roster_file": ".vault/stale.yaml"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "warning: "+stale+" ") || strings.Contains(out.String(), roster) {
+		t.Fatalf("preflight does not compare !unsafe passwords:\n%s", out.String())
+	}
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "main.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+	if !strings.Contains(r.banner, "🔁 已同步 .vault/ipa-identity.yaml 的 freeipa.admin.password") {
+		t.Fatalf("the !unsafe roster was not synced:\n%s", r.banner)
+	}
+	if got := syncRosterPassword(t, roster); got != syncNewPassword {
+		t.Fatalf("roster password = %q", got)
+	}
+	for _, path := range []string{roster, filepath.Join(dir, ".vault", "main.yaml")} {
+		if data, _ := os.ReadFile(path); !bytes.Contains(data, []byte("!unsafe ")) {
+			t.Errorf("%s lost its !unsafe tag:\n%s", filepath.Base(path), data)
+		}
 	}
 }

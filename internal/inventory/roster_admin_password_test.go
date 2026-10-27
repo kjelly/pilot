@@ -190,23 +190,23 @@ func TestSyncRosterAdminPasswordWritesThroughSymlink(t *testing.T) {
 }
 
 // Rosters that hold the old password where it cannot be rewritten by
-// itself — encrypted inline, behind an alias or merge key — or a new
-// password Ansible would template, fail without writing and without a
-// password in the error. Drift is still judged on the value YAML resolves.
+// itself — encrypted inline, behind an alias or merge key — fail without
+// writing and without a password in the error. Drift is still judged on the
+// value YAML resolves. (A new password holding a Jinja delimiter is no
+// longer refused: it is written !unsafe, see
+// TestSyncRosterAdminPasswordWritesADelimiterBearingPasswordUnsafe.)
 func TestSyncRosterAdminPasswordRefusesValuesItCannotOwn(t *testing.T) {
 	inlineVault := "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n    password: !vault |\n      $ANSIBLE_VAULT;1.1;AES256\n      6162636465\n"
 	alias := "schema_version: 3\nshared: &pw Old-pass_1\nfreeipa:\n  admin:\n    principal: admin\n    password: *pw\n"
 	merge := "schema_version: 3\nbase: &base\n  principal: admin\n  password: Old-pass_1\nfreeipa:\n  admin:\n    <<: *base\n"
-	plain := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
 	for name, tt := range map[string]struct {
 		body, newPassword string
 		encrypted         bool
 		differs           bool // against vault password "Vault-pass_9"
 	}{
-		"inline !vault":      {inlineVault, "New-pass_2", true, false},
-		"alias":              {alias, "New-pass_2", false, true},
-		"merge key":          {merge, "New-pass_2", false, true},
-		"jinja new password": {plain, "New{{pass}}", false, true},
+		"inline !vault": {inlineVault, "New-pass_2", true, false},
+		"alias":         {alias, "New-pass_2", false, true},
+		"merge key":     {merge, "New-pass_2", false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeRoster(t, tt.body)
@@ -382,5 +382,108 @@ func TestSyncRosterAdminPasswordDecidesAnEmptyReadUnderTheLock(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != "New-pass_2" {
 		t.Fatalf("roster not synced:\n%s", after)
+	}
+}
+
+// A new password holding a Jinja delimiter — only a vault's !unsafe value
+// is one pilot syncs — is written tagged !unsafe, so Ansible uses it as
+// written; and a roster's !unsafe tag survives a rotation to a password
+// without one (PR #148 re-review, round 4: replaceScalar dropped it).
+func TestSyncRosterAdminPasswordWritesADelimiterBearingPasswordUnsafe(t *testing.T) {
+	for name, tt := range map[string]struct{ oldScalar, newPassword string }{
+		"delimiters in the new password": {`"Old-pass_1"`, "New{{pass}}"},
+		"roster already !unsafe":         {`!unsafe "Old-pass_1"`, "New-pass_2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeRoster(t, strings.Replace(rosterAdminFixture, "%s", tt.oldScalar, 1))
+			if got, err := SyncRosterAdminPassword(path, "Old-pass_1", tt.newPassword); err != nil || got != RosterAdminUpdated {
+				t.Fatalf("SyncRosterAdminPassword() = %v, %v; want RosterAdminUpdated", got, err)
+			}
+			after, _ := os.ReadFile(path)
+			if pw := decodedAdminPassword(t, after); pw != tt.newPassword {
+				t.Fatalf("freeipa.admin.password = %q, want the new password", pw)
+			}
+			_, doc, err := readRosterNode(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, value, _ := rosterAdminPassword(doc); value.ShortTag() != "!unsafe" || !strings.Contains(string(after), "  # rotated with the vault") {
+				t.Fatalf("rewritten line lost !unsafe or its comment:\n%s", after)
+			}
+			if got, err := CompareRosterAdminPassword(path, tt.newPassword); err != nil || got != RosterAdminCurrent {
+				t.Fatalf("CompareRosterAdminPassword() = %v, %v; want RosterAdminCurrent", got, err)
+			}
+		})
+	}
+}
+
+// One classifier judges every password form on both sides
+// (ansibleScalarKind): what the roster compare and sync, and the vault's
+// readers, make of each (PR #148 re-review, round 4: !unsafe was skipped
+// silently on both sides).
+func TestAdminPasswordFormsAreJudgedAlikeOnBothSides(t *testing.T) {
+	for name, tt := range map[string]struct {
+		scalar  string
+		roster  RosterAdminSync // CompareRosterAdminPassword against "Pass-1"
+		vault   string          // VaultAdminPassword
+		tmpl    bool            // VaultAdminPasswordTemplate != ""
+		notStr  bool            // VaultAdminPasswordNotString
+		reusing string          // VaultAdminPasswordReusable
+	}{
+		"double-quoted":         {`"Pass-1"`, RosterAdminCurrent, "Pass-1", false, false, "Pass-1"},
+		"plain string":          {`Pass-1`, RosterAdminCurrent, "Pass-1", false, false, "Pass-1"},
+		"explicit !!str":        {`!!str Pass-1`, RosterAdminCurrent, "Pass-1", false, false, "Pass-1"},
+		"!unsafe":               {`!unsafe "Pass-1"`, RosterAdminCurrent, "Pass-1", false, false, "Pass-1"},
+		"!unsafe with Jinja":    {`!unsafe "Pa{{ss"`, RosterAdminDiffers, "Pa{{ss", false, false, ""},
+		"!unsafe digits":        {`!unsafe 12345678`, RosterAdminDiffers, "12345678", false, false, "12345678"},
+		"template":              {`"{{ ipa_admin_password }}"`, RosterAdminNotLiteral, "", true, false, ""},
+		"unquoted number":       {`12345678`, RosterAdminNotString, "", false, true, ""},
+		"unquoted base 60":      {`190:20:30`, RosterAdminNotString, "", false, true, ""},
+		"explicit !!int":        {`!!int 7`, RosterAdminNotString, "", false, true, ""},
+		"quoted number":         {`"12345678"`, RosterAdminDiffers, "12345678", false, false, "12345678"},
+		"!!str unquoted number": {`!!str 012345678`, RosterAdminDiffers, "012345678", false, false, "012345678"},
+		"null":                  {`null`, RosterAdminNotLiteral, "", false, false, ""},
+		"empty":                 {`""`, RosterAdminNotLiteral, "", false, false, ""},
+		"inline !vault":         {"!vault |\n      $ANSIBLE_VAULT;1.1;AES256\n      6162636465", RosterAdminNotLiteral, "", false, false, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeRoster(t, strings.Replace(rosterAdminFixture, "%s", tt.scalar, 1))
+			if got, err := CompareRosterAdminPassword(path, "Pass-1"); err != nil || got != tt.roster {
+				t.Errorf("roster: CompareRosterAdminPassword = %v, %v; want %v", got, err, tt.roster)
+			}
+			vault := []byte("ipa_admin_password: " + strings.ReplaceAll(tt.scalar, "\n      ", "\n  ") + "\n")
+			if got := VaultAdminPassword(vault); got != tt.vault {
+				t.Errorf("vault: VaultAdminPassword = %q, want %q", got, tt.vault)
+			}
+			if got := VaultAdminPasswordTemplate(vault) != ""; got != tt.tmpl {
+				t.Errorf("vault: template = %v, want %v", got, tt.tmpl)
+			}
+			if got := VaultAdminPasswordNotString(vault); got != tt.notStr {
+				t.Errorf("vault: not a string = %v, want %v", got, tt.notStr)
+			}
+			if got := VaultAdminPasswordReusable(vault); got != tt.reusing {
+				t.Errorf("vault: reusable = %q, want %q", got, tt.reusing)
+			}
+		})
+	}
+}
+
+// An empty ipa_admin_password filled in by the NFS bootstrap is written as
+// a string: the old empty value resolved to null, and keeping its tag
+// wrote !!null "pw", which Ansible reads as no password (PR #148
+// re-review, round 4).
+func TestFillFreeIPAAdminPasswordEmptyKeyWritesAString(t *testing.T) {
+	for _, body := range []string{"ipa_admin_password:\nother: x\n", "ipa_admin_password: CHANGE-ME\n"} {
+		path := filepath.Join(t.TempDir(), "main.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if filled, err := FillFreeIPAAdminPassword(path, "Admin-pass_1"); err != nil || !filled {
+			t.Fatalf("FillFreeIPAAdminPassword(%q) = %v, %v", body, filled, err)
+		}
+		data, _ := os.ReadFile(path)
+		if VaultAdminPassword(data) != "Admin-pass_1" || strings.Contains(string(data), "!!") {
+			t.Fatalf("filled vault does not hold the password as a string:\n%s", data)
+		}
 	}
 }

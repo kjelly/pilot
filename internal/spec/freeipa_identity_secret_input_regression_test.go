@@ -126,10 +126,17 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 			t.Errorf("required-Ansible recipe omits %s", name)
 		}
 	}
-	// pilot's YAML 1.1 typing of admin passwords, checked against the real
+	// pilot's classification of admin passwords, checked against the real
 	// Ansible loader (internal/inventory).
-	if !regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '\^TestYAML11NonStringMatchesAnsible\$\$' ./internal/inventory/`).Match(body) {
-		t.Error("required-Ansible recipe omits internal/inventory's TestYAML11NonStringMatchesAnsible")
+	inv := regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '([^']+)' ./internal/inventory/`).FindSubmatch(body)
+	if inv == nil {
+		t.Fatal("required-Ansible recipe does not run internal/inventory's Ansible checks")
+	}
+	invSelected := regexp.MustCompile(strings.ReplaceAll(string(inv[1]), "$$", "$"))
+	for _, name := range []string{"TestYAML11NonStringMatchesAnsible", "TestAnsibleTagsMatchTheClassifier"} {
+		if !invSelected.MatchString(name) {
+			t.Errorf("required-Ansible recipe omits internal/inventory's %s", name)
+		}
 	}
 	body, err = os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {

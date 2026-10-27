@@ -38,31 +38,43 @@ const (
 	RosterAdminNotLiteral
 	// RosterAdminNotString: the password is written so a YAML loader may
 	// read it as something other than a string — a number, date or boolean
-	// (notStringAdminPassword) — and a typed comparison with the vault's
+	// (scalarNotString) — and a typed comparison with the vault's
 	// string password would then fail: the operator must quote it. pilot
 	// reports it, never judges it current and never rewrites it.
 	RosterAdminNotString
 )
 
 // VaultAdminPassword returns a plaintext vault vars file's
-// ipa_admin_password, or "" when data is encrypted, unparseable, or holds
-// no plain string for that key (an inline !vault value, a template, a
-// value a YAML loader may read as a number or date...).
+// ipa_admin_password when it is a literal password (scalarLiteral: a
+// string Ansible uses as written, !unsafe included), "" when data is
+// encrypted or unparseable or the value is anything else — an inline
+// !vault value, a template, a value a YAML loader may read as a number or
+// date, or none.
 func VaultAdminPassword(data []byte) string {
 	value := vaultAdminValue(data)
-	if !literalAdminPassword(value) {
+	if ansibleScalarKind(value) != scalarLiteral {
 		return ""
 	}
 	return value.Value
 }
 
+// VaultAdminPasswordReusable is VaultAdminPassword when the value can also
+// be written into a new roster as a plain quoted string — no Jinja
+// delimiter, which only !unsafe keeps literal — and "" otherwise; the
+// NFS bootstrap then asks for the password instead.
+func VaultAdminPasswordReusable(data []byte) string {
+	if password := VaultAdminPassword(data); !jinjaDelimited(password) {
+		return password
+	}
+	return ""
+}
+
 // VaultAdminPasswordNotString reports whether a plaintext vault vars
 // file's ipa_admin_password is written so a YAML loader may read it as
-// something other than a string (notStringAdminPassword): pilot can then
-// neither compare it with a roster nor carry it into one, and says to
-// quote it.
+// something other than a string (scalarNotString): pilot can then neither
+// compare it with a roster nor carry it into one, and says to quote it.
 func VaultAdminPasswordNotString(data []byte) bool {
-	return notStringAdminPassword(vaultAdminValue(data))
+	return ansibleScalarKind(vaultAdminValue(data)) == scalarNotString
 }
 
 // VaultAdminPasswordText is a plaintext vault vars file's
@@ -94,15 +106,8 @@ func vaultAdminValue(data []byte) *yaml.Node {
 // tell which password it resolves to, nor keep a roster in step with it.
 // The value may be a password: callers compare it and never show it.
 func VaultAdminPasswordTemplate(data []byte) string {
-	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
-		return ""
-	}
-	var doc yaml.Node
-	if yaml.Unmarshal(data, &doc) != nil {
-		return ""
-	}
-	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
-	if value == nil || value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" || !jinjaDelimited(value.Value) {
+	value := vaultAdminValue(data)
+	if ansibleScalarKind(value) != scalarTemplate {
 		return ""
 	}
 	return value.Value
@@ -131,15 +136,16 @@ func CompareRosterAdminPassword(path, vaultPassword string) (RosterAdminSync, er
 		return 0, err
 	}
 	_, value, _ := rosterAdminPassword(doc)
-	switch {
-	case notStringAdminPassword(value):
+	switch ansibleScalarKind(value) {
+	case scalarNotString:
 		return RosterAdminNotString, nil
-	case !literalAdminPassword(value):
-		return RosterAdminNotLiteral, nil
-	case value.Value == vaultPassword:
-		return RosterAdminCurrent, nil
+	case scalarLiteral:
+		if value.Value == vaultPassword {
+			return RosterAdminCurrent, nil
+		}
+		return RosterAdminDiffers, nil
 	}
-	return RosterAdminDiffers, nil
+	return RosterAdminNotLiteral, nil
 }
 
 // SyncRosterAdminPassword replaces the plaintext roster's literal
@@ -194,13 +200,18 @@ func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync
 		return 0, nil, err
 	}
 	mapping, value, direct := rosterAdminPassword(doc)
-	if value != nil && value.ShortTag() == "!vault" {
+	kind := ansibleScalarKind(value)
+	if kind == scalarEncrypted {
 		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
 	}
+	// !unsafe keeps a password literal for Ansible: kept when the roster's
+	// had it, and needed when the new password holds a Jinja delimiter
+	// (only a vault's !unsafe value can), so Ansible does not template it.
+	unsafe := value != nil && value.ShortTag() == "!unsafe" || jinjaDelimited(newPassword)
 	switch {
-	case notStringAdminPassword(value):
+	case kind == scalarNotString:
 		return RosterAdminNotString, nil, nil
-	case !literalAdminPassword(value):
+	case kind != scalarLiteral:
 		return RosterAdminNotLiteral, nil, nil
 	case value.Value == newPassword:
 		return RosterAdminCurrent, nil, nil
@@ -208,12 +219,10 @@ func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync
 		return RosterAdminDiffers, nil, nil
 	case !direct:
 		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password comes from a YAML alias or merge key; update it by hand", path)
-	case jinjaDelimited(newPassword):
-		return 0, nil, fmt.Errorf("roster %s: the new password contains a Jinja delimiter ({{, {%% or {#) that Ansible would template; update freeipa.admin.password by hand", path)
 	case mapping.Style&yaml.FlowStyle != 0 || value.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0:
 		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is not a one-line block-mapping value; update it by hand", path)
 	}
-	updated, err := replaceScalar(data, value, newPassword)
+	updated, err := replaceScalar(data, value, newPassword, unsafe)
 	if err != nil {
 		return 0, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
 	}
@@ -302,33 +311,61 @@ func resolveAlias(node *yaml.Node) *yaml.Node {
 	return node
 }
 
-// literalAdminPassword reports whether value is a password every YAML
-// loader reads as written: a non-empty string that is no template and
-// that no loader may read as anything else (notStringAdminPassword).
-func literalAdminPassword(value *yaml.Node) bool {
-	return value != nil && value.Kind == yaml.ScalarNode && value.ShortTag() == "!!str" &&
-		value.Value != "" && !jinjaDelimited(value.Value) && !notStringAdminPassword(value)
-}
+// scalarKind is how Ansible reads a password scalar (ansibleScalarKind).
+type scalarKind int
 
-// notStringAdminPassword reports whether value is written so that a YAML
-// loader may read it as something other than a string — a number, date or
-// boolean — which a typed comparison never finds equal to a string
-// password. That is any such tag yaml.v3 (YAML 1.2) resolves, and any
-// unquoted scalar a YAML 1.1 loader such as Ansible's resolves to a
-// non-string (yaml11NonString): the two disagree on 012345678, 1e10,
-// 190:20:30 and yes, among others. Quoting it settles both. Null is no
-// password at all rather than a typed one (RosterAdminNotLiteral).
-func notStringAdminPassword(value *yaml.Node) bool {
-	if value == nil || value.Kind != yaml.ScalarNode {
-		return false
+const (
+	// scalarAbsent: no password — missing, null or empty.
+	scalarAbsent scalarKind = iota
+	// scalarLiteral: a string Ansible uses as written — quoted, tagged
+	// !!str, plain and read as a string by YAML 1.1 and 1.2 alike, or
+	// tagged !unsafe (never templated, whatever it holds).
+	scalarLiteral
+	// scalarTemplate: a string holding a Jinja delimiter, which Ansible
+	// templates.
+	scalarTemplate
+	// scalarNotString: a value a YAML loader may read as something other
+	// than a string — an unquoted number, date or boolean, or a non-string
+	// tag — which a typed comparison never finds equal to a string password.
+	scalarNotString
+	// scalarEncrypted: an inline !vault value.
+	scalarEncrypted
+)
+
+// ansibleScalarKind classifies a password value the one way every vault-
+// and roster-side check here judges it. YAML 1.2 (yaml.v3's tags) and YAML
+// 1.1 (yaml11NonString, the resolver Ansible loads vars files with)
+// disagree on unquoted scalars such as 012345678, 1e10, 190:20:30 and yes,
+// so an unquoted value either may read as a non-string is
+// scalarNotString: quoting it settles both.
+func ansibleScalarKind(value *yaml.Node) scalarKind {
+	if value == nil {
+		return scalarAbsent
 	}
-	switch value.ShortTag() {
-	case "!!int", "!!float", "!!bool", "!!timestamp", "!!binary":
-		return true
-	case "!!str":
-		return value.Style == 0 && yaml11NonString.MatchString(value.Value)
+	if value.Kind != yaml.ScalarNode {
+		return scalarNotString
 	}
-	return false
+	quoted := value.Style&(yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle|yaml.LiteralStyle|yaml.FoldedStyle) != 0
+	switch tag := value.ShortTag(); {
+	case tag == "!vault":
+		return scalarEncrypted
+	case tag == "!unsafe":
+		if value.Value == "" {
+			return scalarAbsent
+		}
+		return scalarLiteral
+	case tag == "!!null":
+		return scalarAbsent
+	case tag != "!!str":
+		return scalarNotString
+	case value.Value == "":
+		return scalarAbsent
+	case !quoted && value.Style&yaml.TaggedStyle == 0 && yaml11NonString.MatchString(value.Value):
+		return scalarNotString
+	case jinjaDelimited(value.Value):
+		return scalarTemplate
+	}
+	return scalarLiteral
 }
 
 // yaml11NonString matches the plain scalars PyYAML's YAML 1.1 implicit
@@ -352,13 +389,18 @@ func jinjaDelimited(s string) bool {
 }
 
 // replaceScalar rewrites the one line holding node so it carries value as
-// a double-quoted scalar, keeping the text before it and its line comment.
-func replaceScalar(data []byte, node *yaml.Node, value string) ([]byte, error) {
+// a double-quoted scalar — tagged !unsafe when unsafe — keeping the text
+// before it and its line comment. node's column is where its tag, if any,
+// begins, so an old tag is replaced along with the value.
+func replaceScalar(data []byte, node *yaml.Node, value string, unsafe bool) ([]byte, error) {
 	encoded, err := yaml.Marshal(&yaml.Node{Kind: yaml.ScalarNode, Style: yaml.DoubleQuotedStyle, Value: value})
 	if err != nil {
 		return nil, err
 	}
 	scalar := strings.TrimSuffix(string(encoded), "\n")
+	if unsafe {
+		scalar = "!unsafe " + scalar
+	}
 	if strings.Contains(scalar, "\n") {
 		return nil, errors.New("the new password does not fit on one line")
 	}
