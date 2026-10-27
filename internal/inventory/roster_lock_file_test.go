@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // writeLockTestRoster writes lockTestRoster in its own directory.
@@ -306,4 +307,37 @@ func TestRestoreRosterFileOnlyUndoesTheSessionsOwnWrite(t *testing.T) {
 			t.Fatalf("roster still there (lstat err=%v)", err)
 		}
 	})
+}
+
+// A FIFO planted as a lock file — one this user may only read, or may
+// read and write — is refused at once: opening it never waits for a
+// writer (PR #148 re-review).
+func TestRosterLockFileFIFOIsRefusedWithoutHanging(t *testing.T) {
+	for name, mode := range map[string]uint32{"read-only": 0o444, "read-write": 0o600} {
+		t.Run(name, func(t *testing.T) {
+			if mode == 0o444 && os.Geteuid() == 0 {
+				t.Skip("root opens a 0444 FIFO read-write")
+			}
+			path := writeLockTestRoster(t)
+			if err := syscall.Mkfifo(path+".pilot-migrate.lock", mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path+".pilot-migrate.lock", os.FileMode(mode)); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- AppendRosterUser(path, "erin") }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrRosterLockFile) || !strings.Contains(err.Error(), "not a plain file") {
+					t.Fatalf("error = %v, want the FIFO refused", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("locking a roster hung on a FIFO lock file")
+			}
+			if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+				t.Fatal("roster changed")
+			}
+		})
+	}
 }

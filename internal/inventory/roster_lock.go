@@ -52,13 +52,15 @@ type mutationLock struct {
 // needs no write access, so an existing lock file this user may only read —
 // one a root-run pilot left, say — still locks; it just gets no pid.
 func acquireMutationLock(path string) (*mutationLock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	// O_NONBLOCK: a FIFO planted as the lock file must not hang the open;
+	// the fstat below refuses it.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0o600)
 	writable := err == nil
 	if errors.Is(err, fs.ErrPermission) {
 		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return nil, fmt.Errorf("cannot create lock file %s; its directory must be writable by this user: %w: %w", path, ErrRosterLockFile, err)
 		}
-		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 		if errors.Is(err, fs.ErrPermission) {
 			return nil, fmt.Errorf("lock file %s exists but this user cannot open it (left by another user, e.g. a root-run pilot); remove it or give it to this user: %w: %w", path, ErrRosterLockFile, err)
 		}
