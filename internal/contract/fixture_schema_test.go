@@ -95,9 +95,10 @@ type fixtureOS struct {
 }
 
 type fixtureResources struct {
-	MinCPU     int `yaml:"minCPU"`
-	MinRAMMiB  int `yaml:"minRAMMiB"`
-	MinDiskGiB int `yaml:"minDiskGiB"`
+	MinCPU     int      `yaml:"minCPU"`
+	MinRAMMiB  int      `yaml:"minRAMMiB"`
+	MinDiskGiB int      `yaml:"minDiskGiB"`
+	DiskPaths  []string `yaml:"diskPaths"`
 }
 
 type fixtureGroupVar struct {
