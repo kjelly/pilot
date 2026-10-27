@@ -285,7 +285,10 @@ admin 密碼存在兩個地方，兩份必須相同：
 - `.vault/` 以外或 `.vault/` 子目錄裡的名冊（例如 `~/.vault/ipa-identity.yaml`）；
 - ansible-vault 加密的名冊或 `!vault` 加密值；
 - 原本就跟舊密碼不同的名冊；
-- 正被另一個 `pilot` 名冊操作（`pilot roster remove-*`、schema 升級等）鎖住的名冊；
+- 密碼寫成沒加引號的數字或布林值（例如 `password: 12345678`）的名冊：Ansible 依型別比對，
+  它永遠不等於 vault 的字串，要改成加上引號的值；
+- 正被另一個 `pilot` 名冊操作（`pilot roster remove-*`、schema 升級等）鎖住的名冊，或 lock 檔
+  （名冊旁的 `*.pilot-migrate.lock`、`*.pilot-remove.lock`）這個使用者打不開的名冊；
 - 密碼經 YAML alias／merge key 取得，或寫成 flow mapping、多行 scalar 的名冊；
 - 新密碼含 `{{`、`{%`、`{#`：Ansible 會當成模板展開，pilot 無法得知實際密碼，所有名冊都不會改。
 
@@ -297,9 +300,18 @@ admin 密碼存在兩個地方，兩份必須相同：
 只有 `.vault/main.yaml`（deploy 預設載入的 vault）會觸發同步；改其他 vault 檔的 `ipa_admin_password` 時只會提示。
 `.vault/main.yaml` 本身是 ansible-vault 加密檔時，pilot 讀不到密碼：不會同步，preflight 也不會警告，名冊要自己更新。
 
+名冊旁的 lock 檔若是舊版 pilot 以 root（例如在 docker 裡）留下、這個使用者打不開，任何會寫名冊的
+操作都會停下並說明是哪個 lock 檔：確認沒有 pilot 正在執行後，刪掉它或把它改回這個使用者擁有。
+`pilot edit` 遇到這種名冊或被鎖住的名冊時只顯示提示，不會結束編輯。lock 檔是 symlink 時一律拒絕使用。
+
+用 MCP 的 `pilot_edit_apply` 時，若之後的步驟失敗而 rollback，已同步的名冊只會在內容仍是這次寫入的
+時候還原；期間被其他 `pilot` 操作改過或正被鎖住的名冊會保留原樣，錯誤訊息會列出它的路徑（不含密碼），
+請手動確認它的 `freeipa.admin.password` 跟 vault 的 `ipa_admin_password` 相同。
+
 不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
 明文 vault 與名冊不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；vault 的
-`ipa_admin_password` 含 `{{`、`{%`、`{#` 時，warning 改為列出無法比對的名冊。freeipa-nfs-server 的
+`ipa_admin_password` 含 `{{`、`{%`、`{#` 時，warning 改為列出無法比對的名冊；名冊密碼是沒加引號的
+數字時，warning 會說明要加引號。freeipa-nfs-server 的
 gate 也會擋下，並指出是哪一份名冊。三者都不會顯示密碼，修正方式都是上面的手動修改。
 
 ---
@@ -846,4 +858,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-07-22 | v1.2 | Delivery batch 1：canonical v1 users/groups、legacy compatibility、12-row verification 與 immutable candidate evidence；新增 `freeipa_roster_file` namespaced 入口及 Ansible magic-variable/duplicate-alias gotcha | pilot |
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
-| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步） | pilot |
+| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號的數字密碼、打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、apply rollback 保留被其他操作改過的名冊 | pilot |
