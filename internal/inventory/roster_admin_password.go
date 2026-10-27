@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -17,49 +20,59 @@ import (
 // to their playbooks (issue #146). The helpers below keep the second in
 // step with the first instead of letting a rotation leave it stale.
 
-// RosterAdminSync is what SyncRosterAdminPassword found in one roster.
+// RosterAdminSync is what SyncRosterAdminPassword found in one roster. The
+// zero value is not a result.
 type RosterAdminSync int
 
 const (
 	// RosterAdminUpdated: the roster held the old password and now holds
 	// the new one.
-	RosterAdminUpdated RosterAdminSync = iota
+	RosterAdminUpdated RosterAdminSync = iota + 1
 	// RosterAdminCurrent: the roster already held the new password.
 	RosterAdminCurrent
 	// RosterAdminDiffers: the roster held neither password and was left
 	// alone; only the operator knows which one it should carry.
 	RosterAdminDiffers
 	// RosterAdminNotLiteral: there is no literal password to keep in step —
-	// the field is absent, empty or a template such as
+	// the field is absent, empty, not a string or a template such as
 	// "{{ ipa_admin_password }}".
 	RosterAdminNotLiteral
 )
 
+// rosterLockSuffixes are the sidecar locks roster migration
+// (MigrateRosterFile) and removal (RemoveRoster*) take.
+var rosterLockSuffixes = []string{".pilot-migrate.lock", ".pilot-remove.lock"}
+
 // VaultAdminPassword returns a plaintext vault vars file's
-// ipa_admin_password, or "" when data is encrypted, unparseable or has no
-// string value for that key.
+// ipa_admin_password, or "" when data is encrypted, unparseable, or holds
+// no plain string for that key (an inline !vault value, a template, a
+// number...).
 func VaultAdminPassword(data []byte) string {
 	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
 		return ""
 	}
-	var vars map[string]any
-	if yaml.Unmarshal(data, &vars) != nil {
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil {
 		return ""
 	}
-	password, _ := vars["ipa_admin_password"].(string)
-	return password
+	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
+	if !literalAdminPassword(value) || value.ShortTag() != "!!str" {
+		return ""
+	}
+	return value.Value
 }
 
 // RosterAdminPasswordDiffers reports whether the plaintext roster at path
-// stores a literal freeipa.admin.password other than vaultPassword. A
-// roster without a literal password never differs; an encrypted one
-// returns ErrRosterEncrypted.
+// stores a literal freeipa.admin.password, wherever YAML aliases or merge
+// keys put it, other than vaultPassword. A roster without a literal
+// password, an inline !vault one included, never differs; an encrypted
+// file returns ErrRosterEncrypted.
 func RosterAdminPasswordDiffers(path, vaultPassword string) (bool, error) {
 	_, doc, err := readRosterNode(path)
 	if err != nil {
 		return false, err
 	}
-	_, value := rosterAdminPasswordNode(doc)
+	_, value, _ := rosterAdminPassword(doc)
 	if !literalAdminPassword(value) {
 		return false, nil
 	}
@@ -69,37 +82,97 @@ func RosterAdminPasswordDiffers(path, vaultPassword string) (bool, error) {
 // SyncRosterAdminPassword replaces the plaintext roster's literal
 // freeipa.admin.password with newPassword when it still holds
 // oldPassword. Only that one scalar is rewritten; every other byte of the
-// file, comments included, is kept. A layout it cannot rewrite in place (a
-// flow mapping, a block or multi-line scalar) is an error and the file is
-// left untouched, as is an encrypted roster (ErrRosterEncrypted).
+// file, comments included, is kept. A symlinked roster is updated where it
+// points, and the file is replaced atomically with its mode and, where the
+// process may set it, its owner. It never writes a roster that is
+// encrypted, inline !vault included (ErrRosterEncrypted), held by another
+// roster mutation (ErrMutationLocked), or whose password it cannot rewrite
+// on one line by itself (an alias, a merge key, a flow mapping, a block or
+// multi-line scalar, a new password Ansible would template): those return
+// an error asking for a manual update.
 func SyncRosterAdminPassword(path, oldPassword, newPassword string) (RosterAdminSync, error) {
-	data, doc, err := readRosterNode(path)
+	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return 0, err
 	}
-	mapping, value := rosterAdminPasswordNode(doc)
+	result, _, err := planRosterAdminSync(target, oldPassword, newPassword)
+	if err != nil || result != RosterAdminUpdated {
+		return result, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return 0, err
+	}
+	// Take the sidecar locks roster migration and removal take, then decide
+	// again on a fresh read, so none of them overwrites another's rewrite.
+	// Only a roster about to change gets lock files.
+	for _, suffix := range rosterLockSuffixes {
+		lock, err := acquireMutationLock(path + suffix)
+		if err != nil {
+			return 0, fmt.Errorf("roster %s: %w", path, err)
+		}
+		defer lock.release() //nolint:errcheck
+		keepOwner(path+suffix, info)
+	}
+	result, updated, err := planRosterAdminSync(target, oldPassword, newPassword)
+	if err != nil || result != RosterAdminUpdated {
+		return result, err
+	}
+	if err := atomicReplaceFile(target, updated, info.Mode().Perm()); err != nil {
+		return 0, fmt.Errorf("write roster %s: %w", path, err)
+	}
+	keepOwner(target, info)
+	return RosterAdminUpdated, nil
+}
+
+// keepOwner gives path the owner recorded in info after this process
+// created or replaced it: under `docker run` as root, a rename or a new
+// lock file would otherwise lock the host user out of their own roster.
+// Only root can give a file away, and only root needs to; failing that,
+// the group alone is kept where possible.
+func keepOwner(path string, info os.FileInfo) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	if os.Chown(path, int(st.Uid), int(st.Gid)) != nil {
+		_ = os.Chown(path, -1, int(st.Gid))
+	}
+}
+
+// planRosterAdminSync decides what SyncRosterAdminPassword does to the roster
+// as it is on disk now and, for RosterAdminUpdated, returns its new bytes.
+func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync, []byte, error) {
+	data, doc, err := readRosterNode(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	mapping, value, direct := rosterAdminPassword(doc)
+	if value != nil && value.ShortTag() == "!vault" {
+		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
+	}
 	switch {
 	case !literalAdminPassword(value):
-		return RosterAdminNotLiteral, nil
+		return RosterAdminNotLiteral, nil, nil
 	case value.Value == newPassword:
-		return RosterAdminCurrent, nil
+		return RosterAdminCurrent, nil, nil
 	case value.Value != oldPassword:
-		return RosterAdminDiffers, nil
-	}
-	if mapping.Style&yaml.FlowStyle != 0 || value.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
-		return 0, fmt.Errorf("roster %s: freeipa.admin.password is not a one-line block-mapping value; update it by hand", path)
+		return RosterAdminDiffers, nil, nil
+	case !direct:
+		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password comes from a YAML alias or merge key; update it by hand", path)
+	case jinjaDelimited(newPassword):
+		return 0, nil, fmt.Errorf("roster %s: the new password contains a Jinja delimiter ({{, {%% or {#) that Ansible would template; update freeipa.admin.password by hand", path)
+	case mapping.Style&yaml.FlowStyle != 0 || value.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0:
+		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is not a one-line block-mapping value; update it by hand", path)
 	}
 	updated, err := replaceScalar(data, value, newPassword)
 	if err != nil {
-		return 0, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
+		return 0, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
 	}
 	if err := sameRosterExceptAdminPassword(data, updated, newPassword); err != nil {
-		return 0, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
+		return 0, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
 	}
-	if err := writeSecretSourceFile(path, updated, 0o600); err != nil {
-		return 0, fmt.Errorf("write roster %s: %w", path, err)
-	}
-	return RosterAdminUpdated, nil
+	return RosterAdminUpdated, updated, nil
 }
 
 func readRosterNode(path string) ([]byte, *yaml.Node, error) {
@@ -117,38 +190,85 @@ func readRosterNode(path string) ([]byte, *yaml.Node, error) {
 	return data, &doc, nil
 }
 
-// rosterAdminPasswordNode returns the mapping holding freeipa.admin.password
-// and its value node, or nils when the roster has no such field. A repeated
-// key resolves to its last occurrence, as it does for Ansible.
-func rosterAdminPasswordNode(doc *yaml.Node) (mapping, value *yaml.Node) {
-	node := doc
-	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		node = node.Content[0]
+func documentRoot(doc *yaml.Node) *yaml.Node {
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		return doc.Content[0]
 	}
-	for _, key := range []string{"freeipa", "admin", "password"} {
-		if node.Kind != yaml.MappingNode {
-			return nil, nil
-		}
-		var next *yaml.Node
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			if node.Content[i].Value == key {
-				next = node.Content[i+1]
-			}
-		}
-		if next == nil {
-			return nil, nil
-		}
-		if key == "password" {
-			return node, next
-		}
-		node = next
-	}
-	return nil, nil
+	return doc
 }
 
+// rosterAdminPassword returns the freeipa.admin mapping and the value YAML
+// gives its password, following aliases and merge keys; direct is true
+// only when every step of that path is written out where it is used, so
+// the password scalar can be rewritten in place.
+func rosterAdminPassword(doc *yaml.Node) (mapping, value *yaml.Node, direct bool) {
+	node, direct := documentRoot(doc), true
+	for _, key := range []string{"freeipa", "admin"} {
+		next, here := mappingValue(node, key)
+		if next == nil {
+			return nil, nil, false
+		}
+		node, direct = next, direct && here
+	}
+	value, here := mappingValue(node, "password")
+	return node, value, direct && here
+}
+
+// mappingValue returns key's value in mapping as YAML resolves it: the last
+// explicit key wins, then the mappings merged in with <<, in order. here
+// is false when the value is an alias or comes from a merge.
+func mappingValue(mapping *yaml.Node, key string) (value *yaml.Node, here bool) {
+	mapping = resolveAlias(mapping)
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if k := mapping.Content[i]; k.Value == key && k.ShortTag() != "!!merge" {
+			value = mapping.Content[i+1]
+		}
+	}
+	if value != nil {
+		return resolveAlias(value), value.Kind != yaml.AliasNode
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].ShortTag() != "!!merge" {
+			continue
+		}
+		sources := []*yaml.Node{resolveAlias(mapping.Content[i+1])}
+		if sources[0] != nil && sources[0].Kind == yaml.SequenceNode {
+			sources = sources[0].Content
+		}
+		for _, source := range sources {
+			if merged, _ := mappingValue(source, key); merged != nil {
+				return merged, false
+			}
+		}
+	}
+	return nil, false
+}
+
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
+}
+
+// literalAdminPassword reports whether value is a password Ansible reads as
+// written: a non-empty plain scalar that is no template.
 func literalAdminPassword(value *yaml.Node) bool {
-	return value != nil && value.Kind == yaml.ScalarNode && value.Tag != "!!null" &&
-		value.Value != "" && !strings.Contains(value.Value, "{{")
+	if value == nil || value.Kind != yaml.ScalarNode || value.Value == "" || jinjaDelimited(value.Value) {
+		return false
+	}
+	switch value.ShortTag() {
+	case "!!str", "!!int", "!!float":
+		return true
+	}
+	return false
+}
+
+func jinjaDelimited(s string) bool {
+	return strings.Contains(s, "{{") || strings.Contains(s, "{%") || strings.Contains(s, "{#")
 }
 
 // replaceScalar rewrites the one line holding node so it carries value as

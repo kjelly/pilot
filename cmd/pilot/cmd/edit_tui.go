@@ -137,7 +137,7 @@ func (r editRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.err = m.err
 			return r, tea.Quit
 		}
-		cmd := pushVaultFilePicker(&r, m.dir, "")
+		cmd := pushVaultFilePicker(&r, m.dir, encryptedVaultSyncHint(m.dir, m.path))
 		return r, cmd
 	}
 	if r.current == nil || r.quit {

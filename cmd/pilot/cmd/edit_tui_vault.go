@@ -252,8 +252,9 @@ func complexVaultFileBanner(path string, doc *vaultfile.Doc) string {
 // editRouterModel.Update (edit_tui.go) since it's not something any
 // individual screen should have to know how to handle.
 type vaultShelloutDoneMsg struct {
-	dir string
-	err error
+	dir  string
+	path string // the vault file ansible-vault edited
+	err  error
 }
 
 // pushAnsibleVaultShellout suspends the router's Program to run the
@@ -278,7 +279,7 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 		if err != nil {
 			err = fmt.Errorf("ansible-vault edit %s: %w", path, err)
 		}
-		return vaultShelloutDoneMsg{dir: dir, err: err}
+		return vaultShelloutDoneMsg{dir: dir, path: path, err: err}
 	})
 }
 
@@ -338,7 +339,7 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 			banner := fmt.Sprintf("✅ 已存檔 %s", path)
 			oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(doc.Bytes())
 			if oldPassword != "" && newPassword != "" && oldPassword != newPassword {
-				for _, line := range syncRosterAdminPasswords(dir, oldPassword, newPassword) {
+				for _, line := range syncRosterAdminPasswords(dir, path, oldPassword, newPassword) {
 					banner += "\n" + line
 				}
 			}

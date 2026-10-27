@@ -117,7 +117,7 @@ func TestEditAutomationDriverVaultAdminPasswordSyncsRosters(t *testing.T) {
 		"🔁 已同步 .vault/ipa-identity.yaml 的 freeipa.admin.password",
 		"🔁 已同步 .vault/nfs-roster.yaml 的 freeipa.admin.password",
 		"⚠️  未同步 .vault/diverged.yaml：freeipa.admin.password 原本就跟 ipa_admin_password 不同",
-		"⚠️  未同步 .vault/encrypted.yaml：ansible-vault 加密檔",
+		"⚠️  未同步 .vault/encrypted.yaml：ansible-vault 加密",
 	} {
 		if !strings.Contains(r.banner, want) {
 			t.Errorf("banner lacks %q:\n%s", want, r.banner)
@@ -130,6 +130,49 @@ func TestEditAutomationDriverVaultAdminPasswordSyncsRosters(t *testing.T) {
 		if strings.Contains(r.banner, secret) {
 			t.Fatalf("banner leaks a password:\n%s", r.banner)
 		}
+	}
+}
+
+// PR #148 review: rotating a secondary vault that happens to share the old
+// password must not rewrite rosters that match .vault/main.yaml, the vault
+// deploy loads — that would create the drift this feature exists to stop.
+func TestEditAutomationDriverSecondaryVaultLeavesRostersAlone(t *testing.T) {
+	dir, rosters := syncWorkspace(t)
+	mainVault := filepath.Join(dir, ".vault", "main.yaml")
+	writeSyncFile(t, filepath.Join(dir, ".vault", "other-realm.yaml"), "ipa_admin_password: \"Old\\\"pass#1\"\n")
+	before := map[string][]byte{}
+	for name, path := range rosters {
+		before[name], _ = os.ReadFile(path)
+	}
+	mainBefore, _ := os.ReadFile(mainVault)
+
+	r := newEditRouterModel(dir)
+	d := automationDriver{dir: dir}
+	if err := d.run(&r, editScenario{Version: 1, Steps: []editAction{
+		{Action: "set_vault_value", File: "other-realm.yaml", Key: "ipa_admin_password", Value: syncNewPassword},
+		{Action: "save_vault", File: "other-realm.yaml"},
+	}}); err != nil {
+		t.Fatalf("driver.run() error = %v", err)
+	}
+
+	other, _ := os.ReadFile(filepath.Join(dir, ".vault", "other-realm.yaml"))
+	var vars map[string]string
+	if err := yaml.Unmarshal(other, &vars); err != nil || vars["ipa_admin_password"] != syncNewPassword {
+		t.Fatalf("secondary vault not saved: %v\n%s", err, other)
+	}
+	if mainAfter, _ := os.ReadFile(mainVault); !bytes.Equal(mainAfter, mainBefore) {
+		t.Fatalf("main vault changed:\n%s", mainAfter)
+	}
+	for name, path := range rosters {
+		if after, _ := os.ReadFile(path); !bytes.Equal(after, before[name]) {
+			t.Errorf("%s roster changed:\n%s", name, after)
+		}
+	}
+	if !strings.Contains(r.banner, "只有 .vault/main.yaml 會自動同步名冊") {
+		t.Errorf("banner does not say the rosters were left alone:\n%s", r.banner)
+	}
+	if strings.Contains(r.banner, "已同步") {
+		t.Errorf("banner reports a sync:\n%s", r.banner)
 	}
 }
 

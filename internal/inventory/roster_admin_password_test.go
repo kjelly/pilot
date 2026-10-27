@@ -37,7 +37,7 @@ func writeRoster(t *testing.T, body string) string {
 	return path
 }
 
-func rosterAdminPassword(t *testing.T, data []byte) any {
+func decodedAdminPassword(t *testing.T, data []byte) any {
 	t.Helper()
 	var roster map[string]any
 	if err := yaml.Unmarshal(data, &roster); err != nil {
@@ -65,7 +65,7 @@ func TestSyncRosterAdminPasswordRewritesOnlyThatScalar(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if pw := rosterAdminPassword(t, after); pw != newPassword {
+			if pw := decodedAdminPassword(t, after); pw != newPassword {
 				t.Fatalf("freeipa.admin.password = %q, want the new password", pw)
 			}
 			// Every other line, the comment on the rewritten one included, is
@@ -126,6 +126,105 @@ func TestSyncRosterAdminPasswordLeavesOtherRostersAlone(t *testing.T) {
 			}
 			if after, _ := os.ReadFile(path); string(after) != tt.body {
 				t.Fatalf("roster changed:\n%s", after)
+			}
+			// No lock files beside a roster that did not change.
+			if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+				t.Fatalf("left %d files beside the roster: %v", len(entries)-1, entries)
+			}
+		})
+	}
+}
+
+// A roster that migration or removal holds is not rewritten under it.
+func TestSyncRosterAdminPasswordRespectsRosterLocks(t *testing.T) {
+	for _, suffix := range []string{".pilot-migrate.lock", ".pilot-remove.lock"} {
+		t.Run(suffix, func(t *testing.T) {
+			body := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+			path := writeRoster(t, body)
+			lock, err := acquireMutationLock(path + suffix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.release() //nolint:errcheck
+			if _, err := SyncRosterAdminPassword(path, "Old-pass_1", "New-pass_2"); !errors.Is(err, ErrMutationLocked) {
+				t.Fatalf("error = %v, want ErrMutationLocked", err)
+			}
+			if after, _ := os.ReadFile(path); string(after) != body {
+				t.Fatalf("roster changed under the lock:\n%s", after)
+			}
+		})
+	}
+}
+
+// The atomic replacement keeps the roster's own mode.
+func TestSyncRosterAdminPasswordKeepsMode(t *testing.T) {
+	path := writeRoster(t, strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1))
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SyncRosterAdminPassword(path, "Old-pass_1", "New-pass_2"); err != nil || got != RosterAdminUpdated {
+		t.Fatalf("SyncRosterAdminPassword() = %v, %v", got, err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("roster mode = %v, %v; want 0640", info.Mode().Perm(), err)
+	}
+}
+
+// A symlinked roster is updated where it points; the link stays a link.
+func TestSyncRosterAdminPasswordWritesThroughSymlink(t *testing.T) {
+	target := writeRoster(t, strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1))
+	link := filepath.Join(t.TempDir(), "ipa-identity.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SyncRosterAdminPassword(link, "Old-pass_1", "New-pass_2"); err != nil || got != RosterAdminUpdated {
+		t.Fatalf("SyncRosterAdminPassword() = %v, %v", got, err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the roster link was replaced: %v, %v", info, err)
+	}
+	after, _ := os.ReadFile(target)
+	if pw := decodedAdminPassword(t, after); pw != "New-pass_2" {
+		t.Fatalf("link target freeipa.admin.password = %q", pw)
+	}
+}
+
+// Rosters that hold the old password where it cannot be rewritten by
+// itself — encrypted inline, behind an alias or merge key — or a new
+// password Ansible would template, fail without writing and without a
+// password in the error. Drift is still judged on the value YAML resolves.
+func TestSyncRosterAdminPasswordRefusesValuesItCannotOwn(t *testing.T) {
+	inlineVault := "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n    password: !vault |\n      $ANSIBLE_VAULT;1.1;AES256\n      6162636465\n"
+	alias := "schema_version: 3\nshared: &pw Old-pass_1\nfreeipa:\n  admin:\n    principal: admin\n    password: *pw\n"
+	merge := "schema_version: 3\nbase: &base\n  principal: admin\n  password: Old-pass_1\nfreeipa:\n  admin:\n    <<: *base\n"
+	plain := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+	for name, tt := range map[string]struct {
+		body, newPassword string
+		encrypted         bool
+		differs           bool // against vault password "Vault-pass_9"
+	}{
+		"inline !vault":      {inlineVault, "New-pass_2", true, false},
+		"alias":              {alias, "New-pass_2", false, true},
+		"merge key":          {merge, "New-pass_2", false, true},
+		"jinja new password": {plain, "New{{pass}}", false, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeRoster(t, tt.body)
+			got, err := SyncRosterAdminPassword(path, "Old-pass_1", tt.newPassword)
+			if err == nil {
+				t.Fatalf("SyncRosterAdminPassword() = %v, nil; want an error", got)
+			}
+			if errors.Is(err, ErrRosterEncrypted) != tt.encrypted {
+				t.Fatalf("error = %v; want ErrRosterEncrypted %v", err, tt.encrypted)
+			}
+			if strings.Contains(err.Error(), "Old-pass_1") || strings.Contains(err.Error(), "New") {
+				t.Fatalf("error leaks a password: %v", err)
+			}
+			if after, _ := os.ReadFile(path); string(after) != tt.body {
+				t.Fatalf("roster changed:\n%s", after)
+			}
+			if differs, err := RosterAdminPasswordDiffers(path, "Vault-pass_9"); err != nil || differs != tt.differs {
+				t.Fatalf("RosterAdminPasswordDiffers() = %v, %v; want %v", differs, err, tt.differs)
 			}
 		})
 	}
@@ -188,11 +287,15 @@ func TestRosterAdminPasswordDiffers(t *testing.T) {
 
 func TestVaultAdminPassword(t *testing.T) {
 	for name, tt := range map[string]struct{ data, want string }{
-		"plaintext":    {"---\n# FreeIPA\nipa_admin_password: \"Vault-pass_1\"\n", "Vault-pass_1"},
-		"encrypted":    {"$ANSIBLE_VAULT;1.1;AES256\n6162636465\n", ""},
-		"missing":      {"grafana_admin_password: x\n", ""},
-		"not a string": {"ipa_admin_password: [a]\n", ""},
-		"not yaml":     {"ipa_admin_password: [\n", ""},
+		"plaintext":     {"---\n# FreeIPA\nipa_admin_password: \"Vault-pass_1\"\n", "Vault-pass_1"},
+		"encrypted":     {"$ANSIBLE_VAULT;1.1;AES256\n6162636465\n", ""},
+		"missing":       {"grafana_admin_password: x\n", ""},
+		"not a string":  {"ipa_admin_password: [a]\n", ""},
+		"inline !vault": {"ipa_admin_password: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465\n", ""},
+		"template":      {"ipa_admin_password: \"{{ lookup('env', 'X') }}\"\n", ""},
+		"number":        {"ipa_admin_password: 12345678\n", ""},
+		"alias":         {"shared: &pw \"Vault-pass_1\"\nipa_admin_password: *pw\n", "Vault-pass_1"},
+		"not yaml":      {"ipa_admin_password: [\n", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := VaultAdminPassword([]byte(tt.data)); got != tt.want {

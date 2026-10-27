@@ -647,7 +647,7 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "save_vault",
-				Description:              "save a .vault/ file and return to the file picker",
+				Description:              "save a .vault/ file and return to the file picker; saving .vault/main.yaml with a changed ipa_admin_password also sets freeipa.admin.password to it in every .vault/ roster still holding the old value",
 				Required:                 []string{"file"},
 				ExecutionMode:            ExecutionModeStructured,
 				SideEffectClassification: SideEffectWrite,

@@ -274,13 +274,23 @@ admin 密碼存在兩個地方，兩份必須相同：
   只載入名冊，用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
 
 在 FreeIPA 改完密碼後，用 `pilot edit` → `.vault/` → `main.yaml` → `ipa_admin_password` → 修改值 → 存檔。
-存檔時，workspace 名冊（`.vault/ipa-identity.yaml`，以及 `hosts.yml` 各主機的 `freeipa_roster_file`）
-裡仍是舊密碼的 `freeipa.admin.password` 會一併改成新密碼，畫面會列出每份名冊的結果。ansible-vault
-加密的名冊、或原本就跟舊密碼不同的名冊不會自動改，請用 `ansible-vault edit` 手動改成同一個值。
+存檔時，這個 workspace `.vault/` 下的名冊（預設的 `.vault/ipa-identity.yaml`，以及 `hosts.yml`、
+`group_vars/`、`host_vars/` 的 `freeipa_roster_file` 指到 `.vault/` 下的）裡仍是舊密碼的
+`freeipa.admin.password` 會一併改成新密碼，畫面會列出每份名冊的結果。下列名冊不會自動改，畫面會提示，
+請手動改成同一個值：
+
+- `.vault/` 以外的名冊（例如 `~/.vault/ipa-identity.yaml`）；
+- ansible-vault 加密的名冊或 `!vault` 加密值（用 `ansible-vault edit`）；
+- 原本就跟舊密碼不同的名冊；
+- 密碼經 YAML alias／merge key 取得的名冊，或新密碼含 `{{`、`{%`、`{#`（Ansible 會當成模板）；
+- 正被 `pilot roster` 移除或 schema 升級鎖住的名冊（稍後再存一次即可）。
+
+只有 `.vault/main.yaml`（deploy 預設載入的 vault）會觸發同步；改其他 vault 檔的 `ipa_admin_password` 時只會提示。
+`.vault/main.yaml` 本身是 ansible-vault 加密檔時，pilot 讀不到密碼：不會同步，preflight 也不會警告，名冊要自己更新。
 
 不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
-兩份不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；freeipa-nfs-server 的 gate 也會
-擋下，並指出是哪一份名冊。
+明文 vault 與名冊不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；freeipa-nfs-server 的
+gate 也會擋下，並指出是哪一份名冊。
 
 ---
 
