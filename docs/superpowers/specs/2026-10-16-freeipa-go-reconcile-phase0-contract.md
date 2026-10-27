@@ -62,7 +62,7 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 | 使用者預設值：first/last 預設為名稱、shell `/bin/bash`、home `/home/<name>`、`enabled` 預設依 `state != disabled` | `Normalize canonical users…` | — | 同一套預設；以表格測試對照 playbook 的 normalize |
 | 建立使用者 | `Ensure IPA users exist` | C9 | 只對不存在者 `user_add` |
 | 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位；未宣告的欄位不碰。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
-| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 時沒有後者）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
+| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 下自行改密碼後沒有後者；admin 重設後兩者相等，2026-10-27 擷取）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
 | SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | **Phase 2 只讀不寫**：變更與 client SSSD 收斂留在舊 playbook（PR #138 的 journal 協定要求先持久化待辦再改 key），見計畫 Phase 1「與 PR #138 的關係」。Go 以 key 本體比較集合，只在 plan 中報告差異，不以此判定成敗；live 端清空後屬性不存在（2026-10-27 擷取）。Phase 3 搬移時的寫入要求：清除時送空值 |
 | 啟用／停用 | `Reconcile canonical account enabled state` | C10 | 只在 `nsaccountlock` 與宣告不同時呼叫 |
 | 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位；type 不同時拒絕（FreeIPA 不能就地轉換） |
