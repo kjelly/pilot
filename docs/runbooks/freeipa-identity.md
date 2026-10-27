@@ -265,6 +265,23 @@ ipa_identity_refresh_sssd_cache=false` 時同樣只記錄、不更新，改回 `
 ... playbooks/apply/freeipa-identity-apply.yml --tags client-cache ...
 ```
 
+### 4.5 更換 FreeIPA admin 密碼
+
+admin 密碼存在兩個地方，兩份必須相同：
+
+- vault vars 檔（例如 `.vault/main.yaml`）的 `ipa_admin_password`：`pilot deploy`、`pilot reconcile` 載入它。
+- 名冊的 `freeipa.admin.password`：`pilot access …`、`pilot identity drift`、`pilot roster remove-*`
+  只載入名冊，用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
+
+在 FreeIPA 改完密碼後，用 `pilot edit` → `.vault/` → `main.yaml` → `ipa_admin_password` → 修改值 → 存檔。
+存檔時，workspace 名冊（`.vault/ipa-identity.yaml`，以及 `hosts.yml` 各主機的 `freeipa_roster_file`）
+裡仍是舊密碼的 `freeipa.admin.password` 會一併改成新密碼，畫面會列出每份名冊的結果。ansible-vault
+加密的名冊、或原本就跟舊密碼不同的名冊不會自動改，請用 `ansible-vault edit` 手動改成同一個值。
+
+不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
+兩份不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；freeipa-nfs-server 的 gate 也會
+擋下，並指出是哪一份名冊。
+
 ---
 
 ## 5. 冪等性

@@ -329,11 +329,20 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
 				return nil
 			}
+			// The password this save replaces, so the rosters holding it can follow.
+			previous, _ := os.ReadFile(path)
 			if werr := os.WriteFile(path, doc.Bytes(), 0o600); werr != nil {
 				r.err = fmt.Errorf("write %s: %w", path, werr)
 				return nil
 			}
-			return pushVaultFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
+			banner := fmt.Sprintf("✅ 已存檔 %s", path)
+			oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(doc.Bytes())
+			if oldPassword != "" && newPassword != "" && oldPassword != newPassword {
+				for _, line := range syncRosterAdminPasswords(dir, oldPassword, newPassword) {
+					banner += "\n" + line
+				}
+			}
+			return pushVaultFilePicker(r, dir, banner)
 		case idx == len(choices)-1:
 			if !dirty {
 				return pushVaultFilePicker(r, dir, "")

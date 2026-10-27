@@ -241,7 +241,7 @@ freeipa:
 
   admin:
     principal: admin
-    password: "VAULT_SECRET"
+    password: "VAULT_SECRET"   # 等於 vault 的 ipa_admin_password；換密碼見 docs/runbooks/freeipa-identity.md §4.5
 
   defaults:
     group_type: posix

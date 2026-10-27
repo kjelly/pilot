@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -218,7 +219,9 @@ func validateDeploymentCompletenessSnapshot(inv string, snapshot deployInventory
 // referenced by an effective freeipa-server/freeipa-server-replica target to
 // the current roster schema — the "pilot reconcile / freeipa-identity
 // preflight" call site the roster-schema-v2 migration spec requires before
-// every local mutating workflow that consumes a canonical roster.
+// every local mutating workflow that consumes a canonical roster. It then
+// warns about any roster whose admin password drifted from the vault
+// (warnFreeIPARosterAdminDrift).
 //
 // Deliberately a separate function from validateDeploymentCompleteness
 // rather than folded into it: that function is documented above to "never
@@ -278,7 +281,59 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 				result.FromVersion, rosterPath, result.ToVersion, result.BackupPath)
 		}
 	}
+	warnFreeIPARosterAdminDrift(out, inv, hostVars)
 	return nil
+}
+
+// warnFreeIPARosterAdminDrift warns, without printing either value, about
+// every plaintext roster whose literal freeipa.admin.password differs from
+// the workspace vault's ipa_admin_password (issue #146) — typically a
+// rotation that changed only one of them. freeipa-nfs-server-apply.yml
+// stops on it, and `pilot access`/`pilot identity drift`/`pilot roster
+// remove-*` would log in with the roster's copy. A warning, not a
+// violation: deploy and reconcile themselves use the vault's value, and an
+// encrypted or unreadable file is left to the playbooks' own gates.
+func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]map[string]any) {
+	vaultPath := defaultVaultFile(inv)
+	if vaultPath == "" {
+		return
+	}
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return
+	}
+	password := inventory.VaultAdminPassword(data)
+	if password == "" {
+		return
+	}
+	dir := filepath.Dir(inv)
+	hosts := make([]string, 0, len(hostVars))
+	for host := range hostVars {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	seen := map[string]bool{}
+	for _, host := range hosts {
+		rosterPath, _ := hostVars[host]["freeipa_roster_file"].(string)
+		rosterPath = strings.TrimSpace(rosterPath)
+		if rosterPath == "" {
+			continue
+		}
+		rosterPath = resolveRosterPath(dir, rosterPath)
+		if seen[rosterPath] {
+			continue
+		}
+		seen[rosterPath] = true
+		if validateSecretSourcePath(dir, rosterPath) != nil {
+			continue
+		}
+		if differs, err := inventory.RosterAdminPasswordDiffers(rosterPath, password); err != nil || !differs {
+			continue
+		}
+		fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 跟 %s 的 ipa_admin_password 不同。"+
+			"freeipa-nfs-server 會在 gate 擋下，pilot access／identity drift／roster remove 也會用名冊裡的舊值登入 FreeIPA。"+
+			"用 pilot edit 修改 ipa_admin_password 會一併同步名冊；或手動把名冊改成同一個值。\n\n", rosterPath, vaultPath)
+	}
 }
 
 // formatCompletenessViolations renders every violation into a single error

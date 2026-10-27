@@ -41,18 +41,32 @@
           # 2026-08-31).
           - freeipa_roster.schema_version | int in [1, 2, 3]
           - freeipa_roster.freeipa.admin.password | length >= 8
-          # `pilot deploy` normally loads main.yaml as well as the canonical
-          # roster.  Do not let a stale duplicate admin secret surface much
-          # later as a no_log kinit failure.
-          - (ipa_admin_password is not defined) or
-            (ipa_admin_password == freeipa_roster.freeipa.admin.password)
           - ansible_os_family in nfs_server_packages_by_os_family
           - nfs_server_packages | length > 0
           - nfs_server_service | length > 0
           - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
           - stage != 'prod' or staging_attested_within_hours | int <= 168
-        fail_msg: "A canonical roster, consistent admin credential, and matching stage confirmation are required."
+        fail_msg: "A canonical roster and matching stage confirmation are required."
       no_log: true
+      tags: [always]
+
+    # `pilot deploy` normally loads main.yaml as well as the canonical roster,
+    # and the kinit below uses the roster's copy. Do not let a stale duplicate
+    # admin secret surface much later as a no_log kinit failure, nor hide
+    # behind the gate above: a rotation that changed one file but not the
+    # other must be named (issue #146). No no_log: the assertion text and
+    # fail_msg hold no value, and Ansible prints only those.
+    - name: "Gate: roster admin password matches the vault's ipa_admin_password"
+      ansible.builtin.assert:
+        that:
+          - (ipa_admin_password is not defined) or
+            (ipa_admin_password == freeipa_roster.freeipa.admin.password)
+        fail_msg: >-
+          freeipa.admin.password in {{ freeipa_roster_file }} differs from
+          ipa_admin_password in the vault vars file. Change ipa_admin_password
+          with pilot edit (.vault/), which updates the roster too, or set both
+          to the same value.
+        quiet: true
       tags: [always]
 
     - name: "Gate: stage must match this host's inventory environment group"
