@@ -63,7 +63,7 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 | 建立使用者 | `Ensure IPA users exist` | C9 | 只對不存在者 `user_add` |
 | 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位；未宣告的欄位不碰。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
 | 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 時沒有後者）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
-| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | 以 key 本體比較集合；清除時送空值 |
+| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | 以 key 本體比較集合；清除時送空值。**Phase 2 只讀不寫**：變更與 client SSSD 收斂留在舊 playbook（PR #138 的 journal 協定要求先持久化待辦再改 key），見計畫 Phase 1「與 PR #138 的關係」；live 端清空後屬性不存在（2026-10-27 擷取） |
 | 啟用／停用 | `Reconcile canonical account enabled state` | C10 | 只在 `nsaccountlock` 與宣告不同時呼叫 |
 | 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位；type 不同時拒絕（FreeIPA 不能就地轉換） |
 | 每個套用過的群組有 history marker（`pilot-internal-history-g-<sha256>`，description `pilot.group-history/v1 name=<name>`）；刪除群組前 marker 必須存在 | `Ensure durable history marker…`（`tasks/freeipa-group-history-marker.yml`） | §9 | 相同命名與描述；marker 查詢失敗或碰撞時 fail closed |
@@ -72,6 +72,7 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 | 不完整讀取時不得撤銷 | #102、#119 的 gate | v1.13、v1.15 | `*_find` 帶 `sizelimit=0`；`truncated` 或缺欄位時禁止 authoritative 撤銷 |
 
 不在 Phase 2 範圍：
+- SSH key 的寫入與 client SSSD 收斂（Go 只讀取，見上表 SSH key 列）；
 - host、hostgroup、netgroup、HBAC、sudo；
 - password policy、per-user authentication types、NFS。
 
