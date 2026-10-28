@@ -200,6 +200,11 @@ type PreparedRosterAdminSync struct {
 	updated []byte
 }
 
+// afterRosterAdminLookHook runs between PrepareRosterAdminSync's first
+// look and its decision whether to lock. Tests use it to have another
+// writer finish in exactly that window; it is nil otherwise.
+var afterRosterAdminLookHook func()
+
 // PrepareRosterAdminSync decides SyncRosterAdminPassword's change to the
 // roster at path. A first look without the lock keeps a roster that will
 // not change free of lock files; it decides nothing. A roster that will
@@ -215,8 +220,13 @@ type PreparedRosterAdminSync struct {
 // roster's writability (ErrRosterNotWritable), resolving its path — means
 // pilot must write the roster but may not.
 func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRosterAdminSync, error) {
-	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
-	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
+	result, _, read, err := planRosterAdminSync(path, oldPassword, newPassword)
+	if afterRosterAdminLookHook != nil {
+		afterRosterAdminLookHook()
+	}
+	// "Empty" is decided from the bytes the look read: a second read could
+	// find a writer's finished roster and skip it without the lock.
+	emptyRead := err == nil && result == RosterAdminNotLiteral && len(bytes.TrimSpace(read)) == 0
 	if err != nil || (result != RosterAdminUpdated && !emptyRead) {
 		return &PreparedRosterAdminSync{Result: result}, err
 	}
@@ -224,7 +234,7 @@ func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRos
 	if err != nil {
 		return nil, err
 	}
-	result, updated, err := planRosterAdminSync(lk.target, oldPassword, newPassword)
+	result, updated, _, err := planRosterAdminSync(lk.target, oldPassword, newPassword)
 	if err != nil || result != RosterAdminUpdated {
 		lk.release() //nolint:errcheck
 		return &PreparedRosterAdminSync{Result: result}, err
@@ -256,13 +266,6 @@ func (p *PreparedRosterAdminSync) Release() {
 	}
 }
 
-// rosterFileEmpty reports whether the roster at path reads as nothing but
-// whitespace.
-func rosterFileEmpty(path string) bool {
-	data, err := readSecretSourceFile(path)
-	return err == nil && len(bytes.TrimSpace(data)) == 0
-}
-
 // ErrRosterNeedsHandEdit marks a roster whose admin password pilot cannot
 // carry forward itself and leaves to the operator — it is encrypted (a
 // file or an inline !vault value), unreadable or invalid, or its password
@@ -282,24 +285,25 @@ func (e handEditError) Unwrap() []error { return []error{e.err, ErrRosterNeedsHa
 
 // planRosterAdminSync decides what SyncRosterAdminPassword does to the roster
 // as it is on disk now and, for RosterAdminUpdated, returns its new bytes.
-// Its errors are ErrRosterNeedsHandEdit.
-func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync, []byte, error) {
-	result, updated, err := decideRosterAdminSync(path, oldPassword, newPassword)
+// read is the roster as it read it, so a caller decides anything else from
+// the same bytes. Its errors are ErrRosterNeedsHandEdit.
+func planRosterAdminSync(path, oldPassword, newPassword string) (result RosterAdminSync, updated, read []byte, err error) {
+	result, updated, read, err = decideRosterAdminSync(path, oldPassword, newPassword)
 	if err != nil {
 		err = handEditError{err}
 	}
-	return result, updated, err
+	return result, updated, read, err
 }
 
-func decideRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync, []byte, error) {
+func decideRosterAdminSync(path, oldPassword, newPassword string) (result RosterAdminSync, updated, read []byte, err error) {
 	data, doc, err := readRosterNode(path)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	mapping, value, direct := rosterAdminPassword(doc)
 	kind := ansibleScalarKind(value)
 	if kind == scalarEncrypted {
-		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
+		return 0, nil, data, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
 	}
 	// !unsafe keeps a password literal for Ansible: kept when the roster's
 	// had it, and needed when the new password holds a Jinja delimiter
@@ -307,26 +311,26 @@ func decideRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSy
 	unsafe := value != nil && value.ShortTag() == "!unsafe" || jinjaDelimited(newPassword)
 	switch {
 	case kind == scalarNotString:
-		return RosterAdminNotString, nil, nil
+		return RosterAdminNotString, nil, data, nil
 	case kind != scalarLiteral:
-		return RosterAdminNotLiteral, nil, nil
+		return RosterAdminNotLiteral, nil, data, nil
 	case value.Value == newPassword:
-		return RosterAdminCurrent, nil, nil
+		return RosterAdminCurrent, nil, data, nil
 	case value.Value != oldPassword:
-		return RosterAdminDiffers, nil, nil
+		return RosterAdminDiffers, nil, data, nil
 	case !direct:
-		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password comes from a YAML alias or merge key; update it by hand", path)
+		return 0, nil, data, fmt.Errorf("roster %s: freeipa.admin.password comes from a YAML alias or merge key; update it by hand", path)
 	case mapping.Style&yaml.FlowStyle != 0 || value.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0:
-		return 0, nil, fmt.Errorf("roster %s: freeipa.admin.password is not a one-line block-mapping value; update it by hand", path)
+		return 0, nil, data, fmt.Errorf("roster %s: freeipa.admin.password is not a one-line block-mapping value; update it by hand", path)
 	}
-	updated, err := replaceScalar(data, value, newPassword, unsafe)
+	updated, err = replaceScalar(data, value, newPassword, unsafe)
 	if err != nil {
-		return 0, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
+		return 0, nil, data, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
 	}
 	if err := sameRosterExceptAdminPassword(data, updated, newPassword); err != nil {
-		return 0, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
+		return 0, nil, data, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
 	}
-	return RosterAdminUpdated, updated, nil
+	return RosterAdminUpdated, updated, data, nil
 }
 
 func readRosterNode(path string) ([]byte, *yaml.Node, error) {

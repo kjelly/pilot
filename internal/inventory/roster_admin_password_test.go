@@ -385,6 +385,29 @@ func TestSyncRosterAdminPasswordDecidesAnEmptyReadUnderTheLock(t *testing.T) {
 	}
 }
 
+// The first look decides "empty" from the bytes it read, not from a second
+// read: a writer that finishes between the two would otherwise turn the
+// empty read into a roster without a password, skipped without the lock,
+// and the roster would keep the old password while pilot edit reports
+// nothing for it (issue #146). The hook plays the writer finishing in
+// exactly that window.
+func TestSyncRosterAdminPasswordDecidesAnEmptyReadFromTheBytesItRead(t *testing.T) {
+	path := writeRoster(t, "")
+	full := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+	afterRosterAdminLookHook = func() {
+		if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterRosterAdminLookHook = nil })
+	if got, err := SyncRosterAdminPassword(path, "Old-pass_1", "New-pass_2"); err != nil || got != RosterAdminUpdated {
+		t.Fatalf("SyncRosterAdminPassword(empty first read) = %v, %v; want RosterAdminUpdated", got, err)
+	}
+	if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != "New-pass_2" {
+		t.Fatalf("roster not synced:\n%s", after)
+	}
+}
+
 // A new password holding a Jinja delimiter — only a vault's !unsafe value
 // is one pilot syncs — is written tagged !unsafe, so Ansible uses it as
 // written; and a roster's !unsafe tag survives a rotation to a password
