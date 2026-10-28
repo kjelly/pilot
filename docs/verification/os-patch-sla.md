@@ -1,6 +1,6 @@
 # Verification Spec — os-patch-sla (Ubuntu/Debian periodic OS patching)
 
-> 版本：v1.0
+> 版本：v1.1
 > 對齊規範：pilot 通用 OS 套件定期更新規範（Critical 15 天、High 30 天、Medium 90 天修補週期；更新前非生產環境驗證；自動化推送更新）
 > 維護者：sre
 
@@ -26,13 +26,16 @@
 | C5  | service      | unattended-upgrades 服務在跑                                | ~active       | systemctl is-active unattended-upgrades |
 | C6  | config       | unattended-upgrades 設定檔含 Allowed-Origins 啟用行          | present       | grep -q Allowed-Origins /etc/apt/apt.conf.d/50unattended-upgrades |
 | C7  | separation   | prod 不應被 marker 標記為允許直接推送                       | 0             | test ! -f /etc/no-prod-direct-push |
+| C8  | pkg          | unattended-upgrades 套件已安裝（與 C5 服務、C6 設定區分）      | 0             | dpkg-query -W -f='${db:Status-Status}' unattended-upgrades | grep -qx installed |
 
-> 預期值為具體數字 / 字串：C1/C2/C3/C4/C7=rc 0；C5=字串 `active`；C6=rc 0 (`present`)。
+> 預期值為具體數字 / 字串：C1/C2/C3/C4/C7/C8=rc 0；C5=字串 `active`；C6=rc 0 (`present`)。
+> C8 只認 dpkg 狀態 `installed`：`dpkg-query -W` 對「已移除但設定檔還在」(`config-files`) 的套件
+> 也回 rc 0，所以不能單看 rc，要 grep 精確狀態。
 > All concrete values; no vague words.## 3. 證據收集
 
 - 工具：`pilot verify docs/verification/os-patch-sla.md --inventory <inv.yaml>`
 - 輸出格式：NDJSON
-- 預期 row 數：7
+- 預期 row 數：8
 - 範例輸出（dev box 套用前 → 預期 FAIL on C2/C6 等依主機狀態而定）：
 
 ```json
@@ -42,7 +45,7 @@
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C7 `status=pass` → **PASS**：host 套件 SLA 全綠
+- 全部 C1–C8 `status=pass` → **PASS**：host 套件 SLA 全綠
 - 任一 row fail → **FAIL**，列出 fail id + actual + want
 - C7 fail → 立即把 host 從 prod rollout 名單中隔離（手動或 auto-pause）
 
@@ -69,6 +72,7 @@
 | C5      | `C5 — unattended-upgrades active` | systemd |
 | C6      | `C6 — unattended-upgrades security origins` | grep config |
 | C7      | `C7 — no prod direct push marker` | file existence |
+| C8      | `Step 1b`–`Step 1e`（偵測、安裝、安裝後重讀、斷言）| 經 `tasks/apt-package-install.yml`（strict）安裝 `unattended-upgrades`；`--check` 不安裝（共用 include 會真的跑 apt-get update），Step 3/4 與 handler 在套件不存在時跳過並印訊息 |
 
 > Apply playbook 區分 stage：
 >   - `sandbox` group：每次跑都直接 `apt upgrade -y`
@@ -117,3 +121,4 @@
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
 | 2026-06-30 | v1.0 | 初版（C1–C7）| pilot |
+| 2026-10-28 | v1.1 | 新增 C8（`unattended-upgrades` 套件已安裝）。起因 issue #167：apply playbook 從不安裝這個套件，Step 4（systemd start+enable）在沒裝的主機上失敗，`--check` 也一樣（套件只被模擬安裝，unit 不存在）；Step 3 的 `failed_when: false` 還把「指令不存在」當成成功。apply 現在以 strict 政策經共用 apt framework 安裝套件，並在安裝後斷言套件存在（C5、C6 原本隱含依賴它，但沒有任何 row 檢查套件本身）| pilot |

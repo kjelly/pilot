@@ -58,9 +58,11 @@ repository.
   counts as healthy; a timed-out probe is `FATAL reason=apt_download_timeout`.
 - `strict` (repository lifecycle / OS-patch-shaped operations): any
   classified refresh error is fatal — the entire configured package
-  universe must be trustworthy, not just one required source. Not yet
-  adopted by any playbook (`os-patch-sla-apply.yml` intentionally keeps
-  its own strict `update_cache: true` — spec.md §17, Non-Goal 7).
+  universe must be trustworthy, not just one required source.
+  `os-patch-sla-apply.yml` keeps its own strict `update_cache: true`
+  (spec.md §17, Non-Goal 7) and installs its own `unattended-upgrades`
+  package through this framework with `pilot_apt_policy: strict`
+  (os-patch-sla C8, issue #167).
 - `offline`: no network refresh is ever attempted; an already-installed
   package or an existing cached candidate succeeds, otherwise fatal
   (`apt_cache_insufficient_offline`).
