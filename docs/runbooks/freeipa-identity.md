@@ -342,11 +342,33 @@ apply 的 rollback 也無法還原 `.vault/` 以外的檔案。`freeipa_roster_f
 主機）就照常通過，那份名冊只會被讀取，旁邊也不會留下 lock 檔。終端機與 `--actions` 不受這個限制。`hosts.yml` 記錄的 `freeipa_roster_file` 是
 絕對路徑，plan 的 diff 顯示的也是真實 workspace 的路徑。
 
-`pilot_edit_apply` 的某一步失敗而 rollback 時，這次寫過的名冊只會在內容仍是這次寫入的時候還原（同一個
-檔案有兩個名字，例如 `.vault/` 裡的 symlink，只還原一次）；這次寫過、但之後被其他 `pilot` 操作改過或
-正被鎖住的名冊會保留原樣，錯誤訊息會列出它的路徑（不含密碼），請手動確認它的 `freeipa.admin.password`
-跟 vault 的 `ipa_admin_password` 相同。這次沒寫過、只是被其他操作改過的名冊不算 rollback 失敗，會保留
-那個操作的修改。
+`pilot_edit_apply` 的某一步失敗而 rollback 時，名冊只還原「這次 apply 自己的寫入」蓋掉的內容。apply 開始前，
+pilot 開始記錄這個 workspace `.vault/` 名冊（含 `.vault/` 裡 symlink 指到的檔案）的每一次寫入：在寫名冊的地方、
+持有名冊鎖時記下寫入前與寫入後的內容。rollback 依這份紀錄逐一處理每份名冊（同一個檔案有兩個名字，例如
+`.vault/` 裡的 symlink，只處理一次）：
+
+- 已經是 apply 前的內容：不動。
+- 這次沒寫過，而且不是在某一步執行期間被改的（在第一步之前、兩步之間或最後一步之後被其他 `pilot` 操作改過）：保留那個
+  修改，不算 rollback 失敗。
+- 這次寫過：還原成這次第一次寫入前的內容（這次建立的名冊則刪除），而且只在名冊仍是這次最後一次寫入的內容、
+  沒被鎖住時才還原。其他操作在這次寫入**之前**存的修改（例如在 `save_vault` 之前，或同一步裡在同步寫入名冊
+  之前）因此會保留。
+
+保留了其他操作修改的名冊會列在結果的 warnings：MCP 回傳的錯誤訊息（`rollback kept: …`）與 audit 目錄的
+`validation.json`，只列路徑，不含密碼。下列情況 pilot 不動那份名冊，改為回傳錯誤，逐一列出路徑與原因（不含密碼）：
+
+- 這次寫過之後又被其他操作改過或刪掉，或正被鎖住、lock 檔不能用；
+- 其他操作在這次的兩次寫入之間改過它：還原會連那個修改一起蓋掉；
+- 這次的寫入是原地覆寫，而且中途失敗：名冊的內容不明；
+- 它在某一步執行期間被改過，但這次沒有任何寫入紀錄：pilot 無法分辨是誰改的，所以不還原。
+
+這些名冊可能同時有這次 apply 與其他操作的修改，請手動檢查，並確認它的 `freeipa.admin.password` 跟 vault 的
+`ipa_admin_password` 相同；其他檔案照常 rollback。名冊以外的 `.vault/` 檔案（例如 `main.yaml`）與其他
+managed files 照舊一律還原成 apply 前的內容。
+
+同一個 `pilot mcp` process 裡兩個 apply 的名冊重疊時（例如一個 workspace 的 `.vault/` 名冊是 symlink，指到另一個
+workspace 正在 apply 的名冊），後來的 apply 在寫入任何東西之前就被拒絕，MCP 回傳 `workspace_locked`，等前一個
+結束後再試。
 
 pilot 寫名冊的方式：
 
@@ -369,6 +391,8 @@ pilot 寫名冊的方式：
 
 已知限制：
 
+- rollback 的寫入紀錄記的是 pilot 這個 process 寫名冊的動作，不是哪個操作寫的：同一個 `pilot mcp` process 裡
+  另一個工具在 apply 期間寫了同一份名冊，會被當成這次 apply 的寫入。
 - 同一份名冊的兩個 hard link 名稱各自有自己的 lock 檔（symlink 不會：一律鎖它指向的檔案），經不同 hard link
   名稱同時寫入的兩個 pilot 不會互相排斥。請只用一個名稱（或 symlink）指向名冊。
 - 名冊以單一檔案 bind mount 進容器時，容器裡的 pilot 把 lock 檔建在容器裡那個目錄，主機上的 pilot 建在主機的
@@ -377,8 +401,12 @@ pilot 寫名冊的方式：
 不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
 明文 vault 與名冊不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；vault 的
 `ipa_admin_password` 含 `{{`、`{%`、`{#` 或是 `!vault` 加密值時，warning 改為列出無法比對的名冊；vault 或名冊的密碼
-沒加引號、YAML 可能把它讀成數字、日期或布林值時，warning 會說明要加引號。freeipa-nfs-server 的
-gate 也會擋下，並指出是哪一份名冊。三者都不會顯示密碼，修正方式都是上面的手動修改。
+沒加引號、YAML 可能把它讀成數字、日期或布林值時，warning 會說明要加引號。這個 preflight 一律拿名冊跟 inventory
+旁的 `.vault/main.yaml` 比對：它在詢問這次要用哪個 vault 檔之前執行，所以這次改用別的 vault 檔時，它比對的不是那份檔案。
+freeipa-nfs-server 的 gate 也會擋下，並指出是哪一份名冊。三者都不會顯示密碼，修正方式都是上面的手動修改；
+例外是 Ansible 無法展開的值：vault 的 `ipa_admin_password` 或名冊的密碼含不成對的 Jinja 符號（例如
+`Vault{{Secret9`）時，gate 展開它就失敗，ansible-core 2.19 會在錯誤的 Origin 段落印出那個檔案的那一行，密碼也在其中，
+`no_log` 也擋不住（它只隱藏 task 的結果）。pilot edit 不會同步含 `{{`、`{%`、`{#` 的 vault 值，preflight 也會警告。
 
 ---
 
