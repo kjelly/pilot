@@ -39,7 +39,7 @@ func onlyWrite(t *testing.T, j *RosterJournal, path string) RosterWrite {
 	writes := j.Writes()
 	got := writes[canonicalPath(t, path)]
 	if len(got) != 1 || len(writes) != 1 {
-		t.Fatalf("journal = %+v; want exactly one write to %s", writes, path)
+		t.Fatalf("journal holds %d writes to %s and writes to %d rosters; want exactly one write, to it", len(got), path, len(writes))
 	}
 	return got[0]
 }
