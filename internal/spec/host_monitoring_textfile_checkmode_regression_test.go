@@ -108,9 +108,6 @@ func textfileHostMonitoring(t *testing.T) (play, block, step9b, setter map[strin
 	if step9b == nil {
 		t.Fatalf("block %q has no %q", textfileBlockName, textfileStep9bName)
 	}
-	if setter == nil {
-		t.Fatalf("%q is not directly followed by %q in the same block", textfileStep9bName, textfileSetterName)
-	}
 	return play, block, step9b, setter
 }
 
@@ -175,6 +172,9 @@ var textfileSpaces = regexp.MustCompile(`\s+`)
 // first.
 func TestRegression_HostMonitoringTextfileCheckModeStructure(t *testing.T) {
 	play, _, step9b, setter := textfileHostMonitoring(t)
+	if setter == nil {
+		t.Fatalf("%q is not directly followed by %q in the same block", textfileStep9bName, textfileSetterName)
+	}
 	vars, _ := play["vars"].(map[string]any)
 	dir, _ := vars["node_exporter_textfile_dir"].(string)
 	if dir == "" {
@@ -243,38 +243,35 @@ func TestRegression_HostMonitoringTextfileCheckModeStructure(t *testing.T) {
 }
 
 // textfilePlays builds the two plays of one run: host-monitoring's real
-// Step 9b and setter inside its block's real `when`, then the consumer's
-// real stat and assert with the directory rewritten to dir. Each play has
-// its real hosts pattern and its site.yml import tags. stripOwner drops
-// Step 9b's owner/group so a real run can create dir unprivileged.
+// Step 9b and the setter after it (if any; the structure test requires it)
+// inside its block's real `when`, then the consumer's real stat and assert
+// with the directory rewritten to dir. Each play has its real hosts pattern
+// and its site.yml import tags. stripOwner drops Step 9b's owner/group so a
+// real run can create dir unprivileged.
 func textfilePlays(t *testing.T, component, playbook, dir string, withHostMonitoring, stripOwner bool) []map[string]any {
 	t.Helper()
 	hmPlay, block, step9b, setter := textfileHostMonitoring(t)
 	consumerPlay, stat, assert := textfileConsumerGate(t, playbook)
 	defaultDir := hmPlay["vars"].(map[string]any)["node_exporter_textfile_dir"].(string)
-
 	if stripOwner {
-		args := map[string]any{}
-		for k, v := range step9b["ansible.builtin.file"].(map[string]any) {
-			if k != "owner" && k != "group" {
-				args[k] = v
-			}
-		}
-		copied := map[string]any{}
-		for k, v := range step9b {
-			copied[k] = v
-		}
-		copied["ansible.builtin.file"] = args
-		step9b = copied
+		// step9b is freshly parsed for this call; editing it is local.
+		args := step9b["ansible.builtin.file"].(map[string]any)
+		delete(args, "owner")
+		delete(args, "group")
+	}
+	blockTasks := []map[string]any{step9b}
+	if setter != nil {
+		blockTasks = append(blockTasks, setter)
 	}
 
-	// Rewrite the consumer's literal path in both tasks.
+	// Rewrite the consumer's literal path everywhere in both tasks (stat
+	// path, check-mode comparison, message).
+	if statArgs, _ := stat["ansible.builtin.stat"].(map[string]any); statArgs["path"] != defaultDir {
+		t.Fatalf("%s gate stats %v, not host-monitoring's %s", component, statArgs["path"], defaultDir)
+	}
 	gate, err := yaml.Marshal([]map[string]any{stat, assert})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if n := strings.Count(string(gate), defaultDir); n < 3 {
-		t.Fatalf("%s gate mentions %s %d times, want the stat path, the check-mode comparison and the message", component, defaultDir, n)
 	}
 	var rewritten []map[string]any
 	if err := yaml.Unmarshal([]byte(strings.ReplaceAll(string(gate), defaultDir, dir)), &rewritten); err != nil {
@@ -293,7 +290,7 @@ func textfilePlays(t *testing.T, component, playbook, dir string, withHostMonito
 			"tasks": []map[string]any{{
 				"name":  block["name"],
 				"when":  block["when"],
-				"block": []map[string]any{step9b, setter},
+				"block": blockTasks,
 			}},
 		})
 	}
@@ -380,8 +377,9 @@ func TestRegression_HostMonitoringTextfileCheckModeRuns(t *testing.T) {
 			{name: "real: directory exists", inHostMonitoring: true, preCreate: true, pass: true},
 			{name: "real: same run creates the directory", inHostMonitoring: true, withHM: true, stripOwner: true, pass: true},
 		} {
+			// Sequential on purpose: load makes ansible-core 2.19.2's
+			// results-thread race (see localPlayCrashWatch) more likely.
 			t.Run(consumer.component+"/"+c.name, func(t *testing.T) {
-				t.Parallel()
 				dir := filepath.Join(t.TempDir(), "textfile")
 				if c.preCreate {
 					if err := os.Mkdir(dir, 0o755); err != nil {
