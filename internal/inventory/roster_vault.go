@@ -129,13 +129,14 @@ func ReadRosterAsMapWithVault(path, vaultPasswordFile string) (map[string]any, e
 // file in place and installs it over the original with writeLockedRoster.
 // On any failure before that install (including mutate's own error) the
 // original is left completely untouched; a failed install says itself
-// whether it left the roster unchanged. The roster's lock is held from
-// the decrypt to the install, so no other roster writer's change is lost
-// in between, and the file path names is the one replaced: a symlinked
-// roster stays a link. mutate must write only plaintextPath. This is the
-// "prefer reusing the encrypted-roster mutation machinery already
-// established by pilot roster migrate instead of inventing a second vault
-// implementation" path spec.md §17 requires.
+// whether it left the roster unchanged or may have written part of it
+// (errRosterPartlyWritten, an in-place install stopped part-way). The
+// roster's lock is held from the decrypt to the install, so no other
+// roster writer's change is lost in between, and the file path names is
+// the one replaced: a symlinked roster stays a link. mutate must write
+// only plaintextPath. This is the "prefer reusing the encrypted-roster
+// mutation machinery already established by pilot roster migrate instead
+// of inventing a second vault implementation" path spec.md §17 requires.
 func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plaintextPath string) error) error {
 	lk, err := lockRosterFile(path)
 	if err != nil {

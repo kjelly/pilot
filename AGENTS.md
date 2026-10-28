@@ -1237,11 +1237,13 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
    - lock 檔本身不跟隨 symlink:以 `O_NOFOLLOW|O_NONBLOCK` 開啟(FIFO 不會卡住
      open),必須是只有一個名字的一般檔案,chown 一律對 fd 做(以 root 執行時,跟隨
      symlink 會截斷並 chown 別的檔案);只能讀的既有 lock 檔照樣可以 flock(例如舊版
-     root 留下的,或在唯讀檔案系統上),完全打不開時回傳 `ErrRosterLockFile` 並說明要修什麼,跟「被持有」
-     (`ErrMutationLocked`)分開。symlink 以外所有開啟、fstat、flock 失敗(`EROFS`、`ENOSPC`、`ENOLCK`…)
-     一律包 `ErrRosterLockFile`,writer 與 probe 一致,`pilot edit` 的 vault 存檔因此會拒絕,而不是存了 vault、
-     名冊留在舊密碼(`roster_lock_mode_test.go::TestRosterLockFileFailuresAreErrRosterLockFile`,經 `openLockFile`/`flockLockFile`
-     seam)。不需要寫入的情況(schema 已是最新、沒有缺的 host)不取鎖。
+     root 留下的,或在唯讀檔案系統上:`EROFS` 跟 `EACCES` 一樣改以唯讀開啟),完全打不開時回傳 `ErrRosterLockFile`
+     並說明要修什麼,跟「被持有」(`ErrMutationLocked`)分開。lock 檔的 open/fstat/flock 失敗只要不是「被持有」
+     (EWOULDBLOCK),不論原因(symlink、目錄、FIFO、`EROFS`、`EIO`、`ENOSPC`、`ENOLCK`…)一律回傳包著原因的
+     `ErrRosterLockFile`,writer 與 probe 一致,`pilot edit` 的 vault 存檔因此會拒絕,而不是存了 vault、名冊留在舊密碼
+     (`roster_lock_mode_test.go::TestRosterLockFileFailuresAreErrRosterLockFile`)。罕見的檔案系統錯誤以
+     `inventory.InjectFileFault`(`fileFault`,只給測試用;lock 檔與名冊的 open、flock、路徑解析唯一的故障注入點,
+     package 內外的測試共用)模擬。不需要寫入的情況(schema 已是最新、沒有缺的 host)不取鎖。
      lock 被持有時 `flockMutationLock` 以短暫 backoff 重試最多 `lockContentionWait`(250ms)才回傳
      `ErrMutationLocked`,讓 plan 探測時一瞬間的 shared flock 不會害 writer 失敗
      (`internal/inventory/roster_lock_file_test.go::TestRosterLockContentionIsBriefAndBounded`)。
@@ -1267,7 +1269,13 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
      `roster_write_test.go::TestWriteLockedRosterWritesInPlaceWhenTheRenameIsRefused`、
      `::TestWriteLockedRosterKeepsTheRostersExtendedAttributes`、`::TestWriteRosterInPlaceReservesRoomFirst`、
      root 才能跑的 `roster_root_mount_test.go::TestRosterSyncThroughASingleFileBindMount` 實際 bind mount)。
-     所有名冊 byte 的寫入(換名、原地覆寫、新建)都只在 `writeLockedRoster` 裡發生。新名冊 `0600`,root 執行時
+     所有名冊 byte 的寫入(換名、原地覆寫、新建)都只在 `writeLockedRoster` 裡發生。寫入失敗時只有原地覆寫
+     寫到一半可能改到名冊,錯誤包 `errRosterPartlyWritten`——這是「可能寫到一半」唯一的訊號,journal 據此記成
+     `Failed`(§5.14 第 7 點);其他失敗名冊不變。schema 升級在建立備份之前以 `checkLockedRosterWritable` 在鎖內
+     再確認一次能寫(`lockRosterFile` 取鎖前已擋過:不留 lock 檔、不留備份、不回報 rollback),寫入失敗時只在
+     `errRosterPartlyWritten` 時經 `writeLockedRoster` 寫回原內容(journal 一樣記下這次 rollback),其他失敗回報
+     「left unchanged」(`internal/inventory/roster_migrate_file_test.go::TestMigrateRosterFileRollsBackOnlyAWriteThatChangedTheRoster`、
+     `roster_journal_test.go::TestRosterJournalRecordsAMigrationsPartWayRollback`)。新名冊 `0600`,root 執行時
      擁有者跟目錄相同,migration 的備份給名冊的擁有者;取得鎖之後清掉超過兩分鐘的殘留暫存檔。加密名冊解密後的
      明文放在 `os.MkdirTemp` 建的 `0700` 私有目錄,清理時整個目錄刪掉,writer 的暫存檔清理只掃那個目錄、
      不掃整個 `$TMPDIR`。admin 密碼同步只改「整個值都在那一行」的 scalar(`scalarOnItsLine`:把那行剩下的
@@ -1275,19 +1283,30 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
      已知限制:同一份名冊的兩個 hard link 名稱各有自己的 lock 檔(`secretpath.Canonical` 只解析 symlink),
      經不同 hard link 名稱的兩個 writer 不互斥;名冊以單一檔案 bind mount 進容器時,lock 檔建在容器裡那個
      目錄,容器內與主機上的 pilot 不互斥(要共用鎖就 mount 整個目錄)。
-     預查讀到空檔時改在鎖內重讀。`TestRosterWritersRefuseALockedRoster` 對每個 writer 驗證這套
-     寫法(唯讀、hard link、殘留暫存檔、root 時保留擁有者)。
+     預查讀到空檔時改在鎖內重讀(空不空依預查讀到的內容判斷,不再讀第二次)。
+     `TestRosterWritersRefuseALockedRoster` 對每個 writer 驗證這套寫法(唯讀時回傳 `ErrRosterNotWritable`、
+     不建立 lock 檔、旁邊不留任何檔案、錯誤不提 rollback,root 則寫入並保留 `0400`;hard link、殘留暫存檔、
+     root 時保留擁有者)。
    - 要跟其他檔案一起改的名冊寫入分成兩步:`inventory.PrepareRosterAdminSync` 在鎖內決定要寫的
      內容並**持有鎖**,`Commit` 寫入後放鎖、`Release` 只放鎖(`SyncRosterAdminPassword` 就是
-     Prepare + Commit)。Prepare 在鎖內呼叫 `openRosterForWrite`,`writeLockedRoster` 會拒絕的名冊
-     在這裡就拒絕;只有執行時才會發生的 I/O 錯誤(寫暫存檔時磁碟滿、rename 失敗)留到 Commit。
+     Prepare + Commit)。Prepare 在鎖內呼叫 `checkLockedRosterWritable`(同一個 `checkRosterWritable`/`openRosterForWrite`
+     判斷,另外要求名冊仍在),`writeLockedRoster` 會拒絕的名冊在這裡就拒絕;只有執行時才會發生的 I/O 錯誤(寫暫存檔時磁碟滿、rename 失敗)留到 Commit。
      `pilot edit` 存 `.vault/main.yaml` 時先 Prepare 每一份要跟著改的名冊,任何一份被持有、lock 檔
      不能用或名冊不能寫就全部 Release、整次存檔拒絕(vault 也不寫),否則寫 vault 再 Commit:先存
      vault 會讓名冊留在舊密碼,而之後再存不會補同步。plan 在暫存複本(永遠可寫、沒人鎖)上執行,另以
-     `inventory.ProbeRosterWrite`(lock 檔的檢查加 `openRosterForWrite`,不建立 lock 檔)檢查真實名冊,
+     `inventory.ProbeRosterWrite`(跟 `lockRosterFile` 同順序:先 `checkRosterWritable`、再檢查 lock 檔,不建立 lock 檔)檢查真實名冊,
      apply 會被拒絕時 plan 也失敗(`cmd/pilot/cmd/edit_vault_save_parity_test.go::TestVaultSaveRosterSyncParity`)。
-     vault 的舊值或新值 pilot 讀不到(inline `!vault`、舊值是模板)時不同步並提示手動確認,deploy
-     preflight 對 inline `!vault` 也列出無法比對的名冊。
+     Prepare 讀取與判斷時的錯誤(加密檔或 inline `!vault`、讀不到或不是合法 YAML、alias、flow mapping、
+     多行 scalar、改寫後自我檢查失敗)都包 `ErrRosterNeedsHandEdit`,只有這些讓存檔照常進行並列為「未同步」;
+     其他任何錯誤(已分類或沒分類)都經 `rosterRefusal` 拒絕存檔(fail closed),plan 的探測解析不到真實名冊
+     也一樣(`internal/inventory/roster_refusal_matrix_test.go::TestRosterRefusalsAgreeAcrossPrepareProbeAndWriter`、
+     `cmd/pilot/cmd/edit_vault_save_refusal_matrix_test.go::TestVaultSaveRefusesEveryRosterWriteRefusal`,
+     每個拒絕原因 × 四個入口)。每一行提示依它談的那個值判斷:「請加引號」看新存的值,「pilot 不知道舊密碼」
+     看舊值(inline `!vault`、模板、沒加引號、list/mapping)(`edit_vault_value_kinds_test.go::TestVaultSaveLineForEveryValueKindPair`),
+     deploy preflight 對 inline `!vault` 也列出無法比對的名冊。
+     暫存複本只有 `group_vars/`、`host_vars/` 最上層的檔案,plan 從真實 workspace 讀子目錄裡 vars 檔的
+     `freeipa_roster_file`,跟 apply 看到同一組名冊
+     (`cmd/pilot/cmd/edit_tui_vault_roster_scope_test.go::TestEditPlanAndApplyAgreeOnNestedVarsRosterReferences`)。
    - package 以外寫名冊的地方也要經過這個鎖:`pilot edit` apply 失敗的 rollback 用
      `inventory.RestoreRosterFile`/`RemoveRosterFile`,只還原這個 session 自己的寫入蓋掉的內容
      (`inventory.RosterJournal` 在 `writeLockedRoster` 記下的紀錄,見 §5.14 第 7 點),且只在名冊仍是
@@ -1313,7 +1332,13 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
      被改動才回傳 `errRosterOutsideEditScope`(經 `rosterBusyBanner` 讓那一步失敗),不需要寫入就照常
      通過、回傳模擬的結果(`cmd/pilot/cmd/edit_write_scope_test.go::TestEditPlanAndApplyAcceptAnExternalRosterThatNeedsNoWrite`)。
      為此每個寫入 closure 都以參數接收要寫的路徑,且參數名必須遮蔽被檢查的路徑變數,寫入不會碰到外層
-     的真實路徑(`TestConfigSecretPaths_AllRosterSourceWritesCarryWorkspace` 檢查)。終端機與 `--actions` 不受限。`hosts.yml` 裡指到真實 workspace `.vault/` 的絕對路徑,在 plan 的複本上
+     的真實路徑(`TestConfigSecretPaths_AllRosterSourceWritesCarryWorkspace` 檢查)。終端機與 `--actions` 不受限。
+     「session 自己的 `.vault/` 檔案」以 `vaultSpelling` 判斷:名稱在 `.vault/` 裡,或是從別處指進 `.vault/` 的
+     symlink。plan 裡的 `freeipa_roster_file` 不論相對或絕對,都相對於真實 workspace 解讀(`rosterWritePath`),
+     `.vault/` 檔案對應到複本、其他檔案用真實檔案(只讀或在副本上試做);plan 的錯誤、warnings 與檢查結果
+     的路徑對應回真實 workspace(`cmd/pilot/cmd/edit_roster_ref_matrix_test.go::TestEnableNFSRosterRefMatrix`、
+     `::TestVaultRotationRosterRefMatrix`,寫法 × 名冊狀態 × 四個入口)。plan 的暫存 workspace 與試做用的副本
+     含 secret,以 `privateTempDir`(`<prefix>-<pid>-*`、`0700`)建立,下次建立時清掉已結束 pilot 留下的(§5.14 第 5 點)。`hosts.yml` 裡指到真實 workspace `.vault/` 的絕對路徑,在 plan 的複本上
      由 `r.rosterWritePath` 對應到複本,寫進 `hosts.yml` 的路徑由 `r.recordedPath` 決定(plan 記錄
      真實路徑);`edit_tui*.go` 不准直接 `resolveRosterPath(`/`filepath.Abs(filepath.Join(dir`
      (`cmd/pilot/cmd/edit_write_scope_test.go::TestEditorResolvesRosterReferencesThroughItsScope`、
@@ -1435,7 +1460,9 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
    檔案(名冊),別人在快照之後、session 寫入之前存的修改會被當成 session 的而被還原掉,
    rollback 還回報成功(PR #148 review P2:`pilot edit` apply 的 rollback 原本這樣推斷)。
    `inventory.JournalRosterWrites` 開啟後,`writeLockedRoster`(唯一寫名冊 byte 的地方)在鎖內
-   記下每次寫入前與寫入後的內容,原地覆寫中途失敗記為 `Failed`;apply 在 rollback 前關掉它,
+   記下每次寫入前與寫入後的內容,原地覆寫中途失敗(錯誤包 `errRosterPartlyWritten`,同一個訊號也決定
+   schema 升級要不要 rollback;那次 rollback 也經 `writeLockedRoster`,一樣被記下)記為 `Failed`;
+   apply 在 rollback 前關掉它,
    rollback 依紀錄:沒寫過且不是在某一步執行期間被改的名冊保留,沒寫過卻在某一步執行期間被改的
    名冊無法歸屬、留給人工檢查且不還原,寫入不成鏈(前一次寫入後的內容 ≠ 下一次寫入前的內容)
    或有 `Failed` 也留給人工檢查,否則在名冊仍是最後一次寫入的內容時還原成第一次寫入前的內容
@@ -1685,4 +1712,4 @@ git status --short
 | 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |
 | 2026-10-16 | v1.53 | §4.5 新增第 15 點：密碼不得插進 shell 或 free-form `command:` 字串。PR #92 的 3 個 FreeIPA kinit task（replica forwarder、replica self-register、primary dnsconfig-mod）改用 `argv` + `stdin`；新增全 repo lint `TestRegression_NoSecretInCommandText`（既有 33 處列入以 task 數計算的 ratchet allowlist，#118 追蹤）與行為測試 `TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`。#79（v1.50）、#80（v1.52）也新增列，後合併者重新編號 | pilot |
 | 2026-10-15 | v1.54 | §4.5 新增第 16 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |
-| 2026-10-27 | v1.55 | §5.7 一致性表新增「名冊 `freeipa.admin.password` ↔ vault `ipa_admin_password`」(issue #146):只改 vault 會讓 freeipa-nfs-server 的 no_log gate 失敗且看不出原因。`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步 workspace 名冊(只認 deploy 預設載入的這份、只寫這個 workspace `.vault/` 目錄裡的名冊,plan 不碰真實檔且與 apply 預覽相同的寫入、失敗的 apply 會一併 rollback、原子寫入)、未同步的名冊列在 banner 與 plan/apply 的 warnings、deploy/reconcile preflight 對不一致發 warning、nfs-server 的密碼一致性拆成不加 no_log、排在 stage gate 之後的獨立 gate;三者都指向唯一有效的修正:手動改名冊(pilot edit 只在密碼改變的那次存檔同步,再存不會補)。名冊不能改成 `{{ ipa_admin_password }}`:`pilot access`/`identity drift`/`roster remove-*` 只載入名冊。同一 PR 的 review 修正:§5.11 新增第 5 點,所有名冊 writer 改用 `lockRosterFile` 鎖 canonical 檔案(`secretpath.Canonical`),修掉 symlink 繞過鎖、migrate/remove 互不排斥、migrate 把 symlink 換成一般檔案、十幾個 writer 沒鎖的問題,新增全 package lint `TestRegression_RosterWritersLockCanonicalTarget`。Re-review 第二輪:lock 檔以 `O_NOFOLLOW` 開啟並對 fd chown(root 執行時不會截斷或 chown symlink 指向的檔案)、只能讀的 lock 檔照樣上鎖、打不開時回傳說明修法的 `ErrRosterLockFile`、不需寫入時不取鎖,`pilot edit` 對被持有的名冊顯示 banner 而不結束 session;名冊密碼只認 YAML 字串(沒加引號的數字跟 Ansible 一樣視為不一致);plan 透過被複製的 workspace 辨識名冊;apply rollback 只還原仍是本 session 寫入內容的名冊;guard 涵蓋 `os.OpenFile`/`os.Create` 寫入、method 與真正的 lock target,`ansible-vault edit` 執行期間持有名冊鎖。第三輪:自動化／MCP 遇到被持有或 lock 檔不能用的名冊時該步失敗並 rollback(MCP 回傳錯誤),終端機仍只顯示 banner;`ansible-vault edit` 的鎖只在 editor 執行期間持有;名冊寫入改為原子替換;lock 檔以 `O_NONBLOCK` 開啟;rollback 對同一檔案只還原一次、不把別人改過的名冊算成失敗;沒加引號、YAML 1.1 或 1.2 可能讀成非字串的密碼(名冊與 vault 兩邊)一律提示加引號,YAML 1.1 的判斷以 `make identity-secret-test` 對真實 Ansible loader 驗證。第四輪:名冊寫入只剩一套寫法 `writeLockedRoster`(拒寫不可寫的名冊;hard link、ACL、給不了擁有者時原地覆寫,否則同目錄暫存檔 rename;root 執行時新名冊與 migration 備份的擁有者正確;取鎖後清殘留暫存檔);密碼值的判斷收斂成 `ansibleScalarKind`(`!unsafe` 視為字串並在同步時保留,`vaultfile.Set` 寫入時改成字串 tag,沿用 vault 密碼建立名冊時不沿用模板、`!vault` 或非字串);vault 存檔改為 Prepare → 寫 vault → Commit,要跟著改的名冊被鎖住時整次存檔拒絕(每個入口一致,plan 以 `ProbeRosterLock` 檢查真實名冊),`Run` 回傳 warnings、`--actions` 印到 stderr;plan/MCP apply 不寫 `.vault/` 以外的名冊(`errRosterOutsideEditScope`),plan 啟用 freeipa-nfs-server 時改寫複本並記錄真實路徑;busy lint 涵蓋所有綁定形式與 `cmd/pilot/cmd` 全部檔案;gateway 測試 harness 一併掃 stderr;新增 `make root-test` 與 CI job "Root-only ownership tests"。第五輪:plan/MCP apply 對 `.vault/` 以外的名冊先在副本上試做,只在真的要改時拒絕(啟用 freeipa-nfs-server 而外部名冊已有 `nfs.servers` 時不再失敗,與 main 相同);Prepare 與 plan 的探測(`ProbeRosterWrite`)檢查 `writeLockedRoster` 會拒絕的名冊(`openRosterForWrite`/`ErrRosterNotWritable`:不能寫、不是一般檔案、symlink),不能寫的名冊也讓存檔拒絕、plan 失敗;writer 碰到被持有的 lock 重試最多 250ms,plan 的探測不會害它失敗;暫存檔只在權限錯誤時改走原地覆寫;vault 舊值或新值是 inline `!vault`、舊值是模板時提示手動確認,preflight 一致。第六輪(獨立 review 對照 main 的回歸):`lockRosterFile` 在建立 lock 檔之前先確認能寫名冊(不能寫的不留 lock 檔),lock 檔以 `O_EXCL` 建立並依名冊的 group/other/ACL/擁有者給讀取權(既有的 `0600` 會補上),lock 檔的其他開啟/flock 錯誤一律 `ErrRosterLockFile`,probe 與 writer 同順序,dry-run migration 不取鎖;換名遇 `EBUSY`/`EXDEV`/`EPERM`/`EACCES`(單一檔案 bind mount)改原地覆寫,原地變大前先 `fallocate`;暫存檔先 fchown、fchmod、比對延伸屬性才寫入內容,屬性不同(目錄 default ACL、SELinux label、`user.*`)改原地覆寫;跨行的 admin 密碼拒絕同步;加密名冊解密到私有 `0700` 目錄;`RemoveRosterFile` 刪 `lk.target`,guard 涵蓋刪檔、`renameRosterTemp`、`rosterLock` 字面值;已知限制:hard link 各自有 lock 檔、單一檔案 bind mount 的容器內外不互斥。第七輪:apply 的 rollback 不再以步驟前後的檔案差異推斷誰寫了名冊(別人在快照之後、session 寫入之前存的修改會被還原掉並回報成功),改由 `inventory.RosterJournal` 在 `writeLockedRoster` 記錄每次寫入前後的內容,rollback 只還原 session 自己的寫入蓋掉的內容,無法歸屬、寫入不成鏈或中途失敗的名冊留給人工檢查(§5.14 第 7 點),新增全 package lint `TestRegression_RosterBytesAreWrittenOnlyByWriteLockedRoster`;rollback 結果的 `After` 改為 rollback 後的實際狀態;plan 拒絕存 vault 時的錯誤改列 workspace 相對路徑;`freeipa_roster_file: ~/…` 展開 `~`(§5.11 第 1 點);`ansible-vault edit` 只對名冊取鎖;freeipa-nfs-server 的 no_log gate 訊息列出檢查條件,並註明 Ansible 無法展開的密碼值會在錯誤的 Origin 段落印出 | pilot |
+| 2026-10-27 | v1.55 | §5.7 一致性表新增「名冊 `freeipa.admin.password` ↔ vault `ipa_admin_password`」(issue #146):只改 vault 會讓 freeipa-nfs-server 的 no_log gate 失敗且看不出原因。`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步 workspace 名冊(只認 deploy 預設載入的這份、只寫這個 workspace `.vault/` 目錄裡的名冊,plan 不碰真實檔且與 apply 預覽相同的寫入、失敗的 apply 會一併 rollback、原子寫入)、未同步的名冊列在 banner 與 plan/apply 的 warnings、deploy/reconcile preflight 對不一致發 warning、nfs-server 的密碼一致性拆成不加 no_log、排在 stage gate 之後的獨立 gate;三者都指向唯一有效的修正:手動改名冊(pilot edit 只在密碼改變的那次存檔同步,再存不會補)。名冊不能改成 `{{ ipa_admin_password }}`:`pilot access`/`identity drift`/`roster remove-*` 只載入名冊。同一 PR 的 review 修正:§5.11 新增第 5 點,所有名冊 writer 改用 `lockRosterFile` 鎖 canonical 檔案(`secretpath.Canonical`),修掉 symlink 繞過鎖、migrate/remove 互不排斥、migrate 把 symlink 換成一般檔案、十幾個 writer 沒鎖的問題,新增全 package lint `TestRegression_RosterWritersLockCanonicalTarget`。Re-review 第二輪:lock 檔以 `O_NOFOLLOW` 開啟並對 fd chown(root 執行時不會截斷或 chown symlink 指向的檔案)、只能讀的 lock 檔照樣上鎖、打不開時回傳說明修法的 `ErrRosterLockFile`、不需寫入時不取鎖,`pilot edit` 對被持有的名冊顯示 banner 而不結束 session;名冊密碼只認 YAML 字串(沒加引號的數字跟 Ansible 一樣視為不一致);plan 透過被複製的 workspace 辨識名冊;apply rollback 只還原仍是本 session 寫入內容的名冊;guard 涵蓋 `os.OpenFile`/`os.Create` 寫入、method 與真正的 lock target,`ansible-vault edit` 執行期間持有名冊鎖。第三輪:自動化／MCP 遇到被持有或 lock 檔不能用的名冊時該步失敗並 rollback(MCP 回傳錯誤),終端機仍只顯示 banner;`ansible-vault edit` 的鎖只在 editor 執行期間持有;名冊寫入改為原子替換;lock 檔以 `O_NONBLOCK` 開啟;rollback 對同一檔案只還原一次、不把別人改過的名冊算成失敗;沒加引號、YAML 1.1 或 1.2 可能讀成非字串的密碼(名冊與 vault 兩邊)一律提示加引號,YAML 1.1 的判斷以 `make identity-secret-test` 對真實 Ansible loader 驗證。第四輪:名冊寫入只剩一套寫法 `writeLockedRoster`(拒寫不可寫的名冊;hard link、ACL、給不了擁有者時原地覆寫,否則同目錄暫存檔 rename;root 執行時新名冊與 migration 備份的擁有者正確;取鎖後清殘留暫存檔);密碼值的判斷收斂成 `ansibleScalarKind`(`!unsafe` 視為字串並在同步時保留,`vaultfile.Set` 寫入時改成字串 tag,沿用 vault 密碼建立名冊時不沿用模板、`!vault` 或非字串);vault 存檔改為 Prepare → 寫 vault → Commit,要跟著改的名冊被鎖住時整次存檔拒絕(每個入口一致,plan 以 `ProbeRosterWrite` 檢查真實名冊),`Run` 回傳 warnings、`--actions` 印到 stderr;plan/MCP apply 不寫 `.vault/` 以外的名冊(`errRosterOutsideEditScope`),plan 啟用 freeipa-nfs-server 時改寫複本並記錄真實路徑;busy lint 涵蓋所有綁定形式與 `cmd/pilot/cmd` 全部檔案;gateway 測試 harness 一併掃 stderr;新增 `make root-test` 與 CI job "Root-only ownership tests"。第五輪:plan/MCP apply 對 `.vault/` 以外的名冊先在副本上試做,只在真的要改時拒絕(啟用 freeipa-nfs-server 而外部名冊已有 `nfs.servers` 時不再失敗,與 main 相同);Prepare 與 plan 的探測(`ProbeRosterWrite`)檢查 `writeLockedRoster` 會拒絕的名冊(`openRosterForWrite`/`ErrRosterNotWritable`:不能寫、不是一般檔案、symlink),不能寫的名冊也讓存檔拒絕、plan 失敗;writer 碰到被持有的 lock 重試最多 250ms,plan 的探測不會害它失敗;暫存檔只在權限錯誤時改走原地覆寫;vault 舊值或新值是 inline `!vault`、舊值是模板時提示手動確認,preflight 一致。第六輪(獨立 review 對照 main 的回歸;兩條平行修正合併成同一套機制):`lockRosterFile` 在建立 lock 檔之前先確認能寫名冊(不能寫的不留 lock 檔),lock 檔以 `O_EXCL` 建立並依名冊的 group/other/ACL/擁有者給讀取權(既有的 `0600` 會補上);lock 檔任何非「被持有」的開啟/fstat/flock 失敗都是 `ErrRosterLockFile`(`EROFS` 跟 `EACCES` 一樣改以唯讀開啟既有 lock 檔),罕見錯誤以唯一的測試注入點 `InjectFileFault` 注入;probe 與 writer 同順序(先名冊、再 lock 檔),dry-run migration 不取鎖;Prepare 只把讀取/判斷的錯誤(`ErrRosterNeedsHandEdit`)列為「未同步」,其他錯誤一律拒絕存檔(四個入口一致,以每個拒絕原因 × 入口的矩陣測試鎖住);換名遇 `EBUSY`/`EXDEV`/`EPERM`/`EACCES`(單一檔案 bind mount)改原地覆寫,原地變大前先 `fallocate`;暫存檔先 fchown、fchmod、比對延伸屬性才寫入內容,屬性不同(目錄 default ACL、SELinux label、`user.*`)改原地覆寫;跨行的 admin 密碼拒絕同步;plan 對相對路徑的 `freeipa_roster_file` 依真實 workspace 解讀,指進 `.vault/` 的 symlink 算 session 的檔案(寫法 × 名冊狀態 × 入口的矩陣測試),plan 的錯誤與 warnings 用真實路徑;含 secret 的暫存副本(plan 的暫存 workspace、試做副本)以 pid 命名、下次執行時清掉,加密名冊解密到私有 `0700` 目錄;「請加引號」只看新存的值;`RemoveRosterFile` 刪 `lk.target`,guard 涵蓋刪檔、`renameRosterTemp`、`rosterLock` 字面值;已知限制:hard link 各自有 lock 檔、單一檔案 bind mount 的容器內外不互斥。第七輪:apply 的 rollback 不再以步驟前後的檔案差異推斷誰寫了名冊(別人在快照之後、session 寫入之前存的修改會被還原掉並回報成功),改由 `inventory.RosterJournal` 在 `writeLockedRoster` 記錄每次寫入前後的內容,rollback 只還原 session 自己的寫入蓋掉的內容,無法歸屬、寫入不成鏈或中途失敗的名冊留給人工檢查(§5.14 第 7 點),新增全 package lint `TestRegression_RosterBytesAreWrittenOnlyByWriteLockedRoster`;rollback 結果的 `After` 改為 rollback 後的實際狀態;寫入失敗時只有原地覆寫寫到一半可能改到名冊,錯誤包 `errRosterPartlyWritten`(journal 的 `Failed` 也以它判斷);schema 升級在建立備份之前拒絕不能寫的名冊(原本留下 `.bak` 並回報「rollback failed」),只在原地覆寫寫到一半時經 `writeLockedRoster` rollback(journal 一併記下);預查以讀到的內容判斷空檔;plan 讀子目錄裡 vars 檔的 `freeipa_roster_file`;plan 拒絕存 vault 時的錯誤與 banner 不再列出暫存複本的路徑;`freeipa_roster_file: ~/…` 展開 `~`(§5.11 第 1 點);`ansible-vault edit` 只對名冊取鎖;freeipa-nfs-server 的 no_log gate 訊息列出檢查條件,並註明 Ansible 無法展開的密碼值會在錯誤的 Origin 段落印出 | pilot |

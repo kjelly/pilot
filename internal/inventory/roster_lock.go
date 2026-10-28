@@ -26,6 +26,51 @@ var ErrMutationLocked = errors.New("inventory: already locked by another process
 // written; the message says what to fix.
 var ErrRosterLockFile = errors.New("inventory: roster lock file unusable")
 
+// fileFault, when set, makes the lock-file and roster opens, the flock
+// and resolving a roster's path below fail with the error it returns for
+// an operation ("open", "flock", "resolve") on a path: how tests produce
+// errors a real file system gives rarely (EROFS, EIO, ENOSPC). It is the
+// one fault seam for these operations, inside this package and out
+// (InjectFileFault). Nil in production.
+var fileFault func(op, path string) error
+
+// InjectFileFault makes the roster lock-file and roster opens and flocks
+// fail as fault says, until restore is called — for tests outside this
+// package that must see how pilot handles EROFS, EIO and the like. fault
+// returns nil to let an operation run. Never call it outside a test.
+func InjectFileFault(fault func(op, path string) error) (restore func()) {
+	old := fileFault
+	fileFault = fault
+	return func() { fileFault = old }
+}
+
+// resolveRoster is secretpath.Canonical(path), which fileFault can make
+// fail ("resolve") with an error no sentinel classifies: how tests check
+// that a caller refuses on an error it does not recognise.
+func resolveRoster(path string) (string, error) {
+	if fileFault != nil {
+		if fault := fileFault("resolve", path); fault != nil {
+			return "", fault
+		}
+	}
+	return secretpath.Canonical(path)
+}
+
+// faultAfterOpen applies fileFault to an open of path that returned f,
+// err: an injected error closes f and replaces err.
+func faultAfterOpen(path string, f *os.File, err error) (*os.File, error) {
+	if fileFault == nil {
+		return f, err
+	}
+	if fault := fileFault("open", path); fault != nil {
+		if f != nil {
+			f.Close()
+		}
+		return nil, &os.PathError{Op: "open", Path: path, Err: fault}
+	}
+	return f, err
+}
+
 // mutationLockInfo is written into the lock file for human introspection
 // only — the actual mutual exclusion is the flock syscall below, not this
 // content, so a stale lock file left behind by a crashed process (whose
@@ -42,12 +87,13 @@ type mutationLock struct {
 	created bool
 }
 
-// openLockFile opens a roster's lock file, and flockLockFile flocks it:
-// variables so a test can make them fail with a chosen error.
-var (
-	openLockFile  = os.OpenFile
-	flockLockFile = syscall.Flock
-)
+// openLockFile is every open of a roster's lock file — its callers pass
+// lockFileOpenFlags — and applies fileFault, so a test can make any of
+// them fail with a chosen error.
+func openLockFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, flag, perm)
+	return faultAfterOpen(path, f, err)
+}
 
 // lockFileOpenFlags are added to every open of a lock file. O_NONBLOCK: a
 // FIFO planted as the lock file must not hang the open; checkLockFileOpen
@@ -81,6 +127,8 @@ func acquireMutationLock(path string) (*mutationLock, error) {
 	if !created {
 		f, err = openLockFile(path, os.O_RDWR|lockFileOpenFlags, 0)
 		writable = err == nil
+		// No write access — permission, or a read-only file system: an
+		// existing lock file still locks read-only.
 		if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
 			f, err = openLockFile(path, os.O_RDONLY|lockFileOpenFlags, 0)
 			if errors.Is(err, fs.ErrPermission) {
@@ -115,18 +163,21 @@ func errLockFileNotOpenable(path string, err error) error {
 }
 
 // checkLockFileOpen vets the result of opening the lock file path: f must
-// be a plain file of its own. It closes f when it refuses it.
+// be a plain file of its own. It closes f when it refuses it. Every
+// refusal is ErrRosterLockFile, whatever the cause (a directory, EIO,
+// ENOSPC, …), so no caller mistakes an unusable lock file for something
+// it may carry on past (PR #148 round 6, P2-1).
 func checkLockFileOpen(path string, f *os.File, err error) error {
 	if errors.Is(err, syscall.ELOOP) {
 		return fmt.Errorf("lock file %s is a symlink; refusing to follow it (remove it): %w", path, ErrRosterLockFile)
 	}
 	if err != nil {
-		return fmt.Errorf("open lock file %s: %w: %w", path, ErrRosterLockFile, err)
+		return fmt.Errorf("cannot open lock file %s: %w: %w", path, ErrRosterLockFile, err)
 	}
 	var st syscall.Stat_t
 	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
 		f.Close()
-		return fmt.Errorf("stat lock file %s: %w: %w", path, ErrRosterLockFile, err)
+		return fmt.Errorf("cannot stat lock file %s: %w: %w", path, ErrRosterLockFile, err)
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
 		f.Close()
@@ -146,17 +197,22 @@ var lockContentionWait = 250 * time.Millisecond
 
 // flockMutationLock takes how (LOCK_EX or LOCK_SH) on the open lock file
 // f without blocking, trying again for up to lockContentionWait while
-// another process holds it: ErrMutationLocked if it still does,
-// ErrRosterLockFile if flock fails otherwise (no lock support, say).
+// another process holds it: ErrMutationLocked if it still does. Any other
+// flock failure (no lock support, say) is ErrRosterLockFile.
 func flockMutationLock(path string, f *os.File, how int) error {
 	deadline := time.Now().Add(lockContentionWait)
 	for delay := 5 * time.Millisecond; ; delay *= 2 {
-		err := flockLockFile(int(f.Fd()), how|syscall.LOCK_NB)
+		err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		if fileFault != nil {
+			if fault := fileFault("flock", path); fault != nil {
+				err = fault
+			}
+		}
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("lock %s: %w: %w", path, ErrRosterLockFile, err)
+			return fmt.Errorf("cannot lock %s: %w: %w", path, ErrRosterLockFile, err)
 		}
 		left := time.Until(deadline)
 		if left <= 0 {
@@ -180,11 +236,11 @@ func flockMutationLock(path string, f *os.File, how int) error {
 // the probe never fails it. Like the writer, the probe waits up to
 // lockContentionWait for a holder to let go.
 func ProbeRosterWrite(path string) error {
-	target, err := secretpath.Canonical(path)
+	target, err := resolveRoster(path)
 	if err != nil {
 		return fmt.Errorf("resolve roster %s: %w", path, err)
 	}
-	if err := checkRosterWritable(target, path); err != nil {
+	if _, err := checkRosterWritable(target, path); err != nil {
 		return err
 	}
 	for _, suffix := range rosterLockSuffixes {
@@ -273,7 +329,7 @@ func lockRosterFile(path string) (*rosterLock, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return nil, err
 	}
-	target, err := secretpath.Canonical(path)
+	target, err := resolveRoster(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve roster %s: %w", path, err)
 	}
@@ -286,7 +342,7 @@ func lockRosterFile(path string) (*rosterLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("roster %s: %w", path, err)
 	}
-	if err := checkRosterWritable(target, path); err != nil {
+	if _, err := checkRosterWritable(target, path); err != nil {
 		return nil, err
 	}
 	share := lockFileShare(owner, exists, hasPOSIXACL(ownerPath))

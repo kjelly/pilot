@@ -30,8 +30,9 @@ type RosterWrite struct {
 	// After is what the write left in the roster; nil when Failed.
 	After []byte
 	// Failed is a write in place that failed after it may have changed
-	// the roster (writeRosterInPlace): what the roster holds is unknown.
-	// A write that failed with the roster unchanged is not recorded.
+	// the roster (its error wraps errRosterPartlyWritten): what the roster
+	// holds is unknown. A write that failed with the roster unchanged is
+	// not recorded.
 	Failed bool
 }
 
@@ -182,7 +183,7 @@ func beginJournaledRosterWrite(lk *rosterLock) (*journaledRosterWrite, error) {
 	if err != nil {
 		// What the writer itself would refuse (a symlink, not a regular
 		// file, not writable) is reported as it would report it.
-		if refused := checkRosterWritable(lk.target, lk.path); refused != nil {
+		if _, refused := checkRosterWritable(lk.target, lk.path); refused != nil {
 			return nil, refused
 		}
 		return nil, fmt.Errorf("roster %s: cannot read it to record this write for the apply's rollback, so it was left unchanged: %w: %w", lk.path, ErrRosterNotWritable, err)
@@ -216,19 +217,21 @@ func readRosterBeforeWrite(target string) (data []byte, existed bool, err error)
 	return data, true, nil
 }
 
-// finish records the write's outcome in its journal: nothing when the
-// roster was left unchanged, After when it now holds data, Failed when a
-// write in place stopped part-way. A journal closed meanwhile records
+// finish records the write's outcome, err from writeRosterBytes, in its
+// journal: nothing when the roster was left unchanged, After when it now
+// holds data (err nil), Failed when a write in place stopped part-way (err
+// wraps errRosterPartlyWritten). A journal closed meanwhile records
 // nothing.
-func (w *journaledRosterWrite) finish(data []byte, outcome rosterWriteOutcome) {
-	if w == nil || outcome == rosterUnchanged {
+func (w *journaledRosterWrite) finish(data []byte, err error) {
+	partly := errors.Is(err, errRosterPartlyWritten)
+	if w == nil || err != nil && !partly {
 		return
 	}
 	record := RosterWrite{Before: w.before, Existed: w.existed}
-	if outcome == rosterWritten {
-		record.After = bytes.Clone(data)
-	} else {
+	if partly {
 		record.Failed = true
+	} else {
+		record.After = bytes.Clone(data)
 	}
 	rosterJournals.mu.Lock()
 	defer rosterJournals.mu.Unlock()

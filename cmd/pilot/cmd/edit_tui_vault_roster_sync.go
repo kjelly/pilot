@@ -47,6 +47,16 @@ func rosterCandidates(dir, source string, referenced []string) []string {
 		if err != nil {
 			continue
 		}
+		// A link from elsewhere into .vault/ is listed under its .vault/
+		// name, as a plan lists it (rosterWritePath), so both write it and
+		// name it alike.
+		root := dir
+		if source != "" {
+			root = source
+		}
+		if !isManagedVaultFile(dir, path) && isManagedVaultFile(root, file) {
+			path = filepath.Join(dir, ".vault", filepath.Base(file))
+		}
 		if i, seen := index[file]; seen {
 			if !isManagedVaultFile(dir, out[i]) && isManagedVaultFile(dir, path) {
 				out[i] = path
@@ -71,9 +81,14 @@ func rosterIdentity(dir, source, path string) (string, error) {
 }
 
 // referencedRosterFiles returns every freeipa_roster_file dir sets, read
-// without Ansible: in hosts.yml (fleet vars and hosts) and at the top of
-// group_vars/ and host_vars/ files.
-func referencedRosterFiles(dir string) []string {
+// without Ansible: in hosts.yml (fleet vars and hosts) and in
+// group_vars/ and host_vars/ files, nested ones included.
+//
+// source is the real workspace when dir is a plan's scratch copy of it, ""
+// otherwise. The copy holds only the files directly in group_vars/ and
+// host_vars/ (managedFileEntries), so the nested ones are read from
+// source, as the apply reads them; pilot edit never changes those.
+func referencedRosterFiles(dir, source string) []string {
 	var out []string
 	if data, err := os.ReadFile(filepath.Join(dir, "hosts.yml")); err == nil {
 		if hf, err := inventory.Parse(data); err == nil {
@@ -84,18 +99,26 @@ func referencedRosterFiles(dir string) []string {
 		}
 	}
 	for _, sub := range []string{"group_vars", "host_vars"} {
-		_ = filepath.WalkDir(filepath.Join(dir, sub), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !hasManagedFileExtension(d.Name()) {
-				return nil
+		for _, root := range []string{dir, source} {
+			if root == "" {
+				continue
 			}
-			var vars map[string]any
-			if data, err := os.ReadFile(path); err == nil && yaml.Unmarshal(data, &vars) == nil {
-				if rosterPath, ok := vars["freeipa_roster_file"].(string); ok {
-					out = append(out, rosterPath)
+			_ = filepath.WalkDir(filepath.Join(root, sub), func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !hasManagedFileExtension(d.Name()) {
+					return nil
 				}
-			}
-			return nil
-		})
+				if root == source && filepath.Dir(path) == filepath.Join(source, sub) {
+					return nil // the copy's own file, read above
+				}
+				var vars map[string]any
+				if data, err := os.ReadFile(path); err == nil && yaml.Unmarshal(data, &vars) == nil {
+					if rosterPath, ok := vars["freeipa_roster_file"].(string); ok {
+						out = append(out, rosterPath)
+					}
+				}
+				return nil
+			})
+		}
 	}
 	return out
 }
@@ -118,20 +141,40 @@ func isManagedVaultFile(dir, path string) bool {
 
 // rosterWritePath is the file a freeipa_roster_file reference ref names
 // for a write in scope: ref resolved against scope.dir, "" for an empty
-// ref. On a plan's scratch copy a reference into the real workspace's
-// .vault/ is mapped onto the copy's own .vault/: pilot edit stores the
-// reference as an absolute path, so the copy's hosts.yml still names the
-// real file, which a plan must leave alone while the apply writes it.
-// Mapped, a plan previews the roster writes the apply makes (PR #148
-// review). Any other path, and every path outside a plan, is kept; a
-// path outside the session's .vault/ is then refused under a plan or an
-// apply (mutateRosterSource).
+// ref. On a plan's scratch copy ref means what it means to the apply, so
+// it is resolved against the real workspace (planSource), relative or
+// absolute: a file in the real .vault/ is mapped onto the copy's own
+// .vault/, which the plan writes and diffs, so a plan previews the roster
+// writes the apply makes (PR #148 review); any other file is the real one,
+// which a plan only reads, or writes on a private copy (mutateRosterSource
+// refuses it when that would change it). Resolved against the copy, a
+// relative ref outside .vault/ named a file the copy does not have, so the
+// plan took it for missing (PR #148 round 6, P2-2).
 func (scope editWriteScope) rosterWritePath(ref string) string {
-	resolved := resolveRosterPath(scope.dir, strings.TrimSpace(ref))
-	if scope.planSource == "" || resolved == "" || !isManagedVaultFile(scope.planSource, resolved) {
-		return resolved
+	ref = strings.TrimSpace(ref)
+	if scope.planSource == "" || ref == "" {
+		return resolveRosterPath(scope.dir, ref)
 	}
-	return filepath.Join(scope.dir, ".vault", filepath.Base(resolved))
+	real := resolveRosterPath(scope.planSource, ref)
+	if vault := vaultSpelling(scope.planSource, real); vault != "" {
+		return filepath.Join(scope.dir, ".vault", filepath.Base(vault))
+	}
+	return real
+}
+
+// vaultSpelling is path's name among dir's own .vault/ files: path itself
+// when it is spelled inside .vault/ (a link there to elsewhere included),
+// the file it names when it is a symlink from elsewhere into .vault/, and
+// "" for anything else. Such a file is one of the session's: a plan's copy
+// holds it and an apply's rollback restores it, however it is reached.
+func vaultSpelling(dir, path string) string {
+	if isManagedVaultFile(dir, path) {
+		return path
+	}
+	if target, err := secretpath.Canonical(path); err == nil && target != path && isManagedVaultFile(dir, target) {
+		return target
+	}
+	return ""
 }
 
 // recordedPath is the absolute path pilot edit records in hosts.yml for
@@ -254,15 +297,20 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 	}
 	oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(saved)
 	templated := inventory.VaultAdminPasswordTemplate(saved) != ""
-	notString := inventory.VaultAdminPasswordNotString(previous) || inventory.VaultAdminPasswordNotString(saved)
+	// Each message is judged on the value it is about: what to do with the
+	// saved value on the saved value, what pilot cannot know about the
+	// old one on the old one (PR #148 round 6, P3-6: an old unquoted
+	// value replaced by a quoted one was told to add quotes).
+	notString := inventory.VaultAdminPasswordNotString(saved)
 	// A value replaced (not added or removed) whose old or new form pilot
-	// cannot read — an inline !vault value, or an old template — leaves
-	// pilot unable to tell which rosters held the old password (PR #148
-	// round 5, P3-c).
+	// cannot read — an inline !vault value, an old template, an old value
+	// a YAML loader may read as a number or date — leaves pilot unable to
+	// tell which rosters held the old password (PR #148 round 5, P3-c).
 	replaced := inventory.VaultAdminPasswordText(previous) != "" && inventory.VaultAdminPasswordText(saved) != ""
 	encrypted := replaced && (inventory.VaultAdminPasswordEncrypted(previous) || inventory.VaultAdminPasswordEncrypted(saved))
 	oldTemplated := replaced && inventory.VaultAdminPasswordTemplate(previous) != ""
-	if !templated && !notString && !encrypted && !oldTemplated && (oldPassword == "" || newPassword == "") {
+	oldNotString := replaced && inventory.VaultAdminPasswordNotString(previous)
+	if !templated && !notString && !encrypted && !oldTemplated && !oldNotString && (oldPassword == "" || newPassword == "") {
 		return sync, ""
 	}
 	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
@@ -280,6 +328,9 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 	if oldTemplated {
 		return fixed("⚠️  ", "未同步名冊：原本的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會把它當成模板展開，pilot 不知道舊密碼是什麼，無法判斷哪些名冊用的是它；請手動確認每份名冊的 freeipa.admin.password 跟新的 ipa_admin_password 相同"), ""
 	}
+	if oldNotString {
+		return fixed("⚠️  ", "未同步名冊：原本的 ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值，pilot 無法判斷哪些名冊用的是它；新的值已存成加引號的字串，請手動確認每份名冊的 freeipa.admin.password 跟它相同（同樣加上引號）"), ""
+	}
 	return prepareRosterAdminPasswords(r, dir, oldPassword, newPassword)
 }
 
@@ -293,7 +344,7 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 // on a busy roster (prepareVaultRosterSync).
 func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPassword string) (*vaultRosterSync, string) {
 	scope := r.writeScope(dir)
-	referenced := referencedRosterFiles(dir)
+	referenced := referencedRosterFiles(dir, scope.planSource)
 	for i, path := range referenced {
 		referenced[i] = scope.rosterWritePath(path)
 	}
@@ -323,21 +374,28 @@ func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPasswo
 			// and which is always writable; the apply locks and writes the
 			// real roster, so the plan probes it to fail where the apply
 			// would.
-			if real, rerr := rosterIdentity(dir, scope.planSource, path); rerr == nil {
-				if err = inventory.ProbeRosterWrite(real); err != nil {
-					prepared.Release()
-				}
+			real, rerr := rosterIdentity(dir, scope.planSource, path)
+			if rerr == nil {
+				rerr = inventory.ProbeRosterWrite(real)
 			}
-		}
-		if banner, busy := rosterBusyBanner(r, shown, err); busy {
-			sync.release()
-			return nil, banner
+			if rerr != nil {
+				prepared.Release()
+				err = rerr
+			}
 		}
 		switch {
 		case errors.Is(err, inventory.ErrRosterEncrypted):
 			manual(shown, "ansible-vault 加密（用 ansible-vault edit）")
-		case err != nil:
+		case errors.Is(err, inventory.ErrRosterNeedsHandEdit):
 			manual(shown, rosterSyncReason(err, path, shown))
+		case err != nil:
+			// Fail closed: any other error means this roster must follow
+			// the new password but cannot be written now — locked, an
+			// unusable lock file, not writable, … — so the save is refused
+			// rather than leaving it on the old password (PR #148 round 6,
+			// P2-1).
+			sync.release()
+			return nil, rosterRefusal(r, shown, err)
 		case prepared.Result == inventory.RosterAdminUpdated:
 			sync.steps = append(sync.steps, vaultRosterStep{path: path, shown: shown, prepared: prepared})
 		case prepared.Result == inventory.RosterAdminNotString:

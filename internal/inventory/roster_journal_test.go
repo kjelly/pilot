@@ -128,7 +128,7 @@ func TestRosterJournalRecordsAFailedWrite(t *testing.T) {
 			return n, syscall.EIO
 		}
 		j := openTestJournal(t, []string{path}, nil)
-		if err := AppendRosterUser(path, "erin"); !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), "partly written") {
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, syscall.EIO) || !errors.Is(err, errRosterPartlyWritten) || !strings.Contains(err.Error(), "partly written") {
 			t.Fatalf("AppendRosterUser() = %v, want the part-way failure", err)
 		}
 		w := onlyWrite(t, j, path)
@@ -140,13 +140,61 @@ func TestRosterJournalRecordsAFailedWrite(t *testing.T) {
 		path := writeLockTestRoster(t)
 		failRename(t, syscall.EIO)
 		j := openTestJournal(t, []string{path}, nil)
-		if err := AppendRosterUser(path, "erin"); !errors.Is(err, syscall.EIO) {
-			t.Fatalf("AppendRosterUser() = %v, want the rename failure", err)
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, syscall.EIO) || errors.Is(err, errRosterPartlyWritten) {
+			t.Fatalf("AppendRosterUser() = %v, want the rename failure, not marked partly written", err)
 		}
 		if writes := j.Writes(); len(writes) != 0 {
 			t.Fatalf("journal = %+v; a write that changed nothing is not recorded", writes)
 		}
 	})
+}
+
+// A migration whose install stops part-way rolls the roster back through
+// writeLockedRoster too (migrationWriteFailed), so the journal holds both
+// writes, once each: the failed install, then the rollback with what it
+// restored. A pilot edit apply's rollback then sees the roster back at
+// what it held before the apply, or — changed since — leaves it alone,
+// never restoring over a write it cannot account for.
+func TestRosterJournalRecordsAMigrationsPartWayRollback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(minimalValidRoster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, filepath.Join(t.TempDir(), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	original := writeRosterAt
+	t.Cleanup(func() { writeRosterAt = original })
+	failed := false
+	writeRosterAt = func(f *os.File, data []byte, off int64) (int, error) {
+		if failed {
+			return f.WriteAt(data, off)
+		}
+		failed = true
+		n, _ := f.WriteAt(data[:len(data)/2], off)
+		return n, syscall.ENOSPC
+	}
+	j := openTestJournal(t, []string{path}, nil)
+	if _, err := MigrateRosterFile(path, RosterMigrationOptions{}); !errors.Is(err, syscall.ENOSPC) || !strings.Contains(err.Error(), "rolled back to the original") {
+		t.Fatalf("MigrateRosterFile() = %v, want the part-way failure, rolled back", err)
+	}
+	writes := j.Writes()[canonicalPath(t, path)]
+	if len(writes) != 2 || len(j.Writes()) != 1 {
+		t.Fatalf("journal holds %d writes to the roster (and writes to %d rosters); want the failed install and the rollback", len(writes), len(j.Writes()))
+	}
+	install, rollback := writes[0], writes[1]
+	if !install.Failed || install.After != nil || string(install.Before) != minimalValidRoster {
+		t.Errorf("install record: Failed=%v, After set=%v, Before is the original=%v; want Failed with the original before it",
+			install.Failed, install.After != nil, string(install.Before) == minimalValidRoster)
+	}
+	if rollback.Failed || string(rollback.After) != minimalValidRoster || !rollback.Existed {
+		t.Errorf("rollback record: Failed=%v, After is the original=%v; want the original restored",
+			rollback.Failed, string(rollback.After) == minimalValidRoster)
+	}
+	if !bytes.Equal(mustRead(t, path), []byte(minimalValidRoster)) {
+		t.Fatal("roster not rolled back to the original")
+	}
 }
 
 // A journal records only the rosters it watches, and nothing once closed;

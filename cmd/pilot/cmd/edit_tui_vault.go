@@ -296,7 +296,7 @@ func newVaultEditCommand(dir, bin, path string) *rosterEditCommand {
 	if sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
 		return edit
 	}
-	for _, roster := range rosterCandidates(dir, "", referencedRosterFiles(dir)) {
+	for _, roster := range rosterCandidates(dir, "", referencedRosterFiles(dir, "")) {
 		if sameExistingFile(path, roster) {
 			edit.roster = path
 			break
@@ -403,9 +403,12 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 			previous, _ := os.ReadFile(path)
 			sync, refused := prepareVaultRosterSync(r, dir, path, previous, doc.Bytes())
 			if refused != "" {
-				// Named in the workspace, never by a plan's scratch copy.
+				// The error names the vault by its path, which a plan maps
+				// from its scratch copy to the real workspace's
+				// (scratchPathError), as it does every path in its errors;
+				// the banner names it within the workspace.
 				shown := shownRosterPath(path, dir, r.planSource)
-				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", shown, r.writeRefused)
+				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", path, r.writeRefused)
 				return pushVaultEditorScreen(r, dir, path, doc, true,
 					fmt.Sprintf("⚠️  未存檔 %s（修改還在）：名冊要跟著改 ipa_admin_password，但它現在不能寫入\n%s", shown, refused))
 			}

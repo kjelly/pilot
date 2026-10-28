@@ -148,7 +148,7 @@ func rosterWritesIn(function string, body *ast.BlockStmt) []rosterWrite {
 			if isRosterWriteCall(n) {
 				calls = append(calls, n)
 			}
-			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "rosterBusyBanner" && len(n.Args) == 3 {
+			if id, ok := n.Fun.(*ast.Ident); ok && (id.Name == "rosterBusyBanner" || id.Name == "rosterRefusal") && len(n.Args) == 3 {
 				if arg, ok := n.Args[2].(*ast.Ident); ok {
 					reports = append(reports, report{n.Pos(), arg.Name})
 				}

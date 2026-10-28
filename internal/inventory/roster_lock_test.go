@@ -368,6 +368,27 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 	}
 }
 
+// assertOnlyLockFilesAdded fails when dir holds a file that was not among
+// before and is not one of target's lock files, which taking the lock
+// creates: a write refused before it starts leaves nothing else beside
+// the roster — a migration backup would be a second copy of its
+// credentials.
+func assertOnlyLockFilesAdded(t *testing.T, dir, target string, before []string) {
+	t.Helper()
+	allowed := map[string]bool{}
+	for _, name := range before {
+		allowed[name] = true
+	}
+	for _, suffix := range rosterLockSuffixes {
+		allowed[filepath.Base(target)+suffix] = true
+	}
+	for _, name := range direntNames(t, dir) {
+		if !allowed[name] {
+			t.Errorf("%s was left beside the roster", name)
+		}
+	}
+}
+
 // assertNoRosterTemps fails when a temp file is left beside target.
 func assertNoRosterTemps(t *testing.T, target string) {
 	t.Helper()
@@ -391,28 +412,47 @@ func assertNoLockFiles(t *testing.T, target string) {
 
 // assertRosterWritePolicy holds one writer to writeLockedRoster's policy
 // (PR #148 re-review, round 4): a roster this user may not write is
-// refused, as an in-place write always refused it, before any lock file is
-// created (PR #148 review, P2-1: a non-writer's lock files locked the
-// owner out); a roster with another hard link is written in place, so
-// every name sees the new content; a temp file a killed pilot left is
-// swept once stale, and one still fresh is kept; run as root, the owner
-// and group survive, and a new roster gets its directory's owner. A writer
-// that removes the roster is held to the refusal and the sweep.
+// refused with ErrRosterNotWritable, as an in-place write always refused
+// it, before anything is written beside it — no lock file (PR #148 review,
+// P2-1: a non-writer's lock files locked the owner out), no migration
+// backup, no temp file — and without reporting a rollback of a write that
+// never happened (root writes it and keeps its mode); a roster with another
+// hard link is written in place, so every name sees the new content; a
+// temp file a killed pilot left is swept once stale, and one still fresh is
+// kept; run as root, the owner and group survive, and a new roster gets its
+// directory's owner. A writer that removes the roster is held to the
+// refusal and the sweep.
 func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 	if !tc.create {
 		t.Run("read-only roster", func(t *testing.T) {
-			if os.Geteuid() == 0 {
-				t.Skip("root writes a 0400 roster, as an in-place write always did")
-			}
 			l := newLockTestLayout(t, tc)
 			if err := os.Chmod(l.target, 0o400); err != nil {
 				t.Fatal(err)
 			}
-			if err := tc.call(t, l.link); !errors.Is(err, ErrRosterNotWritable) {
+			dir := filepath.Dir(l.target)
+			before := direntNames(t, dir)
+			err := tc.call(t, l.link)
+			if os.Geteuid() == 0 {
+				// Root writes a 0400 roster, as an in-place write always did.
+				if err != nil {
+					t.Fatalf("as root: %v", err)
+				}
+				if info, err := os.Stat(l.target); err != nil || info.Mode().Perm() != 0o400 || bytes.Equal(mustRead(t, l.target), l.before) {
+					t.Fatalf("as root: the 0400 roster was not written, or lost its mode (stat err %v)", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrRosterNotWritable) {
 				t.Fatalf("error = %v, want ErrRosterNotWritable", err)
+			}
+			for _, rollback := range []string{"rollback", "rolled back"} {
+				if strings.Contains(err.Error(), rollback) {
+					t.Errorf("error %q reports a rollback, but nothing was written", err)
+				}
 			}
 			l.assertUntouched(t)
 			assertNoLockFiles(t, l.target)
+			assertOnlyLockFilesAdded(t, dir, l.target, before)
 		})
 		// Removing one name of a roster leaves its other names alone.
 		if !tc.removes {
@@ -979,9 +1019,34 @@ func TestWriteLockedRosterFallsBackInPlaceOnlyOnPermission(t *testing.T) {
 			if err == nil || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), "left unchanged") {
 				t.Fatalf("AppendRosterUser() = %v, want the %v failure with the roster unchanged", err, tc.err)
 			}
+			if errors.Is(err, errRosterPartlyWritten) {
+				t.Fatalf("AppendRosterUser() = %v: a write that never touched the roster is marked partly written", err)
+			}
 			if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
 				t.Fatal("roster changed")
 			}
 		})
+	}
+}
+
+// An in-place write that stops part-way is the one failure that may have
+// changed the roster, and only it is marked errRosterPartlyWritten, so a
+// caller knows when there is something to roll back.
+func TestWriteLockedRosterMarksAnInPlaceWriteStoppedPartWay(t *testing.T) {
+	path := writeLockTestRoster(t)
+	if err := os.Link(path, filepath.Join(t.TempDir(), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	writeRosterAt = func(f *os.File, data []byte, off int64) (int, error) {
+		n, _ := f.WriteAt(data[:len(data)/2], off)
+		return n, syscall.ENOSPC
+	}
+	t.Cleanup(func() { writeRosterAt = (*os.File).WriteAt })
+	err := AppendRosterUser(path, "erin")
+	if !errors.Is(err, errRosterPartlyWritten) || !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("AppendRosterUser() = %v, want ENOSPC marked partly written", err)
+	}
+	if bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+		t.Fatal("the hook did not change the roster; the case tests nothing")
 	}
 }

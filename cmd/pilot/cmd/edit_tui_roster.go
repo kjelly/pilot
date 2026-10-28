@@ -697,6 +697,17 @@ func mutateRosterSource(scope editWriteScope, path string, mutate func(path stri
 	return err
 }
 
+// rosterRefusal is rosterBusyBanner for a write that must not go ahead on
+// any error: an error rosterBusyBanner does not know is refused too, with
+// the error itself as the reason, and recorded on r the same way.
+func rosterRefusal(r *editRouterModel, path string, err error) string {
+	if banner, ok := rosterBusyBanner(r, path, err); ok {
+		return banner
+	}
+	r.writeRefused = fmt.Errorf("roster %s was not written: %w", path, err)
+	return fmt.Sprintf("⚠️  未寫入 %s：%v", path, err)
+}
+
 // mutateRosterSourceValue is mutateRosterSource for helpers returning a
 // migration or autofill result as well as an error.
 func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate func(path string) (T, error)) (T, error) {
@@ -716,13 +727,14 @@ func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate fu
 
 // restricts reports whether scope keeps a write to path off the real file:
 // under a plan or a transaction, for anything but the session's own
-// .vault/ files.
+// .vault/ files, however path reaches one (vaultSpelling).
 func (scope editWriteScope) restricts(path string) bool {
-	return (scope.planSource != "" || scope.transaction) && !isManagedVaultFile(scope.dir, path)
+	return (scope.planSource != "" || scope.transaction) && vaultSpelling(scope.dir, path) == ""
 }
 
 // simulateRosterWrite runs mutate on a private copy of the roster at path,
-// in a new temporary directory it removes afterwards, and reports whether
+// in a new temporary directory it removes afterwards (privateTempDir), and
+// reports whether
 // the write would change the roster: different bytes, or a roster created
 // or removed. The real file is only read, and no lock file appears beside
 // it. An error names path, not the copy.
@@ -733,7 +745,9 @@ func simulateRosterWrite[T any](path string, mutate func(path string) (T, error)
 	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
 		return zero, false, fmt.Errorf("read roster %s: %w", path, readErr)
 	}
-	scratchDir, err := os.MkdirTemp("", "pilot-roster-scope-*")
+	// A plaintext roster copy, admin password included: privateTempDir
+	// sweeps the copies a killed pilot leaves.
+	scratchDir, err := privateTempDir("pilot-roster-scope")
 	if err != nil {
 		return zero, false, err
 	}
@@ -753,8 +767,9 @@ func simulateRosterWrite[T any](path string, mutate func(path string) (T, error)
 	return value, changed, err
 }
 
-// scratchPathError is an error from a simulated write with the private
-// copy's path replaced by the roster's.
+// scratchPathError is an error from work on a private copy — a simulated
+// write, a plan's scratch workspace — with the copy's path replaced by the
+// real one.
 type scratchPathError struct {
 	err           error
 	scratch, path string

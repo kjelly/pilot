@@ -159,6 +159,29 @@ func TestRosterLockFilesLetTheRostersWritersIn(t *testing.T) {
 	})
 }
 
+// lockFileFault is a fileFault failing op ("open" or "flock") on a
+// roster's lock files with errno — only on lock files that already exist
+// when existingOnly — and nothing else, the roster included.
+func lockFileFault(op string, errno syscall.Errno, existingOnly bool) func(string, string) error {
+	return func(o, path string) error {
+		if o != op {
+			return nil
+		}
+		for _, suffix := range rosterLockSuffixes {
+			if !strings.HasSuffix(path, suffix) {
+				continue
+			}
+			if existingOnly {
+				if _, err := os.Lstat(path); err != nil {
+					return nil
+				}
+			}
+			return errno
+		}
+		return nil
+	}
+}
+
 // Every way of failing to open or flock a lock file other than its being
 // a symlink or held — a read-only file system, no space, no lock support —
 // is ErrRosterLockFile, for the writer and for the plan's probe alike, so
@@ -171,29 +194,16 @@ func TestRosterLockFileFailuresAreErrRosterLockFile(t *testing.T) {
 		inject   func(t *testing.T)
 	}{
 		"open: read-only file system": {inject: func(t *testing.T) {
-			openLockFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-				return nil, &os.PathError{Op: "open", Path: name, Err: syscall.EROFS}
-			}
-			t.Cleanup(func() { openLockFile = os.OpenFile })
+			t.Cleanup(InjectFileFault(lockFileFault("open", syscall.EROFS, false)))
 		}},
 		"open: no space": {inject: func(t *testing.T) {
-			openLockFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-				return nil, &os.PathError{Op: "open", Path: name, Err: syscall.ENOSPC}
-			}
-			t.Cleanup(func() { openLockFile = os.OpenFile })
+			t.Cleanup(InjectFileFault(lockFileFault("open", syscall.ENOSPC, false)))
 		}},
 		"open of an existing lock file: I/O error": {existing: true, inject: func(t *testing.T) {
-			openLockFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
-				if flag&os.O_CREATE != 0 {
-					return os.OpenFile(name, flag, perm)
-				}
-				return nil, &os.PathError{Op: "open", Path: name, Err: syscall.EIO}
-			}
-			t.Cleanup(func() { openLockFile = os.OpenFile })
+			t.Cleanup(InjectFileFault(lockFileFault("open", syscall.EIO, true)))
 		}},
 		"flock: no lock support": {existing: true, inject: func(t *testing.T) {
-			flockLockFile = func(int, int) error { return syscall.ENOLCK }
-			t.Cleanup(func() { flockLockFile = syscall.Flock })
+			t.Cleanup(InjectFileFault(lockFileFault("flock", syscall.ENOLCK, false)))
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
