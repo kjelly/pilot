@@ -304,6 +304,20 @@ func TestRestoreRosterFileOnlyUndoesTheSessionsOwnWrite(t *testing.T) {
 			t.Fatalf("roster still there (lstat err=%v)", err)
 		}
 	})
+	// Through a symlink the file whose bytes were checked is removed, not
+	// the link (PR #148 review, F6).
+	t.Run("created by the session, named through a link", func(t *testing.T) {
+		l := newLockTestLayout(t, rosterWriterCase{body: string(session)})
+		if err := RemoveRosterFile(l.link, session); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(l.target); !os.IsNotExist(err) {
+			t.Fatalf("the roster the session created is still there (lstat err=%v)", err)
+		}
+		if info, err := os.Lstat(l.link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link was removed instead of the roster (lstat err=%v)", err)
+		}
+	})
 }
 
 // A FIFO planted as a lock file — one this user may only read, or may

@@ -81,10 +81,12 @@ nfs:
 
 // rosterWriterCase calls one roster writer on path. body is the roster it
 // starts from; create marks a create-only writer, whose roster must not
-// exist yet; encrypt has the roster ansible-vault encrypted first.
+// exist yet; removes marks one that removes the roster rather than
+// rewriting it; encrypt has the roster ansible-vault encrypted first.
 type rosterWriterCase struct {
 	body    string
 	create  bool
+	removes bool
 	encrypt bool
 	call    func(t *testing.T, path string) error
 }
@@ -184,6 +186,9 @@ func rosterWriterCases() map[string]rosterWriterCase {
 		"RestoreRosterFile": plain(func(path string) error {
 			return RestoreRosterFile(path, []byte(lockTestRoster), []byte(lockTestRoster+"# restored\n"))
 		}),
+		"RemoveRosterFile": {body: lockTestRoster, removes: true, call: func(_ *testing.T, path string) error {
+			return RemoveRosterFile(path, []byte(lockTestRoster))
+		}},
 		"WriteMinimalNFSServerRoster": {create: true, call: func(_ *testing.T, path string) error {
 			return WriteMinimalNFSServerRoster(path, "nfs1", "ipa.pilot.internal", "admin", "Admin-pass_1")
 		}},
@@ -320,6 +325,14 @@ func TestRosterWritersRefuseALockedRoster(t *testing.T) {
 				if err := tc.call(t, l.link); err != nil {
 					t.Fatalf("unlocked call through the link: %v", err)
 				}
+				if tc.removes {
+					if _, err := os.Lstat(l.target); !os.IsNotExist(err) {
+						t.Fatalf("unlocked call through the link did not remove the roster (lstat err=%v)", err)
+					}
+					l.assertStillALink(t)
+					assertNoRosterTemps(t, l.target)
+					return
+				}
 				after, err := os.ReadFile(l.target)
 				if err != nil || bytes.Equal(after, l.before) {
 					t.Fatalf("unlocked call through the link did not write the roster (err %v)", err)
@@ -380,11 +393,11 @@ func assertNoLockFiles(t *testing.T, target string) {
 // (PR #148 re-review, round 4): a roster this user may not write is
 // refused, as an in-place write always refused it, before any lock file is
 // created (PR #148 review, P2-1: a non-writer's lock files locked the
-// owner out); a roster with another
-// hard link is written in place, so every name sees the new content; a
-// temp file a killed pilot left is swept once stale, and one still fresh is
-// kept; run as root, the owner and group survive, and a new roster gets
-// its directory's owner.
+// owner out); a roster with another hard link is written in place, so
+// every name sees the new content; a temp file a killed pilot left is
+// swept once stale, and one still fresh is kept; run as root, the owner
+// and group survive, and a new roster gets its directory's owner. A writer
+// that removes the roster is held to the refusal and the sweep.
 func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 	if !tc.create {
 		t.Run("read-only roster", func(t *testing.T) {
@@ -401,28 +414,31 @@ func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 			l.assertUntouched(t)
 			assertNoLockFiles(t, l.target)
 		})
-		t.Run("hard link", func(t *testing.T) {
-			l := newLockTestLayout(t, tc)
-			other := filepath.Join(t.TempDir(), "other-name.yaml")
-			if err := os.Link(l.target, other); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.Stat(l.target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := tc.call(t, l.link); err != nil {
-				t.Fatal(err)
-			}
-			after, err := os.Stat(l.target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !os.SameFile(before, after) || !bytes.Equal(mustRead(t, other), mustRead(t, l.target)) || bytes.Equal(mustRead(t, l.target), l.before) {
-				t.Fatal("a roster with another hard link was replaced instead of written in place")
-			}
-			assertNoRosterTemps(t, l.target)
-		})
+		// Removing one name of a roster leaves its other names alone.
+		if !tc.removes {
+			t.Run("hard link", func(t *testing.T) {
+				l := newLockTestLayout(t, tc)
+				other := filepath.Join(t.TempDir(), "other-name.yaml")
+				if err := os.Link(l.target, other); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.Stat(l.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := tc.call(t, l.link); err != nil {
+					t.Fatal(err)
+				}
+				after, err := os.Stat(l.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !os.SameFile(before, after) || !bytes.Equal(mustRead(t, other), mustRead(t, l.target)) || bytes.Equal(mustRead(t, l.target), l.before) {
+					t.Fatal("a roster with another hard link was replaced instead of written in place")
+				}
+				assertNoRosterTemps(t, l.target)
+			})
+		}
 	}
 	t.Run("stale temp files", func(t *testing.T) {
 		l := newLockTestLayout(t, tc)
@@ -452,28 +468,30 @@ func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 			t.Errorf("a fresh temp file was swept: %v", err)
 		}
 	})
-	t.Run("owner kept as root", func(t *testing.T) {
-		requireRoot(t)
-		const uid, gid = 12345, 12346
-		l := newLockTestLayout(t, tc)
-		owned := l.target
-		if tc.create {
-			owned = filepath.Dir(l.target)
-		}
-		if err := os.Chown(owned, uid, gid); err != nil {
-			t.Fatal(err)
-		}
-		if err := tc.call(t, l.link); err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(l.target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
-			t.Fatalf("roster owned by %d:%d after the write, want %d:%d", st.Uid, st.Gid, uid, gid)
-		}
-	})
+	if !tc.removes {
+		t.Run("owner kept as root", func(t *testing.T) {
+			requireRoot(t)
+			const uid, gid = 12345, 12346
+			l := newLockTestLayout(t, tc)
+			owned := l.target
+			if tc.create {
+				owned = filepath.Dir(l.target)
+			}
+			if err := os.Chown(owned, uid, gid); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.call(t, l.link); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(l.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
+				t.Fatalf("roster owned by %d:%d after the write, want %d:%d", st.Uid, st.Gid, uid, gid)
+			}
+		})
+	}
 }
 
 // shortLockContentionWait makes a held lock refuse a writer after 1ms for

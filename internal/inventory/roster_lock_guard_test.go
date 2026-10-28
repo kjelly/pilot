@@ -10,11 +10,24 @@ import (
 	"testing"
 )
 
-// rosterWriteCalls are the calls that put bytes into a file in this
-// package: the secret-source write primitives and the os calls they are
-// built on. os.OpenFile counts when its flags open for writing or creating
+// rosterWriteCalls are the calls that change a file in this package: the
+// secret-source write primitives, the os calls they are built on, and the
+// removals. os.OpenFile counts when its flags open for writing or creating
 // (isRosterWriteCall), so does os.Create.
-var rosterWriteCalls = map[string]bool{"writeLockedRoster": true, "writeSecretSourceFile": true, "os.WriteFile": true, "os.Rename": true, "os.Create": true}
+var rosterWriteCalls = map[string]bool{
+	"writeLockedRoster": true, "writeSecretSourceFile": true,
+	"os.WriteFile": true, "os.Rename": true, "os.Create": true,
+	"os.Remove": true, "os.RemoveAll": true,
+}
+
+// rosterWriteDestination is the argument of a rosterWriteCalls call that
+// names the file it changes: a rename's second, every other call's first.
+func rosterWriteDestination(call *ast.CallExpr) int {
+	if callName(call) == "os.Rename" {
+		return 1
+	}
+	return 0
+}
 
 // rosterWriterExemptions are the only functions here that may write a file
 // without a roster lock. Each must still exist and still write.
@@ -28,6 +41,8 @@ var rosterWriterExemptions = map[string]string{
 	"CreateMinimalInternalEndpointManifest": "writes the internal-endpoints manifest, not a roster",
 	"writeInternalEndpointYAMLDoc":          "writes the internal-endpoints manifest, not a roster",
 	"openRosterForWrite":                    "opens a roster for writing without truncating and writes nothing; only writeLockedRoster writes through the file, under the lock (WriteAt is a raw primitive kept in roster_write.go), and Prepare and the probe only close it",
+	"sweepRosterTemps":                      "removes only temp files a killed pilot left beside the roster (its own .<roster>.pilot-tmp-* names), never the roster; lockRosterFile calls it with the lock held",
+	"decryptedScratchFile":                  "its cleanup removes its own scratch copy of a decrypted roster and the lock files a writer left beside it, never the roster",
 }
 
 // Every roster writer locks the file it changes, however the caller spells
@@ -37,12 +52,13 @@ var rosterWriterExemptions = map[string]string{
 //
 //  1. acquireMutationLock is called only by roster_lock.go: a writer that
 //     took its own sidecar lock would lock its caller's spelling again.
-//  2. A function or method that writes a file (rosterWriteCalls, an
-//     os.OpenFile for writing) calls lockRosterFile or receives the
-//     *rosterLock of a caller that did, and writes that lock's target, or
-//     a path built from it — never the path it was given, which may be a
-//     link, nor any other value's field named target. The exemptions
-//     above are the write primitives and files that are not rosters.
+//  2. A function or method that writes or removes a file
+//     (rosterWriteCalls, an os.OpenFile for writing) calls lockRosterFile
+//     or receives the *rosterLock of a caller that did, and changes that
+//     lock's target, or a path built from it — never the path it was
+//     given, which may be a link, nor any other value's field named
+//     target. The exemptions above are the write primitives and files
+//     that are not rosters.
 //  3. A function holding a roster lock never reaches another lockRosterFile
 //     through this package's calls: the lock is not reentrant, so the
 //     inner call would fail with ErrMutationLocked.
@@ -50,6 +66,8 @@ var rosterWriterExemptions = map[string]string{
 //     and Truncate methods — appear only in roster_write.go, so
 //     writeLockedRoster's policy (replace or write in place, keep the
 //     owner, sweep temp files) is the only one.
+//  5. Only roster_lock.go builds a rosterLock (lockRosterFile), so a
+//     *rosterLock always holds its locks.
 func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -79,6 +97,11 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 			}
 			return true
 		})
+		if path != "roster_lock.go" {
+			for _, pos := range rosterLockLiterals(file) {
+				t.Errorf("%s: a rosterLock built outside roster_lock.go; only lockRosterFile makes one, holding its locks", fset.Position(pos))
+			}
+		}
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
 				funcs[funcName(fn)] = fn
@@ -120,11 +143,7 @@ func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
 		}
 		targets := lockTargetVars(fn, locks)
 		for _, call := range writes {
-			// os.Rename writes its second argument; every other call its first.
-			arg := 0
-			if callName(call) == "os.Rename" {
-				arg = 1
-			}
+			arg := rosterWriteDestination(call)
 			if len(call.Args) <= arg || !isLockTarget(call.Args[arg], locks, targets) {
 				t.Errorf("%s: %s in %s must write the lock's target (lk.target), not the path it was given", fset.Position(call.Pos()), callName(call), name)
 			}
@@ -361,36 +380,67 @@ func lockVars(fn *ast.FuncDecl, lockFields map[string][]string) map[string]bool 
 }
 
 // lockTargetVars returns the local names fn assigns from a lock's target —
-// `target := lk.target`, `path, target := lk.path, lk.target`, or a path
-// built from it such as a backup name — for locks.
+// `target := lk.target`, `path, target := lk.path, lk.target`, a path built
+// from it such as a backup name, or the first result of a call given one,
+// `tmp, err := createRosterTemp(filepath.Dir(target), …)` — for locks.
 func lockTargetVars(fn *ast.FuncDecl, locks map[string]bool) map[string]bool {
 	out := map[string]bool{}
+	derivedFrom := func(expr ast.Expr) bool {
+		derived := false
+		ast.Inspect(expr, func(inner ast.Node) bool {
+			if expr, ok := inner.(ast.Expr); ok && isLockTarget(expr, locks, out) {
+				derived = true
+			}
+			return !derived
+		})
+		return derived
+	}
 	for changed := true; changed; {
 		changed = false
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
 			assign, ok := node.(*ast.AssignStmt)
-			if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			if !ok {
 				return true
 			}
-			for i, rhs := range assign.Rhs {
-				ident, ok := assign.Lhs[i].(*ast.Ident)
+			pairs := map[ast.Expr]ast.Expr{}
+			switch {
+			case len(assign.Lhs) == len(assign.Rhs):
+				for i, rhs := range assign.Rhs {
+					pairs[assign.Lhs[i]] = rhs
+				}
+			case len(assign.Rhs) == 1:
+				// `a, err := f(…)`: only the first result is the file.
+				if _, ok := assign.Rhs[0].(*ast.CallExpr); ok {
+					pairs[assign.Lhs[0]] = assign.Rhs[0]
+				}
+			}
+			for lhs, rhs := range pairs {
+				ident, ok := lhs.(*ast.Ident)
 				if !ok || out[ident.Name] {
 					continue
 				}
-				derived := false
-				ast.Inspect(rhs, func(inner ast.Node) bool {
-					if expr, ok := inner.(ast.Expr); ok && isLockTarget(expr, locks, out) {
-						derived = true
-					}
-					return !derived
-				})
-				if derived {
+				if derivedFrom(rhs) {
 					out[ident.Name], changed = true, true
 				}
 			}
 			return true
 		})
 	}
+	return out
+}
+
+// rosterLockLiterals returns where file builds a rosterLock value: only
+// lockRosterFile may, so every rosterLock a writer holds has its locks.
+func rosterLockLiterals(file *ast.File) []token.Pos {
+	var out []token.Pos
+	ast.Inspect(file, func(node ast.Node) bool {
+		if lit, ok := node.(*ast.CompositeLit); ok {
+			if ident, ok := lit.Type.(*ast.Ident); ok && ident.Name == "rosterLock" {
+				out = append(out, lit.Pos())
+			}
+		}
+		return true
+	})
 	return out
 }
 

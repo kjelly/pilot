@@ -40,7 +40,9 @@ func RestoreRosterFile(path string, expected, original []byte) error {
 }
 
 // RemoveRosterFile is RestoreRosterFile for a roster the session created:
-// path is removed, on the same conditions.
+// the file path names is removed, on the same conditions — the one the
+// lock covers and whose bytes were checked, so a symlinked roster loses
+// its file, not the link (PR #148 review).
 func RemoveRosterFile(path string, expected []byte) error {
 	lk, err := lockRosterFile(path)
 	if err != nil {
@@ -50,7 +52,7 @@ func RemoveRosterFile(path string, expected []byte) error {
 	if err := rosterStillHolds(lk, expected); err != nil {
 		return err
 	}
-	return os.Remove(lk.path)
+	return os.Remove(lk.target)
 }
 
 // HoldRosterLock takes the roster lock on the file path names, for a writer
