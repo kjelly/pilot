@@ -152,12 +152,19 @@ func TestWriteRosterInPlaceReservesRoomFirst(t *testing.T) {
 func TestMutateEncryptedRosterFileReportsTheInstallTruthfully(t *testing.T) {
 	requireAnsibleVault(t)
 	l := newLockTestLayout(t, rosterWriterCase{body: removeFixture, encrypt: true})
-	failRename(t, syscall.EIO)
+	// Only the install fails: the mutation of the decrypted copy succeeds.
+	renameRosterTemp = func(from, to string) error {
+		if to == l.target {
+			return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EIO}
+		}
+		return os.Rename(from, to)
+	}
+	t.Cleanup(func() { renameRosterTemp = os.Rename })
 	err := MutateEncryptedRosterFile(l.link, lockTestVaultPasswordFile(t), func(plaintextPath string) error {
 		return RemoveRosterUser(plaintextPath, "dave", RemoveRosterUserOptions{})
 	})
-	if !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), "left unchanged") || strings.Contains(err.Error(), "untouched") {
-		t.Fatalf("error = %v, want the rename failure saying the roster was left unchanged", err)
+	if !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), "cannot replace it, so it was left unchanged") || strings.Contains(err.Error(), "untouched") {
+		t.Fatalf("error = %v, want the install's rename failure saying the roster was left unchanged", err)
 	}
 	l.assertUntouched(t)
 }
