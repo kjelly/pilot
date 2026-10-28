@@ -47,7 +47,7 @@ Phase 0 交付：
 遠端鎖：
 - 寫入 server 上以 `flock --wait <秒> --conflict-exit-code 75 /etc/ipa sh -c 'echo locked; exec cat'` 持有，鎖到 stdin 關閉或 SSH 中斷為止。
 - 選 `/etc/ipa`，因為它在每台 FreeIPA server 上都存在，且任何 SSH 身分都能以唯讀開啟；不需要建立檔案。共用 `/tmp` 的檔案會受 `fs.protected_regular` 限制。
-- 舊 engine 的入口要在 Phase 2 取得同一把鎖。
+- 目前沒有任何 pilot 入口取這把鎖（只有 `internal/sshdial` 與它的測試呼叫 `AcquireLock`）。啟用混合模式之前（Phase 2 的進入／退出條件），所有會執行 `freeipa-identity-apply.yml` 的 pilot 入口都要取同一把鎖並持有到該次執行結束：`pilot reconcile`／`pilot deploy` 的 identity 項目、`pilot access reconcile --once`（含 `pilot access drift --repair-managed`）、`pilot access breakglass activate`／`deactivate`、`pilot host decommission` 的 identity converge。原因：授權快取義務是 server 上單一布林 `auth_pending`，另一輪完整執行可以在 Go 寫入前清掉它（prepare→settle→refresh→ack），或在 Go 寫入後以舊值覆蓋它（`auth_settle`），Go 的撤銷就不會傳到 client，整輪卻正常結束。手動 `ansible-playbook` 不經 pilot、不取鎖，仍有同樣風險。
 
 ## 3 users／groups 功能對照矩陣
 
@@ -78,7 +78,13 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 
 混合執行時，這些項目仍由舊 playbook 處理（計畫 §5 混合執行模型）。per-user authentication types 雖然是使用者屬性，仍留在舊 playbook，直到 Phase 3 搬移該 section。
 
-Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：Go 的 plan 有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，成功後 Go 才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。
+Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：最終寫入集合有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，Go 觀察到結果才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。契約：
+
+- 入口與 identity playbook 對同一台主機（contract `hostCardinality: exactly-one`）；入口結束碼為 0 不算成功（`no hosts matched` 與被跳過的 task 也可能是 0），要看到該 server 的 `auth_prepare` 結果（`previous`）才算。
+- 本輪持鎖期間入口尚未成功，不送任何寫入 RPC（執行器不變量）。入口的位置在寫入前重讀與重新規劃之後、第一批寫入之前；觸發條件是 plan 有寫入，入口之後才發現無差異時多刷新一次可接受。
+- 入口與 identity playbook 共用三個輸入：journal 路徑（`ipa_identity_ssh_cache_state_file`）、`ipa_domain`、helper 原始碼（`ipa_ssh_cache_program`）。
+- 所有執行 identity playbook 的 pilot 入口都先取 `/etc/ipa` 鎖（見 §2 遠端鎖）。
+- 沒有以會刷新的 playbook run 結尾的 Go 寫入（users/groups-only scope，或 playbook 的 tag 選擇沒有選到 `identity`／`client-cache`）不聲稱已刷新：結果回報授權快取義務未結清並標為 partial，不自行補跑刷新。義務仍留在 server 的 journal，下一次會刷新的 run 清掉它。
 
 ## 4 engine 專屬驗收條件
 

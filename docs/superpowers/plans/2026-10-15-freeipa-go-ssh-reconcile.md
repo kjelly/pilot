@@ -1,6 +1,6 @@
 # 本機 Go 經 SSH tunnel 執行 FreeIPA reconcile 改善計畫
 
-日期：2026-10-15。狀態：設計提案，尚未實作或完成效能驗證。2026-10-15 修訂：架構由「遠端 Go helper」改為「本機 Go 經 SSH tunnel 連 JSON-RPC」。同日再修訂：新增 Phase −1、Phase 2 混合執行模型、test driver 與 spec row 對應檢查、Phase 3 規模與 go/no-go。2026-10-27 修訂：Phase 0 已合併（PR #120）；新增 Phase 1 的 users/groups find 讀取契約（依真實擷取）、與 PR #138 的關係與 SSH key 範圍決定、Phase 1 test driver 可用的非互動入口，以及 vault 讀取方式；同日依 PR #145 review 修正：`user_find` 的 `memberof_group` 含間接群組、#138 授權快取刷新列為 Phase 2 進入條件、SSH key 差異只報告不判定成敗、補擷取 `maxlife=0` admin 重設、key 清除前後與三層巢狀群組。第二輪 review 修正：#138 已於 2026-10-27 合併，相關敘述改為以目前 main 為準；find 契約每一列標出鎖住的測試；授權快取選項 (i) 寫明需在遠端執行 helper 原始碼或自寫 journal，屬遠端規則例外，建議改為 (ii)（待使用者確認）。第三輪 review 修正：(ii) 的測試要求不再互相矛盾，並寫明為何需要專用的 `auth_prepare` 入口；find 契約補上時間戳格式與 SSH key 指紋的斷言。2026-10-28 修訂：授權快取刷新決定採用 (ii)，寫明實作要求，Phase 2 進入條件改為該決定的實作項目。
+日期：2026-10-15。狀態：設計提案，尚未實作或完成效能驗證。2026-10-15 修訂：架構由「遠端 Go helper」改為「本機 Go 經 SSH tunnel 連 JSON-RPC」。同日再修訂：新增 Phase −1、Phase 2 混合執行模型、test driver 與 spec row 對應檢查、Phase 3 規模與 go/no-go。2026-10-27 修訂：Phase 0 已合併（PR #120）；新增 Phase 1 的 users/groups find 讀取契約（依真實擷取）、與 PR #138 的關係與 SSH key 範圍決定、Phase 1 test driver 可用的非互動入口，以及 vault 讀取方式；同日依 PR #145 review 修正：`user_find` 的 `memberof_group` 含間接群組、#138 授權快取刷新列為 Phase 2 進入條件、SSH key 差異只報告不判定成敗、補擷取 `maxlife=0` admin 重設、key 清除前後與三層巢狀群組。第二輪 review 修正：#138 已於 2026-10-27 合併，相關敘述改為以目前 main 為準；find 契約每一列標出鎖住的測試；授權快取選項 (i) 寫明需在遠端執行 helper 原始碼或自寫 journal，屬遠端規則例外，建議改為 (ii)（待使用者確認）。第三輪 review 修正：(ii) 的測試要求不再互相矛盾，並寫明為何需要專用的 `auth_prepare` 入口；find 契約補上時間戳格式與 SSH key 指紋的斷言。2026-10-28 修訂：授權快取刷新決定採用 (ii)，寫明實作要求，Phase 2 進入條件改為該決定的實作項目。2026-10-28 第二次修訂（review 後）：(ii) 補上四項要求。一，混合模式啟用前，所有執行 identity playbook 的 pilot 入口都要取同一把 `/etc/ipa` 遠端鎖，否則另一輪完整執行會清掉或覆蓋 Go 寫入前設定的 `auth_pending`（目前沒有任何 pilot 入口取鎖，這是 Phase 2 的進入／退出條件，不是 Phase 3 的工作）。二，入口必須對 identity playbook 的同一台主機執行，Go 要觀察到該主機的 `auth_prepare` 結果才寫入，且入口與 playbook 共用三個輸入（journal 路徑、`ipa_domain`、helper 原始碼）。三，executor 不變量：本輪鎖內入口尚未成功，就不送任何寫入 RPC；入口位置在寫入前重讀與重新規劃之後。四，Go 寫入後沒有以會刷新的 playbook run 結尾的情形（users/groups-only scope、tag 選擇漏掉刷新），結果必須回報授權快取義務未結清並標為 partial。
 
 目標是將日常 identity reconcile 改為本機 pilot 內的 Go engine：pilot 用系統 OpenSSH 建立到 FreeIPA 寫入 server 的 TCP 轉送，經轉送以 HTTPS 呼叫 FreeIPA JSON-RPC API，用密碼登入取得 session，共用連線、批次讀取現況，只套用實際差異。遠端不安裝或發布任何程式。FreeIPA 安裝與主機設定繼續由現有部署流程負責。
 
@@ -88,7 +88,7 @@ FreeIPA 官方描述了 batch 呼叫；batch 可合併 RPC 往返，本計畫不
 ### 執行流程
 
 1. 載入本次 inventory 與 roster，重用 completeness、stage、staging/prod confirm、attestation 及 grants lifecycle 規則。記錄 desired revision、target identity、FreeIPA server/API version。
-2. 在寫入 server 上取得排他鎖：另開一條 SSH session 以固定指令對固定路徑執行 `flock` 並持有到整輪結束；SSH 中斷時遠端程序結束、鎖釋放。舊 engine 的 pilot 入口在呼叫 ansible-playbook 前取得同一把鎖，因此不同控制主機與 workspace 都互斥。鎖路徑與權限由 Phase 0 決定，須讓所有 pilot 入口使用的 SSH 身分都能取得。手動執行 ansible-playbook 或其他 IPA 管理工具不受鎖控制，仍需處理外部變更。
+2. 在寫入 server 上取得排他鎖：另開一條 SSH session 以固定指令對固定路徑執行 `flock` 並持有到整輪結束；SSH 中斷時遠端程序結束、鎖釋放。目前沒有任何 pilot 入口取這把鎖（只有 `internal/sshdial` 與它的測試呼叫 `AcquireLock`）。Phase 2 在啟用混合模式之前，所有會執行 `freeipa-identity-apply.yml` 的 pilot 入口都必須在呼叫 ansible-playbook 前取得同一把鎖並持有到該次執行結束：`pilot reconcile`／`pilot deploy` 的 `freeipa-identity` 項目（`deployCatalog`）、`pilot access reconcile --once`（含 `pilot access drift --repair-managed`，它呼叫 `ReconcileOnce`）、`pilot access breakglass activate`／`deactivate`、`pilot host decommission` 的 identity converge 步驟。這樣不同控制主機與 workspace 才互斥；這是 (ii) 成立的前提，不是之後再補的相容工作（見 Phase 1「與 PR #138 的關係」(ii) 的實作要求）。唯讀的 tag 執行（`freeipa_host_absent_inspect`、`inspect`）與 `--check` 預覽不執行 `auth_prepare`，不需要這把鎖。鎖路徑與權限由 Phase 0 決定，須讓所有 pilot 入口使用的 SSH 身分都能取得。手動執行 ansible-playbook 或其他 IPA 管理工具不受鎖控制，仍需處理外部變更（對授權快取義務的影響見 (ii) 的殘餘風險）。
 3. 建立 tunnel 與 session。批次讀取 managed users、groups 與所需參照，確認結果完整，產生穩定排序的 plan、操作依賴及去敏 diff。
 4. 在實際套用前重新讀取權威狀態，核對 desired revision、目標、有效時間與 live preconditions。plan 的舊快照只能用於預覽，不可授權 mutation。若變更擴大原計畫或失效，回報 conflict 並重新規劃。
 5. 每批寫入前檢查所需 live preconditions；共用 session 送出有界 batch，逐項判讀錯誤、membership failed/completed 與結果。依賴有先後的操作不能放進依賴伺服器隱含順序的 batch。
@@ -313,7 +313,7 @@ SSH key 範圍的決定：
 
 1. Phase 2 的 Go engine **不接管 SSH key 的變更與 client 快取收斂**，留在舊 playbook，直到 Phase 3 與 client fan-out 一起評估。Go engine 讀取 `ipasshpubkey`，只在 plan 中報告差異；key 的差異不算 Go engine 失敗，也不阻止之後的 playbook 執行。key 的最終驗證是 #138 在 playbook 之後的「every SSH key cache pair converged」gate。
 2. 混合模式的 skip 變數跳過 users／groups 的所有 mutation，**保留** SSH key 區塊與它讀取的 fact（`ipa_active_users` 等）。順序不變：Go 先建立並收斂 users／groups，之後舊 playbook 才處理 SSH key（key 屬於已存在的使用者）。
-3. 鎖：Go engine 持有的 `/etc/ipa` 遠端鎖（§4）正好補上 #138 spec 要求的「操作端互斥」；兩者互補，不是同一把鎖。Phase 2 要測 Go engine 與 #138 journal 同一輪執行時，沒有互相覆蓋對方的寫入。
+3. 鎖：`/etc/ipa` 遠端鎖（§4）補上 #138 spec 要求的「操作端互斥」，但只有在所有執行 identity playbook 的 pilot 入口也取同一把鎖時才成立（目前一個都沒有，見 §4 步驟 2）；兩者互補，不是同一把鎖（#138 的 journal 另有 `<路徑>.lock`，只保護單次 helper 呼叫）。Phase 2 要測 Go engine 與 #138 journal 同一輪執行時，沒有互相覆蓋對方的寫入，並鎖住另一輪完整 identity 執行與混合 run 交錯的情形（見 (ii) 的實作要求）。
 4. 基礎版本：#138 已於 2026-10-27 合併。Phase 1 不改 playbook；Phase 2 對 playbook 的修改以目前 main（含 #138）為基礎。
 5. #138 的 SSH key 比對語意（以 key 本體比較、空清單清除、未宣告不管理）就是 Go engine 日後搬移時要保持的契約；Phase 3 搬移時以 #138 的 spec（main 上的 `docs/superpowers/specs/2026-10-22-ssh-key-cache-convergence.md`）為準，不重新定義。
 
@@ -322,20 +322,43 @@ SSH key 範圍的決定：
 | 選項 | 內容 | 代價與風險 |
 |---|---|---|
 | (i) Go 直接寫遠端 journal | Go 在第一個寫入之前經 SSH 寫入義務。helper 不在主機上，所以只有兩種做法：(i-a) Go 送出同一份 helper 原始碼，以 sudo 執行 `python3 -c <原始碼> auth_prepare <路徑>`；(i-b) Go 自己實作 journal 寫入：對 `<路徑>.lock` 取 `flock`、檢查 `version` 與 `domain`（必須等於 playbook 的 `ipa_domain`，否則下一次 playbook 執行時 helper 會以 `journal domain mismatch` 失敗）、以暫存檔原子替換並 fsync，這仍要在遠端執行一段程式。沒有寫入時不呼叫 | 兩種做法都是本計畫遠端規則的例外：開頭目標段落「遠端不安裝或發布任何程式」、§2「遠端只執行固定的唯讀或鎖指令」、§3「SSH 上只有固定用途」、§7「本方案不需在遠端安裝程式」。另需 Go 的 SSH 身分有 sudo；Go 與 helper 的 journal 格式（version 1、`domain`）需要一致性測試，(i-b) 還多一份要與 Python 同步的實作。有寫入的每輪多一次 SSH 執行，成本小 |
-| (ii) 由 Ansible 在 Go 寫入前記錄 | Go 的 plan 有寫入時，pilot 先以 Ansible 只執行 #138 的 `auth_prepare`，再讓 Go 寫入，最後跑 playbook。Go 不必把結果傳給 `auth_settle`。plan 沒有寫入時不執行這一步 | 遠端程式仍由 Ansible 依 #138 現有方式送出並以 become 執行，Go 的 SSH 規則不變，journal 格式只有 #138 一個擁有者。需要一個只執行 `auth_prepare` 的專用 Ansible 入口：`playbooks/apply/freeipa-identity-apply.yml` 的 task「Prepare legacy authorization cache recovery」（`auth_prepare`，main `ba6e7c0c` 第 934–949 行）與「Settle legacy authorization cache recovery」（`auth_settle`，同版本第 3908–3928 行）都是 `tags: [always]`，條件也相同（非 check mode，且 run tags 與 `['all', 'tagged'] + ipa_identity_cache_recovery_tags` 有交集）。所以用 tag 執行既有 playbook，要嘛 `auth_prepare` 不執行（tag 不在清單內），要嘛同一輪也執行 `auth_settle`；穩態下後者會在 Go 寫入前把 `auth_pending` 設回 false，缺口重新出現。專用入口依 AGENTS.md 帶 stage gate 與 regression；它重複了 `ipa_identity_ssh_cache_state_file` 與 `ipa_domain` 兩個輸入，需要一致性測試（AGENTS.md §5.7），否則義務可能寫進另一個 journal，或讓 helper 以 `journal domain mismatch` 失敗。有寫入的那幾輪多一次 ansible-playbook 啟動，耗時未量測；穩態沒有寫入時為零。寫入前重讀發現已無差異時會多刷新一次，無害 |
+| (ii) 由 Ansible 在 Go 寫入前記錄 | Go 的 plan 有寫入時，pilot 先以 Ansible 只執行 #138 的 `auth_prepare`，再讓 Go 寫入，最後跑 playbook。Go 不必把結果傳給 `auth_settle`。plan 沒有寫入時不執行這一步 | 遠端程式仍由 Ansible 依 #138 現有方式送出並以 become 執行，Go 的 SSH 規則不變，journal 格式只有 #138 一個擁有者。需要一個只執行 `auth_prepare` 的專用 Ansible 入口：`playbooks/apply/freeipa-identity-apply.yml` 的 task「Prepare legacy authorization cache recovery」（`auth_prepare`）與「Settle legacy authorization cache recovery」（`auth_settle`）都是 `tags: [always]`，條件也相同（非 check mode，且 run tags 與 `['all', 'tagged'] + ipa_identity_cache_recovery_tags` 有交集）。所以用 tag 執行既有 playbook，要嘛 `auth_prepare` 不執行（tag 不在清單內），要嘛同一輪也執行 `auth_settle`；穩態下後者會在 Go 寫入前把 `auth_pending` 設回 false，缺口重新出現。專用入口依 AGENTS.md 帶 stage gate 與 regression；它重複了 `ipa_identity_ssh_cache_state_file`、`ipa_domain` 與 helper 原始碼（`ipa_ssh_cache_program`）三個輸入，需要一致性測試（AGENTS.md §5.7），否則義務可能寫進另一個 journal、讓 helper 以 `journal domain mismatch` 失敗，或由不同版本的 helper 寫出 #138 不認得的 journal。它還要求所有執行 identity playbook 的 pilot 入口先序列化（見下方實作要求）：`auth_pending` 只是單一布林，沒有世代，另一輪完整執行可以在 Go 寫入前清掉它，或在 Go 寫入後覆蓋它。有寫入的那幾輪多一次 ansible-playbook 啟動，耗時未量測；穩態沒有寫入時為零。寫入前重讀發現已無差異時會多刷新一次，無害 |
 | (iii) Go 的本機 run journal 記錄義務 | Go 在本機 journal 記錄「有授權寫入、尚未刷新」，傳給 playbook 強制刷新，成功後清除 | 不需要遠端權限；但義務只存在發起的控制主機上，之後從另一台工作站或另一個 workspace 執行就看不到，中斷後可能永遠不刷新 |
+| (iv) 在 helper 的 `auth_pending` 加世代（備案，未採用） | `auth_prepare` 回傳並遞增世代，`auth_settle`／`auth_ack` 只在世代未變時清除；另一輪完整執行就不能清掉或覆蓋較新的義務，手動 `ansible-playbook` 也受保護 | 要改 #138 的 helper、journal 格式與 playbook 傳遞世代的方式，重跑 #138 的 live 矩陣，Python 端單一擁有者仍成立但範圍超出本計畫目前階段。目前以序列化（鎖）取代；若手動執行的殘餘風險不可接受，或鎖的覆蓋範圍證明做不到，改採這個選項並另行記錄 |
 
 決定 (ii)（2026-10-28 使用者確認）：義務和 #138 一樣存在 FreeIPA 主機上，不因控制主機不同而遺失；不需要讓本計畫的遠端規則出現例外，也不需要 Go 有 sudo；journal 格式只有 #138 一個擁有者；穩態沒有寫入時零成本。(iii) 因義務不跨控制主機而不採用；(i) 保留為備案：Phase 2 量測後，若多一次 Ansible 啟動在正式環境不可接受，才以明確的規則例外改採 (i)，並另行記錄該決定。
 
+(ii) 的保證成立有一個前提：義務是 FreeIPA 主機上的單一布林 `auth_pending`。helper 的 `auth_prepare` 把它設為 true 並回傳前一次的值；`auth_settle` 把它覆寫為「前一次的值或本輪有變更」；`auth_ack` 無條件清除，沒有世代或持有者的檢查（`playbooks/apply/files/freeipa-ssh-key-cache.py`，已對 main `ff32bf63` 核對）。所以兩輪交錯會丟掉 Go 的義務，而且整輪正常結束、沒有任何錯誤：
+
+- **S7**：混合 run 的入口把 `auth_pending` 設為 true；Go 寫入前，另一輪完整執行完成 prepare（讀到前一次為 true）→ settle（dirty）→ refresh → ack，把它清成 false。之後 Go 寫入，混合 run 的 playbook 的 prepare 讀到 false，其餘 section 也沒有變更時，settle 判定不 dirty，client 不刷新。
+- **S8**：另一輪完整執行的 prepare 早於入口（讀到 false）；入口與 Go 寫入完成後，它的 settle 才執行，把 `auth_pending` 覆寫為「它的 prepare 讀到的 false 或它自己這輪的變更」，沒有變更就是 false，Go 的義務同樣被丟掉。
+
+用 #138 單獨運作時不會發生，因為一輪自己的變更一定由同一輪的 settle 看到；(ii) 讓義務由入口寫、Go 的寫入不經過任何 playbook register，才引入這個交錯。因此 (ii) 的實作要求包括序列化，見下。
+
 (ii) 的實作要求：
 
-- 專用入口只執行 `auth_prepare`，不能以 tag 執行既有 playbook（理由見上表）。`auth_prepare` 只寫 journal 檔，入口不需要 kinit。
-- 入口在 pilot 同一次 run 的 `/etc/ipa` 遠端鎖（§4 步驟 2）之下執行，帶 AGENTS.md §4.3 的 stage gate，並有 regression test。
-- journal 路徑（`ipa_identity_ssh_cache_state_file`）與 `ipa_domain` 和 identity playbook 取自同一來源，或以一致性測試鎖住兩邊相同（AGENTS.md §5.7）。
-- 順序：Go 的 plan 有寫入時，先執行入口，成功後 Go 才寫入，最後執行 playbook；入口失敗時 Go 不寫入。Go 在入口之後失敗或有 unknown 結果時不執行 playbook（§5 混合執行模型），義務留在 journal，下一次執行 playbook 時刷新。
+- 專用入口只執行 `auth_prepare`，不能以 tag 執行既有 playbook（理由見上表）。`auth_prepare` 只寫 journal 檔，入口不需要 kinit。preview（`--check`）不執行入口；入口不能被 check mode 以外的條件跳過。
+- **入口必須對 identity playbook 的同一台主機執行，Go 要看到結果才寫入。** identity playbook 的 hosts 是 `{{ target_group | default('freeipa-server') }}`，contract `freeipa-identity` 宣告 `hostCardinality: exactly-one`。Ansible 在沒有比對到任何主機（`skipping: no hosts matched`）或 task 被複製來的 `when:` 跳過時仍可能以 0 結束，所以「入口結束碼為 0」不能證明義務已寫入。入口與 identity playbook 使用同一份 inventory、同一個 `target_group` 解析（包含 vm-target 的 `-e target_group=all`）與同一個 `--limit`，並在入口內 assert 剛好一台主機，且等於 Go 持鎖並連線的 server（以 inventory 名稱或 FreeIPA 解析出的 FQDN 判斷，不用 `ansible_host`，AGENTS.md §5.13）。入口對每台主機輸出固定格式、機器可讀的 `auth_prepare` 結果（`previous` 為布林）；Go 只在解析到該 server 的這筆結果之後才寫入。沒有這筆結果、結果來自別台主機、或出現多台主機，一律視為入口失敗，Go 不寫入。
+- **序列化：混合模式啟用前，所有執行 `freeipa-identity-apply.yml` 的 pilot 入口都取同一把 `/etc/ipa` 遠端鎖。** 名單見 §4 步驟 2（`pilot reconcile`／`pilot deploy` 的 identity 項目、`pilot access reconcile --once` 與 drift repair、breakglass `activate`／`deactivate`、`pilot host decommission` 的 identity converge）。混合 run 在自己的鎖之下執行入口、Go 寫入與 playbook，不再經由上述入口的取鎖包裝重新取鎖（同一把鎖不可重入，會死鎖）。這是 Phase 2 的進入／退出條件，不是 Phase 3 的工作：沒有它，S7、S8 會讓 Go 的撤銷不傳到 client。regression test 必須鎖住 S7 與 S8 兩種交錯（見下）。殘餘風險：鎖只約束 pilot 入口；手動 `ansible-playbook`（或其他不經 pilot 的執行）不取鎖，同樣可以在混合 run 的入口之後清掉或覆蓋 `auth_pending`，丟掉的不只是中斷留下的義務，也包括一次已完成的 Go 寫入的刷新。文件與 `pilot` 輸出都要寫明這個前提。備案是上表的 (iv)。
+- **共用輸入：三個，不是兩個。** journal 路徑（`ipa_identity_ssh_cache_state_file`，預設 `/var/lib/pilot-identity/ssh-cache.json`）、`ipa_domain`（`freeipa_domain | default('ipa.pilot.internal')`）、helper 原始碼（`ipa_ssh_cache_program`，即 `playbook_dir ~ '/files/freeipa-ssh-key-cache.py'` 的 lookup）。三者取自同一來源，或以一致性測試鎖住兩邊相同（AGENTS.md §5.7）。入口放在同一個目錄、讀同一個 helper 檔最直接；若另有副本，測試要比對位元組。
+- **執行器不變量（不是測試用語）：本輪持鎖期間入口尚未成功，就不送出任何寫入 RPC。** 入口結果是這一輪的狀態；寫入層（`user_add`、`user_mod`、`user_del`、`passwd`、`group_*`、membership 與含寫入的 batch）在沒有它時拒絕送出。觸發條件是「plan 有寫入」，不是「實際有送出寫入」：
+  - 入口的位置在 §4 步驟 4 的寫入前重讀與重新規劃**之後**、步驟 5 第一批寫入**之前**，使用最終的寫入集合判斷。第一次 plan 沒有寫入、入口因此被跳過，之後重讀或重新規劃才產生寫入時，入口在那時執行，仍先於第一個寫入。
+  - 入口之後才發現已無差異（S6：入口執行了、Go 沒有寫入）是可接受的，多刷新一次無害。plan 一開始就沒有寫入、重讀後也沒有時，不執行入口。
+  - 入口與第一批寫入之間隔著一次 ansible-playbook 啟動；步驟 5 每批寫入前的 live preconditions 檢查涵蓋這段時間內的外部變更，不因入口已成功而省略。
+  - 入口失敗時 Go 不寫入。Go 在入口之後失敗或有 unknown 結果時不執行 playbook（§5 混合執行模型），義務留在 journal，下一次執行 playbook 時刷新；這一輪的結果必須告知義務未結清（見下一點）。
+- **沒有以會刷新的 playbook run 結尾的 run，不聲稱授權快取已刷新。** 兩種情形：users/groups-only 的 opt-in scope（Phase 2 工作項）完全不執行 playbook；或混合 run 的 playbook tag 選擇沒有選到刷新。後者的條件是：`Prepare`／`Settle legacy authorization cache recovery` 與 #138 的「Report deferred authorization cache refresh」都以 run tags 與 `['all', 'tagged'] + ipa_identity_cache_recovery_tags` 有交集為條件，刷新與 ack 的 task 帶 `identity`、`client-cache`；沒有交集時整段（含提示）都不執行，playbook 不會告訴操作者。這兩種情形下 scope 的處理方式選**回報並標為 partial，不自己執行 settle／刷新／ack**：結果附上「授權快取義務未結清，client 在 SSSD 快取過期前可能仍沿用舊授權；下一次選到 `identity` 或 `client-cache` 的 apply 或完整 apply 會刷新所有 enrolled client」，delivery history 與 webhook 記為 partial（名稱沿用既有 partial 語意，由 Phase 2 spec 決定），不是 success。理由：opt-in scope 的定義就是不執行舊 playbook、不宣稱整份 identity 已 reconcile；在 scope 內補跑刷新，等於把 Phase 3 的 client fan-out 與 deferred host 契約提前搬進來，而且得靠 tag 選擇去挑 `auth_prepare`／`auth_settle`／refresh／`auth_ack`，這正是 AGENTS.md §4.4 反覆出事的地方，目前沒有實跑證據；義務已持久化在 journal，報告不會讓它遺失。需要立即生效的撤銷，操作者改跑會刷新的 run。Phase 2 實跑後若證明 `--tags client-cache` 可安全完成 settle／刷新／ack，再改成自動補跑並另行記錄。
 - Phase 2 量測入口的耗時，與整輪時間分開呈現。
 
-混合模式的 regression test 與 live 測試必須涵蓋：Go 移出群組成員、停用、刪除使用者而 HBAC／sudo／hosts 沒有變更時，client 仍被刷新；Go 寫入後、playbook 開始前中斷，下一輪即使 Go 沒有寫入也會刷新；只執行 `auth_prepare` 的額外步驟在 Go 有寫入時執行，且只在那時執行。client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的義務、且 playbook 其餘 section 也沒有變更時（`auth_settle` 以「前一次的 `auth_pending` 或本輪有變更」判定）。
+混合模式的 regression test 與 live 測試必須涵蓋：
+
+- Go 移出群組成員、停用、刪除使用者而 HBAC／sudo／hosts 沒有變更時，client 仍被刷新；Go 寫入後、playbook 開始前中斷，下一輪即使 Go 沒有寫入也會刷新。
+- 入口的觸發條件是 plan 有寫入，不是實際送出寫入：plan 有寫入時入口先於第一個寫入 RPC 執行；plan 沒有寫入時不執行入口；入口執行後才發現已無差異（S6）時，入口執行過、Go 沒有寫入、多刷新一次可接受；第一次 plan 沒有寫入但重讀／重新規劃後產生寫入時，入口在第一個寫入之前執行。
+- 執行器不變量：用記錄寫入的假 RPC 客戶端，入口尚未成功（未執行、失敗、結果來自別台主機、多台主機回報、被 `when:` 跳過、`no hosts matched`）時，任何寫入都被拒絕、沒有寫入送出。這些入口失敗案例要用真實 ansible-playbook 的輸出（結束碼 0 的 `no hosts matched`）擷取，不手寫格式（AGENTS.md §5.6）。
+- 序列化：用真實 helper 與暫存 journal 重現 S7 與 S8，確認沒有序列化時 `auth_pending` 確實被丟掉（先把鎖拿掉，確認測試會 fail，AGENTS.md §5.7）；再確認名單內每個 pilot 入口都在呼叫 ansible-playbook 之前取得 `/etc/ipa` 鎖（取鎖與 runner 的呼叫順序），且第二個同時執行的入口等不到鎖時不呼叫 ansible-playbook；混合 run 在自己的鎖之下執行 playbook，沒有重複取鎖。這項測試與入口位置的測試是 Phase 2 的退出條件，要在任何 live 混合測試之前就通過。
+- 三個共用輸入的一致性測試（journal 路徑、`ipa_domain`、helper 原始碼）。
+- 沒有刷新的 run：users/groups-only scope 成功寫入後結果標 partial 並列出義務未結清；混合 run 的 tag 選擇漏掉刷新時同樣；Go 在入口之後失敗時結果仍告知義務未結清。
+
+client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的義務、且 playbook 其餘 section 也沒有變更時（`auth_settle` 以「前一次的 `auth_pending` 或本輪有變更」判定）；上述序列化前提成立時才適用。
 
 #### Phase 1 工作項
 - [ ] 實作完整性判斷、正規化、差異與依賴排序，先僅提供 preview/shadow comparison。
@@ -348,26 +371,27 @@ SSH key 範圍的決定：
 
 ### Phase 2 使用者與群組 MVP
 
-進入條件：Phase 1 的退出條件。授權快取刷新已於 2026-10-28 決定採用 (ii)（Phase 1「與 PR #138 的關係」），不再是待決項目；它的實作列為本階段的工作項。
+進入條件：Phase 1 的退出條件。授權快取刷新已於 2026-10-28 決定採用 (ii)（Phase 1「與 PR #138 的關係」），不再是待決項目；它的實作列為本階段的工作項。(ii) 要求所有執行 identity playbook 的 pilot 入口先序列化，這是本階段的進入／退出條件：下面「所有舊入口取鎖」工作項完成，並有 S7、S8 的 regression test，才能啟用混合模式或做任何 live 混合測試。
 
 - [ ] 實作使用者屬性、enabled state、群組及直接／巢狀 membership 差異更新。SSH key 的變更與 client 快取收斂不在本階段（見 Phase 1「與 PR #138 的關係」；Go 只讀取 key，在 plan 中報告差異，不以此判定成敗）。
-- [ ] 依 (ii) 實作只執行 #138 `auth_prepare` 的專用 Ansible 入口（實作要求見 Phase 1「與 PR #138 的關係」），讓 Go 的 users／groups 寫入照樣觸發 #138 的 client 刷新，包括寫入後中斷的情形；量測入口耗時。
+- [ ] 讓所有執行 `freeipa-identity-apply.yml` 的 pilot 入口先取得 `/etc/ipa` 遠端鎖（名單見 §4 步驟 2）並鎖住 S7、S8 交錯的 regression test。啟用混合模式前必須完成；目前沒有任何入口取鎖。
+- [ ] 依 (ii) 實作只執行 #138 `auth_prepare` 的專用 Ansible 入口（實作要求見 Phase 1「與 PR #138 的關係」：同一台主機並觀察結果、三個共用輸入、入口位置與寫入前不變量），讓 Go 的 users／groups 寫入照樣觸發 #138 的 client 刷新，包括寫入後中斷的情形；量測入口耗時。
 - [ ] 保留群組 durable history marker、使用者 absent/preserved lifecycle、managed ownership 與相關刪除保護；未完成的 destructive 操作先拒絕。
 - [ ] 完成密碼初始化／明確重設、unknown 結果、journal 與恢復流程。
-- [ ] 提供明確 opt-in 的 users/groups scope；其它 section 只作參照，不宣稱整份 identity 已 reconcile。全量入口遇到未支援功能必須在任何寫入前拒絕，不能靜默略過。
+- [ ] 提供明確 opt-in 的 users/groups scope；其它 section 只作參照，不宣稱整份 identity 已 reconcile。全量入口遇到未支援功能必須在任何寫入前拒絕，不能靜默略過。這個 scope 不執行 playbook，Go 有寫入時結果標 partial 並回報授權快取義務未結清（見 (ii) 的實作要求），不聲稱 client 已刷新。
 - [ ] 實作下述混合執行模型。
 
-退出條件：新增、修改、撤銷、外部 drift 修復、第二輪零 mutation、失敗重跑均通過 live target；達成 users/groups 的效能目標；混合執行的全量 run 通過 live target，且其後以舊 engine 全量重跑時 users/groups 相關 task 為 changed=0。
+退出條件：所有執行 identity playbook 的 pilot 入口已取同一把鎖並有 S7、S8 regression test；新增、修改、撤銷、外部 drift 修復、第二輪零 mutation、失敗重跑均通過 live target；達成 users/groups 的效能目標；混合執行的全量 run 通過 live target，且其後以舊 engine 全量重跑時 users/groups 相關 task 為 changed=0。
 
 #### 混合執行模型
 
 Phase 2 之後、各 section 搬移完成之前，全量 identity reconcile 以混合方式執行。否則全量 run 仍會跑舊 playbook 的 users/groups 迴圈，實際耗時不會下降。
 
 - 一次 pilot run 只持有一把鎖（§4 步驟 2），涵蓋兩個 engine。
-- 順序：Go 的 plan 有寫入時，先執行只跑 `auth_prepare` 的入口（Phase 1「與 PR #138 的關係」的 (ii)）；再由 Go engine 套用並驗證 users/groups，最後執行舊 playbook 的其餘 section。HBAC、sudo、netgroup 等會引用使用者與群組，必須排在後面。
+- 順序：取鎖、讀取、規劃、寫入前重讀（§4 步驟 2–4）；最終寫入集合有寫入時，先執行只跑 `auth_prepare` 的入口（Phase 1「與 PR #138 的關係」的 (ii)），並觀察到 identity server 的結果；再由 Go engine 套用並驗證 users/groups，最後執行舊 playbook 的其餘 section。入口成功之前不送任何寫入 RPC。HBAC、sudo、netgroup 等會引用使用者與群組，必須排在後面。
 - 舊 playbook 以明確變數（擬議名稱 `identity_users_groups_engine=go`）跳過 users/groups 的 mutation task，不用 `--skip-tags users,groups`：帶這些 tag 的 task 也設定後續 section 讀取的 fact（例如 `ipa_active_users`），依 AGENTS.md §4.4，跳過 setter 會讓 reader 讀到未定義值。
-- SSH key 的變更與 SSSD 收斂（PR #138 加入的區塊）不屬於被跳過的 mutation：它留在舊 playbook，排在 Go engine 之後。#138 的授權快取 `auth_prepare`／`auth_settle`／refresh／`auth_ack` 也照常執行；Go 寫入前由 (ii) 的入口設定的 `auth_pending` 讓它判定 dirty（見 Phase 1「與 PR #138 的關係」）。
-- regression test 鎖住：設定該變數時，users/groups 沒有任何 mutation task 執行（SSH key 區塊除外）、後續需要的 fact 仍被設定、其餘 section 的 task 不變；在帶 `--tags` 的 run 下也要成立。另鎖住授權快取：Go 有 users／groups 寫入、其餘 section 沒有變更時，client 仍被刷新；Go 寫入後中斷，下一輪仍會刷新。
+- SSH key 的變更與 SSSD 收斂（PR #138 加入的區塊）不屬於被跳過的 mutation：它留在舊 playbook，排在 Go engine 之後。#138 的授權快取 `auth_prepare`／`auth_settle`／refresh／`auth_ack` 也照常執行；Go 寫入前由 (ii) 的入口設定的 `auth_pending` 讓它判定 dirty（見 Phase 1「與 PR #138 的關係」）。前提是整輪（入口、Go、playbook）都在同一把 `/etc/ipa` 鎖之下，且 playbook 的 tag 選擇會刷新；否則結果標 partial 並回報義務未結清。
+- regression test 鎖住：設定該變數時，users/groups 沒有任何 mutation task 執行（SSH key 區塊除外）、後續需要的 fact 仍被設定、其餘 section 的 task 不變；在帶 `--tags` 的 run 下也要成立。另鎖住授權快取：Go 有 users／groups 寫入、其餘 section 沒有變更時，client 仍被刷新；Go 寫入後中斷，下一輪仍會刷新；另一輪完整執行的 S7、S8 交錯不會丟掉義務（鎖）；沒有刷新的 run 標 partial。完整清單見 (ii) 的測試要求。
 - Go engine 失敗或有 unknown 結果時，不執行舊 playbook。Go 在 plan 中報告的 SSH key 差異不算失敗。舊 playbook 失敗時，run 回報 partial：users/groups 已提交、其餘 section 失敗；兩者都是 reconciler，修正後重跑即可。
 - delivery history 與 webhook 是同一筆 run，分別記錄兩個 engine 的結果；兩者都成功才算成功。
 - 相容性驗證：混合 run 之後，再以舊 engine 全量執行一次，users/groups 相關 task 必須 changed=0。不為 0 代表兩個 engine 對 desired state 的解讀不同，啟用混合模式前須查明原因。
@@ -393,7 +417,7 @@ Phase 3 等於把現有 identity playbook 的其餘部分改寫成 Go。2026-10-
 
 - [ ] 搬移 host/hostgroup/netgroup、HBAC、sudo 與 commands/options/run-as、automount、帳號到期、password policy、authentication types/indicators、grants 與 prune state。
 - [ ] 保留 HBAC break-glass／allow_all 防護、IPA server/replica auth-indicator guard、host 刪除前 service/授權參照與 DNS ownership 驗證。
-- [ ] 檢查 [accessgrants](../../../internal/accessgrants/reconcile.go)、[history probes](../../../internal/freeipa/probe.go)、gateway scope、decommission 及所有舊 identity 呼叫者；維持共用契約與跨入口鎖，避免兩套 writer 同時執行。
+- [ ] 檢查 [accessgrants](../../../internal/accessgrants/reconcile.go)、[history probes](../../../internal/freeipa/probe.go)、gateway scope、decommission 及所有舊 identity 呼叫者；維持共用契約；跨入口鎖已是 Phase 2 啟用混合模式的條件（§4 步驟 2），這裡只確認新搬移 section 的呼叫者沒有繞過它，避免兩套 writer 同時執行。
 - [ ] client SSSD refresh 與中央 reconcile 分別計時（SSH key 的部分已由 PR #138 實作，搬移時以其 spec 為準），沿用 availability/deferred host 契約；若要求立即 client 生效，對受影響主機做有界 SSH fan-out，逐台記錄結果。中央成功但 client refresh 失敗須回報 partial，並測試真實 allow/deny，不以清快取代替正確性驗證。
 
 退出條件：全部支援的 roster 能力、既有 lifecycle 入口及實際登入／sudo 正反案例通過，才允許完整 identity 切換。
