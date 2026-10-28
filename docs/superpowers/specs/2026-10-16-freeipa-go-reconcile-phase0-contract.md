@@ -78,7 +78,7 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 
 混合執行時，這些項目仍由舊 playbook 處理（計畫 §5 混合執行模型）。per-user authentication types 雖然是使用者屬性，仍留在舊 playbook，直到 Phase 3 搬移該 section。
 
-Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形；做法尚待使用者決定，是 Phase 2 的進入條件（計畫 Phase 1「與 PR #138 的關係」）。
+Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：Go 的 plan 有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，成功後 Go 才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。
 
 ## 4 engine 專屬驗收條件
 
