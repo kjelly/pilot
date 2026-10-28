@@ -72,6 +72,10 @@ type rollbackReport struct {
 // file at a time however many managed names it has (a .vault/ symlink and
 // its target, or hard links of one file):
 //
+//   - A .vault/ file the apply's snapshot does not have, with no write of
+//     the session's, is another writer's roster when it looks like one now
+//     (foreignNewRosters): it goes through the cases below, so it is kept
+//     (or left, when it appeared while a step ran) rather than removed.
 //   - Back to its pre-apply bytes, or never changed: nothing to do.
 //   - No write of the session's and not changed while a step ran: another
 //     writer's change, kept as it is (kept).
@@ -120,9 +124,9 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 	// Rosters, a file at a time: their names grouped by the file they
 	// name (inventory.RosterFileKey: one file however many symlinks or hard
 	// links name it, the key the journal records its writes under), in
-	// RelPath order. A file is a roster by what the apply knew before it ran
-	// and what its journal recorded, never by the bytes it holds now
-	// (rosterFile).
+	// RelPath order. A file is a roster by what the apply knew before it ran,
+	// what its journal recorded, and — for a file the snapshot does not
+	// have — whether it is another writer's roster now (rosterFile).
 	var rels []string
 	for _, e := range snapshot {
 		rels = append(rels, e.RelPath)
@@ -148,10 +152,22 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 		}
 		files[file] = append(files[file], rel)
 	}
+	// A file the apply's snapshot does not have may still be another
+	// process's roster, created while the apply ran (foreignNewRosters).
+	var created []managedFileEntry
+	for _, e := range current {
+		if _, ok := wanted[e.RelPath]; !ok {
+			created = append(created, e)
+		}
+	}
+	known := foreignNewRosters(dir, created)
+	for rel := range session.rosters {
+		known[rel] = true
+	}
 	roster := map[string]bool{}
 	var rosterOrder []string
 	for _, file := range order {
-		if rosterFile(files[file], session.writes[file], session.rosters) {
+		if rosterFile(files[file], session.writes[file], known) {
 			rosterOrder = append(rosterOrder, file)
 			for _, rel := range files[file] {
 				roster[rel] = true
@@ -283,18 +299,20 @@ func secretEntry(wanted, now *managedFileEntry) bool {
 }
 
 // rosterFile reports whether the .vault/ file the names rels reach is a
-// roster for the rollback, decided from what the apply knew before it ran and
-// what it recorded, never from the bytes the file holds now (a vault edit
-// can make any file look like one): a file that existed before the apply and
-// was a roster then (rosterNamesBeforeApply), or one the apply's journal
-// recorded a write to (writes). A file the session created and never wrote
-// through a roster writer is a plain one, and is removed.
-func rosterFile(rels []string, writes []inventory.RosterWrite, before map[string]bool) bool {
+// roster for the rollback: one the apply's journal recorded a write to
+// (writes), or one in known — a file that was a roster before the apply ran
+// (rosterNamesBeforeApply), or a new file that is another writer's roster
+// (foreignNewRosters). It is never decided from the bytes a file holds
+// because of what the session made of it (a vault edit can make any file
+// look like one). A file the session created, never wrote through a roster
+// writer and that is no other writer's roster is a plain one, and is
+// removed.
+func rosterFile(rels []string, writes []inventory.RosterWrite, known map[string]bool) bool {
 	if len(writes) > 0 {
 		return true
 	}
 	for _, rel := range rels {
-		if before[rel] {
+		if known[rel] {
 			return true
 		}
 	}
@@ -302,14 +320,37 @@ func rosterFile(rels []string, writes []inventory.RosterWrite, before map[string
 }
 
 // rosterNamesBeforeApply returns the RelPaths of the snapshot's .vault/ files
-// that are rosters before an apply on dir runs: those that are ansible-vault
-// encrypted (a session's automation never writes one), those with a
-// roster-shaped top-level key holding a mapping or a list rather than a
-// scalar (the vault editor writes only scalars, so a plain vault file does
-// not look like that), and those the workspace names as its roster — the
-// editor's default .vault/ipa-identity.yaml or a freeipa_roster_file — which
-// may hold only scalars. Every name of a file that is one is listed.
+// that are rosters before an apply on dir runs (rosterLike).
 func rosterNamesBeforeApply(dir string, snapshot []managedFileEntry) map[string]bool {
+	return rosterLike(dir, snapshot)
+}
+
+// foreignNewRosters returns the RelPaths of the .vault/ files in created —
+// the files the apply's snapshot does not have — that belong to another
+// writer rather than to the session, decided from what they hold now
+// (rosterLike), since no snapshot says what they were: a roster that
+// `pilot roster`, `pilot access` or decommission created in .vault/ while
+// the apply ran must not be removed with the files the session created.
+// The only .vault/ file the session can create without a journaled roster
+// write is a plain one the vault editor wrote, with scalar values; so a new
+// file that is encrypted, holds a roster-shaped mapping or list, or is a
+// roster the workspace names now is kept. A file the vault editor created
+// under the default roster name .vault/ipa-identity.yaml, with only scalars,
+// is kept too: pilot cannot tell it from a roster another process created
+// there, and keeping a file is the safe error.
+func foreignNewRosters(dir string, created []managedFileEntry) map[string]bool {
+	return rosterLike(dir, created)
+}
+
+// rosterLike returns the RelPaths of entries' .vault/ files that look like
+// rosters: those that are ansible-vault encrypted (a session's automation
+// never writes one), those with a roster-shaped top-level key holding a
+// mapping or a list rather than a scalar (the vault editor writes only
+// scalars, so a plain vault file does not look like that), and those the
+// workspace names as its roster — the editor's default
+// .vault/ipa-identity.yaml or a freeipa_roster_file, as it is now — which
+// may hold only scalars. Every name of a file that is one is listed.
+func rosterLike(dir string, entries []managedFileEntry) map[string]bool {
 	referenced := map[string]bool{}
 	for _, path := range rosterCandidates(dir, "", referencedRosterFiles(dir, "")) {
 		if key, err := inventory.RosterFileKey(path); err == nil {
@@ -317,7 +358,7 @@ func rosterNamesBeforeApply(dir string, snapshot []managedFileEntry) map[string]
 		}
 	}
 	out := map[string]bool{}
-	for _, e := range snapshot {
+	for _, e := range entries {
 		if !e.IsSecret {
 			continue
 		}

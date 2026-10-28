@@ -365,7 +365,11 @@ pilot 開始記錄這個 workspace `.vault/` 名冊（含 `.vault/` 裡 symlink 
 檔不會這樣）、或是這個 workspace 指定的名冊（預設的 `.vault/ipa-identity.yaml` 與每個 `freeipa_roster_file`
 指到的檔案，內容可以只有 scalar）；或者這次 apply 的紀錄裡有對它的寫入（這次建立的名冊也在內）。其他 `.vault/`
 檔案（例如 `main.yaml`，即使這次 apply 加了 `groups` 之類的 key）不是名冊，一律還原成 apply 前的內容；這次建立、
-紀錄裡沒有寫入的 `.vault/` 檔案直接移除。加密的非名冊檔（例如 `keycloak.yaml`）照名冊的方式處理，因為這次 apply
+紀錄裡沒有寫入的 `.vault/` 檔案，如果是別的 `pilot` 操作（`pilot roster add-user`、`pilot access`、decommission）在 apply 期間
+建立的名冊，就**不移除**：依現在的內容判斷（加密、名冊專屬 key 是 mapping/list、或是 workspace 現在指定的名冊，
+含預設 `.vault/ipa-identity.yaml`），保留並列入 warnings，在某一步執行期間出現的則留給人工檢查；只有 scalar-only、
+非指定名冊的新檔案（vault 編輯唯一能建立的）直接移除。保守的邊界：vault 編輯以預設名稱 `ipa-identity.yaml` 建立只有
+scalar 的檔案，與別人建立的名冊無法區分，也會保留。加密的非名冊檔（例如 `keycloak.yaml`）照名冊的方式處理，因為這次 apply
 不會寫它：它在某一步執行期間被其他操作改過就保留給人工檢查。
 
 名冊依下列規則處理：
