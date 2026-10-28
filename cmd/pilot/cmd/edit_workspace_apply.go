@@ -107,6 +107,10 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		return nil, err
 	}
 	defer journal.Close()
+	// Which of those files are rosters, as the workspace is before the
+	// scenario runs: the rollback must not take a file for one because of
+	// what the session made of it.
+	rosters := rosterNamesBeforeApply(dir, snapshot)
 	// Which .vault/ files changed while a step ran, by anyone: a roster
 	// that did without a recorded write cannot be attributed.
 	touched, last := map[string]bool{}, map[string][]byte{}
@@ -135,7 +139,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	if runErr != nil {
 		// The rollback's own writes are not the session's.
 		journal.Close()
-		report, restoreErr := restoreManagedFiles(dir, snapshot, &sessionRosterWrites{writes: journal.Writes(), touched: touched})
+		report, restoreErr := restoreManagedFiles(dir, snapshot, &sessionRosterWrites{writes: journal.Writes(), touched: touched, rosters: rosters})
 		if restoreErr != nil {
 			return nil, fmt.Errorf("apply failed (%v) and rollback also failed: %w", runErr, restoreErr)
 		}
@@ -144,7 +148,11 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 			if len(report.notes) > 0 {
 				kept = "; kept: " + strings.Join(report.notes, "; ")
 			}
-			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s; check each by hand — it may hold this apply's changes, another pilot process's, or both — and make sure its freeipa.admin.password equals .vault/main.yaml's ipa_admin_password%s", runErr, strings.Join(report.left, ", "), kept)
+			passwordCheck := ""
+			if report.leftPlaintext {
+				passwordCheck = " — and make sure each plaintext roster's freeipa.admin.password equals .vault/main.yaml's ipa_admin_password"
+			}
+			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s; check each by hand — it may hold this apply's changes, another pilot process's, or both%s%s", runErr, strings.Join(report.left, ", "), passwordCheck, kept)
 		}
 		afterRollback, err := managedFileEntries(dir)
 		if err != nil {

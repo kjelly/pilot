@@ -22,18 +22,24 @@ import (
 	"sort"
 	"strings"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
-// sessionRosterWrites is what an apply knows about its own writes to its
-// .vault/ files: every roster write writeLockedRoster recorded while the
-// session ran (inventory.RosterJournal.Writes, by canonical path), and the
-// files whose bytes changed while a step ran (noteSessionWrites, by
-// RelPath) — by the session or by anyone else.
+// sessionRosterWrites is what an apply knows about its .vault/ files: the
+// ones that were rosters before it ran (rosters), every roster write
+// writeLockedRoster recorded while the session ran
+// (inventory.RosterJournal.Writes, by roster key), and the files whose bytes
+// changed while a step ran (noteSessionWrites, by RelPath) — by the session
+// or by anyone else.
 type sessionRosterWrites struct {
 	writes  map[string][]inventory.RosterWrite
 	touched map[string]bool
+	// rosters are the RelPaths of the snapshot's .vault/ files that were
+	// rosters before the apply ran (rosterNamesBeforeApply).
+	rosters map[string]bool
 }
 
 // rollbackReport is what restoreManagedFiles did not simply put back.
@@ -41,6 +47,10 @@ type rollbackReport struct {
 	// left are rosters left as they are for a hand check, as
 	// "<RelPath> (<why>)".
 	left []string
+	// leftPlaintext is whether one of them is a plaintext roster, whose
+	// freeipa.admin.password the operator must check against the vault; an
+	// encrypted file is no roster pilot reads.
+	leftPlaintext bool
 	// kept are the RelPaths of rosters another writer changed during the
 	// apply whose change the rollback kept: revisionWith takes them as
 	// they are now.
@@ -54,7 +64,7 @@ type rollbackReport struct {
 // managed file present in dir now but absent from snapshot (created by
 // the scenario that's being rolled back) is removed.
 //
-// A roster under .vault/ is the exception (rosterEntry): `pilot roster`,
+// A roster under .vault/ is the exception (rosterFile): `pilot roster`,
 // `pilot access` and decommission write rosters without this session's
 // workspace lock, so a roster may hold another process's change made at
 // any point of the apply. The rollback undoes only what the session's own
@@ -110,7 +120,9 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 	// Rosters, a file at a time: their names grouped by the file they
 	// name (inventory.RosterFileKey: one file however many symlinks or hard
 	// links name it, the key the journal records its writes under), in
-	// RelPath order.
+	// RelPath order. A file is a roster by what the apply knew before it ran
+	// and what its journal recorded, never by the bytes it holds now
+	// (rosterFile).
 	var rels []string
 	for _, e := range snapshot {
 		rels = append(rels, e.RelPath)
@@ -123,12 +135,10 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 	sort.Strings(rels)
 	files := map[string][]string{}
 	var order []string
-	roster := map[string]bool{}
 	for _, rel := range rels {
-		if !rosterEntry(entry(wanted, rel)) && !rosterEntry(entry(now, rel)) {
+		if !secretEntry(entry(wanted, rel), entry(now, rel)) {
 			continue
 		}
-		roster[rel] = true
 		file, err := inventory.RosterFileKey(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {
 			file = "unresolved:" + rel // a dangling link: a file of its own
@@ -138,6 +148,17 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 		}
 		files[file] = append(files[file], rel)
 	}
+	roster := map[string]bool{}
+	var rosterOrder []string
+	for _, file := range order {
+		if rosterFile(files[file], session.writes[file], session.rosters) {
+			rosterOrder = append(rosterOrder, file)
+			for _, rel := range files[file] {
+				roster[rel] = true
+			}
+		}
+	}
+	order = rosterOrder
 	for _, file := range order {
 		if err := restoreRosterFile(dir, file, files[file], wanted, now, session, &report); err != nil {
 			return report, err
@@ -194,6 +215,7 @@ func restoreRosterFile(dir, file string, rels []string, wanted, now map[string]m
 	}
 	leave := func(why string) {
 		report.left = append(report.left, shown+" ("+why+")")
+		report.leftPlaintext = report.leftPlaintext || !rosterEncrypted(before, after)
 	}
 	keep := func(note string) {
 		report.kept = append(report.kept, rels...)
@@ -253,19 +275,85 @@ func restoreRosterFile(dir, file string, rels []string, wanted, now map[string]m
 	return nil
 }
 
-// rosterEntry reports whether e, a managed file, is a roster under .vault/
-// by its content: roster-shaped top-level keys (looksLikeRoster), or
-// ansible-vault encrypted, which a session's automation never writes. nil
-// (the file is absent on that side) is not.
-func rosterEntry(e *managedFileEntry) bool {
-	if e == nil || !e.IsSecret {
-		return false
-	}
-	if isAnsibleVaultEncrypted(e.Content) {
+// secretEntry reports whether either side of a managed file — as the
+// snapshot had it, as it is now; nil when absent on that side — is a .vault/
+// file: only those can be rosters.
+func secretEntry(wanted, now *managedFileEntry) bool {
+	return wanted != nil && wanted.IsSecret || now != nil && now.IsSecret
+}
+
+// rosterFile reports whether the .vault/ file the names rels reach is a
+// roster for the rollback, decided from what the apply knew before it ran and
+// what it recorded, never from the bytes the file holds now (a vault edit
+// can make any file look like one): a file that existed before the apply and
+// was a roster then (rosterNamesBeforeApply), or one the apply's journal
+// recorded a write to (writes). A file the session created and never wrote
+// through a roster writer is a plain one, and is removed.
+func rosterFile(rels []string, writes []inventory.RosterWrite, before map[string]bool) bool {
+	if len(writes) > 0 {
 		return true
 	}
-	doc, err := vaultfile.Parse(e.Content)
-	return err == nil && looksLikeRoster(doc)
+	for _, rel := range rels {
+		if before[rel] {
+			return true
+		}
+	}
+	return false
+}
+
+// rosterNamesBeforeApply returns the RelPaths of the snapshot's .vault/ files
+// that are rosters before an apply on dir runs: those that are ansible-vault
+// encrypted (a session's automation never writes one), those with a
+// roster-shaped top-level key holding a mapping or a list rather than a
+// scalar (the vault editor writes only scalars, so a plain vault file does
+// not look like that), and those the workspace names as its roster — the
+// editor's default .vault/ipa-identity.yaml or a freeipa_roster_file — which
+// may hold only scalars. Every name of a file that is one is listed.
+func rosterNamesBeforeApply(dir string, snapshot []managedFileEntry) map[string]bool {
+	referenced := map[string]bool{}
+	for _, path := range rosterCandidates(dir, "", referencedRosterFiles(dir, "")) {
+		if key, err := inventory.RosterFileKey(path); err == nil {
+			referenced[key] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, e := range snapshot {
+		if !e.IsSecret {
+			continue
+		}
+		key, err := inventory.RosterFileKey(filepath.Join(dir, filepath.FromSlash(e.RelPath)))
+		if isAnsibleVaultEncrypted(e.Content) || rosterShapedStructure(e.Content) || err == nil && referenced[key] {
+			out[e.RelPath] = true
+		}
+	}
+	return out
+}
+
+// rosterShapedStructure reports whether content has a top-level key unique
+// to the roster schema (rosterShapedKeys) holding a mapping, a list or an
+// alias — what the vault editor never writes — rather than a scalar.
+func rosterShapedStructure(content []byte) bool {
+	doc, err := vaultfile.Parse(content)
+	if err != nil {
+		return false
+	}
+	for _, e := range doc.Entries() {
+		if rosterShapedKeys[e.Key] && e.Value.Kind != yaml.ScalarNode {
+			return true
+		}
+	}
+	return false
+}
+
+// rosterEncrypted reports whether a roster file's snapshot or current entry
+// (either may be nil) is ansible-vault encrypted.
+func rosterEncrypted(wanted, now *managedFileEntry) bool {
+	for _, e := range []*managedFileEntry{wanted, now} {
+		if e != nil && isAnsibleVaultEncrypted(e.Content) {
+			return true
+		}
+	}
+	return false
 }
 
 // secretFileContents is every managed .vault/ file's bytes, by RelPath.
