@@ -1,8 +1,10 @@
 // roster_write.go is the one way this package puts bytes into a roster
-// file: writeLockedRoster, called with the roster's lock held. Every other
-// write primitive — the temp files, renames, in-place writes and the
+// file: writeLockedRoster, called with the roster's lock held, which also
+// records each write in an open RosterJournal (roster_journal.go). Every
+// other write primitive — the temp files, renames, in-place writes and the
 // lock-file stamp — lives here too, so the write policy has one home
-// (TestRegression_RosterWritersLockCanonicalTarget enforces it).
+// (TestRegression_RosterWritersLockCanonicalTarget and
+// TestRegression_RosterBytesAreWrittenOnlyByWriteLockedRoster enforce it).
 package inventory
 
 import (
@@ -85,14 +87,50 @@ var (
 // A roster not created yet is written through a temp file renamed into
 // place, mode 0600, and — run as root — owned like its directory, as the
 // lock files are.
+//
+// A roster an open RosterJournal watches (pilot edit's apply) has each
+// write recorded here, whichever way it was written: what it held as the
+// write began, read under the lock, and what the write left — or that a
+// write in place failed part-way (roster_journal.go). No other function
+// writes a roster's bytes (TestRegression_RosterBytesAreWrittenOnlyByWriteLockedRoster),
+// so the journal misses none.
 func writeLockedRoster(lk *rosterLock, data []byte) error {
-	path := lk.target
-	f, st, err := openRosterForWrite(path, lk.path)
+	journaled, err := beginJournaledRosterWrite(lk)
 	if err != nil {
 		return err
 	}
+	outcome, err := writeRosterBytes(lk, data)
+	journaled.finish(data, outcome)
+	return err
+}
+
+// rosterWriteOutcome is what a roster write did to the roster, for the
+// journal: nothing, all of it, or an unknown part of it.
+type rosterWriteOutcome int
+
+const (
+	// rosterUnchanged: the write failed before changing anything.
+	rosterUnchanged rosterWriteOutcome = iota
+	// rosterWritten: the roster holds the data written.
+	rosterWritten
+	// rosterPartlyWritten: a write in place failed after its first byte
+	// may have reached the roster.
+	rosterPartlyWritten
+)
+
+// writeRosterBytes is writeLockedRoster's write itself, reporting what it
+// did to the roster with its error. Only writeLockedRoster calls it.
+func writeRosterBytes(lk *rosterLock, data []byte) (rosterWriteOutcome, error) {
+	path := lk.target
+	f, st, err := openRosterForWrite(path, lk.path)
+	if err != nil {
+		return rosterUnchanged, err
+	}
 	if f == nil {
-		return createLockedRoster(lk, data)
+		if err := createLockedRoster(lk, data); err != nil {
+			return rosterUnchanged, err
+		}
+		return rosterWritten, nil
 	}
 	defer f.Close()
 	if st.Nlink > 1 || hasPOSIXACL(path) {
@@ -103,7 +141,7 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 	case errors.Is(err, fs.ErrPermission):
 		return writeRosterInPlace(f, data)
 	case err != nil:
-		return fmt.Errorf("write roster %s: cannot create its temp file, so it was left unchanged: %w", lk.path, err)
+		return rosterUnchanged, fmt.Errorf("write roster %s: cannot create its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // a no-op once renamed
@@ -112,19 +150,19 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 		if errors.Is(err, errRosterOwnerNotKept) || errors.Is(err, errRosterAttrsDiffer) {
 			return writeRosterInPlace(f, data)
 		}
-		return fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
+		return rosterUnchanged, fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
+		return rosterUnchanged, fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	if err := renameRosterTemp(tmpName, path); err != nil {
 		if renameRefusedForThisFile(err) {
 			return writeRosterInPlace(f, data)
 		}
-		return fmt.Errorf("write roster %s: cannot replace it, so it was left unchanged: %w", lk.path, err)
+		return rosterUnchanged, fmt.Errorf("write roster %s: cannot replace it, so it was left unchanged: %w", lk.path, err)
 	}
 	syncDir(filepath.Dir(path))
-	return nil
+	return rosterWritten, nil
 }
 
 // renameRefusedForThisFile reports whether a rename over the roster
@@ -301,34 +339,40 @@ func readXattr(read func(buf []byte) (int, error)) ([]byte, error) {
 	}
 }
 
+// writeRosterAt is writeRosterInPlace's write: a variable so a test can
+// make it stop part-way.
+var writeRosterAt = func(f *os.File, data []byte, off int64) (int, error) { return f.WriteAt(data, off) }
+
 // writeRosterInPlace overwrites the open roster f with data: the file
 // keeps its inode, owner, mode, links, ACL and other attributes, at the
 // cost of a moment in which a reader without the lock may see it
 // half-written. Growing the file, it reserves the room first, keeping the
 // size, so ENOSPC or EDQUOT leaves the roster unchanged; where fallocate is
 // not supported (EOPNOTSUPP, ENOSYS) it writes regardless. A write that
-// fails after that may have left the roster partly written, and says so.
-func writeRosterInPlace(f *os.File, data []byte) error {
+// fails after that may have left the roster partly written, says so, and
+// reports rosterPartlyWritten — a sync that fails too, as what the disk
+// then holds is not known.
+func writeRosterInPlace(f *os.File, data []byte) (rosterWriteOutcome, error) {
 	var st syscall.Stat_t
 	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return fmt.Errorf("write roster %s: %w; it was left unchanged", f.Name(), err)
+		return rosterUnchanged, fmt.Errorf("write roster %s: %w; it was left unchanged", f.Name(), err)
 	}
 	if size := int64(len(data)); size > st.Size {
 		err := fallocateRoster(int(f.Fd()), unix.FALLOC_FL_KEEP_SIZE, 0, size)
 		if err != nil && !errors.Is(err, unix.EOPNOTSUPP) && !errors.Is(err, unix.ENOSYS) {
-			return fmt.Errorf("write roster %s: cannot reserve room for it, so it was left unchanged: %w", f.Name(), err)
+			return rosterUnchanged, fmt.Errorf("write roster %s: cannot reserve room for it, so it was left unchanged: %w", f.Name(), err)
 		}
 	}
-	if _, err := f.WriteAt(data, 0); err != nil {
-		return fmt.Errorf("write roster %s in place: %w; it may now be partly written, check it by hand", f.Name(), err)
+	if _, err := writeRosterAt(f, data, 0); err != nil {
+		return rosterPartlyWritten, fmt.Errorf("write roster %s in place: %w; it may now be partly written, check it by hand", f.Name(), err)
 	}
 	if err := f.Truncate(int64(len(data))); err != nil {
-		return fmt.Errorf("write roster %s in place: %w; it may now be partly written, check it by hand", f.Name(), err)
+		return rosterPartlyWritten, fmt.Errorf("write roster %s in place: %w; it may now be partly written, check it by hand", f.Name(), err)
 	}
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("write roster %s in place: written, but not synced to disk: %w", f.Name(), err)
+		return rosterPartlyWritten, fmt.Errorf("write roster %s in place: written, but not synced to disk: %w", f.Name(), err)
 	}
-	return nil
+	return rosterWritten, nil
 }
 
 // createLockedRoster writes the new roster lk holds: mode 0600, owned —
