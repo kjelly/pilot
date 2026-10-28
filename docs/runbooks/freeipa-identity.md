@@ -376,6 +376,10 @@ pilot 寫名冊的方式：
 沒加引號、YAML 可能把它讀成數字、日期或布林值時，warning 會說明要加引號。freeipa-nfs-server 的
 gate 也會擋下，並指出是哪一份名冊。三者都不會顯示密碼，修正方式都是上面的手動修改。
 
+最新實機驗證（2026-10-28，candidate `3b4bdb1`，兩台全新 VM）：site chain 通過，gate 的通過、
+失敗與手動修正後的復原都已驗證；`pilot edit --actions` 輪替成功，名冊被持有時拒絕存檔。見
+[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)。
+
 ---
 
 ## 5. 冪等性
