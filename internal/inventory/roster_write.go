@@ -47,8 +47,9 @@ var (
 )
 
 // writeLockedRoster writes data to the roster lk holds, and is the only
-// way this package does. It keeps what a write must not change about the
-// file, choosing between two ways of writing:
+// way this package does: every byte written to a roster — replaced, in
+// place, or created — is written here. It keeps what a write must not
+// change about the file, choosing between two ways of writing:
 //
 //   - It opens the roster for writing first, without truncating. A roster
 //     this user may not write is refused (as an in-place write always was;
@@ -67,10 +68,10 @@ var (
 //     attributes would differ from the roster's — an ACL inherited from
 //     the directory's default ACL, which would widen who may read the
 //     roster, or a SELinux label or user.* attribute the roster carries
-//     that a new file would not. Any other failure to
-//     create the temp file (a full disk or quota, no file descriptors)
-//     fails the write with the roster unchanged: written in place, it
-//     could fail half-way too, leaving a roster neither old nor new.
+//     that a new file would not. Any other failure to create or write the
+//     temp file (a full disk or quota, no file descriptors) fails the
+//     write with the roster unchanged: written in place, it could fail
+//     half-way too, leaving a roster neither old nor new.
 //   - In place too when the rename itself is refused with EBUSY, EXDEV,
 //     EPERM or EACCES: a roster that is a single-file bind mount (pilot-cli
 //     under `docker run -v roster:roster`) cannot be renamed over, nor can
@@ -165,7 +166,7 @@ func openRosterForWrite(target, shown string) (*os.File, *syscall.Stat_t, error)
 	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.EROFS):
 		return nil, nil, fmt.Errorf("roster %s is not writable by this user: %w: %w", shown, ErrRosterNotWritable, err)
 	case errors.Is(err, syscall.ELOOP):
-		return nil, nil, fmt.Errorf("roster %s became a symlink while locked; retry: %w: %w", shown, ErrRosterNotWritable, err)
+		return nil, nil, fmt.Errorf("roster %s became a symlink since it was resolved; retry: %w: %w", shown, ErrRosterNotWritable, err)
 	case err != nil:
 		return nil, nil, fmt.Errorf("open roster %s: %w: %w", shown, ErrRosterNotWritable, err)
 	}
