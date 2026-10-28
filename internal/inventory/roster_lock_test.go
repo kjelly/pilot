@@ -439,6 +439,13 @@ func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 				if err != nil {
 					t.Fatalf("as root: %v", err)
 				}
+				if tc.removes {
+					// A writer that removes the roster removes the 0400 one too.
+					if _, err := os.Lstat(l.target); !os.IsNotExist(err) {
+						t.Fatalf("as root: the 0400 roster was not removed (lstat err %v)", err)
+					}
+					return
+				}
 				if info, err := os.Stat(l.target); err != nil || info.Mode().Perm() != 0o400 || bytes.Equal(mustRead(t, l.target), l.before) {
 					t.Fatalf("as root: the 0400 roster was not written, or lost its mode (stat err %v)", err)
 				}
