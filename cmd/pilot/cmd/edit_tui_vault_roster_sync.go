@@ -81,9 +81,14 @@ func rosterIdentity(dir, source, path string) (string, error) {
 }
 
 // referencedRosterFiles returns every freeipa_roster_file dir sets, read
-// without Ansible: in hosts.yml (fleet vars and hosts) and at the top of
-// group_vars/ and host_vars/ files.
-func referencedRosterFiles(dir string) []string {
+// without Ansible: in hosts.yml (fleet vars and hosts) and in
+// group_vars/ and host_vars/ files, nested ones included.
+//
+// source is the real workspace when dir is a plan's scratch copy of it, ""
+// otherwise. The copy holds only the files directly in group_vars/ and
+// host_vars/ (managedFileEntries), so the nested ones are read from
+// source, as the apply reads them; pilot edit never changes those.
+func referencedRosterFiles(dir, source string) []string {
 	var out []string
 	if data, err := os.ReadFile(filepath.Join(dir, "hosts.yml")); err == nil {
 		if hf, err := inventory.Parse(data); err == nil {
@@ -94,18 +99,26 @@ func referencedRosterFiles(dir string) []string {
 		}
 	}
 	for _, sub := range []string{"group_vars", "host_vars"} {
-		_ = filepath.WalkDir(filepath.Join(dir, sub), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !hasManagedFileExtension(d.Name()) {
-				return nil
+		for _, root := range []string{dir, source} {
+			if root == "" {
+				continue
 			}
-			var vars map[string]any
-			if data, err := os.ReadFile(path); err == nil && yaml.Unmarshal(data, &vars) == nil {
-				if rosterPath, ok := vars["freeipa_roster_file"].(string); ok {
-					out = append(out, rosterPath)
+			_ = filepath.WalkDir(filepath.Join(root, sub), func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !hasManagedFileExtension(d.Name()) {
+					return nil
 				}
-			}
-			return nil
-		})
+				if root == source && filepath.Dir(path) == filepath.Join(source, sub) {
+					return nil // the copy's own file, read above
+				}
+				var vars map[string]any
+				if data, err := os.ReadFile(path); err == nil && yaml.Unmarshal(data, &vars) == nil {
+					if rosterPath, ok := vars["freeipa_roster_file"].(string); ok {
+						out = append(out, rosterPath)
+					}
+				}
+				return nil
+			})
+		}
 	}
 	return out
 }
@@ -331,7 +344,7 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 // on a busy roster (prepareVaultRosterSync).
 func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPassword string) (*vaultRosterSync, string) {
 	scope := r.writeScope(dir)
-	referenced := referencedRosterFiles(dir)
+	referenced := referencedRosterFiles(dir, scope.planSource)
 	for i, path := range referenced {
 		referenced[i] = scope.rosterWritePath(path)
 	}

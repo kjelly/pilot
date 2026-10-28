@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // scopeWorkspace is a workspace whose rosters all hold the old password:
@@ -255,4 +258,76 @@ func TestEditApplyRollbackKeepsARosterTheSessionNeverWrote(t *testing.T) {
 	if after, _ := os.ReadFile(other); !bytes.Equal(after, changed) {
 		t.Fatalf("rollback undid another process's change:\n%s", after)
 	}
+}
+
+// nestedVarsWorkspace sets freeipa_roster_file only in nested vars files,
+// which Ansible reads but a plan's scratch copy does not hold
+// (managedFileEntries copies the top of group_vars/ and host_vars/): a
+// .vault/ roster the save syncs, and a relative reference outside .vault/
+// the save reports. Both rosters hold the old password.
+func nestedVarsWorkspace(t *testing.T) (dir, synced, outside string) {
+	t.Helper()
+	dir = t.TempDir()
+	quotedOld := `"Old\"pass#1"`
+	synced = filepath.Join(dir, ".vault", "other.yaml")
+	outside = filepath.Join(dir, "rosters", "outside.yaml")
+	for _, path := range []string{synced, outside} {
+		writeSyncFile(t, path, syncTestRoster(quotedOld))
+	}
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: "+quotedOld+"\n")
+	writeSyncFile(t, filepath.Join(dir, "group_vars", "freeipa-client", "main.yml"), "freeipa_roster_file: .vault/other.yaml\n")
+	writeSyncFile(t, filepath.Join(dir, "host_vars", "h2", "main.yml"), "freeipa_roster_file: rosters/outside.yaml\n")
+	writeSyncFile(t, filepath.Join(dir, "hosts.yml"), "hosts:\n"+
+		"  h1:\n    ansible_host: 10.0.0.1\n    roles: [freeipa-client]\n"+
+		"  h2:\n    ansible_host: 10.0.0.2\n    roles: [freeipa-client]\n")
+	return dir, synced, outside
+}
+
+// A plan finds the rosters nested vars files name, as the apply does: it
+// previews the .vault/ roster the apply syncs, fails where the apply fails
+// when that roster is busy, and reports the relative reference outside
+// .vault/ with the apply's warning — while leaving every real file alone.
+func TestEditPlanAndApplyAgreeOnNestedVarsRosterReferences(t *testing.T) {
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	t.Run("synced and reported", func(t *testing.T) {
+		dir, synced, outside := nestedVarsWorkspace(t)
+		before := snapshotFiles(t, synced, outside, filepath.Join(dir, ".vault", "main.yaml"))
+		plan, err := planEditScenario(dir, rotationScenario(), editAgentSessionOptions{})
+		if err != nil {
+			t.Fatalf("planEditScenario() error = %v", err)
+		}
+		assertUnchanged(t, before)
+		apply, err := applyEditScenario(dir, "issue-146-nested-vars", rotationScenario(), editAgentSessionOptions{})
+		if err != nil || apply.RolledBack {
+			t.Fatalf("applyEditScenario() = %+v, %v", apply, err)
+		}
+		if got := syncRosterPassword(t, synced); got != syncNewPassword {
+			t.Fatalf("apply did not sync %s", synced)
+		}
+		if !slices.Equal(plan.AffectedFiles, apply.AffectedFiles) || !slices.Contains(plan.AffectedFiles, ".vault/other.yaml") {
+			t.Errorf("plan AffectedFiles %v, apply %v; want the same, with .vault/other.yaml", plan.AffectedFiles, apply.AffectedFiles)
+		}
+		if !slices.Equal(plan.Warnings, apply.Warnings) {
+			t.Errorf("plan warnings %q differ from apply warnings %q", plan.Warnings, apply.Warnings)
+		}
+		if !slices.ContainsFunc(apply.Warnings, func(w string) bool { return strings.HasPrefix(w, "未同步 rosters/outside.yaml：") }) {
+			t.Errorf("apply warnings do not name rosters/outside.yaml: %q", apply.Warnings)
+		}
+	})
+	t.Run("busy", func(t *testing.T) {
+		dir, synced, outside := nestedVarsWorkspace(t)
+		busyRosterCases()["held"](t, synced)
+		before := snapshotFiles(t, synced, outside, filepath.Join(dir, ".vault", "main.yaml"))
+		if _, err := planEditScenario(dir, rotationScenario(), editAgentSessionOptions{}); !errors.Is(err, inventory.ErrMutationLocked) {
+			t.Errorf("planEditScenario() error = %v, want the busy roster to fail the plan", err)
+		}
+		apply, err := applyEditScenario(dir, "issue-146-nested-vars-busy", rotationScenario(), editAgentSessionOptions{})
+		if apply != nil && apply.RolledBack {
+			err = apply.ScenarioErr
+		}
+		if !errors.Is(err, inventory.ErrMutationLocked) {
+			t.Errorf("applyEditScenario() error = %v, want the busy roster to fail the apply", err)
+		}
+		assertUnchanged(t, before)
+	})
 }
