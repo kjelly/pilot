@@ -28,6 +28,33 @@ func TestSweepLeavesADirectoryAnotherUserOwns(t *testing.T) {
 	}
 }
 
+// A marker some other user owns is not a holder this user can judge: the
+// directory is kept although the marker is unlocked, old and its pid dead —
+// and the sweep still removes it for its own owner. The directory is this
+// user's, so removeIfDead is asked with an owner other than the marker's.
+func TestSweepKeepsADirectoryWhoseMarkerAnotherUserOwns(t *testing.T) {
+	tmp := t.TempDir()
+	const prefix = "pilot-roster-scope"
+	dir := mkPrivate(t, tmp, prefix, deadPID(t), "foreign-marker", time.Hour)
+	if err := os.WriteFile(dir+"/"+markerName, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	age(t, dir, time.Hour)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removeIfDead(dir, info, deadPID(t), os.Getpid(), os.Getuid()+1)
+	if gone(dir) {
+		t.Fatal("a directory whose marker another user owns was removed")
+	}
+	removeIfDead(dir, info, deadPID(t), os.Getpid(), os.Getuid())
+	if !gone(dir) {
+		t.Fatal("the same dead directory survived a sweep by its own owner")
+	}
+}
+
 // The caller removes its directory itself; the descriptor holding the lock
 // is let go by the next PrivateTempDir, so a long-running pilot does not
 // accumulate one per plan.
@@ -39,6 +66,9 @@ func TestRemovedDirectoriesReleaseTheirLock(t *testing.T) {
 		defer heldMarkers.Unlock()
 		return len(heldMarkers.byDir)
 	}
+	// Directories an earlier test removed but nothing has reaped yet are
+	// still held: let them go first, so the baseline is this test's own.
+	reapReleasedMarkers()
 	base := held()
 	var dirs []string
 	for range 5 {

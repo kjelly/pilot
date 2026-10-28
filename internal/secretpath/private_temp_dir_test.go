@@ -64,6 +64,15 @@ func holdLock(t *testing.T, p string) (release func()) {
 	return release
 }
 
+// age sets p's modification time to age ago.
+func age(t *testing.T, p string, age time.Duration) {
+	t.Helper()
+	old := time.Now().Add(-age)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func gone(p string) bool {
 	_, err := os.Lstat(p)
 	return errors.Is(err, os.ErrNotExist)
@@ -154,6 +163,9 @@ func TestSweepNeverFollowsASymlink(t *testing.T) {
 	if err := os.Symlink(real, filepath.Join(trap, markerName)); err != nil {
 		t.Fatal(err)
 	}
+	// Creating the marker refreshed the directory's mtime: age it again, so
+	// only the marker rule — not the markerless grace — can keep it.
+	age(t, trap, time.Hour)
 
 	sweepPrivateTempDirs(tmp, prefix)
 	if gone(link) || gone(elsewhere) {
@@ -164,6 +176,63 @@ func TestSweepNeverFollowsASymlink(t *testing.T) {
 	}
 	if gone(trap) {
 		t.Fatal("a directory whose marker is a symlink was removed")
+	}
+}
+
+// A marker that is not a plain file this user can open and lock is not a
+// dead holder, whatever the directory's age or its pid: the sweep cannot
+// tell, and a doubt keeps the directory (PR #148 review of 374a7ca, P3: a
+// sweep that took any marker-open error for "no marker" passed the suite).
+// Each directory is old and its pid dead, so only the marker rule can keep
+// it.
+func TestSweepKeepsADirectoryWhoseMarkerIsNotAUsableFile(t *testing.T) {
+	cases := map[string]func(t *testing.T, marker string){
+		"directory": func(t *testing.T, marker string) {
+			if err := os.Mkdir(marker, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlink to a file": func(t *testing.T, marker string) {
+			real := marker + ".real"
+			if err := os.WriteFile(real, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, marker); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"dangling symlink": func(t *testing.T, marker string) {
+			if err := os.Symlink(marker+".nowhere", marker); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"fifo": func(t *testing.T, marker string) {
+			if err := syscall.Mkfifo(marker, 0o600); err != nil {
+				t.Skipf("no fifo: %v", err)
+			}
+		},
+		"mode 0000": func(t *testing.T, marker string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores the mode of a file")
+			}
+			if err := os.WriteFile(marker, nil, 0o000); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, mkMarker := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			const prefix = "pilot-roster-scope"
+			dir := mkPrivate(t, tmp, prefix, deadPID(t), "odd-marker", time.Hour)
+			mkMarker(t, filepath.Join(dir, markerName))
+			age(t, dir, time.Hour)
+
+			sweepPrivateTempDirs(tmp, prefix)
+			if gone(dir) {
+				t.Fatalf("a directory whose marker is a %s was removed", name)
+			}
+		})
 	}
 }
 
