@@ -6,6 +6,7 @@
 package inventory
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,12 +56,18 @@ var (
 //     refused.
 //   - Replace: a temp file in the same directory with the roster's mode and
 //     owner, renamed over it, so a reader that takes no lock sees the old
-//     roster or the new one, never a truncated file.
+//     roster or the new one, never a truncated file. The temp file gets
+//     its owner and mode, and its extended attributes are compared with
+//     the roster's, before any data goes into it (writeRosterTemp).
 //   - In place, through the open file, when replacing would change the
 //     file's identity: it has other hard links, it carries a POSIX ACL,
 //     this user may not create a temp file in its directory (EACCES/EPERM),
-//     or the temp file cannot be given the roster's owner and group (a
-//     non-root writer of another user's roster). Any other failure to
+//     the temp file cannot be given the roster's owner and group (a
+//     non-root writer of another user's roster), or its extended
+//     attributes would differ from the roster's — an ACL inherited from
+//     the directory's default ACL, which would widen who may read the
+//     roster, or a SELinux label or user.* attribute the roster carries
+//     that a new file would not. Any other failure to
 //     create the temp file (a full disk or quota, no file descriptors)
 //     fails the write with the roster unchanged: written in place, it
 //     could fail half-way too, leaving a roster neither old nor new.
@@ -99,15 +106,15 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // a no-op once renamed
-	if err := writeRosterTemp(tmp, data, os.FileMode(st.Mode)&os.ModePerm, int(st.Uid), int(st.Gid)); err != nil {
+	if err := writeRosterTemp(tmp, f, data, os.FileMode(st.Mode)&os.ModePerm, int(st.Uid), int(st.Gid)); err != nil {
 		tmp.Close()
-		if errors.Is(err, errRosterOwnerNotKept) {
+		if errors.Is(err, errRosterOwnerNotKept) || errors.Is(err, errRosterAttrsDiffer) {
 			return writeRosterInPlace(f, data)
 		}
-		return fmt.Errorf("write roster %s: %w", lk.path, err)
+		return fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write roster %s: %w", lk.path, err)
+		return fmt.Errorf("write roster %s: cannot write its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	if err := renameRosterTemp(tmpName, path); err != nil {
 		if renameRefusedForThisFile(err) {
@@ -187,20 +194,110 @@ func checkRosterWritable(target, shown string) error {
 }
 
 // errRosterOwnerNotKept is writeRosterTemp's refusal when the temp file
-// cannot be given the roster's owner; the caller writes in place instead.
-var errRosterOwnerNotKept = errors.New("cannot give the replacement the roster's owner")
+// cannot be given the roster's owner, and errRosterAttrsDiffer when its
+// extended attributes would not be the roster's; the caller writes in
+// place instead.
+var (
+	errRosterOwnerNotKept = errors.New("cannot give the replacement the roster's owner")
+	errRosterAttrsDiffer  = errors.New("the replacement's extended attributes would differ from the roster's")
+)
 
-func writeRosterTemp(tmp *os.File, data []byte, mode os.FileMode, uid, gid int) error {
-	if _, err := tmp.Write(data); err != nil {
-		return err
+// writeRosterTemp makes tmp the replacement for the open roster: the
+// roster's owner and group, then its mode, then — with the mode set, so an
+// ACL's mask is final — the same extended attributes as the roster
+// (sameXattrs), and only then data. A temp file that inherited a default
+// ACL from the directory is refused before it holds anything, so the
+// roster's content is never readable by whoever that ACL names, not even
+// for the moment before the rename.
+func writeRosterTemp(tmp, roster *os.File, data []byte, mode os.FileMode, uid, gid int) error {
+	if err := fchownRosterTemp(tmp, uid, gid); err != nil {
+		return fmt.Errorf("%w: %w", errRosterOwnerNotKept, err)
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		return err
 	}
-	if err := fchownRosterTemp(tmp, uid, gid); err != nil {
-		return fmt.Errorf("%w: %w", errRosterOwnerNotKept, err)
+	if !sameXattrs(tmp, roster) {
+		return errRosterAttrsDiffer
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
 	}
 	return tmp.Sync()
+}
+
+// ignoredXattrs are the extended attributes sameXattrs does not compare:
+// the kernel's integrity measurement and its signature, which follow the
+// file's content rather than anything set on the file.
+var ignoredXattrs = map[string]bool{"security.ima": true, "security.evm": true}
+
+// sameXattrs reports whether the open files a and b carry the same
+// extended attributes, by name and value — POSIX ACLs (system.posix_acl_*),
+// SELinux labels, user.* attributes — apart from ignoredXattrs. A file
+// system without extended attributes gives both none. Failing to read
+// either side counts as different, so the caller keeps the roster's inode.
+func sameXattrs(a, b *os.File) bool {
+	ax, err := fileXattrs(a)
+	if err != nil {
+		return false
+	}
+	bx, err := fileXattrs(b)
+	if err != nil || len(ax) != len(bx) {
+		return false
+	}
+	for name, value := range ax {
+		if other, ok := bx[name]; !ok || !bytes.Equal(value, other) {
+			return false
+		}
+	}
+	return true
+}
+
+// fileXattrs returns the extended attributes of the open file f this
+// process may read, but ignoredXattrs.
+func fileXattrs(f *os.File) (map[string][]byte, error) {
+	fd := int(f.Fd())
+	list, err := readXattr(func(buf []byte) (int, error) { return unix.Flistxattr(fd, buf) })
+	if errors.Is(err, unix.ENOTSUP) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]byte{}
+	for _, name := range strings.Split(string(list), "\x00") {
+		if name == "" || ignoredXattrs[name] {
+			continue
+		}
+		value, err := readXattr(func(buf []byte) (int, error) { return unix.Fgetxattr(fd, name, buf) })
+		if errors.Is(err, unix.ENODATA) {
+			continue // removed since it was listed
+		}
+		if err != nil {
+			return nil, err
+		}
+		out[name] = value
+	}
+	return out, nil
+}
+
+// readXattr calls read, a listxattr or getxattr, first for the size and
+// then into a buffer of that size, again if it grew in between (ERANGE).
+func readXattr(read func(buf []byte) (int, error)) ([]byte, error) {
+	for {
+		n, err := read(nil)
+		if err != nil || n == 0 {
+			return nil, err
+		}
+		buf := make([]byte, n)
+		n, err = read(buf)
+		if errors.Is(err, unix.ERANGE) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return buf[:n], nil
+	}
 }
 
 // writeRosterInPlace overwrites the open roster f with data: the file

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -159,4 +160,112 @@ func TestMutateEncryptedRosterFileReportsTheInstallTruthfully(t *testing.T) {
 		t.Fatalf("error = %v, want the rename failure saying the roster was left unchanged", err)
 	}
 	l.assertUntouched(t)
+}
+
+// The temp file that replaces a roster gets the roster's owner and group
+// before anything is written into it: a write as root (pilot-cli under
+// `docker run`) never leaves the new content in a root-owned file, even
+// for a moment (PR #148 review, F3: data was written first).
+func TestWriteLockedRosterOwnsTheTempBeforeWritingIt(t *testing.T) {
+	path := writeLockTestRoster(t)
+	var chowned int
+	fchownRosterTemp = func(f *os.File, uid, gid int) error {
+		chowned++
+		if info, err := f.Stat(); err != nil || info.Size() != 0 {
+			t.Errorf("the temp file held %d bytes when it was chowned (err %v), want none", info.Size(), err)
+		}
+		return f.Chown(uid, gid)
+	}
+	t.Cleanup(func() { fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) } })
+	if err := AppendRosterUser(path, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	if chowned != 1 || !bytes.Contains(mustRead(t, path), []byte("name: erin")) {
+		t.Fatalf("chowned %d times; want the roster replaced through one temp file", chowned)
+	}
+}
+
+// A replacement must not change who may read the roster or what else the
+// file carries. A temp file created in a directory with a default ACL
+// inherits an access ACL — with the roster's group bits as its mask, a
+// named user may read it — and a new file lacks the user.* attributes (or
+// SELinux label) the roster has: either way the roster is written in place
+// instead, keeping its inode, its lack of an ACL and its attributes. Before,
+// the rename gave the roster the inherited ACL and dropped the attributes
+// (PR #148 review, F3).
+func TestWriteLockedRosterKeepsTheRostersExtendedAttributes(t *testing.T) {
+	t.Run("the directory's default ACL is not inherited", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		setPOSIXACL(t, filepath.Dir(path), "system.posix_acl_default", namedUserACL(65534)...)
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasPOSIXACL(path) {
+			t.Fatal("the roster has an ACL before the write; the test needs one without")
+		}
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasPOSIXACL(path) {
+			t.Fatal("the roster carries the directory's default ACL after the write")
+		}
+		if !os.SameFile(before, after) || after.Mode().Perm() != 0o640 || !bytes.Contains(mustRead(t, path), []byte("name: erin")) {
+			t.Fatalf("roster replaced or changed: same inode %v, mode %v", os.SameFile(before, after), after.Mode().Perm())
+		}
+		assertNoRosterTemps(t, path)
+	})
+	t.Run("a user.* attribute is kept", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := unix.Setxattr(path, "user.pilot-test", []byte("keep me"), 0); err != nil {
+			if errors.Is(err, unix.ENOTSUP) {
+				t.Skipf("no user.* attributes on %s: %v", filepath.Dir(path), err)
+			}
+			t.Fatal(err)
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 64)
+		n, err := unix.Getxattr(path, "user.pilot-test", buf)
+		if err != nil || string(buf[:n]) != "keep me" {
+			t.Fatalf("user.pilot-test after the write = %q, %v; want it kept", buf[:max(n, 0)], err)
+		}
+		if !os.SameFile(before, after) || !bytes.Contains(mustRead(t, path), []byte("name: erin")) {
+			t.Fatal("roster with a user.* attribute was replaced instead of written in place")
+		}
+		assertNoRosterTemps(t, path)
+	})
+	t.Run("equal attributes: still replaced", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(before, after) {
+			t.Fatal("a roster with nothing to keep was written in place, not replaced")
+		}
+	})
 }
