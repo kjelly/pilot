@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/kjelly/pilot/internal/inventory"
-	"github.com/kjelly/pilot/internal/secretpath"
 	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
@@ -61,7 +60,7 @@ type rollbackReport struct {
 // any point of the apply. The rollback undoes only what the session's own
 // writes replaced, as session.writes recorded them at the write site, one
 // file at a time however many managed names it has (a .vault/ symlink and
-// its target):
+// its target, or hard links of one file):
 //
 //   - Back to its pre-apply bytes, or never changed: nothing to do.
 //   - No write of the session's and not changed while a step ran: another
@@ -109,7 +108,9 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 	}
 
 	// Rosters, a file at a time: their names grouped by the file they
-	// name, in RelPath order.
+	// name (inventory.RosterFileKey: one file however many symlinks or hard
+	// links name it, the key the journal records its writes under), in
+	// RelPath order.
 	var rels []string
 	for _, e := range snapshot {
 		rels = append(rels, e.RelPath)
@@ -128,7 +129,7 @@ func restoreManagedFiles(dir string, snapshot []managedFileEntry, session *sessi
 			continue
 		}
 		roster[rel] = true
-		file, err := secretpath.Canonical(filepath.Join(dir, filepath.FromSlash(rel)))
+		file, err := inventory.RosterFileKey(filepath.Join(dir, filepath.FromSlash(rel)))
 		if err != nil {
 			file = "unresolved:" + rel // a dangling link: a file of its own
 		}

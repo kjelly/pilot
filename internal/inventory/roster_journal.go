@@ -45,8 +45,12 @@ var ErrRosterJournalBusy = errors.New("inventory: another pilot edit apply in th
 // while it is open (JournalRosterWrites).
 type RosterJournal struct {
 	// targets are watched canonical files, dirs watched canonical
-	// directories: every file directly inside one, existing or not.
+	// directories: every file directly inside one, existing or not. keys
+	// are the watched files' identities (RosterFileKey), each with the
+	// canonical path it was asked for: a hard link of a watched file is the
+	// same file, watched under whatever name it is written through.
 	targets, dirs map[string]bool
+	keys          map[string]string
 	writes        map[string][]RosterWrite
 	closed        bool
 }
@@ -62,26 +66,37 @@ var rosterJournals struct {
 // makes to targets — files, however spelled — and to any file directly
 // inside dirs, until Close. Paths are canonicalized (secretpath.Canonical)
 // as lockRosterFile does, so a write through any spelling of a watched
-// file is recorded under its canonical path. A target or directory another
-// open journal already watches is refused with ErrRosterJournalBusy, and
-// nothing is watched.
+// file is recorded under the file's key (RosterFileKey): its canonical path,
+// or, for a file with hard links, one inode key for every name of it. A
+// target or directory another open journal already watches — by name or as
+// the same file — is refused with ErrRosterJournalBusy, and nothing is
+// watched.
 //
 // The journal sees writes, not writers: a roster write any goroutine of
 // this process makes is recorded. Another process's writes are not — they
 // are what a caller compares the recorded writes with.
 func JournalRosterWrites(targets, dirs []string) (*RosterJournal, error) {
-	j := &RosterJournal{targets: map[string]bool{}, dirs: map[string]bool{}, writes: map[string][]RosterWrite{}}
-	for _, set := range []struct {
-		paths []string
-		into  map[string]bool
-	}{{targets, j.targets}, {dirs, j.dirs}} {
-		for _, path := range set.paths {
-			canonical, err := secretpath.Canonical(path)
-			if err != nil {
-				return nil, fmt.Errorf("resolve %s to record writes to it: %w", path, err)
-			}
-			set.into[canonical] = true
+	j := &RosterJournal{targets: map[string]bool{}, dirs: map[string]bool{}, keys: map[string]string{}, writes: map[string][]RosterWrite{}}
+	for _, path := range targets {
+		canonical, err := secretpath.Canonical(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s to record writes to it: %w", path, err)
 		}
+		key, err := RosterFileKey(canonical)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s to record writes to it: %w", path, err)
+		}
+		j.targets[canonical] = true
+		if _, ok := j.keys[key]; !ok {
+			j.keys[key] = canonical
+		}
+	}
+	for _, path := range dirs {
+		canonical, err := secretpath.Canonical(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s to record writes to it: %w", path, err)
+		}
+		j.dirs[canonical] = true
 	}
 	rosterJournals.mu.Lock()
 	defer rosterJournals.mu.Unlock()
@@ -111,7 +126,7 @@ func (j *RosterJournal) Close() {
 	}
 }
 
-// Writes returns the recorded writes by canonical roster path, each
+// Writes returns the recorded writes by roster key (RosterFileKey), each
 // roster's in the order they were made.
 func (j *RosterJournal) Writes() map[string][]RosterWrite {
 	rosterJournals.mu.Lock()
@@ -123,9 +138,12 @@ func (j *RosterJournal) Writes() map[string][]RosterWrite {
 	return out
 }
 
-// watches reports whether j records writes to the canonical file target.
-func (j *RosterJournal) watches(target string) bool {
-	return j.targets[target] || j.dirs[filepath.Dir(target)]
+// watches reports whether j records writes to the canonical file target,
+// whose key is key (RosterFileKey): it is named by a target or inside a
+// watched directory, or is the same file as a target.
+func (j *RosterJournal) watches(target, key string) bool {
+	_, sameFile := j.keys[key]
+	return j.targets[target] || j.dirs[filepath.Dir(target)] || sameFile
 }
 
 // overlap names a path both j and other would record, if any.
@@ -137,12 +155,17 @@ func (j *RosterJournal) overlap(other *RosterJournal) (string, bool) {
 		}
 	}
 	for target := range j.targets {
-		if other.watches(target) {
+		if other.watches(target, "") {
 			shared = append(shared, target)
 		}
 	}
 	for target := range other.targets {
-		if j.watches(target) {
+		if j.watches(target, "") {
+			shared = append(shared, target)
+		}
+	}
+	for key, target := range j.keys {
+		if _, ok := other.keys[key]; ok {
 			shared = append(shared, target)
 		}
 	}
@@ -157,7 +180,7 @@ func (j *RosterJournal) overlap(other *RosterJournal) (string, bool) {
 // an open journal watches, with what the roster held as it began.
 type journaledRosterWrite struct {
 	journal *RosterJournal
-	target  string
+	key     string
 	before  []byte
 	existed bool
 }
@@ -170,7 +193,7 @@ func beginJournaledRosterWrite(lk *rosterLock) (*journaledRosterWrite, error) {
 	rosterJournals.mu.Lock()
 	var journal *RosterJournal
 	for _, j := range rosterJournals.open {
-		if j.watches(lk.target) {
+		if j.watches(lk.target, lk.key) {
 			journal = j
 			break
 		}
@@ -188,7 +211,7 @@ func beginJournaledRosterWrite(lk *rosterLock) (*journaledRosterWrite, error) {
 		}
 		return nil, fmt.Errorf("roster %s: cannot read it to record this write for the apply's rollback, so it was left unchanged: %w: %w", lk.path, ErrRosterNotWritable, err)
 	}
-	return &journaledRosterWrite{journal: journal, target: lk.target, before: before, existed: existed}, nil
+	return &journaledRosterWrite{journal: journal, key: lk.key, before: before, existed: existed}, nil
 }
 
 // readRosterBeforeWrite reads the roster at target, never through a
@@ -236,6 +259,6 @@ func (w *journaledRosterWrite) finish(data []byte, err error) {
 	rosterJournals.mu.Lock()
 	defer rosterJournals.mu.Unlock()
 	if !w.journal.closed {
-		w.journal.writes[w.target] = append(w.journal.writes[w.target], record)
+		w.journal.writes[w.key] = append(w.journal.writes[w.key], record)
 	}
 }

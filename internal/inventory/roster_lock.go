@@ -226,10 +226,11 @@ func flockMutationLock(path string, f *os.File, how int) error {
 // refused now, without writing anything, creating a lock file or holding
 // one past the call, checking what lockRosterFile checks in the order it
 // does: ErrRosterNotWritable when the roster itself would be refused
-// (checkRosterWritable: the probe opens it for writing without truncating,
+// (openRosterForWrite: the probe opens it for writing without truncating,
 // so a file watcher may see an open and a close), then ErrMutationLocked
-// when another process holds a lock file and ErrRosterLockFile when one
-// could not be used; nil otherwise. A plan probes the real roster its
+// when another process holds a lock file — or, for a roster with another
+// hard link, the roster's own inode — and ErrRosterLockFile when one could
+// not be used; nil otherwise. A plan probes the real roster its
 // scratch copy stands in for, so it fails where the apply would. The probe
 // takes each existing lock file's flock shared for an instant; a writer
 // whose attempt lands in that instant keeps trying (flockMutationLock), so
@@ -240,12 +241,24 @@ func ProbeRosterWrite(path string) error {
 	if err != nil {
 		return fmt.Errorf("resolve roster %s: %w", path, err)
 	}
-	if _, err := checkRosterWritable(target, path); err != nil {
+	f, st, err := openRosterForWrite(target, path)
+	if err != nil {
 		return err
+	}
+	if f != nil {
+		defer f.Close() // drops the shared inode flock below
 	}
 	for _, suffix := range rosterLockSuffixes {
 		if err := probeMutationLock(target + suffix); err != nil {
 			return fmt.Errorf("roster %s: %w", path, err)
+		}
+	}
+	// A roster with another name is locked through its inode too
+	// (lockRosterFile): a writer through that name would not meet the
+	// sidecars above.
+	if f != nil && st.Nlink > 1 {
+		if err := flockMutationLock(target, f, syscall.LOCK_SH); err != nil {
+			return fmt.Errorf("roster %s: it has other hard links, so its inode is locked too: %w", path, err)
 		}
 	}
 	return nil
@@ -284,7 +297,8 @@ func (l *mutationLock) release() error {
 var rosterLockSuffixes = []string{".pilot-migrate.lock", ".pilot-remove.lock"}
 
 // rosterLock is what lockRosterFile returns: both roster sidecar locks,
-// held on target, the canonical file the caller's path named.
+// held on target, the canonical file the caller's path named — and, when
+// that file has other hard links, its inode.
 type rosterLock struct {
 	// path is the caller's spelling, for messages.
 	path string
@@ -292,7 +306,18 @@ type rosterLock struct {
 	// must use: a symlinked roster is written where it points, so the link
 	// stays a link and every spelling of the file shares one lock.
 	target string
-	locks  []*mutationLock
+	// key is the roster's identity (RosterFileKey): target for a file with
+	// one name, an inode key once it has hard links — the one key every
+	// name of it records its writes under (roster_journal.go).
+	key   string
+	locks []*mutationLock
+	// identity is the roster itself, opened for writing and flocked
+	// exclusively, held only when it had other hard links as it was locked:
+	// the sidecar locks are named by path, so two names of one inode hold
+	// different ones, and only a lock on the inode excludes both. Nil for a
+	// roster with one name, whose name is its identity (a rename changes the
+	// inode).
+	identity *os.File
 }
 
 // afterRosterLockHook runs between taking a roster's locks and checking
@@ -304,7 +329,10 @@ var afterRosterLockHook func()
 // the canonical file path names (secretpath.Canonical), beside that file,
 // so every writer of one roster excludes every other however each spells
 // its path — through a symlink, a relative link, a chain, or a symlinked
-// directory. A dangling link fails closed. A lock already held by another
+// directory. A roster with other hard links is also locked through its own
+// inode (lockRosterInode): a hard link is another name for the file, with
+// sidecar lock files of its own, so two names would otherwise write it at
+// once. A dangling link fails closed. A lock already held by another
 // process returns ErrMutationLocked, as does a path that resolves to a
 // different file once the locks are held (retry: the link moved).
 //
@@ -346,7 +374,7 @@ func lockRosterFile(path string) (*rosterLock, error) {
 		return nil, err
 	}
 	share := lockFileShare(owner, exists, hasPOSIXACL(ownerPath))
-	lk := &rosterLock{path: path, target: target}
+	lk := &rosterLock{path: path, target: target, key: target}
 	for _, suffix := range rosterLockSuffixes {
 		lock, err := acquireMutationLock(target + suffix)
 		if err != nil {
@@ -356,6 +384,10 @@ func lockRosterFile(path string) (*rosterLock, error) {
 		lk.locks = append(lk.locks, lock)
 		keepOwner(lock.file, owner)
 		shareLockFile(lock, owner, share)
+	}
+	if err := lk.lockRosterInode(); err != nil {
+		lk.release() //nolint:errcheck
+		return nil, fmt.Errorf("roster %s: %w", path, err)
 	}
 	// Temp files a killed pilot left beside the roster: the lock is held,
 	// so no write of ours is in progress.
@@ -370,9 +402,82 @@ func lockRosterFile(path string) (*rosterLock, error) {
 	return lk, nil
 }
 
-// release drops both locks. Safe to call once, on a partly built lock too.
+// lockRosterInode takes the exclusive flock on the roster's own inode when
+// the roster exists and has other hard links, and records its identity key
+// (RosterFileKey). It is taken after the sidecars, always in that order, and
+// never for a roster with one name: its name is its identity, a rename
+// changes the inode, and a file system that cannot flock a roster must keep
+// working through its sidecars. Held, ErrMutationLocked; any other failure
+// to take it, ErrRosterLockFile — fail closed.
+func (lk *rosterLock) lockRosterInode() error {
+	f, st, err := openRosterForWrite(lk.target, lk.path)
+	if err != nil {
+		if errors.Is(err, ErrRosterNotWritable) {
+			return err
+		}
+		return fmt.Errorf("cannot open it to lock its inode: %w: %w", ErrRosterLockFile, err)
+	}
+	if f == nil {
+		return nil
+	}
+	if st.Nlink <= 1 {
+		f.Close()
+		return nil
+	}
+	if err := flockMutationLock(lk.target, f, syscall.LOCK_EX); err != nil {
+		f.Close()
+		if errors.Is(err, ErrMutationLocked) {
+			return fmt.Errorf("it has other hard links, and another process holds it through one of them: %w", err)
+		}
+		return fmt.Errorf("it has other hard links, so its inode is locked too: %w", err)
+	}
+	lk.identity, lk.key = f, inodeKey(st)
+	return nil
+}
+
+// checkNoNewHardLink refuses a write to a roster that gained a hard link
+// since it was locked: st is its fstat now. The roster was locked as a file
+// with one name, so another name's holder is not excluded, and a write in
+// place would change what that holder sees. The caller retries, which then
+// locks the inode.
+func (lk *rosterLock) checkNoNewHardLink(st *syscall.Stat_t) error {
+	if st.Nlink > 1 && lk.identity == nil {
+		return fmt.Errorf("roster %s gained a hard link while it was locked, so its other name is not excluded; retry: %w", lk.path, ErrMutationLocked)
+	}
+	return nil
+}
+
+// RosterFileKey is the one identity of the roster file path names, for
+// anything that must tell whether two names are one file: the journal that
+// records a session's writes and the rollback that groups them. It is the
+// canonical path (secretpath.Canonical) of a file with one name or not yet
+// created, and "inode:<device>:<inode>" for a regular file with other hard
+// links, shared by every name of it. A file's key changes when it gains or
+// loses a name; callers treat a key that no longer matches as a file they
+// cannot attribute.
+func RosterFileKey(path string) (string, error) {
+	canonical, err := secretpath.Canonical(path)
+	if err != nil {
+		return "", err
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(canonical, &st); err == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG && st.Nlink > 1 {
+		return inodeKey(&st), nil
+	}
+	return canonical, nil
+}
+
+func inodeKey(st *syscall.Stat_t) string {
+	return fmt.Sprintf("inode:%d:%d", uint64(st.Dev), uint64(st.Ino)) //nolint:unconvert // Dev is not uint64 on every platform
+}
+
+// release drops every lock. Safe to call once, on a partly built lock too.
 func (lk *rosterLock) release() error {
 	var errs []error
+	if lk.identity != nil {
+		errs = append(errs, lk.identity.Close())
+		lk.identity = nil
+	}
 	for i := len(lk.locks) - 1; i >= 0; i-- {
 		errs = append(errs, lk.locks[i].release())
 	}

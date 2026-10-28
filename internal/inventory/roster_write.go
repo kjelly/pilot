@@ -74,7 +74,8 @@ var errRosterPartlyWritten = errors.New("the roster may be partly written")
 //     its owner and mode, and its extended attributes are compared with
 //     the roster's, before any data goes into it (writeRosterTemp).
 //   - In place, through the open file, when replacing would change the
-//     file's identity: it has other hard links, it carries a POSIX ACL,
+//     file's identity: it has other hard links (all locked, lockRosterInode;
+//     a link gained since the lock is refused), it carries a POSIX ACL,
 //     this user may not create a temp file in its directory (EACCES/EPERM),
 //     the temp file cannot be given the roster's owner and group (a
 //     non-root writer of another user's roster), or its extended
@@ -132,6 +133,9 @@ func writeRosterBytes(lk *rosterLock, data []byte) error {
 		return createLockedRoster(lk, data)
 	}
 	defer f.Close()
+	if err := lk.checkNoNewHardLink(st); err != nil {
+		return err
+	}
 	if st.Nlink > 1 || hasPOSIXACL(path) {
 		return writeRosterInPlace(f, data)
 	}
@@ -241,13 +245,18 @@ func checkRosterWritable(target, shown string) (exists bool, err error) {
 // the write — write the vault, make a migration backup — so a roster that
 // will not be written is refused before anything else is. The roster must
 // still be there: gone, what the caller decided from it no longer holds,
-// and it is ErrRosterNotWritable too.
+// and it is ErrRosterNotWritable too; one that gained a hard link since it
+// was locked is ErrMutationLocked (rosterLock.checkNoNewHardLink).
 func checkLockedRosterWritable(lk *rosterLock) error {
-	exists, err := checkRosterWritable(lk.target, lk.path)
-	if err == nil && !exists {
-		err = fmt.Errorf("roster %s disappeared while locked: %w", lk.path, ErrRosterNotWritable)
+	f, st, err := openRosterForWrite(lk.target, lk.path)
+	if err != nil {
+		return err
 	}
-	return err
+	if f == nil {
+		return fmt.Errorf("roster %s disappeared while locked: %w", lk.path, ErrRosterNotWritable)
+	}
+	f.Close()
+	return lk.checkNoNewHardLink(st)
 }
 
 // errRosterOwnerNotKept is writeRosterTemp's refusal when the temp file

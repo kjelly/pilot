@@ -233,6 +233,60 @@ func TestEditApplyRollbackRestoresARosterWithTwoNames(t *testing.T) {
 	assertLinkTo(t, alias, "ipa-identity.yaml")
 }
 
+// A roster with two hard-linked names in .vault/ is one file: the sync writes
+// it in place, both names change, and the rollback restores it once through
+// the lock on its inode — a complete rollback, not a "left" entry for the
+// name the session never wrote (PR #148 review of 3a4d4a3, P2).
+func TestEditApplyRollbackRestoresARosterWithTwoHardLinkedNames(t *testing.T) {
+	dir, rosters := scopeWorkspace(t)
+	alias := filepath.Join(dir, ".vault", "alias.yaml")
+	if err := os.Link(rosters["default"], alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	before := snapshotFiles(t, rosters["default"], alias, rosters["group_vars"], filepath.Join(dir, ".vault", "main.yaml"))
+
+	result, err := applyEditScenario(dir, "issue-146-rollback-hardlink", rotationScenario(
+		editAction{Action: "delete_vault_key", File: "main.yaml", Key: "no_such_key"},
+	), editAgentSessionOptions{})
+	if err != nil || result == nil || !result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want a complete rollback with nothing left for a hand check", result, err)
+	}
+	assertUnchanged(t, before)
+	a, errA := os.Stat(rosters["default"])
+	b, errB := os.Stat(alias)
+	if errA != nil || errB != nil || !os.SameFile(a, b) {
+		t.Errorf("the rollback broke the hard link between the two names (%v, %v)", errA, errB)
+	}
+}
+
+// A vault rotation syncs a roster that two hard-linked .vault/ names reach
+// once, not once per name: the names are one file with one lock, and a second
+// sync of the same file would meet the first one's lock. The plan and the
+// apply both do.
+func TestEditVaultRotationSyncsAHardLinkedRosterOnce(t *testing.T) {
+	dir, rosters := scopeWorkspace(t)
+	alias := filepath.Join(dir, ".vault", "alias.yaml")
+	if err := os.Link(rosters["default"], alias); err != nil {
+		t.Fatal(err)
+	}
+	// group_vars names the hard link, so both names are rosters to follow.
+	writeSyncFile(t, filepath.Join(dir, "group_vars", "freeipa-client.yml"), "freeipa_roster_file: .vault/alias.yaml\n")
+	t.Setenv("PILOT_TEST_NEW_ADMIN_PASSWORD", syncNewPassword)
+	if _, err := planEditScenario(dir, rotationScenario(), editAgentSessionOptions{}); err != nil {
+		t.Fatalf("planEditScenario() error = %v", err)
+	}
+	apply, err := applyEditScenario(dir, "issue-146-hardlink-sync", rotationScenario(), editAgentSessionOptions{})
+	if err != nil || apply.RolledBack {
+		t.Fatalf("applyEditScenario() error = %v, rolled back = %v (scenario error: %v)", err, apply != nil && apply.RolledBack, apply.ScenarioErr)
+	}
+	for _, path := range []string{rosters["default"], alias} {
+		if got := syncRosterPassword(t, path); got != syncNewPassword {
+			t.Errorf("%s freeipa.admin.password = %q, want the new password", path, got)
+		}
+	}
+}
+
 // A roster this session never wrote, which another pilot process changed
 // meanwhile, is that process's change: the rollback leaves it and is no
 // partial failure (PR #148 re-review).

@@ -47,6 +47,13 @@ func rosterCandidates(dir, source string, referenced []string) []string {
 		if err != nil {
 			continue
 		}
+		// Which file it is — inventory.RosterFileKey, so hard links of one
+		// roster are one file as they are one lock: syncing them separately
+		// would meet its own lock.
+		key, err := rosterIdentityKey(dir, source, path)
+		if err != nil {
+			continue
+		}
 		// A link from elsewhere into .vault/ is listed under its .vault/
 		// name, as a plan lists it (rosterWritePath), so both write it and
 		// name it alike.
@@ -57,13 +64,13 @@ func rosterCandidates(dir, source string, referenced []string) []string {
 		if !isManagedVaultFile(dir, path) && isManagedVaultFile(root, file) {
 			path = filepath.Join(dir, ".vault", filepath.Base(file))
 		}
-		if i, seen := index[file]; seen {
+		if i, seen := index[key]; seen {
 			if !isManagedVaultFile(dir, out[i]) && isManagedVaultFile(dir, path) {
 				out[i] = path
 			}
 			continue
 		}
-		index[file] = len(out)
+		index[key] = len(out)
 		out = append(out, path)
 	}
 	return out
@@ -72,12 +79,23 @@ func rosterCandidates(dir, source string, referenced []string) []string {
 // rosterIdentity is the canonical file path names, read through source for
 // a path inside dir when dir is source's plan copy (rosterCandidates).
 func rosterIdentity(dir, source, path string) (string, error) {
+	return identityOf(dir, source, path, secretpath.Canonical)
+}
+
+// rosterIdentityKey is rosterIdentity's file as inventory.RosterFileKey
+// names it: the canonical path, or one inode key for every hard link of a
+// file.
+func rosterIdentityKey(dir, source, path string) (string, error) {
+	return identityOf(dir, source, path, inventory.RosterFileKey)
+}
+
+func identityOf(dir, source, path string, identity func(string) (string, error)) (string, error) {
 	if source != "" {
 		if rel, err := filepath.Rel(dir, path); err == nil && !strings.HasPrefix(rel, "..") {
-			return secretpath.Canonical(filepath.Join(source, rel))
+			return identity(filepath.Join(source, rel))
 		}
 	}
-	return secretpath.Canonical(path)
+	return identity(path)
 }
 
 // referencedRosterFiles returns every freeipa_roster_file dir sets, read

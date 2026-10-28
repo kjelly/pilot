@@ -32,12 +32,24 @@ func canonicalPath(t *testing.T, path string) string {
 	return c
 }
 
+// journalKey is the key a journal records writes to path under
+// (RosterFileKey): the canonical path, or an inode key once the file has
+// another hard link.
+func journalKey(t *testing.T, path string) string {
+	t.Helper()
+	key, err := RosterFileKey(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 // onlyWrite returns the one write j recorded to path, failing t if there
 // is not exactly one.
 func onlyWrite(t *testing.T, j *RosterJournal, path string) RosterWrite {
 	t.Helper()
 	writes := j.Writes()
-	got := writes[canonicalPath(t, path)]
+	got := writes[journalKey(t, path)]
 	if len(got) != 1 || len(writes) != 1 {
 		t.Fatalf("journal holds %d writes to %s and writes to %d rosters; want exactly one write, to it", len(got), path, len(writes))
 	}
@@ -179,7 +191,7 @@ func TestRosterJournalRecordsAMigrationsPartWayRollback(t *testing.T) {
 	if _, err := MigrateRosterFile(path, RosterMigrationOptions{}); !errors.Is(err, syscall.ENOSPC) || !strings.Contains(err.Error(), "rolled back to the original") {
 		t.Fatalf("MigrateRosterFile() = %v, want the part-way failure, rolled back", err)
 	}
-	writes := j.Writes()[canonicalPath(t, path)]
+	writes := j.Writes()[journalKey(t, path)]
 	if len(writes) != 2 || len(j.Writes()) != 1 {
 		t.Fatalf("journal holds %d writes to the roster (and writes to %d rosters); want the failed install and the rollback", len(writes), len(j.Writes()))
 	}
