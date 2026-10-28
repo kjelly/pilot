@@ -113,6 +113,17 @@ func TestRegression_IdentityHostDNSRecords(t *testing.T) {
 		}
 	})
 
+	// The same holds for the duplicate-record message: it is only the captured
+	// outcome on rc 1.
+	t.Run("the duplicate message alone, with another exit code, fails", func(t *testing.T) {
+		fx := fixtureWithRC(t, "dnsrecord-add-duplicate", "2\n")
+		fakeIPA(t, map[string]string{web1: fx, web2: fx})
+		res := runIdentityTasks(t, []string{task, report}, vars)
+		if res.rc == 0 || failureOf(res, task) == "" {
+			t.Fatalf("expected failure at %q, rc=%d failures=%v", task, res.rc, res.failures)
+		}
+	})
+
 	// A different line mentioning DNS is not the captured message either.
 	t.Run("another DNS error on the same exit code fails", func(t *testing.T) {
 		calls := fakeIPA(t, map[string]string{web1: "dnsrecord-add-zone-not-found", web2: "dnsrecord-add-dns-not-configured"})
