@@ -47,7 +47,7 @@ Phase 0 交付：
 遠端鎖：
 - 寫入 server 上以 `flock --wait <秒> --conflict-exit-code 75 /etc/ipa sh -c 'echo locked; exec cat'` 持有，鎖到 stdin 關閉或 SSH 中斷為止。
 - 選 `/etc/ipa`，因為它在每台 FreeIPA server 上都存在，且任何 SSH 身分都能以唯讀開啟；不需要建立檔案。共用 `/tmp` 的檔案會受 `fs.protected_regular` 限制。
-- 舊 engine 的入口要在 Phase 2 取得同一把鎖。
+- 目前沒有任何 pilot 入口取這把鎖（只有 `internal/sshdial` 與它的測試呼叫 `AcquireLock`）。取鎖閘門：啟用混合模式或執行任何 live Go 寫入測試之前，所有會執行 `freeipa-identity-apply.yml` 的 pilot 程式碼路徑都要在漏斗處取同一把鎖並持有到該次執行結束，不以指令名稱定義。漏斗（2026-10-28 對 main `ff32bf63` 盤點）：`internal/accessgrants` 的 `applyPlan`（`ReconcileOnce`、`Activate`、`Deactivate`、`RepairManaged` 都經過它，所以 `pilot access reconcile --once`、`pilot access drift --repair-managed`、`pilot identity drift --repair-managed`、`pilot access breakglass`、`pilot edit` TUI 的 breakglass 都涵蓋）、host decommission 的 `freeipaIdentityConvergeStep.Execute`、`freeipa-identity` 的 deploy runner（`pilot deploy`、`pilot reconcile`）。以全 repo lint 鎖住新增的呼叫者必須經過取鎖包裝；dev 路徑（`vm-target run`／`test`、`topology test`）不在範圍。詳見計畫 §4 步驟 2。原因：授權快取義務是 server 上單一布林 `auth_pending`，另一輪完整執行可以在 Go 寫入前清掉它（prepare→settle→refresh→ack，清除交錯），或在 Go 寫入後以舊值覆蓋它（`auth_settle`，覆蓋交錯），Go 的撤銷就不會傳到 client，整輪卻正常結束。手動 `ansible-playbook` 與 dev 路徑不經漏斗、不取鎖，仍有同樣風險
 
 ## 3 users／groups 功能對照矩陣
 
@@ -78,7 +78,14 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 
 混合執行時，這些項目仍由舊 playbook 處理（計畫 §5 混合執行模型）。per-user authentication types 雖然是使用者屬性，仍留在舊 playbook，直到 Phase 3 搬移該 section。
 
-Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：Go 的 plan 有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，成功後 Go 才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。
+Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：最終寫入集合（寫入前重讀與重新規劃之後）有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，Go 觀察到結果才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。契約：
+
+- 入口與 identity playbook 對同一台主機（contract `hostCardinality: exactly-one`）；入口結束碼為 0 不算成功（`no hosts matched` 與被跳過的 task 也可能是 0），要看到該 server 的 `auth_prepare` 結果（`previous`）才算。
+- 本輪持鎖期間入口尚未成功，不送任何寫入 RPC（執行器不變量）。入口的位置在寫入前重讀與重新規劃之後、第一批寫入之前；觸發條件是最終寫入集合有寫入；最終寫入集合為空時不執行入口（混合 run 由 playbook 自己的 prepare 讀到既有義務並刷新）；入口執行後才發現無差異時，入口執行過、Go 沒有寫入，多刷新一次可接受。
+- 入口與 identity playbook 共用三個輸入：journal 路徑（`ipa_identity_ssh_cache_state_file`）、`ipa_domain`、helper 原始碼（`ipa_ssh_cache_program`）。
+- 所有執行 identity playbook 的 pilot 程式碼路徑都在漏斗處先取 `/etc/ipa` 鎖（見 §2 遠端鎖與計畫 §4 步驟 2）；取鎖包裝的 target 推導、等待策略與 `Lock.Lost()` 處理由 Phase 2 spec 決定。
+- users/groups-only scope 不執行 playbook，沒有寫入時也要做唯讀探測（不能用入口代替，入口會把 `auth_pending` 設為 true）：探測到上一輪遺留的未結清義務就標為未結清結果，不回報成功。
+- 「是否已刷新」以這一輪觀察到的機器可讀標記（該 server 的 `acked=true`）判定，不在 Go 重推 tag 或 `ipa_identity_refresh_sssd_cache`、`pilot_deferred_hosts` 條件；沒有標記（users/groups-only scope、tag 漏掉、`no hosts matched`）一律未結清。未結清時結果回報授權快取義務未結清並標為未結清結果（非成功：結束碼非 0，對外不得是 `success`；不原樣沿用 `partial_success`，名稱由 Phase 2 spec 決定，見計畫 (ii) 的實作要求），不自行補跑刷新。義務仍留在 server 的 journal，下一次會刷新的 run 清掉它。
 
 ## 4 engine 專屬驗收條件
 
