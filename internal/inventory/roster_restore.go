@@ -43,6 +43,13 @@ func RestoreRosterFile(path string, expected, original []byte) error {
 // the file path names is removed, on the same conditions — the one the
 // lock covers and whose bytes were checked, so a symlinked roster loses
 // its file, not the link (PR #148 review).
+//
+// The removal is not recorded in any RosterJournal: it is a bare
+// os.Remove of the locked target, not a writeLockedRoster. A journal still
+// watching the file would see it vanish without a record, so the caller
+// must already have stopped (RosterJournal.Stop) or closed every journal
+// that watches path — the pilot edit rollback does so before it restores
+// anything.
 func RemoveRosterFile(path string, expected []byte) error {
 	lk, err := lockRosterFile(path)
 	if err != nil {
