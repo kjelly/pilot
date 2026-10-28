@@ -108,16 +108,32 @@ func checkLockFileOpen(path string, f *os.File, err error) error {
 	return nil
 }
 
+// lockContentionWait is how long flockMutationLock keeps trying a lock
+// another process holds before reporting ErrMutationLocked. It covers the
+// instant ProbeRosterLock holds a lock file shared, so a plan's probe never
+// fails a writer, and stays short enough that a busy roster is still
+// reported at once rather than queued behind (PR #148 round 5, P3-a).
+const lockContentionWait = 250 * time.Millisecond
+
 // flockMutationLock takes how (LOCK_EX or LOCK_SH) on the open lock file
-// f without waiting: ErrMutationLocked when another process holds it.
+// f without blocking, trying again for up to lockContentionWait while
+// another process holds it: ErrMutationLocked if it still does.
 func flockMutationLock(path string, f *os.File, how int) error {
-	if err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	deadline := time.Now().Add(lockContentionWait)
+	for delay := 5 * time.Millisecond; ; delay *= 2 {
+		err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("lock %s: %w", path, err)
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
 			return ErrMutationLocked
 		}
-		return fmt.Errorf("lock %s: %w", path, err)
+		time.Sleep(min(delay, left))
 	}
-	return nil
 }
 
 // ProbeRosterLock reports what lockRosterFile would find on the roster at
@@ -126,8 +142,10 @@ func flockMutationLock(path string, f *os.File, how int) error {
 // another process holds one, ErrRosterLockFile when one could not be used.
 // A plan probes the real roster its scratch copy stands in for, so it
 // fails where the apply would. The probe takes each existing lock file's
-// flock shared for an instant; a writer starting in that instant finds
-// the roster busy, as with any other holder, and can retry.
+// flock shared for an instant; a writer whose attempt lands in that
+// instant keeps trying (flockMutationLock), so the probe never fails it.
+// Like the writer, the probe waits up to lockContentionWait for a holder
+// to let go.
 func ProbeRosterLock(path string) error {
 	target, err := secretpath.Canonical(path)
 	if err != nil {

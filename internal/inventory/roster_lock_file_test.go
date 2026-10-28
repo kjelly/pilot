@@ -3,6 +3,7 @@ package inventory
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -439,6 +440,93 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 		}
 		if _, err := lockRosterFile(path); !errors.Is(err, ErrRosterLockFile) {
 			t.Fatalf("lockRosterFile() = %v; the probe and the writer disagree", err)
+		}
+	})
+}
+
+// The plan's probe holds a lock file shared for an instant; a writer whose
+// attempt lands then must not fail, while a roster another process really
+// holds is still reported busy within lockContentionWait (PR #148 round 5,
+// P3-a).
+func TestRosterLockContentionIsBriefAndBounded(t *testing.T) {
+	t.Run("a brief shared hold does not fail a writer", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		f, err := os.OpenFile(path+rosterLockSuffixes[0], os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		released := make(chan struct{})
+		go func() {
+			time.Sleep(lockContentionWait / 5)
+			f.Close()
+			close(released)
+		}()
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatalf("writer during a brief shared hold: %v", err)
+		}
+		<-released
+	})
+	t.Run("probes running beside writers fail none of them", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := ProbeRosterLock(path); err != nil { // lock files absent: nothing to hold
+			t.Fatal(err)
+		}
+		lk, err := lockRosterFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lk.release() //nolint:errcheck
+		stop := make(chan struct{})
+		probed := make(chan int)
+		go func() {
+			n := 0
+			for {
+				select {
+				case <-stop:
+					probed <- n
+					return
+				default:
+					_ = ProbeRosterLock(path)
+					n++
+				}
+			}
+		}()
+		for i := 0; i < 20; i++ {
+			if err := AppendRosterUser(path, fmt.Sprintf("user%d", i)); err != nil {
+				close(stop)
+				<-probed
+				t.Fatalf("write %d beside the probe: %v", i, err)
+			}
+		}
+		close(stop)
+		if n := <-probed; n == 0 {
+			t.Fatal("the probe never ran")
+		}
+	})
+	t.Run("a held lock is reported busy within the bound", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		f, err := os.OpenFile(path+rosterLockSuffixes[1], os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		err = AppendRosterUser(path, "erin")
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("AppendRosterUser() = %v, want ErrMutationLocked", err)
+		}
+		if elapsed < lockContentionWait || elapsed > lockContentionWait+time.Second {
+			t.Fatalf("busy reported after %v, want about %v", elapsed, lockContentionWait)
+		}
+		if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+			t.Fatal("roster changed")
 		}
 	})
 }
