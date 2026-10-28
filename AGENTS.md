@@ -656,6 +656,15 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    第二次安裝 `sssd-tools` 時讀到第一次留下的 `stale_metadata=True`。
    **規則**:會被重複 include 的 task 檔(`playbooks/apply/tasks/*.yml`),
    開頭必須重置自己的 per-include 狀態 fact。
+   2026-10-28 第三次(issue #157):fact 也會活過 play,`site.yml` 對同時在
+   `dns` 與 `freeipa-client` 的主機先從 `dns-apply.yml`、再從
+   `freeipa-client-apply.yml` include `tasks/freeipa-server-pool.yml`,第二次
+   的 replica 迴圈接在第一次的清單後面,duplicate-FQDN gate 讓整個 run 失敗。
+   `internal/spec/loop_accumulator_reset_regression_test.go::TestRegression_LoopAccumulatorsAreResetBeforeTheirLoop`
+   對全部 `playbooks/**` 檢查:在 loop 裡讀自己前值的 `set_fact`,同一個 task
+   清單(task 檔,或 play 的 pre_tasks→tasks→post_tasks)前面要有不帶 loop、
+   不讀自己的 `set_fact` 重置它,`when:` 不比 loop 窄,tag 是 `always` 或涵蓋
+   loop 的 tag(既有 20 處單一 play 的案例列在 ratchet allowlist)。
 3. **play 層級的 `vars:` 優先順序高於 inventory 的 `group_vars`/`host_vars`**。
    `360c6f2`(09-11)先修過 `internal-endpoint-apply.yml` 與
    `detection-engine-apply.yml`(空字串預設值蓋掉 operator 在 inventory 設好的值);
@@ -1534,3 +1543,4 @@ git status --short
 | 2026-10-14 | v1.52 | 新增 `login-probe-apply.yml`（GitHub issue #11：每站外部 SSH/PAM 登入探測；以 FreeIPA canary 帳號經系統 OpenSSH 真實登入，並經 node_exporter textfile collector 發布狀態）；同時新增 host-health / login-probe 告警與 Alertmanager inhibit 規則、topology fixtures、decommission target reconciliation 與 regression coverage。Prometheus spec 保留主線 C20–C22，login-probe 驗收項目編為 C23–C24 | pilot |
 | 2026-10-16 | v1.53 | §4.5 新增第 15 點：密碼不得插進 shell 或 free-form `command:` 字串。PR #92 的 3 個 FreeIPA kinit task（replica forwarder、replica self-register、primary dnsconfig-mod）改用 `argv` + `stdin`；新增全 repo lint `TestRegression_NoSecretInCommandText`（既有 33 處列入以 task 數計算的 ratchet allowlist，#118 追蹤）與行為測試 `TestRegression_FreeIPAKinitTasksPassPasswordUnchanged`。#79（v1.50）、#80（v1.52）也新增列，後合併者重新編號 | pilot |
 | 2026-10-15 | v1.54 | §4.5 新增第 16 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |
+| 2026-10-28 | v1.55 | §4.5 第 2 點：fact 也會活過 play。`site.yml` 對同時在 `dns`、`freeipa-client` 的主機 include `tasks/freeipa-server-pool.yml` 兩次，replica 清單重複、duplicate-FQDN gate 失敗（issue #157）；該檔開頭重置 `freeipa_server_pool_replicas`。新增全 repo lint `TestRegression_LoopAccumulatorsAreResetBeforeTheirLoop`（既有 20 處列入 ratchet allowlist）、runtime 測試 `make freeipa-server-pool-test`（CI Playbook lint job） | pilot |
