@@ -169,6 +169,13 @@ func TestEnableNFSRosterRefMatrix(t *testing.T) {
 		for _, need := range []string{"needs no write", "needs a write", "missing"} {
 			for feName, run := range refFrontEnds() {
 				t.Run(formName+"/"+need+"/"+feName, func(t *testing.T) {
+					if feName != "--actions" {
+						// Each cell has its own workspace; only --actions
+						// reads a package global (editDir). Run the rest
+						// side by side: under -race the matrix is the
+						// package's slowest test otherwise.
+						t.Parallel()
+					}
 					dir, ext, file, _ := refWorkspace(t, form)
 					inScope := form.inScope
 					if form.nfsFile != nil {
