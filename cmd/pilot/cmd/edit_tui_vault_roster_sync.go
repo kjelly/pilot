@@ -284,15 +284,20 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 	}
 	oldPassword, newPassword := inventory.VaultAdminPassword(previous), inventory.VaultAdminPassword(saved)
 	templated := inventory.VaultAdminPasswordTemplate(saved) != ""
-	notString := inventory.VaultAdminPasswordNotString(previous) || inventory.VaultAdminPasswordNotString(saved)
+	// Each message is judged on the value it is about: what to do with the
+	// saved value on the saved value, what pilot cannot know about the
+	// old one on the old one (PR #148 round 6, P3-6: an old unquoted
+	// value replaced by a quoted one was told to add quotes).
+	notString := inventory.VaultAdminPasswordNotString(saved)
 	// A value replaced (not added or removed) whose old or new form pilot
-	// cannot read — an inline !vault value, or an old template — leaves
-	// pilot unable to tell which rosters held the old password (PR #148
-	// round 5, P3-c).
+	// cannot read — an inline !vault value, an old template, an old value
+	// a YAML loader may read as a number or date — leaves pilot unable to
+	// tell which rosters held the old password (PR #148 round 5, P3-c).
 	replaced := inventory.VaultAdminPasswordText(previous) != "" && inventory.VaultAdminPasswordText(saved) != ""
 	encrypted := replaced && (inventory.VaultAdminPasswordEncrypted(previous) || inventory.VaultAdminPasswordEncrypted(saved))
 	oldTemplated := replaced && inventory.VaultAdminPasswordTemplate(previous) != ""
-	if !templated && !notString && !encrypted && !oldTemplated && (oldPassword == "" || newPassword == "") {
+	oldNotString := replaced && inventory.VaultAdminPasswordNotString(previous)
+	if !templated && !notString && !encrypted && !oldTemplated && !oldNotString && (oldPassword == "" || newPassword == "") {
 		return sync, ""
 	}
 	if !sameExistingFile(vaultPath, filepath.Join(dir, ".vault", "main.yaml")) {
@@ -309,6 +314,9 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 	}
 	if oldTemplated {
 		return fixed("⚠️  ", "未同步名冊：原本的 ipa_admin_password 含 {{、{% 或 {#，Ansible 會把它當成模板展開，pilot 不知道舊密碼是什麼，無法判斷哪些名冊用的是它；請手動確認每份名冊的 freeipa.admin.password 跟新的 ipa_admin_password 相同"), ""
+	}
+	if oldNotString {
+		return fixed("⚠️  ", "未同步名冊：原本的 ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值，pilot 無法判斷哪些名冊用的是它；新的值已存成加引號的字串，請手動確認每份名冊的 freeipa.admin.password 跟它相同（同樣加上引號）"), ""
 	}
 	return prepareRosterAdminPasswords(r, dir, oldPassword, newPassword)
 }

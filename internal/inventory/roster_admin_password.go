@@ -86,14 +86,23 @@ func VaultAdminPasswordEncrypted(data []byte) bool {
 }
 
 // VaultAdminPasswordText is a plaintext vault vars file's
-// ipa_admin_password as written, whatever it may be read as, "" when data
-// is encrypted or has none: for telling whether a save changed it, never
-// for showing — it may be a password.
+// ipa_admin_password as written, whatever it may be read as — a list or
+// a mapping as its YAML — "" when data is encrypted or has none: for
+// telling whether a save changed it, never for showing — it may be a
+// password.
 func VaultAdminPasswordText(data []byte) string {
-	if value := vaultAdminValue(data); value != nil && value.Kind == yaml.ScalarNode {
+	value := vaultAdminValue(data)
+	switch {
+	case value == nil:
+		return ""
+	case value.Kind == yaml.ScalarNode:
 		return value.Value
 	}
-	return ""
+	out, err := yaml.Marshal(value)
+	if err != nil {
+		return "unencodable " + value.ShortTag()
+	}
+	return string(out)
 }
 
 func vaultAdminValue(data []byte) *yaml.Node {

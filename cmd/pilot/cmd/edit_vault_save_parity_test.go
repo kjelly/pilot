@@ -125,6 +125,18 @@ func paritySetups() map[string]paritySetup {
 			},
 			warnings: []string{"未同步名冊：原本的 ipa_admin_password 含 {{、{% 或 {#"},
 		},
+		// The old value was unquoted, the new one is saved quoted: the line
+		// is about the old value, never "add quotes" (PR #148 round 6,
+		// P3-6).
+		"unquoted old value": {
+			password: "New-pass_2",
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, syncTestRoster(`"Old-pass_1"`))
+				writeSyncFile(t, vault, "ipa_admin_password: 12345678\n")
+				return []string{vault, roster}, func() {}
+			},
+			warnings: []string{"未同步名冊：原本的 ipa_admin_password 沒加引號"},
+		},
 		"templated value": {
 			password: "{{ lookup('env', 'IPA_ADMIN') }}",
 			prepare: func(t *testing.T, dir string) ([]string, func()) {

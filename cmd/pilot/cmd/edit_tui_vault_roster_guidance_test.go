@@ -377,6 +377,8 @@ func TestUnquotedVaultPasswordIsReported(t *testing.T) {
 	}
 
 	// A rotation away from an unquoted value cannot know the old password.
+	// It says so about the old value; the new one is saved quoted, so it
+	// is not told to add quotes (PR #148 round 6, P3-6).
 	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: 012345678\n")
 	r := newEditRouterModel(dir)
 	d := automationDriver{dir: dir}
@@ -386,10 +388,13 @@ func TestUnquotedVaultPasswordIsReported(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("driver.run() error = %v", err)
 	}
-	if !strings.Contains(r.banner, "⚠️  未同步名冊：ipa_admin_password 沒加引號") || !slices.ContainsFunc(r.rosterSyncWarnings, func(w string) bool {
-		return strings.HasPrefix(w, "未同步名冊：ipa_admin_password 沒加引號")
-	}) {
-		t.Fatalf("rotation from an unquoted password is not reported:\n%s", r.banner)
+	if !strings.Contains(r.banner, "⚠️  未同步名冊：原本的 ipa_admin_password 沒加引號") || !slices.ContainsFunc(r.rosterSyncWarnings, func(w string) bool {
+		return strings.HasPrefix(w, "未同步名冊：原本的 ipa_admin_password 沒加引號")
+	}) || strings.Contains(r.banner, "請把它加上引號") {
+		t.Fatalf("rotation from an unquoted password is not reported as such:\n%s", r.banner)
+	}
+	if saved, _ := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml")); inventory.VaultAdminPasswordNotString(saved) || inventory.VaultAdminPassword(saved) != syncNewPassword {
+		t.Fatalf("the new value was not saved as a quoted string:\n%s", saved)
 	}
 	assertUnchanged(t, before)
 
