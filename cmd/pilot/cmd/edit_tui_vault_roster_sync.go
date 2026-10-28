@@ -323,21 +323,28 @@ func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPasswo
 			// and which is always writable; the apply locks and writes the
 			// real roster, so the plan probes it to fail where the apply
 			// would.
-			if real, rerr := rosterIdentity(dir, scope.planSource, path); rerr == nil {
-				if err = inventory.ProbeRosterWrite(real); err != nil {
-					prepared.Release()
-				}
+			real, rerr := rosterIdentity(dir, scope.planSource, path)
+			if rerr == nil {
+				rerr = inventory.ProbeRosterWrite(real)
 			}
-		}
-		if banner, busy := rosterBusyBanner(r, shown, err); busy {
-			sync.release()
-			return nil, banner
+			if rerr != nil {
+				prepared.Release()
+				err = rerr
+			}
 		}
 		switch {
 		case errors.Is(err, inventory.ErrRosterEncrypted):
 			manual(shown, "ansible-vault 加密（用 ansible-vault edit）")
-		case err != nil:
+		case errors.Is(err, inventory.ErrRosterNeedsHandEdit):
 			manual(shown, rosterSyncReason(err, path, shown))
+		case err != nil:
+			// Fail closed: any other error means this roster must follow
+			// the new password but cannot be written now — locked, an
+			// unusable lock file, not writable, … — so the save is refused
+			// rather than leaving it on the old password (PR #148 round 6,
+			// P2-1).
+			sync.release()
+			return nil, rosterRefusal(r, shown, err)
 		case prepared.Result == inventory.RosterAdminUpdated:
 			sync.steps = append(sync.steps, vaultRosterStep{path: path, shown: shown, prepared: prepared})
 		case prepared.Result == inventory.RosterAdminNotString:

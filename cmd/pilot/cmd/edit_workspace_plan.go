@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -58,13 +59,20 @@ func planEditScenario(dir string, scenario editScenario, opts editAgentSessionOp
 
 	opts.PlanSource = dir
 	session := newEditAgentSession(tempDir, opts)
+	// A plan names files as the apply would: the real workspace's paths,
+	// never its scratch copy's (PR #148 round 5 review, P3-5).
 	run, err := session.Run(scenario)
 	if err != nil {
-		return nil, fmt.Errorf("plan scenario: %w", err)
+		return nil, fmt.Errorf("plan scenario: %w", scratchPathError{err: err, scratch: tempDir, path: dir})
 	}
 
 	blocking, warnings := collectWorkspaceValidation(tempDir)
 	warnings = append(warnings, run.Warnings...)
+	for _, list := range [][]string{blocking, warnings} {
+		for i := range list {
+			list[i] = strings.ReplaceAll(list[i], tempDir, dir)
+		}
+	}
 
 	patch, affected, redacted, err := diffManagedFiles(dir, tempDir)
 	if err != nil {

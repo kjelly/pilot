@@ -116,6 +116,7 @@ func openRosterForWrite(target, shown string) (*os.File, *syscall.Stat_t, error)
 		return nil, nil, fmt.Errorf("roster %s: %w: %w", shown, ErrRosterNotWritable, err)
 	}
 	f, err := os.OpenFile(target, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	f, err = faultAfterOpen(target, f, err)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, nil, nil

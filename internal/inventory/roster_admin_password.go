@@ -199,9 +199,12 @@ type PreparedRosterAdminSync struct {
 // locked: the caller must Commit or Release it. A roster the write would
 // be refused for (ErrRosterNotWritable: not writable by this user, not a
 // regular file, …) is refused here, so the caller learns it before writing
-// anything. Errors are SyncRosterAdminPassword's — ErrMutationLocked,
-// ErrRosterLockFile and ErrRosterNotWritable among them — and leave
-// nothing locked.
+// anything. Errors leave nothing locked and come in two kinds: reading and
+// deciding the change gives ErrRosterNeedsHandEdit (an encrypted,
+// unreadable or invalid roster, a password pilot cannot rewrite itself);
+// anything else — locking (ErrMutationLocked, ErrRosterLockFile), the
+// roster's writability (ErrRosterNotWritable), resolving its path — means
+// pilot must write the roster but may not.
 func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRosterAdminSync, error) {
 	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
 	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
@@ -257,9 +260,35 @@ func rosterFileEmpty(path string) bool {
 	return err == nil && len(bytes.TrimSpace(data)) == 0
 }
 
+// ErrRosterNeedsHandEdit marks a roster whose admin password pilot cannot
+// carry forward itself and leaves to the operator — it is encrypted (a
+// file or an inline !vault value), unreadable or invalid, or its password
+// cannot be rewritten on one line by itself — as opposed to a roster pilot
+// must write but may not (locked, unusable lock file, not writable), which
+// refuses the vault save. Every error PrepareRosterAdminSync returns from
+// reading and deciding is one; every other error refuses (PR #148 round 6,
+// P2-1).
+var ErrRosterNeedsHandEdit = errors.New("roster admin password needs a hand edit")
+
+// handEditError is an error that is ErrRosterNeedsHandEdit too, with the
+// same message.
+type handEditError struct{ err error }
+
+func (e handEditError) Error() string   { return e.err.Error() }
+func (e handEditError) Unwrap() []error { return []error{e.err, ErrRosterNeedsHandEdit} }
+
 // planRosterAdminSync decides what SyncRosterAdminPassword does to the roster
 // as it is on disk now and, for RosterAdminUpdated, returns its new bytes.
+// Its errors are ErrRosterNeedsHandEdit.
 func planRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync, []byte, error) {
+	result, updated, err := decideRosterAdminSync(path, oldPassword, newPassword)
+	if err != nil {
+		err = handEditError{err}
+	}
+	return result, updated, err
+}
+
+func decideRosterAdminSync(path, oldPassword, newPassword string) (RosterAdminSync, []byte, error) {
 	data, doc, err := readRosterNode(path)
 	if err != nil {
 		return 0, nil, err
