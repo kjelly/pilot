@@ -84,8 +84,8 @@ Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（c
 - 本輪持鎖期間入口尚未成功，不送任何寫入 RPC（執行器不變量）。入口的位置在寫入前重讀與重新規劃之後、第一批寫入之前；觸發條件是最終寫入集合有寫入；最終寫入集合為空時不執行入口（混合 run 由 playbook 自己的 prepare 讀到既有義務並刷新）；入口執行後才發現無差異時，入口執行過、Go 沒有寫入，多刷新一次可接受。
 - 入口與 identity playbook 共用三個輸入：journal 路徑（`ipa_identity_ssh_cache_state_file`）、`ipa_domain`、helper 原始碼（`ipa_ssh_cache_program`）。
 - 所有執行 identity playbook 的 pilot 程式碼路徑都在漏斗處先取 `/etc/ipa` 鎖（見 §2 遠端鎖與計畫 §4 步驟 2）；取鎖包裝的 target 推導、等待策略與 `Lock.Lost()` 處理由 Phase 2 spec 決定。
-- users/groups-only scope 不執行 playbook，沒有寫入時也要做唯讀探測（不能用入口代替，入口會把 `auth_pending` 設為 true）：探測到上一輪遺留的未結清義務就標 partial，不回報成功。
-- 「是否已刷新」以這一輪觀察到的機器可讀標記（該 server 的 `acked=true`）判定，不在 Go 重推 tag 或 `ipa_identity_refresh_sssd_cache`、`pilot_deferred_hosts` 條件；沒有標記（users/groups-only scope、tag 漏掉、`no hosts matched`）一律未結清。未結清時結果回報授權快取義務未結清並標為 partial，不自行補跑刷新。義務仍留在 server 的 journal，下一次會刷新的 run 清掉它。
+- users/groups-only scope 不執行 playbook，沒有寫入時也要做唯讀探測（不能用入口代替，入口會把 `auth_pending` 設為 true）：探測到上一輪遺留的未結清義務就標為未結清結果，不回報成功。
+- 「是否已刷新」以這一輪觀察到的機器可讀標記（該 server 的 `acked=true`）判定，不在 Go 重推 tag 或 `ipa_identity_refresh_sssd_cache`、`pilot_deferred_hosts` 條件；沒有標記（users/groups-only scope、tag 漏掉、`no hosts matched`）一律未結清。未結清時結果回報授權快取義務未結清並標為未結清結果（非成功：結束碼非 0，對外不得是 `success`；不原樣沿用 `partial_success`，名稱由 Phase 2 spec 決定，見計畫 (ii) 的實作要求），不自行補跑刷新。義務仍留在 server 的 journal，下一次會刷新的 run 清掉它。
 
 ## 4 engine 專屬驗收條件
 
