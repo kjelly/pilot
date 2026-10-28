@@ -22,7 +22,9 @@ import (
 // The returned cleanup func removes the temp dir; callers should defer
 // it immediately.
 func copyManagedFilesToTemp(dir string) (tempDir string, cleanup func(), err error) {
-	tempDir, err = os.MkdirTemp("", "pilot-edit-plan-*")
+	// The copy holds the workspace's .vault/ files: privateTempDir sweeps
+	// the copies a killed pilot leaves.
+	tempDir, err = privateTempDir("pilot-edit-plan")
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp workspace: %w", err)
 	}

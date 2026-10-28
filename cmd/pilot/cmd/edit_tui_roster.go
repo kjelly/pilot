@@ -733,7 +733,8 @@ func (scope editWriteScope) restricts(path string) bool {
 }
 
 // simulateRosterWrite runs mutate on a private copy of the roster at path,
-// in a new temporary directory it removes afterwards, and reports whether
+// in a new temporary directory it removes afterwards (privateTempDir), and
+// reports whether
 // the write would change the roster: different bytes, or a roster created
 // or removed. The real file is only read, and no lock file appears beside
 // it. An error names path, not the copy.
@@ -744,7 +745,9 @@ func simulateRosterWrite[T any](path string, mutate func(path string) (T, error)
 	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
 		return zero, false, fmt.Errorf("read roster %s: %w", path, readErr)
 	}
-	scratchDir, err := os.MkdirTemp("", "pilot-roster-scope-*")
+	// A plaintext roster copy, admin password included: privateTempDir
+	// sweeps the copies a killed pilot leaves.
+	scratchDir, err := privateTempDir("pilot-roster-scope")
 	if err != nil {
 		return zero, false, err
 	}
