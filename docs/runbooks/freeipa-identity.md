@@ -447,18 +447,17 @@ freeipa-nfs-server 的 gate 也會擋下，並指出是哪一份名冊。三者�
 `Vault{{Secret9`）時，gate 展開它就失敗，ansible-core 2.19 會在錯誤的 Origin 段落印出那個檔案的那一行，密碼也在其中，
 `no_log` 也擋不住（它只隱藏 task 的結果）。pilot edit 不會同步含 `{{`、`{%`、`{#` 的 vault 值，preflight 也會警告。
 
-最新實機驗證（2026-10-28，candidate `3b4bdb1`，兩台全新 VM）：site chain 通過，gate 的通過、
-失敗與手動修正後的復原都已驗證；`pilot edit --actions` 輪替成功，名冊被持有時拒絕存檔。見
-[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)。這份結果只對 candidate `3b4bdb1` 成立，
-不能當作合併後的樹的實機證據：
+最新實機驗證（2026-10-28，candidate `22cad092`，兩台全新 VM）：site chain 通過（L1–L6，`freeipa-server.md` 20/20），
+gate 的通過、失敗與手動修正後的復原都已驗證；`pilot edit --actions` 輪替成功，名冊被持有時拒絕存檔，
+以 hard link 共用 inode 的名冊在被持有時也拒絕存檔、釋放後兩個名字都拿到新密碼。見
+[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-28-22cad09.md)。這份紀錄涵蓋到 `22cad092` 為止的 Go 程式碼與
+playbook；之後只加了這份紀錄與本段文字，沒有改任何會影響執行結果的檔案。沒有涵蓋的部分：
 
-- 之後併入的 Go 程式碼（apply rollback 的寫入紀錄、lock 檔權限、換名被拒時的原地覆寫、暫存目錄的清掃等）
-  與 `playbooks/apply/freeipa-nfs-server-apply.yml` 都跟 candidate 不同；playbook 只是 no_log 名冊 gate 的
-  `fail_msg` 文字與註解（實跑紀錄裡的 sha256 是 `88247b6e…`，撰寫本段時這個樹的檔案是
-  `945657769b995f68fd45f54b157782d4b879a0bb3f16516c6fedc1d0df3d74fa`；這是撰寫當下的值，不是實測值）。
-- 這個樹上，用真實 Ansible 跑 gate 的測試（`TestRegression_FreeIPANFSServerRosterGateNamesItsConditions`、
-  `TestRegression_FreeIPANFSServerAdminPasswordDriftGate`）通過，但沒有對這個樹做過 vm-target 實機執行。
-- 依 AGENTS.md §1.5，要把實機結果當成這個樹的證據，必須對新的 candidate 重跑一次。
+- apply rollback 的還原路徑（journal 記錄、保留別的 process 的修改）沒有實機觸發：`--actions` 不會 rollback，
+  MCP apply 的 rollback 只有本機單元與整合測試。
+- 較早的紀錄（[3b4bdb1](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)）仍保留，它的
+  `playbooks/apply/freeipa-nfs-server-apply.yml` sha256 是 `88247b6e…`，`22cad092` 是 `945657769b99…`；
+  差別只在 no_log 名冊 gate 的 `fail_msg` 文字與註解。
 
 ---
 
@@ -1004,4 +1003,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-07-22 | v1.2 | Delivery batch 1：canonical v1 users/groups、legacy compatibility、12-row verification 與 immutable candidate evidence；新增 `freeipa_roster_file` namespaced 入口及 Ansible magic-variable/duplicate-alias gotcha | pilot |
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
-| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1` 曾實跑，合併後的樹沒有，見 §4.5 末段） | pilot |
+| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1` 與 `22cad092` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑沒有實機觸發） | pilot |
