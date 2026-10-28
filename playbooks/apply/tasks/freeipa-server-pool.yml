@@ -38,7 +38,20 @@
 # value, more than one freeipa-server host, ambiguous replica FQDNs, duplicate
 # FQDNs anywhere in the pool, an IP reused across two different FQDNs, and
 # ha mode requested with fewer than 2 pool members.
+#
+# Safe to include more than once per host in one run: the first task resets
+# the per-include state the replica loop appends to.
 ---
+# set_fact outlives this include and the play (AGENTS.md §4.5 point 2).
+# site.yml includes this file from dns-apply.yml and again from
+# freeipa-client-apply.yml; on a host in both groups the replica loop below
+# appended to the first include's list, listed every replica twice, and the
+# duplicate-FQDN gate failed the run (issue #157).
+- name: "FreeIPA server pool — reset per-include state"
+  ansible.builtin.set_fact:
+    freeipa_server_pool_replicas: []
+  tags: [always]
+
 - name: "FreeIPA server pool — normalize topology_mode input (default auto)"
   ansible.builtin.set_fact:
     freeipa_client_topology_mode_input: "{{ freeipa_client_topology_mode | default('auto') }}"
