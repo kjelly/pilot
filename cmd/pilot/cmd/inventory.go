@@ -330,9 +330,13 @@ func writeMissingHostVarsSkeleton(w io.Writer, dir string, hf *inventory.HostsFi
 
 // resolveRosterPath resolves a freeipa_roster_file value the same way a
 // human editing hosts.yml inside a workspace would expect: an absolute path
-// is used as-is, a relative one is relative to that workspace's own
-// directory (dir), not the pilot process's current working directory.
+// is used as-is, a leading "~" or "~/" is the user's home directory — as
+// Ansible's include_vars expands it, so pilot finds the file the playbooks
+// load (AGENTS.md §5.11) — and any other relative path is relative to that
+// workspace's own directory (dir), not the pilot process's current working
+// directory.
 func resolveRosterPath(dir, rosterPath string) string {
+	rosterPath = expandHomeDir(rosterPath)
 	if rosterPath == "" || filepath.IsAbs(rosterPath) {
 		return rosterPath
 	}
