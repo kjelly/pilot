@@ -393,9 +393,11 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 			previous, _ := os.ReadFile(path)
 			sync, refused := prepareVaultRosterSync(r, dir, path, previous, doc.Bytes())
 			if refused != "" {
-				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", path, r.writeRefused)
+				// Named in the workspace, never by a plan's scratch copy.
+				shown := shownRosterPath(path, dir, r.planSource)
+				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", shown, r.writeRefused)
 				return pushVaultEditorScreen(r, dir, path, doc, true,
-					fmt.Sprintf("⚠️  未存檔 %s（修改還在）：名冊要跟著改 ipa_admin_password，但它現在不能寫入\n%s", path, refused))
+					fmt.Sprintf("⚠️  未存檔 %s（修改還在）：名冊要跟著改 ipa_admin_password，但它現在不能寫入\n%s", shown, refused))
 			}
 			if werr := os.WriteFile(path, doc.Bytes(), 0o600); werr != nil {
 				sync.release()

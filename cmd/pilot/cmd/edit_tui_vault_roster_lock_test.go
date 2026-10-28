@@ -88,7 +88,7 @@ func TestEditAutomationDriverVaultSyncRespectsTheLinkedRostersLock(t *testing.T)
 			r := newEditRouterModel(dir)
 			d := automationDriver{dir: dir}
 			err := d.run(&r, rotationSteps(syncNewPassword))
-			if !errors.Is(err, inventory.ErrMutationLocked) || !strings.Contains(err.Error(), mainVault+" was not saved") {
+			if !errors.Is(err, inventory.ErrMutationLocked) || !strings.Contains(err.Error(), ".vault/main.yaml was not saved") {
 				t.Fatalf("driver.run() error = %v; want the save refused on the locked roster", err)
 			}
 			assertUnchanged(t, before)

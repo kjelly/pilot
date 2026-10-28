@@ -313,7 +313,7 @@ func TestVaultSaveOnABusyRosterKeepsTheEditAtTheTerminal(t *testing.T) {
 			if r.err != nil || r.quit {
 				t.Fatalf("session ended: err=%v quit=%v", r.err, r.quit)
 			}
-			if !strings.Contains(r.banner, "⚠️  未存檔 "+vault+"（修改還在）") || !strings.Contains(r.banner, "未寫入 .vault/ipa-identity.yaml") {
+			if !strings.Contains(r.banner, "⚠️  未存檔 .vault/main.yaml（修改還在）") || !strings.Contains(r.banner, "未寫入 .vault/ipa-identity.yaml") {
 				t.Fatalf("banner does not report the refused save:\n%s", r.banner)
 			}
 			if title := automationState(&r).Title; !strings.HasPrefix(title, "編輯 ") || !strings.Contains(title, "main.yaml") {
