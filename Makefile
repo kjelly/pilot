@@ -122,8 +122,8 @@ playbook-lint: ## L1 syntax (blocking) + L2 lint (advisory) over ALL playbooks â
 thanos-retention-test: ## Run the Thanos Compactor with the playbook's retention defaults against synthetic blocks; fails if data younger than 90 days is deleted (needs docker, python3). See scripts/thanos-retention-behavior-test.sh.
 	./scripts/thanos-retention-behavior-test.sh
 
-alert-rules-test: ## Run the host-health/login-probe alert rules under the pinned promtool, the Alertmanager inhibit rules in the pinned Alertmanager and the login-probe playbook-task tests (needs docker, ansible-playbook); pulls the images and fails instead of skipping.
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_HostHealth|TestRegression_HostIOStall|TestRegression_HostMetricsMissing|TestRegression_Alertmanager|TestRegression_StaleInhibit|TestRegression_LoginProbe|TestRegression_PrometheusTaggedRuntime)' ./internal/spec/
+alert-rules-test: ## Run the host-health/login-probe alert rules under the pinned promtool, the Alertmanager inhibit rules in the pinned Alertmanager and the login-probe/host-monitoring playbook-task tests (needs docker, ansible-playbook); pulls the images and fails instead of skipping.
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_HostHealth|TestRegression_HostIOStall|TestRegression_HostMetricsMissing|TestRegression_HostMonitoringTextfile|TestRegression_Alertmanager|TestRegression_StaleInhibit|TestRegression_LoginProbe|TestRegression_PrometheusTaggedRuntime)' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -run '^(TestRegression_LoginProbeDecommissionRuntime|TestFreeIPAQuery_NoHostsIsNotAnObservation)$$' ./internal/decommission/providers/
 
 identity-noop-test: ## Run the bulk-listing and membership reconciliation regressions with mandatory real Ansible.

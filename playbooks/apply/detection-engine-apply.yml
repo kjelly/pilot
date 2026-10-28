@@ -166,11 +166,22 @@
     # freeipa-dns/internal-endpoint history). `.get(key, default)` avoids
     # it, and matters here specifically because the whole POINT of this
     # gate is to give a clean error on exactly the missing-directory case.
+    #
+    # Under --check only: host-monitoring-apply.yml (earlier in site.yml)
+    # creates nothing, so on a fresh host the directory is still missing
+    # here. Its Step 9b records host_monitoring_textfile_dir_previewed when
+    # it previewed creating this directory in the same run (issue #76); only
+    # that lets the check-mode preview continue. A real run always requires
+    # the directory.
     - name: "Gate: assert host-monitoring's textfile directory is present and a directory"
       ansible.builtin.assert:
         that:
-          - detection_textfile_dir_stat.stat.get('exists', false)
-          - detection_textfile_dir_stat.stat.get('isdir', false)
+          - >-
+            (detection_textfile_dir_stat.stat.get('exists', false)
+             and detection_textfile_dir_stat.stat.get('isdir', false))
+            or (ansible_check_mode
+                and not detection_textfile_dir_stat.stat.get('exists', false)
+                and (host_monitoring_textfile_dir_previewed | default('')) == '/var/lib/node_exporter/textfile')
         fail_msg: >-
           /var/lib/node_exporter/textfile does not exist. detection-engine
           depends on host-monitoring being applied on this SAME host (spec
@@ -178,6 +189,10 @@
           reuses host-monitoring's textfile collector to publish its OWN
           health metrics, not as a managed-host telemetry path. Apply
           playbooks/apply/host-monitoring-apply.yml on this host first.
+          A --check preview passes this gate on a fresh host only when
+          host-monitoring-apply.yml previews creating the directory earlier
+          in the same run (site.yml, with the host in the host-monitoring
+          group).
       tags: [always]
 
     - name: "Gate: artifact path is supplied"

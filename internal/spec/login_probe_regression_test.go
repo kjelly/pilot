@@ -338,6 +338,15 @@ func runLocalPlay(t *testing.T, vars map[string]any, tasks []map[string]any, ext
 // An empty inv means "localhost," only.
 func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks []map[string]any, extra ...string) (string, bool) {
 	t.Helper()
+	play := map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}
+	return runLocalPlays(t, inv, []map[string]any{play}, extra...)
+}
+
+// runLocalPlays runs plays, in order, as one ansible-playbook call against
+// inventory inv (as for runLocalPlayInventory), so a fact one play sets is
+// visible to the next, as between the playbooks site.yml imports.
+func runLocalPlays(t *testing.T, inv string, plays []map[string]any, extra ...string) (string, bool) {
+	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
 			t.Fatalf("ansible-playbook not installed: %v (PILOT_REQUIRE_CONTAINER_TESTS=1)", err)
@@ -345,8 +354,7 @@ func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks 
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	dir := t.TempDir()
-	play := []map[string]any{{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}}
-	data, err := yaml.Marshal(play)
+	data, err := yaml.Marshal(plays)
 	if err != nil {
 		t.Fatal(err)
 	}

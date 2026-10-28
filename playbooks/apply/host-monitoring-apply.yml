@@ -464,6 +464,22 @@
             owner: root
             group: root
             mode: "1777"
+          register: node_exporter_textfile_dir_result
+
+        # Under --check Step 9b creates nothing, so on a fresh host the
+        # directory is still missing when a later playbook of the SAME
+        # ansible-playbook run (detection-engine, after this one in site.yml;
+        # agent-controller) asserts it exists (issue #76, AGENTS.md §4.0
+        # round 13). This fact tells their check-mode gates that this run
+        # previewed creating it.
+        # Not cacheable: it must not outlive this ansible-playbook run.
+        # Same tags as Step 9b, so it runs whenever Step 9b does.
+        - name: "Step 9b: Record that this --check run only previewed the textfile directory"
+          ansible.builtin.set_fact:
+            host_monitoring_textfile_dir_previewed: "{{ node_exporter_textfile_dir }}"
+          when:
+            - ansible_check_mode
+            - node_exporter_textfile_dir_result is changed
 
         - name: "Step 10: Render node_exporter.service (spec C4, C5, C6, C11)"
           tags: [C4, C5, C6, C11]
