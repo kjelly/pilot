@@ -456,7 +456,10 @@ func jinjaDelimited(s string) bool {
 // replaceScalar rewrites the one line holding node so it carries value as
 // a double-quoted scalar — tagged !unsafe when unsafe — keeping the text
 // before it and its line comment. node's column is where its tag, if any,
-// begins, so an old tag is replaced along with the value.
+// begins, so an old tag is replaced along with the value. It refuses a
+// node it cannot prove is written on that line alone (scalarOnItsLine): a
+// quoted or plain scalar continued on the next lines would leave the rest
+// of the old value behind — in a comment, say, where nothing notices it.
 func replaceScalar(data []byte, node *yaml.Node, value string, unsafe bool) ([]byte, error) {
 	encoded, err := yaml.Marshal(&yaml.Node{Kind: yaml.ScalarNode, Style: yaml.DoubleQuotedStyle, Value: value})
 	if err != nil {
@@ -492,8 +495,25 @@ func replaceScalar(data []byte, node *yaml.Node, value string, unsafe bool) ([]b
 		}
 		tail = rest[len(strings.TrimRight(rest[:at], " \t")):]
 	}
+	if !scalarOnItsLine(rest[:len(rest)-len(tail)], node) {
+		return nil, errors.New("freeipa.admin.password is not written on one line")
+	}
 	lines[i] = []byte(string(runes[:col]) + scalar + tail + eol)
 	return bytes.Join(lines, nil), nil
+}
+
+// scalarOnItsLine reports whether text — what replaceScalar would replace,
+// from node's column to the end of its line or its comment — is all of
+// node: parsed on its own as a mapping value, it must give a scalar with
+// node's value and tag. A scalar continued on the following lines gives
+// only its first part (or no valid YAML at all) and fails.
+func scalarOnItsLine(text string, node *yaml.Node) bool {
+	var doc yaml.Node
+	if yaml.Unmarshal([]byte("k: "+text+"\n"), &doc) != nil {
+		return false
+	}
+	got, _ := mappingValue(documentRoot(&doc), "k")
+	return got != nil && got.Kind == yaml.ScalarNode && got.Value == node.Value && got.ShortTag() == node.ShortTag()
 }
 
 // sameRosterExceptAdminPassword proves the rewrite changed nothing but

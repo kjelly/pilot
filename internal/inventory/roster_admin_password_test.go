@@ -261,6 +261,42 @@ func TestSyncRosterAdminPasswordRefusesLayoutsItCannotRewrite(t *testing.T) {
 	}
 }
 
+// A password written over several lines — quoted or plain — is refused,
+// the roster unchanged, and the error names neither password: rewriting
+// only its first line would leave the rest of the old password in the
+// file, as a comment where the next line starts with '#' (PR #148 review,
+// F4: the sync wrote that and reported success).
+func TestSyncRosterAdminPasswordRefusesAPasswordOverSeveralLines(t *testing.T) {
+	const head = "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n"
+	for name, tc := range map[string]struct{ value, old string }{
+		"double-quoted, continued as a comment":  {`"Old-pass` + "\n      #_1\"", "Old-pass #_1"},
+		"single-quoted, continued as a comment":  {`'Old-pass` + "\n      #_1'", "Old-pass #_1"},
+		"double-quoted, escaped line break":      {`"Old-pass\` + "\n      _1\"", "Old-pass_1"},
+		"double-quoted, comment after the close": {`"Old-pass` + "\n      _1\" # rotated", "Old-pass _1"},
+		"plain":                                  {"Old-pass\n      _1", "Old-pass _1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := head + "    password: " + tc.value + "\n  defaults:\n    group_type: posix\n"
+			if got := decodedAdminPassword(t, []byte(body)); got != tc.old {
+				t.Fatalf("fixture password = %q, want %q", got, tc.old)
+			}
+			path := writeRoster(t, body)
+			got, err := SyncRosterAdminPassword(path, tc.old, "New-pass_2")
+			if err == nil {
+				t.Fatalf("SyncRosterAdminPassword() = %v, nil; want it refused\n%s", got, mustRead(t, path))
+			}
+			for _, secret := range []string{"Old-pass", "New-pass_2"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("error leaks a password: %v", err)
+				}
+			}
+			if after := mustRead(t, path); string(after) != body {
+				t.Fatalf("roster changed:\n%s", after)
+			}
+		})
+	}
+}
+
 func TestRosterAdminPasswordDiffers(t *testing.T) {
 	for name, tt := range map[string]struct {
 		scalar string
