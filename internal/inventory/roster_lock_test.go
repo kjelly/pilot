@@ -909,6 +909,11 @@ func TestDecryptedScratchFileSweepsWhatADeadPilotLeft(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(d, "roster-1.yaml"), []byte("password: secret\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		// Directories without a liveness marker (what a pilot from before
+		// the marker left) are only swept once they are old.
+		if err := os.Chtimes(d, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	path, cleanup, err := decryptedScratchFile([]byte("schema_version: 3\n"))
 	if err != nil {
@@ -947,8 +952,18 @@ func TestDecryptRosterToTempFileCleanupRemovesLockFiles(t *testing.T) {
 		if info, err := os.Lstat(plaintextPath); err != nil || info.Mode().Perm() != 0o600 {
 			t.Errorf("plaintext %s mode %v (err %v), want 0600", plaintextPath, info.Mode().Perm(), err)
 		}
-		if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-			t.Errorf("plaintext directory holds %d entries, want the plaintext alone", len(entries))
+		// Besides the plaintext, only the marker the directory's creator
+		// holds locked to show it is alive (secretpath.PrivateTempDir) —
+		// never a lock file or temp file with a predictable name.
+		entries, _ := os.ReadDir(dir)
+		var names []string
+		for _, e := range entries {
+			if e.Name() != ".pilot-alive" {
+				names = append(names, e.Name())
+			}
+		}
+		if len(names) != 1 || names[0] != filepath.Base(plaintextPath) {
+			t.Errorf("plaintext directory holds %v, want the plaintext alone", names)
 		}
 		return RemoveRosterUser(plaintextPath, "dave", RemoveRosterUserOptions{})
 	})

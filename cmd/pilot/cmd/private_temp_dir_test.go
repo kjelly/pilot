@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // deadPID returns the pid of a process that has exited.
@@ -17,6 +18,16 @@ func deadPID(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return cmd.ProcessState.Pid()
+}
+
+// ageDir makes p look an hour old: a directory without a liveness marker
+// (what a pilot from before the marker left) is swept only once it is old.
+func ageDir(t *testing.T, p string) {
+	t.Helper()
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A plan's scratch workspace and a simulated roster write copy secrets to
@@ -36,6 +47,7 @@ func TestPrivateTempDirSweepsWhatADeadPilotLeft(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(p, "ipa-identity.yaml"), []byte("password: secret\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		ageDir(t, p)
 		return p
 	}
 	stale := mk(fmt.Sprintf("%s-%d-abc", prefix, dead))
@@ -86,9 +98,11 @@ func TestSecretScratchDirsArePrivateTempDirs(t *testing.T) {
 	t.Setenv("TMPDIR", tmp)
 	dead := deadPID(t)
 	for _, prefix := range []string{"pilot-edit-plan", "pilot-roster-scope"} {
-		if err := os.MkdirAll(filepath.Join(tmp, fmt.Sprintf("%s-%d-x", prefix, dead)), 0o700); err != nil {
+		p := filepath.Join(tmp, fmt.Sprintf("%s-%d-x", prefix, dead))
+		if err := os.MkdirAll(p, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		ageDir(t, p)
 	}
 	dir, cleanup, err := copyManagedFilesToTemp(t.TempDir())
 	if err != nil {
