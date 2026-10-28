@@ -157,7 +157,7 @@ func pushRosterAddPasswordPolicyPriority(r *editRouterModel, dir, path, name, gr
 			return pushRosterPasswordPoliciesMenu(r, dir, path, "")
 		}
 		priority, _ := strconv.Atoi(strings.TrimSpace(m.Value()))
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterPasswordPolicy(path, name) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterPasswordPolicy(path, name) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterPasswordPoliciesMenu(r, dir, path, banner)
 			}
@@ -279,7 +279,7 @@ func pushRosterPasswordPolicyEdit(r *editRouterModel, dir, path, name string, mu
 	if len(v) > 0 {
 		return pushRosterPasswordPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterPasswordPolicy(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterPasswordPolicy(path, name, f) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterPasswordPolicyDetail(r, dir, path, name, banner)
 		}
@@ -334,7 +334,7 @@ func pushRosterAddCredentialPolicy(r *editRouterModel, dir, path string) tea.Cmd
 			return pushRosterCredentialPoliciesMenu(r, dir, path, "")
 		}
 		name := strings.TrimSpace(m.Value())
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterCredentialPolicy(path, name) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterCredentialPolicy(path, name) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterCredentialPoliciesMenu(r, dir, path, banner)
 			}
@@ -467,7 +467,7 @@ func pushRosterCredentialPolicyEdit(r *editRouterModel, dir, path, name string, 
 	if len(v) > 0 {
 		return pushRosterCredentialPolicyDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterCredentialPolicy(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterCredentialPolicy(path, name, f) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterCredentialPolicyDetail(r, dir, path, name, banner)
 		}
@@ -563,7 +563,7 @@ func pushPrivilegedIdentityEdit(r *editRouterModel, dir, path string, mutate fun
 	if len(v) > 0 {
 		return pushPrivilegedIdentityDetail(r, dir, path, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterPrivilegedIdentity(path, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterPrivilegedIdentity(path, f) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushPrivilegedIdentityDetail(r, dir, path, banner)
 		}

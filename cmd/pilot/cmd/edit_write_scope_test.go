@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -12,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // dirContents is every file under dir, lock files and temp files included,
@@ -297,4 +300,86 @@ func TestEditorRosterPathLintCatchesDirectResolution(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An external roster that already has everything the step would add needs
+// no write, so a plan and an MCP apply go ahead as the terminal does: only
+// a step that would change the roster is refused (PR #148 round 5, F1 —
+// the reviewer's scenario; on main both passed). The external directory
+// stays byte-identical, with no lock files.
+func TestEditPlanAndApplyAcceptAnExternalRosterThatNeedsNoWrite(t *testing.T) {
+	externalDir := t.TempDir()
+	roster := filepath.Join(externalDir, "ipa-identity.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`"Admin-pass_1"`))
+	if _, err := inventory.EnsureRosterCurrent(roster, inventory.RosterMigrationOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if appended, err := inventory.AppendMissingNFSServerStub(roster, "nexus", "ipa.pilot.internal"); err != nil || !appended {
+		t.Fatalf("seed nexus's nfs.servers entry: appended=%v err=%v", appended, err)
+	}
+	for _, f := range []string{roster + ".pilot-migrate.lock", roster + ".pilot-remove.lock"} {
+		os.Remove(f)
+	}
+	external := dirContents(t, externalDir)
+
+	dir := nfsScopeWorkspace(t, roster)
+	if _, err := planEditScenario(dir, enableNFSScenario(), editAgentSessionOptions{}); err != nil {
+		t.Fatalf("planEditScenario() error = %v", err)
+	}
+	assertDirUnchanged(t, externalDir, external)
+
+	result, err := applyEditScenario(dir, "issue-146-external-roster-current", enableNFSScenario(), editAgentSessionOptions{})
+	if err != nil || result == nil || result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want it applied", result, err)
+	}
+	assertDirUnchanged(t, externalDir, external)
+	data, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil || !strings.Contains(string(data), "freeipa-nfs-server") {
+		t.Fatalf("hosts.yml after the apply (err=%v):\n%s", err, data)
+	}
+}
+
+// A simulated write reports what the real one would have done — its value,
+// its error under the roster's own name — and changes nothing.
+func TestSimulateRosterWriteReportsWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	roster := filepath.Join(dir, "ipa-identity.yaml")
+	writeSyncFile(t, roster, "a: 1\n")
+	before := dirContents(t, dir)
+	for name, tc := range map[string]struct {
+		mutate      func(path string) (string, error)
+		wantChanged bool
+		wantErr     string
+	}{
+		"unchanged": {func(string) (string, error) { return "kept", nil }, false, ""},
+		"rewritten": {func(p string) (string, error) { return "", os.WriteFile(p, []byte("a: 2\n"), 0o600) }, true, ""},
+		"removed":   {func(p string) (string, error) { return "", os.Remove(p) }, true, ""},
+		"error": {func(p string) (string, error) {
+			return "", fmt.Errorf("roster %s: %w", p, inventory.ErrRosterEncrypted)
+		}, false, "roster " + roster + ": "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value, changed, err := simulateRosterWrite(roster, tc.mutate)
+			if changed != tc.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tc.wantChanged)
+			}
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) || !errors.Is(err, inventory.ErrRosterEncrypted)) {
+				t.Errorf("err = %v, want prefix %q wrapping ErrRosterEncrypted", err, tc.wantErr)
+			}
+			if name == "unchanged" && value != "kept" {
+				t.Errorf("value = %q", value)
+			}
+			assertDirUnchanged(t, dir, before)
+		})
+	}
+	t.Run("missing roster created", func(t *testing.T) {
+		missing := filepath.Join(dir, "new.yaml")
+		_, changed, err := simulateRosterWrite(missing, func(p string) (string, error) { return "", os.WriteFile(p, []byte("x"), 0o600) })
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v; want a created roster to count as a change", changed, err)
+		}
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Fatalf("simulation created %s", missing)
+		}
+	})
 }

@@ -126,23 +126,25 @@ func TestConfigSecretPaths_RosterWriteGuardMatcher(t *testing.T) {
 		violations int
 	}{
 		{"unguarded", `inventory.SetRosterUser(path, "alice", nil)`, 1},
-		{"guarded", `mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
-		{"guarded_literal_scope", `mutateRosterSource(editWriteScope{dir: dir}, path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
-		{"guarded_scope_param", `mutateRosterSource(scope, path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
+		{"guarded", `mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
+		{"guarded_literal_scope", `mutateRosterSource(editWriteScope{dir: dir}, path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
+		{"guarded_scope_param", `mutateRosterSource(scope, path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 0},
 		{"screen_open_only", `validateSecretSourcePath(dir, path); later(func() { inventory.SetRosterUser(path, "alice", nil) })`, 1},
-		{"delayed_inside_guard", `mutateRosterSource(r.writeScope(dir), path, func() error { later(func() { inventory.SetRosterUser(path, "alice", nil) }); return nil })`, 1},
-		{"wrong_workspace", `mutateRosterSource(r.writeScope("."), path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
-		{"wrong_literal_workspace", `mutateRosterSource(editWriteScope{dir: "."}, path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
-		{"literal_scope_without_dir", `mutateRosterSource(editWriteScope{}, path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
-		{"other_scope_variable", `mutateRosterSource(other, path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
-		{"different_path", `mutateRosterSource(r.writeScope(dir), other, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"delayed_inside_guard", `mutateRosterSource(r.writeScope(dir), path, func(path string) error { later(func() { inventory.SetRosterUser(path, "alice", nil) }); return nil })`, 1},
+		{"wrong_workspace", `mutateRosterSource(r.writeScope("."), path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"wrong_literal_workspace", `mutateRosterSource(editWriteScope{dir: "."}, path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"literal_scope_without_dir", `mutateRosterSource(editWriteScope{}, path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"other_scope_variable", `mutateRosterSource(other, path, func(path string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"different_path", `mutateRosterSource(r.writeScope(dir), other, func(other string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"closure without the path", `mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
+		{"closure parameter not shadowing", `mutateRosterSource(r.writeScope(dir), path, func(p string) error { return inventory.SetRosterUser(path, "alice", nil) })`, 1},
 		{"remove", `inventory.RemoveRosterUser(path, "alice", opts)`, 1},
 		{"encrypted_mutation", `inventory.MutateEncryptedRosterFile(path, passwordFile, mutate)`, 1},
 		{"nfs_without_roster_in_name", `inventory.AppendMissingNFSServerStub(path, "nfs", "example.test")`, 1},
 		{"migration", `inventory.EnsureRosterCurrent(path, opts)`, 1},
 		{"autofill", `inventory.AutoFillFreeIPAClientRosterHosts(dir, path)`, 1},
-		{"typed_guard", `mutateRosterSourceValue(r.writeScope(dir), path, func() ([]string,error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })`, 0},
-		{"typed_wrong_path", `mutateRosterSourceValue(r.writeScope(dir), other, func() ([]string,error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })`, 1},
+		{"typed_guard", `mutateRosterSourceValue(r.writeScope(dir), path, func(path string) ([]string,error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })`, 0},
+		{"typed_wrong_path", `mutateRosterSourceValue(r.writeScope(dir), other, func(other string) ([]string,error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })`, 1},
 		{"vault", `inventory.FillFreeIPAAdminPassword(path, "dummy")`, 1},
 		{"read_only", `inventory.RosterUser(path, "alice")`, 0},
 		{"provider_guard", `if err := validateDecommissionRosterSource(e.rosterPath, e.provider.cfg.ClientInventory, e.provider.cfg.ServerInventory); err != nil { return err }; inventory.SetRosterHostAbsent(e.rosterPath, e.fqdn)`, 0},
@@ -184,6 +186,14 @@ func unguardedRosterWrites(file *ast.File, writers map[string]int) []token.Pos {
 		}
 		body, ok := call.Args[2].(*ast.FuncLit)
 		if !ok {
+			return true
+		}
+		// The closure writes the path mutateRosterSource hands it — a
+		// private copy under a plan or apply — so its one parameter must
+		// shadow the guarded path: a write naming the outer variable
+		// would reach the real roster.
+		guardedPath, ok := call.Args[1].(*ast.Ident)
+		if !ok || !rosterClosureShadows(body, guardedPath.Name) {
 			return true
 		}
 		ast.Inspect(body.Body, func(inner ast.Node) bool {
@@ -571,4 +581,11 @@ func receiverTypeName(expr ast.Expr) string {
 		return ident.Name
 	}
 	return ""
+}
+
+// rosterClosureShadows reports whether fn takes exactly one parameter, named
+// name.
+func rosterClosureShadows(fn *ast.FuncLit, name string) bool {
+	params := fn.Type.Params.List
+	return len(params) == 1 && len(params[0].Names) == 1 && params[0].Names[0].Name == name
 }

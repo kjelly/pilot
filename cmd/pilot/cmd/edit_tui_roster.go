@@ -24,8 +24,10 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,7 +144,7 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 // confirmation prompt, since a deterministic, validated migration with a
 // successfully created backup doesn't need one.
 func ensureRosterSchemaCurrentBanner(scope editWriteScope, path string) string {
-	result, err := mutateRosterSourceValue(scope, path, func() (inventory.RosterMigrationResult, error) {
+	result, err := mutateRosterSourceValue(scope, path, func(path string) (inventory.RosterMigrationResult, error) {
 		return inventory.EnsureRosterCurrent(path, inventory.RosterMigrationOptions{})
 	})
 	if err != nil || !result.Changed {
@@ -162,7 +164,9 @@ func ensureRosterSchemaCurrentBanner(scope editWriteScope, path string) string {
 // disruptive way of reporting that once something actually tries to read
 // the file.
 func autoFillFreeIPAClientRosterHostsBanner(scope editWriteScope, path string) string {
-	added, err := mutateRosterSourceValue(scope, path, func() ([]string, error) { return inventory.AutoFillFreeIPAClientRosterHosts(scope.dir, path) })
+	added, err := mutateRosterSourceValue(scope, path, func(path string) ([]string, error) {
+		return inventory.AutoFillFreeIPAClientRosterHosts(scope.dir, path)
+	})
 	if err != nil || len(added) == 0 {
 		return ""
 	}
@@ -250,7 +254,7 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 		return nil
 	}
 
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushTopMenu(r, dir, banner)
 		}
@@ -261,13 +265,13 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
 	vaultNote := ""
 	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func() error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
+		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func(vaultPath string) error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
 			r.err = vaultErr
 			return nil
 		}
 		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
 	} else if statErr == nil {
-		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func() (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
+		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func(vaultPath string) (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
 		if vaultErr != nil {
 			r.err = vaultErr
 			return nil
@@ -376,7 +380,7 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		if len(violations) > 0 {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterUser(path, name) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterUser(path, name) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterUsersMenu(r, dir, path, banner)
 			}
@@ -497,7 +501,7 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 		if len(violations) > 0 {
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterGroupsMenu(r, dir, path, banner)
 			}
@@ -651,7 +655,8 @@ type editWriteScope struct {
 // errRosterOutsideEditScope refuses, under a plan or an MCP apply, a
 // roster write outside the session's own .vault/ files: the plan's copy
 // does not hold it, so the plan would change the real file, and the
-// apply's rollback does not restore it. At the terminal and under
+// apply's rollback does not restore it. Only a write that would change
+// the file is refused (mutateRosterSource). At the terminal and under
 // --actions there is no such limit.
 var errRosterOutsideEditScope = errors.New("not one of this edit session's .vault/ files: a plan cannot preview it and an apply cannot roll it back; change it at the terminal (pilot edit) or by hand")
 
@@ -677,24 +682,89 @@ func (r *editRouterModel) recordedPath(dir, rel string) (string, error) {
 // mutateRosterSource retains the selected workspace at the persistence
 // boundary. An external roster can become exposed through that workspace's
 // vars aliases while any of its editor screens is open; cwd alone cannot
-// identify that relationship. Under a plan or a transaction it also keeps
-// the write inside the session's .vault/ files (errRosterOutsideEditScope).
-func mutateRosterSource(scope editWriteScope, path string, mutate func() error) error {
-	if err := checkRosterWriteScope(scope, path); err != nil {
-		return err
-	}
-	return mutate()
+// identify that relationship. mutate writes the roster at the path it is
+// given (the closure's parameter shadows path, so it cannot write another;
+// TestConfigSecretPaths_AllRosterSourceWritesCarryWorkspace).
+//
+// Under a plan or a transaction a roster outside the session's .vault/
+// files is never written: mutate runs on a private copy of it instead
+// (simulateRosterWrite). When that would change the roster, the write is
+// refused with errRosterOutsideEditScope; when it would not — the entry it
+// adds is already there, the schema is current — mutate's result stands,
+// as it does at the terminal (PR #148 round 5, F1).
+func mutateRosterSource(scope editWriteScope, path string, mutate func(path string) error) error {
+	_, err := mutateRosterSourceValue(scope, path, func(path string) (struct{}, error) { return struct{}{}, mutate(path) })
+	return err
 }
 
-func checkRosterWriteScope(scope editWriteScope, path string) error {
+// mutateRosterSourceValue is mutateRosterSource for helpers returning a
+// migration or autofill result as well as an error.
+func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate func(path string) (T, error)) (T, error) {
+	var zero T
 	if err := validateSecretSourcePath(scope.dir, path); err != nil {
-		return err
+		return zero, err
 	}
-	if (scope.planSource != "" || scope.transaction) && !isManagedVaultFile(scope.dir, path) {
-		return fmt.Errorf("roster %s: %w", path, errRosterOutsideEditScope)
+	if !scope.restricts(path) {
+		return mutate(path)
 	}
-	return nil
+	value, changed, err := simulateRosterWrite(path, mutate)
+	if changed {
+		return zero, fmt.Errorf("roster %s: %w", path, errRosterOutsideEditScope)
+	}
+	return value, err
 }
+
+// restricts reports whether scope keeps a write to path off the real file:
+// under a plan or a transaction, for anything but the session's own
+// .vault/ files.
+func (scope editWriteScope) restricts(path string) bool {
+	return (scope.planSource != "" || scope.transaction) && !isManagedVaultFile(scope.dir, path)
+}
+
+// simulateRosterWrite runs mutate on a private copy of the roster at path,
+// in a new temporary directory it removes afterwards, and reports whether
+// the write would change the roster: different bytes, or a roster created
+// or removed. The real file is only read, and no lock file appears beside
+// it. An error names path, not the copy.
+func simulateRosterWrite[T any](path string, mutate func(path string) (T, error)) (T, bool, error) {
+	var zero T
+	before, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		return zero, false, fmt.Errorf("read roster %s: %w", path, readErr)
+	}
+	scratchDir, err := os.MkdirTemp("", "pilot-roster-scope-*")
+	if err != nil {
+		return zero, false, err
+	}
+	defer os.RemoveAll(scratchDir)
+	scratch := filepath.Join(scratchDir, filepath.Base(path))
+	if existed {
+		if err := os.WriteFile(scratch, before, 0o600); err != nil {
+			return zero, false, err
+		}
+	}
+	value, err := mutate(scratch)
+	after, afterErr := os.ReadFile(scratch)
+	changed := existed != (afterErr == nil) || !bytes.Equal(before, after)
+	if err != nil {
+		err = scratchPathError{err: err, scratch: scratch, path: path}
+	}
+	return value, changed, err
+}
+
+// scratchPathError is an error from a simulated write with the private
+// copy's path replaced by the roster's.
+type scratchPathError struct {
+	err           error
+	scratch, path string
+}
+
+func (e scratchPathError) Error() string {
+	return strings.ReplaceAll(e.err.Error(), e.scratch, e.path)
+}
+
+func (e scratchPathError) Unwrap() error { return e.err }
 
 // rosterBusyBanner is the banner for a roster write refused because
 // another pilot process holds the roster (inventory.ErrMutationLocked) or
@@ -721,16 +791,6 @@ func rosterBusyBanner(r *editRouterModel, path string, err error) (string, bool)
 	}
 	r.writeRefused = err
 	return banner, true
-}
-
-// mutateRosterSourceValue applies the same persistence guard to helpers
-// returning a migration or autofill result as well as an error.
-func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate func() (T, error)) (T, error) {
-	if err := checkRosterWriteScope(scope, path); err != nil {
-		var zero T
-		return zero, err
-	}
-	return mutate()
 }
 
 // rosterEnumChoices turns one of this file's fixed enum option slices
@@ -783,7 +843,7 @@ func rosterApplyUserEdit(r *editRouterModel, dir, path, name string, mutate func
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return banner, false, nil
 		}
@@ -1173,7 +1233,7 @@ func rosterApplyGroupEdit(r *editRouterModel, dir, path, name string, mutate fun
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return banner, false, nil
 		}

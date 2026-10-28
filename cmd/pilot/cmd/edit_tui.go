@@ -993,7 +993,7 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 		return pushHostList(r, dir, path, hf, "")
 	}
 	domain := nfsBootstrapDomain(dir)
-	if err := mutateRosterSource(r.writeScope(dir), rosterPath, func() error {
+	if err := mutateRosterSource(r.writeScope(dir), rosterPath, func(rosterPath string) error {
 		return inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", password)
 	}); err != nil {
 		if banner, ok := rosterBusyBanner(r, rosterPath, err); ok {
@@ -1005,13 +1005,13 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
 	vaultNote := ""
 	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func() error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
+		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func(vaultPath string) error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
 			r.err = vaultErr
 			return nil
 		}
 		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
 	} else if statErr == nil {
-		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func() (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
+		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func(vaultPath string) (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
 		if vaultErr != nil {
 			r.err = vaultErr
 			return nil
@@ -1061,7 +1061,7 @@ func autofixNFSRosterEntry(r *editRouterModel, dir string, h inventory.Host) str
 	// AppendMissingNFSServerStub below reports that exactly as it always
 	// has, unmigrated or not.
 	migrateNote := ""
-	if result, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func() (inventory.RosterMigrationResult, error) {
+	if result, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func(rosterPath string) (inventory.RosterMigrationResult, error) {
 		return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
 	}); err == nil && result.Changed {
 		migrateNote = fmt.Sprintf("✅ Roster schema v%d detected. Automatically upgraded to schema v%d (backup: %s)", result.FromVersion, result.ToVersion, result.BackupPath)
@@ -1073,7 +1073,9 @@ func autofixNFSRosterEntry(r *editRouterModel, dir string, h inventory.Host) str
 		return migrateNote + "\n" + s
 	}
 	domain := nfsBootstrapDomain(dir)
-	appended, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func() (bool, error) { return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain) })
+	appended, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func(rosterPath string) (bool, error) {
+		return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
+	})
 	if banner, busy := rosterBusyBanner(r, rosterPath, err); busy {
 		return prefixNote(banner)
 	}

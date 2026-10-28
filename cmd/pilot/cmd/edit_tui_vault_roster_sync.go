@@ -125,7 +125,7 @@ func isManagedVaultFile(dir, path string) bool {
 // Mapped, a plan previews the roster writes the apply makes (PR #148
 // review). Any other path, and every path outside a plan, is kept; a
 // path outside the session's .vault/ is then refused under a plan or an
-// apply (checkRosterWriteScope).
+// apply (mutateRosterSource).
 func (scope editWriteScope) rosterWritePath(ref string) string {
 	resolved := resolveRosterPath(scope.dir, strings.TrimSpace(ref))
 	if scope.planSource == "" || resolved == "" || !isManagedVaultFile(scope.planSource, resolved) {
@@ -302,7 +302,7 @@ func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPasswo
 			}
 			continue
 		}
-		prepared, err := mutateRosterSourceValue(scope, path, func() (*inventory.PreparedRosterAdminSync, error) {
+		prepared, err := mutateRosterSourceValue(scope, path, func(path string) (*inventory.PreparedRosterAdminSync, error) {
 			return inventory.PrepareRosterAdminSync(path, oldPassword, newPassword)
 		})
 		if err == nil && prepared.Result == inventory.RosterAdminUpdated && scope.planSource != "" {

@@ -98,7 +98,8 @@ func unreportedRosterWrites(file *ast.File) []rosterWrite {
 	var out []rosterWrite
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
+		if !ok || fn.Body == nil || isRosterWriteHelper(fn.Name.Name) {
+			// The helpers pass their caller's write on; the caller is audited.
 			continue
 		}
 		// Each function body, literal or declared, is audited on its own.
@@ -186,7 +187,11 @@ func rosterWritesIn(function string, body *ast.BlockStmt) []rosterWrite {
 
 func isRosterWriteCall(call *ast.CallExpr) bool {
 	id, ok := call.Fun.(*ast.Ident)
-	return ok && (id.Name == "mutateRosterSource" || id.Name == "mutateRosterSourceValue")
+	return ok && isRosterWriteHelper(id.Name)
+}
+
+func isRosterWriteHelper(name string) bool {
+	return name == "mutateRosterSource" || name == "mutateRosterSourceValue"
 }
 
 // rosterWriteAPI is the inventory function the write's closure calls.

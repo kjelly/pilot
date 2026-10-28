@@ -37,7 +37,7 @@ func pushRosterHostAccessMenu(r *editRouterModel, dir, path, banner string) tea.
 		case 1:
 			return pushRosterHBACMenu(r, dir, path, "")
 		case 2:
-			if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterHBACDisableAllowAll(path, !disabled) }); err != nil {
+			if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterHBACDisableAllowAll(path, !disabled) }); err != nil {
 				if banner, ok := rosterBusyBanner(r, path, err); ok {
 					return pushRosterHostAccessMenu(r, dir, path, banner)
 				}
@@ -95,7 +95,7 @@ func pushRosterAddHostgroup(r *editRouterModel, dir, path string) tea.Cmd {
 			return pushRosterHostgroupsMenu(r, dir, path, "")
 		}
 		name := strings.TrimSpace(m.Value())
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterHostgroup(path, name) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterHostgroup(path, name) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterHostgroupsMenu(r, dir, path, banner)
 			}
@@ -217,7 +217,7 @@ func pushRosterHostgroupEdit(r *editRouterModel, dir, path, name string, mutate 
 	if len(v) > 0 {
 		return pushRosterHostgroupDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterHostgroup(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterHostgroup(path, name, f) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterHostgroupDetail(r, dir, path, name, banner)
 		}
@@ -462,7 +462,7 @@ func pushRosterAddHBACServices(r *editRouterModel, dir, path, name string, group
 		if len(v) > 0 {
 			return pushRosterHBACMenu(r, dir, path, formatRosterViolations(v))
 		}
-		if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.AppendRosterHBACRule(path, rule) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterHBACRule(path, rule) }); err != nil {
 			if banner, ok := rosterBusyBanner(r, path, err); ok {
 				return pushRosterHBACMenu(r, dir, path, banner)
 			}
@@ -658,7 +658,7 @@ func pushRosterHBACEdit(r *editRouterModel, dir, path, name, banner string, muta
 	if len(v) > 0 {
 		return pushRosterHBACDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(r.writeScope(dir), path, func() error { return inventory.SetRosterHBACRule(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterHBACRule(path, name, f) }); err != nil {
 		if banner, ok := rosterBusyBanner(r, path, err); ok {
 			return pushRosterHBACDetail(r, dir, path, name, banner)
 		}

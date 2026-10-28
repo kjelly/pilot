@@ -265,7 +265,7 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 			seen[rosterPath] = true
 
 			dir := filepath.Dir(inv)
-			result, err := mutateRosterSourceValue(editWriteScope{dir: dir}, rosterPath, func() (inventory.RosterMigrationResult, error) {
+			result, err := mutateRosterSourceValue(editWriteScope{dir: dir}, rosterPath, func(rosterPath string) (inventory.RosterMigrationResult, error) {
 				return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
 			})
 			if err != nil {
