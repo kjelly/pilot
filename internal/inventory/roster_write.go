@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kjelly/pilot/internal/secretpath"
 	"golang.org/x/sys/unix"
 )
 
@@ -471,16 +472,22 @@ func sweepRosterTemps(target string) {
 	}
 }
 
+// decryptedRosterDirPrefix names decryptedScratchFile's private
+// directories: <prefix>-<pid>-*.
+const decryptedRosterDirPrefix = "pilot-roster-decrypt"
+
 // decryptedScratchFile writes plaintext — a decrypted roster — to a new
 // mode-0600 file in a new private (0700) directory under the system temp
-// directory, and returns its path and a cleanup that removes that
-// directory with everything in it: the plaintext, and the lock files and
-// temp files a roster writer working on it left there. No name in it is
-// predictable to other users, none is shared with anything else, and a
-// writer's sweep for stale temp files (sweepRosterTemps) reads only that
-// directory, not all of $TMPDIR.
+// directory (secretpath.PrivateTempDir), and returns its path and a
+// cleanup that removes that directory with everything in it: the
+// plaintext, and the lock files and temp files a roster writer working on
+// it left there. No name in it is predictable to other users, none is
+// shared with anything else, and a writer's sweep for stale temp files
+// (sweepRosterTemps) reads only that directory, not all of $TMPDIR. A
+// pilot killed before the cleanup leaves the directory behind; the next
+// one this user makes removes it (AGENTS.md §5.14 rule 5).
 func decryptedScratchFile(plaintext []byte) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "pilot-roster-decrypt-")
+	dir, err := secretpath.PrivateTempDir(decryptedRosterDirPrefix)
 	if err != nil {
 		return "", func() {}, err
 	}

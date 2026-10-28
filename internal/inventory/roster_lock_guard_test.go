@@ -44,7 +44,7 @@ var rosterWriterExemptions = map[string]string{
 	"writeInternalEndpointYAMLDoc":          "writes the internal-endpoints manifest, not a roster",
 	"openRosterForWrite":                    "opens a roster for writing without truncating and writes nothing; only writeLockedRoster writes through the file, under the lock (WriteAt is a raw primitive kept in roster_write.go), and checkRosterWritable and the probe only close it",
 	"sweepRosterTemps":                      "removes only temp files a killed pilot left beside the roster (its own .<roster>.pilot-tmp-* names), never the roster; lockRosterFile calls it with the lock held",
-	"decryptedScratchFile":                  "its cleanup removes its own private scratch directory (os.MkdirTemp) — the decrypted copy and the lock and temp files a writer left in it — never a roster",
+	"decryptedScratchFile":                  "its cleanup removes its own private scratch directory (secretpath.PrivateTempDir) — the decrypted copy and the lock and temp files a writer left in it — never a roster",
 }
 
 // Every roster writer locks the file it changes, however the caller spells

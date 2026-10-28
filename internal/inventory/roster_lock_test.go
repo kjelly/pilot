@@ -3,10 +3,12 @@ package inventory
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -874,6 +876,46 @@ func TestMigrateRosterFileThroughALinkKeepsTheLink(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(l.link)); len(entries) != 1 {
 		t.Errorf("files beside the link: %v, want only the link", entries)
+	}
+}
+
+// A decrypted roster's private directory is a secretpath.PrivateTempDir:
+// one a pilot killed before its cleanup left behind — plaintext and all —
+// is removed the next time this user decrypts a roster, while a live
+// process's directory is kept (AGENTS.md §5.14 rule 5; the plan workspace
+// and the simulated roster write share the mechanism, PR #148 round 6,
+// P3-4).
+func TestDecryptedScratchFileSweepsWhatADeadPilotLeft(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	exited := exec.Command("true")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	dead := exited.ProcessState.Pid()
+	stale := filepath.Join(tmp, fmt.Sprintf("%s-%d-x", decryptedRosterDirPrefix, dead))
+	live := filepath.Join(tmp, fmt.Sprintf("%s-%d-x", decryptedRosterDirPrefix, os.Getppid()))
+	for _, d := range []string{stale, live} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "roster-1.yaml"), []byte("password: secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, cleanup, err := decryptedScratchFile([]byte("schema_version: 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Errorf("a dead pilot's decrypted roster survived (lstat err=%v)", err)
+	}
+	if _, err := os.Lstat(live); err != nil {
+		t.Errorf("a live process's directory was removed: %v", err)
+	}
+	if want := fmt.Sprintf("%s-%d-", decryptedRosterDirPrefix, os.Getpid()); !strings.HasPrefix(filepath.Base(filepath.Dir(path)), want) {
+		t.Errorf("plaintext %s is not in a %s* directory", path, want)
 	}
 }
 
