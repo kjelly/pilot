@@ -563,7 +563,10 @@ func rosterSourceWriterAPIs(t *testing.T) map[string]int {
 			t.Errorf("source call graph missed writer %s", name)
 		}
 	}
-	for _, name := range []string{"RosterUser", "SimulateSetRosterUser", "ValidateRosterFile", "DecryptRosterToTempFile", "ProbeRosterLock", "RosterAdminPasswordDiffers"} {
+	for _, name := range []string{"RosterUser", "SimulateSetRosterUser", "ValidateRosterFile", "DecryptRosterToTempFile", "ProbeRosterWrite", "RosterAdminPasswordDiffers"} {
+		if declarations[name] == nil {
+			t.Errorf("read-only source operation %s no longer exists; update this list", name)
+		}
 		if _, ok := writers[name]; ok {
 			t.Errorf("read-only source operation %s classified as an original-source mutation", name)
 		}

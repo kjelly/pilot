@@ -339,7 +339,7 @@ func TestRosterLockFileFIFOIsRefusedWithoutHanging(t *testing.T) {
 	}
 }
 
-// ProbeRosterLock tells a plan what the apply's lockRosterFile would find
+// ProbeRosterWrite tells a plan what the apply's lockRosterFile and writer would find
 // on the real roster, without leaving a lock file or holding a lock: free,
 // held by another process, or a lock file this user cannot use (PR #148
 // round 4: a plan on a scratch copy otherwise passes where the apply is
