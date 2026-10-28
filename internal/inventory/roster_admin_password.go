@@ -188,9 +188,12 @@ type PreparedRosterAdminSync struct {
 // not change free of lock files; it decides nothing. A roster that will
 // change — or that read empty, a writer caught between truncating and
 // writing it — is locked and decided again on a fresh read, and stays
-// locked: the caller must Commit or Release it. Errors are
-// SyncRosterAdminPassword's, ErrMutationLocked and ErrRosterLockFile
-// among them, and leave nothing locked.
+// locked: the caller must Commit or Release it. A roster the write would
+// be refused for (ErrRosterNotWritable: not writable by this user, not a
+// regular file, …) is refused here, so the caller learns it before writing
+// anything. Errors are SyncRosterAdminPassword's — ErrMutationLocked,
+// ErrRosterLockFile and ErrRosterNotWritable among them — and leave
+// nothing locked.
 func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRosterAdminSync, error) {
 	result, _, err := planRosterAdminSync(path, oldPassword, newPassword)
 	emptyRead := err == nil && result == RosterAdminNotLiteral && rosterFileEmpty(path)
@@ -205,6 +208,18 @@ func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRos
 	if err != nil || result != RosterAdminUpdated {
 		lk.release() //nolint:errcheck
 		return &PreparedRosterAdminSync{Result: result}, err
+	}
+	// Whatever writeLockedRoster would refuse is refused now, before the
+	// caller writes anything else (PR #148 round 5, F2).
+	f, _, err := openRosterForWrite(lk.target, lk.path)
+	if f != nil {
+		f.Close()
+	} else if err == nil {
+		err = fmt.Errorf("roster %s disappeared while locked: %w", lk.path, ErrRosterNotWritable)
+	}
+	if err != nil {
+		lk.release() //nolint:errcheck
+		return nil, err
 	}
 	return &PreparedRosterAdminSync{Result: RosterAdminUpdated, lk: lk, updated: updated}, nil
 }

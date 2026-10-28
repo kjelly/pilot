@@ -143,10 +143,11 @@ func TestRosterCandidatesListEachFileOnce(t *testing.T) {
 	}
 }
 
-// busyRosterCases block a roster's writes two ways: another pilot process
-// holds its lock, or its lock file is one this user cannot open (a
-// root-run pilot left it 0000). Each returns the reason an error or banner
-// must name, and how to unblock.
+// busyRosterCases block a roster's writes three ways: another pilot process
+// holds its lock, its lock file is one this user cannot open (a root-run
+// pilot left it 0000), or the roster itself is not writable by this user
+// (0400). Each returns the reason an error or banner must name, and how to
+// unblock. The last two skip as root, which opens either.
 func busyRosterCases() map[string]func(t *testing.T, roster string) (reason string, unblock func()) {
 	return map[string]func(t *testing.T, roster string) (string, func()){
 		"held": func(t *testing.T, roster string) (string, func()) {
@@ -169,6 +170,15 @@ func busyRosterCases() map[string]func(t *testing.T, roster string) (reason stri
 				t.Fatal(err)
 			}
 			return "exists but this user cannot open it", func() { os.Remove(lock) }
+		},
+		"roster not writable": func(t *testing.T, roster string) (string, func()) {
+			if os.Geteuid() == 0 {
+				t.Skip("root writes a 0400 roster")
+			}
+			if err := os.Chmod(roster, 0o400); err != nil {
+				t.Fatal(err)
+			}
+			return "is not writable by this user", func() { os.Chmod(roster, 0o600) } //nolint:errcheck
 		},
 	}
 }

@@ -288,7 +288,7 @@ func TestRegression_BusyRosterErrorsGoThroughRosterBusyBanner(t *testing.T) {
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
 				sel, ok := node.(*ast.SelectorExpr)
-				if !ok || (sel.Sel.Name != "ErrMutationLocked" && sel.Sel.Name != "ErrRosterLockFile") {
+				if !ok || (sel.Sel.Name != "ErrMutationLocked" && sel.Sel.Name != "ErrRosterLockFile" && sel.Sel.Name != "ErrRosterNotWritable") {
 					return true
 				}
 				if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "inventory" {

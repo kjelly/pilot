@@ -110,10 +110,12 @@ func checkLockFileOpen(path string, f *os.File, err error) error {
 
 // lockContentionWait is how long flockMutationLock keeps trying a lock
 // another process holds before reporting ErrMutationLocked. It covers the
-// instant ProbeRosterLock holds a lock file shared, so a plan's probe never
+// instant ProbeRosterWrite holds a lock file shared, so a plan's probe never
 // fails a writer, and stays short enough that a busy roster is still
 // reported at once rather than queued behind (PR #148 round 5, P3-a).
-const lockContentionWait = 250 * time.Millisecond
+// A variable only so tests about refusal, not timing, can shorten it
+// (shortLockContentionWait).
+var lockContentionWait = 250 * time.Millisecond
 
 // flockMutationLock takes how (LOCK_EX or LOCK_SH) on the open lock file
 // f without blocking, trying again for up to lockContentionWait while
@@ -136,17 +138,20 @@ func flockMutationLock(path string, f *os.File, how int) error {
 	}
 }
 
-// ProbeRosterLock reports what lockRosterFile would find on the roster at
-// path now, without creating a lock file or holding one past the call:
-// nil when the lock files are absent or free, ErrMutationLocked when
-// another process holds one, ErrRosterLockFile when one could not be used.
-// A plan probes the real roster its scratch copy stands in for, so it
-// fails where the apply would. The probe takes each existing lock file's
+// ProbeRosterWrite reports whether a write to the roster at path would be
+// refused now, without writing anything, creating a lock file or holding
+// one past the call: ErrMutationLocked when another process holds a lock
+// file, ErrRosterLockFile when one could not be used (lockRosterFile's
+// refusals), ErrRosterNotWritable when writeLockedRoster would refuse the
+// roster itself (openRosterForWrite: the probe opens it for writing
+// without truncating, so a file watcher may see an open and a close), nil
+// otherwise. A plan probes the real roster its scratch copy stands in for,
+// so it fails where the apply would. The probe takes each existing lock file's
 // flock shared for an instant; a writer whose attempt lands in that
 // instant keeps trying (flockMutationLock), so the probe never fails it.
 // Like the writer, the probe waits up to lockContentionWait for a holder
 // to let go.
-func ProbeRosterLock(path string) error {
+func ProbeRosterWrite(path string) error {
 	target, err := secretpath.Canonical(path)
 	if err != nil {
 		return fmt.Errorf("resolve roster %s: %w", path, err)
@@ -156,7 +161,11 @@ func ProbeRosterLock(path string) error {
 			return fmt.Errorf("roster %s: %w", path, err)
 		}
 	}
-	return nil
+	f, _, err := openRosterForWrite(target, path)
+	if f != nil {
+		f.Close()
+	}
+	return err
 }
 
 func probeMutationLock(path string) error {

@@ -89,6 +89,21 @@ func paritySetups() map[string]paritySetup {
 		},
 		"busy roster (held)":                 {password: "New-pass_2", prepare: busy(busyRosterCases()["held"]), busy: true},
 		"busy roster (lock file not usable)": {password: "New-pass_2", prepare: busy(busyRosterCases()["lock file not openable"]), busy: true},
+		// A roster this user cannot write refuses the save like a busy one
+		// (PR #148 round 5, F2); root writes a 0400 roster, so as root the
+		// rotation syncs it.
+		"unwritable roster": {
+			password: "New-pass_2",
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, syncTestRoster(`"Old-pass_1"`))
+				if err := os.Chmod(roster, 0o400); err != nil {
+					t.Fatal(err)
+				}
+				return []string{vault, roster}, func() {}
+			},
+			busy:   os.Geteuid() != 0,
+			synced: os.Geteuid() == 0,
+		},
 		"templated value": {
 			password: "{{ lookup('env', 'IPA_ADMIN') }}",
 			prepare: func(t *testing.T, dir string) ([]string, func()) {
@@ -190,7 +205,7 @@ func TestVaultSaveRosterSyncParity(t *testing.T) {
 				before := snapshotFiles(t, watched...)
 				run := parityFrontEnds()[frontEnd](t, dir)
 				if setup.busy {
-					if !errors.Is(run.err, inventory.ErrMutationLocked) && !errors.Is(run.err, inventory.ErrRosterLockFile) {
+					if !errors.Is(run.err, inventory.ErrMutationLocked) && !errors.Is(run.err, inventory.ErrRosterLockFile) && !errors.Is(run.err, inventory.ErrRosterNotWritable) {
 						t.Errorf("%s: error = %v; want the busy roster to refuse the save", frontEnd, run.err)
 					}
 					if !strings.Contains(errString(run.err), "was not saved") {

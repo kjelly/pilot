@@ -301,6 +301,7 @@ func holdRawLocks(t *testing.T, path string, suffixes ...string) {
 // review: the admin password sync rewrote a roster through its link while
 // `pilot roster remove-*` held it).
 func TestRosterWritersRefuseALockedRoster(t *testing.T) {
+	shortLockContentionWait(t)
 	cases := rosterWriterCases()
 	assertCoversEveryRosterWriter(t, cases)
 	holders := map[string][]string{
@@ -462,6 +463,17 @@ func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 	})
 }
 
+// shortLockContentionWait makes a held lock refuse a writer after 1ms for
+// t, for tests about which writers refuse, not how long they wait
+// (TestRosterLockContentionIsBriefAndBounded keeps the real wait). This
+// package's tests do not run in parallel.
+func shortLockContentionWait(t *testing.T) {
+	t.Helper()
+	old := lockContentionWait
+	lockContentionWait = time.Millisecond
+	t.Cleanup(func() { lockContentionWait = old })
+}
+
 // requireRoot skips t unless it runs as root, and fails it instead when
 // PILOT_REQUIRE_ROOT_TESTS=1 (`make root-test`), so a run meant to
 // exercise these cannot pass by skipping them.
@@ -621,6 +633,7 @@ func rosterSpellings(t *testing.T, dir, target string) map[string]string {
 // directory all conflict with the real path in both directions, and the
 // lock files sit beside the real file only.
 func TestLockRosterFileSharesOneLockAcrossSpellings(t *testing.T) {
+	shortLockContentionWait(t)
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

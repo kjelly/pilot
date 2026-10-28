@@ -306,11 +306,12 @@ func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPasswo
 			return inventory.PrepareRosterAdminSync(path, oldPassword, newPassword)
 		})
 		if err == nil && prepared.Result == inventory.RosterAdminUpdated && scope.planSource != "" {
-			// A plan writes its scratch copy, which no other process locks;
-			// the apply locks the real roster, so the plan probes it to fail
-			// where the apply would.
+			// A plan writes its scratch copy, which no other process locks
+			// and which is always writable; the apply locks and writes the
+			// real roster, so the plan probes it to fail where the apply
+			// would.
 			if real, rerr := rosterIdentity(dir, scope.planSource, path); rerr == nil {
-				if err = inventory.ProbeRosterLock(real); err != nil {
+				if err = inventory.ProbeRosterWrite(real); err != nil {
 					prepared.Release()
 				}
 			}

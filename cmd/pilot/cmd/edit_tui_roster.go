@@ -767,9 +767,11 @@ func (e scratchPathError) Error() string {
 func (e scratchPathError) Unwrap() error { return e.err }
 
 // rosterBusyBanner is the banner for a roster write refused because
-// another pilot process holds the roster (inventory.ErrMutationLocked) or
-// its lock file cannot be used (inventory.ErrRosterLockFile). Nothing was
-// written. At the terminal the operator can retry once that is over or
+// another pilot process holds the roster (inventory.ErrMutationLocked),
+// its lock file cannot be used (inventory.ErrRosterLockFile), the roster
+// itself cannot be written (inventory.ErrRosterNotWritable: not writable
+// by this user, not a regular file), or it is outside a plan's or apply's
+// scope (errRosterOutsideEditScope). Nothing was written. At the terminal the operator can retry once that is over or
 // fixed, so pilot edit shows the banner and stays open instead of ending
 // the session (r.err). The refusal is also recorded on r (writeRefused):
 // the automation driver fails the step with it, so a scenario — and an
@@ -780,7 +782,7 @@ func rosterBusyBanner(r *editRouterModel, path string, err error) (string, bool)
 	case errors.Is(err, inventory.ErrMutationLocked):
 		banner = fmt.Sprintf("⚠️  未寫入 %s：另一個 pilot 名冊操作正鎖住它，等它結束後再試一次", path)
 		err = fmt.Errorf("roster %s was not written: another pilot process holds its lock: %w", path, inventory.ErrMutationLocked)
-	case errors.Is(err, inventory.ErrRosterLockFile):
+	case errors.Is(err, inventory.ErrRosterLockFile), errors.Is(err, inventory.ErrRosterNotWritable):
 		banner = fmt.Sprintf("⚠️  未寫入 %s：%v", path, err)
 		err = fmt.Errorf("roster %s was not written: %w", path, err)
 	case errors.Is(err, errRosterOutsideEditScope):

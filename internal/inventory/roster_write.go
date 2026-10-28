@@ -60,28 +60,14 @@ var fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid
 // lock files are.
 func writeLockedRoster(lk *rosterLock, data []byte) error {
 	path := lk.target
-	if err := validateSecretSourceFile(path); err != nil {
+	f, st, err := openRosterForWrite(path, lk.path)
+	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	if f == nil {
 		return createLockedRoster(lk, data)
-	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.EROFS):
-		return fmt.Errorf("roster %s is not writable by this user: %w", lk.path, err)
-	case errors.Is(err, syscall.ELOOP):
-		return fmt.Errorf("roster %s became a symlink while locked; retry: %w", lk.path, err)
-	case err != nil:
-		return fmt.Errorf("open roster %s: %w", lk.path, err)
 	}
 	defer f.Close()
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return fmt.Errorf("stat roster %s: %w", lk.path, err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		return fmt.Errorf("roster %s is not a regular file", lk.path)
-	}
 	if st.Nlink > 1 || hasPOSIXACL(path) {
 		return writeRosterInPlace(f, data)
 	}
@@ -109,6 +95,47 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 	}
 	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// ErrRosterNotWritable is a roster write refused before anything is
+// written: the roster is not writable by this user (a 0400 file, a
+// read-only file system), not a regular file, became a symlink, or is a
+// path the workspace may not use. PrepareRosterAdminSync and
+// ProbeRosterWrite report it before a caller commits to writing anything.
+var ErrRosterNotWritable = errors.New("roster cannot be written")
+
+// openRosterForWrite opens the roster at target (shown in messages as
+// shown) for writing, without truncating it, and is the one place that
+// decides what writeLockedRoster refuses (ErrRosterNotWritable): a path
+// the workspace may not use, a roster this user cannot open for writing
+// (root still opens a 0400 one), a symlink, and anything but a regular
+// file. A roster that does not exist returns a nil file and no error: the
+// writer creates it.
+func openRosterForWrite(target, shown string) (*os.File, *syscall.Stat_t, error) {
+	if err := validateSecretSourceFile(target); err != nil {
+		return nil, nil, fmt.Errorf("roster %s: %w: %w", shown, ErrRosterNotWritable, err)
+	}
+	f, err := os.OpenFile(target, os.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil, nil
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.EROFS):
+		return nil, nil, fmt.Errorf("roster %s is not writable by this user: %w: %w", shown, ErrRosterNotWritable, err)
+	case errors.Is(err, syscall.ELOOP):
+		return nil, nil, fmt.Errorf("roster %s became a symlink while locked; retry: %w: %w", shown, ErrRosterNotWritable, err)
+	case err != nil:
+		return nil, nil, fmt.Errorf("open roster %s: %w: %w", shown, ErrRosterNotWritable, err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		f.Close()
+		return nil, nil, fmt.Errorf("stat roster %s: %w", shown, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		f.Close()
+		return nil, nil, fmt.Errorf("roster %s is not a regular file: %w", shown, ErrRosterNotWritable)
+	}
+	return f, &st, nil
 }
 
 // errRosterOwnerNotKept is writeRosterTemp's refusal when the temp file

@@ -344,11 +344,11 @@ func TestRosterLockFileFIFOIsRefusedWithoutHanging(t *testing.T) {
 // held by another process, or a lock file this user cannot use (PR #148
 // round 4: a plan on a scratch copy otherwise passes where the apply is
 // refused).
-func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
+func TestProbeRosterWriteReportsWhatTheWriterWouldFind(t *testing.T) {
 	t.Run("free: no lock file is created", func(t *testing.T) {
 		path := writeLockTestRoster(t)
-		if err := ProbeRosterLock(path); err != nil {
-			t.Fatalf("ProbeRosterLock() = %v, want nil", err)
+		if err := ProbeRosterWrite(path); err != nil {
+			t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
 		}
 		for _, suffix := range rosterLockSuffixes {
 			if _, err := os.Lstat(path + suffix); !errors.Is(err, os.ErrNotExist) {
@@ -363,8 +363,8 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 			t.Fatal(err)
 		}
 		lk.release() //nolint:errcheck
-		if err := ProbeRosterLock(path); err != nil {
-			t.Fatalf("ProbeRosterLock() = %v, want nil", err)
+		if err := ProbeRosterWrite(path); err != nil {
+			t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
 		}
 		if err := AppendRosterUser(path, "erin"); err != nil {
 			t.Fatalf("a writer after the probe: %v", err)
@@ -381,8 +381,8 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 				t.Fatal(err)
 			}
-			if err := ProbeRosterLock(path); !errors.Is(err, ErrMutationLocked) {
-				t.Fatalf("ProbeRosterLock() = %v, want ErrMutationLocked", err)
+			if err := ProbeRosterWrite(path); !errors.Is(err, ErrMutationLocked) {
+				t.Fatalf("ProbeRosterWrite() = %v, want ErrMutationLocked", err)
 			}
 		})
 	}
@@ -397,8 +397,8 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer lk.release() //nolint:errcheck
-		if err := ProbeRosterLock(link); !errors.Is(err, ErrMutationLocked) {
-			t.Fatalf("ProbeRosterLock(link) = %v, want ErrMutationLocked", err)
+		if err := ProbeRosterWrite(link); !errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("ProbeRosterWrite(link) = %v, want ErrMutationLocked", err)
 		}
 	})
 	t.Run("lock file is a symlink", func(t *testing.T) {
@@ -406,8 +406,8 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 		if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), path+rosterLockSuffixes[0]); err != nil {
 			t.Fatal(err)
 		}
-		if err := ProbeRosterLock(path); !errors.Is(err, ErrRosterLockFile) {
-			t.Fatalf("ProbeRosterLock() = %v, want ErrRosterLockFile", err)
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
 		}
 	})
 	t.Run("lock file not openable", func(t *testing.T) {
@@ -418,11 +418,40 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 		if err := os.WriteFile(path+rosterLockSuffixes[1], nil, 0o000); err != nil {
 			t.Fatal(err)
 		}
-		if err := ProbeRosterLock(path); !errors.Is(err, ErrRosterLockFile) {
-			t.Fatalf("ProbeRosterLock() = %v, want ErrRosterLockFile", err)
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
 		}
 		if _, err := lockRosterFile(path); !errors.Is(err, ErrRosterLockFile) {
 			t.Fatalf("lockRosterFile() = %v; the probe and the writer disagree", err)
+		}
+	})
+	t.Run("roster not writable by this user", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		err := ProbeRosterWrite(path)
+		if os.Geteuid() == 0 {
+			// Root opens a 0400 file for writing, and so does its writer.
+			if err != nil {
+				t.Fatalf("ProbeRosterWrite() as root = %v, want nil", err)
+			}
+			return
+		}
+		if !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("AppendRosterUser() = %v; the probe and the writer disagree", err)
+		}
+	})
+	t.Run("roster is not a regular file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "roster.yaml")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
 		}
 	})
 	t.Run("lock file cannot be created", func(t *testing.T) {
@@ -435,8 +464,8 @@ func TestProbeRosterLockReportsWhatTheWriterWouldFind(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { os.Chmod(dir, 0o700) }) //nolint:errcheck
-		if err := ProbeRosterLock(path); !errors.Is(err, ErrRosterLockFile) {
-			t.Fatalf("ProbeRosterLock() = %v, want ErrRosterLockFile", err)
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
 		}
 		if _, err := lockRosterFile(path); !errors.Is(err, ErrRosterLockFile) {
 			t.Fatalf("lockRosterFile() = %v; the probe and the writer disagree", err)
@@ -471,7 +500,7 @@ func TestRosterLockContentionIsBriefAndBounded(t *testing.T) {
 	})
 	t.Run("probes running beside writers fail none of them", func(t *testing.T) {
 		path := writeLockTestRoster(t)
-		if err := ProbeRosterLock(path); err != nil { // lock files absent: nothing to hold
+		if err := ProbeRosterWrite(path); err != nil { // lock files absent: nothing to hold
 			t.Fatal(err)
 		}
 		lk, err := lockRosterFile(path)
@@ -489,7 +518,7 @@ func TestRosterLockContentionIsBriefAndBounded(t *testing.T) {
 					probed <- n
 					return
 				default:
-					_ = ProbeRosterLock(path)
+					_ = ProbeRosterWrite(path)
 					n++
 				}
 			}

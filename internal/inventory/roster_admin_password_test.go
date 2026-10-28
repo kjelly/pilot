@@ -524,3 +524,60 @@ func TestPreparedRosterAdminSyncHoldsTheLockUntilCommit(t *testing.T) {
 		}
 	}
 }
+
+// Prepare refuses, under the lock and before its caller writes anything
+// else, a roster writeLockedRoster would refuse: the vault save must not
+// write the vault and then find the roster unwritable (PR #148 round 5,
+// F2). Nothing stays locked. Root writes a 0400 roster, so it is
+// prepared as usual.
+func TestPrepareRosterAdminSyncRefusesAnUnwritableRoster(t *testing.T) {
+	body := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+	path := writeRoster(t, body)
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+	if os.Geteuid() == 0 {
+		if err != nil || prepared.Result != RosterAdminUpdated {
+			t.Fatalf("PrepareRosterAdminSync() as root = %+v, %v; want it prepared", prepared, err)
+		}
+		prepared.Release()
+		return
+	}
+	if !errors.Is(err, ErrRosterNotWritable) || !strings.Contains(err.Error(), "is not writable by this user") {
+		t.Fatalf("PrepareRosterAdminSync() = %+v, %v; want ErrRosterNotWritable", prepared, err)
+	}
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatalf("Prepare left the roster locked: %v", err)
+	}
+	lk.release() //nolint:errcheck
+	if after, _ := os.ReadFile(path); string(after) != body {
+		t.Fatalf("roster changed:\n%s", after)
+	}
+}
+
+// As root (pilot-cli under `docker run`), a 0400 roster is writable, as
+// root's writer finds it: the probe and Prepare let it through and the
+// commit writes it, so a rotation syncs it instead of refusing the save.
+func TestRootWritesA0400RosterThroughPrepareAndProbe(t *testing.T) {
+	requireRoot(t)
+	body := strings.Replace(rosterAdminFixture, "%s", `"Old-pass_1"`, 1)
+	path := writeRoster(t, body)
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeRosterWrite(path); err != nil {
+		t.Fatalf("ProbeRosterWrite() as root = %v, want nil", err)
+	}
+	prepared, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+	if err != nil || prepared.Result != RosterAdminUpdated {
+		t.Fatalf("PrepareRosterAdminSync() as root = %+v, %v", prepared, err)
+	}
+	if err := prepared.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != "New-pass_2" {
+		t.Fatalf("roster after the commit:\n%s", after)
+	}
+}
