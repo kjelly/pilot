@@ -287,8 +287,9 @@ admin 密碼存在兩個地方，兩份必須相同：
 - 原本就跟舊密碼不同的名冊；
 - 密碼沒加引號、而 YAML 可能把它讀成數字、日期或布林值的名冊（例如 `12345678`、`012345678`、
   `1e10`、`190:20:30`、`2024-01-01`、`yes`）：YAML 1.1（Ansible 載入 vars 檔所用）與 YAML 1.2 對這些值
-  的判斷不一致，比對時可能不等於 vault 的字串。請把名冊與 vault 兩邊都寫成加上引號的值；vault 的
-  `ipa_admin_password` 沒加引號時同樣不會同步，畫面會提示；
+  的判斷不一致，比對時可能不等於 vault 的字串。請把名冊與 vault 兩邊都寫成加上引號的值。`pilot edit`
+  存進 vault 的新值一律是加引號的字串；vault 原本的值沒加引號時，pilot 無法判斷哪些名冊用的是它，同樣不會同步，
+  畫面會提示逐一確認；
 - 密碼經 YAML alias／merge key 取得，或寫成 flow mapping、多行 scalar 的名冊；
 - 新密碼含 `{{`、`{%`、`{#`：Ansible 會當成模板展開，pilot 無法得知實際密碼，所有名冊都不會改。
   vault 的值標成 `!unsafe` 時 Ansible 不展開它，pilot 會照常同步，名冊寫成 `!unsafe` 加引號的字串；
@@ -296,12 +297,14 @@ admin 密碼存在兩個地方，兩份必須相同：
   無法判斷哪些名冊用的是它，所有名冊都不會改，畫面會提示逐一確認。
 
 **要跟著改的名冊正被另一個 `pilot` 名冊操作（`pilot roster remove-*`、schema 升級等）鎖住、lock 檔（名冊旁的
-`*.pilot-migrate.lock`、`*.pilot-remove.lock`）這個使用者打不開，或名冊本身這個使用者不能寫（例如 `0400`，
-root 除外）、不是一般檔案時，這次存檔會被拒絕**：vault 與名冊都不寫入，因為先存 vault 會讓名冊留在舊密碼，
+`*.pilot-migrate.lock`、`*.pilot-remove.lock`）不能用（這個使用者打不開、建不出來、是目錄或其他非一般檔案、
+讀寫時出錯），或名冊本身這個使用者不能寫（例如 `0400`，root 除外）、不是一般檔案時，這次存檔會被拒絕**：vault 與名冊都不寫入，因為先存 vault 會讓名冊留在舊密碼，
 而之後再存也不會補同步。pilot 會先鎖住每一份要跟著改的名冊並確認寫得進去，全部沒問題才寫 vault，再寫名冊。
 在終端機會顯示「未存檔 …（修改還在）」與是哪一份名冊，畫面留在 vault 編輯器、修改沒有遺失，等那個操作結束
-（或修好 lock 檔、名冊的權限）後再存一次即可。自動化時那一步會失敗，見下面的說明。寫名冊時才發生的錯誤
-（例如磁碟已滿）無法事先知道：那時 vault 已經存好，那份名冊會列為「未同步」。
+（或修好 lock 檔、名冊的權限）後再存一次即可。自動化時那一步會失敗，見下面的說明。只有上面清單裡的名冊
+（加密、讀不懂、密碼形式 pilot 改不了、原本就不同）會列為「未同步」而讓存檔照常進行；要跟著改的名冊因為其他
+任何原因寫不進去，存檔都會被拒絕。寫名冊時才發生的錯誤（例如磁碟已滿）無法事先知道：那時 vault 已經存好，
+那份名冊會列為「未同步」。
 
 **pilot edit 只在 `ipa_admin_password` 改變的那次存檔同步名冊。** 之後再存一次 vault 不會補同步，
 所以名冊一旦跟 vault 不一致（上面列出的名冊、在 pilot edit 以外改了 vault，或加密的 `.vault/main.yaml`），
@@ -330,11 +333,14 @@ lock 檔是 symlink、FIFO 或另有其他名字（hard link）時一律拒絕�
 存檔留下的「未同步」名冊，`--actions` 會在 stderr 印成 `warning: …`（成功或之後某一步失敗都會印，因為
 那次存檔已經保留下來）；`pilot_edit_plan`／`pilot_edit_apply` 放在結果的 warnings。都只列路徑，不含密碼。
 
-MCP 的 `pilot_edit_plan`／`pilot_edit_apply` 只會寫這個 workspace `.vault/` 目錄裡的名冊：plan 無法預覽、
-apply 的 rollback 也無法還原 `.vault/` 以外的檔案。`freeipa_roster_file` 指到 `.vault/` 以外時，pilot 先在
+MCP 的 `pilot_edit_plan`／`pilot_edit_apply` 只會寫這個 workspace `.vault/` 目錄裡的名冊（從其他地方以 symlink
+指進 `.vault/` 的也算）：plan 無法預覽、apply 的 rollback 也無法還原 `.vault/` 以外的檔案。`freeipa_roster_file`
+不論寫成絕對或相對路徑，plan 都照 apply 的方式解讀（相對於真實 workspace）。`freeipa_roster_file` 指到 `.vault/`
+以外時，pilot 先在
 暫存複本上試做那一步：真的要改名冊（例如啟用 freeipa-nfs-server 時補上還沒有的 `nfs.servers`、建立名冊）
 就失敗並列出路徑，請改在終端機用 `pilot edit` 或手動修改；名冊已經是要的樣子（例如 `nfs.servers` 已有這台
-主機）就照常通過，那份名冊只會被讀取，旁邊也不會留下 lock 檔。終端機與 `--actions` 不受這個限制。`hosts.yml` 記錄的 `freeipa_roster_file` 是
+主機）就照常通過，那份名冊只會被讀取，旁邊也不會留下 lock 檔。終端機與 `--actions` 不受這個限制。
+plan 的錯誤訊息、warnings 與檢查結果列的都是真實 workspace 的路徑，跟 apply 一樣，不會出現 plan 的暫存複本路徑。`hosts.yml` 記錄的 `freeipa_roster_file` 是
 絕對路徑，plan 的 diff 顯示的也是真實 workspace 的路徑。
 
 `pilot_edit_apply` 的某一步失敗而 rollback 時，這次寫過的名冊只會在內容仍是這次寫入的時候還原（同一個
@@ -355,6 +361,9 @@ pilot 寫名冊的方式：
 - 新建立的名冊權限是 `0600`；以 root 執行（例如 `docker run` 裡的 pilot-cli）時，擁有者跟所在目錄相同，
   schema 升級的備份檔則給名冊的擁有者。
 - pilot 被中斷而留下的暫存檔，會在下一次有 pilot 取得這份名冊的鎖時清掉（只清超過兩分鐘的）。
+- plan 的暫存複本（含 `.vault/` 檔案）與試做外部名冊時的副本放在系統暫存目錄（`pilot-edit-plan-*`、
+  `pilot-roster-scope-*`，權限 `0700`），用完即刪；pilot 被中斷而留下時，下一次建立同類副本時清掉
+  （只清這個使用者、已經結束的 pilot 留下的）。
 
 不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
 明文 vault 與名冊不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；vault 的
