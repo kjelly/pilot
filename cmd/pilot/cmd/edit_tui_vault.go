@@ -283,14 +283,24 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 	})
 }
 
-// newVaultEditCommand is `bin edit path`. Any encrypted .vault/ file but
-// the deploy vault may be a roster, and ansible-vault writes it back: for
-// those the roster lock is held while it runs (rosterEditCommand.Run), so
-// no other roster writer saves in between.
+// newVaultEditCommand is `bin edit path`. ansible-vault writes the file
+// back, so for a roster — the same file as one of the rosters pilot edit
+// knows in this workspace (rosterCandidates: the default
+// .vault/ipa-identity.yaml and every freeipa_roster_file reference) — the
+// roster lock is held while it runs (rosterEditCommand.Run), so no other
+// roster writer saves in between. Any other encrypted file (the deploy
+// vault, keycloak.yaml, …) is not a roster: it gets no lock files, and a
+// directory that refuses them does not keep it from opening.
 func newVaultEditCommand(dir, bin, path string) *rosterEditCommand {
 	edit := &rosterEditCommand{Cmd: exec.Command(bin, "edit", path)}
-	if !sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
-		edit.roster = path
+	if sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
+		return edit
+	}
+	for _, roster := range rosterCandidates(dir, "", referencedRosterFiles(dir)) {
+		if sameExistingFile(path, roster) {
+			edit.roster = path
+			break
+		}
 	}
 	return edit
 }
