@@ -334,3 +334,110 @@ func TestRosterJournalIdentifiesHardLinkedNames(t *testing.T) {
 		t.Fatalf("a write through the file's other name was not recorded: %+v", second.Writes())
 	}
 }
+
+// openFDsUnder lists the descriptors this process holds on files under dir
+// (a deleted file keeps its path in the link, with " (deleted)" appended).
+func openFDsUnder(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skip("no /proc/self/fd")
+	}
+	var held []string
+	for _, e := range entries {
+		link, err := os.Readlink("/proc/self/fd/" + e.Name())
+		if err == nil && strings.HasPrefix(link, dir+string(filepath.Separator)) {
+			held = append(held, e.Name()+" -> "+link)
+		}
+	}
+	return held
+}
+
+// The probe opens a hard-linked roster twice — write-only for the writability
+// check, then read-only to take the inode's shared lock — and refuses (retry,
+// ErrMutationLocked) when the second open reached a different file than the
+// first: the roster was replaced between them, so the lock would be on a file
+// the first open never checked. The "open" fault seam runs right after each
+// open of the roster, so the hook for the first one renames a new roster over
+// the path: the second open then lands on the replacement. The unchanged case
+// is the same probe with the seam only counting: both opens reach one file
+// and the probe succeeds (PR #148 review of b5fb48c0; AGENTS.md 5.12).
+func TestProbeRosterWriteRefusesARosterReplacedBetweenItsTwoOpens(t *testing.T) {
+	const replacement = "schema_version: 3\n# replaced while probed\n"
+	for _, tc := range []struct {
+		name    string
+		replace bool
+	}{
+		{"replaced between the opens is refused", true},
+		{"unchanged between the opens is accepted", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHardLinkedRoster(t)
+			dir := filepath.Dir(h.actual)
+			// Three names, so the roster still has another name once one of
+			// them is replaced: the probe takes the inode lock only for a
+			// file with a hard link left when it stats the descriptor.
+			if err := os.Link(h.actual, filepath.Join(dir, "third.yaml")); err != nil {
+				t.Fatal(err)
+			}
+			before := dirNames(t, dir)
+			opens, armed := 0, tc.replace
+			t.Cleanup(InjectFileFault(func(op, path string) error {
+				if op != "open" || path != h.actual {
+					return nil
+				}
+				opens++
+				if opens == 1 && armed {
+					fresh := filepath.Join(dir, "fresh.tmp")
+					if err := os.WriteFile(fresh, []byte(replacement), 0o600); err != nil {
+						t.Errorf("write the replacement: %v", err)
+						return nil
+					}
+					if err := os.Rename(fresh, h.actual); err != nil {
+						t.Errorf("rename the replacement over the roster: %v", err)
+					}
+				}
+				return nil
+			}))
+			err := ProbeRosterWrite(h.actual)
+			if opens != 2 {
+				t.Fatalf("the probe opened the roster %d times, want 2 (write-only, then read-only): the test does not reach the gate", opens)
+			}
+			if held := openFDsUnder(t, dir); len(held) != 0 {
+				t.Fatalf("the probe left descriptors open: %v", held)
+			}
+			if after := dirNames(t, dir); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Fatalf("the probe changed the directory: %v -> %v", before, after)
+			}
+			if !tc.replace {
+				if err != nil {
+					t.Fatalf("ProbeRosterWrite() of an unchanged roster = %v, want nil", err)
+				}
+				h.assertUnchanged(t)
+				return
+			}
+			if !errors.Is(err, ErrMutationLocked) || !strings.Contains(err.Error(), "replaced while it was probed") {
+				t.Fatalf("ProbeRosterWrite() = %v, want ErrMutationLocked saying the roster was replaced while probed", err)
+			}
+			if got := string(mustRead(t, h.actual)); got != replacement {
+				t.Fatalf("the probe wrote to the roster: %q", got)
+			}
+			if !bytes.Equal(mustRead(t, h.alias), []byte(lockTestRoster)) {
+				t.Fatal("the probe wrote to the replaced inode")
+			}
+			// Nothing stayed locked: probed again with no replacement (and the
+			// new roster given a second name so the inode lock is taken
+			// again), it is accepted.
+			if err := os.Link(h.actual, filepath.Join(dir, "second-name.yaml")); err != nil {
+				t.Fatal(err)
+			}
+			opens, armed = 0, false
+			if err := ProbeRosterWrite(h.actual); err != nil {
+				t.Fatalf("ProbeRosterWrite() after the replacement = %v, want nil", err)
+			}
+			if opens != 2 {
+				t.Fatalf("the second probe opened the roster %d times, want 2", opens)
+			}
+		})
+	}
+}
