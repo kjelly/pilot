@@ -47,6 +47,16 @@ func rosterCandidates(dir, source string, referenced []string) []string {
 		if err != nil {
 			continue
 		}
+		// A link from elsewhere into .vault/ is listed under its .vault/
+		// name, as a plan lists it (rosterWritePath), so both write it and
+		// name it alike.
+		root := dir
+		if source != "" {
+			root = source
+		}
+		if !isManagedVaultFile(dir, path) && isManagedVaultFile(root, file) {
+			path = filepath.Join(dir, ".vault", filepath.Base(file))
+		}
 		if i, seen := index[file]; seen {
 			if !isManagedVaultFile(dir, out[i]) && isManagedVaultFile(dir, path) {
 				out[i] = path
@@ -118,20 +128,40 @@ func isManagedVaultFile(dir, path string) bool {
 
 // rosterWritePath is the file a freeipa_roster_file reference ref names
 // for a write in scope: ref resolved against scope.dir, "" for an empty
-// ref. On a plan's scratch copy a reference into the real workspace's
-// .vault/ is mapped onto the copy's own .vault/: pilot edit stores the
-// reference as an absolute path, so the copy's hosts.yml still names the
-// real file, which a plan must leave alone while the apply writes it.
-// Mapped, a plan previews the roster writes the apply makes (PR #148
-// review). Any other path, and every path outside a plan, is kept; a
-// path outside the session's .vault/ is then refused under a plan or an
-// apply (mutateRosterSource).
+// ref. On a plan's scratch copy ref means what it means to the apply, so
+// it is resolved against the real workspace (planSource), relative or
+// absolute: a file in the real .vault/ is mapped onto the copy's own
+// .vault/, which the plan writes and diffs, so a plan previews the roster
+// writes the apply makes (PR #148 review); any other file is the real one,
+// which a plan only reads, or writes on a private copy (mutateRosterSource
+// refuses it when that would change it). Resolved against the copy, a
+// relative ref outside .vault/ named a file the copy does not have, so the
+// plan took it for missing (PR #148 round 6, P2-2).
 func (scope editWriteScope) rosterWritePath(ref string) string {
-	resolved := resolveRosterPath(scope.dir, strings.TrimSpace(ref))
-	if scope.planSource == "" || resolved == "" || !isManagedVaultFile(scope.planSource, resolved) {
-		return resolved
+	ref = strings.TrimSpace(ref)
+	if scope.planSource == "" || ref == "" {
+		return resolveRosterPath(scope.dir, ref)
 	}
-	return filepath.Join(scope.dir, ".vault", filepath.Base(resolved))
+	real := resolveRosterPath(scope.planSource, ref)
+	if vault := vaultSpelling(scope.planSource, real); vault != "" {
+		return filepath.Join(scope.dir, ".vault", filepath.Base(vault))
+	}
+	return real
+}
+
+// vaultSpelling is path's name among dir's own .vault/ files: path itself
+// when it is spelled inside .vault/ (a link there to elsewhere included),
+// the file it names when it is a symlink from elsewhere into .vault/, and
+// "" for anything else. Such a file is one of the session's: a plan's copy
+// holds it and an apply's rollback restores it, however it is reached.
+func vaultSpelling(dir, path string) string {
+	if isManagedVaultFile(dir, path) {
+		return path
+	}
+	if target, err := secretpath.Canonical(path); err == nil && target != path && isManagedVaultFile(dir, target) {
+		return target
+	}
+	return ""
 }
 
 // recordedPath is the absolute path pilot edit records in hosts.yml for

@@ -18,12 +18,24 @@ import (
 )
 
 // dirContents is every file under dir, lock files and temp files included,
-// keyed by its path relative to dir.
+// keyed by its path relative to dir; a symlink is recorded by its target
+// (what it names is checked where that file lives). The workspace's own
+// .pilot/ directory — pilot edit's session lock, which an apply takes — is
+// left out.
 func dirContents(t *testing.T, dir string) map[string][]byte {
 	t.Helper()
 	out := map[string][]byte{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && d.Name() == ".pilot" && path != dir {
+			return filepath.SkipDir
+		}
 		if err != nil || d.IsDir() {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			rel, _ := filepath.Rel(dir, path)
+			out[rel] = []byte("symlink -> " + target)
 			return err
 		}
 		data, err := os.ReadFile(path)

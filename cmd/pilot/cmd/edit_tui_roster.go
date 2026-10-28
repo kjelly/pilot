@@ -727,9 +727,9 @@ func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate fu
 
 // restricts reports whether scope keeps a write to path off the real file:
 // under a plan or a transaction, for anything but the session's own
-// .vault/ files.
+// .vault/ files, however path reaches one (vaultSpelling).
 func (scope editWriteScope) restricts(path string) bool {
-	return (scope.planSource != "" || scope.transaction) && !isManagedVaultFile(scope.dir, path)
+	return (scope.planSource != "" || scope.transaction) && vaultSpelling(scope.dir, path) == ""
 }
 
 // simulateRosterWrite runs mutate on a private copy of the roster at path,
