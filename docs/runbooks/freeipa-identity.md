@@ -291,13 +291,17 @@ admin 密碼存在兩個地方，兩份必須相同：
   `ipa_admin_password` 沒加引號時同樣不會同步，畫面會提示；
 - 密碼經 YAML alias／merge key 取得，或寫成 flow mapping、多行 scalar 的名冊；
 - 新密碼含 `{{`、`{%`、`{#`：Ansible 會當成模板展開，pilot 無法得知實際密碼，所有名冊都不會改。
-  vault 的值標成 `!unsafe` 時 Ansible 不展開它，pilot 會照常同步，名冊寫成 `!unsafe` 加引號的字串。
+  vault 的值標成 `!unsafe` 時 Ansible 不展開它，pilot 會照常同步，名冊寫成 `!unsafe` 加引號的字串；
+- 原本或新的 `ipa_admin_password` 是 `!vault` 加密值，或原本的值含 `{{`、`{%`、`{#`：pilot 不知道舊密碼，
+  無法判斷哪些名冊用的是它，所有名冊都不會改，畫面會提示逐一確認。
 
-**名冊正被另一個 `pilot` 名冊操作（`pilot roster remove-*`、schema 升級等）鎖住，或 lock 檔（名冊旁的
-`*.pilot-migrate.lock`、`*.pilot-remove.lock`）這個使用者打不開時，這次存檔會被拒絕**：vault 與名冊都不寫入，
-因為先存 vault 會讓名冊留在舊密碼，而之後再存也不會補同步。pilot 會先鎖住每一份要跟著改的名冊，全部
-鎖得到才寫 vault，再寫名冊。在終端機會顯示「未存檔 …（修改還在）」與是哪一份名冊，畫面留在 vault 編輯器、
-修改沒有遺失，等那個操作結束（或修好 lock 檔）後再存一次即可。自動化時那一步會失敗，見下面的說明。
+**要跟著改的名冊正被另一個 `pilot` 名冊操作（`pilot roster remove-*`、schema 升級等）鎖住、lock 檔（名冊旁的
+`*.pilot-migrate.lock`、`*.pilot-remove.lock`）這個使用者打不開，或名冊本身這個使用者不能寫（例如 `0400`，
+root 除外）、不是一般檔案時，這次存檔會被拒絕**：vault 與名冊都不寫入，因為先存 vault 會讓名冊留在舊密碼，
+而之後再存也不會補同步。pilot 會先鎖住每一份要跟著改的名冊並確認寫得進去，全部沒問題才寫 vault，再寫名冊。
+在終端機會顯示「未存檔 …（修改還在）」與是哪一份名冊，畫面留在 vault 編輯器、修改沒有遺失，等那個操作結束
+（或修好 lock 檔、名冊的權限）後再存一次即可。自動化時那一步會失敗，見下面的說明。寫名冊時才發生的錯誤
+（例如磁碟已滿）無法事先知道：那時 vault 已經存好，那份名冊會列為「未同步」。
 
 **pilot edit 只在 `ipa_admin_password` 改變的那次存檔同步名冊。** 之後再存一次 vault 不會補同步，
 所以名冊一旦跟 vault 不一致（上面列出的名冊、在 pilot edit 以外改了 vault，或加密的 `.vault/main.yaml`），
@@ -309,13 +313,17 @@ admin 密碼存在兩個地方，兩份必須相同：
 
 名冊旁的 lock 檔若是舊版 pilot 以 root（例如在 docker 裡）留下、這個使用者打不開，任何會寫名冊的
 操作都會停下並說明是哪個 lock 檔：確認沒有 pilot 正在執行後，刪掉它或把它改回這個使用者擁有。
-在終端機操作 `pilot edit` 時，遇到這種名冊或被鎖住的名冊只顯示提示，不會結束編輯，稍後可以再試。
-自動化時寫不進名冊的那一步會失敗，錯誤訊息列出名冊路徑與原因（被鎖住或 lock 檔不能用，不含密碼），
+名冊被另一個 pilot 操作鎖住時，會先等最多約 0.25 秒再回報（plan 檢查真實名冊時只會短暫碰一下 lock 檔，
+這段等待讓它不會害正在寫名冊的操作失敗）。
+在終端機操作 `pilot edit` 時，遇到這種名冊、被鎖住的名冊或不能寫的名冊只顯示提示，不會結束編輯，稍後可以再試。
+自動化時寫不進名冊的那一步會失敗，錯誤訊息列出名冊路徑與原因（被鎖住、lock 檔不能用或名冊不能寫，不含密碼），
 不會回報成功；之後的處理依入口而不同：
 
 - `pilot edit --actions`：停在失敗的那一步，之後的步驟不執行；**之前的步驟已寫入的內容保留，不會 rollback**。
 - MCP `pilot_edit_apply`：整個 apply rollback，回傳錯誤而不是 `applied`。
-- MCP `pilot_edit_plan`：plan 失敗。plan 在暫存複本上執行，會另外檢查真實名冊的鎖，所以 apply 會被拒絕的情況 plan 也會失敗。
+- MCP `pilot_edit_plan`：plan 失敗。plan 在暫存複本上執行；存 vault 時會另外檢查要跟著改的真實名冊（鎖、
+  能不能寫），所以這種 apply 會被拒絕的情況 plan 也會失敗。其他名冊寫入（例如新增使用者）plan 不檢查真實名冊，
+  apply 時才會發現被鎖住或不能寫，並 rollback。
 
 lock 檔是 symlink、FIFO 或另有其他名字（hard link）時一律拒絕使用。
 
@@ -323,9 +331,10 @@ lock 檔是 symlink、FIFO 或另有其他名字（hard link）時一律拒絕�
 那次存檔已經保留下來）；`pilot_edit_plan`／`pilot_edit_apply` 放在結果的 warnings。都只列路徑，不含密碼。
 
 MCP 的 `pilot_edit_plan`／`pilot_edit_apply` 只會寫這個 workspace `.vault/` 目錄裡的名冊：plan 無法預覽、
-apply 的 rollback 也無法還原 `.vault/` 以外的檔案。`freeipa_roster_file` 指到 `.vault/` 以外時，要寫名冊的
-那一步（例如啟用 freeipa-nfs-server 時補上 `nfs.servers` 或建立名冊）會失敗並列出路徑，請改在終端機用
-`pilot edit` 或手動修改；終端機與 `--actions` 不受這個限制。`hosts.yml` 記錄的 `freeipa_roster_file` 是
+apply 的 rollback 也無法還原 `.vault/` 以外的檔案。`freeipa_roster_file` 指到 `.vault/` 以外時，pilot 先在
+暫存複本上試做那一步：真的要改名冊（例如啟用 freeipa-nfs-server 時補上還沒有的 `nfs.servers`、建立名冊）
+就失敗並列出路徑，請改在終端機用 `pilot edit` 或手動修改；名冊已經是要的樣子（例如 `nfs.servers` 已有這台
+主機）就照常通過，那份名冊只會被讀取，旁邊也不會留下 lock 檔。終端機與 `--actions` 不受這個限制。`hosts.yml` 記錄的 `freeipa_roster_file` 是
 絕對路徑，plan 的 diff 顯示的也是真實 workspace 的路徑。
 
 `pilot_edit_apply` 的某一步失敗而 rollback 時，這次寫過的名冊只會在內容仍是這次寫入的時候還原（同一個
@@ -338,17 +347,18 @@ pilot 寫名冊的方式：
 
 - 通常在名冊所在目錄寫一個暫存檔（`.<名冊檔名>.pilot-tmp-*`），設成名冊原本的權限與擁有者後換名
   取代它，其他程式不會讀到寫到一半的檔案。
-- 名冊另有 hard link、帶 POSIX ACL、目錄裡無法建立暫存檔，或暫存檔無法設成原本的擁有者（例如非 root
-  使用者寫別人的名冊）時，改為直接覆寫原檔：inode、權限、擁有者、hard link 與 ACL 都不變，但沒有取鎖的
-  讀者可能短暫讀到寫到一半的內容。
-- 這個使用者沒有寫入權的名冊（例如 `0400`）拒絕寫入（root 除外）。
+- 名冊另有 hard link、帶 POSIX ACL、這個使用者不能在目錄裡建立暫存檔，或暫存檔無法設成原本的擁有者（例如
+  非 root 使用者寫別人的名冊）時，改為直接覆寫原檔：inode、權限、擁有者、hard link 與 ACL 都不變，但沒有取鎖的
+  讀者可能短暫讀到寫到一半的內容。暫存檔因為其他原因（磁碟或配額已滿、檔案描述子用完）建不出來時，寫入失敗、
+  名冊保持原樣，不會改為直接覆寫（那樣也可能寫到一半失敗）。
+- 這個使用者沒有寫入權的名冊（例如 `0400`）或不是一般檔案的名冊拒絕寫入（root 可以寫 `0400`）。
 - 新建立的名冊權限是 `0600`；以 root 執行（例如 `docker run` 裡的 pilot-cli）時，擁有者跟所在目錄相同，
   schema 升級的備份檔則給名冊的擁有者。
 - pilot 被中斷而留下的暫存檔，會在下一次有 pilot 取得這份名冊的鎖時清掉（只清超過兩分鐘的）。
 
 不要把名冊的密碼改成 `"{{ ipa_admin_password }}"`：上面那些只載入名冊的指令會因變數未定義而失敗。
 明文 vault 與名冊不一致時，`pilot deploy`、`pilot reconcile` 開始前會印出 warning；vault 的
-`ipa_admin_password` 含 `{{`、`{%`、`{#` 時，warning 改為列出無法比對的名冊；vault 或名冊的密碼
+`ipa_admin_password` 含 `{{`、`{%`、`{#` 或是 `!vault` 加密值時，warning 改為列出無法比對的名冊；vault 或名冊的密碼
 沒加引號、YAML 可能把它讀成數字、日期或布林值時，warning 會說明要加引號。freeipa-nfs-server 的
 gate 也會擋下，並指出是哪一份名冊。三者都不會顯示密碼，修正方式都是上面的手動修改。
 
@@ -896,4 +906,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-07-22 | v1.2 | Delivery batch 1：canonical v1 users/groups、legacy compatibility、12-row verification 與 immutable candidate evidence；新增 `freeipa_roster_file` namespaced 入口及 Ansible magic-variable/duplicate-alias gotcha | pilot |
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
-| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、自動化／MCP 遇到寫不進的名冊時該步失敗並 rollback、apply rollback 保留被其他操作改過的名冊 | pilot |
+| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式 | pilot |
