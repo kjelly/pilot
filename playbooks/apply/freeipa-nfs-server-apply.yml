@@ -46,7 +46,21 @@
           - nfs_server_service | length > 0
           - (stage == 'sandbox') or (stage == 'staging' and confirm_staging | bool) or (stage == 'prod' and confirm_prod | bool)
           - stage != 'prod' or staging_attested_within_hours | int <= 168
-        fail_msg: "A canonical roster and matching stage confirmation are required."
+        # no_log hides this message when the gate fails (Ansible prints only
+        # the task name and a "censored" note), so it is written for whoever
+        # reads the playbook to find out why; it names conditions, never a
+        # value. Keep the schema versions it lists equal to the assert's.
+        # no_log does not hide a templating error's Origin excerpt: a roster
+        # freeipa.admin.password Ansible cannot template (an unclosed {{,
+        # say) fails here and ansible-core 2.19 prints the roster's line,
+        # password included.
+        fail_msg: >-
+          Required: the roster at freeipa_roster_file has schema_version 1, 2
+          or 3 and a freeipa.admin.password of at least 8 characters; this
+          host's OS family has NFS server packages and a service mapped; and
+          the stage is confirmed — sandbox, staging with
+          -e confirm_staging=true, or prod with -e confirm_prod=true and
+          staging_attested_within_hours of at most 168.
       no_log: true
       tags: [always]
 
@@ -65,9 +79,16 @@
     # behind the roster gate: a rotation that changed one file but not the
     # other must be named (issue #146). It runs after the stage gates
     # (AGENTS.md §4.3). No no_log: the assertion text and fail_msg hold no
-    # value, and Ansible prints only those. pilot edit carries a new password
-    # into the roster only on the save that changes it, so the fix for an
-    # existing difference is a hand edit of the roster.
+    # value, and Ansible prints only those — with one exception: a vault
+    # ipa_admin_password (or roster password) Ansible cannot template (a
+    # malformed Jinja delimiter, such as an unclosed {{) fails the gate
+    # while templating, and ansible-core 2.19 then prints the file's line,
+    # password included, in the error's Origin excerpt. no_log would not
+    # hide that either: it hides only the task result. pilot edit does not
+    # sync a vault value holding {{, {% or {#, and the deploy preflight
+    # warns about one. pilot edit carries a new password into the roster
+    # only on the save that changes it, so the fix for an existing
+    # difference is a hand edit of the roster.
     - name: "Gate: roster admin password matches the vault's ipa_admin_password"
       ansible.builtin.assert:
         that:

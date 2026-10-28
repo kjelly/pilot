@@ -54,6 +54,53 @@ func TestRegression_FreeIPANFSServerAdminPasswordGateIsVisible(t *testing.T) {
 	}
 }
 
+// The no_log roster gate's fail_msg says what it requires — the roster's
+// schema versions as the assert accepts them, an admin password of at
+// least 8 characters, the stage confirmation — and holds no template, so
+// it can never print a value. It stays tagged always and first among the
+// gates (AGENTS.md §4.3, §4.4). (no_log hides the message on a failure;
+// it is for whoever reads the playbook — PR #148 review, P3.)
+func TestRegression_FreeIPANFSServerRosterGateNamesItsConditions(t *testing.T) {
+	tasks := nfsServerPreTasks(t, nfsRosterAndStageGate, nfsStageCrossCheckGate)
+	gate := tasks[0]
+	if gate["name"] != nfsRosterAndStageGate {
+		t.Fatalf("the roster gate must come before %q", nfsStageCrossCheckGate)
+	}
+	if tags, _ := gate["tags"].([]any); len(tags) != 1 || tags[0] != "always" {
+		t.Errorf("the roster gate must be tagged always: %v", gate["tags"])
+	}
+	if gate["no_log"] != true {
+		t.Error("the roster gate reads the roster's admin password and must keep no_log")
+	}
+	assert := gate["ansible.builtin.assert"].(map[string]any)
+	msg, _ := assert["fail_msg"].(string)
+	for _, marker := range []string{"{{", "{%", "{#"} {
+		if strings.Contains(msg, marker) {
+			t.Errorf("fail_msg must not be templated (it could print a value): %q", msg)
+		}
+	}
+	var versions []string
+	for _, condition := range assert["that"].([]any) {
+		if c := condition.(string); strings.HasPrefix(c, "freeipa_roster.schema_version | int in [") {
+			list := strings.TrimSuffix(strings.TrimPrefix(c, "freeipa_roster.schema_version | int in ["), "]")
+			versions = strings.Split(list, ", ")
+		}
+	}
+	if len(versions) < 2 {
+		t.Fatalf("no schema_version condition with a version list in the roster gate: %v", assert["that"])
+	}
+	accepted := strings.Join(versions[:len(versions)-1], ", ") + " or " + versions[len(versions)-1]
+	for _, want := range []string{
+		"schema_version " + accepted,
+		"freeipa.admin.password of at least 8 characters",
+		"confirm_staging=true", "confirm_prod=true", "staging_attested_within_hours",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("fail_msg does not say %q: %q", want, msg)
+		}
+	}
+}
+
 // Run from the real playbook: a drifted roster fails naming the field and
 // printing neither value; a matching, referencing or vault-less run passes;
 // and the recovery the fail_msg and runbook §4.5 give — set the roster's
