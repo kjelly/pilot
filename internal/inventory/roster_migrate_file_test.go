@@ -195,33 +195,35 @@ func TestMigrateRosterFile_MinimalDocumentEndToEnd(t *testing.T) {
 	}
 }
 
+// A dry run writes nothing — no backup, no temp file, and no lock files,
+// since it takes no lock — so it also previews a roster this user may only
+// read, which lockRosterFile refuses (PR #148 review, P2-1).
 func TestMigrateRosterFile_DryRunDoesNotWriteAnything(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "roster.yaml")
-	original := []byte(minimalValidRoster)
-	if err := os.WriteFile(path, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	for name, mode := range map[string]os.FileMode{"writable": 0o600, "read-only": 0o400} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "roster.yaml")
+			original := []byte(minimalValidRoster)
+			if err := os.WriteFile(path, original, mode); err != nil {
+				t.Fatal(err)
+			}
 
-	result, err := MigrateRosterFile(path, RosterMigrationOptions{DryRun: true})
-	if err != nil {
-		t.Fatalf("MigrateRosterFile() error = %v", err)
-	}
-	if !result.Changed || result.BackupPath != "" {
-		t.Fatalf("dry-run result = %+v, want changed=true (a migration would happen) but no backup", result)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(got, original) {
-		t.Fatalf("dry-run modified the roster file (err=%v)", err)
-	}
-	// The roster's lock files are an expected artifact of even a dry-run
-	// acquiring the lock; only a backup or a leftover temp file would
-	// indicate the dry run actually wrote something it shouldn't.
-	assertNoBackupFiles(t, dir)
-	for _, e := range direntNames(t, dir) {
-		if e != "roster.yaml" && e != "roster.yaml.pilot-migrate.lock" && e != "roster.yaml.pilot-remove.lock" {
-			t.Fatalf("dry-run created an unexpected file: %s", e)
-		}
+			result, err := MigrateRosterFile(path, RosterMigrationOptions{DryRun: true})
+			if err != nil {
+				t.Fatalf("MigrateRosterFile() error = %v", err)
+			}
+			if !result.Changed || result.BackupPath != "" || result.NewSHA256 == "" || len(result.Steps) == 0 {
+				t.Fatalf("dry-run result = %+v, want changed=true (a migration would happen), its steps and new hash, but no backup", result)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, original) {
+				t.Fatalf("dry-run modified the roster file (err=%v)", err)
+			}
+			assertNoBackupFiles(t, dir)
+			if names := direntNames(t, dir); len(names) != 1 || names[0] != "roster.yaml" {
+				t.Fatalf("dry-run left files beside the roster: %v", names)
+			}
+		})
 	}
 }
 
@@ -762,6 +764,7 @@ func TestMigrateRosterFile_EncryptedRoster_DryRunDoesNotWrite(t *testing.T) {
 		t.Fatalf("dry-run modified the encrypted roster (err=%v)", err)
 	}
 	assertNoBackupFiles(t, dir)
+	assertNoLockFiles(t, path)
 }
 
 // TestMigrateRosterFile_EncryptedRoster_RepeatedMigrationNoExtraBackup is

@@ -366,9 +366,21 @@ func assertNoRosterTemps(t *testing.T, target string) {
 	}
 }
 
+// assertNoLockFiles fails when a lock file exists beside target.
+func assertNoLockFiles(t *testing.T, target string) {
+	t.Helper()
+	for _, suffix := range rosterLockSuffixes {
+		if _, err := os.Lstat(target + suffix); !os.IsNotExist(err) {
+			t.Errorf("lock file %s exists (lstat err=%v)", filepath.Base(target+suffix), err)
+		}
+	}
+}
+
 // assertRosterWritePolicy holds one writer to writeLockedRoster's policy
 // (PR #148 re-review, round 4): a roster this user may not write is
-// refused, as an in-place write always refused it; a roster with another
+// refused, as an in-place write always refused it, before any lock file is
+// created (PR #148 review, P2-1: a non-writer's lock files locked the
+// owner out); a roster with another
 // hard link is written in place, so every name sees the new content; a
 // temp file a killed pilot left is swept once stale, and one still fresh is
 // kept; run as root, the owner and group survive, and a new roster gets
@@ -383,10 +395,11 @@ func assertRosterWritePolicy(t *testing.T, tc rosterWriterCase) {
 			if err := os.Chmod(l.target, 0o400); err != nil {
 				t.Fatal(err)
 			}
-			if err := tc.call(t, l.link); err == nil {
-				t.Fatal("a 0400 roster was written")
+			if err := tc.call(t, l.link); !errors.Is(err, ErrRosterNotWritable) {
+				t.Fatalf("error = %v, want ErrRosterNotWritable", err)
 			}
 			l.assertUntouched(t)
+			assertNoLockFiles(t, l.target)
 		})
 		t.Run("hard link", func(t *testing.T) {
 			l := newLockTestLayout(t, tc)
@@ -829,7 +842,8 @@ func TestDecryptRosterToTempFileCleanupRemovesLockFiles(t *testing.T) {
 
 // Run as root (pilot-cli under `docker run`), the lock files belong to the
 // roster's owner — its directory's owner for a roster about to be created
-// — so the owner can still work on it without root.
+// — so the owner can still work on it without root, and stay 0600: only
+// that owner may write a 0600 roster, or create one in a 0700 directory.
 func TestLockRosterFileKeepsTheOwner(t *testing.T) {
 	requireRoot(t)
 	const uid, gid = 12345, 12346
@@ -856,6 +870,9 @@ func TestLockRosterFileKeepsTheOwner(t *testing.T) {
 			}
 			if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
 				t.Errorf("%s owned by %d:%d, want %d:%d", path+suffix, st.Uid, st.Gid, uid, gid)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("%s mode %v, want 0600", path+suffix, info.Mode().Perm())
 			}
 		}
 		lk.release() //nolint:errcheck

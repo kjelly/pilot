@@ -146,7 +146,7 @@ identity-secret-test: ## Require real Ansible for password transport, failure, c
 # They skip as a normal user; root-test compiles them as this user and runs
 # them as root, where PILOT_REQUIRE_ROOT_TESTS=1 turns a skip into a
 # failure. TestRootOnlyTestsRunInCI keeps this list complete.
-ROOT_TESTS := TestLockRosterFileKeepsTheOwner|TestMigrationBackupKeepsTheRosterOwner|TestRootWritesA0400RosterThroughPrepareAndProbe|TestRosterLockFileSymlinkIsNotChowned|TestRosterWritersRefuseALockedRoster|TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot
+ROOT_TESTS := TestLockRosterFileKeepsTheOwner|TestMigrationBackupKeepsTheRosterOwner|TestRootWritesA0400RosterThroughPrepareAndProbe|TestRosterLockFileSymlinkIsNotChowned|TestRosterWritersRefuseALockedRoster|TestRosterWritersSharingAGroupDoNotLockEachOtherOut|TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot
 
 root-test: ## Run the root-only roster ownership tests as root (needs passwordless sudo; CI job "Root-only ownership tests")
 	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \

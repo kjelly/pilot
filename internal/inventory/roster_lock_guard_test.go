@@ -251,13 +251,14 @@ func isRawWritePrimitive(call *ast.CallExpr) bool {
 }
 
 // isRosterWriteCall reports whether call writes a file: one of
-// rosterWriteCalls, or os.OpenFile with a flag that writes or creates.
+// rosterWriteCalls, or os.OpenFile — or openLockFile, its seam for lock
+// files — with a flag that writes or creates.
 func isRosterWriteCall(call *ast.CallExpr) bool {
 	name := callName(call)
 	if rosterWriteCalls[name] {
 		return true
 	}
-	if name != "os.OpenFile" || len(call.Args) < 2 {
+	if name != "os.OpenFile" && name != "openLockFile" || len(call.Args) < 2 {
 		return false
 	}
 	writes := false

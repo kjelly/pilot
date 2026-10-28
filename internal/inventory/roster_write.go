@@ -138,6 +138,18 @@ func openRosterForWrite(target, shown string) (*os.File, *syscall.Stat_t, error)
 	return f, &st, nil
 }
 
+// checkRosterWritable is what writeLockedRoster would refuse about the
+// roster at target (shown in messages as shown), decided by the same
+// openRosterForWrite: lockRosterFile and ProbeRosterWrite ask it before
+// any lock file exists. A roster not created yet passes.
+func checkRosterWritable(target, shown string) error {
+	f, _, err := openRosterForWrite(target, shown)
+	if f != nil {
+		f.Close()
+	}
+	return err
+}
+
 // errRosterOwnerNotKept is writeRosterTemp's refusal when the temp file
 // cannot be given the roster's owner; the caller writes in place instead.
 var errRosterOwnerNotKept = errors.New("cannot give the replacement the roster's owner")

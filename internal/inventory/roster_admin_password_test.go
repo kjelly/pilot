@@ -547,6 +547,12 @@ func TestPrepareRosterAdminSyncRefusesAnUnwritableRoster(t *testing.T) {
 	if !errors.Is(err, ErrRosterNotWritable) || !strings.Contains(err.Error(), "is not writable by this user") {
 		t.Fatalf("PrepareRosterAdminSync() = %+v, %v; want ErrRosterNotWritable", prepared, err)
 	}
+	// Refused before any lock file was created (PR #148 review, P2-1), so
+	// nothing can stay locked; once writable, the roster locks at once.
+	assertNoLockFiles(t, path)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	lk, err := lockRosterFile(path)
 	if err != nil {
 		t.Fatalf("Prepare left the roster locked: %v", err)

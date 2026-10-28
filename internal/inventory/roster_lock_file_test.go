@@ -444,6 +444,28 @@ func TestProbeRosterWriteReportsWhatTheWriterWouldFind(t *testing.T) {
 		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterNotWritable) {
 			t.Fatalf("AppendRosterUser() = %v; the probe and the writer disagree", err)
 		}
+		assertNoLockFiles(t, path)
+	})
+	// The writer asks whether it may write the roster before it touches a
+	// lock file (PR #148 review, P2-1), and so does the probe: a roster
+	// this user cannot write is reported so even while another process
+	// holds it.
+	t.Run("roster not writable and held: checked in the writer's order", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes a 0400 roster")
+		}
+		shortLockContentionWait(t)
+		path := writeLockTestRoster(t)
+		holdRawLocks(t, path, rosterLockSuffixes...)
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterNotWritable) || errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterNotWritable) || errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("AppendRosterUser() = %v; the probe and the writer disagree", err)
+		}
 	})
 	t.Run("roster is not a regular file", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "roster.yaml")

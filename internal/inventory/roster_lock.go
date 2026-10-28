@@ -20,8 +20,10 @@ var ErrMutationLocked = errors.New("inventory: already locked by another process
 
 // ErrRosterLockFile wraps every reason a roster's lock file cannot be used
 // at all — its directory refuses a new one, an existing one cannot be
-// opened, or it is a symlink — as opposed to being held (ErrMutationLocked).
-// Either way nothing was read or written; the message says what to fix.
+// opened, it is a symlink, or opening or flocking it fails for any other
+// reason (a read-only file system, no space, no lock support) — as opposed
+// to being held (ErrMutationLocked). Either way nothing was read or
+// written; the message says what to fix.
 var ErrRosterLockFile = errors.New("inventory: roster lock file unusable")
 
 // mutationLockInfo is written into the lock file for human introspection
@@ -36,7 +38,21 @@ type mutationLockInfo struct {
 
 type mutationLock struct {
 	file *os.File
+	// created is true when this acquisition created the lock file.
+	created bool
 }
+
+// openLockFile opens a roster's lock file, and flockLockFile flocks it:
+// variables so a test can make them fail with a chosen error.
+var (
+	openLockFile  = os.OpenFile
+	flockLockFile = syscall.Flock
+)
+
+// lockFileOpenFlags are added to every open of a lock file. O_NONBLOCK: a
+// FIFO planted as the lock file must not hang the open; checkLockFileOpen
+// refuses it.
+const lockFileOpenFlags = syscall.O_NOFOLLOW | syscall.O_CLOEXEC | syscall.O_NONBLOCK
 
 // acquireMutationLock takes a non-blocking exclusive flock on path,
 // creating it if necessary. This is the same advisory-flock-on-a-sidecar-
@@ -47,21 +63,29 @@ type mutationLock struct {
 // The lock file sits in a directory its owner controls while pilot may run
 // as root (pilot-cli under `docker run`), so it is never followed through a
 // symlink and must be a regular file with no other names: otherwise the pid
-// written below would truncate whatever file the link points at. flock
-// needs no write access, so an existing lock file this user may only read —
-// one a root-run pilot left, say — still locks; it just gets no pid.
+// written below would truncate whatever file the link points at. It is
+// created with O_EXCL, so created says whether this call made it
+// (lockRosterFile then sets its mode, shareLockFile). flock needs no write
+// access, so an existing lock file this user may only read — one a
+// root-run pilot left, say, or one on a read-only file system — still
+// locks; it just gets no pid.
 func acquireMutationLock(path string) (*mutationLock, error) {
-	// O_NONBLOCK: a FIFO planted as the lock file must not hang the open;
-	// the fstat below refuses it.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0o600)
-	writable := err == nil
-	if errors.Is(err, fs.ErrPermission) {
+	f, err := openLockFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|lockFileOpenFlags, 0o600)
+	created := err == nil
+	if err != nil && !errors.Is(err, fs.ErrExist) {
 		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return nil, errLockFileNotCreatable(path, err)
 		}
-		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
-		if errors.Is(err, fs.ErrPermission) {
-			return nil, errLockFileNotOpenable(path, err)
+	}
+	writable := created
+	if !created {
+		f, err = openLockFile(path, os.O_RDWR|lockFileOpenFlags, 0)
+		writable = err == nil
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
+			f, err = openLockFile(path, os.O_RDONLY|lockFileOpenFlags, 0)
+			if errors.Is(err, fs.ErrPermission) {
+				return nil, errLockFileNotOpenable(path, err)
+			}
 		}
 	}
 	if err := checkLockFileOpen(path, f, err); err != nil {
@@ -76,11 +100,14 @@ func acquireMutationLock(path string) (*mutationLock, error) {
 		stampLockFile(f)
 	}
 
-	return &mutationLock{file: f}, nil
+	return &mutationLock{file: f, created: created}, nil
 }
 
 func errLockFileNotCreatable(path string, err error) error {
-	return fmt.Errorf("cannot create lock file %s; its directory must be writable by this user: %w: %w", path, ErrRosterLockFile, err)
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("cannot create lock file %s; its directory must be writable by this user: %w: %w", path, ErrRosterLockFile, err)
+	}
+	return fmt.Errorf("cannot create lock file %s: %w: %w", path, ErrRosterLockFile, err)
 }
 
 func errLockFileNotOpenable(path string, err error) error {
@@ -94,12 +121,12 @@ func checkLockFileOpen(path string, f *os.File, err error) error {
 		return fmt.Errorf("lock file %s is a symlink; refusing to follow it (remove it): %w", path, ErrRosterLockFile)
 	}
 	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", path, err)
+		return fmt.Errorf("open lock file %s: %w: %w", path, ErrRosterLockFile, err)
 	}
 	var st syscall.Stat_t
 	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
 		f.Close()
-		return fmt.Errorf("stat lock file %s: %w", path, err)
+		return fmt.Errorf("stat lock file %s: %w: %w", path, ErrRosterLockFile, err)
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
 		f.Close()
@@ -119,16 +146,17 @@ var lockContentionWait = 250 * time.Millisecond
 
 // flockMutationLock takes how (LOCK_EX or LOCK_SH) on the open lock file
 // f without blocking, trying again for up to lockContentionWait while
-// another process holds it: ErrMutationLocked if it still does.
+// another process holds it: ErrMutationLocked if it still does,
+// ErrRosterLockFile if flock fails otherwise (no lock support, say).
 func flockMutationLock(path string, f *os.File, how int) error {
 	deadline := time.Now().Add(lockContentionWait)
 	for delay := 5 * time.Millisecond; ; delay *= 2 {
-		err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		err := flockLockFile(int(f.Fd()), how|syscall.LOCK_NB)
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("lock %s: %w", path, err)
+			return fmt.Errorf("lock %s: %w: %w", path, ErrRosterLockFile, err)
 		}
 		left := time.Until(deadline)
 		if left <= 0 {
@@ -140,36 +168,35 @@ func flockMutationLock(path string, f *os.File, how int) error {
 
 // ProbeRosterWrite reports whether a write to the roster at path would be
 // refused now, without writing anything, creating a lock file or holding
-// one past the call: ErrMutationLocked when another process holds a lock
-// file, ErrRosterLockFile when one could not be used (lockRosterFile's
-// refusals), ErrRosterNotWritable when writeLockedRoster would refuse the
-// roster itself (openRosterForWrite: the probe opens it for writing
-// without truncating, so a file watcher may see an open and a close), nil
-// otherwise. A plan probes the real roster its scratch copy stands in for,
-// so it fails where the apply would. The probe takes each existing lock file's
-// flock shared for an instant; a writer whose attempt lands in that
-// instant keeps trying (flockMutationLock), so the probe never fails it.
-// Like the writer, the probe waits up to lockContentionWait for a holder
-// to let go.
+// one past the call, checking what lockRosterFile checks in the order it
+// does: ErrRosterNotWritable when the roster itself would be refused
+// (checkRosterWritable: the probe opens it for writing without truncating,
+// so a file watcher may see an open and a close), then ErrMutationLocked
+// when another process holds a lock file and ErrRosterLockFile when one
+// could not be used; nil otherwise. A plan probes the real roster its
+// scratch copy stands in for, so it fails where the apply would. The probe
+// takes each existing lock file's flock shared for an instant; a writer
+// whose attempt lands in that instant keeps trying (flockMutationLock), so
+// the probe never fails it. Like the writer, the probe waits up to
+// lockContentionWait for a holder to let go.
 func ProbeRosterWrite(path string) error {
 	target, err := secretpath.Canonical(path)
 	if err != nil {
 		return fmt.Errorf("resolve roster %s: %w", path, err)
+	}
+	if err := checkRosterWritable(target, path); err != nil {
+		return err
 	}
 	for _, suffix := range rosterLockSuffixes {
 		if err := probeMutationLock(target + suffix); err != nil {
 			return fmt.Errorf("roster %s: %w", path, err)
 		}
 	}
-	f, _, err := openRosterForWrite(target, path)
-	if f != nil {
-		f.Close()
-	}
-	return err
+	return nil
 }
 
 func probeMutationLock(path string) error {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	f, err := openLockFile(path, os.O_RDONLY|lockFileOpenFlags, 0)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// acquireMutationLock would create it.
@@ -223,9 +250,19 @@ var afterRosterLockHook func()
 // its path — through a symlink, a relative link, a chain, or a symlinked
 // directory. A dangling link fails closed. A lock already held by another
 // process returns ErrMutationLocked, as does a path that resolves to a
-// different file once the locks are held (retry: the link moved). The
-// lock files get the roster's owner — its directory's for a roster about
-// to be created — so a root-run pilot does not lock the owner out.
+// different file once the locks are held (retry: the link moved).
+//
+// A roster writeLockedRoster would refuse (checkRosterWritable:
+// ErrRosterNotWritable — not writable by this user, not a regular file) is
+// refused before any lock file is created: only someone who may write the
+// roster creates a lock file, so one left behind never locks a writer out
+// (PR #148 review, P2-1). writeLockedRoster decides again under the lock.
+// The lock files get the roster's owner — its directory's for a roster
+// about to be created — so a root-run pilot does not lock the owner out,
+// and a mode that lets everyone who may write the roster open them
+// (shareLockFile). A lock file is never removed after a failure: removing
+// one another process holds flocked would let a third lock a new file of
+// the same name while the second still holds the old one.
 //
 // It is not reentrant: a second lockRosterFile on the same roster from
 // the same process fails with ErrMutationLocked, so a writer holding a
@@ -240,13 +277,19 @@ func lockRosterFile(path string) (*rosterLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve roster %s: %w", path, err)
 	}
+	ownerPath, exists := target, true
 	owner, err := os.Stat(target)
 	if errors.Is(err, fs.ErrNotExist) {
-		owner, err = os.Stat(filepath.Dir(target))
+		ownerPath, exists = filepath.Dir(target), false
+		owner, err = os.Stat(ownerPath)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("roster %s: %w", path, err)
 	}
+	if err := checkRosterWritable(target, path); err != nil {
+		return nil, err
+	}
+	share := lockFileShare(owner, exists, hasPOSIXACL(ownerPath))
 	lk := &rosterLock{path: path, target: target}
 	for _, suffix := range rosterLockSuffixes {
 		lock, err := acquireMutationLock(target + suffix)
@@ -256,6 +299,7 @@ func lockRosterFile(path string) (*rosterLock, error) {
 		}
 		lk.locks = append(lk.locks, lock)
 		keepOwner(lock.file, owner)
+		shareLockFile(lock, owner, share)
 	}
 	// Temp files a killed pilot left beside the roster: the lock is held,
 	// so no write of ours is in progress.
@@ -294,5 +338,64 @@ func keepOwner(f *os.File, info os.FileInfo) {
 	}
 	if f.Chown(int(st.Uid), int(st.Gid)) != nil {
 		_ = f.Chown(-1, int(st.Gid))
+	}
+}
+
+// lockFileShare is who besides its owner must be able to open a roster's
+// lock files: everyone who may write the roster — for a roster not created
+// yet, everyone who may create it in its directory — described by info.
+// Read is enough: a lock file holds only a pid, and flock needs no write
+// access (acquireMutationLock opens a read-only lock file). It returns
+// group read when the group class may read or write the roster (write the
+// directory), and other read when the other class may, or when it carries
+// an access ACL, which may name any user or group.
+func lockFileShare(info os.FileInfo, exists, acl bool) os.FileMode {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	groupBits, otherBits := uint32(0o060), uint32(0o006)
+	if !exists {
+		groupBits, otherBits = 0o020, 0o002
+	}
+	var share os.FileMode
+	if st.Mode&groupBits != 0 {
+		share |= 0o040
+	}
+	if st.Mode&otherBits != 0 || acl {
+		share |= 0o004
+	}
+	return share
+}
+
+// shareLockFile lets everyone who may write the roster, described by info,
+// open its lock file: share (lockFileShare), and other read as well when
+// the lock file is not owned by the roster's owner — keepOwner could not
+// give it away, and that owner may be in neither its user nor its group. A
+// lock file this call created gets exactly 0600 plus those bits. An
+// existing one this user owns (or any, run as root) gets the read bits it
+// lacks, so a 0600 lock file an earlier pilot left no longer locks the
+// roster's other writers out; nothing else about it changes, and anyone
+// else's is left alone.
+func shareLockFile(lock *mutationLock, info os.FileInfo, share os.FileMode) {
+	roster, ok := info.Sys().(*syscall.Stat_t)
+	var st syscall.Stat_t
+	if !ok || syscall.Fstat(int(lock.file.Fd()), &st) != nil {
+		return
+	}
+	euid := uint32(os.Geteuid())
+	if !lock.created && st.Uid != euid && euid != 0 {
+		return
+	}
+	if st.Uid != roster.Uid {
+		share |= 0o004
+	}
+	current := os.FileMode(st.Mode) & os.ModePerm
+	mode := current | share
+	if lock.created {
+		mode = 0o600 | share
+	}
+	if mode != current {
+		_ = lock.file.Chmod(mode)
 	}
 }
