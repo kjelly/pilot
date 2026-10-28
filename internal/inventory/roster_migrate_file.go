@@ -8,6 +8,7 @@ package inventory
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -171,15 +172,19 @@ type RosterMigrationResult struct {
 //     semantic-equivalence fingerprint (ComputeRosterSemanticFingerprint)
 //     between the original and the final candidate — any failure here
 //     stops before anything is written
-//  6. (unless DryRun) create the persistent backup, then atomically
-//     replace the roster; if the replace fails, roll back to the exact
-//     backed-up bytes and report the failure
+//  6. (unless DryRun) refuse a roster writeLockedRoster would refuse
+//     (ErrRosterNotWritable: not writable by this user, not a regular
+//     file), then create the persistent backup, then replace the roster
+//     through writeLockedRoster; if that write fails after it may have
+//     changed the roster, roll back to the exact backed-up bytes, and
+//     report the failure either way
 //  7. reopen and re-validate the installed result against the target
 //     schema
 //
 // A failure before backup creation leaves the original file completely
-// untouched. A failure after backup creation is rolled back to the exact
-// original bytes before returning an error.
+// untouched, with no backup. A failure after it leaves the original bytes
+// in place — untouched, or rolled back to them — before returning an
+// error, unless the rollback itself fails, which the error says.
 func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigrationResult, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return RosterMigrationResult{}, err
@@ -282,16 +287,16 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		}, nil
 	}
 
+	if err := checkRosterWritable(lk); err != nil {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+	}
 	backupPath, err := createRosterBackup(lk, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
 
 	if err := writeLockedRoster(lk, candidate); err != nil {
-		if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
-			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
-		}
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
+		return RosterMigrationResult{}, migrationWriteFailed(lk, path, backupPath, original, err)
 	}
 
 	reopened, err := readSecretSourceFile(target)
@@ -349,9 +354,13 @@ func migrationNeedsNoLock(path string, opts RosterMigrationOptions, targetVersio
 //	    -> validate original against its own version, run the migration
 //	       chain, check the semantic fingerprint (identical to the
 //	       plaintext path)
+//	    -> refuse a roster the write would refuse, then back it up
+//	       (identical to the plaintext path)
 //	    -> write the candidate plaintext to a mode-0600 temp file
 //	    -> ansible-vault encrypt that temp file in place
-//	    -> atomically install the now-encrypted result
+//	    -> atomically install the now-encrypted result, rolling back only
+//	       a failed write that may have changed the roster (identical to
+//	       the plaintext path)
 //
 // original/originalSHA are the still-encrypted bytes and hash
 // MigrateRosterFile already read before dispatching here, so the
@@ -429,6 +438,9 @@ func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, ori
 		}, nil
 	}
 
+	if err := checkRosterWritable(lk); err != nil {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+	}
 	backupPath, err := createRosterBackup(lk, original, detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
@@ -458,10 +470,7 @@ func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, ori
 	newSHA := sha256Hex(encryptedCandidate)
 
 	if err := writeLockedRoster(lk, encryptedCandidate); err != nil {
-		if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
-			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
-		}
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
+		return RosterMigrationResult{}, migrationWriteFailed(lk, path, backupPath, original, err)
 	}
 
 	reopened, err := readSecretSourceFile(target)
@@ -488,6 +497,21 @@ func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, ori
 		NewSHA256:      newSHA,
 		Steps:          steps,
 	}, nil
+}
+
+// migrationWriteFailed is a migration's error when writeLockedRoster fails
+// to install the candidate. Only a write that may have changed the roster
+// (errRosterPartlyWritten) is rolled back to original; any other failure
+// left it as it was, so a rollback could only fail the same way and report
+// a restore that was never needed.
+func migrationWriteFailed(lk *rosterLock, path, backupPath string, original []byte, err error) error {
+	if !errors.Is(err, errRosterPartlyWritten) {
+		return fmt.Errorf("migrate roster %s: write failed, roster left unchanged (backup at %s): %w", path, backupPath, err)
+	}
+	if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
+		return fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
+	}
+	return fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 }
 
 // mustYAMLMapOrNil parses data as a YAML mapping, returning nil (not an

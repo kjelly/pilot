@@ -27,7 +27,7 @@ var rosterWriterExemptions = map[string]string{
 	"writeDNSYAMLDoc":                       "writes the freeipa-dns manifest, not a roster",
 	"CreateMinimalInternalEndpointManifest": "writes the internal-endpoints manifest, not a roster",
 	"writeInternalEndpointYAMLDoc":          "writes the internal-endpoints manifest, not a roster",
-	"openRosterForWrite":                    "opens a roster for writing without truncating and writes nothing; only writeLockedRoster writes through the file, under the lock (WriteAt is a raw primitive kept in roster_write.go), and Prepare and the probe only close it",
+	"openRosterForWrite":                    "opens a roster for writing without truncating and writes nothing; only writeLockedRoster writes through the file, under the lock (WriteAt is a raw primitive kept in roster_write.go), and checkRosterWritable and the probe only close it",
 }
 
 // Every roster writer locks the file it changes, however the caller spells

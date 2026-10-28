@@ -231,13 +231,7 @@ func PrepareRosterAdminSync(path, oldPassword, newPassword string) (*PreparedRos
 	}
 	// Whatever writeLockedRoster would refuse is refused now, before the
 	// caller writes anything else (PR #148 round 5, F2).
-	f, _, err := openRosterForWrite(lk.target, lk.path)
-	if f != nil {
-		f.Close()
-	} else if err == nil {
-		err = fmt.Errorf("roster %s disappeared while locked: %w", lk.path, ErrRosterNotWritable)
-	}
-	if err != nil {
+	if err := checkRosterWritable(lk); err != nil {
 		lk.release() //nolint:errcheck
 		return nil, err
 	}

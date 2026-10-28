@@ -35,6 +35,17 @@ var createRosterTemp = os.CreateTemp
 // writer of another user's roster.
 var fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
 
+// writeRosterAt is the in-place write's WriteAt. A variable so a test can
+// make it stop part-way, as a full disk would.
+var writeRosterAt = (*os.File).WriteAt
+
+// errRosterPartlyWritten marks a failed write that may have changed the
+// roster: an in-place write stopped after it began overwriting the file.
+// Every other failure of writeLockedRoster leaves the roster as it was —
+// the replacement is renamed over it whole or not at all — so a caller
+// rolls back only a write whose error wraps this (MigrateRosterFile).
+var errRosterPartlyWritten = errors.New("the roster may be partly written")
+
 // writeLockedRoster writes data to the roster lk holds, and is the only
 // way this package does. It keeps what a write must not change about the
 // file, choosing between two ways of writing:
@@ -54,6 +65,9 @@ var fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid
 //     create the temp file (a full disk or quota, no file descriptors)
 //     fails the write with the roster unchanged: written in place, it
 //     could fail half-way too, leaving a roster neither old nor new.
+//
+// A failed write leaves the roster unchanged unless its error wraps
+// errRosterPartlyWritten.
 //
 // A roster not created yet is written through a temp file renamed into
 // place, mode 0600, and — run as root — owned like its directory, as the
@@ -101,7 +115,8 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 // written: the roster is not writable by this user (a 0400 file, a
 // read-only file system), not a regular file, became a symlink, or is a
 // path the workspace may not use. PrepareRosterAdminSync and
-// ProbeRosterWrite report it before a caller commits to writing anything.
+// ProbeRosterWrite report it before a caller commits to writing anything,
+// MigrateRosterFile before it makes a backup.
 var ErrRosterNotWritable = errors.New("roster cannot be written")
 
 // openRosterForWrite opens the roster at target (shown in messages as
@@ -139,6 +154,22 @@ func openRosterForWrite(target, shown string) (*os.File, *syscall.Stat_t, error)
 	return f, &st, nil
 }
 
+// checkRosterWritable is openRosterForWrite's verdict on the existing
+// roster lk holds, without writing anything: nil, or ErrRosterNotWritable
+// when writeLockedRoster would refuse it or it has gone. A caller that
+// must do something before the write — write the vault, make a migration
+// backup — asks it first, so a roster that will not be written is refused
+// before anything else is.
+func checkRosterWritable(lk *rosterLock) error {
+	f, _, err := openRosterForWrite(lk.target, lk.path)
+	if f != nil {
+		f.Close()
+	} else if err == nil {
+		err = fmt.Errorf("roster %s disappeared while locked: %w", lk.path, ErrRosterNotWritable)
+	}
+	return err
+}
+
 // errRosterOwnerNotKept is writeRosterTemp's refusal when the temp file
 // cannot be given the roster's owner; the caller writes in place instead.
 var errRosterOwnerNotKept = errors.New("cannot give the replacement the roster's owner")
@@ -158,15 +189,19 @@ func writeRosterTemp(tmp *os.File, data []byte, mode os.FileMode, uid, gid int) 
 
 // writeRosterInPlace overwrites the open roster f with data: the file
 // keeps its inode, owner, mode, links and ACL, at the cost of a moment in
-// which a reader without the lock may see it half-written.
+// which a reader without the lock may see it half-written. Its failures
+// wrap errRosterPartlyWritten: each may leave the file neither old nor new.
 func writeRosterInPlace(f *os.File, data []byte) error {
-	if _, err := f.WriteAt(data, 0); err != nil {
-		return fmt.Errorf("write roster %s: %w", f.Name(), err)
+	if _, err := writeRosterAt(f, data, 0); err != nil {
+		return fmt.Errorf("write roster %s: %w: %w", f.Name(), err, errRosterPartlyWritten)
 	}
 	if err := f.Truncate(int64(len(data))); err != nil {
-		return fmt.Errorf("write roster %s: %w", f.Name(), err)
+		return fmt.Errorf("write roster %s: %w: %w", f.Name(), err, errRosterPartlyWritten)
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("write roster %s: %w: %w", f.Name(), err, errRosterPartlyWritten)
+	}
+	return nil
 }
 
 // createLockedRoster writes the new roster lk holds: mode 0600, owned —
