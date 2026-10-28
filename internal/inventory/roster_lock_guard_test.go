@@ -11,19 +11,21 @@ import (
 )
 
 // rosterWriteCalls are the calls that change a file in this package: the
-// secret-source write primitives, the os calls they are built on, and the
-// removals. os.OpenFile counts when its flags open for writing or creating
-// (isRosterWriteCall), so does os.Create.
+// secret-source write primitives, the os calls they are built on —
+// renameRosterTemp is writeLockedRoster's os.Rename, a variable so a test
+// can make it fail — and the removals. os.OpenFile counts when its flags
+// open for writing or creating (isRosterWriteCall), so does os.Create.
 var rosterWriteCalls = map[string]bool{
 	"writeLockedRoster": true, "writeSecretSourceFile": true,
-	"os.WriteFile": true, "os.Rename": true, "os.Create": true,
+	"os.WriteFile": true, "os.Rename": true, "renameRosterTemp": true, "os.Create": true,
 	"os.Remove": true, "os.RemoveAll": true,
 }
 
 // rosterWriteDestination is the argument of a rosterWriteCalls call that
 // names the file it changes: a rename's second, every other call's first.
 func rosterWriteDestination(call *ast.CallExpr) int {
-	if callName(call) == "os.Rename" {
+	switch callName(call) {
+	case "os.Rename", "renameRosterTemp":
 		return 1
 	}
 	return 0
@@ -62,10 +64,10 @@ var rosterWriterExemptions = map[string]string{
 //  3. A function holding a roster lock never reaches another lockRosterFile
 //     through this package's calls: the lock is not reentrant, so the
 //     inner call would fail with ErrMutationLocked.
-//  4. The raw write primitives — os.Rename, os.CreateTemp, and the WriteAt
-//     and Truncate methods — appear only in roster_write.go, so
-//     writeLockedRoster's policy (replace or write in place, keep the
-//     owner, sweep temp files) is the only one.
+//  4. The raw write primitives — os.Rename and renameRosterTemp,
+//     os.CreateTemp, and the WriteAt and Truncate methods — appear only in
+//     roster_write.go, so writeLockedRoster's policy (replace or write in
+//     place, keep the owner, sweep temp files) is the only one.
 //  5. Only roster_lock.go builds a rosterLock (lockRosterFile), so a
 //     *rosterLock always holds its locks.
 func TestRegression_RosterWritersLockCanonicalTarget(t *testing.T) {
@@ -258,11 +260,12 @@ func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
 }
 
 // isRawWritePrimitive reports whether call is one of the primitives only
-// roster_write.go may use: os.Rename, os.CreateTemp, an atomicReplaceFile*
-// helper, or a WriteAt or Truncate method.
+// roster_write.go may use: os.Rename or its seam renameRosterTemp,
+// os.CreateTemp, an atomicReplaceFile* helper, or a WriteAt or Truncate
+// method.
 func isRawWritePrimitive(call *ast.CallExpr) bool {
 	switch name := callName(call); {
-	case name == "os.Rename", name == "os.CreateTemp", name == "createRosterTemp", strings.HasPrefix(name, "atomicReplaceFile"):
+	case name == "os.Rename", name == "renameRosterTemp", name == "os.CreateTemp", name == "createRosterTemp", strings.HasPrefix(name, "atomicReplaceFile"):
 		return true
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)

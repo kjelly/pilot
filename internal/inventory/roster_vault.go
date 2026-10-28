@@ -126,9 +126,10 @@ func ReadRosterAsMapWithVault(path, vaultPasswordFile string) (map[string]any, e
 // MutateEncryptedRosterFile decrypts the ansible-vault-encrypted roster
 // at path into a secure temp plaintext file, runs mutate against that
 // temp path, and — only if mutate returns nil — re-encrypts the temp
-// file in place and atomically installs it over the original. On any
-// failure (including mutate's own error) the original is left completely
-// untouched and nothing is re-encrypted. The roster's lock is held from
+// file in place and installs it over the original with writeLockedRoster.
+// On any failure before that install (including mutate's own error) the
+// original is left completely untouched; a failed install says itself
+// whether it left the roster unchanged. The roster's lock is held from
 // the decrypt to the install, so no other roster writer's change is lost
 // in between, and the file path names is the one replaced: a symlinked
 // roster stays a link. mutate must write only plaintextPath. This is the
@@ -159,8 +160,9 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 	if err != nil {
 		return fmt.Errorf("roster %s: read encrypted candidate: %w (original untouched)", path, err)
 	}
+	// writeLockedRoster's error says whether the roster was left unchanged.
 	if err := writeLockedRoster(lk, encrypted); err != nil {
-		return fmt.Errorf("roster %s: write failed, original untouched: %w", path, err)
+		return fmt.Errorf("roster %s: %w", path, err)
 	}
 	return nil
 }
