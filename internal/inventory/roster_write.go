@@ -410,20 +410,23 @@ func sweepRosterTemps(target string) {
 }
 
 // decryptedScratchFile writes plaintext — a decrypted roster — to a new
-// mode-0600 temp file in the system temp directory and returns its path and
-// a cleanup that removes it, along with any roster lock files a writer
-// left beside it (nothing else can know their names).
+// mode-0600 file in a new private (0700) directory under the system temp
+// directory, and returns its path and a cleanup that removes that
+// directory with everything in it: the plaintext, and the lock files and
+// temp files a roster writer working on it left there. No name in it is
+// predictable to other users, none is shared with anything else, and a
+// writer's sweep for stale temp files (sweepRosterTemps) reads only that
+// directory, not all of $TMPDIR.
 func decryptedScratchFile(plaintext []byte) (string, func(), error) {
-	tmp, err := os.CreateTemp("", ".pilot-roster-decrypt-*.yaml")
+	dir, err := os.MkdirTemp("", "pilot-roster-decrypt-")
 	if err != nil {
 		return "", func() {}, err
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() {
-		os.Remove(tmpPath)
-		for _, suffix := range rosterLockSuffixes {
-			os.Remove(tmpPath + suffix)
-		}
+	cleanup := func() { os.RemoveAll(dir) }
+	tmp, err := os.CreateTemp(dir, "roster-*.yaml")
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
 	}
 	if _, err := tmp.Write(plaintext); err != nil {
 		tmp.Close()
@@ -434,7 +437,7 @@ func decryptedScratchFile(plaintext []byte) (string, func(), error) {
 		cleanup()
 		return "", func() {}, err
 	}
-	return tmpPath, cleanup, nil
+	return tmp.Name(), cleanup, nil
 }
 
 // stampLockFile writes this process's pid into a lock file it holds, for

@@ -837,20 +837,39 @@ func TestMigrateRosterFileThroughALinkKeepsTheLink(t *testing.T) {
 	}
 }
 
-// The plaintext an encrypted-roster mutation works on is removed with its
-// lock files.
+// The plaintext an encrypted-roster mutation works on sits alone in its
+// own 0700 directory — not in the shared temp directory, where its lock
+// files had predictable names and a writer's sweep read every entry — and
+// the cleanup removes that directory, lock files and all (PR #148 review,
+// F5).
 func TestDecryptRosterToTempFileCleanupRemovesLockFiles(t *testing.T) {
 	requireAnsibleVault(t)
 	l := newLockTestLayout(t, rosterWriterCase{body: removeFixture, encrypt: true})
 	var plaintext string
 	err := MutateEncryptedRosterFile(l.link, lockTestVaultPasswordFile(t), func(plaintextPath string) error {
 		plaintext = plaintextPath
+		dir := filepath.Dir(plaintextPath)
+		if filepath.Clean(dir) == filepath.Clean(os.TempDir()) {
+			t.Errorf("plaintext %s is directly in the shared temp directory", plaintextPath)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Errorf("plaintext directory %s: %v (err %v), want a 0700 directory", dir, info.Mode(), err)
+		}
+		if info, err := os.Lstat(plaintextPath); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("plaintext %s mode %v (err %v), want 0600", plaintextPath, info.Mode().Perm(), err)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+			t.Errorf("plaintext directory holds %d entries, want the plaintext alone", len(entries))
+		}
 		return RemoveRosterUser(plaintextPath, "dave", RemoveRosterUserOptions{})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.assertStillALink(t)
+	if _, err := os.Lstat(filepath.Dir(plaintext)); !os.IsNotExist(err) {
+		t.Errorf("plaintext directory %s left behind (lstat err=%v)", filepath.Dir(plaintext), err)
+	}
 	for _, path := range []string{plaintext, plaintext + ".pilot-migrate.lock", plaintext + ".pilot-remove.lock"} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("%s left behind (lstat err=%v)", path, err)

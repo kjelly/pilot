@@ -64,9 +64,9 @@ func ansibleVaultEncryptInPlace(path, vaultPasswordFile string) error {
 }
 
 // DecryptRosterToTempFile decrypts the ansible-vault-encrypted roster at
-// path into a fresh, mode-0600 temp plaintext file and returns its path
-// plus a cleanup function the caller must always run (success or
-// failure) to remove it. This is the read-only half of encrypted-roster
+// path into a fresh, mode-0600 temp plaintext file in its own private
+// (0700) directory and returns its path plus a cleanup function the caller
+// must always run (success or failure) to remove that directory. This is the read-only half of encrypted-roster
 // support that `pilot roster remove-user`/`remove-group`'s Phase A-C
 // (spec.md §16) run their local checks against — see
 // MutateEncryptedRosterFile for the write half. Like ansibleVaultView,
