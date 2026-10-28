@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -782,7 +783,9 @@ func applyHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[applyInput, apply
 
 		if err != nil {
 			_ = writeJSONFile(filepath.Join(auditDir, "metadata.json"), meta)
-			if errors.Is(err, errWorkspaceLocked) {
+			// Another apply holds the workspace, or (in this process) one of
+			// its rosters: nothing was written either way.
+			if errors.Is(err, errWorkspaceLocked) || errors.Is(err, inventory.ErrRosterJournalBusy) {
 				return toolErrorResult(mcpToolError{Code: mcpErrWorkspaceLocked, Message: err.Error(), AuditDirectory: auditDir}), applyOutput{}, nil
 			}
 			return toolErrorResult(mcpToolError{Code: mcpErrRollbackFailed, Message: err.Error(), AuditDirectory: auditDir}), applyOutput{}, nil
@@ -793,9 +796,14 @@ func applyHandler(opts editMCPToolsOptions) mcp.ToolHandlerFor[applyInput, apply
 		}
 
 		if result.RolledBack {
+			message := result.ScenarioErr.Error()
+			if len(result.Warnings) > 0 {
+				// The rosters the rollback kept as another process changed them.
+				message += "; rollback kept: " + strings.Join(result.Warnings, "; ")
+			}
 			return toolErrorResult(mcpToolError{
 				Code:           mcpErrApplyFailed,
-				Message:        result.ScenarioErr.Error(),
+				Message:        message,
 				RolledBack:     true,
 				AuditDirectory: auditDir,
 			}), applyOutput{}, nil

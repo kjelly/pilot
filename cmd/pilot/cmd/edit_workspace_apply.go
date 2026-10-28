@@ -6,8 +6,11 @@ package cmd
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // editApplyResult is what an apply attempt produces — success or a
@@ -29,9 +32,11 @@ type editApplyResult struct {
 	// is true.
 	ScenarioErr error
 	// Before/After are the managed-file snapshots audit artifacts need
-	// (managed-files-before.json/managed-files-after.json) — for a
-	// rolled-back apply, After equals Before, since that's what dir was
-	// restored to.
+	// (managed-files-before.json/managed-files-after.json). For a
+	// rolled-back apply After is dir as the rollback left it: Before,
+	// except for the rosters another pilot process changed meanwhile,
+	// whose change the rollback kept (listed in Warnings) — the state
+	// RevisionAfter is the revision of.
 	Before []managedFileEntry
 	After  []managedFileEntry
 }
@@ -66,7 +71,11 @@ func revisionWith(snapshot, now []managedFileEntry, kept []string) string {
 // only one apply session touches dir at a time. If the scenario fails
 // partway, dir is restored to its exact pre-apply state
 // (restoreManagedFiles) and the failure is reported as a rolled-back
-// result rather than a bare error.
+// result rather than a bare error — but for rosters another pilot process
+// changed meanwhile: the rollback undoes only the session's own writes to
+// them, recorded by a RosterJournal opened on .vault/ before the scenario
+// runs, keeps the other process's change (Warnings), and returns an error
+// naming any roster it cannot safely restore, for a hand check.
 func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAgentSessionOptions) (*editApplyResult, error) {
 	if err := validateInventorySecretStorage(dir); err != nil {
 		return nil, err
@@ -90,11 +99,17 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		return nil, err
 	}
 
-	// What each step itself wrote to .vault/ — compared with the files as
-	// the step found them, so a roster another process changes between
-	// steps is not taken for the session's — so a rollback undoes only
-	// that (restoreManagedFiles): rosters have writers outside this lock.
-	written, last := map[string][]byte{}, map[string][]byte{}
+	// Every roster write the session makes to its .vault/ files, recorded
+	// where it is written (writeLockedRoster), so a rollback undoes exactly
+	// that: rosters have writers outside this lock (restoreManagedFiles).
+	journal, err := openSessionRosterJournal(dir, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	defer journal.Close()
+	// Which .vault/ files changed while a step ran, by anyone: a roster
+	// that did without a recorded write cannot be attributed.
+	touched, last := map[string]bool{}, map[string][]byte{}
 	before := opts.BeforeStep
 	opts.BeforeStep = func() {
 		last = secretFileContents(dir)
@@ -104,7 +119,7 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 	trace := opts.Trace
 	opts.Trace = func(event automationTraceEvent) {
-		noteSessionWrites(dir, last, written)
+		noteSessionWrites(dir, last, touched)
 		if trace != nil {
 			trace(event)
 		}
@@ -118,12 +133,18 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 
 	if runErr != nil {
-		left, kept, restoreErr := restoreManagedFiles(dir, snapshot, written)
+		// The rollback's own writes are not the session's.
+		journal.Close()
+		report, restoreErr := restoreManagedFiles(dir, snapshot, &sessionRosterWrites{writes: journal.Writes(), touched: touched})
 		if restoreErr != nil {
 			return nil, fmt.Errorf("apply failed (%v) and rollback also failed: %w", runErr, restoreErr)
 		}
-		if len(left) > 0 {
-			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s: another pilot process changed or holds it since this session wrote it, so check it by hand (the roster's freeipa.admin.password must equal .vault/main.yaml's ipa_admin_password)", runErr, strings.Join(left, ", "))
+		if len(report.left) > 0 {
+			kept := ""
+			if len(report.notes) > 0 {
+				kept = "; kept: " + strings.Join(report.notes, "; ")
+			}
+			return nil, fmt.Errorf("apply failed (%v); rolled back everything except %s; check each by hand — it may hold this apply's changes, another pilot process's, or both — and make sure its freeipa.admin.password equals .vault/main.yaml's ipa_admin_password%s", runErr, strings.Join(report.left, ", "), kept)
 		}
 		afterRollback, err := managedFileEntries(dir)
 		if err != nil {
@@ -132,16 +153,17 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		revisionAfterRollback := revisionOfEntries(afterRollback)
 		// The rosters another writer changed meanwhile are theirs: the
 		// rollback must have restored everything else exactly.
-		if revisionAfterRollback != revisionWith(snapshot, afterRollback, kept) {
+		if revisionAfterRollback != revisionWith(snapshot, afterRollback, report.kept) {
 			return nil, fmt.Errorf("apply failed (%v); rollback did not restore the original revision (before=%s, after=%s)", runErr, revisionBefore, revisionAfterRollback)
 		}
 		return &editApplyResult{
 			RevisionBefore: revisionBefore,
 			RevisionAfter:  revisionAfterRollback,
+			Warnings:       report.notes,
 			RolledBack:     true,
 			ScenarioErr:    runErr,
 			Before:         snapshot,
-			After:          snapshot,
+			After:          afterRollback,
 		}, nil
 	}
 
@@ -169,4 +191,24 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 		Before:         snapshot,
 		After:          after,
 	}, nil
+}
+
+// openSessionRosterJournal starts recording the roster writes an apply on
+// dir makes to its managed .vault/ files: every file directly in .vault/,
+// and the file each of the snapshot's .vault/ entries names (a .vault/
+// symlink to a roster kept elsewhere). Another apply in this process
+// already recording one of them refuses this one before it writes
+// anything (inventory.ErrRosterJournalBusy).
+func openSessionRosterJournal(dir string, snapshot []managedFileEntry) (*inventory.RosterJournal, error) {
+	var targets []string
+	for _, e := range snapshot {
+		if e.IsSecret {
+			targets = append(targets, filepath.Join(dir, filepath.FromSlash(e.RelPath)))
+		}
+	}
+	journal, err := inventory.JournalRosterWrites(targets, []string{filepath.Join(dir, ".vault")})
+	if err != nil {
+		return nil, fmt.Errorf("apply refused, nothing written: %w", err)
+	}
+	return journal, nil
 }

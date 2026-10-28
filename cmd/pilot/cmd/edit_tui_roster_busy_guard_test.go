@@ -21,8 +21,8 @@ var busyReportExemptions = map[string]string{
 	"pushNFSRoleBootstrapWithPassword|FillFreeIPAAdminPassword":               "vault writer, as above",
 	"pushRosterCreateWithPassword|WriteMinimalFreeIPAVault":                   "vault writer, as above",
 	"pushRosterCreateWithPassword|FillFreeIPAAdminPassword":                   "vault writer, as above",
-	"restoreManagedFiles|RemoveRosterFile":                                    "a rollback names a roster it cannot put back in the apply error",
-	"restoreManagedFiles|RestoreRosterFile":                                   "a rollback names a roster it cannot put back in the apply error",
+	"restoreRosterFile|RemoveRosterFile":                                      "a rollback names a roster it cannot put back in the apply error",
+	"restoreRosterFile|RestoreRosterFile":                                     "a rollback names a roster it cannot put back in the apply error",
 	"deploy.go":                                                               "pilot deploy, not pilot edit: it returns or warns about its own errors",
 	"deploy_completeness.go":                                                  "the deploy preflight, not pilot edit: it warns about its own errors",
 	"inventory.go":                                                            "pilot inventory generate, not pilot edit: it reports and skips a roster it cannot write",
@@ -258,8 +258,8 @@ func TestRegression_EditRosterWritesReportABusyRosterMatcher(t *testing.T) {
 // one would report a refused write some other way, which the automation
 // driver cannot see.
 var busyErrorHandlers = map[string]string{
-	"rosterBusyBanner":    "the one place a busy roster becomes a banner and a step error",
-	"restoreManagedFiles": "a roster a rollback cannot put back is named in the apply error",
+	"rosterBusyBanner":  "the one place a busy roster becomes a banner and a step error",
+	"restoreRosterFile": "a roster a rollback cannot put back is named in the apply error",
 }
 
 // A busy roster error is turned into a banner only by rosterBusyBanner,
