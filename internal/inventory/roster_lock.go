@@ -245,23 +245,63 @@ func ProbeRosterWrite(path string) error {
 	if err != nil {
 		return err
 	}
-	if f != nil {
-		defer f.Close() // drops the shared inode flock below
+	// The write-only open above is the writability check; whether it is
+	// kept is probeInodeLock's to decide.
+	inode := f
+	if f != nil && st.Nlink <= 1 {
+		f.Close()
+		inode = nil
 	}
 	for _, suffix := range rosterLockSuffixes {
 		if err := probeMutationLock(target + suffix); err != nil {
+			if inode != nil {
+				inode.Close()
+			}
 			return fmt.Errorf("roster %s: %w", path, err)
 		}
 	}
 	// A roster with another name is locked through its inode too
 	// (lockRosterFile): a writer through that name would not meet the
 	// sidecars above.
-	if f != nil && st.Nlink > 1 {
-		if err := flockMutationLock(target, f, syscall.LOCK_SH); err != nil {
+	if inode != nil {
+		if err := probeInodeLock(target, inode, st); err != nil {
 			return fmt.Errorf("roster %s: it has other hard links, so its inode is locked too: %w", path, err)
 		}
 	}
 	return nil
+}
+
+// probeInodeLock takes the shared flock on the roster's inode for an
+// instant, through a descriptor opened for reading: a file system that
+// emulates flock with byte-range locks (NFS) refuses a shared lock on a
+// write-only descriptor with EBADF, which would read as an unusable lock
+// the writer — whose exclusive lock wants the write-only open — never meets.
+// writeOnly is the descriptor openRosterForWrite returned, st its fstat; it
+// is closed here. A roster this user can write but not read keeps using it,
+// as before. The file opened for reading must still be the one st
+// describes, or the roster was replaced while it was probed and the probe
+// is retried (ErrMutationLocked).
+func probeInodeLock(target string, writeOnly *os.File, st *syscall.Stat_t) error {
+	f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	f, err = faultAfterOpen(target, f, err)
+	if err != nil {
+		if !errors.Is(err, fs.ErrPermission) {
+			writeOnly.Close()
+			return fmt.Errorf("cannot open it to lock its inode: %w: %w", ErrRosterLockFile, err)
+		}
+		f = writeOnly
+	} else {
+		writeOnly.Close()
+	}
+	defer f.Close() // drops the shared flock
+	var now syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &now); err != nil {
+		return fmt.Errorf("stat %s: %w: %w", target, ErrRosterLockFile, err)
+	}
+	if now.Dev != st.Dev || now.Ino != st.Ino {
+		return fmt.Errorf("roster %s was replaced while it was probed; retry: %w", target, ErrMutationLocked)
+	}
+	return flockMutationLock(target, f, syscall.LOCK_SH)
 }
 
 func probeMutationLock(path string) error {

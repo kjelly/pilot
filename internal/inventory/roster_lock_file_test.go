@@ -595,3 +595,78 @@ func TestRosterLockContentionIsBriefAndBounded(t *testing.T) {
 		}
 	})
 }
+
+// The probe's shared lock on a hard-linked roster's inode is taken through a
+// descriptor that can be read: a file system that emulates flock with
+// byte-range locks (NFS) refuses a shared lock on a write-only one with
+// EBADF, which a plan would report as an unusable lock (PR #148 review of
+// 374a7ca4, P4). The fault seam runs at the flock: every descriptor open on
+// the roster's inode at that moment is read from /proc, and none may be
+// write-only.
+func TestProbeRosterWriteLocksAHardLinkedRosterThroughAReadableDescriptor(t *testing.T) {
+	path := writeLockTestRoster(t)
+	if err := os.Link(path, filepath.Join(filepath.Dir(path), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("/proc/self/fdinfo"); err != nil {
+		t.Skip("no /proc/self/fdinfo")
+	}
+	var modes []string
+	restore := InjectFileFault(func(op, p string) error {
+		if op != "flock" || p != path {
+			return nil
+		}
+		entries, _ := os.ReadDir("/proc/self/fd")
+		for _, e := range entries {
+			info, err := os.Stat("/proc/self/fd/" + e.Name())
+			if err != nil || !os.SameFile(info, want) {
+				continue
+			}
+			data, err := os.ReadFile("/proc/self/fdinfo/" + e.Name())
+			if err != nil {
+				continue
+			}
+			var flags int
+			for _, line := range strings.Split(string(data), "\n") {
+				if rest, ok := strings.CutPrefix(line, "flags:"); ok {
+					fmt.Sscanf(strings.TrimSpace(rest), "%o", &flags)
+				}
+			}
+			modes = append(modes, fmt.Sprintf("fd %s accmode %d", e.Name(), flags&syscall.O_ACCMODE))
+			if flags&syscall.O_ACCMODE == syscall.O_WRONLY {
+				t.Errorf("the probe's inode lock is taken through a write-only descriptor (%s)", e.Name())
+			}
+		}
+		return nil
+	})
+	defer restore()
+	if err := ProbeRosterWrite(path); err != nil {
+		t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+	}
+	if len(modes) == 0 {
+		t.Fatal("the fault seam saw no descriptor on the roster's inode: the test does not check anything")
+	}
+}
+
+// A hard-linked roster this user can write but not read is still probed, as
+// before: the probe falls back to the write-only descriptor rather than
+// refusing a roster the writer's own (write-only) inode lock accepts.
+func TestProbeRosterWriteAcceptsAWriteOnlyHardLinkedRoster(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	path := writeLockTestRoster(t)
+	if err := os.Link(path, filepath.Join(filepath.Dir(path), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeRosterWrite(path); err != nil {
+		t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+	}
+}
