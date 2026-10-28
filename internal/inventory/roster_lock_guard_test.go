@@ -242,7 +242,7 @@ func rosterWritesIn(fn *ast.FuncDecl) []*ast.CallExpr {
 // helper, or a WriteAt or Truncate method.
 func isRawWritePrimitive(call *ast.CallExpr) bool {
 	switch name := callName(call); {
-	case name == "os.Rename", name == "os.CreateTemp", strings.HasPrefix(name, "atomicReplaceFile"):
+	case name == "os.Rename", name == "os.CreateTemp", name == "createRosterTemp", strings.HasPrefix(name, "atomicReplaceFile"):
 		return true
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)

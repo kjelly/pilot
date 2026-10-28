@@ -26,6 +26,10 @@ const rosterTempInfix = ".pilot-tmp-"
 // sweepRosterTemps removes it: older than any write still in progress.
 const staleRosterTempAge = 2 * time.Minute
 
+// createRosterTemp creates the temp files beside a roster. A variable so a
+// test can make it fail with a chosen error.
+var createRosterTemp = os.CreateTemp
+
 // fchownRosterTemp gives the replacement temp file the roster's owner and
 // group. A variable so a test can make it fail as it does for a non-root
 // writer of another user's roster.
@@ -43,10 +47,13 @@ var fchownRosterTemp = func(f *os.File, uid, gid int) error { return f.Chown(uid
 //     owner, renamed over it, so a reader that takes no lock sees the old
 //     roster or the new one, never a truncated file.
 //   - In place, through the open file, when replacing would change the
-//     file's identity: it has other hard links, it carries a POSIX ACL, no
-//     temp file can be created in its directory, or the temp file cannot be
-//     given the roster's owner and group (a non-root writer of another
-//     user's roster).
+//     file's identity: it has other hard links, it carries a POSIX ACL,
+//     this user may not create a temp file in its directory (EACCES/EPERM),
+//     or the temp file cannot be given the roster's owner and group (a
+//     non-root writer of another user's roster). Any other failure to
+//     create the temp file (a full disk or quota, no file descriptors)
+//     fails the write with the roster unchanged: written in place, it
+//     could fail half-way too, leaving a roster neither old nor new.
 //
 // A roster not created yet is written through a temp file renamed into
 // place, mode 0600, and — run as root — owned like its directory, as the
@@ -78,9 +85,12 @@ func writeLockedRoster(lk *rosterLock, data []byte) error {
 	if st.Nlink > 1 || hasPOSIXACL(path) {
 		return writeRosterInPlace(f, data)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+rosterTempInfix+"*")
-	if err != nil {
+	tmp, err := createRosterTemp(filepath.Dir(path), "."+filepath.Base(path)+rosterTempInfix+"*")
+	switch {
+	case errors.Is(err, fs.ErrPermission):
 		return writeRosterInPlace(f, data)
+	case err != nil:
+		return fmt.Errorf("write roster %s: cannot create its temp file, so it was left unchanged: %w", lk.path, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // a no-op once renamed
@@ -140,7 +150,7 @@ func createLockedRoster(lk *rosterLock, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("create roster %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+rosterTempInfix+"*")
+	tmp, err := createRosterTemp(dir, "."+filepath.Base(path)+rosterTempInfix+"*")
 	if err != nil {
 		return fmt.Errorf("create roster %s: %w", path, err)
 	}
@@ -183,7 +193,7 @@ func syncDir(dir string) {
 // lk holds, named so sweepRosterTemps removes it if pilot dies before its
 // caller does. The encrypted migration encrypts its candidate in it.
 func rosterScratchFile(lk *rosterLock) (*os.File, error) {
-	return os.CreateTemp(filepath.Dir(lk.target), "."+filepath.Base(lk.target)+rosterTempInfix+"*")
+	return createRosterTemp(filepath.Dir(lk.target), "."+filepath.Base(lk.target)+rosterTempInfix+"*")
 }
 
 // sweepRosterTemps removes temp files a killed pilot left beside target —

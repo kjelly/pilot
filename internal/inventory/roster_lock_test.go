@@ -872,3 +872,49 @@ func TestLockRosterFileNeedsAWritableDirectory(t *testing.T) {
 		t.Fatal("roster changed")
 	}
 }
+
+// Only a permission error creating the temp file makes the write go in
+// place; a full disk, a quota or no file descriptors fails the write and
+// leaves the roster as it was, since an in-place write could stop half-way
+// for the same reason (PR #148 round 5, P3-d).
+func TestWriteLockedRosterFallsBackInPlaceOnlyOnPermission(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err     error
+		inPlace bool
+	}{
+		"EACCES": {syscall.EACCES, true},
+		"EPERM":  {syscall.EPERM, true},
+		"ENOSPC": {syscall.ENOSPC, false},
+		"EDQUOT": {syscall.EDQUOT, false},
+		"EMFILE": {syscall.EMFILE, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeLockTestRoster(t)
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			createRosterTemp = func(dir, pattern string) (*os.File, error) {
+				return nil, &os.PathError{Op: "open", Path: filepath.Join(dir, pattern), Err: tc.err}
+			}
+			t.Cleanup(func() { createRosterTemp = os.CreateTemp })
+			err = AppendRosterUser(path, "erin")
+			if tc.inPlace {
+				if err != nil {
+					t.Fatalf("AppendRosterUser() = %v, want an in-place write", err)
+				}
+				after, _ := os.Stat(path)
+				if !os.SameFile(before, after) || !bytes.Contains(mustRead(t, path), []byte("erin")) {
+					t.Fatal("not written in place")
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), "left unchanged") {
+				t.Fatalf("AppendRosterUser() = %v, want the %v failure with the roster unchanged", err, tc.err)
+			}
+			if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+				t.Fatal("roster changed")
+			}
+		})
+	}
+}
