@@ -312,7 +312,11 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 	}
 	password := inventory.VaultAdminPassword(data)
 	templated := inventory.VaultAdminPasswordTemplate(data) != ""
-	if password == "" && !templated {
+	// An inline !vault value cannot be read either: every roster holding a
+	// literal password is listed as uncompared, as for a template, which
+	// is what the vault save's sync says too.
+	encrypted := inventory.VaultAdminPasswordEncrypted(data)
+	if password == "" && !templated && !encrypted {
 		return
 	}
 	dir := filepath.Dir(inv)
@@ -337,7 +341,7 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 		if err != nil || (result != inventory.RosterAdminDiffers && result != inventory.RosterAdminNotString) {
 			continue
 		}
-		if templated {
+		if templated || encrypted {
 			uncompared = append(uncompared, rosterPath)
 			continue
 		}
@@ -351,7 +355,11 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 			"請手動把名冊的 freeipa.admin.password 改成 vault 的 ipa_admin_password（加密名冊用 ansible-vault edit）；"+
 			"pilot edit 只在改變 ipa_admin_password 的那次存檔同步名冊，之後再存不會修正。\n\n", rosterPath, vaultPath)
 	}
-	if len(uncompared) > 0 {
+	switch {
+	case len(uncompared) > 0 && encrypted:
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 是 !vault 加密值，pilot 讀不到它，無法比對它跟名冊的 freeipa.admin.password。"+
+			"請自行確認這些名冊的值跟它解密後相同：%s\n\n", vaultPath, strings.Join(uncompared, "、"))
+	case len(uncompared) > 0:
 		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 含 {{、{%% 或 {#，Ansible 會當成模板展開，pilot 無法比對它跟名冊的 freeipa.admin.password。"+
 			"請自行確認這些名冊的值跟它展開後相同：%s\n\n", vaultPath, strings.Join(uncompared, "、"))
 	}

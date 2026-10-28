@@ -77,6 +77,14 @@ func VaultAdminPasswordNotString(data []byte) bool {
 	return ansibleScalarKind(vaultAdminValue(data)) == scalarNotString
 }
 
+// VaultAdminPasswordEncrypted reports whether a plaintext vault vars
+// file's ipa_admin_password is an inline !vault value (scalarEncrypted):
+// pilot cannot read it, so it can neither tell which rosters held it nor
+// compare one with it.
+func VaultAdminPasswordEncrypted(data []byte) bool {
+	return ansibleScalarKind(vaultAdminValue(data)) == scalarEncrypted
+}
+
 // VaultAdminPasswordText is a plaintext vault vars file's
 // ipa_admin_password as written, whatever it may be read as, "" when data
 // is encrypted or has none: for telling whether a save changed it, never

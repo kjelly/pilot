@@ -251,3 +251,22 @@ func TestWarnFreeIPARosterAdminDrift(t *testing.T) {
 		t.Fatalf("output without a vault = %q, %v", out.String(), err)
 	}
 }
+
+// The preflight agrees with the vault save about an inline !vault
+// ipa_admin_password: pilot cannot read it, so it names every roster with
+// a literal password as uncompared instead of saying nothing (PR #148
+// round 5, P3-c).
+func TestWarnFreeIPARosterAdminDriftListsRostersAnInlineVaultValueHides(t *testing.T) {
+	dir := t.TempDir()
+	roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+	writeSyncFile(t, roster, syncTestRoster(`"Stale-pass_1"`))
+	writeSyncFile(t, filepath.Join(dir, ".vault", "main.yaml"), "ipa_admin_password: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465\n")
+	var out bytes.Buffer
+	if err := ensureFreeIPARostersCurrentSnapshot(&out, filepath.Join(dir, "inventory.yml"), deployInventorySnapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "的 ipa_admin_password 是 !vault 加密值，pilot 讀不到它，無法比對它跟名冊的 freeipa.admin.password。請自行確認這些名冊的值跟它解密後相同：" + roster
+	if got := out.String(); strings.Count(got, "warning: ") != 1 || !strings.Contains(got, want) || strings.Contains(got, "Stale-pass_1") {
+		t.Fatalf("preflight output:\n%s", got)
+	}
+}

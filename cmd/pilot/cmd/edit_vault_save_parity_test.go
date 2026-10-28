@@ -104,6 +104,27 @@ func paritySetups() map[string]paritySetup {
 			busy:   os.Geteuid() != 0,
 			synced: os.Geteuid() == 0,
 		},
+		// An old value pilot cannot read leaves it unable to tell which
+		// rosters held it, so the rotation names the hand check instead of
+		// returning silently (PR #148 round 5, P3-c).
+		"inline !vault old value": {
+			password: "New-pass_2",
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, syncTestRoster(`"Old-pass_1"`))
+				writeSyncFile(t, vault, "ipa_admin_password: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465\n")
+				return []string{vault, roster}, func() {}
+			},
+			warnings: []string{"未同步名冊：ipa_admin_password 原本或現在是 !vault 加密值"},
+		},
+		"templated old value": {
+			password: "New-pass_2",
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, syncTestRoster(`"Old-pass_1"`))
+				writeSyncFile(t, vault, "ipa_admin_password: \"{{ lookup('env', 'IPA_ADMIN') }}\"\n")
+				return []string{vault, roster}, func() {}
+			},
+			warnings: []string{"未同步名冊：原本的 ipa_admin_password 含 {{、{% 或 {#"},
+		},
 		"templated value": {
 			password: "{{ lookup('env', 'IPA_ADMIN') }}",
 			prepare: func(t *testing.T, dir string) ([]string, func()) {
