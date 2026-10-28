@@ -105,3 +105,66 @@ func TestApplyHandler_RosterAnotherApplyIsRecordingIsWorkspaceLocked(t *testing.
 		t.Fatalf("roster written:\n%s", after)
 	}
 }
+
+// The rollback's own roster writes happen while the apply still holds its
+// claim on the rosters: a second apply on another workspace sharing a roster
+// is refused for the whole of the first, the rollback included. Before, the
+// claim was dropped before the rollback restored anything, so an apply
+// registering in that window recorded the first apply's restore writes as its
+// own. A hook on the lock the rollback takes proves it: every attempt to
+// register on the shared roster, made from inside the first apply — while its
+// steps run and while it rolls back — is refused.
+func TestEditApplyKeepsItsRosterClaimThroughTheRollback(t *testing.T) {
+	first, roster := busyRosterWorkspace(t)
+	second := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(second, ".vault"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(second, ".vault", "ipa-identity.yaml")
+	if err := os.Symlink(roster, shared); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var accepted []error
+	restore := inventory.InjectFileFault(func(op, path string) error {
+		if op != "flock" {
+			return nil
+		}
+		attempts++
+		j, err := inventory.JournalRosterWrites([]string{shared}, nil)
+		if err == nil {
+			j.Close()
+			accepted = append(accepted, errors.New("a second apply registered on the shared roster"))
+		} else if !errors.Is(err, inventory.ErrRosterJournalBusy) {
+			accepted = append(accepted, err)
+		}
+		return nil
+	})
+	defer restore()
+
+	before, _ := os.ReadFile(roster)
+	result, err := applyEditScenario(first, "issue-146-claim", editScenario{Version: 1, Steps: []editAction{
+		{Action: "create_user", User: "alice"},
+		failingStep,
+	}}, editAgentSessionOptions{})
+	restore()
+	if err != nil || result == nil || !result.RolledBack {
+		t.Fatalf("applyEditScenario() = %+v, %v; want a complete rollback", result, err)
+	}
+	if after, _ := os.ReadFile(roster); !bytes.Equal(after, before) {
+		t.Fatalf("roster not rolled back:\n%s", after)
+	}
+	// The write takes the roster's locks, and the rollback takes them again.
+	if attempts < 4 {
+		t.Fatalf("hook ran %d times; want it to see the write and the rollback's restore", attempts)
+	}
+	if len(accepted) != 0 {
+		t.Fatalf("a second apply could register while the first was still running or rolling back: %v", accepted)
+	}
+	// Once the first apply is over its claim is gone.
+	j, err := inventory.JournalRosterWrites([]string{shared}, nil)
+	if err != nil {
+		t.Fatalf("JournalRosterWrites() after the apply = %v; want the claim released", err)
+	}
+	j.Close()
+}

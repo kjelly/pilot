@@ -137,8 +137,11 @@ func applyEditScenario(dir, sessionID string, scenario editScenario, opts editAg
 	}
 
 	if runErr != nil {
-		// The rollback's own writes are not the session's.
-		journal.Close()
+		// The rollback's own writes are not the session's: stop recording,
+		// but keep the claim on the rosters until the rollback is done (the
+		// deferred Close), or an apply on another workspace sharing a roster
+		// could register in between and record the restore as its own.
+		journal.Stop()
 		report, restoreErr := restoreManagedFiles(dir, snapshot, &sessionRosterWrites{writes: journal.Writes(), touched: touched, rosters: rosters})
 		if restoreErr != nil {
 			return nil, fmt.Errorf("apply failed (%v) and rollback also failed: %w", runErr, restoreErr)

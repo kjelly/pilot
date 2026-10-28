@@ -52,11 +52,13 @@ type RosterJournal struct {
 	targets, dirs map[string]bool
 	keys          map[string]string
 	writes        map[string][]RosterWrite
-	closed        bool
+	// stopped is a journal that records no more writes but still claims its
+	// rosters (Stop); closed one that has released them (Close).
+	stopped, closed bool
 }
 
 // rosterJournals is every open RosterJournal in this process. mu also
-// guards each journal's writes and closed.
+// guards each journal's writes, stopped and closed.
 var rosterJournals struct {
 	mu   sync.Mutex
 	open []*RosterJournal
@@ -109,8 +111,22 @@ func JournalRosterWrites(targets, dirs []string) (*RosterJournal, error) {
 	return j, nil
 }
 
-// Close stops recording; writes recorded so far stay readable (Writes).
-// Safe to call more than once.
+// Stop stops recording but keeps the claim on the watched rosters: no other
+// journal may register on them until Close. pilot edit's apply stops its
+// journal before it rolls back, so the rollback's own writes are not taken
+// for the session's, and closes it only after the rollback, so no other
+// apply in this process can register in between and record them as its own.
+// Writes recorded so far stay readable (Writes). Safe to call more than once,
+// and before or after Close.
+func (j *RosterJournal) Stop() {
+	rosterJournals.mu.Lock()
+	defer rosterJournals.mu.Unlock()
+	j.stopped = true
+}
+
+// Close stops recording and releases the claim on the watched rosters;
+// writes recorded so far stay readable (Writes). Safe to call more than
+// once.
 func (j *RosterJournal) Close() {
 	rosterJournals.mu.Lock()
 	defer rosterJournals.mu.Unlock()
@@ -186,14 +202,15 @@ type journaledRosterWrite struct {
 }
 
 // beginJournaledRosterWrite reads what the roster lk holds, under the
-// lock, when an open journal watches it; nil when none does. A watched
+// lock, when an open journal that has not been stopped watches it; nil when
+// none does. A watched
 // roster that cannot be read is not written: the journal could not say
 // what the write replaced, so the rollback relying on it could not undo it.
 func beginJournaledRosterWrite(lk *rosterLock) (*journaledRosterWrite, error) {
 	rosterJournals.mu.Lock()
 	var journal *RosterJournal
 	for _, j := range rosterJournals.open {
-		if j.watches(lk.target, lk.key) {
+		if !j.stopped && j.watches(lk.target, lk.key) {
 			journal = j
 			break
 		}
@@ -243,8 +260,8 @@ func readRosterBeforeWrite(target string) (data []byte, existed bool, err error)
 // finish records the write's outcome, err from writeRosterBytes, in its
 // journal: nothing when the roster was left unchanged, After when it now
 // holds data (err nil), Failed when a write in place stopped part-way (err
-// wraps errRosterPartlyWritten). A journal closed meanwhile records
-// nothing.
+// wraps errRosterPartlyWritten). A journal stopped or closed
+// meanwhile records nothing.
 func (w *journaledRosterWrite) finish(data []byte, err error) {
 	partly := errors.Is(err, errRosterPartlyWritten)
 	if w == nil || err != nil && !partly {
@@ -258,7 +275,7 @@ func (w *journaledRosterWrite) finish(data []byte, err error) {
 	}
 	rosterJournals.mu.Lock()
 	defer rosterJournals.mu.Unlock()
-	if !w.journal.closed {
+	if !w.journal.stopped && !w.journal.closed {
 		w.journal.writes[w.key] = append(w.journal.writes[w.key], record)
 	}
 }

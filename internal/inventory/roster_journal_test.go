@@ -304,3 +304,44 @@ func TestRosterJournalRefusesAWriteItCannotRecord(t *testing.T) {
 		t.Fatalf("journal = %+v", writes)
 	}
 }
+
+// Stop ends a journal's recording but keeps its claim: a write made after it
+// — the apply rollback's own — is not recorded, and no other journal may
+// register on its rosters until Close releases it (an apply running at once
+// on another workspace sharing the roster would otherwise record this
+// apply's rollback writes as its own). Stop and Close are safe in any order
+// and any number of times.
+func TestRosterJournalStopKeepsTheClaimButStopsRecording(t *testing.T) {
+	path := writeLockTestRoster(t)
+	j := openTestJournal(t, []string{path}, nil)
+	if err := AppendRosterUser(path, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	recorded := onlyWrite(t, j, path)
+
+	j.Stop()
+	if err := RestoreRosterFile(path, recorded.After, []byte(lockTestRoster)); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRosterUser(path, "frank"); err != nil {
+		t.Fatal(err)
+	}
+	if w := onlyWrite(t, j, path); !bytes.Equal(w.After, recorded.After) {
+		t.Fatalf("a write after Stop was recorded: %+v", w)
+	}
+	other, err := JournalRosterWrites([]string{path}, nil)
+	if !errors.Is(err, ErrRosterJournalBusy) || other != nil {
+		t.Fatalf("JournalRosterWrites() after Stop = %v, %v; want ErrRosterJournalBusy until Close", other, err)
+	}
+	if other, err := JournalRosterWrites(nil, []string{filepath.Dir(path)}); !errors.Is(err, ErrRosterJournalBusy) || other != nil {
+		t.Fatalf("JournalRosterWrites(dir) after Stop = %v, %v; want ErrRosterJournalBusy until Close", other, err)
+	}
+	j.Stop() // idempotent
+	j.Close()
+	j.Close()
+	j.Stop() // after Close
+	openTestJournal(t, []string{path}, nil)
+	if w := onlyWrite(t, j, path); !bytes.Equal(w.After, recorded.After) {
+		t.Fatalf("what the stopped journal recorded changed: %+v", w)
+	}
+}
