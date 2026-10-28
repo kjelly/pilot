@@ -276,8 +276,9 @@ admin 密碼存在兩個地方，兩份必須相同：
 在 FreeIPA 改完密碼後，用 `pilot edit` → `.vault/` → `main.yaml` → `ipa_admin_password` → 修改值 → 存檔。
 存檔時，名冊裡仍是舊密碼的 `freeipa.admin.password` 會一併改成新密碼，畫面會列出每份名冊的結果。
 只會自動改這個 workspace `.vault/` 目錄裡（不含子目錄）的 `*.yml`、`*.yaml` 名冊：預設的
-`.vault/ipa-identity.yaml`，以及 `hosts.yml`、`group_vars/`、`host_vars/` 的 `freeipa_roster_file`
-指到這裡的名冊。名冊若是 symlink，改的是它指向的檔案，link 本身保留。
+`.vault/ipa-identity.yaml`，以及 `hosts.yml`、`group_vars/`、`host_vars/`（含子目錄裡的檔案）的
+`freeipa_roster_file` 指到這裡的名冊；`pilot_edit_plan` 看到的名冊跟 apply 相同。名冊若是 symlink，
+改的是它指向的檔案，link 本身保留。
 
 下列名冊不會自動改，畫面會列為「未同步」；用 MCP 的 `pilot_edit_plan`／`pilot_edit_apply` 時，
 同樣的內容會出現在結果的 warnings（只列路徑，不含密碼）：
@@ -358,6 +359,10 @@ pilot 寫名冊的方式：
   讀者可能短暫讀到寫到一半的內容。暫存檔因為其他原因（磁碟或配額已滿、檔案描述子用完）建不出來時，寫入失敗、
   名冊保持原樣，不會改為直接覆寫（那樣也可能寫到一半失敗）。
 - 這個使用者沒有寫入權的名冊（例如 `0400`）或不是一般檔案的名冊拒絕寫入（root 可以寫 `0400`）。
+  schema 自動升級也一樣：在建立備份之前就拒絕，不留下備份檔；`pilot deploy`、`pilot reconcile` 印出
+  warning 後繼續，要升級請先讓這個使用者可以寫名冊（或用 root 執行）。
+- 寫入失敗時名冊保持原樣，只有直接覆寫原檔寫到一半時例外，錯誤訊息會說名冊可能只寫了一部分；
+  schema 升級遇到這種情況會改回原本的內容（備份檔照樣保留）。
 - 新建立的名冊權限是 `0600`；以 root 執行（例如 `docker run` 裡的 pilot-cli）時，擁有者跟所在目錄相同，
   schema 升級的備份檔則給名冊的擁有者。
 - pilot 被中斷而留下的暫存檔，會在下一次有 pilot 取得這份名冊的鎖時清掉（只清超過兩分鐘的）。
