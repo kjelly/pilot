@@ -633,7 +633,9 @@ func TestProbeRosterWriteLocksAHardLinkedRosterThroughAReadableDescriptor(t *tes
 			var flags int
 			for _, line := range strings.Split(string(data), "\n") {
 				if rest, ok := strings.CutPrefix(line, "flags:"); ok {
-					fmt.Sscanf(strings.TrimSpace(rest), "%o", &flags)
+					if _, err := fmt.Sscanf(strings.TrimSpace(rest), "%o", &flags); err != nil {
+						t.Errorf("cannot read the flags of fd %s: %v", e.Name(), err)
+					}
 				}
 			}
 			modes = append(modes, fmt.Sprintf("fd %s accmode %d", e.Name(), flags&syscall.O_ACCMODE))
