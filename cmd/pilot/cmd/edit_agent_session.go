@@ -25,6 +25,15 @@ type editAgentSessionOptions struct {
 	Marker            io.Writer
 	PausePresentation func(time.Duration)
 	Recorder          AuditRecorder
+	// PlanSource is the real workspace when the session runs on a plan's
+	// scratch copy of it (planEditScenario), "" otherwise.
+	PlanSource string
+	// Transaction is set by applyEditScenario: the session rolls back on
+	// failure, so it must not write a roster its rollback cannot restore
+	// (editWriteScope).
+	Transaction bool
+	// BeforeStep runs before each step, as Trace runs after it.
+	BeforeStep func()
 }
 
 // editAgentSession is a single pilot-edit automation run against dir.
@@ -38,9 +47,12 @@ type editAgentSession struct {
 }
 
 func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSession {
+	router := newEditRouterModel(dir)
+	router.planSource = opts.PlanSource
+	router.transaction = opts.Transaction
 	return &editAgentSession{
 		dir:    dir,
-		router: newEditRouterModel(dir),
+		router: router,
 		driver: automationDriver{
 			trace:             opts.Trace,
 			presentation:      opts.Presentation,
@@ -49,6 +61,7 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 			marker:            opts.Marker,
 			pausePresentation: opts.PausePresentation,
 			recorder:          opts.Recorder,
+			beforeStep:        opts.BeforeStep,
 		},
 	}
 }
@@ -59,18 +72,29 @@ func newEditAgentSession(dir string, opts editAgentSessionOptions) *editAgentSes
 // after a failed Run to inspect where the router stopped.
 func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
 
+// editRunResult is what a session's Run reports besides its error.
+type editRunResult struct {
+	// Warnings are the rosters a vault save left for the operator to
+	// update by hand, as text without any password. Every front-end
+	// reports them: --actions on stderr, a plan or apply in its result.
+	Warnings []string
+}
+
 // Run drives scenario's steps against the session's router, exactly as
 // calling automationDriver.run directly would — this indirection exists
-// solely so a caller never needs to know automationDriver exists.
-func (s *editAgentSession) Run(scenario editScenario) error {
+// solely so a caller never needs to know automationDriver exists. The
+// result comes back with an error too: it covers the steps before the
+// failing one, which --actions keeps.
+func (s *editAgentSession) Run(scenario editScenario) (editRunResult, error) {
 	if s.router.err != nil {
-		return s.router.err
+		return editRunResult{}, s.router.err
 	}
 	if err := validateEditScenario(scenario); err != nil {
-		return err
+		return editRunResult{}, err
 	}
 	if err := validateInventorySecretStorage(s.dir); err != nil {
-		return err
+		return editRunResult{}, err
 	}
-	return s.driver.run(&s.router, scenario)
+	err := s.driver.run(&s.router, scenario)
+	return editRunResult{Warnings: append([]string(nil), s.router.rosterSyncWarnings...)}, err
 }

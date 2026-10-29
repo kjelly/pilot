@@ -22,11 +22,11 @@ func TestEditAgentSession_IsolatesTwoWorkspaceDirs(t *testing.T) {
 	}}
 
 	sessionA := newEditAgentSession(dirA, editAgentSessionOptions{})
-	if err := sessionA.Run(scenarioA); err != nil {
+	if _, err := sessionA.Run(scenarioA); err != nil {
 		t.Fatalf("session A Run() error = %v", err)
 	}
 	sessionB := newEditAgentSession(dirB, editAgentSessionOptions{})
-	if err := sessionB.Run(scenarioB); err != nil {
+	if _, err := sessionB.Run(scenarioB); err != nil {
 		t.Fatalf("session B Run() error = %v", err)
 	}
 
@@ -58,7 +58,7 @@ func TestEditAgentSession_DoesNotReadEditDirGlobal(t *testing.T) {
 		{Action: "create_host", Host: "x"},
 		{Action: "save_hosts"},
 	}}
-	if err := session.Run(scenario); err != nil {
+	if _, err := session.Run(scenario); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hosts.yml")); err != nil {

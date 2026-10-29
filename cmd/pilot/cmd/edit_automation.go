@@ -426,7 +426,13 @@ func runAutomatedEditWorkflow(cmd *cobra.Command, scenario editScenario, present
 		}
 		fmt.Fprintln(out, session.View())
 	}
-	if err := session.Run(editScenario{Version: 1, Title: scenario.Title, Steps: editSteps}); err != nil {
+	// --actions keeps the steps that ran, a failing one stopping the rest
+	// (no rollback), so their roster warnings are printed either way.
+	run, err := session.Run(editScenario{Version: 1, Title: scenario.Title, Steps: editSteps})
+	for _, warning := range run.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+	}
+	if err != nil {
 		return err
 	}
 	if sink != nil && sink.err != nil {

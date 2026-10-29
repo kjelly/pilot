@@ -3,6 +3,8 @@ package vaultfile
 import (
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func TestParse_EditableTopLevelScalars(t *testing.T) {
@@ -115,5 +117,44 @@ func TestDoc_EmptySkeletonIsEditable(t *testing.T) {
 	got := string(doc.Bytes())
 	if !strings.Contains(got, `ipa_admin_password: "x"`) {
 		t.Fatalf("added key missing:\n%s", got)
+	}
+}
+
+// Set writes a string whatever the old value was or resolved to: an
+// unquoted number, boolean, float or date, an empty or ~ key, an explicit
+// tag, an inline !vault value. Keeping the old tag wrote !!int "NewPass-1"
+// (read as a number) or !!null "NewPass-1" (read as nothing). !unsafe is
+// kept (PR #148 re-review, round 4).
+func TestSetReplacesResolvedTag(t *testing.T) {
+	for name, tt := range map[string]struct{ old, wantTag string }{
+		"int":          {"12345678", "!!str"},
+		"bool":         {"true", "!!str"},
+		"float":        {"1.5", "!!str"},
+		"date":         {"2024-01-01", "!!str"},
+		"empty":        {"", "!!str"},
+		"tilde":        {"~", "!!str"},
+		"explicit int": {"!!int 7", "!!str"},
+		"inline vault": {"!vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162636465", "!!str"},
+		"plain string": {"Old-pass_1", "!!str"},
+		"unsafe":       {`!unsafe "Old{{pass"`, "!unsafe"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc, err := Parse([]byte("ipa_admin_password: " + tt.old + "\nother: x\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc.Set("ipa_admin_password", "NewPass-1")
+			var parsed yaml.Node
+			if err := yaml.Unmarshal(doc.Bytes(), &parsed); err != nil {
+				t.Fatalf("re-parse: %v\n%s", err, doc.Bytes())
+			}
+			value := parsed.Content[0].Content[1]
+			if value.ShortTag() != tt.wantTag || value.Value != "NewPass-1" {
+				t.Fatalf("after Set: tag %s value %q, want %s \"NewPass-1\":\n%s", value.ShortTag(), value.Value, tt.wantTag, doc.Bytes())
+			}
+			if strings.Contains(string(doc.Bytes()), "!!") {
+				t.Fatalf("Set left an explicit core tag:\n%s", doc.Bytes())
+			}
+		})
 	}
 }

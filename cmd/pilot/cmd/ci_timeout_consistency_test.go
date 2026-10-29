@@ -4,12 +4,16 @@
 // ci.yml, and it must stay above go test's -timeout plus setup time.
 // Otherwise a hung test is cut off by a job cancellation that names
 // nothing, instead of go test's stack dump that names the test.
+// TestCIJobTimeoutCoversMakeTargetCaps extends that to every job that runs
+// several `make <target>` steps: their -timeout caps add up, and the job's
+// timeout-minutes may not be below the sum.
 package cmd
 
 import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -120,21 +124,142 @@ func TestCIGoTestTimeoutFiresBeforeJobLimit(t *testing.T) {
 }
 
 func TestCIGoTestTimeoutCheckCatchesDrift(t *testing.T) {
-	const goodCI = "jobs:\n  test:\n    timeout-minutes: 45\n    steps:\n      - name: go test\n        run: make test-race\n"
-	const goodMake = "test-race:     \t## Run tests\n\tgo test -race -count=1 -timeout 30m ./...\n\nclean:\n\trm -f x\n"
+	const goodCI = "jobs:\n  test:\n    timeout-minutes: 60\n    steps:\n      - name: go test\n        run: make test-race\n"
+	const goodMake = "test-race:     \t## Run tests\n\tgo test -race -count=1 -timeout 45m ./...\n\nclean:\n\trm -f x\n"
 	cases := []struct {
 		name, ci, makefile, want string
 	}{
 		{"agree", goodCI, goodMake, ""},
-		{"job limit below go timeout", strings.Replace(goodCI, "45", "20", 1), goodMake, "is not above"},
-		{"job limit without setup margin", strings.Replace(goodCI, "45", "39", 1), goodMake, "is not above"},
-		{"CI runs go test directly", strings.Replace(goodCI, "make test-race", "go test -race -count=1 -timeout 30m ./...", 1), goodMake, "want `make test-race`"},
-		{"no -timeout in Makefile", goodCI, strings.Replace(goodMake, " -timeout 30m", "", 1), "sets no -timeout"},
-		{"no job timeout", strings.Replace(goodCI, "    timeout-minutes: 45\n", "", 1), goodMake, "sets no timeout-minutes"},
+		{"job limit below go timeout", strings.Replace(goodCI, "60", "20", 1), goodMake, "is not above"},
+		{"job limit one minute short of the setup margin", strings.Replace(goodCI, "60", "54", 1), goodMake, "is not above"},
+		{"old 45m job budget with the 45m go timeout", strings.Replace(goodCI, "60", "45", 1), goodMake, "is not above"},
+		{"job limit exactly at go timeout plus setup margin", strings.Replace(goodCI, "60", "55", 1), goodMake, ""},
+		{"CI runs go test directly", strings.Replace(goodCI, "make test-race", "go test -race -count=1 -timeout 45m ./...", 1), goodMake, "want `make test-race`"},
+		{"no -timeout in Makefile", goodCI, strings.Replace(goodMake, " -timeout 45m", "", 1), "sets no -timeout"},
+		{"no job timeout", strings.Replace(goodCI, "    timeout-minutes: 60\n", "", 1), goodMake, "sets no timeout-minutes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkCIGoTestTimeout(t, tc.ci, tc.makefile)
+			if tc.want == "" && got != "" {
+				t.Fatalf("want no error, got %q", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("want error containing %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// makeTimeoutCapsRE finds the explicit Go timeout of a recipe line: go test's
+// -timeout and a compiled test binary's -test.timeout.
+var makeTimeoutCapsRE = regexp.MustCompile(`-(?:test\.)?timeout[ =](\S+)`)
+
+// makeTargetTimeoutCaps is the sum of the explicit Go timeouts in target's
+// recipe. A command without one (go test then caps each package at 10m, which
+// this does not count) adds nothing.
+func makeTargetTimeoutCaps(t *testing.T, makefile, target string) time.Duration {
+	t.Helper()
+	var sum time.Duration
+	for _, line := range makeTargetRecipe(t, makefile, target) {
+		for _, m := range makeTimeoutCapsRE.FindAllStringSubmatch(line, -1) {
+			d, err := time.ParseDuration(m[1])
+			if err != nil {
+				t.Fatalf("target %s: -timeout %s: %v", target, m[1], err)
+			}
+			sum += d
+		}
+	}
+	return sum
+}
+
+var makeStepRE = regexp.MustCompile(`^make\s+([A-Za-z0-9_.-]+)$`)
+
+// checkCIJobTimeoutCoversCaps reports the first job whose timeout-minutes is
+// below the sum of the Go timeouts of the Makefile targets its `run: make
+// <target>` steps invoke, or "" when every job covers its caps. A job with
+// no such step, or whose targets set no explicit timeout, is not checked.
+func checkCIJobTimeoutCoversCaps(t *testing.T, ciYAML, makefile string) string {
+	t.Helper()
+	var wf struct {
+		Jobs map[string]struct {
+			TimeoutMinutes int `yaml:"timeout-minutes"`
+			Steps          []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(ciYAML), &wf); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+	names := make([]string, 0, len(wf.Jobs))
+	for name := range wf.Jobs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		job := wf.Jobs[name]
+		var sum time.Duration
+		var targets []string
+		for _, step := range job.Steps {
+			m := makeStepRE.FindStringSubmatch(strings.TrimSpace(step.Run))
+			if m == nil {
+				continue
+			}
+			targets = append(targets, m[1])
+			sum += makeTargetTimeoutCaps(t, makefile, m[1])
+		}
+		if sum == 0 {
+			continue
+		}
+		if job.TimeoutMinutes == 0 {
+			return "job " + name + " sets no timeout-minutes but runs " + strings.Join(targets, ", ")
+		}
+		if limit := time.Duration(job.TimeoutMinutes) * time.Minute; limit < sum {
+			return "job " + name + " timeout-minutes " + limit.String() + " is below the sum " +
+				sum.String() + " of the -timeout caps of " + strings.Join(targets, ", ")
+		}
+	}
+	return ""
+}
+
+func TestCIJobTimeoutCoversMakeTargetCaps(t *testing.T) {
+	root := repoRootForTest(t)
+	ci, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg := checkCIJobTimeoutCoversCaps(t, string(ci), string(mk)); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+func TestCIJobTimeoutCoversMakeTargetCapsCatchesDrift(t *testing.T) {
+	const goodCI = "jobs:\n  lint:\n    timeout-minutes: 40\n    steps:\n" +
+		"      - run: make a-test\n      - run: make b-test\n      - run: make c-test\n" +
+		"      - run: echo not a make target\n"
+	const goodMake = "a-test: ## a\n\tgo test -count=1 -timeout 5m ./x/\n\n" +
+		"b-test: ## b\n\tgo test -count=1 -timeout 10m ./y/\n\tgo test -count=1 -timeout=10m ./z/\n\n" +
+		"c-test: ## c\n\tgo test -c -o t ./w/ && ./t -test.timeout 10m\n\tgo test ./v/\n"
+	// goodMake sums to 5m + 20m + 10m = 35m.
+	cases := []struct {
+		name, ci, makefile, want string
+	}{
+		{"covers the sum", goodCI, goodMake, ""},
+		{"exactly the sum", strings.Replace(goodCI, "40", "35", 1), goodMake, ""},
+		{"one minute below the sum", strings.Replace(goodCI, "40", "34", 1), goodMake, "is below the sum 35m0s"},
+		{"each cap alone fits but the sum does not", strings.Replace(goodCI, "40", "20", 1), goodMake, "a-test, b-test, c-test"},
+		{"a target gained a cap", goodCI, strings.Replace(goodMake, "./x/", "./x/\n\tgo test -timeout 6m ./x2/", 1), "is below the sum 41m0s"},
+		{"no job timeout", strings.Replace(goodCI, "    timeout-minutes: 40\n", "", 1), goodMake, "sets no timeout-minutes"},
+		{"targets without an explicit cap are not checked", strings.Replace(goodCI, "40", "1", 1), "a-test:\n\tgo test ./x/\nb-test:\n\tgo test ./y/\nc-test:\n\tgo test ./z/\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkCIJobTimeoutCoversCaps(t, tc.ci, tc.makefile)
 			if tc.want == "" && got != "" {
 				t.Fatalf("want no error, got %q", got)
 			}

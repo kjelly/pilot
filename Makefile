@@ -39,8 +39,9 @@ release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
 	@echo "Built $(BIN) (stripped, no debug info)"
 
+# -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
-	go test -count=1 -timeout 30m ./...
+	go test -count=1 -timeout 45m ./...
 
 vet:           	## Run go vet
 	go vet ./...
@@ -51,11 +52,15 @@ lint:          	## Run golangci-lint
 # -timeout: go test's default is 10m per package. Under -race on GitHub
 # runners, internal/spec takes 12-15m when it passes (738-895 s on
 # 2026-10-15/16), and four runs on 2026-10-15 hit the old 15m limit at 900 s.
-# cmd/pilot/cmd takes 7-8m. 30m keeps about a 2x margin for the slowest
-# package. CI runs this target; its job timeout-minutes must stay above this
+# cmd/pilot/cmd takes 7-8m. internal/spec has since outgrown 30m: it took
+# about 1760 s (29.3 m) locally at 448cf330 and went past 30m on the CI
+# runner, so main's last three pushes (runs 40802511042, 40802136845,
+# 40793595116) all died with "panic: test timed out after 30m0s". 45m leaves
+# about 1.5x over the 29.3 m local figure for the slowest package. CI runs this
+# target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 test-race:     	## Run tests with the race detector (CI runs this target)
-	go test -race -count=1 -timeout 30m ./...
+	go test -race -count=1 -timeout 45m ./...
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
@@ -138,7 +143,21 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 .PHONY: identity-ssh-cache-test identity-ssh-cache-live-test
 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText)$$' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)$$' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
+
+# ROOT_TESTS are the internal/inventory tests that call requireRoot: what a
+# roster write keeps when pilot runs as root (pilot-cli under `docker run`).
+# They skip as a normal user; root-test compiles them as this user and runs
+# them as root, where PILOT_REQUIRE_ROOT_TESTS=1 turns a skip into a
+# failure. TestRootOnlyTestsRunInCI keeps this list complete.
+ROOT_TESTS := TestLockRosterFileKeepsTheOwner|TestMigrationBackupKeepsTheRosterOwner|TestRootWritesA0400RosterThroughPrepareAndProbe|TestRosterLockFileSymlinkIsNotChowned|TestRosterSyncThroughASingleFileBindMount|TestRosterWritersRefuseALockedRoster|TestRosterWritersSharingAGroupDoNotLockEachOtherOut|TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot
+
+root-test: ## Run the root-only roster ownership tests as root (needs passwordless sudo; CI job "Root-only ownership tests")
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	go test -c -o "$$tmp/inventory.test" ./internal/inventory/ && \
+	cd internal/inventory && \
+	sudo -n env PILOT_REQUIRE_ROOT_TESTS=1 "$$tmp/inventory.test" -test.run '^($(ROOT_TESTS))$$' -test.count=1 -test.timeout 5m -test.v
 
 freeipa-server-pool-test: ## Include tasks/freeipa-server-pool.yml twice on one host, as site.yml does for a dns + freeipa-client host (issue 157), with mandatory real Ansible.
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_FreeIPAServerPool' ./internal/spec/
@@ -158,7 +177,7 @@ recording-topology-test: ## Ephemeral fresh-host topology test of per-host SSH s
 	@test -n "$(VAULT)" || (echo "ERROR: VAULT=<path-to-vault-file> is required. e.g. make recording-topology-test VAULT=~/.vault/per-host-recording-sandbox.yaml" && exit 2)
 	VAULT="$(VAULT)" KEEP_ON_FAILURE="$(KEEP_ON_FAILURE)" ./scripts/per-host-recording-topology-test.sh
 
-.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test identity-secret-test
+.PHONY: help build test test-all vet test-race release clean install install-callback-user install-callback-system uninstall-callback test-callback test-prereq playbook-lint install-hooks poc-checkmode-test recording-topology-test thanos-retention-test alert-rules-test identity-noop-test identity-secret-test root-test
 
 # ---------------------------------------------------------------------------
 # Ansible playbook 開發迭代（見 docs/ansible-playbook-development.md）

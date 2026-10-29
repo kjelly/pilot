@@ -1,0 +1,674 @@
+package inventory
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// writeLockTestRoster writes lockTestRoster in its own directory.
+func writeLockTestRoster(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "roster.yaml")
+	if err := os.WriteFile(path, []byte(lockTestRoster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A roster's lock file is never followed through a symlink nor shared with
+// another name: as root (pilot-cli under `docker run`) the pid written into
+// it, and the chown, would land on whatever file the link names. Run as
+// any user: the writer refuses, says why, and leaves the link's target and
+// the roster alone (PR #148 re-review, F3).
+func TestRosterLockFileIsNeverFollowed(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, lockPath, victim string){
+		"symlink": func(t *testing.T, lockPath, victim string) {
+			if err := os.Symlink(victim, lockPath); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"hard link": func(t *testing.T, lockPath, victim string) {
+			if err := os.Link(victim, lockPath); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		for _, suffix := range rosterLockSuffixes {
+			t.Run(name+suffix, func(t *testing.T) {
+				path := writeLockTestRoster(t)
+				victim := filepath.Join(t.TempDir(), "victim")
+				if err := os.WriteFile(victim, []byte("not a lock file\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				plant(t, path+suffix, victim)
+				err := AppendRosterUser(path, "erin")
+				if !errors.Is(err, ErrRosterLockFile) || !strings.Contains(err.Error(), path+suffix) {
+					t.Fatalf("error = %v, want ErrRosterLockFile naming %s", err, path+suffix)
+				}
+				if got := mustRead(t, victim); string(got) != "not a lock file\n" {
+					t.Fatalf("the link's target was written: %q", got)
+				}
+				if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+					t.Fatal("roster changed")
+				}
+			})
+		}
+	}
+	t.Run("dangling symlink", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		victim := filepath.Join(t.TempDir(), "created-through-the-link")
+		if err := os.Symlink(victim, path+".pilot-remove.lock"); err != nil {
+			t.Fatal(err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterLockFile) || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("error = %v, want the symlink refusal", err)
+		}
+		if _, err := os.Lstat(victim); !os.IsNotExist(err) {
+			t.Fatalf("a file was created through the dangling link (lstat err=%v)", err)
+		}
+	})
+}
+
+// As root, a symlinked lock file is refused before anything is chowned:
+// the link's target keeps its owner (PR #148 re-review, F3).
+func TestRosterLockFileSymlinkIsNotChowned(t *testing.T) {
+	requireRoot(t)
+	const uid, gid = 12345, 12346
+	path := writeLockTestRoster(t)
+	if err := os.Chown(path, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("root's\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path+".pilot-remove.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterLockFile) {
+		t.Fatalf("error = %v, want ErrRosterLockFile", err)
+	}
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := info.Sys().(*syscall.Stat_t); st.Uid != 0 || string(mustRead(t, victim)) != "root's\n" {
+		t.Fatalf("victim now owned by %d with %q", st.Uid, mustRead(t, victim))
+	}
+}
+
+// A lock file this user may read but not write — one a root-run pilot
+// left with mode 0444, say — still locks: flock needs no write access. The
+// writer goes ahead, and the lock still excludes a second writer
+// (PR #148 re-review, F4).
+func TestRosterLockWorksThroughAReadOnlyLockFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a 0444 file read-write")
+	}
+	path := writeLockTestRoster(t)
+	for _, suffix := range rosterLockSuffixes {
+		if err := os.WriteFile(path+suffix, []byte("left by root\n"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := AppendRosterUser(path, "erin"); err != nil {
+		t.Fatalf("AppendRosterUser() with read-only lock files: %v", err)
+	}
+	if !bytes.Contains(mustRead(t, path), []byte("erin")) {
+		t.Fatal("roster not written")
+	}
+	held, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRosterUser(path, "frank"); !errors.Is(err, ErrMutationLocked) {
+		t.Errorf("second writer error = %v, want ErrMutationLocked", err)
+	}
+	held.release() //nolint:errcheck
+	for _, suffix := range rosterLockSuffixes {
+		if got := string(mustRead(t, path+suffix)); got != "left by root\n" {
+			t.Errorf("read-only lock file %s rewritten: %q", suffix, got)
+		}
+	}
+}
+
+// Each way a lock file cannot be used says what to fix, wraps
+// ErrRosterLockFile (not ErrMutationLocked: nothing holds the roster), and
+// writes nothing (PR #148 re-review, F4).
+func TestRosterLockFileErrorsSayWhatToFix(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens and creates anything")
+	}
+	for name, tt := range map[string]struct {
+		setup func(t *testing.T, path string)
+		want  string
+	}{
+		"directory not writable": {
+			setup: func(t *testing.T, path string) {
+				if err := os.Chmod(filepath.Dir(path), 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(filepath.Dir(path), 0o700) }) //nolint:errcheck
+			},
+			want: "cannot create lock file " + "%s.pilot-migrate.lock; its directory must be writable by this user",
+		},
+		"lock file not openable": {
+			setup: func(t *testing.T, path string) {
+				if err := os.WriteFile(path+".pilot-remove.lock", nil, 0o000); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "lock file %s.pilot-remove.lock exists but this user cannot open it",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeLockTestRoster(t)
+			tt.setup(t, path)
+			err := AppendRosterUser(path, "erin")
+			if want := strings.ReplaceAll(tt.want, "%s", path); !errors.Is(err, ErrRosterLockFile) || errors.Is(err, ErrMutationLocked) || !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want ErrRosterLockFile saying %q", err, want)
+			}
+			if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+				t.Fatal("roster changed")
+			}
+		})
+	}
+}
+
+// A roster that needs nothing written takes no lock: deploy's schema
+// upgrade and freeipa-client host autofill run on every deploy, and a lock
+// file another user left must not make them fail (and warn) on a no-op.
+// Once there is something to write, the same lock file is reported
+// (PR #148 re-review, F4).
+func TestNoOpRosterUpdatesNeedNoLock(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens any lock file")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(lockTestRoster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".pilot-migrate.lock", nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := EnsureRosterCurrent(path, RosterMigrationOptions{}); err != nil || result.Changed {
+		t.Fatalf("EnsureRosterCurrent(current roster) = %+v, %v; want a no-op", result, err)
+	}
+	encrypted := filepath.Join(dir, "encrypted.yaml")
+	if err := os.WriteFile(encrypted, []byte("$ANSIBLE_VAULT;1.1;AES256\n6162636465\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(encrypted+".pilot-migrate.lock", nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureRosterCurrent(encrypted, RosterMigrationOptions{}); !errors.Is(err, ErrRosterEncrypted) {
+		t.Fatalf("EnsureRosterCurrent(encrypted) error = %v, want ErrRosterEncrypted", err)
+	}
+	hosts := "hosts:\n  db-special.ipa.pilot.internal:\n    ansible_host: 10.0.0.5\n    roles: [freeipa-client]\n"
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(hosts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if added, err := AutoFillFreeIPAClientRosterHosts(dir, path); err != nil || len(added) != 0 {
+		t.Fatalf("AutoFillFreeIPAClientRosterHosts(nothing missing) = %v, %v; want nothing", added, err)
+	}
+	hosts += "  web9.ipa.pilot.internal:\n    ansible_host: 10.0.0.9\n    roles: [freeipa-client]\n"
+	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(hosts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AutoFillFreeIPAClientRosterHosts(dir, path); !errors.Is(err, ErrRosterLockFile) {
+		t.Fatalf("AutoFillFreeIPAClientRosterHosts(a host missing) error = %v, want ErrRosterLockFile", err)
+	}
+	if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+		t.Fatal("roster changed")
+	}
+}
+
+// Run as root, the admin password sync's atomic replace hands the new file
+// to the roster's owner through its descriptor (PR #148 re-review, F3).
+func TestSyncRosterAdminPasswordKeepsTheOwnerAsRoot(t *testing.T) {
+	requireRoot(t)
+	const uid, gid = 12345, 12346
+	path := writeLockTestRoster(t)
+	if err := os.Chown(path, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SyncRosterAdminPassword(path, "Old-pass_1", "New-pass_2"); err != nil || got != RosterAdminUpdated {
+		t.Fatalf("SyncRosterAdminPassword() = %v, %v", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := info.Sys().(*syscall.Stat_t); st.Uid != uid || st.Gid != gid {
+		t.Fatalf("roster owned by %d:%d, want %d:%d", st.Uid, st.Gid, uid, gid)
+	}
+}
+
+// pilot edit's rollback puts a roster back only while it holds what the
+// session left: changed by another writer since, or held, it is left
+// alone; a roster the session created is removed on the same terms
+// (PR #148 re-review, F2).
+func TestRestoreRosterFileOnlyUndoesTheSessionsOwnWrite(t *testing.T) {
+	original, session := []byte(lockTestRoster), []byte(lockTestRoster+"# session\n")
+	for name, tt := range map[string]struct {
+		current []byte
+		hold    bool
+		want    error
+		after   []byte
+	}{
+		"unchanged since":  {current: session, after: original},
+		"changed since":    {current: append(append([]byte{}, session...), "# another writer\n"...), want: ErrRosterChanged},
+		"held by a writer": {current: session, hold: true, want: ErrMutationLocked},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "roster.yaml")
+			if err := os.WriteFile(path, tt.current, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.hold {
+				holdRawLocks(t, path, ".pilot-remove.lock")
+			}
+			err := RestoreRosterFile(path, session, original)
+			if tt.want == nil && err != nil || tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("RestoreRosterFile() error = %v, want %v", err, tt.want)
+			}
+			want := tt.after
+			if want == nil {
+				want = tt.current
+			}
+			if got := mustRead(t, path); !bytes.Equal(got, want) {
+				t.Fatalf("roster =\n%s\nwant\n%s", got, want)
+			}
+		})
+	}
+	t.Run("created by the session", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "roster.yaml")
+		if err := os.WriteFile(path, session, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveRosterFile(path, []byte("something else")); !errors.Is(err, ErrRosterChanged) {
+			t.Fatalf("RemoveRosterFile(changed) error = %v, want ErrRosterChanged", err)
+		}
+		if err := RemoveRosterFile(path, session); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("roster still there (lstat err=%v)", err)
+		}
+	})
+	// Through a symlink the file whose bytes were checked is removed, not
+	// the link (PR #148 review, F6).
+	t.Run("created by the session, named through a link", func(t *testing.T) {
+		l := newLockTestLayout(t, rosterWriterCase{body: string(session)})
+		if err := RemoveRosterFile(l.link, session); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(l.target); !os.IsNotExist(err) {
+			t.Fatalf("the roster the session created is still there (lstat err=%v)", err)
+		}
+		if info, err := os.Lstat(l.link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link was removed instead of the roster (lstat err=%v)", err)
+		}
+	})
+}
+
+// A FIFO planted as a lock file — one this user may only read, or may
+// read and write — is refused at once: opening it never waits for a
+// writer (PR #148 re-review).
+func TestRosterLockFileFIFOIsRefusedWithoutHanging(t *testing.T) {
+	for name, mode := range map[string]uint32{"read-only": 0o444, "read-write": 0o600} {
+		t.Run(name, func(t *testing.T) {
+			if mode == 0o444 && os.Geteuid() == 0 {
+				t.Skip("root opens a 0444 FIFO read-write")
+			}
+			path := writeLockTestRoster(t)
+			if err := syscall.Mkfifo(path+".pilot-migrate.lock", mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path+".pilot-migrate.lock", os.FileMode(mode)); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- AppendRosterUser(path, "erin") }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrRosterLockFile) || !strings.Contains(err.Error(), "not a plain file") {
+					t.Fatalf("error = %v, want the FIFO refused", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("locking a roster hung on a FIFO lock file")
+			}
+			if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+				t.Fatal("roster changed")
+			}
+		})
+	}
+}
+
+// ProbeRosterWrite tells a plan what the apply's lockRosterFile and writer would find
+// on the real roster, without leaving a lock file or holding a lock: free,
+// held by another process, or a lock file this user cannot use (PR #148
+// round 4: a plan on a scratch copy otherwise passes where the apply is
+// refused).
+func TestProbeRosterWriteReportsWhatTheWriterWouldFind(t *testing.T) {
+	t.Run("free: no lock file is created", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := ProbeRosterWrite(path); err != nil {
+			t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+		}
+		for _, suffix := range rosterLockSuffixes {
+			if _, err := os.Lstat(path + suffix); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("probe created %s (err=%v)", path+suffix, err)
+			}
+		}
+	})
+	t.Run("free lock files are left free", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		lk, err := lockRosterFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lk.release() //nolint:errcheck
+		if err := ProbeRosterWrite(path); err != nil {
+			t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+		}
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatalf("a writer after the probe: %v", err)
+		}
+	})
+	for _, suffix := range rosterLockSuffixes {
+		t.Run("held "+suffix, func(t *testing.T) {
+			path := writeLockTestRoster(t)
+			f, err := os.OpenFile(path+suffix, os.O_CREATE|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			if err := ProbeRosterWrite(path); !errors.Is(err, ErrMutationLocked) {
+				t.Fatalf("ProbeRosterWrite() = %v, want ErrMutationLocked", err)
+			}
+		})
+	}
+	t.Run("held through a symlinked roster", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		link := filepath.Join(t.TempDir(), "link.yaml")
+		if err := os.Symlink(path, link); err != nil {
+			t.Fatal(err)
+		}
+		lk, err := lockRosterFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lk.release() //nolint:errcheck
+		if err := ProbeRosterWrite(link); !errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("ProbeRosterWrite(link) = %v, want ErrMutationLocked", err)
+		}
+	})
+	t.Run("lock file is a symlink", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), path+rosterLockSuffixes[0]); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
+		}
+	})
+	t.Run("lock file not openable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root opens any lock file")
+		}
+		path := writeLockTestRoster(t)
+		if err := os.WriteFile(path+rosterLockSuffixes[1], nil, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
+		}
+		if _, err := lockRosterFile(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("lockRosterFile() = %v; the probe and the writer disagree", err)
+		}
+	})
+	t.Run("roster not writable by this user", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		err := ProbeRosterWrite(path)
+		if os.Geteuid() == 0 {
+			// Root opens a 0400 file for writing, and so does its writer.
+			if err != nil {
+				t.Fatalf("ProbeRosterWrite() as root = %v, want nil", err)
+			}
+			return
+		}
+		if !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("AppendRosterUser() = %v; the probe and the writer disagree", err)
+		}
+		assertNoLockFiles(t, path)
+	})
+	// The writer asks whether it may write the roster before it touches a
+	// lock file (PR #148 review, P2-1), and so does the probe: a roster
+	// this user cannot write is reported so even while another process
+	// holds it.
+	t.Run("roster not writable and held: checked in the writer's order", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes a 0400 roster")
+		}
+		shortLockContentionWait(t)
+		path := writeLockTestRoster(t)
+		holdRawLocks(t, path, rosterLockSuffixes...)
+		if err := os.Chmod(path, 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterNotWritable) || errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
+		}
+		if err := AppendRosterUser(path, "erin"); !errors.Is(err, ErrRosterNotWritable) || errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("AppendRosterUser() = %v; the probe and the writer disagree", err)
+		}
+	})
+	t.Run("roster is not a regular file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "roster.yaml")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterNotWritable) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterNotWritable", err)
+		}
+	})
+	t.Run("lock file cannot be created", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes any directory")
+		}
+		path := writeLockTestRoster(t)
+		dir := filepath.Dir(path)
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) }) //nolint:errcheck
+		if err := ProbeRosterWrite(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("ProbeRosterWrite() = %v, want ErrRosterLockFile", err)
+		}
+		if _, err := lockRosterFile(path); !errors.Is(err, ErrRosterLockFile) {
+			t.Fatalf("lockRosterFile() = %v; the probe and the writer disagree", err)
+		}
+	})
+}
+
+// The plan's probe holds a lock file shared for an instant; a writer whose
+// attempt lands then must not fail, while a roster another process really
+// holds is still reported busy within lockContentionWait (PR #148 round 5,
+// P3-a).
+func TestRosterLockContentionIsBriefAndBounded(t *testing.T) {
+	t.Run("a brief shared hold does not fail a writer", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		f, err := os.OpenFile(path+rosterLockSuffixes[0], os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		released := make(chan struct{})
+		go func() {
+			time.Sleep(lockContentionWait / 5)
+			f.Close()
+			close(released)
+		}()
+		if err := AppendRosterUser(path, "erin"); err != nil {
+			t.Fatalf("writer during a brief shared hold: %v", err)
+		}
+		<-released
+	})
+	t.Run("probes running beside writers fail none of them", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		if err := ProbeRosterWrite(path); err != nil { // lock files absent: nothing to hold
+			t.Fatal(err)
+		}
+		lk, err := lockRosterFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lk.release() //nolint:errcheck
+		stop := make(chan struct{})
+		probed := make(chan int)
+		go func() {
+			n := 0
+			for {
+				select {
+				case <-stop:
+					probed <- n
+					return
+				default:
+					_ = ProbeRosterWrite(path)
+					n++
+				}
+			}
+		}()
+		for i := 0; i < 20; i++ {
+			if err := AppendRosterUser(path, fmt.Sprintf("user%d", i)); err != nil {
+				close(stop)
+				<-probed
+				t.Fatalf("write %d beside the probe: %v", i, err)
+			}
+		}
+		close(stop)
+		if n := <-probed; n == 0 {
+			t.Fatal("the probe never ran")
+		}
+	})
+	t.Run("a held lock is reported busy within the bound", func(t *testing.T) {
+		path := writeLockTestRoster(t)
+		f, err := os.OpenFile(path+rosterLockSuffixes[1], os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		err = AppendRosterUser(path, "erin")
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrMutationLocked) {
+			t.Fatalf("AppendRosterUser() = %v, want ErrMutationLocked", err)
+		}
+		if elapsed < lockContentionWait || elapsed > lockContentionWait+time.Second {
+			t.Fatalf("busy reported after %v, want about %v", elapsed, lockContentionWait)
+		}
+		if !bytes.Equal(mustRead(t, path), []byte(lockTestRoster)) {
+			t.Fatal("roster changed")
+		}
+	})
+}
+
+// The probe's shared lock on a hard-linked roster's inode is taken through a
+// descriptor that can be read: a file system that emulates flock with
+// byte-range locks (NFS) refuses a shared lock on a write-only one with
+// EBADF, which a plan would report as an unusable lock (PR #148 review of
+// 374a7ca4, P4). The fault seam runs at the flock: every descriptor open on
+// the roster's inode at that moment is read from /proc, and none may be
+// write-only.
+func TestProbeRosterWriteLocksAHardLinkedRosterThroughAReadableDescriptor(t *testing.T) {
+	path := writeLockTestRoster(t)
+	if err := os.Link(path, filepath.Join(filepath.Dir(path), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat("/proc/self/fdinfo"); err != nil {
+		t.Skip("no /proc/self/fdinfo")
+	}
+	var modes []string
+	restore := InjectFileFault(func(op, p string) error {
+		if op != "flock" || p != path {
+			return nil
+		}
+		entries, _ := os.ReadDir("/proc/self/fd")
+		for _, e := range entries {
+			info, err := os.Stat("/proc/self/fd/" + e.Name())
+			if err != nil || !os.SameFile(info, want) {
+				continue
+			}
+			data, err := os.ReadFile("/proc/self/fdinfo/" + e.Name())
+			if err != nil {
+				continue
+			}
+			var flags int
+			for _, line := range strings.Split(string(data), "\n") {
+				if rest, ok := strings.CutPrefix(line, "flags:"); ok {
+					if _, err := fmt.Sscanf(strings.TrimSpace(rest), "%o", &flags); err != nil {
+						t.Errorf("cannot read the flags of fd %s: %v", e.Name(), err)
+					}
+				}
+			}
+			modes = append(modes, fmt.Sprintf("fd %s accmode %d", e.Name(), flags&syscall.O_ACCMODE))
+			if flags&syscall.O_ACCMODE == syscall.O_WRONLY {
+				t.Errorf("the probe's inode lock is taken through a write-only descriptor (%s)", e.Name())
+			}
+		}
+		return nil
+	})
+	defer restore()
+	if err := ProbeRosterWrite(path); err != nil {
+		t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+	}
+	if len(modes) == 0 {
+		t.Fatal("the fault seam saw no descriptor on the roster's inode: the test does not check anything")
+	}
+}
+
+// A hard-linked roster this user can write but not read is still probed, as
+// before: the probe falls back to the write-only descriptor rather than
+// refusing a roster the writer's own (write-only) inode lock accepts.
+func TestProbeRosterWriteAcceptsAWriteOnlyHardLinkedRoster(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	path := writeLockTestRoster(t)
+	if err := os.Link(path, filepath.Join(filepath.Dir(path), "other-name.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeRosterWrite(path); err != nil {
+		t.Fatalf("ProbeRosterWrite() = %v, want nil", err)
+	}
+}

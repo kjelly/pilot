@@ -3,10 +3,12 @@ package inventory
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -61,8 +63,13 @@ func TestAcquireMutationLock_StaleLockFileAloneDoesNotBlock(t *testing.T) {
 func TestCreateRosterBackup_ExactBytesAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	original := []byte("schema_version: 1\nsome: content\n")
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release() //nolint:errcheck
 
-	backupPath, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z")
+	backupPath, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z")
 	if err != nil {
 		t.Fatalf("createRosterBackup() error = %v", err)
 	}
@@ -82,27 +89,38 @@ func TestCreateRosterBackup_ExactBytesAndPermissions(t *testing.T) {
 func TestCreateRosterBackup_RefusesToOverwriteExistingBackup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	original := []byte("schema_version: 1\n")
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.release() //nolint:errcheck
 
-	if _, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z"); err != nil {
+	if _, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z"); err != nil {
 		t.Fatalf("first createRosterBackup() error = %v", err)
 	}
-	if _, err := createRosterBackup(path, original, RosterSchemaV1, "20260101T000000Z"); err == nil {
+	if _, err := createRosterBackup(lk, original, RosterSchemaV1, "20260101T000000Z"); err == nil {
 		t.Fatal("expected the second createRosterBackup() with identical timestamp+content to fail (O_EXCL)")
 	}
 }
 
-// ---- atomic replace -----------------------------------------------------
+// ---- roster writes ------------------------------------------------------
 
-func TestAtomicReplaceFile_WritesContentAndRestoresMode(t *testing.T) {
+// writeLockedRoster's replace path (roster_write.go) keeps the roster's
+// mode and leaves no temp file behind.
+func TestWriteLockedRoster_WritesContentAndKeepsMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "roster.yaml")
 	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := atomicReplaceFile(path, []byte("new"), 0o640); err != nil {
-		t.Fatalf("atomicReplaceFile() error = %v", err)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := writeLockedRoster(lk, []byte("new")); err != nil {
+		t.Fatalf("writeLockedRoster() error = %v", err)
+	}
+	lk.release() //nolint:errcheck
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != "new" {
 		t.Fatalf("content = %q, err = %v, want %q", got, err, "new")
@@ -111,16 +129,17 @@ func TestAtomicReplaceFile_WritesContentAndRestoresMode(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("mode = %v, err = %v, want 0640", info.Mode().Perm(), err)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("dir entries = %v, err = %v, want exactly the roster file (no leftover temp)", entries, err)
+	for _, e := range direntNames(t, dir) {
+		if strings.Contains(e, rosterTempInfix) {
+			t.Fatalf("leftover temp file %s", e)
+		}
 	}
 }
 
-func TestAtomicReplaceFile_FailsCleanlyIntoNonexistentDirectory(t *testing.T) {
+func TestWriteLockedRoster_FailsCleanlyIntoNonexistentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-subdir", "roster.yaml")
-	if err := atomicReplaceFile(path, []byte("data"), 0o600); err == nil {
-		t.Fatal("expected an error writing into a nonexistent directory")
+	if _, err := lockRosterFile(path); err == nil {
+		t.Fatal("expected an error locking a roster in a nonexistent directory")
 	}
 }
 
@@ -178,33 +197,35 @@ func TestMigrateRosterFile_MinimalDocumentEndToEnd(t *testing.T) {
 	}
 }
 
+// A dry run writes nothing — no backup, no temp file, and no lock files,
+// since it takes no lock — so it also previews a roster this user may only
+// read, which lockRosterFile refuses (PR #148 review, P2-1).
 func TestMigrateRosterFile_DryRunDoesNotWriteAnything(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "roster.yaml")
-	original := []byte(minimalValidRoster)
-	if err := os.WriteFile(path, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	for name, mode := range map[string]os.FileMode{"writable": 0o600, "read-only": 0o400} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "roster.yaml")
+			original := []byte(minimalValidRoster)
+			if err := os.WriteFile(path, original, mode); err != nil {
+				t.Fatal(err)
+			}
 
-	result, err := MigrateRosterFile(path, RosterMigrationOptions{DryRun: true})
-	if err != nil {
-		t.Fatalf("MigrateRosterFile() error = %v", err)
-	}
-	if !result.Changed || result.BackupPath != "" {
-		t.Fatalf("dry-run result = %+v, want changed=true (a migration would happen) but no backup", result)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(got, original) {
-		t.Fatalf("dry-run modified the roster file (err=%v)", err)
-	}
-	// The mutation-lock sidecar file is an expected artifact of even a
-	// dry-run acquiring the lock; only a backup or a leftover temp file
-	// would indicate the dry run actually wrote something it shouldn't.
-	assertNoBackupFiles(t, dir)
-	for _, e := range direntNames(t, dir) {
-		if e != "roster.yaml" && e != "roster.yaml.pilot-migrate.lock" {
-			t.Fatalf("dry-run created an unexpected file: %s", e)
-		}
+			result, err := MigrateRosterFile(path, RosterMigrationOptions{DryRun: true})
+			if err != nil {
+				t.Fatalf("MigrateRosterFile() error = %v", err)
+			}
+			if !result.Changed || result.BackupPath != "" || result.NewSHA256 == "" || len(result.Steps) == 0 {
+				t.Fatalf("dry-run result = %+v, want changed=true (a migration would happen), its steps and new hash, but no backup", result)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(got, original) {
+				t.Fatalf("dry-run modified the roster file (err=%v)", err)
+			}
+			assertNoBackupFiles(t, dir)
+			if names := direntNames(t, dir); len(names) != 1 || names[0] != "roster.yaml" {
+				t.Fatalf("dry-run left files beside the roster: %v", names)
+			}
+		})
 	}
 }
 
@@ -745,6 +766,7 @@ func TestMigrateRosterFile_EncryptedRoster_DryRunDoesNotWrite(t *testing.T) {
 		t.Fatalf("dry-run modified the encrypted roster (err=%v)", err)
 	}
 	assertNoBackupFiles(t, dir)
+	assertNoLockFiles(t, path)
 }
 
 // TestMigrateRosterFile_EncryptedRoster_RepeatedMigrationNoExtraBackup is
@@ -807,4 +829,127 @@ func TestMigrateRosterFile_EncryptedRoster_InvalidV1ContentFailsWithoutMutation(
 		t.Fatalf("encrypted roster was modified despite failing v1 validation (err=%v)", err)
 	}
 	assertNoBackupFiles(t, dir)
+}
+
+// ---- a roster the write refuses, and a write that fails -------------------
+
+// An encrypted roster this user cannot write fails the migration with
+// ErrRosterNotWritable before the backup and the encrypted candidate are
+// made: nothing but the lock files appears beside it, and no rollback is
+// reported for a write that never happened. assertRosterWritePolicy's
+// read-only case holds the plaintext path to the same rule.
+func TestMigrateRosterFile_EncryptedRoster_UnwritableRosterFailsBeforeTheBackup(t *testing.T) {
+	requireAnsibleVault(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a 0400 roster")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.yaml")
+	if err := os.WriteFile(path, []byte(minimalValidRoster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pwFile := writeVaultPasswordFile(t, filepath.Join(t.TempDir(), "vault-pass"), "a-password")
+	encryptFileForTest(t, path, pwFile)
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	original := mustRead(t, path)
+	before := direntNames(t, dir)
+
+	_, err := MigrateRosterFile(path, RosterMigrationOptions{VaultPasswordFile: pwFile})
+	if !errors.Is(err, ErrRosterNotWritable) {
+		t.Fatalf("MigrateRosterFile() error = %v, want ErrRosterNotWritable", err)
+	}
+	for _, rollback := range []string{"rollback", "rolled back"} {
+		if strings.Contains(err.Error(), rollback) {
+			t.Errorf("error %q reports a rollback, but nothing was written", err)
+		}
+	}
+	if !bytes.Equal(mustRead(t, path), original) {
+		t.Fatal("roster changed")
+	}
+	assertOnlyLockFilesAdded(t, dir, path, before)
+}
+
+// A migration rolls the roster back only when its failed write may have
+// changed it: an in-place write that stopped part-way. A write that failed
+// before touching the roster — here the temp file for its replacement
+// cannot be created — leaves it as it was and says so, without a rollback
+// that could only fail the same way. Both paths keep the backup, and both
+// the plaintext and the encrypted migration follow the rule.
+func TestMigrateRosterFileRollsBackOnlyAWriteThatChangedTheRoster(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		for name, tc := range map[string]struct {
+			// fail makes the migration's install fail.
+			fail       func(t *testing.T, path string)
+			rolledBack bool
+		}{
+			"temp file refused": {fail: func(t *testing.T, path string) {
+				// The encrypted migration encrypts its candidate in a
+				// scratch file first; only the install's temp file fails.
+				calls := 0
+				createRosterTemp = func(dir, pattern string) (*os.File, error) {
+					if calls++; encrypted && calls == 1 {
+						return os.CreateTemp(dir, pattern)
+					}
+					return nil, &os.PathError{Op: "open", Path: filepath.Join(dir, pattern), Err: syscall.ENOSPC}
+				}
+				t.Cleanup(func() { createRosterTemp = os.CreateTemp })
+			}},
+			"in-place write stopped part-way": {fail: func(t *testing.T, path string) {
+				// Another hard link makes the write go in place; its first
+				// WriteAt writes half the candidate, as a full disk would.
+				if err := os.Link(path, filepath.Join(t.TempDir(), "other-name.yaml")); err != nil {
+					t.Fatal(err)
+				}
+				failed := false
+				writeRosterAt = func(f *os.File, data []byte, off int64) (int, error) {
+					if failed {
+						return f.WriteAt(data, off)
+					}
+					failed = true
+					n, _ := f.WriteAt(data[:len(data)/2], off)
+					return n, syscall.ENOSPC
+				}
+				t.Cleanup(func() { writeRosterAt = (*os.File).WriteAt })
+			}, rolledBack: true},
+		} {
+			t.Run(fmt.Sprintf("%s/encrypted=%v", name, encrypted), func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "roster.yaml")
+				if err := os.WriteFile(path, []byte(minimalValidRoster), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts := RosterMigrationOptions{}
+				if encrypted {
+					requireAnsibleVault(t)
+					opts.VaultPasswordFile = writeVaultPasswordFile(t, filepath.Join(t.TempDir(), "vault-pass"), "a-password")
+					encryptFileForTest(t, path, opts.VaultPasswordFile)
+				}
+				original := mustRead(t, path)
+				tc.fail(t, path)
+
+				_, err := MigrateRosterFile(path, opts)
+				if !errors.Is(err, syscall.ENOSPC) {
+					t.Fatalf("MigrateRosterFile() error = %v, want the ENOSPC write failure", err)
+				}
+				if !bytes.Equal(mustRead(t, path), original) {
+					t.Fatalf("roster not left as the original:\n%s", mustRead(t, path))
+				}
+				if got := strings.Contains(err.Error(), "rolled back to the original"); got != tc.rolledBack {
+					t.Errorf("error %q: reports a rollback = %v, want %v", err, got, tc.rolledBack)
+				}
+				if strings.Contains(err.Error(), "rollback failed") {
+					t.Errorf("error %q reports a failed rollback", err)
+				}
+				if !tc.rolledBack && !strings.Contains(err.Error(), "left unchanged") {
+					t.Errorf("error %q does not say the roster was left unchanged", err)
+				}
+				backups, _ := filepath.Glob(path + ".v1.*.bak")
+				if len(backups) != 1 || !bytes.Equal(mustRead(t, backups[0]), original) {
+					t.Errorf("backups %v, want one holding the original", backups)
+				}
+			})
+		}
+	}
 }

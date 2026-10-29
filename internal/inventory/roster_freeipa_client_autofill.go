@@ -29,6 +29,37 @@ import (
 // (hosts.yml, and group_vars/freeipa.yml as the domain fallback); path
 // is the roster file.
 func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
+	// A first look without the lock, so a roster that already lists every
+	// host — the common case on every deploy — neither gets lock files nor
+	// fails over one another user left; the same look decides under the
+	// lock, held to the last append so a host another writer adds meanwhile
+	// is not appended twice.
+	missing, err := missingFreeIPAClientRosterHosts(dir, path)
+	if err != nil || len(missing) == 0 {
+		return nil, err
+	}
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer lk.release() //nolint:errcheck
+	if missing, err = missingFreeIPAClientRosterHosts(dir, lk.target); err != nil {
+		return nil, err
+	}
+	var added []string
+	for _, host := range missing {
+		if err := appendTopLevelRosterEntryLocked(lk, "hosts", host); err != nil {
+			return added, err
+		}
+		added = append(added, host.Name)
+	}
+	sort.Strings(added)
+	return added, nil
+}
+
+// missingFreeIPAClientRosterHosts is the hosts: entries
+// AutoFillFreeIPAClientRosterHosts would append to the roster at path.
+func missingFreeIPAClientRosterHosts(dir, path string) ([]rosterHostStub, error) {
 	root, err := readRosterAsMap(path)
 	if err != nil {
 		return nil, err
@@ -59,7 +90,7 @@ func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
 		return nil, err
 	}
 
-	var added []string
+	var missing []rosterHostStub
 	for _, h := range hf.Hosts {
 		if !hasRoleTag(h.Roles, "freeipa-client") {
 			continue
@@ -84,14 +115,10 @@ func AutoFillFreeIPAClientRosterHosts(dir, path string) ([]string, error) {
 		if ip == "" {
 			continue
 		}
-		if err := AppendRosterHost(path, fqdn, ip); err != nil {
-			return added, err
-		}
 		existing[fqdn] = true
-		added = append(added, fqdn)
+		missing = append(missing, rosterHostStub{Name: fqdn, State: "present", IPAddress: ip})
 	}
-	sort.Strings(added)
-	return added, nil
+	return missing, nil
 }
 
 func hasRoleTag(roles []string, want string) bool {

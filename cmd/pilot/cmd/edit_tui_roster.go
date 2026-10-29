@@ -24,8 +24,10 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,7 +37,6 @@ import (
 
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/tui"
-	"github.com/kjelly/pilot/internal/vaultfile"
 )
 
 func pushRosterPathPrompt(r *editRouterModel, dir string) tea.Cmd {
@@ -82,14 +83,14 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 	// already have their own, less disruptive way of reporting exactly
 	// that (e.g. the ErrRosterEncrypted banner) once something actually
 	// tries to read it.
-	if notice := ensureRosterSchemaCurrentBanner(dir, path); notice != "" {
+	if notice := ensureRosterSchemaCurrentBanner(r.writeScope(dir), path); notice != "" {
 		if banner == "" {
 			banner = notice
 		} else {
 			banner = notice + "\n" + banner
 		}
 	}
-	if notice := autoFillFreeIPAClientRosterHostsBanner(dir, path); notice != "" {
+	if notice := autoFillFreeIPAClientRosterHostsBanner(r.writeScope(dir), path); notice != "" {
 		if banner == "" {
 			banner = notice
 		} else {
@@ -142,8 +143,8 @@ func pushRosterManager(r *editRouterModel, dir, path, banner string) tea.Cmd {
 // vN detected. Automatically upgraded to schema vM. Backup: <path>" — no
 // confirmation prompt, since a deterministic, validated migration with a
 // successfully created backup doesn't need one.
-func ensureRosterSchemaCurrentBanner(dir, path string) string {
-	result, err := mutateRosterSourceValue(dir, path, func() (inventory.RosterMigrationResult, error) {
+func ensureRosterSchemaCurrentBanner(scope editWriteScope, path string) string {
+	result, err := mutateRosterSourceValue(scope, path, func(path string) (inventory.RosterMigrationResult, error) {
 		return inventory.EnsureRosterCurrent(path, inventory.RosterMigrationOptions{})
 	})
 	if err != nil || !result.Changed {
@@ -162,8 +163,10 @@ func ensureRosterSchemaCurrentBanner(dir, path string) string {
 // ignored here: the roster screens below already have their own, less
 // disruptive way of reporting that once something actually tries to read
 // the file.
-func autoFillFreeIPAClientRosterHostsBanner(dir, path string) string {
-	added, err := mutateRosterSourceValue(dir, path, func() ([]string, error) { return inventory.AutoFillFreeIPAClientRosterHosts(dir, path) })
+func autoFillFreeIPAClientRosterHostsBanner(scope editWriteScope, path string) string {
+	added, err := mutateRosterSourceValue(scope, path, func(path string) ([]string, error) {
+		return inventory.AutoFillFreeIPAClientRosterHosts(scope.dir, path)
+	})
 	if err != nil || len(added) == 0 {
 		return ""
 	}
@@ -251,7 +254,10 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 		return nil
 	}
 
-	if err := mutateRosterSource(dir, path, func() error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.WriteMinimalRosterSkeleton(path, "admin", password) }); err != nil {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
+			return pushTopMenu(r, dir, banner)
+		}
 		r.err = err
 		return nil
 	}
@@ -259,13 +265,13 @@ func pushRosterCreateWithPassword(r *editRouterModel, dir, path, password, extra
 	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
 	vaultNote := ""
 	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-		if vaultErr := mutateRosterSource(dir, vaultPath, func() error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
+		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func(vaultPath string) error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
 			r.err = vaultErr
 			return nil
 		}
 		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
 	} else if statErr == nil {
-		changed, vaultErr := mutateRosterSourceValue(dir, vaultPath, func() (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
+		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func(vaultPath string) (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
 		if vaultErr != nil {
 			r.err = vaultErr
 			return nil
@@ -289,24 +295,17 @@ func existingFreeIPAAdminPassword(dir string) string {
 		return ""
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".vault", "main.yaml"))
-	if err != nil || isAnsibleVaultEncrypted(data) {
-		return ""
-	}
-	doc, err := vaultfile.Parse(data)
 	if err != nil {
 		return ""
 	}
-	for _, e := range doc.Entries() {
-		if e.Key != "ipa_admin_password" {
-			continue
-		}
-		v := e.Value.Value
-		if v == "" || v == "CHANGE-ME" || v == "CHANGE-ME-min-8-chars" {
-			return ""
-		}
-		return v
+	// Only a literal password written as a plain string is reused: not an
+	// inline !vault value, a template or a value YAML may type, which would
+	// otherwise go into the new roster as its raw text.
+	v := inventory.VaultAdminPasswordReusable(data)
+	if v == "CHANGE-ME" || v == "CHANGE-ME-min-8-chars" {
+		return ""
 	}
-	return ""
+	return v
 }
 
 func pushRosterUsersMenu(r *editRouterModel, dir, path, banner string) tea.Cmd {
@@ -381,7 +380,10 @@ func pushRosterAddUser(r *editRouterModel, dir, path string) tea.Cmd {
 		if len(violations) > 0 {
 			return pushRosterUsersMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterUser(path, name) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterUser(path, name) }); err != nil {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
+				return pushRosterUsersMenu(r, dir, path, banner)
+			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -499,7 +501,10 @@ func pushRosterAddGroupName(r *editRouterModel, dir, path, category string) tea.
 		if len(violations) > 0 {
 			return pushRosterGroupsMenu(r, dir, path, formatRosterViolations(violations))
 		}
-		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterGroup(path, name, category) }); err != nil {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
+				return pushRosterGroupsMenu(r, dir, path, banner)
+			}
 			r.err = fmt.Errorf("write %s: %w", path, err)
 			return nil
 		}
@@ -638,25 +643,171 @@ func rosterSecretDisplay(pw map[string]any, key string) string {
 
 var rosterBoolChoices = []string{"true", "false"}
 
+// editWriteScope is where an edit session may write a roster: its
+// workspace dir, the real workspace when dir is a plan's scratch copy
+// (planSource), and whether the session is an apply that rolls back on
+// failure (transaction).
+type editWriteScope struct {
+	dir, planSource string
+	transaction     bool
+}
+
+// errRosterOutsideEditScope refuses, under a plan or an MCP apply, a
+// roster write outside the session's own .vault/ files: the plan's copy
+// does not hold it, so the plan would change the real file, and the
+// apply's rollback does not restore it. Only a write that would change
+// the file is refused (mutateRosterSource). At the terminal and under
+// --actions there is no such limit.
+var errRosterOutsideEditScope = errors.New("not one of this edit session's .vault/ files: a plan cannot preview it and an apply cannot roll it back; change it at the terminal (pilot edit) or by hand")
+
+// writeScope is the scope r's roster writes run in.
+func (r *editRouterModel) writeScope(dir string) editWriteScope {
+	return editWriteScope{dir: dir, planSource: r.planSource, transaction: r.transaction}
+}
+
+// rosterWritePath is the file r writes for the freeipa_roster_file
+// reference ref (editWriteScope.rosterWritePath). The editor's screens
+// resolve a reference only through it, never with resolveRosterPath
+// (TestEditorResolvesRosterReferencesThroughItsScope).
+func (r *editRouterModel) rosterWritePath(dir, ref string) string {
+	return r.writeScope(dir).rosterWritePath(ref)
+}
+
+// recordedPath is the absolute path r records in hosts.yml for rel, a
+// path inside the workspace (editWriteScope.recordedPath).
+func (r *editRouterModel) recordedPath(dir, rel string) (string, error) {
+	return r.writeScope(dir).recordedPath(rel)
+}
+
 // mutateRosterSource retains the selected workspace at the persistence
 // boundary. An external roster can become exposed through that workspace's
 // vars aliases while any of its editor screens is open; cwd alone cannot
-// identify that relationship.
-func mutateRosterSource(dir, path string, mutate func() error) error {
-	if err := validateSecretSourcePath(dir, path); err != nil {
-		return err
-	}
-	return mutate()
+// identify that relationship. mutate writes the roster at the path it is
+// given (the closure's parameter shadows path, so it cannot write another;
+// TestConfigSecretPaths_AllRosterSourceWritesCarryWorkspace).
+//
+// Under a plan or a transaction a roster outside the session's .vault/
+// files is never written: mutate runs on a private copy of it instead
+// (simulateRosterWrite). When that would change the roster, the write is
+// refused with errRosterOutsideEditScope; when it would not — the entry it
+// adds is already there, the schema is current — mutate's result stands,
+// as it does at the terminal (PR #148 round 5, F1).
+func mutateRosterSource(scope editWriteScope, path string, mutate func(path string) error) error {
+	_, err := mutateRosterSourceValue(scope, path, func(path string) (struct{}, error) { return struct{}{}, mutate(path) })
+	return err
 }
 
-// mutateRosterSourceValue applies the same persistence guard to helpers
-// returning a migration or autofill result as well as an error.
-func mutateRosterSourceValue[T any](dir, path string, mutate func() (T, error)) (T, error) {
-	if err := validateSecretSourcePath(dir, path); err != nil {
-		var zero T
+// rosterRefusal is rosterBusyBanner for a write that must not go ahead on
+// any error: an error rosterBusyBanner does not know is refused too, with
+// the error itself as the reason, and recorded on r the same way.
+func rosterRefusal(r *editRouterModel, path string, err error) string {
+	if banner, ok := rosterBusyBanner(r, path, err); ok {
+		return banner
+	}
+	r.writeRefused = fmt.Errorf("roster %s was not written: %w", path, err)
+	return fmt.Sprintf("⚠️  未寫入 %s：%v", path, err)
+}
+
+// mutateRosterSourceValue is mutateRosterSource for helpers returning a
+// migration or autofill result as well as an error.
+func mutateRosterSourceValue[T any](scope editWriteScope, path string, mutate func(path string) (T, error)) (T, error) {
+	var zero T
+	if err := validateSecretSourcePath(scope.dir, path); err != nil {
 		return zero, err
 	}
-	return mutate()
+	if !scope.restricts(path) {
+		return mutate(path)
+	}
+	value, changed, err := simulateRosterWrite(path, mutate)
+	if changed {
+		return zero, fmt.Errorf("roster %s: %w", path, errRosterOutsideEditScope)
+	}
+	return value, err
+}
+
+// restricts reports whether scope keeps a write to path off the real file:
+// under a plan or a transaction, for anything but the session's own
+// .vault/ files, however path reaches one (vaultSpelling).
+func (scope editWriteScope) restricts(path string) bool {
+	return (scope.planSource != "" || scope.transaction) && vaultSpelling(scope.dir, path) == ""
+}
+
+// simulateRosterWrite runs mutate on a private copy of the roster at path,
+// in a new temporary directory it removes afterwards (privateTempDir), and
+// reports whether
+// the write would change the roster: different bytes, or a roster created
+// or removed. The real file is only read, and no lock file appears beside
+// it. An error names path, not the copy.
+func simulateRosterWrite[T any](path string, mutate func(path string) (T, error)) (T, bool, error) {
+	var zero T
+	before, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		return zero, false, fmt.Errorf("read roster %s: %w", path, readErr)
+	}
+	// A plaintext roster copy, admin password included: privateTempDir
+	// sweeps the copies a killed pilot leaves.
+	scratchDir, err := privateTempDir("pilot-roster-scope")
+	if err != nil {
+		return zero, false, err
+	}
+	defer os.RemoveAll(scratchDir)
+	scratch := filepath.Join(scratchDir, filepath.Base(path))
+	if existed {
+		if err := os.WriteFile(scratch, before, 0o600); err != nil {
+			return zero, false, err
+		}
+	}
+	value, err := mutate(scratch)
+	after, afterErr := os.ReadFile(scratch)
+	changed := existed != (afterErr == nil) || !bytes.Equal(before, after)
+	if err != nil {
+		err = scratchPathError{err: err, scratch: scratch, path: path}
+	}
+	return value, changed, err
+}
+
+// scratchPathError is an error from work on a private copy — a simulated
+// write, a plan's scratch workspace — with the copy's path replaced by the
+// real one.
+type scratchPathError struct {
+	err           error
+	scratch, path string
+}
+
+func (e scratchPathError) Error() string {
+	return strings.ReplaceAll(e.err.Error(), e.scratch, e.path)
+}
+
+func (e scratchPathError) Unwrap() error { return e.err }
+
+// rosterBusyBanner is the banner for a roster write refused because
+// another pilot process holds the roster (inventory.ErrMutationLocked),
+// its lock file cannot be used (inventory.ErrRosterLockFile), the roster
+// itself cannot be written (inventory.ErrRosterNotWritable: not writable
+// by this user, not a regular file), or it is outside a plan's or apply's
+// scope (errRosterOutsideEditScope). Nothing was written. At the terminal the operator can retry once that is over or
+// fixed, so pilot edit shows the banner and stays open instead of ending
+// the session (r.err). The refusal is also recorded on r (writeRefused):
+// the automation driver fails the step with it, so a scenario — and an
+// MCP apply — rolls back instead of reporting a write that never happened.
+func rosterBusyBanner(r *editRouterModel, path string, err error) (string, bool) {
+	var banner string
+	switch {
+	case errors.Is(err, inventory.ErrMutationLocked):
+		banner = fmt.Sprintf("⚠️  未寫入 %s：另一個 pilot 名冊操作正鎖住它，等它結束後再試一次", path)
+		err = fmt.Errorf("roster %s was not written: another pilot process holds its lock: %w", path, inventory.ErrMutationLocked)
+	case errors.Is(err, inventory.ErrRosterLockFile), errors.Is(err, inventory.ErrRosterNotWritable):
+		banner = fmt.Sprintf("⚠️  未寫入 %s：%v", path, err)
+		err = fmt.Errorf("roster %s was not written: %w", path, err)
+	case errors.Is(err, errRosterOutsideEditScope):
+		banner = fmt.Sprintf("⚠️  未寫入 %s：不是這個編輯 session 的 .vault/ 檔案，plan 無法預覽、apply 無法 rollback；請在終端機用 pilot edit 或手動修改", path)
+		err = fmt.Errorf("roster %s was not written: %w", path, errRosterOutsideEditScope)
+	default:
+		return "", false
+	}
+	r.writeRefused = err
+	return banner, true
 }
 
 // rosterEnumChoices turns one of this file's fixed enum option slices
@@ -692,7 +843,7 @@ func rosterIntValidator(s string) error {
 // gate chain (Simulate first, only write once it reports no violations).
 // ok=false means nothing was written — either a validation rejection
 // (banner explains why) or name no longer exists.
-func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyUserEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterUser(path, name)
 	if err != nil {
 		return "", false, err
@@ -709,7 +860,10 @@ func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (b
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterUser(path, name, updated) }); err != nil {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
+			return banner, false, nil
+		}
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil
@@ -719,7 +873,7 @@ func rosterApplyUserEdit(dir, path, name string, mutate func(map[string]any)) (b
 // (possibly changed) detail screen — the commit point every scalar/bool/
 // enum/password field widget below routes through.
 func pushRosterEditUser(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyUserEdit(dir, path, name, mutate)
+	banner, _, err := rosterApplyUserEdit(r, dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil
@@ -1060,7 +1214,7 @@ func pushRosterUserSSHKeysEditItem(r *editRouterModel, dir, path, name string, v
 // (not the rejected newValues) on a validation failure, so the screen
 // always shows what's actually on disk.
 func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, oldValues, newValues []string) tea.Cmd {
-	banner, ok, err := rosterApplyUserEdit(dir, path, name, func(f map[string]any) {
+	banner, ok, err := rosterApplyUserEdit(r, dir, path, name, func(f map[string]any) {
 		ssh := rosterSubmapClone(f, "ssh_keys")
 		ssh["authoritative"] = true
 		ssh["values"] = newValues
@@ -1079,7 +1233,7 @@ func pushRosterCommitUserSSHKeys(r *editRouterModel, dir, path, name string, old
 // ---- groups: full-detail preview + per-field edit -----------------------
 
 // rosterApplyGroupEdit is rosterApplyUserEdit's group counterpart.
-func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
+func rosterApplyGroupEdit(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) (banner string, ok bool, err error) {
 	fields, found, err := inventory.RosterGroup(path, name)
 	if err != nil {
 		return "", false, err
@@ -1096,14 +1250,17 @@ func rosterApplyGroupEdit(dir, path, name string, mutate func(map[string]any)) (
 	if len(violations) > 0 {
 		return formatRosterViolations(violations), false, nil
 	}
-	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterGroup(path, name, updated) }); err != nil {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
+			return banner, false, nil
+		}
 		return "", false, err
 	}
 	return "✅ 已更新", true, nil
 }
 
 func pushRosterEditGroup(r *editRouterModel, dir, path, name string, mutate func(map[string]any)) tea.Cmd {
-	banner, _, err := rosterApplyGroupEdit(dir, path, name, mutate)
+	banner, _, err := rosterApplyGroupEdit(r, dir, path, name, mutate)
 	if err != nil {
 		r.err = err
 		return nil

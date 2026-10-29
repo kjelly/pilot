@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -218,7 +219,9 @@ func validateDeploymentCompletenessSnapshot(inv string, snapshot deployInventory
 // referenced by an effective freeipa-server/freeipa-server-replica target to
 // the current roster schema — the "pilot reconcile / freeipa-identity
 // preflight" call site the roster-schema-v2 migration spec requires before
-// every local mutating workflow that consumes a canonical roster.
+// every local mutating workflow that consumes a canonical roster. It then
+// warns about any roster whose admin password drifted from the vault
+// (warnFreeIPARosterAdminDrift).
 //
 // Deliberately a separate function from validateDeploymentCompleteness
 // rather than folded into it: that function is documented above to "never
@@ -262,7 +265,7 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 			seen[rosterPath] = true
 
 			dir := filepath.Dir(inv)
-			result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+			result, err := mutateRosterSourceValue(editWriteScope{dir: dir}, rosterPath, func(rosterPath string) (inventory.RosterMigrationResult, error) {
 				return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
 			})
 			if err != nil {
@@ -278,7 +281,88 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 				result.FromVersion, rosterPath, result.ToVersion, result.BackupPath)
 		}
 	}
+	warnFreeIPARosterAdminDrift(out, inv, hostVars)
 	return nil
+}
+
+// warnFreeIPARosterAdminDrift warns, without printing either value, about
+// every plaintext roster whose literal freeipa.admin.password differs from
+// the workspace vault's ipa_admin_password (issue #146) — typically a
+// rotation that changed only one of them. freeipa-nfs-server-apply.yml
+// stops on it, and `pilot access`/`pilot identity drift`/`pilot roster
+// remove-*` would log in with the roster's copy. A warning, not a
+// violation: deploy and reconcile themselves use the vault's value, and an
+// encrypted or unreadable file is left to the playbooks' own gates. It
+// checks the same rosters pilot edit keeps in step (rosterCandidates),
+// with every host's resolved freeipa_roster_file as the references. A
+// vault value Ansible templates cannot be compared, and says so.
+func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]map[string]any) {
+	vaultPath := defaultVaultFile(inv)
+	if vaultPath == "" {
+		return
+	}
+	data, err := os.ReadFile(vaultPath)
+	if err != nil {
+		return
+	}
+	if inventory.VaultAdminPasswordNotString(data) {
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 沒加引號，YAML 可能把它讀成數字、日期或布林值；pilot 無法拿它跟名冊比對。"+
+			"請把它加上引號，名冊的 freeipa.admin.password 也寫成同一個加引號的值。\n\n", vaultPath)
+		return
+	}
+	password := inventory.VaultAdminPassword(data)
+	templated := inventory.VaultAdminPasswordTemplate(data) != ""
+	// An inline !vault value cannot be read either: every roster holding a
+	// literal password is listed as uncompared, as for a template, which
+	// is what the vault save's sync says too.
+	encrypted := inventory.VaultAdminPasswordEncrypted(data)
+	if password == "" && !templated && !encrypted {
+		return
+	}
+	dir := filepath.Dir(inv)
+	hosts := make([]string, 0, len(hostVars))
+	for host := range hostVars {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	var referenced []string
+	for _, host := range hosts {
+		rosterPath, _ := hostVars[host]["freeipa_roster_file"].(string)
+		referenced = append(referenced, rosterPath)
+	}
+	var uncompared []string
+	for _, rosterPath := range rosterCandidates(dir, "", referenced) {
+		if validateSecretSourcePath(dir, rosterPath) != nil {
+			continue
+		}
+		// Every literal password differs from "", so a templated vault
+		// value lists each roster that holds one.
+		result, err := inventory.CompareRosterAdminPassword(rosterPath, password)
+		if err != nil || (result != inventory.RosterAdminDiffers && result != inventory.RosterAdminNotString) {
+			continue
+		}
+		if templated || encrypted {
+			uncompared = append(uncompared, rosterPath)
+			continue
+		}
+		if result == inventory.RosterAdminNotString {
+			fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 沒加引號，YAML 可能把它讀成數字、日期或布林值而不是字串，跟 %s 的 ipa_admin_password 比對會不相等。"+
+				"請手動把它改成加上引號的 vault 值（加密名冊用 ansible-vault edit）。\n\n", rosterPath, vaultPath)
+			continue
+		}
+		fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 跟 %s 的 ipa_admin_password 不同。"+
+			"freeipa-nfs-server 會在 gate 擋下，pilot access／identity drift／roster remove 也會用名冊裡的舊值登入 FreeIPA。"+
+			"請手動把名冊的 freeipa.admin.password 改成 vault 的 ipa_admin_password（加密名冊用 ansible-vault edit）；"+
+			"pilot edit 只在改變 ipa_admin_password 的那次存檔同步名冊，之後再存不會修正。\n\n", rosterPath, vaultPath)
+	}
+	switch {
+	case len(uncompared) > 0 && encrypted:
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 是 !vault 加密值，pilot 讀不到它，無法比對它跟名冊的 freeipa.admin.password。"+
+			"請自行確認這些名冊的值跟它解密後相同：%s\n\n", vaultPath, strings.Join(uncompared, "、"))
+	case len(uncompared) > 0:
+		fmt.Fprintf(out, "warning: %s 的 ipa_admin_password 含 {{、{%% 或 {#，Ansible 會當成模板展開，pilot 無法比對它跟名冊的 freeipa.admin.password。"+
+			"請自行確認這些名冊的值跟它展開後相同：%s\n\n", vaultPath, strings.Join(uncompared, "、"))
+	}
 }
 
 // formatCompletenessViolations renders every violation into a single error

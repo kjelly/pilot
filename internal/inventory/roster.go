@@ -164,15 +164,22 @@ func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, e
 		return false, fmt.Errorf("FreeIPA domain is required from group_vars/freeipa.yml")
 	}
 	fqdn := RosterHostFQDN(hostName, domain)
+	// A first look without the lock, so a roster that already has the
+	// entry gets no lock files; the same check decides under the lock.
 	has, err := RosterHasNFSServer(path, fqdn)
+	if err != nil || has {
+		return false, err
+	}
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return false, err
 	}
-	if has {
-		return false, nil
+	defer lk.release() //nolint:errcheck
+	if has, err := RosterHasNFSServer(lk.target, fqdn); err != nil || has {
+		return false, err
 	}
 
-	data, err := readSecretSourceFile(path)
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return false, err
 	}
@@ -209,7 +216,7 @@ func AppendMissingNFSServerStub(path, hostName, domain string) (appended bool, e
 	if err != nil {
 		return false, fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return false, fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return true, nil
@@ -440,7 +447,12 @@ func RosterHBACDisableAllowAll(path string) (bool, error) {
 }
 
 func SetRosterHBACDisableAllowAll(path string, value bool) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -469,7 +481,7 @@ render:
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func SimulateSetRosterHostgroup(path, name string, updated map[string]any) ([]RosterViolation, bool, error) {
@@ -514,7 +526,12 @@ func AppendRosterNFSClient(path string, entry map[string]any) error {
 }
 
 func AppendRosterHBACRule(path string, rule map[string]any) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -540,7 +557,7 @@ func AppendRosterHBACRule(path string, rule map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func SimulateAddRosterHBACRule(path string, rule map[string]any) ([]RosterViolation, error) {
@@ -566,7 +583,12 @@ func SetRosterHostgroup(path, name string, updated map[string]any) error {
 }
 
 func SetRosterHBACRule(path, name string, updated map[string]any) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -614,7 +636,7 @@ func SetRosterHBACRule(path, name string, updated map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }
 
 func simulateSetRosterNested(path, listKey, name string, updated map[string]any, kind string) ([]RosterViolation, bool, error) {
@@ -816,7 +838,20 @@ func AppendRosterHost(path, name, ipAddress string) error {
 }
 
 func appendTopLevelRosterEntry(path, listKey string, stub any) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	return appendTopLevelRosterEntryLocked(lk, listKey, stub)
+}
+
+// appendTopLevelRosterEntryLocked is appendTopLevelRosterEntry for a caller
+// that already holds the roster's lock because it read what it appends
+// against (AutoFillFreeIPAClientRosterHosts).
+func appendTopLevelRosterEntryLocked(lk *rosterLock, listKey string, stub any) error {
+	path := lk.path
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -843,7 +878,7 @@ func appendTopLevelRosterEntry(path, listKey string, stub any) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil
@@ -873,7 +908,20 @@ func SetRosterGroup(path, name string, updated map[string]any) error {
 }
 
 func replaceTopLevelRosterEntry(path, listKey, name string, updated map[string]any) error {
-	data, err := readSecretSourceFile(path)
+	lk, err := lockRosterFile(path)
+	if err != nil {
+		return err
+	}
+	defer lk.release() //nolint:errcheck
+	return replaceTopLevelRosterEntryLocked(lk, listKey, name, updated)
+}
+
+// replaceTopLevelRosterEntryLocked is replaceTopLevelRosterEntry for a
+// caller that already holds the roster's lock because it read the entry
+// it replaces (SetRosterHostAbsent, the review marks).
+func replaceTopLevelRosterEntryLocked(lk *rosterLock, listKey, name string, updated map[string]any) error {
+	path := lk.path
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -922,7 +970,7 @@ func replaceTopLevelRosterEntry(path, listKey, name string, updated map[string]a
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	if err := writeSecretSourceFile(path, rendered, 0o600); err != nil {
+	if err := writeLockedRoster(lk, rendered); err != nil {
 		return fmt.Errorf("write roster %s: %w", path, err)
 	}
 	return nil

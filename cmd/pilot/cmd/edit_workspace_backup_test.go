@@ -16,8 +16,8 @@ func TestRestoreManagedFiles_RewritesChangedFileBackToSnapshot(t *testing.T) {
 
 	writeTestFile(t, filepath.Join(dir, "hosts.yml"), "hosts: {web: {}, db: {}}\n")
 
-	if err := restoreManagedFiles(dir, snapshot); err != nil {
-		t.Fatalf("restoreManagedFiles() error = %v", err)
+	if report, err := restoreManagedFiles(dir, snapshot, nil); err != nil || len(report.left) != 0 {
+		t.Fatalf("restoreManagedFiles() = %v, %v", report.left, err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
 	if err != nil {
@@ -38,8 +38,8 @@ func TestRestoreManagedFiles_RemovesFileCreatedAfterSnapshot(t *testing.T) {
 
 	writeTestFile(t, filepath.Join(dir, "role-presets.yml"), "presets: []\n")
 
-	if err := restoreManagedFiles(dir, snapshot); err != nil {
-		t.Fatalf("restoreManagedFiles() error = %v", err)
+	if report, err := restoreManagedFiles(dir, snapshot, nil); err != nil || len(report.left) != 0 {
+		t.Fatalf("restoreManagedFiles() = %v, %v", report.left, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "role-presets.yml")); !os.IsNotExist(err) {
 		t.Fatalf("expected role-presets.yml (created after the snapshot) to be removed, stat error = %v", err)
@@ -61,8 +61,8 @@ func TestRestoreManagedFiles_RevisionMatchesSnapshotRevisionAfterRestore(t *test
 	writeTestFile(t, filepath.Join(dir, "hosts.yml"), "hosts: {web: {}, db: {}}\n")
 	writeTestFile(t, filepath.Join(dir, "group_vars", "new.yml"), "x: 1\n")
 
-	if err := restoreManagedFiles(dir, snapshot); err != nil {
-		t.Fatalf("restoreManagedFiles() error = %v", err)
+	if report, err := restoreManagedFiles(dir, snapshot, nil); err != nil || len(report.left) != 0 {
+		t.Fatalf("restoreManagedFiles() = %v, %v", report.left, err)
 	}
 	revisionAfter, err := computeWorkspaceRevision(dir)
 	if err != nil {

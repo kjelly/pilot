@@ -24,6 +24,12 @@ func computeWorkspaceRevision(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("compute workspace revision: %w", err)
 	}
+	return revisionOfEntries(entries), nil
+}
+
+// revisionOfEntries is computeWorkspaceRevision of entries, sorted by
+// RelPath as managedFileEntries returns them.
+func revisionOfEntries(entries []managedFileEntry) string {
 	h := sha256.New()
 	for _, e := range entries {
 		contentHash := sha256.Sum256(e.Content)
@@ -32,5 +38,5 @@ func computeWorkspaceRevision(dir string) (string, error) {
 			_, _ = h.Write([]byte{0})
 		}
 	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }

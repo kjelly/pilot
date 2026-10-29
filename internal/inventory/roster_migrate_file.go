@@ -8,9 +8,9 @@ package inventory
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -152,12 +152,18 @@ type RosterMigrationResult struct {
 // MigrateRosterFile upgrades the roster at path to opts.TargetVersion
 // (CurrentRosterSchemaVersion if unset), as one transaction:
 //
-//  1. acquire the mutation lock (fails fast if another process holds it —
-//     no backup, no read past this point)
-//  2. read original bytes, record its mode, hash it
+//  1. lock the file path names (lockRosterFile: fails fast if another
+//     roster writer holds it — no backup, no read past this point); every
+//     step below reads, backs up and replaces that file, so a symlinked
+//     roster stays a link. A roster already at the target version, or
+//     encrypted with no VaultPasswordFile, is reported before locking
+//     (migrationNeedsNoLock): neither writes anything. Nor does a dry run,
+//     which therefore takes no lock either: it works on a roster this
+//     user may only read, which lockRosterFile refuses
+//  2. read original bytes and hash them
 //  3. an ansible-vault-encrypted roster with no VaultPasswordFile fails
-//     closed (ErrRosterEncrypted); with one, control passes to
-//     migrateEncryptedRosterFile instead of the steps below
+//     closed (ErrRosterEncrypted); with one, it is decrypted into memory
+//     for the steps below and installed by migrateEncryptedRosterFile
 //  4. detect schema version; already-current is a no-op (Changed: false,
 //     no backup); anything with no chain of rosterMigrationSteps reaching
 //     exactly the target (an unknown source version, or an unsupported
@@ -167,16 +173,22 @@ type RosterMigrationResult struct {
 //     that hop's own target schema — and check the overall
 //     semantic-equivalence fingerprint (ComputeRosterSemanticFingerprint)
 //     between the original and the final candidate — any failure here
-//     stops before anything is written
-//  6. (unless DryRun) create the persistent backup, then atomically
-//     replace the roster; if the replace fails, roll back to the exact
-//     backed-up bytes and report the failure
+//     stops before anything is written (planRosterMigration, steps 3-5)
+//  6. (unless DryRun) refuse a roster writeLockedRoster would refuse
+//     (ErrRosterNotWritable: not writable by this user, not a regular
+//     file — lockRosterFile already refused one before taking the lock,
+//     and this decides again under it), then create the persistent
+//     backup, then replace the roster through writeLockedRoster; if that
+//     write fails after it may have changed the roster
+//     (errRosterPartlyWritten), roll back to the exact backed-up bytes,
+//     and report the failure either way
 //  7. reopen and re-validate the installed result against the target
 //     schema
 //
 // A failure before backup creation leaves the original file completely
-// untouched. A failure after backup creation is rolled back to the exact
-// original bytes before returning an error.
+// untouched, with no backup. A failure after it leaves the original bytes
+// in place — untouched, or rolled back to them — before returning an
+// error, unless the rollback itself fails, which the error says.
 func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigrationResult, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return RosterMigrationResult{}, err
@@ -186,227 +198,236 @@ func MigrateRosterFile(path string, opts RosterMigrationOptions) (RosterMigratio
 		targetVersion = int(CurrentRosterSchemaVersion)
 	}
 
-	lock, err := acquireMutationLock(path + ".pilot-migrate.lock")
+	// Nothing to write needs no lock: deploy, inventory generate and pilot
+	// edit call this on every run, and a roster already current — or
+	// encrypted with no vault password to open it — must not fail over a
+	// lock file another user left beside it. Anything else is decided
+	// again on a fresh read under the lock.
+	if result, done, err := migrationNeedsNoLock(path, opts, targetVersion); done {
+		return result, err
+	}
+	if opts.DryRun {
+		original, err := readSecretSourceFile(path)
+		if err != nil {
+			return RosterMigrationResult{}, fmt.Errorf("read roster %s: %w", path, err)
+		}
+		plan, err := planRosterMigration(path, path, original, opts, targetVersion)
+		return plan.result, err
+	}
+
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return RosterMigrationResult{}, err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
+	// Read, back up and replace the file path names, not path itself: a
+	// symlinked roster stays a link, its backup sits beside the real file,
+	// and every spelling of it shares the lock.
+	target := lk.target
 
-	original, err := readSecretSourceFile(path)
+	original, err := readSecretSourceFile(target)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("read roster %s: %w", path, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("stat roster %s: %w", path, err)
+	plan, err := planRosterMigration(path, target, original, opts, targetVersion)
+	if err != nil || !plan.result.Changed {
+		return plan.result, err
 	}
-	originalMode := info.Mode().Perm()
-	originalSHA := sha256Hex(original)
-
-	if strings.HasPrefix(strings.TrimSpace(string(original)), "$ANSIBLE_VAULT") {
-		if opts.VaultPasswordFile == "" {
-			return RosterMigrationResult{}, ErrRosterEncrypted
-		}
-		return migrateEncryptedRosterFile(path, opts, original, originalMode, originalSHA, targetVersion)
+	if plan.encrypted {
+		return migrateEncryptedRosterFile(lk, opts, original, plan)
 	}
+	candidate := plan.candidate
 
-	detected, err := DetectRosterSchemaVersion(original)
-	if err != nil {
+	if err := checkLockedRosterWritable(lk); err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
 	}
-
-	if int(detected) == targetVersion {
-		return RosterMigrationResult{
-			FromVersion:    int(detected),
-			ToVersion:      targetVersion,
-			Changed:        false,
-			OriginalSHA256: originalSHA,
-			NewSHA256:      originalSHA,
-		}, nil
-	}
-
-	sourceValidator, ok := rosterSourceValidators[detected]
-	if !ok {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: no migration path from schema v%d to v%d", path, detected, targetVersion)
-	}
-
-	var originalRoot map[string]any
-	if err := yaml.Unmarshal(original, &originalRoot); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
-	}
-	if v := sourceValidator(originalRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v%d validation: %v", path, detected, v)
-	}
-
-	migrationPath, err := rosterMigrationPath(detected, RosterSchemaVersion(targetVersion))
-	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
-	}
-
-	originalNode := &yaml.Node{}
-	if err := yaml.Unmarshal(original, originalNode); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
-	}
-	_, candidate, candidateRoot, err := runRosterMigrationChain(originalNode, migrationPath)
-	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
-	}
-
-	before := ComputeRosterSemanticFingerprint(originalRoot)
-	after := ComputeRosterSemanticFingerprint(candidateRoot)
-	if !RosterSemanticFingerprintsEqual(before, after) {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate would change authorization-affecting content, refusing to migrate", path)
-	}
-
-	steps := rosterMigrationStepNames(migrationPath)
-	newSHA := sha256Hex(candidate)
-	if opts.DryRun {
-		return RosterMigrationResult{
-			FromVersion:    int(detected),
-			ToVersion:      targetVersion,
-			Changed:        true,
-			OriginalSHA256: originalSHA,
-			NewSHA256:      newSHA,
-			Steps:          steps,
-		}, nil
-	}
-
-	backupPath, err := createRosterBackup(path, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+	backupPath, err := createRosterBackup(lk, original, plan.detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
 
-	if err := atomicReplaceFile(path, candidate, originalMode); err != nil {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
-			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
-		}
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
+	if err := writeLockedRoster(lk, candidate); err != nil {
+		return RosterMigrationResult{}, migrationWriteFailed(lk, path, backupPath, original, err)
 	}
 
-	reopened, err := readSecretSourceFile(path)
+	reopened, err := readSecretSourceFile(target)
 	var reopenedRoot map[string]any
 	if err == nil {
 		err = yaml.Unmarshal(reopened, &reopenedRoot)
 	}
 	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](reopenedRoot)) != 0 {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation, rolled back to the original (backup at %s)", path, backupPath)
 	}
 
-	return RosterMigrationResult{
-		FromVersion:    int(detected),
-		ToVersion:      targetVersion,
-		Changed:        true,
-		BackupPath:     backupPath,
-		OriginalSHA256: originalSHA,
-		NewSHA256:      newSHA,
-		Steps:          steps,
-	}, nil
+	result := plan.result
+	result.BackupPath = backupPath
+	return result, nil
 }
 
-// migrateEncryptedRosterFile is MigrateRosterFile's branch for an
-// ansible-vault-encrypted roster, following the migration spec's required
-// encrypted-file flow:
-//
-//	decrypt into memory (ansibleVaultView; never a plaintext temp file)
-//	    -> detect version (already-current is a no-op, same as plaintext)
-//	    -> validate original against its own version, run the migration
-//	       chain, check the semantic fingerprint (identical to the
-//	       plaintext path)
-//	    -> write the candidate plaintext to a mode-0600 temp file
-//	    -> ansible-vault encrypt that temp file in place
-//	    -> atomically install the now-encrypted result
-//
-// original/originalMode/originalSHA are the still-encrypted bytes/mode/
-// hash MigrateRosterFile already read before dispatching here, so the
-// backup this creates is guaranteed to be the exact original ciphertext,
-// never anything decrypted. Nothing this function returns, logs, or wraps
-// into an error ever includes plaintext roster content or the vault
-// password itself — only paths, exit statuses, and ansible-vault's own
-// (non-secret) stderr text.
-func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, original []byte, originalMode os.FileMode, originalSHA string, targetVersion int) (RosterMigrationResult, error) {
-	plaintext, err := ansibleVaultView(path, opts.VaultPasswordFile)
+// migrationNeedsNoLock is MigrateRosterFile's look before the lock: done
+// is true, with MigrateRosterFile's own result, when the roster is
+// already at targetVersion or is encrypted with no vault password file —
+// the two outcomes that write nothing.
+func migrationNeedsNoLock(path string, opts RosterMigrationOptions, targetVersion int) (RosterMigrationResult, bool, error) {
+	original, err := readSecretSourceFile(path)
 	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("decrypt roster %s: %w", path, err)
+		return RosterMigrationResult{}, false, nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(original)), "$ANSIBLE_VAULT") {
+		if opts.VaultPasswordFile == "" {
+			return RosterMigrationResult{}, true, ErrRosterEncrypted
+		}
+		return RosterMigrationResult{}, false, nil
+	}
+	detected, err := DetectRosterSchemaVersion(original)
+	if err != nil || int(detected) != targetVersion {
+		return RosterMigrationResult{}, false, nil
+	}
+	sha := sha256Hex(original)
+	return RosterMigrationResult{FromVersion: targetVersion, ToVersion: targetVersion, OriginalSHA256: sha, NewSHA256: sha}, true, nil
+}
+
+// rosterMigrationPlan is what a migration of one roster would do, decided
+// without writing anything (planRosterMigration).
+type rosterMigrationPlan struct {
+	// result is MigrateRosterFile's result as a dry run reports it: no
+	// BackupPath, and for an encrypted roster no NewSHA256.
+	result   RosterMigrationResult
+	detected RosterSchemaVersion
+	// candidate is the migrated roster's plaintext; encrypted says it must
+	// be encrypted before it is installed.
+	candidate []byte
+	encrypted bool
+}
+
+// planRosterMigration is MigrateRosterFile's steps 3-5 on original, the
+// bytes of the roster file (shown in messages as shown): decrypt it in
+// memory if it is ansible-vault encrypted (ansibleVaultView on file, never
+// a plaintext file), detect its version, validate it, run the migration
+// chain and check the semantic fingerprint. It reads nothing but file's
+// decryption, writes nothing and takes no lock, so a dry run is this
+// alone. Errors return the zero plan.
+func planRosterMigration(shown, file string, original []byte, opts RosterMigrationOptions, targetVersion int) (rosterMigrationPlan, error) {
+	originalSHA := sha256Hex(original)
+	plaintext, encrypted := original, false
+	if strings.HasPrefix(strings.TrimSpace(string(original)), "$ANSIBLE_VAULT") {
+		if opts.VaultPasswordFile == "" {
+			return rosterMigrationPlan{}, ErrRosterEncrypted
+		}
+		decrypted, err := ansibleVaultView(file, opts.VaultPasswordFile)
+		if err != nil {
+			return rosterMigrationPlan{}, fmt.Errorf("decrypt roster %s: %w", shown, err)
+		}
+		plaintext, encrypted = decrypted, true
 	}
 
 	detected, err := DetectRosterSchemaVersion(plaintext)
 	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: %w", shown, err)
 	}
 	if int(detected) == targetVersion {
-		return RosterMigrationResult{
+		return rosterMigrationPlan{result: RosterMigrationResult{
 			FromVersion:    int(detected),
 			ToVersion:      targetVersion,
 			Changed:        false,
 			OriginalSHA256: originalSHA,
 			NewSHA256:      originalSHA,
-		}, nil
+		}, detected: detected}, nil
 	}
+
 	sourceValidator, ok := rosterSourceValidators[detected]
 	if !ok {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: no migration path from schema v%d to v%d", path, detected, targetVersion)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: no migration path from schema v%d to v%d", shown, detected, targetVersion)
 	}
 
 	var originalRoot map[string]any
 	if err := yaml.Unmarshal(plaintext, &originalRoot); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
+		return rosterMigrationPlan{}, fmt.Errorf("parse roster %s: %w", shown, err)
 	}
 	if v := sourceValidator(originalRoot); len(v) != 0 {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: original document fails schema v%d validation: %v", path, detected, v)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: original document fails schema v%d validation: %v", shown, detected, v)
 	}
 
 	migrationPath, err := rosterMigrationPath(detected, RosterSchemaVersion(targetVersion))
 	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: %w", shown, err)
 	}
 
-	plaintextNode := &yaml.Node{}
-	if err := yaml.Unmarshal(plaintext, plaintextNode); err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("parse roster %s: %w", path, err)
+	originalNode := &yaml.Node{}
+	if err := yaml.Unmarshal(plaintext, originalNode); err != nil {
+		return rosterMigrationPlan{}, fmt.Errorf("parse roster %s: %w", shown, err)
 	}
-	_, candidatePlaintext, candidateRoot, err := runRosterMigrationChain(plaintextNode, migrationPath)
+	_, candidate, candidateRoot, err := runRosterMigrationChain(originalNode, migrationPath)
 	if err != nil {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: %w", shown, err)
 	}
 
 	before := ComputeRosterSemanticFingerprint(originalRoot)
 	after := ComputeRosterSemanticFingerprint(candidateRoot)
 	if !RosterSemanticFingerprintsEqual(before, after) {
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: candidate would change authorization-affecting content, refusing to migrate", path)
+		return rosterMigrationPlan{}, fmt.Errorf("migrate roster %s: candidate would change authorization-affecting content, refusing to migrate", shown)
 	}
 
-	steps := rosterMigrationStepNames(migrationPath)
-	if opts.DryRun {
-		return RosterMigrationResult{
-			FromVersion:    int(detected),
-			ToVersion:      targetVersion,
-			Changed:        true,
-			OriginalSHA256: originalSHA,
-			// NewSHA256 deliberately omitted: ansible-vault salts each
-			// encryption run independently, so re-encrypting the same
-			// plaintext twice never produces the same ciphertext bytes —
-			// unlike the plaintext path, a dry run has no way to predict
-			// what NewSHA256 a real run would produce.
-			Steps: steps,
-		}, nil
+	result := RosterMigrationResult{
+		FromVersion:    int(detected),
+		ToVersion:      targetVersion,
+		Changed:        true,
+		OriginalSHA256: originalSHA,
+		Steps:          rosterMigrationStepNames(migrationPath),
 	}
+	if !encrypted {
+		result.NewSHA256 = sha256Hex(candidate)
+	}
+	// An encrypted roster's NewSHA256 is deliberately left out here:
+	// ansible-vault salts each encryption run independently, so
+	// re-encrypting the same plaintext twice never produces the same
+	// ciphertext bytes — unlike the plaintext path, a dry run has no way to
+	// predict what NewSHA256 a real run would produce.
+	return rosterMigrationPlan{result: result, detected: detected, candidate: candidate, encrypted: encrypted}, nil
+}
 
-	backupPath, err := createRosterBackup(path, original, detected, time.Now().UTC().Format("20060102T150405Z"))
+// migrateEncryptedRosterFile installs plan, the migration of the
+// ansible-vault-encrypted roster lk holds, following the migration spec's
+// required encrypted-file flow. planRosterMigration already decrypted it
+// into memory (ansibleVaultView; never a plaintext temp file), detected
+// its version, validated it, ran the migration chain and checked the
+// semantic fingerprint, identical to the plaintext path; this
+//
+//	refuses a roster the write would refuse, then backs it up
+//	    (identical to the plaintext path)
+//	    -> writes the candidate plaintext to a mode-0600 temp file
+//	    -> ansible-vault encrypts that temp file in place
+//	    -> atomically installs the now-encrypted result, rolling back only
+//	       a failed write that may have changed the roster (identical to
+//	       the plaintext path)
+//
+// original is the still-encrypted bytes MigrateRosterFile read, so the
+// backup this creates is guaranteed to be the exact original ciphertext,
+// never anything decrypted. Nothing this function returns, logs, or wraps
+// into an error ever includes plaintext roster content or the vault
+// password itself — only paths, exit statuses, and ansible-vault's own
+// (non-secret) stderr text.
+func migrateEncryptedRosterFile(lk *rosterLock, opts RosterMigrationOptions, original []byte, plan rosterMigrationPlan) (RosterMigrationResult, error) {
+	path, target := lk.path, lk.target
+	targetVersion := plan.result.ToVersion
+	if err := checkLockedRosterWritable(lk); err != nil {
+		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: %w", path, err)
+	}
+	backupPath, err := createRosterBackup(lk, original, plan.detected, time.Now().UTC().Format("20060102T150405Z"))
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("backup roster %s: %w", path, err)
 	}
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".migrate-*")
+	tmp, err := rosterScratchFile(lk)
 	if err != nil {
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: create temp file: %w", path, err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // always clean up our own scratch file, success or failure
-	if _, err := tmp.Write(candidatePlaintext); err != nil {
+	if _, err := tmp.Write(plan.candidate); err != nil {
 		tmp.Close()
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write temp file: %w", path, err)
 	}
@@ -423,37 +444,44 @@ func migrateEncryptedRosterFile(path string, opts RosterMigrationOptions, origin
 	}
 	newSHA := sha256Hex(encryptedCandidate)
 
-	if err := atomicReplaceFile(path, encryptedCandidate, originalMode); err != nil {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
-			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
-		}
-		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
+	if err := writeLockedRoster(lk, encryptedCandidate); err != nil {
+		return RosterMigrationResult{}, migrationWriteFailed(lk, path, backupPath, original, err)
 	}
 
-	reopened, err := readSecretSourceFile(path)
+	reopened, err := readSecretSourceFile(target)
 	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(reopened)), "$ANSIBLE_VAULT") {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed (%v); restore manually from backup %s", path, restoreErr, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation (not ansible-vault encrypted), rolled back to the original (backup at %s)", path, backupPath)
 	}
-	reopenedPlaintext, err := ansibleVaultView(path, opts.VaultPasswordFile)
+	reopenedPlaintext, err := ansibleVaultView(target, opts.VaultPasswordFile)
 	if err != nil || len(rosterSourceValidators[RosterSchemaVersion(targetVersion)](mustYAMLMapOrNil(reopenedPlaintext))) != 0 {
-		if restoreErr := atomicReplaceFile(path, original, originalMode); restoreErr != nil {
+		if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
 			return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation AND rollback failed; restore manually from backup %s", path, backupPath)
 		}
 		return RosterMigrationResult{}, fmt.Errorf("migrate roster %s: installed result failed re-validation, rolled back to the original (backup at %s)", path, backupPath)
 	}
 
-	return RosterMigrationResult{
-		FromVersion:    int(detected),
-		ToVersion:      targetVersion,
-		Changed:        true,
-		BackupPath:     backupPath,
-		OriginalSHA256: originalSHA,
-		NewSHA256:      newSHA,
-		Steps:          steps,
-	}, nil
+	result := plan.result
+	result.BackupPath = backupPath
+	result.NewSHA256 = newSHA
+	return result, nil
+}
+
+// migrationWriteFailed is a migration's error when writeLockedRoster fails
+// to install the candidate. Only a write that may have changed the roster
+// (errRosterPartlyWritten) is rolled back to original; any other failure
+// left it as it was, so a rollback could only fail the same way and report
+// a restore that was never needed.
+func migrationWriteFailed(lk *rosterLock, path, backupPath string, original []byte, err error) error {
+	if !errors.Is(err, errRosterPartlyWritten) {
+		return fmt.Errorf("migrate roster %s: write failed, roster left unchanged (backup at %s): %w", path, backupPath, err)
+	}
+	if restoreErr := writeLockedRoster(lk, original); restoreErr != nil {
+		return fmt.Errorf("migrate roster %s: write failed (%v) AND rollback failed (%v); restore manually from backup %s", path, err, restoreErr, backupPath)
+	}
+	return fmt.Errorf("migrate roster %s: write failed, rolled back to the original (backup at %s): %w", path, backupPath, err)
 }
 
 // mustYAMLMapOrNil parses data as a YAML mapping, returning nil (not an
@@ -490,7 +518,9 @@ func EnsureRosterCurrent(path string, opts RosterMigrationOptions) (RosterMigrat
 }
 
 // createRosterBackup writes original's exact bytes to
-// "<path>.v<fromVersion>.<timestamp>.<sha256 prefix>.bak", refusing to
+// "<roster>.v<fromVersion>.<timestamp>.<sha256 prefix>.bak" beside the
+// roster lk holds (so only a migration holding the lock can call it),
+// refusing to
 // overwrite an existing backup (O_EXCL) and mode 0600 throughout — a
 // roster can contain credentials, so this must never be more permissive
 // than that, unlike cmd/edit_workspace_apply.go's restoreManagedFiles
@@ -498,15 +528,19 @@ func EnsureRosterCurrent(path string, opts RosterMigrationOptions) (RosterMigrat
 // deliberately not reused here. timestamp is a parameter rather than
 // computed internally so callers (and tests) control the exact backup
 // filename instead of racing a clock.
-func createRosterBackup(path string, original []byte, fromVersion RosterSchemaVersion, timestamp string) (string, error) {
+func createRosterBackup(lk *rosterLock, original []byte, fromVersion RosterSchemaVersion, timestamp string) (string, error) {
 	sum := sha256.Sum256(original)
-	backupPath := fmt.Sprintf("%s.v%d.%s.%s.bak", path, fromVersion, timestamp, hex.EncodeToString(sum[:])[:8])
+	backupPath := fmt.Sprintf("%s.v%d.%s.%s.bak", lk.target, fromVersion, timestamp, hex.EncodeToString(sum[:])[:8])
 
 	f, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create backup %s: %w", backupPath, err)
 	}
 	defer f.Close()
+	// Run as root, the backup is the roster owner's, like the roster.
+	if roster, err := os.Stat(lk.target); err == nil {
+		keepOwner(f, roster)
+	}
 	if _, err := f.Write(original); err != nil {
 		return "", fmt.Errorf("write backup %s: %w", backupPath, err)
 	}
@@ -514,58 +548,6 @@ func createRosterBackup(path string, original []byte, fromVersion RosterSchemaVe
 		return "", fmt.Errorf("sync backup %s: %w", backupPath, err)
 	}
 	return backupPath, nil
-}
-
-// atomicReplaceFile writes data into a same-directory temp file (mode
-// 0600, per the atomic-replacement contract), fsyncs it, renames it over
-// path, restores path's permissions to finalMode (the original roster's
-// mode — the temp file's 0600 must not silently change what's actually
-// installed), and fsyncs the parent directory so the rename itself is
-// durable. Every failure path removes the temp file; a failure after the
-// rename (restoring finalMode, syncing the directory) leaves path already
-// replaced — MigrateRosterFile's own rollback covers that by re-invoking
-// this function with the original bytes.
-func atomicReplaceFile(path string, data []byte, finalMode os.FileMode) error {
-	if err := validateSecretSourceFile(path); err != nil {
-		return err
-	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".migrate-*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			os.Remove(tmpName)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-	cleanup = false
-
-	if err := os.Chmod(path, finalMode); err != nil {
-		return fmt.Errorf("restore roster mode: %w", err)
-	}
-	if dirFile, err := os.Open(dir); err == nil {
-		_ = dirFile.Sync()
-		dirFile.Close()
-	}
-	return nil
 }
 
 func sha256Hex(data []byte) string {

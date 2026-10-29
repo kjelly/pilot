@@ -109,13 +109,13 @@ func findNFSServerEntry(servers []any, fqdn string) (idx int, ambiguous bool) {
 // first. Errors rather than guessing if fqdn doesn't exist or is
 // ambiguous.
 func SetRosterNFSServerAbsent(path, fqdn string) error {
-	lock, err := acquireMutationLock(path + ".pilot-remove.lock")
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
-	defer lock.release() //nolint:errcheck
+	defer lk.release() //nolint:errcheck
 
-	data, err := readSecretSourceFile(path)
+	data, err := readSecretSourceFile(lk.target)
 	if err != nil {
 		return err
 	}
@@ -177,5 +177,5 @@ func SetRosterNFSServerAbsent(path, fqdn string) error {
 	if err != nil {
 		return fmt.Errorf("render roster %s: %w", path, err)
 	}
-	return writeSecretSourceFile(path, rendered, 0o600)
+	return writeLockedRoster(lk, rendered)
 }

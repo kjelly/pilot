@@ -241,7 +241,7 @@ freeipa:
 
   admin:
     principal: admin
-    password: "VAULT_SECRET"
+    password: "VAULT_SECRET"   # 等於 vault 的 ipa_admin_password；不一致時手動改這裡，見 docs/runbooks/freeipa-identity.md §4.5
 
   defaults:
     group_type: posix
@@ -659,6 +659,20 @@ migration:
 
   delete_old_groups: false
 ```
+
+`freeipa.admin.password` 必須是跟 vault 的 `ipa_admin_password` 相同的字串：`pilot access`、
+`pilot identity drift`、`pilot roster remove-*` 只載入名冊，用它登入 FreeIPA。兩邊都加上引號：沒加引號時，
+YAML 可能把 `12345678`、`012345678`、`1e10`、`190:20:30`、`2024-01-01`、`yes` 這類值讀成數字、日期或
+布林值，比對就會不相等。在 `pilot edit` 裡輸入的值一律存成加引號的字串（原本沒加引號、被讀成數字或
+布林值的 key 也一樣）。密碼含 `{{`、`{%`、`{#` 時，Ansible 會把它當成模板展開；要讓它保持原樣，在 vault
+與名冊都標成 `!unsafe`（例如 `password: !unsafe "a{{b"`），pilot 把 `!unsafe` 的值當成一般字串比對與同步，
+同步時名冊也寫成 `!unsafe`。`pilot edit` 只在改變 `.vault/main.yaml` 的
+`ipa_admin_password` 那次存檔，把新值帶進這個 workspace `.vault/` 目錄裡的明文名冊；其餘情況（加密名冊、
+`.vault/` 以外的名冊、vault 值含 `{{`、`{%`、`{#` 而沒有標 `!unsafe` 等）要手動修改，之後再存一次 vault
+也不會補同步。要跟著改的名冊正被其他 pilot 操作鎖住、lock 檔不能用，或這個使用者不能寫時，那次存檔會被拒絕、
+什麼都不寫；vault 原本或新的值是 `!vault` 加密值、原本的值含 `{{`、`{%`、`{#` 或沒加引號時，pilot 不知道舊密碼，
+不會同步並會提示。
+細節見 `docs/runbooks/freeipa-identity.md` §4.5。
 
 ---
 

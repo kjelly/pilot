@@ -10,6 +10,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -252,8 +253,9 @@ func complexVaultFileBanner(path string, doc *vaultfile.Doc) string {
 // editRouterModel.Update (edit_tui.go) since it's not something any
 // individual screen should have to know how to handle.
 type vaultShelloutDoneMsg struct {
-	dir string
-	err error
+	dir  string
+	path string // the vault file ansible-vault edited
+	err  error
 }
 
 // pushAnsibleVaultShellout suspends the router's Program to run the
@@ -273,13 +275,79 @@ func pushAnsibleVaultShellout(r *editRouterModel, dir, path string) tea.Cmd {
 		r.err = fmt.Errorf("ansible-vault 不在 PATH 上: %w", lookErr)
 		return nil
 	}
-	cmd := exec.Command(bin, "edit", path)
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+	return tea.Exec(newVaultEditCommand(dir, bin, path), func(err error) tea.Msg {
 		if err != nil {
 			err = fmt.Errorf("ansible-vault edit %s: %w", path, err)
 		}
-		return vaultShelloutDoneMsg{dir: dir, err: err}
+		return vaultShelloutDoneMsg{dir: dir, path: path, err: err}
 	})
+}
+
+// newVaultEditCommand is `bin edit path`. ansible-vault writes the file
+// back, so for a roster — the same file as one of the rosters pilot edit
+// knows in this workspace (rosterCandidates: the default
+// .vault/ipa-identity.yaml and every freeipa_roster_file reference) — the
+// roster lock is held while it runs (rosterEditCommand.Run), so no other
+// roster writer saves in between. Any other encrypted file (the deploy
+// vault, keycloak.yaml, …) is not a roster: it gets no lock files, and a
+// directory that refuses them does not keep it from opening.
+func newVaultEditCommand(dir, bin, path string) *rosterEditCommand {
+	edit := &rosterEditCommand{Cmd: exec.Command(bin, "edit", path)}
+	if sameExistingFile(path, filepath.Join(dir, ".vault", "main.yaml")) {
+		return edit
+	}
+	for _, roster := range rosterCandidates(dir, "", referencedRosterFiles(dir, "")) {
+		if sameExistingFile(path, roster) {
+			edit.roster = path
+			break
+		}
+	}
+	return edit
+}
+
+// rosterEditCommand is `ansible-vault edit` as tea.Exec runs it. For a
+// file that may be a roster it holds the roster lock for exactly as long
+// as the editor runs: taken in Run and released when Run returns, so a
+// command nothing runs — the automation driver discards it — holds
+// nothing, and a held roster never opens the editor (Run returns the lock
+// error, which vaultShelloutDoneMsg turns into a banner).
+type rosterEditCommand struct {
+	*exec.Cmd
+	roster string // the file to lock; "" for the deploy vault
+}
+
+// Run takes the roster lock, if any, and runs the editor under it.
+func (c *rosterEditCommand) Run() error {
+	if c.roster != "" {
+		release, err := inventory.HoldRosterLock(c.roster)
+		if err != nil {
+			return err
+		}
+		defer release() //nolint:errcheck
+	}
+	return c.Cmd.Run()
+}
+
+// SetStdin, SetStdout and SetStderr wire the editor to the terminal, as
+// tea.ExecProcess does for an *exec.Cmd, unless already set.
+func (c *rosterEditCommand) SetStdin(r io.Reader) {
+	if c.Stdin == nil {
+		c.Stdin = r
+	}
+}
+
+// SetStdout is SetStdin's stdout counterpart.
+func (c *rosterEditCommand) SetStdout(w io.Writer) {
+	if c.Stdout == nil {
+		c.Stdout = w
+	}
+}
+
+// SetStderr is SetStdin's stderr counterpart.
+func (c *rosterEditCommand) SetStderr(w io.Writer) {
+	if c.Stderr == nil {
+		c.Stderr = w
+	}
 }
 
 func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.Doc, dirty bool, banner string) tea.Cmd {
@@ -329,11 +397,34 @@ func pushVaultEditorScreen(r *editRouterModel, dir, path string, doc *vaultfile.
 				r.err = fmt.Errorf("mkdir %s: %w", filepath.Dir(path), merr)
 				return nil
 			}
+			// The password this save replaces, so the rosters holding it can
+			// follow: prepared (locked) before the vault is written, so a
+			// busy roster refuses the save instead of being left behind.
+			previous, _ := os.ReadFile(path)
+			sync, refused := prepareVaultRosterSync(r, dir, path, previous, doc.Bytes())
+			if refused != "" {
+				// The error names the vault by its path, which a plan maps
+				// from its scratch copy to the real workspace's
+				// (scratchPathError), as it does every path in its errors;
+				// the banner names it within the workspace.
+				shown := shownRosterPath(path, dir, r.planSource)
+				r.writeRefused = fmt.Errorf("%s was not saved, so that it keeps matching its rosters: %w", path, r.writeRefused)
+				return pushVaultEditorScreen(r, dir, path, doc, true,
+					fmt.Sprintf("⚠️  未存檔 %s（修改還在）：名冊要跟著改 ipa_admin_password，但它現在不能寫入\n%s", shown, refused))
+			}
 			if werr := os.WriteFile(path, doc.Bytes(), 0o600); werr != nil {
+				sync.release()
 				r.err = fmt.Errorf("write %s: %w", path, werr)
 				return nil
 			}
-			return pushVaultFilePicker(r, dir, fmt.Sprintf("✅ 已存檔 %s", path))
+			banner := fmt.Sprintf("✅ 已存檔 %s", path)
+			for _, line := range sync.commit() {
+				banner += "\n" + line.icon + line.text
+				if line.manual {
+					r.rosterSyncWarnings = append(r.rosterSyncWarnings, line.text)
+				}
+			}
+			return pushVaultFilePicker(r, dir, banner)
 		case idx == len(choices)-1:
 			if !dirty {
 				return pushVaultFilePicker(r, dir, "")

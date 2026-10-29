@@ -36,7 +36,8 @@ func TestAutofixNFSRosterEntry_MigratesV1RosterBeforeAppending(t *testing.T) {
 	}
 	h := inventory.Host{Name: "nfs-demo", Extra: map[string]string{"freeipa_roster_file": rosterPath}}
 
-	banner := autofixNFSRosterEntry(dir, h)
+	var r editRouterModel
+	banner := autofixNFSRosterEntry(&r, dir, h)
 	if !strings.Contains(banner, "Automatically upgraded to schema v3") {
 		t.Fatalf("banner = %q, want an auto-upgrade notice", banner)
 	}
@@ -53,7 +54,8 @@ func TestAutofixNFSRosterEntry_MigratesV1RosterBeforeAppending(t *testing.T) {
 func TestAutofixNFSRosterEntry_NoRosterPathIsANoOp(t *testing.T) {
 	dir := t.TempDir()
 	h := inventory.Host{Name: "nfs-demo", Extra: map[string]string{}}
-	if banner := autofixNFSRosterEntry(dir, h); banner != "" {
+	var r editRouterModel
+	if banner := autofixNFSRosterEntry(&r, dir, h); banner != "" {
 		t.Fatalf("banner = %q, want empty when no freeipa_roster_file is set", banner)
 	}
 }

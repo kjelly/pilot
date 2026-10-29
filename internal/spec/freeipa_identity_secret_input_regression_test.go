@@ -121,9 +121,21 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 		t.Fatal("identity-secret-test must require Ansible")
 	}
 	selected := regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$"))
-	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText"} {
+	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
 		if !selected.MatchString("TestRegression_" + name) {
 			t.Errorf("required-Ansible recipe omits %s", name)
+		}
+	}
+	// pilot's classification of admin passwords, checked against the real
+	// Ansible loader (internal/inventory).
+	inv := regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '([^']+)' ./internal/inventory/`).FindSubmatch(body)
+	if inv == nil {
+		t.Fatal("required-Ansible recipe does not run internal/inventory's Ansible checks")
+	}
+	invSelected := regexp.MustCompile(strings.ReplaceAll(string(inv[1]), "$$", "$"))
+	for _, name := range []string{"TestYAML11NonStringMatchesAnsible", "TestAnsibleTagsMatchTheClassifier"} {
+		if !invSelected.MatchString(name) {
+			t.Errorf("required-Ansible recipe omits internal/inventory's %s", name)
 		}
 	}
 	body, err = os.ReadFile("../../.github/workflows/ci.yml")
@@ -275,7 +287,7 @@ else cat "$IDENTITY_TEST_DIR/new"; fi
 					t.Fatalf("password failure did not reach the sanitized gate: %v", res.failures)
 				}
 				for _, secret := range append(slices.Clone(passwords), adminPassword) {
-					if strings.Contains(res.raw, secret) {
+					if strings.Contains(res.raw, secret) || strings.Contains(res.stderr, secret) {
 						t.Fatal("Ansible output leaked a password")
 					}
 				}

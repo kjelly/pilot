@@ -19,7 +19,7 @@ jobs:
   test:
     name: Go test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
         run: go build ./...
 
       - name: go test
-        # The flags, including go test's -timeout (30m), live in the Makefile.
+        # The flags, including go test's -timeout (45m), live in the Makefile.
         # -timeout counts from when a test binary starts, so this job's
         # timeout-minutes stays at least 10m above it, for the steps before
         # this one and for compiling the -race test binaries. On 2026-10-16
@@ -71,9 +71,17 @@ jobs:
     # delivery image.
     name: Playbook lint
     runs-on: ubuntu-latest
-    # The identity Ansible regressions have their own 5m Go timeout; leave
-    # room after syntax/tool setup and the alert-rules behavior suite.
-    timeout-minutes: 30
+    # The Go -timeout values in the Makefile targets these steps run
+    # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m,
+    # freeipa-server-pool 5m = 35m) are hang caps: a hung step fails at its
+    # own cap, with go test's stack dump naming the test, and the job
+    # normally takes about 20 minutes. The job budget must not be below the
+    # sum of those caps, so a step is never cut off by an anonymous job
+    # cancellation; 40 is that 35m plus room for the toolchain setup, the
+    # syntax-check loop and the alert-rules suite (no explicit cap).
+    # TestCIJobTimeoutCoversMakeTargetCaps keeps this in step with the
+    # Makefile.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +126,26 @@ jobs:
       - name: make freeipa-server-pool-test
         run: make freeipa-server-pool-test
 
+  root-tests:
+    # The roster ownership tests need root: pilot-cli runs pilot as root
+    # under `docker run`, and only root can give a file to another user.
+    # They skip as the runner user in the Go test job; `make root-test`
+    # runs them through sudo -n, failing any that would skip.
+    name: Root-only ownership tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make root-test
+        run: make root-test
+
   thanos-retention:
     # Runs the Thanos Compactor (the image version the playbooks deploy)
     # with thanos-query-apply.yml's retention defaults against synthetic
@@ -154,7 +182,8 @@ jobs:
 
   image:
     # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
-    # once every other job here has passed, and pushes it to
+    # once every other job here has passed (needs lists them all, root-tests
+    # included: TestCIImageWaitsForEveryValidationJob), and pushes it to
     # ghcr.io/kjelly/pilot-cli:
     #   push or workflow_dispatch on a branch -> :sha-<short>
     #   tag v1.2.3      -> :1.2.3, :1.2 only, so a tag on main's commit does
@@ -163,7 +192,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [test, playbook-lint, thanos-retention, lint]
+    needs: [test, playbook-lint, root-tests, thanos-retention, lint]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20

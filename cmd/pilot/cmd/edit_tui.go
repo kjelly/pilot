@@ -71,10 +71,34 @@ type editRouterModel struct {
 
 	banner string // shown above the current screen; explicitly set (or cleared to "") by every transition
 
+	// planSource is the real workspace a plan's scratch copy was made
+	// from, "" outside a plan; the vault save's roster sync maps the
+	// copy's references to it onto the copy (editWriteScope.rosterWritePath).
+	planSource string
+	// transaction is set when the session is an apply that rolls back on
+	// failure (applyEditScenario): with planSource it keeps roster writes
+	// inside the session's .vault/ files (editWriteScope).
+	transaction bool
+	// writeRefused is the last roster write refused as busy
+	// (rosterBusyBanner): shown as a banner at the terminal, it fails the
+	// automation driver's step (takeWriteRefused).
+	writeRefused error
+	// rosterSyncWarnings are the vault save's roster lines that need the
+	// operator (rosterSyncLine.manual), which a plan or apply returns as
+	// warnings: an MCP caller sees no banner.
+	rosterSyncWarnings []string
+
 	lastWidth, lastHeight int
 
 	quit bool
 	err  error
+}
+
+// takeWriteRefused returns and clears r.writeRefused.
+func (r *editRouterModel) takeWriteRefused() error {
+	err := r.writeRefused
+	r.writeRefused = nil
+	return err
 }
 
 // uiFactory returns r's injected Factory, defaulting to the Huh v2
@@ -133,11 +157,15 @@ func (r editRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// happens to be "current" (there is none — the Program was
 	// suspended, not showing any screen, while that subprocess ran).
 	if m, ok := msg.(vaultShelloutDoneMsg); ok {
+		// The roster was busy, so the editor never opened: say so, stay.
+		if banner, busy := rosterBusyBanner(&r, m.path, m.err); busy {
+			return r, pushVaultFilePicker(&r, m.dir, banner)
+		}
 		if m.err != nil {
 			r.err = m.err
 			return r, tea.Quit
 		}
-		cmd := pushVaultFilePicker(&r, m.dir, "")
+		cmd := pushVaultFilePicker(&r, m.dir, encryptedVaultSyncHint(m.dir, m.path))
 		return r, cmd
 	}
 	if r.current == nil || r.quit {
@@ -903,15 +931,15 @@ func pushNFSRoleBootstrap(r *editRouterModel, dir, path string, hf *inventory.Ho
 		// include_vars runs from the controller context, not the workspace
 		// directory; store an absolute path so `edit --dir <workspace>` followed
 		// by deploy can find the roster outside the repository.
-		defaultPath, err := filepath.Abs(filepath.Join(dir, ".vault", "ipa-identity.yaml"))
+		defaultPath, err := r.recordedPath(dir, filepath.Join(".vault", "ipa-identity.yaml"))
 		if err != nil {
 			return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法建立 roster 絕對路徑：%v", err))
 		}
 		h.Extra["freeipa_roster_file"] = defaultPath
 	}
-	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
+	rosterPath := r.rosterWritePath(dir, h.Extra["freeipa_roster_file"])
 	if _, err := os.Stat(rosterPath); err == nil {
-		return pushRolesMenuBanner(r, dir, path, hf, name, autofixNFSRosterEntry(dir, *h))
+		return pushRolesMenuBanner(r, dir, path, hf, name, autofixNFSRosterEntry(r, dir, *h))
 	} else if !os.IsNotExist(err) {
 		return pushRolesMenuBanner(r, dir, path, hf, name, fmt.Sprintf("⚠️  無法檢查 roster %s：%v", rosterPath, err))
 	}
@@ -965,22 +993,25 @@ func pushNFSRoleBootstrapWithPassword(r *editRouterModel, dir, path string, hf *
 		return pushHostList(r, dir, path, hf, "")
 	}
 	domain := nfsBootstrapDomain(dir)
-	if err := mutateRosterSource(dir, rosterPath, func() error {
+	if err := mutateRosterSource(r.writeScope(dir), rosterPath, func(rosterPath string) error {
 		return inventory.WriteMinimalNFSServerRoster(rosterPath, h.Name, domain, "admin", password)
 	}); err != nil {
+		if banner, ok := rosterBusyBanner(r, rosterPath, err); ok {
+			return pushRolesMenuBanner(r, dir, path, hf, name, banner)
+		}
 		r.err = err
 		return nil
 	}
 	vaultPath := filepath.Join(dir, ".vault", "main.yaml")
 	vaultNote := ""
 	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
-		if vaultErr := mutateRosterSource(dir, vaultPath, func() error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
+		if vaultErr := mutateRosterSource(r.writeScope(dir), vaultPath, func(vaultPath string) error { return inventory.WriteMinimalFreeIPAVault(vaultPath, password) }); vaultErr != nil {
 			r.err = vaultErr
 			return nil
 		}
 		vaultNote = fmt.Sprintf("；並建立 %s 的 ipa_admin_password", vaultPath)
 	} else if statErr == nil {
-		changed, vaultErr := mutateRosterSourceValue(dir, vaultPath, func() (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
+		changed, vaultErr := mutateRosterSourceValue(r.writeScope(dir), vaultPath, func(vaultPath string) (bool, error) { return inventory.FillFreeIPAAdminPassword(vaultPath, password) })
 		if vaultErr != nil {
 			r.err = vaultErr
 			return nil
@@ -1016,9 +1047,11 @@ func nfsBootstrapDomain(dir string) string {
 // happened — empty if there's nothing worth telling the user (no roster
 // path set yet, or an entry already existed). A relative freeipa_roster_file
 // is resolved against dir (the workspace `pilot edit --dir` is pointed at),
-// matching writeMissingNFSRosterEntries' convention (inventory.go).
-func autofixNFSRosterEntry(dir string, h inventory.Host) string {
-	rosterPath := resolveRosterPath(dir, h.Extra["freeipa_roster_file"])
+// matching writeMissingNFSRosterEntries' convention (inventory.go). A busy
+// roster is reported through rosterBusyBanner, so automation fails the
+// step instead of enabling the role without its nfs.servers entry.
+func autofixNFSRosterEntry(r *editRouterModel, dir string, h inventory.Host) string {
+	rosterPath := r.rosterWritePath(dir, h.Extra["freeipa_roster_file"])
 	if rosterPath == "" {
 		return ""
 	}
@@ -1028,7 +1061,7 @@ func autofixNFSRosterEntry(dir string, h inventory.Host) string {
 	// AppendMissingNFSServerStub below reports that exactly as it always
 	// has, unmigrated or not.
 	migrateNote := ""
-	if result, err := mutateRosterSourceValue(dir, rosterPath, func() (inventory.RosterMigrationResult, error) {
+	if result, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func(rosterPath string) (inventory.RosterMigrationResult, error) {
 		return inventory.EnsureRosterCurrent(rosterPath, inventory.RosterMigrationOptions{})
 	}); err == nil && result.Changed {
 		migrateNote = fmt.Sprintf("✅ Roster schema v%d detected. Automatically upgraded to schema v%d (backup: %s)", result.FromVersion, result.ToVersion, result.BackupPath)
@@ -1040,7 +1073,12 @@ func autofixNFSRosterEntry(dir string, h inventory.Host) string {
 		return migrateNote + "\n" + s
 	}
 	domain := nfsBootstrapDomain(dir)
-	appended, err := mutateRosterSourceValue(dir, rosterPath, func() (bool, error) { return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain) })
+	appended, err := mutateRosterSourceValue(r.writeScope(dir), rosterPath, func(rosterPath string) (bool, error) {
+		return inventory.AppendMissingNFSServerStub(rosterPath, h.Name, domain)
+	})
+	if banner, busy := rosterBusyBanner(r, rosterPath, err); busy {
+		return prefixNote(banner)
+	}
 	switch {
 	case err != nil:
 		return prefixNote(fmt.Sprintf("⚠️  已勾選 freeipa-nfs-server，但無法檢查/補齊 roster %s 的 nfs.servers 項目（%v）；請自行確認", rosterPath, err))

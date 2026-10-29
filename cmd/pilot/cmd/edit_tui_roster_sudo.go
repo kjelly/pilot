@@ -88,7 +88,10 @@ func pushRosterAddSudoCommandGroupCommands(r *editRouterModel, dir, path, name s
 		if len(v) > 0 {
 			return pushRosterSudoCommandGroupsMenu(r, dir, path, formatRosterViolations(v))
 		}
-		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterSudoCommandGroup(path, entry) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterSudoCommandGroup(path, entry) }); err != nil {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
+				return pushRosterSudoCommandGroupsMenu(r, dir, path, banner)
+			}
 			r.err = err
 			return nil
 		}
@@ -157,7 +160,10 @@ func pushRosterSudoCommandGroupEdit(r *editRouterModel, dir, path, name string, 
 	if len(v) > 0 {
 		return pushRosterSudoCommandGroupDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterSudoCommandGroup(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterSudoCommandGroup(path, name, f) }); err != nil {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
+			return pushRosterSudoCommandGroupDetail(r, dir, path, name, banner)
+		}
 		r.err = err
 		return nil
 	}
@@ -259,7 +265,10 @@ func pushRosterAddSudoRuleCommands(r *editRouterModel, dir, path, name string, g
 		if len(v) > 0 {
 			return pushRosterSudoRulesMenu(r, dir, path, formatRosterViolations(v))
 		}
-		if err := mutateRosterSource(dir, path, func() error { return inventory.AppendRosterSudoRule(path, entry) }); err != nil {
+		if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.AppendRosterSudoRule(path, entry) }); err != nil {
+			if banner, ok := rosterBusyBanner(r, path, err); ok {
+				return pushRosterSudoRulesMenu(r, dir, path, banner)
+			}
 			r.err = err
 			return nil
 		}
@@ -457,7 +466,10 @@ func pushRosterSudoRuleEdit(r *editRouterModel, dir, path, name string, mutate f
 	if len(v) > 0 {
 		return pushRosterSudoRuleDetail(r, dir, path, name, formatRosterViolations(v))
 	}
-	if err := mutateRosterSource(dir, path, func() error { return inventory.SetRosterSudoRule(path, name, f) }); err != nil {
+	if err := mutateRosterSource(r.writeScope(dir), path, func(path string) error { return inventory.SetRosterSudoRule(path, name, f) }); err != nil {
+		if banner, ok := rosterBusyBanner(r, path, err); ok {
+			return pushRosterSudoRuleDetail(r, dir, path, name, banner)
+		}
 		r.err = err
 		return nil
 	}

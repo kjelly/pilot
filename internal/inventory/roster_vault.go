@@ -64,9 +64,9 @@ func ansibleVaultEncryptInPlace(path, vaultPasswordFile string) error {
 }
 
 // DecryptRosterToTempFile decrypts the ansible-vault-encrypted roster at
-// path into a fresh, mode-0600 temp plaintext file and returns its path
-// plus a cleanup function the caller must always run (success or
-// failure) to remove it. This is the read-only half of encrypted-roster
+// path into a fresh, mode-0600 temp plaintext file in its own private
+// (0700) directory and returns its path plus a cleanup function the caller
+// must always run (success or failure) to remove that directory. This is the read-only half of encrypted-roster
 // support that `pilot roster remove-user`/`remove-group`'s Phase A-C
 // (spec.md §16) run their local checks against — see
 // MutateEncryptedRosterFile for the write half. Like ansibleVaultView,
@@ -76,20 +76,9 @@ func DecryptRosterToTempFile(path, vaultPasswordFile string) (tempPath string, c
 	if err != nil {
 		return "", func() {}, fmt.Errorf("decrypt roster %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp("", ".pilot-roster-decrypt-*.yaml")
+	tmpPath, cleanup, err := decryptedScratchFile(plaintext)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("roster %s: create temp file: %w", path, err)
-	}
-	tmpPath := tmp.Name()
-	cleanup = func() { os.Remove(tmpPath) }
-	if _, err := tmp.Write(plaintext); err != nil {
-		tmp.Close()
-		cleanup()
 		return "", func() {}, fmt.Errorf("roster %s: write temp file: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("roster %s: close temp file: %w", path, err)
 	}
 	return tmpPath, cleanup, nil
 }
@@ -137,19 +126,25 @@ func ReadRosterAsMapWithVault(path, vaultPasswordFile string) (map[string]any, e
 // MutateEncryptedRosterFile decrypts the ansible-vault-encrypted roster
 // at path into a secure temp plaintext file, runs mutate against that
 // temp path, and — only if mutate returns nil — re-encrypts the temp
-// file in place and atomically installs it over the original. On any
-// failure (including mutate's own error) the original is left completely
-// untouched and nothing is re-encrypted. This is the "prefer reusing the
-// encrypted-roster mutation machinery already established by pilot
-// roster migrate instead of inventing a second vault implementation"
-// path spec.md §17 requires.
+// file in place and installs it over the original with writeLockedRoster.
+// On any failure before that install (including mutate's own error) the
+// original is left completely untouched; a failed install says itself
+// whether it left the roster unchanged or may have written part of it
+// (errRosterPartlyWritten, an in-place install stopped part-way). The
+// roster's lock is held from the decrypt to the install, so no other
+// roster writer's change is lost in between, and the file path names is
+// the one replaced: a symlinked roster stays a link. mutate must write
+// only plaintextPath. This is the "prefer reusing the encrypted-roster
+// mutation machinery already established by pilot roster migrate instead
+// of inventing a second vault implementation" path spec.md §17 requires.
 func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plaintextPath string) error) error {
-	info, err := os.Stat(path)
+	lk, err := lockRosterFile(path)
 	if err != nil {
 		return err
 	}
+	defer lk.release() //nolint:errcheck
 
-	tmpPath, cleanup, err := DecryptRosterToTempFile(path, vaultPasswordFile)
+	tmpPath, cleanup, err := DecryptRosterToTempFile(lk.target, vaultPasswordFile)
 	if err != nil {
 		return err
 	}
@@ -166,8 +161,9 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 	if err != nil {
 		return fmt.Errorf("roster %s: read encrypted candidate: %w (original untouched)", path, err)
 	}
-	if err := atomicReplaceFile(path, encrypted, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("roster %s: write failed, original untouched: %w", path, err)
+	// writeLockedRoster's error says whether the roster was left unchanged.
+	if err := writeLockedRoster(lk, encrypted); err != nil {
+		return fmt.Errorf("roster %s: %w", path, err)
 	}
 	return nil
 }

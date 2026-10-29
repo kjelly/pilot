@@ -286,3 +286,67 @@ func TestValidateRejectsVarsFileAliases(t *testing.T) {
 		}
 	}
 }
+
+// Canonical names one file one way: absolute, relative and chained links,
+// a relative path and a symlinked directory all resolve to the real file;
+// a file not created yet resolves through its nearest existing directory;
+// a dangling link fails rather than counting as a new file.
+func TestCanonicalNamesOneFileOneWay(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := func(dest, at string) string {
+		t.Helper()
+		if err := os.Symlink(dest, at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedDir := link(dir, filepath.Join(other, "dir"))
+	mid := link("real.yaml", filepath.Join(dir, "mid.yaml"))
+	for name, tt := range map[string]struct{ path, want string }{
+		"real file":               {target, target},
+		"absolute link":           {link(target, filepath.Join(other, "abs.yaml")), target},
+		"relative link":           {link("real.yaml", filepath.Join(dir, "rel.yaml")), target},
+		"chained link":            {link(mid, filepath.Join(other, "chain.yaml")), target},
+		"relative path":           {relative, target},
+		"linked directory":        {filepath.Join(linkedDir, "real.yaml"), target},
+		"new file":                {filepath.Join(dir, "new.yaml"), filepath.Join(dir, "new.yaml")},
+		"new file, linked dir":    {filepath.Join(linkedDir, "new.yaml"), filepath.Join(dir, "new.yaml")},
+		"new file, new directory": {filepath.Join(linkedDir, "sub", "new.yaml"), filepath.Join(dir, "sub", "new.yaml")},
+		// .. after a link is the link destination's parent, as for open(2).
+		"link then ..": {linkedDir + "/../" + filepath.Base(dir) + "/real.yaml", target},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := Canonical(tt.path)
+			if err != nil || got != tt.want {
+				t.Fatalf("Canonical(%s) = %q, %v; want %q", tt.path, got, err, tt.want)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"dangling link":          link(filepath.Join(dir, "missing.yaml"), filepath.Join(other, "dangling.yaml")),
+		"under a dangling link":  filepath.Join(link(filepath.Join(dir, "missing-dir"), filepath.Join(other, "dangling-dir")), "new.yaml"),
+		"dangling relative link": link("missing.yaml", filepath.Join(dir, "dangling-rel.yaml")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := Canonical(path); err == nil {
+				t.Fatalf("Canonical(%s) = %q, want an error", path, got)
+			}
+		})
+	}
+}
