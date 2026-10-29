@@ -40,6 +40,11 @@ type paritySetup struct {
 
 const parityEnv = "PILOT_TEST_PARITY_ADMIN_PASSWORD"
 
+// notEditableReason is the part of the editor's refusal every front-end keeps
+// (complexVaultFileBanner, edit_automation_driver_vault.go's openVaultFile)
+// that says why a vault is not opened.
+const notEditableReason = "複雜 YAML"
+
 func parityRotation(steps ...editAction) editScenario {
 	return editScenario{Version: 1, Steps: append([]editAction{
 		{Action: "set_vault_value", File: "main.yaml", Key: "ipa_admin_password", ValueEnv: parityEnv},
@@ -284,6 +289,10 @@ func checkVaultSaveRosterSyncParity(t *testing.T, setup paritySetup) {
 		if setup.notEditable {
 			if run.err == nil || !strings.Contains(run.err.Error(), "main.yaml") {
 				t.Errorf("%s: error = %v; want the rotation to fail, naming the vault", frontEnd, run.err)
+			} else if !strings.Contains(run.err.Error(), notEditableReason) {
+				// Any other error that names the vault (a missing file, a
+				// permission failure) must not pass for the refusal.
+				t.Errorf("%s: error = %v; want the editor's refusal (%q)", frontEnd, run.err, notEditableReason)
 			}
 			assertUnchanged(t, before)
 			continue
