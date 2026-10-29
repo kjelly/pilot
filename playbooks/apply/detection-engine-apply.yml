@@ -501,6 +501,19 @@
 
     - name: "Detection Engine install + systemd service"
       block:
+        # Read-only snapshot of the service as it is BEFORE this run changes anything.
+        # always-tagged like the rescue that reads it: the rescue runs whenever its block
+        # does, under any --tags/--skip-tags, and must put the service back from this, not
+        # from facts (detection_engine_is_upgrade) that only exist when Step 6's tag ran.
+        - name: "Step 0: record the service's original active/enabled state (read-only rollback material)"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, pilot-detection-engine.service]
+          register: detection_engine_service_before
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
         - name: "Step 1: create dedicated system user (spec §8)"
           tags: [detection-engine-C2]
           ansible.builtin.user:
@@ -531,12 +544,19 @@
         # reaches Step 6 (pilot deploy --limit passes only the limited hosts'
         # component tags and still pulls in it-core) kept taking a "pre-upgrade"
         # backup while the binary stayed stale, and Step 4's changed_when: true made
-        # the second apply fail the idempotency check. The rescue below therefore
-        # restores only when this run reached Step 6 (detection_engine_binary_result
-        # is defined) and detection_engine_is_upgrade is defined and true: only then
-        # may the binary have been replaced and are the backups this run's own,
-        # not leftovers of an earlier upgrade. The `is defined` guards stay in the
-        # tasks' own bodies because those tasks are `always` and their setters are not.
+        # the second apply fail the idempotency check.
+        #
+        # The rescue below is `always`, so it cannot read what these C1-tagged tasks
+        # set. Its restore tasks run only when this run reached Step 6
+        # (detection_engine_binary_result is defined) and
+        # detection_engine_is_upgrade is defined and true; those `is defined` guards
+        # stay in the tasks' own bodies. The backups are then the ones Steps 4-5 just
+        # took, with two known exceptions that this change does not fix: Step 5 has
+        # failed_when: false, so a failed snapshot leaves an older .prev in place (#193),
+        # and an upgrade with no existing state.db takes no db backup, so an older
+        # pre-upgrade.db could be restored over a db created since (#194). The service,
+        # in contrast, is put back from Step 0's recorded original state, not from these
+        # facts.
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
           tags: [detection-engine-C1]
           ansible.builtin.stat:
@@ -846,6 +866,12 @@
           when: not ansible_check_mode
 
       rescue:
+        # The stop below lets the restores replace the binary/state.db safely; the last
+        # tasks then put the service back as Step 0 found it. Behaviour note: a service
+        # that was active is restarted even when the failed run never replaced the binary.
+        # This rescue does not restore config/unit files, so after a failure that came
+        # after a config change the service restarts WITH that config (it used to be left
+        # stopped and disabled for inspection in that case).
         - name: "ROLLBACK — stop the newly (mis)configured service"
           tags: [always]
           ansible.builtin.systemd:
@@ -880,24 +906,41 @@
             - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
-        - name: "ROLLBACK — restart with the restored previous binary, if any"
+        # The stop above disabled the unit too; put back what Step 0 found, whichever tags
+        # selected the failing step. A unit that did not exist before (first install) or
+        # was inactive/disabled stays stopped/disabled.
+        - name: "ROLLBACK — re-enable the service if it was enabled before this run"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            enabled: true
+          when:
+            - detection_engine_service_before.rc == 0
+            - "'UnitFileState=enabled' in detection_engine_service_before.stdout_lines"
+          failed_when: false
+
+        - name: "ROLLBACK — restart the service if it was active before this run (with the restored binary, if any)"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: restarted
-            enabled: true
-          when: detection_engine_is_upgrade is defined and detection_engine_is_upgrade
+          when:
+            - detection_engine_service_before.rc == 0
+            - "'ActiveState=active' in detection_engine_service_before.stdout_lines"
           failed_when: false
 
         - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              detection-engine apply FAILED (see task output above). If a
-              previous install existed, its binary/state.db were restored
-              and the service was restarted with them; otherwise the
-              service was stopped/disabled and left in place for
-              inspection.
+              detection-engine apply FAILED (see task output above). If this
+              run had replaced the binary of a previous install, that binary
+              and state.db were restored. The service was then put back as
+              Step 0 found it (restarted if it was active, re-enabled if it
+              was enabled); config/unit files are NOT restored, so a service
+              that was active runs with whatever configuration the failed run
+              had already written. A service that was not active before, or
+              did not exist, stays stopped/disabled for inspection.
 
     - name: "Publish detection-engine health metrics via the textfile collector"
       ansible.builtin.wait_for:

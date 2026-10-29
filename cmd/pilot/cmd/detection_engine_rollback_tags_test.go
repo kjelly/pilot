@@ -64,8 +64,8 @@ func loadDetectionEngineSteps(t *testing.T) (steps, rescue, restart []any) {
 	}
 	steps = pick(block, []string{"Step 3:", "Step 3b:", "Step 3c:", "Step 3d:", "Step 4:", "Step 5:", "Step 6:"})
 	rescue = pick(resc, []string{"ROLLBACK — restore the previous binary", "ROLLBACK — restore the pre-upgrade database"})
-	restart = pick(resc, []string{"ROLLBACK — restart with the restored previous binary"})
-	if len(steps) != 7 || len(rescue) != 2 || len(restart) != 1 {
+	restart = pick(resc, []string{"ROLLBACK — re-enable the service", "ROLLBACK — restart the service"})
+	if len(steps) != 7 || len(rescue) != 2 || len(restart) != 2 {
 		t.Fatalf("steps=%d rescue=%d restart=%d: the install block or its rescue was renamed/restructured", len(steps), len(rescue), len(restart))
 	}
 	return
@@ -106,7 +106,7 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 	}
 	// The restore tasks are always-tagged (the rescue must run whenever its block does) and
 	// so must carry the guards in their own bodies instead of relying on the setters' tags.
-	for _, task := range append(append([]any{}, rescue...), restart...) {
+	for _, task := range rescue {
 		m := task.(map[string]any)
 		if got := taskTags(t, task); !reflect.DeepEqual(got, []string{"always"}) {
 			t.Errorf("%v has tags %v, want [always]: the rescue must run whenever its block does", m["name"], got)
@@ -115,9 +115,30 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 		if !strings.Contains(when, "detection_engine_is_upgrade is defined") {
 			t.Errorf("%v: when %q must guard detection_engine_is_upgrade with `is defined`", m["name"], when)
 		}
-		if strings.HasPrefix(m["name"].(string), "ROLLBACK — restore") && !strings.Contains(when, "detection_engine_binary_result is defined") {
+		if !strings.Contains(when, "detection_engine_binary_result is defined") {
 			t.Errorf("%v: when %q must require `detection_engine_binary_result is defined` (this run reached Step 6), or a stale backup of an earlier upgrade can be restored", m["name"], when)
 		}
+	}
+	// The service's original state is restored from Step 0's read-only probe, never from
+	// facts Step 6's tag sets: those are undefined when the selection skips Step 6 and the
+	// rescue still stops+disables the unit (reviewer repro: --tags detection-engine
+	// --skip-tags detection-engine-C1 with a failure in Step 8).
+	for _, task := range restart {
+		m := task.(map[string]any)
+		if got := taskTags(t, task); !reflect.DeepEqual(got, []string{"always"}) {
+			t.Errorf("%v has tags %v, want [always]", m["name"], got)
+		}
+		when := strings.Join(whenStrings(m["when"]), " && ")
+		if !strings.Contains(when, "detection_engine_service_before") {
+			t.Errorf("%v: when %q must read Step 0's detection_engine_service_before", m["name"], when)
+		}
+		if strings.Contains(when, "detection_engine_is_upgrade") || strings.Contains(when, "detection_engine_binary_result") {
+			t.Errorf("%v: when %q must not depend on facts only Step 6's tag sets", m["name"], when)
+		}
+	}
+	probe := loadDetectionEngineProbe(t)
+	if got := taskTags(t, probe); !reflect.DeepEqual(got, []string{"always"}) {
+		t.Errorf("Step 0 has tags %v, want [always]: it must run under every selection, before anything changes", got)
 	}
 }
 
