@@ -452,8 +452,9 @@ freeipa-nfs-server 的 gate 也會擋下，並指出是哪一份名冊。三者�
 最新實機驗證（2026-10-29，candidate `09119dd`，兩台全新 VM）：site chain 通過（L1–L6，`freeipa-server.md` 20/20），
 gate 的通過、失敗與手動修正後的復原都已驗證；`pilot edit --actions` 輪替成功，名冊被持有時拒絕存檔，
 以 hard link 共用 inode 的名冊在被持有時也拒絕存檔、釋放後兩個名字都拿到新密碼；名冊的 YAML alias 有環
-或是 40 層 merge fan-out 時，`pilot edit --actions` 不當機也不卡住（約 0.2 秒），vault 照存、名冊原樣、
-警告指名原因。見[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-29-09119dd.md)。這份紀錄的受測樹是 `09119dd`
+或是 40 層 merge fan-out 時，`pilot edit --actions` 不當機也不卡住（約 0.2 秒），vault 照存、名冊原樣；
+有環時警告指名「alias 或 merge key 指向自己」；fan-out 且名冊裡有 admin 密碼時，警告帶的是 YAML 函式庫自己的
+`excessive aliasing` 上限（不是 pilot 的守衛）；fan-out 且名冊沒有 admin 密碼時沒有東西要同步，也就沒有警告。見[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-29-09119dd.md)。這份紀錄的受測樹是 `09119dd`
 的 Go 程式碼與 playbook；之後只加了測試、`.github/workflows/ci.yml`（`playbook-lint` 的逾時）、文件與這份紀錄，
 沒有改任何正式程式碼、playbook、spec 或 fixture（可用 `git diff 09119dd HEAD --stat` 驗證）。實機只走了
 `pilot edit --actions` 的存檔路徑、hard link 名冊的 inode 鎖、循環／fan-out YAML 的守衛（`pilot edit` 同步與
