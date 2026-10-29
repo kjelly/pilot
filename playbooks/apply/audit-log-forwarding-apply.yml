@@ -399,12 +399,29 @@
           check_mode: false
           when: distro_rsyslog_logrotate.stat.exists | default(false)
 
+        # Rewritten with awk, not lineinfile: when audit_syslog_path is the only
+        # path of its stanza (Ubuntu 22.04+ ships "/var/log/syslog" alone before
+        # its "{"), deleting just that line leaves a stanza with no filename and
+        # logrotate rejects the whole file ("lines must begin with a keyword or a
+        # filename"). The helper drops that whole stanza, and only the one path
+        # when other paths share it. check_mode: false because it only reads.
+        - name: "Step 5c: Compute the distro rsyslog policy without {{ audit_syslog_path }} (spec C20)"
+          tags: [C20]
+          ansible.builtin.shell:
+            cmd: "awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin /etc/logrotate.d/rsyslog"
+            stdin: "{{ lookup('file', playbook_dir ~ '/files/logrotate-drop-path.awk') }}"
+          register: distro_rsyslog_without_audit_path
+          changed_when: false
+          check_mode: false
+          when:
+            - distro_rsyslog_logrotate.stat.exists | default(false)
+            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
+
         - name: "Step 5c: Drop {{ audit_syslog_path }} from the distro rsyslog policy, keeping its other paths (spec C20)"
           tags: [C20]
-          ansible.builtin.lineinfile:
-            path: /etc/logrotate.d/rsyslog
-            regexp: '^{{ audit_syslog_path | regex_escape }}$'
-            state: absent
+          ansible.builtin.copy:
+            dest: /etc/logrotate.d/rsyslog
+            content: "{{ distro_rsyslog_without_audit_path.stdout }}\n"
             # See Step 4: this distro policy relies on the global `su`.
             validate: >-
               /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
