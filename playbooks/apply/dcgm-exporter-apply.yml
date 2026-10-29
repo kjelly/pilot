@@ -195,6 +195,35 @@
              (dcgm_exporter_own_container_check.stdout | default('')) | trim | length == 0 }}
       tags: [always]
 
+    # A --check preview does not install docker (docker-apply.yml skips its
+    # package install in check mode), so on a host that has never had docker
+    # every docker step below fails: Step 2's restart ("Could not find the
+    # requested service docker") and the container tasks. The real apply
+    # installs docker first, so this is a preview-only gap: defer the block.
+    - name: "Check whether docker.service exists yet"  # noqa: command-instead-of-module
+      ansible.builtin.command: systemctl cat docker.service
+      register: dcgm_exporter_docker_unit_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: dcgm_exporter_gpu_present
+      tags: [always]
+
+    - name: "Determine whether this preview must defer the install (docker not installed yet)"
+      ansible.builtin.set_fact:
+        dcgm_exporter_docker_pending_in_preview: >-
+          {{ ansible_check_mode and dcgm_exporter_gpu_present and
+             (dcgm_exporter_docker_unit_check.rc | default(0)) != 0 }}
+      tags: [always]
+
+    - name: "Report: docker is not installed yet, so the dcgm-exporter preview is deferred to the real apply"
+      ansible.builtin.debug:
+        msg: >-
+          docker.service 還不存在，--check 預覽不會安裝 docker，所以略過
+          dcgm-exporter 的安裝與容器步驟；實際套用時 docker 會先裝好。
+      when: dcgm_exporter_docker_pending_in_preview | bool
+      tags: [always]
+
     - name: "Report: skipping native install (port already served by something else)"
       ansible.builtin.debug:
         msg: >-
@@ -242,7 +271,10 @@
 
   tasks:
     - name: "dcgm-exporter install + container"
-      when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other
+      when:
+        - dcgm_exporter_gpu_present
+        - not dcgm_exporter_port_occupied_by_other
+        - not (dcgm_exporter_docker_pending_in_preview | bool)
       block:
         - name: "Step 1: Add NVIDIA Container Toolkit apt signing key"
           tags: [C1]
