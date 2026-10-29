@@ -140,6 +140,11 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText)$$' ./internal/spec/
 
+freeipa-server-pool-test: ## Include tasks/freeipa-server-pool.yml twice on one host, as site.yml does for a dns + freeipa-client host (issue 157), with mandatory real Ansible.
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_FreeIPAServerPool' ./internal/spec/
+
+.PHONY: freeipa-server-pool-test
+
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks
 	@echo "✓ git hooksPath set to .githooks — playbook-lint now runs on commit"
