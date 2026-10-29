@@ -270,6 +270,11 @@
               https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
           register: dcgm_exporter_toolkit_repo
 
+        # The key and repo above are not written in check mode, so on a host
+        # that has never had the repo the scoped refresh cannot copy
+        # nvidia-container-toolkit.list and the whole block rolls back ("Source
+        # ... not found"). Deferred to the real apply, same as wazuh-fim-apply.yml
+        # Step 4, which has the same third-party repo.
         - name: "Step 1: Install nvidia-container-toolkit (spec C1)"
           tags: [C1]
           ansible.builtin.include_tasks:
@@ -284,6 +289,7 @@
               - id: pilot-nvidia-container-toolkit
                 class: pilot
                 source_file: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+          when: not ansible_check_mode
 
         # /etc/docker/daemon.json is only declarative input.  Docker does
         # not reload it automatically, so its contents are not proof that
