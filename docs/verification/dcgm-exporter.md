@@ -58,6 +58,15 @@
 > 已由既有環境管理的 Docker 可以直接使用。這是本 repo 少數 docker-based
 > 而非 binary-based 的 per-host agent。
 >
+> **`--check` 預覽與全新主機**：預覽不會安裝 docker，所以在還沒有
+> `docker.service` 的主機上，安裝與容器步驟只有在「同一次 ansible 執行」會由
+> `docker-apply.yml` 安裝 docker 時才會延後到實際套用（`docker-apply.yml`
+> 在安裝任務前用相同 tags 記錄 `pilot_docker_install_planned`，由 Ansible
+> 自己的 tag 選取決定）。完整 `site.yml`、`--tags docker,dcgm-exporter`
+> 會延後；單獨跑 `dcgm-exporter-apply.yml`、`--tags dcgm-exporter`、
+> `--tags observability`、`--skip-tags docker` 則不會，預覽會照實失敗（實際
+> 套用同樣會因缺少 docker 失敗）。是否在 `docker` inventory group 不影響此判斷。
+>
 > **NVIDIA Container Toolkit**：讓 `docker run --runtime nvidia` 能把 GPU
 > 裝置節點/驅動函式庫正確 bind 進容器，是 GPU 監控容器化的必要中介層，屬於
 > 這個 playbook 的套用範圍（類比 `host-monitoring.md` 為了 Basic Auth 安裝

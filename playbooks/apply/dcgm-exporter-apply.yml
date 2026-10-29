@@ -199,12 +199,15 @@
     # package install in check mode), so on a host that has never had docker
     # every docker step below fails: Step 2's restart ("Could not find the
     # requested service docker") and the container tasks. Defer the block only
-    # when pilot itself will install docker first at the real apply, i.e. the
-    # host is in the `docker` inventory group (it gets docker-apply.yml).
+    # when docker-apply.yml's install is selected for this host in this same
+    # ansible run: that play records pilot_docker_install_planned under the
+    # install tasks' own tags, so Ansible's task selection (site.yml, --tags,
+    # --skip-tags) decides it. Being in the `docker` inventory group proves
+    # nothing: a standalone dcgm-exporter-apply.yml run, `--tags dcgm-exporter`
+    # or `--skip-tags docker` does not install docker, so a preview of a fresh
+    # host there keeps failing on the missing docker, as the real apply would.
     # Docker may also be installed and operated outside pilot (see
-    # contracts/dcgm-exporter.yaml): a host outside the group with no
-    # docker.service would still fail at the real apply, so there the preview
-    # must keep failing instead of going green.
+    # contracts/dcgm-exporter.yaml); such a host never gets the marker.
     - name: "Check whether docker.service exists yet"  # noqa: command-instead-of-module
       ansible.builtin.command: systemctl cat docker.service
       register: dcgm_exporter_docker_unit_check
@@ -214,11 +217,11 @@
       when: dcgm_exporter_gpu_present
       tags: [always]
 
-    - name: "Determine whether this preview must defer the install (docker not installed yet, and pilot installs it)"
+    - name: "Determine whether this preview must defer the install (docker not installed yet, and this run installs it)"
       ansible.builtin.set_fact:
         dcgm_exporter_docker_pending_in_preview: >-
           {{ ansible_check_mode and dcgm_exporter_gpu_present and
-             'docker' in group_names and
+             pilot_docker_install_planned is defined and
              (dcgm_exporter_docker_unit_check.rc | default(0)) != 0 }}
       tags: [always]
 
@@ -226,8 +229,8 @@
       ansible.builtin.debug:
         msg: >-
           docker.service 還不存在，--check 預覽不會安裝 docker，所以略過
-          dcgm-exporter 的安裝與容器步驟；這台主機在 docker 群組裡，實際套用時
-          pilot 會先用 docker-apply.yml 裝好 docker。
+          dcgm-exporter 的安裝與容器步驟；這次執行有選到 docker-apply.yml 的
+          docker 安裝（同一次 ansible 執行），實際套用時會先裝好 docker。
       when: dcgm_exporter_docker_pending_in_preview | bool
       tags: [always]
 
