@@ -29,7 +29,7 @@ func TestCompleteTestSuitesRunSequentially(t *testing.T) {
 set -eu
 mode=normal
 case " $* " in *" -race "*) mode=race;; esac
-[ "$*" = "test -count=1 -timeout 30m ./..." ] || [ "$*" = "test -race -count=1 -timeout 30m ./..." ]
+[ "$*" = "test -count=1 -timeout 45m ./..." ] || [ "$*" = "test -race -count=1 -timeout 45m ./..." ]
 printf '%s start\n' "$mode" >> "$PILOT_SUITE_EVENTS"
 if [ "$mode" = normal ]; then
     if [ "$PILOT_FAIL_NORMAL" = 1 ]; then exit 7; fi

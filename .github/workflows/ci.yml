@@ -19,7 +19,7 @@ jobs:
   test:
     name: Go test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
         run: go build ./...
 
       - name: go test
-        # The flags, including go test's -timeout (30m), live in the Makefile.
+        # The flags, including go test's -timeout (45m), live in the Makefile.
         # -timeout counts from when a test binary starts, so this job's
         # timeout-minutes stays at least 10m above it, for the steps before
         # this one and for compiling the -race test binaries. On 2026-10-16

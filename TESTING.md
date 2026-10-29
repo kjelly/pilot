@@ -62,9 +62,10 @@ go run ./cmd/pilot vm-target test --name <vm> \
 - **完整 normal + race**：`make test-all` 依序執行兩份完整測試，即使帶 `-j`
   也不會重疊；normal 失敗會立即停止。請勿另外同時啟動完整測試或其他大量
   Ansible 測試，以免 subprocess 與 CPU 互相爭用耗盡每套測試的時間預算。
-- **時間預算**：`make test` 與 `make test-race` 均使用 `-count=1 -timeout 30m`，
-  normal 的預設 10 分鐘不足以完成安裝了 Ansible 的本機整合測試；race 保留
-  原有的 30 分鐘上限。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
+- **時間預算**：`make test` 與 `make test-race` 均使用 `-count=1 -timeout 45m`，
+  normal 的預設 10 分鐘不足以完成安裝了 Ansible 的本機整合測試；`internal/spec`
+  已長到超過原本的 30 分鐘上限（本機約 29.3 分鐘、CI runner 上更久），所以兩者
+  都放寬到 45 分鐘，CI 的 `Go test` job 預算隨之是 60 分鐘。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
 - **race detector**：`make test-race` 執行完整 race suite，CI 跑的就是這個 target。
 - **Python callback**：`make test-callback`。
 - **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /

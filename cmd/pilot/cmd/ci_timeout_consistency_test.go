@@ -124,17 +124,19 @@ func TestCIGoTestTimeoutFiresBeforeJobLimit(t *testing.T) {
 }
 
 func TestCIGoTestTimeoutCheckCatchesDrift(t *testing.T) {
-	const goodCI = "jobs:\n  test:\n    timeout-minutes: 45\n    steps:\n      - name: go test\n        run: make test-race\n"
-	const goodMake = "test-race:     \t## Run tests\n\tgo test -race -count=1 -timeout 30m ./...\n\nclean:\n\trm -f x\n"
+	const goodCI = "jobs:\n  test:\n    timeout-minutes: 60\n    steps:\n      - name: go test\n        run: make test-race\n"
+	const goodMake = "test-race:     \t## Run tests\n\tgo test -race -count=1 -timeout 45m ./...\n\nclean:\n\trm -f x\n"
 	cases := []struct {
 		name, ci, makefile, want string
 	}{
 		{"agree", goodCI, goodMake, ""},
-		{"job limit below go timeout", strings.Replace(goodCI, "45", "20", 1), goodMake, "is not above"},
-		{"job limit without setup margin", strings.Replace(goodCI, "45", "39", 1), goodMake, "is not above"},
-		{"CI runs go test directly", strings.Replace(goodCI, "make test-race", "go test -race -count=1 -timeout 30m ./...", 1), goodMake, "want `make test-race`"},
-		{"no -timeout in Makefile", goodCI, strings.Replace(goodMake, " -timeout 30m", "", 1), "sets no -timeout"},
-		{"no job timeout", strings.Replace(goodCI, "    timeout-minutes: 45\n", "", 1), goodMake, "sets no timeout-minutes"},
+		{"job limit below go timeout", strings.Replace(goodCI, "60", "20", 1), goodMake, "is not above"},
+		{"job limit one minute short of the setup margin", strings.Replace(goodCI, "60", "54", 1), goodMake, "is not above"},
+		{"old 45m job budget with the 45m go timeout", strings.Replace(goodCI, "60", "45", 1), goodMake, "is not above"},
+		{"job limit exactly at go timeout plus setup margin", strings.Replace(goodCI, "60", "55", 1), goodMake, ""},
+		{"CI runs go test directly", strings.Replace(goodCI, "make test-race", "go test -race -count=1 -timeout 45m ./...", 1), goodMake, "want `make test-race`"},
+		{"no -timeout in Makefile", goodCI, strings.Replace(goodMake, " -timeout 45m", "", 1), "sets no -timeout"},
+		{"no job timeout", strings.Replace(goodCI, "    timeout-minutes: 60\n", "", 1), goodMake, "sets no timeout-minutes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

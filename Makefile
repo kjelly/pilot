@@ -39,8 +39,9 @@ release:       	## Compile stripped release binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
 	@echo "Built $(BIN) (stripped, no debug info)"
 
+# -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
-	go test -count=1 -timeout 30m ./...
+	go test -count=1 -timeout 45m ./...
 
 vet:           	## Run go vet
 	go vet ./...
@@ -51,11 +52,15 @@ lint:          	## Run golangci-lint
 # -timeout: go test's default is 10m per package. Under -race on GitHub
 # runners, internal/spec takes 12-15m when it passes (738-895 s on
 # 2026-10-15/16), and four runs on 2026-10-15 hit the old 15m limit at 900 s.
-# cmd/pilot/cmd takes 7-8m. 30m keeps about a 2x margin for the slowest
-# package. CI runs this target; its job timeout-minutes must stay above this
+# cmd/pilot/cmd takes 7-8m. internal/spec has since outgrown 30m: it took
+# about 1760 s (29.3 m) locally at 448cf330 and went past 30m on the CI
+# runner, so main's last three pushes (runs 40802511042, 40802136845,
+# 40793595116) all died with "panic: test timed out after 30m0s". 45m leaves
+# about 1.5x over the 29.3 m local figure for the slowest package. CI runs this
+# target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 test-race:     	## Run tests with the race detector (CI runs this target)
-	go test -race -count=1 -timeout 30m ./...
+	go test -race -count=1 -timeout 45m ./...
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
