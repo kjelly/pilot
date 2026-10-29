@@ -287,7 +287,7 @@ admin 密碼存在兩個地方，兩份必須相同：
   vars 檔不是合法 YAML 時 ansible 會印出出錯的那一行，內容可能含密碼，所以這種錯誤只回報「ansible 無法解析
   <檔案:行:欄>，請確認是合法 YAML」。`pilot identity drift`、`pilot access drift` 的錯誤與 `pilot access health`
   的 `probe_error` 都用這個訊息。
-  實跑摘要（vm-target 上的 FreeIPA，candidate `c2158ff6`）：[docs/evidence/freeipa-identity/2026-10-29-c2158ff.md](../evidence/freeipa-identity/2026-10-29-c2158ff.md)。
+  實跑摘要（vm-target 上的 FreeIPA，candidate `46dce32f`）：[docs/evidence/freeipa-identity/2026-10-29-46dce32.md](../evidence/freeipa-identity/2026-10-29-46dce32.md)。
 - 名冊的 `freeipa.admin.password`：`pilot roster remove-*`、`pilot access` 的其他子指令、drift probe 以外的檢查
   playbook（例如 capability probe、ever-applied 檢查）與 `--repair-managed` 的修復步驟（reconcile）只載入名冊，
   用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
