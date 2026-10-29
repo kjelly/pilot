@@ -1395,6 +1395,11 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
    `PILOT_REQUIRE_ROOT_TESTS=1`(skip 變 fail),CI 的 "Root-only ownership tests" job 跑這個
    target;`cmd/pilot/cmd/root_test_consistency_test.go::TestRootOnlyTestsRunInCI` 鎖住
    Makefile 的 `ROOT_TESTS` 等於所有會走到 `requireRoot` 的測試、CI 確實執行它。
+   `image` job(發佈 `:sha-` image,`promote` 再把 `:latest` 指向它)的 `needs` 必須包含這個
+   job 與其餘每一個驗證 job——否則 main push 在 root 測試紅燈時仍會發佈 image、移動 `latest`;
+   `cmd/pilot/cmd/ci_needs_test.go::TestCIImageWaitsForEveryValidationJob` 依 `promote`/`image`
+   的角色(不寫死 job 名稱)對 `needs` 做遞移檢查,新增 job 漏接也會 fail(也擋下驗證 job 的
+   `if:`/`continue-on-error`)。
 
 ### 5.12 每個 gate、matcher、`changed_when` 都要證明它會觸發
 

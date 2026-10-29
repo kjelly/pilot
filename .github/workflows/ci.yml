@@ -171,7 +171,8 @@ jobs:
 
   image:
     # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
-    # once every other job here has passed, and pushes it to
+    # once every other job here has passed (needs lists them all, root-tests
+    # included: TestCIImageWaitsForEveryValidationJob), and pushes it to
     # ghcr.io/kjelly/pilot-cli:
     #   push or workflow_dispatch on a branch -> :sha-<short>
     #   tag v1.2.3      -> :1.2.3, :1.2 only, so a tag on main's commit does
@@ -180,7 +181,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [test, playbook-lint, thanos-retention, lint]
+    needs: [test, playbook-lint, root-tests, thanos-retention, lint]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
