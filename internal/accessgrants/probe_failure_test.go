@@ -48,6 +48,28 @@ func TestSummarizeAnsibleFailure_RealCaptures(t *testing.T) {
 			notWant: []string{"Invalid characters were found in group names", "Origin:", "^ column"},
 		},
 		{
+			// ANSIBLE_STDOUT_CALLBACK=minimal prints no `fatal:` line, so the
+			// gate message is only in the [ERROR] line, whose text names
+			// .vault/main.yaml: it must not be taken for a parse error.
+			name:    "gate_missing_minimal",
+			want:    []string{"No usable FreeIPA admin password", "Both are missing or too short"},
+			notWant: []string{"could not parse", "withheld", "valid YAML", "Origin:"},
+		},
+		{
+			// ANSIBLE_FORCE_COLOR=1: every line carries escape codes.
+			name:    "gate_missing_force_color",
+			want:    []string{"No usable FreeIPA admin password", "Both are missing or too short"},
+			notWant: []string{"\x1b", "[0;3", "could not parse", "Origin:"},
+		},
+		{
+			// A vars file that is a list: a real parse-class [ERROR] that is
+			// not worded "YAML parsing failed".
+			name:     "vault_not_mapping",
+			varsFile: "/repo/.vault/main.yaml",
+			want:     []string{"could not parse an input file", "/repo/.vault/main.yaml is valid YAML", "withheld"},
+			notWant:  []string{"could not be made into a dictionary", "/work/main.yaml"},
+		},
+		{
 			// {{ 1 / 0 }} as the vault value: rescued, so the gate speaks.
 			name:    "vault_template_unresolvable",
 			want:    []string{"No usable FreeIPA admin password", "Both are missing or too short"},
@@ -155,6 +177,54 @@ func TestRedactSecretish(t *testing.T) {
 func TestSummarizeAnsibleFailure_ParseErrorWithoutOriginHintsTheVarsFile(t *testing.T) {
 	got := summarizeAnsibleFailure("", "[ERROR]: Syntax Error while loading YAML.\n  found Sup3rS3cretPw\n", "/ws/.vault/main.yaml")
 	if !strings.Contains(got, "check that /ws/.vault/main.yaml is valid YAML") || strings.Contains(got, "Sup3rS3cretPw") || strings.Contains(got, "Syntax Error") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
+// TestParseErrorRE_OnlyRealParseErrors: the gate's own text names
+// .vault/main.yaml and must never be classed as a parse error, while every
+// real ansible-core 2.19.2 parse-error header (the YAML/JSON ones come from
+// real captures: testdata/ansible/vault_bad_yaml, vault_not_mapping, and a
+// tab-indented file) still is.
+func TestParseErrorRE_OnlyRealParseErrors(t *testing.T) {
+	for _, in := range []string{
+		"YAML parsing failed: Colons in unquoted values must be followed by a non-space character.",
+		"YAML parsing failed: Tabs are usually invalid in YAML.",
+		"JSON parsing failed.",
+		"Syntax Error while loading YAML.",
+		"Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary",
+		"We were unable to read either as JSON nor YAML, these are the errors we got from each",
+	} {
+		if !parseErrorRE.MatchString(in) {
+			t.Errorf("parseErrorRE must match the real parse error %q", in)
+		}
+	}
+	for _, in := range []string{
+		"Task failed: Action failed: No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password in the roster. Both are missing or too short.",
+		"the roster is not valid yaml",
+		"Failed to parse inventory with 'yaml' plugin.",
+		"Unable to parse /work/inventory.yml as an inventory source",
+		"could not load the module",
+		"Attempting to decrypt but no vault secrets found",
+	} {
+		if parseErrorRE.MatchString(in) {
+			t.Errorf("parseErrorRE must not match %q", in)
+		}
+	}
+}
+
+// TestSummarizeAnsibleFailure_StripsAnsiEscapes: colour codes around a real
+// `fatal:` and `[ERROR]:` line are removed before anything is matched.
+func TestSummarizeAnsibleFailure_StripsAnsiEscapes(t *testing.T) {
+	const esc = "\x1b"
+	if got := ansiRE.ReplaceAllString(esc+"[0;31mred"+esc+"[0m "+esc+"[1;35mbold"+esc+"[0m plain "+esc+"[2K", ""); got != "red bold plain " {
+		t.Fatalf("ansiRE left %q", got)
+	}
+	stdout := esc + "[0;31m[ERROR]: Task failed: Action failed: the gate said no (see .vault/main.yaml)" + esc + "[0m\n" +
+		esc + "[0;31mfatal: [h1]: FAILED! => {\"msg\": \"gate says no\"}" + esc + "[0m\n" +
+		"h1 : ok=1    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0\n"
+	got := summarizeAnsibleFailure(stdout, "", "")
+	if !strings.Contains(got, "gate says no") || strings.Contains(got, esc) || strings.Contains(got, "[0;31m") {
 		t.Fatalf("summary = %q", got)
 	}
 }

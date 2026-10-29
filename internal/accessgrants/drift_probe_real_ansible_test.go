@@ -250,3 +250,82 @@ func TestRegression_IdentitySecretDriftProbeWithRealAnsiblePasses(t *testing.T) 
 		})
 	}
 }
+
+// TestRegression_IdentitySecretDriftProbeIgnoresTheOperatorsOutputSettings:
+// the failure extraction reads ansible's default callback output, so DriftProbe
+// pins it (driftProbeEnv). With the operator's environment or ansible.cfg
+// selecting another callback, colour, or a YAML result format, the gate message
+// must still be shown and a gate text that names .vault/main.yaml must not be
+// reported as a parse error, while a real malformed vault still is.
+func TestRegression_IdentitySecretDriftProbeIgnoresTheOperatorsOutputSettings(t *testing.T) {
+	requireRealAnsible(t)
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "ansible.cfg")
+	if err := os.WriteFile(cfgPath, []byte("[defaults]\nstdout_callback = minimal\nforce_color = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		// raw reports whether this setting visibly changes a plain run, so
+		// the case proves the environment is effective and not a no-op.
+		raw func(stdout string) bool
+	}{
+		{"force color", map[string]string{"ANSIBLE_FORCE_COLOR": "1"}, func(o string) bool { return strings.Contains(o, "\x1b[") }},
+		{"minimal callback", map[string]string{"ANSIBLE_STDOUT_CALLBACK": "minimal"}, func(o string) bool { return !strings.Contains(o, "fatal: [") }},
+		{"json callback", map[string]string{"ANSIBLE_STDOUT_CALLBACK": "json"}, func(o string) bool { return strings.HasPrefix(strings.TrimSpace(o), "{") }},
+		{"oneline callback", map[string]string{"ANSIBLE_STDOUT_CALLBACK": "oneline"}, func(o string) bool { return !strings.Contains(o, "TASK [") }},
+		{"yaml result format", map[string]string{"ANSIBLE_CALLBACK_RESULT_FORMAT": "yaml"}, func(o string) bool { return !strings.Contains(o, `"msg": "`) }},
+		{"ansible.cfg stdout_callback and color", map[string]string{"ANSIBLE_CONFIG": cfgPath}, func(o string) bool { return !strings.Contains(o, "fatal: [") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			pb, err := filepath.Abs(realProbePlaybook)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// should-trigger: the gate fails, and the message reaches the error.
+			env := newRealProbeEnv(t, "", "")
+			noKey := env.vault(t, "nokey.yaml", "unrelated: 1\n")
+			raw := exec.Command("ansible-playbook", pb, "-i", env.inventory, "-e", "@"+noKey,
+				"-e", `{"freeipa_roster_file":"`+env.roster+`","pilot_drift_output":"/dev/null"}`)
+			rawOut, _ := raw.Output()
+			if !tc.raw(string(rawOut)) {
+				t.Fatalf("this setting no longer changes ansible's output; the case proves nothing:\n%s", rawOut)
+			}
+			_, probeErr := DriftProbe(context.Background(), env.opts(t, noKey, ""))
+			if probeErr == nil {
+				t.Fatal("the probe succeeded without a usable admin password")
+			}
+			for _, w := range []string{"No usable FreeIPA admin password", "Both are missing or too short"} {
+				if !strings.Contains(probeErr.Error(), w) {
+					t.Errorf("the gate message is lost (%q missing): %v", w, probeErr)
+				}
+			}
+			for _, w := range []string{"could not parse", "no recognisable failure", "\x1b"} {
+				if strings.Contains(probeErr.Error(), w) {
+					t.Errorf("wrong diagnosis (%q): %v", w, probeErr)
+				}
+			}
+
+			// should-trigger: a malformed vault is still a parse error, and
+			// its content still never reaches the error.
+			bad := env.vault(t, "bad.yaml", "ipa_admin_password: "+probeVaultSecret+": oops\n")
+			_, probeErr = DriftProbe(context.Background(), env.opts(t, bad, ""))
+			if probeErr == nil || !strings.Contains(probeErr.Error(), "could not parse") || !strings.Contains(probeErr.Error(), "bad.yaml:1:") {
+				t.Errorf("a malformed vault is not diagnosed as a parse error: %v", probeErr)
+			} else if strings.Contains(probeErr.Error(), probeVaultSecret) || strings.Contains(probeErr.Error(), "oops") {
+				t.Errorf("the malformed vault's content leaked: %v", probeErr)
+			}
+
+			// should-pass: with a usable password the probe still succeeds.
+			good := env.vault(t, "good.yaml", "ipa_admin_password: Vault-Passing-Pw-31\n")
+			if _, err := DriftProbe(context.Background(), env.opts(t, good, "")); err != nil {
+				t.Errorf("the probe failed under this setting although the password is usable: %v", err)
+			}
+		})
+	}
+}

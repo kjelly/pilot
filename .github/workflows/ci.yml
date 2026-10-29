@@ -73,11 +73,11 @@ jobs:
     runs-on: ubuntu-latest
     # The Go -timeout values in the Makefile targets these steps run
     # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m +
-    # 3m + 2m, freeipa-server-pool 5m = 40m) are hang caps: a hung step fails
+    # 5m + 2m, freeipa-server-pool 5m = 42m) are hang caps: a hung step fails
     # at its own cap, with go test's stack dump naming the test, and the job
     # normally takes about 20 minutes. The job budget must not be below the
     # sum of those caps, so a step is never cut off by an anonymous job
-    # cancellation; 45 is that 40m plus room for the toolchain setup, the
+    # cancellation; 45 is that 42m plus room for the toolchain setup, the
     # syntax-check loop and the alert-rules suite (no explicit cap).
     # TestCIJobTimeoutCoversMakeTargetCaps keeps this in step with the
     # Makefile.

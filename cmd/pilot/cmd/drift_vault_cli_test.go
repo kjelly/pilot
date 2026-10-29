@@ -280,6 +280,50 @@ func TestDriftProbeCommandsPassTheVaultFile(t *testing.T) {
 			}
 		})
 
+		// An unreadable default (chmod 000) must not turn a roster-literal
+		// user's working command into a failure; an unreadable explicit
+		// --vars-file is an early error. chmod does not stop root.
+		t.Run(c.name+"/an unreadable auto-detected vault is skipped with a note, an unreadable explicit one is an early error", func(t *testing.T) {
+			resetDriftCmdState(t)
+			if os.Geteuid() == 0 {
+				t.Skip("root can read a chmod 000 file")
+			}
+			argsFile := fakeDriftAnsible(t)
+			ws := newDriftWorkspace(t, "ipa_admin_password: "+secret+"\n")
+			if err := os.Chmod(ws.vault, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(ws.vault, 0o600) })
+
+			out, err := runDriftCmd(t, c.args(ws)...)
+			if err != nil {
+				t.Fatalf("an unreadable default vault must not fail the command: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "skipping unreadable "+ws.vault) || !strings.Contains(out, "permission denied") || !strings.Contains(out, "--vars-file") {
+				t.Fatalf("want a one-line skip note naming the file, the reason and --vars-file, got:\n%s", out)
+			}
+			if strings.Contains(out, secret) {
+				t.Fatal("the vault value reached the output")
+			}
+			for _, a := range readArgv(t, argsFile) {
+				if strings.Contains(a, ".vault") {
+					t.Fatalf("the unreadable vault reached ansible: %s", a)
+				}
+			}
+
+			resetDriftCmdState(t)
+			if err := os.Remove(argsFile); err != nil {
+				t.Fatal(err)
+			}
+			out, err = runDriftCmd(t, c.args(ws, "--vars-file", ws.vault)...)
+			if err == nil || !strings.Contains(err.Error(), "--vars-file") || !strings.Contains(err.Error(), "permission denied") {
+				t.Fatalf("want an early permission error for the explicit file, got %v\n%s", err, out)
+			}
+			if _, statErr := os.Stat(argsFile); statErr == nil {
+				t.Fatal("ansible-playbook ran with an unreadable --vars-file")
+			}
+		})
+
 		// F3: the auto-detected default is a convenience and never fails the
 		// command. A roster-literal user whose .vault/main.yaml is encrypted
 		// and who passes no password file keeps working (before --vars-file

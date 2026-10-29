@@ -7,8 +7,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -26,18 +28,20 @@ const (
 // probe, or "" for none.
 //
 // An explicit --vars-file is strict: it must exist, must not be a directory,
-// and, when ansible-vault encrypted, needs --vault-password-file; each fails
+// must be readable, and, when ansible-vault encrypted, needs
+// --vault-password-file; each fails
 // here, before any probe, instead of as an ansible stack trace, and the file is
 // never silently replaced.
 //
 // Otherwise <inventory dir>/.vault/main.yaml is used when present (the
 // convention pilot deploy follows) and its absence is fine: the probe falls
 // back to the roster's own admin password. That auto-detected default is only
-// ever a convenience, so it never fails the command: when it is encrypted and
-// no --vault-password-file was given it is skipped with a one-line note on
-// note (stderr), as before this flag existed, so a roster-literal user keeps
-// working and `access health` still reports instead of erroring. The file's
-// content is never read.
+// ever a convenience, so it never fails the command: when it cannot be opened
+// (permissions, ...), or is encrypted and no --vault-password-file was given,
+// it is skipped with a one-line note on note (stderr), as before this flag
+// existed, so a roster-literal user keeps working and `access health` still
+// reports instead of erroring. Only the first bytes are read, to recognise an
+// ansible-vault header.
 func resolveDriftVarsFile(note io.Writer, inventoryPath, explicit, vaultPasswordFile string) (string, error) {
 	path := explicit
 	if path == "" {
@@ -61,6 +65,18 @@ func resolveDriftVarsFile(note io.Writer, inventoryPath, explicit, vaultPassword
 		}
 		return "", fmt.Errorf("--vars-file %s: %w", path, err)
 	}
+	// Open it once here: isVaultEncrypted treats a file it cannot open as
+	// plain, which would hand ansible a file it cannot read and surface as a
+	// misleading "could not parse an input file".
+	f, err := os.Open(abs)
+	if err != nil {
+		if explicit == "" {
+			fmt.Fprintf(note, "skipping unreadable %s: %s (pass --vars-file to use its ipa_admin_password)\n", abs, osErrorClass(err))
+			return "", nil
+		}
+		return "", fmt.Errorf("--vars-file %s: %w", path, err)
+	}
+	_ = f.Close()
 	if isVaultEncrypted(abs) && vaultPasswordFile == "" {
 		if explicit == "" {
 			fmt.Fprintf(note, "skipping encrypted %s: pass --vault-password-file or --vars-file to use its ipa_admin_password\n", abs)
@@ -69,4 +85,14 @@ func resolveDriftVarsFile(note io.Writer, inventoryPath, explicit, vaultPassword
 		return "", fmt.Errorf("%s is ansible-vault encrypted; pass --vault-password-file", abs)
 	}
 	return abs, nil
+}
+
+// osErrorClass is the short operating-system reason inside err ("permission
+// denied"), without the path os.PathError prefixes.
+func osErrorClass(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
 }

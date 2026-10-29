@@ -121,6 +121,35 @@ type DriftProbeOptions struct {
 	Runner playbookRunner
 }
 
+// driftProbeEnv pins the output format the failure extraction
+// (summarizeAnsibleFailure) was written against: the default stdout callback,
+// JSON result payloads and no colour codes. Environment variables outrank
+// ansible.cfg, and exec.Cmd keeps the LAST value of a repeated variable, so
+// these override whatever the operator's shell or ansible.cfg selected
+// (ANSIBLE_STDOUT_CALLBACK=minimal|json|oneline..., ANSIBLE_FORCE_COLOR=1,
+// callback result_format=yaml), any of which hid the gate message (issue #179).
+var driftProbeEnv = []string{
+	"ANSIBLE_STDOUT_CALLBACK=default",
+	"ANSIBLE_CALLBACK_RESULT_FORMAT=json",
+	"ANSIBLE_NOCOLOR=1",
+	"ANSIBLE_FORCE_COLOR=0",
+}
+
+// extraEnvRunner is the optional capability of a playbookRunner (satisfied by
+// *ansible.Runner) to run once with extra environment variables.
+type extraEnvRunner interface {
+	RunWithExtraEnv(ctx context.Context, extraEnv []string, args ...string) (*ansible.Result, error)
+}
+
+// runProbe runs the probe playbook under driftProbeEnv when the runner can
+// take per-call environment, and plainly otherwise (test fakes).
+func runProbe(ctx context.Context, runner playbookRunner, args []string) (*ansible.Result, error) {
+	if r, ok := runner.(extraEnvRunner); ok {
+		return r.RunWithExtraEnv(ctx, driftProbeEnv, args...)
+	}
+	return runner.Run(ctx, args...)
+}
+
 // DriftProbe runs DriftProbePlaybook and returns the parsed live state. It
 // never mutates FreeIPA.
 func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) {
@@ -194,7 +223,7 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 	if runner == nil {
 		runner = ansible.NewRunner()
 	}
-	result, err := runner.Run(ctx, args...)
+	result, err := runProbe(ctx, runner, args)
 	if err != nil {
 		return LiveState{}, fmt.Errorf("accessgrants: drift-probe playbook did not run: %w", err)
 	}

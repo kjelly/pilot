@@ -289,8 +289,10 @@ func ensureFreeIPARostersCurrentSnapshot(out io.Writer, inv string, snapshot dep
 // every plaintext roster whose literal freeipa.admin.password differs from
 // the workspace vault's ipa_admin_password (issue #146) — typically a
 // rotation that changed only one of them. freeipa-nfs-server-apply.yml
-// stops on it, and `pilot access`/`pilot identity drift`/`pilot roster
-// remove-*` would log in with the roster's copy. A warning, not a
+// stops on it, and `pilot roster remove-*`, the capability probe and
+// `--repair-managed` would log in with the roster's copy (`pilot identity
+// drift`, `pilot access drift` and `pilot access health` use the vault's
+// value first and the roster's only as a fallback). A warning, not a
 // violation: deploy and reconcile themselves use the vault's value, and an
 // encrypted or unreadable file is left to the playbooks' own gates. It
 // checks the same rosters pilot edit keeps in step (rosterCandidates),
@@ -351,7 +353,8 @@ func warnFreeIPARosterAdminDrift(out io.Writer, inv string, hostVars map[string]
 			continue
 		}
 		fmt.Fprintf(out, "warning: %s 的 freeipa.admin.password 跟 %s 的 ipa_admin_password 不同。"+
-			"freeipa-nfs-server 會在 gate 擋下，pilot access／identity drift／roster remove 也會用名冊裡的舊值登入 FreeIPA。"+
+			"freeipa-nfs-server 會在 gate 擋下，pilot roster remove-*、capability probe 與 --repair-managed 也會用名冊裡的舊值登入 FreeIPA"+
+			"（identity drift／access drift／access health 以 vault 的值為先、名冊只是備援）。"+
 			"請手動把名冊的 freeipa.admin.password 改成 vault 的 ipa_admin_password（加密名冊用 ansible-vault edit）；"+
 			"pilot edit 只在改變 ipa_admin_password 的那次存檔同步名冊，之後再存不會修正。\n\n", rosterPath, vaultPath)
 	}

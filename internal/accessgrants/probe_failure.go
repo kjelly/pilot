@@ -50,8 +50,15 @@ var (
 	recapRE  = regexp.MustCompile(`^(\S+)\s*: ok=\d+\s.*\bunreachable=(\d+)\s+failed=(\d+)`)
 	originRE = regexp.MustCompile(`^Origin: (/\S+)\s*$`)
 	// parseErrorRE marks an [ERROR] whose ansible text may quote the file it
-	// could not parse.
-	parseErrorRE = regexp.MustCompile(`(?i)yaml|syntax error|pars(?:e|ing)|could not (?:be )?load`)
+	// could not parse. It matches only ansible-core's real parse-error
+	// phrases ("YAML parsing failed: ...", "JSON parsing failed", "Syntax
+	// Error while loading YAML", "Invalid extra vars data supplied. '...'
+	// could not be made into a dictionary", "unable to read either as JSON
+	// nor YAML"), never a bare "yaml": the gate's own message names
+	// `.vault/main.yaml`.
+	parseErrorRE = regexp.MustCompile(`(?i)\b(?:yaml|json) parsing failed|syntax error while loading yaml|could not be made into a dictionary|unable to read either as json nor yaml`)
+	// ansiRE matches a terminal escape sequence (colour codes).
+	ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 	// secretLineRE finds a password-shaped `key: value` / `key=value` pair
 	// (JSON keys too) so its value can be blanked.
 	secretLineRE = regexp.MustCompile(`(?i)(pass(?:word|wd|phrase)?\w*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)`)
@@ -69,7 +76,9 @@ func redactSecretish(s string) string {
 // varsFile is the vault vars file passed with -e @file, if any: it only
 // selects the hint when ansible could not parse an input file.
 func summarizeAnsibleFailure(stdout, stderr, varsFile string) string {
-	lines := strings.Split(strings.ReplaceAll(stdout+"\n"+stderr, "\r\n", "\n"), "\n")
+	// ANSI colour codes (ANSIBLE_FORCE_COLOR) would break every anchored match.
+	all := ansiRE.ReplaceAllString(stdout+"\n"+stderr, "")
+	lines := strings.Split(strings.ReplaceAll(all, "\r\n", "\n"), "\n")
 
 	// finalFatal is each host's latest `fatal:` entry, in first-seen order. A
 	// rescued failure is also printed as `fatal:` (ansible 2.19 shows it, then

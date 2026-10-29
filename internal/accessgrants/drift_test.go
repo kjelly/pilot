@@ -655,3 +655,31 @@ func TestDriftProbe_PassesTheVarsFileBeforeThePilotParams(t *testing.T) {
 		})
 	}
 }
+
+// envRecordingDriftRunner is a fakeDriftRunner that also takes per-call
+// environment, as *ansible.Runner does.
+type envRecordingDriftRunner struct {
+	fakeDriftRunner
+	env []string
+}
+
+func (f *envRecordingDriftRunner) RunWithExtraEnv(ctx context.Context, env []string, args ...string) (*ansible.Result, error) {
+	f.env = env
+	return f.Run(ctx, args...)
+}
+
+// TestDriftProbe_PinsAnsibleOutputSettings: a runner that accepts per-call
+// environment gets driftProbeEnv (default callback, JSON results, no colour),
+// which the failure extraction depends on.
+func TestDriftProbe_PinsAnsibleOutputSettings(t *testing.T) {
+	var r envRecordingDriftRunner
+	if _, err := DriftProbe(context.Background(), DriftProbeOptions{RosterFile: "roster.yaml", Inventory: "inv.yml", Runner: &r}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.env, " ")
+	for _, want := range []string{"ANSIBLE_STDOUT_CALLBACK=default", "ANSIBLE_CALLBACK_RESULT_FORMAT=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_FORCE_COLOR=0"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("probe env %q lacks %s", got, want)
+		}
+	}
+}
