@@ -297,7 +297,7 @@ admin 密碼存在兩個地方，兩份必須相同：
   失敗的 task 名稱只在它是 probe 自己的 task 時才會顯示。要看被隱藏的細節請直接以 `ansible-playbook` 跑
   `playbooks/check/freeipa-access-drift-probe.yml`（輸出可能含 vault 的值，勿貼到工單）。`pilot identity drift`、
   `pilot access drift` 的錯誤與 `pilot access health` 的 `probe_error` 都用這個訊息。
-  實跑摘要（vm-target 上的 FreeIPA，candidate `46dce32f`）：[docs/evidence/freeipa-identity/2026-10-29-46dce32.md](../evidence/freeipa-identity/2026-10-29-46dce32.md)。
+  實跑摘要（vm-target 上的 FreeIPA，candidate `5075282c`）：[docs/evidence/freeipa-identity/2026-10-30-5075282.md](../evidence/freeipa-identity/2026-10-30-5075282.md)。
 - 名冊的 `freeipa.admin.password`：`pilot roster remove-*`、`pilot access` 的其他子指令、drift probe 以外的檢查
   playbook（例如 capability probe、ever-applied 檢查）與 `--repair-managed` 的修復步驟（reconcile）只載入名冊，
   用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
