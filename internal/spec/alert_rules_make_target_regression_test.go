@@ -12,7 +12,7 @@ import (
 // docker images or ansible-playbook. The Go test job skips those tests;
 // only `make alert-rules-test` (CI's Playbook lint job,
 // PILOT_REQUIRE_CONTAINER_TESTS=1) runs them.
-var alertRulesHelperCall = regexp.MustCompile(`requireContainerImage\(|runLocalPlay\(|hostHealthPromtest\(|renderHostHealthRules\(`)
+var alertRulesHelperCall = regexp.MustCompile(`requireContainerImage\(|runLocalPlays?\(|hostHealthPromtest\(|renderHostHealthRules\(`)
 
 // alertRulesTestFiles returns every test file in this package that uses
 // those helpers, except this one.
@@ -40,7 +40,7 @@ func alertRulesTestFiles(t *testing.T) []string {
 
 // externalToolCall marks a test body that renders, runs promtool or
 // Alertmanager, or runs ansible-playbook.
-var externalToolCall = regexp.MustCompile(`requireContainerImage\(|runLocalPlay\(|hostHealthPromtest\(|renderHostHealthRules\(|LookPath\("ansible-playbook"\)|LookPath\("docker"\)`)
+var externalToolCall = regexp.MustCompile(`requireContainerImage\(|runLocalPlays?\(|hostHealthPromtest\(|renderHostHealthRules\(|LookPath\("ansible-playbook"\)|LookPath\("docker"\)`)
 
 // alertRulesMakeRun returns the -run pattern of the alert-rules-test target.
 func alertRulesMakeRun(t *testing.T) *regexp.Regexp {
@@ -84,7 +84,7 @@ func TestRegression_AlertRulesMakeTargetSelectsEveryToolTest(t *testing.T) {
 		t.Errorf("alert-rules-test pattern %q must select TestRegression_HostHealth*", run)
 	}
 	files := alertRulesTestFiles(t)
-	for _, want := range []string{"host_health_alert_rules_regression_test.go", "alertmanager_inhibit_regression_test.go", "login_probe_regression_test.go"} {
+	for _, want := range []string{"host_health_alert_rules_regression_test.go", "alertmanager_inhibit_regression_test.go", "login_probe_regression_test.go", "host_monitoring_textfile_checkmode_regression_test.go"} {
 		found := false
 		for _, f := range files {
 			found = found || f == want

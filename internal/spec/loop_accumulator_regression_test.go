@@ -11,8 +11,9 @@ import (
 
 // TestRegression_LoopAccumulatorsAreInitializedOrGuarded is a repo-wide lint
 // over playbooks/**. A fact built up in a loop with
-// `x: "{{ (x | default([])) + [item] }}"` stays undefined when the loop has
-// no items, so any later bare read of x fails with "'x' is undefined".
+// `x: "{{ (x | default([])) + [item] }}"` (or without the parentheses)
+// stays undefined when the loop has no items, so any later bare read of x
+// fails with "'x' is undefined".
 // internal-endpoint-apply.yml's internal_endpoint_normalized did exactly
 // that for a manifest with `endpoints: []`: the decommission verify query
 // read it without a default (2026-09-25). Each such accumulator must be
@@ -49,6 +50,13 @@ func TestUnguardedLoopAccumulatorReads(t *testing.T) {
       loop: "{{ things | default([]) }}"
   tasks:
     - set_fact: {first: "{{ acc | first }}"}
+`, 1},
+		{"paren-less accumulator (tasks/freeipa-server-pool.yml's shape)", `
+- hosts: all
+  tasks:
+    - set_fact: {acc: "{{ acc | default([]) + [item] }}"}
+      loop: "{{ things }}"
+    - debug: {msg: "{{ acc | first }}"}
 `, 1},
 		{"initialized before the loop", `
 - hosts: all
@@ -100,7 +108,7 @@ func TestUnguardedLoopAccumulatorReads(t *testing.T) {
 	}
 }
 
-var accumulatorValue = regexp.MustCompile(`^\s*\{\{\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*default\(`)
+var accumulatorValue = regexp.MustCompile(`^\s*\{\{\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*default\(`)
 
 // unguardedLoopAccumulatorReads returns one message per task in doc that
 // reads a loop accumulator without a default while the accumulator is never
@@ -127,14 +135,6 @@ func unguardedLoopAccumulatorReads(doc any) ([]string, int) {
 		}
 	}
 
-	setFactArgs := func(task map[string]any) map[string]any {
-		for _, key := range []string{"ansible.builtin.set_fact", "set_fact"} {
-			if args, ok := task[key].(map[string]any); ok {
-				return args
-			}
-		}
-		return nil
-	}
 	accumulators := map[string]map[string]any{} // var -> accumulating task
 	initialized := map[string]bool{}
 	for _, task := range tasks {
@@ -200,6 +200,16 @@ func unguardedLoopAccumulatorReads(doc any) ([]string, int) {
 		}
 	}
 	return out, len(accumulators)
+}
+
+// setFactArgs returns a set_fact task's facts, nil for any other task.
+func setFactArgs(task map[string]any) map[string]any {
+	for _, key := range []string{"ansible.builtin.set_fact", "set_fact"} {
+		if args, ok := task[key].(map[string]any); ok {
+			return args
+		}
+	}
+	return nil
 }
 
 func hasLoop(task map[string]any) bool {

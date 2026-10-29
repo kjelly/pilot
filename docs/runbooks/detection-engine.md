@@ -325,6 +325,8 @@ go run ./cmd/pilot vm-target topology test \
 全新拓樸沒有 textfile collector 目錄，detection-engine 的既有 preflight
 gate 會擋下。）
 
+（若 `host-monitoring` 與 detection-engine 在同一次 `site.yml` 呼叫裡一起跑，全新主機的 `--check --diff` 預覽現在也會通過這道 gate；單獨預覽或實際執行 detection-engine 仍然會被擋下，見 [`docs/evidence/detection-engine/2026-10-28-7b2f80ff48f5.md`](../evidence/detection-engine/2026-10-28-7b2f80ff48f5.md)。）
+
 真實輸出（**第一次就全綠**，不像 C11 fake-lane 補跑時踩過 3 個真 bug）：
 
 ```

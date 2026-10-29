@@ -115,6 +115,9 @@ jobs:
       - name: make identity-secret-test
         run: make identity-secret-test
 
+      - name: make freeipa-server-pool-test
+        run: make freeipa-server-pool-test
+
   root-tests:
     # The roster ownership tests need root: pilot-cli runs pilot as root
     # under `docker run`, and only root can give a file to another user.

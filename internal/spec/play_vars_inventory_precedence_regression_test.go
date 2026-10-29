@@ -585,6 +585,21 @@ func localHostVars() map[string]any {
 // failed task's name and message.
 func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]map[string]any, hosts string, playVars any, tasks []any, args ...string) (map[string]any, string) {
 	t.Helper()
+	if playVars == nil {
+		playVars = map[string]any{}
+	}
+	return tryInventoryPlaysIn(t, inv, groupVars, []map[string]any{{
+		"name": "inventory inputs", "hosts": hosts, "gather_facts": false, "become": false,
+		"vars": playVars, "tasks": tasks,
+	}}, args...)
+}
+
+// tryInventoryPlaysIn is tryInventoryPlayIn for a playbook of several plays,
+// run in order in one ansible-playbook run (facts a play sets stay for the
+// next one, as in site.yml). It stops at the first failed task on localhost
+// and returns the first show task's JSON object.
+func tryInventoryPlaysIn(t *testing.T, inv map[string]any, groupVars map[string]map[string]any, plays []map[string]any, args ...string) (map[string]any, string) {
+	t.Helper()
 	dir := t.TempDir()
 	write := func(path string, v any) {
 		body, err := yaml.Marshal(v)
@@ -602,13 +617,7 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 	for group, vars := range groupVars {
 		write(filepath.Join(dir, "group_vars", group+".yml"), vars)
 	}
-	if playVars == nil {
-		playVars = map[string]any{}
-	}
-	write(filepath.Join(dir, "play.yml"), []map[string]any{{
-		"name": "inventory inputs", "hosts": hosts, "gather_facts": false, "become": false,
-		"vars": playVars, "tasks": tasks,
-	}})
+	write(filepath.Join(dir, "play.yml"), plays)
 	cmd := exec.Command("ansible-playbook", append([]string{"-i", filepath.Join(dir, "inventory.yml"), filepath.Join(dir, "play.yml")}, args...)...)
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
 	out, runErr := cmd.Output()
@@ -620,8 +629,8 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 			Tasks []struct {
 				Task  struct{ Name string } `json:"task"`
 				Hosts map[string]struct {
-					Failed bool   `json:"failed"`
-					Msg    string `json:"msg"`
+					Failed bool        `json:"failed"`
+					Msg    callbackMsg `json:"msg"`
 				} `json:"hosts"`
 			} `json:"tasks"`
 		} `json:"plays"`
@@ -635,7 +644,7 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 			// A task named with batchedTaskPrefix runs inside a block whose
 			// rescue records the failure, so the play goes on.
 			if host.Failed && !strings.HasPrefix(task.Task.Name, batchedTaskPrefix) {
-				return nil, task.Task.Name + ": " + host.Msg
+				return nil, task.Task.Name + ": " + string(host.Msg)
 			}
 			if task.Task.Name != "show" {
 				continue
@@ -652,6 +661,21 @@ func tryInventoryPlayIn(t *testing.T, inv map[string]any, groupVars map[string]m
 	}
 	t.Fatalf("no output from the show task:\n%s", out)
 	return nil, ""
+}
+
+// callbackMsg is a JSON callback `msg`: a string as it is, any other value
+// (a debug task printing a mapping) as its JSON text.
+type callbackMsg string
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (m *callbackMsg) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*m = callbackMsg(s)
+		return nil
+	}
+	*m = callbackMsg(b)
+	return nil
 }
 
 // jsonEqual compares a decoded JSON value with a Go value by their JSON.
