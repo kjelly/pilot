@@ -37,9 +37,12 @@
   hosts: "{{ target_group | default(patch_stage) }}"
   become: true
   gather_facts: true
+  # target_group is intentionally NOT declared in play vars: a play var would
+  # shadow the `hosts:` default above (issue #177), so -e patch_stage=staging|prod
+  # (all that pilot deploy / site.yml pass) would still select `sandbox`. Only an
+  # explicit -e target_group= overrides; otherwise the group is named by patch_stage.
   vars:
     patch_stage: sandbox
-    target_group: sandbox
     unattended_origins:
       - "{{ ansible_distribution | lower }}:{{ ansible_distribution_release }}-security"
     reboot_if_needed: false
