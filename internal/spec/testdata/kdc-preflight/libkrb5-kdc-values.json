@@ -300,5 +300,173 @@
    "first_host": "",
    "kinit_error": "Invalid argument"
   }
+ ],
+ "structure_rows": [
+  {
+   "name": "plain realm stanza (control)",
+   "conf": "[realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "indented [realms] header after a [libdefaults] section",
+   "conf": "[libdefaults]\n a=b\n  [realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "tab-indented [realms] header after a section",
+   "conf": "[libdefaults]\n a=b\n\t[realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "indented [realms] header after an empty section",
+   "conf": "[libdefaults]\n  [realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "indented [realms] header as the first line",
+   "conf": "  [realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": []
+  },
+  {
+   "name": "indented [realms] header after comments only",
+   "conf": "# c\n  [realms]\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": []
+  },
+  {
+   "name": "realm brace on the next line",
+   "conf": "[realms]\n T.TEST =\n {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "realm brace on the next line, indented",
+   "conf": "[realms]\n T.TEST =\n  {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "column-0 include as the first line",
+   "conf": "include @D/inc.conf\n",
+   "files": {
+    "inc.conf": "[realms]\n T.TEST = {\n  kdc = s.invalid\n }\n"
+   },
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "indented include as the first line",
+   "conf": "  include @D/inc.conf\n",
+   "files": {
+    "inc.conf": "[realms]\n T.TEST = {\n  kdc = s.invalid\n }\n"
+   },
+   "hosts": []
+  },
+  {
+   "name": "indented include after a section",
+   "conf": "[libdefaults]\n a=b\n  include @D/inc.conf\n",
+   "files": {
+    "inc.conf": "[realms]\n T.TEST = {\n  kdc = s.invalid\n }\n"
+   },
+   "hosts": []
+  },
+  {
+   "name": "includedir: dot-files skipped, *.conf and bare names read",
+   "conf": "includedir @D/dir\n",
+   "files": {
+    "dir/a.conf": "[realms]\n T.TEST = {\n  kdc = a-conf.invalid\n }\n",
+    "dir/freeipa-realm": "[realms]\n T.TEST = {\n  kdc = bare-name.invalid\n }\n",
+    "dir/.hidden.conf": "[realms]\n T.TEST = {\n  kdc = dot-file.invalid\n }\n",
+    "dir/b.bak": "[realms]\n T.TEST = {\n  kdc = bak-file.invalid\n }\n"
+   },
+   "hosts": [
+    "a-conf.invalid",
+    "bare-name.invalid"
+   ]
+  },
+  {
+   "name": "value ending in a brace is an ordinary value",
+   "conf": "[realms]\n T.TEST = {\n  kdc = h1.invalid{\n  kdc = h2.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h1.invalid{",
+    "h2.invalid"
+   ]
+  },
+  {
+   "name": "subsection closed by a brace with a trailing comment",
+   "conf": "[realms]\n T.TEST = {\n  sub = {\n   kdc = hsub.invalid\n  } # c\n  kdc = h3.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h3.invalid"
+   ]
+  },
+  {
+   "name": "subsection closed by a brace with trailing junk",
+   "conf": "[realms]\n T.TEST = {\n  sub = {\n   kdc = hsub.invalid\n  } junk\n  kdc = h3.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h3.invalid"
+   ]
+  },
+  {
+   "name": "subsection with its brace on its own line",
+   "conf": "[realms]\n T.TEST = {\n  sub =\n  {\n   kdc = hsub.invalid\n  }\n  kdc = h3.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h3.invalid"
+   ]
+  },
+  {
+   "name": "quoted subsection name",
+   "conf": "[realms]\n T.TEST = {\n  \"sub\" = {\n   kdc = hsub.invalid\n  }\n  kdc = h3.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h3.invalid"
+   ]
+  },
+  {
+   "name": "nested subsections",
+   "conf": "[realms]\n T.TEST = {\n  a = {\n   b = {\n    kdc = hn.invalid\n   }\n  }\n  kdc = h3.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "h3.invalid"
+   ]
+  },
+  {
+   "name": "another realm stanza is ignored",
+   "conf": "[realms]\n X.TEST = {\n  kdc = other.invalid\n }\n T.TEST = {\n  kdc = s.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "s.invalid"
+   ]
+  },
+  {
+   "name": "duplicate realm stanzas are merged",
+   "conf": "[realms]\n T.TEST = {\n  kdc = d1.invalid\n }\n T.TEST = {\n  kdc = d2.invalid\n }\n",
+   "files": {},
+   "hosts": [
+    "d1.invalid",
+    "d2.invalid"
+   ]
+  }
  ]
 }

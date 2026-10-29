@@ -339,9 +339,13 @@ KDC 日誌也看不到請求）。修復它的 `/etc/hosts` server-pool pin 是 
   （libkrb5 照字面查）；逗號不分隔。libkrb5 會拒絕（kinit 以 `Invalid argument` 結束）的值——
   沒有方括號的兩個以上冒號、非數字或超過 65535 的 port、空 host、沒結尾的 `[`、`http://`——不會被
   當成名稱探測，改列在 `unparsable` 並印提示。`kdc = "localhost:88"` 因此與 `kdc = localhost:88`
-  結果相同。區段與 include 也依 libkrb5 判讀：子區段只在值剛好是 `{`（`kdc = h1{` 是普通值）或單獨
-  一行 `{` 時開啟，以 `}` 開頭的行（可接註解）關閉；`includedir` 讀 `*.conf` 與無副檔名的檔案、
-  跳過 dot-file；縮排的 `include` 與縮排的 `[realms]` 不被辨識；檔案以 `errors='replace'` 讀取。
+  結果相同。區段與 include 也依 libkrb5 判讀（以真實 kinit 1.22.2 逐項實測，擷取在同一份 fixture 的
+  `structure_rows`）：子區段只在值剛好是 `{`（`kdc = h1{` 是普通值）或單獨一行 `{` 時開啟，以 `}` 開頭的行
+  （可接註解或其他文字）關閉；`Realm =` 的 `{` 可以在下一行；`includedir` 讀 `*.conf` 與無副檔名的檔案、
+  跳過 dot-file；`include` 只有在第 0 欄才會被跟隨（縮排的 `include` 不跟隨）；`[realms]` 區段標頭在第 0 欄
+  永遠有效，縮排的標頭只有在前面已經有某個區段開著時才被接受（檔案第一個區段就縮排、或只有註解在前，
+  libkrb5 會忽略它）；檔案以 `errors='replace'` 讀取。libkrb5 在整個 profile 載入失敗（例如縮排 `include`
+  之前已有區段時 kinit 報設定檔錯誤）的情況，probe 無法模擬，只會讀不到該檔。
   比對用小寫並去掉結尾的 `.`（探測的名稱本身也去掉結尾的點）。
 - 狀態 `freeipa_client_kdc_preflight_state`：`ok`；`deferred`（**只**在 `--check`、pin 這個 task 本次
   會變更（`freeipa_client_hosts_pool_pin` is changed）、且 pin 讓 kinit 與 FreeIPA 讀取需要的名稱
@@ -359,7 +363,8 @@ KDC 日誌也看不到請求）。修復它的 `/etc/hosts` server-pool pin 是 
   realm 檔改寫成 active pool、並移除已退役的 KDC 名稱，但它在 `--check` 下被跳過，preview 也**不**預測
   這個移除。因此「krb5.conf 列出的每個 KDC 都在 pool 之外」（retired-only）的主機在 preview 仍會
   `failed`（`not_covered_by_pin`），訊息明說 preview 不預測該 reconciliation，而不是斷言 apply 無法
-  修復；要通過 preview 請修 resolver、`/etc/hosts` 或 krb5.conf 裡過時的名稱。這是已知限制，不嘗試預測。
+  修復；失敗訊息也不把「kinit 一定失敗」當成確定事實（SSSD 的 KDC locator 可能不經名稱查詢就提供 KDC
+  位址）：寫成 kinit 可能失敗、preview 把它當成風險而 fail closed；要通過 preview 請修 resolver、`/etc/hosts` 或 krb5.conf 裡過時的名稱。這是已知限制，不嘗試預測。
 - 限制：`--tags host-annotations`／`--tags host-access-policy` 不會執行 pin task（tag 是
   `freeipa-client`、`C3`），pin 的 register 不存在，視為「沒有待變更的 pin」，所以這種 `--check`
   在名稱解析不到時**明確失敗**而不是 deferred。

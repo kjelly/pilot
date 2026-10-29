@@ -35,11 +35,21 @@ type libkrb5KDCRow struct {
 	KinitError string   `json:"kinit_error"`
 }
 
+// libkrb5StructureRow is a whole krb5.conf layout (files map relative paths to
+// bodies; "@D" in conf is the temp dir) and the hosts kinit really resolved.
+type libkrb5StructureRow struct {
+	Name  string            `json:"name"`
+	Conf  string            `json:"conf"`
+	Files map[string]string `json:"files"`
+	Hosts []string          `json:"hosts"`
+}
+
 type libkrb5KDCFixture struct {
-	CapturedWith string          `json:"captured_with"`
-	Method       string          `json:"method"`
-	NotVerified  string          `json:"not_verified_on"`
-	Rows         []libkrb5KDCRow `json:"rows"`
+	CapturedWith string                `json:"captured_with"`
+	Method       string                `json:"method"`
+	NotVerified  string                `json:"not_verified_on"`
+	Rows         []libkrb5KDCRow       `json:"rows"`
+	Structure    []libkrb5StructureRow `json:"structure_rows"`
 }
 
 func loadLibkrb5KDCFixture(t *testing.T) libkrb5KDCFixture {
@@ -97,6 +107,9 @@ func TestRegression_KDCPreflightFixtureIsHonestlyLabelled(t *testing.T) {
 	if accepted < 20 || rejected < 8 {
 		t.Errorf("fixture shrank: accepted=%d rejected=%d", accepted, rejected)
 	}
+	if len(fx.Structure) < 20 {
+		t.Errorf("structure rows shrank: %d", len(fx.Structure))
+	}
 }
 
 // TestRegression_KDCPreflightKDCNamesMatchLibkrb5 is the table test: for every
@@ -133,6 +146,34 @@ func TestRegression_KDCPreflightKDCNamesMatchLibkrb5(t *testing.T) {
 				if len(res.Unparsable) != 0 {
 					t.Errorf("libkrb5 accepts %q, the probe reports it unparsable: %q", r.Raw, res.Unparsable)
 				}
+			}
+		})
+	}
+}
+
+// writeStructureRow lays a structure row out in a temp dir and returns the
+// path of its krb5.conf.
+func writeStructureRow(t *testing.T, r libkrb5StructureRow) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range r.Files {
+		writeKDCFile(t, dir, name, body)
+	}
+	return writeKDCFile(t, dir, "krb5.conf", strings.ReplaceAll(r.Conf, "@D", dir))
+}
+
+// TestRegression_KDCPreflightStructureMatchesLibkrb5 checks the krb5.conf
+// layout rules (which relations belong to the realm stanza, which files are
+// read) against the real kinit capture: the probe's kdc_names must be exactly
+// the set of hosts kinit resolved.
+func TestRegression_KDCPreflightStructureMatchesLibkrb5(t *testing.T) {
+	requirePython3ForKDCTests(t)
+	for _, r := range loadLibkrb5KDCFixture(t).Structure {
+		t.Run(r.Name, func(t *testing.T) {
+			conf := writeStructureRow(t, r)
+			res := runKDCProbe(t, map[string]any{"realm": "T.TEST", "krb5_paths": []string{conf}, "resolvectl": ""})
+			if !sameSet(res.KDCNames, r.Hosts) {
+				t.Errorf("kdc_names = %q, kinit resolved %q", res.KDCNames, r.Hosts)
 			}
 		})
 	}
@@ -239,11 +280,14 @@ func TestRegression_KDCPreflightKDCUnusable(t *testing.T) {
 }
 
 // TestRegression_KDCPreflightProfileSyntax locks the krb5.conf profile-layer
-// rules that decide which relations belong to the realm stanza (each one
-// verified against libkrb5's profile_get_values): a subsection opener is a
-// value that is exactly `{`, a closer is a line that starts with `}`, an
-// includedir skips dot-files, and include/section lines are only recognised
-// at column 0.
+// rules that decide which relations belong to the realm stanza. The layouts
+// are also checked against the real kinit capture in
+// TestRegression_KDCPreflightStructureMatchesLibkrb5; the cases here pin the
+// individual rules with readable configs: a subsection opener is a value that
+// is exactly `{`, a closer is a line that starts with `}`, an includedir skips
+// dot-files, an `include` is only followed at column 0, an indented section
+// header is accepted once a section is open (but not as the first line), and a
+// realm stanza may have its `{` on the next line.
 func TestRegression_KDCPreflightProfileSyntax(t *testing.T) {
 	requirePython3ForKDCTests(t)
 	const hsub = "hsub.pilot168.invalid"
@@ -289,13 +333,49 @@ func TestRegression_KDCPreflightProfileSyntax(t *testing.T) {
 			t.Fatalf("kdc_names = %v", res.KDCNames)
 		}
 	})
-	t.Run("an indented include and an indented section header are not recognised", func(t *testing.T) {
+	t.Run("an indented include is not followed, at the top or after a section", func(t *testing.T) {
 		dir := t.TempDir()
 		inc := writeKDCFile(t, dir, "inc.conf", "[realms]\n IPA.PILOT.INTERNAL = {\n  kdc = from-indented-include\n }\n")
-		mainConf := writeKDCFile(t, dir, "krb5.conf", "  include "+inc+"\n  [realms]\n IPA.PILOT.INTERNAL = {\n  kdc = from-indented-section\n }\n")
-		res := runKDCProbe(t, map[string]any{"realm": "IPA.PILOT.INTERNAL", "krb5_paths": []string{mainConf}, "resolvectl": ""})
-		if len(res.KDCNames) != 0 {
-			t.Fatalf("libkrb5 ignores both; kdc_names = %v", res.KDCNames)
+		for name, body := range map[string]string{
+			"first line":    "  include " + inc + "\n",
+			"after section": "[libdefaults]\n a = b\n  include " + inc + "\n",
+		} {
+			mainConf := writeKDCFile(t, dir, "krb5-"+strings.ReplaceAll(name, " ", "-")+".conf", body)
+			res := runKDCProbe(t, map[string]any{"realm": "IPA.PILOT.INTERNAL", "krb5_paths": []string{mainConf}, "resolvectl": ""})
+			if len(res.KDCNames) != 0 {
+				t.Errorf("%s: libkrb5 does not follow an indented include; kdc_names = %v", name, res.KDCNames)
+			}
+		}
+	})
+	stanza := "\n IPA.PILOT.INTERNAL = {\n  kdc = from-stanza\n }\n"
+	t.Run("an indented [realms] header is accepted after a section, ignored as the first line", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, body string
+			want       []string
+		}{
+			{"after a section", "[libdefaults]\n a = b\n  [realms]" + stanza, []string{"from-stanza"}},
+			{"tab-indented after a section", "[libdefaults]\n a = b\n\t[realms]" + stanza, []string{"from-stanza"}},
+			{"after an empty section", "[libdefaults]\n  [realms]" + stanza, []string{"from-stanza"}},
+			{"first line", "  [realms]" + stanza, nil},
+			{"after comments only", "# c\n  [realms]" + stanza, nil},
+		} {
+			res := probeKDCConf(t, tc.body, nil)
+			if !sameSet(res.KDCNames, tc.want) {
+				t.Errorf("%s: kdc_names = %v, want %v", tc.name, res.KDCNames, tc.want)
+			}
+		}
+	})
+	t.Run("a realm stanza whose brace is on the next line", func(t *testing.T) {
+		for _, brace := range []string{" {", "  {", "{"} {
+			res := probeKDCConf(t, "[realms]\n IPA.PILOT.INTERNAL =\n"+brace+"\n  kdc = from-stanza\n }\n", nil)
+			if !sameSet(res.KDCNames, []string{"from-stanza"}) {
+				t.Errorf("brace %q: kdc_names = %v", brace, res.KDCNames)
+			}
+		}
+		// ...and it must not swallow a later, different realm's stanza.
+		res := probeKDCConf(t, "[realms]\n OTHER.REALM =\n {\n  kdc = other\n }\n IPA.PILOT.INTERNAL = {\n  kdc = mine\n }\n", nil)
+		if !sameSet(res.KDCNames, []string{"mine"}) {
+			t.Errorf("kdc_names = %v", res.KDCNames)
 		}
 	})
 	t.Run("a column-0 include is followed", func(t *testing.T) {
@@ -365,6 +445,31 @@ func TestRegression_KDCPreflightProbeMatchesLiveKinit(t *testing.T) {
 				if !sameSet(res.KDCNames, []string{want}) {
 					t.Errorf("kinit resolved %q first, probe kdc_names = %v (raw %q)", host, res.KDCNames, r.Raw)
 				}
+			}
+		})
+	}
+	for _, r := range fx.Structure {
+		t.Run("structure: "+r.Name, func(t *testing.T) {
+			conf := writeStructureRow(t, r)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "kinit", "-c", "MEMORY:probe", "u@T.TEST")
+			cmd.Env = append(os.Environ(), "KRB5_CONFIG="+conf, "KRB5_TRACE=/dev/stdout")
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			_ = cmd.Run()
+			seen := map[string]bool{}
+			var hosts []string
+			for _, m := range regexp.MustCompile(`Resolving hostname (\S+)`).FindAllStringSubmatch(out.String(), -1) {
+				h := strings.ToLower(strings.TrimRight(m[1], "."))
+				if !seen[h] {
+					seen[h] = true
+					hosts = append(hosts, h)
+				}
+			}
+			res := runKDCProbe(t, map[string]any{"realm": "T.TEST", "krb5_paths": []string{conf}, "resolvectl": ""})
+			if !sameSet(res.KDCNames, hosts) {
+				t.Errorf("kinit resolved %q, probe kdc_names = %q", hosts, res.KDCNames)
 			}
 		})
 	}

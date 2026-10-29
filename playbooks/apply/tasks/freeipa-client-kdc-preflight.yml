@@ -217,20 +217,38 @@
           section = None
           depth = 0
           in_realm = False
+          pending = None
           for line in text.splitlines():
               s = line.strip()
               if not s or s[0] in '#;':
                   continue
               if depth == 0:
+                  # A section header is recognised at column 0; once any section is
+                  # open libkrb5 also accepts an indented one (an indented header as
+                  # the first line of the file is ignored).
                   m = re.match(r'^\[(\w+)\]', line)
+                  if not m and section is not None:
+                      m = re.match(r'^\s+\[(\w+)\]', line)
                   if m:
                       section = m.group(1)
+                      pending = None
                       continue
                   if section == 'realms':
+                      name = None
                       m = re.match(r'^(\S+)\s*=\s*\{\s*$', s)
                       if m:
-                          in_realm = (m.group(1) == realm)
+                          name = m.group(1)
+                      elif s == '{' and pending is not None:
+                          name = pending
+                      pending = None
+                      if name is not None:
+                          in_realm = (name == realm)
                           depth = 1
+                      else:
+                          # `Realm =` with the opening brace on the next line.
+                          m = re.match(r'^(\S+)\s*=$', s)
+                          if m:
+                              pending = m.group(1)
                   continue
               # A subsection opens on a value that is exactly `{` (`kdc = h1{` is an
               # ordinary value) or on a line that is only `{`; a line that starts
@@ -486,8 +504,10 @@
     that:
       - freeipa_client_kdc_preflight_state != 'failed'
     fail_msg: >-
-      {{ freeipa_client_kdc_preflight_summary }}; kinit would fail before it
-      reached any KDC. {{ freeipa_client_kdc_preflight_hint }}
+      {{ freeipa_client_kdc_preflight_summary }}; kinit may fail before it
+      reaches a KDC (MIT kinit resolves KDC names with this resolver; an SSSD
+      KDC locator can supply an address without a name lookup, so this preview
+      treats it as a risk and fails closed). {{ freeipa_client_kdc_preflight_hint }}
       All names that failed to resolve:
       {{ freeipa_client_kdc_preflight_unresolved | join(', ') }}.
   vars:
