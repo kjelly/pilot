@@ -65,7 +65,9 @@
 > 自己的 tag 選取決定）。完整 `site.yml`、`--tags docker,dcgm-exporter`
 > 會延後；單獨跑 `dcgm-exporter-apply.yml`、`--tags dcgm-exporter`、
 > `--tags observability`、`--skip-tags docker` 則不會，預覽會照實失敗（實際
-> 套用同樣會因缺少 docker 失敗）。是否在 `docker` inventory group 不影響此判斷。
+> 套用同樣會因缺少 docker 失敗）。主機不在 `docker` inventory group 時，`docker-apply.yml`
+> 根本不會在它上面執行，所以也不會有這個標記，預覽同樣照實失敗：在 `docker`
+> group 是「會延後」的必要條件，不是充分條件（還要這次執行真的選到 docker 的安裝）。
 >
 > **NVIDIA Container Toolkit**：讓 `docker run --runtime nvidia` 能把 GPU
 > 裝置節點/驅動函式庫正確 bind 進容器，是 GPU 監控容器化的必要中介層，屬於
