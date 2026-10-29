@@ -531,8 +531,12 @@
         # reaches Step 6 (pilot deploy --limit passes only the limited hosts'
         # component tags and still pulls in it-core) kept taking a "pre-upgrade"
         # backup while the binary stayed stale, and Step 4's changed_when: true made
-        # the second apply fail the idempotency check. The rollback below reads
-        # detection_engine_is_upgrade with default(false).
+        # the second apply fail the idempotency check. The rescue below therefore
+        # restores only when this run reached Step 6 (detection_engine_binary_result
+        # is defined) and detection_engine_is_upgrade is defined and true: only then
+        # may the binary have been replaced and are the backups this run's own,
+        # not leftovers of an earlier upgrade. The `is defined` guards stay in the
+        # tasks' own bodies because those tasks are `always` and their setters are not.
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
           tags: [detection-engine-C1]
           ansible.builtin.stat:
@@ -857,7 +861,9 @@
             dest: "{{ detection_engine_bin_dest }}"
             remote_src: true
             mode: "0755"
-          when: detection_engine_is_upgrade | default(false)
+          when:
+            - detection_engine_binary_result is defined
+            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
         - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
@@ -869,7 +875,9 @@
             mode: "0600"
             owner: "{{ detection_engine_user }}"
             group: "{{ detection_engine_user }}"
-          when: detection_engine_is_upgrade | default(false)
+          when:
+            - detection_engine_binary_result is defined
+            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
         - name: "ROLLBACK — restart with the restored previous binary, if any"
@@ -878,7 +886,7 @@
             name: pilot-detection-engine.service
             state: restarted
             enabled: true
-          when: detection_engine_is_upgrade | default(false)
+          when: detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
         - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
