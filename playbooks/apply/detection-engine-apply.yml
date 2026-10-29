@@ -523,14 +523,24 @@
             - { path: "{{ detection_engine_data_dir }}", owner: "{{ detection_engine_user }}", group: "{{ detection_engine_user }}", mode: "0700" }
             - { path: "{{ detection_engine_backup_dir }}", owner: root, group: root, mode: "0700" }
 
+        # Steps 3-5 take Step 6's own tag (detection-engine-C1; the observability and
+        # detection-engine tags come from site.yml's import for all of them), not
+        # `always`. Backup and upgrade detection must run exactly when Step 6
+        # replaces the binary, under every selection Ansible makes (--tags tagged,
+        # --skip-tags, ...), and not otherwise: with `always`, a run that never
+        # reaches Step 6 (pilot deploy --limit passes only the limited hosts'
+        # component tags and still pulls in it-core) kept taking a "pre-upgrade"
+        # backup while the binary stayed stale, and Step 4's changed_when: true made
+        # the second apply fail the idempotency check. The rollback below reads
+        # detection_engine_is_upgrade with default(false).
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.stat:
             path: "{{ detection_engine_db_path }}"
           register: detection_engine_existing_db
 
         - name: "Step 3b: check whether a previous binary exists and would actually change (spec §26 upgrade detection)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.stat:
             path: "{{ detection_engine_bin_dest }}"
             checksum_algorithm: sha256
@@ -540,32 +550,15 @@
         # as changed — a no-op re-apply must stay changed=0 (spec §44's
         # "second apply: changed=0"), so this must not be true just
         # because a previous binary happens to exist.
-        # Steps 3-5 are `always` so the backup exists before Step 6 in ANY
-        # tag-scoped run that reaches Step 6. The converse also has to hold: a
-        # run whose tags never reach Step 6 (e.g. `pilot deploy --limit`, which
-        # passes --tags for the limited hosts' components and still pulls in
-        # it-core as a provider host) installs nothing, so the binary stays
-        # stale, is_upgrade stays true and Step 4's `changed_when: true` fires
-        # on every apply, failing pilot's second-apply idempotency check.
-        # Step 6 carries detection-engine-C1 plus the tags site.yml gives this
-        # import (observability, detection-engine).
-        - name: "Step 3c: determine whether this run installs the binary at all"
-          tags: [always]
-          ansible.builtin.set_fact:
-            detection_engine_install_selected: >-
-              {{ 'all' in ansible_run_tags
-                 or (ansible_run_tags | intersect(['detection-engine-C1', 'detection-engine', 'observability'])) | length > 0 }}
-
         - name: "Step 3c: determine whether this apply is an upgrade"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.set_fact:
             detection_engine_is_upgrade: >-
-              {{ detection_engine_install_selected | bool
-                 and detection_engine_existing_binary_stat.stat.exists
+              {{ detection_engine_existing_binary_stat.stat.exists
                  and detection_engine_existing_binary_stat.stat.checksum != detection_engine_artifact_sha256 }}
 
         - name: "Step 3d: ensure the backup directory exists before taking rollback material"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.file:
             path: "{{ detection_engine_backup_dir }}"
             state: directory
@@ -575,7 +568,7 @@
           when: detection_engine_is_upgrade
 
         - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO, spec §26/§40)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.command:
             argv:
               - "{{ detection_engine_bin_dest }}"
@@ -589,7 +582,7 @@
           changed_when: true
 
         - name: "Step 5: snapshot the previously installed binary (rollback material, spec §26)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.copy:
             src: "{{ detection_engine_bin_dest }}"
             dest: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
