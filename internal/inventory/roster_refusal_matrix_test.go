@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // rosterRefusalCause is one way a roster that must be written cannot be:
@@ -202,13 +203,25 @@ func TestRosterRefusalsAgreeAcrossPrepareProbeAndWriter(t *testing.T) {
 		"flow mapping":   "schema_version: 3\nfreeipa:\n  admin: {principal: admin, password: \"Old-pass_1\"}\n",
 		"invalid YAML":   "schema_version: 3\nfreeipa: [unclosed\n",
 		"folded scalar":  "schema_version: 3\nfreeipa:\n  admin:\n    principal: admin\n    password: >-\n      Old-pass_1\n",
+		// A graph that refers to itself is a roster pilot cannot follow, the
+		// same hand-edit report as any other layout it cannot (round 11).
+		"cyclic merge key": "schema_version: 3\nfreeipa: &f\n  <<: *f\n",
+		"cyclic alias":     "schema_version: 3\nfreeipa: &f\n  admin: *f\n",
 	} {
 		t.Run("hand edit: "+name, func(t *testing.T) {
-			path := writeRoster(t, body)
-			_, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
-			if !errors.Is(err, ErrRosterNeedsHandEdit) {
-				t.Fatalf("error = %v; want ErrRosterNeedsHandEdit", err)
+			check := func(t *testing.T) {
+				path := writeRoster(t, body)
+				_, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+				if !errors.Is(err, ErrRosterNeedsHandEdit) {
+					t.Fatalf("error = %v; want ErrRosterNeedsHandEdit", err)
+				}
 			}
+			// A stack overflow takes the whole test binary down.
+			if strings.HasPrefix(name, "cyclic") {
+				runIsolated(t, 20*time.Second, check)
+				return
+			}
+			check(t)
 		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // vaultValueKinds are the forms an ipa_admin_password can take in
@@ -82,5 +83,38 @@ func TestVaultSaveLineForEveryValueKindPair(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A previous vault whose YAML aliases refer to themselves reads as no
+// password, so the save syncs no roster and does not crash (PR #148 round
+// 11). The previous vault is read from disk, so it can differ from the
+// document the editor loaded; the child process keeps a stack overflow from
+// taking the package with it.
+func TestPrepareVaultRosterSyncSurvivesACyclicPreviousVault(t *testing.T) {
+	for name, previous := range map[string]string{
+		"cyclic root":  "&r\n<<: *r\nipa_admin_password: \"Old-pass_1\"\n",
+		"cyclic value": "ipa_admin_password: &p\n  <<: *p\n",
+		"fan-out":      fanOutRosterLevels(40) + "<<: *a39\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			runIsolated(t, 20*time.Second, func(t *testing.T) {
+				dir := t.TempDir()
+				vault := filepath.Join(dir, ".vault", "main.yaml")
+				roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+				writeSyncFile(t, vault, previous)
+				writeSyncFile(t, roster, syncTestRoster(`"Old-pass_1"`))
+				before := snapshotFiles(t, vault, roster)
+				r := newEditRouterModel(dir)
+				sync, refused := prepareVaultRosterSync(&r, dir, vault, []byte(previous), []byte("ipa_admin_password: \"New-pass_2\"\n"))
+				if refused != "" {
+					t.Fatalf("refused: %s", refused)
+				}
+				if lines := sync.commit(); len(lines) != 0 {
+					t.Fatalf("lines = %v, want none: nothing is known of the old password", lines)
+				}
+				assertUnchanged(t, before)
+			})
+		})
 	}
 }

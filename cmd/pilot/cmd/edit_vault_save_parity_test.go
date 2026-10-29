@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -28,6 +29,13 @@ type paritySetup struct {
 	warnings []string
 	// synced: .vault/ipa-identity.yaml ends up with the new password.
 	synced bool
+	// notEditable: the vault is YAML the editor refuses to open — every front-end
+	// fails at the first step, naming the vault, and nothing is written.
+	notEditable bool
+	// isolated runs each front-end's rotation in a child process: the setup
+	// is input that once overflowed the stack, which no recover catches and
+	// which would take every other test of the package with it.
+	isolated bool
 }
 
 const parityEnv = "PILOT_TEST_PARITY_ADMIN_PASSWORD"
@@ -137,6 +145,32 @@ func paritySetups() map[string]paritySetup {
 			},
 			warnings: []string{"未同步名冊：原本的 ipa_admin_password 沒加引號"},
 		},
+		// A roster whose YAML aliases or merge keys refer to themselves is
+		// reported for a hand edit with the cycle as the reason, on every
+		// front-end, and never refuses the rotation (PR #148 round 11).
+		"cyclic roster": {
+			password: "New-pass_2",
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, "schema_version: 3\nfreeipa: &f\n  <<: *f\n")
+				return []string{vault, roster}, func() {}
+			},
+			warnings: []string{"未同步 .vault/ipa-identity.yaml：YAML aliases or merge keys refer to themselves", rosterSyncOnlyOnChange.text},
+			isolated: true,
+		},
+		// The editor will not open a vault whose aliases refer to themselves,
+		// so no front-end reaches the roster sync with one (see
+		// TestPrepareVaultRosterSyncSurvivesACyclicPreviousVault for the
+		// sync itself); the rotation fails clean, with nothing written.
+		"cyclic previous vault": {
+			password:    "New-pass_2",
+			notEditable: true,
+			prepare: func(t *testing.T, dir string) ([]string, func()) {
+				vault, roster := parityWorkspace(t, dir, syncTestRoster(`"Old-pass_1"`))
+				writeSyncFile(t, vault, "&r\n<<: *r\nipa_admin_password: \"Old-pass_1\"\n")
+				return []string{vault, roster}, func() {}
+			},
+			isolated: true,
+		},
 		"templated value": {
 			password: "{{ lookup('env', 'IPA_ADMIN') }}",
 			prepare: func(t *testing.T, dir string) ([]string, func()) {
@@ -228,73 +262,88 @@ func stderrWarnings(stderr string) []string {
 func TestVaultSaveRosterSyncParity(t *testing.T) {
 	for name, setup := range paritySetups() {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv(parityEnv, setup.password)
-			var reference []string
-			var referenceFrom string
-			written := map[string]map[string][]byte{}
-			for _, frontEnd := range []string{"terminal router", "--actions", "plan", "apply"} {
-				dir := t.TempDir()
-				watched, _ := setup.prepare(t, dir)
-				before := snapshotFiles(t, watched...)
-				run := parityFrontEnds()[frontEnd](t, dir)
-				if setup.busy {
-					if !errors.Is(run.err, inventory.ErrMutationLocked) && !errors.Is(run.err, inventory.ErrRosterLockFile) && !errors.Is(run.err, inventory.ErrRosterNotWritable) {
-						t.Errorf("%s: error = %v; want the busy roster to refuse the save", frontEnd, run.err)
-					}
-					if !strings.Contains(errString(run.err), "was not saved") {
-						t.Errorf("%s: error %v does not say the vault was not saved", frontEnd, run.err)
-					}
-					assertUnchanged(t, before)
-					continue
-				}
-				if run.err != nil {
-					t.Fatalf("%s: error = %v", frontEnd, run.err)
-				}
-				got := rosterWarnings(run.warnings)
-				// Each run has its own directories; compare the warnings
-				// with the watched files' paths named alike.
-				for i := range got {
-					for j, path := range watched {
-						got[i] = strings.ReplaceAll(got[i], path, fmt.Sprintf("<watched %d>", j))
-					}
-				}
-				for _, want := range setup.warnings {
-					if n := len(slices.DeleteFunc(slices.Clone(got), func(w string) bool { return !strings.Contains(w, want) })); n != 1 {
-						t.Errorf("%s: %d warnings contain %q, want 1: %q", frontEnd, n, want, got)
-					}
-				}
-				if len(setup.warnings) == 0 && len(got) != 0 {
-					t.Errorf("%s: unexpected roster warnings %q", frontEnd, got)
-				}
-				if reference == nil {
-					reference, referenceFrom = got, frontEnd
-				} else if !slices.Equal(got, reference) {
-					t.Errorf("%s warns %q, %s warned %q", frontEnd, got, referenceFrom, reference)
-				}
-				if frontEnd == "plan" {
-					assertUnchanged(t, before)
-					continue
-				}
-				roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
-				if setup.synced {
-					if pw := syncRosterPassword(t, roster); pw != setup.password {
-						t.Errorf("%s: roster password = %q, want the new one", frontEnd, pw)
-					}
-				}
-				written[frontEnd] = map[string][]byte{}
-				for _, rel := range []string{".vault/main.yaml", ".vault/ipa-identity.yaml"} {
-					data, _ := os.ReadFile(filepath.Join(dir, rel))
-					written[frontEnd][rel] = data
-				}
+			if setup.isolated {
+				runIsolated(t, 30*time.Second, func(t *testing.T) { checkVaultSaveRosterSyncParity(t, setup) })
+				return
 			}
-			if setup.synced {
-				for rel, data := range written["apply"] {
-					if !bytes.Equal(written["--actions"][rel], data) {
-						t.Errorf("%s differs between apply and --actions:\n%s\n---\n%s", rel, data, written["--actions"][rel])
-					}
-				}
-			}
+			checkVaultSaveRosterSyncParity(t, setup)
 		})
+	}
+}
+
+func checkVaultSaveRosterSyncParity(t *testing.T, setup paritySetup) {
+	t.Setenv(parityEnv, setup.password)
+	var reference []string
+	var referenceFrom string
+	written := map[string]map[string][]byte{}
+	for _, frontEnd := range []string{"terminal router", "--actions", "plan", "apply"} {
+		dir := t.TempDir()
+		watched, _ := setup.prepare(t, dir)
+		before := snapshotFiles(t, watched...)
+		run := parityFrontEnds()[frontEnd](t, dir)
+		if setup.notEditable {
+			if run.err == nil || !strings.Contains(run.err.Error(), "main.yaml") {
+				t.Errorf("%s: error = %v; want the rotation to fail, naming the vault", frontEnd, run.err)
+			}
+			assertUnchanged(t, before)
+			continue
+		}
+		if setup.busy {
+			if !errors.Is(run.err, inventory.ErrMutationLocked) && !errors.Is(run.err, inventory.ErrRosterLockFile) && !errors.Is(run.err, inventory.ErrRosterNotWritable) {
+				t.Errorf("%s: error = %v; want the busy roster to refuse the save", frontEnd, run.err)
+			}
+			if !strings.Contains(errString(run.err), "was not saved") {
+				t.Errorf("%s: error %v does not say the vault was not saved", frontEnd, run.err)
+			}
+			assertUnchanged(t, before)
+			continue
+		}
+		if run.err != nil {
+			t.Fatalf("%s: error = %v", frontEnd, run.err)
+		}
+		got := rosterWarnings(run.warnings)
+		// Each run has its own directories; compare the warnings
+		// with the watched files' paths named alike.
+		for i := range got {
+			for j, path := range watched {
+				got[i] = strings.ReplaceAll(got[i], path, fmt.Sprintf("<watched %d>", j))
+			}
+		}
+		for _, want := range setup.warnings {
+			if n := len(slices.DeleteFunc(slices.Clone(got), func(w string) bool { return !strings.Contains(w, want) })); n != 1 {
+				t.Errorf("%s: %d warnings contain %q, want 1: %q", frontEnd, n, want, got)
+			}
+		}
+		if len(setup.warnings) == 0 && len(got) != 0 {
+			t.Errorf("%s: unexpected roster warnings %q", frontEnd, got)
+		}
+		if reference == nil {
+			reference, referenceFrom = got, frontEnd
+		} else if !slices.Equal(got, reference) {
+			t.Errorf("%s warns %q, %s warned %q", frontEnd, got, referenceFrom, reference)
+		}
+		if frontEnd == "plan" {
+			assertUnchanged(t, before)
+			continue
+		}
+		roster := filepath.Join(dir, ".vault", "ipa-identity.yaml")
+		if setup.synced {
+			if pw := syncRosterPassword(t, roster); pw != setup.password {
+				t.Errorf("%s: roster password = %q, want the new one", frontEnd, pw)
+			}
+		}
+		written[frontEnd] = map[string][]byte{}
+		for _, rel := range []string{".vault/main.yaml", ".vault/ipa-identity.yaml"} {
+			data, _ := os.ReadFile(filepath.Join(dir, rel))
+			written[frontEnd][rel] = data
+		}
+	}
+	if setup.synced {
+		for rel, data := range written["apply"] {
+			if !bytes.Equal(written["--actions"][rel], data) {
+				t.Errorf("%s differs between apply and --actions:\n%s\n---\n%s", rel, data, written["--actions"][rel])
+			}
+		}
 	}
 }
 

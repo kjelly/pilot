@@ -109,11 +109,12 @@ func vaultAdminValue(data []byte) *yaml.Node {
 	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
 		return nil
 	}
-	var doc yaml.Node
-	if yaml.Unmarshal(data, &doc) != nil {
+	// A cyclic document reads like an unparseable one: no value.
+	doc, err := parseYAMLDocument(data)
+	if err != nil {
 		return nil
 	}
-	value, _ := mappingValue(documentRoot(&doc), "ipa_admin_password")
+	value, _ := mappingValue(documentRoot(doc), "ipa_admin_password")
 	return value
 }
 
@@ -341,11 +342,16 @@ func readRosterNode(path string) ([]byte, *yaml.Node, error) {
 	if strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
 		return nil, nil, ErrRosterEncrypted
 	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	doc, err := parseYAMLDocument(data)
+	switch {
+	case errors.Is(err, errCyclicYAML):
+		// Reported for a hand edit like any layout pilot cannot follow; the
+		// message holds the path and never the document.
+		return nil, nil, fmt.Errorf("roster %s: %w; update freeipa.admin.password by hand", path, err)
+	case err != nil:
 		return nil, nil, fmt.Errorf("parse roster %s: %w", path, err)
 	}
-	return data, &doc, nil
+	return data, doc, nil
 }
 
 func documentRoot(doc *yaml.Node) *yaml.Node {
@@ -376,10 +382,23 @@ func rosterAdminPassword(doc *yaml.Node) (mapping, value *yaml.Node, direct bool
 // explicit key wins, then the mappings merged in with <<, in order. here
 // is false when the value is an alias or comes from a merge.
 func mappingValue(mapping *yaml.Node, key string) (value *yaml.Node, here bool) {
+	return mappingValueSeen(mapping, key, map[*yaml.Node]bool{})
+}
+
+// mappingValueSeen is mappingValue that looks into each mapping at most once
+// per lookup. A mapping reached a second time was either searched already
+// without finding key — a found value ends the lookup at once — or is being
+// searched, so a revisit adds nothing and the answer is unchanged: the first
+// hit in merge order still wins. That keeps the walk linear in the document
+// even where merge sources are shared by many paths (2^n of them), and ends
+// it on a cycle, which parseYAMLDocument already refuses — the bound is for
+// a caller that skips it.
+func mappingValueSeen(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) (value *yaml.Node, here bool) {
 	mapping = resolveAlias(mapping)
-	if mapping == nil || mapping.Kind != yaml.MappingNode {
+	if mapping == nil || mapping.Kind != yaml.MappingNode || seen[mapping] {
 		return nil, false
 	}
+	seen[mapping] = true
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
 		if k := mapping.Content[i]; k.Value == key && k.ShortTag() != "!!merge" {
 			value = mapping.Content[i+1]
@@ -397,7 +416,7 @@ func mappingValue(mapping *yaml.Node, key string) (value *yaml.Node, here bool) 
 			sources = sources[0].Content
 		}
 		for _, source := range sources {
-			if merged, _ := mappingValue(source, key); merged != nil {
+			if merged, _ := mappingValueSeen(source, key, seen); merged != nil {
 				return merged, false
 			}
 		}
@@ -405,8 +424,17 @@ func mappingValue(mapping *yaml.Node, key string) (value *yaml.Node, here bool) 
 	return nil, false
 }
 
+// maxAliasHops bounds resolveAlias: the parser points an alias at the node it
+// names, never at another alias, so one hop is all a parsed document needs.
+const maxAliasHops = 16
+
+// resolveAlias is the node an alias names, node itself when it is not one,
+// nil for a chain longer than maxAliasHops (a tree built by hand, not parsed).
 func resolveAlias(node *yaml.Node) *yaml.Node {
-	for node != nil && node.Kind == yaml.AliasNode {
+	for hops := 0; node != nil && node.Kind == yaml.AliasNode; hops++ {
+		if hops == maxAliasHops {
+			return nil
+		}
 		node = node.Alias
 	}
 	return node
@@ -544,11 +572,11 @@ func replaceScalar(data []byte, node *yaml.Node, value string, unsafe bool) ([]b
 // node's value and tag. A scalar continued on the following lines gives
 // only its first part (or no valid YAML at all) and fails.
 func scalarOnItsLine(text string, node *yaml.Node) bool {
-	var doc yaml.Node
-	if yaml.Unmarshal([]byte("k: "+text+"\n"), &doc) != nil {
+	doc, err := parseYAMLDocument([]byte("k: " + text + "\n"))
+	if err != nil {
 		return false
 	}
-	got, _ := mappingValue(documentRoot(&doc), "k")
+	got, _ := mappingValue(documentRoot(doc), "k")
 	return got != nil && got.Kind == yaml.ScalarNode && got.Value == node.Value && got.ShortTag() == node.ShortTag()
 }
 

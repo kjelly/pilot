@@ -2,10 +2,12 @@ package inventory
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -644,5 +646,283 @@ func TestRootWritesA0400RosterThroughPrepareAndProbe(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(path); decodedAdminPassword(t, after) != "New-pass_2" {
 		t.Fatalf("roster after the commit:\n%s", after)
+	}
+}
+
+// Cyclic alias and merge graphs. yaml.v3 refuses them only when decoding into
+// a Go value; a yaml.Node keeps every alias unexpanded, so the walk that
+// follows merge keys looped until the stack overflowed (PR #148 round 11).
+var cyclicYAMLFixtures = map[string]string{
+	"self merge":               "schema_version: 3\nfreeipa: &f\n  <<: *f\n",
+	"merge in a sequence":      "schema_version: 3\nfreeipa: &f\n  <<: [*f]\n",
+	"two-node cycle":           "schema_version: 3\nfreeipa: &f\n  admin: &a\n    <<: *f\n  <<: *a\n",
+	"explicit-key cycle":       "schema_version: 3\nfreeipa: &f\n  admin: *f\n",
+	"explicit-key merge cycle": "schema_version: 3\nfreeipa: &f\n  admin: *f\n  <<: *f\n",
+	"cycle outside the lookup": "schema_version: 3\nother: &o\n  <<: *o\nfreeipa:\n  admin:\n    password: Old-pass_1\n",
+	"cycle through a sequence": "schema_version: 3\nlist: &l [*l]\nfreeipa:\n  admin:\n    password: Old-pass_1\n",
+}
+
+// fanOutYAML is a document of n levels, each merging the one below it twice:
+// acyclic, but 2^n paths from the top to the bottom. top is the node the
+// last line anchors the chain under.
+func fanOutYAML(n int, indent string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%sl0: &a0 {k: 1}\n", indent)
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, "%sl%d: &a%d {<<: [*a%d, *a%d]}\n", indent, i, i, i-1, i-1)
+	}
+	return b.String()
+}
+
+func TestRosterAdminCyclicYAMLDoesNotCrash(t *testing.T) {
+	for name, body := range cyclicYAMLFixtures {
+		t.Run(name, func(t *testing.T) {
+			runIsolated(t, 20*time.Second, func(t *testing.T) {
+				path := writeRoster(t, body)
+				dir := filepath.Dir(path)
+
+				got, err := CompareRosterAdminPassword(path, "Vault-pass_1")
+				if err == nil || errors.Is(err, ErrRosterEncrypted) {
+					t.Fatalf("CompareRosterAdminPassword() = %v, %v; want the cycle reported", got, err)
+				}
+				if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "refer to themselves") || !strings.Contains(err.Error(), "by hand") {
+					t.Fatalf("error does not name the roster, the cycle and the hand edit: %v", err)
+				}
+				if differs, err := RosterAdminPasswordDiffers(path, "Vault-pass_1"); err == nil || differs {
+					t.Fatalf("RosterAdminPasswordDiffers() = %v, %v; want the cycle reported", differs, err)
+				}
+
+				prepared, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+				if !errors.Is(err, ErrRosterNeedsHandEdit) || errors.Is(err, ErrRosterEncrypted) {
+					t.Fatalf("PrepareRosterAdminSync() error = %v; want a hand-edit report", err)
+				}
+				if prepared != nil {
+					prepared.Release()
+				}
+				for _, secret := range []string{"Old-pass_1", "New-pass_2", "Vault-pass_1"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatalf("error leaks a password: %v", err)
+					}
+				}
+				if after := mustRead(t, path); string(after) != body {
+					t.Fatalf("roster changed:\n%s", after)
+				}
+				if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+					t.Fatalf("PrepareRosterAdminSync left files beside the roster: %v", entries)
+				}
+			})
+		})
+	}
+	for name, body := range map[string]string{
+		"cyclic vault root":      "&r\n<<: *r\nk: 1\n",
+		"cyclic value":           "ipa_admin_password: &p\n  <<: *p\n",
+		"cycle beside the value": "other: &o [*o]\nipa_admin_password: \"Vault-pass_1\"\n",
+		"merge cycle, no value":  "base: &b\n  <<: *b\nipa_admin_password: *b\n",
+	} {
+		t.Run("vault "+name, func(t *testing.T) {
+			runIsolated(t, 20*time.Second, func(t *testing.T) {
+				data := []byte(body)
+				if got := VaultAdminPassword(data); got != "" {
+					t.Fatalf("VaultAdminPassword() = %q, want \"\"", got)
+				}
+				if got := VaultAdminPasswordReusable(data); got != "" {
+					t.Fatalf("VaultAdminPasswordReusable() = %q, want \"\"", got)
+				}
+				if got := VaultAdminPasswordTemplate(data); got != "" {
+					t.Fatalf("VaultAdminPasswordTemplate() = %q, want \"\"", got)
+				}
+				if VaultAdminPasswordNotString(data) || VaultAdminPasswordEncrypted(data) {
+					t.Fatal("a cyclic vault is neither not-a-string nor encrypted")
+				}
+				if got := VaultAdminPasswordText(data); got != "" {
+					t.Fatalf("VaultAdminPasswordText() = %q, want \"\"", got)
+				}
+			})
+		})
+	}
+}
+
+// An acyclic document may share one anchor over and over — each level here
+// merges the one below it twice, so 2^40 paths lead to the bottom — and is
+// read in linear time: the answer is the same as for a document that shares
+// nothing (a roster without a password to keep in step).
+func TestRosterAdminFanOutAliasesStayLinear(t *testing.T) {
+	t.Run("roster", func(t *testing.T) {
+		runIsolated(t, 10*time.Second, func(t *testing.T) {
+			body := "schema_version: 3\nlevels:\n" + fanOutYAML(40, "  ") + "freeipa:\n  admin: {<<: *a39}\n"
+			path := writeRoster(t, body)
+			got, err := CompareRosterAdminPassword(path, "Vault-pass_1")
+			if err != nil || got != RosterAdminNotLiteral {
+				t.Fatalf("CompareRosterAdminPassword() = %v, %v; want RosterAdminNotLiteral, nil", got, err)
+			}
+			prepared, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+			if err != nil || prepared.Result != RosterAdminNotLiteral {
+				t.Fatalf("PrepareRosterAdminSync() = %+v, %v; want RosterAdminNotLiteral, nil", prepared, err)
+			}
+			prepared.Release()
+			if after := mustRead(t, path); string(after) != body {
+				t.Fatalf("roster changed")
+			}
+		})
+	})
+	t.Run("vault", func(t *testing.T) {
+		runIsolated(t, 10*time.Second, func(t *testing.T) {
+			data := []byte(fanOutYAML(40, "") + "<<: *a39\n")
+			if VaultAdminPassword(data) != "" || VaultAdminPasswordText(data) != "" || VaultAdminPasswordNotString(data) {
+				t.Fatal("a vault without ipa_admin_password reported one")
+			}
+		})
+	})
+}
+
+// A password supplied through a merge key, or through the same anchor merged
+// twice, is found as before — a diamond is not a cycle — and reported for a
+// hand edit, never rewritten.
+func TestRosterAdminPasswordThroughSharedMergeSources(t *testing.T) {
+	for name, body := range map[string]string{
+		"base merged once":  "schema_version: 3\nbase: &base\n  password: Old-pass_1\nfreeipa:\n  admin:\n    <<: *base\n",
+		"base merged twice": "schema_version: 3\nbase: &base\n  password: Old-pass_1\nfreeipa:\n  admin:\n    <<: [*base, *base]\n",
+		"diamond":           "schema_version: 3\nbase: &base {password: Old-pass_1}\nl: &l {<<: [*base, *base]}\nfreeipa:\n  admin: {<<: [*l, *l]}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeRoster(t, body)
+			if got, err := CompareRosterAdminPassword(path, "Vault-pass_1"); err != nil || got != RosterAdminDiffers {
+				t.Fatalf("CompareRosterAdminPassword() = %v, %v; want RosterAdminDiffers, nil", got, err)
+			}
+			if got, err := CompareRosterAdminPassword(path, "Old-pass_1"); err != nil || got != RosterAdminCurrent {
+				t.Fatalf("CompareRosterAdminPassword(old) = %v, %v; want RosterAdminCurrent, nil", got, err)
+			}
+			_, err := PrepareRosterAdminSync(path, "Old-pass_1", "New-pass_2")
+			if !errors.Is(err, ErrRosterNeedsHandEdit) || !strings.Contains(err.Error(), "YAML alias or merge key") {
+				t.Fatalf("PrepareRosterAdminSync() error = %v; want the alias hand-edit report", err)
+			}
+		})
+	}
+}
+
+func TestVaultAdminPasswordThroughSharedMergeSources(t *testing.T) {
+	for name, data := range map[string]string{
+		"merged once":  "base: &base {ipa_admin_password: Vault-pass_1}\n<<: *base\n",
+		"merged twice": "base: &base {ipa_admin_password: Vault-pass_1}\n<<: [*base, *base]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := VaultAdminPassword([]byte(data)); got != "Vault-pass_1" {
+				t.Fatalf("VaultAdminPassword() = %q, want Vault-pass_1", got)
+			}
+		})
+	}
+}
+
+func TestCheckAliasGraph(t *testing.T) {
+	for name, tc := range map[string]struct {
+		doc    string
+		cyclic bool
+	}{
+		"no aliases":             {"a: 1\nb: [x, y]\n", false},
+		"alias to a scalar":      {"a: &x 1\nb: *x\n", false},
+		"shared anchor":          {"a: &x {k: 1}\nb: *x\nc: *x\n", false},
+		"diamond":                {"base: &b {k: 1}\nl: &l {<<: *b}\nr: &r {<<: *b}\ntop: {<<: [*l, *r]}\n", false},
+		"same source twice":      {"base: &b {k: 1}\ntop: {<<: [*b, *b]}\n", false},
+		"anchor reused in a seq": {"x: &s [1]\ny: [*s, *s, *s]\n", false},
+		"self merge":             {"f: &f\n  <<: *f\n", true},
+		"merge in a sequence":    {"f: &f\n  <<: [*f]\n", true},
+		"two nodes":              {"f: &f\n  a: &a\n    <<: *f\n  <<: *a\n", true},
+		"explicit key":           {"f: &f\n  a: *f\n", true},
+		"sequence of itself":     {"s: &s [*s]\n", true},
+		"cyclic document root":   {"&r\n<<: *r\nk: 1\n", true},
+		"cycle after a diamond":  {"b: &b {k: 1}\nd: {<<: [*b, *b]}\nf: &f\n  <<: *f\n", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc, err := parseYAMLDocument([]byte(tc.doc))
+			if tc.cyclic {
+				if !errors.Is(err, errCyclicYAML) || doc != nil {
+					t.Fatalf("parseYAMLDocument() = %v, %v; want errCyclicYAML", doc, err)
+				}
+				if strings.Contains(err.Error(), tc.doc) {
+					t.Fatalf("error repeats the document: %v", err)
+				}
+				return
+			}
+			if err != nil || doc == nil {
+				t.Fatalf("parseYAMLDocument() = %v, %v; want the document", doc, err)
+			}
+		})
+	}
+	if _, err := parseYAMLDocument([]byte("a: [unclosed\n")); err == nil || errors.Is(err, errCyclicYAML) {
+		t.Fatalf("invalid YAML error = %v; want the parser's, not the cycle's", err)
+	}
+	if err := checkAliasGraph(nil); err != nil {
+		t.Fatalf("checkAliasGraph(nil) = %v", err)
+	}
+}
+
+// The guard follows yaml.v3's own semantics: every cyclic fixture is one the
+// library refuses to decode into a Go value, and every acyclic aliased
+// document the library decodes passes the guard — so pilot neither accepts a
+// graph the library would call self-containing nor rejects one it reads.
+func TestCyclicFixturesAreRejectedByYAMLv3Too(t *testing.T) {
+	for name, body := range cyclicYAMLFixtures {
+		t.Run(name, func(t *testing.T) {
+			var v any
+			if err := yaml.Unmarshal([]byte(body), &v); err == nil || !strings.Contains(err.Error(), "contains itself") {
+				t.Fatalf("yaml.Unmarshal() error = %v; want \"contains itself\"", err)
+			}
+		})
+	}
+	for name, body := range map[string]string{
+		"cyclic vault root":      "&r\n<<: *r\nk: 1\n",
+		"cyclic value":           "ipa_admin_password: &p\n  <<: *p\n",
+		"merge cycle, no value":  "base: &b\n  <<: *b\nipa_admin_password: *b\n",
+		"cycle beside the value": "other: &o [*o]\nipa_admin_password: \"Vault-pass_1\"\n",
+	} {
+		t.Run("vault "+name, func(t *testing.T) {
+			var v any
+			if err := yaml.Unmarshal([]byte(body), &v); err == nil || !strings.Contains(err.Error(), "contains itself") {
+				t.Fatalf("yaml.Unmarshal() error = %v; want \"contains itself\"", err)
+			}
+		})
+	}
+	for name, body := range map[string]string{
+		"merge once":         "base: &b {password: x}\nadmin: {<<: *b}\n",
+		"merge twice":        "base: &b {password: x}\nadmin: {<<: [*b, *b]}\n",
+		"shared scalar":      "pw: &p secret\nfreeipa: {admin: {password: *p}}\nother: {password: *p}\n",
+		"shared list":        "xs: &s [1, 2]\na: *s\nb: [*s, *s]\n",
+		"nested diamond":     "b: &b {k: 1}\nl: &l {<<: *b}\nr: &r {<<: *b}\ntop: {<<: [*l, *r]}\n",
+		"anchor in a anchor": "a: &a {x: &b 1}\nc: *b\nd: *a\n",
+	} {
+		t.Run("acyclic "+name, func(t *testing.T) {
+			var v any
+			if err := yaml.Unmarshal([]byte(body), &v); err != nil {
+				t.Fatalf("yaml.Unmarshal() error = %v; the fixture is not acyclic YAML", err)
+			}
+			if _, err := parseYAMLDocument([]byte(body)); err != nil {
+				t.Fatalf("parseYAMLDocument() error = %v; yaml.v3 reads this document", err)
+			}
+		})
+	}
+}
+
+// mappingValue is bounded on its own, for a caller that skips
+// parseYAMLDocument: a cycle ends the lookup and a graph with 2^40 paths is
+// searched once per mapping.
+func TestMappingValueIsBoundedWithoutTheGraphCheck(t *testing.T) {
+	for name, tc := range map[string]struct{ doc, key, want string }{
+		"cycle":            {"&r\n<<: *r\nk: 1\n", "missing", ""},
+		"cycle, key found": {"&r\n<<: *r\nk: 1\n", "k", "1"},
+		"fan-out":          {fanOutYAML(40, "") + "<<: *a39\n", "missing", ""},
+		"fan-out, found":   {fanOutYAML(40, "") + "<<: *a39\n", "k", "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runIsolated(t, 10*time.Second, func(t *testing.T) {
+				var doc yaml.Node
+				if err := yaml.Unmarshal([]byte(tc.doc), &doc); err != nil {
+					t.Fatal(err)
+				}
+				got, _ := mappingValue(documentRoot(&doc), tc.key)
+				if (got == nil) != (tc.want == "") || got != nil && got.Value != tc.want {
+					t.Fatalf("mappingValue(%q) = %v, want %q", tc.key, got, tc.want)
+				}
+			})
+		})
 	}
 }
