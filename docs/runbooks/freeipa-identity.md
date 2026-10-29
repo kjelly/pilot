@@ -269,9 +269,19 @@ ipa_identity_refresh_sssd_cache=false` 時同樣只記錄、不更新，改回 `
 
 admin 密碼存在兩個地方，兩份必須相同：
 
-- vault vars 檔（例如 `.vault/main.yaml`）的 `ipa_admin_password`：`pilot deploy`、`pilot reconcile` 載入它。
-- 名冊的 `freeipa.admin.password`：`pilot access …`、`pilot identity drift`、`pilot roster remove-*`
-  只載入名冊，用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
+- vault vars 檔（例如 `.vault/main.yaml`）的 `ipa_admin_password`：`pilot deploy`、`pilot reconcile` 載入它；
+  `pilot identity drift`、`pilot access drift`、`pilot access health` 的 drift probe 也載入它（vault 優先，
+  跟 `freeipa-identity-apply.yml` 相同）：預設讀 `<--inventory 所在目錄>/.vault/main.yaml`（存在才載入），
+  或用 `--vars-file <檔案>` 指定；檔案是 ansible-vault 加密時要帶 `--vault-password-file`，沒帶會在
+  執行 probe 之前就報錯。pilot 只把檔案交給 `ansible-playbook`，不會讀它的內容。
+- 名冊的 `freeipa.admin.password`：`pilot roster remove-*`、`pilot access` 的其他子指令、drift probe 以外的檢查
+  playbook（例如 capability probe、ever-applied 檢查）與 `--repair-managed` 的修復步驟（reconcile）只載入名冊，
+  用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。
+  drift probe 在 vault 沒有 `ipa_admin_password`（沒有這個 key、值是空的、或根本沒有 vault 檔）時才讀名冊的值；
+  名冊的值若是 `{{ ipa_admin_password }}` 這類模板，沒有 vault 就無法使用，probe 會以固定訊息失敗並同時指名兩個來源
+  （各至少 8 個字元）。vault 有值就一律用它，即使太短也不會改用名冊（跟 apply 一致）。
+  已知限制：`--repair-managed` 的 reconcile 步驟、`pilot roster remove-*` 與上述檢查 playbook 尚未讀 vault，
+  所以名冊的密碼是模板時它們仍然不能用。
 
 在 FreeIPA 改完密碼後，用 `pilot edit` → `.vault/` → `main.yaml` → `ipa_admin_password` → 修改值 → 存檔。
 存檔時，名冊裡仍是舊密碼的 `freeipa.admin.password` 會一併改成新密碼，畫面會列出每份名冊的結果。

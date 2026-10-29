@@ -121,7 +121,7 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 		t.Fatal("identity-secret-test must require Ansible")
 	}
 	selected := regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$"))
-	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
+	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentitySecretDriftProbeAdminPassword", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
 		if !selected.MatchString("TestRegression_" + name) {
 			t.Errorf("required-Ansible recipe omits %s", name)
 		}

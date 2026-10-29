@@ -6,8 +6,19 @@
 # controller-side JSON result file for Go (internal/accessgrants/drift.go)
 # to parse and diff against desired state.
 #
+# FreeIPA admin password source (issue #179), vault first exactly like
+# playbooks/apply/freeipa-identity-apply.yml's "Normalize canonical FreeIPA
+# settings": `ipa_admin_password` (the vault vars file `pilot access drift`/
+# `pilot identity drift`/`pilot access health` pass as `-e @<file>`, by
+# default <inventory dir>/.vault/main.yaml) wins when it is non-empty;
+# otherwise the roster's `freeipa.admin.password`. Either must be at least 8
+# characters. The roster is read only when the vault supplies nothing,
+# because a roster password of '{{ ipa_admin_password }}' cannot be
+# templated without the vault.
+#
 # Required extra-vars:
-#   freeipa_roster_file    -- canonical roster path (for admin creds)
+#   freeipa_roster_file    -- canonical roster path (admin principal and the
+#                              fallback admin password)
 #   pilot_drift_output     -- controller-side path this writes JSON to
 #   pilot_drift_hbac_names -- list of desired compiled HBAC rule names to
 #                              check existence for (pilot-grant-login-*)
@@ -91,14 +102,66 @@
       ansible.builtin.assert:
         that:
           - freeipa_roster.schema_version is defined
-          - freeipa_roster.freeipa is defined
-          - freeipa_roster.freeipa.admin is defined
-          - freeipa_roster.freeipa.admin.password is defined
-          - freeipa_roster.freeipa.admin.password | length >= 8
         fail_msg: >-
-          Canonical roster with FreeIPA admin credentials is required for
-          an authoritative drift probe.
+          Canonical roster (schema_version) is required for an authoritative
+          drift probe.
+      run_once: true
+      tags: [always]
+
+    # Vault first, mirroring freeipa-identity-apply.yml. `| string` keeps a
+    # YAML number a password-shaped value instead of a type error.
+    - name: "Resolve the FreeIPA admin password from the vault variable"
+      ansible.builtin.set_fact:
+        identity_admin_password: "{{ ipa_admin_password | default('', true) | string }}"
       no_log: true
+      run_once: true
+      tags: [always]
+
+    # Jinja evaluates default() arguments eagerly and the roster value may be
+    # '{{ ipa_admin_password }}', which raises when the vault supplied
+    # nothing. So the roster is read only here, only when the vault gave an
+    # empty value, and an unresolvable roster value counts as "no password"
+    # (the gate below then fails with a fixed message that names both
+    # sources). The rescue sets nothing but an empty string.
+    - name: "Fall back to the roster admin password when the vault has none"
+      block:
+        - name: "Read the roster admin password"
+          ansible.builtin.set_fact:
+            identity_admin_password: >-
+              {{ ((freeipa_roster.freeipa | default({}, true)).admin | default({}, true)).password
+                 | default('', true) | string }}
+          when: identity_admin_password | length == 0
+          no_log: true
+          run_once: true
+          tags: [always]
+      rescue:
+        - name: "Treat an unresolvable roster admin password as missing"
+          ansible.builtin.set_fact:
+            identity_admin_password: ""
+          no_log: true
+          run_once: true
+          tags: [always]
+      tags: [always]
+
+    # The boolean is computed under no_log so the assert below can keep its
+    # message visible without ever evaluating the password.
+    - name: "Check the resolved FreeIPA admin password length"
+      ansible.builtin.set_fact:
+        identity_admin_password_ok: "{{ identity_admin_password | length >= 8 }}"
+      no_log: true
+      run_once: true
+      tags: [always]
+
+    - name: "Gate: a FreeIPA admin password is available (vault or roster)"
+      ansible.builtin.assert:
+        that:
+          - identity_admin_password_ok | bool
+        fail_msg: >-
+          No usable FreeIPA admin password for the drift probe. Set
+          ipa_admin_password (at least 8 characters) in the vault vars file
+          (default <inventory dir>/.vault/main.yaml, or --vars-file), or
+          freeipa.admin.password (at least 8 characters, not a template) in
+          the roster. Both are missing or too short.
       run_once: true
       tags: [always]
 
@@ -109,8 +172,8 @@
           {{ freeipa_realm |
              default((freeipa_domain | default('ipa.pilot.internal')) | upper) }}
         identity_admin_principal: >-
-          {{ freeipa_roster.freeipa.admin.principal | default('admin') }}
-        identity_admin_password: "{{ freeipa_roster.freeipa.admin.password }}"
+          {{ ((freeipa_roster.freeipa | default({}, true)).admin | default({}, true)).principal
+             | default('admin', true) }}
       no_log: true
       run_once: true
       tags: [always]

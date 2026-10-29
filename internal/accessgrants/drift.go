@@ -84,9 +84,16 @@ type DriftProbeOptions struct {
 
 	// Playbook overrides DriftProbePlaybook.
 	Playbook string
-	// VaultPasswordFile is required when RosterFile is ansible-vault
-	// encrypted.
+	// VaultPasswordFile is required when RosterFile or VarsFile is
+	// ansible-vault encrypted.
 	VaultPasswordFile string
+	// VarsFile is the operator's vault vars file (conventionally
+	// <inventory dir>/.vault/main.yaml). It is handed to ansible-playbook
+	// only as `-e @<file>`, never read here, so the probe sees
+	// ipa_admin_password the way freeipa-identity-apply.yml does: vault
+	// first, roster fallback. Empty passes nothing and the probe falls back
+	// to the roster's freeipa.admin.password alone.
+	VarsFile string
 	// TargetGroup overrides the probe playbook's default host-targeting
 	// group ("freeipa-server").
 	TargetGroup string
@@ -167,7 +174,18 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 		return LiveState{}, fmt.Errorf("accessgrants: write drift-probe extra-vars: %w", err)
 	}
 
-	args := []string{playbook, "-i", opts.Inventory, "-e", "@" + extraVarsPath}
+	// The vault vars file comes first: Ansible gives the last -e precedence,
+	// and freeipa_roster_file/pilot_drift_*/target_group are Pilot's own
+	// decisions, which a key in the vault file must not replace.
+	args := []string{playbook, "-i", opts.Inventory}
+	if opts.VarsFile != "" {
+		absVarsFile, err := filepath.Abs(opts.VarsFile)
+		if err != nil {
+			return LiveState{}, fmt.Errorf("accessgrants: resolve vars file path: %w", err)
+		}
+		args = append(args, "-e", "@"+absVarsFile)
+	}
+	args = append(args, "-e", "@"+extraVarsPath)
 	if opts.VaultPasswordFile != "" {
 		args = append(args, "--vault-password-file", opts.VaultPasswordFile)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -120,6 +121,43 @@ func TestEvaluateHealth_UnknownWhenProbeFails(t *testing.T) {
 	}
 	if health.Status != HealthUnknown || health.FreeIPAReachable {
 		t.Fatalf("expected unknown/unreachable, got: %+v", health)
+	}
+	if !strings.Contains(health.ProbeError, "connection refused") {
+		t.Fatalf("the probe failure must be visible, got ProbeError %q", health.ProbeError)
+	}
+}
+
+// TestEvaluateHealth_UnknownExplainsAProbeFailureOnOneCappedLine locks the
+// diagnostic that tells a missing admin password (issue #179) apart from an
+// unreachable FreeIPA: multi-line ansible output is collapsed to one capped
+// line, and the vars file is forwarded to the probe.
+func TestEvaluateHealth_UnknownExplainsAProbeFailureOnOneCappedLine(t *testing.T) {
+	rosterPath := writeHealthTestRoster(t, healthTestRosterNoGrants)
+	varsFile := filepath.Join(t.TempDir(), "main.yaml")
+	long := "No usable FreeIPA admin password\n" + strings.Repeat("x", 2*maxProbeErrorLen)
+	runner := &fakeDriftRunner{exitCode: 2, runErr: nil}
+	runner.stderr = long
+
+	health, err := EvaluateHealth(context.Background(), HealthOptions{
+		DriftProbeOptions: DriftProbeOptions{
+			RosterFile: rosterPath, Inventory: "inv.yml", Runner: runner, VarsFile: varsFile,
+			Now: time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Status != HealthUnknown {
+		t.Fatalf("status = %q, want unknown", health.Status)
+	}
+	if strings.ContainsAny(health.ProbeError, "\n\r") || !strings.Contains(health.ProbeError, "No usable FreeIPA admin password") {
+		t.Fatalf("ProbeError = %q, want one line starting with the probe message", health.ProbeError)
+	}
+	if got := len([]rune(health.ProbeError)); got > maxProbeErrorLen+3 {
+		t.Fatalf("ProbeError is %d runes, want it capped near %d", got, maxProbeErrorLen)
+	}
+	if driftArgIndex(runner.lastArgs, "@"+varsFile) < 0 {
+		t.Fatalf("EvaluateHealth did not forward the vars file: %v", runner.lastArgs)
 	}
 }
 
