@@ -1,8 +1,12 @@
 package spec
 
 import (
+	"os"
+	"sort"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_OsPatchSlaSpec locks the structure of the
@@ -64,5 +68,123 @@ func TestRegression_OsPatchSlaSpec(t *testing.T) {
 	fs := Lint(s)
 	if HasErrors(fs) {
 		t.Errorf("Lint produced errors:\n%s", joinFindings(fs))
+	}
+}
+
+// TestRegression_OsPatchSlaTargetsAreEnvironmentGroups locks the §1 targets
+// table of os-patch-sla.md to the stage vocabulary (issue #174).
+//
+// Why TestRegression_SpecAndInventoryAgree's template is NOT used here: that
+// template assumes the spec declares the group set of one concrete inventory.
+// os-patch-sla is applied per stage, each stage with its own inventory, so the
+// §1 rows are environment GROUPS (sandbox/staging/prod) resolved against
+// whatever inventory `pilot verify -i` is given. The vm-target reference
+// environment gets its group via `vm-target up --hosts sandbox`; alignment
+// responsibility lives there, not in a fixed host list in this spec.
+//
+// The table must never contain a group `all` (or empty) row: pilot verify's
+// v1TargetGroups then switches the whole table to LITERAL hostnames and fails
+// with "absent from inventory" on every inventory that lacks those names
+// (`test-vm`, ...). So the groups must equal the stage vocabulary the apply
+// playbook's own `patch_stage in [...]` gate accepts; the vocabulary is read
+// from the playbook rather than hard-coded a second time.
+func TestRegression_OsPatchSlaTargetsAreEnvironmentGroups(t *testing.T) {
+	s, err := Parse("../../docs/verification/os-patch-sla.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vocab := osPatchSlaPlaybookStages(t)
+	if len(vocab) == 0 {
+		t.Fatal("playbook stage vocabulary is empty")
+	}
+	if len(s.Hosts) == 0 {
+		t.Fatal("spec §1 declares no targets")
+	}
+	var groups []string
+	for _, h := range s.Hosts {
+		g := strings.TrimSpace(h.Group)
+		if g == "" || g == "all" {
+			t.Errorf("§1 row %q has group %q: an all/empty group makes pilot verify match the table as literal hostnames", h.Hostname, h.Group)
+		}
+		if h.Hostname != g {
+			t.Errorf("§1 row hostname %q must equal its group %q (rows are environment groups, not hosts)", h.Hostname, g)
+		}
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	if got, want := strings.Join(groups, ","), strings.Join(vocab, ","); got != want {
+		t.Errorf("§1 groups=%s, playbook patch_stage vocabulary=%s", got, want)
+	}
+}
+
+// osPatchSlaPlaybookStages reads the stage list from the `patch_stage in [...]`
+// assert of playbooks/apply/os-patch-sla-apply.yml, sorted.
+func osPatchSlaPlaybookStages(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile("../../playbooks/apply/os-patch-sla-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []struct {
+		Tasks []struct {
+			Name   string `yaml:"name"`
+			Assert struct {
+				That []string `yaml:"that"`
+			} `yaml:"ansible.builtin.assert"`
+		} `yaml:"tasks"`
+	}
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "patch_stage in ["
+	for _, p := range plays {
+		for _, task := range p.Tasks {
+			for _, cond := range task.Assert.That {
+				cond = strings.TrimSpace(cond)
+				if !strings.HasPrefix(cond, prefix) || !strings.HasSuffix(cond, "]") {
+					continue
+				}
+				var out []string
+				for _, v := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(cond, prefix), "]"), ",") {
+					out = append(out, strings.Trim(strings.TrimSpace(v), "'\""))
+				}
+				sort.Strings(out)
+				return out
+			}
+		}
+	}
+	t.Fatal("no `patch_stage in [...]` assert found in os-patch-sla-apply.yml")
+	return nil
+}
+
+// TestRegression_OsPatchSlaTargetsGateTriggers is the "should trigger" half
+// (AGENTS.md section 5.12): the previous §1 shape (a literal test host in group
+// `all`) must be rejected by the same predicate the test above applies.
+func TestRegression_OsPatchSlaTargetsGateTriggers(t *testing.T) {
+	real, err := os.ReadFile("../../docs/verification/os-patch-sla.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const newRow = "| sandbox  | sandbox  |"
+	if !strings.Contains(string(real), newRow) {
+		t.Fatalf("spec §1 no longer has the %q row", newRow)
+	}
+	old := strings.Replace(string(real), newRow, "| test-vm  | all      |", 1)
+	path := t.TempDir() + "/old.md"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := 0
+	for _, h := range s.Hosts {
+		if g := strings.TrimSpace(h.Group); g == "" || g == "all" || h.Hostname != g {
+			bad++
+		}
+	}
+	if bad != 1 {
+		t.Fatalf("old-shape rows flagged=%d want 1 (hosts=%+v)", bad, s.Hosts)
 	}
 }

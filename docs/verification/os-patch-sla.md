@@ -1,6 +1,6 @@
 # Verification Spec — os-patch-sla (Ubuntu/Debian periodic OS patching)
 
-> 版本：v1.1
+> 版本：v1.2
 > 對齊規範：pilot 通用 OS 套件定期更新規範（Critical 15 天、High 30 天、Medium 90 天修補週期；更新前非生產環境驗證；自動化推送更新）
 > 維護者：sre
 
@@ -8,12 +8,32 @@
 
 | Hostname | Group    | Address          | User   | Port | IdentityFile                |
 |----------|----------|------------------|--------|------|------------------------------|
-| test-vm  | all      |                  |        |      |                              |
+| sandbox  | sandbox  |                  |        |      |                              |
 | staging  | staging  |                  |        |      |                              |
 | prod     | prod     |                  |        |      |                              |
 
 > 各 host 的 Address/User/IdentityFile 留空、靠 `--from-ssh-config` 從 `~/.ssh/config` 補；
 > 實際位址在 deployment repo 的 inventory 維護，這份 spec 留在工具的通用 repo。
+
+> **每一列是 inventory 的「環境 group」，不是 hostname**（issue #174）：`pilot verify` 把這張表
+> 以 group pattern（`prod:sandbox:staging`）交給 `ansible --list-hosts`，對你用 `-i` 傳入的那份
+> inventory 解析成實際 host。每個 stage 各有自己的 inventory，所以只有該 stage 的 group 會比對到 host。
+> 這張表**不准**放 `all` group，也不准放某台測試機的字面 hostname（例如 `test-vm`）：只要有一列的 Group
+> 是 `all`（或留空），`pilot verify` 就改成把整張表當字面 hostname 比對，在沒有那些名字的 inventory 上
+> 直接報 `spec targets contains host "..." that is absent from inventory`。
+>
+> vm-target 測試做法：每個 stage 一台拋棄式 VM，**不要**讓同一台 VM 同時屬於 staging 與 prod
+> （playbook 的 stage cross-check 會正確地擋下 sandbox 套用，見 AGENTS.md §4.3）：
+>
+> - sandbox：`pilot vm-target up --name <n> --hosts sandbox`，
+>   然後 `pilot vm-target test --name <n> --playbook playbooks/apply/os-patch-sla-apply.yml --spec docs/verification/os-patch-sla.md -- <vars>`。
+>   sandbox 不需要 `-e target_group=`（playbook play vars 的 `target_group` 預設就是 `sandbox`）。
+> - staging：`--hosts staging`，`--` 後帶 `-e patch_stage=staging -e target_group=staging -e confirm_staging=true`。
+> - prod：`--hosts prod`，`--` 後帶 `-e patch_stage=prod -e target_group=prod -e confirm_prod=true -e staging_attested_within_hours=24`。
+> - staging/prod 必須同時帶 `-e target_group=`：play vars 的 `target_group: sandbox` 讓 `hosts:` 的
+>   `default(patch_stage)` 永遠不會生效，只帶 `-e patch_stage=staging` 會得到 `Could not match supplied
+>   host pattern, ignoring: sandbox`、0 台 host（`ansible-playbook --list-hosts` 對只有 staging group 的
+>   inventory 實測）。
 
 ## 2. Checklist
 
@@ -81,7 +101,7 @@
 
 ## 7. 把 FAIL 變 PASS 的 SOP
 
-1. **先在 sandbox 驗證**：
+1. **先在 sandbox 驗證**（vm-target 測試做法見 §1 的說明，每個 stage 一台 VM）：
    ```bash
    ansible-playbook -i inventory-sandbox.yaml \
        playbooks/apply/os-patch-sla-apply.yml \
@@ -122,3 +142,4 @@
 |------|------|------|--------|
 | 2026-06-30 | v1.0 | 初版（C1–C7）| pilot |
 | 2026-10-28 | v1.1 | 新增 C8（`unattended-upgrades` 套件已安裝）。起因 issue #167：apply playbook 從不安裝這個套件，Step 4（systemd start+enable）在沒裝的主機上失敗，`--check` 也一樣（套件只被模擬安裝，unit 不存在）；Step 3 的 `failed_when: false` 還把「指令不存在」當成成功。apply 現在以 strict 政策經共用 apt framework 安裝套件，並在安裝後斷言套件存在（C5、C6 原本隱含依賴它，但沒有任何 row 檢查套件本身）| pilot |
+| 2026-10-29 | v1.2 | §1 目標系統表改為純環境 group（`sandbox`/`staging`/`prod`），移除 `test-vm`/`all` 那一列，並在表下說明每列是 inventory group、不准放 `all` 或字面測試 hostname、vm-target 每個 stage 一台 VM。起因 issue #174：`all` 列讓 `pilot verify` 把整張表當字面 hostname，單台 vm-target VM 上報 `spec targets contains host "test-vm" that is absent from inventory`。依 AGENTS.md §2.1 選 B（改 spec）；stage gate 不動。Checklist C1–C8 與所有 Expected 值不變 | pilot |
