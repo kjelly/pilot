@@ -18,10 +18,10 @@ func TestRegression_OsPatchSlaSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
-	// C1..C7 inclusive, no gaps, no duplicates.
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
-	if len(s.Rows) != 7 {
-		t.Fatalf("rows=%d want=7", len(s.Rows))
+	// C1..C8 inclusive, no gaps, no duplicates.
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"}
+	if len(s.Rows) != 8 {
+		t.Fatalf("rows=%d want=8", len(s.Rows))
 	}
 	for i, id := range wantIDs {
 		if s.Rows[i].ID != id {
@@ -41,6 +41,23 @@ func TestRegression_OsPatchSlaSpec(t *testing.T) {
 	for _, r := range s.Rows {
 		if r.ID == "C7" && !strings.Contains(r.Command, "/etc/no-prod-direct-push") {
 			t.Errorf("C7 must guard the /etc/no-prod-direct-push marker; got %q", r.Command)
+		}
+	}
+	// C8 (issue #167) is the package-installed row: it must read dpkg's
+	// state for unattended-upgrades and compare the exact `installed` status.
+	// `dpkg-query -W` alone exits 0 for a removed-but-not-purged package
+	// (`config-files`), so a bare rc check would pass without the package.
+	for _, r := range s.Rows {
+		if r.ID != "C8" {
+			continue
+		}
+		for _, want := range []string{"dpkg-query", "unattended-upgrades", "grep -qx installed"} {
+			if !strings.Contains(r.Command, want) {
+				t.Errorf("C8 command %q must contain %q", r.Command, want)
+			}
+		}
+		if strings.TrimSpace(r.Expected) != "0" {
+			t.Errorf("C8 expected=%q want 0", r.Expected)
 		}
 	}
 	// Lint must not produce errors.
