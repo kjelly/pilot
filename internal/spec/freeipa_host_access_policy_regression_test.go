@@ -188,9 +188,15 @@ func TestRegression_FreeipaHostAccessPolicyTask_StaticSafetyInvariants(t *testin
 			}
 		}
 
-		// Variable prefix: every set_fact key and register name is ipa_host_policy_*.
+		// Variable prefix: every set_fact key and register name is ipa_host_policy_*,
+		// except the shared KDC preflight state (issue #168), which both this file
+		// and the annotations file default to `skipped` before including
+		// tasks/freeipa-client-kdc-preflight.yml.
 		if facts, ok := task["ansible.builtin.set_fact"].(map[string]any); ok {
 			for k := range facts {
+				if k == "freeipa_client_kdc_preflight_state" {
+					continue
+				}
 				if !strings.HasPrefix(k, "ipa_host_policy_") {
 					t.Errorf("task %q sets fact %q; all facts must use the ipa_host_policy_ prefix", name, k)
 				}
