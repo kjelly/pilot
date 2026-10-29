@@ -449,19 +449,24 @@ freeipa-nfs-server 的 gate 也會擋下，並指出是哪一份名冊。三者�
 `Vault{{Secret9`）時，gate 展開它就失敗，ansible-core 2.19 會在錯誤的 Origin 段落印出那個檔案的那一行，密碼也在其中，
 `no_log` 也擋不住（它只隱藏 task 的結果）。pilot edit 不會同步含 `{{`、`{%`、`{#` 的 vault 值，preflight 也會警告。
 
-最新實機驗證（2026-10-28，candidate `22cad092`，兩台全新 VM）：site chain 通過（L1–L6，`freeipa-server.md` 20/20），
+最新實機驗證（2026-10-29，candidate `09119dd`，兩台全新 VM）：site chain 通過（L1–L6，`freeipa-server.md` 20/20），
 gate 的通過、失敗與手動修正後的復原都已驗證；`pilot edit --actions` 輪替成功，名冊被持有時拒絕存檔，
-以 hard link 共用 inode 的名冊在被持有時也拒絕存檔、釋放後兩個名字都拿到新密碼。見
-[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-28-22cad09.md)。這份紀錄的受測樹是 `22cad092`（Go 程式碼與
-playbook）；之後只加了這份紀錄與文字，沒有改任何會影響執行結果的檔案。實機只走了 `pilot edit --actions` 的存檔路徑、
-hard link 名冊的 inode 鎖與 playbook chain。下列程式碼沒有實機觸發，只有本機單元與整合測試：
+以 hard link 共用 inode 的名冊在被持有時也拒絕存檔、釋放後兩個名字都拿到新密碼；名冊的 YAML alias 有環
+或是 40 層 merge fan-out 時，`pilot edit --actions` 不當機也不卡住（約 0.2 秒），vault 照存、名冊原樣、
+警告指名原因。見[實跑紀錄](../evidence/freeipa-nfs-server/2026-10-29-09119dd.md)。這份紀錄的受測樹是 `09119dd`
+的 Go 程式碼與 playbook；之後只加了測試、`.github/workflows/ci.yml`（`playbook-lint` 的逾時）、文件與這份紀錄，
+沒有改任何正式程式碼、playbook、spec 或 fixture（可用 `git diff 09119dd HEAD --stat` 驗證）。實機只走了
+`pilot edit --actions` 的存檔路徑、hard link 名冊的 inode 鎖、循環／fan-out YAML 的守衛（`pilot edit` 同步與
+`pilot deploy --preview-only` 的名冊 migration 步驟）與 playbook chain。下列程式碼沒有實機觸發，只有本機單元與整合測試：
 
 - apply rollback 的還原路徑（journal 記錄、保留別的 process 的修改）：`--actions` 不會 rollback，MCP apply 才會。
-- plan 的探測（`ProbeRosterWrite`）與 plan 的暫存複本：實機只用了 `--actions`，沒有走 MCP plan/apply。
+- plan 的探測（`ProbeRosterWrite`）與 plan 的暫存複本，以及 MCP plan/apply：實機只用了 `--actions`。
 - `PrivateTempDir` 以持有的 flock 判斷建立者是否還在（含跨 PID namespace）的清掃。
-- 較早的紀錄（[3b4bdb1](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)）仍保留，它的
-  `playbooks/apply/freeipa-nfs-server-apply.yml` sha256 是 `88247b6e…`，`22cad092` 是 `945657769b99…`；
-  差別只在 no_log 名冊 gate 的 `fail_msg` 文字與註解。
+- deploy preflight 的 `warnFreeIPARosterAdminDrift` 對循環名冊做出判斷：preflight 在那之前就把解析不了的名冊略過了。
+
+較早的紀錄仍保留：[22cad092](../evidence/freeipa-nfs-server/2026-10-28-22cad09.md)（hard link 名冊的 inode 鎖）與
+[3b4bdb1](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)。`playbooks/apply/freeipa-nfs-server-apply.yml` 的
+sha256 在 `3b4bdb1` 是 `88247b6e…`，之後是 `945657769b99…`，差別只在 no_log 名冊 gate 的 `fail_msg` 文字與註解。
 
 ---
 
@@ -1007,4 +1012,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-07-22 | v1.2 | Delivery batch 1：canonical v1 users/groups、legacy compatibility、12-row verification 與 immutable candidate evidence；新增 `freeipa_roster_file` namespaced 入口及 Ansible magic-variable/duplicate-alias gotcha | pilot |
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
-| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1` 與 `22cad092` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測與暫存目錄清掃沒有實機觸發） | pilot |
+| 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1`、`22cad092` 與 `09119dd` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測、MCP plan/apply 與暫存目錄清掃沒有實機觸發） | pilot |
