@@ -292,6 +292,8 @@ admin 密碼存在兩個地方，兩份必須相同：
   存進 vault 的新值一律是加引號的字串；vault 原本的值沒加引號時，pilot 無法判斷哪些名冊用的是它，同樣不會同步，
   畫面會提示逐一確認；
 - 密碼經 YAML alias／merge key 取得，或寫成 flow mapping、多行 scalar（包括跨到下一行的加引號字串）的名冊；
+  alias／merge key 自己指回自己的名冊（例如 `freeipa: &f` 底下 `<<: *f`）也一樣列為「未同步」，原因寫「YAML aliases or merge keys
+  refer to themselves」，要手動修改；deploy／reconcile 的 preflight 讀不了這樣的名冊，會略過它、不比對；
 - 新密碼含 `{{`、`{%`、`{#`：Ansible 會當成模板展開，pilot 無法得知實際密碼，所有名冊都不會改。
   vault 的值標成 `!unsafe` 時 Ansible 不展開它，pilot 會照常同步，名冊寫成 `!unsafe` 加引號的字串；
 - 原本或新的 `ipa_admin_password` 是 `!vault` 加密值，或原本的值含 `{{`、`{%`、`{#`：pilot 不知道舊密碼，
