@@ -110,7 +110,7 @@ function flush_stanza(   i) {
 }
 # Adds a header line (path words, possibly the "{"), dropping the path from it.
 # Returns 1 when the line holds the "{"; the text behind it is left in btail.
-function add_header(line,   s, i, kept, out, changed) {
+function add_header(line,   s, i, kept, out, changed, sep) {
     btail = ""
     s = ltrim(line)
     if (s == "" || substr(s, 1, 1) == "#") { hdr[++nhdr] = line; return 0 }
@@ -119,12 +119,15 @@ function add_header(line,   s, i, kept, out, changed) {
     kept = ""; changed = 0
     for (i = 1; i <= ntok; i++) {
         if (unquote(tok[i]) == drop) { changed = 1; hit++; continue }
-        kept = kept (kept == "" ? "" : " ") tok[i]
+        # Never a name, a blank and "(": busybox awk 1.30 (Ubuntu 22.04, Debian 11) reads that
+        # as a call of the function of that name.
+        sep = (kept == "") ? "" : " "
+        kept = kept sep tok[i]
         remaining++
     }
     if (!changed) { hdr[++nhdr] = line; return has_brace }
     out = kept
-    if (has_brace) out = out (out == "" ? "{" : " {") btail
+    if (has_brace) { sep = (out == "") ? "{" : " {"; out = out sep btail }
     hdr[++nhdr] = out
     return has_brace
 }

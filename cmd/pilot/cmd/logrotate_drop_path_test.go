@@ -123,8 +123,9 @@ func hookStanza(opener, term string) string {
 }
 
 // A policy the helper must rewrite by only removing the syslog path, and that
-// real logrotate 3.22 accepts. warns marks the ones logrotate accepts with an
-// "unknown option" warning (it ignores that line): they are valid, but the
+// real logrotate (3.19, 3.21 and 3.22 agree on all of these) accepts. warns marks
+// the ones logrotate accepts with an "unknown option" diagnostic (it ignores that
+// line; "error:" before 3.22, "warning:" in 3.22): they are valid, but the
 // playbook's own validate would not let a file with them through, which is the
 // same before and after this helper.
 type acceptedPolicy struct {
@@ -134,7 +135,7 @@ type acceptedPolicy struct {
 
 func acceptedPolicies() []acceptedPolicy {
 	var cs []acceptedPolicy
-	// How logrotate 3.22 ends a script: "endscript" at the start of a line, after
+	// How logrotate (3.19 to 3.22) ends a script: "endscript" at the start of a line, after
 	// blanks, with no ASCII letter right behind it. Found with `logrotate -d`.
 	for _, term := range []struct {
 		name, text string
@@ -264,15 +265,94 @@ func TestLogrotateDropPathFollowsLogrotateStanzaSyntax(t *testing.T) {
 	}
 }
 
-// The policy as logrotate parses it: the logs it considers and its errors
-// (unreadable logs, which do not exist here, are not parse errors).
+// The policy as logrotate parses it: the logs it considers, the lines it
+// ignored and its errors (unreadable logs, which do not exist here, are not
+// parse errors).
 type logrotateView struct {
 	considered []string
+	ignored    []string
 	errors     []string
 	raw        string
 }
 
-var logrotateErrLine = regexp.MustCompile(`(?m)^error: .*$`)
+// logrotate says "unknown option 'x' -- ignoring line" when it meets a word it
+// does not know, and carries on with the rest of the policy: it skips that one
+// line and still reads, and uses, every stanza. Only the prefix depends on the
+// version: logrotate 3.19 and 3.21 (Ubuntu 22.04, 24.04) print "error:", 3.22
+// prints "warning:". So the message is classified by its text, never by its
+// prefix: it is not a rejection of the policy under either.
+var logrotateIgnoredLine = regexp.MustCompile(`^(?:error|warning): \S+:\d+ unknown option .* -- ignoring line$`)
+
+// A log that does not exist on the machine running the test; not a parse error.
+var logrotateUnreadableLog = regexp.MustCompile(`^error: stat of .* failed: `)
+
+type logrotateLineKind int
+
+const (
+	logrotateLineOther   logrotateLineKind = iota // not a diagnostic that matters here
+	logrotateLineIgnored                          // a line logrotate skipped; the policy still parses
+	logrotateLineError                            // the policy is rejected (or the run is aborted)
+)
+
+// classifyLogrotateLine decides what one line of `logrotate -d` output means,
+// the same way for every logrotate version. Any "error:" that is not one of the
+// two known harmless messages rejects the policy: "lines must begin with a
+// keyword or a filename", "duplicate log entry", "unexpected }", "unexpected
+// text", "without endscript", "found error in file" and whatever else a version
+// prints. A "warning:" other than the ignored-line one is not an error.
+func classifyLogrotateLine(l string) logrotateLineKind {
+	switch {
+	case logrotateIgnoredLine.MatchString(l):
+		return logrotateLineIgnored
+	case logrotateUnreadableLog.MatchString(l):
+		return logrotateLineOther
+	case strings.HasPrefix(l, "error: "):
+		return logrotateLineError
+	}
+	return logrotateLineOther
+}
+
+// The wording below was captured from logrotate 3.19.0 and 3.21.0 (Ubuntu 22.04,
+// 24.04: "error:") and 3.22.0 (the local one: "warning:").
+func TestClassifyLogrotateLine(t *testing.T) {
+	for _, tt := range []struct {
+		line string
+		want logrotateLineKind
+	}{
+		// Skipped lines, whichever prefix the version uses.
+		{"error: rsyslog:5 unknown option 'x' -- ignoring line", logrotateLineIgnored},
+		{"warning: rsyslog:5 unknown option 'x' -- ignoring line", logrotateLineIgnored},
+		{"error: rsyslog:3 unknown option 'postrotatex' -- ignoring line", logrotateLineIgnored},
+		{"error: rsyslog:4 unknown option 'true' -- ignoring line", logrotateLineIgnored},
+		{"error: r:2 unknown option 'endscript' -- ignoring line", logrotateLineIgnored},
+		// Unreadable logs are an artefact of the test, not of the policy.
+		{"error: stat of /var/log/other failed: No such file or directory", logrotateLineOther},
+		// Every other error rejects the policy.
+		{"error: r:1 lines must begin with a keyword or a filename (possibly in double quotes)", logrotateLineError},
+		{"error: found error in file r, skipping", logrotateLineError},
+		{"error: r:3 duplicate log entry for /var/log/a", logrotateLineError},
+		{"error: r:prerotate, postrotate or preremove without endscript", logrotateLineError},
+		{"error: r:4 unexpected }", logrotateLineError},
+		{"error: r:7 unexpected text", logrotateLineError},
+		{"error: r:9 missing end of script", logrotateLineError},
+		{"error: something no version has printed yet", logrotateLineError},
+		// Close to the ignored message but not it: still rejected.
+		{"error: r:3 unknown option 'x'", logrotateLineError},
+		{"error: r:3 unknown option 'x' -- ignoring line, and then some", logrotateLineError},
+		{"error: unknown option 'x' -- ignoring line", logrotateLineError},
+		{"error: bad stat of /x", logrotateLineError},
+		// Warnings other than the ignored line are not errors.
+		{"warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.", logrotateLineOther},
+		{"WARNING: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.", logrotateLineOther},
+		{"warning: r:3 duplicate log entry for /var/log/a", logrotateLineOther},
+		{"considering log /var/log/syslog", logrotateLineOther},
+		{"", logrotateLineOther},
+	} {
+		if got := classifyLogrotateLine(tt.line); got != tt.want {
+			t.Errorf("classifyLogrotateLine(%q) = %d, want %d", tt.line, got, tt.want)
+		}
+	}
+}
 
 func parseWithLogrotate(t *testing.T, logrotate string, files map[string]string) logrotateView {
 	t.Helper()
@@ -301,8 +381,12 @@ func parseWithLogrotate(t *testing.T, logrotate string, files map[string]string)
 			v.considered = append(v.considered, p)
 		}
 	}
-	for _, l := range logrotateErrLine.FindAllString(v.raw, -1) {
-		if !strings.Contains(l, "stat of ") {
+	for _, l := range strings.Split(v.raw, "\n") {
+		l = strings.TrimRight(l, "\r")
+		switch classifyLogrotateLine(l) {
+		case logrotateLineIgnored:
+			v.ignored = append(v.ignored, l)
+		case logrotateLineError:
 			v.errors = append(v.errors, l)
 		}
 	}
@@ -344,7 +428,7 @@ func TestLogrotateDropPathLeavesNoDuplicateWithTheManagedStanza(t *testing.T) {
 }
 
 // The tests above only know what the helper does. This one asks logrotate: for
-// every policy that logrotate 3.22 itself accepts, the logs it considers after
+// every policy that logrotate itself accepts, the logs it considers after
 // "rewritten policy + the managed /etc/logrotate.d/syslog" are exactly the logs
 // it considered before, with no parse error and no duplicate. That is what the
 // terminator, keyword and quoting rules in the helper are written to mirror.
@@ -361,8 +445,8 @@ func TestLogrotateDropPathAgreesWithRealLogrotate(t *testing.T) {
 			if len(before.errors) > 0 {
 				t.Fatalf("the test policy is not one logrotate accepts: %v\n%s", before.errors, before.raw)
 			}
-			if tt.warns != strings.Contains(before.raw, "unknown option") {
-				t.Fatalf("warns=%v but logrotate said:\n%s", tt.warns, before.raw)
+			if tt.warns != (len(before.ignored) > 0) {
+				t.Fatalf("warns=%v but logrotate ignored %v:\n%s", tt.warns, before.ignored, before.raw)
 			}
 			seen := 0
 			for _, c := range before.considered {
