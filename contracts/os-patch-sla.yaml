@@ -23,5 +23,6 @@ traceability:
     "docs/verification/os-patch-sla.md#C5": {kind: derived, reason: unattended-upgrades configuration outcome}
     "docs/verification/os-patch-sla.md#C6": {kind: derived, reason: unattended-upgrades configuration outcome}
     "docs/verification/os-patch-sla.md#C7": {kind: derived, reason: production safety policy outcome}
+    "docs/verification/os-patch-sla.md#C8": {kind: derived, reason: unattended-upgrades package installation outcome}
 verification: {autoDeploy: false}
 site: {include: true, order: 140, vars: {}, tags: [maintenance, os-patch-sla], optIn: false}

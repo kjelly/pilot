@@ -1,0 +1,108 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "1f529da2-d1d4-11f1-9980-5254001b059e"
+        ],
+        "description": [
+          "P1 non-posix"
+        ],
+        "cn": [
+          "p1-nonposix"
+        ],
+        "member_user": [
+          "p1-reset"
+        ],
+        "dn": "cn=p1-nonposix,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "1f827a9a-d1d4-11f1-8f9b-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1227"
+        ],
+        "description": [
+          "P1 parent"
+        ],
+        "gidnumber": [
+          "1927600227"
+        ],
+        "cn": [
+          "p1-parent"
+        ],
+        "member_user": [
+          "p1-off"
+        ],
+        "member_group": [
+          "p1-team"
+        ],
+        "memberindirect_user": [
+          "p1-keys",
+          "p1-nopw",
+          "p1-self"
+        ],
+        "dn": "cn=p1-parent,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "1f47f1fe-d1d4-11f1-a205-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1226"
+        ],
+        "description": [
+          "P1 team"
+        ],
+        "gidnumber": [
+          "1927600226"
+        ],
+        "cn": [
+          "p1-team"
+        ],
+        "member_user": [
+          "p1-nopw",
+          "p1-self",
+          "p1-keys"
+        ],
+        "memberof_group": [
+          "p1-parent"
+        ],
+        "dn": "cn=p1-team,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": false,
+    "summary": "3 groups matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -12,7 +12,7 @@ regressionTests:
 dependencies:
   - {component: docker, required: true, relation: sameHosts}
 hostCardinality: exactly-one
-resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}
+resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20, diskPaths: [/var/lib/pilot/seaweedfs]}
 endpoints:
   - {name: s3, scheme: http, port: 8333}
 stagePolicy: {variable: stage, default: sandbox}

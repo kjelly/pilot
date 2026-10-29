@@ -315,7 +315,16 @@ type Resources struct {
 	MinCPU     int `yaml:"minCPU"`
 	MinRAMMiB  int `yaml:"minRAMMiB"`
 	MinDiskGiB int `yaml:"minDiskGiB"`
+	// DiskPaths are the directories the component stores its data in. Each
+	// one's filesystem must have MinDiskGiB available; without any, the
+	// minimum applies to /. A data directory can sit on another filesystem
+	// (a separate data disk, a bind mount), where / says nothing about it.
+	DiskPaths []string `yaml:"diskPaths"`
 }
+
+// diskPathPattern keeps a diskPaths entry an absolute path made only of
+// characters that need no shell quoting: the host facts probe passes it to df.
+var diskPathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._-]+)+$`)
 
 // GroupVar declares one typed component input or vault-backed variable.
 type GroupVar struct {
@@ -706,6 +715,9 @@ func validateLocal(contract Contract) error {
 	if contract.Resources.MinCPU < 0 || contract.Resources.MinRAMMiB < 0 || contract.Resources.MinDiskGiB < 0 {
 		return fmt.Errorf("resource minimums cannot be negative")
 	}
+	if err := validateDiskPaths(contract.Resources); err != nil {
+		return err
+	}
 	if err := validateGroupVars(contract.GroupVars, contract.InputRules); err != nil {
 		return err
 	}
@@ -943,6 +955,23 @@ func validateDependenciesAndBindings(dependencies []Dependency, bindings []Bindi
 		if !bound {
 			return fmt.Errorf("providerEndpoint dependency %q requires a binding", dependency.Component)
 		}
+	}
+	return nil
+}
+
+func validateDiskPaths(resources Resources) error {
+	if len(resources.DiskPaths) > 0 && resources.MinDiskGiB <= 0 {
+		return fmt.Errorf("resources.diskPaths requires a positive minDiskGiB")
+	}
+	seen := make(map[string]struct{}, len(resources.DiskPaths))
+	for _, path := range resources.DiskPaths {
+		if !diskPathPattern.MatchString(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("resources.diskPaths entry %q must be a clean absolute path below / using only A-Z a-z 0-9 . _ -", path)
+		}
+		if _, exists := seen[path]; exists {
+			return fmt.Errorf("duplicate resources.diskPaths entry %q", path)
+		}
+		seen[path] = struct{}{}
 	}
 	return nil
 }

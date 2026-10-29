@@ -20,7 +20,40 @@ type HostFacts struct {
 	Version   string
 	CPU       int
 	RAMMiB    int
-	DiskGiB   int
+	// DiskGiB is the space available on /.
+	DiskGiB int
+	// DiskGiBByPath is the space available on the filesystem holding each
+	// probed contract diskPaths entry. A path the probe could not measure is
+	// absent.
+	DiskGiBByPath map[string]int
+}
+
+// DiskPathsByHost returns, for each host in scope, the sorted diskPaths of
+// every selected component placed on it: the paths the host facts probe must
+// measure for validateHostFacts.
+func DiskPathsByHost(selected []contract.Contract, scope Scope) map[string][]string {
+	sets := map[string]map[string]struct{}{}
+	for _, component := range selected {
+		if len(component.Resources.DiskPaths) == 0 {
+			continue
+		}
+		for _, host := range uniqueHosts(scope.HostsByRole[component.Role]) {
+			if sets[host] == nil {
+				sets[host] = map[string]struct{}{}
+			}
+			for _, path := range component.Resources.DiskPaths {
+				sets[host][path] = struct{}{}
+			}
+		}
+	}
+	paths := make(map[string][]string, len(sets))
+	for host, set := range sets {
+		for path := range set {
+			paths[host] = append(paths[host], path)
+		}
+		sort.Strings(paths[host])
+	}
+	return paths
 }
 
 // PreflightRequest contains only resolved, non-secret values. Secret inputs
@@ -74,8 +107,12 @@ func ValidateContractPreflight(request PreflightRequest) (PreflightResult, error
 				result.Warnings = append(result.Warnings, fmt.Sprintf("component %q host %q facts unavailable; OS/resource minimums not verified", component.ID, host))
 				continue
 			}
-			if err := validateHostFacts(component, host, facts); err != nil {
+			warning, err := validateHostFacts(component, host, facts)
+			if err != nil {
 				return result, err
+			}
+			if warning != "" {
+				result.Warnings = append(result.Warnings, warning)
 			}
 		}
 	}
@@ -196,14 +233,28 @@ func evaluateInputCondition(value any, provided bool, condition contract.InputCo
 	}
 }
 
-func validateHostFacts(component contract.Contract, host string, facts HostFacts) error {
-	if facts.CPU < component.Resources.MinCPU || facts.RAMMiB < component.Resources.MinRAMMiB || facts.DiskGiB < component.Resources.MinDiskGiB {
-		return fmt.Errorf("component %q host %q resources cpu=%d ramMiB=%d diskGiB=%d are below minimum cpu=%d ramMiB=%d diskGiB=%d",
-			component.ID, host, facts.CPU, facts.RAMMiB, facts.DiskGiB,
+// validateHostFacts returns an error for a known deficit or unsupported OS,
+// and a warning when a diskPaths entry went unmeasured, so its minimum is
+// not verified.
+func validateHostFacts(component contract.Contract, host string, facts HostFacts) (string, error) {
+	diskGiB, diskPath, unmeasured := componentDiskGiB(component, facts)
+	diskShort := diskPath != "" && diskGiB < component.Resources.MinDiskGiB
+	if facts.CPU < component.Resources.MinCPU || facts.RAMMiB < component.Resources.MinRAMMiB || diskShort {
+		disk := "not measured"
+		if diskPath != "" {
+			disk = fmt.Sprintf("%d (available on %s)", diskGiB, diskPath)
+		}
+		return "", fmt.Errorf("component %q host %q resources cpu=%d ramMiB=%d diskGiB=%s are below minimum cpu=%d ramMiB=%d diskGiB=%d",
+			component.ID, host, facts.CPU, facts.RAMMiB, disk,
 			component.Resources.MinCPU, component.Resources.MinRAMMiB, component.Resources.MinDiskGiB)
 	}
+	var warning string
+	if len(unmeasured) > 0 {
+		warning = fmt.Sprintf("component %q host %q disk space on %s not measured; minimum diskGiB=%d not verified",
+			component.ID, host, strings.Join(unmeasured, ", "), component.Resources.MinDiskGiB)
+	}
 	if len(component.OS) == 0 {
-		return nil
+		return warning, nil
 	}
 	for _, supported := range component.OS {
 		if supported.Distro != facts.Distro {
@@ -211,11 +262,33 @@ func validateHostFacts(component contract.Contract, host string, facts HostFacts
 		}
 		for _, version := range supported.Versions {
 			if version == "any" || version == facts.Version {
-				return nil
+				return warning, nil
 			}
 		}
 	}
-	return fmt.Errorf("component %q host %q OS %s %s is unsupported", component.ID, host, facts.Distro, facts.Version)
+	return "", fmt.Errorf("component %q host %q OS %s %s is unsupported", component.ID, host, facts.Distro, facts.Version)
+}
+
+// componentDiskGiB returns the least space available across the component's
+// diskPaths (/ when it declares none), the path it was measured on ("" when
+// none was), and the diskPaths the probe did not measure.
+func componentDiskGiB(component contract.Contract, facts HostFacts) (int, string, []string) {
+	if len(component.Resources.DiskPaths) == 0 {
+		return facts.DiskGiB, "/", nil
+	}
+	least, leastPath := 0, ""
+	var unmeasured []string
+	for _, path := range component.Resources.DiskPaths {
+		available, ok := facts.DiskGiBByPath[path]
+		if !ok {
+			unmeasured = append(unmeasured, path)
+			continue
+		}
+		if leastPath == "" || available < least {
+			least, leastPath = available, path
+		}
+	}
+	return least, leastPath, unmeasured
 }
 
 func validateProviderBindings(component, provider contract.Contract, scope Scope, selections map[string][]string) error {

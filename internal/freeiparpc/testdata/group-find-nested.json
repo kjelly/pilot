@@ -1,0 +1,121 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "69fb7f0e-d1e3-11f1-b246-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1231"
+        ],
+        "cn": [
+          "p1-leaf"
+        ],
+        "gidnumber": [
+          "1927600231"
+        ],
+        "description": [
+          "P1 leaf"
+        ],
+        "member_user": [
+          "p1-deep"
+        ],
+        "memberof_group": [
+          "p1-mid"
+        ],
+        "memberofindirect_group": [
+          "p1-top"
+        ],
+        "dn": "cn=p1-leaf,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "6a2ac0d4-d1e3-11f1-a06e-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1232"
+        ],
+        "cn": [
+          "p1-mid"
+        ],
+        "gidnumber": [
+          "1927600232"
+        ],
+        "description": [
+          "P1 mid"
+        ],
+        "member_group": [
+          "p1-leaf"
+        ],
+        "memberof_group": [
+          "p1-top"
+        ],
+        "memberindirect_user": [
+          "p1-deep"
+        ],
+        "dn": "cn=p1-mid,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "6a5b80e8-d1e3-11f1-bc24-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1233"
+        ],
+        "cn": [
+          "p1-top"
+        ],
+        "gidnumber": [
+          "1927600233"
+        ],
+        "description": [
+          "P1 top"
+        ],
+        "member_group": [
+          "p1-mid"
+        ],
+        "memberindirect_group": [
+          "p1-leaf"
+        ],
+        "memberindirect_user": [
+          "p1-deep"
+        ],
+        "dn": "cn=p1-top,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": false,
+    "summary": "3 groups matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

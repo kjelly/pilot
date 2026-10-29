@@ -14,6 +14,24 @@
 #   ansible-playbook -i inventory-prod.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=prod -e confirm_prod=true -e staging_attested_within_hours=24
 #
 # Variables: patch_stage, confirm_staging, confirm_prod, staging_attested_within_hours, unattended_origins, reboot_if_needed
+#
+# unattended-upgrades package (spec row C8, issue #167):
+#   Steps 1b-1e install the `unattended-upgrades` package itself. Without
+#   them Step 4 (systemd start+enable) fails on any host that lacks the
+#   package, and Step 3's `failed_when: false` hid the missing command.
+#   * Step 1 keeps its own strict `update_cache: true` (apt-repository-
+#     fault-tolerance spec §17: OS patching needs the whole configured
+#     package universe to be trustworthy; cmd/pilot/cmd/apt_policy_test.go
+#     aptUpdateCacheAllowlist pins it).
+#   * The install goes through tasks/apt-package-install.yml with
+#     pilot_apt_policy: strict (the only sanctioned apt install route,
+#     TestAptDirectInstallAllowlist). That include runs REAL apt-get update
+#     and download-only probes even under --check, so it is skipped under
+#     --check; --check therefore cannot see the unit of a package that is
+#     still missing. Step 3, Step 4 and the restart handler are gated on
+#     `unattended_upgrades_usable` (package present, or a real run) and a
+#     check-mode run on a host without the package says apply will install
+#     it instead of failing (AGENTS.md section 4.0, 4.5 point 4).
 
 - name: OS patch SLA apply (stage={{ patch_stage }}, target={{ target_group | default(patch_stage) }})
   hosts: "{{ target_group | default(patch_stage) }}"
@@ -89,6 +107,74 @@
         update_cache: true
         cache_valid_time: 3600
 
+    # Presence is read with dpkg-query (not package_facts): `db:Status-Status`
+    # is exactly `installed` for a usable package, while a removed-but-not-
+    # purged one (`config-files`) also makes plain `dpkg-query -W` exit 0.
+    # check_mode: false because a command is skipped under --check and the
+    # gates below need a real answer; it only reads dpkg's database.
+    - name: "Step 1b: Read whether the unattended-upgrades package is installed (spec C8)"
+      ansible.builtin.command:
+        argv: [dpkg-query, -W, -f, "${db:Status-Status}", unattended-upgrades]
+      register: uu_pkg_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: "Step 1b: Record unattended-upgrades presence"
+      ansible.builtin.set_fact:
+        unattended_upgrades_present: "{{ (uu_pkg_probe.stdout | default('') | trim) == 'installed' }}"
+
+    # Not included under --check: the shared include runs real apt-get
+    # update / download-only probes (check_mode: false inside), so a
+    # preview must not touch the network or apt locks. The play has no tags,
+    # so the include needs no apply.tags; the file:/apply: form is the one
+    # TestAptPackageInstallCallSitesUseApplyTags expects.
+    - name: "Step 1c: Install unattended-upgrades (strict apt policy, spec C8)"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+      vars:
+        pilot_apt_packages: [unattended-upgrades]
+        pilot_apt_policy: strict
+        pilot_apt_component: os-patch-sla
+        pilot_apt_required_sources:
+          - id: ubuntu-os
+            class: os
+      when:
+        - not ansible_check_mode
+        - not (unattended_upgrades_present | bool)
+
+    - name: "Step 1d: Re-read unattended-upgrades presence after the install"
+      ansible.builtin.command:
+        argv: [dpkg-query, -W, -f, "${db:Status-Status}", unattended-upgrades]
+      register: uu_pkg_probe_after
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: not ansible_check_mode
+
+    - name: "Step 1d: Record presence after the install, and whether the steps that need the package can run"
+      ansible.builtin.set_fact:
+        unattended_upgrades_present: >-
+          {{ ((uu_pkg_probe_after.stdout | default('') | trim) == 'installed')
+             if not ansible_check_mode else (unattended_upgrades_present | bool) }}
+
+    # Defined under --check too, so the handler can read it. A real run with
+    # the package missing never gets past Step 1e.
+    - name: "Step 1d: unattended-upgrades is usable (present, or this is a real run that has just installed it)"
+      ansible.builtin.set_fact:
+        unattended_upgrades_usable: "{{ (unattended_upgrades_present | bool) or not ansible_check_mode }}"
+
+    - name: "Step 1e: Fail closed when the package is still missing after the install"
+      ansible.builtin.assert:
+        that:
+          - unattended_upgrades_present | bool
+        fail_msg: >-
+          unattended-upgrades is not installed on {{ inventory_hostname }}
+          after Step 1c (dpkg status: {{ uu_pkg_probe_after.stdout | default('') | trim | default('absent', true) }}).
+          Steps 3-5 need the package; without it unattended-upgrade is
+          missing and the service unit does not exist (spec C8).
+      when: not ansible_check_mode
+
     - name: "Step 2: Capture pre-upgrade package set (for rollback sanity)"
       ansible.builtin.command: "dpkg-query -W -f='${Package} ${Version}\n'"
       register: pre_upgrade_pkgs
@@ -105,14 +191,38 @@
       register: uu_run
       changed_when: "'Packages installed' in uu_run.stdout or 'pkgs to upgrade' in uu_run.stdout"
       failed_when: false
+      when: unattended_upgrades_usable | bool
       # unattended-upgrade is idempotent; rc 0 means "no work" or "applied".
-      # We don't fail the playbook on non-zero — verify catches it.
+      # We don't fail the playbook on a non-zero exit of unattended-upgrade
+      # itself (verify catches it), but Step 1e has already made sure the
+      # command exists, so a non-zero rc here is a real unattended-upgrade
+      # result and Step 3b surfaces it instead of leaving it silent.
+
+    - name: "Step 3b: Report the unattended-upgrade exit status"
+      ansible.builtin.debug:
+        msg: >-
+          unattended-upgrade rc={{ uu_run.rc | default('n/a') }}
+          {{ ('stderr: ' ~ (uu_run.stderr_lines | default([]) | last | default(''))) if (uu_run.rc | default(0)) != 0 else '' }}
+      when:
+        - unattended_upgrades_usable | bool
+        - uu_run is not skipped
+        - (uu_run.rc | default(0)) != 0
+
+    - name: "Step 4 (check mode): unattended-upgrades is not installed, so there is no unit to preview"
+      ansible.builtin.debug:
+        msg: >-
+          Check mode: unattended-upgrades is not installed on
+          {{ inventory_hostname }}, so its service unit does not exist yet.
+          Skipping the start+enable preview; apply will install the package
+          (Step 1c) and then start and enable the service.
+      when: not (unattended_upgrades_usable | bool)
 
     - name: "Step 4: Ensure unattended-upgrades is enabled + timer active"
       ansible.builtin.systemd:
         name: unattended-upgrades
         state: started
         enabled: true
+      when: unattended_upgrades_usable | bool
 
     - name: "Step 5: Drop /etc/apt/apt.conf.d/50unattended-upgrades with security origins"
       ansible.builtin.copy:
@@ -159,3 +269,6 @@
       ansible.builtin.systemd:
         name: unattended-upgrades
         state: restarted
+      # The same gate as Step 4: under --check Step 5 reports changed and
+      # notifies, but a host without the package has no unit to restart.
+      when: unattended_upgrades_usable | bool

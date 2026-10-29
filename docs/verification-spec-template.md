@@ -213,7 +213,7 @@ Spec-driven 工作流把 **inspect 跟 mutate 分開**：
   3 rows；用來熟悉 generator / verify 流程
 - [`docs/verification/pam-oidc-sshd.md`](./docs/verification/pam-oidc-sshd.md)：7 rows，
   PAM OIDC / Keycloak Device Flow；lockout-safety 範例
-- [`docs/verification/os-patch-sla.md`](./docs/verification/os-patch-sla.md)：7 rows，
+- [`docs/verification/os-patch-sla.md`](./docs/verification/os-patch-sla.md)：8 rows，
   OS 套件 SLA；stage-gating 範例
 
 ---

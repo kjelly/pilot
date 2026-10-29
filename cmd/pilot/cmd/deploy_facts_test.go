@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestParseHostFactsLine(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parseHostFactsLine(%q) = %+v, want %+v", tc.line, got, tc.want)
 			}
 		})
@@ -107,7 +108,7 @@ func TestExtractAdHocStdoutRealCallbackFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := delivery.HostFacts{Available: true, Distro: "ubuntu", Version: "24.04", CPU: 12, RAMMiB: 64006, DiskGiB: 268}
-	if facts != want {
+	if !reflect.DeepEqual(facts, want) {
 		t.Fatalf("facts = %+v, want %+v", facts, want)
 	}
 }
@@ -140,16 +141,98 @@ func TestGatherHostFactsFailsOpenPerHostOnProbeFailure(t *testing.T) {
 	}
 	ctx := withDeployAnsibleRuntime(context.Background(), runtime)
 	hosts := []string{"unreachable-host-1", "unreachable-host-2"}
-	facts := gatherHostFacts(ctx, "does-not-matter-for-this-test.yml", hosts)
+	facts := gatherHostFacts(ctx, "does-not-matter-for-this-test.yml", hosts, nil)
 	if len(facts) != 0 {
 		t.Fatalf("gatherHostFacts against unreachable hosts = %+v, want empty", facts)
 	}
 }
 
 func TestHostFactsProbeCommandIsReadOnly(t *testing.T) {
-	for _, mutating := range []string{"rm ", "mkfs", "dd if=", "shutdown", "reboot", "> /"} {
-		if strings.Contains(hostFactsProbeCommand, mutating) {
-			t.Fatalf("hostFactsProbeCommand contains a mutating pattern %q: %s", mutating, hostFactsProbeCommand)
+	command := hostFactsProbeCommand([]string{"/var/lib/docker", "/opt/pilot/wazuh-docker"})
+	for _, mutating := range []string{"rm ", "mkfs", "dd if=", "shutdown", "reboot", "> /", "mkdir", "touch"} {
+		if strings.Contains(command, mutating) {
+			t.Fatalf("hostFactsProbeCommand contains a mutating pattern %q: %s", mutating, command)
+		}
+	}
+}
+
+func TestHostFactsProbeCommandMeasuresEachDiskPath(t *testing.T) {
+	if got := hostFactsProbeCommand(nil); got != hostFactsBaseProbe {
+		t.Fatalf("hostFactsProbeCommand(nil) = %q, want the base probe alone", got)
+	}
+	got := hostFactsProbeCommand([]string{"/opt/pilot/wazuh-docker", "/var/lib/docker"})
+	if want := hostFactsBaseProbe + "; for p in '/opt/pilot/wazuh-docker' '/var/lib/docker'; do " + hostFactsDiskPathProbe + "; done"; got != want {
+		t.Fatalf("hostFactsProbeCommand = %q, want %q", got, want)
+	}
+}
+
+// TestParseHostFactsOutputRealDiskPathFixture uses the callback document of a
+// real `ansible ... -m shell -a <hostFactsProbeCommand(...)>` run (ansible-core
+// 2.19.14 in the pilot-cli image, ansible.posix.json), trimmed of irrelevant
+// fields. The host has 38 GiB free on / and its data directories bind-mounted
+// from a separate 500 GiB filesystem; /var/lib/pilot/prometheus did not exist
+// yet, so the probe measured its nearest existing ancestor, the
+// /var/lib/pilot bind mount.
+func TestParseHostFactsOutputRealDiskPathFixture(t *testing.T) {
+	const doc = `{
+		"plays": [{
+			"tasks": [{
+				"hosts": {
+					"dev-nexus": {
+						"action": "shell",
+						"changed": true,
+						"rc": 0,
+						"stderr": "",
+						"stdout": "ubuntu;24.04;8;23964;38\ndisk;/opt/pilot/wazuh-docker;467\ndisk;/var/lib/docker;467\ndisk;/var/lib/pilot/prometheus;467",
+						"stdout_lines": [
+							"ubuntu;24.04;8;23964;38",
+							"disk;/opt/pilot/wazuh-docker;467",
+							"disk;/var/lib/docker;467",
+							"disk;/var/lib/pilot/prometheus;467"
+						]
+					}
+				}
+			}]
+		}],
+		"stats": {"dev-nexus": {"changed": 1, "failures": 0, "ok": 1, "unreachable": 0}}
+	}`
+	stdout, err := extractAdHocStdout(doc, "dev-nexus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := parseHostFactsOutput(stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := delivery.HostFacts{
+		Available: true, Distro: "ubuntu", Version: "24.04", CPU: 8, RAMMiB: 23964, DiskGiB: 38,
+		DiskGiBByPath: map[string]int{"/opt/pilot/wazuh-docker": 467, "/var/lib/docker": 467, "/var/lib/pilot/prometheus": 467},
+	}
+	if !reflect.DeepEqual(facts, want) {
+		t.Fatalf("facts = %+v, want %+v", facts, want)
+	}
+}
+
+func TestParseHostFactsOutputLeavesUnmeasuredDiskPathOut(t *testing.T) {
+	facts, err := parseHostFactsOutput("ubuntu;24.04;4;7975;38\ndisk;/var/lib/docker;\ndisk;/opt/pilot;120\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int{"/opt/pilot": 120}; !reflect.DeepEqual(facts.DiskGiBByPath, want) {
+		t.Fatalf("DiskGiBByPath = %v, want %v", facts.DiskGiBByPath, want)
+	}
+}
+
+func TestParseHostFactsOutputRejectsMalformedDiskLine(t *testing.T) {
+	for _, line := range []string{
+		"disk;/var/lib/docker",
+		"disk;/var/lib/docker;1;2",
+		"disc;/var/lib/docker;10",
+		"disk;;10",
+		"disk;/var/lib/docker;ten",
+	} {
+		if _, err := parseHostFactsOutput("ubuntu;24.04;4;7975;38\n" + line); err == nil {
+			t.Fatalf("parseHostFactsOutput accepted disk line %q", line)
 		}
 	}
 }

@@ -1935,7 +1935,7 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	fmt.Fprintf(out, "ℹ️  deployment run: %s\n", writer.RunID())
 
 	preflight := func(ctx context.Context) error {
-		facts := gatherHostFacts(ctx, inv, hosts)
+		facts := gatherHostFacts(ctx, inv, hosts, delivery.DiskPathsByHost(selected, scope))
 		result, err := delivery.ValidateContractPreflight(delivery.PreflightRequest{
 			Selected: selected, Scope: scope, Inputs: inputs, Facts: facts,
 		})

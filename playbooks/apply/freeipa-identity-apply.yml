@@ -1801,6 +1801,21 @@
             - ipa_canonical_host_show.results[ipa_canonical_host_index].rc != 0
           tags: [identity, hosts, C13]
 
+        # Issue #155. Outcomes of `ipa dnsrecord-add`, captured from FreeIPA
+        # 4.13.4 (internal/spec/testdata/freeipa-ipa-cli/dnsrecord-add-*):
+        #   record added      rc 0, stdout "Record name: ... / A record: ..."
+        #                     (there is no "Added record" line)
+        #   already present   rc 1, stderr "ipa: ERROR: no modifications to be performed"
+        #   zone not found    rc 2, stderr "ipa: ERROR: <zone>.: DNS zone not found"  (fails)
+        #   no ticket         rc 1, "did not receive Kerberos credentials"          (fails)
+        #   API unreachable   rc 1, "[Errno 111] Connection refused"                (fails)
+        #   no integrated DNS rc 2, stderr exactly "ipa: ERROR: DNS is not configured"
+        # The last one is what a server installed with freeipa_setup_dns: false
+        # answers to every DNS command. It is read from the server, not from
+        # that variable, so a server whose DNS state differs from the inventory
+        # variable is still handled correctly. The A record is then skipped
+        # (reported by the next task); host objects, hostgroups and HBAC are
+        # unaffected.
         - name: "Ensure canonical host DNS A records exist"
           ansible.builtin.command:
             argv:
@@ -1810,15 +1825,38 @@
               - "{{ item.name | regex_replace('\\.' + (ipa_domain | regex_escape) + '$', '') }}"
               - "--a-rec={{ item.ip_address }}"
           loop: "{{ freeipa_roster.hosts | default([]) }}"
+          loop_control:
+            label: "{{ item.name }}"
           register: ipa_canonical_host_dns
-          changed_when: "'Added record' in (ipa_canonical_host_dns.stdout | default(''))"
+          changed_when: ipa_canonical_host_dns.rc == 0
+          vars:
+            freeipa_dns_record_present_error: '(?m)^ipa: ERROR: no modifications to be performed$'
+            freeipa_dns_not_configured_error: '(?m)^ipa: ERROR: DNS is not configured$'
           failed_when:
             - ipa_canonical_host_dns.rc != 0
-            - "'already exists' not in (ipa_canonical_host_dns.stderr | default(''))"
-            - "'no modifications to be performed' not in (ipa_canonical_host_dns.stderr | default(''))"
+            - not (ipa_canonical_host_dns.rc == 1 and (ipa_canonical_host_dns.stderr | default('')) is search(freeipa_dns_record_present_error))
+            - not (ipa_canonical_host_dns.rc == 2 and (ipa_canonical_host_dns.stderr | default('')) is search(freeipa_dns_not_configured_error))
           when:
             - freeipa_roster.schema_version is defined
             - item.state | default('present') == 'present'
+          tags: [identity, hosts, C13]
+
+        - name: "Report roster hosts whose DNS A record was skipped (FreeIPA DNS not configured)"
+          ansible.builtin.debug:
+            msg: >-
+              FreeIPA DNS is not configured on this server (ipa: ERROR: DNS is not configured),
+              so A-record registration was skipped for {{ freeipa_dns_skipped_hosts | length }} roster host(s):
+              {{ freeipa_dns_skipped_hosts | join(', ') }}. Host objects, hostgroups and HBAC are still reconciled;
+              register these names in your own DNS.
+          vars:
+            freeipa_dns_skipped_hosts: >-
+              {{ ((ipa_canonical_host_dns | default({})).results | default([]))
+                 | selectattr('rc', 'defined')
+                 | selectattr('rc', 'equalto', 2)
+                 | selectattr('stderr', 'defined')
+                 | selectattr('stderr', 'search', '(?m)^ipa: ERROR: DNS is not configured$')
+                 | map(attribute='item.name') | list }}
+          when: freeipa_dns_skipped_hosts | length > 0
           tags: [identity, hosts, C13]
 
         - name: "Ensure IPA hostgroups exist"
@@ -3640,6 +3678,13 @@
         # but a sudo rule can still name it as an external host. `find` exits 1
         # when there is no rule at all and 0 with a stderr warning when the
         # result is truncated, so both are checked (captured, FreeIPA 4.13.4).
+        #
+        # The DNS lookup (issue #105) fails on any error except the three
+        # outcomes that prove there is no record, captured from FreeIPA
+        # 4.13.4 (exit 2): "<name>: DNS resource record not found",
+        # "<zone>.: DNS zone not found", and "DNS is not configured" from a
+        # server installed with freeipa_setup_dns: false. A Kerberos, LDAP or
+        # connection error used to read as "no record" and pass HD10.
         - name: "Look up the current live DNS A record for the query target host (read-only, decommission verify)"
           ansible.builtin.command:
             argv:
@@ -3651,7 +3696,11 @@
               - --raw
           register: freeipa_decom_query_dns
           changed_when: false
-          failed_when: false
+          vars:
+            freeipa_dns_absent_error: '(?m)^ipa: ERROR: (.+: DNS (resource record|zone) not found|DNS is not configured)$'
+          failed_when:
+            - freeipa_decom_query_dns.rc != 0
+            - not (freeipa_decom_query_dns.rc == 2 and (freeipa_decom_query_dns.stderr | default('')) is search(freeipa_dns_absent_error))
           when:
             - pilot_decommission_query | default('') == 'host_dns'
             - pilot_decommission_target_fqdn | default('') | length > 0
@@ -3794,6 +3843,10 @@
         # cascade, and never a foreign value at the same owner. Mirrors
         # playbooks/apply/tasks/internal-endpoint-delete.yml's own
         # check-then-exact-delete idiom (spec.md §17 reference design).
+        # Only the captured "no record" outcomes pass (issue #105, same
+        # allowlist as the decommission verify DNS lookup above); any other
+        # error stops the run here, before host-del (which has no
+        # --updatedns) could leave the roster-owned A record behind.
         - name: "Check the current DNS A record value for each absent host's owner (surgical delete step 1)"
           ansible.builtin.command:
             argv:
@@ -3808,7 +3861,11 @@
             label: "{{ item.name }}"
           register: freeipa_absent_host_dns_show
           changed_when: false
-          failed_when: false
+          vars:
+            freeipa_dns_absent_error: '(?m)^ipa: ERROR: (.+: DNS (resource record|zone) not found|DNS is not configured)$'
+          failed_when:
+            - freeipa_absent_host_dns_show.rc != 0
+            - not (freeipa_absent_host_dns_show.rc == 2 and (freeipa_absent_host_dns_show.stderr | default('')) is search(freeipa_dns_absent_error))
           tags: [identity, hosts]
 
         - name: "Gate: refuse to delete an absent host's DNS record if the live value is foreign/ambiguous (spec.md §16.5)"

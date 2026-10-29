@@ -47,7 +47,7 @@ Phase 0 交付：
 遠端鎖：
 - 寫入 server 上以 `flock --wait <秒> --conflict-exit-code 75 /etc/ipa sh -c 'echo locked; exec cat'` 持有，鎖到 stdin 關閉或 SSH 中斷為止。
 - 選 `/etc/ipa`，因為它在每台 FreeIPA server 上都存在，且任何 SSH 身分都能以唯讀開啟；不需要建立檔案。共用 `/tmp` 的檔案會受 `fs.protected_regular` 限制。
-- 舊 engine 的入口要在 Phase 2 取得同一把鎖。
+- 目前沒有任何 pilot 入口取這把鎖（只有 `internal/sshdial` 與它的測試呼叫 `AcquireLock`）。取鎖閘門：啟用混合模式或執行任何 live Go 寫入測試之前，所有會執行 `freeipa-identity-apply.yml` 的 pilot 程式碼路徑都要在漏斗處取同一把鎖並持有到該次執行結束，不以指令名稱定義。漏斗（2026-10-28 對 main `ff32bf63` 盤點）：`internal/accessgrants` 的 `applyPlan`（`ReconcileOnce`、`Activate`、`Deactivate`、`RepairManaged` 都經過它，所以 `pilot access reconcile --once`、`pilot access drift --repair-managed`、`pilot identity drift --repair-managed`、`pilot access breakglass`、`pilot edit` TUI 的 breakglass 都涵蓋）、host decommission 的 `freeipaIdentityConvergeStep.Execute`、`freeipa-identity` 的 deploy runner（`pilot deploy`、`pilot reconcile`）。以全 repo lint 鎖住新增的呼叫者必須經過取鎖包裝；dev 路徑（`vm-target run`／`test`、`topology test`）不在範圍。詳見計畫 §4 步驟 2。原因：授權快取義務是 server 上單一布林 `auth_pending`，另一輪完整執行可以在 Go 寫入前清掉它（prepare→settle→refresh→ack，清除交錯），或在 Go 寫入後以舊值覆蓋它（`auth_settle`，覆蓋交錯），Go 的撤銷就不會傳到 client，整輪卻正常結束。手動 `ansible-playbook` 與 dev 路徑不經漏斗、不取鎖，仍有同樣風險
 
 ## 3 users／groups 功能對照矩陣
 
@@ -62,20 +62,30 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 | 使用者預設值：first/last 預設為名稱、shell `/bin/bash`、home `/home/<name>`、`enabled` 預設依 `state != disabled` | `Normalize canonical users…` | — | 同一套預設；以表格測試對照 playbook 的 normalize |
 | 建立使用者 | `Ensure IPA users exist` | C9 | 只對不存在者 `user_add` |
 | 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位；未宣告的欄位不碰。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
-| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 時沒有後者）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
-| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | 以 key 本體比較集合；清除時送空值 |
+| 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 下自行改密碼後沒有後者；admin 重設後兩者相等，2026-10-27 擷取）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
+| SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | **Phase 2 只讀不寫**：變更與 client SSSD 收斂留在舊 playbook（PR #138 的 journal 協定要求先持久化待辦再改 key），見計畫 Phase 1「與 PR #138 的關係」。Go 以 key 本體比較集合，只在 plan 中報告差異，不以此判定成敗；live 端清空後屬性不存在（2026-10-27 擷取）。Phase 3 搬移時的寫入要求：清除時送空值 |
 | 啟用／停用 | `Reconcile canonical account enabled state` | C10 | 只在 `nsaccountlock` 與宣告不同時呼叫 |
 | 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位；type 不同時拒絕（FreeIPA 不能就地轉換） |
 | 每個套用過的群組有 history marker（`pilot-internal-history-g-<sha256>`，description `pilot.group-history/v1 name=<name>`）；刪除群組前 marker 必須存在 | `Ensure durable history marker…`（`tasks/freeipa-group-history-marker.yml`） | §9 | 相同命名與描述；marker 查詢失敗或碰撞時 fail closed |
-| 直接成員：`membership.authoritative`（預設 true）時撤銷名冊外的直接成員；false 時只新增 | `Look up canonical group direct membership`、`Remove stale…`、`Ensure canonical direct …` | C11、C12 | 直接與間接成員分開；新增與撤銷依集合差合併呼叫，逐成員檢查 `MemberResult`；成員查詢失敗不能當成空集合 |
+| 直接成員：`membership.authoritative`（預設 true）時撤銷名冊外的直接成員；false 時只新增 | `Look up canonical group direct membership`、`Remove stale…`、`Ensure canonical direct …` | C11、C12 | 直接與間接成員分開：直接成員只從 `group_find --all` 的 `member_user`／`member_group` 讀取，`user_find` 的 `memberof_group` 含間接群組，不得使用（2026-10-27 擷取）；新增與撤銷依集合差合併呼叫，逐成員檢查 `MemberResult`；成員查詢失敗不能當成空集合 |
 | 刪除 `state: absent` 的使用者與群組 | `Delete canonical users…`、`Look up actual FreeIPA group…`、`Delete canonical groups…` | §9 | 刪除前即時重讀；not found 視為已完成；其他錯誤停止 |
 | 不完整讀取時不得撤銷 | #102、#119 的 gate | v1.13、v1.15 | `*_find` 帶 `sizelimit=0`；`truncated` 或缺欄位時禁止 authoritative 撤銷 |
 
 不在 Phase 2 範圍：
+- SSH key 的寫入與 client SSSD 收斂（Go 只讀取，見上表 SSH key 列）；
 - host、hostgroup、netgroup、HBAC、sudo；
 - password policy、per-user authentication types、NFS。
 
 混合執行時，這些項目仍由舊 playbook 處理（計畫 §5 混合執行模型）。per-user authentication types 雖然是使用者屬性，仍留在舊 playbook，直到 Phase 3 搬移該 section。
+
+Go 的 users／groups 寫入必須照樣觸發 PR #138 的授權快取刷新（client `sss_cache -E`），包括 Go 寫入後中斷的情形。2026-10-28 決定採用計畫的選項 (ii)：最終寫入集合（寫入前重讀與重新規劃之後）有寫入時，先由專用 Ansible 入口只執行 #138 的 `auth_prepare`，Go 觀察到結果才寫入，最後執行 playbook（計畫 Phase 1「與 PR #138 的關係」）。契約：
+
+- 入口與 identity playbook 對同一台主機（contract `hostCardinality: exactly-one`）；入口結束碼為 0 不算成功（`no hosts matched` 與被跳過的 task 也可能是 0），要看到該 server 的 `auth_prepare` 結果（`previous`）才算。
+- 本輪持鎖期間入口尚未成功，不送任何寫入 RPC（執行器不變量）。入口的位置在寫入前重讀與重新規劃之後、第一批寫入之前；觸發條件是最終寫入集合有寫入；最終寫入集合為空時不執行入口（混合 run 由 playbook 自己的 prepare 讀到既有義務並刷新）；入口執行後才發現無差異時，入口執行過、Go 沒有寫入，多刷新一次可接受。
+- 入口與 identity playbook 共用三個輸入：journal 路徑（`ipa_identity_ssh_cache_state_file`）、`ipa_domain`、helper 原始碼（`ipa_ssh_cache_program`）。
+- 所有執行 identity playbook 的 pilot 程式碼路徑都在漏斗處先取 `/etc/ipa` 鎖（見 §2 遠端鎖與計畫 §4 步驟 2）；取鎖包裝的 target 推導、等待策略與 `Lock.Lost()` 處理由 Phase 2 spec 決定。
+- users/groups-only scope 不執行 playbook，沒有寫入時也要做唯讀探測（不能用入口代替，入口會把 `auth_pending` 設為 true）：探測到上一輪遺留的未結清義務就標為未結清結果，不回報成功。
+- 「是否已刷新」以這一輪觀察到的機器可讀標記（該 server 的 `acked=true`）判定，不在 Go 重推 tag 或 `ipa_identity_refresh_sssd_cache`、`pilot_deferred_hosts` 條件；沒有標記（users/groups-only scope、tag 漏掉、`no hosts matched`）一律未結清。未結清時結果回報授權快取義務未結清並標為未結清結果（非成功：結束碼非 0，對外不得是 `success`；不原樣沿用 `partial_success`，名稱由 Phase 2 spec 決定，見計畫 (ii) 的實作要求），不自行補跑刷新。義務仍留在 server 的 journal，下一次會刷新的 run 清掉它。
 
 ## 4 engine 專屬驗收條件
 

@@ -1,0 +1,57 @@
+{
+  "result": {
+    "result": [
+      {
+        "ipasshpubkey": [
+          {
+            "__base64__": "c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSU5aOStRRTJpS050UytMRmIvbHFmUzhTU25ZRFhsbExqTVNjanVwRGVUOFkgcDEta2V5MQ=="
+          },
+          {
+            "__base64__": "c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBSVBINVZJSFF1cW9tdlpRSkdWVk5pOUZzTVJRUHB0UHVVcDdVM0kveVdMSGwgcDEta2V5Mg=="
+          }
+        ],
+        "uid": [
+          "p1-keys"
+        ],
+        "dn": "uid=p1-keys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-nokeys"
+        ],
+        "dn": "uid=p1-nokeys,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-nopw"
+        ],
+        "dn": "uid=p1-nopw,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-off"
+        ],
+        "dn": "uid=p1-off,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-reset"
+        ],
+        "dn": "uid=p1-reset,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "uid": [
+          "p1-self"
+        ],
+        "dn": "uid=p1-self,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 6,
+    "truncated": false,
+    "summary": "6 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

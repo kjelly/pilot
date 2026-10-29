@@ -18,7 +18,7 @@ bindings:
     sourceSelection: exactlyOne
     from: {component: log-server, endpoint: syslog}
 hostCardinality: exactly-one
-resources: {minCPU: 4, minRAMMiB: 8192, minDiskGiB: 50}
+resources: {minCPU: 4, minRAMMiB: 8192, minDiskGiB: 50, diskPaths: [/var/lib/docker]}
 groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
   - {name: siem_forward_port, type: integer, required: false, default: 514, secret: false}

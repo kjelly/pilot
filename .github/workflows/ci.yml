@@ -3,8 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags only: the image job publishes a tag as :<semver>, and
+    # buildx fails a push with no tags, so a tag like vm-snapshot would run
+    # the full CI only to fail there
+    # (TestCIImageReleaseTagTriggerMatchesReleasesOnly).
+    tags: ['v[0-9]*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -162,3 +168,139 @@ jobs:
         with:
           version: v2.12.1
           args: --timeout=5m
+
+  image:
+    # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
+    # once every other job here has passed, and pushes it to
+    # ghcr.io/kjelly/pilot-cli:
+    #   push or workflow_dispatch on a branch -> :sha-<short>
+    #   tag v1.2.3      -> :1.2.3, :1.2 only, so a tag on main's commit does
+    #                      not overwrite that commit's :sha- image with a
+    #                      different version stamp
+    #   pull_request, or a fork -> build only, nothing is pushed
+    # :latest is moved only by the promote job below.
+    name: pilot-cli image
+    needs: [test, playbook-lint, thanos-retention, lint]
+    runs-on: ubuntu-latest
+    # A cold-cache build took 3 min on 2026-10-27.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/kjelly/pilot-cli
+      PUBLISH: ${{ github.repository == 'kjelly/pilot' && github.event_name != 'pull_request' }}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A v1.2.3 tag stamps 1.2.3 into main.version of every binary the image
+      # bakes; any other ref keeps the Dockerfile default.
+      - name: Component version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # latest=false: without it a semver tag push would also write :latest.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,enable=${{ github.ref_type == 'branch' }}
+
+      # The baked dist/*-linux-amd64 artifacts are amd64 only, so the image
+      # is too.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile.pilot-cli
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PILOT_GIT_SHA=${{ github.sha }}
+            PILOT_GIT_DIRTY=false
+            DETECTION_ENGINE_VERSION=${{ steps.version.outputs.value }}
+            LOGIN_PROBE_VERSION=${{ steps.version.outputs.value }}
+            AGENT_CONTROLLER_VERSION=${{ steps.version.outputs.value }}
+            PILOT_ACCESS_GATEWAY_VERSION=${{ steps.version.outputs.value }}
+            PILOT_ACCESS_DIRECTORY_VERSION=${{ steps.version.outputs.value }}
+            PILOT_SESSION_STORE_VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  promote:
+    # Points :latest at this run's image while its commit is still main's
+    # head. Two main runs reach this job in whichever order their CI finishes
+    # (two main runs on 2026-10-27 ended 15 s apart), so reading main and
+    # moving :latest happen under one lock shared by every run: a run that
+    # holds it sees every earlier promotion, and one whose commit is no longer
+    # main's head leaves :latest alone. :latest therefore never goes back to
+    # an older commit (TestCIImageLatestNeverGoesBack). queue: max keeps every
+    # waiting promote instead of the default single pending one, which a later
+    # promote would cancel: if that later one is an older commit it skips, and
+    # :latest would stay behind main's head. actionlint 1.7.12 does not know
+    # `queue` yet; GitHub documents it for github.com (2026-05).
+    name: promote pilot-cli:latest
+    needs: image
+    if: github.repository == 'kjelly/pilot' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ghcr-pilot-cli-latest
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/kjelly/pilot-cli
+      DIGEST: ${{ needs.image.outputs.digest }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move :latest if main is still at this commit
+        shell: bash
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "main is at $head, not $GITHUB_SHA: :latest is left to that commit's run"
+            exit 0
+          fi
+          : "${DIGEST:?the image job published no digest}"
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+          echo ":latest -> $IMAGE@$DIGEST ($GITHUB_SHA)"
