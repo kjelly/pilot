@@ -36,8 +36,13 @@ The probe reads the FreeIPA admin password from the vault vars file's
 ipa_admin_password first (the same order 'pilot deploy' uses), then from the
 roster's freeipa.admin.password. The vars file is --vars-file, or by default
 <inventory dir>/.vault/main.yaml when it exists; it is only handed to
-ansible-playbook as a file, never read by pilot. An encrypted vars file or
-roster needs --vault-password-file.`,
+ansible-playbook as a file, never read by pilot. --vault-password-file decrypts
+both an encrypted roster and an encrypted vars file, so they must share one
+vault password. An explicit --vars-file that is missing, a directory, or
+encrypted without --vault-password-file is an error; the auto-detected default
+that is encrypted without --vault-password-file is skipped with a note on
+stderr, and the roster's password is used. The vars file is loaded whole, so
+a freeipa_domain/freeipa_realm in it also sets the probe's realm (as in apply).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAccessHealthCmd,
 }
@@ -63,7 +68,7 @@ func runAccessHealthCmd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--format must be table or json, got %q", accessHealthFormat)
 	}
 
-	varsFile, err := resolveDriftVarsFile(accessHealthInventory, accessHealthVarsFile, accessHealthVaultPasswordFile)
+	varsFile, err := resolveDriftVarsFile(cmd.ErrOrStderr(), accessHealthInventory, accessHealthVarsFile, accessHealthVaultPasswordFile)
 	if err != nil {
 		return err
 	}

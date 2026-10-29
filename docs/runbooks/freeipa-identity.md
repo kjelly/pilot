@@ -272,8 +272,17 @@ admin 密碼存在兩個地方，兩份必須相同：
 - vault vars 檔（例如 `.vault/main.yaml`）的 `ipa_admin_password`：`pilot deploy`、`pilot reconcile` 載入它；
   `pilot identity drift`、`pilot access drift`、`pilot access health` 的 drift probe 也載入它（vault 優先，
   跟 `freeipa-identity-apply.yml` 相同）：預設讀 `<--inventory 所在目錄>/.vault/main.yaml`（存在才載入），
-  或用 `--vars-file <檔案>` 指定；檔案是 ansible-vault 加密時要帶 `--vault-password-file`，沒帶會在
-  執行 probe 之前就報錯。pilot 只把檔案交給 `ansible-playbook`，不會讀它的內容。
+  或用 `--vars-file <檔案>` 指定。pilot 只把檔案交給 `ansible-playbook`，不會讀它的內容。
+  `--vault-password-file` 只有一個，同時用來解開加密的名冊與加密的 vars 檔，所以兩者必須用同一個 vault 密碼。
+  明確指定的 `--vars-file` 不存在、是目錄、或加密卻沒帶 `--vault-password-file`，會在執行 probe 之前就報錯；
+  自動偵測到的預設 `.vault/main.yaml` 若是加密的、又沒帶 `--vault-password-file`，則略過它並在 stderr 印一行
+  `skipping encrypted <路徑>: pass --vault-password-file or --vars-file ...`，改用名冊的密碼（跟這個功能出現之前相同，
+  `access health` 也照常回報）。vars 檔是整份載入的（跟 apply 一樣），所以裡面的 `freeipa_domain`/`freeipa_realm`
+  也會決定 probe 登入的 realm。
+  probe 失敗時的訊息只取 ansible 的失敗訊息（失敗 task 的 `msg`、`[ERROR]` 的第一行），不轉貼 ansible 的原始輸出：
+  vars 檔不是合法 YAML 時 ansible 會印出出錯的那一行，內容可能含密碼，所以這種錯誤只回報「ansible 無法解析
+  <檔案:行:欄>，請確認是合法 YAML」。`pilot identity drift`、`pilot access drift` 的錯誤與 `pilot access health`
+  的 `probe_error` 都用這個訊息。
 - 名冊的 `freeipa.admin.password`：`pilot roster remove-*`、`pilot access` 的其他子指令、drift probe 以外的檢查
   playbook（例如 capability probe、ever-applied 檢查）與 `--repair-managed` 的修復步驟（reconcile）只載入名冊，
   用它登入 FreeIPA；`freeipa-nfs-server-apply.yml` 的 gate 會檢查它等於 `ipa_admin_password`。

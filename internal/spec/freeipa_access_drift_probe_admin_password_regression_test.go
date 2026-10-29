@@ -15,6 +15,8 @@ const (
 	driftProbeKinit    = "Kinit admin for read-only drift probe"
 	driftProbePwGate   = "Gate: a FreeIPA admin password is available (vault or roster)"
 	driftProbeRosterEx = "{{ ipa_admin_password }}"
+	// driftProbeBadTemplate raises "division by zero" when ansible renders it.
+	driftProbeBadTemplate = "{{ 1 / 0 }}"
 )
 
 // driftProbeTasks returns the production probe's pre_tasks, every one of
@@ -71,6 +73,12 @@ func TestRegression_IdentitySecretDriftProbeAdminPassword(t *testing.T) {
 		{name: "roster literal, vault without the key", roster: rosterSecret, wantStdin: rosterSecret},
 		{name: "both set: vault wins like apply", vault: vaultSecret, roster: rosterSecret, wantStdin: vaultSecret},
 		{name: "tagged run still resolves the password", vault: vaultSecret, roster: driftProbeRosterEx, args: []string{"--tags", "drift"}, wantStdin: vaultSecret},
+		// A vault value that is itself a template which raises used to end the
+		// play in a censored no_log failure; it now counts as "no vault
+		// password", so the roster is used or the gate speaks.
+		{name: "vault template that raises falls back to the roster", vault: driftProbeBadTemplate, roster: rosterSecret, wantStdin: rosterSecret},
+		{name: "vault template that raises and no roster password hits the gate", vault: driftProbeBadTemplate},
+		{name: "vault template over an undefined variable hits the gate", vault: "{{ nope.x.y | upper }}"},
 		{name: "neither source fails before kinit", noVaultFile: true},
 		{name: "vault without the key and no roster password fails before kinit"},
 		{name: "vault too short and no roster password fails before kinit", vault: shortSecret},
@@ -164,8 +172,11 @@ func TestRegression_IdentitySecretDriftProbeAdminPassword(t *testing.T) {
 					t.Errorf("gate message %q does not name %q", msg, want)
 				}
 			}
-			if len(res.failures) != 1 {
-				t.Errorf("want only the gate to fail, got %v", res.failures)
+			// A rescued failure is also reported as failed by the callback
+			// (the vault-template cases), so look at the run's end state: the
+			// gate is the failure that stopped it, and nothing after it ran.
+			if last := res.failures[len(res.failures)-1]; !strings.HasPrefix(last, driftProbePwGate) {
+				t.Errorf("the last failure must be the gate, got %v", res.failures)
 			}
 		})
 	}
@@ -178,6 +189,9 @@ func TestRegression_DriftProbeResolvesThePasswordUnderEveryTag(t *testing.T) {
 	doc := loadYAML(t, driftProbePath)
 	for _, name := range []string{
 		"Resolve the FreeIPA admin password from the vault variable",
+		"Read the vault admin password",
+		"Treat an unresolvable vault admin password as missing",
+		"Fall back to the roster admin password when the vault has none",
 		"Read the roster admin password",
 		"Treat an unresolvable roster admin password as missing",
 		"Check the resolved FreeIPA admin password length",
@@ -188,7 +202,8 @@ func TestRegression_DriftProbeResolvesThePasswordUnderEveryTag(t *testing.T) {
 		if len(tags) != 1 || tags[0] != "always" {
 			t.Errorf("%s: tags = %v, want [always]", name, task["tags"])
 		}
-		if name != driftProbePwGate && task["no_log"] != true {
+		_, isBlock := task["block"]
+		if name != driftProbePwGate && !isBlock && task["no_log"] != true {
 			t.Errorf("%s touches the password and must keep no_log: true", name)
 		}
 	}

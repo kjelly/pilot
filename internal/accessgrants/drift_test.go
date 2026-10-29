@@ -159,6 +159,7 @@ type fakeDriftRunner struct {
 	live     LiveState
 	exitCode int
 	runErr   error
+	stdout   string
 	stderr   string
 	lastArgs []string
 	// capturedVars is the extra-vars @file's decoded content, captured
@@ -198,7 +199,7 @@ func (f *fakeDriftRunner) Run(_ context.Context, args ...string) (*ansible.Resul
 		}
 		_ = os.WriteFile(outputPath, blob, 0o600)
 	}
-	return &ansible.Result{ExitCode: f.exitCode, Stderr: f.stderr}, nil
+	return &ansible.Result{ExitCode: f.exitCode, Stdout: f.stdout, Stderr: f.stderr}, nil
 }
 
 const driftTestRoster = `

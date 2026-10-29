@@ -138,6 +138,21 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 			t.Errorf("required-Ansible recipe omits internal/inventory's %s", name)
 		}
 	}
+	// The drift probe's failure reporting runs real Ansible through DriftProbe
+	// and the three drift commands (issue #179); both must be in the recipe.
+	for pkg, name := range map[string]string{
+		"./internal/accessgrants/": "TestRegression_IdentitySecretDriftProbeFailureIsSafe",
+		"./cmd/pilot/cmd/":         "TestIdentitySecretDriftCommandsShowTheGateAndHideTheVault",
+	} {
+		m := regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '([^']+)' ` + regexp.QuoteMeta(pkg) + `$`).FindSubmatch(body)
+		if m == nil {
+			t.Errorf("required-Ansible recipe does not run %s", pkg)
+			continue
+		}
+		if !regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$")).MatchString(name) {
+			t.Errorf("required-Ansible recipe for %s omits %s", pkg, name)
+		}
+	}
 	body, err = os.ReadFile("../../.github/workflows/ci.yml")
 	if err != nil {
 		t.Fatal(err)

@@ -129,14 +129,15 @@ func TestEvaluateHealth_UnknownWhenProbeFails(t *testing.T) {
 
 // TestEvaluateHealth_UnknownExplainsAProbeFailureOnOneCappedLine locks the
 // diagnostic that tells a missing admin password (issue #179) apart from an
-// unreachable FreeIPA: multi-line ansible output is collapsed to one capped
+// unreachable FreeIPA. The fake runner replays a REAL ansible capture of both
+// streams: the gate message is on stdout and stderr only has the hyphenated-
+// group warning, yet the gate message is what the health line shows, in one
 // line, and the vars file is forwarded to the probe.
 func TestEvaluateHealth_UnknownExplainsAProbeFailureOnOneCappedLine(t *testing.T) {
 	rosterPath := writeHealthTestRoster(t, healthTestRosterNoGrants)
 	varsFile := filepath.Join(t.TempDir(), "main.yaml")
-	long := "No usable FreeIPA admin password\n" + strings.Repeat("x", 2*maxProbeErrorLen)
-	runner := &fakeDriftRunner{exitCode: 2, runErr: nil}
-	runner.stderr = long
+	stdout, stderr := readCapture(t, "gate_missing")
+	runner := &fakeDriftRunner{exitCode: 2, stdout: stdout, stderr: stderr}
 
 	health, err := EvaluateHealth(context.Background(), HealthOptions{
 		DriftProbeOptions: DriftProbeOptions{
@@ -150,14 +151,52 @@ func TestEvaluateHealth_UnknownExplainsAProbeFailureOnOneCappedLine(t *testing.T
 	if health.Status != HealthUnknown {
 		t.Fatalf("status = %q, want unknown", health.Status)
 	}
-	if strings.ContainsAny(health.ProbeError, "\n\r") || !strings.Contains(health.ProbeError, "No usable FreeIPA admin password") {
-		t.Fatalf("ProbeError = %q, want one line starting with the probe message", health.ProbeError)
+	if strings.ContainsAny(health.ProbeError, "\n\r") || !strings.Contains(health.ProbeError, "No usable FreeIPA admin password") ||
+		!strings.Contains(health.ProbeError, "Both are missing or too short") {
+		t.Fatalf("ProbeError = %q, want one line carrying the whole gate message", health.ProbeError)
+	}
+	if strings.Contains(health.ProbeError, "Invalid characters") {
+		t.Fatalf("the group-name warning must not be the reason: %q", health.ProbeError)
 	}
 	if got := len([]rune(health.ProbeError)); got > maxProbeErrorLen+3 {
 		t.Fatalf("ProbeError is %d runes, want it capped near %d", got, maxProbeErrorLen)
 	}
 	if driftArgIndex(runner.lastArgs, "@"+varsFile) < 0 {
 		t.Fatalf("EvaluateHealth did not forward the vars file: %v", runner.lastArgs)
+	}
+}
+
+// TestEvaluateHealth_NeverDumpsAnUnrecognisedTranscript: output that holds no
+// failure message is replaced by a fixed line, not embedded; and any other
+// error text that reaches the health line has password-shaped pairs blanked
+// and is capped.
+func TestEvaluateHealth_NeverDumpsAnUnrecognisedTranscript(t *testing.T) {
+	rosterPath := writeHealthTestRoster(t, healthTestRosterNoGrants)
+	opts := func(r *fakeDriftRunner) HealthOptions {
+		return HealthOptions{DriftProbeOptions: DriftProbeOptions{
+			RosterFile: rosterPath, Inventory: "inv.yml", Runner: r,
+			Now: time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
+		}}
+	}
+	transcript := "PLAY [x]\nipa_admin_password: Hunter2Hunter2\n" + strings.Repeat("noise\n", 400)
+	for name, runner := range map[string]*fakeDriftRunner{
+		"stdout only": {exitCode: 2, stdout: transcript},
+		"stderr only": {exitCode: 2, stderr: transcript},
+	} {
+		health, err := EvaluateHealth(context.Background(), opts(runner))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(health.ProbeError, "Hunter2") || strings.Contains(health.ProbeError, "noise") || !strings.Contains(health.ProbeError, "no recognisable failure message") {
+			t.Errorf("%s: ProbeError = %q, want the fixed no-message line only", name, health.ProbeError)
+		}
+	}
+
+	// summarizeProbeError is the second line of defence for errors that are
+	// not an ansible failure.
+	long := summarizeProbeError(errors.New("boom ipa_admin_password: Hunter2Hunter2 " + strings.Repeat("x", 2*maxProbeErrorLen)))
+	if strings.Contains(long, "Hunter2") || len([]rune(long)) > maxProbeErrorLen+3 {
+		t.Errorf("summarizeProbeError = %d runes %q", len([]rune(long)), long[:60])
 	}
 }
 

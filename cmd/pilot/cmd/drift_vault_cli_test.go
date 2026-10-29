@@ -11,7 +11,9 @@ import (
 // fakeDriftAnsible puts an ansible-playbook on PATH that records its argv,
 // writes an empty (schema 1) probe result to the pilot_drift_output named in
 // whichever -e @file carries it, and exits $FAKE_ANSIBLE_RC after printing
-// $FAKE_ANSIBLE_STDERR. It returns the argv file.
+// $FAKE_ANSIBLE_STDERR and the contents of the files named by
+// $FAKE_ANSIBLE_STDOUT_FILE / $FAKE_ANSIBLE_STDERR_FILE (real captures, see
+// internal/accessgrants/testdata/ansible). It returns the argv file.
 func fakeDriftAnsible(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
@@ -29,6 +31,8 @@ for a in "$@"; do
   prev="$a"
 done
 [ -n "$FAKE_ANSIBLE_STDERR" ] && printf '%s\n' "$FAKE_ANSIBLE_STDERR" >&2
+[ -n "$FAKE_ANSIBLE_STDOUT_FILE" ] && cat "$FAKE_ANSIBLE_STDOUT_FILE"
+[ -n "$FAKE_ANSIBLE_STDERR_FILE" ] && cat "$FAKE_ANSIBLE_STDERR_FILE" >&2
 exit "${FAKE_ANSIBLE_RC:-0}"
 `
 	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
@@ -38,6 +42,8 @@ exit "${FAKE_ANSIBLE_RC:-0}"
 	t.Setenv("FAKE_ANSIBLE_ARGS", argsFile)
 	t.Setenv("FAKE_ANSIBLE_RC", "0")
 	t.Setenv("FAKE_ANSIBLE_STDERR", "")
+	t.Setenv("FAKE_ANSIBLE_STDOUT_FILE", "")
+	t.Setenv("FAKE_ANSIBLE_STDERR_FILE", "")
 	return argsFile
 }
 
@@ -242,16 +248,16 @@ func TestDriftProbeCommandsPassTheVaultFile(t *testing.T) {
 			}
 		})
 
-		t.Run(c.name+"/an encrypted vault needs --vault-password-file, early", func(t *testing.T) {
+		t.Run(c.name+"/an encrypted explicit --vars-file needs --vault-password-file, early", func(t *testing.T) {
 			resetDriftCmdState(t)
 			argsFile := fakeDriftAnsible(t)
 			ws := newDriftWorkspace(t, header)
-			out, err := runDriftCmd(t, c.args(ws)...)
+			out, err := runDriftCmd(t, c.args(ws, "--vars-file", ws.vault)...)
 			if err == nil || !strings.Contains(err.Error(), "--vault-password-file") || !strings.Contains(err.Error(), "encrypted") {
 				t.Fatalf("want a clear encrypted-vault error, got %v\n%s", err, out)
 			}
 			if _, statErr := os.Stat(argsFile); statErr == nil {
-				t.Fatal("ansible-playbook ran with an encrypted vault and no password file")
+				t.Fatal("ansible-playbook ran with an encrypted vars file and no password file")
 			}
 
 			resetDriftCmdState(t)
@@ -259,7 +265,7 @@ func TestDriftProbeCommandsPassTheVaultFile(t *testing.T) {
 			if err := os.WriteFile(passFile, []byte("pw\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := runDriftCmd(t, c.args(ws, "--vault-password-file", passFile)...); err != nil {
+			if out, err := runDriftCmd(t, c.args(ws, "--vars-file", ws.vault, "--vault-password-file", passFile)...); err != nil {
 				t.Fatalf("%v\n%s", err, out)
 			}
 			argv := readArgv(t, argsFile)
@@ -273,19 +279,60 @@ func TestDriftProbeCommandsPassTheVaultFile(t *testing.T) {
 				t.Fatalf("want the vault file and the password file, argv = %v", argv)
 			}
 		})
+
+		// F3: the auto-detected default is a convenience and never fails the
+		// command. A roster-literal user whose .vault/main.yaml is encrypted
+		// and who passes no password file keeps working (before --vars-file
+		// existed the vault was never given to ansible), and `access health`
+		// still reports instead of erroring.
+		t.Run(c.name+"/an encrypted auto-detected vault without a password file is skipped with a note", func(t *testing.T) {
+			resetDriftCmdState(t)
+			argsFile := fakeDriftAnsible(t)
+			ws := newDriftWorkspace(t, header)
+			out, err := runDriftCmd(t, c.args(ws)...)
+			if err != nil {
+				t.Fatalf("an encrypted default vault must not fail the command: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "skipping encrypted "+ws.vault) || !strings.Contains(out, "--vault-password-file") || !strings.Contains(out, "--vars-file") {
+				t.Fatalf("want a one-line skip note naming the file and both flags, got:\n%s", out)
+			}
+			argv := readArgv(t, argsFile)
+			for _, a := range argv {
+				if strings.Contains(a, ".vault") {
+					t.Fatalf("the skipped vault reached ansible: %v", argv)
+				}
+			}
+
+			// With a password file the same default vault IS used.
+			resetDriftCmdState(t)
+			passFile := filepath.Join(t.TempDir(), "vault-pass")
+			if err := os.WriteFile(passFile, []byte("pw\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runDriftCmd(t, c.args(ws, "--vault-password-file", passFile)...); err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if envIndex(readArgv(t, argsFile), "@"+ws.vault) < 0 {
+				t.Fatal("the default vault was not used although a password file was given")
+			}
+		})
 	}
 }
 
 // TestAccessHealthShowsWhyTheProbeCouldNotRun: a probe failure stays status
 // unknown, but the reason (for example no usable admin password, issue #179)
 // is printed on its own line instead of looking like an unreachable FreeIPA,
-// and never contains the vault's value.
+// and never contains the vault's value. The fake ansible replays a REAL
+// capture of both streams: the gate message is on stdout while stderr only
+// carries ansible's hyphenated-group warning.
 func TestAccessHealthShowsWhyTheProbeCouldNotRun(t *testing.T) {
 	const secret = "Vault-Sentinel-pw-9b4f"
 	resetDriftCmdState(t)
 	fakeDriftAnsible(t)
+	capture := filepath.Join(repoRootForTest(t), "internal", "accessgrants", "testdata", "ansible")
 	t.Setenv("FAKE_ANSIBLE_RC", "2")
-	t.Setenv("FAKE_ANSIBLE_STDERR", "fatal: No usable FreeIPA admin password for the drift probe. Both are missing or too short.")
+	t.Setenv("FAKE_ANSIBLE_STDOUT_FILE", filepath.Join(capture, "gate_missing.stdout"))
+	t.Setenv("FAKE_ANSIBLE_STDERR_FILE", filepath.Join(capture, "gate_missing.stderr"))
 	ws := newDriftWorkspace(t, "unrelated: "+secret+"\n")
 
 	out, err := runDriftCmd(t, "access", "health", ws.roster, "-i", ws.inventory)
@@ -294,6 +341,9 @@ func TestAccessHealthShowsWhyTheProbeCouldNotRun(t *testing.T) {
 	}
 	if !strings.Contains(out, "status=unknown") || !strings.Contains(out, "probe_error=") || !strings.Contains(out, "No usable FreeIPA admin password") {
 		t.Fatalf("want status=unknown with a probe_error line, got:\n%s", out)
+	}
+	if strings.Contains(out, "Invalid characters") {
+		t.Fatalf("the group-name warning must not be the reason shown:\n%s", out)
 	}
 	if strings.Contains(out, secret) {
 		t.Fatal("the vault value reached the output")

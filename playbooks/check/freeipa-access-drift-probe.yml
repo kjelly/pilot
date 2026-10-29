@@ -16,6 +16,11 @@
 # because a roster password of '{{ ipa_admin_password }}' cannot be
 # templated without the vault.
 #
+# The vault vars file is loaded as a whole (-e @file), as apply does, so its
+# freeipa_domain / freeipa_realm (when present) also decide the realm this
+# probe kinits against, consistent with apply. pilot only passes the file
+# by reference and never reads it.
+#
 # Required extra-vars:
 #   freeipa_roster_file    -- canonical roster path (admin principal and the
 #                              fallback admin password)
@@ -109,12 +114,26 @@
       tags: [always]
 
     # Vault first, mirroring freeipa-identity-apply.yml. `| string` keeps a
-    # YAML number a password-shaped value instead of a type error.
+    # YAML number a password-shaped value instead of a type error. A vault
+    # value that is itself a template (for example '{{ other_var }}' with
+    # other_var undefined, or '{{ 1 / 0 }}') raises while it renders; that
+    # would end the play in a censored no_log failure before the gate below
+    # could say what to fix, so the rescue counts it as "vault has none".
     - name: "Resolve the FreeIPA admin password from the vault variable"
-      ansible.builtin.set_fact:
-        identity_admin_password: "{{ ipa_admin_password | default('', true) | string }}"
-      no_log: true
-      run_once: true
+      block:
+        - name: "Read the vault admin password"
+          ansible.builtin.set_fact:
+            identity_admin_password: "{{ ipa_admin_password | default('', true) | string }}"
+          no_log: true
+          run_once: true
+          tags: [always]
+      rescue:
+        - name: "Treat an unresolvable vault admin password as missing"
+          ansible.builtin.set_fact:
+            identity_admin_password: ""
+          no_log: true
+          run_once: true
+          tags: [always]
       tags: [always]
 
     # Jinja evaluates default() arguments eagerly and the roster value may be

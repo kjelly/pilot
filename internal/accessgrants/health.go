@@ -51,19 +51,24 @@ type Health struct {
 	Status string `json:"status"`
 
 	// ProbeError is a one-line, length-capped reason the drift probe could
-	// not complete, set only with Status unknown. It carries the probe's
-	// own message (ansible no_log tasks never print the admin password), so
-	// "FreeIPA unreachable" and "no usable admin password" are told apart.
+	// not complete, set only with Status unknown. It carries only the
+	// failure message DriftProbe extracted from ansible's output (never the
+	// raw output, which can quote the vault vars file), so "FreeIPA
+	// unreachable" and "no usable admin password" are told apart.
 	ProbeError string `json:"probe_error,omitempty"`
 }
 
-// maxProbeErrorLen caps Health.ProbeError so one chatty ansible failure
-// cannot flood a table row.
-const maxProbeErrorLen = 400
+// maxProbeErrorLen caps Health.ProbeError. DriftProbe already reduces
+// ansible's output to its failure message, so this only bounds an unusually
+// long one; it leaves room for the password gate's message, which names both
+// admin-password sources.
+const maxProbeErrorLen = 600
 
-// summarizeProbeError collapses err to a single capped line.
+// summarizeProbeError collapses err to a single capped line with any
+// password-shaped key: value pair blanked. It is applied on top of DriftProbe's
+// own extraction so no other error path can put a secret on the health line.
 func summarizeProbeError(err error) string {
-	msg := strings.Join(strings.Fields(err.Error()), " ")
+	msg := redactSecretish(strings.Join(strings.Fields(err.Error()), " "))
 	if r := []rune(msg); len(r) > maxProbeErrorLen {
 		msg = string(r[:maxProbeErrorLen]) + "..."
 	}
