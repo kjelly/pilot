@@ -1,0 +1,7 @@
+# source: synthetic: a failure no class matches (not a libkrb5 message)
+# class: other
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Something unexpected happened while getting initial credentials

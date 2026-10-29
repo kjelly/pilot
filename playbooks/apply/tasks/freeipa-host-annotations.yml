@@ -274,8 +274,34 @@
           will be reconciled once enrollment actually applies.
       when: ansible_check_mode and not ipa_annotations_enrolled_stat.stat.exists
 
-    - name: "FreeIPA host annotations (Phase B-F, enrolled only) — read, plan, apply, verify"
+    # Name-resolution preflight (GitHub issue #168): kinit resolves the KDC
+    # names in /etc/krb5.conf with this host's own resolver and fails before
+    # reaching any KDC when they do not resolve. The state is fixed HERE,
+    # before the block below: a block's `when:` is re-evaluated for every
+    # task inside it (AGENTS.md §4.5 item 1), so the block may only depend
+    # on a fact nothing in it changes. `deferred` (check mode only, the
+    # /etc/hosts server-pool pin that fixes the names is pending) skips the
+    # kinit-dependent reads; any other unresolved case fails here with the
+    # host, the FQDNs and the resolver list.
+    - name: "FreeIPA host annotations — KDC preflight state defaults to skipped (host not enrolled, nothing to resolve)"
+      ansible.builtin.set_fact:
+        freeipa_client_kdc_preflight_state: skipped
+
+    - name: "FreeIPA host annotations — preflight: the KDC and FreeIPA server names kinit needs must resolve (read-only)"
+      ansible.builtin.include_tasks:
+        file: freeipa-client-kdc-preflight.yml
+        # Shared by two callers with different row tags: `always` means
+        # "whenever this include runs" (AGENTS.md §4.5 item 8).
+        apply:
+          tags: [always]
+      vars:
+        freeipa_client_kdc_preflight_caller: "FreeIPA host annotations"
       when: ipa_annotations_enrolled_stat.stat.exists | bool
+
+    - name: "FreeIPA host annotations (Phase B-F, enrolled only) — read, plan, apply, verify"
+      when:
+        - ipa_annotations_enrolled_stat.stat.exists | bool
+        - freeipa_client_kdc_preflight_state != 'deferred'
       block:
         - name: "FreeIPA host annotations — create a dedicated Kerberos credential cache path"
           ansible.builtin.tempfile:
@@ -286,15 +312,30 @@
           changed_when: false
           check_mode: false
 
+        # The password goes in on stdin (never into a shell string: $, `,
+        # quotes would be expanded or split, AGENTS.md §4.5 item 15). The
+        # task is no_log and does not fail by itself: the next two tasks
+        # classify the result and fail with a fixed, secret-free message.
         - name: "FreeIPA host annotations — kinit admin into the dedicated ccache"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_annotations_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ ipa_enroll_password }}"
+          environment:
+            KRB5CCNAME: "{{ ipa_annotations_ccache_file.path }}"
+          register: ipa_annotations_kinit
           changed_when: false
+          failed_when: false
           no_log: true
           check_mode: false
+
+        - name: "FreeIPA host annotations — kinit result: classify and gate (raw output withheld)"
+          ansible.builtin.include_tasks:
+            file: freeipa-client-kinit-result.yml
+            apply:
+              tags: [always]
+          vars:
+            freeipa_client_kinit_rc: "{{ ipa_annotations_kinit.rc | default(1) }}"
+            freeipa_client_kinit_stderr: "{{ ipa_annotations_kinit.stderr | default('') }}"
 
         # Phase B — read live (spec.md §10 Phase B): runs even under --check
         # (check_mode: false) so a --check --diff preview can show the plan,

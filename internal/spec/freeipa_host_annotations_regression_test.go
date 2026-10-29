@@ -99,15 +99,12 @@ func TestRegression_FreeipaHostAnnotationsTask_StaticSafetyInvariants(t *testing
 		t.Error("must never call `ipa host-add` — annotations only project onto an already-enrolled host (spec.md §25.10/§19.8)")
 	}
 
-	// 11. Every `ipa` invocation uses argv, never a shell string.
+	// 11. Every `ipa` invocation uses argv, never a shell string. The admin
+	// kinit used to be the one shell task (a printf | kinit pipe that
+	// expanded $ and backticks in the password); it now passes the
+	// password on stdin to an argv `command`, so no shell task is left.
 	if strings.Contains(task, "ansible.builtin.shell") {
-		// The only shell task in this file is the admin kinit (piping the
-		// password via stdin, which argv cannot express) — every other
-		// `ipa` call must be ansible.builtin.command with argv.
-		shellCount := strings.Count(task, "ansible.builtin.shell")
-		if shellCount != 1 {
-			t.Errorf("expected exactly 1 ansible.builtin.shell task (the kinit password pipe), got %d", shellCount)
-		}
+		t.Error("no ansible.builtin.shell task may remain: the kinit password goes in on stdin of an argv command (issue #168)")
 	}
 	if strings.Contains(task, "command: \"ipa ") || strings.Contains(task, "command: ipa ") {
 		t.Error("every `ipa` invocation must use argv, not a bare command string")

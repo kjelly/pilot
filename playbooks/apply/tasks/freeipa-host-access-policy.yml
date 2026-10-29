@@ -116,8 +116,27 @@
           refusing to reconcile the FreeIPA host access policy.
       when: not ansible_check_mode
 
-    - name: "FreeIPA host access policy (enrolled only) — read, plan, apply, verify"
+    # Name-resolution preflight (GitHub issue #168), same contract and same
+    # placement rule as freeipa-host-annotations.yml: the state is fixed
+    # before the block below, because a block's `when:` is re-evaluated for
+    # every task inside it.
+    - name: "FreeIPA host access policy — KDC preflight state defaults to skipped (host not enrolled, nothing to resolve)"
+      ansible.builtin.set_fact:
+        freeipa_client_kdc_preflight_state: skipped
+
+    - name: "FreeIPA host access policy — preflight: the KDC and FreeIPA server names kinit needs must resolve (read-only)"
+      ansible.builtin.include_tasks:
+        file: freeipa-client-kdc-preflight.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_client_kdc_preflight_caller: "FreeIPA host access policy"
       when: ipa_host_policy_enrolled_stat.stat.exists | bool
+
+    - name: "FreeIPA host access policy (enrolled only) — read, plan, apply, verify"
+      when:
+        - ipa_host_policy_enrolled_stat.stat.exists | bool
+        - freeipa_client_kdc_preflight_state != 'deferred'
       block:
         - name: "FreeIPA host access policy — create a dedicated Kerberos credential cache path"
           ansible.builtin.tempfile:
@@ -134,9 +153,20 @@
             stdin: "{{ ipa_enroll_password }}"
           environment:
             KRB5CCNAME: "FILE:{{ ipa_host_policy_ccache_file.path }}"
+          register: ipa_host_policy_kinit
           changed_when: false
+          failed_when: false
           no_log: true
           check_mode: false
+
+        - name: "FreeIPA host access policy — kinit result: classify and gate (raw output withheld)"
+          ansible.builtin.include_tasks:
+            file: freeipa-client-kinit-result.yml
+            apply:
+              tags: [always]
+          vars:
+            freeipa_client_kinit_rc: "{{ ipa_host_policy_kinit.rc | default(1) }}"
+            freeipa_client_kinit_stderr: "{{ ipa_host_policy_kinit.stderr | default('') }}"
 
         # Phase B — read live. Runs under --check too (check_mode: false) so
         # a --check --diff preview shows the plan.
