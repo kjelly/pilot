@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -100,21 +101,31 @@ func TestRegression_OsPatchSlaTargetsAreEnvironmentGroups(t *testing.T) {
 	if len(s.Hosts) == 0 {
 		t.Fatal("spec §1 declares no targets")
 	}
+	for _, problem := range osPatchSlaTargetProblems(s.Hosts, vocab) {
+		t.Error(problem)
+	}
+}
+
+// osPatchSlaTargetProblems is the single predicate for the §1 contract, shared
+// by the "should pass" test (real spec) and the "should trigger" test.
+func osPatchSlaTargetProblems(hosts []Host, vocab []string) []string {
+	var problems []string
 	var groups []string
-	for _, h := range s.Hosts {
+	for _, h := range hosts {
 		g := strings.TrimSpace(h.Group)
 		if g == "" || g == "all" {
-			t.Errorf("§1 row %q has group %q: an all/empty group makes pilot verify match the table as literal hostnames", h.Hostname, h.Group)
+			problems = append(problems, fmt.Sprintf("§1 row %q has group %q: an all/empty group makes pilot verify match the table as literal hostnames", h.Hostname, h.Group))
 		}
 		if h.Hostname != g {
-			t.Errorf("§1 row hostname %q must equal its group %q (rows are environment groups, not hosts)", h.Hostname, g)
+			problems = append(problems, fmt.Sprintf("§1 row hostname %q must equal its group %q (rows are environment groups, not hosts)", h.Hostname, g))
 		}
 		groups = append(groups, g)
 	}
 	sort.Strings(groups)
 	if got, want := strings.Join(groups, ","), strings.Join(vocab, ","); got != want {
-		t.Errorf("§1 groups=%s, playbook patch_stage vocabulary=%s", got, want)
+		problems = append(problems, fmt.Sprintf("§1 groups=%s, playbook patch_stage vocabulary=%s", got, want))
 	}
+	return problems
 }
 
 // osPatchSlaPlaybookStages reads the stage list from the `patch_stage in [...]`
@@ -159,32 +170,35 @@ func osPatchSlaPlaybookStages(t *testing.T) []string {
 
 // TestRegression_OsPatchSlaTargetsGateTriggers is the "should trigger" half
 // (AGENTS.md section 5.12): the previous §1 shape (a literal test host in group
-// `all`) must be rejected by the same predicate the test above applies.
+// `all` instead of the sandbox row) must be rejected by the same predicate the
+// test above applies. The old shape is built from the parsed Hosts, so
+// re-aligning the markdown table cannot break this test.
 func TestRegression_OsPatchSlaTargetsGateTriggers(t *testing.T) {
-	real, err := os.ReadFile("../../docs/verification/os-patch-sla.md")
+	s, err := Parse("../../docs/verification/os-patch-sla.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const newRow = "| sandbox  | sandbox  |"
-	if !strings.Contains(string(real), newRow) {
-		t.Fatalf("spec §1 no longer has the %q row", newRow)
+	vocab := osPatchSlaPlaybookStages(t)
+	if p := osPatchSlaTargetProblems(s.Hosts, vocab); len(p) != 0 {
+		t.Fatalf("precondition: real spec must be clean, got %v", p)
 	}
-	old := strings.Replace(string(real), newRow, "| test-vm  | all      |", 1)
-	path := t.TempDir() + "/old.md"
-	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s, err := Parse(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := 0
+	old := make([]Host, 0, len(s.Hosts))
+	replaced := false
 	for _, h := range s.Hosts {
-		if g := strings.TrimSpace(h.Group); g == "" || g == "all" || h.Hostname != g {
-			bad++
+		if h.Group == "sandbox" {
+			h = Host{Hostname: "test-vm", Group: "all"}
+			replaced = true
 		}
+		old = append(old, h)
 	}
-	if bad != 1 {
-		t.Fatalf("old-shape rows flagged=%d want 1 (hosts=%+v)", bad, s.Hosts)
+	if !replaced {
+		t.Fatal("real spec §1 has no sandbox row to replace")
+	}
+	problems := osPatchSlaTargetProblems(old, vocab)
+	if len(problems) == 0 {
+		t.Fatal("old-shape §1 (test-vm in group all) was not rejected")
+	}
+	if !strings.Contains(strings.Join(problems, "\n"), `group "all"`) {
+		t.Errorf("old shape rejected for the wrong reason: %v", problems)
 	}
 }

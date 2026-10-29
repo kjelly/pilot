@@ -115,14 +115,14 @@
    ```bash
    ansible-playbook -i inventory-staging.yaml \
        playbooks/apply/os-patch-sla-apply.yml \
-       -e patch_stage=staging
+       -e patch_stage=staging -e target_group=staging -e confirm_staging=true
    ```
 3. **觀察 24h**：再跑一次 `pilot verify`，確認 C2/C3 都 PASS。
 4. **推 prod**（promote gate 在 playbook 本身：`confirm_prod` + staging 佐證時效）：
    ```bash
    ansible-playbook -i inventory-prod.yaml \
        playbooks/apply/os-patch-sla-apply.yml \
-       -e patch_stage=prod -e confirm_prod=true \
+       -e patch_stage=prod -e target_group=prod -e confirm_prod=true \
        -e staging_attested_within_hours=24
    ```
    沒帶 `confirm_prod=true`、或 staging 佐證超過時效，playbook 的
@@ -142,4 +142,4 @@
 |------|------|------|--------|
 | 2026-06-30 | v1.0 | 初版（C1–C7）| pilot |
 | 2026-10-28 | v1.1 | 新增 C8（`unattended-upgrades` 套件已安裝）。起因 issue #167：apply playbook 從不安裝這個套件，Step 4（systemd start+enable）在沒裝的主機上失敗，`--check` 也一樣（套件只被模擬安裝，unit 不存在）；Step 3 的 `failed_when: false` 還把「指令不存在」當成成功。apply 現在以 strict 政策經共用 apt framework 安裝套件，並在安裝後斷言套件存在（C5、C6 原本隱含依賴它，但沒有任何 row 檢查套件本身）| pilot |
-| 2026-10-29 | v1.2 | §1 目標系統表改為純環境 group（`sandbox`/`staging`/`prod`），移除 `test-vm`/`all` 那一列，並在表下說明每列是 inventory group、不准放 `all` 或字面測試 hostname、vm-target 每個 stage 一台 VM。起因 issue #174：`all` 列讓 `pilot verify` 把整張表當字面 hostname，單台 vm-target VM 上報 `spec targets contains host "test-vm" that is absent from inventory`。依 AGENTS.md §2.1 選 B（改 spec）；stage gate 不動。Checklist C1–C8 與所有 Expected 值不變 | pilot |
+| 2026-10-29 | v1.2 | §1 目標系統表改為純環境 group（`sandbox`/`staging`/`prod`），移除 `test-vm`/`all` 那一列，並在表下說明每列是 inventory group、不准放 `all` 或字面測試 hostname、vm-target 每個 stage 一台 VM。起因 issue #174：`all` 列讓 `pilot verify` 把整張表當字面 hostname，單台 vm-target VM 上報 `spec targets contains host "test-vm" that is absent from inventory`。依 AGENTS.md §2.1 選 B（改 spec）；stage gate 不動。Checklist C1–C8 與所有 Expected 值不變。§7 SOP 的 staging/prod 指令補上 `-e target_group=<stage>`（play vars 的 `target_group: sandbox` 讓 `hosts:` 的 default 不生效，不帶會 0 host）；staging 指令一併補上 apply 本來就要求的 `confirm_staging=true` | pilot |
