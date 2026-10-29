@@ -540,11 +540,28 @@
         # as changed — a no-op re-apply must stay changed=0 (spec §44's
         # "second apply: changed=0"), so this must not be true just
         # because a previous binary happens to exist.
+        # Steps 3-5 are `always` so the backup exists before Step 6 in ANY
+        # tag-scoped run that reaches Step 6. The converse also has to hold: a
+        # run whose tags never reach Step 6 (e.g. `pilot deploy --limit`, which
+        # passes --tags for the limited hosts' components and still pulls in
+        # it-core as a provider host) installs nothing, so the binary stays
+        # stale, is_upgrade stays true and Step 4's `changed_when: true` fires
+        # on every apply, failing pilot's second-apply idempotency check.
+        # Step 6 carries detection-engine-C1 plus the tags site.yml gives this
+        # import (observability, detection-engine).
+        - name: "Step 3c: determine whether this run installs the binary at all"
+          tags: [always]
+          ansible.builtin.set_fact:
+            detection_engine_install_selected: >-
+              {{ 'all' in ansible_run_tags
+                 or (ansible_run_tags | intersect(['detection-engine-C1', 'detection-engine', 'observability'])) | length > 0 }}
+
         - name: "Step 3c: determine whether this apply is an upgrade"
           tags: [always]
           ansible.builtin.set_fact:
             detection_engine_is_upgrade: >-
-              {{ detection_engine_existing_binary_stat.stat.exists
+              {{ detection_engine_install_selected | bool
+                 and detection_engine_existing_binary_stat.stat.exists
                  and detection_engine_existing_binary_stat.stat.checksum != detection_engine_artifact_sha256 }}
 
         - name: "Step 3d: ensure the backup directory exists before taking rollback material"
