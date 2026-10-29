@@ -18,17 +18,34 @@
 #      kinit and `ipa` use).
 #   2. Decides what is REQUIRED: kinit succeeds when ANY listed KDC name
 #      resolves and answers, so a stale extra KDC name alone is not a
-#      failure; but if no KDC name resolves, or the admin endpoint FQDN
-#      (`ipa -e xmlrpc_uri=https://<fqdn>/...`) does not resolve, the host
-#      cannot do its job.
+#      failure; but if NO `kdc` name resolves (`kdc_unusable`), or the admin
+#      endpoint FQDN (`ipa -e xmlrpc_uri=https://<fqdn>/...`) does not
+#      resolve (`admin_unresolved`), the host cannot do its job. `master_kdc`
+#      is not a KDC list for the initial AS exchange, so it never counts
+#      (a resolvable master_kdc must not hide a dead kdc list).
+#      The KDC value is read the way libkrb5 reads it (verified against MIT
+#      libkrb5 1.22.x with profile_get_values and kinit KRB5_TRACE): a quoted
+#      value is decoded first, `#`/`;` are not comments inside a value, the
+#      host is the first whitespace-delimited token, then host:port,
+#      [v6]:port and https://host[:port]/path are split. A value libkrb5
+#      rejects (two or more colons without brackets, a non-numeric or
+#      out-of-range port) is reported as `unparsable`, not probed.
 #   3. State `freeipa_client_kdc_preflight_state`:
 #        ok       every required name resolves
 #        deferred --check only: something required is unresolvable, the
 #                 /etc/hosts server-pool pin task WOULD change this run
 #                 (it is a real mutation, so --check does not write it), and
-#                 the pin covers every unresolved name. Callers skip the
-#                 kinit-dependent reads and say "deferred to apply"; apply
-#                 writes the pin first and self-repairs.
+#                 the pin makes what kinit needs resolvable: at least ONE
+#                 unresolved KDC name is a pool member (when the kdc list is
+#                 unusable) and every unresolved admin endpoint is a pool
+#                 member. Other stale KDC names in krb5.conf do not block the
+#                 deferral: apply's server-list reconciliation
+#                 (freeipa-client-server-failover.yml) rewrites the realm
+#                 file to the active pool, but that is skipped under --check
+#                 and is NOT predicted here, so a host whose every configured
+#                 KDC is outside the pool still fails the preview. Callers
+#                 skip the kinit-dependent reads and say "deferred to apply";
+#                 apply writes the pin first and self-repairs.
 #        failed   any other unresolved case (check mode without a pending pin
 #                 or with names the pin does not cover; a real run). The
 #                 assert at the end fails with the host, the FQDNs, the
@@ -61,6 +78,10 @@
     freeipa_client_kdc_preflight_resolvers: []
     freeipa_client_kdc_preflight_reason: ""
     freeipa_client_kdc_preflight_summary: ""
+    freeipa_client_kdc_preflight_kdc_unusable: false
+    freeipa_client_kdc_preflight_admin_unresolved: []
+    freeipa_client_kdc_preflight_kdc_names: []
+    freeipa_client_kdc_preflight_unparsable: []
 
 - name: "FreeIPA KDC preflight — resolve the KDC and FreeIPA server names with this host's own resolver (read-only)"
   ansible.builtin.command:
@@ -85,9 +106,13 @@
 
       cfg = json.loads(sys.argv[1])
       realm = cfg.get('realm') or ''
-      KDC_KEYS = ('kdc', 'master_kdc')
-      OTHER_KEYS = ('admin_server', 'kpasswd_server')
+      # Only `kdc` is a KDC list for the initial AS exchange; master_kdc is
+      # not used for it, so it is probed and reported but never makes kinit
+      # (un)usable.
+      KDC_KEYS = ('kdc',)
       REL_RE = re.compile(r'^(kdc|master_kdc|admin_server|kpasswd_server)\s*=\s*(.+?)\s*$')
+      ESCAPES = {'n': chr(10), 't': chr(9), 'b': chr(8)}
+      BACKSLASH = chr(92)
 
 
       def is_ip(text):
@@ -98,17 +123,65 @@
               return False
 
 
-      def host_of(value):
-          v = re.sub(r'^(?:tcp|udp)/', '', value.strip())
-          m = re.match(r'^https?://([^/]+)', v)
-          if m:
-              v = m.group(1)
-          if v.startswith('['):
-              end = v.find(']')
-              v = v[1:end] if end > 0 else v[1:]
-          elif v.count(':') == 1:
-              v = v.split(':')[0]
-          return v.strip().rstrip('.').lower()
+      def norm(name):
+          return name.strip().rstrip('.').lower()
+
+
+      def decode_value(raw):
+          """The profile-layer value: a quoted string is unescaped up to its closing quote
+          (anything after it is dropped, an unterminated quote runs to the end); an
+          unquoted value is kept as written, and `#`/`;` inside it are not comments."""
+          value = raw.strip()
+          if not value.startswith('"'):
+              return value
+          out = []
+          i = 1
+          while i < len(value):
+              c = value[i]
+              if c == '"':
+                  break
+              if c == BACKSLASH and i + 1 < len(value):
+                  i += 1
+                  c = ESCAPES.get(value[i], value[i])
+              out.append(c)
+              i += 1
+          return ''.join(out)
+
+
+      def valid_port(port):
+          return re.fullmatch(r'[+]?[0-9]+', port) is not None and int(port) <= 65535
+
+
+      def split_hostport(text):
+          """One whitespace-free token: host, host:port or [v6]:port -> (host, ok)."""
+          if text.startswith('['):
+              end = text.find(']')
+              if end < 0:
+                  return '', False
+              host, rest = text[1:end], text[end + 1:]
+              if rest.startswith(':') and not valid_port(rest[1:]):
+                  return '', False
+              return host, bool(host)
+          if text.count(':') > 1:
+              return '', False
+          if text.count(':') == 1:
+              host, port = text.split(':')
+              return host, bool(host) and valid_port(port)
+          return text, bool(text)
+
+
+      def host_of(raw):
+          """The host libkrb5 looks up first for one kdc value -> (host, ok).
+          ('', True) for an empty value; ok is False for a value libkrb5 rejects."""
+          tokens = decode_value(raw).split()
+          if not tokens:
+              return '', True
+          token = tokens[0]
+          if token.startswith('https://'):
+              host, ok = split_hostport(token[len('https://'):].split('/', 1)[0])
+          else:
+              host, ok = split_hostport(token)
+          return norm(host), ok
 
 
       def expand(path, files, seen, depth=0):
@@ -116,18 +189,24 @@
               return
           seen.add(path)
           if os.path.isdir(path):
-              for name in sorted(os.listdir(path)):
-                  if re.match(r'^[A-Za-z0-9_-]+$', name) or name.endswith('.conf'):
+              try:
+                  entries = sorted(os.listdir(path))
+              except OSError:
+                  return
+              for name in entries:
+                  # libkrb5 reads *.conf and extension-less names, never dot-files.
+                  if not name.startswith('.') and (re.match(r'^[A-Za-z0-9_-]+$', name) or name.endswith('.conf')):
                       expand(os.path.join(path, name), files, seen, depth + 1)
               return
           try:
-              with open(path) as handle:
+              with open(path, encoding='utf-8', errors='replace') as handle:
                   text = handle.read()
           except OSError:
               return
           files.append((path, text))
           for line in text.splitlines():
-              m = re.match(r'^\s*(include|includedir)\s+(\S+)', line)
+              # Only a column-0 directive is an include; an indented one is a plain relation.
+              m = re.match(r'^(include|includedir)\s+(\S+)', line)
               if m:
                   expand(m.group(2), files, seen, depth + 1)
 
@@ -143,7 +222,7 @@
               if not s or s[0] in '#;':
                   continue
               if depth == 0:
-                  m = re.match(r'^\[(\w+)\]', s)
+                  m = re.match(r'^\[(\w+)\]', line)
                   if m:
                       section = m.group(1)
                       continue
@@ -153,9 +232,12 @@
                           in_realm = (m.group(1) == realm)
                           depth = 1
                   continue
-              if s.endswith('{'):
+              # A subsection opens on a value that is exactly `{` (`kdc = h1{` is an
+              # ordinary value) or on a line that is only `{`; a line that starts
+              # with `}` closes it, whatever follows the brace.
+              if s == '{' or re.match(r'^[^=]*=\s*\{$', s):
                   depth += 1
-              elif s == '}':
+              elif s.startswith('}'):
                   depth -= 1
                   if depth == 0:
                       in_realm = False
@@ -170,10 +252,14 @@
       seen = set()
       for p in cfg.get('krb5_paths') or []:
           expand(p, files, seen)
-      kdc_names, other_names, ip_kdc = [], [], False
+      kdc_names, other_names, unparsable, ip_kdc = [], [], [], False
       for _path, text in files:
           for key, value in realm_relations(text):
-              h = host_of(value)
+              h, ok = host_of(value)
+              if not ok:
+                  if key in KDC_KEYS and value not in unparsable:
+                      unparsable.append(value)
+                  continue
               if not h:
                   continue
               if key in KDC_KEYS:
@@ -184,8 +270,8 @@
               elif not is_ip(h) and h not in other_names:
                   other_names.append(h)
 
-      required_names = [host_of(n) for n in cfg.get('required_names') or [] if n]
-      extra_names = [host_of(n) for n in cfg.get('extra_names') or [] if n]
+      required_names = [norm(n) for n in cfg.get('required_names') or [] if n]
+      extra_names = [norm(n) for n in cfg.get('extra_names') or [] if n]
       names = []
       for n in kdc_names + other_names + required_names + extra_names:
           if n and not is_ip(n) and n not in names:
@@ -214,11 +300,17 @@
               results[n] = 'timed out'
 
       unresolved = [n for n in names if results[n] is not None]
-      required_unresolved = []
-      if kdc_names and not ip_kdc and all(results[n] is not None for n in kdc_names):
-          required_unresolved.extend(kdc_names)
+      # kinit needs ONE usable KDC name; it is only "unusable" when kdc names exist,
+      # none of them is an IP literal, and none of them resolves.
+      kdc_unusable = bool(kdc_names) and not ip_kdc and all(results[n] is not None for n in kdc_names)
+      admin_unresolved = []
       for n in required_names:
-          if n in results and results[n] is not None and n not in required_unresolved:
+          if n in results and results[n] is not None and n not in admin_unresolved:
+              admin_unresolved.append(n)
+      # Kept for callers of the older output: the union of both.
+      required_unresolved = list(kdc_names) if kdc_unusable else []
+      for n in admin_unresolved:
+          if n not in required_unresolved:
               required_unresolved.append(n)
 
 
@@ -267,6 +359,9 @@
           'unresolved': unresolved,
           'errors': dict((n, results[n]) for n in unresolved),
           'required_unresolved': required_unresolved,
+          'kdc_unusable': kdc_unusable,
+          'admin_unresolved': admin_unresolved,
+          'unparsable': unparsable,
           'nameservers': nameservers(),
           'krb5_files': [p for p, _t in files],
       }))
@@ -291,6 +386,10 @@
     freeipa_client_kdc_preflight_unresolved: "{{ freeipa_client_kdc_preflight_result.unresolved }}"
     freeipa_client_kdc_preflight_required_unresolved: "{{ freeipa_client_kdc_preflight_required }}"
     freeipa_client_kdc_preflight_resolvers: "{{ freeipa_client_kdc_preflight_result.nameservers }}"
+    freeipa_client_kdc_preflight_kdc_unusable: "{{ freeipa_client_kdc_preflight_result.kdc_unusable | bool }}"
+    freeipa_client_kdc_preflight_admin_unresolved: "{{ freeipa_client_kdc_preflight_result.admin_unresolved }}"
+    freeipa_client_kdc_preflight_kdc_names: "{{ freeipa_client_kdc_preflight_result.kdc_names }}"
+    freeipa_client_kdc_preflight_unparsable: "{{ freeipa_client_kdc_preflight_result.unparsable }}"
     freeipa_client_kdc_preflight_state: >-
       {{ 'ok' if (freeipa_client_kdc_preflight_required | length) == 0
          else ('deferred' if (ansible_check_mode and freeipa_client_kdc_preflight_pin_pending | bool
@@ -315,16 +414,48 @@
     # reports whether it WOULD change. Absent (not run under --tags, or not
     # reached) reads as "not pending".
     freeipa_client_kdc_preflight_pin_pending: "{{ (freeipa_client_hosts_pool_pin | default({})) is changed }}"
-    freeipa_client_kdc_preflight_covered: "{{ (freeipa_client_kdc_preflight_required | difference(freeipa_client_kdc_preflight_pool) | length) == 0 }}"
+    # kinit needs ONE resolvable KDC name: the pin helps when at least one
+    # configured KDC name is a pool member. Every other stale name is left to
+    # apply's server-list reconciliation (not predicted by this preview).
+    freeipa_client_kdc_preflight_kdc_pinnable: >-
+      {{ (freeipa_client_kdc_preflight_result.kdc_names | map('lower') | list
+          | intersect(freeipa_client_kdc_preflight_pool) | length) > 0 }}
+    # Covered = the pin makes what kinit and the FreeIPA reads need resolvable:
+    # a usable KDC list (or one pinnable KDC name) AND every unresolved admin
+    # endpoint pinned.
+    freeipa_client_kdc_preflight_covered: >-
+      {{ (not (freeipa_client_kdc_preflight_result.kdc_unusable | bool)
+          or (freeipa_client_kdc_preflight_kdc_pinnable | bool))
+         and ((freeipa_client_kdc_preflight_result.admin_unresolved | map('lower') | list
+               | difference(freeipa_client_kdc_preflight_pool) | length) == 0) }}
 
 - name: "FreeIPA KDC preflight — report the deferral (check mode: apply repairs this first)"
   ansible.builtin.debug:
     msg: >-
       {{ freeipa_client_kdc_preflight_caller | default('FreeIPA client reads') }}
       deferred to apply: {{ freeipa_client_kdc_preflight_summary }}; the
-      /etc/hosts FreeIPA server-pool pin (pending in this run, written by
-      apply before this step) will repair this, so kinit and the FreeIPA
+      pending /etc/hosts server-pool pin (written by apply before this step)
+      makes {{ freeipa_client_kdc_preflight_pinned_what }} resolvable, which
+      is all kinit and the FreeIPA reads need (kinit works when any one KDC
+      name resolves); other stale KDC names in krb5.conf are left to the
+      server-list reconciliation that apply performs; kinit and the FreeIPA
       reads are skipped in this preview.
+  vars:
+    freeipa_client_kdc_preflight_pool: "{{ freeipa_server_fqdns | default([]) | map('lower') | list }}"
+    freeipa_client_kdc_preflight_pinned_kdcs: >-
+      {{ freeipa_client_kdc_preflight_kdc_names | map('lower') | list
+         | intersect(freeipa_client_kdc_preflight_pool) }}
+    freeipa_client_kdc_preflight_pinned_what: >-
+      {{ [(freeipa_client_kdc_preflight_pinned_kdcs | join(', '))
+            if (freeipa_client_kdc_preflight_kdc_unusable | bool) else '',
+          ('the admin endpoint ' ~ (freeipa_client_kdc_preflight_pinned_admin | join(', ')))
+            if (freeipa_client_kdc_preflight_pinned_admin | length) > 0 else '']
+         | select | join(' and ') }}
+    # An admin endpoint that is also one of the KDC names above is not said twice.
+    freeipa_client_kdc_preflight_pinned_admin: >-
+      {{ freeipa_client_kdc_preflight_admin_unresolved
+         | difference(freeipa_client_kdc_preflight_pinned_kdcs
+                      if (freeipa_client_kdc_preflight_kdc_unusable | bool) else []) }}
   when: freeipa_client_kdc_preflight_state == 'deferred'
 
 - name: "FreeIPA KDC preflight — note names that do not resolve but are not required"
@@ -338,6 +469,18 @@
     - freeipa_client_kdc_preflight_state == 'ok'
     - (freeipa_client_kdc_preflight_unresolved | length) > 0
 
+- name: "FreeIPA KDC preflight — note KDC values in krb5.conf that libkrb5 rejects"
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: libkrb5 rejects these kdc values in
+      /etc/krb5.conf (more than one colon without brackets, or a port that
+      is not a number up to 65535), so they were not resolved here and
+      kinit fails with "Invalid argument" if it reaches them:
+      {{ freeipa_client_kdc_preflight_unparsable | join(', ') }}.
+  when:
+    - freeipa_client_kdc_preflight_state == 'ok'
+    - (freeipa_client_kdc_preflight_unparsable | length) > 0
+
 - name: "Gate: the KDC and FreeIPA admin server names must resolve before any kinit (never censored)"
   ansible.builtin.assert:
     that:
@@ -348,18 +491,40 @@
       All names that failed to resolve:
       {{ freeipa_client_kdc_preflight_unresolved | join(', ') }}.
   vars:
+    freeipa_client_kdc_preflight_pool: "{{ freeipa_server_fqdns | default([]) | map('lower') | list }}"
+    # The names the /etc/hosts pin cannot help with, in words. Built only from
+    # what is true: a KDC list with no pool member (every configured KDC is
+    # outside the pool), and/or an admin endpoint outside the pool.
+    freeipa_client_kdc_preflight_kdc_blocked: >-
+      {{ (freeipa_client_kdc_preflight_kdc_unusable | bool)
+         and ((freeipa_client_kdc_preflight_kdc_names | map('lower') | list
+               | intersect(freeipa_client_kdc_preflight_pool) | length) == 0) }}
+    freeipa_client_kdc_preflight_admin_blocked: >-
+      {{ freeipa_client_kdc_preflight_admin_unresolved | map('lower') | list
+         | difference(freeipa_client_kdc_preflight_pool) }}
+    freeipa_client_kdc_preflight_blocked_text: >-
+      {{ [('it cannot make any KDC name in /etc/krb5.conf ('
+             ~ (freeipa_client_kdc_preflight_kdc_names | join(', '))
+             ~ ') resolve, none of them is a pool member')
+            if (freeipa_client_kdc_preflight_kdc_blocked | bool) else '',
+          ('the admin endpoint ' ~ (freeipa_client_kdc_preflight_admin_blocked | join(', '))
+             ~ ' is not a pool member')
+            if (freeipa_client_kdc_preflight_admin_blocked | length) > 0 else '']
+         | select | join('; ') }}
     freeipa_client_kdc_preflight_hint: >-
       {{ {
         'not_covered_by_pin':
-          'The /etc/hosts FreeIPA server-pool pin does not cover every unresolved name (it only pins the active pool members: '
-          ~ (freeipa_server_fqdns | default([]) | join(', '))
-          ~ '), so apply cannot repair this. Fix the host resolver or /etc/hosts, or the stale name in /etc/krb5.conf.',
+          'The /etc/hosts FreeIPA server-pool pin only pins the active pool members ('
+          ~ (freeipa_client_kdc_preflight_pool | join(', '))
+          ~ '); ' ~ freeipa_client_kdc_preflight_blocked_text
+          ~ '. This preview does not predict the krb5.conf server-list reconciliation that apply performs. '
+          ~ 'Fix the host resolver or /etc/hosts, or the stale names in /etc/krb5.conf.',
         'no_pending_pin':
           'This --check run has no pending /etc/hosts server-pool pin to repair it (the pin is already present, or --tags '
           ~ 'skipped the pin task), so apply would not fix it either. Check the resolver list in this message and that '
           ~ '/etc/nsswitch.conf hosts: includes files.',
         'unresolved_after_pin':
-          'The /etc/hosts server-pool pin was already applied in this run, so the resolver and /etc/nsswitch.conf hosts: are '
-          ~ 'the cause. Check the resolver list in this message (a dead FreeIPA DNS, or a public DNS in the list that cannot '
-          ~ 'resolve the internal domain) and that hosts: includes files.',
+          'The /etc/hosts server-pool pin is already in place (or apply wrote it earlier in this run), so the resolver '
+          ~ 'and /etc/nsswitch.conf hosts: are the cause. Check the resolver list in this message (a dead FreeIPA DNS, '
+          ~ 'or a public DNS in the list that cannot resolve the internal domain) and that hosts: includes files.',
       }.get(freeipa_client_kdc_preflight_reason, '') }}

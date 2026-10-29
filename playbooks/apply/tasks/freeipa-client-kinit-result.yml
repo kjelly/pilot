@@ -16,12 +16,16 @@
 #                       `Cannot resolve network address for KDC in requested
 #                       realm`; also `Cannot contact any KDC` when the KDC
 #                       preflight (tasks/freeipa-client-kdc-preflight.yml)
-#                       saw an unresolved name: the two cases print the same
-#                       stderr (MIT krb5 1.22.2: an unresolvable KDC name and
-#                       a closed KDC port both give `Cannot contact any KDC
-#                       for realm 'R'`), so stderr alone cannot separate them.
-#   cannot_contact_kdc  `Cannot contact any KDC for realm 'R'` with every
-#                       KDC name resolving (or no preflight evidence)
+#                       found a REQUIRED name unresolved (no kdc name resolves,
+#                       or the admin endpoint does not): the two cases print
+#                       the same stderr (MIT krb5 1.22.2: an unresolvable KDC
+#                       name and a closed KDC port both give `Cannot contact
+#                       any KDC for realm 'R'`), so stderr alone cannot
+#                       separate them. A stale name kinit does not need
+#                       (another KDC name resolves) is not evidence: a closed
+#                       port stays cannot_contact_kdc.
+#   cannot_contact_kdc  `Cannot contact any KDC for realm 'R'` with no required
+#                       name unresolved (or no preflight evidence)
 #   preauth_failed      `Password incorrect` (MIT KDC) or
 #                       `Preauthentication failed` / `Pre-authentication
 #                       failed` (FreeIPA KDC)
@@ -31,7 +35,7 @@
 #
 # Inputs (include vars): freeipa_client_kinit_rc, freeipa_client_kinit_stderr.
 # Also reads ipa_enroll_principal, ipa_realm and, when set,
-# freeipa_client_kdc_preflight_unresolved.
+# freeipa_client_kdc_preflight_required_unresolved.
 ---
 - name: "FreeIPA kinit result — classify the exit code and stderr (stderr is never printed)"
   ansible.builtin.set_fact:
@@ -39,7 +43,7 @@
       {{ 'ok' if (freeipa_client_kinit_rc | int) == 0
          else ('cannot_resolve' if (freeipa_client_kinit_stderr is search(freeipa_client_kinit_re_resolve)
                                     or (freeipa_client_kinit_stderr is search(freeipa_client_kinit_re_contact)
-                                        and (freeipa_client_kdc_preflight_unresolved | default([]) | length) > 0))
+                                        and (freeipa_client_kdc_preflight_required_unresolved | default([]) | length) > 0))
                else ('cannot_contact_kdc' if freeipa_client_kinit_stderr is search(freeipa_client_kinit_re_contact)
                else ('preauth_failed' if freeipa_client_kinit_stderr is search(freeipa_client_kinit_re_preauth)
                else ('client_not_found' if freeipa_client_kinit_stderr is search(freeipa_client_kinit_re_client_not_found)

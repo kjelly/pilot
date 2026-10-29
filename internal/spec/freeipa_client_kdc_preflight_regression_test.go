@@ -79,6 +79,9 @@ type kdcProbeResult struct {
 	Unresolved         []string          `json:"unresolved"`
 	Errors             map[string]string `json:"errors"`
 	RequiredUnresolved []string          `json:"required_unresolved"`
+	KDCUnusable        bool              `json:"kdc_unusable"`
+	AdminUnresolved    []string          `json:"admin_unresolved"`
+	Unparsable         []string          `json:"unparsable"`
 	Nameservers        []string          `json:"nameservers"`
 	Krb5Files          []string          `json:"krb5_files"`
 }
@@ -358,6 +361,14 @@ func TestRegression_KDCPreflightStateMachine(t *testing.T) {
 	badConf := writeKDCFile(t, dir, "bad.conf", krb5Realm("kdc = "+bad+":88"))
 	goodConf := writeKDCFile(t, dir, "good.conf", krb5Realm("kdc = localhost:88"))
 	staleConf := writeKDCFile(t, dir, "stale.conf", krb5Realm("kdc = localhost:88", "kdc = ipa9.pilot168.invalid:88"))
+	// The issue #168 follow-up (P2 findings of PR #180 review): a host whose
+	// krb5.conf still lists a RETIRED KDC next to the active one.
+	const active, retired = "active.pilot168.invalid", "retired.pilot168.invalid"
+	activeRetiredConf := writeKDCFile(t, dir, "active-retired.conf", krb5Realm("kdc = "+active+":88", "kdc = "+retired+":88"))
+	retiredOnlyConf := writeKDCFile(t, dir, "retired-only.conf", krb5Realm("kdc = "+retired+":88"))
+	quotedLocalConf := writeKDCFile(t, dir, "quoted-local.conf", krb5Realm(`kdc = "localhost:88"`))
+	plainLocalConf := writeKDCFile(t, dir, "plain-local.conf", krb5Realm("kdc = localhost:88"))
+	quotedActiveConf := writeKDCFile(t, dir, "quoted-active.conf", krb5Realm(`kdc = "`+active+`:88"`))
 	resolv := writeKDCFile(t, dir, "resolv.conf", "nameserver 192.0.2.53\nnameserver 1.1.1.1\n")
 
 	pending := map[string]any{"changed": true}
@@ -370,28 +381,70 @@ func TestRegression_KDCPreflightStateMachine(t *testing.T) {
 		wantState string
 		wantReas  string
 		mustHave  []string
+		mustNot   []string
 	}
 	cells := []cell{
-		{"check, pin pending, covered: deferred", kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: pending, resolvConf: resolv},
-			true, "deferred", "pin_pending",
-			[]string{"FreeIPA host annotations deferred to apply", "localhost cannot resolve " + bad, "resolver: 192.0.2.53, 1.1.1.1", "pin"}},
-		{"real run, pin pending, covered: fails, never defers", kdcPlay{check: false, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: pending, resolvConf: resolv},
-			false, "", "unresolved_after_pin",
-			[]string{"localhost cannot resolve " + bad, "resolver: 192.0.2.53, 1.1.1.1", "kinit would fail before it reached any KDC"}},
-		{"real run, pin not pending, covered: fails", kdcPlay{check: false, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: notPending, resolvConf: resolv},
-			false, "", "unresolved_after_pin", []string{"localhost cannot resolve " + bad}},
-		{"check, pin not pending, covered: fails", kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: notPending, resolvConf: resolv},
-			false, "", "no_pending_pin", []string{"localhost cannot resolve " + bad, "no pending /etc/hosts server-pool pin"}},
-		{"check, pin register absent (--tags host-annotations): fails", kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: nil, resolvConf: resolv},
-			false, "", "no_pending_pin", []string{"localhost cannot resolve " + bad, "--tags skipped the pin task"}},
-		{"check, pin pending, NOT covered (name outside the pool): fails", kdcPlay{check: true, krb5Conf: badConf, pool: []string{"ipa7.pilot168.invalid"}, admin: "ipa7.pilot168.invalid", pin: pending, resolvConf: resolv},
-			false, "", "not_covered_by_pin", []string{"localhost cannot resolve", bad, "does not cover every unresolved name"}},
-		{"check, resolvable: ok", kdcPlay{check: true, krb5Conf: goodConf, pool: []string{"localhost"}, admin: "localhost", pin: pending, resolvConf: resolv},
-			true, "ok", "", nil},
-		{"real run, resolvable: ok", kdcPlay{check: false, krb5Conf: goodConf, pool: []string{"localhost"}, admin: "localhost", pin: nil, resolvConf: resolv},
-			true, "ok", "", nil},
-		{"real run, stale extra KDC name only: ok with a note", kdcPlay{check: false, krb5Conf: staleConf, pool: []string{"localhost"}, admin: "localhost", pin: nil, resolvConf: resolv},
-			true, "ok", "", []string{"ipa9.pilot168.invalid", "do not need them"}},
+		{name: "check, pin pending, covered: deferred", play: kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "deferred", wantReas: "pin_pending",
+			mustHave: []string{"FreeIPA host annotations deferred to apply", "localhost cannot resolve " + bad, "resolver: 192.0.2.53, 1.1.1.1", "pin"}},
+		{name: "real run, pin pending, covered: fails, never defers", play: kdcPlay{check: false, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: pending, resolvConf: resolv},
+			wantReas: "unresolved_after_pin",
+			mustHave: []string{"localhost cannot resolve " + bad, "resolver: 192.0.2.53, 1.1.1.1", "kinit would fail before it reached any KDC", "the resolver and /etc/nsswitch.conf hosts: are the cause"}},
+		{name: "real run, pin not pending, covered: fails", play: kdcPlay{check: false, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: notPending, resolvConf: resolv},
+			wantReas: "unresolved_after_pin", mustHave: []string{"localhost cannot resolve " + bad}},
+		{name: "check, pin not pending, covered: fails", play: kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: notPending, resolvConf: resolv},
+			wantReas: "no_pending_pin", mustHave: []string{"localhost cannot resolve " + bad, "no pending /etc/hosts server-pool pin"}},
+		{name: "check, pin register absent (--tags host-annotations): fails", play: kdcPlay{check: true, krb5Conf: badConf, pool: []string{bad}, admin: bad, pin: nil, resolvConf: resolv},
+			wantReas: "no_pending_pin", mustHave: []string{"localhost cannot resolve " + bad, "--tags skipped the pin task"}},
+		{name: "check, pin pending, NOT covered (name outside the pool): fails", play: kdcPlay{check: true, krb5Conf: badConf, pool: []string{"ipa7.pilot168.invalid"}, admin: "ipa7.pilot168.invalid", pin: pending, resolvConf: resolv},
+			wantReas: "not_covered_by_pin",
+			mustHave: []string{"localhost cannot resolve", bad, "only pins the active pool members (ipa7.pilot168.invalid)", "none of them is a pool member"}},
+		{name: "check, resolvable: ok", play: kdcPlay{check: true, krb5Conf: goodConf, pool: []string{"localhost"}, admin: "localhost", pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "ok"},
+		{name: "real run, resolvable: ok", play: kdcPlay{check: false, krb5Conf: goodConf, pool: []string{"localhost"}, admin: "localhost", pin: nil, resolvConf: resolv},
+			wantOK: true, wantState: "ok"},
+		{name: "real run, stale extra KDC name only: ok with a note", play: kdcPlay{check: false, krb5Conf: staleConf, pool: []string{"localhost"}, admin: "localhost", pin: nil, resolvConf: resolv},
+			wantOK: true, wantState: "ok", mustHave: []string{"ipa9.pilot168.invalid", "do not need them"}},
+
+		// Finding A (PR #180 review): kinit works when ANY one KDC name resolves,
+		// so a pin that makes the active KDC resolvable defers the preview even
+		// though a retired KDC name in krb5.conf stays unresolvable (apply's
+		// server-list reconciliation drops it, but it is skipped under --check
+		// and not predicted by this preview).
+		{name: "A: check, active+retired KDC, pin covers the active one: deferred", play: kdcPlay{check: true, krb5Conf: activeRetiredConf, pool: []string{active}, admin: active, pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "deferred", wantReas: "pin_pending",
+			mustHave: []string{active, retired, "makes " + active + " resolvable", "other stale KDC names in krb5.conf are left to the server-list reconciliation that apply performs"},
+			mustNot:  []string{"cannot repair", "not_covered"}},
+		{name: "A: check, a pinned KDC and a different pinned admin endpoint: deferred naming both", play: kdcPlay{check: true, krb5Conf: activeRetiredConf, pool: []string{active, "adm.pilot168.invalid"}, admin: "adm.pilot168.invalid", pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "deferred", wantReas: "pin_pending",
+			mustHave: []string{"makes " + active + " and the admin endpoint adm.pilot168.invalid resolvable"}},
+		{name: "A: check, active+retired KDC, no KDC in the pool: fails not covered", play: kdcPlay{check: true, krb5Conf: activeRetiredConf, pool: []string{"other.pilot168.invalid"}, admin: "other.pilot168.invalid", pin: pending, resolvConf: resolv},
+			wantReas: "not_covered_by_pin",
+			mustHave: []string{"only pins the active pool members (other.pilot168.invalid)", "none of them is a pool member", active, retired},
+			mustNot:  []string{"cannot repair"}},
+		{name: "A: check, active+retired KDC, no pending pin: fails", play: kdcPlay{check: true, krb5Conf: activeRetiredConf, pool: []string{active}, admin: active, pin: notPending, resolvConf: resolv},
+			wantReas: "no_pending_pin", mustHave: []string{"no pending /etc/hosts server-pool pin"}},
+		{name: "A: real run, active+retired KDC, pin pending: fails (apply wrote the pin first, so the resolver is the cause)", play: kdcPlay{check: false, krb5Conf: activeRetiredConf, pool: []string{active}, admin: active, pin: pending, resolvConf: resolv},
+			wantReas: "unresolved_after_pin", mustHave: []string{"the resolver and /etc/nsswitch.conf hosts: are the cause"}},
+		{name: "A: check, a KDC is in the pool but the admin endpoint is not: fails not covered", play: kdcPlay{check: true, krb5Conf: activeRetiredConf, pool: []string{active}, admin: "outside.pilot168.invalid", pin: pending, resolvConf: resolv},
+			wantReas: "not_covered_by_pin",
+			mustHave: []string{"the admin endpoint outside.pilot168.invalid is not a pool member"},
+			mustNot:  []string{"none of them is a pool member"}},
+		{name: "A: check, retired-only KDC (every configured KDC outside the pool): fails, preview does not predict failover", play: kdcPlay{check: true, krb5Conf: retiredOnlyConf, pool: []string{active}, admin: active, pin: pending, resolvConf: resolv},
+			wantReas: "not_covered_by_pin",
+			mustHave: []string{"none of them is a pool member", "does not predict the krb5.conf server-list reconciliation that apply performs", retired},
+			mustNot:  []string{"cannot repair"}},
+
+		// Finding B (PR #180 review): a quoted value is a valid libkrb5 profile
+		// string; the probe must decode the quotes before it splits host:port.
+		{name: "B: check, kdc = \"localhost:88\" on a healthy host: ok", play: kdcPlay{check: true, krb5Conf: quotedLocalConf, pool: []string{"localhost"}, admin: "localhost", pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "ok", mustNot: []string{"cannot resolve"}},
+		{name: "B: real run, kdc = \"localhost:88\" on a healthy host: ok", play: kdcPlay{check: false, krb5Conf: quotedLocalConf, pool: []string{"localhost"}, admin: "localhost", pin: nil, resolvConf: resolv},
+			wantOK: true, wantState: "ok", mustNot: []string{"cannot resolve"}},
+		{name: "B control: the same KDC written without quotes: ok", play: kdcPlay{check: true, krb5Conf: plainLocalConf, pool: []string{"localhost"}, admin: "localhost", pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "ok"},
+		{name: "B combined: quoted KDC in the pool, pin pending: deferred", play: kdcPlay{check: true, krb5Conf: quotedActiveConf, pool: []string{active}, admin: active, pin: pending, resolvConf: resolv},
+			wantOK: true, wantState: "deferred", wantReas: "pin_pending", mustHave: []string{"localhost cannot resolve " + active}, mustNot: []string{`"` + active}},
 	}
 	for _, c := range cells {
 		t.Run(c.name, func(t *testing.T) {
@@ -400,13 +453,32 @@ func TestRegression_KDCPreflightStateMachine(t *testing.T) {
 				t.Fatalf("ansible-playbook success = %v, want %v\n%s", ok, c.wantOK, out)
 			}
 			if c.wantOK {
-				if !strings.Contains(out, "PREFLIGHT_STATE="+c.wantState+" ") {
-					t.Errorf("want state %q\n%s", c.wantState, out)
+				if !strings.Contains(out, "PREFLIGHT_STATE="+c.wantState+" REASON="+c.wantReas+`"`) {
+					t.Errorf("want state %q reason %q\n%s", c.wantState, c.wantReas, out)
+				}
+			}
+			// A failure names its reason through the hint text; exactly the hint of
+			// the expected reason must be there.
+			hints := map[string]string{
+				"not_covered_by_pin":   "only pins the active pool members",
+				"no_pending_pin":       "no pending /etc/hosts server-pool pin",
+				"unresolved_after_pin": "the resolver and /etc/nsswitch.conf hosts: are the cause",
+			}
+			if !c.wantOK {
+				for reason, hint := range hints {
+					if has := strings.Contains(out, hint); has != (reason == c.wantReas) {
+						t.Errorf("reason %s: hint %q present = %v, expected reason is %q\n%s", reason, hint, has, c.wantReas, out)
+					}
 				}
 			}
 			for _, s := range c.mustHave {
 				if !strings.Contains(out, s) {
 					t.Errorf("output lacks %q\n%s", s, out)
+				}
+			}
+			for _, s := range c.mustNot {
+				if strings.Contains(out, s) {
+					t.Errorf("output must not contain %q\n%s", s, out)
 				}
 			}
 			if strings.Contains(out, "hidden due to the fact that") || strings.Contains(out, `"censored"`) {
@@ -496,15 +568,16 @@ func TestRegression_KinitResultClassification(t *testing.T) {
 	resultAbs, _ := filepath.Abs(kinitResultPath)
 
 	type tcase struct {
-		Name       string   `json:"name"`
-		RC         string   `json:"rc"`
-		Stderr     string   `json:"stderr"`
-		Unresolved []string `json:"unresolved"`
-		WantClass  string   `json:"-"`
+		Name      string   `json:"name"`
+		RC        string   `json:"rc"`
+		Stderr    string   `json:"stderr"`
+		Required  []string `json:"required"`
+		Optional  []string `json:"optional"`
+		WantClass string   `json:"-"`
 	}
 	var cases []tcase
 	for _, fx := range loadKinitFixtures(t) {
-		cases = append(cases, tcase{Name: fx.name, RC: fx.rc, Stderr: fx.stderr, WantClass: fx.class, Unresolved: []string{}})
+		cases = append(cases, tcase{Name: fx.name, RC: fx.rc, Stderr: fx.stderr, WantClass: fx.class, Required: []string{}, Optional: []string{}})
 	}
 	// The same stderr means two different things; only the preflight tells
 	// them apart.
@@ -513,12 +586,15 @@ func TestRegression_KinitResultClassification(t *testing.T) {
 		byName[fx.name] = fx
 	}
 	cases = append(cases,
-		tcase{Name: "kdc-name-unresolvable+preflight-unresolved", RC: "1", Stderr: byName["kdc-name-unresolvable"].stderr, Unresolved: []string{"ipa1.pilot168.invalid"}, WantClass: "cannot_resolve"},
-		tcase{Name: "kdc-port-closed+preflight-ok", RC: "1", Stderr: byName["kdc-port-closed"].stderr, Unresolved: []string{}, WantClass: "cannot_contact_kdc"},
+		tcase{Name: "kdc-name-unresolvable+preflight-unresolved", RC: "1", Stderr: byName["kdc-name-unresolvable"].stderr, Required: []string{"ipa1.pilot168.invalid"}, Optional: []string{}, WantClass: "cannot_resolve"},
+		// A stale name that kinit does not need (another KDC resolves) is only
+		// "unresolved", not "required": a closed KDC port stays cannot_contact_kdc.
+		tcase{Name: "kdc-port-closed+optional-unresolved-name", RC: "1", Stderr: byName["kdc-port-closed"].stderr, Required: []string{}, Optional: []string{"retired.pilot168.invalid"}, WantClass: "cannot_contact_kdc"},
+		tcase{Name: "kdc-port-closed+preflight-ok", RC: "1", Stderr: byName["kdc-port-closed"].stderr, Required: []string{}, Optional: []string{}, WantClass: "cannot_contact_kdc"},
 		// Wrong password and a dead KDC must not be confused in either direction.
-		tcase{Name: "wrong-password+preflight-unresolved", RC: "1", Stderr: byName["wrong-password"].stderr, Unresolved: []string{"ipa1.pilot168.invalid"}, WantClass: "preauth_failed"},
-		tcase{Name: "success", RC: "0", Stderr: "", Unresolved: []string{}, WantClass: "ok"},
-		tcase{Name: "binary-missing", RC: "2", Stderr: "[Errno 2] No such file or directory: b'kinit'", Unresolved: []string{}, WantClass: "other"},
+		tcase{Name: "wrong-password+preflight-unresolved", RC: "1", Stderr: byName["wrong-password"].stderr, Required: []string{"ipa1.pilot168.invalid"}, Optional: []string{}, WantClass: "preauth_failed"},
+		tcase{Name: "success", RC: "0", Stderr: "", Required: []string{}, Optional: []string{}, WantClass: "ok"},
+		tcase{Name: "binary-missing", RC: "2", Stderr: "[Errno 2] No such file or directory: b'kinit'", Required: []string{}, Optional: []string{}, WantClass: "other"},
 	)
 
 	dir := t.TempDir()
@@ -529,7 +605,8 @@ func TestRegression_KinitResultClassification(t *testing.T) {
       vars:
         freeipa_client_kinit_rc: "{{ case.rc }}"
         freeipa_client_kinit_stderr: "{{ case.stderr }}"
-        freeipa_client_kdc_preflight_unresolved: "{{ case.unresolved }}"
+        freeipa_client_kdc_preflight_required_unresolved: "{{ case.required }}"
+        freeipa_client_kdc_preflight_unresolved: "{{ (case.required + case.optional) | unique | list }}"
     - ansible.builtin.debug:
         msg: "RESULT {{ case.name }} class={{ freeipa_client_kinit_class }} PASSED"
   rescue:
@@ -701,7 +778,7 @@ func TestRegression_KDCPreflightWiring(t *testing.T) {
 		if facts == nil {
 			t.Fatalf("the first task must be a set_fact that resets this file's state, got %v", first["name"])
 		}
-		for _, f := range []string{"state", "unresolved", "required_unresolved", "resolvers", "reason", "summary"} {
+		for _, f := range []string{"state", "unresolved", "required_unresolved", "resolvers", "reason", "summary", "kdc_unusable", "admin_unresolved", "kdc_names", "unparsable"} {
 			if _, ok := facts["freeipa_client_kdc_preflight_"+f]; !ok {
 				t.Errorf("the reset task does not reset freeipa_client_kdc_preflight_%s", f)
 			}

@@ -1,0 +1,304 @@
+{
+ "captured_with": "Kerberos 5 release 1.22.2",
+ "method": "profile_get_values(realms, T.TEST, kdc) via ctypes on libkrb5.so.3, and the first \"Resolving hostname\" line of kinit KRB5_TRACE (kinit -c MEMORY:x u@T.TEST, dns_lookup_kdc=false)",
+ "not_verified_on": "EL9 krb5 1.21.1 and Ubuntu 24.04 krb5 1.20.1 were not run; the live cross-check test re-captures with whatever kinit is on PATH",
+ "rows": [
+  {
+   "name": "plain host:port",
+   "raw": "h1.pilot168.invalid:88",
+   "decoded": [
+    "h1.pilot168.invalid:88"
+   ],
+   "first_host": "h1.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "plain host only",
+   "raw": "h1.pilot168.invalid",
+   "decoded": [
+    "h1.pilot168.invalid"
+   ],
+   "first_host": "h1.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "quoted host:port",
+   "raw": "\"h2.pilot168.invalid:88\"",
+   "decoded": [
+    "h2.pilot168.invalid:88"
+   ],
+   "first_host": "h2.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "quoted host, port outside quotes",
+   "raw": "\"h3.pilot168.invalid\":88",
+   "decoded": [
+    "h3.pilot168.invalid"
+   ],
+   "first_host": "h3.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "mixed case",
+   "raw": "H4.Pilot168.Invalid",
+   "decoded": [
+    "H4.Pilot168.Invalid"
+   ],
+   "first_host": "H4.Pilot168.Invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "trailing dot",
+   "raw": "h5.pilot168.invalid.",
+   "decoded": [
+    "h5.pilot168.invalid."
+   ],
+   "first_host": "h5.pilot168.invalid.",
+   "kinit_error": ""
+  },
+  {
+   "name": "inline # comment",
+   "raw": "h6.pilot168.invalid # not a comment at the profile layer",
+   "decoded": [
+    "h6.pilot168.invalid # not a comment at the profile layer"
+   ],
+   "first_host": "h6.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "inline ; comment",
+   "raw": "h7.pilot168.invalid ; not a comment either",
+   "decoded": [
+    "h7.pilot168.invalid ; not a comment either"
+   ],
+   "first_host": "h7.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "two names space separated",
+   "raw": "h8.pilot168.invalid h9.pilot168.invalid",
+   "decoded": [
+    "h8.pilot168.invalid h9.pilot168.invalid"
+   ],
+   "first_host": "h8.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "quoted two names",
+   "raw": "\"h10.pilot168.invalid h11.pilot168.invalid\"",
+   "decoded": [
+    "h10.pilot168.invalid h11.pilot168.invalid"
+   ],
+   "first_host": "h10.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "escaped backslash-t inside quotes",
+   "raw": "\"h12\\tx.pilot168.invalid\"",
+   "decoded": [
+    "h12\tx.pilot168.invalid"
+   ],
+   "first_host": "h12",
+   "kinit_error": ""
+  },
+  {
+   "name": "trailing tab",
+   "raw": "h13.pilot168.invalid\t",
+   "decoded": [
+    "h13.pilot168.invalid"
+   ],
+   "first_host": "h13.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "unterminated quote",
+   "raw": "\"h14.pilot168.invalid:88",
+   "decoded": [
+    "h14.pilot168.invalid:88"
+   ],
+   "first_host": "h14.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "junk after closing quote",
+   "raw": "\"h15.pilot168.invalid\" junk",
+   "decoded": [
+    "h15.pilot168.invalid"
+   ],
+   "first_host": "h15.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "KKDCP https with path",
+   "raw": "https://h16.pilot168.invalid/KdcProxy",
+   "decoded": [
+    "https://h16.pilot168.invalid/KdcProxy"
+   ],
+   "first_host": "h16.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "KKDCP https with port and path",
+   "raw": "https://h17.pilot168.invalid:8443/KdcProxy",
+   "decoded": [
+    "https://h17.pilot168.invalid:8443/KdcProxy"
+   ],
+   "first_host": "h17.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "bracketed IPv6 with port",
+   "raw": "[::1]:88",
+   "decoded": [
+    "[::1]:88"
+   ],
+   "first_host": "::1",
+   "kinit_error": ""
+  },
+  {
+   "name": "bracketed IPv6 plain",
+   "raw": "[::1]",
+   "decoded": [
+    "[::1]"
+   ],
+   "first_host": "::1",
+   "kinit_error": ""
+  },
+  {
+   "name": "quoted bracketed IPv6 with port",
+   "raw": "\"[::1]:88\"",
+   "decoded": [
+    "[::1]:88"
+   ],
+   "first_host": "::1",
+   "kinit_error": ""
+  },
+  {
+   "name": "tcp/ prefix is looked up literally",
+   "raw": "tcp/h18.pilot168.invalid",
+   "decoded": [
+    "tcp/h18.pilot168.invalid"
+   ],
+   "first_host": "tcp/h18.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "multiple colons without brackets",
+   "raw": "h19.pilot168.invalid:88:99",
+   "decoded": [
+    "h19.pilot168.invalid:88:99"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "bare IPv6 without brackets",
+   "raw": "2001:db8::10",
+   "decoded": [
+    "2001:db8::10"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "non-numeric port",
+   "raw": "h20.pilot168.invalid:abc",
+   "decoded": [
+    "h20.pilot168.invalid:abc"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "plain http URL is not KKDCP",
+   "raw": "http://h21.pilot168.invalid/KdcProxy",
+   "decoded": [
+    "http://h21.pilot168.invalid/KdcProxy"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "empty port",
+   "raw": "h22.pilot168.invalid:",
+   "decoded": [
+    "h22.pilot168.invalid:"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "port out of range",
+   "raw": "h23.pilot168.invalid:99999",
+   "decoded": [
+    "h23.pilot168.invalid:99999"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "port zero",
+   "raw": "h24.pilot168.invalid:0",
+   "decoded": [
+    "h24.pilot168.invalid:0"
+   ],
+   "first_host": "h24.pilot168.invalid",
+   "kinit_error": ""
+  },
+  {
+   "name": "empty host",
+   "raw": ":88",
+   "decoded": [
+    ":88"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "unterminated bracket",
+   "raw": "[::1",
+   "decoded": [
+    "[::1"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "https with non-numeric port",
+   "raw": "https://h25.pilot168.invalid:abc/KdcProxy",
+   "decoded": [
+    "https://h25.pilot168.invalid:abc/KdcProxy"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "https with bracketed IPv6 and port",
+   "raw": "https://[::1]:8443/KdcProxy",
+   "decoded": [
+    "https://[::1]:8443/KdcProxy"
+   ],
+   "first_host": "::1",
+   "kinit_error": ""
+  },
+  {
+   "name": "https with empty authority",
+   "raw": "https://",
+   "decoded": [
+    "https://"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  },
+  {
+   "name": "upper-case scheme is not KKDCP",
+   "raw": "HTTPS://h26.pilot168.invalid/KdcProxy",
+   "decoded": [
+    "HTTPS://h26.pilot168.invalid/KdcProxy"
+   ],
+   "first_host": "",
+   "kinit_error": "Invalid argument"
+  }
+ ]
+}
