@@ -33,6 +33,15 @@ import (
 // DriftProbePlaybook is the read-only check playbook DriftProbe invokes.
 const DriftProbePlaybook = "playbooks/check/freeipa-access-drift-probe.yml"
 
+// DefaultDriftTargetGroup is the inventory group DriftProbe targets when the
+// operator gives no TargetGroup. It equals the probe playbook's own
+// `hosts: "{{ target_group | default('freeipa-server') }}"` default
+// (TestDriftTargetGroupDefaultMatchesPlaybook locks the two together). Pilot
+// passes it explicitly instead of relying on the playbook default: the vault
+// vars file is a whole `-e @file`, and a target_group key in it (valid for
+// other playbooks) would otherwise decide which hosts the probe contacts.
+const DefaultDriftTargetGroup = "freeipa-server"
+
 // pilotGrantHBACPrefix/pilotGrantSudoPrefix identify Pilot's own compiled-
 // rule namespace (internal/inventory's CompiledLoginRuleName/
 // CompiledSudoRuleName) — the only live rules an orphan check may ever
@@ -94,8 +103,9 @@ type DriftProbeOptions struct {
 	// first, roster fallback. Empty passes nothing and the probe falls back
 	// to the roster's freeipa.admin.password alone.
 	VarsFile string
-	// TargetGroup overrides the probe playbook's default host-targeting
-	// group ("freeipa-server").
+	// TargetGroup overrides the host-targeting group; empty means
+	// DefaultDriftTargetGroup ("freeipa-server"), always passed to the probe
+	// so a vault vars file cannot decide it.
 	TargetGroup string
 
 	// HBACNames/SudoNames/Users/Hosts/PasswordPolicyGroups are the
@@ -186,6 +196,10 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 		"pilot_drift_hosts":                  emptyOr(opts.Hosts),
 		"pilot_drift_password_policy_groups": emptyOr(opts.PasswordPolicyGroups),
 	}
+	// Always emitted, never left to the playbook default: the vault vars file
+	// precedes this file, but a key this file does not set is not overridden,
+	// so an omitted target_group would be the vault's value.
+	extraVars["target_group"] = DefaultDriftTargetGroup
 	if opts.TargetGroup != "" {
 		extraVars["target_group"] = opts.TargetGroup
 	}

@@ -121,3 +121,97 @@ func TestIdentitySecretDriftCommandsShowTheGateAndHideTheVault(t *testing.T) {
 		})
 	}
 }
+
+// TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup drives the three real
+// cobra commands with REAL ansible-playbook on a server + client inventory
+// whose auto-detected .vault/main.yaml carries target_group (issue #179
+// review). Default freeipa-server scope survives conflicting auto-loaded
+// target_group: all: client1 refuses every connection, so any run that
+// targets it shows a connection error. The explicit-flag cases prove
+// --target-group is still honoured, and the unreachable-group case proves the
+// probe really contacts the group it targets.
+func TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup(t *testing.T) {
+	for _, tool := range []string{"ansible-playbook", "ssh"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+				t.Fatalf("required %s not installed: %v", tool, err)
+			}
+			t.Skipf("%s not installed: %v", tool, err)
+		}
+	}
+	t.Chdir(repoRootForTest(t))
+
+	dead := "          ansible_connection: ssh\n          ansible_host: 127.0.0.1\n          ansible_port: 1\n" +
+		"          ansible_ssh_common_args: \"-o ConnectTimeout=3 -o BatchMode=yes\"\n"
+	live := "          ansible_connection: local\n"
+	serverAndClient := "all:\n  children:\n    freeipa-server:\n      hosts:\n        ipa1:\n" + live +
+		"    ipa-alt:\n      hosts:\n        ipa2:\n" + live + "    clients:\n      hosts:\n        client1:\n" + dead
+	deadServer := "all:\n  children:\n    freeipa-server:\n      hosts:\n        client1:\n" + dead +
+		"    ipa-alt:\n      hosts:\n        ipa2:\n" + live
+
+	commands := []struct {
+		name string
+		args func(ws driftWorkspace, extra ...string) []string
+	}{
+		{"access drift", func(ws driftWorkspace, extra ...string) []string {
+			return append([]string{"access", "drift", ws.roster, "-i", ws.inventory}, extra...)
+		}},
+		{"identity drift", func(ws driftWorkspace, extra ...string) []string {
+			return append([]string{"identity", "drift", ws.roster, "-i", ws.inventory}, extra...)
+		}},
+		{"access health", func(ws driftWorkspace, extra ...string) []string {
+			return append([]string{"access", "health", ws.roster, "-i", ws.inventory}, extra...)
+		}},
+	}
+	const pw = "ipa_admin_password: Vault-Passing-Pw-31\n"
+	cases := []struct {
+		name, inventory, vault string
+		flags                  []string
+		reachesClient          bool // the run must fail on the unreachable client1
+	}{
+		{name: "omitted flag, vault target_group: all", inventory: serverAndClient, vault: pw + "target_group: all\n"},
+		{name: "omitted flag, vault target_group: clients", inventory: serverAndClient, vault: pw + "target_group: clients\n"},
+		{name: "explicit freeipa-server, vault target_group: all", inventory: serverAndClient, vault: pw + "target_group: all\n", flags: []string{"--target-group", "freeipa-server"}},
+		{name: "explicit alternate group wins over the vault", inventory: deadServer, vault: pw + "target_group: all\n", flags: []string{"--target-group", "ipa-alt"}},
+		// Should trigger.
+		{name: "explicit unreachable group fails", inventory: serverAndClient, vault: pw, flags: []string{"--target-group", "clients"}, reachesClient: true},
+		{name: "omitted flag targets freeipa-server, not the vault's group", inventory: deadServer, vault: pw + "target_group: ipa-alt\n", reachesClient: true},
+	}
+
+	for _, c := range commands {
+		for _, tc := range cases {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				bin := t.TempDir()
+				for name, body := range map[string]string{"kinit": "cat >/dev/null\n", "ipa": "exit 0\n"} {
+					if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				ws := newDriftWorkspace(t, tc.vault)
+				rosterNoPassword := strings.Replace(accessCLIFixtureRoster, "{principal: admin, password: x}", "{principal: admin}", 1)
+				for path, body := range map[string]string{ws.inventory: tc.inventory, ws.roster: rosterNoPassword} {
+					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				resetDriftCmdState(t)
+				out, err := runDriftCmd(t, c.args(ws, tc.flags...)...)
+				if err != nil {
+					out += "\nERROR: " + err.Error()
+				}
+				if tc.reachesClient {
+					if !strings.Contains(out, "client1") {
+						t.Fatalf("the run should have failed on the unreachable client1:\n%s", out)
+					}
+					return
+				}
+				for _, bad := range []string{"client1", "drift-probe playbook", "unreachable", "UNREACHABLE", "status: unknown", "\"unknown\""} {
+					if strings.Contains(out, bad) {
+						t.Fatalf("the probe reached the wrong group (%q in output):\n%s", bad, out)
+					}
+				}
+			})
+		}
+	}
+}

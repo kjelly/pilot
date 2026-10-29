@@ -37,7 +37,11 @@
 #   pilot_drift_password_policy_groups
 #                          -- list of group names to read live `ipa
 #                              pwpolicy-show --raw` state for (v3.2 §7/§12)
-#   target_group           -- optional, default freeipa-server
+#   target_group           -- pilot always passes it (--target-group, else
+#                              freeipa-server) so a target_group key in the
+#                              vault vars file cannot retarget the probe; the
+#                              playbook default freeipa-server only applies
+#                              when the playbook is run directly
 #
 # Output contract (schema_version 1):
 #   {"schema_version": 1,
