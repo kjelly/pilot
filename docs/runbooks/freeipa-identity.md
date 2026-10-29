@@ -280,13 +280,23 @@ admin 密碼存在兩個地方，兩份必須相同：
   `skipping unreadable <路徑>: permission denied (pass --vars-file ...)`，改用名冊的密碼（跟這個功能出現之前相同，
   `access health` 也照常回報）。vars 檔是整份載入的（跟 apply 一樣），所以裡面的 `freeipa_domain`/`freeipa_realm`
   也會決定 probe 登入的 realm，`identity_admin_password`、`ipa_realm` 這類 key 同樣會蓋掉 probe 自己算出的值
-  （跟 apply 相同）；ansible 自己的錯誤訊息也可能引用 vault 裡非密碼的值。
+  （跟 apply 相同）；ansible 自己的錯誤訊息可能把 vault 裡任何 key 展開後的值（包括密碼）寫進去，
+  例如 vault 裡誤寫 `ansible_connection: "{{ ipa_admin_password }}"`，ansible 會回報
+  `the connection plugin '<密碼>' was not found`，所以 pilot 完全不轉貼 ansible 的訊息文字（見下）。
   probe 固定以 `ANSIBLE_STDOUT_CALLBACK=default`、`ANSIBLE_CALLBACK_RESULT_FORMAT=json`、`ANSIBLE_NOCOLOR=1`、
   `ANSIBLE_FORCE_COLOR=0` 執行（環境變數優先於 ansible.cfg），不受操作者環境裡其他 callback 或顏色設定影響。
-  probe 失敗時的訊息只取 ansible 的失敗訊息（失敗 task 的 `msg`、`[ERROR]` 的第一行），不轉貼 ansible 的原始輸出：
-  vars 檔不是合法 YAML 時 ansible 會印出出錯的那一行，內容可能含密碼，所以這種錯誤只回報「ansible 無法解析
-  <檔案:行:欄>，請確認是合法 YAML」。`pilot identity drift`、`pilot access drift` 的錯誤與 `pilot access health`
-  的 `probe_error` 都用這個訊息。
+  probe 失敗時的訊息完全由 pilot 自己的固定文字組成，不轉貼任何 ansible 的訊息文字（`msg`、`[ERROR]` 的行、原始輸出）：
+  pilot 不讀 vault，無法知道哪些字串是密碼，而 ansible 會把任何 vault key 展開進任何訊息，密碼 key 的樣式過濾擋不住
+  句子裡的值。可能出現的只有：(1) probe playbook 自己的固定 gate 訊息（缺少 `ipa_admin_password`／名冊密碼時同時指名兩個來源，
+  以及名冊 gate），輸出的是 pilot 自己那一份文字；(2) 少數固定的失敗類別，由 ansible 的穩定用語辨識、輸出 pilot 自己的措辭
+  （`Connection refused`、`Connection timed out`、`Could not resolve hostname`、`Permission denied`、`Host key verification failed`、
+  `ansible_connection` 指到不存在的 connection plugin、`ansible_python_interpreter` 指到不存在的 interpreter、
+  加密檔需要 `--vault-password-file`／解密失敗、指令回傳非 0、樣板無法展開，值一律不顯示）；(3) vars 檔不是合法 YAML 時，
+  ansible 會印出出錯的那一行，所以只回報「ansible 無法解析 <檔案:行:欄>，請確認是合法 YAML」；(4) `no_log` 的結果標示為被遮蔽；
+  (5) 其他一切都是固定句「details withheld: ansible messages can echo values expanded from the vault vars file」。
+  失敗的 task 名稱只在它是 probe 自己的 task 時才會顯示。要看被隱藏的細節請直接以 `ansible-playbook` 跑
+  `playbooks/check/freeipa-access-drift-probe.yml`（輸出可能含 vault 的值，勿貼到工單）。`pilot identity drift`、
+  `pilot access drift` 的錯誤與 `pilot access health` 的 `probe_error` 都用這個訊息。
   實跑摘要（vm-target 上的 FreeIPA，candidate `46dce32f`）：[docs/evidence/freeipa-identity/2026-10-29-46dce32.md](../evidence/freeipa-identity/2026-10-29-46dce32.md)。
 - 名冊的 `freeipa.admin.password`：`pilot roster remove-*`、`pilot access` 的其他子指令、drift probe 以外的檢查
   playbook（例如 capability probe、ever-applied 檢查）與 `--repair-managed` 的修復步驟（reconcile）只載入名冊，

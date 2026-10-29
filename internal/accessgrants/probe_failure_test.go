@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // readCapture loads a REAL ansible-playbook capture of the drift probe from
@@ -103,6 +105,27 @@ func TestSummarizeAnsibleFailure_RealCaptures(t *testing.T) {
 			want:    []string{"ipa1 is unreachable", "Connection refused"},
 			notWant: []string{"Origin:", "^ column"},
 		},
+		{
+			// ansible_connection: "{{ ipa_admin_password }}" in the vault: ansible
+			// puts the expanded password in the message and in the [ERROR] line.
+			name:    "vault_connection_template",
+			want:    []string{"ansible_connection names a connection plugin ansible does not have", "the value is withheld", "(task: Gate: drift probe input is complete)"},
+			notWant: []string{sentinel, "Origin:", "connection plugin '"},
+		},
+		{
+			// ansible_python_interpreter: "/nonexistent/{{ ipa_admin_password }}":
+			// the msg, module_stderr and the [ERROR] chain all carry the value.
+			name:    "vault_interpreter_template",
+			want:    []string{"ansible_python_interpreter points at an interpreter that does not exist", "the value is withheld"},
+			notWant: []string{sentinel, "/nonexistent", "module_stderr", "not found"},
+		},
+		{
+			// ansible_host: "{{ ipa_admin_password }}" over ssh: the UNREACHABLE
+			// msg carries the (lower-cased) value as the host name.
+			name:    "vault_ssh_host_template",
+			want:    []string{"ipa1 is unreachable", "Could not resolve hostname (check ansible_host)"},
+			notWant: []string{sentinel, "sup3rs3cretpw", "Name or service not known"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr := readCapture(t, tc.name)
@@ -120,6 +143,9 @@ func TestSummarizeAnsibleFailure_RealCaptures(t *testing.T) {
 					t.Errorf("summary %q must not contain %q", got, w)
 				}
 			}
+			if strings.Contains(strings.ToLower(got), strings.ToLower(sentinel)) {
+				t.Errorf("summary %q carries the vault sentinel", got)
+			}
 			if strings.ContainsAny(got, "\n\r") {
 				t.Errorf("summary spans several lines: %q", got)
 			}
@@ -129,6 +155,14 @@ func TestSummarizeAnsibleFailure_RealCaptures(t *testing.T) {
 	// The should-trigger for the leak: the real capture of a malformed vault
 	// really does carry the secret, so the absence above is the extraction's
 	// doing and not an empty fixture.
+	t.Run("the expanded-template captures really contain the secret", func(t *testing.T) {
+		for _, name := range []string{"vault_connection_template", "vault_interpreter_template", "vault_ssh_host_template"} {
+			stdout, stderr := readCapture(t, name)
+			if !strings.Contains(strings.ToLower(stdout+stderr), strings.ToLower(sentinel)) {
+				t.Errorf("the %s capture no longer carries the expanded vault value; it can no longer prove the leak", name)
+			}
+		}
+	})
 	t.Run("the malformed-vault capture really contains the secret", func(t *testing.T) {
 		_, stderr := readCapture(t, "vault_bad_yaml")
 		if !strings.Contains(stderr, sentinel) {
@@ -220,11 +254,260 @@ func TestSummarizeAnsibleFailure_StripsAnsiEscapes(t *testing.T) {
 	if got := ansiRE.ReplaceAllString(esc+"[0;31mred"+esc+"[0m "+esc+"[1;35mbold"+esc+"[0m plain "+esc+"[2K", ""); got != "red bold plain " {
 		t.Fatalf("ansiRE left %q", got)
 	}
-	stdout := esc + "[0;31m[ERROR]: Task failed: Action failed: the gate said no (see .vault/main.yaml)" + esc + "[0m\n" +
-		esc + "[0;31mfatal: [h1]: FAILED! => {\"msg\": \"gate says no\"}" + esc + "[0m\n" +
+	stdout := esc + "[0;31m[ERROR]: Task failed: Action failed: Connection refused (see .vault/main.yaml)" + esc + "[0m\n" +
+		esc + "[0;31mfatal: [h1]: FAILED! => {\"msg\": \"Connection refused\"}" + esc + "[0m\n" +
 		"h1 : ok=1    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0\n"
 	got := summarizeAnsibleFailure(stdout, "", "")
-	if !strings.Contains(got, "gate says no") || strings.Contains(got, esc) || strings.Contains(got, "[0;31m") {
+	if !strings.Contains(got, "Connection refused") || strings.Contains(got, esc) || strings.Contains(got, "[0;31m") {
 		t.Fatalf("summary = %q", got)
+	}
+}
+
+// leakySentinel stands for a vault value that ansible expanded into a message.
+const leakySentinel = "Sup3rS3cretPw"
+
+// TestSummarizeAnsibleFailure_NeverCopiesAnsibleMessageText is the issue #179
+// review finding: ansible's own message text is never returned, because any
+// vault key can be expanded into it. Each case puts the sentinel inside prose
+// that no password-key pattern can mask, through every path that used to copy
+// text: a FAILED msg, an UNREACHABLE msg, the [ERROR] first line, an unknown
+// task name. Each has a should-trigger twin: text that IS ours still appears.
+func TestSummarizeAnsibleFailure_NeverCopiesAnsibleMessageText(t *testing.T) {
+	failed := func(task, msg string) string {
+		return "TASK [" + task + "] ****\nfatal: [h1]: FAILED! => {\"changed\": false, \"msg\": \"" + msg + "\"}\n" +
+			"\nPLAY RECAP ****\nh1 : ok=1    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0\n"
+	}
+	unreachable := func(msg string) string {
+		return "TASK [Kinit admin for read-only drift probe] ****\nfatal: [h1]: UNREACHABLE! => {\"changed\": false, \"msg\": \"" + msg + "\", \"unreachable\": true}\n" +
+			"\nPLAY RECAP ****\nh1 : ok=1    changed=0    unreachable=1    failed=0    skipped=0    rescued=0    ignored=0\n"
+	}
+	for _, tc := range []struct {
+		name, stdout, stderr string
+		want                 []string // must appear (our text)
+		notWant              []string // must not appear (ansible's text)
+	}{
+		{
+			name:    "unknown FAILED msg is withheld",
+			stdout:  failed("Kinit admin for read-only drift probe", "Something odd happened with "+leakySentinel+" in it"),
+			want:    []string{"details withheld", "vault vars file", "(task: Kinit admin for read-only drift probe)"},
+			notWant: []string{"odd", "happened"},
+		},
+		{
+			name:    "a known class never reuses the surrounding text",
+			stdout:  failed("Gate: drift probe input is complete", "Task failed: the connection plugin '"+leakySentinel+"' was not found"),
+			want:    []string{"ansible_connection names a connection plugin ansible does not have"},
+			notWant: []string{"Task failed", "'"},
+		},
+		{
+			name:    "a gate message with a secret glued on is replaced by ours",
+			stdout:  failed("Gate: a FreeIPA admin password is available (vault or roster)", "No usable FreeIPA admin password for the drift probe. "+leakySentinel+" Both are missing or too short."),
+			want:    []string{"Set ipa_admin_password (at least 8 characters) in the vault vars file", "Both are missing or too short."},
+			notWant: []string{" " + leakySentinel + " "},
+		},
+		{
+			name:    "unknown UNREACHABLE msg is withheld",
+			stdout:  unreachable("Task failed: Failed to connect to the host via ssh: user " + leakySentinel + " is odd"),
+			want:    []string{"h1 is unreachable: details withheld"},
+			notWant: []string{"user ", "odd"},
+		},
+		{
+			name:    "a task name that is not the probe's own is dropped",
+			stdout:  failed("Run as "+leakySentinel, "Something odd"),
+			want:    []string{"details withheld"},
+			notWant: []string{"task:", "Run as"},
+		},
+		{
+			name:    "[ERROR] first line of an unknown error is withheld",
+			stderr:  "[ERROR]: Some new ansible failure mentioning " + leakySentinel + " here\nOrigin: /w/x.yml:1:1\n",
+			want:    []string{"details withheld"},
+			notWant: []string{"new ansible failure", "here"},
+		},
+		{
+			name:    "[ERROR] first line of a known class is replaced by ours",
+			stderr:  "[ERROR]: Task failed: the connection plugin '" + leakySentinel + "' was not found\n",
+			want:    []string{"ansible_connection names a connection plugin ansible does not have"},
+			notWant: []string{"Task failed"},
+		},
+		{
+			name:    "no_log censored output is reported as hidden",
+			stdout:  "TASK [Kinit admin for read-only drift probe] ****\nfatal: [h1]: FAILED! => {\"censored\": \"the output has been hidden\", \"changed\": false}\n",
+			want:    []string{"Kinit admin for read-only drift probe", "hidden by no_log"},
+			notWant: []string{"the output has been hidden"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeAnsibleFailure(tc.stdout, tc.stderr, "")
+			if got == "" {
+				t.Fatal("nothing extracted")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("summary %q does not contain %q", got, w)
+				}
+			}
+			for _, w := range append(tc.notWant, leakySentinel) {
+				if strings.Contains(got, w) {
+					t.Errorf("summary %q must not contain %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+// TestClassifyMessage: the allowlisted gate messages and the failure classes
+// return OUR text, and everything else is the withheld sentence.
+func TestClassifyMessage(t *testing.T) {
+	for _, k := range knownProbeMessages {
+		if got := classifyMessage("Task failed: Action failed: " + k.marker + " " + leakySentinel); got != k.text {
+			t.Errorf("gate %q -> %q, want our copy %q", k.marker, got, k.text)
+		}
+	}
+	for _, c := range failureClasses {
+		if c.text == "" || c.text == withheldText {
+			t.Errorf("class %v has no text of its own", c.re)
+		}
+	}
+	for _, in := range []string{
+		"", "boom", "Something " + leakySentinel, "Module failed: " + leakySentinel,
+		"Failed to connect to the host via ssh: user@" + leakySentinel,
+	} {
+		if got := classifyMessage(in); got != withheldText {
+			t.Errorf("classifyMessage(%q) = %q, want the withheld sentence", in, got)
+		}
+	}
+}
+
+// probePlaybookFiles are the files whose task names and fail_msg values the
+// allowlists must cover: the probe and the task files it includes.
+var probePlaybookFiles = []string{
+	"playbooks/check/freeipa-access-drift-probe.yml",
+	"playbooks/apply/tasks/freeipa-private-ccache-open.yml",
+	"playbooks/apply/tasks/freeipa-private-ccache-close.yml",
+}
+
+func loadProbeYAML(t *testing.T, rel string) yaml.Node {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("%s: %v", rel, err)
+	}
+	return doc
+}
+
+// TestProbeMessagesMatchThePlaybook: knownProbeMessages is exactly the set of
+// the probe playbook's static fail_msg values (both directions, so a new gate
+// without an entry fails here instead of being withheld in production, and a
+// stale entry fails instead of lingering). A fail_msg with a template could
+// carry a vault value, so each must be a literal.
+func TestProbeMessagesMatchThePlaybook(t *testing.T) {
+	var found []string
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if n.Content[i].Value == "fail_msg" {
+					found = append(found, strings.Join(strings.Fields(n.Content[i+1].Value), " "))
+				}
+			}
+		}
+		for _, c := range n.Content {
+			walk(c)
+		}
+	}
+	for _, f := range probePlaybookFiles {
+		doc := loadProbeYAML(t, f)
+		walk(&doc)
+	}
+	if len(found) == 0 {
+		t.Fatal("found no fail_msg in the probe playbook; the walker needs updating")
+	}
+	want := map[string]bool{}
+	for _, k := range knownProbeMessages {
+		want[k.text] = true
+	}
+	got := map[string]bool{}
+	for _, m := range found {
+		if strings.Contains(m, "{{") || strings.Contains(m, "{%") {
+			t.Errorf("fail_msg %q is templated; it could carry a vault value", m)
+		}
+		got[m] = true
+		if !want[m] {
+			t.Errorf("playbook fail_msg is not in knownProbeMessages: %q", m)
+		}
+	}
+	for m := range want {
+		if !got[m] {
+			t.Errorf("knownProbeMessages has a message the playbook does not: %q", m)
+		}
+	}
+	for _, k := range knownProbeMessages {
+		if !strings.Contains(k.text, k.marker) {
+			t.Errorf("marker %q is not part of its own text", k.marker)
+		}
+	}
+}
+
+// TestProbeTaskNamesCoverThePlaybook: every task name in the probe (and the
+// task files it includes) is in probeTaskNames and none has a template, so a
+// banner naming one is static. An unlisted name is dropped from the summary,
+// which is safe but loses the location.
+func TestProbeTaskNamesCoverThePlaybook(t *testing.T) {
+	var names []string
+	var tasks func(n *yaml.Node)
+	tasks = func(seq *yaml.Node) {
+		for _, task := range seq.Content {
+			if task.Kind != yaml.MappingNode {
+				continue
+			}
+			for i := 0; i+1 < len(task.Content); i += 2 {
+				switch task.Content[i].Value {
+				case "name":
+					names = append(names, task.Content[i+1].Value)
+				case "block", "rescue", "always":
+					tasks(task.Content[i+1])
+				}
+			}
+		}
+	}
+	for _, f := range probePlaybookFiles {
+		doc := loadProbeYAML(t, f)
+		root := doc.Content[0]
+		if root.Kind == yaml.SequenceNode {
+			for _, play := range root.Content {
+				for i := 0; i+1 < len(play.Content); i += 2 {
+					switch play.Content[i].Value {
+					case "name":
+						names = append(names, play.Content[i+1].Value)
+					case "pre_tasks", "tasks", "post_tasks":
+						tasks(play.Content[i+1])
+					}
+				}
+			}
+		}
+		if f != probePlaybookFiles[0] {
+			tasks(root)
+		}
+	}
+	if len(names) < 30 {
+		t.Fatalf("collected only %d task names; the walker needs updating", len(names))
+	}
+	listed := map[string]bool{}
+	for _, n := range names {
+		listed[n] = true
+		if strings.Contains(n, "{{") || strings.Contains(n, "{%") {
+			t.Errorf("task name %q is templated; it could carry a vault value", n)
+		}
+		if !probeTaskNames[n] {
+			t.Errorf("task name %q is missing from probeTaskNames", n)
+		}
+	}
+	for n := range probeTaskNames {
+		if !listed[n] {
+			t.Errorf("probeTaskNames has a name the playbook no longer has: %q", n)
+		}
 	}
 }

@@ -242,8 +242,9 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 		return LiveState{}, fmt.Errorf("accessgrants: drift-probe playbook did not run: %w", err)
 	}
 	if result.ExitCode != 0 {
-		// Never embed ansible's raw output: with a vault vars file in play
-		// it can quote the file (issue #179, see probe_failure.go).
+		// Never embed ansible's output or message text: with a vault vars
+		// file in play it can quote or expand the file (issue #179, see
+		// probe_failure.go); only pilot's own fixed wording is returned.
 		detail := summarizeAnsibleFailure(result.Stdout, result.Stderr, opts.VarsFile)
 		if detail == "" {
 			detail = "no recognisable failure message in ansible's output; run the probe playbook directly for detail"

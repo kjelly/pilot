@@ -14,6 +14,9 @@ password, fake kinit/ipa on PATH, and:
   gate_missing_minimal          the gate_missing vault under ANSIBLE_STDOUT_CALLBACK=minimal
   gate_missing_force_color      the gate_missing vault under ANSIBLE_FORCE_COLOR=1 (escape codes kept)
   vault_not_mapping             a vault vars file that is a YAML list, not a mapping
+  vault_connection_template     ansible_connection: "{{ ipa_admin_password }}" (leaks the value into ansible's message)
+  vault_interpreter_template    ansible_python_interpreter: "/nonexistent/{{ ipa_admin_password }}" (same, in msg, module_stderr and [ERROR])
+  vault_ssh_host_template       ansible_host: "{{ ipa_admin_password }}" over ssh (ansible lower-cases the value into the host name)
 
 Only the machine's paths were rewritten (to /work, /repo, /scratch, /home/user).
 Sup3rS3cretPw is a made-up sentinel, not a credential.

@@ -215,3 +215,105 @@ func TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup(t *tes
 		}
 	}
 }
+
+// TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues drives the three
+// real cobra commands (access health with --format json too) with REAL
+// ansible-playbook and an auto-detected .vault/main.yaml whose keys are
+// templates over ipa_admin_password (issue #179 review): ansible puts the
+// expanded password into its failure message, so what the operator sees (stdout,
+// stderr, the returned error, probe_error) must carry our fixed diagnosis and
+// none of that value. Controls: a valid vault passes, and a missing password
+// still names both sources.
+func TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues(t *testing.T) {
+	for _, tool := range []string{"ansible-playbook", "ssh"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+				t.Fatalf("required %s not installed: %v", tool, err)
+			}
+			t.Skipf("%s not installed: %v", tool, err)
+		}
+	}
+	t.Chdir(repoRootForTest(t))
+
+	const sentinel = "Sup3rS3cretPw"
+	const pw = "ipa_admin_password: " + sentinel + "\n"
+	local := "all:\n  children:\n    freeipa-server:\n      hosts:\n        ipa1:\n          ansible_connection: local\n"
+	ssh := "all:\n  children:\n    freeipa-server:\n      hosts:\n        ipa1:\n          ansible_connection: ssh\n          ansible_port: 1\n          ansible_ssh_common_args: \"-o ConnectTimeout=3 -o BatchMode=yes\"\n"
+
+	cases := []struct {
+		name, inventory, vault string
+		wantFail               bool
+		want                   []string
+	}{
+		{"templated ansible_connection", local, pw + "ansible_connection: \"{{ ipa_admin_password }}\"\n", true,
+			[]string{"ansible_connection names a connection plugin ansible does not have", "the value is withheld"}},
+		{"templated ansible_python_interpreter", local, pw + "ansible_python_interpreter: \"/nonexistent/{{ ipa_admin_password }}\"\n", true,
+			[]string{"ansible_python_interpreter points at an interpreter that does not exist"}},
+		{"templated ansible_host over ssh", ssh, pw + "ansible_host: \"{{ ipa_admin_password }}\"\n", true,
+			[]string{"ipa1 is unreachable", "Could not resolve hostname (check ansible_host)"}},
+		{"control: valid ansible_connection", local, pw + "ansible_connection: local\n", false, nil},
+		{"control: no password names both sources", local, "unrelated: 1\n", true,
+			[]string{"No usable FreeIPA admin password", "ipa_admin_password", "freeipa.admin.password", "Both are missing or too short"}},
+	}
+	commands := []struct {
+		name  string
+		args  func(ws driftWorkspace) []string
+		isRun bool // true when a probe failure is the command's error
+	}{
+		{"access drift", func(ws driftWorkspace) []string { return []string{"access", "drift", ws.roster, "-i", ws.inventory} }, true},
+		{"identity drift", func(ws driftWorkspace) []string { return []string{"identity", "drift", ws.roster, "-i", ws.inventory} }, true},
+		{"access health", func(ws driftWorkspace) []string { return []string{"access", "health", ws.roster, "-i", ws.inventory} }, false},
+		{"access health --format json", func(ws driftWorkspace) []string {
+			return []string{"access", "health", ws.roster, "-i", ws.inventory, "--format", "json"}
+		}, false},
+	}
+	rosterNoPassword := strings.Replace(accessCLIFixtureRoster, "{principal: admin, password: x}", "{principal: admin}", 1)
+
+	for _, c := range commands {
+		for _, tc := range cases {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				bin := t.TempDir()
+				for name, body := range map[string]string{"kinit": "cat >/dev/null\n", "ipa": "exit 0\n"} {
+					if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				ws := newDriftWorkspace(t, tc.vault)
+				for path, body := range map[string]string{ws.inventory: tc.inventory, ws.roster: rosterNoPassword} {
+					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				resetDriftCmdState(t)
+				out, err := runDriftCmd(t, c.args(ws)...)
+				seen := out
+				if err != nil {
+					seen += "\nERROR: " + err.Error()
+				}
+				if strings.Contains(strings.ToLower(seen), strings.ToLower(sentinel)) {
+					t.Fatalf("the vault value reached what the operator sees (rc %v):\n%s", err != nil, seen)
+				}
+				if !tc.wantFail {
+					if strings.Contains(seen, "probe_error") || strings.Contains(seen, "unknown") || strings.Contains(seen, "drift-probe playbook") {
+						t.Fatalf("control failed:\n%s", seen)
+					}
+					return
+				}
+				// rc: drift commands return the probe failure; health reports
+				// it as status unknown with rc 0, as on main.
+				if c.isRun && err == nil {
+					t.Fatalf("%s should fail when the probe fails:\n%s", c.name, out)
+				}
+				if !c.isRun && err != nil {
+					t.Fatalf("%s must report a failed probe, not error: %v\n%s", c.name, err, out)
+				}
+				for _, w := range tc.want {
+					if !strings.Contains(seen, w) {
+						t.Errorf("output does not contain %q:\n%s", w, seen)
+					}
+				}
+			})
+		}
+	}
+}

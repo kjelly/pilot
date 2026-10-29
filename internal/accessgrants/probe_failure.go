@@ -12,17 +12,27 @@
 // ansible's `[WARNING]: Invalid characters were found in group names` noise
 // (pilot inventories use hyphenated groups such as freeipa-server).
 //
-// So only these are ever extracted, never a pass-through:
-//   - the "msg" of a `fatal: [host]: FAILED!/UNREACHABLE! => {...}` payload (the
-//     gate's fixed message, a module's own message), with the failing task's
-//     name; a no_log result is reported as hidden;
-//   - without a fatal payload, the first line of each `[ERROR]:` block, except
-//     that a parse error is replaced by fixed text plus the Origin location,
-//     because a parser message can quote the file;
-//   - [WARNING] lines, numbered source snippets, caret lines and Origin blocks
-//     are never taken.
+// Go never reads the vault file, so it cannot know which strings in ansible's
+// output are secret, and ansible will expand any vault key into any message:
+// a vars file with `ansible_connection: "{{ ipa_admin_password }}"` makes
+// ansible fail with "the connection plugin '<the password>' was not found", and
+// the same happens with ansible_python_interpreter, ssh arguments, and so on. A
+// password-key regex cannot mask a value that sits inside prose. So ansible's
+// own message text is NEVER copied. Only text that is OURS is ever returned:
 //
-// The result then goes through redactSecretish as a last defence.
+//   - the probe playbook's own fixed gate messages (knownProbeMessages),
+//     recognised in ansible's output and replaced by our own copy of the text;
+//   - a small fixed vocabulary of failure classes (failureClasses: connection
+//     refused, no vault secrets, a missing connection plugin, ...), each
+//     recognised by a stable ansible phrase and replaced by our wording, never
+//     by the original text;
+//   - for a parse error, fixed text plus the `Origin:` file:line:column;
+//   - anything else becomes a fixed "details withheld" sentence.
+//
+// The failing task's name is printed only when it is one of the probe's own
+// task names (probeTaskNames); [WARNING] lines, numbered source snippets,
+// caret lines and Origin blocks are never taken. The result still goes through
+// redactSecretish as a last defence, and Health.ProbeError caps it.
 package accessgrants
 
 import (
@@ -69,6 +79,126 @@ var (
 // a source line.
 func redactSecretish(s string) string {
 	return secretLineRE.ReplaceAllString(s, "${1}[redacted]")
+}
+
+// knownProbeMessages are the probe playbook's own static `fail_msg` texts, in
+// the form ansible prints them (whitespace collapsed). Each marker identifies
+// one in ansible's output; the text returned is OUR copy, so nothing of
+// ansible's line (which could carry a prefix or suffix) is reused.
+// TestProbeMessagesMatchThePlaybook keeps this list equal to the playbook's
+// fail_msg values.
+var knownProbeMessages = []struct{ marker, text string }{
+	{
+		"No usable FreeIPA admin password",
+		"No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short.",
+	},
+	{
+		"freeipa_roster_file and pilot_drift_output are required",
+		"freeipa_roster_file and pilot_drift_output are required.",
+	},
+	{
+		"Canonical roster (schema_version) is required",
+		"Canonical roster (schema_version) is required for an authoritative drift probe.",
+	},
+}
+
+// failureClasses is the fixed vocabulary for every other failure: a stable
+// ansible phrase (case-insensitive regexp) mapped to OUR text. The first match
+// wins; the matched ansible text is never returned.
+var failureClasses = []struct {
+	re   *regexp.Regexp
+	text string
+}{
+	{regexp.MustCompile(`(?i)connection refused`), "Connection refused"},
+	{regexp.MustCompile(`(?i)connection timed out|operation timed out`), "Connection timed out"},
+	{regexp.MustCompile(`(?i)no route to host`), "No route to host"},
+	{regexp.MustCompile(`(?i)could not resolve hostname`), "Could not resolve hostname (check ansible_host)"},
+	{regexp.MustCompile(`(?i)host key verification failed`), "Host key verification failed"},
+	{regexp.MustCompile(`(?i)permission denied`), "Permission denied (check ansible_user and the SSH key)"},
+	{regexp.MustCompile(`(?i)connection plugin .* was not found`), "ansible_connection names a connection plugin ansible does not have (check ansible_connection in the inventory and the vault vars file; the value is withheld)"},
+	{regexp.MustCompile(`(?i)module interpreter .* was not found`), "ansible_python_interpreter points at an interpreter that does not exist (the value is withheld)"},
+	{regexp.MustCompile(`(?i)attempting to decrypt but no vault secrets found`), "Attempting to decrypt but no vault secrets found (an input file is ansible-vault encrypted: pass --vault-password-file)"},
+	{regexp.MustCompile(`(?i)decryption failed`), "Decryption failed (the --vault-password-file does not decrypt an input file)"},
+	{regexp.MustCompile(`(?i)non-zero return code`), "a command returned a non-zero return code"},
+	{regexp.MustCompile(`(?i)is undefined`), "a template used an undefined variable (the name is withheld)"},
+	{regexp.MustCompile(`(?i)error rendering template|finalization of task args`), "a template could not be rendered (the detail is withheld)"},
+}
+
+// withheldText is the fallback for an ansible message that matches nothing
+// above.
+const withheldText = "details withheld: ansible messages can echo values expanded from the vault vars file"
+
+// probeTaskNames are the names of the tasks in the probe playbook and the
+// task files it includes. A task name from ansible's banner is printed only
+// when it is in this set. TestProbeTaskNamesCoverThePlaybook keeps it complete.
+var probeTaskNames = map[string]bool{
+	"Probe live FreeIPA access-governance state for drift inspection":              true,
+	"Gate: drift probe input is complete":                                          true,
+	"Load canonical roster under a namespace":                                      true,
+	"Gate: canonical roster is available":                                          true,
+	"Resolve the FreeIPA admin password from the vault variable":                   true,
+	"Read the vault admin password":                                                true,
+	"Treat an unresolvable vault admin password as missing":                        true,
+	"Fall back to the roster admin password when the vault has none":               true,
+	"Read the roster admin password":                                               true,
+	"Treat an unresolvable roster admin password as missing":                       true,
+	"Check the resolved FreeIPA admin password length":                             true,
+	"Gate: a FreeIPA admin password is available (vault or roster)":                true,
+	"Normalize FreeIPA probe settings":                                             true,
+	"Read-only FreeIPA queries with a private Kerberos cache for the admin ticket": true,
+	"Private Kerberos cache for the tickets below (issue #69)":                     true,
+	"Kinit admin for read-only drift probe":                                        true,
+	"List live HBAC rule names":                                                    true,
+	"List live sudo rule names":                                                    true,
+	"Check existence of each desired compiled HBAC rule":                           true,
+	"Check existence of each desired compiled sudo rule":                           true,
+	"Read live account principal expiration per user":                              true,
+	"Read live authentication indicators per host":                                 true,
+	"Read live group password policies (v3.2 §7/§12)":                              true,
+	"Initialize drift-probe accumulators":                                          true,
+	"Accumulate compiled HBAC rule existence":                                      true,
+	"Accumulate compiled sudo rule existence":                                      true,
+	"Accumulate live account principal expiration per user":                        true,
+	"Accumulate live authentication indicators per host":                           true,
+	"Accumulate live authentication types per user (v3.2 §8)":                      true,
+	"Accumulate live group password policy state (v3.2 §7/§12)":                    true,
+	"Normalize live group password policy fields to int-or-null":                   true,
+	"Build machine-readable drift-probe result":                                    true,
+	"Write drift-probe result on the Ansible controller":                           true,
+	"Destroy the private Kerberos cache":                                           true,
+	"Private Kerberos cache — create the cache file":                               true,
+	"Private Kerberos cache — point KRB5CCNAME at it":                              true,
+	"Private Kerberos cache — find caches a killed run left behind":                true,
+	"Private Kerberos cache — remove them":                                         true,
+	"Private Kerberos cache — destroy the tickets in it":                           true,
+	"Private Kerberos cache — remove the cache file":                               true,
+	"Private Kerberos cache — forget it":                                           true,
+}
+
+// knownProbeMessage returns our copy of the probe's own gate message when
+// msg is one, else "".
+func knownProbeMessage(msg string) string {
+	for _, k := range knownProbeMessages {
+		if strings.Contains(msg, k.marker) {
+			return k.text
+		}
+	}
+	return ""
+}
+
+// classifyMessage maps one ansible message to text that is ours: a gate
+// message, a vocabulary class, or the withheld sentence. It never returns any
+// of msg.
+func classifyMessage(msg string) string {
+	if t := knownProbeMessage(msg); t != "" {
+		return t
+	}
+	for _, c := range failureClasses {
+		if c.re.MatchString(msg) {
+			return c.text
+		}
+	}
+	return withheldText
 }
 
 // summarizeAnsibleFailure returns a short, secret-free description of why an
@@ -140,6 +270,8 @@ func summarizeAnsibleFailure(stdout, stderr, varsFile string) string {
 					}
 				}
 				msg = parseErrorText(origin, varsFile)
+			} else {
+				msg = classifyMessage(msg)
 			}
 			add(&errs, msg)
 		}
@@ -175,9 +307,10 @@ func parseErrorText(origin, varsFile string) string {
 	return "ansible could not parse an input file (check that it is valid YAML); the parser detail is withheld because it can quote the file"
 }
 
-// describeFatal renders one `fatal:` payload: the module's own msg plus the
-// task it came from. A payload with no msg, or a no_log-censored one, is
-// reported as hidden rather than dumped.
+// describeFatal renders one `fatal:` payload as our own text: the gate
+// message or failure class its msg maps to (never the msg itself), plus the
+// failing task when it is one of the probe's own. A payload with no msg, or a
+// no_log-censored one, is reported as hidden rather than dumped.
 func describeFatal(host, kind, task, payload string) string {
 	var p struct {
 		Msg      any    `json:"msg"`
@@ -186,6 +319,9 @@ func describeFatal(host, kind, task, payload string) string {
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		p.Msg = nil
 	}
+	if !probeTaskNames[task] {
+		task = ""
+	}
 	where := ""
 	if task != "" {
 		where = fmt.Sprintf(" (task: %s)", task)
@@ -193,11 +329,17 @@ func describeFatal(host, kind, task, payload string) string {
 	msg, _ := p.Msg.(string)
 	switch {
 	case p.Censored != "":
+		if task == "" {
+			return fmt.Sprintf("a task failed on %s; its output is hidden by no_log", host)
+		}
 		return fmt.Sprintf("task %q failed on %s; its output is hidden by no_log", task, host)
 	case msg == "":
+		if task == "" {
+			return fmt.Sprintf("a task %s on %s; ansible gave no message", strings.ToLower(kind), host)
+		}
 		return fmt.Sprintf("task %q %s on %s; ansible gave no message", task, strings.ToLower(kind), host)
 	case kind == "UNREACHABLE":
-		return fmt.Sprintf("%s is unreachable: %s%s", host, msg, where)
+		return fmt.Sprintf("%s is unreachable: %s%s", host, classifyMessage(msg), where)
 	}
-	return msg + where
+	return classifyMessage(msg) + where
 }

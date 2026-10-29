@@ -329,3 +329,88 @@ func TestRegression_IdentitySecretDriftProbeIgnoresTheOperatorsOutputSettings(t 
 		})
 	}
 }
+
+// TestRegression_IdentitySecretDriftProbeNeverEchoesExpandedVaultValues is the
+// issue #179 review finding on real ansible: a vault key that is a template
+// over ipa_admin_password (a mistaken `ansible_connection: "{{
+// ipa_admin_password }}"`) makes ansible put the EXPANDED password into its
+// failure message, in prose that no password-key pattern can mask. The probe
+// error and the health line must say what is wrong in our own words and carry
+// none of it. Each leak vector has a should-pass control (a valid vault, the
+// missing-password gate), and the first assertion proves ansible really did
+// echo the sentinel, so the absence is the extraction's doing.
+func TestRegression_IdentitySecretDriftProbeNeverEchoesExpandedVaultValues(t *testing.T) {
+	requireRealAnsible(t, "ssh")
+	const pw = "ipa_admin_password: " + probeVaultSecret + "\n"
+	const sshInventory = "all:\n  children:\n    freeipa-server:\n      hosts:\n        ipa1:\n          ansible_connection: ssh\n          ansible_port: 1\n          ansible_ssh_common_args: \"-o ConnectTimeout=3 -o BatchMode=yes\"\n"
+
+	for _, tc := range []struct {
+		name, inventory, vault string
+		wantErr                bool
+		want                   []string
+	}{
+		{name: "templated ansible_connection", vault: pw + "ansible_connection: \"{{ ipa_admin_password }}\"\n", wantErr: true,
+			want: []string{"ansible_connection names a connection plugin ansible does not have", "the value is withheld"}},
+		{name: "templated ansible_python_interpreter", vault: pw + "ansible_python_interpreter: \"/nonexistent/{{ ipa_admin_password }}\"\n", wantErr: true,
+			want: []string{"ansible_python_interpreter points at an interpreter that does not exist"}},
+		{name: "templated ansible_host over ssh", inventory: sshInventory, vault: pw + "ansible_host: \"{{ ipa_admin_password }}\"\n", wantErr: true,
+			want: []string{"ipa1 is unreachable", "Could not resolve hostname (check ansible_host)"}},
+		// Controls: the same shapes with values that work, and the gate.
+		{name: "control: valid ansible_connection", vault: pw + "ansible_connection: local\n"},
+		{name: "control: templated ansible_user on a local connection", vault: pw + "ansible_user: \"{{ ipa_admin_password }}\"\n"},
+		{name: "control: no password still names both sources", vault: "unrelated: 1\n", wantErr: true,
+			want: []string{"No usable FreeIPA admin password", "ipa_admin_password", "freeipa.admin.password", "Both are missing or too short"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newRealProbeEnv(t, "", "")
+			if tc.inventory != "" {
+				if err := os.WriteFile(env.inventory, []byte(tc.inventory), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := env.opts(t, env.vault(t, "main.yaml", tc.vault), "")
+
+			_, probeErr := DriftProbe(context.Background(), opts)
+			health, err := EvaluateHealth(context.Background(), HealthOptions{DriftProbeOptions: opts})
+			if err != nil {
+				t.Fatalf("a failed probe is status unknown, not an error: %v", err)
+			}
+			healthJSON, err := json.Marshal(health)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantErr {
+				if probeErr != nil || health.Status == HealthUnknown {
+					t.Fatalf("control failed: %v / %+v", probeErr, health)
+				}
+				return
+			}
+			if probeErr == nil || health.Status != HealthUnknown {
+				t.Fatalf("expected a probe failure, got %v / %+v", probeErr, health)
+			}
+			for where, text := range map[string]string{"DriftProbe error": probeErr.Error(), "Health.ProbeError": health.ProbeError, "health JSON": string(healthJSON)} {
+				if strings.Contains(strings.ToLower(text), strings.ToLower(probeVaultSecret)) {
+					t.Errorf("%s carries the vault value:\n%s", where, text)
+				}
+				if where == "health JSON" {
+					continue
+				}
+				for _, w := range tc.want {
+					if !strings.Contains(text, w) {
+						t.Errorf("%s does not contain %q:\n%s", where, w, text)
+					}
+				}
+			}
+			// The leak is real: ansible itself echoed the value into the
+			// message for the template vectors.
+			if strings.HasPrefix(tc.name, "templated ") {
+				pb, _ := filepath.Abs(realProbePlaybook)
+				raw, _ := exec.Command("ansible-playbook", pb, "-i", env.inventory, "-e", "@"+opts.VarsFile,
+					"-e", `{"freeipa_roster_file":"`+env.roster+`","pilot_drift_output":"/dev/null"}`).CombinedOutput()
+				if !strings.Contains(strings.ToLower(string(raw)), strings.ToLower(probeVaultSecret)) {
+					t.Fatalf("ansible no longer echoes the expanded value in this case; it proves nothing:\n%s", raw)
+				}
+			}
+		})
+	}
+}

@@ -1,0 +1,71 @@
+
+PLAY [Probe live FreeIPA access-governance state for drift inspection] *********
+
+TASK [Gate: drift probe input is complete] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Load canonical roster under a namespace] *********************************
+ok: [ipa1]
+
+TASK [Gate: canonical roster is available] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the vault admin password] *******************************************
+ok: [ipa1]
+
+TASK [Read the roster admin password] ******************************************
+skipping: [ipa1]
+
+TASK [Check the resolved FreeIPA admin password length] ************************
+ok: [ipa1]
+
+TASK [Gate: a FreeIPA admin password is available (vault or roster)] ***********
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Normalize FreeIPA probe settings] ****************************************
+ok: [ipa1]
+
+TASK [Private Kerberos cache for the tickets below (issue #69)] ****************
+included: /repo/playbooks/apply/tasks/freeipa-private-ccache-open.yml for ipa1
+
+TASK [Private Kerberos cache — create the cache file] **************************
+[ERROR]: Task failed: Action failed: The module interpreter '/nonexistent/Sup3rS3cretPw' was not found.
+
+Task failed: Action failed.
+Origin: /repo/playbooks/apply/tasks/freeipa-private-ccache-open.yml:30:3
+
+28 # cache also exists in --check, where some kinit/ipa reads still run.
+29
+30 - name: "Private Kerberos cache — create the cache file"
+     ^ column 3
+
+<<< caused by >>>
+
+The module interpreter '/nonexistent/Sup3rS3cretPw' was not found. Consider overriding the configured interpreter path for this host. See stdout/stderr for the returned output.
+
+fatal: [ipa1]: FAILED! => {"changed": false, "module_stderr": "/bin/sh: 1: /nonexistent/Sup3rS3cretPw: not found\n", "module_stdout": "", "msg": "The module interpreter '/nonexistent/Sup3rS3cretPw' was not found.", "rc": 127}
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: /repo/playbooks/apply/tasks/freeipa-private-ccache-close.yml for ipa1
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+skipping: [ipa1]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+skipping: [ipa1]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [ipa1]
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=10   changed=0    unreachable=0    failed=1    skipped=3    rescued=0    ignored=0   
+

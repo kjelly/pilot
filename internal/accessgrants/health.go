@@ -52,8 +52,9 @@ type Health struct {
 
 	// ProbeError is a one-line, length-capped reason the drift probe could
 	// not complete, set only with Status unknown. It carries only the
-	// failure message DriftProbe extracted from ansible's output (never the
-	// raw output, which can quote the vault vars file), so "FreeIPA
+	// diagnosis DriftProbe derived from ansible's output as pilot's own fixed
+	// text (never ansible's message text, which can echo a value expanded
+	// from the vault vars file; see probe_failure.go), so "FreeIPA
 	// unreachable" and "no usable admin password" are told apart.
 	ProbeError string `json:"probe_error,omitempty"`
 }

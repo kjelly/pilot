@@ -1,0 +1,17 @@
+
+PLAY [Probe live FreeIPA access-governance state for drift inspection] *********
+
+TASK [Gate: drift probe input is complete] *************************************
+[ERROR]: Task failed: the connection plugin 'Sup3rS3cretPw' was not found
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:91:7
+
+89
+90   pre_tasks:
+91     - name: "Gate: drift probe input is complete"
+         ^ column 7
+
+fatal: [ipa1]: FAILED! => {"changed": false, "msg": "Task failed: the connection plugin 'Sup3rS3cretPw' was not found"}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=0    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   
+
