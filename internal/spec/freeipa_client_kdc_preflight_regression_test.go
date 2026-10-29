@@ -791,7 +791,7 @@ func TestRegression_KDCPreflightWiring(t *testing.T) {
 			iDefault := strings.Index(raw, "freeipa_client_kdc_preflight_state: skipped")
 			iGate := strings.Index(raw, "freeipa_client_kdc_preflight_state != 'deferred'")
 			iKinit := strings.Index(raw, tc.kinitName)
-			if !(iDefault >= 0 && iDefault < iPre && iPre < iGate && iGate < iKinit) {
+			if iDefault < 0 || iDefault >= iPre || iPre >= iGate || iGate >= iKinit {
 				t.Errorf("order must be: state default (%d) < preflight include (%d) < block gate (%d) < kinit (%d)", iDefault, iPre, iGate, iKinit)
 			}
 			if strings.Count(raw, "freeipa_client_kdc_preflight_state:") != 1 {
