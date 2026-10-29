@@ -1,12 +1,17 @@
 package spec
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/loginprobe"
 	"go.yaml.in/yaml/v3"
@@ -338,6 +343,15 @@ func runLocalPlay(t *testing.T, vars map[string]any, tasks []map[string]any, ext
 // An empty inv means "localhost," only.
 func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks []map[string]any, extra ...string) (string, bool) {
 	t.Helper()
+	play := map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}
+	return runLocalPlays(t, inv, []map[string]any{play}, extra...)
+}
+
+// runLocalPlays runs plays, in order, as one ansible-playbook call against
+// inventory inv (as for runLocalPlayInventory), so a fact one play sets is
+// visible to the next, as between the playbooks site.yml imports.
+func runLocalPlays(t *testing.T, inv string, plays []map[string]any, extra ...string) (string, bool) {
+	t.Helper()
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
 			t.Fatalf("ansible-playbook not installed: %v (PILOT_REQUIRE_CONTAINER_TESTS=1)", err)
@@ -345,8 +359,7 @@ func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks 
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
 	dir := t.TempDir()
-	play := []map[string]any{{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}}
-	data, err := yaml.Marshal(play)
+	data, err := yaml.Marshal(plays)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,11 +373,62 @@ func runLocalPlayInventory(t *testing.T, inv string, vars map[string]any, tasks 
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command("ansible-playbook", append([]string{"-i", invArg, "play.yml"}, extra...)...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
-	out, err := cmd.CombinedOutput()
-	return string(out), err == nil
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(t.Context(), localPlayTimeout)
+		cmd := exec.CommandContext(ctx, "ansible-playbook", append([]string{"-i", invArg, "play.yml"}, extra...)...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
+		// A worker that outlives the killed parent must not keep the
+		// pipes, and so the test, open.
+		cmd.WaitDelay = 10 * time.Second
+		watch := &localPlayCrashWatch{cancel: cancel}
+		cmd.Stdout, cmd.Stderr = watch, watch
+		err := cmd.Run()
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		watch.mu.Lock()
+		out, crashed := watch.buf.String(), watch.crashed
+		watch.mu.Unlock()
+		switch {
+		case crashed && attempt == 1:
+			t.Logf("ansible-core's results thread crashed (KeyError in _convert_wire_task_result_to_raw); retrying once:\n%s", out)
+			continue
+		case crashed:
+			t.Fatalf("ansible-core's results thread crashed again on the retry:\n%s", out)
+		case timedOut:
+			t.Fatalf("ansible-playbook did not finish within %s and was killed:\n%s", localPlayTimeout, out)
+		}
+		return out, err == nil
+	}
+}
+
+// localPlayTimeout bounds one ansible-playbook run of runLocalPlays.
+const localPlayTimeout = 3 * time.Minute
+
+// localPlayCrashWatch collects an ansible-playbook run's output and kills
+// the run as soon as ansible-core 2.19.2's results thread dies under load:
+// results_thread_main raises KeyError in _convert_wire_task_result_to_raw
+// and the playbook then waits for that result forever (seen in this
+// package's tests; internal/diagnose/dns_architecture_playbook_test.go
+// handles the same race). It is an ansible-core race, not a playbook
+// result, so runLocalPlays retries such a run once; any other failure, a
+// second crash or a timeout fails the test.
+type localPlayCrashWatch struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	cancel  context.CancelFunc
+	crashed bool
+}
+
+func (w *localPlayCrashWatch) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if !w.crashed && bytes.Contains(w.buf.Bytes(), []byte("_convert_wire_task_result_to_raw")) && bytes.Contains(w.buf.Bytes(), []byte("KeyError")) {
+		w.crashed = true
+		w.cancel()
+	}
+	return n, err
 }
 
 // One unresolvable target must not block the deploy or a decommission
