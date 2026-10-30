@@ -449,13 +449,16 @@
           run_once: true
           tags: [identity, drift]
 
+        # Same tags as the kinit above: the observer needs that ticket, so it
+        # runs exactly when the kinit does (its inner tasks are run_once for the
+        # same reason; see the included file).
         - name: "Read the complete users/groups object model for identity drift"
           ansible.builtin.include_tasks:
             file: tasks/freeipa-identity-object-observe.yml
             apply:
-              tags: [always]
+              tags: [identity, drift]
           when: pilot_drift_identity_objects | default(false) | bool
-          tags: [always]
+          tags: [identity, drift]
 
         - name: "Build machine-readable drift-probe result"
           ansible.builtin.set_fact:

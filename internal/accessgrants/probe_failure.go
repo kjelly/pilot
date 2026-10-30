@@ -100,6 +100,46 @@ var knownProbeMessages = []struct{ marker, text string }{
 		"Canonical roster (schema_version) is required",
 		"Canonical roster (schema_version) is required for an authoritative drift probe.",
 	},
+	// The users/groups observer's error classes (freeipa-identity-object-
+	// observer.py ERROR_CLASSES), one gate each in freeipa-identity-object-
+	// observe.yml. TestObserverErrorClassesHaveAGateAndAMessage keeps the three
+	// lists equal.
+	{
+		"The users/groups observer rejected its input",
+		"The users/groups observer rejected its input (internal error: the desired state handed to it was malformed or carried a credential field). No complete users/groups plan is available.",
+	},
+	{
+		"The FreeIPA Python client (ipalib and ipapython) could not be imported",
+		"The FreeIPA Python client (ipalib and ipapython) could not be imported on the probed host; install the FreeIPA client packages there. No complete users/groups plan is available.",
+	},
+	{
+		"ssh_keys value is not a valid SSH public key",
+		"A roster user's ssh_keys value is not a valid SSH public key (FreeIPA would reject it on apply); fix the roster. No complete users/groups plan is available.",
+	},
+	{
+		"The users/groups observer had no usable Kerberos credentials",
+		"The users/groups observer had no usable Kerberos credentials for FreeIPA (the admin ticket was missing, expired or rejected). No complete users/groups plan is available.",
+	},
+	{
+		"The users/groups observer could not complete a FreeIPA API call",
+		"The users/groups observer could not complete a FreeIPA API call (connection or request failed; the detail is withheld). No complete users/groups plan is available.",
+	},
+	{
+		"FreeIPA returned a truncated or inconsistent user or group search result",
+		"FreeIPA returned a truncated or inconsistent user or group search result. No complete users/groups plan is available.",
+	},
+	{
+		"FreeIPA did not report the account lock state",
+		"FreeIPA did not report the account lock state (nsaccountlock) of a user, so enabled and disabled drift cannot be evaluated. No complete users/groups plan is available.",
+	},
+	{
+		"FreeIPA returned a user or group record in an unexpected shape",
+		"FreeIPA returned a user or group record in an unexpected shape (the detail is withheld). No complete users/groups plan is available.",
+	},
+	{
+		"failed for a reason outside its fixed error classes",
+		"The users/groups observer failed for a reason outside its fixed error classes (the detail is withheld). No complete users/groups plan is available.",
+	},
 }
 
 // failureClasses is the fixed vocabulary for every other failure: a stable
@@ -137,7 +177,18 @@ var probeTaskNames = map[string]bool{
 	"Reset canonical users and groups":                                             true,
 	"Normalize canonical users for the compatibility reconciler":                   true,
 	"Normalize canonical groups for the compatibility reconciler":                  true,
+	"Project the desired users and groups for the observer":                        true,
 	"Observe complete FreeIPA users and groups without credentials in output":      true,
+	"Classify the users/groups observation result":                                 true,
+	"Gate: the users/groups observer got well-formed input":                        true,
+	"Gate: the FreeIPA Python client is installed on the probed host":              true,
+	"Gate: every roster ssh_keys value is a valid SSH public key":                  true,
+	"Gate: the observer had usable Kerberos credentials":                           true,
+	"Gate: the observer completed its FreeIPA API calls":                           true,
+	"Gate: the FreeIPA user and group searches were complete":                      true,
+	"Gate: FreeIPA reported every account lock state":                              true,
+	"Gate: FreeIPA user and group records had the expected shape":                  true,
+	"Gate: the users/groups observation succeeded":                                 true,
 	"Decode the credential-free identity observation":                              true,
 	"Probe live FreeIPA access-governance state for drift inspection":              true,
 	"Gate: drift probe input is complete":                                          true,

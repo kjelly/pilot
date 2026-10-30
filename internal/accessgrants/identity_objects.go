@@ -2,10 +2,19 @@ package accessgrants
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 )
+
+// historyMarkerRE is the name of the empty group apply keeps for every group it
+// has ever applied, even after the group is deleted (tasks/freeipa-group-
+// history-marker.yml: "pilot-internal-history-g-" + sha256 of the group name,
+// lowercase hex). They are Pilot's own bookkeeping, never roster objects, so
+// they are not reported as objects outside the roster.
+// TestHistoryMarkerNameMatchesTheApplyTask keeps this equal to the task file.
+var historyMarkerRE = regexp.MustCompile(`^pilot-internal-history-g-[0-9a-f]{64}$`)
 
 // IdentityObject is the credential-free projection of an apply-normalized
 // user/group or an observed FreeIPA object. Attributes use FreeIPA RPC names.
@@ -22,21 +31,29 @@ type IdentityObject struct {
 
 // IdentityObjects is a complete users/groups read paired with the same
 // normalized desired objects apply consumes. It never contains credentials.
+// PreservedUsers are the logins of users deleted with --preserve: a plain user
+// search never returns them, but apply meets them (see ComputeIdentityObjectDrift).
 type IdentityObjects struct {
-	SchemaVersion int              `json:"schema_version"`
-	DesiredUsers  []IdentityObject `json:"desired_users"`
-	DesiredGroups []IdentityObject `json:"desired_groups"`
-	LiveUsers     []IdentityObject `json:"live_users"`
-	LiveGroups    []IdentityObject `json:"live_groups"`
+	SchemaVersion  int              `json:"schema_version"`
+	DesiredUsers   []IdentityObject `json:"desired_users"`
+	DesiredGroups  []IdentityObject `json:"desired_groups"`
+	LiveUsers      []IdentityObject `json:"live_users"`
+	PreservedUsers []string         `json:"preserved_users"`
+	LiveGroups     []IdentityObject `json:"live_groups"`
 }
 
 // ComputeIdentityObjectDrift describes only operations implemented by apply.
 // It uses direct group members, never a user's transitive memberof_group.
+//
+// Actions: create, delete, update, add_member, remove_member are what apply
+// does; report is an object apply never touches; manual is a state apply cannot
+// resolve (it fails), so an operator must act first. Only report is not
+// actionable.
 func ComputeIdentityObjectDrift(snapshot IdentityObjects) ([]DriftItem, error) {
 	if snapshot.SchemaVersion != 1 {
 		return nil, fmt.Errorf("accessgrants: unsupported identity object snapshot")
 	}
-	if snapshot.DesiredUsers == nil || snapshot.DesiredGroups == nil || snapshot.LiveUsers == nil || snapshot.LiveGroups == nil {
+	if snapshot.DesiredUsers == nil || snapshot.DesiredGroups == nil || snapshot.LiveUsers == nil || snapshot.PreservedUsers == nil || snapshot.LiveGroups == nil {
 		return nil, fmt.Errorf("accessgrants: incomplete identity object snapshot")
 	}
 	items := []DriftItem{}
@@ -58,6 +75,13 @@ func ComputeIdentityObjectDrift(snapshot IdentityObjects) ([]DriftItem, error) {
 			}
 			index[name] = object
 		}
+		// A preserved user is not in the live search but is not gone either.
+		preserved := map[string]bool{}
+		if kind.name == "user" {
+			for _, login := range snapshot.PreservedUsers {
+				preserved[strings.ToLower(login)] = true
+			}
+		}
 		managed := map[string]bool{}
 		for _, want := range kind.want {
 			name := strings.ToLower(want.Name)
@@ -72,7 +96,16 @@ func ComputeIdentityObjectDrift(snapshot IdentityObjects) ([]DriftItem, error) {
 			if want.State == "absent" {
 				if exists {
 					add("should_be_absent", "delete", "explicitly absent managed object exists live")
+				} else if preserved[name] {
+					// apply's user-del removes the preserved account permanently.
+					add("should_be_absent", "delete", "explicitly absent managed user exists as a preserved user; apply deletes it permanently")
 				}
+				continue
+			}
+			if !exists && preserved[name] {
+				// apply's user-add treats "already exists" as done, then fails on the
+				// first step that needs an active user (group membership).
+				add("preserved", "manual", "preserved user blocks apply; restore or delete it")
 				continue
 			}
 			if !exists {
@@ -127,8 +160,16 @@ func ComputeIdentityObjectDrift(snapshot IdentityObjects) ([]DriftItem, error) {
 			}
 		}
 		for name := range index {
+			if kind.name == "group" && historyMarkerRE.MatchString(name) && !managed[name] {
+				continue
+			}
 			if !managed[name] {
 				items = append(items, DriftItem{Category: kind.name + "_unexpected", Name: name, Action: "report", Detail: "object outside the roster; apply will not delete it"})
+			}
+		}
+		for name := range preserved {
+			if !managed[name] {
+				items = append(items, DriftItem{Category: "user_unexpected", Name: name, Action: "report", Detail: "preserved user outside the roster; apply will not delete it"})
 			}
 		}
 	}
