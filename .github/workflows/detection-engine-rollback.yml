@@ -47,10 +47,10 @@ jobs:
         run: |
           sudo mkdir -p /var/lib/libvirt/images/pilot
           sudo curl --fail --location --max-time 180 https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img -o /var/lib/libvirt/images/pilot/rollback-base.qcow2
-          sudo env "PATH=$PATH" .verification/pilot vm-target up --name "de-rollback-${GITHUB_RUN_ID}" --base-image /var/lib/libvirt/images/pilot/rollback-base.qcow2 --ssh-user root --memory 1024
+          sudo env "PATH=$PATH" .verification/pilot vm-target up --name "de-rollback-${GITHUB_RUN_ID}" --base-image /var/lib/libvirt/images/pilot/rollback-base.qcow2 --ssh-user root --hosts detection-engine --memory 1024
       - name: Real Ansible fault matrix on isolated vm-target
         run: |
-          sudo env "PATH=$PATH" python3 scripts/tests/detection-engine-rollback-vm.py --pilot .verification/pilot --name "de-rollback-${GITHUB_RUN_ID}" --old-binary .verification/engine-old --new-binary .verification/engine-new --evidence .verification/rollback-provenance
+          sudo env "PATH=$PATH" python3 scripts/tests/detection-engine-rollback-vm.py --pilot .verification/pilot --name "de-rollback-${GITHUB_RUN_ID}" --old-binary .verification/engine-old --new-binary .verification/engine-new --evidence .verification/rollback-provenance --base-image /var/lib/libvirt/images/pilot/rollback-base.qcow2
       - name: Preserve all evidence including failures
         if: always()
         uses: actions/upload-artifact@v4

@@ -46,6 +46,7 @@ def main():
     ap.add_argument('--old-binary', required=True, type=Path)
     ap.add_argument('--new-binary', required=True, type=Path)
     ap.add_argument('--evidence', required=True, type=Path)
+    ap.add_argument('--base-image', required=True, type=Path)
     args = ap.parse_args()
     if not re.fullmatch(r'de-rollback-[0-9]+', args.name):
         ap.error('only the dedicated de-rollback-<run-id> disposable target is accepted')
@@ -59,11 +60,13 @@ def main():
     steps = [t for t in install['block'] if t.get('name', '').startswith(('Step 3', 'Step 4', 'Step 5', 'Step 6:', 'Step 7:'))]
     evidence = {'revision': subprocess.check_output(['git', '-c', 'safe.directory=' + str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
                 'tree': subprocess.check_output(['git', '-c', 'safe.directory=' + str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
-                'playbook_sha256': sha(source), 'old_binary_sha256': sha(args.old_binary),
+                'playbook_sha256': sha(source), 'spec_sha256': sha(ROOT / 'docs/verification/detection-engine.md'),
+                'base_image_sha256': sha(args.base_image), 'stage': 'sandbox',
+                'old_binary_sha256': sha(args.old_binary),
                 'new_binary_sha256': sha(args.new_binary), 'cases': []}
     assert evidence['old_binary_sha256'] != evidence['new_binary_sha256']
 
-    def run(label, tasks, variables, check=False, full=False):
+    def run(label, tasks, variables, check=False, full=False, extra_args=(), expected_failure=False):
         # Read the authoritative inventory before EVERY invocation, never hand-edit it.
         inv = subprocess.check_output([str(args.pilot), 'vm-target', 'show-inventory', '--name', args.name], text=True)
         inventory = yaml.safe_load(inv)
@@ -73,7 +76,7 @@ def main():
         play = [{'name': label, 'hosts': args.name, 'gather_facts': False, 'become': True,
                  'vars': variables, 'tasks': tasks}]
         if full:
-            play = [{'ansible.builtin.import_playbook': str(source)}]
+            play = [{'ansible.builtin.import_playbook': str(source), 'tags': ['observability', 'detection-engine']}]
         pb = args.evidence / (label + '.yml')
         pb.write_text(yaml.safe_dump(play, sort_keys=False))
         cmd = [str(args.pilot), 'vm-target', 'run', '--name', args.name, '--skip-lint', str(pb.resolve())]
@@ -83,13 +86,34 @@ def main():
             cmd += ['-e', '@' + str(extra.resolve())]
         if check:
             cmd += ['--check', '--diff']
+        cmd += list(extra_args)
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=360)
         (args.evidence / (label + '.log')).write_text(proc.stdout)
         print(label, 'rc=', proc.returncode, flush=True)
-        if proc.returncode:
+        if (proc.returncode != 0) != expected_failure:
             print(proc.stdout[-18000:], flush=True)
             raise RuntimeError(label)
         return proc.stdout
+
+    def target_test(label, variables):
+        inv = subprocess.check_output([str(args.pilot), 'vm-target', 'show-inventory', '--name', args.name], text=True)
+        inventory = yaml.safe_load(inv)
+        assert list(inventory['all']['hosts']) == [args.name]
+        assert 'detection-engine' in inventory['all']['children']
+        (args.evidence / (label + '-inventory.yml')).write_text(inv)
+        extra = args.evidence / (label + '-vars.json')
+        extra.write_text(json.dumps(variables))
+        cmd = [str(args.pilot), 'vm-target', 'test', '--name', args.name,
+               '--playbook', str(source), '--spec', str(ROOT / 'docs/verification/detection-engine.md'),
+               '--verify-timeout', '60', '--', '-e', '@' + str(extra.resolve())]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
+        (args.evidence / (label + '.log')).write_text(proc.stdout)
+        print(label, 'rc=', proc.returncode, flush=True)
+        if proc.returncode or 'ALL TESTS PASSED SUCCESSFULLY' not in proc.stdout:
+            print(proc.stdout[-20000:], flush=True)
+            raise RuntimeError(label)
+        evidence['cases'].append({'name': label, 'verdict': 'PASS'})
+        (args.evidence / 'results.json').write_text(json.dumps(evidence, indent=2))
 
     variables = {'detection_engine_bin_dest': BASE + '/engine', 'detection_engine_db_path': BASE + '/state.db',
                  'detection_engine_backup_dir': BASE + '/backups', 'detection_engine_config_dir': BASE + '/etc',
@@ -210,19 +234,93 @@ print(json.dumps({k:v for k,v in result.items() if k!='provider'}))
                 'detection_engine_feature_profile_src': str(ROOT / 'monitoring/detection/feature-profiles/linux-host-v1.yaml'),
                 'detection_engine_artifact_path': str(args.old_binary.resolve()),
                 'detection_engine_artifact_sha256': evidence['old_binary_sha256']}
-    run('full-first-install-check', None, fullvars, check=True, full=True)
-    run('full-first-install', None, fullvars, full=True)
-    for label, binary, checksum in [('full-first-install-noop', args.old_binary, evidence['old_binary_sha256']),
-                                    ('full-upgrade', args.new_binary, evidence['new_binary_sha256']),
-                                    ('full-upgrade-noop', args.new_binary, evidence['new_binary_sha256'])]:
-        fullvars.update(detection_engine_artifact_path=str(binary.resolve()), detection_engine_artifact_sha256=checksum)
-        log = run(label, None, fullvars, full=True)
-        if label.endswith('-noop'):
-            assert re.search(r'changed=0\b', log), log[-8000:]
+    target_test('committed-spec-first-install-C1-C12', fullvars)
+    fullvars.update(detection_engine_artifact_path=str(args.new_binary.resolve()),
+                    detection_engine_artifact_sha256=evidence['new_binary_sha256'])
+    target_test('committed-spec-upgrade-C1-C12', fullvars)
     run('full-apply-final-verify', [command('Full deployment binary and SQLite checks', ['/usr/local/bin/pilot-detection-engine', 'db', 'check', '--db', '/var/lib/pilot/detection-engine/state.db'], register='full_db_check', changed_when=False),
         task('Full deployment checksum', 'ansible.builtin.stat', {'path': '/usr/local/bin/pilot-detection-engine', 'checksum_algorithm': 'sha256'}, register='full_binary_stat'),
         command('Full deployment service state', ['systemctl', 'is-active', 'pilot-detection-engine.service'], register='full_service', changed_when=False),
         task('Full deployment expected state', 'ansible.builtin.assert', {'that': ["full_db_check.stdout | trim == 'ok'", "full_service.stdout | trim == 'active'", "full_binary_stat.stat.checksum == '" + evidence['new_binary_sha256'] + "'"]})], {})
+    snapshot_script = r"""import hashlib,json,pathlib,subprocess,sys,time
+base=pathlib.Path('/etc/pilot/detection-engine')
+paths=[pathlib.Path('/etc/systemd/system/pilot-detection-engine.service'), base/'config.yaml',base/'feature-profile.yaml',base/'provider.env']
+def capture():
+ files={}
+ for p in paths:
+  if p.exists():
+   st=p.stat(); files[str(p)]={'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'mode':st.st_mode&0o777,'uid':st.st_uid,'gid':st.st_gid}
+  else: files[str(p)]=None
+ raw=subprocess.check_output(['systemctl','show','pilot-detection-engine.service','--property=ActiveState,SubState,UnitFileState,MainPID,NRestarts'],text=True)
+ state=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
+ return {'files':files,'service':state,'binary_sha256':hashlib.sha256(pathlib.Path('/usr/local/bin/pilot-detection-engine').read_bytes()).hexdigest()}
+record=pathlib.Path('/opt/pilot-fixtures/native-before.json')
+if sys.argv[1]=='before':
+ data=capture(); assert data['service']['ActiveState']=='active' and data['service']['SubState']=='running',data
+ assert data['service']['UnitFileState']=='enabled' and data['service']['NRestarts']=='0',data
+ record.write_text(json.dumps(data));print(json.dumps(data))
+else:
+ time.sleep(3)
+ before=json.loads(record.read_text());after=capture()
+ assert before['files']==after['files'] and before['binary_sha256']==after['binary_sha256'],after
+ assert after['service']['ActiveState']=='active' and after['service']['SubState']=='running',after
+ assert after['service']['UnitFileState']=='enabled' and after['service']['NRestarts']=='0',after
+ if sys.argv[1]=='same-pid': assert before['service']['MainPID']==after['service']['MainPID'],after
+ else: assert before['service']['MainPID']!=after['service']['MainPID'],after
+ check=subprocess.check_output(['/usr/local/bin/pilot-detection-engine','db','check','--db','/var/lib/pilot/detection-engine/state.db'],text=True)
+ assert check.strip()=='ok',check
+ print(json.dumps(after))
+"""
+    nativevars = dict(prod['vars'])
+    nativevars.update(fullvars)
+    nativevars['detection_engine_artifact_abs_path'] = str(args.new_binary.resolve())
+    defaults = [t for t in prod['pre_tasks'] if t['name'] in (
+        'Resolve model provider defaults without overriding inventory or extra vars',
+        'Resolve inventory-overridable defaults without shadowing group_vars/host_vars')]
+    for case in ['native-C1-skipped-Step8-failure', 'native-one-shot-query-failure',
+                 'native-rejected-config', 'native-unit-rewrite-failure']:
+        # Test-only secret; restoring provider.env is verified without printing contents.
+        run(case + '-before', [put('/etc/pilot/detection-engine/provider.env', 'TEST_ONLY_TOKEN=original-native-fixture\n', mode='0600'),
+            command('Capture native original service and file state', ['python3', '-c', snapshot_script, 'before'])], {})
+        if case == 'native-C1-skipped-Step8-failure':
+            faultvars = dict(fullvars)
+            faultvars['detection_engine_feature_profile_dest'] = '/proc/pilot-rollback-forced-copy-failure.yaml'
+            log = run(case, None, faultvars, full=True,
+                      extra_args=['--tags','detection-engine','--skip-tags','detection-engine-C1'], expected_failure=True)
+            assert 'detection-engine apply FAILED' in log and 'Step 8:' in log
+        elif case == 'native-one-shot-query-failure':
+            wrapper = '#!/bin/sh\nif [ "$1" = show ] && [ ! -e /opt/pilot-fixtures/query-failed-once ]; then touch /opt/pilot-fixtures/query-failed-once; exit 1; fi\nexec /usr/bin/systemctl "$@"\n'
+            run(case + '-inject', [put('/opt/pilot-fixtures/query-fail-systemctl', wrapper, mode='0755')], {})
+            faultprobes = copy.deepcopy(probes)
+            for t in faultprobes:
+                if t['name'].startswith('Step 0: query'):
+                    t['ansible.builtin.command']['argv'][0] = '/opt/pilot-fixtures/query-fail-systemctl'
+            log = run(case, faultprobes + [task('Must not reach mutation block', 'ansible.builtin.fail', {'msg':'UNREACHABLE_MUTATION'})], nativevars, expected_failure=True)
+            assert 'Refusing to change anything' in log and 'TASK [Must not reach mutation block]' not in log
+            run(case + '-confirm-injection', [task('Observe actual one-shot query injection', 'ansible.builtin.stat', {'path':'/opt/pilot-fixtures/query-failed-once'}, register='query_injection_marker'), task('Require the wrapper to have actually run', 'ansible.builtin.assert', {'that':['query_injection_marker.stat.exists']})], {})
+        else:
+            faultsteps = []
+            for t in install['block']:
+                name = t.get('name','')
+                if not re.match(r'Step (?:[3-9][a-z]?|1[0-2]):', name):
+                    continue
+                faultsteps.append(copy.deepcopy(t))
+                if case == 'native-rejected-config' and name.startswith('Step 9:'):
+                    faultsteps += [put('/etc/pilot/detection-engine/config.yaml', 'invalid: [unterminated\n')]
+                if case == 'native-unit-rewrite-failure' and name.startswith('Step 11:'):
+                    faultsteps += [put(UNIT, '[Service]\nExecStart=/usr/bin/false\n'),
+                                   task('Inject failure after unit rewrite', 'ansible.builtin.fail', {'msg':'EXPECTED_AFTER_UNIT_REWRITE'})]
+            log = run(case, defaults + probes + [{'name':'Native production rollback', 'block':faultsteps,'rescue':install['rescue']}], nativevars, expected_failure=True)
+            assert 'detection-engine apply FAILED' in log
+            if case == 'native-rejected-config':
+                assert 'Step 10: validate the rendered config' in log
+            else:
+                assert 'EXPECTED_AFTER_UNIT_REWRITE' in log
+        run(case + '-after', [command('Assert native availability restored with original files',
+            ['python3','-c',snapshot_script,'same-pid' if case == 'native-one-shot-query-failure' else 'restarted'])], {})
+        run(case + '-cleanup', [task('Remove test-only provider secret', 'ansible.builtin.file', {'path':'/etc/pilot/detection-engine/provider.env','state':'absent'})], {})
+        evidence['cases'].append({'name':case,'verdict':'PASS'})
+        (args.evidence/'results.json').write_text(json.dumps(evidence,indent=2))
     evidence['cases'].append({'name': 'complete-apply-first-install-upgrade-idempotency', 'verdict': 'PASS'})
     (args.evidence / 'results.json').write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence, indent=2))
