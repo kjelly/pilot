@@ -81,7 +81,7 @@ coding agent 能呼叫的工具，不是對持有 key 的人的強制控制。�
 | 舊診斷工具經 `resolveDiagnoseInventory` → `autoRegenerateInventoryFromHosts` 重寫 `inventory.yml`；delivery/monitoring 工具用不會重寫的 `resolveDiagnoseInventoryReadOnly`，`inventory.yml` 不存在就失敗 | `mcp_diagnose_tools.go:99-136`、`mcp_delivery_tools.go:73` | session 開始時必須先產生 `inventory.yml`（§7.2） |
 | `autoRegenerateInventoryFromHosts` 除了寫 `inventory.yml`，還會從目前目錄的 `group_vars/` 補缺少的 group_vars（`copyMissingGroupVars` 用相對路徑），並補 host_vars skeleton、NFS roster 條目與 vault skeleton | `cmd/pilot/cmd/inventory.go:465-505`、`:206-208` | 這些補寫不能被當成 edit 的變更匯出（§7.2 baseline）；vault skeleton 在唯讀 `.vault` 上只印 `vault: skip` 警告（`inventory.go:291-294`） |
 | NFS roster 補寫以 host 變數裡的 roster 路徑為準，沒有範圍限制 | `inventory.go:372-386`、`edit_tui_roster.go:718` | 設定裡指向 `/pilot/vault`、`/pilot/data`、`/tmp/pilot-mcp` 的路徑在 session 開始時拒絕（§6.2） |
-| 解析不可信 YAML 前要先擋 alias 環與過度展開：`parseYAMLDocument`/`checkAliasGraph`（未匯出） | `internal/inventory/yaml_alias_graph.go:23`、`:45`、`AGENTS.md` §5.11 第 6 點 | 新增匯出的包裝函式給 remote 的路徑檢查使用（§6.2） |
+| 走訪不可信 YAML 時跟隨 alias 會遇到環與指數級展開；repo 的 `parseYAMLDocument`/`checkAliasGraph` 為此而設（未匯出） | `internal/inventory/yaml_alias_graph.go:23`、`:45`、`AGENTS.md` §5.11 第 6 點 | remote 的路徑檢查只走 node 樹、從不跟隨 alias，每個 node 只看一次，不需要匯出它們（§6.2） |
 | delivery 工具從 `<--dir>/contracts` 載入 contract catalog | `mcp_delivery_tools.go:80-85`、`mcp_diagnose_tools.go:66-78` | session 開始時把 image 內的 `contracts/` 複製進 workspace（§7.2） |
 | contract root 由 flag、`PILOT_ROOT` 或目前目錄決定 | `cmd/pilot/cmd/contract.go:123-133` | container 內目前目錄是 `/pilot`；測試以 `--pilot-root` 指定 |
 | audit 預設寫在 workspace 內 `<dir>/.pilot/audit/edit`；`pilot_diagnose_recent_changes` 從這裡讀變更歷史；所有工具都遵守 `--audit-dir` | `mcp.go:86-89`、`mcp_diagnose_composite_tools.go:598`、`mcp_diagnose_evidence.go:81-86` | 遠端一律指定 data dir 內的 `--audit-dir`，跨 session 保留 |
@@ -319,7 +319,7 @@ profiles:
    transport 用 `mcp.IOTransport`，Reader 是讀 ready 行的同一個 buffered reader（保留已多讀的位元組），
    Writer 是 ssh 的 stdin。不用 `CommandTransport`：它會自己啟動子程序，無法接在已經在跑的 ssh 上。
 7. 工具集斷言（名單定義在 `internal/mcpwire`，與 server 的一致性由 §13.1 的測試鎖住）：
-   - 兩種 mode 都必須有 `pilot_edit_inspect` 與 `pilot_diagnose_sudo`；都不得有
+   - 兩種 mode 都必須有 `pilot_edit_inspect`、`pilot_edit_plan` 與 `pilot_diagnose_sudo`；都不得有
      `pilot_diagnose_run`、`pilot_diagnose_snmp_probe` 或任何 `pilot_repair_*`。
    - observe 不得有 `pilot_edit_apply`；edit 必須有。
 8. 結束 session。doctor 不呼叫任何工具，所以 edit session 也不會被保留（§7.2 第 7 步）。
@@ -402,9 +402,9 @@ digest；內容、路徑或大小改變一定改變 digest。
   - snapshot 根目錄必須有 `hosts.yml`；
   - 用 `inventory.Parse` 讀出每台主機的 `env`（空字串視為 `sandbox`），全部必須等於 `--env`；
     否則 `ENV_MISMATCH`。這可以防止把一個環境的設定配上另一個環境的 `.vault`；
-  - **路徑引用範圍**：以 alias 防護過的 parser（`internal/inventory` 新增匯出的
-    `parseYAMLDocument` 包裝函式，§2.1）解析 snapshot 內每個 `.yml`/`.yaml` 檔；解析失敗或 alias 有環、
-    過度展開，回 `SNAPSHOT_INVALID`。逐一檢查所有 scalar 字串：以 `/` 開頭、`path.Clean` 後等於或位於
+  - **路徑引用範圍**：以 `yaml.Decoder` 解析 snapshot 內每個 `.yml`/`.yaml` 檔的每一份 document（解析失敗回
+    `SNAPSHOT_INVALID`），只走 node 樹、從不跟隨 alias，所以 alias 環或大量共用的 anchor 都只花線性時間
+    （§2.1）。逐一檢查所有 scalar 字串：以 `/` 開頭、`path.Clean` 後等於或位於
     `/pilot/vault`、`/pilot/data`、`/tmp/pilot-mcp` 之下的，回 `PATH_OUT_OF_SCOPE`（`/pilot/config/../data`
     清理後是 `/pilot/data`，一樣拒絕）。image 內其他唯讀路徑（例：`/pilot/dist/…`）與受管主機上的路徑
     不受影響。以 Jinja 模板組出的路徑檢查不到（§16）；
@@ -489,7 +489,7 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   `base_sha256` 是 source 的 SHA-256（`add` 為空）。
 - 任何匯出的檔案內容含有 session 目錄的內部路徑（`/pilot/data/mcp/` 或 `/tmp/pilot-mcp/`）時回
   `CHANGESET_INVALID`。
-- stdout 輸出 tar：第一個 entry 是 manifest
+- stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
   `{"protocol","session_id","env","base_commit_sha","changes":[{"path","op","base_sha256","new_sha256"}]}`，
   之後是 `add`/`modify` 的檔案，依路徑排序。
 - 不刪除 session（可重複執行）；由 §7.4 的保留期限回收。
@@ -630,11 +630,10 @@ internal/mcpclient/
   profile.go  git.go  snapshot.go  dockercmd.go  transport.go  bridge.go
   doctor.go   changes.go  records.go
 internal/mcpremote/
-  command.go  archive.go  pathscope.go  session.go  gc.go
-  workspace.go  export.go
+  remote.go  archive.go  validate.go  session.go  gc.go
+  workspace.go  export.go  sys_unix.go
 cmd/pilot/cmd/mcp_remote.go           # pilot mcp remote；注入 callback
 cmd/pilot/cmd/mcp.go                  # 抽出 serveMCP(ctx, mcpServeOptions, mcp.Transport)，pilot mcp serve 傳 StdioTransport，行為不變
-internal/inventory/yaml_alias_graph.go  # 新增匯出的 parseYAMLDocument 包裝函式（給 remote 的路徑檢查）
 ```
 
 - `internal/mcpwire`、`internal/mcpclient` 不得匯入 Linux 專用的 package（`cmd/pilot/cmd`、
@@ -755,7 +754,7 @@ internal/inventory/yaml_alias_graph.go  # 新增匯出的 parseYAMLDocument 包�
 | WP | 內容 | 完成條件 |
 |---|---|---|
 | WP1 | 把 `runMCPServe` 抽成 `serveMCP(ctx, mcpServeOptions, mcp.Transport)`，`pilot mcp serve` 傳 `StdioTransport`，行為不變 | 既有 MCP 測試全綠；`go test -race ./...` 綠 |
-| WP2 | `internal/mcpwire`、`internal/mcpremote`、`pilot mcp remote`、`internal/inventory` 匯出的 YAML 解析包裝；工具名單一致性測試 | §13.1 中 remote、session、workspace、stdin、一致性測試全綠；fuzz 跑過 |
+| WP2 | `internal/mcpwire`、`internal/mcpremote`、`pilot mcp remote`；工具名單一致性測試 | §13.1 中 remote、session、workspace、stdin、一致性測試全綠；fuzz 跑過 |
 | WP3 | `internal/mcpclient`、`cmd/pilot-mcp`（connect/doctor/changes/sessions/version）；CI 加 darwin/linux cross-compile job，加進 `image.needs` 並通過 timeout 一致性測試 | §13.1 中 client 的測試全綠；四種 GOOS/GOARCH 都能 build；`ci_needs_test`、`ci_timeout_consistency_test` 綠 |
 | WP4 | §13.2 整合測試（含 shim）、`make mcp-remote-test`、CI job（安裝 `openssh-server`、`PILOT_REQUIRE_SSHD_TESTS=1`、加進 `image.needs`） | §13.2 全部 case 通過；CI 綠，含 `ci_needs_test`、`ci_timeout_consistency_test` |
 | WP5 | §13.3 fixture、vm-target 實跑、`docs/runbooks/mcp-remote-access.md`、evidence | evidence 記錄 tested revision/tree 與實際結果；runbook 指令都實跑過；本 WP 新增的檔案只含佔位符與測試路徑 |
