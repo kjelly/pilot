@@ -57,13 +57,13 @@ def main():
     probes = [t for t in prod['tasks'] if t.get('name', '').startswith('Step 0')]
     install = next(t for t in prod['tasks'] if t.get('name') == 'Detection Engine install + systemd service')
     steps = [t for t in install['block'] if t.get('name', '').startswith(('Step 3', 'Step 4', 'Step 5', 'Step 6:', 'Step 7:'))]
-    evidence = {'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-                'tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+    evidence = {'revision': subprocess.check_output(['git', '-c', 'safe.directory=' + str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+                'tree': subprocess.check_output(['git', '-c', 'safe.directory=' + str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
                 'playbook_sha256': sha(source), 'old_binary_sha256': sha(args.old_binary),
                 'new_binary_sha256': sha(args.new_binary), 'cases': []}
     assert evidence['old_binary_sha256'] != evidence['new_binary_sha256']
 
-    def run(label, tasks, variables, check=False):
+    def run(label, tasks, variables, check=False, full=False):
         # Read the authoritative inventory before EVERY invocation, never hand-edit it.
         inv = subprocess.check_output([str(args.pilot), 'vm-target', 'show-inventory', '--name', args.name], text=True)
         inventory = yaml.safe_load(inv)
@@ -72,9 +72,15 @@ def main():
         (args.evidence / 'inventory.yml').write_text(inv)
         play = [{'name': label, 'hosts': args.name, 'gather_facts': False, 'become': True,
                  'vars': variables, 'tasks': tasks}]
+        if full:
+            play = [{'ansible.builtin.import_playbook': str(source)}]
         pb = args.evidence / (label + '.yml')
         pb.write_text(yaml.safe_dump(play, sort_keys=False))
         cmd = [str(args.pilot), 'vm-target', 'run', '--name', args.name, '--skip-lint', str(pb.resolve())]
+        if full:
+            extra = args.evidence / (label + '-vars.json')
+            extra.write_text(json.dumps(variables))
+            cmd += ['-e', '@' + str(extra.resolve())]
         if check:
             cmd += ['--check', '--diff']
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=360)
@@ -188,6 +194,37 @@ print(json.dumps({k:v for k,v in result.items() if k!='provider'}))
             assert re.search(r'changed=0\b', log), log[-8000:]
         evidence['cases'].append({'name': case, 'verdict': 'PASS'})
         (args.evidence / 'results.json').write_text(json.dumps(evidence, indent=2))
+    # Exercise the complete apply as well as the fault-isolated upgrade slice.
+    # Existing protocol fixtures supply external dependencies; the daemon is real.
+    fixtures = yaml.safe_load((ROOT / 'playbooks/test/detection-engine-fixtures.yml').read_text())
+    for i, fixture in enumerate(fixtures[:2]):
+        run('full-protocol-fixture-' + str(i), fixture['tasks'], {})
+    cleanup = [task('Stop slice fixture unit', 'ansible.builtin.systemd', {'name': 'pilot-detection-engine.service', 'state': 'stopped', 'enabled': False}),
+               task('Remove slice fixture unit and prior full installation', 'ansible.builtin.file', {'path': '{{ item }}', 'state': 'absent'}, loop=[UNIT, '/etc/pilot/detection-engine', '/var/lib/pilot/detection-engine', '/var/backups/pilot-detection-engine', '/usr/local/bin/pilot-detection-engine']),
+               task('Reload for genuine first install', 'ansible.builtin.systemd', {'daemon_reload': True}),
+               task('Prepare host-monitoring prerequisite user', 'ansible.builtin.user', {'name': 'pilot-detect', 'system': True, 'create_home': False, 'shell': '/usr/sbin/nologin'}),
+               task('Prepare host-monitoring textfile prerequisite', 'ansible.builtin.file', {'path': '/var/lib/node_exporter/textfile', 'state': 'directory', 'owner': 'pilot-detect', 'group': 'pilot-detect', 'mode': '0755'})]
+    run('full-apply-prerequisites', cleanup, {})
+    fullvars = {'target_group': args.name, 'stage': 'sandbox', 'detection_metrics_source_host': '127.0.0.1',
+                'detection_alertmanager_target_host': '127.0.0.1',
+                'detection_engine_feature_profile_src': str(ROOT / 'monitoring/detection/feature-profiles/linux-host-v1.yaml'),
+                'detection_engine_artifact_path': str(args.old_binary.resolve()),
+                'detection_engine_artifact_sha256': evidence['old_binary_sha256']}
+    run('full-first-install-check', None, fullvars, check=True, full=True)
+    run('full-first-install', None, fullvars, full=True)
+    for label, binary, checksum in [('full-first-install-noop', args.old_binary, evidence['old_binary_sha256']),
+                                    ('full-upgrade', args.new_binary, evidence['new_binary_sha256']),
+                                    ('full-upgrade-noop', args.new_binary, evidence['new_binary_sha256'])]:
+        fullvars.update(detection_engine_artifact_path=str(binary.resolve()), detection_engine_artifact_sha256=checksum)
+        log = run(label, None, fullvars, full=True)
+        if label.endswith('-noop'):
+            assert re.search(r'changed=0\b', log), log[-8000:]
+    run('full-apply-final-verify', [command('Full deployment binary and SQLite checks', ['/usr/local/bin/pilot-detection-engine', 'db', 'check', '--db', '/var/lib/pilot/detection-engine/state.db'], register='full_db_check', changed_when=False),
+        task('Full deployment checksum', 'ansible.builtin.stat', {'path': '/usr/local/bin/pilot-detection-engine', 'checksum_algorithm': 'sha256'}, register='full_binary_stat'),
+        command('Full deployment service state', ['systemctl', 'is-active', 'pilot-detection-engine.service'], register='full_service', changed_when=False),
+        task('Full deployment expected state', 'ansible.builtin.assert', {'that': ["full_db_check.stdout | trim == 'ok'", "full_service.stdout | trim == 'active'", "full_binary_stat.stat.checksum == '" + evidence['new_binary_sha256'] + "'"]})], {})
+    evidence['cases'].append({'name': 'complete-apply-first-install-upgrade-idempotency', 'verdict': 'PASS'})
+    (args.evidence / 'results.json').write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence, indent=2))
 
 

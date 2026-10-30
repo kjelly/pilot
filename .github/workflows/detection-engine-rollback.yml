@@ -14,7 +14,7 @@ permissions:
 jobs:
   isolated-vm:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -38,6 +38,11 @@ jobs:
           go build -o .verification/pilot ./cmd/pilot
           go build -ldflags '-X main.version=rollback-old' -o .verification/engine-old ./cmd/pilot-detection-engine
           go build -ldflags '-X main.version=rollback-new' -o .verification/engine-new ./cmd/pilot-detection-engine
+      - name: Real Ansible file-level regression tests (no skipped tool dependency)
+        run: |
+          set -o pipefail
+          command -v ansible-playbook
+          go test -count=1 -timeout 15m -v -run '^TestDetectionEngine' ./cmd/pilot/cmd | tee .verification/rollback-provenance/file-unit-tests.log
       - name: Create dedicated vm-target
         run: |
           sudo mkdir -p /var/lib/libvirt/images/pilot
