@@ -234,10 +234,11 @@ outcomes. Current acceptance evidence is linked below.
 
 ## Actual-run evidence
 
-Latest rollback-provenance evidence: [2026-10-30-cc413e7](../evidence/detection-engine/2026-10-30-cc413e7.md).
-Candidate `cc413e7`, tree `8a6e131`, isolated vm-target: 13/13 PASS,
-including complete apply first-install/upgrade/no-op and the actual Ansible
-regression suite. No verification row or Expected value was changed.
+Latest rollback-provenance evidence: [2026-10-30-5adea80](../evidence/detection-engine/2026-10-30-5adea80.md).
+Candidate `5adea80`, tree `9367a31`, isolated vm-target: 19/19 PASS.
+Sanctioned first-install and upgrade chains each verified C1–C12:
+12 PASS / 0 FAIL / 0 SKIP, then changed=0. Native service-query/config/unit/tag
+failure cases also passed. No verification row or Expected value was changed.
 
 Latest notification-correctness evidence:
 `docs/evidence/detection-engine/2026-09-17-30d6b92.md` (candidate
