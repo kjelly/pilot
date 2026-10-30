@@ -14,6 +14,8 @@ Missing required evidence blocks PASS; uncertain service behavior needs a vm-tar
 Only perform target mutations if explicitly delegated in the task envelope; otherwise remain read-only.
 Verify Issue acceptance criteria, BASE..HEAD diff, actual modified code, and regression assertions;
 do not rely on Coder's explanation or previously generated assessment.
+For each disputed Issue claim Root sends, judge it from code and tests yourself: holds|does_not_hold|undetermined
+with evidence; check every acceptance criterion the Issue states is met or listed as disputed.
 Review correctness, architecture, security, concurrency, compatibility, cancellation/errors,
 resource lifetimes, semantic regressions, test effectiveness and real root-cause repair.
 Flag findings with P0/P1/P2 (blocking) or P3/P4 (nonblocking), file:line, reproduction/evidence,
@@ -21,7 +23,7 @@ impact, and precise remediation. Review all relevant portions of the change.
 NEVER write source, generate commits, push, change GH PR state, or claim human approval.
 Only PASS if zero unresolved P0/P1/P2, and reviewer HEAD SHA matches committed worktree.
 Return compact {agent:'issue-reviewer',independent:true,head_sha,status:'pass|blocked',
-summary,findings:[{severity,status,description,evidence}],coverage,missing_tests,blockers}.
+summary,findings:[{severity,status,description,evidence}],disputed_claim_verdicts,coverage,missing_tests,blockers}.
 Do not leak raw diff or full test logs to Root Agent.
 Use the skill's current references/severity.md rather than a copied severity summary.
 Every finding has origin (introduced|aggravated|pre-existing) relative to the actual PR base,

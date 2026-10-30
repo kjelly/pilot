@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from issue_gate import GateError, command, evaluate
+from issue_gate import GateError, closes_issue, command, evaluate, references_issue
 
 
 def execute(args: list[str], cwd: Path) -> str:
@@ -29,7 +29,22 @@ def execute(args: list[str], cwd: Path) -> str:
     return p.stdout.strip()
 
 
-def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue: int) -> dict:
+def issue_reference_problem(body: str, repo: str, issue: int, resolution: str) -> str | None:
+    """A 'fixes' PR must close the Issue; a 'partial' one must reference it without closing it,
+    so merging does not silently close the claims that stay open."""
+    if resolution == "partial":
+        if closes_issue(body, repo, issue):
+            return f"issue_resolution is 'partial': the PR body must not close #{issue}; use 'Refs #{issue}'"
+        if not references_issue(body, repo, issue):
+            return f"PR body must reference #{issue} (e.g. 'Refs #{issue}')"
+        return None
+    if not re.search(rf"(?i)\b(?:fixes|closes|resolves)\s+(?:(?:[\w.-]+/[\w.-]+)?#){issue}\b", body):
+        return f"PR body must contain a genuine 'Fixes #{issue}' or equivalent closing keyword"
+    return None
+
+
+def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue: int,
+             resolution: str = "fixes") -> dict:
     p = command(["gh", "pr", "view", branch, "-R", repo,
                  "--json", "number,url,state,isDraft,headRefName,headRefOid,baseRefName,body"])
     if not isinstance(p, dict):
@@ -40,8 +55,9 @@ def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue:
         raise GateError("New PR base/Draft-state mismatch")
     if not isinstance(p.get("number"), int) or not p.get("url"):
         raise GateError("Cannot identify created PR")
-    if not re.search(rf"(?i)\b(?:fixes|closes|resolves)\s+(?:(?:[\w.-]+/[\w.-]+)?#){issue}\b", p.get("body") or ""):
-        raise GateError("New PR lacks the expected Issue-closing keyword")
+    problem = issue_reference_problem(p.get("body") or "", repo, issue, resolution)
+    if problem:
+        raise GateError(f"New PR body: {problem}")
     return p
 
 
@@ -52,8 +68,11 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
     if body_file.is_relative_to(worktree):
         raise GateError("PR body file must be outside the worktree to keep source clean")
     body = body_file.read_text(encoding="utf-8")
-    if not re.search(rf"(?i)\b(?:fixes|closes|resolves)\s+(?:(?:[\w.-]+/[\w.-]+)?#){issue}\b", body):
-        raise GateError(f"PR body must contain a genuine 'Fixes #{issue}' or equivalent closing keyword")
+    evidence_data = json.loads(evidence.expanduser().resolve(strict=True).read_text(encoding="utf-8"))
+    resolution = evidence_data.get("issue_resolution", "fixes") if isinstance(evidence_data, dict) else "fixes"
+    problem = issue_reference_problem(body, repo, issue, resolution)
+    if problem:
+        raise GateError(problem)
     if len(title.strip()) < 8 or not title.strip():
         raise GateError("Provide a meaningful PR title")
     if not ("tests" in body.lower() or "測試" in body):
@@ -64,7 +83,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
         return {"status": "BLOCKED", "issue": issue, "blockers": errors}
     branch, sha = info["branch"], info["head_sha"]
     # Base comes from the validated evidence, not the mutable main checkout.
-    base_name = json.loads(evidence.expanduser().resolve(strict=True).read_text(encoding="utf-8"))["base_branch"]
+    base_name = evidence_data["base_branch"]
     # Push is intentionally a side effect only after local gate passes. No force-push.
     execute(["git", "push", "--set-upstream", remote, branch], cwd=worktree)
     errors, _ = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
@@ -83,7 +102,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
         return {"status": "CREATE_UNCERTAIN", "issue": issue, "head_sha": sha,
                 "blockers": [str(exc), "Check gh pr view <branch> before attempting to retry"]}
     try:
-        pr = check_pr(repo, branch, base_name, sha, draft=draft, issue=issue)
+        pr = check_pr(repo, branch, base_name, sha, draft=draft, issue=issue, resolution=resolution)
     except GateError as exc:
         return {"status": "CREATED_UNVERIFIED", "issue": issue, "head_sha": sha,
                 "blockers": [str(exc), "Do not retry creation; inspect the created PR"]}

@@ -36,7 +36,9 @@ Example (full SHA values must be actual full git commit hashes; placeholders bel
     "status": "pass",
     "summary": "Verified the state machine and regression coverage",
     "findings": []
-  }
+  },
+  "issue_resolution": "fixes",
+  "disputed_issue_claims": []
 }
 ```
 
@@ -47,6 +49,20 @@ Example (full SHA values must be actual full git commit hashes; placeholders bel
 - `review.independent` represents an independently delegated review; the gate validates declared evidence structurally, not the cognitive independence of an LLM.
 - `review.findings` items have `severity` (`P0`/`P1`/`P2`/`P3`), `status` (`resolved`/`open`), `description`, and (when resolved) fix/test evidence. Any `open` P0/P1/P2 blocks. Findings also carry `origin` (`introduced`/`aggravated`/`pre-existing`) and `class` per [severity.md](severity.md); `pre-existing` findings cap at P3.
 - `repo_required_evidence` (list) holds one entry per item the repository requires (`id`, `status` `pass`/`not-applicable`, `head_sha`, committed `artifact`, `summary`/`reason`). `checks[]` receipts, `review.head_sha` and these entries may predate HEAD when every file changed since matches the base branch's `evidence_only_paths`. Top-level `head_sha` must equal HEAD. Details: [repo-evidence.md](repo-evidence.md).
+- `disputed_issue_claims` (list, optional) holds one entry per Issue claim the PR does not implement ([Issue claims](issue-claims.md)):
+
+  ```json
+  {"source_url": "https://github.com/OWNER/REPO/issues/123#issuecomment-6487450538",
+   "claim": "The retry loop hides the error and must be removed",
+   "disposition": "invalid",
+   "counter_evidence": "retry.go:41 re-raises after the last attempt; TestRetrySurfacesError fails without it",
+   "reply_url": "https://github.com/OWNER/REPO/issues/123#issuecomment-6487999001",
+   "head_sha": "<actual HEAD SHA>",
+   "reviewer_confirmed": true}
+  ```
+
+  `disposition` is `invalid`, `needs_evidence` or `out_of_scope`. `source_url` is the Issue URL (a claim in the body) or one of its comments. `reply_url` is Root's comment on the Issue, posted after the claim, containing `source_url` when the claim came from a comment. `head_sha` follows the same evidence-only delta rule as `review.head_sha`. Set `reviewer_confirmed` only when the independent reviewer's own verdict agrees. When the list is non-empty the gate reads the Issue's comments to verify each entry.
+- `issue_resolution` is `fixes` (default: the PR body must close the Issue with `Fixes #N`) or `partial` (something the Issue asks for stays open; needs at least one disputed claim, and the PR body must reference the Issue with `Refs #N` and no closing keyword).
 - GitHub CI on a new Draft PR happens only **after** PR creation; this contract does not spoof post-PR CI success. Draft → Ready additionally requires `CI_PASSED` on the exact HEAD (`mark_ready.py`).
 
 Successful gate output (stdout JSON): `{"status":"GATE-PASS", ...}`. If unverified or blocked: `{"status":"BLOCKED","blockers":[...]}` and exit code 2. Non-gate misuse exits nonzero and must never be interpreted as success.

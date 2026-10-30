@@ -293,5 +293,118 @@ class RepoEvidenceGateTests(LocalGitFixture):
         self.assertTrue(any("defeat SHA binding" in e for e in self.eval_local()[0]))
 
 
+
+# Shapes copied from real `gh issue view --json number,url,createdAt,comments` output
+# (kjelly/pilot#177), with the repository and Issue number changed.
+ISSUE_URL = "https://github.com/OWNER/REPO/issues/123"
+REPORTER_COMMENT = ISSUE_URL + "#issuecomment-6487450538"
+REPLY = ISSUE_URL + "#issuecomment-6487999001"
+
+
+class DisputedIssueClaimTests(LocalGitFixture):
+    """An Issue claim the PR does not act on must be answered on the Issue."""
+
+    def setUp(self):
+        super().setUp()
+        self.thread = {"number": 123, "url": ISSUE_URL, "createdAt": "2026-10-29T02:57:42Z", "comments": [
+            {"url": REPORTER_COMMENT, "createdAt": "2026-10-29T03:54:16Z", "viewerDidAuthor": False,
+             "author": {"login": "reporter"}, "body": "Also: the retry loop must be removed, it hides the error."},
+            {"url": REPLY, "createdAt": "2026-10-29T05:10:00Z", "viewerDidAuthor": True,
+             "author": {"login": "pilot"},
+             "body": f"Re {REPORTER_COMMENT}: the retry loop does not hide the error; see the test below."},
+        ]}
+        self.dispute = {"source_url": REPORTER_COMMENT, "reply_url": REPLY, "disposition": "invalid",
+                        "claim": "The retry loop hides the error and must be removed",
+                        "counter_evidence": "retry.go:41 re-raises after the last attempt; TestRetrySurfacesError fails without it",
+                        "head_sha": self.sha, "reviewer_confirmed": True}
+        self.evidence["disputed_issue_claims"] = [self.dispute]
+        self.save()
+
+    def eval_with_thread(self, error=None):
+        if error:
+            fetch = patch.object(issue_gate, "gh_issue_thread", side_effect=error)
+        else:
+            fetch = patch.object(issue_gate, "gh_issue_thread", return_value=self.thread)
+        with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), fetch as mocked:
+            errors, info = issue_gate.evaluate(repo="OWNER/REPO", issue=123,
+                                               worktree=self.worktree, evidence_path=self.path)
+        return errors, info, mocked
+
+    def eval_local(self):
+        # The inherited gate tests also run with an answered dispute present.
+        return self.eval_with_thread()[:2]
+
+    def blocked(self, needle, mutate):
+        mutate(self.dispute, self.thread)
+        self.save()
+        errors = self.eval_with_thread()[0]
+        self.assertTrue(any(needle in e for e in errors), errors)
+
+    def test_answered_comment_claim_passes(self):
+        self.assertEqual([], self.eval_with_thread()[0])
+
+    def test_answered_issue_body_claim_passes_without_a_link(self):
+        def body_claim(d, t):
+            d["source_url"] = ISSUE_URL
+            t["comments"][1]["body"] = "The described crash does not reproduce on main; see the trace below."
+        body_claim(self.dispute, self.thread)
+        self.save()
+        self.assertEqual([], self.eval_with_thread()[0])
+
+    def test_no_disputes_never_fetches_comments(self):
+        self.evidence.pop("disputed_issue_claims")
+        self.save()
+        errors, _, mocked = self.eval_with_thread()
+        self.assertEqual([], errors)
+        mocked.assert_not_called()
+
+    def test_reply_must_link_the_disputed_comment(self):
+        self.blocked("does not link", lambda d, t: t["comments"][1].update(body="The retry loop is fine."))
+
+    def test_reply_must_follow_the_claim(self):
+        self.blocked("not posted after", lambda d, t: t["comments"][1].update(createdAt="2026-10-29T03:00:00Z"))
+
+    def test_source_must_belong_to_this_issue(self):
+        self.blocked("not this Issue", lambda d, t: d.update(
+            source_url="https://github.com/OWNER/REPO/issues/124#issuecomment-1"))
+
+    def test_reply_must_be_a_comment(self):
+        self.blocked("reply_url is not a comment", lambda d, t: d.update(reply_url=ISSUE_URL))
+
+    def test_reviewer_must_confirm(self):
+        self.blocked("independent reviewer", lambda d, t: d.update(reviewer_confirmed="yes"))
+
+    def test_other_head_blocks(self):
+        self.blocked("another HEAD", lambda d, t: d.update(head_sha="0" * 40))
+
+    def test_unknown_disposition_blocks(self):
+        self.blocked("disposition", lambda d, t: d.update(disposition="wontfix"))
+
+    def test_vague_counter_evidence_blocks(self):
+        self.blocked("counter_evidence", lambda d, t: d.update(counter_evidence="issue is wrong"))
+
+    def test_unavailable_comments_fail_closed(self):
+        errors = self.eval_with_thread(error=issue_gate.GateError("gh: rate limited"))[0]
+        self.assertTrue(any("comments unavailable" in e for e in errors), errors)
+
+    def test_malformed_list_blocks(self):
+        self.evidence["disputed_issue_claims"] = {"source_url": ISSUE_URL}
+        self.save()
+        self.assertTrue(any("malformed" in e for e in self.eval_with_thread()[0]))
+
+    def test_partial_resolution_needs_a_dispute(self):
+        self.evidence["issue_resolution"] = "partial"
+        self.save()
+        self.assertEqual([], self.eval_with_thread()[0])
+        self.evidence.pop("disputed_issue_claims")
+        self.save()
+        self.assertTrue(any("'partial' needs" in e for e in self.eval_with_thread()[0]))
+
+    def test_unknown_resolution_blocks(self):
+        self.evidence["issue_resolution"] = "mostly"
+        self.save()
+        self.assertTrue(any("issue_resolution must be" in e for e in self.eval_with_thread()[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

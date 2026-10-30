@@ -17,6 +17,9 @@ re-apply the rows below, then run `make skill-test` and
 | `references/severity.md` | note that the project-local workflows share the rubric |
 | `scripts/install.sh`, `tests/test_installer.py` | removed: the skill is repository-local, nothing installs it elsewhere |
 | `README.md`, `references/platforms.md` | install sections replaced by the repository layout (symlinks, `.codex/agents` copies, consistency test) |
+| `references/issue-claims.md` (new), `SKILL.md` (§0 Issue fetch with `comments` and claims rule, §1 SA claims and `CLOSED`/`INVALID`/`NEEDS_DECISION` classification, §2.5 reviewer, §4 `Refs #N`, §5 statuses), `references/{workflow,evidence-contract,quality-gate}.md`, `README.md` | Issue claims are hypotheses: triage into `valid`/`invalid`/`needs_evidence`/`out_of_scope`, the reviewer judges disputed claims without SA's conclusion, Root answers them on the Issue and records `disputed_issue_claims`; `issue_resolution: partial` for Issues that stay open; a claim raised again without new evidence is `NEEDS_DECISION` |
+| `scripts/issue_gate.py` (`gh_issue_thread`, `check_disputed_claims`, `issue_resolution`, shared `closes_issue`/`references_issue`), `scripts/create_pr.py` (`issue_reference_problem`), `tests/test_issue_gate.py` (`DisputedIssueClaimTests`), `tests/test_create_and_ci.py` (partial-resolution cases) | the gate verifies each disputed claim's reply against the Issue's comments (fetched only when there are disputes); a `partial` PR must reference the Issue without closing it |
+| `platforms/{claude,codex,agy}/agents/issue-{sa,coder,reviewer}.*` | Issue claims are hypotheses (SA, Coder); the reviewer returns `disputed_claim_verdicts` and checks every stated acceptance criterion is met or disputed |
 
 Repository-side pieces the skill relies on: `.github/pr-evidence.json` (evidence manifest the
 gate reads from the base branch), `make skill-test` (runs `tests/`, wired into CI's Go test

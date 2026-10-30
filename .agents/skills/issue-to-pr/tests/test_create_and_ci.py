@@ -101,6 +101,51 @@ class CreatePRTest(unittest.TestCase):
                 create_pr.check_pr("OWNER/REPO", "issue/123-fix", "main", self.sha,
                                    draft=True, issue=123)
 
+    def partial(self, body: str):
+        self.evidence.write_text(json.dumps({"base_branch": "main", "issue_resolution": "partial"}))
+        self.body.write_text(body + "\n\n## Tests\n- regression passed\n")
+
+    def test_partial_resolution_must_not_close_the_issue(self):
+        for body in ("Fixes #123", "closes OWNER/REPO#123", "Resolved: https://github.com/OWNER/REPO/issues/123"):
+            with self.subTest(body=body), patch.object(create_pr, "execute") as execute:
+                self.partial(body)
+                with self.assertRaisesRegex(create_pr.GateError, "must not close"):
+                    self.invoke()
+                execute.assert_not_called()
+
+    def test_partial_resolution_must_reference_the_issue(self):
+        for body in ("Partial fix.", "Refs #1234", "Refs `#123`", "Refs foo#123"):
+            with self.subTest(body=body):
+                self.partial(body)
+                with self.assertRaisesRegex(create_pr.GateError, "must reference #123"):
+                    self.invoke()
+
+    def test_partial_resolution_with_reference_creates_and_verifies(self):
+        self.partial("Refs #123: the retry claim is disputed on the Issue. Do not write `Fixes #123` here.")
+        with patch.object(create_pr, "evaluate", return_value=([], self.info)), \
+             patch.object(create_pr, "execute", return_value=""), \
+             patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "u"}) as check:
+            result = self.invoke()
+        self.assertEqual("DRAFT_PR_CREATED", result["status"])
+        self.assertEqual("partial", check.call_args.kwargs["resolution"])
+
+    def test_default_resolution_still_requires_a_closing_keyword(self):
+        self.body.write_text("Refs #123\n\n## Tests\n- regression passed\n")
+        with self.assertRaisesRegex(create_pr.GateError, "closing keyword"):
+            self.invoke()
+
+    def test_created_partial_pr_that_closes_the_issue_is_rejected(self):
+        pr = {"number": 9, "state": "OPEN", "url": "https://github.com/OWNER/REPO/pull/9",
+              "isDraft": True, "headRefName": "issue/123-fix", "headRefOid": self.sha,
+              "baseRefName": "main", "body": "Closes #123"}
+        with patch.object(create_pr, "command", return_value=pr):
+            with self.assertRaisesRegex(create_pr.GateError, "must not close"):
+                create_pr.check_pr("OWNER/REPO", "issue/123-fix", "main", self.sha,
+                                   draft=True, issue=123, resolution="partial")
+            pr["body"] = "Refs OWNER/REPO#123"
+            self.assertEqual(9, create_pr.check_pr("OWNER/REPO", "issue/123-fix", "main", self.sha,
+                                                   draft=True, issue=123, resolution="partial")["number"])
+
 
 class CiTest(unittest.TestCase):
     def test_all_pass(self):

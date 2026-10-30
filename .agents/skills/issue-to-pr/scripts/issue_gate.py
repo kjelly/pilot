@@ -187,6 +187,79 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
                     errors.append(f"Unresolved blocking review finding: {f.get('description', f['severity'])}")
     if ctx is not None:
         errors.extend(ctx.check_required(evidence.get("repo_required_evidence")))
+    resolution = evidence.get("issue_resolution", "fixes")
+    if resolution not in ISSUE_RESOLUTIONS:
+        errors.append("issue_resolution must be 'fixes' or 'partial'")
+    elif resolution == "partial" and not evidence.get("disputed_issue_claims"):
+        errors.append("issue_resolution 'partial' needs the disputed_issue_claims that stay open")
+    return errors
+
+
+ISSUE_RESOLUTIONS = ("fixes", "partial")
+DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
+
+
+def gh_issue_thread(repo: str, issue: int) -> dict[str, Any]:
+    """The Issue's URL, creation time and every comment (gh pages through all of them)."""
+    value = command(["gh", "issue", "view", str(issue), "-R", repo, "--json", "number,url,createdAt,comments"])
+    if not isinstance(value, dict) or value.get("number") != issue or not isinstance(value.get("comments"), list):
+        raise GateError("Issue comments unavailable")
+    return value
+
+
+def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | None, *, sha: str,
+                          ctx: "repo_evidence.Context | None" = None) -> list[str]:
+    """Verify each Issue claim the PR does not act on was answered on the Issue.
+
+    The gate cannot judge whether the dispute is right; it checks that the claim's
+    source is this Issue or one of its comments, that a later comment on the Issue
+    answers it (linking the source comment when the claim came from a comment), and
+    that the independent reviewer confirmed it for the current HEAD.
+    """
+    items = evidence.get("disputed_issue_claims", [])
+    if not isinstance(items, list):
+        return ["disputed_issue_claims malformed"]
+    if not items:
+        return []
+    if thread is None:
+        return ["Issue comments not fetched; cannot verify disputed Issue claims"]
+    errors: list[str] = []
+    issue_url = thread.get("url")
+    comments: dict[str, tuple[str, str]] = {}
+    for c in thread.get("comments") or []:
+        if isinstance(c, dict) and isinstance(c.get("url"), str) and isinstance(c.get("createdAt"), str):
+            comments[c["url"]] = (c["createdAt"], c.get("body") if isinstance(c.get("body"), str) else "")
+    for i, item in enumerate(items):
+        label = f"disputed_issue_claims[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} malformed")
+            continue
+        if item.get("disposition") not in DISPUTE_DISPOSITIONS:
+            errors.append(f"{label}.disposition must be one of {', '.join(DISPUTE_DISPOSITIONS)}")
+        for key, minimum in (("claim", 20), ("counter_evidence", 30)):
+            if not nontrivial(item.get(key), minimum):
+                errors.append(f"{label}.{key} missing or lacks specific detail")
+        if not covers_head(ctx, item.get("head_sha"), sha, label):
+            errors.append(f"{label} is for another HEAD")
+        if item.get("reviewer_confirmed") is not True:
+            errors.append(f"{label} not confirmed by the independent reviewer")
+        source, reply = item.get("source_url"), item.get("reply_url")
+        if not isinstance(source, str) or not isinstance(reply, str):
+            errors.append(f"{label} needs source_url and reply_url")
+            continue
+        if source == issue_url and isinstance(thread.get("createdAt"), str):
+            source_time: str | None = thread["createdAt"]
+        else:
+            source_time = comments[source][0] if source in comments else None
+        if source_time is None:
+            errors.append(f"{label}.source_url is not this Issue or one of its comments: {source}")
+        if reply not in comments:
+            errors.append(f"{label}.reply_url is not a comment on this Issue: {reply}")
+            continue
+        if source_time is not None and comments[reply][0] <= source_time:
+            errors.append(f"{label} reply was not posted after the disputed claim")
+        if source != issue_url and source not in comments[reply][1]:
+            errors.append(f"{label} reply does not link the disputed comment ({source})")
     return errors
 
 
@@ -196,6 +269,23 @@ def _strip_code(text: str) -> str:
     text = re.sub(r"(?s)(`{3,}|~{3,}).*?(?:\1|\Z)", " ", text)
     text = re.sub(r"(?s)<!--.*?-->", " ", text)
     return re.sub(r"(`+)[^`\n]*?\1", " ", text)
+
+
+def closes_issue(body: str, repo: str, issue: int) -> bool:
+    """True if `body` has a GitHub closing keyword for the Issue outside code."""
+    mention = re.compile(
+        r"(?<![A-Za-z0-9])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:"
+        + re.escape(repo) + r"#|https://github\.com/" + re.escape(repo) + r"/issues/|#)" + str(issue)
+        + r"\b", re.IGNORECASE)
+    return bool(mention.search(_strip_code(body)))
+
+
+def references_issue(body: str, repo: str, issue: int) -> bool:
+    """True if `body` mentions the Issue (#N, OWNER/REPO#N or its URL) outside code."""
+    mention = re.compile(
+        r"(?:(?<![\w&])|" + re.escape(repo) + r")#" + str(issue) + r"\b|https://github\.com/"
+        + re.escape(repo) + r"/issues/" + str(issue) + r"\b", re.IGNORECASE)
+    return bool(mention.search(_strip_code(body)))
 
 
 def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | None = None) -> list[str]:
@@ -231,10 +321,6 @@ def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | No
         # Catch closing references even if GitHub does not yet register the closing relationship.
         # Only a closing keyword (Fixes/Closes/Resolves ...) makes another PR a duplicate: a plain
         # "#N" / "Related: #N" / "see #N" in its body is a cross-reference, not a competing fix.
-        mention = re.compile(
-            r"(?<![A-Za-z0-9])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:"
-            + re.escape(repo) + r"#|https://github\.com/" + re.escape(repo) + r"/issues/|#)" + str(issue)
-            + r"\b", re.IGNORECASE)
         for pr in open_prs:
             if not isinstance(pr, dict):
                 errors.append("Malformed GitHub PR response")
@@ -247,7 +333,7 @@ def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | No
                 for x in closing)
             if own_pr is not None and pr.get("number") == own_pr:
                 continue
-            if linked_issue or mention.search(_strip_code(pr.get("body") or "")):
+            if linked_issue or closes_issue(pr.get("body") or "", repo, issue):
                 errors.append(f"Potential duplicate PR already references Issue #{issue}: {pr.get('url')}")
     return errors
 
@@ -312,6 +398,13 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     ctx = repo_evidence.Context.load(worktree, sha, f"refs/remotes/{remote}/{base}" if base else None)
     errors.extend(check_evidence(evidence, repo=repo, issue=issue, sha=sha,
                                  branch=branch, base=base, evidence_dir=evidence_path.parent, ctx=ctx))
+    if evidence.get("disputed_issue_claims"):
+        thread = None
+        try:
+            thread = gh_issue_thread(repo, issue)
+        except GateError as exc:
+            errors.append(f"GitHub Issue comments unavailable: {exc}")
+        errors.extend(check_disputed_claims(evidence, thread, sha=sha, ctx=ctx))
     try:
         if not remote_identity(worktree, remote, repo):
             errors.append(f"Git remote '{remote}' does not identify {repo} (forks require manual handling)")
