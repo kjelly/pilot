@@ -16,6 +16,19 @@ import (
 // TestHistoryMarkerNameMatchesTheApplyTask keeps this equal to the task file.
 var historyMarkerRE = regexp.MustCompile(`^pilot-internal-history-g-[0-9a-f]{64}$`)
 
+// managedIdentityAttributes are the FreeIPA attributes (RPC names) that the
+// users/groups drift compares, for users and groups together. The same set is
+// written down in two other places that must move with it: the observer's
+// USER_FIELDS/GROUP_FIELDS (playbooks/check/files/freeipa-identity-object-observer.py)
+// and the options apply passes to `ipa user-add/user-mod/group-add/group-mod`
+// (playbooks/apply/freeipa-identity-apply.yml, over the fields of
+// playbooks/apply/tasks/freeipa-identity-normalize-users-groups.yml).
+// TestManagedIdentityAttributesAgreeAcrossObserverGoAndApply keeps all of them
+// equal: an attribute apply sets but drift does not compare is drift that can
+// never be seen, and one drift compares but apply never sets is drift apply can
+// never fix.
+var managedIdentityAttributes = []string{"givenname", "sn", "displayname", "mail", "uidnumber", "gidnumber", "loginshell", "homedirectory", "description"}
+
 // IdentityObject is the credential-free projection of an apply-normalized
 // user/group or an observed FreeIPA object. Attributes use FreeIPA RPC names.
 type IdentityObject struct {
@@ -114,7 +127,7 @@ func ComputeIdentityObjectDrift(snapshot IdentityObjects) ([]DriftItem, error) {
 				continue
 			}
 			for field, values := range want.Attributes {
-				if !slices.Contains([]string{"givenname", "sn", "displayname", "mail", "uidnumber", "gidnumber", "loginshell", "homedirectory", "description"}, field) {
+				if !slices.Contains(managedIdentityAttributes, field) {
 					return nil, fmt.Errorf("accessgrants: unsupported identity attribute")
 				}
 				// Report the field name only: values may be user-controlled text.

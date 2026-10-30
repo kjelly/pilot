@@ -542,7 +542,7 @@ sha256 在 `3b4bdb1` 是 `88247b6e…`，之後是 `945657769b99…`，差別只
   `items` 依 category、name、action、detail 排序，沒有差異時是 `[]`（不是 `null`）；`complete` 在 phase 1 一律是 `false`
   （還有手寫 HBAC/sudo 規則附件、hosts/hostgroups/netgroups、密碼動作沒有比對）。這取代了舊的 `{"Items": [...]}`
   （沒有差異時是 `{"Items": null}`）：讀舊形狀的腳本要改讀 `items`。
-- `--exit-code`（CI 用）：`0` 完整涵蓋且沒有差異（phase 1 不會發生）、`1` 錯誤、`2` 有 apply 會處理或需要人工處理的差異
+- `--exit-code`（CI 用）：`0` 完整涵蓋且沒有差異（phase 1 還到不了：涵蓋不完整，所以乾淨的執行也回傳 `3`）、`1` 錯誤、`2` 有 apply 會處理或需要人工處理的差異
   （任何 action 不是 `report`）、`3` 只有 report-only 的差異，或涵蓋不完整。沒有這個旗標時，有差異也回傳 `0`。
 - action 詞彙：`create`、`delete`、`update`、`add_member`、`remove_member` 是 apply 會做的事；`manual` 是 apply 會失敗、
   要人工處理的狀態；`report` 是 apply 不會碰的物件（只報告）。

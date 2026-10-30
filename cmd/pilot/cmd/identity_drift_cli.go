@@ -59,7 +59,8 @@ attachments, host objects and password actions are pending, so complete is false
 and an empty report is not full parity.
 
 --exit-code returns 2 for actionable drift, 3 for partial coverage or report-only
-differences, and 1 on failure. Zero is reserved for fully covered clean state.
+differences, and 1 on failure. Zero is reserved for a fully covered clean state,
+which is not reachable yet: coverage is partial, so even a clean run returns 3.
 --repair-managed cannot be combined with --include-users-groups or --exit-code.
 
 --repair-managed additionally reconciles any drift found via the same
@@ -91,7 +92,7 @@ func init() {
 	identityDriftCmd.Flags().StringVar(&identityDriftVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	identityDriftCmd.Flags().BoolVar(&identityDriftRepairManaged, "repair-managed", false, "explicitly repair any drift found (Pilot-owned managed constructs only)")
 	identityDriftCmd.Flags().BoolVar(&identityDriftIncludeObjects, "include-users-groups", false, "include staged users/groups observer (requires FreeIPA Python client on target)")
-	identityDriftCmd.Flags().BoolVar(&identityDriftExitCode, "exit-code", false, "CI status: 0 fully clean, 1 error, 2 actionable drift, 3 partial coverage/report-only")
+	identityDriftCmd.Flags().BoolVar(&identityDriftExitCode, "exit-code", false, "CI status: 0 fully covered and clean (not reachable yet: coverage is partial, so a clean run returns 3), 1 error, 2 actionable drift, 3 partial coverage or report-only differences")
 	identityCmd.AddCommand(identityDriftCmd)
 }
 

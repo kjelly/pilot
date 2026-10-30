@@ -207,3 +207,24 @@ func TestIdentityDriftExitCodeNeedsTheFlag(t *testing.T) {
 		t.Fatalf("--exit-code with actionable drift: err = %v", err)
 	}
 }
+
+// TestIdentityDriftExitCodeHelpSaysZeroIsNotReachable: what the help promises
+// must be what the command does. While coverage is partial (complete is always
+// false) a clean run returns 3, never 0 (identity_drift_objects_cli_test.go
+// pins the behaviour); the flag help and the long help must not offer 0 as a
+// state a CI job can reach.
+func TestIdentityDriftExitCodeHelpSaysZeroIsNotReachable(t *testing.T) {
+	flag := identityDriftCmd.Flags().Lookup("exit-code")
+	if flag == nil {
+		t.Fatal("--exit-code is not registered")
+	}
+	if !strings.Contains(flag.Usage, "not reachable yet") || !strings.Contains(flag.Usage, "a clean run returns 3") {
+		t.Errorf("--exit-code usage promises an exit status 0 it cannot give: %q", flag.Usage)
+	}
+	if strings.Contains(flag.Usage, "0 fully clean") {
+		t.Errorf("--exit-code usage still says %q", "0 fully clean")
+	}
+	if !strings.Contains(identityDriftCmd.Long, "not reachable yet") || !strings.Contains(identityDriftCmd.Long, "even a clean run returns 3") {
+		t.Errorf("the long help does not say a clean run returns 3:\n%s", identityDriftCmd.Long)
+	}
+}
