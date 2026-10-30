@@ -19,6 +19,12 @@ func TestMain(m *testing.M) {
 	if scenario := os.Getenv("PILOT_MCP_FAKE_SSH"); scenario != "" {
 		os.Exit(fakeSSH(scenario))
 	}
+	if os.Getenv("PILOT_MCP_FAKE_DOCKER") != "" {
+		os.Exit(fakeDocker())
+	}
+	if opts := os.Getenv("PILOT_MCP_RUN_CONNECT"); opts != "" {
+		os.Exit(runConnectChild(opts))
+	}
 	os.Exit(m.Run())
 }
 

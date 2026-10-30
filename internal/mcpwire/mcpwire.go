@@ -78,16 +78,16 @@ var sessionIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // ValidSessionID reports whether id is 32 lowercase hex characters.
 func ValidSessionID(id string) bool { return sessionIDPattern.MatchString(id) }
 
-// ReservedDirs are top-level directories a snapshot never carries: secrets
-// and pilot state come from the deploy node, contracts from the image.
-var ReservedDirs = []string{".vault", ".pilot", ".pilot-data", "contracts", ".git"}
+// ReservedPaths are directories a snapshot never carries: secrets and
+// pilot state come from the deploy node; contracts and the verification
+// specs their autoDeploy entries reference come from the image.
+var ReservedPaths = []string{".vault", ".pilot", ".pilot-data", "contracts", "docs/verification", ".git"}
 
 // IsReserved reports whether a clean relative path is a reserved directory
 // or lies under one.
 func IsReserved(p string) bool {
-	top, _, _ := strings.Cut(p, "/")
-	for _, r := range ReservedDirs {
-		if top == r {
+	for _, r := range ReservedPaths {
+		if p == r || strings.HasPrefix(p, r+"/") {
 			return true
 		}
 	}

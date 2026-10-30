@@ -715,9 +715,9 @@ cmd/pilot/cmd/mcp.go                  # 抽出 serveMCP(ctx, mcpServeOptions, mc
 | I03 | edit profile | 有 `pilot_edit_apply`；對 `hosts.yml` 做一次 apply 後 `changes` 帶回正確檔案（含 subdir 前綴），不含產生器的補寫 |
 | I04 | shim 在 ready 前印雜訊 | 連線成功；雜訊出現在 stderr，不在給 agent 的 stdout |
 | I05 | 兩個 session 用不同 SHA 同時執行 | 讀到的設定各自對應自己的 SHA |
-| I06 | 舊診斷工具重寫 `inventory.yml` | 只寫在 `work/`；`source/` 不變；`changes` 不帶出 |
-| I08 | SIGKILL `pilot-mcp`、強制斷 SSH | remote process 在 30 秒內結束 |
-| I09 | snapshot 含 `.vault/x` 或 `contracts/x` | `SNAPSHOT_INVALID` |
+| I06 | session 產生 `inventory.yml` | 只寫在 `work/`；`source/` 不變；`changes` 不帶出（I03 一併驗證） |
+| I08 | SIGKILL 在獨立行程中執行的 `pilot-mcp` | remote process 在 30 秒內結束 |
+| I09 | repo 的環境目錄含 `.vault/x` | 使用者端不送出並在 stderr 列出；session 照常開始（remote 端對保留路徑回 `SNAPSHOT_INVALID` 由 §13.1 涵蓋） |
 | I10 | snapshot 的 `group_vars` 有明文密碼 | `SECRET_POLICY_VIOLATION`，訊息不含密碼 |
 | I11 | 帶假 GitHub token 的 credential helper | remote 的檔案、process args、env、audit 都找不到該 token |
 | I12 | edit session 呼叫 `set_vault_value`（`value_env=HOME`） | apply 失敗並 rollback；`.vault` 內容不變 |

@@ -62,8 +62,12 @@ func buildWorkspace(cfg *Config, source, work string) (string, error) {
 	if err := os.Symlink(cfg.VaultDir, filepath.Join(work, ".vault")); err != nil {
 		return "", errorf(mcpwire.CodeRuntimeError, "link .vault: %v", err)
 	}
-	if err := copyTree(filepath.Join(cfg.PilotRoot, "contracts"), filepath.Join(work, "contracts")); err != nil {
-		return "", errorf(mcpwire.CodeRuntimeError, "copy contracts: %v", err)
+	// The delivery tools load the contract catalog from the workspace, and
+	// the catalog reads the verification spec of every autoDeploy contract.
+	for _, dir := range []string{"contracts", filepath.Join("docs", "verification")} {
+		if err := copyTree(filepath.Join(cfg.PilotRoot, dir), filepath.Join(work, dir)); err != nil {
+			return "", errorf(mcpwire.CodeRuntimeError, "copy %s: %v", dir, err)
+		}
 	}
 	return linkConfig(cfg, work)
 }
@@ -90,8 +94,8 @@ func linkConfig(cfg *Config, work string) (string, error) {
 }
 
 // hashTree returns path -> SHA-256 for the regular files under root,
-// skipping symlinks and the .pilot and contracts directories (pilot state
-// and the image's catalog, never part of an edit).
+// skipping symlinks, .pilot (pilot state), and contracts and
+// docs/verification (copied from the image, never part of an edit).
 func hashTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -104,7 +108,7 @@ func hashTree(root string) (map[string]string, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if rel == ".pilot" || rel == "contracts" {
+			if rel == ".pilot" || rel == "contracts" || rel == "docs/verification" {
 				return filepath.SkipDir
 			}
 			return nil

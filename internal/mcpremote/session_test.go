@@ -109,12 +109,16 @@ func TestRunSessionObserveServesAfterTheReadyLineAndLeavesNothing(t *testing.T) 
 }
 
 func TestRunSessionBuildsTheWorkspace(t *testing.T) {
-	var vaultTarget, contractFile string
+	var vaultTarget, contractFile, specFile string
 	fs := newFakeSession(t, mcpwire.ModeObserve, "prod", func(dir string) {
 		vaultTarget, _ = os.Readlink(filepath.Join(dir, ".vault"))
 		contractFile = filepath.Join(dir, "contracts", "docker.yaml")
 		if _, err := os.Stat(contractFile); err != nil {
 			contractFile = ""
+		}
+		specFile = filepath.Join(dir, "docs", "verification", "docker.md")
+		if _, err := os.Stat(specFile); err != nil {
+			specFile = ""
 		}
 	})
 	fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
@@ -124,8 +128,8 @@ func TestRunSessionBuildsTheWorkspace(t *testing.T) {
 	if vaultTarget != fs.cfg.VaultDir {
 		t.Fatalf(".vault → %q, want %q", vaultTarget, fs.cfg.VaultDir)
 	}
-	if contractFile == "" {
-		t.Fatal("the image's contracts were not copied into the workspace")
+	if contractFile == "" || specFile == "" {
+		t.Fatal("the image's contracts and verification specs were not copied into the workspace")
 	}
 	if !strings.HasSuffix(fs.served.DiagnoseInventory, "/inventory.yml") {
 		t.Fatalf("diagnose inventory = %s", fs.served.DiagnoseInventory)

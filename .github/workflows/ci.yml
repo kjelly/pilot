@@ -199,6 +199,27 @@ jobs:
       - name: make pilot-mcp-cross
         run: make pilot-mcp-cross
 
+  mcp-remote:
+    # pilot-mcp end to end against a real sshd; the deploy node's docker is
+    # a stand-in that execs the real `pilot mcp remote`.
+    name: pilot-mcp integration (sshd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install openssh-server
+        run: command -v sshd || test -x /usr/sbin/sshd || (sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server)
+
+      - name: make mcp-remote-test
+        run: make mcp-remote-test
+
   image:
     # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
     # once every other job here has passed (needs lists them all, root-tests
@@ -211,7 +232,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross]
+    needs: [test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20

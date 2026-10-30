@@ -105,13 +105,13 @@ func TestErrorLineRoundTripAndExitCodes(t *testing.T) {
 }
 
 func TestCheckSnapshotPath(t *testing.T) {
-	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore"} {
+	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore", "docs/readme.md", "contractsx/a"} {
 		if err := CheckSnapshotPath(ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"", "/etc/passwd", "../x", "a/../b", "a//b", "./a", "a/", "a\\b", "a\x00b", "a\nb",
-		".vault/main.yaml", ".pilot/x", ".pilot-data/x", "contracts/docker.yaml", ".git/config", ".vault"} {
+		".vault/main.yaml", ".pilot/x", ".pilot-data/x", "contracts/docker.yaml", "docs/verification/docker.md", ".git/config", ".vault"} {
 		if err := CheckSnapshotPath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
