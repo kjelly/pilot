@@ -9,7 +9,11 @@ Execute on real GitHub PRs using **GitHub CLI (`gh`)**. When explicitly invoked,
 
 ## Single-item checkout contract (mandatory)
 
-Follow [single-item scope and branch checkout](../_shared/single-item-checkout.md)
+Follow the single-item scope and branch checkout contract,
+`.agents/skills/_shared/single-item-checkout.md`, from the repo root (a path, not a
+relative link: Claude Code presents this skill as the symlink `.claude/skills/<name>`,
+where `../_shared` does not exist). Resolve this skill's directory with `realpath`
+before reading shared files or taking the snapshot. Apply it
 before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
 per invocation; multiple/all targets require choosing one with the user. Checkout
 the selected branch in the current clean checkout; do not create per-item worktrees.
@@ -31,8 +35,10 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 - Delegate by the configured native role name, with a fresh independent context;
   do not override its model/effort or use a conversation fork that inherits another
   model. Report unavailable roles/models rather than silently substituting them.
-- Resolve packaged scripts and references relative to this `SKILL.md`, including
-  when operating in another worktree. Do not fall back to `~/.agents/skills`.
+- Run packaged scripts and read references from the verified snapshot (`$SNAP`) the
+  checkout contract takes, by absolute snapshot paths, never from the branch being
+  worked on: it may predate or replace them. `$REPO_ROOT` is the current checkout.
+  Do not fall back to `~/.agents/skills`.
 
 ## Pilot: repository rules the review and the merge must respect
 
@@ -78,11 +84,11 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 
 ## 2. Orchestration / context isolation
 
-1. Root inventories the selected PR number, URL, author, HEAD/Base SHA, CI, dependencies, overlap, and current state. Map PR-to-PR dependencies and shared test infrastructure; block PRs with unmet dependencies or unreviewed interactions. Do not start another PR in this invocation.
-2. After checking out the selected PR head branch, spawn one independent `prm-reviewer` in a **fresh context for this PR**. Use `prm-dependency` if overlapping PRs/stacked branches need separate analysis. If the runtime lacks true subagents, report `WAITING` rather than simulating independent review via one context.
+1. Root inventories the selected PR number, URL, author, HEAD/Base SHA, CI, dependencies, overlap, and current state. Map this PR's dependencies and shared test infrastructure; block it on unmet dependencies or unreviewed interactions with other PRs, which are read-only context. Do not start another PR in this invocation.
+2. After checking out the selected PR head branch, spawn one independent `prm-reviewer` in a **fresh context for this PR**. Use `prm-dependency` if this PR's overlaps or stacked branches need separate analysis. If the runtime lacks true subagents, report `WAITING` rather than simulating independent review via one context.
 3. Each reviewer reads *actual full diff* (`gh pr diff`, and source/context for impacted modules), PR description/issues/reviews, CI and tests; inspect correctness, requirements, architecture, security, concurrency, edge cases, semantic regression, migration/rollback implications, and test coverage. Fetch large diffs to local files; do not stuff raw code or logs into Root context.
 4. Reviewer must return compact typed findings (`P0`–`P3`, path/line, rationale, reproducible evidence, blocking flag), relevant tests/check URLs, summary, **reviewed HEAD + BASE commit SHAs**, verdict `PASS` / `BLOCK` / `NEEDS_MORE_EVIDENCE`, and explicit review scope. A reviewer's verbal `LGTM` is insufficient.
-5. Root handles triage, writes one JSON evidence file **per PR** outside tracked worktrees (see `references/evidence-contract.md`), and runs the deterministic gate. The gate checks consistency and GitHub metadata, **not proof of semantic correctness or true subagent isolation**; Root remains accountable for independent substantive review.
+5. Root handles triage, writes the selected PR's JSON evidence file outside the checkout (see `references/evidence-contract.md`), and runs the deterministic gate. The gate checks consistency and GitHub metadata, **not proof of semantic correctness or true subagent isolation**; Root remains accountable for independent substantive review.
 
 ## 3. Decision semantics
 
@@ -100,14 +106,14 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 Before taking action, require review evidence for the current HEAD and Base SHA. Use:
 
 ```bash
-python3 /path/to/pr-review-merge/scripts/review_gate.py --repo OWNER/REPO --pr 123 \
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 \
   --evidence /safe/state/123/review.json
 ```
 
 This command reads GitHub state and outputs structured JSON, no mutation. If the result is `MERGE` or `DRAFT`, run the guarded actor:
 
 ```bash
-python3 /path/to/pr-review-merge/scripts/apply_decision.py --repo OWNER/REPO --pr 123 \
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 \
   --evidence /safe/state/123/review.json --method merge --execute
 ```
 
@@ -122,7 +128,7 @@ Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live P
 - Review and act on **only the selected PR**. Re-fetch its HEAD, Base, mergeability, CI and dependencies before action. Old evidence is invalid after any HEAD or Base change; obtain a new independent review. Do not continue to another PR after completion.
 - If a PR has verified blockers: do not silently edit it here. Comment with path/line, severity, issue rationale, test failure details and resolution steps; convert to Draft. The separate `pr-ready` skill can remediate it later.
 - If CI/permissions are pending, report `WAITING`, leave Ready and re-check if current session permits. Do not issue a blind loop or mark the PR as merged.
-- Save durable per-PR checkpoints outside worktrees. Do not create new PRs, modify PR branches, or delete branches. Do not close unrelated issues.
+- Save the durable checkpoint for the selected PR outside the checkout. Do not create new PRs, modify PR branches, or delete branches. Do not close unrelated issues.
 - Review steps are subject to runtime capabilities. If code execution, GitHub API, or subagents are unavailable, **do not claim completion**.
 
 ## 6. Final report (selected PR)
@@ -137,6 +143,6 @@ Keep Root context small: include structured findings and essential citations/pat
 - [JSON evidence contract](references/evidence-contract.md)
 - [Quality gate and merge-queue safety](references/quality-gate.md)
 - [Platforms and repository layout](references/platforms.md)
-- `scripts/list_ready.py` — enumerates all open Ready PRs (paginated)
+- `scripts/list_ready.py` — lists candidate open Ready PRs (paginated) so the user can choose one; listing is not authorization to process them
 - `scripts/review_gate.py` — live read-only decision gate
 - `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required)

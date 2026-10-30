@@ -7,7 +7,11 @@ description: Repair and verify existing GitHub Draft pull requests until merge-r
 
 ## Single-item checkout contract (mandatory)
 
-Follow [single-item scope and branch checkout](../_shared/single-item-checkout.md)
+Follow the single-item scope and branch checkout contract,
+`.agents/skills/_shared/single-item-checkout.md`, from the repo root (a path, not a
+relative link: Claude Code presents this skill as the symlink `.claude/skills/<name>`,
+where `../_shared` does not exist). Resolve this skill's directory with `realpath`
+before reading shared files or taking the snapshot. Apply it
 before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
 per invocation; multiple/all targets require choosing one with the user. Checkout
 the selected branch in the current clean checkout; do not create per-item worktrees.
@@ -30,16 +34,19 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 - Delegate by the configured native role name, with a fresh independent context;
   do not override its model/effort or use a conversation fork that inherits another
   model. Report unavailable roles/models rather than silently substituting them.
-- Resolve packaged scripts and references relative to this `SKILL.md`, including
-  when operating in another worktree. Do not fall back to `~/.agents/skills`.
+- Run packaged scripts and read references from the verified snapshot (`$SNAP`) the
+  checkout contract takes, by absolute snapshot paths, never from the branch being
+  worked on: it may predate or replace them. `$REPO_ROOT` is the current checkout.
+  Do not fall back to `~/.agents/skills`.
 
 You are the **orchestrator**, not the implementer of last resort. Execute the work; do not stop after making a plan. This skill supports Codex, Claude Code, and Antigravity CLI (`agy`). Use each runtime's native subagent mechanism; role contracts are under `references/roles.md` and the platform-native `pr-sa`, `pr-coder`, `pr-reviewer` agent definitions ship beside this skill (`platforms/<platform>/agents/`).
 
 ## Pilot: turn review history into a verification plan
 
 Read [shared historical checks and vm-target prompts](../pilot-code-review/references/pilot-history-checks.md)
-before SA/Coder dispatch. Resolve the reference to an absolute path for children
-working elsewhere. Read all relevant earlier findings and actual fix commits,
+before SA/Coder dispatch. Resolve the reference to its absolute path inside the
+verified snapshot for the children: the checked-out PR branch may predate it.
+Read all relevant earlier findings and actual fix commits,
 not merely the latest “fixed” comment. Maintain a finding ledger with root-cause
 class, trigger, invariant, fix SHA and regression/counterexample. On the second
 occurrence of a class, send SA to assess related callers/includes/backends before
@@ -59,7 +66,7 @@ Text-only changes need no unrelated VM run.
 ## Inputs and preflight
 
 - Accept one PR number/URL. Multiple targets or **all Draft PRs** require asking the user to select one; never process a batch. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
-- Verify `git`, `gh`, `python3`, an authenticated `gh auth status`, repository identity, clean worktree, and write permission to each PR head branch. If an action is permission-blocked, request the normal permission grant; **never** bypass sandbox/branch protections.
+- Verify `git`, `gh`, `python3`, an authenticated `gh auth status`, repository identity, a clean checkout, and write permission to the selected PR's head branch. If an action is permission-blocked, request the normal permission grant; **never** bypass sandbox/branch protections.
 - Fetch for the selected PR: description/body, diff, base/head SHAs, linked issues, acceptance criteria, review comments and threads, required checks, all CI checks, branch restrictions, dependency edges. Do not assume a comment is resolved simply because it is outdated.
 - Skip closed/merged PRs and never revert a non-Draft PR to Draft. If a Draft already meets every gate, do not make unnecessary changes.
 
@@ -67,14 +74,14 @@ Text-only changes need no unrelated VM run.
 
 - Checkout the existing PR **head branch** in the current clean checkout; confirm branch name and HEAD equal the GitHub PR head before working. Do not create per-PR worktrees. Preserve the original branch and PR; no duplicate PRs, no destructive resets or force-push.
 - For fork PRs, confirm head repository and permissions; if updating the original head is impossible, report `DRAFT-BLOCKED` rather than creating a replacement.
-- Inspect dependencies as read-only context. An unmet prerequisite blocks this PR; do not start that prerequisite or another PR. Never run concurrent writers on the same branch/worktree or shared mutable resources.
-- Each PR owns its own state/checkpoint and validation receipts. Checkpoint after every meaningful step; on resume, revalidate the current remote HEAD and invalidate stale evidence.
+- Inspect dependencies as read-only context. An unmet prerequisite blocks this PR; do not start that prerequisite or another PR. Never let two writers touch the same branch/checkout or shared mutable resources at the same time.
+- Keep this PR's state/checkpoint and validation receipts under `.pr-ready/<N>/` (N = PR number): one checkout serves different PRs over time, so never reuse another PR's state. Checkpoint after every meaningful step; on resume, revalidate the current remote HEAD and invalidate stale evidence.
 
 ## Per-PR execution loop
 
 1. **Analyze first.** Gather GitHub context; derive acceptance criteria and reproduce reported failures. Check whether the PR already passes the entire quality gate.
 2. **SA (`pr-sa`)** independently diagnose root cause, architectural impact, design options, and regressions. Produce a concise evidence-backed diagnosis.
-3. **Coder (`pr-coder`)** owns implementation *only* in that PR's worktree. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis as applicable. Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
+3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis as applicable. Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
 4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof.
 5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD, and re-query GitHub until checks settle or an external blocker prevents completion.
@@ -91,7 +98,7 @@ Text-only changes need no unrelated VM run.
 
 ## Context discipline / supporting docs
 
-- Read `references/workflow.md` for scheduling, isolation, and resumption.
+- Read `references/workflow.md` for checkout, checkpoint, and resumption.
 - Read `references/roles.md` before delegating; pass concise task inputs and have agents return structured summaries, not full logs.
 - Read `references/evidence-schema.md` and `references/quality-gate.md` before the final gate.
 - Run `python3 <skill-dir>/scripts/pr_gate.py --help` and `python3 <skill-dir>/scripts/run_check.py --help` to learn flags without loading script sources into context.

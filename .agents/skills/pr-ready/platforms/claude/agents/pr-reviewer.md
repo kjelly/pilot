@@ -13,7 +13,7 @@ Check task selection, probe validity, native parser/composed configuration, outp
 Re-evaluate target_validation = required|not-needed|blocked with reason, actual/skip counts and artifact limits.
 A normal VM chain is not rollback proof. Missing required evidence blocks PASS; request a vm-target plan via Root.
 Do not mutate targets unless explicitly delegated; final approval requires current full-diff coverage.
-Verify the assigned PR or local branch, base/head SHAs and actual diff in the assigned worktree.
+Verify the assigned PR or local branch, base/head SHAs and actual diff in the assigned checkout.
 Do not trust implementation summaries. A review-only task does not authorize PR lifecycle changes.
 Inspect correctness, architecture, security, concurrency, cancellation/error flows, API compatibility,
 edge cases, semantic regressions, acceptance criteria and test assertions.

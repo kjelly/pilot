@@ -19,7 +19,8 @@ runs `tests/`.
 The subagent declarations are platform-specific, but business rules, review evidence
 schema, GitHub action scripts and Quality Gate are shared. If platform invocation fails,
 fall back to a built-in isolated review subagent with the same role instructions; if no
-genuine isolated context exists, review sequentially and disclose the limitation.
+genuine isolated context exists, report `WAITING` rather than simulating an independent
+review in one context.
 
 Dependencies: `bash`, `python3 >= 3.10`, `gh`, `git` for repository review, and
 `gh auth login`/permissions. No Python PyPI dependencies.

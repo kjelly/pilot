@@ -5,7 +5,7 @@
 Accept:
 - Absolute Issue URL, e.g. `https://github.com/OWNER/REPO/issues/123`.
 - `OWNER/REPO#123` or `#123` in an unambiguous Git repository.
-- Exactly one Issue per invocation. For multiple/all targets, ask which one to handle; never queue or fan out. Read [the checkout contract](../../_shared/single-item-checkout.md) before analysis.
+- Exactly one Issue per invocation. For multiple/all targets, ask which one to handle; never queue or fan out. Read the checkout contract, `.agents/skills/_shared/single-item-checkout.md` (repo-root path), before analysis.
 
 Missing Issue IDs are not permission to process every open Issue.
 
@@ -40,15 +40,15 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
 
 - Fetch remote base; record `base_sha` in checkpoint.
 - Create branch from verified remote base, not from the current checkout's potentially dirty HEAD.
-- Example: `git switch -c issue/123-short-slug origin/main` after verifying base, clean checkout and branch absence. Do not create per-Issue worktrees.
-- Keep one writer per worktree. SA/Reviewer are read-only. Avoid using the same worktree for two concurrent subagents with write access.
+- Example: `git switch --no-track -c issue/123-short-slug origin/main` after the contract's preflight and snapshot, verifying base, clean checkout and branch absence (`--no-track`: the Issue branch must not track the base branch). Do not create per-Issue worktrees.
+- Keep one writer in the checkout. SA/Reviewer are read-only; never let two subagents write to it at the same time.
 - For check receipts: commit, confirm `git status --porcelain` empty, then run checks. Never run check receipts on a dirty/uncommitted tree.
-- On resume, examine `git worktree list --porcelain`, branch mapping, open PR list, and `git status` before issuing new worktree/commit/PR operations. Never force-delete an existing worktree or existing user's branch.
+- On resume, rerun the contract's preflight (it reads `git worktree list --porcelain` and `git status`), check the branch mapping and open PR list before any commit/PR operation. Never force-delete or force-switch away from an existing branch, another checkout or user work.
 - Stage intentional files explicitly; no blanket `git add -A` if it may include user files, state, secrets, or platform configs.
 
 ## Long-running execution
 
-Keep an Issue→status→worktree→branch→commit→gate timestamp→PR URL ledger outside source control. Suggested per Issue `checkpoint.json`:
+Keep an Issue→status→branch→commit→gate timestamp→PR URL ledger outside source control. Suggested `checkpoint.json` for the selected Issue:
 
 ```json
 {
@@ -56,7 +56,7 @@ Keep an Issue→status→worktree→branch→commit→gate timestamp→PR URL le
   "issue": 123,
   "phase": "CHECKED",
   "branch": "issue/123-short-slug",
-  "worktree": "/absolute/path/repo-issue-123",
+  "checkout": "/absolute/path/of/the/current/checkout",
   "head_sha": "<40-hex-digit commit>",
   "dependents": [],
   "blockers": [],

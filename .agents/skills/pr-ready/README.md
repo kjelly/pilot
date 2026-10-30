@@ -49,7 +49,7 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 
 ## 流程
 
-1. 每次只處理一個 PR；多個或全部項目先請使用者選一個。主 Agent 先依[checkout 契約](../_shared/single-item-checkout.md)在目前乾淨 checkout 切到該 PR 原始 head branch，再分析 PR/CI/Issue/review；不建立 per-PR worktrees。
+1. 每次只處理一個 PR；多個或全部項目先請使用者選一個。主 Agent 先依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-ready` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）做 preflight 與 snapshot，在目前乾淨 checkout 切到該 PR 原始 head branch，再分析 PR/CI/Issue/review；不建立 per-PR worktrees。
 2. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。
 3. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。
 4. 僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads 及衝突後，才執行 `gh pr ready`。
@@ -57,17 +57,17 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 
 ## Quality Gate 腳本（可單獨使用）
 
-已存在 `.pr-ready/evidence.json`（格式見 `references/evidence-schema.md`）時，從原 PR branch worktree 執行：
+每個 PR 的狀態放在 `.pr-ready/<N>/`（N 為 PR 編號；同一個 checkout 會依序服務不同 PR）。已存在 `.pr-ready/<N>/evidence.json`（格式見 `references/evidence-schema.md`）時，在已切到原 PR head branch 的目前 checkout 執行（`$SNAP` 是 checkout 契約取得的 snapshot 目錄；單獨使用時可改用 `.agents/skills/pr-ready` 的實體路徑）：
 
 ```bash
-python3 /path/to/pr-ready/scripts/pr_gate.py \
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/evidence.json --worktree .
+  --evidence .pr-ready/123/evidence.json --worktree .
 
 # 狀態為 GATE-PASS 後，準備將 Draft 轉成 Ready for Review：
-python3 /path/to/pr-ready/scripts/pr_gate.py \
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/evidence.json --worktree . --ready
+  --evidence .pr-ready/123/evidence.json --worktree . --ready
 ```
 
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。

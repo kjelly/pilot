@@ -20,7 +20,7 @@ Codex 的角色定義是 `.codex/agents/prm-*.toml` 的位元組副本。
 ## 使用
 
 每次只處理一個 PR。多個或全部項目先列候選並請使用者選一個，不自動處理下一個。
-依[checkout 契約](../_shared/single-item-checkout.md)先在目前乾淨 checkout 切到該 PR 原始 head branch，再審查與測試；不建立 per-PR worktrees。
+依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-review-merge` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）做 preflight 與 snapshot，在目前乾淨 checkout 切到該 PR 原始 head branch，再審查與測試；不建立 per-PR worktrees。
 
 **Codex CLI**
 
@@ -45,7 +45,7 @@ $pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge�
 ## 內部安全檢查（供 Agent 呼叫）
 
 ```bash
-# 取得完整（跨分頁）Ready PR 清單
+# 列出完整（跨分頁）Ready PR 候選清單，供使用者選一個（列出不等於授權處理）
 python3 scripts/list_ready.py --repo OWNER/REPO
 
 # Reviewer 綁定 HEAD/Base SHA 的證據檔產生後，進行唯讀 Quality Gate

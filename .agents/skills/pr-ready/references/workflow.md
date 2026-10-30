@@ -2,20 +2,20 @@
 
 ## Initialization
 
-1. Resolve exactly one Draft PR. For multiple/all targets, list candidates and ask which one to handle. Follow [the checkout contract](../../_shared/single-item-checkout.md) before analysis.
+1. Resolve exactly one Draft PR. For multiple/all targets, list candidates and ask which one to handle. Follow the checkout contract, `.agents/skills/_shared/single-item-checkout.md` (repo-root path), before analysis.
 2. Fetch the selected PR's current head/base, title, body, linked Issues, diff, CI, reviews/comments, and history (`gh pr view`, `gh pr diff`, `gh api`, `gh pr checks`). Treat failures to fetch metadata as blockers, not missing data.
-3. Model PR dependencies: explicit base/head stacking, shared feature assumptions, cross-PR changes to the same symbol/API/schema or shared integration fixture; ambiguous dependencies must be serialized until resolved.
+3. Model PR dependencies: explicit base/head stacking, shared feature assumptions, cross-PR changes to the same symbol/API/schema or shared integration fixture; an ambiguous dependency blocks this PR until resolved; the other PR is read-only context, never started here.
 4. Run one PR workflow only. SA → Coder → Reviewer are sequential for dependent steps on this item. A reviewer never reviews its own diff.
 
 ## Checkout lifecycle
 
-- Start from a clean clone of the correct repository. Do not run `gh pr checkout` blindly in the user's active worktree.
-- Confirm `headRepository`, `headRefName`, `headRefOid`, and writable remote. Fetch the branch/ref explicitly. Reuse an existing local branch/worktree only when its ownership and upstream match the target PR.
-- Example **same-origin branch** sequence, to adapt after verifying refs and remote:
+- Work in the current clean checkout of the correct repository, after the contract's preflight (clean tree, no ignored-file collision, branch not checked out elsewhere) and snapshot. `gh pr checkout N --repo OWNER/REPO` (no `--force`) is the normal way to check out the PR head.
+- Confirm `headRepository`, `headRefName`, `headRefOid`, and writable remote. Fetch the branch/ref explicitly. Reuse an existing local branch only when its upstream matches the target PR; otherwise stop and ask.
+- Example **same-origin branch** sequence when not using `gh pr checkout`, to adapt after verifying refs and remote:
 
   ```bash
   git fetch origin refs/heads/BRANCH:refs/remotes/origin/BRANCH
-  # Stop first if dirty, owned by another writer, or checked out elsewhere.
+  # Stop first if the preflight did not PASS (dirty, ignored-file collision, owned by another writer, or checked out elsewhere).
   if git show-ref --verify --quiet refs/heads/BRANCH; then
     git switch BRANCH
   else
@@ -27,12 +27,12 @@
   Use the current clean checkout; do not create per-PR worktrees. A tracking or temporary branch is for reading only; **the implementation must push back to the original PR head branch/ref**, with a verified repository/remote.
 
 - If branch is already checked out elsewhere, stop and identify that checkout; do not silently switch directories. Never use `--force`, `git reset --hard`, or discard user's work.
-- Set per-PR checkpoint under the *worktree* `.pr-ready/` (ensure ignored locally and not committed). Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
+- Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
 - After new commit/push or remote movement, invalidate prior receipts and reviews. Do not treat older check results as reusable, even if the test command is unchanged.
 
 ## Delegation contract
 
-Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, worktree_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context.
+Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, checkout_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context.
 
 For pilot, also supply `pilot_history_checks` (absolute path to the shared history
 reference), relevant fix/review links, finding ledger and the `target_validation`
@@ -45,7 +45,7 @@ Use the ready-to-copy prompts in
 Expected concise result: `{role, head_sha, status, root_causes, changed_files, commits, findings:[{severity,file,line,evidence,remediation}], validation:[{command,result,head_sha,log_path}], blockers, next_action}`.
 
 - SA/Reviewer: analytical roles; no code edits, commit, push or Ready transition.
-- Coder: can edit/test/commit only its assigned worktree. Parent owns Github mutations (push/Ready) after verification.
+- Coder: can edit/test/commit only in the assigned verified checkout (no worktrees, no branch switching). Parent owns Github mutations (push/Ready) after verification.
 - Reviewer must inspect the actual current diff, not just Coder's claims, and independently assess whether the stated acceptance criteria are met.
 
 ## Loop and interruption
