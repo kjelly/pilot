@@ -149,6 +149,50 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 			t.Errorf("%q is inside the install block: a failing probe would run the rescue, which stops and disables the service", name)
 		}
 	}
+	// The re-enable and the restart must not run when the old unit/config files could not be
+	// put back: restarting then runs a configuration this run wrote (crash loop that a state
+	// check calls active). The restore tasks exist, are always-tagged, and sit between the
+	// stop and the restart.
+	names := map[string]int{}
+	for i, task := range resc {
+		m := task.(map[string]any)
+		name, _ := m["name"].(string)
+		names[name] = i
+		if got := taskTags(t, task); !reflect.DeepEqual(got, []string{"always"}) {
+			t.Errorf("rescue task %q has tags %v, want [always]", name, got)
+		}
+	}
+	idx := func(prefix string) int {
+		for name, i := range names {
+			if strings.HasPrefix(name, prefix) {
+				return i
+			}
+		}
+		t.Fatalf("no rescue task %q", prefix)
+		return -1
+	}
+	stopIdx, restoreIdx, reloadIdx, enableIdx, restartIdx := idx("ROLLBACK — stop"), idx("ROLLBACK — restore the unit, config"), idx("ROLLBACK — reload systemd"), idx("ROLLBACK — re-enable"), idx("ROLLBACK — restart")
+	if !(stopIdx < restoreIdx && restoreIdx < reloadIdx && reloadIdx < enableIdx && enableIdx < restartIdx) {
+		t.Errorf("rescue order must be stop < restore files < daemon-reload < re-enable < restart, got %d %d %d %d %d", stopIdx, restoreIdx, reloadIdx, enableIdx, restartIdx)
+	}
+	for _, i := range []int{enableIdx, restartIdx} {
+		m := resc[i].(map[string]any)
+		when := strings.Join(whenStrings(m["when"]), " && ")
+		for _, reg := range []string{"detection_engine_rescue_restore_files is not failed", "detection_engine_rescue_remove_files is not failed", "detection_engine_rescue_reload is not failed"} {
+			if !strings.Contains(when, reg) {
+				t.Errorf("%v: when %q must require %q (never restart into a config this run wrote)", m["name"], when, reg)
+			}
+		}
+	}
+	for _, i := range []int{restoreIdx, reloadIdx, idx("ROLLBACK — remove the files")} {
+		m := resc[i].(map[string]any)
+		if m["ignore_errors"] != true {
+			t.Errorf("%v must use ignore_errors with register (a failed restore has to reach the final message and stop the restart), not failed_when: false", m["name"])
+		}
+	}
+	if resc[restoreIdx].(map[string]any)["no_log"] != true {
+		t.Errorf("the restore task carries provider.env: it must be no_log")
+	}
 	// The rescue's mutating stop+disable must itself require the valid snapshot.
 	stop, _ := resc[0].(map[string]any)
 	if name, _ := stop["name"].(string); !strings.HasPrefix(name, "ROLLBACK — stop") {
@@ -300,6 +344,7 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 	const oldBin = "#!/bin/sh\n# old build\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 	const newBin = "#!/bin/sh\n# new build\n"
 	changed := regexp.MustCompile(`changed=(\d+)\b`)
+	backupStep := regexp.MustCompile(`TASK \[Step [3-6][:b-d]`) // Step 0* run on every apply
 	for _, tt := range []struct {
 		name        string
 		args        []string
@@ -322,10 +367,26 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 				t.Fatal(err)
 			}
 			sum := sha256.Sum256([]byte(newBin))
-			play := []any{map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false,
-				"vars": map[string]any{"detection_engine_db_path": db, "detection_engine_bin_dest": bin, "detection_engine_backup_dir": backups,
-					"detection_engine_artifact_abs_path": artifact, "detection_engine_artifact_sha256": hex.EncodeToString(sum[:])},
-				"tasks": []any{map[string]any{"block": steps, "tags": []string{"observability", "detection-engine"}}}}}
+			vars := map[string]any{"detection_engine_db_path": db, "detection_engine_bin_dest": bin, "detection_engine_backup_dir": backups,
+				"detection_engine_artifact_abs_path": artifact, "detection_engine_artifact_sha256": hex.EncodeToString(sum[:])}
+			for k, v := range detectionEngineSnapshotVars(t, dir) {
+				vars[k] = v
+			}
+			// the real Step 0* (service probe, assert, file snapshot) run on every apply too, so
+			// the second apply's changed=0 covers them; they need a systemctl to ask.
+			fakebin, sd := filepath.Join(dir, "fakebin"), filepath.Join(dir, "sd")
+			for _, d := range []string{fakebin, sd} {
+				if err := os.MkdirAll(d, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for p, c := range map[string]string{filepath.Join(fakebin, "systemctl"): fakeSystemctl, filepath.Join(sd, "loaded"): "", filepath.Join(sd, "active"): "", filepath.Join(sd, "enabled"): ""} {
+				if err := os.WriteFile(p, []byte(c), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			play := []any{map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars,
+				"tasks": append(append([]any{}, loadDetectionEngineProbes(t)...), map[string]any{"block": steps, "tags": []string{"observability", "detection-engine"}})}}
 			out, err := yaml.Marshal(play)
 			if err != nil {
 				t.Fatal(err)
@@ -336,7 +397,7 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 			}
 			run := func() string {
 				cmd := exec.Command(ansible, append([]string{"-i", "localhost,", pb}, tt.args...)...)
-				cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False")
+				cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False", "FAKE_SD="+sd, "PATH="+fakebin+":"+os.Getenv("PATH"))
 				log, err := cmd.CombinedOutput()
 				if err != nil {
 					t.Fatalf("%v\n%s", err, log)
@@ -346,7 +407,7 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 			first, second := run(), run()
 			got, _ := os.ReadFile(bin)
 			if !tt.step6 {
-				if strings.Contains(first, "TASK [Step") || strings.Contains(second, "TASK [Step") {
+				if backupStep.MatchString(first) || backupStep.MatchString(second) {
 					t.Errorf("a detection-engine task ran although the selection excludes it\n%s", first)
 				}
 				if string(got) != oldBin {

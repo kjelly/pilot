@@ -51,6 +51,14 @@
     detection_engine_config_dir: /etc/pilot/detection-engine
     detection_engine_config_path: /etc/pilot/detection-engine/config.yaml
     detection_engine_feature_profile_dest: /etc/pilot/detection-engine/feature-profile.yaml
+    detection_engine_unit_path: /etc/systemd/system/pilot-detection-engine.service
+    # Files Steps 8/9/9b/9c/11 rewrite or delete, and the mode the rescue puts back
+    # (Step 0b-0d snapshot them, the rescue restores them before restarting the service).
+    detection_engine_rollback_files:
+      - { path: "{{ detection_engine_unit_path }}", mode: "0644" }
+      - { path: "{{ detection_engine_config_path }}", mode: "0644" }
+      - { path: "{{ detection_engine_feature_profile_dest }}", mode: "0644" }
+      - { path: "{{ detection_engine_config_dir }}/provider.env", mode: "0600" }
     detection_engine_feature_profile_src: "{{ playbook_dir }}/../../monitoring/detection/feature-profiles/linux-host-v1.yaml"
     detection_engine_data_dir: /var/lib/pilot/detection-engine
     detection_engine_db_path: /var/lib/pilot/detection-engine/state.db
@@ -535,6 +543,43 @@
           service was active/enabled to put it back. Nothing was modified; fix
           systemd/systemctl on the host and re-run.
 
+    # The rescue puts the service back by restarting it, and Steps 8-12 rewrite what it
+    # runs from (feature profile, config.yaml, provider.env, the unit file) BEFORE Step 10's
+    # `config validate` and Step 15's health check can reject them: restarting into a
+    # configuration this run wrote is a crash loop that a state-based check calls "active".
+    # So the files' original contents are read here, read-only (stat + slurp: never
+    # changed, fine under --check), always-tagged like the rescue that restores them, and
+    # outside the block like Step 0 so a failure here is a refusal before any change.
+    # Held in memory only: no backup files to go stale or to make the second apply
+    # report changed.
+    - name: "Step 0b: record which of the files this apply rewrites exist now (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      loop: "{{ detection_engine_rollback_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: detection_engine_prev_stat
+
+    - name: "Step 0c: read the existing ones' contents (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.slurp:
+        src: "{{ item.item.path }}"
+      loop: "{{ detection_engine_prev_stat.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      when: item.stat.exists
+      no_log: true
+      register: detection_engine_prev_content
+
+    - name: "Step 0d: record whether the unit file existed (a first install has nothing to put back)"
+      tags: [always]
+      ansible.builtin.set_fact:
+        detection_engine_prev_unit_existed: >-
+          {{ (detection_engine_prev_stat.results
+              | selectattr('item.path', 'equalto', detection_engine_unit_path)
+              | first).stat.exists }}
+
     - name: "Detection Engine install + systemd service"
       block:
         - name: "Step 1: create dedicated system user (spec §8)"
@@ -761,7 +806,7 @@
         - name: "Step 11: render pilot-detection-engine.service (spec §8 systemd hardening)"
           tags: [detection-engine-C5]
           ansible.builtin.copy:
-            dest: /etc/systemd/system/pilot-detection-engine.service
+            dest: "{{ detection_engine_unit_path }}"
             mode: "0644"
             content: |
               [Unit]
@@ -891,10 +936,8 @@
       rescue:
         # The stop below lets the restores replace the binary/state.db safely; the last
         # tasks then put the service back as Step 0 found it. Behaviour note: a service
-        # that was active is restarted even when the failed run never replaced the binary.
-        # This rescue does not restore config/unit files, so after a failure that came
-        # after a config change the service restarts WITH that config (it used to be left
-        # stopped and disabled for inspection in that case).
+        # that was active is restarted even when the failed run never replaced the binary
+        # (it used to be left stopped and disabled); the config files are restored first.
         #
         # The stop is guarded by a valid Step 0 snapshot: without one nothing could put
         # the service back, so it must not be stopped. Step 0 is outside this block and
@@ -937,6 +980,52 @@
             - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
+        # Put back the unit file, config.yaml, feature profile and provider.env as Step 0b-0d
+        # found them (a file that did not exist then is removed), so the restart below runs
+        # the configuration that was running, not one this run wrote and Step 10 or a later
+        # check rejected. Only when the unit already existed: after a failed first install
+        # the files are left for inspection with the service stopped, as before. Restoring a
+        # file the failed run never touched rewrites identical bytes. Failures are recorded
+        # (not swallowed): if the old files cannot be put back the service is NOT
+        # re-enabled/restarted, and the final message says so.
+        - name: "ROLLBACK — restore the unit, config, feature profile and provider.env this run may have rewritten"
+          tags: [always]
+          ansible.builtin.copy:
+            dest: "{{ item.0.item.path }}"
+            content: "{{ item.1.content | b64decode }}"
+            mode: "{{ item.0.item.mode }}"
+          loop: "{{ detection_engine_prev_stat.results | zip(detection_engine_prev_content.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - item.0.stat.exists
+          no_log: true
+          register: detection_engine_rescue_restore_files
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove the files this run created next to an existing unit"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item.path }}"
+            state: absent
+          loop: "{{ detection_engine_prev_stat.results }}"
+          loop_control:
+            label: "{{ item.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - not item.stat.exists
+          register: detection_engine_rescue_remove_files
+          ignore_errors: true
+
+        - name: "ROLLBACK — reload systemd after putting the unit file back"
+          tags: [always]
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: detection_engine_prev_unit_existed | bool
+          register: detection_engine_rescue_reload
+          ignore_errors: true
+
         # The stop above disabled the unit too; put back what Step 0 found, whichever tags
         # selected the failing step. A unit that did not exist before (first install) or
         # was inactive/disabled stays stopped/disabled. Restore semantics per state:
@@ -958,6 +1047,9 @@
           when:
             - detection_engine_service_before.rc == 0
             - "'UnitFileState=enabled' in detection_engine_service_before.stdout_lines"
+            - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_remove_files is not failed
+            - detection_engine_rescue_reload is not failed
           register: detection_engine_rescue_reenable
           ignore_errors: true
 
@@ -969,6 +1061,9 @@
           when:
             - detection_engine_service_before.rc == 0
             - detection_engine_service_before.stdout_lines | intersect(['ActiveState=active', 'ActiveState=reloading', 'ActiveState=activating']) | length > 0
+            - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_remove_files is not failed
+            - detection_engine_rescue_reload is not failed
           register: detection_engine_rescue_restart
           ignore_errors: true
 
@@ -980,10 +1075,21 @@
               run had replaced the binary of a previous install, that binary
               and state.db were restored. The service was then put back as
               Step 0 found it (restarted if it was active, re-enabled if it
-              was enabled); config/unit files are NOT restored, so a service
-              that was active runs with whatever configuration the failed run
-              had already written. A service that was not active before, or
-              did not exist, stays stopped/disabled for inspection.
+              was enabled), after the unit file, config.yaml, feature profile and
+              provider.env were put back as they were before the run (when a unit
+              already existed). A service that was not active before, or did not
+              exist, stays stopped/disabled for inspection.
+              {% if detection_engine_rescue_restore_files is failed
+                 or detection_engine_rescue_remove_files is failed
+                 or detection_engine_rescue_reload is failed %}
+              WARNING: putting the previous unit/config.yaml/feature
+              profile/provider.env back FAILED (that task's output is
+              censored: it carries provider.env); the service was NOT
+              re-enabled or restarted so it does not run a configuration this
+              run wrote. It is stopped and disabled: fix the files in
+              {{ detection_engine_config_dir }} and
+              {{ detection_engine_unit_path }}, then re-run.
+              {% endif %}
               {% if detection_engine_rescue_reenable is failed %}
               WARNING: re-enabling the service FAILED; it was enabled before this run and is now disabled.
               {% endif %}

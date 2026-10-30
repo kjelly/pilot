@@ -15,7 +15,8 @@ import (
 )
 
 // loadDetectionEnginePlay returns the real install block, its real rescue and the real
-// Step 0 tasks that precede the block (read-only probe + its fail-closed assert), with the
+// Step 0* tasks that precede the block (read-only probe + its fail-closed assert, and
+// the read-only snapshot of the files the rescue restores), with the
 // unprivileged owner/group dropped from copy/file tasks.
 func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 	t.Helper()
@@ -38,7 +39,7 @@ func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 				block, _ = m["block"].([]any)
 				rescue, _ = m["rescue"].([]any)
 			}
-			if name, _ := m["name"].(string); strings.HasPrefix(name, "Step 0:") {
+			if name, _ := m["name"].(string); strings.HasPrefix(name, "Step 0") {
 				probes = append(probes, m)
 			}
 		}
@@ -57,11 +58,32 @@ func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 	if len(block) == 0 || len(rescue) == 0 {
 		t.Fatal("the install block or its rescue is gone from detection-engine-apply.yml")
 	}
-	if len(probes) != 2 {
-		t.Fatalf("found %d Step 0 tasks outside the install block, want 2 (the systemctl show probe and its assert): "+
-			"the snapshot must be taken and validated before the block, whose rescue stops the service", len(probes))
+	if len(probes) != 5 {
+		t.Fatalf("found %d Step 0* tasks outside the install block, want 5 (the systemctl show probe, its assert, and the stat/slurp/unit-existed snapshot of the files the rescue restores): "+
+			"the snapshots must be taken and validated before the block, whose rescue stops the service", len(probes))
 	}
 	return
+}
+
+// detectionEngineRollbackFilesVar returns the playbook's own detection_engine_rollback_files
+// (templated against the harness vars at run time).
+func detectionEngineRollbackFilesVar(t *testing.T) any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "playbooks", "apply", "detection-engine-apply.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []map[string]any
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		t.Fatal(err)
+	}
+	for _, play := range plays {
+		if vars, ok := play["vars"].(map[string]any); ok && vars["detection_engine_rollback_files"] != nil {
+			return vars["detection_engine_rollback_files"]
+		}
+	}
+	t.Fatal("detection_engine_rollback_files is gone from the playbook vars")
+	return nil
 }
 
 // loadDetectionEngineBlock returns the real install block and its real rescue.
@@ -71,7 +93,7 @@ func loadDetectionEngineBlock(t *testing.T) (block, rescue []any) {
 	return
 }
 
-// loadDetectionEngineProbes returns the real Step 0 tasks (probe, then assert).
+// loadDetectionEngineProbes returns the real Step 0* tasks (probe, assert, file snapshots).
 func loadDetectionEngineProbes(t *testing.T) []any {
 	t.Helper()
 	probes, _, _ := loadDetectionEnginePlay(t)
@@ -90,7 +112,10 @@ func loadDetectionEngineProbes(t *testing.T) []any {
 //
 // Fault injection by marker files: show_fail_once (the next `show` exits 1 and the marker
 // goes away), show_fail_always, show_raw (`show` prints that file's content, exit 0),
-// enable_fail, restart_fail.
+// show_raw_rc (exit code of the show_raw output, default 0), enable_fail, restart_fail.
+// With FAKE_HEALTH_CFG/FAKE_HEALTH_MARK set, start/restart leave the unit "activating" (a
+// crash loop) unless that config file contains the marker, like a real unit whose
+// ExecStart needs a good config.
 const fakeSystemctl = `#!/bin/bash
 sd=$FAKE_SD; cmd=; skip=0
 for a in "$@"; do
@@ -102,13 +127,17 @@ kind() { local v; v=$(cat "$sd/$1"); echo "${v:-$2}"; }
 case "$cmd" in
  show) [ -e $sd/show_fail_always ] && { echo "Failed to connect to bus" >&2; exit 1; }
        [ -e $sd/show_fail_once ] && { rm -f $sd/show_fail_once; echo "Failed to connect to bus" >&2; exit 1; }
-       [ -e $sd/show_raw ] && { cat $sd/show_raw; exit 0; }
+       [ -e $sd/show_raw ] && { cat $sd/show_raw; exit $(cat $sd/show_raw_rc 2>/dev/null || echo 0); }
        if [ -e $sd/loaded ]; then echo LoadState=loaded
          [ -e $sd/active ] && echo ActiveState=$(kind active active) || echo ActiveState=inactive
          [ -e $sd/enabled ] && echo UnitFileState=$(kind enabled enabled) || echo UnitFileState=disabled
        else echo LoadState=not-found; echo ActiveState=inactive; echo UnitFileState=; fi ;;
  is-enabled) [ -e $sd/enabled ] && { kind enabled enabled; exit 0; }; echo disabled; exit 1 ;;
- start|restart) [ -e $sd/loaded ] || exit 5; [ -e $sd/restart_fail ] && exit 1; echo active > $sd/active ;;
+ start|restart) [ -e $sd/loaded ] || exit 5; [ -e $sd/restart_fail ] && exit 1
+       # a unit whose ExecStart needs the config: with a config that lacks the marker the
+       # start "succeeds" and the unit crash-loops (Restart=on-failure -> activating)
+       if [ -n "$FAKE_HEALTH_CFG" ] && ! grep -q "$FAKE_HEALTH_MARK" "$FAKE_HEALTH_CFG" 2>/dev/null; then echo activating > $sd/active
+       else echo active > $sd/active; fi ;;
  stop) [ -e $sd/loaded ] || exit 5; rm -f $sd/active ;;
  enable) [ -e $sd/loaded ] || exit 1; [ -e $sd/enable_fail ] && exit 1; echo enabled > $sd/enabled ;;
  disable) [ -e $sd/loaded ] || exit 1; [ "$(kind enabled enabled)" = enabled ] && rm -f $sd/enabled ;;
@@ -139,6 +168,12 @@ type harness struct {
 	binary    string   // "old", "new" or "" (first install)
 	started   bool     // the run itself created/started the unit before failing (Steps 11-14)
 	noSystemd bool     // PATH without any systemctl
+
+	files       map[string]string // files that exist before the run: unit, config, profile, provider (provider.env is 0600)
+	artifact    string            // content of the artifact Step 6 installs (default deNewBin)
+	healthMark  string            // the unit crash-loops unless config.yaml contains this
+	vars        map[string]any    // extra playbook vars
+	noBlockOnly bool              // run only probes (no block/rescue)
 }
 
 type harnessResult struct {
@@ -147,6 +182,9 @@ type harnessResult struct {
 	unit        fakeUnit
 	bin, db     string
 	backupFiles []string
+	files       map[string]string // unit, config, profile, provider after the run ("" and absent: see exists)
+	exists      map[string]bool
+	providerMod os.FileMode
 }
 
 const (
@@ -182,25 +220,56 @@ func (h harness) run(t *testing.T) harnessResult {
 		name, content, _ := strings.Cut(f, "=")
 		write(filepath.Join(sd, name), content, 0o600)
 	}
+	etc := filepath.Join(dir, "etc")
+	if err := os.MkdirAll(etc, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths := detectionEnginePaths(dir)
+	for name, content := range h.files {
+		mode := os.FileMode(0o644)
+		if name == "provider" {
+			mode = 0o600
+		}
+		write(paths[name], content, mode)
+	}
+	write(filepath.Join(dir, "new-profile.yaml"), "NEW-PROFILE\n", 0o644)
 	bin, artifact, db := filepath.Join(dir, "bin"), filepath.Join(dir, "artifact"), filepath.Join(dir, "state.db")
 	if h.binary != "" {
 		write(bin, map[string]string{"old": deOldBin, "new": deNewBin}[h.binary], 0o755)
 		write(db, "state", 0o600)
 	}
-	write(artifact, deNewBin, 0o755)
+	newBin := h.artifact
+	if newBin == "" {
+		newBin = deNewBin
+	}
+	write(artifact, newBin, 0o755)
 	inject := h.inject
 	if h.started { // what Steps 11-14 do to the service before a later step fails
 		inject = append([]any{map[string]any{"name": "emulate Steps 11-14", "ansible.builtin.shell": "touch " + sd + "/loaded " + sd + "/enabled " + sd + "/active"}}, inject...)
 	}
-	sum := sha256.Sum256([]byte(deNewBin))
+	sum := sha256.Sum256([]byte(newBin))
 	tasks := append([]any{}, h.probes...)
-	tasks = append(tasks, map[string]any{"block": append(append([]any{}, h.steps...), inject...), "rescue": h.rescue,
-		"tags": []string{"observability", "detection-engine"}})
-	play := []any{map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false,
-		"vars": map[string]any{"detection_engine_db_path": db, "detection_engine_bin_dest": bin,
-			"detection_engine_backup_dir": backups, "detection_engine_artifact_abs_path": artifact,
-			"detection_engine_artifact_sha256": hex.EncodeToString(sum[:])},
-		"tasks": tasks}}
+	if !h.noBlockOnly {
+		tasks = append(tasks, map[string]any{"block": append(append([]any{}, h.steps...), inject...), "rescue": h.rescue,
+			"tags": []string{"observability", "detection-engine"}})
+	}
+	vars := map[string]any{"detection_engine_db_path": db, "detection_engine_bin_dest": bin,
+		"detection_engine_backup_dir": backups, "detection_engine_artifact_abs_path": artifact,
+		"detection_engine_artifact_sha256": hex.EncodeToString(sum[:]),
+		"detection_engine_user":            "pilot-detect", "detection_engine_data_dir": "/var/lib/pilot/detection-engine", "detection_engine_status_path": filepath.Join(dir, "status.json"),
+		"detection_engine_textfile_path": filepath.Join(dir, "x.prom"), "detection_metrics_source_alias": "m", "detection_alertmanager_alias": "a",
+		"detection_model_provider_enabled": false, "detection_model_provider_protocol": "openai-responses", "detection_model_provider_base_url": "",
+		"detection_model_provider_model": "", "detection_model_provider_auth": "none", "detection_model_provider_fallback_enabled": false,
+		"detection_model_provider_fallback_protocol": "openai-responses", "detection_model_provider_fallback_base_url": "",
+		"detection_model_provider_fallback_model": "", "detection_model_provider_fallback_auth": "none", "detection_log_source_enabled": false,
+		"detection_log_source_base_url": "", "detection_log_source_query": "", "detection_log_source_current_window": "5m", "detection_log_source_baseline_window": "1h"}
+	for k, v := range detectionEngineSnapshotVars(t, dir) {
+		vars[k] = v
+	}
+	for k, v := range h.vars {
+		vars[k] = v
+	}
+	play := []any{map[string]any{"hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars, "tasks": tasks}}
 	out, err := yaml.Marshal(play)
 	if err != nil {
 		t.Fatal(err)
@@ -230,12 +299,24 @@ func (h harness) run(t *testing.T) harnessResult {
 	}
 	cmd := exec.Command(ansible, append([]string{"-i", "localhost,", pb}, h.args...)...)
 	cmd.Env = append(os.Environ(), "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False", "FAKE_SD="+sd, "PATH="+path)
+	if h.healthMark != "" {
+		cmd.Env = append(cmd.Env, "FAKE_HEALTH_CFG="+paths["config"], "FAKE_HEALTH_MARK="+h.healthMark)
+	}
 	log, runErr := cmd.CombinedOutput()
 	read := func(path string) string { b, _ := os.ReadFile(path); return string(b) }
 	exists := func(n string) bool { _, e := os.Stat(filepath.Join(sd, n)); return e == nil }
 	res := harnessResult{log: string(log), calls: read(filepath.Join(sd, "calls.log")), err: runErr, bin: read(bin), db: read(db)}
 	res.unit = fakeUnit{loaded: exists("loaded"), active: exists("active"), enabled: exists("enabled"),
 		activeKind: strings.TrimSpace(read(filepath.Join(sd, "active"))), enabledKind: strings.TrimSpace(read(filepath.Join(sd, "enabled")))}
+	res.files, res.exists = map[string]string{}, map[string]bool{}
+	for name, path := range paths {
+		if b, err := os.ReadFile(path); err == nil {
+			res.files[name], res.exists[name] = string(b), true
+		}
+	}
+	if fi, err := os.Stat(paths["provider"]); err == nil {
+		res.providerMod = fi.Mode().Perm()
+	}
 	// the fake writes the plain state name when it starts/enables the unit; "" means plain
 	if res.unit.activeKind == "active" {
 		res.unit.activeKind = ""
@@ -248,6 +329,44 @@ func (h harness) run(t *testing.T) harnessResult {
 		res.backupFiles = append(res.backupFiles, e.Name())
 	}
 	return res
+}
+
+// detectionEnginePaths are the files Steps 8-12 rewrite, under a test dir.
+func detectionEnginePaths(dir string) map[string]string {
+	etc := filepath.Join(dir, "etc")
+	return map[string]string{"etc": etc, "unit": filepath.Join(dir, "pilot-detection-engine.service"), "config": filepath.Join(etc, "config.yaml"),
+		"profile": filepath.Join(etc, "feature-profile.yaml"), "provider": filepath.Join(etc, "provider.env")}
+}
+
+// detectionEngineSnapshotVars are the vars the Step 0* snapshot tasks (and Steps 8-12) read;
+// the list of files to snapshot is the playbook's own.
+func detectionEngineSnapshotVars(t *testing.T, dir string) map[string]any {
+	t.Helper()
+	paths := detectionEnginePaths(dir)
+	if err := os.MkdirAll(paths["etc"], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{"detection_engine_config_dir": paths["etc"], "detection_engine_config_path": paths["config"],
+		"detection_engine_feature_profile_dest": paths["profile"], "detection_engine_feature_profile_src": filepath.Join(dir, "new-profile.yaml"),
+		"detection_engine_unit_path": paths["unit"], "detection_engine_rollback_files": detectionEngineRollbackFilesVar(t)}
+}
+
+func detectionEnginePick(t *testing.T, block []any, prefixes ...string) []any {
+	t.Helper()
+	var out []any
+	for _, task := range block {
+		name, _ := task.(map[string]any)["name"].(string)
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) {
+				out = append(out, task)
+				break
+			}
+		}
+	}
+	if len(out) < len(prefixes) {
+		t.Fatalf("picked %d tasks for %v", len(out), prefixes)
+	}
+	return out
 }
 
 func detectionEngineRescueSteps(t *testing.T) (probes, steps, rescue []any) {
@@ -368,6 +487,8 @@ func TestDetectionEngineServiceStateQueryFailsClosed(t *testing.T) {
 			[]string{"--tags", "detection-engine-C4"}, injectedFailure([]string{"detection-engine-C4"})},
 		{"show keeps failing", []string{"show_fail_always"}, false, nil, injectedFailure(nil)},
 		{"show exits 0 with empty output", []string{"show_raw="}, false, nil, injectedFailure(nil)},
+		// valid-looking output must not be believed when the command itself failed
+		{"show exits 1 but printed valid-looking properties", []string{"show_raw=ActiveState=active\nUnitFileState=enabled\n", "show_raw_rc=1"}, false, nil, injectedFailure(nil)},
 		{"show exits 0 with garbage", []string{"show_raw=Failed to get properties: Access denied\n"}, false, nil, injectedFailure(nil)},
 		{"show exits 0 without UnitFileState", []string{"show_raw=ActiveState=active\n"}, false, nil, injectedFailure(nil)},
 		{"show exits 0 with an empty ActiveState", []string{"show_raw=ActiveState=\nUnitFileState=enabled\n"}, false, nil, injectedFailure(nil)},
@@ -417,5 +538,133 @@ func TestDetectionEngineRescueDoesNotStopWithoutSnapshot(t *testing.T) {
 		if regexp.MustCompile(`(?m)^` + mutating + ` `).MatchString(res.calls) {
 			t.Errorf("systemctl %s was called without a snapshot:\n%s", mutating, res.calls)
 		}
+	}
+}
+
+// Steps 8/9/9b/9c/11 rewrite what the unit runs from before Step 10's `config validate` and
+// the health checks can reject it. The rescue must put those files back BEFORE restarting,
+// or it restarts a healthy service into a configuration this run wrote (the reviewer's
+// repro: ExecStart needs the old config, Step 10 rejects the new one, the restarted unit
+// crash-loops while a state-based check says active). The fake unit crash-loops
+// ("activating") unless config.yaml still has the old content, so "ends active" below means
+// healthy on the old config, not just a state name.
+func TestDetectionEngineRescueDoesNotRestartIntoNewConfig(t *testing.T) {
+	_, steps, rescue := detectionEngineRescueSteps(t)
+	probes, block, _ := loadDetectionEnginePlay(t)
+	rejectBin := "#!/bin/sh\n# new build whose validator rejects the new config\n[ \"$1 $2\" = \"config validate\" ] && { echo 'invalid config' >&2; exit 1; }\nexit 0\n"
+	steps = append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 8:", "Step 9:", "Step 9b:", "Step 9c:", "Step 10:")...)
+	withUnit := append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 11:", "Step 12:")...)
+	const oldCfg, oldProfile, oldProvider, oldUnit = "OLD-GOOD-CONFIG\n", "OLD-PROFILE\n", "OLD=1\n", "OLD-UNIT\n"
+	all := map[string]string{"config": oldCfg, "profile": oldProfile, "provider": oldProvider, "unit": oldUnit}
+	plain := fakeUnit{loaded: true, active: true, enabled: true}
+	bearer := map[string]any{"detection_model_provider_enabled": true, "detection_model_provider_base_url": "http://x", "detection_model_provider_model": "m",
+		"detection_model_provider_auth": "bearer", "detection_model_provider_api_key": "k"}
+	breakConfig := append([]any{map[string]any{"name": "make the config path unwritable", "ansible.builtin.shell": "rm -f {{ detection_engine_config_path }} && mkdir {{ detection_engine_config_path }}"}}, injectedFailure(nil)...)
+
+	for _, tt := range []struct {
+		name       string
+		before     fakeUnit
+		files      map[string]string
+		binary     string
+		artifact   string
+		steps      []any
+		inject     []any
+		vars       map[string]any
+		wantUnit   fakeUnit
+		wantFiles  map[string]string // present with this content afterwards
+		wantAbsent []string
+		wantLog    string
+		wantReload int // minimum daemon-reload calls
+	}{
+		{"Step 10 rejects the new config: old files back, restart is healthy", plain, all, "old", rejectBin, steps, nil, nil, plain, all, nil, "", 0},
+		{"failure after Step 11 rewrote the unit: unit back and systemd reloaded", plain, all, "old", "", withUnit, injectedFailure(nil), nil, plain, all, nil, "", 2},
+		{"provider.env did not exist and the run created it: removed", plain, map[string]string{"config": oldCfg, "profile": oldProfile, "unit": oldUnit}, "old", rejectBin, steps, nil, bearer, plain,
+			map[string]string{"config": oldCfg, "profile": oldProfile, "unit": oldUnit}, []string{"provider"}, "", 0},
+		{"first install: nothing to put back, the new files stay for inspection and the service is not touched", fakeUnit{}, nil, "", rejectBin, steps, nil, nil, fakeUnit{}, nil, nil, "", 0},
+		{"the old config cannot be put back: not restarted/enabled, said loudly", plain, all, "old", "", steps, breakConfig, nil, fakeUnit{loaded: true}, nil, nil,
+			"putting the previous unit/config.yaml/feature profile/provider.env back FAILED", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res := harness{probes: probes, steps: tt.steps, inject: tt.inject, rescue: rescue, unit: tt.before, files: tt.files, binary: tt.binary,
+				artifact: tt.artifact, healthMark: "OLD-GOOD-CONFIG", vars: tt.vars}.run(t)
+			if res.err == nil {
+				t.Fatalf("the run must still fail\n%s", res.log)
+			}
+			if res.unit != tt.wantUnit {
+				t.Errorf("service = %v, want %v (an activating unit is a crash loop on a config this run wrote)\n%s", res.unit, tt.wantUnit, res.log)
+			}
+			for name, want := range tt.wantFiles {
+				if got := res.files[name]; got != want {
+					t.Errorf("%s = %q after the failed run, want the original %q", name, got, want)
+				}
+			}
+			for _, name := range tt.wantAbsent {
+				if res.exists[name] {
+					t.Errorf("%s exists after the failed run, want it removed (it did not exist before)", name)
+				}
+			}
+			if _, ok := tt.wantFiles["provider"]; ok && res.providerMod != 0o600 {
+				t.Errorf("provider.env mode = %v, want 0600", res.providerMod)
+			}
+			if tt.name == "first install: nothing to put back, the new files stay for inspection and the service is not touched" && !res.exists["config"] {
+				t.Errorf("config.yaml written by the failed first install was removed; it is left for inspection")
+			}
+			if tt.wantLog != "" {
+				if !strings.Contains(res.log, tt.wantLog) {
+					t.Errorf("failure message lacks %q\n%s", tt.wantLog, res.log)
+				}
+				for _, mutating := range []string{"restart", "start", "enable"} {
+					if regexp.MustCompile(`(?m)^` + mutating + ` `).MatchString(res.calls) {
+						t.Errorf("systemctl %s was called although the old files could not be put back:\n%s", mutating, res.calls)
+					}
+				}
+			}
+			if n := strings.Count(res.calls, "daemon-reload"); n < tt.wantReload {
+				t.Errorf("daemon-reload called %d times, want >= %d (the rescue must reload after restoring the unit)\n%s", n, tt.wantReload, res.calls)
+			}
+			if t.Failed() {
+				t.Logf("%s", res.log)
+			}
+		})
+	}
+}
+
+// Step 0* (the probe, its assert and the file snapshot) run on every apply, so they must
+// be read-only: nothing changed (a second apply must report changed=0), nothing skipped or
+// failed under --check (the probe is a `command`, which check mode skips unless
+// check_mode: false; slurp/stat are read-only), and every task must actually have run.
+func TestDetectionEngineStepZeroIsReadOnlyAndCheckModeSafe(t *testing.T) {
+	probes := loadDetectionEngineProbes(t)
+	recap := regexp.MustCompile(`ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)\s+skipped=(\d+)`)
+	all := map[string]string{"config": "C\n", "profile": "P\n", "provider": "E=1\n", "unit": "U\n"}
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		files       map[string]string
+		ok, skipped string
+	}{
+		{"apply, all files exist", nil, all, "5", "0"},
+		{"--check, all files exist", []string{"--check"}, all, "5", "0"},
+		{"apply, first install (no files; slurp has nothing to read)", nil, nil, "4", "1"},
+		{"--check, first install", []string{"--check"}, nil, "4", "1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res := harness{probes: probes, noBlockOnly: true, args: tt.args, files: tt.files, unit: fakeUnit{loaded: true, active: true, enabled: true}}.run(t)
+			if res.err != nil {
+				t.Fatalf("Step 0* must not fail%s\n%s", map[bool]string{true: " under --check"}[len(tt.args) > 0], res.log)
+			}
+			m := recap.FindStringSubmatch(res.log)
+			if m == nil {
+				t.Fatalf("no recap\n%s", res.log)
+			}
+			if got := [5]string{m[1], m[2], m[3], m[4], m[5]}; got != [5]string{tt.ok, "0", "0", "0", tt.skipped} {
+				t.Errorf("recap ok/changed/unreachable/failed/skipped = %v, want [%s 0 0 0 %s] (a changed probe breaks the second-apply changed=0 check; a skipped one breaks --check)\n%s", got, tt.ok, tt.skipped, res.log)
+			}
+			for _, mutating := range []string{"stop", "disable", "enable", "start", "restart"} {
+				if regexp.MustCompile(`(?m)^` + mutating + ` `).MatchString(res.calls) {
+					t.Errorf("Step 0* called systemctl %s", mutating)
+				}
+			}
+		})
 	}
 }
