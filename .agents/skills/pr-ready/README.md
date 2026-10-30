@@ -2,46 +2,25 @@
 
 這是 **Skill + 原生 subagents + fail-closed Quality Gate**，不是會獨立執行的排程 daemon。呼叫 Skill 的 Agent 需要實際具備 Git、GitHub CLI、Python 與必要的網路權限，才能執行修復、驗證、push、Ready transition。未達品質門檻時不得轉 Ready；絕不自動 merge 或繞過 branch protection。
 
-## 一次安裝三平台（Linux/macOS/WSL）
+## 安裝（repo 內建，不另外安裝）
 
-前置：`git`、`gh`（執行 `gh auth login`）、`python3`，以及已安裝的 Codex CLI / Claude Code / agy（只需安裝你要使用的 CLI）。
+這個 skill 是 pilot repository 專用，沒有全域安裝與安裝腳本。canonical 內容就是
+`.agents/skills/pr-ready/`（Codex 與 agy 直接讀這裡）；Claude Code 透過
+`.claude/skills/pr-ready` 與 `.claude/agents/pr-*.md` 的 symlink 讀同一份，
+Codex 的角色定義是 `.codex/agents/pr-*.toml` 的位元組副本。
+`cmd/pilot/cmd/agent_skill_consistency_test.go` 鎖住這些連結與副本，`make skill-test` 跑 `tests/`。
+改角色 prompt 時三個平台副本與 `.codex/agents` 要一起改，測試會擋漏改。
+模型只釘在角色定義檔（見 SKILL.md 的 Project runtime configuration），orchestrator 用當前 session 的模型。
 
-將壓縮檔解壓後進入 `pr-ready` 目錄：
+前置：`git`、`gh`（執行 `gh auth login`）、`python3`，以及你要使用的 CLI（Codex CLI / Claude Code / agy）。
 
-```bash
-bash scripts/install.sh --global
-```
+| 平台 | Skill | 原生 agents |
+|---|---|---|
+| Codex | `.agents/skills/pr-ready` | `.codex/agents/pr-*.toml`（副本） |
+| Claude Code | `.claude/skills/pr-ready`（symlink） | `.claude/agents/pr-*.md`（symlink） |
+| agy CLI / App / IDE | `.agents/skills/pr-ready` | `platforms/agy/agents/`（要用 agy 時複製到 `.agents/agents/`） |
 
-更新已安裝版本：先自行備份任何修改過的 agent 定義，再執行：
-
-```bash
-bash scripts/install.sh --global --force
-```
-
-不想使用符號連結時改用 `--copy`（後續更新需要重新執行安裝器）：
-
-```bash
-bash scripts/install.sh --global --copy
-```
-
-只安裝到某個 Git 儲存庫（可提交配置供團隊使用）：
-
-```bash
-bash scripts/install.sh --project /path/to/your/repo
-```
-
-**注意：**不要在尚有相同名字的 `.claude/skills/pr-ready`、`.codex/agents/pr-*` 等自訂檔案上強制覆蓋；預設發現衝突會中止而非覆寫。
-
-## 三平台 Skill 和原生 Agent 位置
-
-| 平台 | 全域 Skill | 專案 Skill | 原生 agents |
-|---|---|---|---|
-| Codex | `~/.agents/skills/pr-ready` | `.agents/skills/pr-ready` | `~/.codex/agents/pr-*.toml` / `.codex/agents/` |
-| Claude Code | `~/.claude/skills/pr-ready` | `.claude/skills/pr-ready` | `~/.claude/agents/pr-*.md` / `.claude/agents/` |
-| agy CLI | `~/.gemini/antigravity-cli/skills/pr-ready` | `.agents/skills/pr-ready` | `~/.gemini/config/agents/pr-*.md` / `.agents/agents/` |
-| Antigravity App/IDE | `~/.gemini/config/skills/pr-ready` | `.agents/skills/pr-ready` | 同 agy 原生 agents |
-
-共用 `SKILL.md`、`scripts/`、`references/`，不用每個平台維護三套 prompt。`install.sh` 會安裝 SA、Coder、Reviewer **原生 agent 定義**，沒有強制指定模型，使用平台原本的模型與權限規則。
+共用 `SKILL.md`、`scripts/`、`references/`，不用每個平台維護三套 prompt。
 
 ## 呼叫方式
 
@@ -101,7 +80,6 @@ python3 /path/to/pr-ready/scripts/pr_gate.py \
 
 ```bash
 python3 -m unittest discover -s tests -v
-bash -n scripts/install.sh
 python3 -m py_compile scripts/*.py
 ```
 

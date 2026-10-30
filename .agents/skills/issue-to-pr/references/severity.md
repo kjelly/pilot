@@ -1,6 +1,6 @@
 # Severity and finding rubric (P0–P4)
 
-The project-local `issue-to-pr`, `pr-ready`, `pr-review-merge` and `pilot-code-review` workflows use this shared rubric. Reviewers, SAs and Root classify findings against the same PR base and acceptance contract. This does not change separately installed workflows.
+The project-local `issue-to-pr`, `pr-ready`, `pr-review-merge` and `pilot-code-review` workflows use this shared rubric. Reviewers, SAs and Root classify findings against the same PR base and acceptance contract.
 
 ## Severity
 

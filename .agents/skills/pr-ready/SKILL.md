@@ -7,8 +7,8 @@ description: Repair and verify existing GitHub Draft pull requests until merge-r
 
 ## Project runtime configuration
 
-Use this project's skill and native `pr-sa`, `pr-coder`, and `pr-reviewer`
-definitions, which take precedence over personal installations. Codex invocation:
+This skill is repository-local: use the native `pr-sa`, `pr-coder`, and `pr-reviewer`
+definitions shipped beside it; there is no personal installation. Codex invocation:
 `$pr-ready`; Claude Code invocation: `/pr-ready`.
 
 - The orchestrator runs on the invoking session's model: the repository pins no
@@ -26,7 +26,7 @@ definitions, which take precedence over personal installations. Codex invocation
 - Resolve packaged scripts and references relative to this `SKILL.md`, including
   when operating in another worktree. Do not fall back to `~/.agents/skills`.
 
-You are the **orchestrator**, not the implementer of last resort. Execute the work; do not stop after making a plan. This skill supports Codex, Claude Code, and Antigravity CLI (`agy`). Use each runtime's native subagent mechanism; role contracts are under `references/roles.md` and optional platform-native `pr-sa`, `pr-coder`, `pr-reviewer` agent definitions are installed with this skill.
+You are the **orchestrator**, not the implementer of last resort. Execute the work; do not stop after making a plan. This skill supports Codex, Claude Code, and Antigravity CLI (`agy`). Use each runtime's native subagent mechanism; role contracts are under `references/roles.md` and the platform-native `pr-sa`, `pr-coder`, `pr-reviewer` agent definitions ship beside this skill (`platforms/<platform>/agents/`).
 
 ## Pilot: turn review history into a verification plan
 
@@ -88,4 +88,4 @@ Text-only changes need no unrelated VM run.
 - Read `references/roles.md` before delegating; pass concise task inputs and have agents return structured summaries, not full logs.
 - Read `references/evidence-schema.md` and `references/quality-gate.md` before the final gate.
 - Run `python3 <skill-dir>/scripts/pr_gate.py --help` and `python3 <skill-dir>/scripts/run_check.py --help` to learn flags without loading script sources into context.
-- Native agent roles are installed under Codex `.codex/agents`, Claude `.claude/agents`, and agy `.agents/agents` (repo) or `~/.gemini/config/agents` (global). Delegate using native facilities and these role names, without inventing tool API names.
+- Native agent roles live under Codex `.codex/agents` (copies) and Claude `.claude/agents` (symlinks into this skill); the agy definitions are in `platforms/agy/agents/` (copy into `.agents/agents/` when agy is used). Delegate using native facilities and these role names, without inventing tool API names.

@@ -7,8 +7,9 @@ description: Fix specified GitHub Issues with isolated Git worktrees, parallel r
 
 ## Project runtime configuration
 
-Use this project's skill and native `issue-sa`, `issue-coder`, and `issue-reviewer`
-definitions, which take precedence over personal installations. Codex invocation:
+This skill is repository-local: use the native `issue-sa`, `issue-coder`, and
+`issue-reviewer` definitions shipped beside it; there is no personal installation.
+Codex invocation:
 `$issue-to-pr`; Claude Code invocation: `/issue-to-pr`.
 
 - The orchestrator runs on the invoking session's model: the repository pins no
@@ -121,7 +122,6 @@ For **every target Issue**, report: Issue number/URL, `READY_FOR_REVIEW` (conver
 - [Severity and finding rubric](references/severity.md)
 - [Native subagent roles / cross-platform notes](references/platforms.md)
 - [Repository evidence rules: manifest, evidence-only delta, required evidence](references/repo-evidence.md)
-- `scripts/install.sh` — install skill and native agents for Codex/Claude/agy
 - `scripts/claim.py` — cross-session Issue claim (acquire / renew / release / check / list)
 - `scripts/repo_evidence.py` — print/validate the repository evidence manifest as the gate sees it
 - `scripts/run_check.py` — record command results against clean committed HEAD

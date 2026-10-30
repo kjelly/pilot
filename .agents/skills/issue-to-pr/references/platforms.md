@@ -1,13 +1,12 @@
 # Platform portability
 
-The shared `SKILL.md` follows the Agent Skills YAML frontmatter contract. Installers use identical workflow instructions on all three platforms, with native role definitions adapted to each agent host. This project pins models only inside the native role definitions (Codex roles `gpt-6.1-sol` / `high`, Claude SA `claude-opus-5-5` / `xhigh`, other Claude roles `claude-sonnet-5-5` / `xhigh`); the orchestrator keeps the invoking session's model, and `cmd/pilot/cmd/agent_skill_consistency_test.go` keeps the platform copies identical.
+The shared `SKILL.md` follows the Agent Skills YAML frontmatter contract; the same workflow instructions serve all three platforms, with native role definitions adapted to each agent host. This skill is repository-local to pilot: there is no installer and no personal installation. Models are pinned only inside the native role definitions (Codex roles `gpt-6.1-sol` / `high`, Claude SA `claude-opus-5-5` / `xhigh`, other Claude roles `claude-sonnet-5-5` / `xhigh`); the orchestrator keeps the invoking session's model, and `cmd/pilot/cmd/agent_skill_consistency_test.go` keeps the platform copies, the `.codex/agents` copies and the `.claude` symlinks identical.
 
-| Platform | Global skill directory | Project skill directory | Global role definitions | Project role definitions |
-| --- | --- | --- | --- | --- |
-| Codex CLI | `~/.agents/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.codex/agents/issue-*.toml` | `.codex/agents/issue-*.toml` |
-| Claude Code | `~/.claude/skills/issue-to-pr` | `.claude/skills/issue-to-pr` | `~/.claude/agents/issue-*.md` | `.claude/agents/issue-*.md` |
-| Antigravity CLI (`agy`) | `~/.gemini/antigravity-cli/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.gemini/config/agents/issue-*.md` | `.agents/agents/issue-*.md` |
-| Antigravity App/IDE | `~/.gemini/config/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.gemini/config/agents/issue-*.md` | `.agents/agents/issue-*.md` |
+| Platform | Skill directory | Role definitions |
+| --- | --- | --- |
+| Codex CLI | `.agents/skills/issue-to-pr` | `.codex/agents/issue-*.toml` (byte copies of `platforms/codex/agents/`) |
+| Claude Code | `.claude/skills/issue-to-pr` (symlink) | `.claude/agents/issue-*.md` (symlinks to `platforms/claude/agents/`) |
+| Antigravity CLI / App / IDE (`agy`) | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here) |
 
 Call syntax: Codex `$issue-to-pr ...`; Claude Code `/issue-to-pr ...`; agy `/issue-to-pr ...`.
 
@@ -16,7 +15,7 @@ Subagent dispatch is a **host feature**. This skill tells the Root how to delega
 Root passes an absolute `pilot_history_checks` reference path, applicable past
 fix/review links, finding ledger and target-validation plan to native roles.
 The reference lives in the project `pilot-code-review` skill; do not assume a child worktree
-contains it or silently use a personal installation. SA proposes the plan,
+contains it: pass the absolute path. SA proposes the plan,
 Coder/Root executes authorized target tests, and Reviewer evaluates actual
 artifacts and any missing evidence before PASS.
 

@@ -14,8 +14,8 @@ then run `make skill-test` and `go test ./cmd/pilot/cmd -run TestAgentSkillLayou
 | `platforms/{claude,codex,agy}/agents/pr-{sa,coder,reviewer}.*` | pilot lines: read the Root-supplied `pilot_history_checks`, finding ledger and target-validation plan; vm-target evidence rules; unavailable required validation keeps the PR Draft |
 | `references/roles.md`, `references/workflow.md` | `pilot_history_checks` hand-off paragraphs (reference lives in `../pilot-code-review/references/pilot-history-checks.md`) |
 | `references/quality-gate.md` | item 8, "Pilot target evidence (Root/Reviewer check)" |
-| `scripts/install.sh` | `--force` backs up the existing skill directory / agent file (`*.backup-<timestamp>`) instead of `rm -rf`, as the usage text promises; `--copy` re-installs over an existing symlink alias (same behaviour as the issue-to-pr installer) |
-| `tests/test_installer.py` | new: global/project install, idempotency, backup-on-force for the skill and for an agent file |
+| `scripts/install.sh`, `tests/test_installer.py`, the two `test_install_*_smoke` cases in `tests/test_pr_gate.py` | removed: the skill is repository-local, nothing installs it elsewhere |
+| `README.md` | install sections replaced by the repository layout (symlinks, `.codex/agents` copies, consistency test) |
 
 Repository-side pieces the skill relies on: `.github/pr-evidence.json`, `make skill-test`
 (wired into CI's Go test job) and the consistency test above. Files not listed here are

@@ -126,37 +126,6 @@ class GateTests(unittest.TestCase):
         self.assertTrue(any("root_cause_fixed" in x for x in errs))
         self.assertTrue(any("did not pass" in x for x in errs))
 
-    def test_install_global_smoke(self):
-        # No real $HOME changes: installs into a temporary path only.
-        with tempfile.TemporaryDirectory() as tmp:
-            env = __import__("os").environ.copy()
-            env["HOME"] = tmp
-            installer = ROOT / "scripts" / "install.sh"
-            for attempt in range(2):
-                p = subprocess.run(["bash", str(installer), "--global"], capture_output=True,
-                                   text=True, env=env)
-                self.assertEqual(0, p.returncode, p.stderr)
-            home = Path(tmp)
-            self.assertTrue((home / ".agents/skills/pr-ready/SKILL.md").is_file())
-            self.assertTrue((home / ".claude/skills/pr-ready/SKILL.md").is_file())
-            self.assertTrue((home / ".gemini/antigravity-cli/skills/pr-ready/SKILL.md").is_file())
-            self.assertTrue((home / ".codex/agents/pr-sa.toml").is_file())
-            self.assertTrue((home / ".claude/agents/pr-reviewer.md").is_file())
-            self.assertTrue((home / ".gemini/config/agents/pr-coder.md").is_file())
-
-    def test_install_project_smoke(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = subprocess.run(["git", "init", "--quiet", tmp], capture_output=True, text=True)
-            self.assertEqual(0, p.returncode, p.stderr)
-            p = subprocess.run(["bash", str(ROOT / "scripts/install.sh"), "--project", tmp],
-                               capture_output=True, text=True)
-            self.assertEqual(0, p.returncode, p.stderr)
-            project = Path(tmp)
-            self.assertTrue((project / ".agents/skills/pr-ready/SKILL.md").is_file())
-            self.assertTrue((project / ".claude/skills/pr-ready/SKILL.md").is_file())
-            self.assertTrue((project / ".agents/agents/pr-sa.md").is_file())
-            self.assertTrue((project / ".codex/agents/pr-reviewer.toml").is_file())
-
     def test_run_check_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -6,42 +6,18 @@ Use the same [Agent Skills](https://agentskills.io/) workflow with **Codex CLI**
 
 - Bash on Linux/macOS/WSL, `python3` **3.10+**, `git`, GitHub CLI `gh` (`gh auth login`).
 - GitHub repository write permission and ability to push dedicated branches.
-- Native subagent feature must be available/enabled for true independent SA, Coder, Reviewer roles; installation does not enable unsupported features.
+- Native subagent feature must be available/enabled for true independent SA, Coder, Reviewer roles; the repository layout does not enable unsupported features.
 - For automated PR creation, `origin` must point to the **same GitHub `OWNER/REPO`** being targeted. The deterministic helper intentionally rejects fork-only remotes; adapt manually for forks after reviewing the trust boundary.
 
-## Install — all three platforms
+## Repository-local layout (no installer)
 
-Extract the provided archive (`unzip issue-to-pr-skill.zip` also works):
+This skill is repository-local to pilot; nothing installs it elsewhere. The canonical copy is `.agents/skills/issue-to-pr/` (Codex and agy read it directly). Claude Code reads the same files through the `.claude/skills/issue-to-pr` and `.claude/agents/issue-*.md` symlinks; Codex reads the role definitions as byte copies in `.codex/agents/issue-*.toml`. `cmd/pilot/cmd/agent_skill_consistency_test.go` keeps the three platform copies of each role, the `.codex/agents` copies and the `.claude` symlinks in step, and `make skill-test` runs `tests/`. Model pins live only in the role definitions; the orchestrator keeps the invoking session's model.
 
-```bash
-# Linux / macOS / WSL
-tar -xzf issue-to-pr-skill.tar.gz
-cd issue-to-pr
-bash scripts/install.sh --global
-```
-
-Or, from a checked-out Git repository:
-
-```bash
-bash scripts/install.sh --project /path/to/your/repo
-```
-
-To replace a previous install while keeping timestamped backups:
-
-```bash
-bash scripts/install.sh --global --force
-```
-
-Symlinks are used for aliases (one canonical copy) unless `--copy` is provided. Reopen the CLI if discovery seems stale. This installer only installs the Skill and three native role definitions; it does **not** execute `git push` or modify any GitHub issue or PR.
-
-| Platform | Global Skill | Project Skill | Global native subagents |
-| --- | --- | --- | --- |
-| Codex | `~/.agents/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.codex/agents/issue-{sa,coder,reviewer}.toml` |
-| Claude Code | `~/.claude/skills/issue-to-pr` | `.claude/skills/issue-to-pr` | `~/.claude/agents/issue-{sa,coder,reviewer}.md` |
-| agy CLI | `~/.gemini/antigravity-cli/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.gemini/config/agents/issue-{sa,coder,reviewer}.md` |
-| Antigravity App/IDE | `~/.gemini/config/skills/issue-to-pr` | `.agents/skills/issue-to-pr` | `~/.gemini/config/agents/issue-{sa,coder,reviewer}.md` |
-
-Per-project agent definitions use `.codex/agents/`, `.claude/agents/`, and `.agents/agents/` respectively. The project-scoped Skill is committed only if you choose to version it in your repository.
+| Platform | Skill | Native subagents |
+| --- | --- | --- |
+| Codex | `.agents/skills/issue-to-pr` | `.codex/agents/issue-{sa,coder,reviewer}.toml` (copies) |
+| Claude Code | `.claude/skills/issue-to-pr` (symlink) | `.claude/agents/issue-{sa,coder,reviewer}.md` (symlinks) |
+| agy CLI / App / IDE | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here) |
 
 ## Invoke
 
@@ -109,7 +85,6 @@ Evidence JSON and Check schema: [references/evidence-contract.md](references/evi
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/*.py
-bash -n scripts/install.sh
 ```
 
 Tests use local temporary Git repositories and mock GitHub CLI responses. They do **not** verify your real GitHub credentials, CLI version, repository-specific tests, provider sandbox policy, or live PR creation. The gate mechanically checks evidence **shape and commit binding**, not whether a language model's semantic claims are true. Subagents and the Root must be genuinely independent and inspect evidence, not simply fill in JSON fields.

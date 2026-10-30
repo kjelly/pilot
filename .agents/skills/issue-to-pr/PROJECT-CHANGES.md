@@ -14,7 +14,9 @@ re-apply the rows below, then run `make skill-test` and
 | `SKILL.md` | "Project runtime configuration" (orchestrator keeps the session model; role models live only in the native role definitions) and "Pilot: history and actual-run decision before implementation" sections |
 | `platforms/{claude,codex,agy}/agents/issue-{sa,coder,reviewer}.*` | pilot lines: read the Root-supplied `pilot_history_checks`, finding ledger and target-validation plan; vm-target evidence rules; unavailable required validation is blocked, not PASS |
 | `references/platforms.md` | role model pins paragraph; `pilot_history_checks` hand-off paragraph (reference lives in `../pilot-code-review/references/pilot-history-checks.md`) |
-| `references/severity.md` | note that the project-local `issue-to-pr`, `pr-ready` and `pilot-code-review` workflows share the rubric |
+| `references/severity.md` | note that the project-local workflows share the rubric |
+| `scripts/install.sh`, `tests/test_installer.py` | removed: the skill is repository-local, nothing installs it elsewhere |
+| `README.md`, `references/platforms.md` | install sections replaced by the repository layout (symlinks, `.codex/agents` copies, consistency test) |
 
 Repository-side pieces the skill relies on: `.github/pr-evidence.json` (evidence manifest the
 gate reads from the base branch), `make skill-test` (runs `tests/`, wired into CI's Go test
