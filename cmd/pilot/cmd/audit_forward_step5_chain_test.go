@@ -113,10 +113,19 @@ func runStep5(t *testing.T, dir, playbook string, extra ...string) step5Run {
 
 func runStep5With(t *testing.T, dir, playbook string, o step5Opts, extra ...string) step5Run {
 	t.Helper()
-	scratch := filepath.Join(dir, "scratch")
-	if err := os.MkdirAll(scratch, 0o700); err != nil {
+	// ansible-core 2.20+ binds a unix socket in a pymp-* directory under TMPDIR, and a
+	// socket path is limited to about 107 bytes: a scratch directory under the (long)
+	// t.TempDir path makes every ansible-playbook start fail with "Local RPC server did
+	// not start". So the scratch directory is short and lives outside dir.
+	base := os.TempDir()
+	if len(base) > 32 {
+		base = "/tmp"
+	}
+	scratch, err := os.MkdirTemp(base, "s5-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(scratch) })
 	args := append([]string{"-i", "localhost,", "-c", "local", playbook}, extra...)
 	var cmd *exec.Cmd
 	if o.umask != "" {
@@ -152,6 +161,9 @@ func runStep5With(t *testing.T, dir, playbook string, o step5Opts, extra ...stri
 	}
 	ents, _ := os.ReadDir(scratch)
 	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "pymp-") { // ansible's own RPC socket directory
+			continue
+		}
 		r.leftovers = append(r.leftovers, e.Name())
 	}
 	return r
