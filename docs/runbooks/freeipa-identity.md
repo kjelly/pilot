@@ -570,7 +570,7 @@ sha256 在 `3b4bdb1` 是 `88247b6e…`，之後是 `945657769b99…`，差別只
 `--repair-managed` 的行為不變（印出 apply 的輸出，可搭配 `--format json`），但不能與 `--include-users-groups` 或
 `--exit-code` 併用：repair 只修 grants 時代那幾類，不修 users/groups。
 
-實跑摘要（2026-10-30，candidate `3a40ee11`，tree `4056b686`，單台拋棄式 vm-target 上的 FreeIPA 4.13.4）：fresh realm 上 identity apply 的 `vm-target test` verify **24/24 PASS**、冪等 `changed=0`；tag-scoped apply 皆 `failed=0`；drift 的 perturb → drift（exit 2）→ apply → drift（exit 3、0 個 actionable）→ 重跑 `changed=0` 全部通過，含 preserved 使用者、沒有 `@` 的 e-mail、只改 comment／options 的公鑰；drift 前後 FreeIPA 狀態相同；drift 輸出（含 `-vvv`）沒有任何密碼或 sentinel。`kerberos`／`rpc_failed` 兩類 observer 失敗只有 fake ipalib 測試涵蓋。見 [evidence](../evidence/identity-drift-178/2026-10-30-3a40ee1.md)。
+實跑摘要（2026-10-30，candidate `3a40ee11`，tree `4056b686`，單台拋棄式 vm-target 上的 FreeIPA 4.13.4）：從安裝後 snapshot 還原的 realm 上 identity apply 的 `vm-target test` verify **24/24 PASS**、冪等 `changed=0`；tag-scoped apply 皆 `failed=0`；drift 的 perturb → drift（exit 2）→ apply → drift（exit 3、0 個 actionable）→ 重跑 `changed=0` 全部通過，含 preserved 使用者、沒有 `@` 的 e-mail、只改 comment／options 的公鑰；drift 前後 FreeIPA 狀態相同；drift 輸出（含 `-vvv`）沒有任何密碼或 sentinel。observer 自己的失敗類別都沒有在實機觸發（只有 fake ipalib 的 real-Ansible 測試涵蓋）；實機走過的失敗只有名冊公鑰 gate 與既有 probe task。見 [evidence](../evidence/identity-drift-178/2026-10-30-3a40ee1.md)。
 
 ---
 

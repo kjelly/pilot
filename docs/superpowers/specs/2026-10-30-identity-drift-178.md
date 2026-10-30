@@ -12,7 +12,7 @@ is a delete only where apply implements deletion. Direct and indirect membership
 must remain distinct. Authoritative group membership removes extra direct members;
 additive membership reports extras without claiming they will be removed.
 
-Phase 1 (opt-in `--include-users-groups` until live acceptance) covers normalized canonical users and groups: create/delete, enable/disable,
+Phase 1 (opt-in `--include-users-groups`) covers normalized canonical users and groups: create/delete, enable/disable,
 managed attributes, SSH public keys, direct user and nested-group
 membership. Apply and drift load the same Ansible normalization tasks. Passwords
 and credential lifecycle are outside this phase; no password, vault text, key
