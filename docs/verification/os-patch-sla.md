@@ -27,13 +27,12 @@
 >
 > - sandbox：`pilot vm-target up --name <n> --hosts sandbox`，
 >   然後 `pilot vm-target test --name <n> --playbook playbooks/apply/os-patch-sla-apply.yml --spec docs/verification/os-patch-sla.md -- <vars>`。
->   sandbox 不需要 `-e target_group=`（playbook play vars 的 `target_group` 預設就是 `sandbox`）。
-> - staging：`--hosts staging`，`--` 後帶 `-e patch_stage=staging -e target_group=staging -e confirm_staging=true`。
-> - prod：`--hosts prod`，`--` 後帶 `-e patch_stage=prod -e target_group=prod -e confirm_prod=true -e staging_attested_within_hours=24`。
-> - staging/prod 必須同時帶 `-e target_group=`：play vars 的 `target_group: sandbox` 讓 `hosts:` 的
->   `default(patch_stage)` 永遠不會生效，只帶 `-e patch_stage=staging` 會得到 `Could not match supplied
->   host pattern, ignoring: sandbox`、0 台 host（`ansible-playbook --list-hosts` 對只有 staging group 的
->   inventory 實測）。
+> - staging：`--hosts staging`，`--` 後帶 `-e patch_stage=staging -e confirm_staging=true`。
+> - prod：`--hosts prod`，`--` 後帶 `-e patch_stage=prod -e confirm_prod=true -e staging_attested_within_hours=24`。
+> - 不需要 `-e target_group=`：playbook 的 `hosts:` 是 `target_group | default(patch_stage)`，
+>   所以 `patch_stage` 就決定要套用哪個環境 group（issue #177 之前 play vars 寫死
+>   `target_group: sandbox`，staging/prod 因此選不到 host）。只有要刻意改選別的 group 時才帶
+>   `-e target_group=`。
 
 ## 2. Checklist
 
@@ -77,6 +76,8 @@
 | C3 | Critical CVE 補丁在紅色警戒時例外 ≤ 7 天 | OS vendor 公告 critical emergency | 公告結束即撤 |
 | C6 | RHEL/CentOS 用 dnf-automatic 而非 unattended-upgrades；spec 不適用 | RHEL 系列 | 暫停支援 |
 
+> 最近一次實跑（staging、prod 兩台全新 VM，不帶 `-e target_group=`）：2026-10-30，candidate `505d527`，check/apply/re-apply 皆 `failed=0`、re-apply `changed=0`；verify 5 過 3 失敗（C1/C2/C4，全新 VM 未升級，既有現象）。完整摘要見 [`docs/evidence/os-patch-sla/2026-10-30-505d527.md`](../evidence/os-patch-sla/2026-10-30-505d527.md)。
+
 ## 6. Playbook 對應
 
 對應的 **apply** playbook：`playbooks/apply/os-patch-sla-apply.yml`（手寫）
@@ -115,14 +116,14 @@
    ```bash
    ansible-playbook -i inventory-staging.yaml \
        playbooks/apply/os-patch-sla-apply.yml \
-       -e patch_stage=staging -e target_group=staging -e confirm_staging=true
+       -e patch_stage=staging -e confirm_staging=true
    ```
 3. **觀察 24h**：再跑一次 `pilot verify`，確認 C2/C3 都 PASS。
 4. **推 prod**（promote gate 在 playbook 本身：`confirm_prod` + staging 佐證時效）：
    ```bash
    ansible-playbook -i inventory-prod.yaml \
        playbooks/apply/os-patch-sla-apply.yml \
-       -e patch_stage=prod -e target_group=prod -e confirm_prod=true \
+       -e patch_stage=prod -e confirm_prod=true \
        -e staging_attested_within_hours=24
    ```
    沒帶 `confirm_prod=true`、或 staging 佐證超過時效，playbook 的
@@ -143,3 +144,4 @@
 | 2026-06-30 | v1.0 | 初版（C1–C7）| pilot |
 | 2026-10-28 | v1.1 | 新增 C8（`unattended-upgrades` 套件已安裝）。起因 issue #167：apply playbook 從不安裝這個套件，Step 4（systemd start+enable）在沒裝的主機上失敗，`--check` 也一樣（套件只被模擬安裝，unit 不存在）；Step 3 的 `failed_when: false` 還把「指令不存在」當成成功。apply 現在以 strict 政策經共用 apt framework 安裝套件，並在安裝後斷言套件存在（C5、C6 原本隱含依賴它，但沒有任何 row 檢查套件本身）| pilot |
 | 2026-10-29 | v1.2 | §1 目標系統表改為純環境 group（`sandbox`/`staging`/`prod`），移除 `test-vm`/`all` 那一列，並在表下說明每列是 inventory group、不准放 `all` 或字面測試 hostname、vm-target 每個 stage 一台 VM。起因 issue #174：`all` 列讓 `pilot verify` 把整張表當字面 hostname，單台 vm-target VM 上報 `spec targets contains host "test-vm" that is absent from inventory`。依 AGENTS.md §2.1 選 B（改 spec）；stage gate 不動。Checklist C1–C8 與所有 Expected 值不變。§7 SOP 的 staging/prod 指令補上 `-e target_group=<stage>`（play vars 的 `target_group: sandbox` 讓 `hosts:` 的 default 不生效，不帶會 0 host）；staging 指令一併補上 apply 本來就要求的 `confirm_staging=true` | pilot |
+| 2026-10-29 | v1.3 | issue #177 已修正 `os-patch-sla-apply.yml`：play vars 不再宣告 `target_group: sandbox`，`hosts:` 的 `default(patch_stage)` 恢復生效。移除 v1.2 加進 §1 與 §7 SOP 的 `-e target_group=<stage>` 提醒與說明（staging/prod 只帶 `-e patch_stage=<stage>` 與對應 confirm 旗標即可）；Checklist C1–C8、Expected 值與 §1 目標系統表不變 | pilot |
