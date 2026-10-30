@@ -41,13 +41,26 @@ expiration, password_policies, and per-user authentication types. It runs
 once and exits — no recurring loop (spec.md v3.2 §1).
 
 --include-users-groups enables the staged object observer using apply's shared
-normalization: create/delete, enabled state, attributes, SSH key counts and direct
-group memberships. Extra members of additive groups and objects outside the
-roster are report-only. The JSON schema is version 1, with sorted items and
-explicit covered/uncovered lists. Coverage remains partial while rule attachments,
-host objects and password actions are pending; an empty report is not full parity.
+normalization: create/delete, enabled state, attributes, SSH public-key sets
+(compared as FreeIPA stores them, so a changed comment or option counts, exactly
+as it would make apply modify the user) and direct group memberships. Extra
+members of additive groups and objects outside the roster are report-only.
+Without the flag users and groups are not inspected and are listed as not
+inspected.
+
+--format json is the version 1 envelope {schema_version, complete, covered,
+uncovered, items}; items are sorted, have category/name/action/detail and are
+[] rather than null. The action is create, delete, update, add_member or
+remove_member (what apply would do), manual (apply cannot resolve it and would
+fail: an operator must act first, e.g. a preserved user) or report (apply never
+touches it). This replaces the earlier {"Items": [...]} shape for every
+use of 'identity drift --format json'. Coverage remains partial while rule
+attachments, host objects and password actions are pending, so complete is false
+and an empty report is not full parity.
+
 --exit-code returns 2 for actionable drift, 3 for partial coverage or report-only
 differences, and 1 on failure. Zero is reserved for fully covered clean state.
+--repair-managed cannot be combined with --include-users-groups or --exit-code.
 
 --repair-managed additionally reconciles any drift found via the same
 apply path 'pilot access reconcile' uses — it only ever touches
@@ -83,8 +96,11 @@ func init() {
 }
 
 func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
-	if identityDriftRepairManaged && (identityDriftIncludeObjects || identityDriftExitCode || identityDriftFormat == "json") {
-		return fmt.Errorf("--repair-managed cannot be combined with --include-users-groups, --exit-code or --format json; inspect and apply separately")
+	// Repair reconciles only what the grants-era probe covers (RepairManaged
+	// does not repair users/groups), and --exit-code describes an inspection;
+	// refuse both flags rather than let a repair run look like a full check.
+	if identityDriftRepairManaged && (identityDriftIncludeObjects || identityDriftExitCode) {
+		return fmt.Errorf("--repair-managed cannot be combined with --include-users-groups or --exit-code; inspect and apply separately")
 	}
 	path := args[0]
 	readPath, cleanup, err := resolveGrantsReadPath(path, identityDriftVaultPasswordFile)
@@ -156,7 +172,7 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "repaired via reconcile: %d hbac rule(s), %d sudo rule(s), %d account expiration(s), %d password polic(y/ies), %d user auth type(s)\n",
 		len(plan.HBACRules), len(plan.SudoRules), len(plan.AccountExpirations), len(plan.PasswordPolicies), len(plan.UserAuthTypes))
 	if result != nil {
-		fmt.Fprintf(out, "apply exit code: %d\n", result.ExitCode)
+		fmt.Fprint(out, result.Stdout)
 	}
 	return err
 }

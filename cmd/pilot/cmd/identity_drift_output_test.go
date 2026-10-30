@@ -34,6 +34,8 @@ func TestIdentityDriftCIStatuses(t *testing.T) {
 		{accessgrants.DriftReport{}, 3},
 		{accessgrants.DriftReport{Items: []accessgrants.DriftItem{{Category: "user_unexpected", Action: "report"}}}, 3},
 		{accessgrants.DriftReport{Items: []accessgrants.DriftItem{{Category: "group_member_extra", Action: "remove_member"}}}, 2},
+		// A preserved user blocks apply: it is not report-only, so CI must fail on it.
+		{accessgrants.DriftReport{Items: []accessgrants.DriftItem{{Category: "user_preserved", Action: "manual"}, {Category: "user_unexpected", Action: "report"}}}, 2},
 	} {
 		var status ExitCoder
 		if !errors.As(identityDriftStatus(tc.report), &status) || status.ExitCode() != tc.code {
