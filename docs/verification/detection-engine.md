@@ -230,9 +230,14 @@ SQLite backup command failure, binary snapshot failure, corrupt/missing snapshot
 no pre-existing database with stale backups, failure immediately after Step 6,
 normal upgrade, first install and repeated apply. Evidence must identify the
 candidate commit/tree, inventory and actual checksums/integrity/service/config
-outcomes. Until those runs exist this acceptance remains **unverified**.
+outcomes. Current acceptance evidence is linked below.
 
 ## Actual-run evidence
+
+Latest rollback-provenance evidence: [2026-10-30-cc413e7](../evidence/detection-engine/2026-10-30-cc413e7.md).
+Candidate `cc413e7`, tree `8a6e131`, isolated vm-target: 13/13 PASS,
+including complete apply first-install/upgrade/no-op and the actual Ansible
+regression suite. No verification row or Expected value was changed.
 
 Latest notification-correctness evidence:
 `docs/evidence/detection-engine/2026-09-17-30d6b92.md` (candidate
@@ -249,3 +254,5 @@ evidence remains summarized in `docs/runbooks/detection-engine.md`.
 | 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |
 | 2026-09-17 | v1.1 | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; candidate `30d6b92` L1-L6 and runtime scenario evidence PASS. |
 | 2026-09-22 | v1.2 | Add contract point 8: `FeatureProfile.notifyByCategory` lets an operator override runbook/recommended-action/destinations per resource category instead of one profile-wide default; management-plane CLI `pilot detection-engine feature-profile show/set-notify` edits it without hand-editing YAML. No C-row added (same reasoning as C9/C10: exhaustive correctness is `internal/detection`'s own Go unit test suite, cited above); C1-C12 gate the deployed profile still parsing/loading unaffected. |
+
+| 2026-10-30 | v1.3 | Add independent #193/#194 rollback-provenance acceptance and link immutable-candidate VM evidence (13/13 PASS); C1–C12 unchanged. |
