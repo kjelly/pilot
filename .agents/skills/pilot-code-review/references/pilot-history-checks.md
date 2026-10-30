@@ -1,6 +1,6 @@
 # Pilot 歷史缺陷與 target 驗證
 
-`issue-to-pr`、`pr-ready` 與 `pilot-code-review` 共用此檔。修復或審查 pilot 時先讀，再選與 diff 有關的列；
+`issue-to-pr`、`pr-ready`、`pr-review-merge` 與 `pilot-code-review` 共用此檔。修復或審查 pilot 時先讀，再選與 diff 有關的列；
 不把所有歷史案例都變成每次必跑的測試。現行 `AGENTS.md`、
 `docs/actual-run-evidence.md` 與需求是規則來源，歷史留言只是選題線索。
 案例記錄截至 2026-10-30，**不代表各 PR 目前仍有同一缺陷**。

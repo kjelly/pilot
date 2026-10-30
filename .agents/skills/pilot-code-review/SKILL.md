@@ -15,7 +15,7 @@ description: Review pilot repository PRs, branches, or local changes for deploym
   歷史案例用來選檢查方向，不能取代目前規則或外部工具的實際語意。
 - 修復或審查前也讀 [references/pilot-history-checks.md](references/pilot-history-checks.md)：
   近期 PR 的缺陷類別、要證明的 invariant、`target_validation` 的決定方式，以及可直接放進
-  task envelope 的提示詞；`issue-to-pr` 與 `pr-ready` 引用的是同一份。
+  task envelope 的提示詞；`issue-to-pr`、`pr-ready` 與 `pr-review-merge` 引用的是同一份。
 - 使用者指定 PR、branch、commit 或 local changes 時，以該範圍為準。
   未指定範圍時先看 working tree 與 staged diff；若兩者皆空且沒有可推定的目標，
   詢問要 review 哪個 revision，不自行擴大成全 repo audit。
