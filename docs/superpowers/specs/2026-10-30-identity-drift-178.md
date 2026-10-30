@@ -1,6 +1,8 @@
 # Identity drift / apply parity (#178)
 
-Status: staged implementation; live vm-target acceptance pending.
+Status: Phase 1 (users/groups, opt-in `--include-users-groups`) passed live vm-target acceptance on
+candidate `3a40ee11` against FreeIPA 4.13.4 ([evidence](../../evidence/identity-drift-178/2026-10-30-3a40ee1.md)).
+Phases 2 and 3 are not implemented; #178 stays open.
 
 ## Acceptance contract
 
