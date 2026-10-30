@@ -1,0 +1,19 @@
+# Ready gate — operational policy
+
+`pr_gate.py` is a fail-closed **automated corroboration**, not a full semantic proof. The independent reviewer and orchestrator must verify all real-world assertions before signing evidence.
+
+1. **Identity:** original PR exists, open, Draft, remote head matches `head_sha` in evidence, and checkout matches if `--worktree` is supplied.
+2. **Scope:** acceptance criteria traced to code/tests, no serious design flaw, actual root cause fixed, PR description reflects latest code, no unresolved cross-PR dependencies.
+3. **Local checks:** tests, lint, and static analysis verified by HEAD-bound recorded receipts; not-applicable is allowed only with explicit and specific technical justification. Local tests must not be weakened to pass. Prefer `run_check.py` receipts, not free-text claims.
+4. **Independent review:** distinct subagent, same HEAD, zero P0/P1/P2 blocking findings, all major comments resolved.
+5. **GitHub:** all required checks completed and passed for current PR head, no relevant nonrequired failures or pending checks, no merge conflict. If CI is not configured or status lookup fails, block until metadata is inspected and documented; don't infer pass from absence.
+6. **Human approvals:** not a prerequisite for Draft→Ready. GitHub `REVIEW_REQUIRED`/no approvals must not automatically block.
+7. **Transition:** `pr_gate.py ... --ready` performs fresh GH preflight, invokes `gh pr ready`, and verifies new state. It never merges or enables auto-merge.
+8. **Pilot target evidence (Root/Reviewer check):** inspect the target-validation decision, relevant history/counterexample and actual-run artifacts per [the shared reference](../../pilot-code-review/references/pilot-history-checks.md). Required target evidence must cover the current candidate, actual task selection, effective state and relevant failure recovery. A normal-chain PASS does not prove rollback; an unavailable required run keeps Draft. This semantic gate is not implemented by `pr_gate.py`; record its evidence and limitations in the independent report and `assessment.rationale` before using `--ready`.
+
+## Important boundaries
+- GitHub CLI `gh pr checks --json ...` includes `bucket`; `--required` identifies required checks. Both queries are necessary. JSON may still be emitted when CLI exit status is nonzero due to checks: parse data and evaluate individual statuses.
+- A manually typed JSON `local_checks[].exit_code=0` is an attestation, not a cryptographic proof. `run_check.py` stores the command result and SHA in the same validation record; reviewers should inspect logs when needed.
+- GitHub merge-state can be BLOCKED due to required *human* approval. Check `mergeable=CONFLICTING` separately rather than blanket-rejecting `mergeStateStatus=BLOCKED`.
+- Existing unresolved review threads are detected through paginated GraphQL. A nonblocking unresolved thread is only eligible for exemption when the independent reviewer documents the exact thread ID, P3/P4 severity, and reason in the evidence. `CHANGES_REQUESTED` is **not automatically blocking**: technical objections must be resolved and independently verified, but changing Draft → Ready must not depend on the original human reviewer submitting a new approval.
+- `gh pr ready` has a race between last read and mutation; guard SHA both before and after. If the head changed during the transition, do **not** claim validated Ready. Escalate for reevaluation.

@@ -1,4 +1,14 @@
 {
   "schema_version": 1,
-  "evidence_only_paths": ["docs/evidence/**"]
+  "evidence_only_paths": [
+    "docs/evidence/**"
+  ],
+  "required_evidence": [
+    {
+      "id": "actual-run",
+      "source": "AGENTS.md §1 (actual-run rule: §1.4 vm-target test / topology test chain, §1.5 frozen candidate) and docs/actual-run-evidence.md",
+      "artifact_glob": "docs/evidence/**/*.md",
+      "description": "Candidate-bound target run (syntax, check/diff, apply, spec verify, second apply changed=0, plus the failure paths the change touches) on a disposable vm-target/docker-target, with the sanitized summary committed as docs/evidence/<feature>/<date>-<tested-revision>.md. Required for any change to playbooks, specs, contracts, inventory handling or deploy orchestration; not-applicable, with the reason, for docs/skill-only changes or pure Go changes proven by native-tool tests."
+    }
+  ]
 }

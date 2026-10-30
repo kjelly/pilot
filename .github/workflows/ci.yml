@@ -60,6 +60,13 @@ jobs:
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
+      # The issue-to-pr / pr-ready skills' gate scripts (claim, SHA-bound
+      # receipts, PR creation, Draft→Ready) ship their own unit tests; they
+      # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
+      # that drifts).
+      - name: Agent skill unit tests (make skill-test)
+        run: make skill-test
+
       - name: Duplicate YAML key check (repo-wide)
         run: python3 scripts/check-yaml-duplicate-keys.py
 
