@@ -103,7 +103,9 @@ coding agent 能呼叫的工具，不是對持有 key 的人的強制控制。�
   目錄（`hosts.yml`、`group_vars/`、`host_vars/`、`monitoring/`、`integrations.yaml`，部分環境有
   roster 檔）。`inventory.yml` 由 `hosts.yml` 產生，不進 Git。
 - 環境名稱、目錄名稱、pilot stage 是同一個值；每台主機的 `env` 必須等於環境名稱（沒寫視為 `sandbox`）。
-- roster 檔放在 workspace 根目錄、進 Git，只有結構；密碼欄位寫成 vault 變數引用，值在 `.vault/main.yaml`。
+- roster 檔放在 workspace 根目錄、進 GitHub（使用者 2026-10-30 確認：roster 不放 `.vault`），只有結構；密碼欄位寫成
+  vault 變數引用，值在 `.vault/main.yaml`。所以 roster 是 snapshot 的一部分。（2026-10-30 讀取時，prod 已是如此；
+  staging 的 `hosts.yml` 仍以 `/pilot/config/.vault/ipa-identity.yaml` 引用 roster，屬設定 repo 待調整的項目。）
 - 不進 Git 的資料放在 deploy node 上，依環境分目錄：`<env-root>/<env>/.vault/`（`main.yaml`、
   Ansible 用的 SSH key 等）與 `<env-root>/<env>/.pilot-data/`（pilot data dir，含執行紀錄）。
 - 設定檔以 `/pilot/config/...` 絕對路徑引用檔案，例如 `ansible_ssh_private_key_file` 指向
@@ -537,6 +539,13 @@ pilot-mcp-remote: <CODE>: <訊息>
 不開放：`pilot_diagnose_run`（`--enable-diagnose-raw`）、`pilot_repair_*`（`--enable-repair`）、
 `pilot_diagnose_snmp_probe`（`--enable-diagnose-active`）。需要時由操作者在 deploy node 上自己執行。
 
+roster 在 GitHub 的 workspace 裡（§2.2），既有 pilot 對它有兩個限制，本規格不改變：
+
+- `pilot_diagnose_login` 等工具透過 host 變數 `freeipa_roster_file`（`/pilot/config/<roster>`）讀得到它。
+- `pilot_edit_inspect` 的 roster 檢視只在 `.vault/` 的 secret 檔案裡找 roster，看不到它；plan 與 MCP apply 拒絕寫
+  `.vault/` 以外的 roster（`errRosterOutsideEditScope`）。因此 roster 無法經 edit session 修改，要直接在設定 repo
+  送 PR。若要開放，需要另寫規格調整 `pilot edit` 的寫入範圍（§16）。
+
 mode 由 profile 決定（D5）。coding agent 只能呼叫這次 session 註冊的工具，無法在 session 中提高 mode。
 
 `--enable-diagnose` 的工具會以該環境 `.vault` 內的 Ansible SSH key，對受管主機執行固定的唯讀指令。
@@ -805,8 +814,11 @@ cmd/pilot/cmd/mcp.go                  # 抽出 serveMCP(ctx, mcpServeOptions, mc
    `mcp/` 子目錄），與同環境的 Deploy 並行時由 SQLite 與既有檔案鎖處理；§13.3 在 vm-target 上驗證並行。
 9. **MCP 看到的設定不一定是最後部署的版本**：session 用 profile 的 ref（通常是 `main`），而 deploy node
    最後一次部署的可能是另一個 commit。delivery 工具讀得到部署紀錄，可用來比對。
-10. **Azure Key Vault**：未來改用時，邊界仍是 container 內的 `/pilot/vault`（或替代它的 secret 來源）；
+10. **roster 無法經 edit session 修改**：roster 在 GitHub，但 `pilot edit` 的 plan/MCP apply 只寫 `.vault/` 內的
+    roster（§8）。要讓 agent 也能改 roster 並帶回 PR，需要另寫規格調整 `pilot edit` 的寫入範圍，並重新驗證
+    AGENTS.md §5.11 的 roster 鎖與 rollback 規則。
+11. **Azure Key Vault**：未來改用時，邊界仍是 container 內的 `/pilot/vault`（或替代它的 secret 來源）；
    需另寫規格，不影響使用者端與傳輸方式。
-11. **上線後事項（使用者決定時機；不是本規格的工作包）**：以包含 WP2 的 commit build pilot-cli image 並
+12. **上線後事項（使用者決定時機；不是本規格的工作包）**：以包含 WP2 的 commit build pilot-cli image 並
     載入 deploy node、在 deploy node 建立 SSH 帳號並登記公鑰、用真實 GitHub repo 跑 `pilot-mcp doctor`、
     確認後再把 pilot repo 內 `.codex/config.toml` 與 `crush.json` 改成 `pilot-mcp connect`。
