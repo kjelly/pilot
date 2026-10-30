@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import yaml
@@ -106,13 +107,26 @@ def main():
         cmd = [str(args.pilot), 'vm-target', 'test', '--name', args.name,
                '--playbook', str(source), '--spec', str(ROOT / 'docs/verification/detection-engine.md'),
                '--verify-timeout', '60', '--', '-e', '@' + str(extra.resolve())]
+        before_reports = set((ROOT / '.verification').glob('detection-engine-*'))
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
         (args.evidence / (label + '.log')).write_text(proc.stdout)
+        reports = set((ROOT / '.verification').glob('detection-engine-*')) - before_reports
+        verified_rows = []
+        for report in reports:
+            if report.suffix not in ('.md', '.ndjson'):
+                continue
+            shutil.copyfile(report, args.evidence / report.name)
+            if report.suffix == '.ndjson':
+                verified_rows = [json.loads(line) for line in report.read_text().splitlines() if line.strip()]
+                if proc.returncode:
+                    print(report.read_text()[-14000:], flush=True)
         print(label, 'rc=', proc.returncode, flush=True)
         if proc.returncode or 'ALL TESTS PASSED SUCCESSFULLY' not in proc.stdout:
             print(proc.stdout[-20000:], flush=True)
             raise RuntimeError(label)
-        evidence['cases'].append({'name': label, 'verdict': 'PASS'})
+        assert {r['id'] for r in verified_rows} == {'C' + str(i) for i in range(1,13)}, verified_rows
+        assert all(r['status'] == 'pass' and r['host'] == args.name for r in verified_rows), verified_rows
+        evidence['cases'].append({'name': label, 'verdict': 'PASS', 'spec_pass': 12, 'spec_fail': 0, 'spec_skip': 0})
         (args.evidence / 'results.json').write_text(json.dumps(evidence, indent=2))
 
     variables = {'detection_engine_bin_dest': BASE + '/engine', 'detection_engine_db_path': BASE + '/state.db',
