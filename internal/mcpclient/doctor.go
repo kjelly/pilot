@@ -105,7 +105,7 @@ func Doctor(ctx context.Context, o *Options) *Report {
 		return fmt.Sprintf("%d files, %d bytes", len(snap.Manifest.Files), len(snap.Framed)), nil
 	})
 	step("remote-version", func() (string, error) {
-		v, err := remoteVersion(o, img)
+		v, err := remoteVersion(ctx, o, img)
 		if err != nil {
 			return "", err
 		}
@@ -147,13 +147,22 @@ func Doctor(ctx context.Context, o *Options) *Report {
 	return rep
 }
 
-func remoteVersion(o *Options, image string) (mcpwire.Version, error) {
+func remoteVersion(ctx context.Context, o *Options, image string) (mcpwire.Version, error) {
 	proc, err := startSSH(o, versionCommand(o.Profile.Target, image), false)
 	if err != nil {
 		return mcpwire.Version{}, err
 	}
-	var out bytes.Buffer
-	_, _ = out.ReadFrom(proc.stdout)
+	const maxVersionBytes = 64 << 10
+	data, _ := proc.readAll(ctx, maxVersionBytes+1)
+	if err := ctx.Err(); err != nil {
+		proc.kill()
+		return mcpwire.Version{}, err
+	}
+	if len(data) > maxVersionBytes {
+		proc.kill() // still writing; waiting would never return
+		return mcpwire.Version{}, &Error{Code: CodeRemoteRuntime, Msg: "version output is larger than 64 KiB"}
+	}
+	out := bytes.NewBuffer(data)
 	if exit := proc.wait(); exit != 0 {
 		return mcpwire.Version{}, remoteFailure(exit, proc.stderr.String())
 	}

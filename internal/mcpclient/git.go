@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -101,16 +102,31 @@ func (r *gitRepo) lock(ctx context.Context) (func(), error) {
 func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", r.dir}, args...)...)
+	cmd := boundedCommand(ctx, "git", append([]string{"-C", r.dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never")
-	detachFromTerminal(cmd)
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil // git succeeded; a helper it started kept a pipe open
+	}
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return stdout.Bytes(), gitContextError(args, ctxErr, r.timeout)
+		}
 		return stdout.Bytes(), classifyGitError(args, stderr.String(), err)
 	}
 	return stdout.Bytes(), nil
+}
+
+// gitContextError reports a git command ended by its timeout or by
+// cancellation (its process group was killed).
+func gitContextError(args []string, ctxErr error, timeout time.Duration) error {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return &Error{Code: CodeGitFailed, Msg: fmt.Sprintf("git %s did not finish within %s (timeouts.git_seconds)", args[0], timeout)}
+	}
+	return &Error{Code: CodeGitFailed, Msg: fmt.Sprintf("git %s: %v", args[0], ctxErr)}
 }
 
 func classifyGitError(args []string, stderr string, err error) error {

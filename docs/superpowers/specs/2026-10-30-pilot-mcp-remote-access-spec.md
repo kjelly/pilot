@@ -260,6 +260,11 @@ profiles:
    （`0700`）。git 子程序以新的 session 執行（`Setsid`，沒有 controlling terminal），並設
    `GIT_TERMINAL_PROMPT=0`、`SSH_ASKPASS_REQUIRE=never`：不能互動輸入就直接失敗，同時保留使用者的
    `core.sshCommand` 與 credential helper。
+   - 子程序的上限（git、ssh 都適用）：每個子程序以 `Setsid` 成為自己 process group 的 leader，它啟動的
+     helper（SSH、credential helper、ProxyCommand）都在同一個 group。git 每個指令受 `git_seconds` 限制
+     （使用者 clone 裡的 `changes` git 指令也是），逾時或取消（SIGINT/SIGTERM）時對整個 group 送 SIGKILL；
+     `WaitDelay`（2 秒）限制子程序結束或被 kill 後等待管線的時間，所以離開 group、仍拿著管線的 helper
+     也不會讓指令卡住。git 成功但 helper 還拿著管線時，視為成功。
    - branch/tag：fetch `refs/heads/<ref>` 與 `refs/tags/<ref>`；兩者都存在時報錯（不猜）。
    - SHA：`git fetch origin <sha>`；失敗時 fetch 所有 heads/tags 後再檢查該 SHA 是否存在。
    - 以 `git rev-parse --verify <x>^{commit}` 取得完整 SHA。
@@ -306,7 +311,10 @@ profiles:
 
 - ready 之前，給 agent 的 stdout 不寫任何 byte。
 - 串流不解析、不緩衝整份 JSON-RPC；處理短寫、雙向 EOF 與子程序結束。
-- SIGINT/SIGTERM：關閉 ssh 的 stdin，最多等 5 秒後 kill ssh；結束碼 130/143。
+- SIGINT/SIGTERM：關閉 ssh 的 stdin，最多等 5 秒後 kill ssh 的整個 process group；結束碼 130/143。
+  一次性的 ssh 讀取（`changes` 的 tar、doctor 的 `remote-version`）收到 SIGINT/SIGTERM 時立刻 kill ssh 的
+  process group 並關閉 stdout 管線（離開 group 的 helper 仍拿著它時也不會卡住），以 130/143 結束；輸出超過
+  上限時也直接 kill，不等 remote。
 - 不自動重試。失敗由 agent 重新啟動 MCP server 處理。
 - 錯誤判讀見 §11。
 

@@ -57,12 +57,15 @@ func Changes(ctx context.Context, o *Options, sessionID, into string) (*ChangesR
 	if err != nil {
 		return nil, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(proc.stdout, mcpwire.MaxStreamBytes+1))
+	data, readErr := proc.readAll(ctx, mcpwire.MaxStreamBytes+1)
+	if err := ctx.Err(); err != nil {
+		proc.kill()
+		return nil, err
+	}
 	if readErr == nil && len(data) > mcpwire.MaxStreamBytes {
 		// The remote is still writing into a pipe nobody reads; waiting
 		// for it would never return.
-		_ = proc.cmd.Process.Kill()
-		proc.wait()
+		proc.kill()
 		return nil, &Error{Code: CodeChangesetInvalid, Msg: fmt.Sprintf("changes output is larger than %d bytes", mcpwire.MaxStreamBytes)}
 	}
 	if exit := proc.wait(); exit != 0 {
@@ -157,14 +160,23 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 	return m, contents, nil
 }
 
-// runGit runs git in dir and returns its exit status as well as stdout.
+// runGit runs git in dir, bounded by the profile's Git timeout, and
+// returns its exit status as well as stdout. A timeout or cancellation
+// kills git's process group and is returned as an error.
 func runGit(ctx context.Context, o *Options, dir string, args ...string) (string, int, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	ctx, cancel := context.WithTimeout(ctx, o.Profile.gitTimeout())
+	defer cancel()
+	cmd := boundedCommand(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never")
-	detachFromTerminal(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil // git succeeded; a helper it started kept a pipe open
+	}
+	if ctxErr := ctx.Err(); err != nil && ctxErr != nil {
+		return "", -1, gitContextError(args, ctxErr, o.Profile.gitTimeout())
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return stdout.String(), exitErr.ExitCode(), nil

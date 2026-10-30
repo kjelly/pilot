@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/mcpwire"
 )
@@ -45,6 +47,20 @@ func fakeSSH(scenario string) int {
 	case "changes":
 		data, _ := os.ReadFile(os.Getenv("PILOT_MCP_FAKE_CHANGES"))
 		_, _ = os.Stdout.Write(data)
+		return 0
+	case "hang":
+		// A remote that never answers and never closes stdout.
+		writeFakePID(os.Getpid())
+		time.Sleep(time.Minute)
+		return 0
+	case "hang-child":
+		// ssh ends, but a helper it started keeps stdout open.
+		child := exec.Command("sleep", "60")
+		child.Stdout = os.Stdout
+		if err := child.Start(); err != nil {
+			return 1
+		}
+		writeFakePID(child.Process.Pid)
 		return 0
 	case "changes-flood":
 		// Keep writing, as a remote with an unbounded export would.
@@ -91,6 +107,13 @@ func fakeSSH(scenario string) int {
 		return 0
 	}
 	return 66
+}
+
+// writeFakePID records a fake ssh process's pid for the test to check.
+func writeFakePID(pid int) {
+	if path := os.Getenv("PILOT_MCP_FAKE_PID"); path != "" {
+		_ = os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600)
+	}
 }
 
 // useFakeSSH points sshBinary at the test binary for scenario.

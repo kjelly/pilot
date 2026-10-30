@@ -91,8 +91,12 @@ func (t *tailBuffer) String() string {
 type sshProc struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
+	pipe   io.ReadCloser // ssh's stdout, under stdout
 	stdout *bufio.Reader
 	stderr *tailBuffer
+
+	waitOnce sync.Once
+	exit     int
 }
 
 func startSSH(o *Options, argv []string, withStdin bool) (*sshProc, error) {
@@ -105,7 +109,7 @@ func startSSH(o *Options, argv []string, withStdin bool) (*sshProc, error) {
 		return nil, &Error{Code: CodeProfileInvalid, Msg: err.Error()}
 	}
 	cmd := exec.Command(sshBinary, sshArgs(o.Profile, cfg, remote)...)
-	detachFromTerminal(cmd)
+	isolate(cmd)
 	p := &sshProc{cmd: cmd, stderr: &tailBuffer{out: o.Stderr, max: 64 << 10}}
 	cmd.Stderr = p.stderr
 	if withStdin {
@@ -117,6 +121,7 @@ func startSSH(o *Options, argv []string, withStdin bool) (*sshProc, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.pipe = stdout
 	p.stdout = bufio.NewReaderSize(stdout, 64<<10)
 	if err := cmd.Start(); err != nil {
 		return nil, &Error{Code: CodeSSHFailed, Msg: "start ssh: " + err.Error()}
@@ -125,36 +130,69 @@ func startSSH(o *Options, argv []string, withStdin bool) (*sshProc, error) {
 }
 
 // wait reaps ssh once its stdout is drained and returns its exit status.
+// It may be called more than once.
 func (p *sshProc) wait() int {
-	err := p.cmd.Wait()
-	var exitErr *exec.ExitError
-	switch {
-	case err == nil:
-		return 0
-	case errors.As(err, &exitErr):
-		if exitErr.ExitCode() >= 0 {
-			return exitErr.ExitCode()
+	p.waitOnce.Do(func() {
+		err := p.cmd.Wait()
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil, errors.Is(err, exec.ErrWaitDelay):
+			p.exit = 0 // ErrWaitDelay: ssh succeeded; a helper kept a pipe open
+		case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
+			p.exit = exitErr.ExitCode()
+		default:
+			p.exit = 255
 		}
-		return 255
-	default:
-		return 255
+	})
+	return p.exit
+}
+
+// kill ends ssh and every helper in its process group, closes its stdout
+// (a helper that left the group may still hold it) and reaps it.
+func (p *sshProc) kill() {
+	_ = killGroup(p.cmd)
+	_ = p.pipe.Close()
+	p.wait()
+}
+
+// readAll reads ssh's stdout to EOF, at most limit bytes. When ctx ends
+// first it kills ssh (kill), which unblocks the read, and returns
+// ctx.Err().
+func (p *sshProc) readAll(ctx context.Context, limit int64) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(p.stdout, limit))
+		done <- result{data, err}
+	}()
+	select {
+	case r := <-done:
+		return r.data, r.err
+	case <-ctx.Done():
+		p.kill()
+		<-done
+		return nil, ctx.Err()
 	}
 }
 
-// stop closes ssh's stdin, gives the remote 5 seconds to end, then kills.
+// stop closes ssh's stdin, gives the remote 5 seconds to end, then kills
+// ssh's process group.
 func (p *sshProc) stop() {
 	if p.stdin != nil {
 		p.stdin.Close()
 	}
 	exited := make(chan struct{})
 	go func() {
-		p.cmd.Wait() //nolint:errcheck // the exit status no longer matters
+		p.wait()
 		close(exited)
 	}()
 	select {
 	case <-exited:
 	case <-time.After(5 * time.Second):
-		_ = p.cmd.Process.Kill()
+		p.kill()
 		<-exited
 	}
 }
