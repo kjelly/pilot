@@ -33,8 +33,6 @@ type lrFuzz struct {
 	r        *rand.Rand
 	counter  int
 	keep     []string // text that must survive the rewrite untouched
-	managed  string
-	inScript bool
 	hashUsed bool
 }
 
