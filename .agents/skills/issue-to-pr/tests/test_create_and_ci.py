@@ -217,8 +217,16 @@ sys.exit(int(os.environ.get("FAKE_RC", "0")))
 """
 
 
+# gh 2.103.3 on a branch without required checks, `gh pr checks <n> --required --json ...`:
+# exit 1, nothing on stdout, exactly this line on stderr (real capture, branch name as printed).
+REAL_NO_REQUIRED = "no required checks reported on the 'chore/pr-ready-dispute-review-comments' branch\n"
+PHRASE_NAME = "Build (no required checks reported)"
+PHRASE_FAILURE = json.dumps([{"name": PHRASE_NAME, "state": "FAILURE", "bucket": "fail", "link": "https://x"}])
+
+
 class RequiredChecksQueryTest(unittest.TestCase):
-    """`gh pr checks --required` prints plain text, not JSON, without branch protection."""
+    """`gh pr checks --required` prints plain text, not JSON, without branch protection; that one
+    failure means "no required checks". Nothing else may be read that way."""
 
     def run_checks(self, *, required, rc, out="", err=""):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,11 +239,12 @@ class RequiredChecksQueryTest(unittest.TestCase):
                 return pr_ci.checks("OWNER/REPO", 9, required)
 
     def test_no_required_checks_reported_means_empty(self):
-        self.assertEqual([], self.run_checks(required=True, rc=1, err="no required checks reported on the 'x' branch\n"))
+        self.assertEqual([], self.run_checks(required=True, rc=1, err=REAL_NO_REQUIRED))
+        self.assertEqual([], self.run_checks(required=True, rc=1, out="\n", err=REAL_NO_REQUIRED))
 
     def test_message_only_tolerated_for_required_query(self):
         with self.assertRaises(pr_ci.GateError):
-            self.run_checks(required=False, rc=1, err="no required checks reported\n")
+            self.run_checks(required=False, rc=1, err=REAL_NO_REQUIRED)
 
     def test_other_failures_still_fail_closed(self):
         with self.assertRaises(pr_ci.GateError):
@@ -244,6 +253,48 @@ class RequiredChecksQueryTest(unittest.TestCase):
     def test_failing_checks_json_still_parsed(self):
         out = '[{"name": "ci", "bucket": "fail", "state": "FAILURE"}]'
         self.assertEqual("FAIL", pr_ci.classify(self.run_checks(required=True, rc=1, out=out)))
+
+    def test_a_failing_required_check_named_like_the_message_stays_a_failure(self):
+        found = self.run_checks(required=True, rc=1, out=PHRASE_FAILURE)
+        self.assertEqual([PHRASE_NAME], [c["name"] for c in found])
+        self.assertEqual("FAIL", pr_ci.classify(found))
+
+    def test_json_on_stdout_wins_over_the_message_on_stderr(self):
+        found = self.run_checks(required=True, rc=1, out=PHRASE_FAILURE, err=REAL_NO_REQUIRED)
+        self.assertEqual("FAIL", pr_ci.classify(found))
+
+    def test_the_message_inside_other_output_is_not_the_message(self):
+        for err in ("warning: retrying\n" + REAL_NO_REQUIRED, "HTTP 502: " + REAL_NO_REQUIRED,
+                    REAL_NO_REQUIRED + "extra line\n", REAL_NO_REQUIRED.upper(),
+                    "no required checks reported\n", "No required checks reported on the 'x' branch\n",
+                    "no required checks reported on the '' branch\n"):
+            with self.subTest(err=err), self.assertRaises(pr_ci.GateError):
+                self.run_checks(required=True, rc=1, err=err)
+
+    def test_other_exit_statuses_do_not_use_the_fallback(self):
+        for rc in (0, 2, 8):
+            with self.subTest(rc=rc), self.assertRaises(pr_ci.GateError):
+                self.run_checks(required=True, rc=rc, err=REAL_NO_REQUIRED)
+
+    def test_unparseable_stdout_does_not_use_the_fallback(self):
+        with self.assertRaises(pr_ci.GateError):
+            self.run_checks(required=True, rc=1, out="something went wrong", err=REAL_NO_REQUIRED)
+
+    def test_inspect_reports_a_failing_required_check_named_like_the_message(self):
+        sha = "a" * 40
+        view = {"number": 9, "state": "OPEN", "isDraft": True, "headRefOid": sha, "url": "u"}
+        gh_command = pr_ci.command
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = Path(tmp) / "gh"
+            gh.write_text(FAKE_GH)
+            gh.chmod(0o755)
+            env = {"PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}", "FAKE_RC": "1", "FAKE_OUT": PHRASE_FAILURE}
+            with patch.dict(os.environ, env), patch.object(
+                    pr_ci, "command",
+                    side_effect=lambda argv, **kw: view if argv[:3] == ["gh", "pr", "view"] else gh_command(argv, **kw)):
+                result = pr_ci.inspect("OWNER/REPO", 9, sha)
+        self.assertEqual("CI_FAILED", result["status"])
+        self.assertEqual([PHRASE_NAME], [c["name"] for c in result["required_checks"]])
 
 
 if __name__ == "__main__":

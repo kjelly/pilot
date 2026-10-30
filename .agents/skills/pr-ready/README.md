@@ -75,7 +75,7 @@ python3 /path/to/pr-ready/scripts/pr_gate.py \
 - `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變。
 - `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。
 
-驗證命令可由 `scripts/run_check.py` 執行並產生 SHA-bound receipt；腳本不會自動編造 acceptance criteria / reviewer 結論。`gh pr checks --required` 和 GraphQL reviewThreads 資訊不可存取時採 **fail-closed**；branch 沒有 required checks 時 `--required` 以 exit 1 印出 `no required checks reported`，gate 視為 0 個 required checks，其餘 checks 仍須全部通過。evidence 有 `disputed_review_comments` 時，gate 另外讀取 PR 的 conversation comments 與 reviews，確認被反駁的意見與回覆都在這個 PR 上、回覆在意見之後、inline 回覆在同一個 thread 且仍是最新一則、其他回覆內含原意見的 URL；反駁本身對不對由獨立 Reviewer 判斷，gate 判斷不了。
+驗證命令可由 `scripts/run_check.py` 執行並產生 SHA-bound receipt；腳本不會自動編造 acceptance criteria / reviewer 結論。`gh pr checks --required` 和 GraphQL reviewThreads 資訊不可存取時採 **fail-closed**；branch 沒有 required checks 時 `--required` 以 exit 1、stdout 為空、stderr 恰為 `no required checks reported on the '<branch>' branch` 結束，gate 只在這個完全吻合的情況視為 0 個 required checks，其餘 checks 仍須全部通過；stdout 有 JSON 就一律照 JSON 判斷（名稱含這段文字的 required check 失敗仍然是失敗），訊息混在其他輸出、大小寫不同或其他 exit status 一律 fail-closed。evidence 有 `disputed_review_comments` 時，gate 另外讀取 PR 的 conversation comments 與 reviews，確認被反駁的意見與回覆都在這個 PR 上、回覆在意見之後、inline 回覆在同一個 thread 且仍是最新一則、其他回覆內含原意見的 URL；反駁本身對不對由獨立 Reviewer 判斷，gate 判斷不了。
 
 ## 本機測試
 

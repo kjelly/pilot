@@ -22,12 +22,15 @@ class GateError(RuntimeError):
     pass
 
 
-def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: str | None = None) -> Any:
+def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Pattern[str] | None = None) -> Any:
+    """Run argv and parse its stdout as JSON. `empty_if` is the one tolerated failure: exit 1 with
+    nothing on stdout and stderr that is exactly that message means "empty list". It is never matched
+    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output."""
     try:
         p = subprocess.run(argv, text=True, capture_output=True, check=False)
     except OSError as exc:
         raise GateError(f"Cannot execute {argv[0]}: {exc}") from exc
-    if empty_if and p.returncode and empty_if in f"{p.stdout}\n{p.stderr}".lower():
+    if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
         return []
     if p.returncode and not allow_nonzero_json:
         raise GateError(f"{' '.join(argv[:4])}: exit {p.returncode}: {(p.stderr or p.stdout).strip()[:700]}")
@@ -46,9 +49,12 @@ def gh_pr(repo: str, pr: int) -> dict[str, Any]:
     return value
 
 
-# `gh pr checks --required` exits 1 with this plain-text message on stderr (no JSON) when the
-# branch has no required checks (no branch protection or rulesets requiring any).
-NO_REQUIRED_CHECKS = "no required checks reported"
+# `gh pr checks --required` on a branch without required checks (no branch protection or ruleset
+# requiring any) exits 1 with nothing on stdout and, on stderr, exactly this line (gh 2.103.3):
+#   no required checks reported on the 'chore/pr-ready-dispute-review-comments' branch\n
+# Case-sensitive and anchored: a failing required check named "no required checks reported" arrives
+# as JSON on stdout and must stay a failure.
+NO_REQUIRED_CHECKS = re.compile(r"no required checks reported on the '[^\n]+' branch\n?")
 
 
 def gh_checks(repo: str, pr: int, *, required: bool) -> list[dict[str, Any]]:

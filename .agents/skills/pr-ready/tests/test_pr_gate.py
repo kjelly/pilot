@@ -1,10 +1,13 @@
+import contextlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("pr_gate", ROOT / "scripts" / "pr_gate.py")
@@ -150,6 +153,88 @@ class GateTests(unittest.TestCase):
             receipt = json.loads(p.stdout)
             self.assertEqual(0, receipt["exit_code"])
             self.assertTrue((root / receipt["log"]).is_file())
+
+
+FAKE_GH = """#!/usr/bin/env python3
+import os, sys
+sys.stdout.write(os.environ.get("FAKE_OUT", ""))
+sys.stderr.write(os.environ.get("FAKE_ERR", ""))
+sys.exit(int(os.environ.get("FAKE_RC", "0")))
+"""
+
+# gh 2.103.3 on a branch without required checks, `gh pr checks <n> --required --json ...`:
+# exit 1, nothing on stdout, exactly this line on stderr (real capture, branch name as printed).
+REAL_NO_REQUIRED = "no required checks reported on the 'chore/pr-ready-dispute-review-comments' branch\n"
+PHRASE_NAME = "Build (no required checks reported)"
+PHRASE_FAILURE = json.dumps([{"name": PHRASE_NAME, "state": "FAILURE", "bucket": "fail", "link": "https://x"}])
+
+
+@contextlib.contextmanager
+def fake_gh(rc, out="", err=""):
+    """Put a `gh` on PATH that exits `rc` with the given stdout/stderr, whatever it is asked."""
+    with tempfile.TemporaryDirectory() as tmp:
+        gh = Path(tmp) / "gh"
+        gh.write_text(FAKE_GH)
+        gh.chmod(0o755)
+        env = {"PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}", "FAKE_RC": str(rc), "FAKE_OUT": out, "FAKE_ERR": err}
+        with patch.dict(os.environ, env):
+            yield
+
+
+class RequiredChecksQueryTests(unittest.TestCase):
+    """`gh pr checks --required` fails with plain text, not JSON, on a branch without required checks;
+    that one failure means "no required checks". Nothing else may be read that way."""
+
+    def required(self, rc, out="", err=""):
+        with fake_gh(rc, out, err):
+            return module.gh_checks("acme/repo", 7, required=True)
+
+    def test_exact_gh_message_on_an_empty_stdout_means_no_required_checks(self):
+        self.assertEqual([], self.required(1, err=REAL_NO_REQUIRED))
+        self.assertEqual([], self.required(1, out="\n", err=REAL_NO_REQUIRED))
+
+    def test_a_failing_required_check_named_like_the_message_stays_a_failure(self):
+        found = self.required(1, out=PHRASE_FAILURE)
+        self.assertEqual([PHRASE_NAME], [c["name"] for c in found])
+        self.assertEqual("fail", found[0]["bucket"])
+
+    def test_json_on_stdout_wins_over_the_message_on_stderr(self):
+        found = self.required(1, out=PHRASE_FAILURE, err=REAL_NO_REQUIRED)
+        self.assertEqual([PHRASE_NAME], [c["name"] for c in found])
+
+    def test_the_message_inside_other_output_is_not_the_message(self):
+        for err in ("warning: retrying\n" + REAL_NO_REQUIRED, "HTTP 502: " + REAL_NO_REQUIRED,
+                    REAL_NO_REQUIRED + "extra line\n", REAL_NO_REQUIRED.upper(),
+                    "no required checks reported\n", "No required checks reported on the 'x' branch\n",
+                    "no required checks reported on the '' branch\n"):
+            with self.subTest(err=err), self.assertRaises(module.GateError):
+                self.required(1, err=err)
+
+    def test_other_exit_statuses_do_not_use_the_fallback(self):
+        for rc in (0, 2, 8):
+            with self.subTest(rc=rc), self.assertRaises(module.GateError):
+                self.required(rc, err=REAL_NO_REQUIRED)
+
+    def test_unparseable_stdout_does_not_use_the_fallback(self):
+        with self.assertRaises(module.GateError):
+            self.required(1, out="something went wrong", err=REAL_NO_REQUIRED)
+
+    def test_the_full_query_never_falls_back(self):
+        with fake_gh(1, err=REAL_NO_REQUIRED), self.assertRaises(module.GateError):
+            module.gh_checks("acme/repo", 7, required=False)
+
+    def test_other_failures_still_fail_closed(self):
+        with self.assertRaises(module.GateError):
+            self.required(1, err="HTTP 502: Bad Gateway\n")
+
+    def test_exemption_cannot_hide_a_required_check_named_like_the_message(self):
+        s, e = good()
+        required = self.required(1, out=PHRASE_FAILURE)
+        s.checks, s.required_checks = [*s.checks, *required], required
+        e["unrelated_failing_checks"] = [{"name": PHRASE_NAME, "reviewer_confirmed": True,
+                                          "reason": "Unrelated failure, same on main at the base SHA"}]
+        errors = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []))
+        self.assertIn(f"Required GitHub check not passing: {PHRASE_NAME} (FAILURE, fail)", errors)
 
 
 # URL and timestamp shapes copied from real GraphQL output (kjelly/pilot#190,

@@ -23,6 +23,8 @@ checks = [{"name": "go test", "bucket": "pass", "state": "SUCCESS"},
           {"name": "lint", "bucket": "pass", "state": "SUCCESS"}]
 if (state / "fail").exists():
     checks[0]["bucket"] = "fail"
+if (state / "phrase_check").exists():
+    checks[0].update(name="Build (no required checks reported)", state="FAILURE", bucket="fail")
 if args[:2] == ["pr", "view"]:
     print(json.dumps({"number": 7, "url": "https://github.com/acme/repo/pull/7",
         "headRefOid": sha, "headRefName": "fix-one", "state": "OPEN",
@@ -36,6 +38,8 @@ elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "no_requ
     sys.exit(1)
 elif args[:2] == ["pr", "checks"]:
     print(json.dumps(checks[:1] if "--required" in args else checks))
+    # Real gh exits 1 when a check failed, with the JSON still on stdout.
+    sys.exit(1 if checks[0]["bucket"] == "fail" else 0)
 elif args[:2] == ["api", "graphql"]:
     query = next(a[len("query="):] for a in args if a.startswith("query="))
     field = re.search(r"pullRequest\(number:\$number\)\s*\{\s*(\w+)", query).group(1)
@@ -132,6 +136,21 @@ class CLIMockTests(unittest.TestCase):
             ready = self.gate(repo, evidence, env, "--ready")
             self.assertEqual(0, ready.returncode, ready.stdout)
             self.assertEqual("READY", json.loads(ready.stdout)["status"])
+
+    def test_failing_required_check_named_like_the_no_required_message_still_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.make_pr(t)
+            (t / "phrase_check").touch()
+            name = "Build (no required checks reported)"
+            evidence["unrelated_failing_checks"] = [{
+                "name": name, "reviewer_confirmed": True,
+                "reason": "Unrelated failure, same on main at the base SHA (CI run 40802511042)"}]
+            blocked = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            errors = json.loads(blocked.stdout)["errors"]
+            self.assertIn(f"Required GitHub check not passing: {name} (FAILURE, fail)", errors)
+            self.assertFalse((t / "ready").exists())
 
     def test_required_checks_lookup_failure_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

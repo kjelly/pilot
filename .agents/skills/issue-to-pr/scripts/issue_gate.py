@@ -27,12 +27,15 @@ class GateError(RuntimeError):
 
 
 def command(argv: list[str], *, cwd: Path | None = None, allow_nonzero_json: bool = False,
-            empty_if: str | None = None) -> Any:
+            empty_if: re.Pattern[str] | None = None) -> Any:
+    """Run argv and parse its stdout as JSON. `empty_if` is the one tolerated failure: exit 1 with
+    nothing on stdout and stderr that is exactly that message means "empty list". It is never matched
+    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output."""
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
     except OSError as exc:
         raise GateError(f"Missing executable {argv[0]}: {exc}") from exc
-    if empty_if and p.returncode and empty_if in f"{p.stdout}\n{p.stderr}".lower():
+    if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
         return []
     if p.returncode and not allow_nonzero_json:
         raise GateError(f"{argv[:4]} failed: {(p.stderr or p.stdout).strip()[:500]}")
