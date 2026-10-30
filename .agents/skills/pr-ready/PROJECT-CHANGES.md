@@ -16,6 +16,9 @@ then run `make skill-test` and `go test ./cmd/pilot/cmd -run TestAgentSkillLayou
 | `references/quality-gate.md` | item 8, "Pilot target evidence (Root/Reviewer check)" |
 | `scripts/install.sh`, `tests/test_installer.py`, the two `test_install_*_smoke` cases in `tests/test_pr_gate.py` | removed: the skill is repository-local, nothing installs it elsewhere |
 | `README.md` | install sections replaced by the repository layout (symlinks, `.codex/agents` copies, consistency test) |
+| `references/review-comments.md` (new), `SKILL.md` (step 1, step 4, quality rules, context list), `references/{roles,workflow,quality-gate,evidence-schema}.md`, `README.md` flow | review comments are claims to verify: triage into `valid`/`invalid`/`needs_evidence`/`nonblocking`, the reviewer judges disputed comments without Root's conclusion, Root replies on GitHub and records `disputed_review_comments`; a claim raised again without new evidence goes to a person |
+| `scripts/pr_gate.py` (`gh_connection`, `check_disputes`, `fetch_snapshot(conversation=)`), `tests/test_pr_gate.py` (`DisputedReviewCommentTests`), `tests/test_cli_mock.py` (fake `gh` answers per GraphQL connection; dispute end-to-end case) | the gate verifies each disputed comment's reply against GitHub; conversation comments and reviews are fetched only when the evidence has disputes |
+| `platforms/{claude,codex,agy}/agents/pr-{sa,coder,reviewer}.*` | review comments are claims (SA, Coder); the reviewer returns `disputed_comment_verdicts` |
 
 Repository-side pieces the skill relies on: `.github/pr-evidence.json`, `make skill-test`
 (wired into CI's Go test job) and the consistency test above. Files not listed here are

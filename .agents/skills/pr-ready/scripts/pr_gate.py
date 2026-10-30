@@ -58,12 +58,12 @@ def gh_checks(repo: str, pr: int, *, required: bool) -> list[dict[str, Any]]:
     return checks
 
 
-THREAD_QUERY = """
+CONNECTION_QUERY = """
 query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
   repository(owner:$owner,name:$repo) {
     pullRequest(number:$number) {
-      reviewThreads(first:100,after:$cursor) {
-        nodes { id isResolved isOutdated }
+      %s(first:100,after:$cursor) {
+        nodes { %s }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -71,38 +71,56 @@ query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
 }
 """
 
+# PR connections the gate reads: field -> (node fields, label for errors).
+# Thread comments let the gate check that a disputed thread's reply is still
+# its newest comment; conversation comments and reviews are only fetched when
+# the evidence disputes a review comment.
+CONNECTIONS = {
+    "reviewThreads": ("id isResolved isOutdated "
+                      "comments(first:100) { nodes { url createdAt } pageInfo { hasNextPage } }",
+                      "review threads"),
+    "comments": ("url createdAt body", "conversation comments"),
+    "reviews": ("url createdAt", "reviews"),
+}
 
-def gh_threads(repo: str, pr: int) -> list[dict[str, Any]]:
+
+def gh_connection(repo: str, pr: int, field: str) -> list[dict[str, Any]]:
     if len(repo.split("/")) != 2:
         raise GateError("--repo must be OWNER/REPO")
     owner, name = repo.split("/", 1)
+    node_fields, label = CONNECTIONS[field]
+    query = CONNECTION_QUERY % (field, node_fields)
     cursor: str | None = None
     pages = 0
-    threads: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     while True:
-        argv = ["gh", "api", "graphql", "-f", f"query={THREAD_QUERY}", "-f", f"owner={owner}",
+        argv = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
                 "-f", f"repo={name}", "-F", f"number={pr}"]
         if cursor:
             argv.extend(["-f", f"cursor={cursor}"])
         payload = cmd(argv)
         if not isinstance(payload, dict) or payload.get("errors"):
-            raise GateError(f"GraphQL review threads query failed: {str(payload.get('errors'))[:300]}")
+            raise GateError(f"GraphQL {label} query failed: {str(payload.get('errors'))[:300]}")
         try:
-            connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+            connection = payload["data"]["repository"]["pullRequest"][field]
             nodes, page = connection["nodes"], connection["pageInfo"]
             if not isinstance(nodes, list) or not isinstance(page["hasNextPage"], bool):
-                raise ValueError("invalid threads page")
-            threads.extend(nodes)
+                raise ValueError(f"invalid {label} page")
+            items.extend(nodes)
         except (KeyError, TypeError, ValueError) as exc:
-            raise GateError(f"Cannot retrieve complete PR review threads: {exc}") from exc
+            raise GateError(f"Cannot retrieve complete PR {label}: {exc}") from exc
         pages += 1
         if not page["hasNextPage"]:
             break
         new_cursor = page.get("endCursor")
         if not new_cursor or new_cursor == cursor or pages >= 100:
-            raise GateError("Review thread pagination incomplete")
+            raise GateError(f"PR {label} pagination incomplete")
         cursor = new_cursor
-    return threads
+    return items
+
+
+def gh_threads(repo: str, pr: int) -> list[dict[str, Any]]:
+    return gh_connection(repo, pr, "reviewThreads")
 
 
 @dataclass
@@ -111,14 +129,19 @@ class Snapshot:
     checks: list[dict[str, Any]]
     required_checks: list[dict[str, Any]]
     threads: list[dict[str, Any]]
+    # None means "not fetched": only needed to verify disputed review comments.
+    comments: list[dict[str, Any]] | None = None
+    reviews: list[dict[str, Any]] | None = None
 
 
-def fetch_snapshot(repo: str, pr: int) -> Snapshot:
+def fetch_snapshot(repo: str, pr: int, *, conversation: bool = False) -> Snapshot:
     return Snapshot(
         pr=gh_pr(repo, pr),
         checks=gh_checks(repo, pr, required=False),
         required_checks=gh_checks(repo, pr, required=True),
         threads=gh_threads(repo, pr),
+        comments=gh_connection(repo, pr, "comments") if conversation else None,
+        reviews=gh_connection(repo, pr, "reviews") if conversation else None,
     )
 
 
@@ -192,6 +215,98 @@ def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path 
                     errors.append(f"{loc} log artifact missing/unreadable: {logfile}")
             if item.get("head_unchanged") is False:
                 errors.append(f"{loc} executed while HEAD was changing")
+
+
+DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "nonblocking")
+
+
+def check_disputes(s: Snapshot, evidence: dict[str, Any], sha: Any, errors: list[str]) -> None:
+    """Verify each review comment the PR does not act on was answered on GitHub.
+
+    The gate cannot judge whether the dispute is right; it checks that the
+    disputed comment is on this PR, that a later reply exists where the
+    commenter will see it (same thread, or a conversation comment linking the
+    disputed URL), that nobody has written in the thread since, and that the
+    independent reviewer confirmed the dispute on the current HEAD.
+    """
+    items = evidence.get("disputed_review_comments", [])
+    if not isinstance(items, list):
+        errors.append("disputed_review_comments malformed")
+        return
+    if not items:
+        return
+    if s.comments is None or s.reviews is None:
+        errors.append("PR conversation comments/reviews not fetched; cannot verify disputed review comments")
+        return
+
+    # url -> (where, createdAt, body); where is "thread:<id>", "conversation" or "review".
+    index: dict[str, tuple[str, str, str | None]] = {}
+    newest: dict[str, str] = {}
+    incomplete: set[str] = set()
+    for t in s.threads:
+        conn = t.get("comments") if isinstance(t, dict) else None
+        if not isinstance(conn, dict) or not isinstance(conn.get("nodes"), list) \
+                or not isinstance(t.get("id"), str):
+            continue
+        where = "thread:" + t["id"]
+        page = conn.get("pageInfo")
+        if not isinstance(page, dict) or page.get("hasNextPage") is not False:
+            incomplete.add(where)
+        latest: tuple[str, str] | None = None
+        for c in conn["nodes"]:
+            if isinstance(c, dict) and isinstance(c.get("url"), str) and isinstance(c.get("createdAt"), str):
+                index[c["url"]] = (where, c["createdAt"], None)
+                if latest is None or c["createdAt"] >= latest[0]:
+                    latest = (c["createdAt"], c["url"])
+        if latest:
+            newest[where] = latest[1]
+    for where, nodes in (("conversation", s.comments), ("review", s.reviews)):
+        for c in nodes:
+            if isinstance(c, dict) and isinstance(c.get("url"), str) and isinstance(c.get("createdAt"), str):
+                body = c.get("body") if isinstance(c.get("body"), str) else None
+                index[c["url"]] = (where, c["createdAt"], body)
+
+    for i, item in enumerate(items):
+        loc = f"disputed_review_comments[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{loc} malformed")
+            continue
+        disposition = item.get("disposition")
+        if disposition not in DISPUTE_DISPOSITIONS:
+            errors.append(f"{loc}.disposition must be one of {', '.join(DISPUTE_DISPOSITIONS)}")
+        elif disposition == "nonblocking" and item.get("severity") not in ("P3", "P4"):
+            errors.append(f"{loc} nonblocking dispute needs severity P3 or P4")
+        for key, minimum in (("claim", 20), ("counter_evidence", 30)):
+            if not isinstance(item.get(key), str) or len(item[key].strip()) < minimum:
+                errors.append(f"{loc}.{key} missing or lacks specific detail")
+        if item.get("head_sha") != sha:
+            errors.append(f"{loc} stale/missing SHA")
+        if item.get("reviewer_confirmed") is not True:
+            errors.append(f"{loc} not confirmed by the independent reviewer")
+        source, reply = item.get("source_url"), item.get("reply_url")
+        if not isinstance(source, str) or not isinstance(reply, str):
+            errors.append(f"{loc} needs source_url and reply_url")
+            continue
+        src, rep = index.get(source), index.get(reply)
+        if src is None:
+            errors.append(f"{loc}.source_url is not a review comment on this PR: {source}")
+        if rep is None:
+            errors.append(f"{loc}.reply_url is not a comment on this PR: {reply}")
+        if src is None or rep is None:
+            continue
+        if rep[1] <= src[1]:
+            errors.append(f"{loc} reply was not posted after the disputed comment")
+        if src[0].startswith("thread:"):
+            if rep[0] != src[0]:
+                errors.append(f"{loc} reply must be in the disputed comment's review thread")
+            elif src[0] in incomplete:
+                errors.append(f"{loc} review thread comments incomplete; cannot verify the reply is the newest")
+            elif newest.get(src[0]) != reply:
+                errors.append(f"{loc} review thread has comments after the reply; triage them again")
+        elif rep[0] != "conversation":
+            errors.append(f"{loc} reply to a conversation comment or review must be a PR conversation comment")
+        elif source not in (rep[2] or ""):
+            errors.append(f"{loc} reply does not link the disputed comment ({source})")
 
 
 def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
@@ -334,6 +449,7 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
                     errs.append(f"Unresolved GitHub review thread: {thread_id}")
     for thread_id in allowed.keys() - unresolved_ids:
         errs.append(f"Thread exemption not an unresolved thread on HEAD: {thread_id}")
+    check_disputes(s, evidence, sha, errs)
     return errs
 
 
@@ -359,7 +475,8 @@ def main() -> int:
         evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
         if not isinstance(evidence, dict):
             raise GateError("Evidence JSON must be an object")
-        before = fetch_snapshot(args.repo, args.pr)
+        conversation = bool(evidence.get("disputed_review_comments"))
+        before = fetch_snapshot(args.repo, args.pr, conversation=conversation)
         local = check_local(args.worktree) if args.worktree else None
         errors = evaluate(before, evidence, repo=args.repo, number=args.pr, local=local,
                           log_base=args.worktree)
@@ -375,7 +492,7 @@ def main() -> int:
 
         # Re-read GitHub and the worktree immediately before the irreversible
         # lifecycle change. Any change causes us to refuse rather than guessing.
-        latest = fetch_snapshot(args.repo, args.pr)
+        latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
         errors = evaluate(latest, evidence, repo=args.repo, number=args.pr,
                           local=check_local(args.worktree), log_base=args.worktree)
         if errors:

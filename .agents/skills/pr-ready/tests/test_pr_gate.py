@@ -145,5 +145,148 @@ class GateTests(unittest.TestCase):
             self.assertTrue((root / receipt["log"]).is_file())
 
 
+# URL and timestamp shapes copied from real GraphQL output (kjelly/pilot#190,
+# kjelly/pilot#92 and cli/cli#14796), with the PR number changed to 7.
+REVIEW = "https://github.com/acme/repo/pull/7#issuecomment-6494548870"
+REBUTTAL = "https://github.com/acme/repo/pull/7#issuecomment-6501033173"
+REVIEW_BODY = "https://github.com/acme/repo/pull/7#pullrequestreview-5526281476"
+INLINE = "https://github.com/acme/repo/pull/7#discussion_r4358213254"
+INLINE_REPLY = "https://github.com/acme/repo/pull/7#discussion_r4358333969"
+
+
+def disputed():
+    """A PR whose review comment Root disputed with a linked rebuttal."""
+    s, e = good()
+    s.comments = [
+        {"url": REVIEW, "createdAt": "2026-10-29T10:44:27Z",
+         "body": "## Automated PR review: Draft required\n\n**[P2]** gate accepts an empty list"},
+        {"url": REBUTTAL, "createdAt": "2026-10-29T15:32:36Z",
+         "body": f"Re {REVIEW}: the P2 does not hold; `pr_gate.py:180` rejects empty lists, see test_empty."},
+    ]
+    s.reviews = [{"url": REVIEW_BODY, "createdAt": "2026-10-29T11:00:00Z"}]
+    s.threads = [{"id": "PRRT_kwDODKw3uc6vjTgB", "isResolved": True, "isOutdated": False,
+                  "comments": {"nodes": [
+                      {"url": INLINE, "createdAt": "2026-10-23T09:44:41Z"},
+                      {"url": INLINE_REPLY, "createdAt": "2026-10-23T09:59:24Z"}],
+                      "pageInfo": {"hasNextPage": False}}}]
+    e["disputed_review_comments"] = [{
+        "source_url": REVIEW, "reply_url": REBUTTAL, "disposition": "invalid",
+        "claim": "P2: the gate accepts an empty local_validation list",
+        "counter_evidence": "pr_gate.py:180 appends an error for an empty list; test_empty fails when it is removed",
+        "head_sha": SHA, "reviewer_confirmed": True}]
+    return s, e
+
+
+class DisputedReviewCommentTests(unittest.TestCase):
+    def check(self, snapshot, evidence):
+        return module.evaluate(snapshot, evidence, repo="acme/repo", number=7, local=(SHA, "fix-one", []))
+
+    def errors_for(self, mutate):
+        s, e = disputed()
+        mutate(s, e, e["disputed_review_comments"][0])
+        return self.check(s, e)
+
+    def assertBlocked(self, needle, mutate):
+        errs = self.errors_for(mutate)
+        self.assertTrue(any(needle in x for x in errs), errs)
+
+    def test_rebutted_conversation_comment_passes(self):
+        s, e = disputed()
+        self.assertEqual([], self.check(s, e))
+
+    def test_rebutted_inline_comment_passes(self):
+        def inline(s, e, d):
+            d.update(source_url=INLINE, reply_url=INLINE_REPLY)
+        self.assertEqual([], self.errors_for(inline))
+
+    def test_review_body_rebutted_in_conversation_passes(self):
+        def review(s, e, d):
+            d["source_url"] = REVIEW_BODY
+            s.comments[1]["body"] = f"Re {REVIEW_BODY}: does not reproduce on HEAD."
+        self.assertEqual([], self.errors_for(review))
+
+    def test_nonblocking_needs_p3_or_p4(self):
+        def no_severity(s, e, d):
+            d["disposition"] = "nonblocking"
+        self.assertBlocked("severity P3 or P4", no_severity)
+
+        def p3(s, e, d):
+            d.update(disposition="nonblocking", severity="P3")
+        self.assertEqual([], self.errors_for(p3))
+
+    def test_unknown_disposition_blocks(self):
+        self.assertBlocked("disposition", lambda s, e, d: d.update(disposition="wontfix"))
+
+    def test_reviewer_must_confirm(self):
+        self.assertBlocked("independent reviewer", lambda s, e, d: d.update(reviewer_confirmed="true"))
+
+    def test_stale_sha_blocks(self):
+        self.assertBlocked("stale/missing SHA", lambda s, e, d: d.update(head_sha="f" * 40))
+
+    def test_vague_counter_evidence_blocks(self):
+        self.assertBlocked("counter_evidence", lambda s, e, d: d.update(counter_evidence="reviewer is wrong"))
+
+    def test_source_must_be_on_this_pr(self):
+        def other_pr(s, e, d):
+            d["source_url"] = "https://github.com/acme/repo/pull/8#issuecomment-1"
+        self.assertBlocked("source_url is not a review comment", other_pr)
+
+    def test_reply_must_exist(self):
+        def missing(s, e, d):
+            s.comments.pop()
+        self.assertBlocked("reply_url is not a comment", missing)
+
+    def test_reply_must_follow_the_comment(self):
+        def earlier(s, e, d):
+            s.comments[1]["createdAt"] = "2026-10-29T09:00:00Z"
+        self.assertBlocked("not posted after", earlier)
+
+    def test_conversation_reply_must_link_the_comment(self):
+        def unlinked(s, e, d):
+            s.comments[1]["body"] = "The P2 does not hold; pr_gate.py:180 rejects empty lists."
+        self.assertBlocked("does not link", unlinked)
+
+    def test_review_body_reply_must_be_a_conversation_comment(self):
+        def in_thread(s, e, d):
+            d.update(source_url=REVIEW_BODY, reply_url=INLINE_REPLY)
+            s.reviews[0]["createdAt"] = "2026-10-23T09:00:00Z"
+        self.assertBlocked("must be a PR conversation comment", in_thread)
+
+    def test_inline_reply_must_be_in_the_same_thread(self):
+        def conversation(s, e, d):
+            d.update(source_url=INLINE, reply_url=REBUTTAL)
+        self.assertBlocked("disputed comment's review thread", conversation)
+
+    def test_inline_comment_after_reply_blocks(self):
+        def pushback(s, e, d):
+            d.update(source_url=INLINE, reply_url=INLINE_REPLY)
+            s.threads[0]["comments"]["nodes"].append(
+                {"url": "https://github.com/acme/repo/pull/7#discussion_r4358400000",
+                 "createdAt": "2026-10-23T10:30:00Z"})
+        self.assertBlocked("comments after the reply", pushback)
+
+    def test_incomplete_thread_blocks(self):
+        def truncated(s, e, d):
+            d.update(source_url=INLINE, reply_url=INLINE_REPLY)
+            s.threads[0]["comments"]["pageInfo"]["hasNextPage"] = True
+        self.assertBlocked("incomplete", truncated)
+
+    def test_dispute_does_not_exempt_an_unresolved_thread(self):
+        def reopened(s, e, d):
+            d.update(source_url=INLINE, reply_url=INLINE_REPLY)
+            s.threads[0]["isResolved"] = False
+        self.assertBlocked("Unresolved GitHub review thread", reopened)
+
+    def test_conversation_not_fetched_fails_closed(self):
+        def unfetched(s, e, d):
+            s.comments = None
+        self.assertBlocked("not fetched", unfetched)
+
+    def test_malformed_list_blocks(self):
+        s, e = disputed()
+        e["disputed_review_comments"] = {"source_url": REVIEW}
+        self.assertTrue(any("malformed" in x for x in self.check(s, e)))
+
+
 if __name__ == "__main__":
     unittest.main()

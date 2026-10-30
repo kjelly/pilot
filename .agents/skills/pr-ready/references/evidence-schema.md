@@ -31,11 +31,28 @@ Create one evidence file *per PR per latest HEAD*. A new commit always invalidat
     "static_analysis": [{"command": "go vet ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/static-analysis.log"}]
   },
   "unresolved_nonblocking_threads": [],
-  "unrelated_failing_checks": []
+  "unrelated_failing_checks": [],
+  "disputed_review_comments": []
 }
 ```
 
 Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. Unresolved minor review threads can be listed as `{ "id": "PRRT_...", "severity": "P3", "reason": "...", "reviewer_confirmed": true }`.
+
+A review comment the PR does not act on (see [review comments](review-comments.md)) gets one `disputed_review_comments` entry per disputed claim:
+
+```json
+{
+  "source_url": "https://github.com/OWNER/REPO/pull/123#issuecomment-6494548870",
+  "reply_url": "https://github.com/OWNER/REPO/pull/123#issuecomment-6501033173",
+  "disposition": "invalid",
+  "claim": "P2: the rescue drops the snapshot when --tags C3 is used",
+  "counter_evidence": "Snapshot task is tagged always (apply.yml:88); tag-scoped vm-target run kept it, log .pr-ready/logs/c3.log",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "reviewer_confirmed": true
+}
+```
+
+`disposition` is `invalid`, `needs_evidence` or `nonblocking`; `nonblocking` also needs `"severity": "P3"` or `"P4"`. `source_url` can be a conversation comment (`#issuecomment-`), a review (`#pullrequestreview-`) or an inline comment (`#discussion_r`). `reply_url` is the reply Root posted: in the same thread for an inline comment, otherwise a conversation comment whose body contains `source_url`. Set `reviewer_confirmed` only when the independent reviewer's own verdict agrees with the disposition on this HEAD.
 
 A `run_check.py` execution prints/writes a receipt with `command`, `exit_code`, `head_sha`, and `log`; the orchestrator can append it to `local_validation.<category>` in the evidence. Do not carry receipts forward after any commit, and do not change a failed exit code to 0.
 
