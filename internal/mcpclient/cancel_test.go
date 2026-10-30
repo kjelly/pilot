@@ -322,6 +322,51 @@ func TestGitCacheRepairsWhatAKilledGitLeft(t *testing.T) {
 	})
 }
 
+// A healthy cache is never rebuilt: not when git fails (here: missing from
+// PATH), and not with repository variables inherited from the caller,
+// which git must ignore (they would point it at another repository).
+func TestGitCacheKeepsAHealthyCache(t *testing.T) {
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	cacheDir, untouched := enclosingRepo(t)
+	ctx := context.Background()
+	repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.resolve(ctx, "main"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(repo.dir, "pilot-test-marker")
+	mustWriteFile(t, marker, "kept\n")
+
+	t.Run("git missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := openGitCache(ctx, cacheDir, bare, 30*time.Second); err == nil {
+			t.Fatal("open succeeded without git")
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("a failing git rebuilt the cache: %v", err)
+		}
+	})
+	t.Run("inherited repository variables", func(t *testing.T) {
+		outer := filepath.Dir(cacheDir)
+		t.Setenv("GIT_DIR", filepath.Join(outer, ".git"))
+		t.Setenv("GIT_WORK_TREE", outer)
+		repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second)
+		if err != nil {
+			t.Fatalf("open with GIT_DIR/GIT_WORK_TREE set: %v", err)
+		}
+		if got, err := repo.resolve(ctx, "main"); err != nil || got != commit {
+			t.Fatalf("resolve = %s, %v", got, err)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("the healthy cache was rebuilt: %v", err)
+		}
+	})
+	untouched()
+}
+
 // Cancelling at arbitrary points (a signal during startup) never leaves a
 // cache the next run cannot use, and never reaches an enclosing repository.
 func TestGitCacheSurvivesCancellationAtRandomPoints(t *testing.T) {

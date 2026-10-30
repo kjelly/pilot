@@ -173,7 +173,7 @@ func runGit(ctx context.Context, o *Options, dir string, args ...string) (string
 	cmd := boundedCommand(ctx, "git", append([]string{"-C", dir}, args...)...)
 	// GIT_OPTIONAL_LOCKS=0: git status does not take index.lock in the
 	// user's clone, so a cancelled import cannot leave one behind.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never", "GIT_OPTIONAL_LOCKS=0")
+	cmd.Env = append(gitEnv(), "GIT_OPTIONAL_LOCKS=0")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()

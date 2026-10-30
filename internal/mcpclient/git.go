@@ -43,7 +43,8 @@ func DefaultCacheDir() (string, error) {
 // ends them. A process killed while changing the cache can leave it with
 // stale lock files or half initialized; under the lock, which every
 // changing command runs under, such leftovers are removed and a cache that
-// is not a valid bare repository is rebuilt (it is only a cache).
+// does not have the structure of a bare repository is rebuilt (it is only
+// a cache; the check never runs git, so a failing git cannot cause it).
 func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Duration) (*gitRepo, error) {
 	key := sha256.Sum256([]byte(url))
 	dir := filepath.Join(cacheDir, "git", hex.EncodeToString(key[:]))
@@ -77,12 +78,7 @@ func (r *gitRepo) repair(ctx context.Context) error {
 			_ = os.RemoveAll(p)
 		}
 	}
-	ok := r.valid(ctx)
-	if err := ctx.Err(); err != nil {
-		// A cancelled check says nothing about the cache; leave it.
-		return &Error{Code: CodeGitFailed, Msg: "check git cache: " + err.Error()}
-	}
-	if ok {
+	if r.valid() {
 		return filepath.WalkDir(r.dir, func(p string, d fs.DirEntry, err error) error {
 			if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".lock") {
 				_ = os.Remove(p) // no git runs in the cache without our lock
@@ -109,16 +105,21 @@ func (r *gitRepo) repair(ctx context.Context) error {
 	return nil
 }
 
-// valid reports whether the cache directory is a bare repository git can
-// use as it is.
-func (r *gitRepo) valid(ctx context.Context) bool {
-	for _, p := range []string{"HEAD", "config", "objects", "refs"} {
-		if _, err := os.Stat(filepath.Join(r.dir, p)); err != nil {
+// valid reports whether the cache has the structure of an initialized
+// bare repository. It looks at files only, never runs git: a slow or
+// failing git must not make a healthy cache look broken and be deleted.
+// git init writes HEAD before objects/, so a killed init fails this check.
+func (r *gitRepo) valid() bool {
+	for _, p := range []struct {
+		name string
+		dir  bool
+	}{{"HEAD", false}, {"config", false}, {"objects", true}, {"refs", true}} {
+		info, err := os.Lstat(filepath.Join(r.dir, p.name))
+		if err != nil || info.IsDir() != p.dir || (!p.dir && !info.Mode().IsRegular()) {
 			return false
 		}
 	}
-	out, err := r.git(ctx, nil, "rev-parse", "--is-bare-repository")
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	return true
 }
 
 // lock serializes the commands that change the cache (init, config, and a
@@ -163,10 +164,11 @@ func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]b
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	// --git-dir: git never searches upward from the cache for another
-	// repository (a broken cache inside ~/.git must not reach it). No
-	// automatic gc: a detached gc would outlive the cache lock.
-	cmd := boundedCommand(ctx, "git", append([]string{"--git-dir=" + r.dir, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never")
+	// repository (a broken cache inside ~/.git must not reach it).
+	// Automatic gc after a fetch runs in the foreground, under the cache
+	// lock: a detached gc would outlive it.
+	cmd := boundedCommand(ctx, "git", append([]string{"--git-dir=" + r.dir, "-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false"}, args...)...)
+	cmd.Env = gitEnv()
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -181,6 +183,26 @@ func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]b
 		return stdout.Bytes(), classifyGitError(args, stderr.String(), err)
 	}
 	return stdout.Bytes(), nil
+}
+
+// gitRepoEnv names the variables that tell git which repository to use.
+// pilot-mcp says so itself (--git-dir, -C), so inherited ones are dropped:
+// an inherited GIT_DIR or GIT_OBJECT_DIRECTORY would point git elsewhere.
+var gitRepoEnv = map[string]bool{
+	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_OBJECT_DIRECTORY": true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_COMMON_DIR": true, "GIT_NAMESPACE": true,
+}
+
+// gitEnv is the environment for every git pilot-mcp runs: the user's,
+// without repository-locating variables, and never prompting.
+func gitEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); !gitRepoEnv[k] {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never")
 }
 
 // gitContextError reports a git command ended by its timeout or by
