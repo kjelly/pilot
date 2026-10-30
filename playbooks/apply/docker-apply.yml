@@ -66,6 +66,18 @@
       when: stage == 'prod'
 
   tasks:
+    # Planned-install marker, read by dcgm-exporter-apply.yml's --check preview.
+    # Same tags as the install tasks below and the same OS conditions minus
+    # `not ansible_check_mode`, so Ansible's own task selection decides whether
+    # this run will install docker for this host. set_fact is host-scoped for the
+    # rest of this ansible-playbook run only (not cacheable).
+    - name: "Docker — record that this run installs docker on this host (check-mode preview marker)"
+      tags: [docker, docker-C1]
+      ansible.builtin.set_fact:
+        pilot_docker_install_planned: true
+      when:
+        - ansible_os_family in ['Debian', 'RedHat']
+
     # Spec: docs/verification/docker.md C1
     - name: "Docker — install docker.io (Debian family)"
       tags: [docker, docker-C1]

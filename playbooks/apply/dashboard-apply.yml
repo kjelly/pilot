@@ -482,13 +482,19 @@
               - "3000:3000"
           no_log: true
 
+        # A first start runs all of Grafana's database migrations (572 log lines on
+        # staging dev-nexus) before the HTTP port opens, and /api/health answers
+        # "connection reset" until then. On that slow host the old 60 s budget ran
+        # out while Grafana was still migrating, the apply rolled back, and Grafana
+        # reported healthy about a minute later. 3 min leaves room; a container that
+        # really is crash-looping now fails after 3 min instead of 1.
         - name: "Wait for Grafana to become ready"
           ansible.builtin.uri:
             url: "http://127.0.0.1:3000/api/health"
             status_code: 200
           register: grafana_ready
           until: grafana_ready.status == 200
-          retries: 30
+          retries: 90
           delay: 2
 
       rescue:

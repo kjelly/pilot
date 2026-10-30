@@ -596,6 +596,16 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   對全 repo 鎖住;2026-10-01 修正 8 支(agent-controller、alertmanager、
   dashboard、detection-engine、pam-oidc-sshd、prometheus、restic-backup、
   thanos-query),同日再修正其餘 12 支,`rescueTagGapAllowlist` 清空。
+- 刻意的例外:跨檔的「本次執行是否會做 X」標記。`always` 的讀取者用
+  `x is defined` 讀另一支 playbook 的 setter,而 setter **不能**標 `always`:
+  `docker-apply.yml` 在安裝 docker 的 task 前,用和安裝 task 完全相同的 tags
+  設 `pilot_docker_install_planned`,`dcgm-exporter-apply.yml` 的
+  `--check` 預覽只在看到它時才延後 docker 相關步驟。標記若是 `always`,
+  `--tags dcgm-exporter` 這種不會安裝 docker 的執行也會設,預覽就假綠
+  (見 kjelly/pilot#184)。`AlwaysTagPrerequisite` lint 只看單一檔案,看不到
+  這種跨檔 setter,所以別把標記「修」成 `always`;
+  `internal/spec/dcgm_exporter_preview_defer_test.go` 鎖住 tags 相等、
+  不是 `always`、`is defined` 讀法與完整的 selector 矩陣。
 - 不只 `always` task:帶 row tag 的 task 讀的 `register`/`set_fact`,setter 也
   要在同樣的 `--tags` 下執行(setter 標 `always`,或帶 reader 的每個 tag),
   不然就用 `| default(...)`/`is defined` 讀。最常見的是 container task 的
@@ -1070,8 +1080,8 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 | log-server 的 `siem_log_root`/`siem_receiver_tcp_port` ↔ log-shipping 的 `siem_log_root`、audit-log-forwarding/wazuh-manager 的 `siem_forward_port` | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` |
 | audit-log-forwarding client 的 `siem_forward_port` ↔ inventory log-server 的 `siem_receiver_tcp_port`(apply 時的 gate) | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_AuditForwardPortMatchesTheLogServerReceiver` |
 | `pilot deploy` preflight ↔ `pilot repair` 對 contract input 型別的判斷(單一來源 `contract.ValueMatchesType`) | `internal/repair/reapply_plan_test.go::TestBuildReapplyPlan_IntegerInputFormsMatchPreflight`、`cmd/pilot/cmd/deploy_input_types_test.go::TestDeployPreflightAcceptsInventoryNumbers` |
-| ci.yml 每個 job 的 `timeout-minutes` ↔ 該 job `run: make <target>` 各步驟的 Makefile target 內 Go `-timeout`(`-test.timeout`)總和(這些 `-timeout` 是單步的卡死上限,加總超過 job 預算時,卡住的步驟會被沒有名字的 job 取消打斷,看不到 go test 點名測試的 stack dump;沒有明確 `-timeout` 的 target 不計) | `cmd/pilot/cmd/ci_timeout_consistency_test.go::TestCIJobTimeoutCoversMakeTargetCaps`(`playbook-lint` 目前 35m 對 40m);`Go test` job 的單一 `-timeout` 另要求 job 預算至少高出 10m(setup 與編譯 -race binary):`TestCIGoTestTimeoutFiresBeforeJobLimit`(目前 `-timeout 45m` 對 job 60m) |
-| canonical roster 的 `freeipa.admin.password` ↔ vault 的 `ipa_admin_password`(操作者資料;只載入名冊的 `pilot access`/`identity drift`/`roster remove-*` 需要前者,所以不能改成參照) | `pilot edit` 改後者時同步前者:`cmd/pilot/cmd/edit_tui_vault_roster_sync_test.go::TestEditAutomationDriverVaultAdminPasswordSyncsRosters`(只認 `.vault/main.yaml`:`::TestEditAutomationDriverSecondaryVaultLeavesRostersAlone`);preflight warning:`::TestWarnFreeIPARosterAdminDrift`;apply gate:`internal/spec/freeipa_nfs_admin_password_regression_test.go::TestRegression_FreeIPANFSServerAdminPasswordDriftGate`;已不一致時的修正(手動改名冊):`cmd/pilot/cmd/edit_tui_vault_roster_guidance_test.go::TestFreeIPARosterDriftRecoveryIsAHandEdit`;名冊要跟著改卻被鎖住時整次存檔拒絕,終端機、`--actions`、plan、apply 的結果與 warnings 一致:`cmd/pilot/cmd/edit_vault_save_parity_test.go::TestVaultSaveRosterSyncParity`;兩邊對密碼值的判斷(單一來源 `inventory.ansibleScalarKind`,含 `!unsafe`、`!vault`、模板、沒加引號的非字串):`internal/inventory/roster_admin_password_test.go::TestAdminPasswordFormsAreJudgedAlikeOnBothSides`,對真實 Ansible loader 驗證:`internal/inventory/roster_yaml_types_test.go::TestAnsibleTagsMatchTheClassifier`(`make identity-secret-test`) |
+| ci.yml 每個 job 的 `timeout-minutes` ↔ 該 job `run: make <target>` 各步驟的 Makefile target 內 Go `-timeout`(`-test.timeout`)總和(這些 `-timeout` 是單步的卡死上限,加總超過 job 預算時,卡住的步驟會被沒有名字的 job 取消打斷,看不到 go test 點名測試的 stack dump;沒有明確 `-timeout` 的 target 不計) | `cmd/pilot/cmd/ci_timeout_consistency_test.go::TestCIJobTimeoutCoversMakeTargetCaps`(`playbook-lint` 目前 44m 對 50m);`Go test` job 的單一 `-timeout` 另要求 job 預算至少高出 10m(setup 與編譯 -race binary):`TestCIGoTestTimeoutFiresBeforeJobLimit`(目前 `-timeout 45m` 對 job 60m) |
+| canonical roster 的 `freeipa.admin.password` ↔ vault 的 `ipa_admin_password`(操作者資料;只載入名冊的 `roster remove-*`、capability probe、`--repair-managed` 需要前者,所以不能改成參照;`identity drift`/`access drift`/`access health` 以 vault 為先、名冊為備援) | `pilot edit` 改後者時同步前者:`cmd/pilot/cmd/edit_tui_vault_roster_sync_test.go::TestEditAutomationDriverVaultAdminPasswordSyncsRosters`(只認 `.vault/main.yaml`:`::TestEditAutomationDriverSecondaryVaultLeavesRostersAlone`);preflight warning:`::TestWarnFreeIPARosterAdminDrift`;apply gate:`internal/spec/freeipa_nfs_admin_password_regression_test.go::TestRegression_FreeIPANFSServerAdminPasswordDriftGate`;已不一致時的修正(手動改名冊):`cmd/pilot/cmd/edit_tui_vault_roster_guidance_test.go::TestFreeIPARosterDriftRecoveryIsAHandEdit`;名冊要跟著改卻被鎖住時整次存檔拒絕,終端機、`--actions`、plan、apply 的結果與 warnings 一致:`cmd/pilot/cmd/edit_vault_save_parity_test.go::TestVaultSaveRosterSyncParity`;兩邊對密碼值的判斷(單一來源 `inventory.ansibleScalarKind`,含 `!unsafe`、`!vault`、模板、沒加引號的非字串):`internal/inventory/roster_admin_password_test.go::TestAdminPasswordFormsAreJudgedAlikeOnBothSides`,對真實 Ansible loader 驗證:`internal/inventory/roster_yaml_types_test.go::TestAnsibleTagsMatchTheClassifier`(`make identity-secret-test`) |
 
 規則:
 

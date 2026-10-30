@@ -1,0 +1,23 @@
+Global:
+Link 2 (enp3s0):
+Link 3 (wlo1): 192.168.100.254 10.1.24.1
+Link 4 (mpqemubrzone1):
+Link 5 (mpqemubrzone2):
+Link 6 (mpqemubrzone3):
+Link 7 (virbr0):
+Link 10 (docker0):
+Link 16 (br-3e1f097e0e7c):
+Link 404 (vethf24637c):
+Link 405 (vethfb1fffa):
+Link 429 (br-15c7d2e22ff1):
+Link 430 (vethd557703):
+Link 431 (vethae3547a):
+Link 432 (veth9904d4d):
+Link 433 (veth3981c0e):
+Link 434 (vethbcf4dc2):
+Link 435 (vethb5ec65e):
+Link 436 (veth2979987):
+Link 439 (veth9870ec2):
+Link 440 (veth9cbf463):
+Link 4661 (veth0a353bd):
+Link 5129 (veth1bdf5b2):

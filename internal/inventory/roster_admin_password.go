@@ -14,8 +14,10 @@ import (
 // The FreeIPA admin password lives in two files on purpose: the vault's
 // ipa_admin_password, which `pilot deploy`/`pilot reconcile` load, and the
 // canonical roster's freeipa.admin.password, the only credential that
-// `pilot access`, `pilot identity drift` and `pilot roster remove-*` pass
-// to their playbooks (issue #146). The helpers below keep the second in
+// `pilot roster remove-*`, the capability probe and `--repair-managed` pass
+// to their playbooks; `pilot identity drift`, `pilot access drift` and
+// `pilot access health` use the vault's value first and the roster's as a
+// fallback (issues #146, #179). The helpers below keep the second in
 // step with the first instead of letting a rotation leave it stale.
 
 // RosterAdminSync is what SyncRosterAdminPassword (or

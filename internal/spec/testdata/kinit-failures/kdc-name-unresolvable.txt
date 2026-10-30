@@ -1,0 +1,7 @@
+# source: live capture, MIT krb5 1.22.2 kinit (2026-10-29), krb5.conf kdc = <unresolvable .invalid name>:88; stderr is identical to kdc-port-closed
+# class: cannot_contact_kdc
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Cannot contact any KDC for realm 'IPA.PILOT.INTERNAL' while getting initial credentials

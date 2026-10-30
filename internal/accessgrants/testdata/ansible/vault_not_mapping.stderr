@@ -1,0 +1,30 @@
+[WARNING]: Failed to parse inventory with 'auto' plugin: no root 'plugin' key found, '/work/inventory.yml' is not a valid YAML inventory plugin config file
+
+Failed to parse inventory with 'auto' plugin.
+
+<<< caused by >>>
+
+no root 'plugin' key found, '/work/inventory.yml' is not a valid YAML inventory plugin config file
+Origin: <inventory plugin 'auto' with source '/work/inventory.yml'>
+
+[WARNING]: Failed to parse inventory with 'yaml' plugin: Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary
+
+Failed to parse inventory with 'yaml' plugin.
+
+<<< caused by >>>
+
+Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary
+Origin: <inventory plugin 'yaml' with source '/work/inventory.yml'>
+
+[WARNING]: Failed to parse inventory with 'ini' plugin: Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary
+
+Failed to parse inventory with 'ini' plugin.
+
+<<< caused by >>>
+
+Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary
+Origin: <inventory plugin 'ini' with source '/work/inventory.yml'>
+
+[WARNING]: Unable to parse /work/inventory.yml as an inventory source
+[WARNING]: No inventory was parsed, only implicit localhost is available
+[ERROR]: Invalid extra vars data supplied. '@/work/main.yaml' could not be made into a dictionary

@@ -406,3 +406,77 @@ func TestRunBoundedPerHost_ParentCancellationMarksPending(t *testing.T) {
 		t.Fatal("runner did not return after parent cancellation")
 	}
 }
+
+// vmTargetShapedLister mimics `ansible --list-hosts` for a vm-target inventory
+// created with `vm-target up --name vm --hosts sandbox`: host `vm`, group
+// `sandbox` only. Colon-joined patterns union their members; an unknown group
+// matches nothing; --limit intersects.
+func vmTargetShapedLister(t *testing.T) ansibleHostLister {
+	t.Helper()
+	return func(_ context.Context, pattern, limit string) ([]string, error) {
+		groups := map[string][]string{"all": {"vm"}, "sandbox": {"vm"}, "vm": {"vm"}}
+		match := func(p string) []string {
+			set := map[string]struct{}{}
+			for _, part := range strings.Split(p, ":") {
+				for _, h := range groups[part] {
+					set[h] = struct{}{}
+				}
+			}
+			out := make([]string, 0, len(set))
+			for h := range set {
+				out = append(out, h)
+			}
+			return out
+		}
+		hosts := match(pattern)
+		if limit != "" {
+			keep := stringSet(match(limit))
+			filtered := hosts[:0]
+			for _, h := range hosts {
+				if _, ok := keep[h]; ok {
+					filtered = append(filtered, h)
+				}
+			}
+			hosts = filtered
+		}
+		return hosts, nil
+	}
+}
+
+// TestResolveRemoteHostsOsPatchSlaSpecOnVMTargetInventory parses the REAL
+// os-patch-sla spec (issue #174): its §1 rows are environment groups, so a
+// single-VM inventory with only group `sandbox` resolves to that VM with and
+// without an explicit --limit.
+func TestResolveRemoteHostsOsPatchSlaSpecOnVMTargetInventory(t *testing.T) {
+	parsed, err := spec.Parse("../../docs/verification/os-patch-sla.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []string{"", "vm"} {
+		tool := &VerifySpecTool{Inventory: "inventory.yml", Limit: limit, listHosts: vmTargetShapedLister(t)}
+		resolved, err := tool.resolveRemoteHosts(context.Background(), parsed, "")
+		if err != nil {
+			t.Fatalf("limit=%q: %v", limit, err)
+		}
+		if len(resolved.Hosts) != 1 || resolved.Hosts[0] != "vm" {
+			t.Fatalf("limit=%q resolved=%+v want [vm]", limit, resolved)
+		}
+	}
+}
+
+// TestResolveRemoteHostsLiteralHostInAllGroupRowIsAbsent is the "should
+// trigger" half: the pre-#174 os-patch-sla shape (a literal `test-vm` row in
+// group `all`) turns the whole table into literal hostnames, which the same
+// inventory rejects.
+func TestResolveRemoteHostsLiteralHostInAllGroupRowIsAbsent(t *testing.T) {
+	parsed := &spec.Spec{SchemaVersion: 1, Hosts: []spec.Host{
+		{Hostname: "test-vm", Group: "all"},
+		{Hostname: "staging", Group: "staging"},
+		{Hostname: "prod", Group: "prod"},
+	}}
+	tool := &VerifySpecTool{Inventory: "inventory.yml", listHosts: vmTargetShapedLister(t)}
+	_, err := tool.resolveRemoteHosts(context.Background(), parsed, "")
+	if err == nil || !strings.Contains(err.Error(), "absent from inventory") {
+		t.Fatalf("err=%v want absent from inventory", err)
+	}
+}

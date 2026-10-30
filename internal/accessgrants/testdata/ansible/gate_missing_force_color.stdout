@@ -1,0 +1,46 @@
+
+PLAY [Probe live FreeIPA access-governance state for drift inspection] *********
+
+TASK [Gate: drift probe input is complete] *************************************
+[0;32mok: [ipa1] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Load canonical roster under a namespace] *********************************
+[0;32mok: [ipa1][0m
+
+TASK [Gate: canonical roster is available] *************************************
+[0;32mok: [ipa1] => {[0m
+[0;32m    "changed": false,[0m
+[0;32m    "msg": "All assertions passed"[0m
+[0;32m}[0m
+
+TASK [Read the vault admin password] *******************************************
+[0;32mok: [ipa1][0m
+
+TASK [Read the roster admin password] ******************************************
+[0;32mok: [ipa1][0m
+
+TASK [Check the resolved FreeIPA admin password length] ************************
+[0;32mok: [ipa1][0m
+
+TASK [Gate: a FreeIPA admin password is available (vault or roster)] ***********
+[0;31m[ERROR]: Task failed: Action failed: No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short.[0m
+[0;31mOrigin: /repo/playbooks/check/freeipa-access-drift-probe.yml:174:7[0m
+[0;31m[0m
+[0;31m172       tags: [always][0m
+[0;31m173[0m
+[0;31m174     - name: "Gate: a FreeIPA admin password is available (vault or roster)"[0m
+[0;31m          ^ column 7[0m
+[0;31m[0m
+[0;31mfatal: [ipa1]: FAILED! => {[0m
+[0;31m    "assertion": "identity_admin_password_ok | bool",[0m
+[0;31m    "changed": false,[0m
+[0;31m    "evaluated_to": false,[0m
+[0;31m    "msg": "No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short."[0m
+[0;31m}[0m
+
+PLAY RECAP *********************************************************************
+[0;31mipa1[0m                       : [0;32mok=6   [0m changed=0    unreachable=0    [0;31mfailed=1   [0m skipped=0    rescued=0    ignored=0   
+

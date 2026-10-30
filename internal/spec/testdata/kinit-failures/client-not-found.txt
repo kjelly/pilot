@@ -1,0 +1,7 @@
+# source: live capture, MIT krb5 1.22.2 kinit (2026-10-29), password on stdin, throwaway local KDC for the realm below
+# class: client_not_found
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Client 'nosuch@IPA.PILOT.INTERNAL' not found in Kerberos database while getting initial credentials

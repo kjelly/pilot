@@ -483,6 +483,10 @@
           {% endfor %}
         state: present
         create: false
+      # Read by tasks/freeipa-client-kdc-preflight.yml: under --check this is
+      # the "a pin repair is pending" signal (blockinfile reports `changed`
+      # without writing). Never combined with another register (§4.5 item 13).
+      register: freeipa_client_hosts_pool_pin
       tags: [freeipa-client, C3]
 
     - name: "FreeIPA client — set system hostname to the client FQDN (after /etc/hosts pin so sudo stays fast)"

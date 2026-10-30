@@ -158,9 +158,28 @@
         state: present
       when: ansible_os_family == 'RedHat'
       tags: [C2]
+    # Without --server ipa-client-automount rediscovers the IPA server from this
+    # host's own DNS domain and fails with "Autodiscovery was successful but
+    # didn't return a server" when that lookup does not land on a usable server,
+    # even though the host is enrolled and the server is up (staging
+    # dev-client1: SRV records, rootDSE and ca.crt of ipa1 all fine). Use the
+    # server it enrolled with, which is the one default.conf already names.
+    - name: "Read the IPA server this host is enrolled with (/etc/ipa/default.conf)"
+      ansible.builtin.command:
+        argv: [awk, -F, '[ \t]*=[ \t]*', '$1 == "server" {print $2; exit}', /etc/ipa/default.conf]
+      register: nfs_client_enrolled_server
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [C3, C4]
+
     - name: "Configure the IPA automount location"
       ansible.builtin.command:
-        argv: [ipa-client-automount, --unattended, "--location={{ nfs_client_entry.automount.location | default(nfs_automount_location) }}"]
+        argv: >-
+          {{ [ 'ipa-client-automount', '--unattended',
+               '--location=' ~ (nfs_client_entry.automount.location | default(nfs_automount_location)) ]
+             + ([ '--server=' ~ (nfs_client_enrolled_server.stdout | trim) ]
+                if ((nfs_client_enrolled_server.stdout | default('') | trim) | length > 0) else []) }}
       register: nfs_client_automount
       changed_when: "'Configured automount' in (nfs_client_automount.stdout | default(''))"
       failed_when:

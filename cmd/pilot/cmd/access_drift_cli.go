@@ -25,6 +25,7 @@ var (
 	accessDriftInventory         string
 	accessDriftTargetGroup       string
 	accessDriftVaultPasswordFile string
+	accessDriftVarsFile          string
 	accessDriftRepairManaged     bool
 )
 
@@ -43,7 +44,20 @@ subject/target/service attribute drift for HBAC/sudo rules is not covered
 
 --repair-managed additionally reconciles any drift found, via the same
 apply path 'pilot access reconcile --once' uses (§13) — it never touches
-anything outside Pilot's own managed namespace.`,
+anything outside Pilot's own managed namespace. The repair step itself still
+reads the admin password from the roster only.
+
+The probe reads the FreeIPA admin password from the vault vars file's
+ipa_admin_password first (the same order 'pilot deploy' uses), then from the
+roster's freeipa.admin.password. The vars file is --vars-file, or by default
+<inventory dir>/.vault/main.yaml when it exists; it is only handed to
+ansible-playbook as a file, never read by pilot. --vault-password-file decrypts
+both an encrypted roster and an encrypted vars file, so they must share one
+vault password. An explicit --vars-file that is missing, a directory, or
+encrypted without --vault-password-file is an error; the auto-detected default
+that is encrypted without --vault-password-file is skipped with a note on
+stderr, and the roster's password is used. The vars file is loaded whole, so
+a freeipa_domain/freeipa_realm in it also sets the probe's realm (as in apply).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAccessDriftCmd,
 }
@@ -52,7 +66,8 @@ func init() {
 	accessDriftCmd.Flags().StringVar(&accessDriftFormat, "format", "table", "output format: table|json")
 	accessDriftCmd.Flags().StringVarP(&accessDriftInventory, "inventory", "i", "inventory.yml", "inventory to probe live state against")
 	accessDriftCmd.Flags().StringVar(&accessDriftTargetGroup, "target-group", "", "override the probe playbook's default host-targeting group")
-	accessDriftCmd.Flags().StringVar(&accessDriftVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster")
+	accessDriftCmd.Flags().StringVar(&accessDriftVaultPasswordFile, "vault-password-file", "", driftVaultPasswordFlagHelp)
+	accessDriftCmd.Flags().StringVar(&accessDriftVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	accessDriftCmd.Flags().BoolVar(&accessDriftRepairManaged, "repair-managed", false, "explicitly repair any drift found (Pilot-owned managed constructs only)")
 	accessCmd.AddCommand(accessDriftCmd)
 }
@@ -67,6 +82,11 @@ func runAccessDriftCmd(cmd *cobra.Command, args []string) error {
 
 	if accessDriftFormat != "table" && accessDriftFormat != "json" {
 		return fmt.Errorf("--format must be table or json, got %q", accessDriftFormat)
+	}
+
+	varsFile, err := resolveDriftVarsFile(cmd.ErrOrStderr(), accessDriftInventory, accessDriftVarsFile, accessDriftVaultPasswordFile)
+	if err != nil {
+		return err
 	}
 
 	violations, err := inventory.ValidateRosterFile(readPath)
@@ -85,6 +105,7 @@ func runAccessDriftCmd(cmd *cobra.Command, args []string) error {
 		Inventory:         accessDriftInventory,
 		TargetGroup:       accessDriftTargetGroup,
 		VaultPasswordFile: accessDriftVaultPasswordFile,
+		VarsFile:          varsFile,
 		StateDir:          resolveStateDir(accessStateFiles...),
 		Now:               time.Now(),
 	}

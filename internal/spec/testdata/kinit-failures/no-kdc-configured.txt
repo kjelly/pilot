@@ -1,0 +1,7 @@
+# source: live capture, MIT krb5 1.22.2 kinit (2026-10-29), empty realm stanza and dns_lookup_kdc = false
+# class: cannot_resolve
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Cannot find KDC for realm "IPA.PILOT.INTERNAL" while getting initial credentials

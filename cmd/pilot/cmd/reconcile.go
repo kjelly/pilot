@@ -50,6 +50,7 @@ func init() {
 	reconcileCmd.Flags().StringArrayVar(&reconcileComponentFlags, "component", nil, "要調和的 day-2 元件 key(可重複，例如 --component freeipa-identity)；指定後不再顯示勾選清單")
 	reconcileCmd.Flags().BoolVar(&reconcileForceFlag, "force", false, "不顯示互動提示：各欄位採用預設值，依計畫順序逐支 playbook 先預覽、成功後隨即正式套用(後面的預覽失敗時，前面已套用的不會還原)；需要 --component")
 	reconcileCmd.Flags().BoolVar(&reconcilePreviewOnlyFlag, "preview-only", false, "不顯示互動提示：各欄位採用預設值，只預覽(--check --diff)計畫中的每一支 playbook，全部不套用；每一支都實際預覽通過才以結束碼 0 結束(目標主機全部是無法連線的 optional 主機而延後的 playbook 算沒有預覽)；需要 --component")
+	reconcileCmd.Flags().StringVar(&limitFlag, "limit", "", "只對這些主機(或 Ansible 的主機樣式)執行，等同回答「要限定只套用到某台主機嗎？」；--force/--preview-only 也適用")
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
@@ -62,7 +63,13 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
 		return err
 	}
+	if err := validateLimitFlag(limitFlag); err != nil {
+		return err
+	}
 	if reconcileActionsPath != "" {
+		if limitFlag != "" {
+			return fmt.Errorf("--limit 不能與 --actions 同時使用(scenario 自己回答 limit)")
+		}
 		if reconcileForceFlag || reconcilePreviewOnlyFlag || stageFlag != "" || len(reconcileComponentFlags) > 0 {
 			return fmt.Errorf("--actions 不能與 --force、--preview-only、--stage 或 --component 同時使用(scenario 自己回答這些問題)")
 		}
