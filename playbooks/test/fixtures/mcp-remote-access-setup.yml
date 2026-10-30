@@ -39,10 +39,13 @@
       tags: [always]
 
   tasks:
+    # The read-only probes run in check mode too: a skipped command has no
+    # rc, and the tasks that read it would fail (AGENTS.md §4.5 item 4).
     - name: Docker is installed
       ansible.builtin.command:
         argv: [docker, version]
       changed_when: false
+      check_mode: false
 
     - name: The pilot-mcp SSH account can use docker
       ansible.builtin.user:
@@ -125,6 +128,7 @@
       register: mcp_e2e_image_present
       changed_when: false
       failed_when: false
+      check_mode: false
 
     - name: Copy the image tarball
       ansible.builtin.copy:
@@ -150,6 +154,7 @@
       register: mcp_e2e_alias_present
       changed_when: false
       failed_when: false
+      check_mode: false
       when: mcp_e2e_image_alias | length > 0
 
     - name: Tag the alias

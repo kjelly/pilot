@@ -43,6 +43,11 @@ func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error)
 		return nil, err
 	}
 	r := &gitRepo{dir: dir, url: url, timeout: timeout}
+	unlock, err := r.lock(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := os.Stat(filepath.Join(dir, "HEAD")); os.IsNotExist(err) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
@@ -57,6 +62,36 @@ func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error)
 		return nil, err
 	}
 	return r, nil
+}
+
+// lock serializes the commands that change the cache (init, config, and a
+// fetch together with reading back what it fetched) between pilot-mcp
+// processes: an agent starts the MCP servers of every profile at once, and
+// profiles of one repository share its cache. Reading objects needs no
+// lock. It waits at most the Git timeout.
+func (r *gitRepo) lock(ctx context.Context) (func(), error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	f, err := os.OpenFile(r.dir+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, &Error{Code: CodeGitFailed, Msg: "open git cache lock: " + err.Error()}
+	}
+	for {
+		held, err := tryFlock(f)
+		if err != nil {
+			f.Close()
+			return nil, &Error{Code: CodeGitFailed, Msg: "lock git cache: " + err.Error()}
+		}
+		if held {
+			return func() { f.Close() }, nil
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, &Error{Code: CodeGitFailed, Msg: "git cache " + r.dir + " is busy (another pilot-mcp is fetching)"}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // git runs one non-interactive git command in the cache. It never prompts:
@@ -95,8 +130,15 @@ func firstLine(s string) string {
 	return line
 }
 
-// resolve fetches ref and returns the full commit SHA it names.
+// resolve fetches ref and returns the full commit SHA it names. The fetch
+// and the read of the ref it updates run under the cache lock, so another
+// process fetching another ref of the same repository cannot swap it.
 func (r *gitRepo) resolve(ctx context.Context, ref string) (string, error) {
+	unlock, err := r.lock(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if fullSHAPattern.MatchString(ref) {
 		if _, err := r.git(ctx, nil, "fetch", "--quiet", "--no-tags", "origin", ref); err != nil {
 			if _, err := r.git(ctx, nil, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/*:refs/pilot/heads/*", "+refs/tags/*:refs/pilot/tags/*"); err != nil {
@@ -145,9 +187,11 @@ func (r *gitRepo) commitOf(ctx context.Context, rev string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// treeEntry is one line of `git ls-tree -r`.
+// treeEntry is one line of `git ls-tree -r -l`. size is -1 for an entry
+// that is not a blob (git prints "-").
 type treeEntry struct {
 	mode, kind, object, path string
+	size                     int64
 }
 
 // listTree lists every entry under subdir of commit, paths relative to subdir.
@@ -156,7 +200,7 @@ func (r *gitRepo) listTree(ctx context.Context, commit, subdir string) ([]treeEn
 	if subdir != "." {
 		tree = commit + ":" + subdir
 	}
-	out, err := r.git(ctx, nil, "ls-tree", "-r", "-z", "--full-tree", tree)
+	out, err := r.git(ctx, nil, "ls-tree", "-r", "-l", "-z", "--full-tree", tree)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +211,16 @@ func (r *gitRepo) listTree(ctx context.Context, commit, subdir string) ([]treeEn
 		}
 		meta, p, ok := strings.Cut(rec, "\t")
 		fields := strings.Fields(meta)
-		if !ok || len(fields) != 3 {
+		if !ok || len(fields) != 4 {
 			return nil, &Error{Code: CodeGitFailed, Msg: "unexpected git ls-tree output"}
 		}
-		entries = append(entries, treeEntry{mode: fields[0], kind: fields[1], object: fields[2], path: p})
+		size := int64(-1)
+		if fields[3] != "-" {
+			if size, err = strconv.ParseInt(fields[3], 10, 64); err != nil {
+				return nil, &Error{Code: CodeGitFailed, Msg: "unexpected git ls-tree size"}
+			}
+		}
+		entries = append(entries, treeEntry{mode: fields[0], kind: fields[1], object: fields[2], path: p, size: size})
 	}
 	return entries, nil
 }

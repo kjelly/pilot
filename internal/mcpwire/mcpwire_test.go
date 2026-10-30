@@ -105,13 +105,17 @@ func TestErrorLineRoundTripAndExitCodes(t *testing.T) {
 }
 
 func TestCheckSnapshotPath(t *testing.T) {
-	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore", "docs/readme.md", "contractsx/a"} {
+	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore", "docs/readme.md", "contractsx/a", ".gitx/a", "Docs/verificationx/a"} {
 		if err := CheckSnapshotPath(ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"", "/etc/passwd", "../x", "a/../b", "a//b", "./a", "a/", "a\\b", "a\x00b", "a\nb",
-		".vault/main.yaml", ".pilot/x", ".pilot-data/x", "contracts/docker.yaml", "docs/verification/docker.md", ".git/config", ".vault"} {
+		".vault/main.yaml", ".pilot/x", ".pilot-data/x", "contracts/docker.yaml", "docs/verification/docker.md", ".git/config", ".vault",
+		// A case-insensitive clone (macOS) resolves these to the reserved
+		// directories, and HFS+ also drops the ignorable code points.
+		".GIT/config", ".Git", ".VAULT/main.yaml", "Contracts/docker.yaml", "docs/Verification/docker.md",
+		".g\u200cit/config", "a/\ufeffb"} {
 		if err := CheckSnapshotPath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

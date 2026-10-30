@@ -263,6 +263,9 @@ profiles:
    - branch/tag：fetch `refs/heads/<ref>` 與 `refs/tags/<ref>`；兩者都存在時報錯（不猜）。
    - SHA：`git fetch origin <sha>`；失敗時 fetch 所有 heads/tags 後再檢查該 SHA 是否存在。
    - 以 `git rev-parse --verify <x>^{commit}` 取得完整 SHA。
+   - 會改動 cache 的指令（`init`、`config`，以及 fetch 連同讀回它更新的 ref）在 `<cache>.lock` 的
+     `flock` 下執行，最多等 `git_seconds`：agent 會同時啟動每個 profile 的 MCP server，同一個 repo 的
+     profile 共用 cache，沒有鎖時會互相蓋掉 fetch 的 ref 或撞上 git 的 `config.lock`。讀 object 不需要鎖。
 3. **Snapshot**：依 §6.1 產生 tar。
 4. **組遠端指令**（每個 token 都符合 §5.3 的字元規則，再逐一加單引號後以空白串接）：
 
@@ -324,7 +327,7 @@ profiles:
    - 兩種 mode 都必須有 `pilot_edit_inspect`、`pilot_edit_plan` 與 `pilot_diagnose_sudo`；都不得有
      `pilot_diagnose_run`、`pilot_diagnose_snmp_probe` 或任何 `pilot_repair_*`。
    - observe 不得有 `pilot_edit_apply`；edit 必須有。
-8. 結束 session。doctor 不呼叫任何工具，所以 edit session 也不會被保留（§7.2 第 7 步）。
+8. 結束 session。doctor 不呼叫任何工具，所以 edit session 也不會被保留（§7.2 第 8 步）。
 
 ### 5.6 `changes`
 
@@ -332,7 +335,8 @@ profiles:
 
 1. 決定 session：`--session`，或 `sessions.jsonl` 裡該 profile 最近一次 edit session。
 2. 以 §5.4 相同的方式 SSH 執行 `docker run`（不加 `-i`，只掛 `/pilot/data`，不掛 `.vault`），container 指令為
-   `mcp remote changes --protocol v1 --env <env> <session-id>`，stdout 收到 tar（§7.3）。
+   `mcp remote changes --protocol v1 --env <env> <session-id>`，stdout 收到 tar（§7.3）。超過 80 MiB 時
+   直接結束 ssh（remote 還在寫一個沒人讀的 pipe，等它結束會永遠卡住），報 `CHANGESET_INVALID`。
 3. 驗證 tar：第一個 entry 是 manifest；其餘 entry 只能是 regular file，路徑規則同 §6.2，必須正好是
    manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`。任何不符都報
    `CHANGESET_INVALID`，一個檔案都不寫。
@@ -346,7 +350,9 @@ profiles:
    （`git diff --quiet <base> HEAD -- <path>`）。任何一個不符就報 `CHANGESET_CONFLICT`，一個檔案都不寫。
 8. 寫入前對每個目標路徑的每一層既有元件做 `Lstat`，任何一層是 symlink 就報 `CHANGESET_CONFLICT`
    （`os.Root` 只防止寫出根目錄，仍會跟隨根目錄內的 symlink）。之後經 `os.Root`（以 `--into` 為根）
-   以「同目錄暫存檔 + rename」寫入新增/修改的檔案、刪除被刪的檔案。
+   以「同目錄暫存檔 + rename」寫入新增/修改的檔案、刪除被刪的檔案。暫存檔名帶隨機字串（被殺掉的上一次
+   留下的暫存檔不會擋住之後的匯入），rename 失敗時刪除暫存檔。寫到一半失敗時，錯誤列出已經寫入或刪除的
+   路徑（`--into` 在匯入前是乾淨的，`git status` 會列出它們）。
 9. stdout 列出變更清單，並提示：用 `git diff` 審核，自行 commit 並開 PR；PR 會經過設定 repo
    既有的 lint 與 preview 檢查。
 
@@ -356,13 +362,13 @@ profiles:
 
 ### 6.1 使用者端產生
 
-1. 以 `git ls-tree -r -z --full-tree <sha>:<subdir>`（subdir 是 `.` 時用 `<sha>`）列出檔案，以
-   `git cat-file --batch` 讀取內容。不用 `git archive`，避免 `export-ignore`／`export-subst` 改變內容。
+1. 以 `git ls-tree -r -l -z --full-tree <sha>:<subdir>`（subdir 是 `.` 時用 `<sha>`）列出檔案與大小，以
+   `git cat-file --batch` 讀取內容。下面的大小上限先以列出的大小檢查，超過就不讀任何 blob。不用 `git archive`，避免 `export-ignore`／`export-subst` 改變內容。
    - mode `120000`（symlink）、`160000`（submodule）或其他非 `100644`/`100755` 的 entry：報
      `SNAPSHOT_INVALID`。
    - 內容以 `version https://git-lfs.github.com/spec/v1` 開頭（LFS pointer）：報 `SNAPSHOT_INVALID`。
-   - `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/` 下的路徑：移除，並在 stderr 逐一列出（正常情況下
-     設定 repo 不會有這些路徑）。
+   - `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/`、`.git/` 下的路徑（不分大小寫）：
+     移除，並在 stderr 逐一列出（正常情況下設定 repo 不會有這些路徑）。
    - 上限：檔案總量 ≤ 64 MiB、檔案數 ≤ 10,000、單檔 ≤ 8 MiB；超過報 `SNAPSHOT_TOO_LARGE`。
 2. 寫出正規化的 tar：mode 一律 `0644`，mtime/uid/gid 歸零，依路徑 byte 排序，不含 directory entry。
 3. tar 的第一個 entry 是 `.pilot-mcp-manifest.json`（≤ 1 MiB）。manifest 本身不在 `files` 清單內，
@@ -393,9 +399,12 @@ digest；內容、路徑或大小改變一定改變 digest。
 - 第一個 entry 必須是 manifest；manifest 的 `env` 必須等於 `--env`，否則 `ENV_MISMATCH`。
 - 每個 entry 只接受 regular file（directory entry 忽略）。路徑必須：
   - 是相對路徑，且 `path.Clean(p) == p`；
-  - 不含 `..`、`\`、NUL 或控制字元；
+  - 不含 `..`、`\`、NUL、控制字元，或 HFS+ 比對名稱時忽略的 code point（U+200C–U+200F、U+202A–U+202E、
+    U+206A–U+206F、U+FEFF，與 Git 的 `is_hfs_dotgit` 相同）；
   - 不重複，轉成小寫後也不重複；
-  - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`.git/` 之下。違反時回 `SNAPSHOT_INVALID`；
+  - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/`、`.git/` 之下，比對不分
+    大小寫（使用者端的 clone 在 macOS 預設的檔案系統上，`.GIT/config` 就是 `.git/config`；這條規則也用在
+    `changes` 的路徑，§5.6）。違反時回 `SNAPSHOT_INVALID`；
     `.vault/` 的訊息寫明「secret 由 deploy node 提供」。
 - 寫入 session 目錄的 `source/`：目錄由 remote 自己建立（`0700`），檔案以
   `O_CREAT|O_EXCL|O_NOFOLLOW` 建立（`0600`）。
@@ -459,23 +468,25 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
    6. edit mode 記錄 **baseline**：`work/` 內所有 regular file（不跟隨 symlink，排除 `.pilot/`、`contracts/`）
       的路徑與 SHA-256，並以 `statefile.Store` 寫入 `session.json`：`id`、`mode`、`env`、`created_at`、
       source 聲明、`client_user`、`content_digest`、baseline、`pilot_binary_sha256`、`state: serving`。
-5. stdout 輸出一行 ready（之後才有 MCP bytes）：
+5. 建立 `/pilot/data/mcp/audit/`。啟動時所有可能失敗的步驟都在 ready 之前，使用者端看到的是啟動失敗，
+   而不是一個開始後就結束的 session。
+6. stdout 輸出一行 ready（之後才有 MCP bytes）：
 
    ```text
    PILOT-MCP-READY {"protocol":"pilot-mcp-remote/v1","session_id":"<32 hex>","mode":"observe","env":"prod","commit_sha":"<hex>","content_digest":"<hex>","files":42,"pilot_binary_sha256":"<hex>"}
    ```
 
-6. root 的 `--data-dir` 沒有指定時，設定 package 變數 `dataDir = /pilot/data`（等同 `pilot --data-dir`；
+7. root 的 `--data-dir` 沒有指定時，設定 package 變數 `dataDir = /pilot/data`（等同 `pilot --data-dir`；
    工具在呼叫時讀它，§2.1；測試以 `--data-dir` 指定時保留測試值）。然後在同一個 process 內啟動 MCP
    server（由 `cmd/pilot/cmd` 注入的 `serveMCP`，傳入第 2 步的 `IOTransport`，§12），等同：
    `pilot mcp serve --dir /pilot/config --audit-dir /pilot/data/mcp/audit
    --diagnose-inventory /pilot/config/inventory.yml --enable-diagnose [--allow-write]`。
    `--allow-write` 只在 edit mode。stdout 只有 MCP bytes；診斷寫 stderr（`slog`）。
-7. 結束條件：stdin EOF、SIGTERM/SIGHUP，或執行超過 `--max-session-duration`（預設 12h）。結束時：
+8. 結束條件：stdin EOF、SIGTERM/SIGHUP，或執行超過 `--max-session-duration`（預設 12h）。結束時：
    - observe：不需處理（container 結束後 `/tmp` 一起消失）。
    - edit：跟 baseline 比沒有變更（§7.3 的清單為空）就刪除 session 目錄；否則寫入 `state: ended`、
      `ended_at`，保留給 `changes` 使用。
-8. 任何一步在送出 ready 之前失敗：刪除 session 目錄，依 §7.5 輸出錯誤，stdout 不輸出任何內容。
+9. 任何一步在送出 ready 之前失敗：刪除 session 目錄，依 §7.5 輸出錯誤，stdout 不輸出任何內容。
 
 ### 7.3 `changes <session-id>`
 
@@ -491,6 +502,10 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   `base_sha256` 是 source 的 SHA-256（`add` 為空）。
 - 任何匯出的檔案內容含有 session 目錄的內部路徑（`/pilot/data/mcp/` 或 `/tmp/pilot-mcp/`）時回
   `CHANGESET_INVALID`。
+- 匯出的變更會被 commit，成為下一個 session 的 snapshot，所以也要符合 snapshot 的規則，否則回
+  `CHANGESET_INVALID`：變更的檔案數 ≤ 10,000、單檔 ≤ 8 MiB、變更檔案總量 ≤ 64 MiB（也讓 tar 不超過
+  使用者端讀取的 80 MiB），變更的 `.yml`/`.yaml` 必須是合法 YAML 且通過 §6.2 的路徑引用範圍檢查
+  （例如 `/pilot/vault/...`）。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
 - stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
   `{"protocol","session_id","env","base_commit_sha","changes":[{"path","op","base_sha256","new_sha256"}]}`，
   之後是 `add`/`modify` 的檔案，依路徑排序。
@@ -502,8 +517,10 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   （照 `internal/secretpath/private_temp_dir.go` 的寫法）。
 - 每次執行 edit 的 `session` 與 `changes` 時，處理之前先對 `/pilot/data/mcp/sessions/` 做一次有時間上限
   （2 秒）的回收。只處理非阻塞拿得到 `.lock` 的目錄（拿得到代表沒有 process 在用），處理期間一直持有鎖：
-  - 沒有 `session.json`、且目錄建立超過 10 分鐘（session 在寫入 `session.json` 之前就中斷）：刪除；
-  - `state: serving`（container 被殺掉，沒走到結束步驟）：視為已中斷，照 §7.2 第 7 步處理：沒有變更就刪除，
+  - 沒有 `session.json`、且目錄建立超過 10 分鐘（session 在寫入 `session.json` 之前就中斷）：刪除。
+    還沒超過 10 分鐘的這種目錄連 `.lock` 都不碰：它可能是剛建立、還沒取得自己的鎖的 session，回收先拿到
+    鎖會讓那個 session 啟動失敗；
+  - `state: serving`（container 被殺掉，沒走到結束步驟）：視為已中斷，照 §7.2 第 8 步處理：沒有變更就刪除，
     有變更就改成 `ended`（`ended_at` 用目前時間）保留；
   - `ended` 且 `ended_at` 超過 7 天、或建立超過 30 天：刪除。
   這是 AGENTS.md §5.14 第 5 點的要求：不能只靠正常結束清理。回收失敗只記 `slog.Warn`，不影響請求。

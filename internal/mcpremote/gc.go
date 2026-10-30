@@ -55,6 +55,12 @@ func collectOne(cfg *Config, dir string, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	// A young directory without session.json may be a session that has
+	// just been created and not locked yet; taking its lock first would
+	// make that session fail. Leave it alone without touching the lock.
+	if _, err := os.Lstat(filepath.Join(dir, "session.json")); os.IsNotExist(err) && now.Sub(info.ModTime()) <= orphanGrace {
+		return nil
+	}
 	lock, err := tryLock(filepath.Join(dir, ".lock"))
 	if err != nil || lock == nil {
 		return err // in use, or unreadable

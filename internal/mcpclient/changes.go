@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +58,13 @@ func Changes(ctx context.Context, o *Options, sessionID, into string) (*ChangesR
 		return nil, err
 	}
 	data, readErr := io.ReadAll(io.LimitReader(proc.stdout, mcpwire.MaxStreamBytes+1))
+	if readErr == nil && len(data) > mcpwire.MaxStreamBytes {
+		// The remote is still writing into a pipe nobody reads; waiting
+		// for it would never return.
+		_ = proc.cmd.Process.Kill()
+		proc.wait()
+		return nil, &Error{Code: CodeChangesetInvalid, Msg: fmt.Sprintf("changes output is larger than %d bytes", mcpwire.MaxStreamBytes)}
+	}
 	if exit := proc.wait(); exit != 0 {
 		return nil, remoteFailure(exit, proc.stderr.String())
 	}
@@ -238,17 +247,27 @@ func applyChanges(ctx context.Context, o *Options, m mcpwire.ChangesManifest, co
 		name := filepath.FromSlash(a.full)
 		if a.change.Op == mcpwire.OpDelete {
 			if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return nil, err
+				return nil, partlyApplied(res, a.full, err)
 			}
 			res.Deleted = append(res.Deleted, a.full)
 			continue
 		}
 		if err := writeInRoot(root, name, contents[a.change.Path]); err != nil {
-			return nil, err
+			return nil, partlyApplied(res, a.full, err)
 		}
 		res.Written = append(res.Written, a.full)
 	}
 	return res, nil
+}
+
+// partlyApplied reports a write that failed after others succeeded. The
+// clone was clean before the import, so Git shows exactly what was done.
+func partlyApplied(res *ChangesResult, failed string, err error) error {
+	done := append(append([]string{}, res.Written...), res.Deleted...)
+	if len(done) == 0 {
+		return fmt.Errorf("%s: %w", failed, err)
+	}
+	return fmt.Errorf("%s: %w; already applied before the failure: %s (the clone was clean, so `git status` shows them)", failed, err, strings.Join(done, ", "))
 }
 
 // refuseSymlinkComponents rejects a target any of whose existing path
@@ -282,7 +301,13 @@ func writeInRoot(root *os.Root, name string, data []byte) error {
 			return err
 		}
 	}
-	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+".pilot-mcp-tmp")
+	// A random name: a temporary file left by a killed run must not block
+	// every later import of the same path.
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+"."+hex.EncodeToString(suffix[:])+".pilot-mcp-tmp")
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
@@ -296,5 +321,9 @@ func writeInRoot(root *os.Root, name string, data []byte) error {
 		_ = root.Remove(tmp)
 		return err
 	}
-	return root.Rename(tmp, name)
+	if err := root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -73,7 +74,44 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	if err := checkExportable(work, changes, contents); err != nil {
+		return nil, nil, err
+	}
 	return changes, contents, nil
+}
+
+// checkExportable holds the changed files to the rules the next session's
+// snapshot is held to: the size limits (which also bound the changes
+// stream the client reads) and the path scope, so a change that is
+// exported and committed never makes every later session fail.
+func checkExportable(work string, changes []mcpwire.Change, contents map[string][]byte) error {
+	if len(changes) > mcpwire.MaxFiles {
+		return errorf(mcpwire.CodeChangesetInvalid, "%d changed files, more than %d", len(changes), mcpwire.MaxFiles)
+	}
+	var total int64
+	var written []string
+	for _, c := range changes {
+		data, ok := contents[c.Path]
+		if !ok {
+			continue
+		}
+		if int64(len(data)) > mcpwire.MaxFileBytes {
+			return errorf(mcpwire.CodeChangesetInvalid, "%s is larger than %d bytes", c.Path, mcpwire.MaxFileBytes)
+		}
+		total += int64(len(data))
+		written = append(written, c.Path)
+	}
+	if total > mcpwire.MaxTotalBytes {
+		return errorf(mcpwire.CodeChangesetInvalid, "changed files total %d bytes, more than %d", total, mcpwire.MaxTotalBytes)
+	}
+	if err := CheckPathScope(work, written); err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Code != mcpwire.CodeRuntimeError {
+			return &Error{Code: mcpwire.CodeChangesetInvalid, Err: e.Err}
+		}
+		return err
+	}
+	return nil
 }
 
 // internalPathIn reports a session-internal location written into a file.

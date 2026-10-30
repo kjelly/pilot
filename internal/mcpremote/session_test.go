@@ -254,6 +254,76 @@ func TestRunChangesRejectsSessionInternalPaths(t *testing.T) {
 	}
 }
 
+// An exported change is committed to the config repository and becomes
+// the next session's snapshot, so `changes` refuses anything that snapshot
+// would be refused for, and keeps the session so it can say why.
+func TestRunChangesRejectsWhatTheNextSnapshotWouldReject(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), mcpwire.MaxFileBytes+1)
+	cases := map[string]struct {
+		file string
+		data []byte
+		want string
+	}{
+		"vault path":   {"group_vars/all.yml", []byte("roster: /pilot/vault/ipa-identity.yaml\n"), "/pilot/vault"},
+		"data path":    {"host_vars/web-1.yml", []byte("x: /pilot/data/./x\n"), "/pilot/data"},
+		"invalid yaml": {"group_vars/all.yml", []byte("a: [\n"), "not valid YAML"},
+		"too large":    {"files/blob.bin", big, "larger than"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(tc.file)), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, filepath.Join(dir, tc.file), tc.data)
+			})
+			fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
+			if err := RunSession(context.Background(), fs.cfg); err != nil {
+				t.Fatal(err)
+			}
+			id := mustReadyID(t, fs.stdout.String())
+			cfg := *fs.cfg
+			var out bytes.Buffer
+			cfg.Stdout = &out
+			err := RunChanges(&cfg, id)
+			if CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want CHANGESET_INVALID mentioning %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("wrote %d bytes of changes", out.Len())
+			}
+			if st, ok, err := loadSession(filepath.Join(cfg.sessionsRoot(), id)); err != nil || !ok || st.State != stateEnded {
+				t.Fatalf("session = %+v %v %v, want kept as ended", st, ok, err)
+			}
+		})
+	}
+}
+
+// The audit directory is the last thing a session needs; failing to create
+// it is a startup failure, reported before the ready line.
+func TestRunSessionAuditDirFailureIsReportedBeforeReady(t *testing.T) {
+	for _, mode := range []string{mcpwire.ModeObserve, mcpwire.ModeEdit} {
+		fs := newFakeSession(t, mode, "prod", nil)
+		if err := os.MkdirAll(filepath.Join(fs.cfg.DataDir, mcpwire.DataMCPDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, fs.cfg.auditDir(), []byte("not a directory"))
+		fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
+		err := RunSession(context.Background(), fs.cfg)
+		if CodeOf(err) != mcpwire.CodeRuntimeError || !strings.Contains(err.Error(), "audit directory") {
+			t.Fatalf("%s: err = %v, want RUNTIME_ERROR about the audit directory", mode, err)
+		}
+		if fs.stdout.Len() != 0 {
+			t.Fatalf("%s: stdout = %q, want no ready line", mode, fs.stdout.String())
+		}
+		for _, dir := range []string{fs.cfg.TmpDir, fs.cfg.sessionsRoot()} {
+			if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+				t.Fatalf("%s: %d session entries left in %s", mode, len(entries), dir)
+			}
+		}
+	}
+}
+
 func mustReadyID(t *testing.T, stdout string) string {
 	t.Helper()
 	ready, err := mcpwire.ParseReady(strings.SplitN(stdout, "\n", 2)[0])
@@ -339,6 +409,11 @@ func TestCollectEditSessions(t *testing.T) {
 		if exists(dir) != want {
 			t.Errorf("%s exists = %v, want %v", filepath.Base(dir), !want, want)
 		}
+	}
+	// A young directory without session.json may belong to a session that
+	// has not locked it yet; collection must not take its lock.
+	if _, err := os.Lstat(filepath.Join(young, ".lock")); !os.IsNotExist(err) {
+		t.Errorf("collection created a lock in the young session directory: %v", err)
 	}
 	st, ok, err := loadSession(strandedEdited)
 	if err != nil || !ok || st.State != stateEnded || st.EndedAt.IsZero() {

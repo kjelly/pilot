@@ -48,6 +48,18 @@ func buildSnapshot(ctx context.Context, repo *gitRepo, src SourceConfig, commit,
 	if len(keep) > mcpwire.MaxFiles {
 		return nil, &Error{Code: CodeSnapshotTooLarge, Msg: fmt.Sprintf("%d files, more than %d", len(keep), mcpwire.MaxFiles)}
 	}
+	// Check the sizes git lists before reading any blob, so an oversized
+	// file is refused without loading it.
+	var listed int64
+	for _, e := range keep {
+		if e.size > mcpwire.MaxFileBytes {
+			return nil, &Error{Code: CodeSnapshotTooLarge, Msg: fmt.Sprintf("%s is larger than %d bytes", e.path, mcpwire.MaxFileBytes)}
+		}
+		listed += e.size
+	}
+	if listed > mcpwire.MaxTotalBytes {
+		return nil, &Error{Code: CodeSnapshotTooLarge, Msg: fmt.Sprintf("files total %d bytes, more than %d", listed, mcpwire.MaxTotalBytes)}
+	}
 	sort.Slice(keep, func(i, j int) bool { return keep[i].path < keep[j].path })
 	objects := make([]string, len(keep))
 	for i, e := range keep {

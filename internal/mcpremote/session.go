@@ -94,6 +94,9 @@ func RunSession(ctx context.Context, cfg *Config) error {
 	lock, err := tryLock(filepath.Join(dir, ".lock"))
 	if err != nil || lock == nil {
 		os.RemoveAll(dir)
+		if err == nil {
+			err = errors.New("another process holds its lock")
+		}
 		return errorf(mcpwire.CodeRuntimeError, "lock session directory: %v", err)
 	}
 	defer lock.Close()
@@ -160,6 +163,12 @@ func RunSession(ctx context.Context, cfg *Config) error {
 		}
 	}
 
+	// Everything that can still fail at startup happens before the ready
+	// line, so the client sees a startup failure, not a session that ends.
+	if err := os.MkdirAll(cfg.auditDir(), 0o700); err != nil {
+		return errorf(mcpwire.CodeRuntimeError, "create audit directory: %v", err)
+	}
+
 	line, err := mcpwire.FormatReady(mcpwire.Ready{
 		Protocol: mcpwire.Protocol, SessionID: id, Mode: cfg.Mode, Env: cfg.Env,
 		CommitSHA: manifest.Source.CommitSHA, ContentDigest: manifest.ContentDigest,
@@ -179,10 +188,6 @@ func RunSession(ctx context.Context, cfg *Config) error {
 		var cancel context.CancelFunc
 		serveCtx, cancel = context.WithTimeout(ctx, cfg.MaxSessionDuration)
 		defer cancel()
-	}
-	if err := os.MkdirAll(cfg.auditDir(), 0o700); err != nil {
-		finishSession(cfg, dir, state)
-		return errorf(mcpwire.CodeRuntimeError, "create audit directory: %v", err)
 	}
 	serveErr := cfg.Serve(serveCtx, ServeOptions{
 		Dir:               configDir,

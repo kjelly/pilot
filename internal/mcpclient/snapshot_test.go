@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +48,60 @@ func TestGitResolveBranchTagShaAndAmbiguity(t *testing.T) {
 	}
 	if _, err := repo.resolve(ctx, "v1"); !hasCode(err, CodeGitRefNotFound) || !strings.Contains(err.Error(), "both a branch and a tag") {
 		t.Fatalf("ambiguous ref: %v", err)
+	}
+}
+
+// Profiles of one repository share its cache, and an agent starts all
+// their MCP servers together: concurrent processes fetching different refs
+// must each get their own ref's commit, and a fresh cache must survive
+// being opened by all of them at once.
+func TestGitCacheIsSafeAcrossConcurrentProcesses(t *testing.T) {
+	allowLocalRepos(t)
+	bare, first := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n"})
+	work := t.TempDir()
+	git(t, work, "clone", "--quiet", bare, ".")
+	git(t, work, "tag", "release")
+	writeTree(t, work, map[string]string{"env/hosts.yml": "hosts: {a: {}}\n"})
+	git(t, work, "commit", "--quiet", "-am", "advance")
+	git(t, work, "push", "--quiet", "origin", "refs/heads/main:refs/heads/main", "refs/tags/release:refs/tags/release")
+	second := git(t, work, "rev-parse", "HEAD")
+
+	cacheDir := t.TempDir()
+	want := map[string]string{"main": second, "release": first}
+	const workers = 8
+	errs := make(chan error, workers*4)
+	var wg sync.WaitGroup
+	for i := range workers {
+		ref := "main"
+		if i%2 == 1 {
+			ref = "release"
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 4 {
+				// A handle per call, as a separate process would have.
+				repo, err := openGitCache(cacheDir, bare, 30*time.Second)
+				if err != nil {
+					errs <- fmt.Errorf("open: %w", err)
+					return
+				}
+				got, err := repo.resolve(context.Background(), ref)
+				if err != nil {
+					errs <- fmt.Errorf("resolve %s: %w", ref, err)
+					return
+				}
+				if got != want[ref] {
+					errs <- fmt.Errorf("resolve %s = %s, want %s", ref, got, want[ref])
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
@@ -163,6 +219,34 @@ func TestBuildSnapshotRejectsSymlinksAndLFS(t *testing.T) {
 	}
 	if _, err := buildSnapshot(context.Background(), repo, SourceConfig{URL: work, Ref: "main", Subdir: "env"}, commit, "prod", "t", "t"); !hasCode(err, CodeSnapshotInvalid) {
 		t.Fatalf("symlink: %v", err)
+	}
+}
+
+func TestBuildSnapshotRefusesOversizedFilesAndSubmodules(t *testing.T) {
+	big := strings.Repeat("x", mcpwire.MaxFileBytes+1)
+	if _, err := buildFrom(t, map[string]string{"env/hosts.yml": "hosts: {}\n", "env/big.bin": big}, "env"); !hasCode(err, CodeSnapshotTooLarge) || !strings.Contains(err.Error(), "big.bin") {
+		t.Fatalf("oversized file: %v", err)
+	}
+	// git ls-tree -l prints "-" as the size of a submodule (gitlink).
+	allowLocalRepos(t)
+	work := t.TempDir()
+	git(t, work, "init", "--quiet")
+	writeTree(t, work, map[string]string{"env/hosts.yml": "hosts: {}\n"})
+	git(t, work, "add", "-A")
+	git(t, work, "commit", "--quiet", "-m", "x")
+	head := git(t, work, "rev-parse", "HEAD")
+	git(t, work, "update-index", "--add", "--cacheinfo", "160000,"+head+",env/sub")
+	git(t, work, "commit", "--quiet", "-m", "submodule")
+	repo, err := openGitCache(t.TempDir(), work, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repo.resolve(context.Background(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildSnapshot(context.Background(), repo, SourceConfig{URL: work, Ref: "main", Subdir: "env"}, commit, "prod", "t", "t"); !hasCode(err, CodeSnapshotInvalid) || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("submodule: %v", err)
 	}
 }
 

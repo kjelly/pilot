@@ -46,6 +46,14 @@ func fakeSSH(scenario string) int {
 		data, _ := os.ReadFile(os.Getenv("PILOT_MCP_FAKE_CHANGES"))
 		_, _ = os.Stdout.Write(data)
 		return 0
+	case "changes-flood":
+		// Keep writing, as a remote with an unbounded export would.
+		chunk := make([]byte, 1<<20)
+		for {
+			if _, err := os.Stdout.Write(chunk); err != nil {
+				return 0
+			}
+		}
 	case "version":
 		fmt.Printf(`{"protocol":%q,"pilot_binary_sha256":%q}`+"\n", mcpwire.Protocol, strings.Repeat("ab", 32))
 		return 0

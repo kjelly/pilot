@@ -269,6 +269,54 @@ func TestChangesWritesIntoACleanCloneAndRefusesConflicts(t *testing.T) {
 	}
 }
 
+// A remote that keeps writing past the stream limit is stopped, not
+// waited for: waiting on ssh blocked on a full pipe never returns.
+func TestChangesStopsAnOversizedStream(t *testing.T) {
+	p := testProfile("https://example.invalid/org/config.git", "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes-flood", p)
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	done := make(chan error, 1)
+	go func() {
+		_, err := Changes(context.Background(), o, strings.Repeat("d", 32), t.TempDir())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !hasCode(err, CodeChangesetInvalid) || !strings.Contains(err.Error(), "larger than") {
+			t.Fatalf("err = %v, want CHANGESET_INVALID", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Changes hung on an oversized stream")
+	}
+}
+
+// A failure part way through names what was already applied, and leaves
+// no temporary file behind.
+func TestChangesReportsAPartialImport(t *testing.T) {
+	allowLocalRepos(t)
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/b.yml/keep": "x\n"})
+	id := strings.Repeat("d", 32)
+	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
+		change("a.yml", mcpwire.OpAdd, "", "a: 1\n"),
+		change("b.yml", mcpwire.OpAdd, "", "b: 1\n"), // a directory in the clone: the rename fails
+	}}
+	tarPath := changesTar(t, m, map[string]string{"a.yml": "a: 1\n", "b.yml": "b: 1\n"})
+	p := testProfile(bare, "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes", p)
+	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
+	clone := t.TempDir()
+	git(t, clone, "clone", "--quiet", bare, ".")
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	_, err := Changes(context.Background(), o, id, clone)
+	if err == nil || !strings.Contains(err.Error(), "prod/b.yml") || !strings.Contains(err.Error(), "already applied before the failure: prod/a.yml") {
+		t.Fatalf("err = %v, want the failed path and what was already applied", err)
+	}
+	leftovers, _ := filepath.Glob(filepath.Join(clone, "prod", ".*.pilot-mcp-tmp"))
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary files left: %v", leftovers)
+	}
+}
+
 func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 	id := strings.Repeat("e", 32)
 	base := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc",
@@ -290,8 +338,10 @@ func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 		"other session": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: strings.Repeat("f", 32), Env: "prod", BaseCommitSHA: "abc"}, nil)),
 		"escaping path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("../x", mcpwire.OpAdd, "", "x")}}, map[string]string{"../x": "x"})),
 		"reserved path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".vault/main.yaml", mcpwire.OpAdd, "", "x")}}, map[string]string{".vault/main.yaml": "x"})),
-		"not a tar":     []byte("garbage"),
-		"wrong first":   read(changesTar(t, base, nil))[512:],
+		// On a case-insensitive clone (macOS) this is the clone's .git.
+		"case-folded .git": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".GIT/config", mcpwire.OpAdd, "", "x")}}, map[string]string{".GIT/config": "x"})),
+		"not a tar":        []byte("garbage"),
+		"wrong first":      read(changesTar(t, base, nil))[512:],
 	}
 	for name, data := range cases {
 		if _, _, err := parseChanges(data, id, "prod"); !hasCode(err, CodeChangesetInvalid) {
