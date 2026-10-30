@@ -407,6 +407,8 @@ digest；內容、路徑或大小改變一定改變 digest。
 - 第一個 entry 必須是 manifest；manifest 的 `env` 必須等於 `--env`，否則 `ENV_MISMATCH`。
 - 每個 entry 只接受 regular file（directory entry 忽略）。路徑必須：
   - 是相對路徑，且 `path.Clean(p) == p`；
+  - 長度 ≤ 4096 bytes，每一層 ≤ 255 bytes（Linux 的 `PATH_MAX`/`NAME_MAX`；也讓每個路徑檢查的成本有上限，
+    `FoldCollision` 對路徑總長是線性的）；
   - 不含 `..`、`\`、NUL 或控制字元；
   - 不重複；路徑與它們的上層目錄經 `mcpwire.FoldCollision`（以 `FoldPath` 比較：不分大小寫、忽略下面列
     的 HFS+ code point）也不得有兩種拼法；

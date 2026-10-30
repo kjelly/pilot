@@ -3,6 +3,7 @@ package mcpwire
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func entry(p, content string) FileEntry {
@@ -123,6 +124,34 @@ func TestCheckSnapshotPath(t *testing.T) {
 		if err := CheckSnapshotPath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestCheckSnapshotPathLengthLimits(t *testing.T) {
+	name := strings.Repeat("n", MaxNameBytes)
+	if err := CheckSnapshotPath("d/" + name); err != nil {
+		t.Errorf("a %d-byte component rejected: %v", MaxNameBytes, err)
+	}
+	if err := CheckSnapshotPath("d/" + name + "n"); err == nil {
+		t.Errorf("a %d-byte component accepted", MaxNameBytes+1)
+	}
+	long := strings.Repeat("a/", MaxPathBytes/2) + "x"
+	if err := CheckSnapshotPath(long); err == nil {
+		t.Errorf("a %d-byte path accepted", len(long))
+	}
+}
+
+// FoldCollision is linear in the length of a path, however deep: a 1 MB
+// path of one-letter components (each prefix a new folded key) must not
+// take quadratic time.
+func TestFoldCollisionIsLinear(t *testing.T) {
+	deep := strings.Repeat("a/", 1<<19) + "x"
+	start := time.Now()
+	if a, b := FoldCollision([]string{deep, strings.Repeat("a/", 1<<19) + "y"}); a != "" {
+		t.Fatalf("FoldCollision = %q, %q", a[:10], b[:10])
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("FoldCollision on a 1 MB path took %v", d)
 	}
 }
 

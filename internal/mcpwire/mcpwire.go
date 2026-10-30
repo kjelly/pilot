@@ -51,6 +51,11 @@ const (
 	MaxStreamBytes   = 80 << 20
 	MaxManifestBytes = 1 << 20
 	MaxHeaderLine    = 64
+	// MaxPathBytes and MaxNameBytes are Linux's PATH_MAX and NAME_MAX: a
+	// longer path could not be written on the deploy node anyway, and the
+	// cap keeps every path check cheap.
+	MaxPathBytes = 4096
+	MaxNameBytes = 255
 )
 
 // Modes and environments.
@@ -129,20 +134,37 @@ func FoldPath(p string) string {
 // parent directories that FoldPath maps to one name, or two empty strings.
 // On a case-insensitive file system (macOS) such spellings are one file or
 // directory, and Git there records only one of them, so "host_vars/WEB/b"
-// collides with "host_vars/web/a" as "a.yml" does with "A.yml".
+// collides with "host_vars/web/a" as "a.yml" does with "A.yml". Each
+// component is folded and hashed once (a tree keyed by parent and folded
+// name), so the cost is linear in the total length of paths.
 func FoldCollision(paths []string) (string, string) {
-	seen := make(map[string]string, len(paths))
+	type key struct {
+		parent int
+		name   string
+	}
+	type node struct {
+		id        int
+		component string
+		prefix    string
+	}
+	nodes := map[key]node{}
 	for _, p := range paths {
+		parent, start := 0, 0
 		for i := 0; i <= len(p); i++ {
 			if i < len(p) && p[i] != '/' {
 				continue
 			}
-			prefix := p[:i]
-			key := FoldPath(prefix)
-			if other, ok := seen[key]; ok && other != prefix {
-				return other, prefix
+			component := p[start:i]
+			k := key{parent, FoldPath(component)}
+			n, ok := nodes[k]
+			switch {
+			case !ok:
+				n = node{id: len(nodes) + 1, component: component, prefix: p[:i]}
+				nodes[k] = n
+			case n.component != component:
+				return n.prefix, p[:i]
 			}
-			seen[key] = prefix
+			parent, start = n.id, i+1
 		}
 	}
 	return "", ""
@@ -156,11 +178,15 @@ func hfsIgnorable(r rune) bool {
 }
 
 // CheckSnapshotPath validates one file path inside a snapshot or changeset:
-// relative, already clean, no "..", backslash, NUL or control characters,
-// and not reserved (see IsReserved).
+// relative, already clean, at most MaxPathBytes long with components of at
+// most MaxNameBytes (the Linux limits), no "..", backslash, NUL or control
+// characters, and not reserved (see IsReserved).
 func CheckSnapshotPath(p string) error {
 	if p == "" || strings.HasPrefix(p, "/") {
 		return fmt.Errorf("path %q must be relative", p)
+	}
+	if len(p) > MaxPathBytes {
+		return fmt.Errorf("path %.40q… is longer than %d bytes", p, MaxPathBytes)
 	}
 	if path.Clean(p) != p || p == "." {
 		return fmt.Errorf("path %q is not clean", p)
@@ -168,6 +194,9 @@ func CheckSnapshotPath(p string) error {
 	for _, seg := range strings.Split(p, "/") {
 		if seg == ".." {
 			return fmt.Errorf("path %q contains a parent-directory segment", p)
+		}
+		if len(seg) > MaxNameBytes {
+			return fmt.Errorf("path %.40q… has a component longer than %d bytes", p, MaxNameBytes)
 		}
 	}
 	for _, r := range p {
