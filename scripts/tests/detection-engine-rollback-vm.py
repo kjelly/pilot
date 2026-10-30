@@ -87,7 +87,7 @@ def main():
 
     variables = {'detection_engine_bin_dest': BASE + '/engine', 'detection_engine_db_path': BASE + '/state.db',
                  'detection_engine_backup_dir': BASE + '/backups', 'detection_engine_config_dir': BASE + '/etc',
-                 'detection_engine_unit_path': UNIT, 'detection_engine_feature_profile_dest': BASE + '/etc/profile.yaml',
+                 'detection_engine_config_path': BASE + '/etc/config.yaml', 'detection_engine_unit_path': UNIT, 'detection_engine_feature_profile_dest': BASE + '/etc/profile.yaml',
                  'detection_engine_user': 'root', 'detection_engine_artifact_abs_path': str(args.new_binary.resolve()),
                  'detection_engine_artifact_sha256': evidence['new_binary_sha256'],
                  'detection_engine_rollback_files': prod['vars']['detection_engine_rollback_files']}
@@ -173,6 +173,8 @@ assert result['binary_sha256']==sys.argv[2],result
 assert integrity==[('ok',)] and marker==sys.argv[3],result
 assert status==sys.argv[4] and enabled==sys.argv[5],result
 assert result['config']==sys.argv[6] and result['provider']==sys.argv[7],result
+assert (b/'etc/config.yaml').stat().st_mode & 0o777 == 0o640
+assert (b/'etc/provider.env').stat().st_mode & 0o777 == 0o600
 assert (b/'backups/pre-upgrade.db').read_text()=='STALE-DB' and (b/'backups/pilot-detection-engine.prev').read_text()=='STALE-BIN'
 print(json.dumps({k:v for k,v in result.items() if k!='provider'}))
 '''
