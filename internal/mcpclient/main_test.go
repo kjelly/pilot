@@ -53,6 +53,12 @@ func fakeSSH(scenario string) int {
 		writeFakePID(os.Getpid())
 		time.Sleep(time.Minute)
 		return 0
+	case "close-linger":
+		// The remote closes stdout but ssh keeps running.
+		writeFakePID(os.Getpid())
+		_ = os.Stdout.Close()
+		time.Sleep(time.Minute)
+		return 0
 	case "hang-child":
 		// ssh ends, but a helper it started keeps stdout open.
 		child := exec.Command("sleep", "60")
@@ -109,10 +115,13 @@ func fakeSSH(scenario string) int {
 	return 66
 }
 
-// writeFakePID records a fake ssh process's pid for the test to check.
+// writeFakePID records a fake ssh process's pid for the test to check. It
+// renames a complete file into place, so a reader never sees it empty.
 func writeFakePID(pid int) {
 	if path := os.Getenv("PILOT_MCP_FAKE_PID"); path != "" {
-		_ = os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o600)
+		if os.WriteFile(path+".tmp", []byte(strconv.Itoa(pid)), 0o600) == nil {
+			_ = os.Rename(path+".tmp", path)
+		}
 	}
 }
 

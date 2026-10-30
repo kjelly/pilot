@@ -37,14 +37,17 @@ func DefaultCacheDir() (string, error) {
 	return filepath.Join(base, "pilot-mcp"), nil
 }
 
-func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error) {
+// openGitCache opens (creating it if needed) the bare cache of url. The
+// wait for the cache lock and the git commands observe ctx, so a signal
+// ends them.
+func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Duration) (*gitRepo, error) {
 	key := sha256.Sum256([]byte(url))
 	dir := filepath.Join(cacheDir, "git", hex.EncodeToString(key[:]))
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return nil, err
 	}
 	r := &gitRepo{dir: dir, url: url, timeout: timeout}
-	unlock, err := r.lock(context.Background())
+	unlock, err := r.lock(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -53,13 +56,13 @@ func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, err
 		}
-		if _, err := r.git(context.Background(), nil, "init", "--bare", "--quiet"); err != nil {
+		if _, err := r.git(ctx, nil, "init", "--bare", "--quiet"); err != nil {
 			return nil, err
 		}
 	}
 	// The cache is keyed by URL, but set it every time so a hand-edited
 	// cache cannot point elsewhere.
-	if _, err := r.git(context.Background(), nil, "config", "remote.origin.url", url); err != nil {
+	if _, err := r.git(ctx, nil, "config", "remote.origin.url", url); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -71,9 +74,10 @@ func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error)
 // profiles of one repository share its cache. Reading objects and asking
 // the remote (ls-remote) need no lock. A holder runs at most three git
 // commands under it, each bounded by the Git timeout, so a waiter waits
-// three timeouts before it gives up.
-func (r *gitRepo) lock(ctx context.Context) (func(), error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*r.timeout)
+// three timeouts before it gives up. A cancelled parent ctx (a signal)
+// ends the wait at once.
+func (r *gitRepo) lock(parent context.Context) (func(), error) {
+	ctx, cancel := context.WithTimeout(parent, 3*r.timeout)
 	defer cancel()
 	f, err := os.OpenFile(r.dir+".lock", os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -91,6 +95,9 @@ func (r *gitRepo) lock(ctx context.Context) (func(), error) {
 		select {
 		case <-ctx.Done():
 			f.Close()
+			if err := parent.Err(); err != nil {
+				return nil, &Error{Code: CodeGitFailed, Msg: "waiting for the git cache: " + err.Error()}
+			}
 			return nil, &Error{Code: CodeGitFailed, Msg: "git cache " + r.dir + " is busy (another pilot-mcp is fetching)"}
 		case <-time.After(50 * time.Millisecond):
 		}

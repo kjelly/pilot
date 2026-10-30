@@ -25,7 +25,8 @@ func isolate(cmd *exec.Cmd) {
 }
 
 // killGroup SIGKILLs cmd's process group: cmd and every helper it started
-// that did not leave the group. Call it before cmd is reaped.
+// that did not leave the group. Callers avoid calling it after cmd has
+// been reaped (while helpers remain, the group id stays reserved anyway).
 func killGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil

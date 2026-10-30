@@ -20,7 +20,7 @@ import (
 func TestGitResolveBranchTagShaAndAmbiguity(t *testing.T) {
 	allowLocalRepos(t)
 	bare, first := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n"})
-	repo, err := openGitCache(t.TempDir(), bare, 30*time.Second)
+	repo, err := openGitCache(context.Background(), t.TempDir(), bare, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestGitCacheIsSafeAcrossConcurrentProcesses(t *testing.T) {
 			defer wg.Done()
 			for range 4 {
 				// A handle per call, as a separate process would have.
-				repo, err := openGitCache(cacheDir, bare, 30*time.Second)
+				repo, err := openGitCache(context.Background(), cacheDir, bare, 30*time.Second)
 				if err != nil {
 					errs <- fmt.Errorf("open: %w", err)
 					return
@@ -113,7 +113,7 @@ func TestGitCacheWaiterOutlastsOneTimeout(t *testing.T) {
 	allowLocalRepos(t)
 	bare, commit := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n"})
 	const timeout = time.Second
-	repo, err := openGitCache(t.TempDir(), bare, timeout)
+	repo, err := openGitCache(context.Background(), t.TempDir(), bare, timeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestGitCacheWaiterOutlastsOneTimeout(t *testing.T) {
 }
 
 func TestGitAuthFailureIsNonInteractive(t *testing.T) {
-	repo, err := openGitCache(t.TempDir(), "https://127.0.0.1:9/org/repo", 20*time.Second)
+	repo, err := openGitCache(context.Background(), t.TempDir(), "https://127.0.0.1:9/org/repo", 20*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func buildFrom(t *testing.T, files map[string]string, subdir string) (*Snapshot,
 	t.Helper()
 	allowLocalRepos(t)
 	bare, commit := makeRepo(t, files)
-	repo, err := openGitCache(t.TempDir(), bare, 30*time.Second)
+	repo, err := openGitCache(context.Background(), t.TempDir(), bare, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestBuildSnapshotRejectsSymlinksAndLFS(t *testing.T) {
 	}
 	git(t, work, "add", "-A")
 	git(t, work, "commit", "--quiet", "-m", "x")
-	repo, err := openGitCache(t.TempDir(), work, 30*time.Second)
+	repo, err := openGitCache(context.Background(), t.TempDir(), work, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestBuildSnapshotRefusesOversizedFilesAndSubmodules(t *testing.T) {
 	// is read: a git that refuses cat-file must not be reached.
 	allowLocalRepos(t)
 	bare, commit := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n", "env/big.bin": strings.Repeat("x", mcpwire.MaxFileBytes+1)})
-	repo, err := openGitCache(t.TempDir(), bare, 30*time.Second)
+	repo, err := openGitCache(context.Background(), t.TempDir(), bare, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestBuildSnapshotRefusesOversizedFilesAndSubmodules(t *testing.T) {
 	head := git(t, work, "rev-parse", "HEAD")
 	git(t, work, "update-index", "--add", "--cacheinfo", "160000,"+head+",env/sub")
 	git(t, work, "commit", "--quiet", "-m", "submodule")
-	repo, err = openGitCache(t.TempDir(), work, 30*time.Second)
+	repo, err = openGitCache(context.Background(), t.TempDir(), work, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

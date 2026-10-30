@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kjelly/pilot/internal/mcpwire"
@@ -97,6 +98,8 @@ type sshProc struct {
 
 	waitOnce sync.Once
 	exit     int
+	reaped   atomic.Bool
+	killOnce sync.Once
 }
 
 func startSSH(o *Options, argv []string, withStdin bool) (*sshProc, error) {
@@ -143,15 +146,36 @@ func (p *sshProc) wait() int {
 		default:
 			p.exit = 255
 		}
+		p.reaped.Store(true)
 	})
 	return p.exit
 }
 
+// waitCtx is wait that observes ctx: ssh may keep running after its stdout
+// closed (a remote that closed its descriptors, or a dropped connection
+// waiting for the exit status), so a signal kills it instead of waiting.
+func (p *sshProc) waitCtx(ctx context.Context) (int, error) {
+	done := make(chan int, 1)
+	go func() { done <- p.wait() }()
+	select {
+	case exit := <-done:
+		return exit, nil
+	case <-ctx.Done():
+		p.kill()
+		return 0, ctx.Err()
+	}
+}
+
 // kill ends ssh and every helper in its process group, closes its stdout
-// (a helper that left the group may still hold it) and reaps it.
+// (a helper that left the group may still hold it) and reaps it. It may be
+// called more than once; it does not signal once ssh has been reaped.
 func (p *sshProc) kill() {
-	_ = killGroup(p.cmd)
-	_ = p.pipe.Close()
+	p.killOnce.Do(func() {
+		if !p.reaped.Load() {
+			_ = killGroup(p.cmd)
+		}
+		_ = p.pipe.Close()
+	})
 	p.wait()
 }
 
@@ -235,7 +259,7 @@ func startSession(ctx context.Context, o *Options) (*sshProc, mcpwire.Ready, *Sn
 	if err != nil {
 		return nil, mcpwire.Ready{}, nil, err
 	}
-	repo, err := openGitCache(o.CacheDir, o.Profile.Source.URL, o.Profile.gitTimeout())
+	repo, err := openGitCache(ctx, o.CacheDir, o.Profile.Source.URL, o.Profile.gitTimeout())
 	if err != nil {
 		return nil, mcpwire.Ready{}, nil, &Error{Code: CodeGitFailed, Msg: "git cache: " + err.Error()}
 	}
@@ -287,7 +311,11 @@ func startSession(ctx context.Context, o *Options) (*sshProc, mcpwire.Ready, *Sn
 			proc.stop()
 			return nil, mcpwire.Ready{}, nil, &Error{Code: CodeRemoteRuntime, Msg: "session did not start: " + res.err.Error()}
 		}
-		if exit := proc.wait(); exit != 0 {
+		exit, err := proc.waitCtx(ctx)
+		if err != nil {
+			return nil, mcpwire.Ready{}, nil, err
+		}
+		if exit != 0 {
 			return nil, mcpwire.Ready{}, nil, remoteFailure(exit, proc.stderr.String())
 		}
 		return nil, mcpwire.Ready{}, nil, &Error{Code: CodeRemoteRuntime, Msg: "the remote ended before the session started"}
@@ -331,7 +359,11 @@ func Connect(ctx context.Context, o *Options) error {
 		proc.stop()
 		return ctx.Err()
 	}
-	if exit := proc.wait(); exit != 0 {
+	exit, err := proc.waitCtx(ctx)
+	if err != nil {
+		return err
+	}
+	if exit != 0 {
 		return remoteFailure(exit, proc.stderr.String())
 	}
 	return nil

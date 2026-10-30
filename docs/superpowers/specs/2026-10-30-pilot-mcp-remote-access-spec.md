@@ -272,7 +272,7 @@ profiles:
      `flock` 下執行：agent 會同時啟動每個 profile 的 MCP server，同一個 repo 的 profile 共用 cache，沒有鎖時
      會互相蓋掉 fetch 的 ref 或撞上 git 的 `config.lock`。`ls-remote` 與讀 object 不需要鎖。持有者在鎖內最多
      執行三個 git 指令（SHA 的兩次 fetch 加 `rev-parse`），每個都受 `git_seconds` 限制，所以等鎖最多等
-     三倍 `git_seconds`。
+     三倍 `git_seconds`；SIGINT/SIGTERM 會立刻結束等鎖。
 3. **Snapshot**：依 §6.1 產生 tar。
 4. **組遠端指令**（每個 token 都符合 §5.3 的字元規則，再逐一加單引號後以空白串接）：
 
@@ -314,7 +314,8 @@ profiles:
 - SIGINT/SIGTERM：關閉 ssh 的 stdin，最多等 5 秒後 kill ssh 的整個 process group；結束碼 130/143。
   一次性的 ssh 讀取（`changes` 的 tar、doctor 的 `remote-version`）收到 SIGINT/SIGTERM 時立刻 kill ssh 的
   process group 並關閉 stdout 管線（離開 group 的 helper 仍拿著它時也不會卡住），以 130/143 結束；輸出超過
-  上限時也直接 kill，不等 remote。
+  上限時也直接 kill，不等 remote。stdout 結束之後等 ssh 結束（取 exit status）的那一步也一樣：ssh 可能在
+  stdout 關閉後仍在執行（remote 關了 descriptor 卻還在跑、連線斷了在等 exit status），收到訊號就 kill。
 - 不自動重試。失敗由 agent 重新啟動 MCP server 處理。
 - 錯誤判讀見 §11。
 

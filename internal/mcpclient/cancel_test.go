@@ -59,7 +59,7 @@ func TestGitTimeoutEndsHelpersHoldingItsPipes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_SSH_COMMAND", helper)
-	repo, err := openGitCache(t.TempDir(), "ssh://git.example.invalid/org/config.git", timeout)
+	repo, err := openGitCache(context.Background(), t.TempDir(), "ssh://git.example.invalid/org/config.git", timeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestGitDoesNotWaitForAHelperThatLeftItsGroup(t *testing.T) {
 					}
 				}
 			})
-			repo, err := openGitCache(t.TempDir(), "ssh://git.example.invalid/org/config.git", tc.timeout)
+			repo, err := openGitCache(context.Background(), t.TempDir(), "ssh://git.example.invalid/org/config.git", tc.timeout)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -119,6 +119,9 @@ func TestGitDoesNotWaitForAHelperThatLeftItsGroup(t *testing.T) {
 			}
 			if elapsed := time.Since(start); elapsed > tc.limit {
 				t.Fatalf("resolve returned after %v, want at most %v", elapsed, tc.limit)
+			}
+			if _, err := os.Stat(pidFile); err != nil {
+				t.Skip("setsid -f did not start the helper (busybox setsid has no -f)")
 			}
 		})
 	}
@@ -185,6 +188,66 @@ func TestDoctorVersionStopsOnCancel(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Doctor did not return after cancellation")
+	}
+	waitGone(t, pidFile, 3*time.Second)
+}
+
+// A signal ends the wait for the cache lock another pilot-mcp holds;
+// the wait would otherwise last up to three Git timeouts.
+func TestOpenGitCacheStopsWaitingForTheLockOnCancel(t *testing.T) {
+	allowLocalRepos(t)
+	bare, _ := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	cacheDir := t.TempDir()
+	repo, err := openGitCache(context.Background(), cacheDir, bare, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(repo.dir+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if held, err := tryFlock(f); !held || err != nil {
+		t.Fatalf("hold the cache lock: %v %v", held, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	_, err = openGitCache(ctx, cacheDir, bare, 5*time.Second)
+	if !hasCode(err, CodeGitFailed) || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("err = %v, want the cancellation", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("returned %v after the start; the cancel came at 200ms", elapsed)
+	}
+}
+
+// ssh can outlive its stdout (a remote that closed its descriptors, a
+// dropped connection waiting for the exit status); a signal then kills it
+// instead of waiting for it to exit.
+func TestChangesStopsOnCancelAfterStdoutCloses(t *testing.T) {
+	p := testProfile("https://example.invalid/org/config.git", "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "close-linger", p)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("PILOT_MCP_FAKE_PID", pidFile)
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Changes(ctx, o, strings.Repeat("d", 32), t.TempDir())
+		done <- err
+	}()
+	waitForFile(t, pidFile)
+	time.Sleep(300 * time.Millisecond) // past the EOF, into the wait for ssh
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Changes did not return after cancellation")
 	}
 	waitGone(t, pidFile, 3*time.Second)
 }

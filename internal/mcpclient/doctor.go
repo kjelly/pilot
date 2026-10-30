@@ -87,7 +87,7 @@ func Doctor(ctx context.Context, o *Options) *Report {
 	var commit string
 	step("git", func() (string, error) {
 		var err error
-		if repo, err = openGitCache(o.CacheDir, o.Profile.Source.URL, o.Profile.gitTimeout()); err != nil {
+		if repo, err = openGitCache(ctx, o.CacheDir, o.Profile.Source.URL, o.Profile.gitTimeout()); err != nil {
 			return "", &Error{Code: CodeGitFailed, Msg: err.Error()}
 		}
 		if commit, err = repo.resolve(ctx, o.Profile.Source.Ref); err != nil {
@@ -163,7 +163,11 @@ func remoteVersion(ctx context.Context, o *Options, image string) (mcpwire.Versi
 		return mcpwire.Version{}, &Error{Code: CodeRemoteRuntime, Msg: "version output is larger than 64 KiB"}
 	}
 	out := bytes.NewBuffer(data)
-	if exit := proc.wait(); exit != 0 {
+	exit, err := proc.waitCtx(ctx)
+	if err != nil {
+		return mcpwire.Version{}, err
+	}
+	if exit != 0 {
 		return mcpwire.Version{}, remoteFailure(exit, proc.stderr.String())
 	}
 	var v mcpwire.Version

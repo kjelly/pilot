@@ -68,7 +68,11 @@ func Changes(ctx context.Context, o *Options, sessionID, into string) (*ChangesR
 		proc.kill()
 		return nil, &Error{Code: CodeChangesetInvalid, Msg: fmt.Sprintf("changes output is larger than %d bytes", mcpwire.MaxStreamBytes)}
 	}
-	if exit := proc.wait(); exit != 0 {
+	exit, err := proc.waitCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if exit != 0 {
 		return nil, remoteFailure(exit, proc.stderr.String())
 	}
 	if readErr != nil || len(data) > mcpwire.MaxStreamBytes {
