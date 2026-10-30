@@ -55,6 +55,11 @@ var deployPreviewOnlyFlag bool
 // --staging-attested-within-hours on both deploy and reconcile, which share
 // promptStageDecision.
 var stageFlag string
+
+// limitFlag backs --limit on deploy and reconcile: the answer to the limit
+// prompt, so a --force/--preview-only run (which takes every default) can still
+// be limited to some hosts. Interactively it pre-fills the prompt.
+var limitFlag string
 var stagingAttestedHoursFlag string
 
 // deployStdinIsTerminal is a variable so tests can simulate a missing TTY.
@@ -192,6 +197,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
 	deployCmd.Flags().BoolVar(&deployForceFlag, "force", false, "不顯示互動提示：各欄位採用精靈顯示的預設值，但預覽成功後會直接執行正式套用(略過預設為 No 的「要接著套用真正的變更嗎？」與正式套用確認)")
 	deployCmd.Flags().BoolVar(&deployPreviewOnlyFlag, "preview-only", false, "不顯示互動提示：跟 --force 一樣採用精靈顯示的預設值，但只跑預覽(--check --diff)，不做正式套用；預覽通過才以結束碼 0 結束")
+	deployCmd.Flags().StringVar(&limitFlag, "limit", "", "只對這些主機(或 Ansible 的主機樣式)執行，等同回答「要限定只套用到某台主機嗎？」；--force/--preview-only 也適用。其餘主機仍留在 inventory，只是不執行 play")
 	deployCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認(等同 -e confirm_staging=true / confirm_prod=true)；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
 	deployCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	deployPlanCmd.Flags().StringArrayVar(&deployPlanComponents, "component", nil, "contract component to include; repeatable")
@@ -323,7 +329,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
 		return err
 	}
+	if err := validateLimitFlag(limitFlag); err != nil {
+		return err
+	}
 	if deployActionsPath != "" {
+		if limitFlag != "" {
+			return fmt.Errorf("--limit 不能與 --actions 同時使用(scenario 自己回答 limit)")
+		}
 		if deployForceFlag {
 			return fmt.Errorf("--force 不能與 --actions 同時使用")
 		}
@@ -731,6 +743,15 @@ func validateStageFlags(stage, attestedHours string) error {
 		}
 	default:
 		return fmt.Errorf("--stage 只能是 sandbox、staging 或 prod：%q", stage)
+	}
+	return nil
+}
+
+// validateLimitFlag rejects a --limit that could not be one Ansible host
+// pattern on one line; whether the hosts exist is Ansible's check.
+func validateLimitFlag(limit string) error {
+	if strings.ContainsAny(limit, "\r\n\t ") {
+		return fmt.Errorf("--limit 不能含空白或換行(多台主機用逗號分隔)：%q", limit)
 	}
 	return nil
 }
@@ -3231,7 +3252,7 @@ func runSiteDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, i
 	extraVars := []string{"stage=" + decision.Stage, "patch_stage=" + decision.Stage}
 	extraVars = append(extraVars, decision.ConfirmVars...)
 
-	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", limitFlag, nil)
 	if err != nil {
 		return err
 	}
@@ -3509,7 +3530,7 @@ type catalogDeploymentRequest struct {
 }
 
 func promptCatalogBatchInputs(out io.Writer, inv string, entries []deployPlaybook) (catalogBatchInputs, error) {
-	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+	limit, err := runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", limitFlag, nil)
 	if err != nil {
 		return catalogBatchInputs{}, err
 	}
@@ -3695,7 +3716,7 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		tags = batchInputs.tags
 		vault = batchInputs.vault
 	} else {
-		limit, err = runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", "", nil)
+		limit, err = runTextPrompt(promptLimit, "要限定只套用到某台主機嗎？(--limit，留空 = 不限定)", limitFlag, nil)
 		if err != nil {
 			return err
 		}

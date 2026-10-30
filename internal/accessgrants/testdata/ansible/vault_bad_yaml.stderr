@@ -1,0 +1,68 @@
+[WARNING]: Failed to parse inventory with 'auto' plugin: no root 'plugin' key found, '/work/inv.yml' is not a valid YAML inventory plugin config file
+
+Failed to parse inventory with 'auto' plugin.
+
+<<< caused by >>>
+
+no root 'plugin' key found, '/work/inv.yml' is not a valid YAML inventory plugin config file
+Origin: <inventory plugin 'auto' with source '/work/inv.yml'>
+
+[WARNING]: Failed to parse inventory with 'yaml' plugin: YAML parsing failed: Colons in unquoted values must be followed by a non-space character.
+
+Failed to parse inventory with 'yaml' plugin.
+
+<<< caused by >>>
+
+YAML parsing failed: Colons in unquoted values must be followed by a non-space character.
+Origin: /work/bad-vault.yaml:1:34
+
+1 ipa_admin_password: Sup3rS3cretPw: oops
+                                   ^ column 34
+
+
+For example:
+
+    raw: echo 'name: ansible'
+
+Should be:
+
+    raw: "echo 'name: ansible'"
+
+[WARNING]: Failed to parse inventory with 'ini' plugin: YAML parsing failed: Colons in unquoted values must be followed by a non-space character.
+
+Failed to parse inventory with 'ini' plugin.
+
+<<< caused by >>>
+
+YAML parsing failed: Colons in unquoted values must be followed by a non-space character.
+Origin: /work/bad-vault.yaml:1:34
+
+1 ipa_admin_password: Sup3rS3cretPw: oops
+                                   ^ column 34
+
+
+For example:
+
+    raw: echo 'name: ansible'
+
+Should be:
+
+    raw: "echo 'name: ansible'"
+
+[WARNING]: Unable to parse /work/inv.yml as an inventory source
+[WARNING]: No inventory was parsed, only implicit localhost is available
+[ERROR]: YAML parsing failed: Colons in unquoted values must be followed by a non-space character.
+Origin: /work/bad-vault.yaml:1:34
+
+1 ipa_admin_password: Sup3rS3cretPw: oops
+                                   ^ column 34
+
+
+For example:
+
+    raw: echo 'name: ansible'
+
+Should be:
+
+    raw: "echo 'name: ansible'"
+

@@ -60,6 +60,13 @@ jobs:
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
+      # The issue-to-pr / pr-ready skills' gate scripts (claim, SHA-bound
+      # receipts, PR creation, Draft→Ready) ship their own unit tests; they
+      # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
+      # that drifts).
+      - name: Agent skill unit tests (make skill-test)
+        run: make skill-test
+
       - name: Duplicate YAML key check (repo-wide)
         run: python3 scripts/check-yaml-duplicate-keys.py
 
@@ -72,16 +79,16 @@ jobs:
     name: Playbook lint
     runs-on: ubuntu-latest
     # The Go -timeout values in the Makefile targets these steps run
-    # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m,
-    # freeipa-server-pool 5m = 35m) are hang caps: a hung step fails at its
-    # own cap, with go test's stack dump naming the test, and the job
+    # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m +
+    # 5m + 4m, freeipa-server-pool 5m = 44m) are hang caps: a hung step fails
+    # at its own cap, with go test's stack dump naming the test, and the job
     # normally takes about 20 minutes. The job budget must not be below the
     # sum of those caps, so a step is never cut off by an anonymous job
-    # cancellation; 40 is that 35m plus room for the toolchain setup, the
+    # cancellation; 50 is that 44m plus room for the toolchain setup, the
     # syntax-check loop and the alert-rules suite (no explicit cap).
     # TestCIJobTimeoutCoversMakeTargetCaps keeps this in step with the
     # Makefile.
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 

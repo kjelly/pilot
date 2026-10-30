@@ -44,7 +44,6 @@ var secretCommandTextAllowlist = map[string]int{
 	"playbooks/apply/pilot-session-store-apply.yml::Kinit admin (management-plane operations only — never shipped to this host)":                   1,
 	"playbooks/apply/tasks/freeipa-client-host-dns.yml::FreeIPA client DNS backfill — kinit admin into the dedicated ccache":                       1,
 	"playbooks/apply/tasks/freeipa-client-host-dns.yml::FreeIPA client DNS replace — kinit admin into the dedicated ccache":                        1,
-	"playbooks/apply/tasks/freeipa-host-annotations.yml::FreeIPA host annotations — kinit admin into the dedicated ccache":                         1,
 	"playbooks/apply/tasks/internal-endpoint-delete.yml::Kinit as IPA admin (delete sequence)":                                                     1,
 	"playbooks/check/freeipa-access-drift-probe.yml::Kinit admin for read-only drift probe":                                                        1,
 	"playbooks/check/freeipa-capability-probe.yml::Kinit admin for read-only capability probe":                                                     1,
@@ -287,10 +286,20 @@ func TestRegression_FreeIPAKinitTasksPassPasswordUnchanged(t *testing.T) {
 		// ccache is the KRB5CCNAME the task itself sets, "" when an
 		// enclosing block sets it.
 		ccache bool
+		// ccachePrefix is what the task puts before the cache path
+		// ("FILE:" or nothing).
+		ccachePrefix string
 	}{
 		{playbook: "freeipa-server-replica-apply.yml", task: "FreeIPA replica DNS — kinit admin (for dnsserver-mod)", secretVar: "ipa_admin_password"},
 		{playbook: "freeipa-server-replica-apply.yml", task: "FreeIPA replica DNS self-register — kinit admin into the dedicated ccache", secretVar: "ipa_enroll_password",
 			vars: map[string]any{"ipa_enroll_principal": "admin"}, ccache: true},
+		// Issue #168: the host annotations kinit was a shell printf pipe;
+		// the access-policy one was already stdin. Both feed the shared
+		// classification, so they run here as registered tasks.
+		{playbook: "tasks/freeipa-host-annotations.yml", task: "FreeIPA host annotations — kinit admin into the dedicated ccache", secretVar: "ipa_enroll_password",
+			vars: map[string]any{"ipa_enroll_principal": "admin", "ipa_annotations_ccache_file": map[string]any{"path": "@CCACHE@"}}, ccache: true},
+		{playbook: "tasks/freeipa-host-access-policy.yml", task: "FreeIPA host access policy — kinit admin into the dedicated ccache", secretVar: "ipa_enroll_password",
+			vars: map[string]any{"ipa_enroll_principal": "admin", "ipa_host_policy_ccache_file": map[string]any{"path": "@CCACHE@"}}, ccache: true, ccachePrefix: "FILE:"},
 		{playbook: "freeipa-server-apply.yml", task: "Kinit admin (for dnsconfig-mod)", secretVar: "ipa_admin_password"},
 		{playbook: "freeipa-identity-apply.yml", task: "Kinit admin", secretVar: "identity_admin_password",
 			vars: map[string]any{"identity_admin_principal": "admin"}},
@@ -334,6 +343,9 @@ func TestRegression_FreeIPAKinitTasksPassPasswordUnchanged(t *testing.T) {
 				// only that the task adds no templating of its own.
 				vars := map[string]any{tc.secretVar: unsafeString(password), "ipa_realm": realm, "ipa_replica_dns_ccache_file": map[string]any{"path": ccache}}
 				for k, v := range tc.vars {
+					if m, ok := v.(map[string]any); ok && m["path"] == "@CCACHE@" {
+						v = map[string]any{"path": ccache}
+					}
 					vars[k] = v
 				}
 				play := []map[string]any{{
@@ -372,8 +384,8 @@ func TestRegression_FreeIPAKinitTasksPassPasswordUnchanged(t *testing.T) {
 					t.Errorf("password %q: kinit args = %q, want the principal only", password, gotArgs)
 				}
 				if tc.ccache {
-					if got, _ := os.ReadFile(ccFile); string(got) != ccache {
-						t.Errorf("password %q: KRB5CCNAME = %q, want the dedicated cache %q", password, got, ccache)
+					if got, _ := os.ReadFile(ccFile); string(got) != tc.ccachePrefix+ccache {
+						t.Errorf("password %q: KRB5CCNAME = %q, want the dedicated cache %q", password, got, tc.ccachePrefix+ccache)
 					}
 				}
 				if _, err := os.Stat(marker); err == nil {

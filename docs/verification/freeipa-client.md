@@ -315,6 +315,81 @@ re-read 並三向驗證（desired 全部落地 + foreign 全部存活 + native l
 既有 C1–C11 刻意全部只讀本機檔案/服務正是為了避開這個限制；Phase F 內建讀回驗證取代了
 checklist row 的角色。真機證據見 §9 v1.6 變更紀錄（spec.md §26 L1-L13 全數 live 通過）。
 
+**Host annotations / access policy 的名稱解析前置檢查（v1.13，不是 checklist row）**：上面兩個
+reconcile 的 admin `kinit` 讀的是**主機當下的解析狀態**——MIT `kinit` 用 glibc `getaddrinfo` 解析
+`/etc/krb5.conf` 的 KDC 名稱，解析不到時在送出任何封包前就失敗（stderr 與「KDC 連不上」完全相同，
+KDC 日誌也看不到請求）。修復它的 `/etc/hosts` server-pool pin 是 mutation，`--check` 不會寫入，
+所以 resolver 被改過的主機（例：DNS 清單含公共 DNS、FreeIPA DNS 沒回應）過去在 preview 就以
+`no_log` 遮蔽的訊息失敗（issue #168）。現在兩個 task 檔在 kinit 之前、已 enroll 才 include 共用的
+`tasks/freeipa-client-kdc-preflight.yml`（唯讀、`check_mode: false`、有 `timeout`）：
+
+- 用主機自己的 resolver（`socket.getaddrinfo`，與 kinit/`ipa` 同一條 libc 路徑）解析 realm stanza
+  （`/etc/krb5.conf` 與 `krb5.conf.d`，含 `includedir`）的 KDC 名稱、選定的 admin endpoint FQDN 與
+  FreeIPA server pool FQDN。**必要名稱**有兩種：(a) admin endpoint FQDN（`ipa -e xmlrpc_uri=…` 要用；
+  輸出 `admin_unresolved`）；(b) 「沒有任何 `kdc` 名稱解析得到」（`kdc_unusable`：有 kdc 名稱、
+  沒有 IP literal 的 KDC、且全部解析不到）時的 KDC 名稱。kinit 只要**任一** KDC 名稱可解析就能運作
+  （OR，不是 AND），所以多餘的舊 KDC 名稱只印提示、不失敗。`master_kdc` 不是初始 AS exchange 的
+  KDC 清單，**不計入**（可解析的 `master_kdc` 不得遮住已死的 `kdc` 清單；不可解析的 `master_kdc`
+  也不使可用的 `kdc` 變成必要），與 `admin_server`／`kpasswd_server` 一樣只回報、不要求。
+- **KDC 值的解析契約**（對 MIT libkrb5 1.22.x 以 `profile_get_values` 與 kinit `KRB5_TRACE` 實測；
+  EL9 的 1.21.1、Ubuntu 24.04 的 1.20.1 未逐一重跑）：先依 profile 層解碼——以 `"` 開頭的值會處理
+  跳脫（`\n \t \b`，其他 `\x` 為 `x`）直到結尾引號、引號之後的文字丟棄、沒結尾的引號延伸到行尾；
+  未加引號的值照原樣，值內的 `#`／`;` **不是**註解——再取**第一個空白分隔的 token** 當 host，然後
+  拆 `host:port`、`[v6]` 或 `[v6]:port`、`https://host[:port]/path`；`tcp/`、`udp/` 前綴**不剝除**
+  （libkrb5 照字面查）；逗號不分隔。libkrb5 會拒絕（kinit 以 `Invalid argument` 結束）的值——
+  沒有方括號的兩個以上冒號、非數字或超過 65535 的 port、空 host、沒結尾的 `[`、`http://`——不會被
+  當成名稱探測，改列在 `unparsable` 並印提示。`kdc = "localhost:88"` 因此與 `kdc = localhost:88`
+  結果相同。區段與 include 也依 libkrb5 判讀（以真實 kinit 1.22.2 逐項實測，擷取在同一份 fixture 的
+  `structure_rows`）：子區段只在值剛好是 `{`（`kdc = h1{` 是普通值）或單獨一行 `{` 時開啟，以 `}` 開頭的行
+  （可接註解或其他文字）關閉；`Realm =` 的 `{` 可以在下一行；`includedir` 讀 `*.conf` 與無副檔名的檔案、
+  跳過 dot-file；`include` 只有在第 0 欄才會被跟隨（縮排的 `include` 不跟隨）；`[realms]` 區段標頭在第 0 欄
+  永遠有效，縮排的標頭只有在前面已經有某個區段開著時才被接受（檔案第一個區段就縮排、或只有註解在前，
+  libkrb5 會忽略它）；檔案以 `errors='replace'` 讀取。libkrb5 在整個 profile 載入失敗（例如縮排 `include`
+  之前已有區段時 kinit 報設定檔錯誤）的情況，probe 無法模擬，只會讀不到該檔。
+  比對用小寫並去掉結尾的 `.`（探測的名稱本身也去掉結尾的點）。
+- 狀態 `freeipa_client_kdc_preflight_state`：`ok`；`deferred`（**只**在 `--check`、pin 這個 task 本次
+  會變更（`freeipa_client_hosts_pool_pin` is changed）、且 pin 讓 kinit 與 FreeIPA 讀取需要的名稱
+  可解析時：`kdc_unusable` 的話至少**一個**解析不到的 KDC 名稱是 pool 成員（`kdc_names ∩ pool ≠ ∅`），
+  且每個解析不到的 admin endpoint 都是 pool 成員）——呼叫端略過整段依賴 kinit 的讀取，印出
+  「annotations/access policy 延後到 apply：`<host>` 解析不到 `<名稱>`（resolver: `<list>`）；pin 會讓
+  `<KDC∩pool 名稱>`［與 admin endpoint `<fqdn>`］可解析，這就是 kinit 與 FreeIPA 讀取需要的；krb5.conf
+  裡其他過時的 KDC 名稱留給 apply 的 server-list reconciliation」，apply 會先寫 pin 再 reconcile
+  （pin 在 playbook 裡早於這兩個 include）；其餘解析不到的情況一律 `failed`：assert 明說 `<host>`
+  解析不到哪些 FQDN、resolver 清單（`/etc/resolv.conf` 加 `resolvectl dns`）與可能原因（沒有待變更的
+  pin／pin 只釘 pool 成員（列出 pool），而 krb5.conf 的 KDC 名稱沒有任何一個是 pool 成員、或 admin
+  endpoint 不是 pool 成員／pin 已套用仍解析不到），**不遮蔽**（此檔沒有 secret，不用 `no_log`）。
+  真實 run 永遠不會 deferred。
+- **preview 不預測 failover reconciliation**：真實 apply 的 `freeipa-client-server-failover.yml` 會把
+  realm 檔改寫成 active pool、並移除已退役的 KDC 名稱，但它在 `--check` 下被跳過，preview 也**不**預測
+  這個移除。因此「krb5.conf 列出的每個 KDC 都在 pool 之外」（retired-only）的主機在 preview 仍會
+  `failed`（`not_covered_by_pin`），訊息明說 preview 不預測該 reconciliation，而不是斷言 apply 無法
+  修復；失敗訊息也不把「kinit 一定失敗」當成確定事實（SSSD 的 KDC locator 可能不經名稱查詢就提供 KDC
+  位址）：寫成 kinit 可能失敗、preview 把它當成風險而 fail closed；要通過 preview 請修 resolver、`/etc/hosts` 或 krb5.conf 裡過時的名稱。這是已知限制，不嘗試預測。
+- 限制：`--tags host-annotations`／`--tags host-access-policy` 不會執行 pin task（tag 是
+  `freeipa-client`、`C3`），pin 的 register 不存在，視為「沒有待變更的 pin」，所以這種 `--check`
+  在名稱解析不到時**明確失敗**而不是 deferred。
+- admin `kinit` 本身改成 `command` + `stdin`（原本是 shell `printf %s "{{ ipa_enroll_password }}" | kinit`，
+  密碼裡的 `$`、反引號會被 shell 展開；#118 清單移除這一項），不再讓 task 直接失敗：它 `register`
+  結果，交給共用的 `tasks/freeipa-client-kinit-result.yml` 只用結束碼與 stderr 分類——
+  `cannot_resolve`／`cannot_contact_kdc`／`preauth_failed`／`client_not_found`／`clock_skew`／`other`——
+  再以固定文字失敗（類別、principal、主機、kinit rc；**絕不輸出原始 stderr**，分類 task 是
+  `no_log`）。同一個 stderr（`Cannot contact any KDC for realm …`）同時代表「名稱解析不到」與「KDC
+  port 沒人聽」（MIT krb5 1.22.2 實測），所以只在 preflight 有**必要**名稱解析不到（`required_unresolved`）時才歸 `cannot_resolve`；kinit 用不到的過時名稱（另一個 KDC 可解析）不算證據，port 不通仍是 `cannot_contact_kdc`。
+  access policy 的 kinit 同樣修正（它原本已是 stdin，但失敗一樣被遮蔽）。
+- 不在此次範圍：resolver 偏離偵測（`freeipa-dns-client`／`pilot doctor`／`~domain` routing）另開 issue；
+  沒有新的 C-number row（理由同 annotations：`pilot verify` 探針沒有 Kerberos ticket）。
+  驗證：`internal/spec/freeipa_client_kdc_preflight_regression_test.go`（以真 python3 跑探針、以真
+  `ansible-playbook` 跑 `check × pin pending × pin 涵蓋` 狀態機與 kinit 分類、fixture 來自本機真實
+  MIT kinit 1.22.2 擷取，無法在本機重現的 libkrb5 訊息有明確標示不是 live capture）。vm-target 實跑
+  （AlmaLinux 9 FreeIPA server + Ubuntu 24.04 client，resolver 被改過、`/etc/hosts` pin 被移除；
+  healthy baseline L3→L6、drift 的 `--check` deferred／`--tags` 明確失敗／real apply 自行修復、錯誤
+  密碼與 KDC 不通的分類、stale+active KDC 延後與 retired-only 失敗、帶引號的 KDC 值、Ubuntu 1.20.1／EL9
+  1.21.1 的 libkrb5 解析交叉檢查）見
+  [`docs/evidence/freeipa-client/2026-10-29-9e9f2b3e.md`](../evidence/freeipa-client/2026-10-29-9e9f2b3e.md)；
+  `Clock skew too great` 無法在 live 重現。OR 規則與 KDC 值解析契約（含 libkrb5 實測擷取
+  `internal/spec/testdata/kdc-preflight/libkrb5-kdc-values.json`）由上面的 regression test 鎖住，
+  live 驗證以 evidence 記錄的 tested revision 為準。
+
 **Host access policy（v1.9，不是 checklist row）**：annotations 之後，
 `tasks/freeipa-host-access-policy.yml` 被 include 一次（兩個 include 都以 `apply: tags` 把
 tag 帶進被 include 的 task）。它把 `pilot_ssh_recording`（`hosts.yml` 的 `ssh_recording:`
@@ -537,3 +612,4 @@ subprocess timeout——均與 freeipa-client DNS 無關，非本次改動造成
 | 2026-09-24 | v1.10 | Checklist 不變。實作面：(1) 全新 AlmaLinux 9 client 沒有 `dig`，DNS 預檢 rc=127 被 fail-closed gate 擋下——現在先檢查、缺少就安裝（EL `bind-utils`、Debian 經 apt framework 的 `bind9-dnsutils`），check-mode preview 對沒有 dig 的主機印訊息後 `end_host`；(2) EL 的 ipa-client 4.13.1 把 realm 區塊寫在 `/etc/krb5.conf.d/freeipa-realm`，failover reconcile 改為先找出實際檔案；(3) EL 上 `sssd-sudo.socket` 預設停用、socket 啟動的 sudo responder 連不到 backend，C8 在 EL 永遠 "not allowed"——RedHat 改為在 `services=` 保留顯式 `sudo` responder（NFS client overlay 寫同一行）；(4) 各 include 補上 `apply` tags、`ipa_cfg`/keytab stat 補 C11、auditd 改走 apt framework。4 台 vm-target topology（含一般 EL client）L3→L6 PASS，見 `docs/evidence/include-apply-tags-apt-framework/2026-09-24-dfb58a5.md` | pilot |
 | 2026-10-12 | v1.11 | Checklist 不變。password-auth drop-in（`/etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf`）原本不驗證就寫入並 restart sshd：`sshd_config.d` 裡有其他壞掉的檔案時，restart 失敗、sshd 停在 down，下一次 run 看到 drop-in 沒變也不會再試。現在寫入時先用 `sshd -t -f` 單獨驗證，再對整份設定跑 `sshd -t`，通過才 **reload**（不再 restart；reload 失敗時正在執行的 sshd 不受影響）。任何一步失敗，rescue 把 drop-in 放回這次 run 開始時的樣子並讓 run 失敗，下一次 run 會重試。`playbooks/decommission/freeipa-client-decommission.yml` 移除這個 drop-in 時也一樣（失敗時放回 drop-in，decommission 可 resume）。由 `internal/spec/sshd_config_write_regression_test.go::TestRegression_SshdConfigWritesAreValidatedAndReverted`（allowlist 清空）與 `sshd_config_write_behavior_test.go` 鎖住。另外，`ipa-client-install`（enroll）與 `ipa-client-install --uninstall`（decommission）自己會 restart sshd：設定壞掉時 restart 失敗、sshd 停在 down，uninstall 還會做到一半就停（SSSD 設定已移除、`/etc/ipa/default.conf` 還在；2026-10-12 在 AlmaLinux 9 實測）。兩者之前現在都先跑 `sshd -t`，失敗就不執行 installer、什麼都不改；`TestRegression_IpaInstallersRunAfterAnSshdCheck` 對全 repo 鎖住（freeipa-server、replica、realm-replacement 的 installer 列在 allowlist，各需自己的實跑）；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-aca4915.md`](../evidence/sshd-config-writes/2026-10-12-aca4915.md) | pilot |
 | 2026-10-12 | v1.12 | Checklist 不變。enrollment 之前的 `sshd -t` 移到 pre_tasks、任何變更與套件安裝之前（`always`，唯讀，`--check` 也會執行；仍沿用 enrollment 的 `creates:`）：`dnf install` FreeIPA 套件本身也會讓 sshd 被 restart（2026-10-12 在全新 AlmaLinux 9 主機實測：systemd「Queuing reload/restart jobs for marked units」），v1.11 放在 `ipa-client-install` 正前方的檢查在全新主機上來不及；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住，並檢查會跑 installer 的 play 不得在 `sshd -t` 之前安裝套件；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |
+| 2026-10-29 | v1.13 | Checklist 不變。issue #168：已 enroll 主機的 resolver 被改過、解析不到 `krb5.conf` 的 KDC 名稱時，`--check` preview 在 host annotations 的 admin `kinit` 失敗且被 `no_log` 遮蔽；修復它的 `/etc/hosts` server-pool pin 是 mutation，preview 不會寫入。新增 `tasks/freeipa-client-kdc-preflight.yml`（kinit 之前以主機自己的 resolver 解析 KDC 與 FreeIPA 名稱，`--check` 且 pin 待變更時 deferred、其餘解析不到一律不遮蔽地失敗並列出 host/FQDN/resolver）與 `tasks/freeipa-client-kinit-result.yml`（kinit 失敗分類，不輸出原始 stderr），接到 annotations 與 access policy 兩個 task 檔；annotations 的 kinit 由 shell `printf` pipe 改為 `command` + `stdin`。pool pin 加 `register: freeipa_client_hosts_pool_pin`。PR #180 review 後就地修正：preflight 的必要名稱改為 OR（任一 KDC 名稱可解析即可，pin 只需涵蓋其中一個＋每個解析不到的 admin endpoint；retired-only 在 preview 仍失敗、不預測 failover reconciliation），KDC 值依 libkrb5 解碼（引號、空白、`host:port`／`[v6]`／https），`master_kdc` 不計入，kinit 分類只在必要名稱解析不到時才歸 `cannot_resolve`。resolver 偏離偵測不在此次範圍（另開 issue）。見 §6；vm-target 實跑見 [`docs/evidence/freeipa-client/2026-10-29-9e9f2b3e.md`](../evidence/freeipa-client/2026-10-29-9e9f2b3e.md) | pilot |

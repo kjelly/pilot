@@ -1,0 +1,87 @@
+
+PLAY [Probe live FreeIPA access-governance state for drift inspection] *********
+
+TASK [Gate: drift probe input is complete] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Load canonical roster under a namespace] *********************************
+ok: [ipa1]
+
+TASK [Gate: canonical roster is available] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the vault admin password] *******************************************
+[ERROR]: Task failed: Finalization of task args for 'ansible.builtin.set_fact' failed: Error while resolving value for 'identity_admin_password': Error rendering template: division by zero
+
+Task failed.
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:124:11
+
+122     - name: "Resolve the FreeIPA admin password from the vault variable"
+123       block:
+124         - name: "Read the vault admin password"
+              ^ column 11
+
+<<< caused by >>>
+
+Finalization of task args for 'ansible.builtin.set_fact' failed.
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:125:11
+
+123       block:
+124         - name: "Read the vault admin password"
+125           ansible.builtin.set_fact:
+              ^ column 11
+
+<<< caused by >>>
+
+Error while resolving value for 'identity_admin_password'.
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:126:38
+
+124         - name: "Read the vault admin password"
+125           ansible.builtin.set_fact:
+126             identity_admin_password: "{{ ipa_admin_password | default('', true) | string }}"
+                                         ^ column 38
+
+<<< caused by >>>
+
+Error rendering template: division by zero
+Origin: /work/tmpl-vault.yaml:1:21
+
+1 ipa_admin_password: "{{ 1 / 0 }}"
+                      ^ column 21
+
+fatal: [ipa1]: FAILED! => {"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result", "changed": false}
+
+TASK [Treat an unresolvable vault admin password as missing] *******************
+ok: [ipa1]
+
+TASK [Read the roster admin password] ******************************************
+ok: [ipa1]
+
+TASK [Check the resolved FreeIPA admin password length] ************************
+ok: [ipa1]
+
+TASK [Gate: a FreeIPA admin password is available (vault or roster)] ***********
+[ERROR]: Task failed: Action failed: No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short.
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:174:7
+
+172       tags: [always]
+173
+174     - name: "Gate: a FreeIPA admin password is available (vault or roster)"
+          ^ column 7
+
+fatal: [ipa1]: FAILED! => {
+    "assertion": "identity_admin_password_ok | bool",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short."
+}
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=6    changed=0    unreachable=0    failed=1    skipped=0    rescued=1    ignored=0   
+

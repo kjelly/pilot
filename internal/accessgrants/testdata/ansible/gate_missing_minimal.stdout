@@ -1,0 +1,38 @@
+ipa1 | SUCCESS => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ipa1 | SUCCESS => {
+    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",
+    "changed": false
+}
+ipa1 | SUCCESS => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ipa1 | SUCCESS => {
+    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",
+    "changed": false
+}
+ipa1 | SUCCESS => {
+    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",
+    "changed": false
+}
+ipa1 | SUCCESS => {
+    "censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result",
+    "changed": false
+}
+[ERROR]: Task failed: Action failed: No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short.
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:174:7
+
+172       tags: [always]
+173
+174     - name: "Gate: a FreeIPA admin password is available (vault or roster)"
+          ^ column 7
+
+ipa1 | FAILED! => {
+    "assertion": "identity_admin_password_ok | bool",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "No usable FreeIPA admin password for the drift probe. Set ipa_admin_password (at least 8 characters) in the vault vars file (default <inventory dir>/.vault/main.yaml, or --vars-file), or freeipa.admin.password (at least 8 characters, not a template) in the roster. Both are missing or too short."
+}

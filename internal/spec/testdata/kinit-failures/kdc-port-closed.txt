@@ -1,0 +1,7 @@
+# source: live capture, MIT krb5 1.22.2 kinit (2026-10-29), krb5.conf kdc = 127.0.0.1:1 (nothing listening)
+# class: cannot_contact_kdc
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Cannot contact any KDC for realm 'IPA.PILOT.INTERNAL' while getting initial credentials

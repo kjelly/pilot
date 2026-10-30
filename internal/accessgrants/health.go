@@ -4,6 +4,7 @@ package accessgrants
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -48,6 +49,31 @@ type Health struct {
 	ReconcileRequiredTemporaryGrantCount int `json:"reconcile_required_temporary_grant_count"`
 
 	Status string `json:"status"`
+
+	// ProbeError is a one-line, length-capped reason the drift probe could
+	// not complete, set only with Status unknown. It carries only the
+	// diagnosis DriftProbe derived from ansible's output as pilot's own fixed
+	// text (never ansible's message text, which can echo a value expanded
+	// from the vault vars file; see probe_failure.go), so "FreeIPA
+	// unreachable" and "no usable admin password" are told apart.
+	ProbeError string `json:"probe_error,omitempty"`
+}
+
+// maxProbeErrorLen caps Health.ProbeError. DriftProbe already reduces
+// ansible's output to its failure message, so this only bounds an unusually
+// long one; it leaves room for the password gate's message, which names both
+// admin-password sources.
+const maxProbeErrorLen = 600
+
+// summarizeProbeError collapses err to a single capped line with any
+// password-shaped key: value pair blanked. It is applied on top of DriftProbe's
+// own extraction so no other error path can put a secret on the health line.
+func summarizeProbeError(err error) string {
+	msg := redactSecretish(strings.Join(strings.Fields(err.Error()), " "))
+	if r := []rune(msg); len(r) > maxProbeErrorLen {
+		msg = string(r[:maxProbeErrorLen]) + "..."
+	}
+	return msg
 }
 
 // HealthOptions configures a single health evaluation.
@@ -64,6 +90,8 @@ type HealthOptions struct {
 // failure (FreeIPA unreachable) is NOT propagated as an error — it is
 // reported as Status: unknown with FreeIPAReachable: false, since "cannot
 // determine health" is itself a valid, non-fatal health answer (§16.3).
+// Health.ProbeError carries the one-line reason, so a missing admin
+// password is not mistaken for an unreachable FreeIPA.
 func EvaluateHealth(ctx context.Context, opts HealthOptions) (Health, error) {
 	now := opts.Now
 	if now.IsZero() {
@@ -76,6 +104,7 @@ func EvaluateHealth(ctx context.Context, opts HealthOptions) (Health, error) {
 	report, driftErr := DriftOnce(ctx, driftOpts)
 	if driftErr != nil {
 		health.Status = HealthUnknown
+		health.ProbeError = summarizeProbeError(driftErr)
 		return health, nil
 	}
 	health.FreeIPAReachable = true

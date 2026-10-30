@@ -1,0 +1,2 @@
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+[WARNING]: Host 'ipa1' is using the discovered Python interpreter at '/home/user/.local/share/mise/shims/python3.13', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.19/reference_appendices/interpreter_discovery.html for more information.
