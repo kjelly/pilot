@@ -305,17 +305,14 @@ func TestRunChangesRejectsWhatTheNextSnapshotWouldReject(t *testing.T) {
 	}
 }
 
-// A check the session's unchanged base already fails with the same code
+// Every check runs on the whole next snapshot: a base that already fails
 // (an image upgraded since the session started now flags a file the edit
-// did not touch) is reported, not blamed on the changes; a different
-// failure the changes add is still refused.
-func TestRunChangesDoesNotBlameTheChangesForTheBase(t *testing.T) {
-	secret := []byte("grafana_admin_password: \"hunter2\"\n")
-	run := func(t *testing.T, edit func(work string)) (string, error) {
+// did not touch) refuses the export too, and never hides a failure the
+// changes add.
+func TestRunChangesRefusesWhenTheBaseAlreadyFails(t *testing.T) {
+	run := func(t *testing.T, breakBase func(source string), edit func(work string)) error {
 		fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(work string) {
-			// Stand-in for a newer image: the unchanged base now fails
-			// the secret policy.
-			mustWrite(t, filepath.Join(filepath.Dir(work), "source", "group_vars", "all.yml"), secret)
+			breakBase(filepath.Join(filepath.Dir(work), "source"))
 			edit(work)
 		})
 		fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
@@ -324,30 +321,40 @@ func TestRunChangesDoesNotBlameTheChangesForTheBase(t *testing.T) {
 		}
 		id := mustReadyID(t, fs.stdout.String())
 		cfg := *fs.cfg
-		var stderr bytes.Buffer
-		cfg.Stdout, cfg.Stderr = io.Discard, &stderr
-		err := RunChanges(&cfg, id)
-		return stderr.String(), err
+		cfg.Stdout = io.Discard
+		return RunChanges(&cfg, id)
 	}
-	t.Run("same check", func(t *testing.T) {
-		stderr, err := run(t, func(work string) {
-			if err := os.MkdirAll(filepath.Join(work, "host_vars"), 0o700); err != nil {
-				t.Fatal(err)
+	addHostVars := func(work string) {
+		if err := os.MkdirAll(filepath.Join(work, "host_vars"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(work, "host_vars", "web-1.yml"), []byte("b: 1\n"))
+	}
+	secret := []byte("grafana_admin_password: \"hunter2\"\n")
+	cases := map[string]struct {
+		breakBase func(source string)
+		edit      func(work string)
+		want      string
+	}{
+		"base secret, harmless edit": {
+			func(source string) { mustWrite(t, filepath.Join(source, "group_vars", "all.yml"), secret) },
+			addHostVars, "SECRET_POLICY_VIOLATION"},
+		"base env, added secret": {
+			func(source string) { mustWrite(t, filepath.Join(source, "hosts.yml"), []byte(hostsFor("staging"))) },
+			func(work string) { mustWrite(t, filepath.Join(work, "group_vars", "dashboard.yml"), secret) }, "ENV_MISMATCH"},
+		"base too large, added secret": {
+			func(source string) {
+				mustWrite(t, filepath.Join(source, "group_vars", "all.yml"), bytes.Repeat([]byte("#"), mcpwire.MaxFileBytes+1))
+			},
+			func(work string) { mustWrite(t, filepath.Join(work, "group_vars", "dashboard.yml"), secret) }, "SNAPSHOT_TOO_LARGE"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := run(t, tc.breakBase, tc.edit); CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want CHANGESET_INVALID for %s", err, tc.want)
 			}
-			mustWrite(t, filepath.Join(work, "host_vars", "web-1.yml"), []byte("b: 1\n"))
 		})
-		if err != nil || !strings.Contains(stderr, "base commit already fails SECRET_POLICY_VIOLATION") {
-			t.Fatalf("err = %v, stderr = %q; want the changes exported with a warning", err, stderr)
-		}
-	})
-	t.Run("different check", func(t *testing.T) {
-		_, err := run(t, func(work string) {
-			mustWrite(t, filepath.Join(work, "hosts.yml"), []byte(hostsFor("prod")+"  web-2:\n    ansible_host: \"192.0.2.11\"\n    roles: [docker]\n"))
-		})
-		if CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), "ENV_MISMATCH") {
-			t.Fatalf("err = %v, want CHANGESET_INVALID for ENV_MISMATCH", err)
-		}
-	})
+	}
 }
 
 // A tracked inventory.yml is regenerated in the workspace and never

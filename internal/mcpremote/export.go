@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -89,10 +88,10 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 // session's snapshot) to the same checks a snapshot gets on import: the
 // file-list rules and the content checks. An exported change therefore
 // never makes every later session fail. Unchanged files come from the
-// session's source/, changed ones from contents. A check the unchanged
-// source already fails with the same code (the image was upgraded since
-// the session started, for example) is not the changes' doing: it is
-// reported on stderr and the changes are exported.
+// session's source/, changed ones from contents. A failure in a file the
+// edit did not touch (the image was upgraded since the session started,
+// for example) refuses the export too: every check runs on the whole
+// next snapshot, so none is skipped.
 func checkNextSnapshot(cfg *Config, dir string, state SessionState, changes []mcpwire.Change, contents map[string][]byte) error {
 	if len(changes) == 0 {
 		return nil
@@ -125,24 +124,8 @@ func checkNextSnapshot(cfg *Config, dir string, state SessionState, changes []mc
 		data[p] = b
 		files = append(files, mcpwire.FileEntry{Path: p, Size: int64(len(b))})
 	}
-	sourcePaths := make([]string, 0, len(state.SourceFiles))
-	for p := range state.SourceFiles {
-		sourcePaths = append(sourcePaths, p)
-	}
-	sort.Strings(sourcePaths)
-
 	if err := checkFileSet(files); err != nil {
-		return refusedNextSnapshot(cfg, err, sourceDir, func() error {
-			entries := make([]mcpwire.FileEntry, 0, len(sourcePaths))
-			for _, p := range sourcePaths {
-				info, err := os.Stat(filepath.Join(sourceDir, filepath.FromSlash(p)))
-				if err != nil {
-					return err
-				}
-				entries = append(entries, mcpwire.FileEntry{Path: p, Size: info.Size()})
-			}
-			return checkFileSet(entries)
-		})
+		return refusedNextSnapshot(err)
 	}
 
 	parent := cfg.TmpDir
@@ -166,28 +149,17 @@ func checkNextSnapshot(cfg *Config, dir string, state SessionState, changes []mc
 		}
 	}
 	if err := checkSnapshotContent(cfg, root, state.Env, paths); err != nil {
-		return refusedNextSnapshot(cfg, err, sourceDir, func() error {
-			return checkSnapshotContent(cfg, sourceDir, state.Env, sourcePaths)
-		})
+		return refusedNextSnapshot(err)
 	}
 	return nil
 }
 
 // refusedNextSnapshot reports a check the next snapshot fails as an
-// invalid changeset naming the code the import would return, unless the
-// session's unchanged source fails the same check with the same code.
-func refusedNextSnapshot(cfg *Config, err error, sourceDir string, sourceCheck func() error) error {
+// invalid changeset, naming the code the import would return.
+func refusedNextSnapshot(err error) error {
 	var e *Error
 	if !errors.As(err, &e) || e.Code == mcpwire.CodeRuntimeError {
 		return err
-	}
-	if _, statErr := os.Stat(sourceDir); statErr == nil {
-		if srcErr := sourceCheck(); srcErr != nil && CodeOf(srcErr) == e.Code {
-			if cfg.Stderr != nil {
-				fmt.Fprintf(cfg.Stderr, "pilot mcp remote: warning: the session's base commit already fails %s (%v); exporting the changes anyway\n", e.Code, srcErr)
-			}
-			return nil
-		}
 	}
 	return errorf(mcpwire.CodeChangesetInvalid, "the next session would refuse the configuration with these changes: %s: %v", e.Code, e.Err)
 }

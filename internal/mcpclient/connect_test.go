@@ -317,6 +317,58 @@ func TestChangesReportsAPartialImport(t *testing.T) {
 	}
 }
 
+// A case-only rename (delete a.yml, add A.yml) is accepted: deletes are
+// applied before writes, so it also works on a case-insensitive clone.
+func TestChangesAppliesACaseOnlyRename(t *testing.T) {
+	allowLocalRepos(t)
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all.yml": "a: 1\n"})
+	id := strings.Repeat("d", 32)
+	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
+		change("group_vars/ALL.yml", mcpwire.OpAdd, "", "a: 1\n"),
+		change("group_vars/all.yml", mcpwire.OpDelete, "", ""),
+	}}
+	tarPath := changesTar(t, m, map[string]string{"group_vars/ALL.yml": "a: 1\n"})
+	p := testProfile(bare, "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes", p)
+	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
+	clone := t.TempDir()
+	git(t, clone, "clone", "--quiet", bare, ".")
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	res, err := Changes(context.Background(), o, id, clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.Deleted, ",") != "prod/group_vars/all.yml" || strings.Join(res.Written, ",") != "prod/group_vars/ALL.yml" {
+		t.Fatalf("result = %+v", res)
+	}
+	if got, _ := os.ReadFile(filepath.Join(clone, "prod", "group_vars", "ALL.yml")); string(got) != "a: 1\n" {
+		t.Fatalf("ALL.yml = %q", got)
+	}
+}
+
+// An added path is absent at base and HEAD in a clean clone; if it exists
+// on disk it names another file (on macOS, a case or normalization
+// variant), and writing it would overwrite that file.
+func TestChangesRefusesAnAddThatExistsOnDisk(t *testing.T) {
+	allowLocalRepos(t)
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all.yml": "a: 1\n"})
+	id := strings.Repeat("d", 32)
+	// On Linux a directory stands in for the colliding file.
+	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
+		change("group_vars", mcpwire.OpAdd, "", "x\n"),
+	}}
+	tarPath := changesTar(t, m, map[string]string{"group_vars": "x\n"})
+	p := testProfile(bare, "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes", p)
+	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
+	clone := t.TempDir()
+	git(t, clone, "clone", "--quiet", bare, ".")
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	if _, err := Changes(context.Background(), o, id, clone); !hasCode(err, CodeChangesetConflict) || !strings.Contains(err.Error(), "already exists on disk") {
+		t.Fatalf("err = %v, want CHANGESET_CONFLICT for an add that exists on disk", err)
+	}
+}
+
 func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 	id := strings.Repeat("e", 32)
 	base := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc",

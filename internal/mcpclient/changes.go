@@ -111,11 +111,15 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		if _, dup := want[c.Path]; dup {
 			return m, nil, invalid("%s listed twice", c.Path)
 		}
-		// On a case-insensitive clone (macOS) these would be one file.
-		if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
-			return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
+		// Two files written here would be one file on a case-insensitive
+		// clone (macOS). A delete is applied before every write, so a
+		// case-only rename (delete a.yml, add A.yml) is fine.
+		if c.Op != mcpwire.OpDelete {
+			if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
+				return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
+			}
+			folded[mcpwire.FoldPath(c.Path)] = c.Path
 		}
-		folded[mcpwire.FoldPath(c.Path)] = c.Path
 		switch c.Op {
 		case mcpwire.OpAdd, mcpwire.OpModify, mcpwire.OpDelete:
 		default:
@@ -249,14 +253,29 @@ func applyChanges(ctx context.Context, o *Options, m mcpwire.ChangesManifest, co
 			return nil, err
 		}
 	}
+	// Deletes first, so a case-only rename works on a case-insensitive
+	// clone; then writes.
 	for _, a := range apply {
-		name := filepath.FromSlash(a.full)
-		if a.change.Op == mcpwire.OpDelete {
-			if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return nil, partlyApplied(res, a.full, err)
-			}
-			res.Deleted = append(res.Deleted, a.full)
+		if a.change.Op != mcpwire.OpDelete {
 			continue
+		}
+		if err := root.Remove(filepath.FromSlash(a.full)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, partlyApplied(res, a.full, err)
+		}
+		res.Deleted = append(res.Deleted, a.full)
+	}
+	for _, a := range apply {
+		if a.change.Op == mcpwire.OpDelete {
+			continue
+		}
+		name := filepath.FromSlash(a.full)
+		// An added path is absent at base and HEAD and the clone is clean,
+		// so if it exists on disk it names another file: the file system
+		// folds case or Unicode normalization (macOS) and the two collide.
+		if a.change.Op == mcpwire.OpAdd {
+			if _, err := root.Lstat(name); err == nil {
+				return nil, partlyApplied(res, a.full, conflict("%s already exists on disk as another file (a case-insensitive or normalizing file system?)", a.full))
+			}
 		}
 		if err := writeInRoot(root, name, contents[a.change.Path]); err != nil {
 			return nil, partlyApplied(res, a.full, err)
@@ -268,12 +287,20 @@ func applyChanges(ctx context.Context, o *Options, m mcpwire.ChangesManifest, co
 
 // partlyApplied reports a write that failed after others succeeded. The
 // clone was clean before the import, so Git shows exactly what was done.
+// A coded error keeps its code.
 func partlyApplied(res *ChangesResult, failed string, err error) error {
-	done := append(append([]string{}, res.Written...), res.Deleted...)
-	if len(done) == 0 {
-		return fmt.Errorf("%s: %w", failed, err)
+	msg := fmt.Sprintf("%s: %v", failed, err)
+	var coded *Error
+	if errors.As(err, &coded) {
+		msg = fmt.Sprintf("%s: %s", failed, coded.Msg)
 	}
-	return fmt.Errorf("%s: %w; already applied before the failure: %s (the clone was clean, so `git status` shows them)", failed, err, strings.Join(done, ", "))
+	if done := append(append([]string{}, res.Written...), res.Deleted...); len(done) > 0 {
+		msg += fmt.Sprintf("; already applied before the failure: %s (the clone was clean, so `git status` shows them)", strings.Join(done, ", "))
+	}
+	if coded != nil {
+		return &Error{Code: coded.Code, Msg: msg}
+	}
+	return errors.New(msg)
 }
 
 // refuseSymlinkComponents rejects a target any of whose existing path

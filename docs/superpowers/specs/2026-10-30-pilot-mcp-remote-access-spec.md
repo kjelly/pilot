@@ -340,9 +340,9 @@ profiles:
    `mcp remote changes --protocol v1 --env <env> <session-id>`，stdout 收到 tar（§7.3）。超過 80 MiB 時
    直接結束 ssh（remote 還在寫一個沒人讀的 pipe，等它結束會永遠卡住），報 `CHANGESET_INVALID`。
 3. 驗證 tar：第一個 entry 是 manifest；其餘 entry 只能是 regular file，路徑規則同 §6.2，必須正好是
-   manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`；manifest 的路徑經
-   `mcpwire.FoldPath`（不分大小寫、忽略 HFS+ 略過的 code point）比較也不得重複（macOS 的 clone 上會是
-   同一個檔案）。任何不符都報 `CHANGESET_INVALID`，一個檔案都不寫。
+   manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`；要寫入（add/modify）的
+   路徑經 `mcpwire.FoldPath`（不分大小寫、忽略 HFS+ 略過的 code point）比較也不得重複（macOS 的 clone
+   上會是同一個檔案）。任何不符都報 `CHANGESET_INVALID`，一個檔案都不寫。
 4. 檢查 `--into`：等於 `git rev-parse --show-toplevel`（是 repo 的最上層）、`origin` 的 URL 與 profile 的
    `source.url` 指向同一個 repo、`git status --porcelain` 為空，且 base commit（session 的 commit_sha）
    在本機存在（不存在就從 `origin` fetch）。「同一個 repo」的判斷：把兩個 URL 都解析成 host、owner、
@@ -353,7 +353,10 @@ profiles:
    （`git diff --quiet <base> HEAD -- <path>`）。任何一個不符就報 `CHANGESET_CONFLICT`，一個檔案都不寫。
 8. 寫入前對每個目標路徑的每一層既有元件做 `Lstat`，任何一層是 symlink 就報 `CHANGESET_CONFLICT`
    （`os.Root` 只防止寫出根目錄，仍會跟隨根目錄內的 symlink）。之後經 `os.Root`（以 `--into` 為根）
-   以「同目錄暫存檔 + rename」寫入新增/修改的檔案、刪除被刪的檔案。暫存檔名帶隨機字串（被殺掉的上一次
+   先刪除被刪的檔案，再以「同目錄暫存檔 + rename」寫入新增/修改的檔案（先刪除，大小寫不同的改名在
+   不分大小寫的檔案系統上也能正確套用）。`add` 的路徑在 base 與 `HEAD` 都不存在、clone 也是乾淨的，
+   所以寫入前它若已存在於磁碟，代表它指到另一個檔案（檔案系統不分大小寫或正規化 Unicode，例如 macOS
+   上 NFC 與 NFD 的同名檔），報 `CHANGESET_CONFLICT`，不覆寫。暫存檔名帶隨機字串（被殺掉的上一次
    留下的暫存檔不會擋住之後的匯入），rename 失敗時刪除暫存檔。寫到一半失敗時，錯誤列出已經寫入或刪除的
    路徑（`--into` 在匯入前是乾淨的，`git status` 會列出它們）。
 9. stdout 列出變更清單，並提示：用 `git diff` 審核，自行 commit 並開 PR；PR 會經過設定 repo
@@ -514,9 +517,10 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   內容檢查（每台主機的 `env`、路徑引用範圍、secret policy）。沒變更的檔案取自 session 的 `source/`（不是
   workspace 裡重新產生的版本），有變更的取自 workspace。例如在 prod 的 edit session 新增一台沒有 `env`
   的主機（等於 sandbox），會在匯出時被拒絕，而不是 commit 之後讓之後每個 session 都 `ENV_MISMATCH`。
-  沒變更的 source 本身就以同一個 code 失敗時（例如 session 開始後 image 升級，新的 contract 把某個沒被
-  修改的檔案標成明文 secret），那不是這些變更造成的：stderr 印出警告，照常匯出。session 照樣以 `ended`
-  保留，`changes` 每次都能說明原因。
+  每個檢查都對整個下一個 snapshot 執行，所以沒被修改的檔案失敗時也一樣拒絕（例如 session 開始後 image
+  升級，新的 contract 把某個沒被修改的檔案標成明文 secret；訊息列出的檔案會說明這一點）：在設定 repo
+  修正後，用新的 edit session 重做修改。不因 base 已經失敗而放行，否則 base 的失敗會蓋掉這些變更新增的
+  失敗。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
 - 匯出的 tar 也要符合使用者端讀取的上限：變更數 ≤ 10,000、manifest ≤ 1 MiB、整個 tar ≤ 80 MiB，否則回
   `CHANGESET_INVALID`。
 - stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
