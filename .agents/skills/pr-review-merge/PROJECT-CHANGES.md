@@ -20,6 +20,7 @@ below, then run `make skill-test` and `go test ./cmd/pilot/cmd -run TestAgentSki
 | `tests/test_project_defaults.py` | new |
 | `scripts/install.sh`, `tests/test_installer.py` | removed: the skill is repository-local, nothing installs it elsewhere |
 | `README.md` | install section replaced by the repository layout; examples target `kjelly/pilot`; default merge method wording |
+| `scripts/review_gate.py`, `tests/test_gate.py`, `tests/test_pr_ready_handoff.py` (new), `SKILL.md` ("Hand-off with `pr-ready`", "Disputed findings", §2, §3 table), `references/{evidence-contract,quality-gate,workflow}.md`, `platforms/{claude,codex,agy}/agents/prm-reviewer.*` | no Draft/Ready loop with `pr-ready`: `CHANGES_REQUESTED` and reviewer-confirmed `unrelated_failing_checks` decide `WAITING` instead of `DRAFT` (upstream: `DRAFT`); a finding that repeats a disputed claim carries `disputed_reply_url` and is `DRAFT` only with `new_evidence`, otherwise `WAITING` for a person; severity `P4` accepted (shared rubric); the hand-off test runs both gates over the same GitHub states |
 
 Files not listed here are believed unchanged from upstream 1.0.0; verify against the upstream
 archive when upgrading.

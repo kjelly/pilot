@@ -2,8 +2,9 @@
 
 | Signal | Decision | Why |
 |---|---|---|
-| Independent reviewer finds P0/P1/P2, failing unit/regression tests, GH checks `fail` or `cancel`, unresolved review threads, merge conflict, `CHANGES_REQUESTED` | DRAFT | Confirmed defect or blocker; comment with proof and next fix |
+| Independent reviewer finds P0/P1/P2 (a repeated disputed claim only with new evidence), failing unit/regression tests, GH checks `fail` or `cancel` not confirmed unrelated, unresolved review threads, merge conflict | DRAFT | Confirmed defect or blocker; comment with proof and next fix |
 | GH checks `pending`, review `REVIEW_REQUIRED`, PR mergeability `UNKNOWN`, unavailable GraphQL threads, base/head mismatch, incomplete reviewer coverage, PR dependency not satisfied | WAITING | Transient or unverified conditions; keep Ready |
+| `CHANGES_REQUESTED`; a `fail`/`cancel` check listed in `unrelated_failing_checks`; a disputed finding repeated without `new_evidence` | WAITING | The PR has nothing left to change: a reviewer has to re-review, a check has to be rerun after its cause is fixed, or a person decides between two reviews. A Draft would be undone by `pr-ready` |
 | Active rules include `merge_queue` | WAITING | `gh pr merge` may enqueue or enable auto-merge without a final merge; do not trigger automatically |
 | Empty CI, no documented rationale or no positive test evidence | WAITING | Absent checks are not an implicit pass |
 | Every gate clear, no unresolved threads, base/HEAD unchanged, branch mergeability `MERGEABLE`, merge state `CLEAN`, tests/CI passed | MERGE | Attempt `gh pr merge --merge --match-head-commit SHA` (merge commits are this repository's practice); verify state `MERGED` |

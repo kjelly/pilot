@@ -429,19 +429,12 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     for name in exemptions.keys() - observed_names:
         errs.append(f"Claimed unrelated check does not exist on HEAD: {name}")
 
-    allowed_threads = evidence.get("unresolved_nonblocking_threads", [])
-    if not isinstance(allowed_threads, list):
-        errs.append("unresolved_nonblocking_threads malformed")
-        allowed_threads = []
-    allowed: dict[str, dict[str, Any]] = {}
-    for item in allowed_threads:
-        if not isinstance(item, dict) or item.get("severity") not in ("P3", "P4") \
-                or not isinstance(item.get("id"), str) or not isinstance(item.get("reason"), str) \
-                or len(item["reason"].strip()) < 20 or item.get("reviewer_confirmed") is not True:
-            errs.append("Invalid unresolved nonblocking thread exemption")
-        else:
-            allowed[item["id"]] = item
-    unresolved_ids: set[str] = set()
+    # Every thread must be resolved: pr-review-merge returns a PR with any unresolved
+    # thread to Draft, so a Ready PR with one would only bounce back. A P3/P4 thread
+    # is answered and resolved like any disputed comment (disposition nonblocking).
+    if evidence.get("unresolved_nonblocking_threads"):
+        errs.append("unresolved_nonblocking_threads is no longer accepted: reply to the thread, resolve it "
+                    "and record it in disputed_review_comments (disposition nonblocking)")
     for t in s.threads:
         if not isinstance(t, dict) or not isinstance(t.get("isResolved"), bool):
             errs.append("Unknown review thread state")
@@ -451,11 +444,7 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
             if not isinstance(thread_id, str):
                 errs.append("Review thread missing ID")
             else:
-                unresolved_ids.add(thread_id)
-                if thread_id not in allowed:
-                    errs.append(f"Unresolved GitHub review thread: {thread_id}")
-    for thread_id in allowed.keys() - unresolved_ids:
-        errs.append(f"Thread exemption not an unresolved thread on HEAD: {thread_id}")
+                errs.append(f"Unresolved GitHub review thread: {thread_id} (fix or dispute it, then resolve it)")
     check_disputes(s, evidence, sha, errs)
     return errs
 

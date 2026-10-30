@@ -11,6 +11,7 @@ from gh_runtime import GitHubError, Repo, branch_rules, current_repo, pr_checks,
 COVERAGE = ("requirements", "correctness", "architecture", "security", "concurrency",
             "edge_cases", "semantic_regression", "tests")
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
 
 
 def _sha(s: Any) -> bool:
@@ -86,6 +87,11 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     defects: list[str] = []
     missing: list[str] = []
+    # A reply disputing an earlier finding is a conversation comment or an inline
+    # reply on this PR (pr-ready's references/review-comments.md).
+    reply_url = re.compile(rf"https://github\.com/{re.escape(repo.raw)}/pull/{number}"
+                           r"#(?:issuecomment-|discussion_r)\d+", re.IGNORECASE)
+    repeated_disputes = 0
     findings = evidence.get("findings")
     if not isinstance(findings, list):
         missing.append("Reviewer findings array missing")
@@ -95,7 +101,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
             missing.append("Invalid finding object")
             continue
         sev = finding.get("severity")
-        if sev not in ("P0", "P1", "P2", "P3"):
+        if sev not in SEVERITIES:
             missing.append("Invalid finding severity")
             continue
         if not all(isinstance(finding.get(key), str) and finding[key].strip()
@@ -104,11 +110,27 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
             continue
         loc = f"{finding['path']}:{finding.get('line', '?')}"
         if sev in ("P0", "P1", "P2") or finding.get("blocking") is True:
-            defects.append(f"{sev} {loc}: {finding['reason']} | Fix: {finding['recommendation']}")
+            text = f"{sev} {loc}: {finding['reason']} | Fix: {finding['recommendation']}"
+            disputed = finding.get("disputed_reply_url")
+            if disputed is not None:
+                # The finding repeats a claim already disputed on the PR. Only new
+                # evidence sends it back to Draft; otherwise two reviewers disagree
+                # and a person decides, instead of another Draft/Ready round.
+                if not isinstance(disputed, str) or not reply_url.fullmatch(disputed):
+                    missing.append(f"{sev} {loc}: disputed_reply_url is not a comment on this PR: {disputed!r}")
+                    continue
+                new = finding.get("new_evidence")
+                if not isinstance(new, str) or len(new.strip()) < 30:
+                    repeated_disputes += 1
+                    missing.append(f"{text} | Repeats the claim disputed in {disputed} without new evidence; "
+                                   "a person decides between the finding and the dispute")
+                    continue
+                text += f" | Disputed in {disputed}; new evidence: {new.strip()}"
+            defects.append(text)
     test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), result["head_sha"])
     defects.extend(test_defects)
     missing.extend(test_gaps)
-    if evidence.get("verdict") == "BLOCK" and not defects:
+    if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes:
         missing.append("BLOCK verdict needs a specific finding or failed test")
     elif evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
         missing.append("Invalid reviewer verdict")
@@ -127,6 +149,23 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     if not isinstance(deps, dict) or deps.get("resolved") is not True or \
        not isinstance(deps.get("evidence"), str) or len(deps["evidence"].strip()) < 12:
         missing.append("Unresolved/unverified inter-PR dependencies")
+
+    # A failing check the reviewer confirmed unrelated to this PR (for example the
+    # same failure on the base branch) is not something the PR can fix: it keeps the
+    # PR Ready and WAITING for a rerun instead of sending it back to Draft, which
+    # pr-ready would undo with the same exemption. It never allows a merge.
+    unrelated: dict[str, dict[str, Any]] = {}
+    items = evidence.get("unrelated_failing_checks", [])
+    if not isinstance(items, list):
+        missing.append("unrelated_failing_checks malformed")
+        items = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"] \
+                and isinstance(item.get("reason"), str) and len(item["reason"].strip()) >= 30 \
+                and item.get("reviewer_confirmed") is True:
+            unrelated[item["name"]] = item
+        else:
+            missing.append("Invalid unrelated_failing_checks entry (needs exact name, reason, reviewer_confirmed)")
 
     # Live remote evidence: failures are recorded as WAITING instead of inferred success.
     try:
@@ -148,7 +187,12 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                 result["checks"]["skipped"] += 1
             elif bucket in ("fail", "cancel"):
                 result["checks"]["failed"] += 1
-                defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
+                if name in unrelated:
+                    missing.append(f"GitHub CI check {name} is {bucket}, unrelated to this PR per the reviewer "
+                                   f"({unrelated[name]['reason'].strip()[:300]}); rerun it once the cause is fixed: "
+                                   f"{check.get('link', '')}")
+                else:
+                    defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
             elif bucket == "pending":
                 result["checks"]["pending"] += 1
                 missing.append(f"GitHub CI check pending: {name}")
@@ -183,7 +227,10 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":
-        defects.append("GitHub reviewDecision is CHANGES_REQUESTED")
+        # pr-ready marks a PR Ready once the requested changes are fixed or disputed,
+        # without waiting for the reviewer to re-approve; drafting it again would only
+        # restart that loop. Objections still open come back as reviewer findings.
+        missing.append("GitHub reviewDecision is CHANGES_REQUESTED: waiting for that reviewer to re-review")
     elif decision == "REVIEW_REQUIRED":
         missing.append("Human approval required by repository rules")
     elif decision not in ("APPROVED", None, ""):

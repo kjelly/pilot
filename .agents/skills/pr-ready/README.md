@@ -53,7 +53,7 @@ $pr-ready 處理目前 repo 所有 Draft PR，最多同時兩個
 2. 每則 review 意見（人、bot 或之前的自動審查）都先當成待驗證的主張分類（`valid`/`invalid`/`needs_evidence`/`nonblocking`），只有成立的才交給 Coder。不成立的意見不改 code：獨立 Reviewer 在看不到主 Agent 結論的情況下確認後，主 Agent 在 GitHub 回覆反證，記錄在 evidence 的 `disputed_review_comments`（見 `references/review-comments.md`）。同一主張沒有新證據又被提出時交給人決定，不再來回修改或回覆。
 3. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。
 4. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。
-5. 僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads 及衝突後，才執行 `gh pr ready`。
+5. 僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
 6. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。
 
 ## Quality Gate 腳本（可單獨使用）

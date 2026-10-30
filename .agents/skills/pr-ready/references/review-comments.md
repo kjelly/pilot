@@ -28,7 +28,7 @@ change:
 | `valid` | Reproduces or traces as claimed | Coder fixes it. After the independent reviewer verifies the fix, reply with the fix commit and regression test; resolve an inline thread. |
 | `invalid` | Counter-evidence shows the claim does not hold on HEAD | No code change. Dispute it (§2–§4). |
 | `needs_evidence` | No reproduction or concrete trace, and none can be found | No code change. Dispute it and ask for the missing reproduction (§2–§4). |
-| `nonblocking` | The claim holds but rates P3/P4 under the rubric (pre-existing, outside supported use, style) | Do not block on it. Dispute the severity (§2–§4); record it under "Not in this PR" or a follow-up issue. |
+| `nonblocking` | The claim holds but rates P3/P4 under the rubric (pre-existing, outside supported use, style) | Do not block on it. Dispute the severity (§2–§4) and resolve an inline thread; record it under "Not in this PR" or a follow-up issue. |
 
 ## 2. Independent confirmation (pr-reviewer)
 
@@ -51,7 +51,7 @@ and what would change the conclusion. Never paste secrets or raw logs.
 
 ```bash
 # Inline thread: reply in the same thread, then resolve it. The gate requires
-# every thread to be resolved (or exempted as P3/P4), and the commenter can reopen it.
+# every thread to be resolved, P3/P4 included, and the commenter can reopen it.
 gh api graphql \
   -f query='mutation($t:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$body}){comment{url}}}' \
   -f t=PRRT_xxx -F body=@reply.md --jq .data.addPullRequestReviewThreadReply.comment.url
@@ -93,3 +93,8 @@ the same claim means triage again:
   fix it and do not start another reply round. Report `DRAFT-BLOCKED`, "disputed
   review finding needs a human decision", with both comment URLs. Repeating an
   argument between two automated reviewers does not settle it.
+
+`pr-review-merge` reads these replies too: its reviewer gets each disputed finding
+with your reply, and a finding it repeats without new evidence leaves the PR Ready
+and waiting for a person instead of returning it to Draft. A finding it returns
+with new evidence is a new claim.

@@ -30,13 +30,12 @@ Create one evidence file *per PR per latest HEAD*. A new commit always invalidat
     "lint": [{"command": "golangci-lint run", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/lint.log"}],
     "static_analysis": [{"command": "go vet ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/static-analysis.log"}]
   },
-  "unresolved_nonblocking_threads": [],
   "unrelated_failing_checks": [],
   "disputed_review_comments": []
 }
 ```
 
-Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. Unresolved minor review threads can be listed as `{ "id": "PRRT_...", "severity": "P3", "reason": "...", "reviewer_confirmed": true }`.
+Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. The exemption only lets the PR become Ready: `pr-review-merge` never merges with a failing check, and with the same entry in its evidence it waits for a rerun instead of returning the PR to Draft. There is no exemption for review threads: resolve each one after fixing or disputing it (the upstream `unresolved_nonblocking_threads` field is rejected).
 
 A review comment the PR does not act on (see [review comments](review-comments.md)) gets one `disputed_review_comments` entry per disputed claim:
 

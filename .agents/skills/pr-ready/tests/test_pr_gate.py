@@ -33,7 +33,7 @@ def good():
                 "local_validation": {key: [{"command": f"run {key}", "exit_code": 0,
                                            "head_sha": SHA, "log": f".pr-ready/logs/{key}.log"}]
                                      for key in ("tests", "lint", "static_analysis")},
-                "unresolved_nonblocking_threads": [], "unrelated_failing_checks": []}
+                "unrelated_failing_checks": []}
     return snapshot, evidence
 
 
@@ -73,12 +73,19 @@ class GateTests(unittest.TestCase):
         s.threads[0]["isResolved"] = False
         self.assertTrue(any("Unresolved" in x for x in self.check(s, e)))
 
-    def test_minor_thread_with_explicit_exemption(self):
+    def test_minor_thread_must_be_resolved_too(self):
+        # pr-review-merge drafts a PR with any unresolved thread, so P3/P4 ones are not exempt.
         s, e = good()
         s.threads[0]["isResolved"] = False
         e["unresolved_nonblocking_threads"] = [
             {"id": "T1", "severity": "P3", "reason": "Stylistic suggestion unrelated to acceptance criteria",
              "reviewer_confirmed": True}]
+        errors = self.check(s, e)
+        self.assertTrue(any("Unresolved GitHub review thread: T1" in x for x in errors))
+        self.assertTrue(any("no longer accepted" in x for x in errors))
+        s.threads[0]["isResolved"] = True
+        self.assertTrue(any("no longer accepted" in x for x in self.check(s, e)))
+        e["unresolved_nonblocking_threads"] = []
         self.assertEqual([], self.check(s, e))
 
     def test_pending_check_fails_closed(self):

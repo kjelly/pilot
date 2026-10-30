@@ -37,7 +37,7 @@ $pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不�
 /pr-review-merge 審查 kjelly/pilot #42 #43 #44
 ```
 
-**參數及預設策略：**最多 2 個獨立 Reviewer Subagents 並行、Merge 串行、預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
+**參數及預設策略：**最多 2 個獨立 Reviewer Subagents 並行、Merge 串行、預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft；`CHANGES_REQUESTED`（等原 reviewer 重新審查）、Reviewer 確認與本 PR 無關而失敗的 check、沒有新證據就重提已被反駁的 finding，也是 `WAITING`，否則 pr-ready 會再把它轉回 Ready。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
 
 ## 內部安全檢查（供 Agent 呼叫）
 
