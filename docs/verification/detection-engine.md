@@ -200,6 +200,38 @@ never makes a row PASS.
   `playbooks/apply/detection-engine-apply.yml`.
 - C11 is intentionally `verifyOnly` — see the note above and spec §49.
 
+## Rollback provenance acceptance (#193 / #194)
+
+The binary and database have independent acceptance criteria:
+
+- #193: failure to copy or SHA256-verify this apply's previous binary aborts
+  before Step 6. Rollback never reads a shared `.prev` from an earlier apply.
+- #194: an absent pre-existing state.db produces no database backup and grants
+  no database restore permission. A database created later in the failed apply
+  is preserved; a stale shared pre-upgrade.db is never restored.
+- Each real upgrade uses a new private backup directory. The SQLite snapshot
+  must exist as a regular, nonempty file and pass `db check` before Step 6.
+  The binary snapshot must match the SHA256 observed before the upgrade.
+- Restore permission is reset on every play invocation, including tag-scoped
+  runs. Successful backup commands alone do not grant restore permission.
+- After Step 6 is attempted, rescue revalidates the recorded snapshots before
+  restoring. Missing, changed or corrupt snapshots keep the service stopped;
+  no fallback to another directory is permitted. Restored binary SHA256 and
+  SQLite integrity must pass before the original service is re-enabled/restarted.
+- A stopped service is required before replacing SQLite or removing its WAL/SHM
+  sidecars. Settings, unit, profile and provider.env use PR #190's original-state
+  restore contract, including metadata and symlinks.
+- Normal upgrade, first install and the first subsequent apply must succeed;
+  the subsequent apply reports changed=0. Backup failures must leave the
+  pre-existing binary/database unchanged.
+
+Target acceptance is restricted to an isolated vm-target. Required fault cases:
+SQLite backup command failure, binary snapshot failure, corrupt/missing snapshots,
+no pre-existing database with stale backups, failure immediately after Step 6,
+normal upgrade, first install and repeated apply. Evidence must identify the
+candidate commit/tree, inventory and actual checksums/integrity/service/config
+outcomes. Until those runs exist this acceptance remains **unverified**.
+
 ## Actual-run evidence
 
 Latest notification-correctness evidence:
