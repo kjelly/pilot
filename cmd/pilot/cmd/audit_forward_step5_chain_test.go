@@ -192,7 +192,7 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 		name, policy string
 		// kept: the file stays (true) or goes (false)
 		kept bool
-		// fails: ansible fails before any write
+		// fails: ansible fails before any config write
 		fails bool
 		// every one of these must be in the file afterwards
 		contains []string
@@ -200,11 +200,11 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 		compare bool
 	}
 	for _, c := range []tc{
-		{name: "Ubuntu 22.04+: the managed path alone in the only stanza goes with the file",
+		{name: "Ubuntu 20.04 default (or its old conffile after an upgrade): the managed path alone in the only stanza goes with the file",
 			policy: "/var/log/syslog\n{\n\trotate 7\n\tpostrotate\n\t\t/usr/lib/rsyslog/rsyslog-rotate\n\tendscript\n}\n", kept: false, compare: true},
 		{name: "a lone stanza with only comments around it goes with the file",
 			policy: "# vendor\n\n/var/log/syslog\n{\n\trotate 7\n}\n# end\n", kept: false, compare: true},
-		{name: "Ubuntu 24.04: lone stanza first, others after",
+		{name: "lone stanza first, others after",
 			policy: "/var/log/syslog\n{\n\trotate 7\n}\n\n/var/log/mail.log\n/var/log/kern.log\n{\n\trotate 4\n}\n", kept: true, compare: true,
 			contains: []string{"/var/log/mail.log\n/var/log/kern.log\n{"}},
 		{name: "quoted other paths",
@@ -474,7 +474,7 @@ func TestAuditLogForwardingStep5cFollowsASymlinkedPolicy(t *testing.T) {
 
 // A check-mode run on a host that has the policy but not logrotate yet (Step 1c does not
 // install it in check mode) must still work: the helper runs, only logrotate's check of
-// its output is skipped. A real run without logrotate fails, before any write.
+// its output is skipped. A real run without logrotate fails, before any config write.
 func TestAuditLogForwardingStep1dWithoutLogrotate(t *testing.T) {
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skip("ansible-playbook not installed")

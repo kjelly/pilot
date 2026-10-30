@@ -294,7 +294,8 @@
     # rescue below does not restore logrotate policies). So the helper runs here
     # first, on a private temporary copy, and so does logrotate's own check of its
     # output (the same check Step 5c's validate makes); any failure, the helper's exit
-    # 3 included, fails the play before the first write. Read-only: check_mode: false
+    # 3 included, fails the play before the first config write (the package installs
+    # of Step 0a-1c come earlier and are not undone). Read-only: check_mode: false
     # because it only reads, the temporary directory (0700) is removed on every exit.
     # Known and accepted: the policy is read again in Step 5b, so a change to it between
     # Step 1d and Step 5b is not covered by this check.
@@ -427,8 +428,10 @@
         # splits the stanza headers the way logrotate does (quoted, indented, ~ and
         # globbed paths included), removes audit_syslog_path from the one stanza that
         # declares it, and drops that stanza whole when the path was its only one
-        # (Ubuntu 22.04+ ships "/var/log/syslog" alone before its "{": deleting just
-        # that line would leave a stanza with no filename and logrotate would reject
+        # (the Ubuntu 20.04 default policy, rsyslog 8.2001, ships "/var/log/syslog" alone
+        # before its "{", and so does a host upgraded from 20.04 that kept the old
+        # conffile; Ubuntu 22.04 and 24.04 ship one shared stanza. Deleting just that
+        # line would leave a stanza with no filename and logrotate would reject
         # the whole file, "lines must begin with a keyword or a filename"). Other
         # paths stay with the distro's own file. Since Step 5 above renders our own
         # /etc/logrotate.d/syslog for the same path, logrotate would otherwise find
@@ -440,8 +443,8 @@
         # The helper exits 3 when it cannot do that without guessing (a policy
         # logrotate itself rejects, a path spelled so that the logrotate versions
         # disagree on it, a glob that would still match the path). Step 1d has already
-        # run it, before the first write of this play, so that failure stops the run
-        # before anything is written. The computed policy goes to a file, never through
+        # run it, before the first config write of this play, so that failure stops the run
+        # before any config is written. The computed policy goes to a file, never through
         # a task result: a policy may hold bytes that are not UTF-8 and Ansible could not
         # carry those. The file lives in a private (0700) directory that the always
         # section removes on every path out, failures included.

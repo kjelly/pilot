@@ -71,7 +71,8 @@ func runDropPath(t *testing.T, a awkImpl, drop, policy string) (stdout, stderr s
 }
 
 // The audit-log-forwarding playbook removes its own log path from the distro's
-// /etc/logrotate.d/rsyslog with this helper. Ubuntu 22.04+ ships
+// /etc/logrotate.d/rsyslog with this helper. The Ubuntu 20.04 default policy
+// (rsyslog 8.2001, also kept by hosts upgraded from 20.04) ships
 // "/var/log/syslog" alone before its "{": removing only that line left a stanza
 // with no filename, which logrotate rejects as a whole.
 func TestLogrotateDropPathHelper(t *testing.T) {
@@ -554,7 +555,7 @@ func TestLogrotateDropPathLeavesNoDuplicateWithTheManagedStanza(t *testing.T) {
 	awks := dropPathAwks(t)
 
 	for _, tt := range []struct{ name, policy string }{
-		{"Ubuntu 24.04, syslog alone in its stanza", "/var/log/syslog\n{\n\trotate 7\n\tpostrotate\n\t\t/usr/lib/rsyslog/rsyslog-rotate\n\tendscript\n}\n\n/var/log/mail.log\n/var/log/kern.log\n{\n\trotate 4\n}\n"},
+		{"syslog alone in its stanza (Ubuntu 20.04 default shape)", "/var/log/syslog\n{\n\trotate 7\n\tpostrotate\n\t\t/usr/lib/rsyslog/rsyslog-rotate\n\tendscript\n}\n\n/var/log/mail.log\n/var/log/kern.log\n{\n\trotate 4\n}\n"},
 		{"syslog shared with other paths", "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"},
 		{"a commented endscript before the shared stanza", "/var/log/other\n{\n\trotate 7\n\tpostrotate\n\t\t/usr/lib/rsyslog/rsyslog-rotate\n\tendscript # rotate done\n}\n\n/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"},
 	} {

@@ -4,10 +4,12 @@
 # removes the file when nothing but blank lines and comments is printed (Step 5d).
 #
 # A stanza is: path words, then "{", then a body, then "}". The path may be the
-# stanza's only one (Ubuntu 22.04+: "/var/log/syslog" alone before its "{"),
+# stanza's only one (the Ubuntu 20.04 default, rsyslog 8.2001, and a host upgraded
+# from it that kept the old conffile: "/var/log/syslog" alone before its "{"),
 # in which case removing just that line would leave a stanza with no filename
 # and logrotate would reject the whole file: the whole stanza goes then. When
-# other paths share the stanza (Debian's older file, RHEL's), only the path goes.
+# other paths share the stanza (the one shared stanza of Ubuntu 22.04 and 24.04,
+# RHEL's), only the path goes.
 # Everything else is copied byte for byte: comments, blank lines, global
 # options, stanza bodies, scripts, the other paths of a header (their quoting
 # and escapes stay as written).
@@ -82,9 +84,9 @@
 # path is declared in one of them the helper fails: the caller's validate only
 # parses this one file, so a path that survives would later collide with the
 # managed /etc/logrotate.d/syslog and break rotation for every log while the apply
-# still looks successful. Every exit 3 stops the playbook before it writes anything:
+# still looks successful. Every exit 3 stops the playbook before it writes any config:
 # the playbook runs the helper (and logrotate's check of its output) in a preflight
-# ahead of the first write, and again, to install the result, in Step 5b-5d.
+# ahead of the first config write, and again, to install the result, in Step 5b-5d.
 #
 # Portable on purpose (gawk, mawk, busybox awk): no regex intervals, no
 # gensub/RT, no character ranges (they follow the locale); characters are
