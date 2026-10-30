@@ -10,9 +10,9 @@
 
 | 項目 | 狀態 |
 |---|---|
-| 最新驗證 | 2026-10-30，tested commit `e62eea3`（tree `365479a9`），[evidence](../evidence/mcp-remote-access/2026-10-30-e62eea3.md) |
-| 驗證 target | 拋棄式 vm-target（Ubuntu 24.04、Docker 29.1.3），已刪除；inventory 只有 `all` 一台 host |
-| 結果 | fixture 冪等（第二次 `changed=0`）；E2E 4/4 PASS；`pilot-mcp doctor` 全部 pass；Claude Code `claude mcp get` 為 `✔ Connected` |
+| 最新驗證 | 2026-10-30，tested commit `e30da4c`（tree `dfa5508a`），[evidence](../evidence/mcp-remote-access/2026-10-30-e30da4c.md) |
+| 驗證 target | 拋棄式 vm-target（Ubuntu 24.04 golden），已刪除；inventory 只有 `all` 一台 host |
+| 結果 | fixture `--check --diff` 對全新 VM 通過；fixture 冪等（第二次 `changed=0`）；E2E 4/4 PASS；`pilot-mcp doctor` 全部 pass；Claude Code `claude mcp get` 為 `✔ Connected` |
 | 真實 deploy node | 尚未依本 runbook 設定（由操作者決定時機，規格 §16） |
 | 外部 state | 每個環境的 `<env-root>/<env>/.vault/`：Ansible 用的 SSH key 與 `main.yaml` 等；MCP 以唯讀掛載，不讀寫 secret 值 |
 | 對齊決定 | 不適用：本功能不是 Ansible 元件，沒有 spec §1 Targets table |
