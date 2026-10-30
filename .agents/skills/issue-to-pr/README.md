@@ -1,6 +1,6 @@
 # issue-to-pr — Cross-platform GitHub Issue → PR Skill (Draft first, Ready only when mergeable)
 
-Use the same [Agent Skills](https://agentskills.io/) workflow with **Codex CLI**, **Claude Code**, and **Antigravity CLI (`agy`) / App / IDE**. By default, fixes each specified Issue in an isolated branch/worktree and opens **one PR per Issue** after independent review and local checks. The PR is a **Draft** until everything is done and CI is green on its exact HEAD; only then is it marked **Ready for Review** (meaning: quality is already mergeable, nothing left to do). **Does not auto-merge**.
+Use the same [Agent Skills](https://agentskills.io/) workflow with **Codex CLI**, **Claude Code**, and **Antigravity CLI (`agy`) / App / IDE**. By default, fixes exactly one selected Issue per invocation after checking out its dedicated branch and opens **one PR per Issue** after independent review and local checks. The PR is a **Draft** until everything is done and CI is green on its exact HEAD; only then is it marked **Ready for Review** (meaning: quality is already mergeable, nothing left to do). **Does not auto-merge**.
 
 ## Requirements
 
@@ -24,18 +24,18 @@ This skill is repository-local to pilot; nothing installs it elsewhere. The cano
 ```text
 # Codex CLI
 $issue-to-pr 修正 OWNER/REPO#43，完成驗證後建立 PR（草稿；全部做完且 CI 全綠才轉 Ready）
-$issue-to-pr 處理 https://github.com/OWNER/REPO/issues/123 和 #124
+$issue-to-pr 處理 https://github.com/OWNER/REPO/issues/123
 
 # Claude Code and agy CLI
-/issue-to-pr 修正 OWNER/REPO#123 #124，每個 Issue 各建一個 PR（草稿 → 全部完成才 Ready）
+/issue-to-pr 修正 OWNER/REPO#123，建立一個 PR（草稿 → 全部完成才 Ready）
 ```
 
-For multiple repos, supply full URLs or qualified `OWNER/REPO#N` IDs. **An empty `Issues:` list is not treated as permission to process all open Issues.**
+Supply one full URL or qualified `OWNER/REPO#N` ID. For multiple/all targets, ask the user to choose one; do not queue the rest. **An empty `Issues:` list is not treated as permission to process all open Issues.**
 
 ## Execution protocol
 
-1. SA independently analyzes root cause, acceptance criteria, dependencies and impacted areas. Root coordinates a DAG and **at most two simultaneous source-writing Issue streams**; avoid shared-resource conflicts.
-2. Each Issue gets an isolated Git worktree and dedicated branch. Coder fixes real root cause, adds regression tests and commits.
+1. SA independently analyzes root cause, acceptance criteria, dependencies and impacted areas. Root checks this Issue’s dependencies without starting another item; retain one writer.
+2. Before analysis or implementation, checkout the selected Issue’s dedicated branch in the current clean checkout. Follow [the checkout contract](../_shared/single-item-checkout.md); do not create per-Issue worktrees. Coder fixes real root cause, adds regression tests and commits.
 3. `repo_evidence.py` loads the repository's `.github/pr-evidence.json` from the base branch (evidence-only paths and mandated evidence such as a live run); the gate then accepts receipts across an evidence-only commit and requires `repo_required_evidence`. See `references/repo-evidence.md`.
 4. `claim.py` takes a per-Issue claim before any work so a second session or clone cannot start the same Issue; `run_check.py` records clean-HEAD, SHA-bound test/lint/static-check receipts in a state folder *outside the worktree*.
 5. Fresh independent `issue-reviewer` reviews the committed HEAD. P0–P2 findings require changes and repeat verification.

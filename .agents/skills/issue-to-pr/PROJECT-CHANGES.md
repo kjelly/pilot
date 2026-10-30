@@ -11,6 +11,7 @@ re-apply the rows below, then run `make skill-test` and
 
 | File | Project-specific change |
 |---|---|
+| `SKILL.md`, `README.md`, `references/workflow.md` | Single item per invocation; checkout the selected branch in the current clean checkout before work, no per-item worktree/batch scheduling. Shared contract: `../_shared/single-item-checkout.md`, including stable skill snapshot, branch/HEAD verification and dirty-checkout protection. Regression guard: `../pr-review-merge/tests/test_single_item_contract.py`. |
 | `SKILL.md` | "Project runtime configuration" (orchestrator keeps the session model; role models live only in the native role definitions) and "Pilot: history and actual-run decision before implementation" sections |
 | `platforms/{claude,codex,agy}/agents/issue-{sa,coder,reviewer}.*` | pilot lines: read the Root-supplied `pilot_history_checks`, finding ledger and target-validation plan; vm-target evidence rules; unavailable required validation is blocked, not PASS |
 | `references/platforms.md` | role model pins paragraph; `pilot_history_checks` hand-off paragraph (reference lives in `../pilot-code-review/references/pilot-history-checks.md`) |

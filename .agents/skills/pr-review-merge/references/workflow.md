@@ -1,14 +1,14 @@
 # Work sequencing and review discipline
 
-1. Inventory (paginated) open Ready PRs via `python3 scripts/list_ready.py --repo OWNER/REPO`; include individual PR targets exactly when specified.
+1. Select exactly one Ready PR. For multiple/all targets, list candidates via `python3 scripts/list_ready.py --repo OWNER/REPO` and ask which one to handle. Follow [the checkout contract](../../_shared/single-item-checkout.md) before review.
 2. Resolve PR DAG (stacked PRs, explicit depends-on text, related Issues, shared touching files, migrations). Cross-PR interactions require a separate dependency review. Do not assume issue references imply hard dependencies.
-3. Read the pilot history reference (`../../pilot-code-review/references/pilot-history-checks.md`) and the base branch's `.github/pr-evidence.json`; for each PR note which changed paths need an actual-run record and whether a `docs/evidence/**` record covers its HEAD or tested revision. Pass the absolute reference path and the relevant earlier findings to every reviewer.
-4. Allocate up to two independent PR reviewer subagents. They review the actual diff at a captured Head/Base SHA and may run sandboxed, trusted tests in isolated worktrees without touching PR state. Use capped log artifacts and include only summary/paths in Root context.
+3. Read the pilot history reference (`../../pilot-code-review/references/pilot-history-checks.md`) and the base branch's `.github/pr-evidence.json`; for the selected PR note which changed paths need an actual-run record and whether a `docs/evidence/**` record covers its HEAD or tested revision. Pass the absolute reference path and the relevant earlier findings to every reviewer.
+4. After checking out the selected PR head branch, allocate one independent reviewer. It reviews the actual diff at captured Head/Base SHAs and may run sandboxed, trusted tests in that checkout without touching source, branches or PR state. Use capped log artifacts and include only summary/paths in Root context.
 5. Save each reviewed PR evidence JSON according to `evidence-contract.md`. If reviewer returned findings without exact location/evidence, ask reviewer for targeted verification before classification.
 6. Run read-only gate; WAITING PRs are left unchanged. For confirmed blockers, guarded actor posts findings + converts to Draft. For clean PRs, Root serially runs actor with `--execute`.
-7. After each merge, update the dependency ledger and **invalidate/review evidence for PRs whose Base SHA has changed**. GH may automatically update base SHA when merging another PR. Do not reuse a passing review against a prior base.
+7. Before acting, **invalidate/review evidence if the selected PR Base SHA has changed**. Do not reuse a passing review against a prior base. After handling this PR, stop; no next-item scheduling.
 8. Revisit WAITING PRs only when they can progress; do not loop forever waiting for CI or approval.
-9. Final report includes exact state and evidence per PR, including error cases and partial GitHub operations.
+9. Final report includes exact state and evidence for the selected PR, including error cases and partial GitHub operations.
 
 # Expected reviewer return (compact)
 

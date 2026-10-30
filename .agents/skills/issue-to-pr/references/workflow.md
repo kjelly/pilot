@@ -5,7 +5,7 @@
 Accept:
 - Absolute Issue URL, e.g. `https://github.com/OWNER/REPO/issues/123`.
 - `OWNER/REPO#123` or `#123` in an unambiguous Git repository.
-- Multiple Issues separated by commas/spaces. Resolve each URL to its real repository; **never blindly assume all have the same owner/repo**.
+- Exactly one Issue per invocation. For multiple/all targets, ask which one to handle; never queue or fan out. Read [the checkout contract](../../_shared/single-item-checkout.md) before analysis.
 
 Missing Issue IDs are not permission to process every open Issue.
 
@@ -16,7 +16,7 @@ Missing Issue IDs are not permission to process every open Issue.
 ## Issue-oriented state machine
 
 ```
-DISCOVERED -> ANALYZED -> QUEUED -> WORKTREE_READY -> IMPLEMENTING
+DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
          -> COMMITTED -> CHECKED -> REVIEWED -> GATE_PASS
          -> PUSHED -> DRAFT_PR_CREATED -> (CI green + follow-ups done) -> READY_FOR_REVIEW
            \-> BLOCKED  (any stage; preserve evidence)
@@ -33,14 +33,14 @@ DISCOVERED -> ANALYZED -> QUEUED -> WORKTREE_READY -> IMPLEMENTING
 - Use explicit `blocked by`, acceptance dependencies, related PR branches, and actual source prerequisites; mentions alone do not imply a hard dependency.
 - Issue A requiring code introduced by Issue B: block A until B is merged, **unless user explicitly requests stacked PRs**.
 - For authorized stacked PRs: A's PR base must be the predecessor's branch. Document `Depends on #...`, ensure only A's incremental diff is reviewed, and require retarget + revalidation after B merges.
-- Independent Issues editing shared core files, DB migrations, global code generation, or shared integration test deployments should be serialized, despite worktree isolation.
-- At most 2 active source-writing Issue workstreams (and preferably 2 simultaneous analysis workers); this is a scheduler instruction, not a host-global concurrency control. A host with fewer worker slots must serialize.
+- Dependencies are read-only context. This invocation never starts another Issue, even when the selected one is blocked.
+- Exactly one source-writing Issue workstream; retain separate SA/Coder/Reviewer roles for that item.
 
 ## Git and write isolation
 
 - Fetch remote base; record `base_sha` in checkpoint.
 - Create branch from verified remote base, not from the current checkout's potentially dirty HEAD.
-- Example: `git worktree add -b issue/123-short-slug ../repo-issue-123 origin/main` after checking branch/path absence.
+- Example: `git switch -c issue/123-short-slug origin/main` after verifying base, clean checkout and branch absence. Do not create per-Issue worktrees.
 - Keep one writer per worktree. SA/Reviewer are read-only. Avoid using the same worktree for two concurrent subagents with write access.
 - For check receipts: commit, confirm `git status --porcelain` empty, then run checks. Never run check receipts on a dirty/uncommitted tree.
 - On resume, examine `git worktree list --porcelain`, branch mapping, open PR list, and `git status` before issuing new worktree/commit/PR operations. Never force-delete an existing worktree or existing user's branch.
@@ -68,7 +68,7 @@ An agent may update the checkpoint atomically using temp-write/rename. Keep it s
 
 ## Three unsuccessful revisions
 
-Keep a findings ledger (`id, class, severity, origin, status, fix commit`); rounds after the first review the delta against it, and the second finding of one `class` goes to SA for a class-level fix (see `severity.md`). After 3 substantive, nonconverging review/fix attempts on the same Issue, hand the evidence and alternate hypotheses to a fresh SA. If resolution still cannot be proven, mark `BLOCKED` with minimal reproducible symptom, relevant artifact paths, suggested next action. Proceed with other independent Issues; do not manufacture a success.
+Keep a findings ledger (`id, class, severity, origin, status, fix commit`); rounds after the first review the delta against it, and the second finding of one `class` goes to SA for a class-level fix (see `severity.md`). After 3 substantive, nonconverging review/fix attempts on the same Issue, hand the evidence and alternate hypotheses to a fresh SA. If resolution still cannot be proven, mark `BLOCKED` with minimal reproducible symptom, relevant artifact paths, suggested next action. Stop this invocation; do not start another Issue or manufacture a success.
 
 ## PR creation and idempotency
 

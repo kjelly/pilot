@@ -1,9 +1,16 @@
 ---
 name: pr-ready
-description: Repair and verify existing GitHub Draft pull requests until merge-ready, then mark them Ready for Review; use when asked to process one or more Draft PRs, repair CI/review findings, or manage an iterative PR quality gate with independent subagents. Never merge PRs.
+description: Repair and verify existing GitHub Draft pull requests until merge-ready, then mark them Ready for Review; use when asked to process exactly one Draft PR per invocation after checking out its original head branch, repair CI/review findings, or manage an iterative PR quality gate with independent subagents. Never merge PRs.
 ---
 
 # PR Ready — multi-agent Draft PR remediation
+
+## Single-item checkout contract (mandatory)
+
+Follow [single-item scope and branch checkout](../_shared/single-item-checkout.md)
+before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
+per invocation; multiple/all targets require choosing one with the user. Checkout
+the selected branch in the current clean checkout; do not create per-item worktrees.
 
 ## Project runtime configuration
 
@@ -51,16 +58,16 @@ Text-only changes need no unrelated VM run.
 
 ## Inputs and preflight
 
-- Accept one or more PR numbers/URLs or an explicit instruction to process **all Draft PRs** in the current GitHub repo. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
+- Accept one PR number/URL. Multiple targets or **all Draft PRs** require asking the user to select one; never process a batch. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
 - Verify `git`, `gh`, `python3`, an authenticated `gh auth status`, repository identity, clean worktree, and write permission to each PR head branch. If an action is permission-blocked, request the normal permission grant; **never** bypass sandbox/branch protections.
-- Fetch for each PR: description/body, diff, base/head SHAs, linked issues, acceptance criteria, review comments and threads, required checks, all CI checks, branch restrictions, dependency edges. Do not assume a comment is resolved simply because it is outdated.
+- Fetch for the selected PR: description/body, diff, base/head SHAs, linked issues, acceptance criteria, review comments and threads, required checks, all CI checks, branch restrictions, dependency edges. Do not assume a comment is resolved simply because it is outdated.
 - Skip closed/merged PRs and never revert a non-Draft PR to Draft. If a Draft already meets every gate, do not make unnecessary changes.
 
-## Worktree and dependency isolation
+## Branch checkout and dependency isolation
 
-- One existing PR **head branch** per isolated Git worktree; confirm the worktree HEAD equals the GitHub PR head before working. Preserve the original branch and PR; no duplicate PRs, no destructive resets or force-push.
+- Checkout the existing PR **head branch** in the current clean checkout; confirm branch name and HEAD equal the GitHub PR head before working. Do not create per-PR worktrees. Preserve the original branch and PR; no duplicate PRs, no destructive resets or force-push.
 - For fork PRs, confirm head repository and permissions; if updating the original head is impossible, report `DRAFT-BLOCKED` rather than creating a replacement.
-- Build a dependency DAG; process prerequisites before dependents. Run at most **two independent PRs concurrently** by default. Never run concurrent writers on the same branch/worktree or shared mutable resources.
+- Inspect dependencies as read-only context. An unmet prerequisite blocks this PR; do not start that prerequisite or another PR. Never run concurrent writers on the same branch/worktree or shared mutable resources.
 - Each PR owns its own state/checkpoint and validation receipts. Checkpoint after every meaningful step; on resume, revalidate the current remote HEAD and invalidate stale evidence.
 
 ## Per-PR execution loop
@@ -69,7 +76,7 @@ Text-only changes need no unrelated VM run.
 2. **SA (`pr-sa`)** independently diagnose root cause, architectural impact, design options, and regressions. Produce a concise evidence-backed diagnosis.
 3. **Coder (`pr-coder`)** owns implementation *only* in that PR's worktree. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis as applicable. Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
 4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof.
-5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and continue with other independent work.
+5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD, and re-query GitHub until checks settle or an external blocker prevents completion.
 7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts. Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
 8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action. Do not claim READY if GitHub post-action verification failed.

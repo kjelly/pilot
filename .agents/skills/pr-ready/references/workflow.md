@@ -2,12 +2,12 @@
 
 ## Initialization
 
-1. Resolve explicit PR targets; if user requests all Drafts, enumerate open PRs and select only `isDraft=true`.
-2. Fetch each PR's current head/base, title, body, linked Issues, diff, CI, reviews/comments, and history (`gh pr view`, `gh pr diff`, `gh api`, `gh pr checks`). Treat failures to fetch metadata as blockers, not missing data.
+1. Resolve exactly one Draft PR. For multiple/all targets, list candidates and ask which one to handle. Follow [the checkout contract](../../_shared/single-item-checkout.md) before analysis.
+2. Fetch the selected PR's current head/base, title, body, linked Issues, diff, CI, reviews/comments, and history (`gh pr view`, `gh pr diff`, `gh api`, `gh pr checks`). Treat failures to fetch metadata as blockers, not missing data.
 3. Model PR dependencies: explicit base/head stacking, shared feature assumptions, cross-PR changes to the same symbol/API/schema or shared integration fixture; ambiguous dependencies must be serialized until resolved.
-4. Cap active PR workflows at 2. Within a PR, SA → Coder → Reviewer are sequential for dependent steps. Independent read-only analysis may run concurrently. A reviewer never reviews its own diff.
+4. Run one PR workflow only. SA → Coder → Reviewer are sequential for dependent steps on this item. A reviewer never reviews its own diff.
 
-## Worktree lifecycle
+## Checkout lifecycle
 
 - Start from a clean clone of the correct repository. Do not run `gh pr checkout` blindly in the user's active worktree.
 - Confirm `headRepository`, `headRefName`, `headRefOid`, and writable remote. Fetch the branch/ref explicitly. Reuse an existing local branch/worktree only when its ownership and upstream match the target PR.
@@ -15,18 +15,18 @@
 
   ```bash
   git fetch origin refs/heads/BRANCH:refs/remotes/origin/BRANCH
-  # If local PR branch is not already checked out in another worktree:
+  # Stop first if dirty, owned by another writer, or checked out elsewhere.
   if git show-ref --verify --quiet refs/heads/BRANCH; then
-    git worktree add ../pr-ready-NUMBER BRANCH
+    git switch BRANCH
   else
-    git worktree add -b BRANCH ../pr-ready-NUMBER origin/BRANCH
+    git switch --track -c BRANCH origin/BRANCH
   fi
   # Verify HEAD equals remote PR headRefOid before making any edits.
   ```
 
-  Prefer `git worktree add ../path BRANCH` when BRANCH already exists locally and is free. A tracking or temporary branch is for reading only; **the implementation must push back to the original PR head branch/ref**, with a verified repository/remote.
+  Use the current clean checkout; do not create per-PR worktrees. A tracking or temporary branch is for reading only; **the implementation must push back to the original PR head branch/ref**, with a verified repository/remote.
 
-- If branch is already checked out elsewhere, reuse that isolated worktree if safe, or serialize. Never use `--force`, `git reset --hard`, or discard user's work.
+- If branch is already checked out elsewhere, stop and identify that checkout; do not silently switch directories. Never use `--force`, `git reset --hard`, or discard user's work.
 - Set per-PR checkpoint under the *worktree* `.pr-ready/` (ensure ignored locally and not committed). Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
 - After new commit/push or remote movement, invalidate prior receipts and reviews. Do not treat older check results as reusable, even if the test command is unchanged.
 
@@ -51,6 +51,6 @@ Expected concise result: `{role, head_sha, status, root_causes, changed_files, c
 ## Loop and interruption
 
 - Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round.
-- After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and move on to independent PRs.
+- After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and end this invocation without starting another PR.
 - Permission errors, rate limiting, pending CI, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
 - Do not poll indefinitely. When CI does not settle within the interactive execution or runtime is ending, persist checkpoint, leave Draft and report the specific pending checks; on future invocation resume after requerying current HEAD. This is not a quality relaxation.

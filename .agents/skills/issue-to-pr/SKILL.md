@@ -1,9 +1,16 @@
 ---
 name: issue-to-pr
-description: Fix specified GitHub Issues with isolated Git worktrees, parallel root-cause analysis, independent subagent code review, SHA-bound tests, and one PR per Issue that stays Draft until everything is done and CI is green, then is marked Ready for Review. Use for GitHub Issue 修復、批次 Issues 開 PR、多代理修復與驗證; do not use for repairing existing Draft PRs (use pr-ready).
+description: Fix exactly one specified GitHub Issue per invocation after checking out its dedicated branch, with root-cause analysis, independent subagent code review, SHA-bound tests, and one PR per Issue that stays Draft until everything is done and CI is green, then is marked Ready for Review. Use for 單一 GitHub Issue 修復、多代理修復與驗證; do not use for repairing existing Draft PRs (use pr-ready).
 ---
 
 # GitHub Issue → PR (multi-agent, multi-repository)
+
+## Single-item checkout contract (mandatory)
+
+Follow [single-item scope and branch checkout](../_shared/single-item-checkout.md)
+before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
+per invocation; multiple/all targets require choosing one with the user. Checkout
+the selected branch in the current clean checkout; do not create per-item worktrees.
 
 ## Project runtime configuration
 
@@ -27,7 +34,7 @@ Codex invocation:
 - Resolve packaged scripts and references relative to this `SKILL.md`, including
   when operating in another worktree. Do not fall back to `~/.agents/skills`.
 
-Execute actual issue fixes and create **one independent PR for each specified Issue**. Do not stop at a plan when code access and permissions allow execution. **Ready for Review means the PR is already merge-quality and nothing is left to do.** So the PR is opened as a **Draft** after the mandatory local quality gates, stays Draft while anything is outstanding (CI pending/failing on its exact HEAD, unresolved review findings, PR body/evidence/doc follow-ups, merge conflicts), and is converted to Ready only when all of it is done. Open a Ready PR directly only when the user explicitly requests it. This skill never merges or enables auto-merge.
+Execute actual issue fixes and create **one independent PR for the selected Issue**. Do not stop at a plan when code access and permissions allow execution. **Ready for Review means the PR is already merge-quality and nothing is left to do.** So the PR is opened as a **Draft** after the mandatory local quality gates, stays Draft while anything is outstanding (CI pending/failing on its exact HEAD, unresolved review findings, PR body/evidence/doc follow-ups, merge conflicts), and is converted to Ready only when all of it is done. Open a Ready PR directly only when the user explicitly requests it. This skill never merges or enables auto-merge.
 
 ## Pilot: history and actual-run decision before implementation
 
@@ -58,23 +65,23 @@ independent Reviewer must inspect the artifacts before pre-PR/Ready gates.
 - **Claim each Issue before any worktree, branch or analysis**, so two sessions (e.g. two clones of one repo) never fix the same Issue:
   `python3 scripts/claim.py acquire --repo OWNER/REPO --issue N --skill issue-to-pr --git-dir <clone> --label <session name>`.
   On exit 3 (`CONFLICT`) another session holds the Issue, or a branch/worktree for it already exists on the remote or in this clone: report `EXISTING_WORK` with the claim owner or branch, do not create another branch, and ask the user. Resume your own earlier branch with `--branch NAME`; use `--takeover` only when the user says the other session is gone. Save the printed `token` in the Issue checkpoint, `renew` it at every checkpoint and before any background run, and `release` it in the final report (success or `BLOCKED`). `renew` returning `NOT_OWNER` or `CLAIM_LOST` means stop writing and re-validate. `gh pr list` and local `git worktree list` alone cannot see another clone's unpushed work.
-- Root Agent owns scope, dependency DAG, concurrency, state, acceptance criteria, final gate, and remote GitHub changes; subagents own bounded analysis, coding, or review only.
+- Root Agent owns the selected Issue scope, dependency checks, state, acceptance criteria, final gate, and remote GitHub changes; subagents own bounded analysis, coding, or review only.
 
-## 1. Parallel initial analysis and scheduling
+## 1. Single-Issue analysis and dependency checks
 
-1. Dispatch `issue-sa` to analyze each Issue in a distinct context: reproducible problem, actual root cause, impact radius, acceptance criteria, dependencies, and security/semantic regression. Parallelize independent analysis when beneficial.
-2. Build a dependency DAG and classify each Issue: `INDEPENDENT`, `BLOCKED_BY`, `OVERLAPPING_WRITE`, `EXISTING_PR`, `INVALID_OR_CLOSED`, or `NEEDS_DECISION`. Verify suspected links instead of treating every issue mention as a dependency.
-3. Run **at most two concurrent modifying Issue workstreams**, with one writer per worktree. Serialize shared-file, shared-generated-file, migration, shared integration environment, or conflicting-resource edits even if worktrees are isolated. Do not parallelize dependent branches unless explicit stacked-PR handling is authorized.
-4. **Default: wait until a required predecessor is merged** before implementing a dependent Issue against the default branch; report blocked dependencies and work on other independent Issues. If user explicitly authorizes stacked PRs, target the predecessor's branch, document the stack, and retarget after predecessor merges. Never silently copy a predecessor's changes into a supposedly independent PR.
+1. After checkout, dispatch `issue-sa` to analyze the selected Issue in a distinct context: reproducible problem, actual root cause, impact radius, acceptance criteria, dependencies, and security/semantic regression. Do not analyze additional Issues as separate workstreams.
+2. Inspect prerequisites as read-only context and classify the selected Issue: `INDEPENDENT`, `BLOCKED_BY`, `OVERLAPPING_WRITE`, `EXISTING_PR`, `INVALID_OR_CLOSED`, or `NEEDS_DECISION`. Verify suspected links instead of treating every issue mention as a dependency.
+3. Run **exactly one Issue workstream**, with one writer in the checked-out branch. SA, Coder and Reviewer remain separate roles for this Issue, not parallel Issue workers. Dependencies do not authorize work on another item.
+4. **Default: wait until a required predecessor is merged** before implementing a dependent Issue against the default branch; report blocked dependencies and stop this invocation. If user explicitly authorizes stacked PRs, target the predecessor's branch, document the stack, and retarget after predecessor merges. Never silently copy a predecessor's changes into a supposedly independent PR.
 
 ## 2. Implementation per Issue
 
-1. Resolve the actual default/base branch and fetch current remote heads; use a **dedicated branch and worktree**, e.g. `issue/123-short-slug` in `../<repo>-issue-123`. Do not reuse another Issue's worktree or a shared mutable checkout. Resume an existing isolated worktree only after verifying its Issue mapping and clean scope. Keep an Issue→branch→worktree ledger outside version control.
+1. Revalidate the **dedicated branch already checked out during preflight**, its recorded base and current remote heads; do not create or checkout a second branch here. Use the current checkout, not a new per-Issue worktree. Resume only after verifying the Issue-to-branch mapping and clean scope. Keep the branch/checkout identity outside version control.
 2. Dispatch `issue-coder` with an explicit envelope: Issue URL, worktree path, base SHA, approved scope, acceptance criteria, SA's root-cause assessment, allowed files, regression expectations, and dependencies. Only the assigned Coder changes source.
 3. Require a genuine root-cause fix, targeted regression tests, and any relevant integration tests. Do not bypass by disabling/skipping tests, weakening assertions, swallowing errors, hardcoding results, or ignoring findings. If a true root-cause fix cannot be proven, report `BLOCKED`; do not substitute a workaround silently.
 4. Run repository-appropriate tests, lint, static analysis/security checks where applicable. Order the expensive work per [repo evidence rules](references/repo-evidence.md#order-of-work): freeze the candidate and review it, gather repository-required evidence (live runs) on that commit, commit the evidence, then run the long receipts, so an evidence commit does not force a rerun. Write high-volume logs **outside the working tree**. Commit source changes to the Issue branch; run tests again on the **clean committed HEAD** using `scripts/run_check.py` receipts for mechanical SHA binding. If fixes change HEAD, invalidate old results and repeat the relevant checks.
 5. Dispatch a **fresh `issue-reviewer`** independent of implementation context. It must examine the diff against the intended base, correctness, acceptance criteria, architecture, security, concurrency, edge cases, and semantic regressions. Reviewer does not edit source. Rate findings with [severity rubric](references/severity.md) (severity, `origin`, `class`, reproduction) and return them with the reviewed HEAD SHA.
-6. Any unresolved P0/P1/P2 finding is blocking; `pre-existing` findings are capped at P3 and go to the PR body or a follow-up issue. Coder corrects blockers, tests are rerun, and an independent reviewer re-reviews the new HEAD as a delta review against the findings ledger. A repeated finding `class` goes to SA for a class-level fix before the Coder. After three unsuccessful substantive revisions, re-dispatch SA to challenge the diagnosis and approach; if still blocked, preserve branch/state and proceed with another independent Issue. Never lower standards due to time/token limits.
+6. Any unresolved P0/P1/P2 finding is blocking; `pre-existing` findings are capped at P3 and go to the PR body or a follow-up issue. Coder corrects blockers, tests are rerun, and an independent reviewer re-reviews the new HEAD as a delta review against the findings ledger. A repeated finding `class` goes to SA for a class-level fix before the Coder. After three unsuccessful substantive revisions, re-dispatch SA to challenge the diagnosis and approach; if still blocked, preserve branch/state and stop without starting another Issue. Never lower standards due to time/token limits.
 
 ## 3. Mandatory pre-PR gate (fail closed)
 
@@ -112,7 +119,7 @@ python3 /path/to/issue-to-pr/scripts/issue_gate.py \
 
 Maintain per-Issue checkpoint (`references/workflow.md`) so interrupted runs can resume without reproducing commits or creating duplicate PRs. Child agents return compact summaries, not full code diffs or raw test logs. Include paths to evidence artifacts and last verified HEAD. Root should complete permitted execution, not wait for an artificial check-in between normal steps.
 
-For **every target Issue**, report: Issue number/URL, `READY_FOR_REVIEW` (converted after everything was done) / `DRAFT_PR_CREATED` (open as Draft, work still in progress) / `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` / `EXISTING_PR` / `EXISTING_WORK` / `BLOCKED` / `INVALID`, PR URL if present, root cause/fix, reviewer disposition, test results, latest SHA, remaining blockers, CI state (if known). Separate local test pass from GitHub CI pass. Do not claim success without corresponding verification.
+For **the selected Issue**, report: Issue number/URL, `READY_FOR_REVIEW` (converted after everything was done) / `DRAFT_PR_CREATED` (open as Draft, work still in progress) / `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` / `EXISTING_PR` / `EXISTING_WORK` / `BLOCKED` / `INVALID`, PR URL if present, root cause/fix, reviewer disposition, test results, latest SHA, remaining blockers, CI state (if known). Separate local test pass from GitHub CI pass. Do not claim success without corresponding verification.
 
 ## Supporting files
 

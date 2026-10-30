@@ -10,6 +10,7 @@ then run `make skill-test` and `go test ./cmd/pilot/cmd -run TestAgentSkillLayou
 
 | File | Project-specific change |
 |---|---|
+| `SKILL.md`, `README.md`, `references/workflow.md` | Single item per invocation; checkout the selected branch in the current clean checkout before work, no per-item worktree/batch scheduling. Shared contract: `../_shared/single-item-checkout.md`, including stable skill snapshot, branch/HEAD verification and dirty-checkout protection. Regression guard: `../pr-review-merge/tests/test_single_item_contract.py`. |
 | `SKILL.md` | "Project runtime configuration" (orchestrator keeps the session model; role models live only in the native role definitions) and "Pilot: turn review history into a verification plan" sections |
 | `platforms/{claude,codex,agy}/agents/pr-{sa,coder,reviewer}.*` | pilot lines: read the Root-supplied `pilot_history_checks`, finding ledger and target-validation plan; vm-target evidence rules; unavailable required validation keeps the PR Draft |
 | `references/roles.md`, `references/workflow.md` | `pilot_history_checks` hand-off paragraphs (reference lives in `../pilot-code-review/references/pilot-history-checks.md`) |

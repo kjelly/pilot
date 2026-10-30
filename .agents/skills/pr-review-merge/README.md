@@ -19,25 +19,28 @@ Codex 的角色定義是 `.codex/agents/prm-*.toml` 的位元組副本。
 
 ## 使用
 
+每次只處理一個 PR。多個或全部項目先列候選並請使用者選一個，不自動處理下一個。
+依[checkout 契約](../_shared/single-item-checkout.md)先在目前乾淨 checkout 切到該 PR 原始 head branch，再審查與測試；不建立 per-PR worktrees。
+
 **Codex CLI**
 
 ```text
-$pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不合格轉 Draft 並留言。
+$pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge，不合格轉 Draft 並留言。
 ```
 
 **Claude Code / agy CLI / Antigravity IDE**
 
 ```text
-/pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不合格轉 Draft 並留言。
+/pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge，不合格轉 Draft 並留言。
 ```
 
 指定 PR：
 
 ```text
-/pr-review-merge 審查 kjelly/pilot #42 #43 #44
+/pr-review-merge 審查 kjelly/pilot #42
 ```
 
-**參數及預設策略：**最多 2 個獨立 Reviewer Subagents 並行、Merge 串行、預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
+**參數及預設策略：**只處理選定的單一 PR，由獨立 Reviewer 審查，完成或受阻後停止，不自動處理下一項。預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
 
 ## 內部安全檢查（供 Agent 呼叫）
 
