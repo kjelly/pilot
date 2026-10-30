@@ -121,7 +121,7 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 		t.Fatal("identity-secret-test must require Ansible")
 	}
 	selected := regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$"))
-	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
+	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentitySecretDriftProbeAdminPassword", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
 		if !selected.MatchString("TestRegression_" + name) {
 			t.Errorf("required-Ansible recipe omits %s", name)
 		}
@@ -136,6 +136,25 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 	for _, name := range []string{"TestYAML11NonStringMatchesAnsible", "TestAnsibleTagsMatchTheClassifier"} {
 		if !invSelected.MatchString(name) {
 			t.Errorf("required-Ansible recipe omits internal/inventory's %s", name)
+		}
+	}
+	// The drift probe's failure reporting runs real Ansible through DriftProbe
+	// and the three drift commands (issue #179); both must be in the recipe.
+	// The accessgrants recipe also runs the operator-environment matrix
+	// (ANSIBLE_FORCE_COLOR, ANSIBLE_STDOUT_CALLBACK, ...; issue #179).
+	for pkg, names := range map[string][]string{
+		"./internal/accessgrants/": {"TestRegression_IdentitySecretDriftProbeFailureIsSafe", "TestRegression_IdentitySecretDriftProbeIgnoresTheOperatorsOutputSettings"},
+		"./cmd/pilot/cmd/":         {"TestIdentitySecretDriftCommandsShowTheGateAndHideTheVault"},
+	} {
+		m := regexp.MustCompile(`(?m)^identity-secret-test:.*\n(?:\t.*\n)*\tPILOT_REQUIRE_CONTAINER_TESTS=1 go test .* -run '([^']+)' ` + regexp.QuoteMeta(pkg) + `$`).FindSubmatch(body)
+		if m == nil {
+			t.Errorf("required-Ansible recipe does not run %s", pkg)
+			continue
+		}
+		for _, name := range names {
+			if !regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$")).MatchString(name) {
+				t.Errorf("required-Ansible recipe for %s omits %s", pkg, name)
+			}
 		}
 	}
 	body, err = os.ReadFile("../../.github/workflows/ci.yml")

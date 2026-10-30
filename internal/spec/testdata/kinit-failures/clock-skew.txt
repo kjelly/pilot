@@ -1,0 +1,7 @@
+# source: libkrb5 error-table text (strings of libkrb5.so 1.22.2) in the live kinit line format; NOT a live capture - the situation was not reproduced locally
+# class: clock_skew
+# rc=1
+# --- stdout ---
+
+# --- stderr ---
+kinit: Clock skew too great while getting initial credentials

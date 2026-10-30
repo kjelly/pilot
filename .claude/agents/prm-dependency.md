@@ -1,0 +1,1 @@
+../../.agents/skills/pr-review-merge/platforms/claude/agents/prm-dependency.md

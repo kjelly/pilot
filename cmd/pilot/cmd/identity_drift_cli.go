@@ -25,6 +25,7 @@ var (
 	identityDriftInventory         string
 	identityDriftTargetGroup       string
 	identityDriftVaultPasswordFile string
+	identityDriftVarsFile          string
 	identityDriftRepairManaged     bool
 )
 
@@ -40,7 +41,20 @@ once and exits — no recurring loop (spec.md v3.2 §1).
 --repair-managed additionally reconciles any drift found via the same
 apply path 'pilot access reconcile' uses — it only ever touches
 Pilot-owned managed constructs (spec.md §13.1's ownership boundary),
-never a hand-authored roster entry it doesn't compile itself.`,
+never a hand-authored roster entry it doesn't compile itself. The repair step
+itself still reads the admin password from the roster only.
+
+The probe reads the FreeIPA admin password from the vault vars file's
+ipa_admin_password first (the same order 'pilot deploy' uses), then from the
+roster's freeipa.admin.password. The vars file is --vars-file, or by default
+<inventory dir>/.vault/main.yaml when it exists; it is only handed to
+ansible-playbook as a file, never read by pilot. --vault-password-file decrypts
+both an encrypted roster and an encrypted vars file, so they must share one
+vault password. An explicit --vars-file that is missing, a directory, or
+encrypted without --vault-password-file is an error; the auto-detected default
+that is encrypted without --vault-password-file is skipped with a note on
+stderr, and the roster's password is used. The vars file is loaded whole, so
+a freeipa_domain/freeipa_realm in it also sets the probe's realm (as in apply).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runIdentityDriftCmd,
 }
@@ -49,7 +63,8 @@ func init() {
 	identityDriftCmd.Flags().StringVar(&identityDriftFormat, "format", "table", "output format: table|json")
 	identityDriftCmd.Flags().StringVarP(&identityDriftInventory, "inventory", "i", "inventory.yml", "inventory to probe live state against")
 	identityDriftCmd.Flags().StringVar(&identityDriftTargetGroup, "target-group", "", "override the probe playbook's default host-targeting group")
-	identityDriftCmd.Flags().StringVar(&identityDriftVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster")
+	identityDriftCmd.Flags().StringVar(&identityDriftVaultPasswordFile, "vault-password-file", "", driftVaultPasswordFlagHelp)
+	identityDriftCmd.Flags().StringVar(&identityDriftVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	identityDriftCmd.Flags().BoolVar(&identityDriftRepairManaged, "repair-managed", false, "explicitly repair any drift found (Pilot-owned managed constructs only)")
 	identityCmd.AddCommand(identityDriftCmd)
 }
@@ -64,6 +79,11 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 
 	if identityDriftFormat != "table" && identityDriftFormat != "json" {
 		return fmt.Errorf("--format must be table or json, got %q", identityDriftFormat)
+	}
+
+	varsFile, err := resolveDriftVarsFile(cmd.ErrOrStderr(), identityDriftInventory, identityDriftVarsFile, identityDriftVaultPasswordFile)
+	if err != nil {
+		return err
 	}
 
 	violations, err := inventory.ValidateRosterFile(readPath)
@@ -82,6 +102,7 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		Inventory:         identityDriftInventory,
 		TargetGroup:       identityDriftTargetGroup,
 		VaultPasswordFile: identityDriftVaultPasswordFile,
+		VarsFile:          varsFile,
 		StateDir:          resolveStateDir(accessStateFiles...),
 		Now:               time.Now(),
 	}

@@ -1,0 +1,1 @@
+../../.agents/skills/pr-ready/platforms/claude/agents/pr-sa.md

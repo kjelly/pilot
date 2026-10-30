@@ -100,6 +100,13 @@ uninstall-callback: ## Remove installed callback plugin
 test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
+skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
+	@for skill in .agents/skills/*/; do \
+	  [ -d "$$skill/tests" ] || continue; \
+	  printf '── %s\n' "$$skill"; \
+	  (cd "$$skill" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py') || exit 1; \
+	done
+
 test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)
 	@command -v docker >/dev/null          && echo "docker OK"          || (echo "docker MISSING"; exit 1)
@@ -145,6 +152,8 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)$$' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 4m -run '^TestIdentitySecretDriftCommands' ./cmd/pilot/cmd/
 
 # ROOT_TESTS are the internal/inventory tests that call requireRoot: what a
 # roster write keeps when pilot runs as root (pilot-cli under `docker run`).

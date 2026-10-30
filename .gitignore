@@ -16,7 +16,12 @@ __pycache__/
 *.db-shm
 *.db-wal
 .crush/
-.claude/
+# Shared Claude skills and agents are versioned (symlinks into .agents/skills);
+# everything else under .claude/ is local state. Model/effort choices stay in
+# settings.local.json so a shared file never outranks /model or user settings.
+/.claude/*
+!/.claude/skills/
+!/.claude/agents/
 opencode.json
 
 # Test artifacts

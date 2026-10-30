@@ -159,6 +159,8 @@ type fakeDriftRunner struct {
 	live     LiveState
 	exitCode int
 	runErr   error
+	stdout   string
+	stderr   string
 	lastArgs []string
 	// capturedVars is the extra-vars @file's decoded content, captured
 	// here because DriftProbe deletes that temp file via defer as soon
@@ -197,7 +199,7 @@ func (f *fakeDriftRunner) Run(_ context.Context, args ...string) (*ansible.Resul
 		}
 		_ = os.WriteFile(outputPath, blob, 0o600)
 	}
-	return &ansible.Result{ExitCode: f.exitCode}, nil
+	return &ansible.Result{ExitCode: f.exitCode, Stdout: f.stdout, Stderr: f.stderr}, nil
 }
 
 const driftTestRoster = `
@@ -562,5 +564,122 @@ password_policies:
 	}
 	if !found {
 		t.Fatalf("expected pilot_drift_users to include alice (for user_auth_type probing), got: %v", users)
+	}
+}
+
+// driftArgIndex returns the index of the "-e" value that starts with prefix,
+// or -1. Both the vault file and the params file are passed as "-e @file".
+func driftArgIndex(args []string, prefix string) int {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" && strings.HasPrefix(args[i+1], prefix) {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// TestDriftProbe_PassesTheVarsFileBeforeThePilotParams is issue #179: the
+// probe takes the admin password vault-first, so the vault vars file reaches
+// ansible-playbook as a file reference. It must come BEFORE the params file
+// (the last -e wins, so the vault cannot override freeipa_roster_file,
+// pilot_drift_* or target_group), and Go must never read the value into argv
+// or the params.
+func TestDriftProbe_PassesTheVarsFileBeforeThePilotParams(t *testing.T) {
+	const secret = "Vault-Sentinel-pw-3e8b"
+	rosterPath := writeDriftTestRoster(t)
+	vaultPath := filepath.Join(t.TempDir(), "main.yaml")
+	if err := os.WriteFile(vaultPath, []byte("ipa_admin_password: "+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		varsFile     string
+		passwordFile string
+	}{
+		{name: "vars file only", varsFile: vaultPath},
+		{name: "vars file and vault password file", varsFile: vaultPath, passwordFile: "/secret/vault-pass"},
+		{name: "vault password file only (encrypted roster)", passwordFile: "/secret/vault-pass"},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeDriftRunner{live: LiveState{HBACExists: map[string]bool{}}}
+			_, err := DriftOnce(context.Background(), DriftProbeOptions{
+				RosterFile: rosterPath, Inventory: "inv.yml", Runner: runner,
+				VarsFile: tc.varsFile, VaultPasswordFile: tc.passwordFile,
+				Now: time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := runner.lastArgs
+			vaultIdx := driftArgIndex(args, "@"+vaultPath)
+			paramsIdx := -1
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-e" && strings.HasPrefix(args[i+1], "@") && args[i+1] != "@"+vaultPath {
+					paramsIdx = i + 1
+				}
+			}
+			if paramsIdx < 0 {
+				t.Fatalf("no params file in args: %v", args)
+			}
+			if tc.varsFile == "" {
+				// No VarsFile leaves the pre-#179 argv unchanged.
+				want := []string{DriftProbePlaybook, "-i", "inv.yml", "-e", args[paramsIdx]}
+				if tc.passwordFile != "" {
+					want = append(want, "--vault-password-file", tc.passwordFile)
+				}
+				if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+					t.Fatalf("argv = %v, want %v", args, want)
+				}
+			} else if vaultIdx < 0 || vaultIdx > paramsIdx {
+				t.Fatalf("the vars file must precede the params file in %v", args)
+			}
+			gotPW := false
+			for i, a := range args {
+				if a == "--vault-password-file" {
+					gotPW = i+1 < len(args) && args[i+1] == tc.passwordFile
+				}
+			}
+			if gotPW != (tc.passwordFile != "") {
+				t.Fatalf("--vault-password-file presence = %v, want %v in %v", gotPW, tc.passwordFile != "", args)
+			}
+			joined := strings.Join(args, "\x00")
+			blob, _ := json.Marshal(runner.capturedVars)
+			if strings.Contains(joined, secret) || strings.Contains(string(blob), secret) {
+				t.Fatal("the vault value reached argv or the params file")
+			}
+			if _, ok := runner.capturedVars["ipa_admin_password"]; ok {
+				t.Fatal("ipa_admin_password must come only from the vault file")
+			}
+		})
+	}
+}
+
+// envRecordingDriftRunner is a fakeDriftRunner that also takes per-call
+// environment, as *ansible.Runner does.
+type envRecordingDriftRunner struct {
+	fakeDriftRunner
+	env []string
+}
+
+func (f *envRecordingDriftRunner) RunWithExtraEnv(ctx context.Context, env []string, args ...string) (*ansible.Result, error) {
+	f.env = env
+	return f.Run(ctx, args...)
+}
+
+// TestDriftProbe_PinsAnsibleOutputSettings: a runner that accepts per-call
+// environment gets driftProbeEnv (default callback, JSON results, no colour),
+// which the failure extraction depends on.
+func TestDriftProbe_PinsAnsibleOutputSettings(t *testing.T) {
+	var r envRecordingDriftRunner
+	if _, err := DriftProbe(context.Background(), DriftProbeOptions{RosterFile: "roster.yaml", Inventory: "inv.yml", Runner: &r}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.env, " ")
+	for _, want := range []string{"ANSIBLE_STDOUT_CALLBACK=default", "ANSIBLE_CALLBACK_RESULT_FORMAT=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_FORCE_COLOR=0"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("probe env %q lacks %s", got, want)
+		}
 	}
 }
