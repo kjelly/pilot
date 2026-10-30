@@ -57,6 +57,7 @@ jobs:
         with:
           name: detection-engine-rollback-${{ github.sha }}
           path: .verification/rollback-provenance/
+          include-hidden-files: true
       - name: Tear down only dedicated target
         if: always()
         run: sudo env "PATH=$PATH" .verification/pilot vm-target down --name "de-rollback-${GITHUB_RUN_ID}"

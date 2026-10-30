@@ -706,10 +706,10 @@ func TestDetectionEngineStepZeroIsReadOnlyAndCheckModeSafe(t *testing.T) {
 		files       map[string]string
 		ok, skipped string
 	}{
-		{"apply, all files exist", nil, all, "5", "0"},
-		{"--check, all files exist", []string{"--check"}, all, "5", "0"},
-		{"apply, first install (no files; slurp has nothing to read)", nil, nil, "4", "1"},
-		{"--check, first install", []string{"--check"}, nil, "4", "1"},
+		{"apply, all files exist", nil, all, "6", "0"},
+		{"--check, all files exist", []string{"--check"}, all, "6", "0"},
+		{"apply, first install (no files; slurp has nothing to read)", nil, nil, "5", "1"},
+		{"--check, first install", []string{"--check"}, nil, "5", "1"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			res := harness{probes: probes, noBlockOnly: true, args: tt.args, files: tt.files, unit: fakeUnit{loaded: true, active: true, enabled: true}}.run(t)
