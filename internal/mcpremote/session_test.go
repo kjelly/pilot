@@ -357,6 +357,26 @@ func TestRunChangesRefusesWhenTheBaseAlreadyFails(t *testing.T) {
 	}
 }
 
+// A case-only rename is refused at export: on a case-insensitive clone the
+// two names are one file and Git there would not record the rename.
+func TestRunChangesRefusesACaseOnlyRename(t *testing.T) {
+	fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(work string) {
+		if err := os.Rename(filepath.Join(work, "group_vars", "all.yml"), filepath.Join(work, "group_vars", "ALL.yml")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
+	if err := RunSession(context.Background(), fs.cfg); err != nil {
+		t.Fatal(err)
+	}
+	id := mustReadyID(t, fs.stdout.String())
+	cfg := *fs.cfg
+	cfg.Stdout = io.Discard
+	if err := RunChanges(&cfg, id); CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), "git mv") {
+		t.Fatalf("err = %v, want CHANGESET_INVALID suggesting git mv", err)
+	}
+}
+
 // A tracked inventory.yml is regenerated in the workspace and never
 // exported; deleting it must not break the export of the real changes.
 func TestRunChangesWithATrackedInventoryDeleted(t *testing.T) {

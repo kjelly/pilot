@@ -293,79 +293,64 @@ func TestChangesStopsAnOversizedStream(t *testing.T) {
 // A failure part way through names what was already applied, and leaves
 // no temporary file behind.
 func TestChangesReportsAPartialImport(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
 	allowLocalRepos(t)
-	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/b.yml/keep": "x\n"})
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/ro/keep": "x\n"})
 	id := strings.Repeat("d", 32)
 	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
 		change("a.yml", mcpwire.OpAdd, "", "a: 1\n"),
-		change("b.yml", mcpwire.OpAdd, "", "b: 1\n"), // a directory in the clone: the rename fails
+		change("ro/b.yml", mcpwire.OpAdd, "", "b: 1\n"), // its directory is read-only: the write fails
 	}}
-	tarPath := changesTar(t, m, map[string]string{"a.yml": "a: 1\n", "b.yml": "b: 1\n"})
+	tarPath := changesTar(t, m, map[string]string{"a.yml": "a: 1\n", "ro/b.yml": "b: 1\n"})
 	p := testProfile(bare, "prod", mcpwire.ModeEdit)
 	useFakeSSH(t, "changes", p)
 	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
 	clone := t.TempDir()
 	git(t, clone, "clone", "--quiet", bare, ".")
-	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
-	_, err := Changes(context.Background(), o, id, clone)
-	if err == nil || !strings.Contains(err.Error(), "prod/b.yml") || !strings.Contains(err.Error(), "already applied before the failure: prod/a.yml") {
-		t.Fatalf("err = %v, want the failed path and what was already applied", err)
-	}
-	leftovers, _ := filepath.Glob(filepath.Join(clone, "prod", ".*.pilot-mcp-tmp"))
-	if len(leftovers) != 0 {
-		t.Fatalf("temporary files left: %v", leftovers)
-	}
-}
-
-// A case-only rename (delete a.yml, add A.yml) is accepted: deletes are
-// applied before writes, so it also works on a case-insensitive clone.
-func TestChangesAppliesACaseOnlyRename(t *testing.T) {
-	allowLocalRepos(t)
-	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all.yml": "a: 1\n"})
-	id := strings.Repeat("d", 32)
-	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
-		change("group_vars/ALL.yml", mcpwire.OpAdd, "", "a: 1\n"),
-		change("group_vars/all.yml", mcpwire.OpDelete, "", ""),
-	}}
-	tarPath := changesTar(t, m, map[string]string{"group_vars/ALL.yml": "a: 1\n"})
-	p := testProfile(bare, "prod", mcpwire.ModeEdit)
-	useFakeSSH(t, "changes", p)
-	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
-	clone := t.TempDir()
-	git(t, clone, "clone", "--quiet", bare, ".")
-	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
-	res, err := Changes(context.Background(), o, id, clone)
-	if err != nil {
+	ro := filepath.Join(clone, "prod", "ro")
+	if err := os.Chmod(ro, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(res.Deleted, ",") != "prod/group_vars/all.yml" || strings.Join(res.Written, ",") != "prod/group_vars/ALL.yml" {
-		t.Fatalf("result = %+v", res)
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	_, err := Changes(context.Background(), o, id, clone)
+	if err == nil || !strings.Contains(err.Error(), "prod/ro/b.yml") || !strings.Contains(err.Error(), "already applied before the failure: prod/a.yml") {
+		t.Fatalf("err = %v, want the failed path and what was already applied", err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(clone, "prod", "group_vars", "ALL.yml")); string(got) != "a: 1\n" {
-		t.Fatalf("ALL.yml = %q", got)
+	for _, dir := range []string{filepath.Join(clone, "prod"), ro} {
+		if leftovers, _ := filepath.Glob(filepath.Join(dir, ".*.pilot-mcp-tmp")); len(leftovers) != 0 {
+			t.Fatalf("temporary files left: %v", leftovers)
+		}
 	}
 }
 
 // An added path is absent at base and HEAD in a clean clone; if it exists
-// on disk it names another file (on macOS, a case or normalization
-// variant), and writing it would overwrite that file.
+// on disk it is a directory or names another file (on macOS, a case or
+// normalization variant). Either is refused before anything is changed.
 func TestChangesRefusesAnAddThatExistsOnDisk(t *testing.T) {
 	allowLocalRepos(t)
-	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all.yml": "a: 1\n"})
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all/main.yml": "a: 1\n"})
 	id := strings.Repeat("d", 32)
-	// On Linux a directory stands in for the colliding file.
+	// A directory replaced by a file of the same name, with its file
+	// deleted in the same changeset.
 	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
-		change("group_vars", mcpwire.OpAdd, "", "x\n"),
+		change("group_vars/all", mcpwire.OpAdd, "", "a: 1\n"),
+		change("group_vars/all/main.yml", mcpwire.OpDelete, "", ""),
 	}}
-	tarPath := changesTar(t, m, map[string]string{"group_vars": "x\n"})
+	tarPath := changesTar(t, m, map[string]string{"group_vars/all": "a: 1\n"})
 	p := testProfile(bare, "prod", mcpwire.ModeEdit)
 	useFakeSSH(t, "changes", p)
 	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
 	clone := t.TempDir()
 	git(t, clone, "clone", "--quiet", bare, ".")
 	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
-	if _, err := Changes(context.Background(), o, id, clone); !hasCode(err, CodeChangesetConflict) || !strings.Contains(err.Error(), "already exists on disk") {
-		t.Fatalf("err = %v, want CHANGESET_CONFLICT for an add that exists on disk", err)
+	if _, err := Changes(context.Background(), o, id, clone); !hasCode(err, CodeChangesetConflict) || !strings.Contains(err.Error(), "is a directory in the clone") {
+		t.Fatalf("err = %v, want CHANGESET_CONFLICT for an add over a directory", err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "prod", "group_vars", "all", "main.yml")); err != nil {
+		t.Fatalf("the refused import already deleted a file: %v", err)
 	}
 }
 
@@ -392,6 +377,7 @@ func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 		"reserved path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".vault/main.yaml", mcpwire.OpAdd, "", "x")}}, map[string]string{".vault/main.yaml": "x"})),
 		// On a case-insensitive clone (macOS) this is the clone's .git.
 		"nested .git":      read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("x/.git/config", mcpwire.OpAdd, "", "x")}}, map[string]string{"x/.git/config": "x"})),
+		"case-only rename": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("A.yml", mcpwire.OpAdd, "", "x"), change("a.yml", mcpwire.OpDelete, "", "")}}, map[string]string{"A.yml": "x"})),
 		"folded duplicate": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("a.yml", mcpwire.OpAdd, "", "x"), change("A.yml", mcpwire.OpAdd, "", "y")}}, map[string]string{"a.yml": "x", "A.yml": "y"})),
 		"case-folded .git": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".GIT/config", mcpwire.OpAdd, "", "x")}}, map[string]string{".GIT/config": "x"})),
 		"not a tar":        []byte("garbage"),

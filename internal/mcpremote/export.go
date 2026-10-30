@@ -74,6 +74,16 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	folded := make(map[string]string, len(changes))
+	for _, c := range changes {
+		key := mcpwire.FoldPath(c.Path)
+		if other, dup := folded[key]; dup {
+			// A case-only rename: on a case-insensitive clone (macOS) the two
+			// are one file, and Git there does not record the rename.
+			return nil, nil, errorf(mcpwire.CodeChangesetInvalid, "%s and %s differ only in case or ignorable characters; a rename like this cannot be exported, rename it with git mv in the config repository", other, c.Path)
+		}
+		folded[key] = c.Path
+	}
 	if err := checkNextSnapshot(cfg, dir, state, changes, contents); err != nil {
 		return nil, nil, err
 	}

@@ -111,15 +111,12 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		if _, dup := want[c.Path]; dup {
 			return m, nil, invalid("%s listed twice", c.Path)
 		}
-		// Two files written here would be one file on a case-insensitive
-		// clone (macOS). A delete is applied before every write, so a
-		// case-only rename (delete a.yml, add A.yml) is fine.
-		if c.Op != mcpwire.OpDelete {
-			if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
-				return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
-			}
-			folded[mcpwire.FoldPath(c.Path)] = c.Path
+		// On a case-insensitive clone (macOS) these are one file, and Git
+		// there would not record a case-only rename (core.ignorecase).
+		if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
+			return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
 		}
+		folded[mcpwire.FoldPath(c.Path)] = c.Path
 		switch c.Op {
 		case mcpwire.OpAdd, mcpwire.OpModify, mcpwire.OpDelete:
 		default:
@@ -252,9 +249,20 @@ func applyChanges(ctx context.Context, o *Options, m mcpwire.ChangesManifest, co
 		if err := refuseSymlinkComponents(root, a.full); err != nil {
 			return nil, err
 		}
+		// An added path is absent at base and HEAD and the clone is clean,
+		// so if it exists on disk it is a directory, or it names another
+		// file because the file system folds case or Unicode normalization
+		// (macOS). Either way, refuse before anything is changed.
+		if a.change.Op == mcpwire.OpAdd {
+			if info, err := root.Lstat(filepath.FromSlash(a.full)); err == nil {
+				if info.IsDir() {
+					return nil, conflict("%s is a directory in the clone; replacing a directory with a file is not supported", a.full)
+				}
+				return nil, conflict("%s already exists on disk as another file (a case-insensitive or normalizing file system?)", a.full)
+			}
+		}
 	}
-	// Deletes first, so a case-only rename works on a case-insensitive
-	// clone; then writes.
+	// Deletes first, then writes.
 	for _, a := range apply {
 		if a.change.Op != mcpwire.OpDelete {
 			continue
@@ -269,14 +277,6 @@ func applyChanges(ctx context.Context, o *Options, m mcpwire.ChangesManifest, co
 			continue
 		}
 		name := filepath.FromSlash(a.full)
-		// An added path is absent at base and HEAD and the clone is clean,
-		// so if it exists on disk it names another file: the file system
-		// folds case or Unicode normalization (macOS) and the two collide.
-		if a.change.Op == mcpwire.OpAdd {
-			if _, err := root.Lstat(name); err == nil {
-				return nil, partlyApplied(res, a.full, conflict("%s already exists on disk as another file (a case-insensitive or normalizing file system?)", a.full))
-			}
-		}
 		if err := writeInRoot(root, name, contents[a.change.Path]); err != nil {
 			return nil, partlyApplied(res, a.full, err)
 		}
