@@ -27,6 +27,13 @@ if args[:2] == ["pr", "view"]:
     print(json.dumps({"number": 7, "url": "https://github.com/acme/repo/pull/7",
         "headRefOid": sha, "headRefName": "fix-one", "state": "OPEN",
         "isDraft": not (state / "ready").exists(), "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED"}))
+elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "checks_error").exists():
+    print("HTTP 502: Bad Gateway", file=sys.stderr)
+    sys.exit(1)
+elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "no_required").exists():
+    # Real gh 2.103.3 on a branch without required checks: exit 1, no stdout, this stderr line.
+    print("no required checks reported on the 'fix-one' branch", file=sys.stderr)
+    sys.exit(1)
 elif args[:2] == ["pr", "checks"]:
     print(json.dumps(checks[:1] if "--required" in args else checks))
 elif args[:2] == ["api", "graphql"]:
@@ -109,6 +116,32 @@ class CLIMockTests(unittest.TestCase):
             self.assertTrue((t / "ready").exists())
             # Without disputes the gate never reads conversation comments or reviews.
             self.assertNotIn("comments", (t / "graphql.log").read_text().split())
+
+    def test_ready_without_required_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.make_pr(t)
+            (t / "no_required").touch()
+            (t / "fail").touch()
+            blocked = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            self.assertEqual(["Nonpassing GitHub check: go test (SUCCESS, fail)"],
+                             json.loads(blocked.stdout)["errors"])
+            self.assertFalse((t / "ready").exists())
+            (t / "fail").unlink()
+            ready = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(0, ready.returncode, ready.stdout)
+            self.assertEqual("READY", json.loads(ready.stdout)["status"])
+
+    def test_required_checks_lookup_failure_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.make_pr(t)
+            (t / "checks_error").touch()
+            blocked = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            self.assertIn("HTTP 502", json.loads(blocked.stdout)["errors"][0])
+            self.assertFalse((t / "ready").exists())
 
     def test_disputed_comment_is_checked_against_github(self):
         with tempfile.TemporaryDirectory() as tmp:

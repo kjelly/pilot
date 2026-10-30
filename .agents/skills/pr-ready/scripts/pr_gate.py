@@ -22,11 +22,13 @@ class GateError(RuntimeError):
     pass
 
 
-def cmd(argv: list[str], *, allow_nonzero_json: bool = False) -> Any:
+def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: str | None = None) -> Any:
     try:
         p = subprocess.run(argv, text=True, capture_output=True, check=False)
     except OSError as exc:
         raise GateError(f"Cannot execute {argv[0]}: {exc}") from exc
+    if empty_if and p.returncode and empty_if in f"{p.stdout}\n{p.stderr}".lower():
+        return []
     if p.returncode and not allow_nonzero_json:
         raise GateError(f"{' '.join(argv[:4])}: exit {p.returncode}: {(p.stderr or p.stdout).strip()[:700]}")
     try:
@@ -44,13 +46,18 @@ def gh_pr(repo: str, pr: int) -> dict[str, Any]:
     return value
 
 
+# `gh pr checks --required` exits 1 with this plain-text message on stderr (no JSON) when the
+# branch has no required checks (no branch protection or rulesets requiring any).
+NO_REQUIRED_CHECKS = "no required checks reported"
+
+
 def gh_checks(repo: str, pr: int, *, required: bool) -> list[dict[str, Any]]:
     args = ["gh", "pr", "checks", str(pr), "-R", repo, "--json", "name,state,bucket,link"]
     if required:
         args.append("--required")
     # gh pr checks may exit 1 for failures or 8 for pending checks while still
     # producing valid JSON. We must evaluate individual check buckets.
-    checks = cmd(args, allow_nonzero_json=True)
+    checks = cmd(args, allow_nonzero_json=True, empty_if=NO_REQUIRED_CHECKS if required else None)
     if not isinstance(checks, list):
         raise GateError("Expected a GitHub check list")
     if not all(isinstance(x, dict) for x in checks):
