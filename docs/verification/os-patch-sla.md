@@ -76,6 +76,8 @@
 | C3 | Critical CVE 補丁在紅色警戒時例外 ≤ 7 天 | OS vendor 公告 critical emergency | 公告結束即撤 |
 | C6 | RHEL/CentOS 用 dnf-automatic 而非 unattended-upgrades；spec 不適用 | RHEL 系列 | 暫停支援 |
 
+> 最近一次實跑（staging、prod 兩台全新 VM，不帶 `-e target_group=`）：2026-10-30，candidate `505d527`，check/apply/re-apply 皆 `failed=0`、re-apply `changed=0`；verify 5 過 3 失敗（C1/C2/C4，全新 VM 未升級，既有現象）。完整摘要見 [`docs/evidence/os-patch-sla/2026-10-30-505d527.md`](../evidence/os-patch-sla/2026-10-30-505d527.md)。
+
 ## 6. Playbook 對應
 
 對應的 **apply** playbook：`playbooks/apply/os-patch-sla-apply.yml`（手寫）
