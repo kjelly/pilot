@@ -136,9 +136,26 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 			t.Errorf("%v: when %q must not depend on facts only Step 6's tag sets", m["name"], when)
 		}
 	}
-	probe := loadDetectionEngineProbe(t)
-	if got := taskTags(t, probe); !reflect.DeepEqual(got, []string{"always"}) {
-		t.Errorf("Step 0 has tags %v, want [always]: it must run under every selection, before anything changes", got)
+	// Step 0 (probe + assert) is always-tagged and sits BEFORE the block: a refusal there
+	// must not run the rescue, whose first task stops and disables the unit.
+	for _, probe := range loadDetectionEngineProbes(t) {
+		if got := taskTags(t, probe); !reflect.DeepEqual(got, []string{"always"}) {
+			t.Errorf("%v has tags %v, want [always]: it must run under every selection, before anything changes", probe.(map[string]any)["name"], got)
+		}
+	}
+	block, resc := loadDetectionEngineBlock(t)
+	for _, task := range block {
+		if name, _ := task.(map[string]any)["name"].(string); strings.HasPrefix(name, "Step 0") {
+			t.Errorf("%q is inside the install block: a failing probe would run the rescue, which stops and disables the service", name)
+		}
+	}
+	// The rescue's mutating stop+disable must itself require the valid snapshot.
+	stop, _ := resc[0].(map[string]any)
+	if name, _ := stop["name"].(string); !strings.HasPrefix(name, "ROLLBACK — stop") {
+		t.Fatalf("the rescue's first task is %q, want the stop task", name)
+	}
+	if when := strings.Join(whenStrings(stop["when"]), " && "); !strings.Contains(when, "detection_engine_service_before.rc == 0") {
+		t.Errorf("the rescue's stop+disable has when %q: it must require Step 0's snapshot (detection_engine_service_before.rc == 0), or a failed query leaves a healthy service stopped and disabled with nothing to put it back", when)
 	}
 }
 

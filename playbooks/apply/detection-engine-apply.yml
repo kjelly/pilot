@@ -499,21 +499,44 @@
         fail_msg: "missing or empty {{ detection_engine_feature_profile_src }}"
       run_once: true
 
+    # Read-only snapshot of the service as it is BEFORE this run changes anything. It is
+    # the only thing the rescue below can put the service back from (facts like
+    # detection_engine_is_upgrade belong to Step 6's tag and are undefined under other
+    # selections), so it must be VALID before the first mutation, and it sits OUTSIDE the
+    # block on purpose: a refusal here (systemctl missing, `show` failing, output we cannot
+    # read) must not run the rescue, whose first task stops AND disables the unit. The
+    # tasks are always-tagged like the rescue that reads them.
+    - name: "Step 0: query the detection-engine service's original active/enabled state (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, pilot-detection-engine.service]
+      register: detection_engine_service_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # `systemctl show` exits 0 for a unit that does not exist (LoadState=not-found,
+    # ActiveState=inactive, UnitFileState= empty), so a first install passes this. Anything
+    # else that is not a clean answer with both properties present stops the play here,
+    # before Steps 1-17 touch anything and before the rescue exists.
+    - name: "Step 0: assert the original service state was read (fail closed before any change)"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - detection_engine_service_before.rc == 0
+          - detection_engine_service_before.stdout_lines | select('match', '^ActiveState=.+$') | list | length == 1
+          - detection_engine_service_before.stdout_lines | select('match', '^UnitFileState=') | list | length == 1
+        fail_msg: >-
+          cannot read the original state of pilot-detection-engine.service
+          (`systemctl show` rc={{ detection_engine_service_before.rc | default('n/a') }},
+          stdout={{ detection_engine_service_before.stdout | default('') | to_json }},
+          stderr={{ detection_engine_service_before.stderr | default(detection_engine_service_before.msg | default('')) | to_json }}).
+          Refusing to change anything: the rollback needs to know whether the
+          service was active/enabled to put it back. Nothing was modified; fix
+          systemd/systemctl on the host and re-run.
+
     - name: "Detection Engine install + systemd service"
       block:
-        # Read-only snapshot of the service as it is BEFORE this run changes anything.
-        # always-tagged like the rescue that reads it: the rescue runs whenever its block
-        # does, under any --tags/--skip-tags, and must put the service back from this, not
-        # from facts (detection_engine_is_upgrade) that only exist when Step 6's tag ran.
-        - name: "Step 0: record the service's original active/enabled state (read-only rollback material)"
-          tags: [always]
-          ansible.builtin.command:
-            argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, pilot-detection-engine.service]
-          register: detection_engine_service_before
-          changed_when: false
-          failed_when: false
-          check_mode: false
-
         - name: "Step 1: create dedicated system user (spec §8)"
           tags: [detection-engine-C2]
           ansible.builtin.user:
@@ -872,12 +895,20 @@
         # This rescue does not restore config/unit files, so after a failure that came
         # after a config change the service restarts WITH that config (it used to be left
         # stopped and disabled for inspection in that case).
+        #
+        # The stop is guarded by a valid Step 0 snapshot: without one nothing could put
+        # the service back, so it must not be stopped. Step 0 is outside this block and
+        # fails the play when it cannot read the state, so the guard only matters if the
+        # snapshot is missing altogether (`when` on the undefined register then fails this
+        # rescue before the service is touched). No `is defined` here on purpose: the
+        # always-tag prerequisite lint then keeps Step 0 always-tagged.
         - name: "ROLLBACK — stop the newly (mis)configured service"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: stopped
             enabled: false
+          when: detection_engine_service_before.rc == 0
           failed_when: false
 
         - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
@@ -908,7 +939,17 @@
 
         # The stop above disabled the unit too; put back what Step 0 found, whichever tags
         # selected the failing step. A unit that did not exist before (first install) or
-        # was inactive/disabled stays stopped/disabled.
+        # was inactive/disabled stays stopped/disabled. Restore semantics per state:
+        #   UnitFileState=enabled          -> `systemctl enable` (persistent).
+        #   enabled-runtime, static, ...   -> not re-enabled: the stop's `systemctl disable`
+        #                                     does not remove a /run (runtime) link, and
+        #                                     the others have no enable state to put back.
+        #   ActiveState=active|reloading|activating
+        #                                  -> restart (activating is a unit that is meant to
+        #                                     run: starting, or waiting out Restart=on-failure).
+        #   inactive|failed|deactivating   -> left stopped.
+        # ignore_errors (not failed_when: false) so a failed restore does not abort the
+        # remaining rescue tasks but is still visible to the final message below.
         - name: "ROLLBACK — re-enable the service if it was enabled before this run"
           tags: [always]
           ansible.builtin.systemd:
@@ -917,7 +958,8 @@
           when:
             - detection_engine_service_before.rc == 0
             - "'UnitFileState=enabled' in detection_engine_service_before.stdout_lines"
-          failed_when: false
+          register: detection_engine_rescue_reenable
+          ignore_errors: true
 
         - name: "ROLLBACK — restart the service if it was active before this run (with the restored binary, if any)"
           tags: [always]
@@ -926,8 +968,9 @@
             state: restarted
           when:
             - detection_engine_service_before.rc == 0
-            - "'ActiveState=active' in detection_engine_service_before.stdout_lines"
-          failed_when: false
+            - detection_engine_service_before.stdout_lines | intersect(['ActiveState=active', 'ActiveState=reloading', 'ActiveState=activating']) | length > 0
+          register: detection_engine_rescue_restart
+          ignore_errors: true
 
         - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
           tags: [always]
@@ -941,6 +984,12 @@
               that was active runs with whatever configuration the failed run
               had already written. A service that was not active before, or
               did not exist, stays stopped/disabled for inspection.
+              {% if detection_engine_rescue_reenable is failed %}
+              WARNING: re-enabling the service FAILED; it was enabled before this run and is now disabled.
+              {% endif %}
+              {% if detection_engine_rescue_restart is failed %}
+              WARNING: restarting the service FAILED; it was active before this run and is now stopped.
+              {% endif %}
 
     - name: "Publish detection-engine health metrics via the textfile collector"
       ansible.builtin.wait_for:
