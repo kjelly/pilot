@@ -52,3 +52,18 @@ class Repo:
 
     def branch_from_main(self, name):
         self.git("switch", "-q", "-c", name, "main")
+
+    def nested(self, rel, **files):
+        """An independent git repository (own .git) at `rel`, with the given files committed."""
+        path = self.path / rel
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", str(path), "init", "-q", "-b", "main"], check=True,
+                       capture_output=True, env=self.env)
+        for name, text in files.items():
+            (path / name).write_text(text)
+        if files:
+            subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True,
+                           env=self.env)
+            subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "n"], check=True,
+                           capture_output=True, env=self.env)
+        return path

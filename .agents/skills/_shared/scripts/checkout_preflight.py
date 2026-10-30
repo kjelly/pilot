@@ -10,11 +10,15 @@ that stands where the target needs a directory (or the reverse). This script
 refuses every case where that, or another silent loss, could happen.
 
 Usage:
-    checkout_preflight.py --target-ref SHA_OR_REF [--branch NAME] [--repo DIR]
+    checkout_preflight.py --target-ref SHA_OR_REF [--target-ref ...] [--branch NAME] [--repo DIR]
 
-`--target-ref` is the commit whose tree will be checked out (fetch it first).
-`--branch` is the local branch that will be checked out, for the "already
-checked out elsewhere" check. Prints one JSON object. Exit 0 = PASS; exit 1 =
+`--target-ref` is a commit whose tree may be checked out (fetch it first). It
+is repeatable: every commit that can land in the working tree must be listed,
+because the preflight checks each one. `--branch` is the local branch that will
+be checked out. It is used for the "already checked out elsewhere" check, and
+its existing local tip is checked as one more target: `git switch BRANCH` and
+`gh pr checkout` first check out that tip, which can be stale and track other
+paths than the fetched head. Prints one JSON object. Exit 0 = PASS; exit 1 =
 STOP (a problem was found, or a check could not be run: fail closed). Any other
 exit code (argument errors) is also not a pass. The script changes nothing in
 the repository.
@@ -50,8 +54,10 @@ def split_z(data: bytes) -> list[str]:
     return [os.fsdecode(item) for item in data.split(b"\0") if item]
 
 
-def problem(check: str, detail: str, paths: list[str] | None = None) -> dict:
+def problem(check: str, detail: str, paths: list[str] | None = None, target: str | None = None) -> dict:
     out: dict = {"check": check, "detail": detail}
+    if target:
+        out["target"] = target
     if paths:
         out["count"] = len(paths)
         out["paths"] = sorted(paths)[:MAX_PATHS]
@@ -65,7 +71,9 @@ def proper_prefixes(path: str):
 
 
 def check_dirty(top: Path) -> list[dict]:
-    entries = split_z(git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout)
+    # --ignore-submodules=none: diff.ignoreSubmodules / .gitmodules `ignore` must not hide a dirty submodule
+    entries = split_z(git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                          "--ignore-submodules=none").stdout)
     if not entries:
         return []
     return [problem("dirty", "tracked changes or untracked files; never stash, discard or "
@@ -124,46 +132,86 @@ def check_checked_out_elsewhere(top: Path, branch: str) -> list[dict]:
                     "worktree; do not force it or silently switch directories", elsewhere)]
 
 
-def check_ignored_collisions(top: Path, target: str) -> list[dict]:
-    """Ignored files the switch to `target` would overwrite, remove or block.
+def ignored_entries(top: Path) -> tuple[set[str], set[str]]:
+    """(ignored files, ignored directory-shaped entries) of the working tree.
 
-    With a clean `git status` every untracked file is ignored, so the ignored
-    files are exactly the ones git considers expendable. Three ways to lose one:
+    `git ls-files --others --ignored --exclude-standard` lists every ignored file
+    and nothing else, except that a nested git repository (a directory with its
+    own .git, tracked or not by anyone) is listed as one entry with a trailing
+    slash (`vendor/x/`), whatever it contains. Empty directories are not listed.
+    """
+    files: set[str] = set()
+    dirs: set[str] = set()
+    for entry in split_z(git(top, "ls-files", "-z", "--others", "--ignored",
+                             "--exclude-standard").stdout):
+        if entry.endswith("/"):
+            dirs.add(entry.rstrip("/"))
+        else:
+            files.add(entry)
+    return files, dirs
+
+
+def check_ignored_collisions(top: Path, label: str, target: str,
+                             ignored: tuple[set[str], set[str]]) -> list[dict]:
+    """Ignored paths the switch to `target` would overwrite, remove or write into.
+
+    With a clean `git status` every untracked path is ignored, so these are
+    exactly the paths git considers expendable. Ways to lose one:
       * the target tracks the same path (it is overwritten);
       * the target tracks a directory where the ignored file `a` stands
         (the file is removed to make room: target tracks `a/b`);
       * the target tracks a file where an ignored directory stands
-        (its ignored files are removed: ignored `a/b`, target tracks `a`).
+        (its ignored files are removed: ignored `a/b`, target tracks `a`);
+      * the target tracks any path below an ignored nested repository entry
+        (`vendor/x/`): its content is unknown, so every path under it counts.
     """
-    ignored = set(split_z(git(top, "ls-files", "-z", "--others", "--ignored",
-                              "--exclude-standard").stdout))
-    if not ignored:
+    files, dirs = ignored
+    if not files and not dirs:
         return []
     tracked = set(split_z(git(top, "ls-tree", "-r", "-z", "--name-only", "--full-tree",
                               target).stdout))
     tracked_dirs = {d for t in tracked for d in proper_prefixes(t)}
-    ignored_dirs = {d for i in ignored for d in proper_prefixes(i)}
-    problems = []
-    overwritten = ignored & tracked
-    if overwritten:
-        problems.append(problem(
-            "ignored_collision", "ignored file would be overwritten by a file the target "
-            "branch tracks (git does not warn about ignored files)", list(overwritten)))
-    blocked = ignored & tracked_dirs
-    if blocked:
-        problems.append(problem(
-            "ignored_collision", "ignored file would be deleted: the target branch tracks "
-            "files below that path", list(blocked)))
-    removed = tracked & ignored_dirs
-    if removed:
-        problems.append(problem(
-            "ignored_collision", "ignored files below this path would be deleted: the target "
-            "branch tracks a file there", list(removed)))
-    return problems
+    holding_dirs = {d for i in files for d in proper_prefixes(i)}
+    holding_dirs |= dirs | {d for e in dirs for d in proper_prefixes(e)}
+    found = []
+    for paths, detail in (
+        (files & tracked, "ignored file would be overwritten by a file the target tracks "
+                          "(git does not warn about ignored files)"),
+        (files & tracked_dirs, "ignored file would be deleted: the target tracks files "
+                               "below that path"),
+        (tracked & holding_dirs, "ignored files below this path would be deleted: the target "
+                                 "tracks a file there"),
+        ({t for t in tracked if any(p in dirs for p in proper_prefixes(t))},
+         "tracked path of the target lies inside an ignored nested repository or directory "
+         "entry; git writes into it and overwrites whatever is there"),
+    ):
+        if paths:
+            found.append(problem("ignored_collision", detail, list(paths), target=label))
+    return found
 
 
-def run_preflight(repo: Path, target_ref: str, branch: str | None) -> dict:
-    report: dict = {"status": "STOP", "repo": str(repo), "target_ref": target_ref,
+def resolve_targets(top: Path, refs: list[str], branch: str | None,
+                    problems: list[dict]) -> list[dict]:
+    """Resolve every commit that may be checked out; the local branch tip is one of them."""
+    wanted = [(ref, "target-ref") for ref in refs]
+    if branch:
+        wanted.append((f"refs/heads/{branch}", "local branch tip"))
+    targets: list[dict] = []
+    for ref, source in wanted:
+        sha = git(top, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+                  ok=(0, 1)).stdout.decode().strip()
+        if not sha:
+            if source == "target-ref":
+                problems.append(problem("unresolvable_target", f"{ref} is not a commit "
+                                        "in this repository; fetch it first"))
+            continue  # no local branch yet: nothing stale to check out
+        if all(t["sha"] != sha for t in targets):
+            targets.append({"ref": ref, "sha": sha, "source": source})
+    return targets
+
+
+def run_preflight(repo: Path, target_refs: list[str], branch: str | None) -> dict:
+    report: dict = {"status": "STOP", "repo": str(repo), "target_refs": target_refs,
                     "branch": branch, "problems": []}
     problems: list[dict] = report["problems"]
     try:
@@ -173,21 +221,19 @@ def run_preflight(repo: Path, target_ref: str, branch: str | None) -> dict:
         report["head"] = head.stdout.decode().strip() or None
         cur = git(top, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1))
         report["current_branch"] = cur.stdout.decode().strip() or None
-        resolved = git(top, "rev-parse", "--verify", "--quiet", f"{target_ref}^{{commit}}",
-                       ok=(0, 1))
-        target = resolved.stdout.decode().strip()
-        if not target:
-            problems.append(problem("unresolvable_target", f"{target_ref} is not a commit "
-                                    "in this repository; fetch it first"))
-        report["target"] = target or None
+        targets = resolve_targets(top, target_refs, branch, problems)
+        report["targets"] = targets
+        report["target"] = targets[0]["sha"] if targets else None
         problems += check_dirty(top)
         problems += check_in_progress(top)
         if report["head"]:
             problems += check_detached(top)
         if branch:
             problems += check_checked_out_elsewhere(top, branch)
-        if target:
-            problems += check_ignored_collisions(top, target)
+        if targets:
+            ignored = ignored_entries(top)
+            for t in targets:
+                problems += check_ignored_collisions(top, t["ref"], t["sha"], ignored)
     except (GitError, OSError) as exc:
         problems.append(problem("unverifiable", str(exc)))
     if not problems:
@@ -198,8 +244,10 @@ def run_preflight(repo: Path, target_ref: str, branch: str | None) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=Path("."), help="the current checkout")
-    parser.add_argument("--target-ref", required=True, help="commit-ish that will be checked out")
-    parser.add_argument("--branch", help="local branch that will be checked out")
+    parser.add_argument("--target-ref", action="append", required=True,
+                        help="commit-ish that may be checked out (repeatable)")
+    parser.add_argument("--branch", help="local branch that will be checked out; its local tip "
+                        "is checked too")
     args = parser.parse_args(argv)
     report = run_preflight(args.repo, args.target_ref, args.branch)
     json.dump(report, sys.stdout, indent=2)

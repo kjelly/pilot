@@ -122,6 +122,36 @@ class Snapshot(unittest.TestCase):
                 self.assertIn("differs from its manifest", out["error"])
 
 
+    def test_retargeted_symlink_inside_the_snapshot_fails_verification(self):
+        r = skill_repo(self)
+        snapshot, _ = self.create(r)
+        link = snapshot / ".claude/agents/issue-coder.md"
+        self.assertTrue(link.is_symlink())
+        link.unlink()
+        # still a valid, in-snapshot target, so only the recorded link target gives it away
+        os.symlink("../../" + TOML, link)
+        self.assertTrue(link.exists())
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        self.assertEqual((1, "STOP"), (rc, out["status"]))
+        self.assertIn("differs from its manifest", out["error"])
+        self.assertIn(".claude/agents/issue-coder.md", out["error"])
+
+    def test_dirty_submodule_hidden_by_ignore_configuration_refuses_the_snapshot(self):
+        sub = Repo(self, "sub")
+        sub.write("f", "1\n")
+        sub.commit("sub init")
+        r = skill_repo(self)
+        r.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub.path), "sub")
+        r.commit("add submodule")
+        self.create(r)  # control: a clean submodule is fine
+        (r.path / "sub" / "f").write_text("edited inside the submodule\n")
+        r.git("config", "diff.ignoreSubmodules", "all")
+        self.assertEqual("", r.out("status", "--porcelain"), "the setting hides it from status")
+        rc, out = snap(r, "create", "--repo", str(r.path), "--out-parent", str(r.base))
+        self.assertEqual((1, "STOP"), (rc, out["status"]))
+        self.assertIn("not clean", out["error"])
+
+
 class RoleVerification(unittest.TestCase):
     def verify(self, r, snapshot, platform="claude"):
         return snap(r, "verify-role", "--snapshot", str(snapshot), "--repo", str(r.path),
@@ -179,6 +209,20 @@ class RoleVerification(unittest.TestCase):
         rc, out = self.verify(r, self.snapshot)
         self.assertEqual((1, "STOP"), (rc, out["status"]))
         self.assertIn("outside the checkout", out["error"])
+
+    def test_invalid_role_names_are_blocked_before_any_path_is_built(self):
+        """A role is a plain file name: no separators, no `..`, not empty."""
+        outside = self.r.base / "outside.md"
+        outside.write_text("---\nname: x\n---\n\nsecret\n")
+        for bad in ("", "..", "../outside", "a/b", "/etc/passwd", "..\\x", ".hidden", "-flag",
+                    "issue-coder/../issue-coder", "issue..coder"):
+            with self.subTest(role=bad):
+                rc, out = snap(self.r, "verify-role", "--snapshot", str(self.snapshot), "--repo",
+                               str(self.r.path), "--platform", "claude", f"--role={bad}")
+                self.assertEqual((1, "STOP"), (rc, out["status"]))
+                self.assertIn("invalid role name", out["error"])
+        rc, out = self.verify(self.r, self.snapshot)  # control: the real role still verifies
+        self.assertEqual((0, "PASS"), (rc, out["status"]))
 
     def test_tampered_snapshot_blocks_role_verification(self):
         (self.snapshot / ROLE).write_text("tampered\n")

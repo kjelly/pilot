@@ -17,8 +17,10 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "checkout_preflight.p
 
 
 def preflight(repo, target, branch=None, cwd=None):
-    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path),
-           "--target-ref", target]
+    """`target` is one ref or a list of refs (each becomes its own --target-ref)."""
+    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path)]
+    for ref in ([target] if isinstance(target, str) else target):
+        cmd += ["--target-ref", ref]
     if branch:
         cmd += ["--branch", branch]
     p = subprocess.run(cmd, capture_output=True, text=True, env=repo.env)
@@ -232,6 +234,213 @@ class OtherSilentLosses(unittest.TestCase):
     def test_missing_target_argument_is_not_a_pass(self):
         p = subprocess.run([sys.executable, "-I", str(SCRIPT)], capture_output=True, text=True)
         self.assertNotEqual(0, p.returncode)
+
+
+class NestedRepositories(unittest.TestCase):
+    """`git ls-files -o -i` lists an ignored nested repository as one `dir/` entry."""
+
+    def nested_vendor(self):
+        """main ignores vendor/x/ (a nested repo with its own file); branch pr force-tracks vendor/x/file."""
+        r = Repo(self)
+        r.write(".gitignore", "vendor/x/\nbuild/\n")
+        r.write("a.txt")
+        r.commit("init")
+        r.branch_from_main("pr")
+        r.write("vendor/x/file", "tracked by pr\n")
+        r.commit("track vendor/x/file", "-f", "vendor/x/file")
+        r.git("switch", "-q", "main")
+        r.nested("vendor/x", file="MY NESTED REPO FILE\n")
+        self.assertEqual("", r.out("status", "--porcelain"), "the nested repo is ignored")
+        listed = r.out("ls-files", "--others", "--ignored", "--exclude-standard")
+        self.assertEqual("vendor/x/", listed, "the premise: one directory-shaped entry")
+        return r
+
+    def test_target_tracking_a_path_inside_an_ignored_nested_repo_stops(self):
+        r = self.nested_vendor()
+        rc, report = preflight(r, "pr", "pr")
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual(["vendor/x/file"], report["problems"][0]["paths"])
+        self.assertIn("nested repository", report["problems"][0]["detail"])
+        self.assertEqual("MY NESTED REPO FILE\n", (r.path / "vendor/x/file").read_text())
+        # premise: plain git writes into the nested repo and replaces the user's file
+        r.git("switch", "-q", "pr")
+        self.assertEqual("tracked by pr\n", (r.path / "vendor/x/file").read_text())
+
+    def test_nested_repo_elsewhere_is_not_a_collision(self):
+        """Control: the same ignored nested repo, but the target tracks nothing below it."""
+        r = self.nested_vendor()
+        r.git("switch", "-q", "pr")
+        r.git("rm", "-q", "--cached", "vendor/x/file")  # pr's tracked file moves elsewhere
+        r.write("vendor/y/file", "elsewhere\n")
+        r.commit("move it", "-f", "vendor/y/file")
+        r.git("switch", "-q", "main")
+        rc, report = preflight(r, "pr", "pr")
+        self.assertEqual((0, "PASS", []), (rc, report["status"], report["problems"]))
+
+    def test_nested_repo_inside_an_ignored_directory_stops(self):
+        r = Repo(self)
+        r.write(".gitignore", "build/\n")
+        r.write("a.txt")
+        r.commit("init")
+        r.branch_from_main("pr")
+        r.write("build/dep/g", "tracked\n")
+        r.commit("force-track", "-f", "build/dep/g")
+        r.git("switch", "-q", "main")
+        r.nested("build/dep", g="MINE\n")
+        r.write("build/obj/1.o")
+        self.assertEqual(["build/dep/", "build/obj/1.o"],
+                         r.out("ls-files", "--others", "--ignored", "--exclude-standard").split("\n"))
+        rc, report = preflight(r, "pr", "pr")
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual(["build/dep/g"], report["problems"][0]["paths"])
+
+    def test_target_file_where_an_ignored_nested_repo_stands_stops(self):
+        """The reverse direction: the target tracks a file at the nested repo's path or above it."""
+        for tracked in ("vendor/x", "vendor"):
+            with self.subTest(tracked=tracked):
+                r = Repo(self)
+                r.write(".gitignore", "vendor/\n")
+                r.write("a.txt")
+                r.commit("init")
+                r.branch_from_main("pr")
+                r.write(tracked, "a file now\n")
+                r.commit("file where the nested repo will be", "-f", tracked)
+                r.git("switch", "-q", "main")
+                r.nested("vendor/x", file="MINE\n")
+                rc, report = preflight(r, "pr", "pr")
+                self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+                self.assertEqual([tracked], report["problems"][0]["paths"])
+                self.assertTrue((r.path / "vendor/x/file").is_file(), "preflight is read-only")
+
+
+class StaleLocalBranch(unittest.TestCase):
+    """`git switch BRANCH` / `gh pr checkout` land on the local tip first, not on the fetched SHA."""
+
+    def stale_pr(self):
+        """Local `pr` is stale and tracks local.cfg; the fetched new head `new` does not."""
+        r = Repo(self)
+        r.write(".gitignore", "local.cfg\n")
+        r.write("a.txt")
+        r.commit("init")
+        r.branch_from_main("pr")
+        r.write("local.cfg", "stale tip content\n")
+        r.commit("stale tip tracks local.cfg", "-f", "local.cfg")
+        r.git("switch", "-q", "main")
+        r.git("switch", "-q", "-c", "new", "main")
+        r.write("feature.txt")
+        new = r.commit("fetched head: no local.cfg")
+        r.git("switch", "-q", "main")
+        mine = r.write("local.cfg", "MY LOCAL SETTINGS\n")
+        self.assertEqual("", r.out("status", "--porcelain"))
+        return r, new, mine
+
+    def test_stale_local_branch_tip_is_checked_even_when_the_target_is_clean(self):
+        r, new, mine = self.stale_pr()
+        # the target commit alone is harmless...
+        rc, alone = preflight(r, new)
+        self.assertEqual((0, "PASS"), (rc, alone["status"]))
+        # ...but with the branch named, the local tip it would land on first is checked too
+        rc, report = preflight(r, new, "pr")
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual(["local.cfg"], report["problems"][0]["paths"])
+        self.assertEqual("refs/heads/pr", report["problems"][0]["target"])
+        self.assertEqual({new, r.out("rev-parse", "pr")}, {t["sha"] for t in report["targets"]})
+        self.assertEqual("MY LOCAL SETTINGS\n", mine.read_text())
+        # premise: the switch to the stale local tip is what destroys the file
+        r.git("switch", "-q", "pr")
+        self.assertEqual("stale tip content\n", mine.read_text())
+
+    def test_every_repeated_target_ref_is_checked(self):
+        r, new, mine = self.stale_pr()
+        rc, report = preflight(r, [new, "refs/heads/pr"])
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual("refs/heads/pr", report["problems"][0]["target"])
+
+    def test_local_tip_equal_to_the_target_or_absent_passes(self):
+        r, new, mine = self.stale_pr()
+        r.git("branch", "-f", "pr", new)  # the local branch already equals the fetched head
+        rc, report = preflight(r, new, "pr")
+        self.assertEqual((0, "PASS", 1), (rc, report["status"], len(report["targets"])))
+        rc, report = preflight(r, new, "not-yet-created")  # new branch: no local tip to check
+        self.assertEqual((0, "PASS", 1), (rc, report["status"], len(report["targets"])))
+
+    def test_fast_forwardable_stale_tip_without_the_tracked_path_passes(self):
+        """Control: a stale local tip that does not track the user's ignored file is fine."""
+        r, new, mine = self.stale_pr()
+        r.git("branch", "-f", "pr", "main")  # tip = main: tracks nothing the user has ignored
+        rc, report = preflight(r, new, "pr")
+        self.assertEqual((0, "PASS"), (rc, report["status"]))
+
+
+class OddPathsAndSubmodules(unittest.TestCase):
+    ODD = ("with space.cfg", "new\nline.cfg", "設定.cfg", "dir with space/inner file.cfg",
+           "tab\there.cfg")
+
+    def test_collisions_on_paths_with_spaces_newlines_and_unicode(self):
+        r = Repo(self)
+        r.write(".gitignore", "*.cfg\n")
+        r.write("a.txt")
+        r.commit("init")
+        r.branch_from_main("pr")
+        for name in self.ODD:
+            r.write(name, "tracked\n")
+        r.git("add", "-f", "--", *self.ODD)
+        r.git("commit", "-q", "-m", "odd names")
+        r.git("switch", "-q", "main")
+        for name in self.ODD:
+            r.write(name, "MINE\n")
+        self.assertEqual("", r.out("status", "--porcelain"))
+        rc, report = preflight(r, "pr", "pr")
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual(sorted(self.ODD), report["problems"][0]["paths"])
+        self.assertEqual(len(self.ODD), report["problems"][0]["count"])
+
+    def test_odd_named_ignored_files_the_target_does_not_track_pass(self):
+        """Control: the same odd names, ignored, with nothing tracked at them."""
+        r = Repo(self)
+        r.write(".gitignore", "*.cfg\n")
+        r.write("a.txt")
+        r.commit("init")
+        r.branch_from_main("pr")
+        r.write("feature.txt")
+        r.commit("feature")
+        r.git("switch", "-q", "main")
+        for name in self.ODD:
+            r.write(name, "MINE\n")
+        rc, report = preflight(r, "pr", "pr")
+        self.assertEqual((0, "PASS"), (rc, report["status"]))
+
+    def submodule_repo(self):
+        sub = Repo(self, "sub")
+        sub.write("f", "1\n")
+        sub.commit("sub init")
+        r = Repo(self, "par")
+        r.write("a.txt")
+        r.commit("init")
+        r.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub.path), "sub")
+        r.commit("add submodule")
+        r.branch_from_main("pr")
+        r.write("b.txt")
+        r.commit("pr work")
+        r.git("switch", "-q", "main")
+        return r
+
+    def test_dirty_submodule_is_not_hidden_by_ignore_configuration(self):
+        for hide in (("config", "diff.ignoreSubmodules", "all"),
+                     ("config", "-f", ".gitmodules", "submodule.sub.ignore", "all")):
+            with self.subTest(hide=hide[1:]):
+                r = self.submodule_repo()
+                rc, clean = preflight(r, "pr", "pr")
+                self.assertEqual((0, "PASS"), (rc, clean["status"]), "control: clean submodule")
+                (r.path / "sub" / "f").write_text("edited inside the submodule\n")
+                r.git(*hide)
+                if hide[1] == "-f":
+                    r.git("add", ".gitmodules")  # keep only the submodule edit unstaged
+                    r.git("commit", "-q", "-m", "hide")
+                    (r.path / "sub" / "f").write_text("edited inside the submodule\n")
+                self.assertEqual("", r.out("status", "--porcelain"), "the setting hides it from status")
+                rc, report = preflight(r, "pr", "pr")
+                self.assertEqual((1, ["dirty"]), (rc, checks(report)))
 
 
 if __name__ == "__main__":

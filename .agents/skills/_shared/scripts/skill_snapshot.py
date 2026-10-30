@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,7 @@ BUNDLE_PATHS = (
     ".claude/agents",
 )
 ROLE_FILES = {"claude": ".claude/agents/{role}.md", "codex": ".codex/agents/{role}.toml"}
+ROLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 class Stop(Exception):
@@ -90,7 +92,9 @@ def manifest_path(snapshot: Path) -> Path:
 
 def create(repo: Path, out_parent: Path | None) -> dict:
     top = toplevel(repo)
-    if git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout:
+    # --ignore-submodules=none: diff.ignoreSubmodules / .gitmodules `ignore` must not hide a dirty submodule
+    if git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+           "--ignore-submodules=none").stdout:
         raise Stop("checkout is not clean: run checkout_preflight.py and resolve it first; "
                    "the snapshot is taken only after the clean check")
     head = git(top, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
@@ -135,6 +139,9 @@ def verify(snapshot: Path) -> dict:
 
 
 def verify_role(snapshot: Path, repo: Path, platform: str, role: str) -> dict:
+    if not ROLE_NAME.fullmatch(role) or ".." in role:
+        raise Stop(f"BLOCKED: invalid role name {role!r}: a role is a plain file name such as "
+                   "issue-coder (no path separators, no '..', not empty)")
     result = verify(snapshot)
     top = Path(os.path.realpath(toplevel(repo)))
     rel = ROLE_FILES[platform].format(role=role)
