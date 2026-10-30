@@ -6,11 +6,14 @@
 > 一組 Shape 3（client+server）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
-> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
-> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
-> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
-> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+> 最後驗證（TCP 鏈與 C20 distro policy 改寫，PR #188）：2026-10-30，candidate
+> `c97caf38cb0694274b65a5e2a07537fafe69421e`，tree `c13922899fc1bfaa26ec5f496c3d626b3202f86a`。
+> 全新三機 L3/L4 通過，receiver 11/11、sender 66/66、L6 三台 changed=0；單獨的
+> `/var/log/syslog` stanza（BASE 重現事故、本版不會）、glob 在 Step 1d 拒絕（真實與 `--check`）、
+> EL 只剩一個路徑時移除檔案、保留 mode/owner/group 與 symlink 均通過。
+> [完整驗證摘要](../evidence/audit-log-forwarding/2026-10-30-c97caf38cb06.md)。
+> RELP/mTLS 最後驗證於 `34cfabea416eb9645aaa323e541198ae39bbbe96`，本輪未重跑，
+> [該次摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 目標系統
 
