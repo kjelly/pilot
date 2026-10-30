@@ -414,6 +414,10 @@
           tags: [C20]
           ansible.builtin.stat:
             path: /etc/logrotate.d/rsyslog
+            # A symlinked policy (config management, stow) is the file logrotate reads:
+            # follow it, so the mode taken below is the target's and Step 5c edits the
+            # target instead of replacing the link with a regular file.
+            follow: true
             get_checksum: false
             get_mime: false
             get_attributes: false
@@ -476,6 +480,7 @@
                 src: "{{ distro_rsyslog_tmp.path }}/policy"
                 dest: /etc/logrotate.d/rsyslog
                 remote_src: true
+                follow: true
                 # The file keeps the mode, owner and group it had (from Step 5a), as it
                 # would with an in-place edit: without them the copy takes the umask's
                 # mode (0664 under umask 002, which logrotate refuses: "writable by group

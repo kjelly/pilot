@@ -401,6 +401,65 @@ func TestAuditLogForwardingStep5cKeepsModeOwnerAndGroup(t *testing.T) {
 	}
 }
 
+// A symlinked distro policy (config management, stow) stays a symlink: the target is
+// edited and keeps its mode. Replacing the link with a regular file would give it the
+// link's own mode (0777), which logrotate refuses, and leave the target declaring the
+// managed path. A dangling link does not fail the apply.
+func TestAuditLogForwardingStep5cFollowsASymlinkedPolicy(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	if _, err := exec.LookPath("logrotate"); err != nil {
+		t.Skip("logrotate not installed")
+	}
+	const policy = "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"
+
+	t.Run("valid link", func(t *testing.T) {
+		dir := newStep5Dir(t, policy)
+		rs, target := filepath.Join(dir, "rsyslog"), filepath.Join(dir, "target")
+		if err := os.Rename(rs, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target", rs); err != nil {
+			t.Fatal(err)
+		}
+		r := runStep5(t, dir, step5Playbook(t, dir, true))
+		if r.rc != 0 || r.failed != 0 {
+			t.Fatalf("the apply failed (rc %d):\n%s", r.rc, r.out)
+		}
+		if fi, err := os.Lstat(rs); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the policy link was replaced (%v, %v)", fi, err)
+		}
+		b, err := os.ReadFile(target)
+		if err != nil || strings.Contains(string(b), "/var/log/syslog") || !strings.Contains(string(b), "/var/log/mail.log") {
+			t.Fatalf("the link's target was not edited (%v):\n%q", err, b)
+		}
+		if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o600 {
+			t.Fatalf("target mode %v after the apply, was 0600", fi.Mode().Perm())
+		}
+	})
+	t.Run("dangling link", func(t *testing.T) {
+		dir := newStep5Dir(t, policy)
+		rs := filepath.Join(dir, "rsyslog")
+		if err := os.Remove(rs); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("nowhere", rs); err != nil {
+			t.Fatal(err)
+		}
+		r := runStep5(t, dir, step5Playbook(t, dir, true))
+		if r.rc != 0 || r.failed != 0 {
+			t.Fatalf("a dangling policy link failed the apply (rc %d):\n%s", r.rc, r.out)
+		}
+		if len(r.leftovers) > 0 {
+			t.Fatalf("left %v in the temp directory", r.leftovers)
+		}
+	})
+}
+
 // A check-mode run on a host that has the policy but not logrotate yet (Step 1c does not
 // install it in check mode) must still work: the helper runs, only logrotate's check of
 // its output is skipped. A real run without logrotate fails, before any write.
