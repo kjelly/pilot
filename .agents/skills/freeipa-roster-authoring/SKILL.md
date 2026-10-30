@@ -5,24 +5,29 @@ description: Generate or update the pilot repo's canonical FreeIPA identity rost
 
 # FreeIPA Roster Authoring
 
-Produce a canonical `schema_version: 2` roster consumable by
-`playbooks/apply/freeipa-identity-apply.yml`. Treat it as a declarative
-authorization document, not as an inventory or ad-hoc Ansible extra-vars file.
+Produce a canonical roster at the current schema, `schema_version: 3`
+(`CurrentRosterSchemaVersion` in `internal/inventory/roster_version.go`),
+consumable by `playbooks/apply/freeipa-identity-apply.yml`. Treat it as a
+declarative authorization document, not as an inventory or ad-hoc Ansible
+extra-vars file.
 
-An existing `schema_version: 1` roster does not need hand conversion: `pilot
-edit`, the MCP roster driver, and `pilot deploy`/`pilot reconcile`'s preflight
-all call `EnsureRosterCurrent` before touching a roster, which upgrades it to
-v2 automatically (validated, backed up, atomic) the first time any of them
-open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
-(add `--vault-password-file <path>` for an ansible-vault-encrypted roster) or
-`pilot roster lint <roster-file>` to check without upgrading. Never hand-edit
-`schema_version` — always go through one of these.
+An existing v1 or v2 roster does not need hand conversion: `pilot edit`, the
+MCP roster driver, and `pilot deploy`/`pilot reconcile`'s preflight all call
+`EnsureRosterCurrent` before touching a roster, which upgrades it to v3
+(validated, backed up, atomic) the first time any of them open it. Use `pilot
+roster migrate <roster-file>` to upgrade one explicitly (add
+`--vault-password-file <path>` for an ansible-vault-encrypted roster). Never
+hand-edit `schema_version`. The v2 -> v3 step only sets the version and adds an
+empty `grants: []`.
 
 ## Required workflow
 
 1. Inspect repository sources before writing:
 
    - `playbooks/apply/freeipa-identity.roster.example.yaml` for field shape.
+     It is still a v2 document: after copying it, upgrade the copy with
+     `pilot roster lint --upgrade <copy>` (step 5) instead of editing the
+     version.
    - `internal/inventory/roster_validate.go`, `internal/inventory/roster_netgroup.go`,
      and `cmd/pilot/cmd/roster_lint.go` for enforced rules.
    - `docs/runbooks/freeipa-identity.md` and
@@ -40,12 +45,22 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
 
 3. Generate only canonical fields. Start from the repository example or an
    existing roster and preserve unrelated sections where practical. Keep
-   `schema_version: 2`; do not introduce an unimplemented version, and do not
+   `schema_version: 3`; do not introduce an unimplemented version, and do not
    generate `freeipa.domain`/`freeipa.realm` for a new roster (migration-
    compatibility fields for old v1 rosters only — deployment naming now comes
    from `group_vars/freeipa.yml`). Use exact names such as
    `freeipa_roster_file`, `service_principal`, `nfs_clients`,
    `password.initial`, and `ssh_keys.authoritative`.
+
+   The v3-only sections (`grants`, `auth_policies`, `security`,
+   `account_policies`, `password_policies`, `credential_policies`) are access
+   governance. Write them only when the request is about them, take their shape
+   from the validators that enforce it (`internal/inventory/roster_grants.go`,
+   `auth_policy.go`, `grant_security_policy.go`, `sod.go`,
+   `account_policy.go`, `password_policy.go`, `credential_policy.go`,
+   `privileged_identity.go`), and prefer `pilot edit`'s roster editors
+   ("Access governance", "Identity hardening") and `pilot access` for grants
+   and break-glass. Leave `grants: []` empty otherwise.
 
 4. Enforce these invariants:
 
@@ -80,7 +95,7 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
      hostgroup is redundant (`all` alone already covers everything).
    - HBAC/sudo subjects, targets, hostgroups, services, command groups, and
      referenced groups resolve to declared objects.
-   - Netgroups (`netgroups:`) are optional and v2-only. Each needs a unique
+   - Netgroups (`netgroups:`) are optional, v2 and later. Each needs a unique
      name matching `^ng-[a-z0-9][a-z0-9_.-]*$` that does not collide with any
      hostgroup name, `membership.authoritative: true` (the only value this
      validator accepts), and every `membership.users`/`groups`/`hosts`/
@@ -103,20 +118,39 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
      in repo-tracked files or examples. Keep the real roster outside the repo,
      mode 600, and encrypted with `ansible-vault`.
 
-5. Validate every plaintext candidate:
+5. Validate every candidate:
 
    ```bash
    go run ./cmd/pilot roster lint <roster-file>
    ```
 
-   Require `ok: schema v2; no issues found` (a v1 roster instead shows `ok:
-   schema v1 is valid` plus a notice to run `pilot roster migrate` — pass
-   `--upgrade` to have lint do that itself), then inspect YAML and all
-   references. For an encrypted roster, `pilot roster lint`/`pilot roster
-   migrate --vault-password-file <path>` decrypt in memory and never leave a
-   plaintext copy on disk — do not manually decrypt to a temp file for this.
-   Lint success does not replace target `--check --diff` or apply/verify when
-   deployment evidence is requested.
+   Require exit 0 and `ok: schema v3; no issues found`, then inspect YAML and
+   all references. An older roster prints `ok: schema v2 is valid` and a
+   `notice:` line pointing at `pilot roster migrate <file>`; `--upgrade`
+   upgrades it in place and leaves a backup of the original beside it
+   (`<file>.v2.<UTC time>.<sha>.bak`, plaintext if the roster was) plus
+   `<file>.pilot-migrate.lock` / `.pilot-remove.lock`. `warning:` lines do not
+   fail lint, but a dangling host reference makes the outbound webhook
+   snapshot fail closed, so fix it.
+
+   **Lint cannot read an encrypted roster.** It has no vault option: on an
+   ansible-vault file it exits 1 with "is ansible-vault encrypted; decrypt it
+   first". It also reads the path more than once, so a pipe or `<(...)` fails
+   ("cannot resolve secret source path"). Lint a decrypted copy in a private
+   directory and delete it whatever the result; never under the repository or
+   `./tmp`, never printed:
+
+   ```bash
+   d=$(mktemp -d) && chmod 700 "$d"
+   (umask 077; ansible-vault view --vault-password-file <vault-pass> <roster> > "$d/roster.yaml")
+   go run ./cmd/pilot roster lint "$d/roster.yaml"; rm -rf "$d"
+   ```
+
+   `pilot roster migrate --vault-password-file` decrypts in memory, but on a
+   roster already at v3 it only reports "already schema v3; nothing to do"
+   without validating anything, so it is not a lint. Lint success does not
+   replace target `--check --diff` or apply/verify when deployment evidence is
+   requested.
 
 6. Report what was generated, placeholders or confirmations still required,
    and the namespaced loading contract:
@@ -135,9 +169,38 @@ open it. Use `pilot roster migrate <roster-file>` to upgrade one explicitly
 
 Make the smallest semantic change. Before removing a user, group, rule,
 membership, host, or export, identify the access/data impact and get explicit
-confirmation unless it is already authorized. Preserve secrets by editing via
+confirmation unless it is already authorized. Prefer `pilot edit`'s roster
+editors (Users, Groups, Host access, Sudo, Access governance, Identity
+hardening): they validate and lock the file. Otherwise edit with
 `ansible-vault edit`; do not print decrypted content in chat or logs. Re-run
 lint after every structural change and check all references after renames.
+
+## Revoking access and removing objects
+
+What a change does in FreeIPA on the next `freeipa-identity-apply.yml` run
+(`playbooks/apply/freeipa-identity-apply.yml`):
+
+| Roster change | FreeIPA result |
+|---|---|
+| user `state: disabled` | `ipa user-disable`: reversible, the account and its data stay. `enabled: true` beside it is a lint error. |
+| user `state: absent` | `ipa user-del` without `--preserve`: **permanent**. FreeIPA keeps no copy and can no longer prove the user ever existed. |
+| group `state: absent` | `ipa group-del`, after a permanent marker group `pilot-internal-history-g-<sha256(name)>` records that the name was managed. |
+| host, HBAC rule, sudo rule, netgroup `state: absent` | the object is deleted (`host-del`, `hbacrule-del`, `sudorule-del`, `netgroup-del`). `allow_all` cannot be absent; use `hbac.disable_allow_all`. |
+| entry deleted from the YAML | **nothing is disabled or deleted.** The FreeIPA object stays, a user stays enabled with its password; only roster-managed memberships that listed it are removed (group and hostgroup membership is authoritative). |
+
+Rules that follow:
+
+- To revoke a user's access, set `state: disabled`. Use `state: absent` only
+  when the person explicitly confirms permanent deletion.
+- A `state: absent` entry is a tombstone: keep it in the roster for good.
+  Deleting that line later is not a revocation and removes the only local
+  record that the object was deleted; `pilot roster remove-user` refuses it.
+- Never delete a user or group entry by hand to "remove" it. To undo an entry
+  that was never applied (a mistaken local addition), use
+  `pilot roster remove-user|remove-group <roster> <name> -i <inventory> --dry-run`
+  (`--vault-password-file` for an encrypted roster), then without `--dry-run`.
+  It asks FreeIPA first and refuses once the object has been applied; there is
+  no `--force`.
 
 If a `freeipa-nfs-server` inventory host lacks an `nfs.servers` entry, do not
 guess its FQDN or shares. Pilot may append a derived minimal stub, but the
