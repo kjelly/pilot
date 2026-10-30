@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_DcgmExporterSpec locks the structure of
@@ -277,12 +279,13 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 
 	// The entire install block must be skipped wholesale unless GPU present
 	// and not occupied-by-other.
-	blockIdx := strings.Index(applyRaw, `"dcgm-exporter install + container"`)
-	if blockIdx < 0 {
-		t.Fatalf("dcgm-exporter-apply.yml missing the main install block")
-	}
-	if !strings.Contains(applyRaw[blockIdx:blockIdx+250], "when: dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other") {
-		t.Errorf("the main install block must be gated on dcgm_exporter_gpu_present and not dcgm_exporter_port_occupied_by_other")
+	// The block's `when` is a scalar or a list (a --check preview also defers it
+	// while docker is not installed yet); read the YAML rather than match its text.
+	blockWhen := dcgmInstallBlockWhen(t, playbookRaw)
+	for _, cond := range []string{"dcgm_exporter_gpu_present", "not dcgm_exporter_port_occupied_by_other"} {
+		if !strings.Contains(blockWhen, cond) {
+			t.Errorf("the main install block must be gated on %q, got when: %q", cond, blockWhen)
+		}
 	}
 
 	// Kubernetes GPU Operator / foreign-exporter detection: the port check
@@ -365,4 +368,36 @@ func TestRegression_DcgmExporterSpec(t *testing.T) {
 	if !strings.Contains(applyRaw, "security_opts: \"{{ ['seccomp=unconfined'] if (dcgm_exporter_mig_enabled | bool) else omit }}\"") {
 		t.Errorf("dcgm-exporter-apply.yml must set seccomp=unconfined only when dcgm_exporter_mig_enabled")
 	}
+}
+
+// dcgmInstallBlockWhen returns the conditions of the "dcgm-exporter install +
+// container" block joined with " and ", whether `when` is a scalar or a list.
+func dcgmInstallBlockWhen(t *testing.T, playbookRaw []byte) string {
+	t.Helper()
+	var plays []map[string]any
+	if err := yaml.Unmarshal(playbookRaw, &plays); err != nil {
+		t.Fatalf("parse dcgm-exporter-apply.yml: %v", err)
+	}
+	for _, play := range plays {
+		tasks, _ := play["tasks"].([]any)
+		for _, task := range tasks {
+			m, ok := task.(map[string]any)
+			if !ok || m["name"] != "dcgm-exporter install + container" {
+				continue
+			}
+			switch w := m["when"].(type) {
+			case string:
+				return w
+			case []any:
+				var parts []string
+				for _, c := range w {
+					parts = append(parts, c.(string))
+				}
+				return strings.Join(parts, " and ")
+			}
+			t.Fatalf("the main install block has no when")
+		}
+	}
+	t.Fatalf("dcgm-exporter-apply.yml missing the main install block")
+	return ""
 }

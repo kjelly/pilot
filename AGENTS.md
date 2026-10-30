@@ -596,6 +596,16 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   對全 repo 鎖住;2026-10-01 修正 8 支(agent-controller、alertmanager、
   dashboard、detection-engine、pam-oidc-sshd、prometheus、restic-backup、
   thanos-query),同日再修正其餘 12 支,`rescueTagGapAllowlist` 清空。
+- 刻意的例外:跨檔的「本次執行是否會做 X」標記。`always` 的讀取者用
+  `x is defined` 讀另一支 playbook 的 setter,而 setter **不能**標 `always`:
+  `docker-apply.yml` 在安裝 docker 的 task 前,用和安裝 task 完全相同的 tags
+  設 `pilot_docker_install_planned`,`dcgm-exporter-apply.yml` 的
+  `--check` 預覽只在看到它時才延後 docker 相關步驟。標記若是 `always`,
+  `--tags dcgm-exporter` 這種不會安裝 docker 的執行也會設,預覽就假綠
+  (見 kjelly/pilot#184)。`AlwaysTagPrerequisite` lint 只看單一檔案,看不到
+  這種跨檔 setter,所以別把標記「修」成 `always`;
+  `internal/spec/dcgm_exporter_preview_defer_test.go` 鎖住 tags 相等、
+  不是 `always`、`is defined` 讀法與完整的 selector 矩陣。
 - 不只 `always` task:帶 row tag 的 task 讀的 `register`/`set_fact`,setter 也
   要在同樣的 `--tags` 下執行(setter 標 `always`,或帶 reader 的每個 tag),
   不然就用 `| default(...)`/`is defined` 讀。最常見的是 container task 的
