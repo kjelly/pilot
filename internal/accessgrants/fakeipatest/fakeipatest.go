@@ -9,7 +9,11 @@
 // FreeIPA API, whose replies are the captured 4.13.4 fixtures in
 // internal/freeiparpc/testdata (with each mutation spelled out by the test),
 // and Kerberos (the fake client only checks that the private cache holds the
-// word "ticket", which the fake kinit writes). See python/README.txt.
+// word "ticket", which the fake kinit writes). Every reply it serves is a
+// capture, none is constructed: user_find/group_find from the 2026-10-27
+// sessions, config_show and the preserved-users search (user-find-no-match,
+// user-find-preserved-one) from a live vm-target on 2026-10-31. See
+// python/README.txt.
 package fakeipatest
 
 import (
@@ -223,7 +227,7 @@ func Captured(t *testing.T) Scenario {
 		}
 	}
 	s := Scenario{UserFind: Capture(t, "user-find-states"), GroupFind: Capture(t, "group-find-states"),
-		PreservedFind: Capture(t, "user-find-no-match"), ConfigShow: ConfigShow("ipa.pilot.internal")}
+		PreservedFind: PreservedUsers(t), ConfigShow: Capture(t, "config-show")}
 	for _, e := range s.UserFind["result"].([]any) {
 		mapped(e.(map[string]any), "memberof_group")
 	}
@@ -295,24 +299,46 @@ func Converged(t *testing.T, keepUnexpected bool) (Scenario, string) {
 	return s, roster
 }
 
-// ConfigShow is a config_show reply with the given default e-mail domain. It is
-// CONSTRUCTED, not captured: FreeIPA 4.13.4 reads the domain as
-// config['ipadefaultemaildomain'][0] (ipaserver/plugins/baseuser.py), so the
-// attribute is a sequence of one string; a live capture of the real reply is
-// still to be taken (see python/README.txt).
-func ConfigShow(domain string) map[string]any {
-	return map[string]any{"result": map[string]any{"ipadefaultemaildomain": []any{domain}}, "value": nil, "summary": nil}
-}
-
-// PreservedUsers is the reply to the search for preserved users: pkey-only
-// entries like the captured user-find-states-pkey reply (uid and dn), with the
-// DN under the preserved-users container FreeIPA moves a `--preserve` deletion
-// to. The entry shape is the captured one; the container DN is from the source.
-func PreservedUsers(uids ...string) map[string]any {
+// PreservedUsers is the reply to the search for preserved users (user_find with
+// preserved=True, pkey_only=True) for the given logins. Nothing in it is
+// constructed. With no login it is the captured user-find-no-match reply, which
+// is byte-identical to what FreeIPA 4.13.4 answered to this search on a realm
+// with no preserved user (live capture, 2026-10-31). Otherwise it is the
+// captured user-find-preserved-one reply (a real `user-del --preserve`d user,
+// its DN under cn=deleted users,cn=accounts,cn=provisioning) with its login
+// replaced by each of the given ones: the same entry shape, once per login, and
+// count following. A single login keeps the captured summary ("1 user matched");
+// another count uses the plural FreeIPA printed in the user-find-states and
+// user-find-no-match captures ("N users matched").
+func PreservedUsers(t *testing.T, uids ...string) map[string]any {
+	t.Helper()
+	if len(uids) == 0 {
+		return Capture(t, "user-find-no-match")
+	}
+	reply := Capture(t, "user-find-preserved-one")
+	captured, ok := reply["result"].([]any)
+	if !ok || len(captured) != 1 {
+		t.Fatalf("fixture user-find-preserved-one changed: %v", reply["result"])
+	}
+	template := captured[0].(map[string]any)
+	const capturedLogin = "pv-capture"
+	dn, _ := template["dn"].(string)
+	if !strings.HasPrefix(dn, "uid="+capturedLogin+",cn=deleted users,cn=accounts,cn=provisioning,") {
+		t.Fatalf("fixture user-find-preserved-one changed: dn %q", dn)
+	}
 	entries := make([]any, 0, len(uids))
 	for _, uid := range uids {
-		entries = append(entries, map[string]any{"uid": []any{uid},
-			"dn": "uid=" + uid + ",cn=deleted users,cn=accounts,cn=provisioning,dc=ipa,dc=pilot,dc=internal"})
+		entry := map[string]any{}
+		for field, value := range template {
+			entry[field] = value
+		}
+		entry["uid"] = []any{uid}
+		entry["dn"] = "uid=" + uid + strings.TrimPrefix(dn, "uid="+capturedLogin)
+		entries = append(entries, entry)
 	}
-	return map[string]any{"result": entries, "count": len(entries), "truncated": false, "summary": fmt.Sprintf("%d users matched", len(entries))}
+	reply["result"], reply["count"] = entries, len(entries)
+	if len(uids) != 1 {
+		reply["summary"] = fmt.Sprintf("%d users matched", len(uids))
+	}
+	return reply
 }

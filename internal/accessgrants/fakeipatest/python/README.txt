@@ -9,15 +9,41 @@ ipalib/__init__.py   a fake `ipalib.api` that serves recorded user_find/group_fi
                      a ticket (the fake kinit in the tests writes one).
 ipapython/ssh.py     a MODEL of FreeIPA 4.13.4 ipapython/ssh.py `SSHPublicKey`:
                      the same parse order and the same openssh() normal form,
-                     written from the upstream source, not copied. It is a model:
-                     the real class is what runs on a FreeIPA host, and the
-                     observer's key identity relies on it. The vm-target
-                     acceptance run (perturb, drift, apply, drift again) is what
-                     confirms the model on the real class.
+                     written from the upstream source, not copied. It is a model,
+                     and the real class is what runs on a FreeIPA host, so the
+                     model is pinned to it: ../testdata/ssh-normalizer-4.13.4.json
+                     holds 18 inputs run through the REAL
+                     `ipapython.ssh.SSHPublicKey(k).openssh()` on a FreeIPA
+                     4.13.4 server (2026-10-31, all inputs are throwaway public
+                     keys), with the real output or the real rejection
+                     (ValueError), and, for every accepted input, what FreeIPA
+                     stored as ipasshpubkey after `user-mod --sshpubkey`.
+                     playbooks/check/files/test_identity_object_observer.py
+                     (KeyNormalizerModelTests) requires this model to give the
+                     same output, and to refuse the same inputs, as the capture.
 
-Replies that are CONSTRUCTED rather than captured (to be replaced by live
-captures): config_show (fakeipatest.ConfigShow: FreeIPA reads
-config["ipadefaultemaildomain"][0], so the attribute is a one-element list) and
-the preserved-users search (fakeipatest.PreservedUsers: pkey-only entries shaped
-like the captured user-find-states-pkey reply, with the preserved-users container
-DN taken from the FreeIPA source).
+Every reply the fake ipalib serves is a capture of FreeIPA 4.13.4 (a JSON-RPC
+reply's `result`, which is the dict ipalib's Command returns); none is
+constructed:
+
+  user_find, group_find        the 2026-10-27 sessions, internal/freeiparpc/testdata
+                               (user-find-states, group-find-states, ...).
+  config_show                  internal/freeiparpc/testdata/config-show: taken on
+                               a live vm-target on 2026-10-31. FreeIPA reads
+                               config["ipadefaultemaildomain"][0]; the real reply
+                               has it as a one-element list, with value and
+                               summary null, and 23 other attributes.
+  preserved-users search       user_find(preserved=True, pkey_only=True): no
+                               preserved user is user-find-no-match (byte-identical
+                               to the live capture of that search); one is
+                               user-find-preserved-one (a real `--preserve`d user,
+                               DN under cn=deleted users,cn=accounts,cn=provisioning,
+                               summary "1 user matched"). fakeipatest.PreservedUsers
+                               substitutes the login into that entry for the logins
+                               a test needs.
+
+One container type differs from the captures: an in-process ipalib Command
+returns tuples of str where JSON has lists, and an int count. The observer
+accepts both (it checks for list or tuple, and for an int count); a live
+in-process ipalib client on the same server returned exactly that shape for
+config_show and the preserved-users search (2026-10-31).

@@ -172,7 +172,7 @@ func TestRegression_IdentitySecretDriftProbeUsersGroupsConverged(t *testing.T) {
 func TestRegression_IdentitySecretDriftProbePreservedUsersMailAndMarkers(t *testing.T) {
 	keys := capturedKeys(t)
 	scenario := capturedScenario(t)
-	scenario.PreservedFind = fakeipatest.PreservedUsers("p1-ghost", "p1-held", "p1-stray")
+	scenario.PreservedFind = fakeipatest.PreservedUsers(t, "p1-ghost", "p1-held", "p1-stray")
 	marker := "pilot-internal-history-g-" + strings.Repeat("0f", 32)
 	lookalike := "pilot-internal-history-g-" + strings.Repeat("0f", 31)
 	for _, name := range []string{marker, lookalike} {
@@ -346,7 +346,7 @@ func TestRegression_IdentitySecretDriftProbeObserverFailuresAreFixedClasses(t *t
 			s.Fail = &fakeipatest.Failure{Where: "preserved_find", Error: "NetworkError", Text: objectsLeakSentinel}
 		}, "The users/groups observer could not complete a FreeIPA API call"},
 		{"the preserved-user search is truncated", func(t *testing.T, s *fakeipatest.Scenario, _ *string) {
-			s.PreservedFind = fakeipatest.PreservedUsers("p1-held")
+			s.PreservedFind = fakeipatest.PreservedUsers(t, "p1-held")
 			s.PreservedFind["truncated"] = true
 		}, "FreeIPA returned a truncated or inconsistent user or group search result"},
 		{"the default e-mail domain cannot be read", func(t *testing.T, s *fakeipatest.Scenario, roster *string) {

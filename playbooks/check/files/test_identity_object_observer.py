@@ -11,6 +11,8 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE.parents[2] / "internal/freeiparpc/testdata"
 FAKE_IPA = HERE.parents[2] / "internal/accessgrants/fakeipatest/python"
+# What the REAL ipapython.ssh.SSHPublicKey(k).openssh() answered on FreeIPA 4.13.4.
+SSH_NORMALIZER_CAPTURE = HERE.parents[2] / "internal/accessgrants/fakeipatest/testdata/ssh-normalizer-4.13.4.json"
 # ipapython.ssh there is a MODEL of FreeIPA's SSHPublicKey (see its README.txt);
 # the observer imports it exactly as it imports the real one on a FreeIPA host.
 sys.path.insert(0, str(FAKE_IPA))
@@ -187,7 +189,8 @@ class FakeAPI:
             "user_find": users if users is not None else {"result": [], "count": 0, "truncated": False},
             "preserved": preserved if preserved is not None else {"result": [], "count": 0, "truncated": False},
             "group_find": groups if groups is not None else {"result": [], "count": 0, "truncated": False},
-            "config_show": config if config is not None else {"result": {"ipadefaultemaildomain": ["ipa.pilot.internal"]}},
+            # The captured config_show reply (FreeIPA 4.13.4, live vm-target 2026-10-31).
+            "config_show": config if config is not None else capture("config-show"),
         }
         self.Command = self
 
@@ -210,6 +213,14 @@ class DesiredNormalizationTests(unittest.TestCase):
         self.assertEqual(["bob@example.test"], rows[1]["attributes"]["mail"])
         self.assertEqual([], rows[2]["attributes"]["mail"])  # an empty value clears the attribute
         self.assertNotIn("mail", rows[3]["attributes"])
+
+    def test_the_captured_config_show_reply_yields_the_default_domain(self):
+        # The real reply: ipadefaultemaildomain is a one-element list, value and
+        # summary are null, and 23 other attributes are present and ignored.
+        reply = capture("config-show")
+        self.assertIsNone(reply["value"])
+        self.assertEqual(["ipa.pilot.internal"], reply["result"]["ipadefaultemaildomain"])
+        self.assertEqual("ipa.pilot.internal", observer.default_email_domain(FakeAPI()))
 
     def test_without_a_default_domain_the_value_is_left_alone(self):
         row = observer.desired([user("a", email="alice")], "user", None, "")[0]
@@ -246,10 +257,12 @@ class PreservedUserTests(unittest.TestCase):
     """L1: user_find hides preserved users; the observer must read them too."""
 
     def test_the_snapshot_lists_preserved_users_from_a_second_complete_search(self):
-        api = FakeAPI(preserved={"result": [{"uid": ["gone"], "dn": "uid=gone,cn=deleted users,cn=accounts,cn=provisioning,dc=x"}],
-                                 "count": 1, "truncated": False})
+        # The captured replies of FreeIPA 4.13.4 (live vm-target 2026-10-31): one
+        # preserved user, and none (byte-identical to user-find-no-match).
+        api = FakeAPI(preserved=capture("user-find-preserved-one"))
         snap = observer.snapshot({"users": [], "groups": []}, api)
-        self.assertEqual(["gone"], snap["preserved_users"])
+        self.assertEqual(["pv-capture"], snap["preserved_users"])
+        self.assertEqual([], observer.snapshot({"users": [], "groups": []}, FakeAPI(preserved=capture("user-find-no-match")))["preserved_users"])
         searches = [options for name, options in api.calls if name == "user_find"]
         self.assertIn({"sizelimit": 0, "timelimit": 0, "preserved": True, "pkey_only": True}, searches)
         self.assertEqual(2, len(searches))
@@ -265,6 +278,52 @@ class PreservedUserTests(unittest.TestCase):
             with self.assertRaises(observer.ObserverError) as caught:
                 observer.preserved_names([entry])
             self.assertEqual("invalid_response", caught.exception.error_class)
+
+
+class KeyNormalizerModelTests(unittest.TestCase):
+    """The test double ipapython/ssh.py is pinned to the real FreeIPA class.
+
+    Every key identity the observer computes goes through `SSHPublicKey(k).openssh()`
+    (load_key_normalizer). In these tests that is a model (see the README beside it);
+    the capture holds the real class's answer to 18 inputs on FreeIPA 4.13.4, so a
+    model that drifts from the real one fails here instead of in a live run.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.capture = json.loads(SSH_NORMALIZER_CAPTURE.read_text(encoding="utf-8"))
+        cls.normalize = staticmethod(observer.load_key_normalizer())
+
+    def test_the_observer_is_running_the_model_not_a_real_ipapython(self):
+        import ipapython.ssh
+        self.assertEqual(FAKE_IPA.resolve(), Path(ipapython.ssh.__file__).resolve().parents[1])
+
+    def test_the_capture_is_what_it_claims_to_be(self):
+        cases = self.capture["cases"]
+        self.assertEqual(18, len(cases))
+        self.assertEqual(3, sum("error" in case for case in cases))
+        for case in cases:
+            if "error" in case:
+                self.assertEqual({"in", "error", "user_mod"}, set(case), case["in"])
+                self.assertEqual(("ValueError", "ValidationError"), (case["error"], case["user_mod"]))
+            else:
+                # FreeIPA stored exactly what openssh() returned: the premise of key identity.
+                self.assertEqual({"in", "openssh", "user_mod", "stored"}, set(case), case["in"])
+                self.assertEqual(case["openssh"], case["stored"])
+        # The spellings the observer's tests rely on: option order and case, whitespace, a
+        # bare blob, an empty comment, a quoted option holding a space and a comma.
+        accepted = [case["in"] for case in cases if "openssh" in case]
+        for needle in ('no-pty,from="10.0.0.1" ', 'NO-PTY,FROM=', "   kA@test  ", 'environment="A=B c",from="10.*,!10.1.1.1"'):
+            self.assertTrue(any(needle in text for text in accepted), needle)
+
+    def test_the_model_answers_every_captured_input_as_the_real_class_did(self):
+        for case in self.capture["cases"]:
+            with self.subTest(case["in"][:60]):
+                if "error" in case:
+                    with self.assertRaises(ValueError):
+                        self.normalize(case["in"])
+                else:
+                    self.assertEqual(case["openssh"], self.normalize(case["in"]))
 
 
 class FailureVocabularyTests(unittest.TestCase):
