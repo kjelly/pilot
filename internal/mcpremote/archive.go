@@ -65,34 +65,52 @@ func ReadSnapshot(br *bufio.Reader, dest, wantEnv string) (*mcpwire.Manifest, er
 	return manifest, nil
 }
 
+// checkFileSet applies the file-list rules of a snapshot (§6.2): each
+// path's rules, no path twice (also when compared ignoring case), and the
+// count and size limits. `changes` holds the next snapshot to the same
+// rules (computeChanges).
+func checkFileSet(files []mcpwire.FileEntry) error {
+	if len(files) > mcpwire.MaxFiles {
+		return errorf(mcpwire.CodeSnapshotTooLarge, "snapshot has %d files, more than %d", len(files), mcpwire.MaxFiles)
+	}
+	seen := make(map[string]bool, len(files))
+	folded := make(map[string]string, len(files))
+	var total int64
+	for _, f := range files {
+		if err := mcpwire.CheckSnapshotPath(f.Path); err != nil {
+			return errorf(mcpwire.CodeSnapshotInvalid, "manifest: %v", err)
+		}
+		if seen[f.Path] {
+			return errorf(mcpwire.CodeSnapshotInvalid, "manifest lists %q twice", f.Path)
+		}
+		seen[f.Path] = true
+		lower := strings.ToLower(f.Path)
+		if other, dup := folded[lower]; dup {
+			return errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case", other, f.Path)
+		}
+		folded[lower] = f.Path
+		if f.Size < 0 || f.Size > mcpwire.MaxFileBytes {
+			return errorf(mcpwire.CodeSnapshotTooLarge, "file %q is larger than %d bytes", f.Path, mcpwire.MaxFileBytes)
+		}
+		total += f.Size
+	}
+	if total > mcpwire.MaxTotalBytes {
+		return errorf(mcpwire.CodeSnapshotTooLarge, "snapshot files total %d bytes, more than %d", total, mcpwire.MaxTotalBytes)
+	}
+	return nil
+}
+
 func extractSnapshot(tr *tar.Reader, dest, wantEnv string) (*mcpwire.Manifest, error) {
 	manifest, err := readManifest(tr, wantEnv)
 	if err != nil {
 		return nil, err
 	}
-	want := make(map[string]mcpwire.FileEntry, len(manifest.Files))
-	folded := make(map[string]string, len(manifest.Files))
-	var total int64
-	for _, f := range manifest.Files {
-		if err := mcpwire.CheckSnapshotPath(f.Path); err != nil {
-			return nil, errorf(mcpwire.CodeSnapshotInvalid, "manifest: %v", err)
-		}
-		if _, dup := want[f.Path]; dup {
-			return nil, errorf(mcpwire.CodeSnapshotInvalid, "manifest lists %q twice", f.Path)
-		}
-		lower := strings.ToLower(f.Path)
-		if other, dup := folded[lower]; dup {
-			return nil, errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case", other, f.Path)
-		}
-		folded[lower] = f.Path
-		if f.Size < 0 || f.Size > mcpwire.MaxFileBytes {
-			return nil, errorf(mcpwire.CodeSnapshotTooLarge, "file %q is larger than %d bytes", f.Path, mcpwire.MaxFileBytes)
-		}
-		total += f.Size
-		want[f.Path] = f
+	if err := checkFileSet(manifest.Files); err != nil {
+		return nil, err
 	}
-	if total > mcpwire.MaxTotalBytes {
-		return nil, errorf(mcpwire.CodeSnapshotTooLarge, "snapshot files total %d bytes, more than %d", total, mcpwire.MaxTotalBytes)
+	want := make(map[string]mcpwire.FileEntry, len(manifest.Files))
+	for _, f := range manifest.Files {
+		want[f.Path] = f
 	}
 	digest, err := mcpwire.ContentDigest(manifest.Files)
 	if err != nil {

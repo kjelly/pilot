@@ -124,13 +124,7 @@ func RunSession(ctx context.Context, cfg *Config) error {
 		sourceFiles[f.Path] = f.SHA256
 	}
 	sort.Strings(paths)
-	if err := CheckHostsEnv(source, cfg.Env); err != nil {
-		return err
-	}
-	if err := CheckPathScope(source, paths); err != nil {
-		return err
-	}
-	if err := CheckSecretPolicy(cfg.PilotRoot, source); err != nil {
+	if err := checkSnapshotContent(cfg, source, cfg.Env, paths); err != nil {
 		return err
 	}
 
@@ -205,6 +199,19 @@ func RunSession(ctx context.Context, cfg *Config) error {
 		return errorf(mcpwire.CodeRuntimeError, "serve: %v", serveErr)
 	}
 	return nil
+}
+
+// checkSnapshotContent runs the checks on a snapshot's files once they are
+// on disk (§6.2): every host's env, the path scope and the secret policy.
+// `changes` runs the same checks on the next snapshot (computeChanges).
+func checkSnapshotContent(cfg *Config, root, env string, paths []string) error {
+	if err := CheckHostsEnv(root, env); err != nil {
+		return err
+	}
+	if err := CheckPathScope(root, paths); err != nil {
+		return err
+	}
+	return CheckSecretPolicy(cfg.PilotRoot, root)
 }
 
 // finishSession removes an observe session, and an edit session with

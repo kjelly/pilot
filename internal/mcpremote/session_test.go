@@ -268,6 +268,10 @@ func TestRunChangesRejectsWhatTheNextSnapshotWouldReject(t *testing.T) {
 		"data path":    {"host_vars/web-1.yml", []byte("x: /pilot/data/./x\n"), "/pilot/data"},
 		"invalid yaml": {"group_vars/all.yml", []byte("a: [\n"), "not valid YAML"},
 		"too large":    {"files/blob.bin", big, "larger than"},
+		// An added host without env is a sandbox host in a prod config.
+		"host env":     {"hosts.yml", []byte(hostsFor("prod") + "  web-2:\n    ansible_host: \"192.0.2.11\"\n    roles: [docker]\n"), "ENV_MISMATCH"},
+		"case only":    {"group_vars/ALL.yml", []byte("b: 1\n"), "differ only in case"},
+		"plain secret": {"group_vars/dashboard.yml", []byte("grafana_admin_password: \"hunter2\"\n"), "SECRET_POLICY_VIOLATION"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

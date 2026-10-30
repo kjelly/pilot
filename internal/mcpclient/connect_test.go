@@ -339,6 +339,7 @@ func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 		"escaping path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("../x", mcpwire.OpAdd, "", "x")}}, map[string]string{"../x": "x"})),
 		"reserved path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".vault/main.yaml", mcpwire.OpAdd, "", "x")}}, map[string]string{".vault/main.yaml": "x"})),
 		// On a case-insensitive clone (macOS) this is the clone's .git.
+		"nested .git":      read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("x/.git/config", mcpwire.OpAdd, "", "x")}}, map[string]string{"x/.git/config": "x"})),
 		"case-folded .git": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".GIT/config", mcpwire.OpAdd, "", "x")}}, map[string]string{".GIT/config": "x"})),
 		"not a tar":        []byte("garbage"),
 		"wrong first":      read(changesTar(t, base, nil))[512:],

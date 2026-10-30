@@ -105,7 +105,9 @@ func TestErrorLineRoundTripAndExitCodes(t *testing.T) {
 }
 
 func TestCheckSnapshotPath(t *testing.T) {
-	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore", "docs/readme.md", "contractsx/a", ".gitx/a", "Docs/verificationx/a"} {
+	for _, ok := range []string{"hosts.yml", "group_vars/all.yml", "monitoring/snmp/x.yaml", ".gitignore", "docs/readme.md", "contractsx/a", ".gitx/a", "Docs/verificationx/a",
+		// Ignorable code points are fine in ordinary names (a ZWJ emoji).
+		"docs/\U0001F469\u200d\U0001F4BB-onboarding.md", "a/\ufeffb", "x/contracts/a", "x/.vault"} {
 		if err := CheckSnapshotPath(ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
@@ -115,7 +117,9 @@ func TestCheckSnapshotPath(t *testing.T) {
 		// A case-insensitive clone (macOS) resolves these to the reserved
 		// directories, and HFS+ also drops the ignorable code points.
 		".GIT/config", ".Git", ".VAULT/main.yaml", "Contracts/docker.yaml", "docs/Verification/docker.md",
-		".g\u200cit/config", "a/\ufeffb"} {
+		".g\u200cit/config", "contract\u017f/x",
+		// Git refuses a .git component anywhere in a path.
+		"x/.git/config", "a/b/.Git/HEAD", "x/.g\u200dit/config", "x/.git"} {
 		if err := CheckSnapshotPath(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}

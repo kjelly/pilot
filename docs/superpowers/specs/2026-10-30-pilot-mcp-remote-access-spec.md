@@ -264,8 +264,10 @@ profiles:
    - SHA：`git fetch origin <sha>`；失敗時 fetch 所有 heads/tags 後再檢查該 SHA 是否存在。
    - 以 `git rev-parse --verify <x>^{commit}` 取得完整 SHA。
    - 會改動 cache 的指令（`init`、`config`，以及 fetch 連同讀回它更新的 ref）在 `<cache>.lock` 的
-     `flock` 下執行，最多等 `git_seconds`：agent 會同時啟動每個 profile 的 MCP server，同一個 repo 的
-     profile 共用 cache，沒有鎖時會互相蓋掉 fetch 的 ref 或撞上 git 的 `config.lock`。讀 object 不需要鎖。
+     `flock` 下執行：agent 會同時啟動每個 profile 的 MCP server，同一個 repo 的 profile 共用 cache，沒有鎖時
+     會互相蓋掉 fetch 的 ref 或撞上 git 的 `config.lock`。`ls-remote` 與讀 object 不需要鎖。持有者在鎖內最多
+     執行三個 git 指令（SHA 的兩次 fetch 加 `rev-parse`），每個都受 `git_seconds` 限制，所以等鎖最多等
+     三倍 `git_seconds`。
 3. **Snapshot**：依 §6.1 產生 tar。
 4. **組遠端指令**（每個 token 都符合 §5.3 的字元規則，再逐一加單引號後以空白串接）：
 
@@ -399,12 +401,14 @@ digest；內容、路徑或大小改變一定改變 digest。
 - 第一個 entry 必須是 manifest；manifest 的 `env` 必須等於 `--env`，否則 `ENV_MISMATCH`。
 - 每個 entry 只接受 regular file（directory entry 忽略）。路徑必須：
   - 是相對路徑，且 `path.Clean(p) == p`；
-  - 不含 `..`、`\`、NUL、控制字元，或 HFS+ 比對名稱時忽略的 code point（U+200C–U+200F、U+202A–U+202E、
-    U+206A–U+206F、U+FEFF，與 Git 的 `is_hfs_dotgit` 相同）；
+  - 不含 `..`、`\`、NUL 或控制字元；
   - 不重複，轉成小寫後也不重複；
-  - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/`、`.git/` 之下，比對不分
-    大小寫（使用者端的 clone 在 macOS 預設的檔案系統上，`.GIT/config` 就是 `.git/config`；這條規則也用在
-    `changes` 的路徑，§5.6）。違反時回 `SNAPSHOT_INVALID`；
+  - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/` 之下，任何一層都不是 `.git`
+    （與 Git 相同：巢狀的 `.git/config` 可以指定 Git 會執行的指令）。比對方式與不分大小寫的檔案系統（macOS
+    預設）相同：不分大小寫，並忽略 HFS+ 比對名稱時略過的 code point（U+200C–U+200F、U+202A–U+202E、
+    U+206A–U+206F、U+FEFF，與 Git 的 `is_hfs_dotgit` 相同），所以 `.GIT/config` 與 `.g<U+200C>it/config`
+    都算 `.git/config`。一般檔名可以含這些 code point（例如 emoji 的 ZWJ 序列）。這條規則也用在 `changes`
+    的路徑（§5.6）。違反時回 `SNAPSHOT_INVALID`；
     `.vault/` 的訊息寫明「secret 由 deploy node 提供」。
 - 寫入 session 目錄的 `source/`：目錄由 remote 自己建立（`0700`），檔案以
   `O_CREAT|O_EXCL|O_NOFOLLOW` 建立（`0600`）。
@@ -502,10 +506,12 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   `base_sha256` 是 source 的 SHA-256（`add` 為空）。
 - 任何匯出的檔案內容含有 session 目錄的內部路徑（`/pilot/data/mcp/` 或 `/tmp/pilot-mcp/`）時回
   `CHANGESET_INVALID`。
-- 匯出的變更會被 commit，成為下一個 session 的 snapshot，所以也要符合 snapshot 的規則，否則回
-  `CHANGESET_INVALID`：變更的檔案數 ≤ 10,000、單檔 ≤ 8 MiB、變更檔案總量 ≤ 64 MiB（也讓 tar 不超過
-  使用者端讀取的 80 MiB），變更的 `.yml`/`.yaml` 必須是合法 YAML 且通過 §6.2 的路徑引用範圍檢查
-  （例如 `/pilot/vault/...`）。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
+- 匯出的變更會被 commit，成為下一個 session 的 snapshot，所以「source 套用這些變更之後」要通過 import
+  的全部檢查（與 §6.2 共用同一份實作），否則回 `CHANGESET_INVALID`，訊息寫出 import 會回的 code：
+  檔案清單規則（路徑規則、大小寫不同也不得重複、檔案數 ≤ 10,000、單檔 ≤ 8 MiB、總量 ≤ 64 MiB，也讓 tar
+  不超過使用者端讀取的 80 MiB），以及內容檢查（每台主機的 `env`、路徑引用範圍、secret policy）。例如在
+  prod 的 edit session 新增一台沒有 `env` 的主機（等於 sandbox），會在匯出時被拒絕，而不是 commit 之後讓
+  之後每個 session 都 `ENV_MISMATCH`。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
 - stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
   `{"protocol","session_id","env","base_commit_sha","changes":[{"path","op","base_sha256","new_sha256"}]}`，
   之後是 `add`/`modify` 的檔案，依路徑排序。

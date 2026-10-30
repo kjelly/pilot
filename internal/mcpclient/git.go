@@ -67,10 +67,12 @@ func openGitCache(cacheDir, url string, timeout time.Duration) (*gitRepo, error)
 // lock serializes the commands that change the cache (init, config, and a
 // fetch together with reading back what it fetched) between pilot-mcp
 // processes: an agent starts the MCP servers of every profile at once, and
-// profiles of one repository share its cache. Reading objects needs no
-// lock. It waits at most the Git timeout.
+// profiles of one repository share its cache. Reading objects and asking
+// the remote (ls-remote) need no lock. A holder runs at most three git
+// commands under it, each bounded by the Git timeout, so a waiter waits
+// three timeouts before it gives up.
 func (r *gitRepo) lock(ctx context.Context) (func(), error) {
-	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	ctx, cancel := context.WithTimeout(ctx, 3*r.timeout)
 	defer cancel()
 	f, err := os.OpenFile(r.dir+".lock", os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
@@ -134,12 +136,12 @@ func firstLine(s string) string {
 // and the read of the ref it updates run under the cache lock, so another
 // process fetching another ref of the same repository cannot swap it.
 func (r *gitRepo) resolve(ctx context.Context, ref string) (string, error) {
-	unlock, err := r.lock(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer unlock()
 	if fullSHAPattern.MatchString(ref) {
+		unlock, err := r.lock(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer unlock()
 		if _, err := r.git(ctx, nil, "fetch", "--quiet", "--no-tags", "origin", ref); err != nil {
 			if _, err := r.git(ctx, nil, "fetch", "--quiet", "--no-tags", "origin", "+refs/heads/*:refs/pilot/heads/*", "+refs/tags/*:refs/pilot/tags/*"); err != nil {
 				return "", err
@@ -173,6 +175,11 @@ func (r *gitRepo) resolve(ctx context.Context, ref string) (string, error) {
 	default:
 		return "", &Error{Code: CodeGitRefNotFound, Msg: fmt.Sprintf("no branch or tag named %q", ref)}
 	}
+	unlock, err := r.lock(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	if _, err := r.git(ctx, nil, "fetch", "--quiet", "--no-tags", "origin", "+"+remote+":refs/pilot/fetched"); err != nil {
 		return "", err
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -102,6 +103,32 @@ func TestGitCacheIsSafeAcrossConcurrentProcesses(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// A holder may run up to three git commands under the cache lock, each
+// with its own timeout, so a waiter must not give up after one timeout
+// while the holder is still making progress.
+func TestGitCacheWaiterOutlastsOneTimeout(t *testing.T) {
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n"})
+	const timeout = time.Second
+	repo, err := openGitCache(t.TempDir(), bare, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(repo.dir+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if held, err := tryFlock(f); !held || err != nil {
+		t.Fatalf("hold the cache lock: %v %v", held, err)
+	}
+	release := time.AfterFunc(timeout*3/2, func() { f.Close() })
+	defer release.Stop()
+	if got, err := repo.resolve(context.Background(), "main"); err != nil || got != commit {
+		t.Fatalf("resolve while another process held the lock for 1.5 timeouts = %s, %v", got, err)
 	}
 }
 
@@ -223,8 +250,28 @@ func TestBuildSnapshotRejectsSymlinksAndLFS(t *testing.T) {
 }
 
 func TestBuildSnapshotRefusesOversizedFilesAndSubmodules(t *testing.T) {
-	big := strings.Repeat("x", mcpwire.MaxFileBytes+1)
-	if _, err := buildFrom(t, map[string]string{"env/hosts.yml": "hosts: {}\n", "env/big.bin": big}, "env"); !hasCode(err, CodeSnapshotTooLarge) || !strings.Contains(err.Error(), "big.bin") {
+	// The limits are checked from the sizes ls-tree lists, before any blob
+	// is read: a git that refuses cat-file must not be reached.
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n", "env/big.bin": strings.Repeat("x", mcpwire.MaxFileBytes+1)})
+	repo, err := openGitCache(t.TempDir(), bare, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.resolve(context.Background(), "main"); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	wrapper := "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = cat-file ] && { echo 'cat-file must not run' >&2; exit 1; }; done\nexec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := buildSnapshot(context.Background(), repo, SourceConfig{URL: bare, Ref: "main", Subdir: "env"}, commit, "prod", "t", "t"); !hasCode(err, CodeSnapshotTooLarge) || !strings.Contains(err.Error(), "big.bin") {
 		t.Fatalf("oversized file: %v", err)
 	}
 	// git ls-tree -l prints "-" as the size of a submodule (gitlink).
@@ -237,11 +284,11 @@ func TestBuildSnapshotRefusesOversizedFilesAndSubmodules(t *testing.T) {
 	head := git(t, work, "rev-parse", "HEAD")
 	git(t, work, "update-index", "--add", "--cacheinfo", "160000,"+head+",env/sub")
 	git(t, work, "commit", "--quiet", "-m", "submodule")
-	repo, err := openGitCache(t.TempDir(), work, 30*time.Second)
+	repo, err = openGitCache(t.TempDir(), work, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commit, err := repo.resolve(context.Background(), "main")
+	commit, err = repo.resolve(context.Background(), "main")
 	if err != nil {
 		t.Fatal(err)
 	}

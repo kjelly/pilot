@@ -84,26 +84,53 @@ func ValidSessionID(id string) bool { return sessionIDPattern.MatchString(id) }
 var ReservedPaths = []string{".vault", ".pilot", ".pilot-data", "contracts", "docs/verification", ".git"}
 
 // IsReserved reports whether a clean relative path is a reserved directory
-// or lies under one. The match ignores case: on a case-insensitive file
-// system (the macOS default) ".GIT/config" is ".git/config".
+// or lies under one, or has a .git component anywhere (Git refuses those
+// too: a nested .git/config can name a command Git runs). Components are
+// compared the way a case-insensitive file system (the macOS default)
+// compares them: ignoring case and the code points HFS+ ignores, so
+// ".GIT/config" and ".g\u200cit/config" are ".git/config" there.
 func IsReserved(p string) bool {
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		segs[i] = strings.Map(func(r rune) rune {
+			if hfsIgnorable(r) {
+				return -1
+			}
+			return r
+		}, seg)
+		if strings.EqualFold(segs[i], ".git") {
+			return true
+		}
+	}
 	for _, r := range ReservedPaths {
-		if len(p) >= len(r) && strings.EqualFold(p[:len(r)], r) && (len(p) == len(r) || p[len(r)] == '/') {
+		rs := strings.Split(r, "/")
+		if len(segs) < len(rs) {
+			continue
+		}
+		match := true
+		for i := range rs {
+			if !strings.EqualFold(segs[i], rs[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
 			return true
 		}
 	}
 	return false
 }
 
-// hfsIgnorable reports a code point HFS+ drops when it compares names, so
-// ".g\u200cit" names ".git" there (the same set Git's is_hfs_dotgit skips).
+// hfsIgnorable reports a code point HFS+ drops when it compares names (the
+// set Git's is_hfs_dotgit skips). Names may contain them, emoji sequences
+// do; they only matter when comparing against a reserved name.
 func hfsIgnorable(r rune) bool {
 	return (r >= 0x200c && r <= 0x200f) || (r >= 0x202a && r <= 0x202e) || (r >= 0x206a && r <= 0x206f) || r == 0xfeff
 }
 
 // CheckSnapshotPath validates one file path inside a snapshot or changeset:
-// relative, already clean, no "..", backslash, NUL, control characters or
-// code points HFS+ ignores, and not reserved (in any case).
+// relative, already clean, no "..", backslash, NUL or control characters,
+// and not reserved (see IsReserved).
 func CheckSnapshotPath(p string) error {
 	if p == "" || strings.HasPrefix(p, "/") {
 		return fmt.Errorf("path %q must be relative", p)
@@ -117,8 +144,8 @@ func CheckSnapshotPath(p string) error {
 		}
 	}
 	for _, r := range p {
-		if r == '\\' || r < 0x20 || r == 0x7f || hfsIgnorable(r) {
-			return fmt.Errorf("path %q contains a backslash, control or ignorable character", p)
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path %q contains a backslash or control character", p)
 		}
 	}
 	if IsReserved(p) {

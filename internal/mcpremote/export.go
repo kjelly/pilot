@@ -74,44 +74,86 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	if err := checkExportable(work, changes, contents); err != nil {
+	if err := checkNextSnapshot(cfg, work, state, changes); err != nil {
 		return nil, nil, err
 	}
 	return changes, contents, nil
 }
 
-// checkExportable holds the changed files to the rules the next session's
-// snapshot is held to: the size limits (which also bound the changes
-// stream the client reads) and the path scope, so a change that is
-// exported and committed never makes every later session fail.
-func checkExportable(work string, changes []mcpwire.Change, contents map[string][]byte) error {
-	if len(changes) > mcpwire.MaxFiles {
-		return errorf(mcpwire.CodeChangesetInvalid, "%d changed files, more than %d", len(changes), mcpwire.MaxFiles)
+// checkNextSnapshot holds the source with these changes applied (what the
+// config repository holds once they are committed, and so the next
+// session's snapshot) to the same checks a snapshot gets on import: the
+// file-list rules and the content checks. An exported change therefore
+// never makes every later session fail; the size limits also bound the
+// changes stream the client reads.
+func checkNextSnapshot(cfg *Config, work string, state SessionState, changes []mcpwire.Change) error {
+	if len(changes) == 0 {
+		return nil
 	}
-	var total int64
-	var written []string
+	next := make(map[string]bool, len(state.SourceFiles)+len(changes))
+	for p := range state.SourceFiles {
+		next[p] = true
+	}
 	for _, c := range changes {
-		data, ok := contents[c.Path]
-		if !ok {
-			continue
-		}
-		if int64(len(data)) > mcpwire.MaxFileBytes {
-			return errorf(mcpwire.CodeChangesetInvalid, "%s is larger than %d bytes", c.Path, mcpwire.MaxFileBytes)
-		}
-		total += int64(len(data))
-		written = append(written, c.Path)
+		next[c.Path] = c.Op != mcpwire.OpDelete
 	}
-	if total > mcpwire.MaxTotalBytes {
-		return errorf(mcpwire.CodeChangesetInvalid, "changed files total %d bytes, more than %d", total, mcpwire.MaxTotalBytes)
-	}
-	if err := CheckPathScope(work, written); err != nil {
-		var e *Error
-		if errors.As(err, &e) && e.Code != mcpwire.CodeRuntimeError {
-			return &Error{Code: mcpwire.CodeChangesetInvalid, Err: e.Err}
+	var paths []string
+	for p, keep := range next {
+		if keep {
+			paths = append(paths, p)
 		}
-		return err
+	}
+	sort.Strings(paths)
+	files := make([]mcpwire.FileEntry, 0, len(paths))
+	for _, p := range paths {
+		info, err := os.Lstat(filepath.Join(work, filepath.FromSlash(p)))
+		if err != nil || !info.Mode().IsRegular() {
+			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %s is not a regular file in the work tree", p)
+		}
+		files = append(files, mcpwire.FileEntry{Path: p, Size: info.Size()})
+	}
+	if err := checkFileSet(files); err != nil {
+		return refusedNextSnapshot(err)
+	}
+
+	parent := cfg.TmpDir
+	if parent != "" {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return errorf(mcpwire.CodeRuntimeError, "create %s: %v", parent, err)
+		}
+	}
+	root, err := os.MkdirTemp(parent, "next-snapshot-")
+	if err != nil {
+		return errorf(mcpwire.CodeRuntimeError, "next snapshot: %v", err)
+	}
+	defer os.RemoveAll(root)
+	for _, p := range paths {
+		data, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(p)))
+		if err != nil {
+			return errorf(mcpwire.CodeRuntimeError, "next snapshot: read %s: %v", p, err)
+		}
+		dst := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %v", err)
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %v", err)
+		}
+	}
+	if err := checkSnapshotContent(cfg, root, state.Env, paths); err != nil {
+		return refusedNextSnapshot(err)
 	}
 	return nil
+}
+
+// refusedNextSnapshot reports a check the next snapshot fails as an
+// invalid changeset, naming the code the import would have returned.
+func refusedNextSnapshot(err error) error {
+	var e *Error
+	if errors.As(err, &e) && e.Code != mcpwire.CodeRuntimeError {
+		return errorf(mcpwire.CodeChangesetInvalid, "the next session would refuse these changes with %s: %v", e.Code, e.Err)
+	}
+	return err
 }
 
 // internalPathIn reports a session-internal location written into a file.
