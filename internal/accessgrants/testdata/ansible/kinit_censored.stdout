@@ -1,0 +1,77 @@
+
+PLAY [Probe live FreeIPA access-governance state for drift inspection] *********
+
+TASK [Gate: drift probe input is complete] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Load canonical roster under a namespace] *********************************
+ok: [ipa1]
+
+TASK [Gate: canonical roster is available] *************************************
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the vault admin password] *******************************************
+ok: [ipa1]
+
+TASK [Read the roster admin password] ******************************************
+skipping: [ipa1]
+
+TASK [Check the resolved FreeIPA admin password length] ************************
+ok: [ipa1]
+
+TASK [Gate: a FreeIPA admin password is available (vault or roster)] ***********
+ok: [ipa1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Normalize FreeIPA probe settings] ****************************************
+ok: [ipa1]
+
+TASK [Private Kerberos cache for the tickets below (issue #69)] ****************
+included: /repo/playbooks/apply/tasks/freeipa-private-ccache-open.yml for ipa1
+
+TASK [Private Kerberos cache — create the cache file] **************************
+ok: [ipa1]
+
+TASK [Private Kerberos cache — point KRB5CCNAME at it] *************************
+ok: [ipa1]
+
+TASK [Private Kerberos cache — find caches a killed run left behind] ***********
+ok: [ipa1]
+
+TASK [Private Kerberos cache — remove them] ************************************
+skipping: [ipa1]
+
+TASK [Kinit admin for read-only drift probe] ***********************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: /repo/playbooks/check/freeipa-access-drift-probe.yml:212:11
+
+210           tags: [always]
+211
+212         - name: "Kinit admin for read-only drift probe"
+              ^ column 11
+
+fatal: [ipa1]: FAILED! => {"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result", "changed": false}
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: /repo/playbooks/apply/tasks/freeipa-private-ccache-close.yml for ipa1
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+ok: [ipa1]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+ok: [ipa1]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [ipa1]
+
+PLAY RECAP *********************************************************************
+ipa1                       : ok=15   changed=0    unreachable=0    failed=1    skipped=2    rescued=0    ignored=0   
+

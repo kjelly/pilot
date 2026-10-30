@@ -33,6 +33,15 @@ import (
 // DriftProbePlaybook is the read-only check playbook DriftProbe invokes.
 const DriftProbePlaybook = "playbooks/check/freeipa-access-drift-probe.yml"
 
+// DefaultDriftTargetGroup is the inventory group DriftProbe targets when the
+// operator gives no TargetGroup. It equals the probe playbook's own
+// `hosts: "{{ target_group | default('freeipa-server') }}"` default
+// (TestDriftTargetGroupDefaultMatchesPlaybook locks the two together). Pilot
+// passes it explicitly instead of relying on the playbook default: the vault
+// vars file is a whole `-e @file`, and a target_group key in it (valid for
+// other playbooks) would otherwise decide which hosts the probe contacts.
+const DefaultDriftTargetGroup = "freeipa-server"
+
 // pilotGrantHBACPrefix/pilotGrantSudoPrefix identify Pilot's own compiled-
 // rule namespace (internal/inventory's CompiledLoginRuleName/
 // CompiledSudoRuleName) — the only live rules an orphan check may ever
@@ -84,11 +93,19 @@ type DriftProbeOptions struct {
 
 	// Playbook overrides DriftProbePlaybook.
 	Playbook string
-	// VaultPasswordFile is required when RosterFile is ansible-vault
-	// encrypted.
+	// VaultPasswordFile is required when RosterFile or VarsFile is
+	// ansible-vault encrypted.
 	VaultPasswordFile string
-	// TargetGroup overrides the probe playbook's default host-targeting
-	// group ("freeipa-server").
+	// VarsFile is the operator's vault vars file (conventionally
+	// <inventory dir>/.vault/main.yaml). It is handed to ansible-playbook
+	// only as `-e @<file>`, never read here, so the probe sees
+	// ipa_admin_password the way freeipa-identity-apply.yml does: vault
+	// first, roster fallback. Empty passes nothing and the probe falls back
+	// to the roster's freeipa.admin.password alone.
+	VarsFile string
+	// TargetGroup overrides the host-targeting group; empty means
+	// DefaultDriftTargetGroup ("freeipa-server"), always passed to the probe
+	// so a vault vars file cannot decide it.
 	TargetGroup string
 
 	// HBACNames/SudoNames/Users/Hosts/PasswordPolicyGroups are the
@@ -112,6 +129,35 @@ type DriftProbeOptions struct {
 	// Runner overrides the ansible.Runner used to run the probe. nil
 	// selects a production ansible.NewRunner().
 	Runner playbookRunner
+}
+
+// driftProbeEnv pins the output format the failure extraction
+// (summarizeAnsibleFailure) was written against: the default stdout callback,
+// JSON result payloads and no colour codes. Environment variables outrank
+// ansible.cfg, and exec.Cmd keeps the LAST value of a repeated variable, so
+// these override whatever the operator's shell or ansible.cfg selected
+// (ANSIBLE_STDOUT_CALLBACK=minimal|json|oneline..., ANSIBLE_FORCE_COLOR=1,
+// callback result_format=yaml), any of which hid the gate message (issue #179).
+var driftProbeEnv = []string{
+	"ANSIBLE_STDOUT_CALLBACK=default",
+	"ANSIBLE_CALLBACK_RESULT_FORMAT=json",
+	"ANSIBLE_NOCOLOR=1",
+	"ANSIBLE_FORCE_COLOR=0",
+}
+
+// extraEnvRunner is the optional capability of a playbookRunner (satisfied by
+// *ansible.Runner) to run once with extra environment variables.
+type extraEnvRunner interface {
+	RunWithExtraEnv(ctx context.Context, extraEnv []string, args ...string) (*ansible.Result, error)
+}
+
+// runProbe runs the probe playbook under driftProbeEnv when the runner can
+// take per-call environment, and plainly otherwise (test fakes).
+func runProbe(ctx context.Context, runner playbookRunner, args []string) (*ansible.Result, error) {
+	if r, ok := runner.(extraEnvRunner); ok {
+		return r.RunWithExtraEnv(ctx, driftProbeEnv, args...)
+	}
+	return runner.Run(ctx, args...)
 }
 
 // DriftProbe runs DriftProbePlaybook and returns the parsed live state. It
@@ -150,6 +196,10 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 		"pilot_drift_hosts":                  emptyOr(opts.Hosts),
 		"pilot_drift_password_policy_groups": emptyOr(opts.PasswordPolicyGroups),
 	}
+	// Always emitted, never left to the playbook default: the vault vars file
+	// precedes this file, but a key this file does not set is not overridden,
+	// so an omitted target_group would be the vault's value.
+	extraVars["target_group"] = DefaultDriftTargetGroup
 	if opts.TargetGroup != "" {
 		extraVars["target_group"] = opts.TargetGroup
 	}
@@ -167,7 +217,18 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 		return LiveState{}, fmt.Errorf("accessgrants: write drift-probe extra-vars: %w", err)
 	}
 
-	args := []string{playbook, "-i", opts.Inventory, "-e", "@" + extraVarsPath}
+	// The vault vars file comes first: Ansible gives the last -e precedence,
+	// and freeipa_roster_file/pilot_drift_*/target_group are Pilot's own
+	// decisions, which a key in the vault file must not replace.
+	args := []string{playbook, "-i", opts.Inventory}
+	if opts.VarsFile != "" {
+		absVarsFile, err := filepath.Abs(opts.VarsFile)
+		if err != nil {
+			return LiveState{}, fmt.Errorf("accessgrants: resolve vars file path: %w", err)
+		}
+		args = append(args, "-e", "@"+absVarsFile)
+	}
+	args = append(args, "-e", "@"+extraVarsPath)
 	if opts.VaultPasswordFile != "" {
 		args = append(args, "--vault-password-file", opts.VaultPasswordFile)
 	}
@@ -176,14 +237,17 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 	if runner == nil {
 		runner = ansible.NewRunner()
 	}
-	result, err := runner.Run(ctx, args...)
+	result, err := runProbe(ctx, runner, args)
 	if err != nil {
 		return LiveState{}, fmt.Errorf("accessgrants: drift-probe playbook did not run: %w", err)
 	}
 	if result.ExitCode != 0 {
-		detail := strings.TrimSpace(result.Stderr)
+		// Never embed ansible's output or message text: with a vault vars
+		// file in play it can quote or expand the file (issue #179, see
+		// probe_failure.go); only pilot's own fixed wording is returned.
+		detail := summarizeAnsibleFailure(result.Stdout, result.Stderr, opts.VarsFile)
 		if detail == "" {
-			detail = strings.TrimSpace(result.Stdout)
+			detail = "no recognisable failure message in ansible's output; run the probe playbook directly for detail"
 		}
 		return LiveState{}, fmt.Errorf("accessgrants: drift-probe playbook exited %d: %s", result.ExitCode, detail)
 	}

@@ -20,6 +20,7 @@ var (
 	accessHealthInventory         string
 	accessHealthTargetGroup       string
 	accessHealthVaultPasswordFile string
+	accessHealthVarsFile          string
 )
 
 var accessHealthCmd = &cobra.Command{
@@ -28,7 +29,20 @@ var accessHealthCmd = &cobra.Command{
 	Long: `pilot access health evaluates drift, breakglass, and reconcile-
 required grant state once and reports a single healthy/degraded/critical/
 unknown status (spec.md v3.1 §16). It does not monitor continuously —
-there is no scheduler behind this command.`,
+there is no scheduler behind this command. A probe that cannot run is reported
+as status unknown, with probe_error saying why.
+
+The probe reads the FreeIPA admin password from the vault vars file's
+ipa_admin_password first (the same order 'pilot deploy' uses), then from the
+roster's freeipa.admin.password. The vars file is --vars-file, or by default
+<inventory dir>/.vault/main.yaml when it exists; it is only handed to
+ansible-playbook as a file, never read by pilot. --vault-password-file decrypts
+both an encrypted roster and an encrypted vars file, so they must share one
+vault password. An explicit --vars-file that is missing, a directory, or
+encrypted without --vault-password-file is an error; the auto-detected default
+that is encrypted without --vault-password-file is skipped with a note on
+stderr, and the roster's password is used. The vars file is loaded whole, so
+a freeipa_domain/freeipa_realm in it also sets the probe's realm (as in apply).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAccessHealthCmd,
 }
@@ -37,7 +51,8 @@ func init() {
 	accessHealthCmd.Flags().StringVar(&accessHealthFormat, "format", "table", "output format: table|json")
 	accessHealthCmd.Flags().StringVarP(&accessHealthInventory, "inventory", "i", "inventory.yml", "inventory to probe live state against")
 	accessHealthCmd.Flags().StringVar(&accessHealthTargetGroup, "target-group", "", "override the probe playbook's default host-targeting group")
-	accessHealthCmd.Flags().StringVar(&accessHealthVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster")
+	accessHealthCmd.Flags().StringVar(&accessHealthVaultPasswordFile, "vault-password-file", "", driftVaultPasswordFlagHelp)
+	accessHealthCmd.Flags().StringVar(&accessHealthVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	accessCmd.AddCommand(accessHealthCmd)
 }
 
@@ -51,6 +66,11 @@ func runAccessHealthCmd(cmd *cobra.Command, args []string) error {
 
 	if accessHealthFormat != "table" && accessHealthFormat != "json" {
 		return fmt.Errorf("--format must be table or json, got %q", accessHealthFormat)
+	}
+
+	varsFile, err := resolveDriftVarsFile(cmd.ErrOrStderr(), accessHealthInventory, accessHealthVarsFile, accessHealthVaultPasswordFile)
+	if err != nil {
+		return err
 	}
 
 	violations, err := inventory.ValidateRosterFile(readPath)
@@ -70,6 +90,7 @@ func runAccessHealthCmd(cmd *cobra.Command, args []string) error {
 			Inventory:         accessHealthInventory,
 			TargetGroup:       accessHealthTargetGroup,
 			VaultPasswordFile: accessHealthVaultPasswordFile,
+			VarsFile:          varsFile,
 			Now:               time.Now(),
 		},
 		StateDir: resolveStateDir(accessStateFiles...),
@@ -91,6 +112,9 @@ func runAccessHealthCmd(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "status=%s\n", health.Status)
 	fmt.Fprintf(out, "evaluated_at=%s\n", health.EvaluatedAt.Format(time.RFC3339))
 	fmt.Fprintf(out, "freeipa_reachable=%v\n", health.FreeIPAReachable)
+	if health.ProbeError != "" {
+		fmt.Fprintf(out, "probe_error=%s\n", health.ProbeError)
+	}
 	fmt.Fprintf(out, "compiled_grant_hbac_drift_count=%d\n", health.CompiledGrantHBACDriftCount)
 	fmt.Fprintf(out, "sudo_drift_count=%d\n", health.SudoDriftCount)
 	fmt.Fprintf(out, "auth_policy_drift_count=%d\n", health.AuthPolicyDriftCount)

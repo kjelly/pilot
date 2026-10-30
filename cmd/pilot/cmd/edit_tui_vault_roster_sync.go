@@ -355,9 +355,11 @@ func prepareVaultRosterSync(r *editRouterModel, dir, vaultPath string, previous,
 // prepareRosterAdminPasswords prepares carrying an ipa_admin_password
 // change saved to .vault/main.yaml into every workspace roster that still
 // holds the old password as its freeipa.admin.password (issue #146):
-// `pilot access`, `pilot identity drift` and `pilot roster remove-*`
-// authenticate with the roster's copy, and freeipa-nfs-server-apply.yml
-// refuses a roster that disagrees with the vault. It reports one line per
+// `pilot roster remove-*`, the capability probe and `--repair-managed`
+// authenticate with the roster's copy (`pilot identity drift`, `pilot access
+// drift` and `pilot access health` take the vault's value first and fall
+// back to the roster's), and freeipa-nfs-server-apply.yml refuses a roster
+// that disagrees with the vault. It reports one line per
 // roster it will update or that needs the operator, and refuses the save
 // on a busy roster (prepareVaultRosterSync).
 func prepareRosterAdminPasswords(r *editRouterModel, dir, oldPassword, newPassword string) (*vaultRosterSync, string) {
