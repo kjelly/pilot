@@ -100,6 +100,13 @@ uninstall-callback: ## Remove installed callback plugin
 test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
+skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
+	@for skill in .agents/skills/*/; do \
+	  [ -d "$$skill/tests" ] || continue; \
+	  printf '── %s\n' "$$skill"; \
+	  (cd "$$skill" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py') || exit 1; \
+	done
+
 test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)
 	@command -v docker >/dev/null          && echo "docker OK"          || (echo "docker MISSING"; exit 1)

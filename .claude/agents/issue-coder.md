@@ -1,0 +1,1 @@
+../../.agents/skills/issue-to-pr/platforms/claude/agents/issue-coder.md
