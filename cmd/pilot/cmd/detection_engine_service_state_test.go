@@ -183,8 +183,9 @@ type harness struct {
 	vars        map[string]any    // extra playbook vars
 	noBlockOnly bool              // run only probes (no block/rescue)
 	fileModes   map[string]os.FileMode
-	fileGIDs    map[string]int  // chgrp the seeded file to this gid
-	symlinks    map[string]bool // seed this file as a symlink to a real file with the content
+	fileGIDs    map[string]int    // chgrp the seeded file to this gid
+	symlinks    map[string]bool   // seed this file as a symlink to a real file with the content
+	linkKinds   map[string]string // with symlinks: "dangling" (the target does not exist) or "dir" (the target is a directory holding marker.txt)
 }
 
 type harnessResult struct {
@@ -255,11 +256,21 @@ func (h harness) run(t *testing.T) harnessResult {
 		if h.symlinks[name] {
 			target = filepath.Join(dir, "real-"+name)
 		}
-		write(target, content, mode)
-		if err := os.Chmod(target, mode); err != nil {
-			t.Fatal(err)
+		switch h.linkKinds[name] {
+		case "dangling":
+			// the link is made below; nothing exists at its target
+		case "dir":
+			if err := os.Mkdir(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(filepath.Join(target, "marker.txt"), content, 0o644)
+		default:
+			write(target, content, mode)
+			if err := os.Chmod(target, mode); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if gid, ok := h.fileGIDs[name]; ok {
+		if gid, ok := h.fileGIDs[name]; ok && h.linkKinds[name] == "" {
 			if err := os.Chown(target, -1, gid); err != nil {
 				t.Fatal(err)
 			}
@@ -864,6 +875,61 @@ func TestDetectionEngineSnapshotDoesNotLeakProviderEnv(t *testing.T) {
 			}
 			if tt.rescued && res.files["provider"] != content {
 				t.Errorf("provider.env not restored: %q", res.files["provider"])
+			}
+		})
+	}
+}
+
+// Step 0c slurps only regular files: `slurp` follows symlinks, so a config.yaml that is a
+// dangling link, or a link to a directory, would fail the snapshot (a refusal before any
+// change, for a layout the apply handled before) if the `when` did not skip links. With a
+// failure injected after Step 11 the rescue must run, recreate the link with the same target
+// and leave everything else as it was: the other files restored, the target untouched, the
+// service back in its original state.
+func TestDetectionEngineSnapshotAndRescueHandleUnreadableSymlinks(t *testing.T) {
+	_, steps, rescue := detectionEngineRescueSteps(t)
+	probes, block, _ := loadDetectionEnginePlay(t)
+	steps = append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 8:", "Step 9:", "Step 9b:", "Step 9c:", "Step 10:", "Step 11:", "Step 12:")...)
+	files := map[string]string{"config": "OLD-GOOD-CONFIG\n", "profile": "OLD-PROFILE\n", "provider": "OLD=1\n", "unit": "OLD-UNIT\n"}
+	plain := fakeUnit{loaded: true, active: true, enabled: true}
+	for _, kind := range []string{"dangling", "dir"} {
+		t.Run("config.yaml is a "+kind+" symlink", func(t *testing.T) {
+			// no healthMark: the fake unit cannot "read" a config through a link like these
+			res := harness{probes: probes, steps: steps, inject: injectedFailure(nil), rescue: rescue, unit: plain, binary: "old", files: files,
+				symlinks: map[string]bool{"config": true}, linkKinds: map[string]string{"config": kind}}.run(t)
+			if res.err == nil {
+				t.Fatalf("the run must fail (the injected failure after Step 11)\n%s", res.log)
+			}
+			// Step 0c did not fail: nothing fatal happens before the block's first task
+			if i := strings.Index(res.log, "TASK [Step 3:"); i < 0 || strings.Contains(res.log[:i], "fatal:") {
+				t.Fatalf("the snapshot failed before the block ran (slurp following the link?)\n%s", res.log)
+			}
+			if !strings.Contains(res.log, `"msg": "boom"`) || !strings.Contains(res.log, "TASK [ROLLBACK — restore the files that were symlinks]") {
+				t.Fatalf("the injected failure or the rescue did not run\n%s", res.log)
+			}
+			link := res.stats["config"].link
+			if !strings.HasSuffix(link, "real-config") {
+				t.Fatalf("config.yaml = %+v, want the same symlink to its original target\n%s", res.stats["config"], res.log)
+			}
+			switch kind {
+			case "dangling":
+				if _, err := os.Lstat(link); err == nil {
+					t.Errorf("the target %s exists now: the rescue created what the link pointed at", link)
+				}
+			case "dir":
+				// (Step 9's copy onto a link to a directory drops a temp-named file into it; that
+				// is the playbook's own pre-existing behaviour, not the rescue's)
+				if got, _ := os.ReadFile(filepath.Join(link, "marker.txt")); string(got) != files["config"] {
+					t.Errorf("target directory marker = %q, want it untouched (%q)", got, files["config"])
+				}
+			}
+			for _, name := range []string{"profile", "provider", "unit"} {
+				if res.files[name] != files[name] {
+					t.Errorf("%s = %q, want it restored to %q", name, res.files[name], files[name])
+				}
+			}
+			if res.unit != plain {
+				t.Errorf("service = %v, want its original state %v\n%s", res.unit, plain, res.log)
 			}
 		})
 	}
