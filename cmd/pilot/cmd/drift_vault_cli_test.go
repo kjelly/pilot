@@ -59,23 +59,30 @@ func resetDriftCmdState(t *testing.T) {
 		&accessHealthFormat, &accessHealthInventory, &accessHealthTargetGroup, &accessHealthVaultPasswordFile, &accessHealthVarsFile,
 		&dataDir,
 	}
-	bools := []*bool{&accessDriftRepairManaged, &identityDriftRepairManaged}
+	bools := []*bool{&accessDriftRepairManaged, &identityDriftRepairManaged, &identityDriftIncludeObjects, &identityDriftExitCode}
 	saved := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		saved[i] = *p
 	}
-	savedBools := []bool{*bools[0], *bools[1]}
+	savedBools := make([]bool, len(bools))
+	for i, p := range bools {
+		savedBools[i] = *p
+	}
 	t.Cleanup(func() {
 		for i, p := range ptrs {
 			*p = saved[i]
 		}
-		*bools[0], *bools[1] = savedBools[0], savedBools[1]
+		for i, p := range bools {
+			*p = savedBools[i]
+		}
 		rootCmd.SetArgs(nil)
 	})
 	for _, p := range ptrs {
 		*p = ""
 	}
-	*bools[0], *bools[1] = false, false
+	for _, p := range bools {
+		*p = false
+	}
 	for _, p := range []*string{&accessDriftFormat, &identityDriftFormat, &accessHealthFormat} {
 		*p = "table"
 	}

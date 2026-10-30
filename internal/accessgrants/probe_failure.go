@@ -132,6 +132,13 @@ const withheldText = "details withheld: ansible messages can echo values expande
 // task files it includes. A task name from ansible's banner is printed only
 // when it is in this set. TestProbeTaskNamesCoverThePlaybook keeps it complete.
 var probeTaskNames = map[string]bool{
+	"Read the complete users/groups object model for identity drift":               true,
+	"Normalize canonical users and groups (shared with apply)":                     true,
+	"Reset canonical users and groups":                                             true,
+	"Normalize canonical users for the compatibility reconciler":                   true,
+	"Normalize canonical groups for the compatibility reconciler":                  true,
+	"Observe complete FreeIPA users and groups without credentials in output":      true,
+	"Decode the credential-free identity observation":                              true,
 	"Probe live FreeIPA access-governance state for drift inspection":              true,
 	"Gate: drift probe input is complete":                                          true,
 	"Load canonical roster under a namespace":                                      true,

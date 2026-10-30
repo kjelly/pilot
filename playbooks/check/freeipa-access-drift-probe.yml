@@ -449,10 +449,19 @@
           run_once: true
           tags: [identity, drift]
 
+        - name: "Read the complete users/groups object model for identity drift"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-identity-object-observe.yml
+            apply:
+              tags: [always]
+          when: pilot_drift_identity_objects | default(false) | bool
+          tags: [always]
+
         - name: "Build machine-readable drift-probe result"
           ansible.builtin.set_fact:
             pilot_drift_result:
               schema_version: 1
+              identity_objects: "{{ pilot_identity_objects | default(none) }}"
               live_hbac_names: >-
                 {{ pilot_drift_hbac_find.stdout | default('') |
                    regex_findall('(?m)^\s*cn:\s*(\S+)\s*$') }}

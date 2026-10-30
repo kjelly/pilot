@@ -27,6 +27,8 @@ var (
 	identityDriftVaultPasswordFile string
 	identityDriftVarsFile          string
 	identityDriftRepairManaged     bool
+	identityDriftIncludeObjects    bool
+	identityDriftExitCode          bool
 )
 
 var identityDriftCmd = &cobra.Command{
@@ -37,6 +39,15 @@ against the roster's desired compiled state for every axis this delivery
 covers: HBAC/sudo grants, auth_policies indicators, account_policies
 expiration, password_policies, and per-user authentication types. It runs
 once and exits — no recurring loop (spec.md v3.2 §1).
+
+--include-users-groups enables the staged object observer using apply's shared
+normalization: create/delete, enabled state, attributes, SSH key counts and direct
+group memberships. Extra members of additive groups and objects outside the
+roster are report-only. The JSON schema is version 1, with sorted items and
+explicit covered/uncovered lists. Coverage remains partial while rule attachments,
+host objects and password actions are pending; an empty report is not full parity.
+--exit-code returns 2 for actionable drift, 3 for partial coverage or report-only
+differences, and 1 on failure. Zero is reserved for fully covered clean state.
 
 --repair-managed additionally reconciles any drift found via the same
 apply path 'pilot access reconcile' uses — it only ever touches
@@ -66,10 +77,15 @@ func init() {
 	identityDriftCmd.Flags().StringVar(&identityDriftVaultPasswordFile, "vault-password-file", "", driftVaultPasswordFlagHelp)
 	identityDriftCmd.Flags().StringVar(&identityDriftVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	identityDriftCmd.Flags().BoolVar(&identityDriftRepairManaged, "repair-managed", false, "explicitly repair any drift found (Pilot-owned managed constructs only)")
+	identityDriftCmd.Flags().BoolVar(&identityDriftIncludeObjects, "include-users-groups", false, "include staged users/groups observer (requires FreeIPA Python client on target)")
+	identityDriftCmd.Flags().BoolVar(&identityDriftExitCode, "exit-code", false, "CI status: 0 fully clean, 1 error, 2 actionable drift, 3 partial coverage/report-only")
 	identityCmd.AddCommand(identityDriftCmd)
 }
 
 func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
+	if identityDriftRepairManaged && (identityDriftIncludeObjects || identityDriftExitCode || identityDriftFormat == "json") {
+		return fmt.Errorf("--repair-managed cannot be combined with --include-users-groups, --exit-code or --format json; inspect and apply separately")
+	}
 	path := args[0]
 	readPath, cleanup, err := resolveGrantsReadPath(path, identityDriftVaultPasswordFile)
 	if err != nil {
@@ -98,13 +114,14 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	driftOpts := accessgrants.DriftProbeOptions{
-		RosterFile:        readPath,
-		Inventory:         identityDriftInventory,
-		TargetGroup:       identityDriftTargetGroup,
-		VaultPasswordFile: identityDriftVaultPasswordFile,
-		VarsFile:          varsFile,
-		StateDir:          resolveStateDir(accessStateFiles...),
-		Now:               time.Now(),
+		IncludeIdentityObjects: identityDriftIncludeObjects,
+		RosterFile:             readPath,
+		Inventory:              identityDriftInventory,
+		TargetGroup:            identityDriftTargetGroup,
+		VaultPasswordFile:      identityDriftVaultPasswordFile,
+		VarsFile:               varsFile,
+		StateDir:               resolveStateDir(accessStateFiles...),
+		Now:                    time.Now(),
 	}
 
 	out := cmd.OutOrStdout()
@@ -114,7 +131,13 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printIdentityDriftReport(out, report)
+		if err := printIdentityDriftReport(out, report); err != nil {
+			return err
+		}
+		if identityDriftExitCode {
+			return identityDriftStatus(report)
+		}
+		return nil
 	}
 
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
@@ -133,23 +156,25 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "repaired via reconcile: %d hbac rule(s), %d sudo rule(s), %d account expiration(s), %d password polic(y/ies), %d user auth type(s)\n",
 		len(plan.HBACRules), len(plan.SudoRules), len(plan.AccountExpirations), len(plan.PasswordPolicies), len(plan.UserAuthTypes))
 	if result != nil {
-		fmt.Fprint(out, result.Stdout)
+		fmt.Fprintf(out, "apply exit code: %d\n", result.ExitCode)
 	}
 	return err
 }
 
 func printIdentityDriftReport(out io.Writer, report accessgrants.DriftReport) error {
+	view := identityDriftJSON(report, identityDriftIncludeObjects)
 	if identityDriftFormat == "json" {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(report)
+		return enc.Encode(view)
 	}
+	fmt.Fprintf(out, "partial coverage; not inspected: %v\n", view.Uncovered)
 	if report.Empty() {
-		fmt.Fprintln(out, "no drift found")
+		fmt.Fprintln(out, "no drift found within inspected scope")
 		return nil
 	}
-	for _, item := range report.Items {
-		fmt.Fprintf(out, "%s\tname=%s\tdetail=%s\n", item.Category, item.Name, item.Detail)
+	for _, item := range view.Items {
+		fmt.Fprintf(out, "%s\tname=%s\taction=%s\tdetail=%s\n", item.Category, item.Name, item.Action, item.Detail)
 	}
 	return nil
 }

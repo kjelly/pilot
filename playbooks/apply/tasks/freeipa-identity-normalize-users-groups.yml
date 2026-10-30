@@ -1,0 +1,63 @@
+# Canonical desired state shared by apply and the read-only drift observer.
+# Reset per-include accumulators; repeated includes must not retain old users.
+- name: "Reset canonical users and groups"
+  ansible.builtin.set_fact:
+    ipa_users: []
+    ipa_groups: []
+  when: freeipa_roster.schema_version is defined
+  no_log: true
+  tags: [always]
+
+# `ssh_keys` below MUST use `.get('values', none)`, never `['values']` or
+# `.values`. On a roster user with no `ssh_keys` field at all (exactly what
+# `pilot edit`'s roster manager "➕ 新增 User" produces), a bracket lookup for
+# the key 'values' on an empty dict hits Jinja2's item-then-attribute
+# fallback and resolves to the dict's own bound `.values` METHOD instead of
+# raising Undefined — `set_fact` then fails with
+# "Type 'method' is unsupported for variable storage", masked by no_log.
+# Found live round 16 (2026-07-25) on ansible-core 2.19.2; do not "simplify"
+# this back to a subscript. Full writeup:
+# docs/evidence/minimal-poc-architecture/2026-07-25-round-16.md
+- name: "Normalize canonical users for the compatibility reconciler"
+  ansible.builtin.set_fact:
+    ipa_users: >-
+      {{ ipa_users + [{
+        'name': item.name,
+        'state': item.state | default('present'),
+        'first': item.first | default(item.name),
+        'last': item.last | default(item.name),
+        'display_name': item.display_name | default(none),
+        'email': item.email | default(none),
+        'uid': item.uid | default(none),
+        'gid': item.gid | default(none),
+        'login_shell': item.login_shell | default('/bin/bash'),
+        'home_directory': item.home_directory | default('/home/' + item.name),
+        'enabled': item.enabled | default(item.state | default('present') != 'disabled'),
+        'password': (item.password | default({})).initial | default(none),
+        'force_password': (item.password | default({})).force_change | default(false),
+        'preserve_existing': (item.password | default({})).preserve_existing | default(true),
+        'ssh_keys': (item.ssh_keys | default({})).get('values', none)
+      }] }}
+  loop: "{{ freeipa_roster.users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: freeipa_roster.schema_version is defined
+  no_log: true
+  tags: [always]
+
+- name: "Normalize canonical groups for the compatibility reconciler"
+  ansible.builtin.set_fact:
+    ipa_groups: >-
+      {{ ipa_groups + [{
+        'name': item.name,
+        'state': item.state | default('present'),
+        'desc': item.description | default(item.name),
+        'type': item.type | default('posix'),
+        'gid': item.gid | default(none),
+        'membership': item.membership | default({})
+      }] }}
+  loop: "{{ freeipa_roster.groups | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: freeipa_roster.schema_version is defined
+  tags: [always]

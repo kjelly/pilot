@@ -381,6 +381,8 @@ func TestClassifyMessage(t *testing.T) {
 // allowlists must cover: the probe and the task files it includes.
 var probePlaybookFiles = []string{
 	"playbooks/check/freeipa-access-drift-probe.yml",
+	"playbooks/check/tasks/freeipa-identity-object-observe.yml",
+	"playbooks/apply/tasks/freeipa-identity-normalize-users-groups.yml",
 	"playbooks/apply/tasks/freeipa-private-ccache-open.yml",
 	"playbooks/apply/tasks/freeipa-private-ccache-close.yml",
 }

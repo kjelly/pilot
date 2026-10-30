@@ -1,0 +1,26 @@
+# Requires the caller's private Kerberos cache. Pure reads; no stage gate needed.
+- name: "Normalize canonical users and groups (shared with apply)"
+  ansible.builtin.include_tasks:
+    file: ../../apply/tasks/freeipa-identity-normalize-users-groups.yml
+    apply:
+      tags: [always]
+  tags: [always]
+
+- name: "Observe complete FreeIPA users and groups without credentials in output"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('file', playbook_dir ~ '/files/freeipa-identity-object-observer.py') }}"
+    stdin: "{{ {'users': ipa_users, 'groups': ipa_groups} | to_json }}"
+  register: pilot_identity_object_observation
+  changed_when: false
+  check_mode: false
+  no_log: true
+  tags: [always]
+
+- name: "Decode the credential-free identity observation"
+  ansible.builtin.set_fact:
+    pilot_identity_objects: "{{ pilot_identity_object_observation.stdout | from_json }}"
+  no_log: true
+  tags: [always]
