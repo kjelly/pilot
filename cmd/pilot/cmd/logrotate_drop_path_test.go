@@ -742,6 +742,13 @@ func TestLogrotateDropPathDoesNotEndAScriptOnLookalikes(t *testing.T) {
 // glob matches the path. The matching is shell style, "/" never matched by a
 // wildcard; it is compared here with bash's own matching.
 func TestLogrotateDropPathRefusesAGlobThatMatchesTheManagedPath(t *testing.T) {
+	// where bash's [[ ]] and glob() differ: a wildcard crossing "/", a trailing slash, escapes
+	bashDiffers := map[string]bool{
+		"/var/log/*": true, "/var/log/**": true, "/var/*/syslog": true, "/var/*": true, "/*": true, "/var/log/*/syslog": true,
+		"/var/log/syslog/": true, "/var/log/syslog//": true, "/var/log/sys*/": true,
+		"/var?log/syslog": true, "/var/log?syslog": true, "/var[/]log/syslog": true,
+		"/var/log/sys\\*": true, "/var/log/sys\\\\*": true, "/var/log/sys[l": true, "/var/log/sys[a-]og": true,
+	}
 	const path = "/var/log/syslog"
 	for _, tt := range []struct {
 		glob  string
@@ -767,7 +774,15 @@ func TestLogrotateDropPathRefusesAGlobThatMatchesTheManagedPath(t *testing.T) {
 		// popt removes one level of backslashes: "\*" is a star, "\\*" is the glob escape of one
 		{"/var/log/sys\\*", true},
 		{"/var/log/sys\\\\*", false},
-		{"/var/log/sys[l", false}, // an unclosed bracket is an ordinary character
+		{"/var/log/sys[l", false},  // an unclosed bracket is an ordinary character
+		{"/var/log/syslog/", true}, // glob() finds the plain file behind a trailing slash
+		{"/var/log/syslog//", true},
+		{"/var/log/sys*/", false},  // a pattern with a trailing slash matches directories only
+		{"/var?log/syslog", false}, // ? is no "/"
+		{"/var/log?syslog", false},
+		{"/var[/]log/syslog", false},
+		{"/var/lo[g]/syslog", true},
+		{"/var/*/syslog", true},
 		{"/var/log/*.log", false},
 		{"/var/log/sys?og.1", false},
 		{"/var/log/sys[a-k]og", false},
@@ -784,7 +799,7 @@ func TestLogrotateDropPathRefusesAGlobThatMatchesTheManagedPath(t *testing.T) {
 	} {
 		for _, a := range dropPathAwks(t) {
 			t.Run(a.name+"/"+tt.glob, func(t *testing.T) {
-				if bash, err := exec.LookPath("bash"); err == nil && !strings.Contains(tt.glob, "/*") && tt.glob != "/var/log/**" && !strings.Contains(tt.glob, "sys\\") && tt.glob != "/var/log/sys[l" && tt.glob != "/var/log/sys[a-]og" {
+				if bash, err := exec.LookPath("bash"); err == nil && !bashDiffers[tt.glob] {
 					// the expectation above is bash's too (where bash's [[ ]] and glob() agree)
 					out, _ := exec.Command(bash, "-c", `[[ "$1" == $2 ]] && echo y || echo n`, "bash", path, tt.glob).Output()
 					if got := strings.TrimSpace(string(out)) == "y"; got != tt.match {
@@ -829,5 +844,43 @@ func TestLogrotateDropPathGlobDuplicatesTheManagedStanzaInRealLogrotate(t *testi
 				t.Fatalf("exit %d, want 3\n%s%s", code, out, stderr)
 			}
 		})
+	}
+}
+
+// For a policy whose only header word is a glob (or a path with a trailing slash), the
+// helper says "refuse" exactly when real logrotate, with the file there, reports
+// "duplicate log entry" against the managed stanza.
+func TestLogrotateDropPathGlobVerdictMatchesRealLogrotate(t *testing.T) {
+	logrotate, err := exec.LookPath("logrotate")
+	if err != nil {
+		t.Skip("logrotate not installed")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "log", "syslog")
+	writeFile(t, log, "x\n")
+	managed := log + " {\n\tdaily\n\trotate 4\n\tmissingok\n}\n"
+	for _, tpl := range []string{
+		`"@D@/log/sys*"`, `'@D@/log/sys*'`, `@D@/log/sys\*`, `@D@/log/sys"*"`, `@D@/log/sys\\*`, `"@D@/log/sys\*"`,
+		`@D@/log/s"y"s*`, `@D@/log/sys[l]og`, `@D@/log/sys"[l]og"`, `@D@/log/sys\[l\]og`, `@D@/log/syslo[g]`,
+		`@D@/log/a.log @D@/log/sys* @D@/log/b`, `@D@/log/syslog/`, `@D@/log/syslog//`, `@D@/log/sys*/`, `@D@/log/syslo?/`,
+		`@D@/log//syslog`, `@D@/log/./syslog`, `@D@/log/../log/syslog`, `@D@/lo*/syslog`, `@D@/lo?/syslog`,
+		`@D@/log?syslog`, `@D@/lo[g]/syslog`, `@D@/lo[/]/syslog`, `@D@/log/Sys*`, `@D@/log/sys?`, `@D@/log/sys??og`,
+		`@D@/*/syslog`, `@D@/log/*`, `@D@/log/s[a-z]slog`, `@D@/log/s[!a-z]slog`, `@D@/log/s[[:alpha:]]slog`,
+	} {
+		header := strings.ReplaceAll(tpl, "@D@", dir)
+		policy := header + " {\n\trotate 4\n}\n"
+		v := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": policy, "syslog": managed})
+		dup := strings.Contains(v.raw, "duplicate log entry")
+		for _, a := range dropPathAwks(t) {
+			t.Run(a.name+"/"+tpl, func(t *testing.T) {
+				_, stderr, code := runDropPath(t, a, log, policy)
+				if (code == 3) != dup {
+					t.Fatalf("logrotate duplicate=%v, helper exit %d\n%s", dup, code, stderr)
+				}
+			})
+		}
 	}
 }

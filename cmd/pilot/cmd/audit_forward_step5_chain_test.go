@@ -10,50 +10,80 @@ import (
 	"testing"
 )
 
-// The distro rsyslog policy chain of audit-log-forwarding-apply.yml (Step 5a to 5d),
-// taken from the playbook as it is and run by real ansible-playbook against a copy of
-// the policy, then judged by real logrotate:
+// The distro rsyslog policy handling of audit-log-forwarding-apply.yml: Step 1d (the
+// preflight), Step 5 (renders the managed /etc/logrotate.d/syslog) and Step 5a to 5e
+// (rewrite or remove /etc/logrotate.d/rsyslog), taken from the playbook as it is and
+// run by real ansible-playbook against copies of the files, then judged by real
+// logrotate:
 //
 //   - the paths the policy rotates other than the managed one survive the apply
-//     whatever their spelling (flush-left, indented, quoted, ~): logrotate's own list
-//     of considered logs, with the managed /etc/logrotate.d/syslog next to the rewritten
-//     file, is exactly the list before the apply;
+//     whatever their spelling (flush-left, indented, quoted, ~) and whatever bytes the
+//     file holds (a Latin-1 comment, a non-UTF-8 name);
 //   - the file is removed only when nothing but the managed path was in it;
-//   - a second apply changes nothing;
-//   - a policy the helper cannot handle safely stops the run with the file untouched.
+//   - a second apply changes nothing, a check-mode run writes nothing;
+//   - when the helper (or logrotate's check of its output) cannot accept the policy the
+//     play fails before ANY write: the managed stanza is not written, the policy is
+//     untouched and no temporary directory is left behind. (Without the preflight the
+//     managed stanza would already be there while the distro file still declares the
+//     path: logrotate then aborts on "duplicate log entry". kjelly/pilot#199 is the
+//     rescue that does not restore logrotate files; it is not covered here.)
 //
-// (The playbook's Step 5 writes the managed stanza before this chain and does not
-// restore logrotate when a later task fails: kjelly/pilot#199, not covered here.)
+// What the tree before the helper did with these inputs (BASE, `grep -cE '^/'` and
+// lineinfile): quoted, indented and ~ paths deleted the whole policy; a Latin-1 byte
+// anywhere was applied; a non-UTF-8 byte in a path line made grep treat the file as binary
+// and deleted it.
 type step5Run struct {
 	rc          int
 	changed     int
 	failed      int
 	out         string
-	policy      string // the file after the run
+	policy      string // the policy file after the run
 	policyAlive bool
+	managed     string // the managed stanza file after the run
+	managedLive bool
+	leftovers   []string // entries in the temp directory the playbook was given
 }
 
 var step5Recap = regexp.MustCompile(`localhost\s+: ok=(\d+)\s+changed=(\d+)\s+unreachable=\d+\s+failed=(\d+)`)
 
-func step5Playbook(t *testing.T, dir string) string {
+// step5Playbook writes the extracted tasks; withPreflight false leaves Step 1d out.
+func step5Playbook(t *testing.T, dir string, withPreflight bool) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "playbooks", "apply", "audit-log-forwarding-apply.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(raw)
-	a := strings.Index(s, "        - name: \"Step 5a:")
+	pa := strings.Index(s, "    # Step 1d:")
+	pb := strings.Index(s, "    - block:\n        - name: \"Step 2:")
+	a := strings.Index(s, "        - name: \"Step 5: Render /etc/logrotate.d/syslog\"")
 	b := strings.Index(s, "        - name: \"Step 6a:")
-	if a < 0 || b < a {
-		t.Fatal("cannot find Step 5a .. Step 6a in audit-log-forwarding-apply.yml")
+	if pa < 0 || pb < pa || a < 0 || b < a {
+		t.Fatal("cannot find Step 1d or Step 5 .. Step 6a in audit-log-forwarding-apply.yml")
 	}
-	block := strings.ReplaceAll(s[a:b], "/etc/logrotate.d/rsyslog", filepath.Join(dir, "rsyslog"))
-	for _, bad := range []string{"dest: /etc", "path: /etc", " /etc/logrotate.d/rsyslog"} {
+	pre := s[pa:pb]
+	if !withPreflight {
+		pre = ""
+	}
+	// the preflight is a play-level task (4 spaces); Step 5 is inside the block (8)
+	var indented []string
+	for _, l := range strings.Split(pre, "\n") {
+		if l != "" {
+			l = "    " + l
+		}
+		indented = append(indented, l)
+	}
+	block := strings.Join(indented, "\n") + s[a:b]
+	block = strings.ReplaceAll(block, "/etc/logrotate.d/rsyslog", filepath.Join(dir, "rsyslog"))
+	block = strings.ReplaceAll(block, "/etc/logrotate.d/syslog", filepath.Join(dir, "syslog"))
+	// not root here
+	block = regexp.MustCompile(`\n\s+owner: root\n\s+group: root`).ReplaceAllString(block, "")
+	for _, bad := range []string{"dest: /etc", "path: /etc", " /etc/logrotate.d/", "f=/etc/"} {
 		if strings.Contains(block, bad) {
 			t.Fatalf("the extracted block still touches %q:\n%s", bad, block)
 		}
 	}
-	pb := "- hosts: localhost\n  gather_facts: false\n  vars:\n    audit_syslog_path: /var/log/syslog\n  tasks:\n" + block
+	pb2 := "- hosts: localhost\n  gather_facts: false\n  vars:\n    audit_syslog_path: /var/log/syslog\n    audit_syslog_group: root\n    syslog_logrotate_rotate: 14\n    syslog_logrotate_maxage: 90\n  tasks:\n" + block
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -62,16 +92,26 @@ func step5Playbook(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "files", "logrotate-drop-path.awk"), string(awk))
-	writeFile(t, filepath.Join(dir, "p.yml"), pb)
-	return filepath.Join(dir, "p.yml")
+	name := "p.yml"
+	if !withPreflight {
+		name = "nopre.yml"
+	}
+	writeFile(t, filepath.Join(dir, name), pb2)
+	return filepath.Join(dir, name)
 }
 
-func runStep5(t *testing.T, dir, playbook string) step5Run {
+func runStep5(t *testing.T, dir, playbook string, extra ...string) step5Run {
 	t.Helper()
-	cmd := exec.Command("ansible-playbook", "-i", "localhost,", "-c", "local", playbook)
+	scratch := filepath.Join(dir, "scratch")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"-i", "localhost,", "-c", "local", playbook}, extra...)
+	cmd := exec.Command("ansible-playbook", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False",
-		"ANSIBLE_LOCAL_TEMP="+filepath.Join(dir, "tmp"), "ANSIBLE_NOCOLOR=1", "ANSIBLE_FORCE_COLOR=0")
+		"ANSIBLE_LOCAL_TEMP="+filepath.Join(dir, "tmp"), "ANSIBLE_NOCOLOR=1", "ANSIBLE_FORCE_COLOR=0",
+		"TMPDIR="+scratch)
 	out, err := cmd.CombinedOutput()
 	r := step5Run{out: string(out)}
 	if err != nil {
@@ -90,7 +130,24 @@ func runStep5(t *testing.T, dir, playbook string) step5Run {
 	if b, err := os.ReadFile(filepath.Join(dir, "rsyslog")); err == nil {
 		r.policy, r.policyAlive = string(b), true
 	}
+	if b, err := os.ReadFile(filepath.Join(dir, "syslog")); err == nil {
+		r.managed, r.managedLive = string(b), true
+	}
+	ents, _ := os.ReadDir(scratch)
+	for _, e := range ents {
+		r.leftovers = append(r.leftovers, e.Name())
+	}
 	return r
+}
+
+func newStep5Dir(t *testing.T, policy string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "rsyslog"), policy)
+	if err := os.Chmod(filepath.Join(dir, "rsyslog"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
@@ -104,8 +161,10 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 	const tail = "\n\trotate 4\n}\n"
 	type tc struct {
 		name, policy string
-		// kept: the file stays (true) or goes (false); fails: ansible fails and the file is untouched
-		kept, fails bool
+		// kept: the file stays (true) or goes (false)
+		kept bool
+		// fails: ansible fails before any write
+		fails bool
 		// every one of these must be in the file afterwards
 		contains []string
 		// the managed path is declared by the policy exactly once (so logrotate's list must equal)
@@ -136,23 +195,33 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 			contains: []string{"\tpostrotate\n\t/var/log/syslog\n\tendscript\n}", "/var/log/mail.log\n{"}},
 		{name: "words that are data after the managed path",
 			policy: "/var/log/syslog # vendor default\n{" + tail, kept: true, compare: true},
+		// BASE applied this; a Latin-1 byte (here in a comment) anywhere in the file must not stop the apply
+		{name: "a Latin-1 byte in a comment of the distro layout",
+			policy: "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n# caf\xe9 comment\n", kept: true, compare: true,
+			contains: []string{"# caf\xe9 comment\n", "/var/log/mail.log\n{"}},
+		// BASE deleted the whole policy for this one (grep took the file for binary)
+		{name: "a non-UTF-8 byte in another path is kept as it is",
+			policy: "/var/log/syslog /var/log/\xff.log {" + tail, kept: true, contains: []string{"/var/log/\xff.log {"}},
 		{name: "a policy that does not declare the managed path stays as it is",
 			policy: "\"/var/log/mail.log\" {" + tail, kept: true, contains: []string{"\"/var/log/mail.log\" {"}},
 		{name: "a kept glob that covers the managed path stops the run",
 			policy: "/var/log/syslog /var/log/sys* {" + tail, kept: true, fails: true},
-		{name: "a byte that is not UTF-8 stops the run",
-			policy: "/var/log/syslog /var/log/\xff.log {" + tail, kept: true, fails: true},
+		{name: "a kept path with a trailing slash that covers the managed path stops the run",
+			policy: "/var/log/syslog /var/log/syslog/ {" + tail, kept: true, fails: true},
 		{name: "a policy logrotate rejects stops the run",
 			policy: "/var/log/other\n{\n\trotate 7\n\t/var/log/syslog\n}\n", kept: true, fails: true},
+		{name: "a lone stanza that logrotate rejects (no endscript) stops the run",
+			policy: "/var/log/syslog\n{\n\trotate 7\n\tpostrotate\n\t\ttrue\n}\n", kept: true, fails: true},
+		{name: "a rewrite that logrotate warns about (unknown option) stops the run",
+			policy: "/var/log/syslog\n/var/log/mail.log\n{\n\tbogus\n\trotate 4\n}\n", kept: true, fails: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			dir := t.TempDir()
-			playbook := step5Playbook(t, dir)
-			writeFile(t, filepath.Join(dir, "rsyslog"), c.policy)
-			if err := os.Chmod(filepath.Join(dir, "rsyslog"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			dir := newStep5Dir(t, c.policy)
+			playbook := step5Playbook(t, dir, true)
 			first := runStep5(t, dir, playbook)
+			if len(first.leftovers) > 0 {
+				t.Fatalf("the run left %v in the temp directory", first.leftovers)
+			}
 			if c.fails {
 				if first.rc == 0 || first.failed == 0 {
 					t.Fatalf("ansible did not fail (rc %d):\n%s", first.rc, first.out)
@@ -160,10 +229,16 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 				if !first.policyAlive || first.policy != c.policy {
 					t.Fatalf("the policy changed although the run failed:\n%q", first.policy)
 				}
+				if first.managedLive {
+					t.Fatalf("the managed stanza was written although the run failed (the distro file still declares the path):\n%s", first.managed)
+				}
 				return
 			}
 			if first.rc != 0 {
 				t.Fatalf("ansible rc %d:\n%s", first.rc, first.out)
+			}
+			if !first.managedLive {
+				t.Fatal("the managed stanza was not written")
 			}
 			if first.policyAlive != c.kept {
 				t.Fatalf("file kept=%v, want %v; content %q\n%s", first.policyAlive, c.kept, first.policy, first.out)
@@ -176,6 +251,9 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 			second := runStep5(t, dir, playbook)
 			if second.rc != 0 || second.changed != 0 {
 				t.Fatalf("second apply: rc %d changed=%d (want 0, 0)\n%s", second.rc, second.changed, second.out)
+			}
+			if len(second.leftovers) > 0 {
+				t.Fatalf("the second run left %v in the temp directory", second.leftovers)
 			}
 			if second.policyAlive != first.policyAlive || second.policy != first.policy {
 				t.Fatalf("the second apply changed the policy:\n%q\n%q", first.policy, second.policy)
@@ -195,5 +273,54 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A check-mode run reports what would change and writes nothing (the helper runs for
+// real, on a temporary copy that is removed again); the real run after it applies.
+func TestAuditLogForwardingStep5CheckModeWritesNothing(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	if _, err := exec.LookPath("logrotate"); err != nil {
+		t.Skip("logrotate not installed")
+	}
+	const policy = "/var/log/syslog\n{\n\trotate 7\n}\n\n/var/log/mail.log\n{\n\trotate 4\n}\n"
+	dir := newStep5Dir(t, policy)
+	playbook := step5Playbook(t, dir, true)
+	chk := runStep5(t, dir, playbook, "--check")
+	if chk.rc != 0 || chk.policy != policy || chk.managedLive || len(chk.leftovers) > 0 {
+		t.Fatalf("check mode: rc %d, policy changed=%v, managed written=%v, leftovers %v\n%s", chk.rc, chk.policy != policy, chk.managedLive, chk.leftovers, chk.out)
+	}
+	if chk.changed == 0 {
+		t.Fatalf("check mode reports nothing to change:\n%s", chk.out)
+	}
+	real := runStep5(t, dir, playbook)
+	if real.rc != 0 || !strings.Contains(real.policy, "/var/log/mail.log") || strings.Contains(real.policy, "/var/log/syslog") || !real.managedLive {
+		t.Fatalf("real run after check mode: rc %d\n%q\n%s", real.rc, real.policy, real.out)
+	}
+}
+
+// Step 5c's own validate (logrotate's check of the file about to be installed) stops the
+// install and leaves the file as it was. The preflight normally stops such a policy
+// earlier, so this runs the chain without it.
+func TestAuditLogForwardingStep5cValidateRejectsAndKeepsTheFile(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	if _, err := exec.LookPath("logrotate"); err != nil {
+		t.Skip("logrotate not installed")
+	}
+	const policy = "/var/log/syslog\n/var/log/mail.log\n{\n\tbogus\n\trotate 4\n}\n"
+	dir := newStep5Dir(t, policy)
+	r := runStep5(t, dir, step5Playbook(t, dir, false))
+	if r.rc == 0 || r.failed == 0 || !strings.Contains(r.out, "Step 5c") {
+		t.Fatalf("ansible did not fail at Step 5c (rc %d):\n%s", r.rc, r.out)
+	}
+	if r.policy != policy {
+		t.Fatalf("the rejected policy was installed:\n%q", r.policy)
+	}
+	if len(r.leftovers) > 0 {
+		t.Fatalf("the failed run left %v in the temp directory (the always section must remove it)", r.leftovers)
 	}
 }

@@ -66,20 +66,25 @@
 # managed one. If plain removal fails that, the managed word is replaced by "" (an
 # empty word is no log at all to logrotate 3.19, 3.21 and 3.22; a second run finds no
 # managed word and leaves it alone); if that fails too the helper refuses.
-# A kept word that is a glob matching the path (/var/log/sys*) would still declare
-# it for logrotate, which globs every word: the helper refuses (exit 3), since the
-# managed policy for the path would then be a duplicate. (Known limits: only this one
-# file is read, so a glob in another file of /etc/logrotate.d is not seen; the
-# match is by pattern, whether the file exists is not asked.) A byte in the policy
-# that is not valid UTF-8 makes the playbook task fail when it reads this output;
-# that is fail-closed too, nothing is written.
+# A kept word that is a glob matching the path (/var/log/sys*), or the path with a
+# trailing slash (logrotate's glob() returns the file for "/var/log/syslog/"), would
+# still declare it for logrotate, which globs every word: the helper refuses (exit 3),
+# since the managed policy for the path would then be a duplicate. This is decided by
+# the pattern alone, not by whether the file exists right now: the path is a log that
+# rsyslog creates when it first writes, so a glob that matches nothing today collides
+# with the managed policy as soon as the file appears. (Known limit: only this one file
+# is read, so a glob in another file of /etc/logrotate.d is not seen.)
+# A byte in the policy that is not valid UTF-8 is fine for this helper (it only
+# compares bytes); the playbook keeps the output in a file, never in a task result.
 # Lines this parser cannot place (a path-looking statement inside a stanza,
 # which logrotate itself rejects, a header with no "{" or with a backslash
 # before it, a script with no endscript) are copied as they are, but if the
-# path is declared in one of them the helper fails: the caller's validate only parses this one file, so a path
-# that survives would later collide with the managed /etc/logrotate.d/syslog and
-# break rotation for every log while the apply still looks successful. A failed
-# task stops the run and rolls back.
+# path is declared in one of them the helper fails: the caller's validate only
+# parses this one file, so a path that survives would later collide with the
+# managed /etc/logrotate.d/syslog and break rotation for every log while the apply
+# still looks successful. Every exit 3 stops the playbook before it writes anything:
+# the playbook runs the helper (and logrotate's check of its output) in a preflight
+# ahead of the first write, and again, to install the result, in Step 5b-5d.
 #
 # Portable on purpose (gawk, mawk, busybox awk): no regex intervals, no
 # gensub/RT, no character ranges (they follow the locale); characters are
@@ -228,7 +233,7 @@ function finish_header(b,   w, v, vt, n) {
     # A kept word that is a glob matching the path would still declare it.
     for (w = 1; w <= nw; w++) {
         v = wval[w]
-        if (v != "" && v != drop && has_glob(v) && fnm(v, 1, drop, 1)) globhit++
+        if (v != "" && v != drop && covers(v, drop)) globhit++
     }
 }
 
@@ -253,6 +258,9 @@ function rewrite_hdr(b,   j, k) {
     h1only = 0
     build_blanked()
     if (hdr_ok()) return
+    # Not reachable: the blank replacement keeps every other byte, an empty word is
+    # no log, and a managed word never touches its neighbours (words are separated by
+    # unquoted blanks). If it ever happens, refuse rather than write an unchecked header.
     for (j = 1; j <= nh; j++) { hl[j] = ol[j]; hdel[j] = 0 }
     h1only = 0
     unsafe++
@@ -380,6 +388,19 @@ function hdr_ok(   m, go, gn, co, cn, want) {
     return 1
 }
 
+# Does the kept word v declare the path as well, through glob() on it? A plain name
+# with trailing slashes still finds a plain file (glibc), a pattern with a trailing
+# slash only matches directories (checked on logrotate 3.22: only "/var/log/syslog/"
+# collides, "/var/log/sys*/" does not).
+function covers(v, path,   n, w) {
+    n = length(v)
+    while (n > 1 && substr(v, n, 1) == "/") n--
+    if (n < length(v)) {
+        w = substr(v, 1, n)
+        return !has_glob(w) && w == path
+    }
+    return has_glob(v) && fnm(v, 1, path, 1)
+}
 # --- shell-style matching, for a kept word that is a glob ------------------------
 # logrotate runs glob() on every word, so a kept "/var/log/sys*" still declares
 # /var/log/syslog once the file exists, and the managed stanza would be a duplicate.
@@ -570,7 +591,7 @@ END {
         exit 3
     }
     if (unsafe > 0) {
-        print "logrotate-drop-path.awk: cannot remove " drop " from a stanza header without changing what logrotate reads there; refusing to rewrite the policy" > "/dev/stderr"
+        print "logrotate-drop-path.awk: internal error: cannot remove " drop " from a stanza header without changing what logrotate reads there; refusing to rewrite the policy" > "/dev/stderr"
         exit 3
     }
     if (ambiguous > 0) {
