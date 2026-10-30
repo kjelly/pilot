@@ -374,38 +374,28 @@
             path: /etc/logrotate.d/rsyslog
           register: distro_rsyslog_logrotate
 
-        - name: "Step 5b: Count paths the distro rsyslog policy rotates OTHER than {{ audit_syslog_path }}"
-          tags: [C20]
-          # Both Debian and RedHat family ship their rsyslog package's
-          # logrotate policy under this exact filename (Debian: mail.log,
-          # kern.log, auth.log, ...; RHEL/AlmaLinux via rsyslog-logrotate:
-          # cron, maillog, messages, secure, spooler), each as one shared
-          # block also listing audit_syslog_path. Since Step 5 above renders
-          # our own /etc/logrotate.d/syslog for the same path, logrotate
-          # finds that path declared in two policy files and aborts the
-          # ENTIRE run with "duplicate log entry", silently breaking
-          # rotation for every log on the host — this is the root cause of
-          # the C20 regression (see docs/runbooks/audit-log-forwarding.md
-          # §5.5). Only the count is needed here to decide whether removing
-          # our path leaves other paths behind.
-          ansible.builtin.shell:
-            cmd: >-
-              set -o pipefail;
-              grep -vFx {{ audit_syslog_path | quote }} /etc/logrotate.d/rsyslog
-              | grep -cE '^/' || true
-            executable: /bin/bash
-          register: distro_rsyslog_other_paths
-          changed_when: false
-          check_mode: false
-          when: distro_rsyslog_logrotate.stat.exists | default(false)
-
-        # Rewritten with awk, not lineinfile: when audit_syslog_path is the only
-        # path of its stanza (Ubuntu 22.04+ ships "/var/log/syslog" alone before
-        # its "{"), deleting just that line leaves a stanza with no filename and
-        # logrotate rejects the whole file ("lines must begin with a keyword or a
-        # filename"). The helper drops that whole stanza, and only the one path
-        # when other paths share it. check_mode: false because it only reads.
-        - name: "Step 5c: Compute the distro rsyslog policy without {{ audit_syslog_path }} (spec C20)"
+        # Step 5b-5d work from what logrotate itself would read: logrotate-drop-path.awk
+        # splits the stanza headers the way logrotate does (quoted, indented, ~ and
+        # globbed paths included), removes audit_syslog_path from the one stanza that
+        # declares it, and drops that stanza whole when the path was its only one
+        # (Ubuntu 22.04+ ships "/var/log/syslog" alone before its "{": deleting just
+        # that line would leave a stanza with no filename and logrotate would reject
+        # the whole file, "lines must begin with a keyword or a filename"). Other
+        # paths stay with the distro's own file. Since Step 5 above renders our own
+        # /etc/logrotate.d/syslog for the same path, logrotate would otherwise find
+        # that path declared in two policy files and abort the ENTIRE run with
+        # "duplicate log entry", silently breaking rotation for every log on the
+        # host: this is the root cause of the C20 regression (see
+        # docs/runbooks/audit-log-forwarding.md section 5.5).
+        #
+        # The helper exits 3, and the task fails, when it cannot do that without
+        # guessing: a policy logrotate itself rejects, a path spelled so that the
+        # logrotate versions disagree on it, or a glob that would still match the path.
+        # A byte that is not valid UTF-8 anywhere in the file also fails here (the
+        # output goes through the task's stdout, which Ansible must decode). All of
+        # those stop the run before anything is written or deleted.
+        # check_mode: false because it only reads.
+        - name: "Step 5b: Compute the distro rsyslog policy without {{ audit_syslog_path }} (spec C20)"
           tags: [C20]
           ansible.builtin.shell:
             cmd: "awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin /etc/logrotate.d/rsyslog"
@@ -413,9 +403,18 @@
           register: distro_rsyslog_without_audit_path
           changed_when: false
           check_mode: false
-          when:
-            - distro_rsyslog_logrotate.stat.exists | default(false)
-            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
+          when: distro_rsyslog_logrotate.stat.exists | default(false)
+
+        # Whether anything is left to rotate: a line that is neither blank nor a comment.
+        # Only when nothing is, the file is removed (Step 5d); otherwise the computed
+        # policy replaces it (Step 5c). Decided from the helper's output, not from a
+        # count of lines that start with "/": quoted, indented and ~ paths are paths too.
+        - name: "Step 5b: Decide whether the distro rsyslog policy keeps any content without {{ audit_syslog_path }} (spec C20)"
+          tags: [C20]
+          ansible.builtin.set_fact:
+            distro_rsyslog_keeps_content: >-
+              {{ (distro_rsyslog_without_audit_path.stdout | default('') | regex_findall('(?m)^[ \t]*[^ \t#\r\n]') | length) > 0 }}
+          when: distro_rsyslog_logrotate.stat.exists | default(false)
 
         - name: "Step 5c: Drop {{ audit_syslog_path }} from the distro rsyslog policy, keeping its other paths (spec C20)"
           tags: [C20]
@@ -430,7 +429,7 @@
               ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
-            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
+            - distro_rsyslog_keeps_content | default(false) | bool
 
         - name: "Step 5d: Remove the distro rsyslog policy entirely if it only rotated {{ audit_syslog_path }} (avoids leaving an orphan block with no filename)"
           tags: [C20]
@@ -439,7 +438,7 @@
             state: absent
           when:
             - distro_rsyslog_logrotate.stat.exists | default(false)
-            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) == 0
+            - not (distro_rsyslog_keeps_content | default(false) | bool)
 
         - name: "Step 6a: Resolve this host's canonical FQDN before pinning SIEM aliases"
           tags: [C15]

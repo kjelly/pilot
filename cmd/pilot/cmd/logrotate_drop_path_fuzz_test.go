@@ -35,6 +35,7 @@ type lrFuzz struct {
 	keep     []string // text that must survive the rewrite untouched
 	managed  string
 	inScript bool
+	hashUsed bool
 }
 
 func (g *lrFuzz) pick(opts ...string) string { return opts[g.r.Intn(len(opts))] }
@@ -88,13 +89,33 @@ var fuzzOtherWords = []string{
 	"~/lr%d.log",
 	"\"/var/log/ml%d\n/x.log\"", // a quoted word may span lines
 	"'/var/log/ml%d\n  # not a comment\n/y.log'",
+	// A # that does not start a line is data: these are logs named "#c<N>" and so on,
+	// and the rewrite must never move one to the start of a line (a comment there).
+	"#c%d",
+	"\"#c%d\"",
+	"#",
 }
 
-func (g *lrFuzz) other() string {
+// other returns a new path word. The first word of a header has to start with a
+// path character; "#" as the single word may be used once per policy (a log
+// named # cannot be declared twice).
+func (g *lrFuzz) other(first bool) string {
 	g.counter++
-	w := fmt.Sprintf(g.pick(fuzzOtherWords...), g.counter)
-	g.keep = append(g.keep, w)
-	return w
+	for {
+		f := g.pick(fuzzOtherWords...)
+		if first && !strings.ContainsRune(`/"'~`, rune(f[0])) {
+			continue
+		}
+		if f == "#" {
+			if g.hashUsed || first {
+				continue
+			}
+			g.hashUsed = true
+		}
+		w := fmt.Sprintf(f, g.counter)
+		g.keep = append(g.keep, w)
+		return w
+	}
 }
 
 // A header: path words, the brace, and what follows the brace. closes tells the
@@ -103,7 +124,7 @@ func (g *lrFuzz) header(prefix string, withManaged bool) (text string, closes, o
 	n := 1 + g.r.Intn(4)
 	var words []string
 	for i := 0; i < n; i++ {
-		words = append(words, g.other())
+		words = append(words, g.other(i == 0))
 	}
 	managedAt := -1
 	if withManaged {
@@ -114,14 +135,25 @@ func (g *lrFuzz) header(prefix string, withManaged bool) (text string, closes, o
 	var b strings.Builder
 	b.WriteString(prefix)
 	for i, w := range words {
-		if i > 0 {
-			switch g.r.Intn(12) {
+		if i > 0 && strings.HasPrefix(w, "#") {
+			// at the start of a line it would be a comment that swallows the rest of the line
+			b.WriteString(g.pick(" ", "\t"))
+		} else if i > 0 {
+			switch g.r.Intn(14) {
 			case 0, 1, 2, 3, 4: // newline, as the distro files write them
 				b.WriteString("\n" + g.pick("", "", "  ", "\t"))
 			case 5:
 				b.WriteString("\n# note " + strconv.Itoa(g.counter) + "\n")
 			case 6:
 				b.WriteString("\n\n")
+			case 9:
+				// a continuation, then a comment line and a blank line: the comment's text is
+				// dropped by logrotate, and the backslash must stay where it is
+				if i == managedAt || i-1 == managedAt {
+					b.WriteString("\n")
+				} else {
+					b.WriteString("\\\n# note " + strconv.Itoa(g.counter) + "\n" + g.pick("", "\n"))
+				}
 			case 8:
 				// a backslash before the newline makes the newline part of one word;
 				// next to the managed path that would hide it from logrotate (and,
@@ -375,4 +407,134 @@ func TestLogrotateDropPathFuzzAgainstRealLogrotate(t *testing.T) {
 		t.Fatalf("only %d of %d generated policies are ones logrotate accepts: the generator is broken", valid, cases)
 	}
 	t.Logf("%d of %d generated policies accepted by logrotate, all rewritten correctly on %d awks", valid, cases, len(awks))
+}
+
+// The same generator, judged by other logrotate versions. CI has the logrotate of
+// its own runner only (3.22 here), so 3.19 and 3.21 are not covered there; this
+// opt-in test runs the policies inside docker images that ship the other versions
+// (Ubuntu 22.04 has 3.19.0, Ubuntu 24.04 has 3.21.0), with every awk the image has:
+//
+//	PILOT_LOGROTATE_IMAGES=lrtest:22.04,lrtest:24.04 go test -run InImages ./cmd/pilot/cmd/
+//
+// An image needs bash, logrotate and awk (mawk, gawk and busybox are used when
+// present). It is skipped when the variable is empty, docker is missing or an image
+// is not there. The policies are the ones the local logrotate accepts with the path
+// once; inside an image a policy that version rejects is skipped (and counted).
+const fuzzImageScript = `#!/bin/bash
+cons() { # policy [managed]
+  d=$(mktemp -d); mkdir $d/l.d
+  cp "$1" $d/l.d/rsyslog
+  [ -n "$2" ] && printf '/var/log/syslog {\n\tdaily\n\trotate 4\n\tmissingok\n}\n' > $d/l.d/syslog
+  echo "include $d/l.d" > $d/m.conf
+  chown -R root:root $d; chmod 644 $d/l.d/* $d/m.conf
+  logrotate -d -s $d/state $d/m.conf 2>&1 | grep -aE "^(considering log|error|warning: .*unknown option)" | grep -av "stat of" | sed "s#$d#D#g" | sort
+  rm -rf $d
+}
+logrotate --version | head -1
+for impl in "awk" "mawk" "gawk" "busybox awk"; do
+  set -- $impl; command -v $1 >/dev/null || continue
+  [ "$1" = busybox ] && ! busybox awk 'BEGIN{}' 2>/dev/null && continue
+  bad=0; n=0; skipped=0
+  for o in /dump/*.orig; do
+    i=${o%.orig}; n=$((n+1))
+    a=$(cons $o)
+    if echo "$a" | grep -aq '^error'; then skipped=$((skipped+1)); continue; fi
+    $impl -v drop=/var/log/syslog -f /helper.awk $o > /tmp/rw 2>/tmp/err || { bad=$((bad+1)); echo "FAIL awkexit $impl $(basename $i): $(cat /tmp/err)"; continue; }
+    b=$(cons /tmp/rw m)
+    [ "$a" == "$b" ] || { bad=$((bad+1)); echo "FAIL differs $impl $(basename $i)"; }
+  done
+  echo "RESULT $impl checked=$n skipped=$skipped bad=$bad"
+done
+`
+
+func TestLogrotateDropPathFuzzInImages(t *testing.T) {
+	images := strings.Split(os.Getenv("PILOT_LOGROTATE_IMAGES"), ",")
+	if strings.TrimSpace(os.Getenv("PILOT_LOGROTATE_IMAGES")) == "" {
+		t.Skip("PILOT_LOGROTATE_IMAGES not set")
+	}
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("docker not installed")
+	}
+	logrotate, err := exec.LookPath("logrotate")
+	if err != nil {
+		t.Skip("logrotate not installed")
+	}
+	cases, seed := 400, int64(31337)
+	if v, err := strconv.Atoi(os.Getenv("PILOT_LOGROTATE_FUZZ_N")); err == nil && v > 0 {
+		cases = v
+	}
+	if v, err := strconv.ParseInt(os.Getenv("PILOT_LOGROTATE_FUZZ_SEED"), 10, 64); err == nil {
+		seed = v
+	}
+	dir := t.TempDir()
+	written := 0
+	for i := 0; i < cases; i++ {
+		g := &lrFuzz{r: rand.New(rand.NewSource(seed + int64(i)))}
+		policy := g.policy()
+		before := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": policy})
+		seen := 0
+		for _, c := range before.considered {
+			if c == "/var/log/syslog" {
+				seen++
+			}
+		}
+		if len(before.errors) > 0 || seen != 1 {
+			continue
+		}
+		writeFile(t, filepath.Join(dir, fmt.Sprintf("%d.orig", i)), policy)
+		written++
+	}
+	// the hand-written policies of logrotate_drop_path_test.go go along
+	for i, ap := range acceptedPolicies() {
+		before := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": ap.policy})
+		seen := 0
+		for _, c := range before.considered {
+			if c == "/var/log/syslog" {
+				seen++
+			}
+		}
+		if len(before.errors) == 0 && seen == 1 {
+			writeFile(t, filepath.Join(dir, fmt.Sprintf("hand%d.orig", i)), ap.policy)
+			written++
+		}
+	}
+	script := filepath.Join(t.TempDir(), "check.sh")
+	writeFile(t, script, fuzzImageScript)
+	ran := 0
+	for _, img := range images {
+		img = strings.TrimSpace(img)
+		if img == "" {
+			continue
+		}
+		if err := exec.Command(docker, "image", "inspect", img).Run(); err != nil {
+			t.Logf("image %s not present, skipped", img)
+			continue
+		}
+		ran++
+		t.Run(img, func(t *testing.T) {
+			out, err := exec.Command(docker, "run", "--rm",
+				"-v", dir+":/dump:ro", "-v", script+":/check.sh:ro", "-v", dropPathScript(t)+":/helper.awk:ro",
+				img, "bash", "/check.sh").CombinedOutput()
+			if err != nil {
+				t.Fatalf("docker run: %v\n%s", err, out)
+			}
+			results := 0
+			for _, l := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(l, "FAIL") || (strings.HasPrefix(l, "RESULT") && !strings.HasSuffix(l, "bad=0")) {
+					t.Errorf("%s", l)
+				}
+				if strings.HasPrefix(l, "RESULT") {
+					results++
+				}
+			}
+			if results == 0 {
+				t.Fatalf("no awk ran in %s:\n%s", img, out)
+			}
+			t.Logf("%s: %d policies\n%s", img, written, out)
+		})
+	}
+	if ran == 0 {
+		t.Skip("none of the images is present")
+	}
 }

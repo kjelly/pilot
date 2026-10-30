@@ -289,6 +289,11 @@ func acceptedPolicies() []acceptedPolicy {
 		}
 		cs = append(cs, acceptedPolicy{name: c.name, policy: c.in, want: want})
 	}
+	// An empty word names no log, so a stanza whose other words are all empty is a lone-path
+	// stanza: it goes whole (a header of only "" would be rejected by logrotate).
+	cs = append(cs, acceptedPolicy{name: "only empty words beside the managed path: the stanza goes",
+		policy: "/var/log/syslog \"\" '' {\n\trotate 4\n}\n/var/log/o {\n}\n",
+		want:   "/var/log/o {\n}\n"})
 	cs = append(cs, acceptedPolicy{name: "a flag after an unknown option stays ignored", warns: true,
 		policy: "/var/log/other {\n\tbogus }\n}\n" + sharedSyslogStanza,
 		want:   withoutSharedSyslogPath("/var/log/other {\n\tbogus }\n}\n" + sharedSyslogStanza)})
@@ -324,7 +329,25 @@ func acceptedPolicies() []acceptedPolicy {
 		{"the managed path with an escaped letter", `/var/log/sys\log /var/log/a.log {`, `/var/log/a.log {`},
 		{"an empty quoted word is no path", `/var/log/a.log "" /var/log/syslog {`, `/var/log/a.log "" {`},
 		{"a quote still open at the brace is closed there", `/var/log/a.log "/var/log/syslog{`, `/var/log/a.log {`},
-		{"a quote still open at the brace, in another path", `/var/log/syslog "/var/log/a.log{`, `"/var/log/a.log {`},
+		// Removing the managed word must not change what any other word is. A "{" glued to
+		// the open quote cannot take a blank (the word would end in one on 3.19 and 3.21),
+		// so the managed word is replaced by an empty word, which is no log at all.
+		{"a quote still open at the brace, in another path", `/var/log/syslog "/var/log/a.log{`, `"" "/var/log/a.log{`},
+		// A kept word that starts with # is a comment when it begins a line, and data
+		// anywhere else; removing the managed word must not move it to a line start.
+		{"words that are data after the managed path", "/var/log/syslog # vendor default {", `"" # vendor default {`},
+		{"words that are data after the managed path, on the second line", "/var/log/mail.log\n/var/log/syslog # c {", "/var/log/mail.log\n\"\" # c {"},
+		{"a # word that stays behind another path", "/var/log/a.log /var/log/syslog #c {", "/var/log/a.log #c {"},
+		{"a # word between paths", "/var/log/a.log /var/log/syslog #c /var/log/b.log {", "/var/log/a.log #c /var/log/b.log {"},
+		{"a lone # word line is a comment line already", "/var/log/syslog /var/log/a.log\n#c\n/var/log/b.log {", "/var/log/a.log\n#c\n/var/log/b.log {"},
+		{"a first word that would no longer start a header", "/var/log/syslog daily /var/log/a.log {", `"" daily /var/log/a.log {`},
+		{"a first word that would no longer start a header, quoted managed path", `"/var/log/syslog" compress /var/log/a.log {`, `"" compress /var/log/a.log {`},
+		// logrotate 3.22 strips the blanks at the end of the header text; the older versions
+		// do not. A backslash before the newline left at the end must not become an error.
+		{"a continuation backslash that the removal would leave at the end", "/var/log/mail.log\\\n# note\n\n/var/log/syslog\n{", "/var/log/mail.log\\\n# note\n\n\"\"\n{"},
+		{"a continuation backslash that the removal would leave at the end, no comment", "/var/log/mail.log\\\n\n/var/log/syslog\n{", "/var/log/mail.log\\\n\n\"\"\n{"},
+		{"an empty word left by an earlier run stays and the managed path goes", "\"\" /var/log/a.log /var/log/syslog {", "\"\" /var/log/a.log {"},
+		{"a glob that does not match the managed path", "/var/log/syslog /var/log/s[a-x]slog /var/log/m*.log /var/log/sys?og.1 /var/log/[!s]yslog {", "/var/log/s[a-x]slog /var/log/m*.log /var/log/sys?og.1 /var/log/[!s]yslog {"},
 		{"a glob keeps working", "/var/log/syslog /var/log/g*.log {", "/var/log/g*.log {"},
 		{"a tilde path", "/var/log/syslog ~/lr.log {", "~/lr.log {"},
 		{"multibyte names", "/var/log/日本.log \"/var/log/é x.log\" /var/log/syslog {", "/var/log/日本.log \"/var/log/é x.log\" {"},
@@ -709,5 +732,102 @@ func TestLogrotateDropPathDoesNotEndAScriptOnLookalikes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// logrotate runs glob() on every word of a header, so a kept word such as
+// /var/log/sys* declares /var/log/syslog as soon as the file exists, and the
+// managed stanza then is a duplicate ("duplicate log entry": logrotate skips the
+// file, or aborts the run). The helper refuses to write a policy in which a kept
+// glob matches the path. The matching is shell style, "/" never matched by a
+// wildcard; it is compared here with bash's own matching.
+func TestLogrotateDropPathRefusesAGlobThatMatchesTheManagedPath(t *testing.T) {
+	const path = "/var/log/syslog"
+	for _, tt := range []struct {
+		glob  string
+		match bool
+	}{
+		{"/var/log/sys*", true},
+		{"/var/log/*", true},
+		{"/var/log/s*g", true},
+		{"/var/log/*log", true},
+		{"/var/log/syslo?", true},
+		{"/var/log/?yslog", true},
+		{"/var/log/sys[a-z]og", true},
+		{"/var/log/sys[k-m]og", true},
+		{"/var/log/sys[!a]og", true},
+		{"/var/log/sys[^a]og", true},
+		{"/var/log/sys[[:alpha:]]og", true},
+		{"/var/log/sys[[:lower:]]og", true},
+		{"/var/log/sys[a-]og", false},
+		{"/var/log/sys[]l]og", true},
+		{"/var/log/sy[s]log", true},
+		{"/var/log/syslog*", true},
+		{"/var/log/**", true},
+		// popt removes one level of backslashes: "\*" is a star, "\\*" is the glob escape of one
+		{"/var/log/sys\\*", true},
+		{"/var/log/sys\\\\*", false},
+		{"/var/log/sys[l", false}, // an unclosed bracket is an ordinary character
+		{"/var/log/*.log", false},
+		{"/var/log/sys?og.1", false},
+		{"/var/log/sys[a-k]og", false},
+		{"/var/log/sys[!l]og", false},
+		{"/var/log/sys[[:digit:]]og", false},
+		{"/var/log/sy?log?", false},
+		{"/var/log/m*", false},
+		{"/var/log/syslog.?", false},
+		{"/var/lo?/syslog", true},
+		{"/var/*/syslog", true},
+		{"/var/log/*/syslog", false},
+		{"/*", false}, // a wildcard does not cross "/"
+		{"/var/*", false},
+	} {
+		for _, a := range dropPathAwks(t) {
+			t.Run(a.name+"/"+tt.glob, func(t *testing.T) {
+				if bash, err := exec.LookPath("bash"); err == nil && !strings.Contains(tt.glob, "/*") && tt.glob != "/var/log/**" && !strings.Contains(tt.glob, "sys\\") && tt.glob != "/var/log/sys[l" && tt.glob != "/var/log/sys[a-]og" {
+					// the expectation above is bash's too (where bash's [[ ]] and glob() agree)
+					out, _ := exec.Command(bash, "-c", `[[ "$1" == $2 ]] && echo y || echo n`, "bash", path, tt.glob).Output()
+					if got := strings.TrimSpace(string(out)) == "y"; got != tt.match {
+						t.Fatalf("test table wrong: bash says %v for %q", got, tt.glob)
+					}
+				}
+				policy := tt.glob + " {\n\trotate 4\n}\n"
+				out, stderr, code := runDropPath(t, a, path, policy)
+				if tt.match {
+					if code != 3 || !strings.Contains(stderr, "glob") {
+						t.Fatalf("exit %d, want 3 (a glob that matches the path)\n%s%s", code, out, stderr)
+					}
+					return
+				}
+				if code != 0 || out != policy {
+					t.Fatalf("exit %d, want 0 and the policy unchanged\n%q\n%s", code, out, stderr)
+				}
+			})
+		}
+	}
+}
+
+// The same with logrotate itself: a glob that covers an existing file declares it.
+func TestLogrotateDropPathGlobDuplicatesTheManagedStanzaInRealLogrotate(t *testing.T) {
+	logrotate, err := exec.LookPath("logrotate")
+	if err != nil {
+		t.Skip("logrotate not installed")
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "syslog")
+	writeFile(t, log, "x\n")
+	policy := filepath.Join(dir, "sys*") + " {\n\trotate 4\n}\n"
+	managed := log + " {\n\tdaily\n\trotate 4\n\tmissingok\n}\n"
+	v := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": policy, "syslog": managed})
+	if !strings.Contains(v.raw, "duplicate log entry") {
+		t.Fatalf("logrotate does not see the glob and the managed stanza as a duplicate:\n%s", v.raw)
+	}
+	for _, a := range dropPathAwks(t) {
+		t.Run(a.name, func(t *testing.T) {
+			out, stderr, code := runDropPath(t, a, log, policy)
+			if code != 3 || !strings.Contains(stderr, "glob") {
+				t.Fatalf("exit %d, want 3\n%s%s", code, out, stderr)
+			}
+		})
 	}
 }

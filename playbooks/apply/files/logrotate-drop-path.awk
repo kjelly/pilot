@@ -1,6 +1,7 @@
 # Prints a logrotate policy file with one log path (awk -v drop=<path>) removed.
-# Used by audit-log-forwarding-apply.yml Step 5c on the distro's own
-# /etc/logrotate.d/rsyslog.
+# Used by audit-log-forwarding-apply.yml Step 5b on the distro's own
+# /etc/logrotate.d/rsyslog. The playbook writes what this prints (Step 5c), or
+# removes the file when nothing but blank lines and comments is printed (Step 5d).
 #
 # A stanza is: path words, then "{", then a body, then "}". The path may be the
 # stanza's only one (Ubuntu 22.04+: "/var/log/syslog" alone before its "{"),
@@ -55,6 +56,23 @@
 #    blanks at the end of the header text, older versions keep them, so an
 #    escaped blank or an open quote there names another file per version: if
 #    that decides whether the last word is the path, the helper fails.
+# The rewrite is checked, not trusted. Removing the managed word changes the text
+# logrotate sees in more ways than the word itself (a kept word that starts with "#"
+# turns into a comment when it ends up first on a line, a kept "daily" can become the
+# first word and then no longer opens a header, a continuation backslash can end up
+# last in the text, where logrotate 3.22 strips the blanks that protected it). So the
+# header text of the result is split again the way logrotate splits it, for the 3.22
+# reading and the older one, and must give exactly the original words minus the
+# managed one. If plain removal fails that, the managed word is replaced by "" (an
+# empty word is no log at all to logrotate 3.19, 3.21 and 3.22; a second run finds no
+# managed word and leaves it alone); if that fails too the helper refuses.
+# A kept word that is a glob matching the path (/var/log/sys*) would still declare
+# it for logrotate, which globs every word: the helper refuses (exit 3), since the
+# managed policy for the path would then be a duplicate. (Known limits: only this one
+# file is read, so a glob in another file of /etc/logrotate.d is not seen; the
+# match is by pattern, whether the file exists is not asked.) A byte in the policy
+# that is not valid UTF-8 makes the playbook task fail when it reads this output;
+# that is fail-closed too, nothing is written.
 # Lines this parser cannot place (a path-looking statement inside a stanza,
 # which logrotate itself rejects, a header with no "{" or with a backslash
 # before it, a script with no endscript) are copied as they are, but if the
@@ -207,8 +225,41 @@ function finish_header(b,   w, v, vt, n) {
         return
     }
     if (hit > 0 && remaining > 0) rewrite_hdr(b)
+    # A kept word that is a glob matching the path would still declare it.
+    for (w = 1; w <= nw; w++) {
+        v = wval[w]
+        if (v != "" && v != drop && has_glob(v) && fnm(v, 1, drop, 1)) globhit++
+    }
 }
-function rewrite_hdr(b,   j, k, line, out, cnt, hasdrop, txt, sep) {
+
+# --- rewrite, and a check that logrotate reads the result the same way -------
+# Removing the managed word changes the text logrotate sees, and not only by that
+# word: a kept word that starts with "#" becomes a comment when it is moved to the
+# start of a line, a kept "daily" can become the first word and no longer starts a
+# header, and logrotate 3.22 strips the blanks at the end of the header text, which
+# can leave a backslash dangling. So the rewrite is never trusted: the header text
+# of the rewritten lines is split again the way logrotate does and must give
+# exactly the words of the original minus the managed one, for the 3.22 and the
+# older (no stripping) reading alike. If the plain removal fails that, the managed
+# word is replaced by "" instead (an empty word is no log at all to logrotate 3.19,
+# 3.21 and 3.22, and keeps every other word where it was); if that fails too the
+# helper refuses.
+function rewrite_hdr(b,   j, k) {
+    for (j = 1; j <= nh; j++) ol[j] = hl[j]
+    h1only = 0
+    build_removed(b)
+    if (hdr_ok()) return
+    for (j = 1; j <= nh; j++) { hl[j] = ol[j]; hdel[j] = 0 }
+    h1only = 0
+    build_blanked()
+    if (hdr_ok()) return
+    for (j = 1; j <= nh; j++) { hl[j] = ol[j]; hdel[j] = 0 }
+    h1only = 0
+    unsafe++
+}
+# Plain removal of the managed words: the other words of a line are joined by one
+# blank (their own bytes untouched), a line left empty goes.
+function build_removed(b,   j, k, line, out, cnt, hasdrop, txt, sep) {
     for (j = 1; j <= nh; j++) {
         if (hcom[j]) continue
         hasdrop = 0
@@ -229,17 +280,194 @@ function rewrite_hdr(b,   j, k, line, out, cnt, hasdrop, txt, sep) {
             sep = (cnt > 0) ? " {" : "{"
             out = out sep substr(line, b + 1)
         } else if (cnt == 0) {
-            if (j == 1 && !blank_only(out)) out = rtrim_blank(out)
+            if (j == 1 && !blank_only(out)) { out = rtrim_blank(out); h1only = 1 }
             else hdel[j] = 1
         }
         hl[j] = out
+    }
+}
+# Replacement of each managed word by "", everything else byte for byte.
+function build_blanked(   j, k, line, out, pos) {
+    for (j = 1; j <= nh; j++) {
+        if (hcom[j]) continue
+        line = hl[j]; out = ""; pos = 1
+        for (k = 1; k <= nr[j]; k++) {
+            if (!wdrop[rw[j, k]]) continue
+            out = out substr(line, pos, rs[j, k] - pos) "\"\""
+            pos = re[j, k]
+        }
+        if (pos > 1) hl[j] = out substr(line, pos)
+    }
+}
+# The text logrotate hands to popt (parseGlobString) for the header held in ol[]
+# (useorig) or in hl[]/hdel[]: from the first path character to the first "{",
+# comment lines reduced to their newline. BADTEXT when the lines no longer form a
+# header (a first word that is not a path start, no brace).
+function glob_of(useorig,   j, line, text, started, c, s, i, n, k, g) {
+    g = ""; started = 0
+    for (j = 1; j <= nh; j++) {
+        if (!useorig && hdel[j]) continue
+        line = useorig ? ol[j] : hl[j]
+        if (!started) {
+            if (j == 1 && (useorig || !h1only)) {
+                text = substr(line, hstart)
+                if (!is_path_start(substr(text, 1, 1))) return BADTEXT
+            } else {
+                n = length(line); i = 1
+                while (i <= n && is_blank(substr(line, i, 1))) i++
+                s = substr(line, i); c = substr(s, 1, 1)
+                if (s == "" || c == "#") continue
+                if (!is_path_start(c)) return BADTEXT
+                text = s
+            }
+            started = 1
+        } else {
+            n = length(line); i = 1
+            while (i <= n && is_ws(substr(line, i, 1))) i++
+            if (substr(line, i, 1) == "#") { g = g "\n"; continue }
+            text = line
+        }
+        k = index(text, "{")
+        if (k > 0) return g substr(text, 1, k - 1)
+        g = g text "\n"
+    }
+    return BADTEXT
+}
+# popt's words of a glob string, the non-empty ones, in pw[1..]; returns their
+# number, or -1 when popt fails (a backslash with nothing behind it). strip: the
+# blanks at the end are dropped first, as logrotate 3.22 does (3.19 and 3.21 keep
+# them).
+function popt_words(g, strip, pw,   n, i, c, q, e, v, cnt) {
+    split("", pw); cnt = 0; q = ""; e = 0; v = ""
+    n = length(g)
+    if (strip) while (n > 1 && is_ws(substr(g, n, 1))) n--
+    for (i = 1; i <= n; i++) {
+        c = substr(g, i, 1)
+        if (e) {
+            if (e == 2 && c != q) v = v "\\"
+            v = v c; e = 0
+        } else if (q != "") {
+            if (c == q) q = ""
+            else if (c == "\\") e = 2
+            else v = v c
+        } else if (is_ws(c)) {
+            if (v != "") pw[++cnt] = v
+            v = ""
+        } else if (c == "\"" || c == "'") q = c
+        else if (c == "\\") e = 1
+        else v = v c
+    }
+    if (e) return -1
+    if (v != "") pw[++cnt] = v
+    return cnt
+}
+function join_words(pw, cnt, skip,   i, r) {
+    r = ""
+    for (i = 1; i <= cnt; i++) if (pw[i] != skip) r = r pw[i] SEP
+    return r
+}
+function hdr_ok(   m, go, gn, co, cn, want) {
+    go = glob_of(1); gn = glob_of(0)
+    if (go == BADTEXT) return 1   # cannot happen: the header was read from these lines
+    if (gn == BADTEXT) return 0
+    for (m = 0; m <= 1; m++) {
+        co = popt_words(go, m, ow)
+        if (co < 0) continue      # logrotate of that reading rejects the original anyway
+        want = join_words(ow, co, drop)
+        cn = popt_words(gn, m, nwd)
+        if (cn < 0 || join_words(nwd, cn, "") != want) return 0
+    }
+    return 1
+}
+
+# --- shell-style matching, for a kept word that is a glob ------------------------
+# logrotate runs glob() on every word, so a kept "/var/log/sys*" still declares
+# /var/log/syslog once the file exists, and the managed stanza would be a duplicate.
+# Wildcards never match "/". Characters outside ASCII in a bracket expression and
+# unknown [:classes:] count as matching, so that an unclear case refuses rather than
+# passes.
+function has_glob(w) { return index(w, "*") > 0 || index(w, "?") > 0 || index(w, "[") > 0 }
+function ord(c) { return index(ASCII, c) + 31 }
+function in_class(name, c) {
+    if (name == "alpha") return is_alpha(c)
+    if (name == "digit") return c != "" && index("0123456789", c) > 0
+    if (name == "alnum") return is_alpha(c) || (c != "" && index("0123456789", c) > 0)
+    if (name == "upper") return c != "" && index("ABCDEFGHIJKLMNOPQRSTUVWXYZ", c) > 0
+    if (name == "lower") return c != "" && index("abcdefghijklmnopqrstuvwxyz", c) > 0
+    if (name == "space") return is_ws(c)
+    if (name == "blank") return is_blank(c)
+    if (name == "xdigit") return c != "" && index("0123456789abcdefABCDEF", c) > 0
+    if (name == "punct") return c != "" && index("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", c) > 0
+    return 1
+}
+# Matches the bracket expression of p that starts at pi against c. Sets bnext to
+# the index behind it and returns 1/0, or returns -1 when it has no closing "]"
+# (then the "[" is an ordinary character).
+function bracket(p, pi, c,   i, n, neg, ok, lo, hi, first, a, name, e) {
+    n = length(p); i = pi + 1; neg = 0; ok = 0; first = 1
+    if (substr(p, i, 1) == "!" || substr(p, i, 1) == "^") { neg = 1; i++ }
+    while (i <= n) {
+        a = substr(p, i, 1)
+        if (a == "]" && !first) {
+            bnext = i + 1
+            if (c == "/") return 0
+            return neg ? !ok : ok
+        }
+        first = 0
+        if (a == "[" && substr(p, i + 1, 1) == ":") {
+            e = index(substr(p, i + 2), ":]")
+            if (e > 0) {
+                name = substr(p, i + 2, e - 1)
+                if (in_class(name, c)) ok = 1
+                i = i + 2 + e + 1
+                continue
+            }
+        }
+        if (a == "\\" && i < n) { i++; a = substr(p, i, 1) }
+        lo = a
+        if (substr(p, i + 1, 1) == "-" && i + 2 <= n && substr(p, i + 2, 1) != "]") {
+            hi = substr(p, i + 2, 1)
+            if (hi == "\\" && i + 3 <= n) { hi = substr(p, i + 3, 1); i++ }
+            if (ord(lo) == 31 || ord(hi) == 31 || ord(c) == 31) ok = 1
+            else if (ord(c) >= ord(lo) && ord(c) <= ord(hi)) ok = 1
+            i += 3
+            continue
+        }
+        if (lo == c) ok = 1
+        i++
+    }
+    return -1
+}
+function fnm(p, pi, s, si,   pc, sc, r, k, ns, np) {
+    np = length(p); ns = length(s)
+    while (1) {
+        if (pi > np) return si > ns
+        pc = substr(p, pi, 1)
+        if (pc == "*") {
+            while (substr(p, pi + 1, 1) == "*") pi++
+            for (k = si; k <= ns + 1; k++) {
+                if (fnm(p, pi + 1, s, k)) return 1
+                if (k > ns || substr(s, k, 1) == "/") break
+            }
+            return 0
+        }
+        if (si > ns) return 0
+        sc = substr(s, si, 1)
+        if (pc == "?") { if (sc == "/") return 0; pi++; si++; continue }
+        if (pc == "[") {
+            r = bracket(p, pi, sc)
+            if (r >= 0) { if (!r) return 0; pi = bnext; si++; continue }
+        }
+        if (pc == "\\" && pi < np) { pi++; pc = substr(p, pi, 1) }
+        if (pc != sc) return 0
+        pi++; si++
     }
 }
 function begin_header(line, pos,   b) {
     nh = 0; nw = 0; nbody = 0
     split("", hl); split("", hdel); split("", hcom); split("", nr)
     split("", rs); split("", re); split("", rw); split("", rcn)
-    split("", wval); split("", wdrop)
+    split("", wval); split("", wdrop); split("", ol)
     reset_words(); hbad = 0; hit = 0; remaining = 0; track = 1
     hstart = pos; hpre = substr(line, 1, pos - 1)
     cap = 1; mode = M_HDR
@@ -302,6 +530,8 @@ BEGIN {
     split("compress nocompress delaycompress nodelaycompress shred noshred allowhardlink noallowhardlink sharedscripts nosharedscripts copytruncate nocopytruncate renamecopy norenamecopy copy nocopy ifempty notifempty dateext nodateext dateyesterday datehourago noolddir mailfirst maillast nocreateolddir nocreate hourly daily monthly yearly errors nomail missingok nomissingok ignoreduplicates", kwf, " ")
     for (i in kwf) FLAGKW[kwf[i]] = 1
     M_TOP = 1; M_STANZA = 2; M_SCRIPT = 3; M_HDR = 4
+    BADTEXT = sprintf("%c", 1) "BAD" sprintf("%c", 1); SEP = sprintf("%c", 28)
+    ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
     mode = M_TOP; track = 1
 }
 {
@@ -333,6 +563,14 @@ END {
     }
     if (leftover > 0) {
         print "logrotate-drop-path.awk: " drop " is still declared after the rewrite; refusing to write a policy that would duplicate it" > "/dev/stderr"
+        exit 3
+    }
+    if (globhit > 0) {
+        print "logrotate-drop-path.awk: a glob in the policy also matches " drop "; the managed policy for it would be a duplicate; refusing to rewrite the policy" > "/dev/stderr"
+        exit 3
+    }
+    if (unsafe > 0) {
+        print "logrotate-drop-path.awk: cannot remove " drop " from a stanza header without changing what logrotate reads there; refusing to rewrite the policy" > "/dev/stderr"
         exit 3
     }
     if (ambiguous > 0) {
