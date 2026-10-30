@@ -239,12 +239,111 @@ func acceptedPolicies() []acceptedPolicy {
 			policy: "/var/log/syslog\r\n/var/log/mail.log\r\n{\n\trotate 4\n}\n",
 			want:   "/var/log/mail.log\r\n{\n\trotate 4\n}\n"},
 	}...)
+	// The path text in a place that is not a path declaration: a script body (a
+	// heredoc), a directive's value, a comment. All of it is kept as written and
+	// only the shared stanza's header loses the path.
+	for _, body := range []struct{ name, kw, text string }{
+		{"a tab-indented path line", "postrotate", "\t/var/log/syslog"},
+		{"a space-indented path line", "postrotate", "  /var/log/syslog"},
+		{"an unindented path line", "prerotate", "/var/log/syslog"},
+		{"a double quoted path line", "lastaction", "\t\"/var/log/syslog\""},
+		{"a single quoted path line", "firstaction", "\t'/var/log/syslog'"},
+		{"a path and a brace", "preremove", "\t/var/log/syslog {"},
+		{"the path among other words", "postrotate", "\t/var/log/syslog /var/log/mail.log"},
+		{"a brace and the path", "postrotate", "\t{ /var/log/syslog"},
+	} {
+		in := "/var/log/other {\n\trotate 7\n\t" + body.kw + "\n" + body.text + "\n\tendscript\n}\n" + sharedSyslogStanza
+		cs = append(cs, acceptedPolicy{name: "a script body with " + body.name + " is not a declaration", policy: in, want: withoutSharedSyslogPath(in)})
+		// ... and the same stanza after the one that holds the path
+		in = strings.TrimPrefix(sharedSyslogStanza, "\n") + "\n/var/log/other {\n\trotate 7\n\t" + body.kw + "\n" + body.text + "\n\tendscript\n}\n"
+		cs = append(cs, acceptedPolicy{name: "a script body with " + body.name + " after the shared stanza", policy: in, want: strings.Replace(in, "/var/log/syslog\n/var/log/mail.log\n{", "/var/log/mail.log\n{", 1)})
+	}
+	for _, c := range []struct{ name, in, want string }{
+		{name: "a global script body with the path", in: "postrotate\n\t/var/log/syslog\nendscript\n" + sharedSyslogStanza},
+		{name: "a directive value that is the path", in: "/var/log/other {\n\trotate 7\n\tdateformat /var/log/syslog\n}\n" + sharedSyslogStanza},
+		{name: "a comment that is the path", in: "/var/log/other {\n\trotate 7\n\t# /var/log/syslog\n\t#/var/log/syslog\n}\n# /var/log/syslog\n" + sharedSyslogStanza},
+		{name: "a script closed on its keyword line, then the path text as a comment", in: "/var/log/other {\n\tpostrotate endscript\n\t# /var/log/syslog\n}\n" + sharedSyslogStanza},
+		// logrotate reads a flag keyword and goes on with the rest of the line, so
+		// "missingok }" closes the stanza; a helper that took the rest of the line
+		// for the keyword's value would still be inside it at the next header.
+		{name: "a flag keyword then a closing brace", in: "/var/log/other {\n\trotate 7\n\tmissingok }\n" + sharedSyslogStanza},
+		{name: "a flag keyword, another flag, then a closing brace", in: "/var/log/other {\n\tcompress delaycompress # c\n\tmissingok daily }\n" + sharedSyslogStanza},
+		{name: "a flag keyword then a script that closes the stanza", in: "/var/log/other {\n\tmissingok postrotate\n\t\ttrue\n\tendscript }\n" + sharedSyslogStanza},
+		{name: "a flag glued to = then a closing brace", in: "/var/log/other {\n\tmissingok= }\n" + sharedSyslogStanza},
+		// A directive that takes a value takes the whole rest of the line, brace included.
+		{name: "a value keyword swallows a closing brace", in: "/var/log/other {\n\tdateformat -%Y }\n}\n" + sharedSyslogStanza},
+		// Between stanzas a global flag may share the line with the next header.
+		{name: "a global flag on the header line of another stanza", in: "compress /var/log/other {\n\trotate 7\n}\n" + sharedSyslogStanza},
+		{name: "a global flag on the header line of the shared stanza", in: "/var/log/other {\n\trotate 7\n}\ncompress /var/log/syslog /var/log/mail.log {\n\trotate 4\n}\n",
+			want: "/var/log/other {\n\trotate 7\n}\ncompress /var/log/mail.log {\n\trotate 4\n}\n"},
+		{name: "a global flag on the header line of the lone stanza", in: "/var/log/other {\n\trotate 7\n}\ndaily compress /var/log/syslog {\n\trotate 4\n}\n/var/log/mail.log {\n}\n",
+			// the stanza goes, the global flag stays
+			want: "/var/log/other {\n\trotate 7\n}\ndaily compress\n/var/log/mail.log {\n}\n"},
+		// A stanza the file never closes: logrotate accepts that at the end of the file.
+		{name: "an unclosed last stanza", in: "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n"},
+		{name: "an unclosed lone last stanza", in: "/var/log/other {\n}\n/var/log/syslog\n{\n\trotate 4\n", want: "/var/log/other {\n}\n"},
+	} {
+		want := c.want
+		if want == "" && strings.HasSuffix(c.in, sharedSyslogStanza) {
+			want = withoutSharedSyslogPath(c.in)
+		}
+		cs = append(cs, acceptedPolicy{name: c.name, policy: c.in, want: want})
+	}
+	cs = append(cs, acceptedPolicy{name: "a flag after an unknown option stays ignored", warns: true,
+		policy: "/var/log/other {\n\tbogus }\n}\n" + sharedSyslogStanza,
+		want:   withoutSharedSyslogPath("/var/log/other {\n\tbogus }\n}\n" + sharedSyslogStanza)})
+	// Which paths are words of the header, and which bytes of the other words stay.
+	// The quoting rules are popt's (logrotate hands the text between the start of the
+	// header and its first "{" to poptParseArgvString): " and ' quote, a quoted part
+	// may start inside a word, outside quotes a backslash makes the next character
+	// literal, inside quotes it only protects the quote character itself.
+	for _, c := range []struct{ name, header, want string }{
+		{"another path with an escaped double quote", `/var/log/syslog "/var/log/mail\".log" {`, `"/var/log/mail\".log" {`},
+		{"another path with an escaped double quote, before the managed one", `"/var/log/mail\".log" /var/log/syslog {`, `"/var/log/mail\".log" {`},
+		{"another path with an escaped single quote", `/var/log/syslog '/var/log/m\'.log' {`, `'/var/log/m\'.log' {`},
+		{"another path with an escaped backslash in double quotes", `"/var/log/b\\.log" /var/log/syslog {`, `"/var/log/b\\.log" {`},
+		{"another path with a backslash that protects nothing in single quotes", `'/var/log/b\x.log' /var/log/syslog {`, `'/var/log/b\x.log' {`},
+		{"another path with the other quote character inside", `/var/log/syslog '/var/log/s"p.log' "/var/log/t'p.log" {`, `'/var/log/s"p.log' "/var/log/t'p.log" {`},
+		{"another path with an escaped blank", `/var/log/s\ p.log /var/log/syslog {`, `/var/log/s\ p.log {`},
+		{"another path with an escaped quote outside quotes", `/var/log/syslog /var/log/e\".log {`, `/var/log/e\".log {`},
+		{"another path with a quoted part inside the word", `/var/log/q"a b".log /var/log/syslog {`, `/var/log/q"a b".log {`},
+		{"another path with an escaped backslash outside quotes", `/var/log/syslog /var/log/\\x.log {`, `/var/log/\\x.log {`},
+		{"a brace in a comment line of the header", "/var/log/syslog\n# {\n/var/log/mail.log {", "# {\n/var/log/mail.log {"},
+		{"tab separated paths", "/var/log/a.log\t/var/log/syslog\t/var/log/b.log\t{", "/var/log/a.log /var/log/b.log {"},
+		{"several paths on one line", "/var/log/a.log /var/log/syslog /var/log/b.log /var/log/c.log {", "/var/log/a.log /var/log/b.log /var/log/c.log {"},
+		{"paths over several lines", "/var/log/a.log\n  /var/log/syslog\n/var/log/b.log\n{", "/var/log/a.log\n/var/log/b.log\n{"},
+		{"a blank line and a comment in the header", "/var/log/a.log\n\n# note\n/var/log/syslog\n{", "/var/log/a.log\n\n# note\n{"},
+		{"a line continuation before another path", "/var/log/syslog /var/log/a.log\\\n/var/log/b.log {", "/var/log/a.log\\\n/var/log/b.log {"},
+		{"a line continuation joining two other paths", "/var/log/a.log\\\n/var/log/b.log /var/log/syslog {", "/var/log/a.log\\\n/var/log/b.log {"},
+		{"a quoted path that spans lines", "\"/var/log/ml\n/x.log\" /var/log/syslog {", "\"/var/log/ml\n/x.log\" {"},
+		{"a quoted path that spans lines and holds a comment-looking line", "/var/log/syslog '/var/log/ml\n  # kept\n/y.log' /var/log/b.log {", "'/var/log/ml\n  # kept\n/y.log' /var/log/b.log {"},
+		{"trailing words that are data, not a comment", "/var/log/syslog /var/log/a.log # c\n{", "/var/log/a.log # c\n{"},
+		{"a comment after the brace", "/var/log/syslog /var/log/a.log { # vendor", "/var/log/a.log { # vendor"},
+		{"the managed path spelled with quoted parts", `/var/log/sys"log" /var/log/a.log {`, `/var/log/a.log {`},
+		{"the managed path spelled with empty quotes", `""/var/log/syslog'' /var/log/a.log {`, `/var/log/a.log {`},
+		{"the managed path with an escaped letter", `/var/log/sys\log /var/log/a.log {`, `/var/log/a.log {`},
+		{"an empty quoted word is no path", `/var/log/a.log "" /var/log/syslog {`, `/var/log/a.log "" {`},
+		{"a quote still open at the brace is closed there", `/var/log/a.log "/var/log/syslog{`, `/var/log/a.log {`},
+		{"a quote still open at the brace, in another path", `/var/log/syslog "/var/log/a.log{`, `"/var/log/a.log {`},
+		{"a glob keeps working", "/var/log/syslog /var/log/g*.log {", "/var/log/g*.log {"},
+		{"a tilde path", "/var/log/syslog ~/lr.log {", "~/lr.log {"},
+		{"multibyte names", "/var/log/日本.log \"/var/log/é x.log\" /var/log/syslog {", "/var/log/日本.log \"/var/log/é x.log\" {"},
+	} {
+		cs = append(cs, acceptedPolicy{name: c.name, policy: c.header + "\n\trotate 4\n}\n", want: c.want + "\n\trotate 4\n}\n"})
+	}
 	for i := range cs {
 		if cs[i].want == "" {
 			cs[i].want = onlySyslogDropped(cs[i].policy)
 		}
 	}
 	return cs
+}
+
+// withoutSharedSyslogPath is the policy with the path line of its trailing
+// shared stanza gone (the same text may appear earlier, inside a script).
+func withoutSharedSyslogPath(policy string) string {
+	i := strings.LastIndex(policy, sharedSyslogStanza)
+	return policy[:i] + strings.Replace(sharedSyslogStanza, "/var/log/syslog\n", "", 1) + policy[i+len(sharedSyslogStanza):]
 }
 
 // The helper must end a script where logrotate does and nowhere else, keep
@@ -284,7 +383,7 @@ type logrotateView struct {
 var logrotateIgnoredLine = regexp.MustCompile(`^(?:error|warning): \S+:\d+ unknown option .* -- ignoring line$`)
 
 // A log that does not exist on the machine running the test; not a parse error.
-var logrotateUnreadableLog = regexp.MustCompile(`^error: stat of .* failed: `)
+var logrotateUnreadableLog = regexp.MustCompile(`(?s)^error: stat of .* failed: `)
 
 type logrotateLineKind int
 
@@ -354,6 +453,30 @@ func TestClassifyLogrotateLine(t *testing.T) {
 	}
 }
 
+// A log name may hold a newline (a quoted word that spans lines), and logrotate
+// prints it raw: "error: stat of /var/log/a" and "b failed: ..." are then two
+// output lines for one harmless message. Join them before classifying.
+func joinSplitStatErrors(lines []string) []string {
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
+		if strings.HasPrefix(l, "error: stat of ") && !strings.Contains(l, " failed: ") {
+			for j := i + 1; j < len(lines) && j <= i+4; j++ {
+				if strings.HasPrefix(lines[j], "error: ") || strings.HasPrefix(lines[j], "warning: ") {
+					break
+				}
+				l += "\n" + lines[j]
+				if strings.Contains(lines[j], " failed: ") {
+					i = j
+					break
+				}
+			}
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 func parseWithLogrotate(t *testing.T, logrotate string, files map[string]string) logrotateView {
 	t.Helper()
 	dir := t.TempDir()
@@ -381,7 +504,7 @@ func parseWithLogrotate(t *testing.T, logrotate string, files map[string]string)
 			v.considered = append(v.considered, p)
 		}
 	}
-	for _, l := range strings.Split(v.raw, "\n") {
+	for _, l := range joinSplitStatErrors(strings.Split(v.raw, "\n")) {
 		l = strings.TrimRight(l, "\r")
 		switch classifyLogrotateLine(l) {
 		case logrotateLineIgnored:
@@ -474,26 +597,100 @@ func TestLogrotateDropPathAgreesWithRealLogrotate(t *testing.T) {
 	}
 }
 
-func TestLogrotateDropPathFailsInsteadOfLeavingThePath(t *testing.T) {
+// The helper reads only header words. A script line, a directive value or a
+// comment that holds the path is not a declaration: logrotate accepts the policy,
+// the helper must not fail on it and must not touch the text.
+func TestLogrotateDropPathKeepsScriptTextThatLooksLikeTheHeader(t *testing.T) {
+	// The managed stanza is the one that follows; the lines above are script text.
+	const (
+		shared     = "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"
+		sharedWant = "/var/log/mail.log\n{\n\trotate 4\n}\n"
+		heredoc    = "/var/log/other {\n\trotate 7\n\tpostrotate\n\t/var/log/syslog\n\t\"/var/log/syslog\"\n\t'/var/log/syslog' /var/log/mail.log\n\t}\n\t/var/log/zzz {\n\tendscript # done\n}\n"
+	)
+	logrotate, _ := exec.LookPath("logrotate")
 	for _, a := range dropPathAwks(t) {
 		t.Run(a.name, func(t *testing.T) {
-			// A script line that is the path itself: the helper keeps script text verbatim, so
-			// the path survives. That must be an error, not a silently written duplicate.
-			out, stderr, code := runDropPath(t, a, "/var/log/syslog", "/var/log/other\n{\n\tpostrotate\n\t/var/log/syslog\n\tendscript\n}\n")
-			if code != 3 {
-				t.Fatalf("exit %d, want 3 (awk left the path in):\n%s%s", code, out, stderr)
+			in := heredoc + "\n" + shared
+			out, stderr, code := runDropPath(t, a, "/var/log/syslog", in)
+			if code != 0 {
+				t.Fatalf("exit %d on a policy logrotate accepts\n%s%s", code, out, stderr)
 			}
-			if !strings.Contains(stderr, "still declared") {
-				t.Fatalf("unexpected failure: %s", stderr)
+			if want := heredoc + "\n" + sharedWant; out != want {
+				t.Fatalf("got:\n%q\nwant:\n%q", out, want)
+			}
+			if logrotate == "" {
+				return
+			}
+			before := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": in})
+			after := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": out, "syslog": managedSyslogStanza})
+			if len(before.errors) > 0 || len(after.errors) > 0 || strings.Contains(after.raw, "duplicate log entry") {
+				t.Fatalf("errors before %v, after %v:\n%s", before.errors, after.errors, after.raw)
+			}
+			if strings.Join(before.considered, "\n") != strings.Join(after.considered, "\n") {
+				t.Fatalf("considered %v before, %v after", before.considered, after.considered)
 			}
 		})
+	}
+}
+
+// logrotate versions disagree on the blanks at the very end of the header text
+// (3.22 strips them, 3.19 and 3.21 keep them). For `"/var/log/syslog {` 3.19 and
+// 3.21 consider the log "/var/log/syslog " (blank included) and 3.22 considers
+// "/var/log/syslog" (or rejects a blank that is escaped right before the brace): the
+// rewrite that is right for one drops another file on the
+// other, so the helper refuses. (Captured on logrotate 3.19.0, 3.21.0, 3.22.0.)
+func TestLogrotateDropPathRefusesAPathThatTheLogrotateVersionDecides(t *testing.T) {
+	for _, in := range []string{
+		"/var/log/other {\n}\n\"/var/log/syslog {\n}\n",
+		"/var/log/other {\n}\n/var/log/a.log '/var/log/syslog \n{\n}\n",
+		"/var/log/other {\n}\n/var/log/syslog\\ {\n}\n",
+	} {
+		for _, a := range dropPathAwks(t) {
+			t.Run(a.name+"/"+strings.ReplaceAll(in, "\n", "|"), func(t *testing.T) {
+				out, stderr, code := runDropPath(t, a, "/var/log/syslog", in)
+				if code != 3 || !strings.Contains(stderr, "versions disagree") {
+					t.Fatalf("exit %d, want 3 \"versions disagree\"\nstdout:\n%s\nstderr:\n%s", code, out, stderr)
+				}
+			})
+		}
+	}
+}
+
+// What logrotate rejects is not rewritten silently: a path-looking statement in
+// a stanza body ("unexpected log filename", so a stanza this helper believes is
+// open is really closed or the file is broken), a header with no "{" and one
+// with an unbalanced quote. If the path is in it, the helper fails instead of
+// writing a policy that keeps the path.
+func TestLogrotateDropPathFailsOnPoliciesLogrotateRejects(t *testing.T) {
+	logrotate, _ := exec.LookPath("logrotate")
+	for _, tt := range []struct{ name, in, logrotateSays string }{
+		{"a path line in a stanza body", "/var/log/other\n{\n\trotate 7\n\t/var/log/syslog\n}\n", "unexpected log filename"},
+		{"a quoted path line in a stanza body", "/var/log/other\n{\n\trotate 7\n\t\"/var/log/syslog\"\n}\n", "unexpected log filename"},
+		{"a path after a flag keyword in a stanza body", "/var/log/other\n{\n\tmissingok /var/log/syslog\n}\n", "unexpected log filename"},
+		{"a header with no brace", "/var/log/other {\n}\n/var/log/syslog\n/var/log/mail.log\n", "missing '{'"},
+		{"a header with a backslash before the brace", "/var/log/other {\n}\n/var/log/syslog\\{\n}\n", "error parsing filename"},
+	} {
+		for _, a := range dropPathAwks(t) {
+			t.Run(a.name+"/"+tt.name, func(t *testing.T) {
+				if logrotate != "" {
+					v := parseWithLogrotate(t, logrotate, map[string]string{"rsyslog": tt.in})
+					if !strings.Contains(v.raw, tt.logrotateSays) {
+						t.Fatalf("logrotate does not say %q about this policy:\n%s", tt.logrotateSays, v.raw)
+					}
+				}
+				out, stderr, code := runDropPath(t, a, "/var/log/syslog", tt.in)
+				if code != 3 || !strings.Contains(stderr, "still declared") {
+					t.Fatalf("exit %d, want 3 \"still declared\"\nstdout:\n%s\nstderr:\n%s", code, out, stderr)
+				}
+			})
+		}
 	}
 }
 
 // Words that only look like the end of a script. logrotate does not end the
 // script there (it reports a script that never ends), so a helper that did
 // would see the later shared stanza as a stanza, drop its path and write a
-// policy that is not the original one. It has to keep the path and fail.
+// policy that is not the original one. It has to leave the text alone and fail.
 func TestLogrotateDropPathDoesNotEndAScriptOnLookalikes(t *testing.T) {
 	logrotate, _ := exec.LookPath("logrotate")
 	for _, term := range []string{"endscriptx", "endscriptX", "ENDSCRIPT", "Endscript", "end script", "endscrip"} {
@@ -507,22 +704,10 @@ func TestLogrotateDropPathDoesNotEndAScriptOnLookalikes(t *testing.T) {
 					}
 				}
 				out, stderr, code := runDropPath(t, a, "/var/log/syslog", in)
-				if code != 3 || !strings.Contains(stderr, "still declared") {
-					t.Fatalf("exit %d, want 3 \"still declared\"\nstdout:\n%s\nstderr:\n%s", code, out, stderr)
+				if code != 3 || !strings.Contains(stderr, "script never ends") {
+					t.Fatalf("exit %d, want 3 \"script never ends\"\nstdout:\n%s\nstderr:\n%s", code, out, stderr)
 				}
 			})
 		}
-	}
-}
-
-// A quoted path in a place the helper cannot rewrite is still found.
-func TestLogrotateDropPathFailsOnAQuotedPathItKeeps(t *testing.T) {
-	for _, a := range dropPathAwks(t) {
-		t.Run(a.name, func(t *testing.T) {
-			_, stderr, code := runDropPath(t, a, "/var/log/syslog", "/var/log/other\n{\n\tpostrotate\n\t\"/var/log/syslog\"\n\tendscript\n}\n")
-			if code != 3 || !strings.Contains(stderr, "still declared") {
-				t.Fatalf("exit %d, want 3 \"still declared\"\n%s", code, stderr)
-			}
-		})
 	}
 }
