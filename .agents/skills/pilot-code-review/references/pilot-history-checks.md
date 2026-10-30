@@ -13,8 +13,8 @@
 2. 保存 finding ledger：`id, class, origin, trigger, invariant, fix_sha,
    regression, counterexample, status`。再次出現同 class 就先讓 SA 盤點受影響
    路徑與測試矩陣，再實作 class 層級修復；不要依每則新留言追加一個字串特例。
-3. 把 regression 的 oracle 寫成外部行為。適用時在隔離 scratch checkout
-   撤回修復或做單點 mutation，確認測試會因**指定 invariant**失敗；編譯失敗、
+3. 把 regression 的 oracle 寫成外部行為。適用時在唯讀 scratch 複本
+   （例如 `git archive`，不是 item 的 worktree）撤回修復或做單點 mutation，確認測試會因**指定 invariant**失敗；編譯失敗、
    缺工具、權限錯誤或另一道 gate 先拒絕，都不是該 regression 的負向證明。
 4. 分開記錄「結構檢查」「真實工具 harness」「完整產品入口」「VM 原生服務」。
    harness 使用抽出的 task、fake executable、合成輸入或 fault shim 時明列邊界。
@@ -62,7 +62,8 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
    確認 hosts/groups/stage。只對自己建立的 VM/snapshot 注入故障與清理；
    使用者既有環境與真實主機不因 skill 自動取得 mutation 授權。延用已有授權，
    只有目標、風險或副作用超出範圍時才請使用者決定。
-2. 從乾淨隔離的 candidate checkout 執行，記 commit/tree、執行檔案 hashes、
+2. 從乾淨的 candidate checkout 執行（凍結 candidate commit 後的乾淨目前 checkout，
+   或該 SHA 的唯讀 `git archive` scratch 複本），記 commit/tree、執行檔案 hashes、
    image digest、工具版本與 inventory facts。對外部合成 vars/fixtures/fault
    shim 也記錄內容 fingerprint 與用途，不能用修改 production source 的 overlay
    聲稱測過原始 HEAD。開發快測允許 dirty；正式證據不允許。
@@ -99,7 +100,7 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
 > check/apply/verify/idempotency，另測本次 tags、probe-error 與 rollback 邊界。
 > 需要 BASE 對照時還原相同 snapshot。回報 candidate/tree、命令、工具版本、
 > 真實執行/skip 數、counterexample、回復後 effective state、artifact 與限制。
-> 只使用指派 worktree；你不是唯一工作者，不回退別人的改動。只有 Root 操作
+> 只使用 Root 指派且已驗證的 checkout（不建立 worktree、不切換 branch）；你不是唯一工作者，不回退別人的改動。只有 Root 操作
 > push/PR lifecycle；未授權 review 不自行啟動 target mutation。
 
 ### Independent Reviewer

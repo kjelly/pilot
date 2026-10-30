@@ -19,7 +19,7 @@ Some facts about "valid evidence" belong to the repository, not to these skills:
 - **Read from the base branch** (`origin/<base>`), never from the PR head. A change cannot grant itself an exemption. If the manifest is itself part of the change, it takes effect only after it is merged.
 - `evidence_only_paths`: globs (`*`, `**`, `?`) for files that hold evidence only. Default is none, meaning strict SHA binding. A glob that would cover all code of a language or all build files (`**`, `**/*.go`, `*`) is rejected. Only list paths no test, build step or runtime reads. If a test reads `AGENTS.md` or a docs file, that file is behaviour, not evidence.
 - `required_evidence[].artifact_glob`: where the committed artifact for that item must live. These paths are also treated as evidence-only.
-- Check the manifest the way the gate sees it: `python3 scripts/repo_evidence.py --worktree WT --base-ref origin/main`.
+- Check the manifest the way the gate sees it: `python3 "$SNAP/.agents/skills/issue-to-pr/scripts/repo_evidence.py" --worktree "$REPO_ROOT" --base-ref origin/main`.
 
 ## Evidence-only delta
 

@@ -44,18 +44,20 @@ $pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge�
 
 ## 內部安全檢查（供 Agent 呼叫）
 
+`$SNAP` 是 checkout 契約取得的 snapshot 目錄；腳本從那裡執行，不從目前切到的 branch 執行。
+
 ```bash
 # 列出完整（跨分頁）Ready PR 候選清單，供使用者選一個（列出不等於授權處理）
-python3 scripts/list_ready.py --repo OWNER/REPO
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/list_ready.py" --repo OWNER/REPO
 
 # Reviewer 綁定 HEAD/Base SHA 的證據檔產生後，進行唯讀 Quality Gate
-python3 scripts/review_gate.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
 
 # 乾跑（不變更 GitHub）
-python3 scripts/apply_decision.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
 
 # 真正執行：僅在通過 live gate 時才合併或降草稿
-python3 scripts/apply_decision.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
 ```
 
 `apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。`gh pr merge --match-head-commit` 可防止合併錯誤的 HEAD；結果還要遠端驗證 `state == MERGED`。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。

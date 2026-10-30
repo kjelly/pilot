@@ -47,7 +47,7 @@ Supply one full URL or qualified `OWNER/REPO#N` ID. For multiple/all targets, as
 
 ## Quality helper CLI
 
-The agent should choose *real* repo-specific commands, never invent them. Example below is illustrative for a Go repository:
+The agent should choose *real* repo-specific commands, never invent them. `$SNAP` is the verified snapshot the checkout contract takes (scripts run from there, not from the checked-out branch). Example below is illustrative for a Go repository:
 
 ```bash
 STATE="$HOME/.cache/issue-to-pr/OWNER/REPO/123"
@@ -55,25 +55,25 @@ WT="$(git rev-parse --show-toplevel)"   # the current checkout (the script flags
 mkdir -p "$STATE"
 
 # run after git commit and verify git status is clean:
-python3 scripts/run_check.py --worktree "$WT" --name regression \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$WT" --name regression \
   --out "$STATE/regression.json" -- go test ./...
-python3 scripts/run_check.py --worktree "$WT" --name lint \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$WT" --name lint \
   --out "$STATE/lint.json" -- golangci-lint run
 
 # Root Agent collects test receipts + Reviewer evidence into $STATE/evidence.json
-python3 scripts/issue_gate.py --repo OWNER/REPO --issue 123 \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/issue_gate.py" --repo OWNER/REPO --issue 123 \
   --worktree "$WT" --evidence "$STATE/evidence.json"
 
 # After gate passes: create the PR as a DRAFT (the default)
-python3 scripts/create_pr.py --repo OWNER/REPO --issue 123 \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/create_pr.py" --repo OWNER/REPO --issue 123 \
   --worktree "$WT" --evidence "$STATE/evidence.json" \
   --title "fix: correct issue 123 root cause" --body-file "$STATE/pr_body.md"
 
 # After PR creation; use the returned PR number and current SHA:
-python3 scripts/pr_ci.py --repo OWNER/REPO --pr 99 --head-sha FULL_SHA --watch --timeout 900
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/pr_ci.py" --repo OWNER/REPO --pr 99 --head-sha FULL_SHA --watch --timeout 900
 
 # Only when CI is green on that SHA and ALL other follow-up work is finished:
-python3 scripts/mark_ready.py --repo OWNER/REPO --issue 123 --pr 99 \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/mark_ready.py" --repo OWNER/REPO --issue 123 --pr 99 \
   --worktree "$WT" --evidence "$STATE/evidence.json" --confirm-complete
 ```
 

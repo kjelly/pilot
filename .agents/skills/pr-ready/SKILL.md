@@ -101,5 +101,5 @@ Text-only changes need no unrelated VM run.
 - Read `references/workflow.md` for checkout, checkpoint, and resumption.
 - Read `references/roles.md` before delegating; pass concise task inputs and have agents return structured summaries, not full logs.
 - Read `references/evidence-schema.md` and `references/quality-gate.md` before the final gate.
-- Run `python3 <skill-dir>/scripts/pr_gate.py --help` and `python3 <skill-dir>/scripts/run_check.py --help` to learn flags without loading script sources into context.
+- Run `python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --help` and `python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --help` to learn flags without loading script sources into context.
 - Native agent roles live under Codex `.codex/agents` (copies) and Claude `.claude/agents` (symlinks into this skill); the agy definitions are in `platforms/agy/agents/` (copy into `.agents/agents/` when agy is used). Delegate using native facilities and these role names, without inventing tool API names.

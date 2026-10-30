@@ -36,14 +36,21 @@ each prints one JSON object and exits 0 only on PASS (any other exit is a stop).
 3. Preflight, read-only, **before any switch**:
    `python3 "$REPO_ROOT/.agents/skills/_shared/scripts/checkout_preflight.py"
    --repo "$REPO_ROOT" --target-ref TARGET_SHA --branch BRANCH`. It stops when the
-   checkout is dirty or has untracked files, when a git operation is in progress,
-   when a detached HEAD would be orphaned, when BRANCH is checked out in another
-   worktree, or when an **ignored** path collides with a path the target tracks
-   (same path, or a file/directory prefix of it in either direction). `git status
-   --porcelain` cannot see ignored files and git overwrites or deletes them
-   without warning, so this check is not optional. On any non-zero exit stop and
-   ask. Never stash, discard, reset, force-checkout, or overwrite user work
-   automatically, and do not create per-item worktrees as a workaround.
+   checkout is dirty or has untracked files (a dirty submodule counts, whatever
+   `diff.ignoreSubmodules` says), when a git operation is in progress, when a
+   detached HEAD would be orphaned, when BRANCH is checked out in another
+   worktree, or when an **ignored** path collides with a path the target tracks:
+   the same path, a file/directory prefix of it in either direction, or any path
+   below an ignored nested git repository (`vendor/x/`). `git status --porcelain`
+   cannot see ignored files and git overwrites or deletes them without warning, so
+   this check is not optional. **Every commit that can land in the working tree
+   is checked**: `--target-ref` is repeatable, and BRANCH's existing local tip is
+   checked as well as TARGET_SHA, because `git switch BRANCH` and `gh pr checkout`
+   check out that (possibly stale) tip first. Pass an extra `--target-ref` for any
+   other commit you may check out. It also stops, failing closed, when a target
+   cannot be resolved or a check cannot be run. On any non-zero exit stop and ask. Never
+   stash, discard, reset, force-checkout, or overwrite user work automatically,
+   and do not create per-item worktrees as a workaround.
 4. Snapshot, **after** the clean check (the script refuses a dirty checkout):
    `python3 "$REPO_ROOT/.agents/skills/_shared/scripts/skill_snapshot.py" create
    --repo "$REPO_ROOT"`. It copies `.agents/skills/{_shared,pilot-code-review,issue-to-pr,
@@ -52,7 +59,8 @@ each prints one JSON object and exits 0 only on PASS (any other exit is a stop).
    records the source repository/revision (HEAD and tree ID) and a sha256 manifest.
    Run every later script, reference and child prompt from that snapshot (`SNAP` =
    `snapshot_dir` in its output) using absolute snapshot paths: switching to an
-   older PR branch can replace or remove the files in the checkout. `skill_snapshot.py verify
+   older PR branch can replace or remove the files in the checkout.
+   `python3 "$SNAP/.agents/skills/_shared/scripts/skill_snapshot.py" verify
    --snapshot "$SNAP"` re-checks it. Do not install or change native role
    configuration silently; report a missing native role as blocked.
 5. For an existing PR, verify head repository, head branch and head SHA, then
@@ -68,12 +76,17 @@ each prints one JSON object and exits 0 only on PASS (any other exit is a stop).
    verify the Issue-to-branch mapping before `git switch EXISTING_BRANCH`.
    Existing PRs remain with `pr-ready`; never create a duplicate.
 6. Verify `git branch --show-current` and `git rev-parse HEAD` against the selected
-   branch and captured remote SHA (or fetched base for a new Issue branch).
-   Stop on detached HEAD, mismatched branch, divergence or remote movement. Do not
-   reset a local branch to make this check pass. Only then dispatch the first role.
+   branch and captured remote SHA (or fetched base for a new Issue branch). For a
+   fork PR (or a name clash) `gh pr checkout` may create a local branch named
+   differently from the PR's head branch: record the actual name from
+   `git branch --show-current` and verify it together with the SHA instead of
+   assuming BRANCH. Stop on detached HEAD, mismatched branch, divergence or remote
+   movement. Do not reset a local branch to make this check pass. Only then
+   dispatch the first role.
 7. Give every child the same verified checkout and target identity. Before each
-   dispatch run `skill_snapshot.py verify-role --snapshot "$SNAP" --repo "$REPO_ROOT"
-   --platform claude|codex --role NAME` for the role file the runtime will load
+   dispatch run `python3 "$SNAP/.agents/skills/_shared/scripts/skill_snapshot.py"
+   verify-role --snapshot "$SNAP" --repo "$REPO_ROOT" --platform claude|codex
+   --role NAME` for the role file the runtime will load
    (`.claude/agents/NAME.md` or `.codex/agents/NAME.toml` in the checkout); a
    missing or different role file is `BLOCKED`, never dispatched. In existing
    script flags and evidence schemas, `worktree` means this checkout directory; it
@@ -90,7 +103,10 @@ Never create per-item writer worktrees or checkouts. A read-only scratch copy
 (for example `git archive SHA | tar -x -C SCRATCH`, outside the checkout, no
 branch, never pushed from) is allowed for revert or mutation negative controls and
 for AGENTS.md §1.5 evidence runs. The clean current checkout at the committed
-candidate SHA is the candidate checkout; do not build another one for it.
+candidate SHA is the candidate checkout, and a read-only scratch copy of that same
+SHA is an equally valid one for an evidence run; mutations and reverts go only into
+scratch copies. Neither is an item workspace: do not give a candidate its own
+writer worktree or branch.
 
 ## Finish only the selected item
 
