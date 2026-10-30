@@ -11,20 +11,22 @@ import mark_ready  # noqa: E402
 import issue_gate  # noqa: E402
 
 SHA = "a" * 40
-INFO = {"branch": "issue/1-fix", "head_sha": SHA}
+INFO = {"branch": "issue/1-fix", "head_sha": SHA, "issue_resolution": "fixes"}
 
 
 def view(**kw):
     base = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/1-fix",
-            "headRefOid": SHA, "mergeable": "MERGEABLE", "url": "https://github.com/O/R/pull/9"}
+            "headRefOid": SHA, "mergeable": "MERGEABLE", "url": "https://github.com/O/R/pull/9",
+            "body": "Fixes #1\n\nTests pass"}
     base.update(kw)
     return base
 
 
 class MarkReadyTest(unittest.TestCase):
-    def run_mark(self, *, errors=(), views=(), ci="CI_PASSED", confirm=True):
+    def run_mark(self, *, errors=(), views=(), ci="CI_PASSED", confirm=True, resolution="fixes"):
         calls = []
-        with patch.object(mark_ready, "evaluate", return_value=(list(errors), INFO)) as ev, \
+        with patch.object(mark_ready, "evaluate",
+                          return_value=(list(errors), {**INFO, "issue_resolution": resolution})) as ev, \
              patch.object(mark_ready, "command", side_effect=list(views)), \
              patch.object(mark_ready.pr_ci, "inspect", return_value={"status": ci}), \
              patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
@@ -64,6 +66,36 @@ class MarkReadyTest(unittest.TestCase):
         result, calls, _ = self.run_mark(views=[view(isDraft=False)])
         self.assertEqual("ALREADY_READY", result["status"])
         self.assertEqual([], calls)
+
+    def test_body_must_agree_with_the_evidence_resolution(self):
+        # The evidence (or the body) can change after create_pr.py checked it: re-check before `gh pr ready`.
+        cases = (("partial", "Fixes #1\n\nTests pass", "must not close #1"),
+                 ("partial", "Closes O/R#1", "must not close #1"),
+                 ("partial", "Partial fix, tests pass", "must reference #1"),
+                 ("fixes", "Refs #1\n\nTests pass", "closing keyword"),
+                 ("fixes", "", "closing keyword"))
+        for resolution, body, needle in cases:
+            with self.subTest(resolution=resolution, body=body):
+                result, calls, _ = self.run_mark(views=[view(body=body)], resolution=resolution)
+                self.assertEqual("BLOCKED", result["status"])
+                self.assertTrue(any("PR body" in b and needle in b for b in result["blockers"]), result)
+                self.assertEqual([], calls)
+
+    def test_body_that_agrees_with_the_resolution_marks_ready(self):
+        for resolution, body in (("partial", "Refs #1\n\nTests pass"), ("fixes", "Fixes #1\n\nTests pass")):
+            with self.subTest(resolution=resolution):
+                result, calls, _ = self.run_mark(
+                    views=[view(body=body), {"isDraft": False, "headRefOid": SHA, "url": "u"}], resolution=resolution)
+                self.assertEqual("READY_FOR_REVIEW", result["status"])
+                self.assertEqual([["gh", "pr", "ready", "9", "-R", "O/R"]], calls)
+
+    def test_pr_view_asks_for_the_body(self):
+        with patch.object(mark_ready, "evaluate", return_value=([], INFO)), \
+             patch.object(mark_ready, "command", return_value=view(isDraft=False)) as command:
+            mark_ready.mark_ready(repo="O/R", issue=1, pr=9, worktree=Path("/tmp"), evidence=Path("/tmp/e.json"),
+                                  confirm_complete=True)
+        argv = command.call_args_list[0].args[0]
+        self.assertIn("body", argv[argv.index("--json") + 1].split(","))
 
     def test_success_marks_ready_and_verifies(self):
         result, calls, _ = self.run_mark(views=[view(), {"isDraft": False, "headRefOid": SHA, "url": "u"}])

@@ -14,7 +14,7 @@
 | Git hygiene | No unstaged/staged/untracked artifacts, no secrets, correct branch/worktree, no invalid base. |
 | Evidence | Actual `run_check.py` receipts, correct SHA (or an evidence-only delta per the base branch manifest), no stale check or stale reviewer verdict. |
 | Repository-required evidence | Every applicable repository mandate (base manifest or the recorded list from `AGENTS.md`) is in `repo_required_evidence`, committed and current. See [repo-evidence.md](repo-evidence.md). |
-| Remote | Correct Issue state, known-PR duplication screened, branch push matches validated commit before `gh pr create`. Each disputed claim has a later reply on the Issue; the PR body closes the Issue only when `issue_resolution` is `fixes`. |
+| Remote | Correct Issue state, known-PR duplication screened, branch push matches validated commit before `gh pr create`. Each disputed claim has a later reply on the Issue; the PR body closes the Issue only when `issue_resolution` is `fixes`, and `fixes` (also the default) is refused while a `needs_evidence` claim, or an `out_of_scope` claim without a verified, reply-linked `follow_up_issue_url`, stays open. `mark_ready.py` re-checks the PR body against `issue_resolution` before Ready. |
 
 **After PR (PR is a Draft)** — GitHub CI runs on the Draft PR. Report CI state; a CI failure does **not** retroactively make the pre-PR gate pass. Retain the existing Draft PR, repair failures on the same branch and rerun checks; if blocked, leave it Draft and report `DRAFT_CI_BLOCKED` without falsely claiming CI success. Never claim CI passed if it is pending/not observed.
 

@@ -23,7 +23,7 @@ reproduction or counter-evidence on the base commit. Root classifies:
 | `valid` | Reproduces or traces as claimed | Implement and test it. |
 | `invalid` | Counter-evidence shows the claim does not hold (the code does not behave that way, or the requested behaviour contradicts a repository contract) | Do not implement it. Dispute it (§2–§4). |
 | `needs_evidence` | No reproduction or concrete trace, and none can be found | Do not implement it. Dispute it and ask for the missing reproduction (§2–§4). |
-| `out_of_scope` | The claim may hold but is a different defect or request | Do not fold it into this PR. Dispute it (§2–§4) with a link to a follow-up Issue, or ask whether one is wanted. |
+| `out_of_scope` | The claim may hold but is a different defect or request | Do not fold it into this PR. Dispute it (§2–§4) with a link to a follow-up Issue (record it as `follow_up_issue_url`), or ask whether one is wanted. |
 
 A proposed fix that differs from the root-cause fix is normal, not a dispute:
 explain in the PR body why the actual root cause needs a different change. A
@@ -43,7 +43,10 @@ relaxation `AGENTS.md` forbids.
   stays open after merge (`needs_evidence` waiting on the reporter, `out_of_scope`
   without a follow-up Issue), set `issue_resolution: "partial"` and reference the
   Issue with `Refs #N` instead of `Fixes #N`. An `invalid` claim answered with
-  evidence does not by itself keep the Issue open.
+  evidence does not by itself keep the Issue open. The gate enforces both
+  directions (§4): one `needs_evidence` entry, or one `out_of_scope` entry without a
+  verified follow-up, is enough to forbid `fixes`, and `fixes` is the default when
+  `issue_resolution` is absent, so the default is rejected too.
 
 ## 2. Independent confirmation (issue-reviewer)
 
@@ -84,10 +87,24 @@ has disputes, `issue_gate.py` reads the Issue's comments and fails closed unless
   `counter_evidence` are specific, `head_sha` covers the current HEAD and
   `reviewer_confirmed` is `true`.
 
-`issue_resolution: "partial"` needs at least one dispute. `create_pr.py` then
-requires the PR body to reference the Issue (`Refs #N`) without a closing keyword;
-with `fixes` (the default) it requires `Fixes #N` as before. The gate cannot judge
-whether a dispute is right; §2 is what makes it credible.
+`issue_resolution` and the disputes must agree:
+
+- `partial` needs at least one dispute;
+- `fixes` (also when the key is absent) is rejected when any entry is
+  `needs_evidence`, or `out_of_scope` without `follow_up_issue_url`. `invalid`
+  entries alone keep `fixes` valid;
+- an `out_of_scope` entry may carry `follow_up_issue_url` instead of forcing
+  `partial`. It must be `https://github.com/OWNER/REPO/issues/M` for this repository
+  (compared case-insensitively), M must differ from this Issue's number, `reply_url`'s
+  comment must contain that URL, and `gh issue view M` must find an Issue (open or
+  closed; a PR number does not count). Any lookup failure blocks. The field is
+  rejected on `invalid` and `needs_evidence` entries, where it would be ignored.
+
+`create_pr.py` then requires the PR body to reference the Issue (`Refs #N`) without a
+closing keyword for `partial`, and `Fixes #N` for `fixes`; `mark_ready.py` repeats that
+check against the PR's current body and the evidence's current `issue_resolution`
+before `gh pr ready`, because either can change after the PR is created. The gate
+cannot judge whether a dispute is right; §2 is what makes it credible.
 
 ## 5. When the claim comes back
 

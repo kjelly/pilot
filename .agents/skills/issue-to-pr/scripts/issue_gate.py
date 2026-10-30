@@ -187,16 +187,55 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
                     errors.append(f"Unresolved blocking review finding: {f.get('description', f['severity'])}")
     if ctx is not None:
         errors.extend(ctx.check_required(evidence.get("repo_required_evidence")))
+    # `fixes` is the default when the key is absent: the PR body then closes the Issue.
     resolution = evidence.get("issue_resolution", "fixes")
     if resolution not in ISSUE_RESOLUTIONS:
         errors.append("issue_resolution must be 'fixes' or 'partial'")
     elif resolution == "partial" and not evidence.get("disputed_issue_claims"):
         errors.append("issue_resolution 'partial' needs the disputed_issue_claims that stay open")
+    elif resolution == "fixes":
+        # The converse (references/issue-claims.md "Whole-Issue outcomes"): a claim that stays open
+        # after merge must not ride on a closing keyword. any(), not all(): one open claim is enough.
+        items = evidence.get("disputed_issue_claims")
+        still_open = [f"disputed_issue_claims[{i}] ({item['disposition']})"
+                      for i, item in enumerate(items if isinstance(items, list) else [])
+                      if isinstance(item, dict) and leaves_issue_open(item)]
+        if still_open:
+            errors.append("issue_resolution is 'fixes' (the default when absent), but " + ", ".join(still_open)
+                          + " stays open after merge: set issue_resolution 'partial' (Refs #N), or for an "
+                          "out_of_scope claim record the follow-up Issue in follow_up_issue_url")
     return errors
 
 
 ISSUE_RESOLUTIONS = ("fixes", "partial")
 DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
+
+
+def leaves_issue_open(item: dict[str, Any]) -> bool:
+    """True if this dispute keeps part of the Issue open after merge: `needs_evidence` always does,
+    `out_of_scope` unless it carries a follow_up_issue_url (whether that is valid is checked
+    separately). An `invalid` claim, answered with evidence, does not."""
+    if item.get("disposition") == "needs_evidence":
+        return True
+    return item.get("disposition") == "out_of_scope" and item.get("follow_up_issue_url") is None
+
+
+def follow_up_number(item: dict[str, Any], repo: str, issue: int) -> tuple[int | None, str | None]:
+    """The follow-up Issue number named by `follow_up_issue_url`, or an error message.
+
+    Only `https://github.com/<this repo>/issues/<M>` (repo compared case-insensitively) with M
+    different from this Issue is accepted; (None, None) when the field is absent.
+    """
+    url = item.get("follow_up_issue_url")
+    if url is None:
+        return None, None
+    found = re.fullmatch(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]*)",
+                         url, re.IGNORECASE) if isinstance(url, str) else None
+    if found is None:
+        return None, f"follow_up_issue_url must be https://github.com/{repo}/issues/<number>"
+    if int(found.group(1)) == issue:
+        return None, f"follow_up_issue_url must be a different Issue than #{issue}"
+    return int(found.group(1)), None
 
 
 def gh_issue_thread(repo: str, issue: int) -> dict[str, Any]:
@@ -207,14 +246,15 @@ def gh_issue_thread(repo: str, issue: int) -> dict[str, Any]:
     return value
 
 
-def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | None, *, sha: str,
-                          ctx: "repo_evidence.Context | None" = None) -> list[str]:
+def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | None, *, repo: str,
+                          issue: int, sha: str, ctx: "repo_evidence.Context | None" = None) -> list[str]:
     """Verify each Issue claim the PR does not act on was answered on the Issue.
 
     The gate cannot judge whether the dispute is right; it checks that the claim's
     source is this Issue or one of its comments, that a later comment on the Issue
-    answers it (linking the source comment when the claim came from a comment), and
-    that the independent reviewer confirmed it for the current HEAD.
+    answers it (linking the source comment when the claim came from a comment, and the
+    follow-up Issue of an out_of_scope claim), and that the independent reviewer
+    confirmed it for the current HEAD. That the follow-up Issue exists is `check_follow_ups`.
     """
     items = evidence.get("disputed_issue_claims", [])
     if not isinstance(items, list):
@@ -236,6 +276,15 @@ def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | Non
             continue
         if item.get("disposition") not in DISPUTE_DISPOSITIONS:
             errors.append(f"{label}.disposition must be one of {', '.join(DISPUTE_DISPOSITIONS)}")
+        follow_up = None
+        if item.get("follow_up_issue_url") is not None:
+            if item.get("disposition") != "out_of_scope":
+                errors.append(f"{label}.follow_up_issue_url only applies to an out_of_scope claim")
+            else:
+                number, problem = follow_up_number(item, repo, issue)
+                follow_up = item["follow_up_issue_url"] if number is not None else None
+                if problem:
+                    errors.append(f"{label}.{problem}")
         for key, minimum in (("claim", 20), ("counter_evidence", 30)):
             if not nontrivial(item.get(key), minimum):
                 errors.append(f"{label}.{key} missing or lacks specific detail")
@@ -260,6 +309,35 @@ def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | Non
             errors.append(f"{label} reply was not posted after the disputed claim")
         if source != issue_url and source not in comments[reply][1]:
             errors.append(f"{label} reply does not link the disputed comment ({source})")
+        if follow_up and not re.search(re.escape(follow_up) + r"(?!\w)", comments[reply][1], re.IGNORECASE):
+            errors.append(f"{label} reply does not link the follow-up Issue ({follow_up})")
+    return errors
+
+
+def gh_follow_up_issue(repo: str, number: int) -> None:
+    """Raise GateError unless `number` is an Issue (not a PR) of `repo`; read-only. Open or closed."""
+    value = command(["gh", "issue", "view", str(number), "-R", repo, "--json", "number,url"])
+    # `gh issue view` also resolves a PR number, answering with its /pull/ URL: the URL tells them apart.
+    if (not isinstance(value, dict) or value.get("number") != number or not isinstance(value.get("url"), str)
+            or not re.fullmatch(re.escape(f"https://github.com/{repo}/issues/{number}"), value["url"], re.IGNORECASE)):
+        raise GateError(f"#{number} is not an Issue of {repo}: {str(value)[:200]}")
+
+
+def check_follow_ups(evidence: dict[str, Any], *, repo: str, issue: int) -> list[str]:
+    """Confirm every follow-up Issue named by an out_of_scope claim exists. gh is only called for
+    a well-formed follow_up_issue_url; a failed lookup is an error, never a pass."""
+    errors: list[str] = []
+    items = evidence.get("disputed_issue_claims")
+    for i, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict) or item.get("disposition") != "out_of_scope":
+            continue
+        number, _ = follow_up_number(item, repo, issue)
+        if number is None:
+            continue
+        try:
+            gh_follow_up_issue(repo, number)
+        except GateError as exc:
+            errors.append(f"disputed_issue_claims[{i}].follow_up_issue_url cannot be verified: {exc}")
     return errors
 
 
@@ -404,7 +482,8 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
             thread = gh_issue_thread(repo, issue)
         except GateError as exc:
             errors.append(f"GitHub Issue comments unavailable: {exc}")
-        errors.extend(check_disputed_claims(evidence, thread, sha=sha, ctx=ctx))
+        errors.extend(check_disputed_claims(evidence, thread, repo=repo, issue=issue, sha=sha, ctx=ctx))
+        errors.extend(check_follow_ups(evidence, repo=repo, issue=issue))
     try:
         if not remote_identity(worktree, remote, repo):
             errors.append(f"Git remote '{remote}' does not identify {repo} (forks require manual handling)")
@@ -422,6 +501,7 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     except GateError as exc:
         errors.append(f"GitHub duplicate/issue validation unavailable: {exc}")
     return errors, {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
+                    "issue_resolution": evidence.get("issue_resolution", "fixes"),
                     "repo_evidence": ctx.report()}
 
 

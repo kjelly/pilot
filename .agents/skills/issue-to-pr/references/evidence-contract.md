@@ -61,8 +61,11 @@ Example (full SHA values must be actual full git commit hashes; placeholders bel
    "reviewer_confirmed": true}
   ```
 
+  An `out_of_scope` entry may also carry `"follow_up_issue_url": "https://github.com/OWNER/REPO/issues/124"`. See `issue_resolution` below for what that changes.
+
   `disposition` is `invalid`, `needs_evidence` or `out_of_scope`. `source_url` is the Issue URL (a claim in the body) or one of its comments. `reply_url` is Root's comment on the Issue, posted after the claim, containing `source_url` when the claim came from a comment. `head_sha` follows the same evidence-only delta rule as `review.head_sha`. Set `reviewer_confirmed` only when the independent reviewer's own verdict agrees. When the list is non-empty the gate reads the Issue's comments to verify each entry.
-- `issue_resolution` is `fixes` (default: the PR body must close the Issue with `Fixes #N`) or `partial` (something the Issue asks for stays open; needs at least one disputed claim, and the PR body must reference the Issue with `Refs #N` and no closing keyword).
+- `issue_resolution` is `fixes` (default when the key is absent: the PR body must close the Issue with `Fixes #N`) or `partial` (something the Issue asks for stays open; needs at least one disputed claim, and the PR body must reference the Issue with `Refs #N` and no closing keyword). The two must agree with `disputed_issue_claims`: any `needs_evidence` entry, or any `out_of_scope` entry without `follow_up_issue_url`, requires `partial` (the default `fixes` is rejected); `invalid` entries alone allow `fixes`.
+- `follow_up_issue_url` (optional, `out_of_scope` entries only) names the follow-up Issue that now tracks the claim, so `fixes` stays allowed. It must fully match `https://github.com/OWNER/REPO/issues/M` for the same repository (case-insensitive) with M different from `issue`, the entry's `reply_url` comment must contain it, and the gate confirms with a read-only `gh issue view M --json number,url` that an Issue (not a PR) numbered M exists; it need not be open. Any lookup failure blocks. `gh` is only called when the field is present.
 - GitHub CI on a new Draft PR happens only **after** PR creation; this contract does not spoof post-PR CI success. Draft → Ready additionally requires `CI_PASSED` on the exact HEAD (`mark_ready.py`).
 
 Successful gate output (stdout JSON): `{"status":"GATE-PASS", ...}`. If unverified or blocked: `{"status":"BLOCKED","blockers":[...]}` and exit code 2. Non-gate misuse exits nonzero and must never be interpreted as success.
