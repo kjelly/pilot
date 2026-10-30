@@ -234,6 +234,13 @@ outcomes. Current acceptance evidence is linked below.
 
 ## Actual-run evidence
 
+PR #190 predecessor install-block backup/rescue evidence:
+`docs/evidence/detection-engine/2026-10-30-ccde655b4d07.md` (candidate
+`ccde655b4d07`, PR #190: normal chain L1/L3/L4, C1-C12 12/12 PASS and L6
+`changed=0`, plus the backup-selection, fail-closed and rescue-availability
+arms against the base on the same snapshot). The current-run backup provenance
+fix and its independent #193/#194 acceptance are recorded below.
+
 Latest rollback-provenance evidence: [2026-10-30-5adea80](../evidence/detection-engine/2026-10-30-5adea80.md).
 Candidate `5adea80`, tree `9367a31`, isolated vm-target: 19/19 PASS.
 Sanctioned first-install and upgrade chains each verified C1–C12:
