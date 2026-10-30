@@ -103,6 +103,7 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		return m, nil, invalid("manifest does not belong to session %s in %s", sessionID, env)
 	}
 	want := map[string]mcpwire.Change{}
+	folded := map[string]string{}
 	for _, c := range m.Changes {
 		if err := mcpwire.CheckSnapshotPath(c.Path); err != nil {
 			return m, nil, invalid("%v", err)
@@ -110,6 +111,11 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		if _, dup := want[c.Path]; dup {
 			return m, nil, invalid("%s listed twice", c.Path)
 		}
+		// On a case-insensitive clone (macOS) these would be one file.
+		if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
+			return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
+		}
+		folded[mcpwire.FoldPath(c.Path)] = c.Path
 		switch c.Op {
 		case mcpwire.OpAdd, mcpwire.OpModify, mcpwire.OpDelete:
 		default:

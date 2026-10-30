@@ -126,6 +126,17 @@ func TestCheckSnapshotPath(t *testing.T) {
 	}
 }
 
+func TestFoldPath(t *testing.T) {
+	for _, pair := range [][2]string{{"ALL.yml", "all.yml"}, {"contract\u017f", "contracts"}, {"a\u200cll.yml", "all.yml"}, {"\u212a", "k"}} {
+		if FoldPath(pair[0]) != FoldPath(pair[1]) {
+			t.Errorf("FoldPath(%q) != FoldPath(%q)", pair[0], pair[1])
+		}
+	}
+	if FoldPath("a.yml") == FoldPath("b.yml") || FoldPath("a/b") == FoldPath("ab") {
+		t.Error("FoldPath merges different names")
+	}
+}
+
 func TestValidators(t *testing.T) {
 	for _, e := range []string{"sandbox", "staging", "prod"} {
 		if !ValidEnv(e) {

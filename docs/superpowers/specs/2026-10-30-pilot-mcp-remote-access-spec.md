@@ -340,8 +340,9 @@ profiles:
    `mcp remote changes --protocol v1 --env <env> <session-id>`，stdout 收到 tar（§7.3）。超過 80 MiB 時
    直接結束 ssh（remote 還在寫一個沒人讀的 pipe，等它結束會永遠卡住），報 `CHANGESET_INVALID`。
 3. 驗證 tar：第一個 entry 是 manifest；其餘 entry 只能是 regular file，路徑規則同 §6.2，必須正好是
-   manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`。任何不符都報
-   `CHANGESET_INVALID`，一個檔案都不寫。
+   manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`；manifest 的路徑經
+   `mcpwire.FoldPath`（不分大小寫、忽略 HFS+ 略過的 code point）比較也不得重複（macOS 的 clone 上會是
+   同一個檔案）。任何不符都報 `CHANGESET_INVALID`，一個檔案都不寫。
 4. 檢查 `--into`：等於 `git rev-parse --show-toplevel`（是 repo 的最上層）、`origin` 的 URL 與 profile 的
    `source.url` 指向同一個 repo、`git status --porcelain` 為空，且 base commit（session 的 commit_sha）
    在本機存在（不存在就從 `origin` fetch）。「同一個 repo」的判斷：把兩個 URL 都解析成 host、owner、
@@ -402,7 +403,7 @@ digest；內容、路徑或大小改變一定改變 digest。
 - 每個 entry 只接受 regular file（directory entry 忽略）。路徑必須：
   - 是相對路徑，且 `path.Clean(p) == p`；
   - 不含 `..`、`\`、NUL 或控制字元；
-  - 不重複，轉成小寫後也不重複；
+  - 不重複，經 `mcpwire.FoldPath`（不分大小寫、忽略下面列的 HFS+ code point）比較後也不重複；
   - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/` 之下，任何一層都不是 `.git`
     （與 Git 相同：巢狀的 `.git/config` 可以指定 Git 會執行的指令）。比對方式與不分大小寫的檔案系統（macOS
     預設）相同：不分大小寫，並忽略 HFS+ 比對名稱時略過的 code point（U+200C–U+200F、U+202A–U+202E、
@@ -489,7 +490,8 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
 8. 結束條件：stdin EOF、SIGTERM/SIGHUP，或執行超過 `--max-session-duration`（預設 12h）。結束時：
    - observe：不需處理（container 結束後 `/tmp` 一起消失）。
    - edit：跟 baseline 比沒有變更（§7.3 的清單為空）就刪除 session 目錄；否則寫入 `state: ended`、
-     `ended_at`，保留給 `changes` 使用。
+     `ended_at`，保留給 `changes` 使用。變更無法計算或無法匯出時（例如 `RUNTIME_ERROR`、
+     `CHANGESET_INVALID`）也以 `ended` 保留，讓 `changes` 回報原因，不會停在 `serving`。
 9. 任何一步在送出 ready 之前失敗：刪除 session 目錄，依 §7.5 輸出錯誤，stdout 不輸出任何內容。
 
 ### 7.3 `changes <session-id>`
@@ -508,10 +510,15 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   `CHANGESET_INVALID`。
 - 匯出的變更會被 commit，成為下一個 session 的 snapshot，所以「source 套用這些變更之後」要通過 import
   的全部檢查（與 §6.2 共用同一份實作），否則回 `CHANGESET_INVALID`，訊息寫出 import 會回的 code：
-  檔案清單規則（路徑規則、大小寫不同也不得重複、檔案數 ≤ 10,000、單檔 ≤ 8 MiB、總量 ≤ 64 MiB，也讓 tar
-  不超過使用者端讀取的 80 MiB），以及內容檢查（每台主機的 `env`、路徑引用範圍、secret policy）。例如在
-  prod 的 edit session 新增一台沒有 `env` 的主機（等於 sandbox），會在匯出時被拒絕，而不是 commit 之後讓
-  之後每個 session 都 `ENV_MISMATCH`。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
+  檔案清單規則（路徑規則、`FoldPath` 後不得重複、檔案數 ≤ 10,000、單檔 ≤ 8 MiB、總量 ≤ 64 MiB），以及
+  內容檢查（每台主機的 `env`、路徑引用範圍、secret policy）。沒變更的檔案取自 session 的 `source/`（不是
+  workspace 裡重新產生的版本），有變更的取自 workspace。例如在 prod 的 edit session 新增一台沒有 `env`
+  的主機（等於 sandbox），會在匯出時被拒絕，而不是 commit 之後讓之後每個 session 都 `ENV_MISMATCH`。
+  沒變更的 source 本身就以同一個 code 失敗時（例如 session 開始後 image 升級，新的 contract 把某個沒被
+  修改的檔案標成明文 secret），那不是這些變更造成的：stderr 印出警告，照常匯出。session 照樣以 `ended`
+  保留，`changes` 每次都能說明原因。
+- 匯出的 tar 也要符合使用者端讀取的上限：變更數 ≤ 10,000、manifest ≤ 1 MiB、整個 tar ≤ 80 MiB，否則回
+  `CHANGESET_INVALID`。
 - stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
   `{"protocol","session_id","env","base_commit_sha","changes":[{"path","op","base_sha256","new_sha256"}]}`，
   之後是 `add`/`modify` 的檔案，依路徑排序。

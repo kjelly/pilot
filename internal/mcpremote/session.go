@@ -226,18 +226,18 @@ func finishSession(cfg *Config, dir string, state SessionState) {
 	}
 }
 
-// endEditSession deletes dir when the work tree has no exportable change
-// against the baseline; otherwise it records the session as ended.
+// endEditSession deletes dir when the work tree has no change against the
+// baseline; otherwise it records the session as ended. A session whose
+// changes cannot be computed or exported is kept as ended too, so
+// `changes` reports why instead of the edit vanishing or the session
+// staying in serving.
 func endEditSession(cfg *Config, dir string, state SessionState) error {
 	changes, _, err := computeChanges(cfg, dir, state)
 	switch {
-	case CodeOf(err) == mcpwire.CodeChangesetInvalid:
-		// There are changes, but they cannot be exported; keep the session
-		// so `changes` reports why instead of the edit silently vanishing.
-	case err != nil:
-		return err
-	case len(changes) == 0:
+	case err == nil && len(changes) == 0:
 		return os.RemoveAll(dir)
+	case err != nil && CodeOf(err) != mcpwire.CodeChangesetInvalid:
+		slog.Warn("mcp remote: compute edit session changes", "session", state.ID, "err", err)
 	}
 	state.State = stateEnded
 	state.EndedAt = cfg.now().UTC()

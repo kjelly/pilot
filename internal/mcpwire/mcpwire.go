@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode"
 )
 
 // Protocol identifies this wire format in manifests and ready lines.
@@ -86,39 +88,41 @@ var ReservedPaths = []string{".vault", ".pilot", ".pilot-data", "contracts", "do
 // IsReserved reports whether a clean relative path is a reserved directory
 // or lies under one, or has a .git component anywhere (Git refuses those
 // too: a nested .git/config can name a command Git runs). Components are
-// compared the way a case-insensitive file system (the macOS default)
-// compares them: ignoring case and the code points HFS+ ignores, so
-// ".GIT/config" and ".g\u200cit/config" are ".git/config" there.
+// compared through FoldPath, the way a case-insensitive file system (the
+// macOS default) compares them, so ".GIT/config" and ".g\u200cit/config"
+// are ".git/config" there.
 func IsReserved(p string) bool {
-	segs := strings.Split(p, "/")
-	for i, seg := range segs {
-		segs[i] = strings.Map(func(r rune) rune {
-			if hfsIgnorable(r) {
-				return -1
-			}
-			return r
-		}, seg)
-		if strings.EqualFold(segs[i], ".git") {
+	segs := strings.Split(FoldPath(p), "/")
+	dotGit := FoldPath(".git")
+	for _, seg := range segs {
+		if seg == dotGit {
 			return true
 		}
 	}
 	for _, r := range ReservedPaths {
-		rs := strings.Split(r, "/")
-		if len(segs) < len(rs) {
-			continue
-		}
-		match := true
-		for i := range rs {
-			if !strings.EqualFold(segs[i], rs[i]) {
-				match = false
-				break
-			}
-		}
-		if match {
+		rs := strings.Split(FoldPath(r), "/")
+		if len(segs) >= len(rs) && slices.Equal(segs[:len(rs)], rs) {
 			return true
 		}
 	}
 	return false
+}
+
+// FoldPath is p as a case-insensitive file system sees it: case folded
+// (Unicode simple folding, as strings.EqualFold) and without the code
+// points HFS+ ignores. Two paths with the same FoldPath name one file
+// there.
+func FoldPath(p string) string {
+	return strings.Map(func(r rune) rune {
+		if hfsIgnorable(r) {
+			return -1
+		}
+		folded := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			folded = min(folded, f)
+		}
+		return folded
+	}, p)
 }
 
 // hfsIgnorable reports a code point HFS+ drops when it compares names (the

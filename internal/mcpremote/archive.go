@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/kjelly/pilot/internal/mcpwire"
 )
@@ -66,7 +65,8 @@ func ReadSnapshot(br *bufio.Reader, dest, wantEnv string) (*mcpwire.Manifest, er
 }
 
 // checkFileSet applies the file-list rules of a snapshot (§6.2): each
-// path's rules, no path twice (also when compared ignoring case), and the
+// path's rules, no path twice (also as a case-insensitive file system
+// compares them, mcpwire.FoldPath), and the
 // count and size limits. `changes` holds the next snapshot to the same
 // rules (computeChanges).
 func checkFileSet(files []mcpwire.FileEntry) error {
@@ -84,11 +84,11 @@ func checkFileSet(files []mcpwire.FileEntry) error {
 			return errorf(mcpwire.CodeSnapshotInvalid, "manifest lists %q twice", f.Path)
 		}
 		seen[f.Path] = true
-		lower := strings.ToLower(f.Path)
-		if other, dup := folded[lower]; dup {
-			return errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case", other, f.Path)
+		key := mcpwire.FoldPath(f.Path)
+		if other, dup := folded[key]; dup {
+			return errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case or ignorable characters", other, f.Path)
 		}
-		folded[lower] = f.Path
+		folded[key] = f.Path
 		if f.Size < 0 || f.Size > mcpwire.MaxFileBytes {
 			return errorf(mcpwire.CodeSnapshotTooLarge, "file %q is larger than %d bytes", f.Path, mcpwire.MaxFileBytes)
 		}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -271,6 +272,7 @@ func TestRunChangesRejectsWhatTheNextSnapshotWouldReject(t *testing.T) {
 		// An added host without env is a sandbox host in a prod config.
 		"host env":     {"hosts.yml", []byte(hostsFor("prod") + "  web-2:\n    ansible_host: \"192.0.2.11\"\n    roles: [docker]\n"), "ENV_MISMATCH"},
 		"case only":    {"group_vars/ALL.yml", []byte("b: 1\n"), "differ only in case"},
+		"ignorable":    {"group_vars/a\u200cll.yml", []byte("b: 1\n"), "differ only in case"},
 		"plain secret": {"group_vars/dashboard.yml", []byte("grafana_admin_password: \"hunter2\"\n"), "SECRET_POLICY_VIOLATION"},
 	}
 	for name, tc := range cases {
@@ -303,6 +305,122 @@ func TestRunChangesRejectsWhatTheNextSnapshotWouldReject(t *testing.T) {
 	}
 }
 
+// A check the session's unchanged base already fails with the same code
+// (an image upgraded since the session started now flags a file the edit
+// did not touch) is reported, not blamed on the changes; a different
+// failure the changes add is still refused.
+func TestRunChangesDoesNotBlameTheChangesForTheBase(t *testing.T) {
+	secret := []byte("grafana_admin_password: \"hunter2\"\n")
+	run := func(t *testing.T, edit func(work string)) (string, error) {
+		fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(work string) {
+			// Stand-in for a newer image: the unchanged base now fails
+			// the secret policy.
+			mustWrite(t, filepath.Join(filepath.Dir(work), "source", "group_vars", "all.yml"), secret)
+			edit(work)
+		})
+		fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
+		if err := RunSession(context.Background(), fs.cfg); err != nil {
+			t.Fatal(err)
+		}
+		id := mustReadyID(t, fs.stdout.String())
+		cfg := *fs.cfg
+		var stderr bytes.Buffer
+		cfg.Stdout, cfg.Stderr = io.Discard, &stderr
+		err := RunChanges(&cfg, id)
+		return stderr.String(), err
+	}
+	t.Run("same check", func(t *testing.T) {
+		stderr, err := run(t, func(work string) {
+			if err := os.MkdirAll(filepath.Join(work, "host_vars"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(work, "host_vars", "web-1.yml"), []byte("b: 1\n"))
+		})
+		if err != nil || !strings.Contains(stderr, "base commit already fails SECRET_POLICY_VIOLATION") {
+			t.Fatalf("err = %v, stderr = %q; want the changes exported with a warning", err, stderr)
+		}
+	})
+	t.Run("different check", func(t *testing.T) {
+		_, err := run(t, func(work string) {
+			mustWrite(t, filepath.Join(work, "hosts.yml"), []byte(hostsFor("prod")+"  web-2:\n    ansible_host: \"192.0.2.11\"\n    roles: [docker]\n"))
+		})
+		if CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), "ENV_MISMATCH") {
+			t.Fatalf("err = %v, want CHANGESET_INVALID for ENV_MISMATCH", err)
+		}
+	})
+}
+
+// A tracked inventory.yml is regenerated in the workspace and never
+// exported; deleting it must not break the export of the real changes.
+func TestRunChangesWithATrackedInventoryDeleted(t *testing.T) {
+	fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(work string) {
+		if err := os.Remove(filepath.Join(work, "inventory.yml")); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(work, "group_vars", "all.yml"), []byte("a: 2\n"))
+	})
+	files := sessionFiles("prod")
+	files["inventory.yml"] = "all: {}\n"
+	fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", files))
+	if err := RunSession(context.Background(), fs.cfg); err != nil {
+		t.Fatal(err)
+	}
+	id := mustReadyID(t, fs.stdout.String())
+	cfg := *fs.cfg
+	var out bytes.Buffer
+	cfg.Stdout = &out
+	if err := RunChanges(&cfg, id); err != nil {
+		t.Fatalf("RunChanges: %v", err)
+	}
+	manifest, _ := readChanges(t, out.Bytes())
+	if len(manifest.Changes) != 1 || manifest.Changes[0].Path != "group_vars/all.yml" {
+		t.Fatalf("changes = %+v, want only group_vars/all.yml", manifest.Changes)
+	}
+}
+
+// A session whose changes cannot be computed is kept as ended, so
+// `changes` reports the error instead of "has not ended".
+func TestEditSessionWithUncomputableChangesIsKeptAsEnded(t *testing.T) {
+	fs := newFakeSession(t, mcpwire.ModeEdit, "prod", func(work string) {
+		mustWrite(t, filepath.Join(work, "group_vars", "all.yml"), []byte("a: 2\n"))
+		if err := os.Remove(filepath.Join(filepath.Dir(work), "source", "hosts.yml")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
+	if err := RunSession(context.Background(), fs.cfg); err != nil {
+		t.Fatal(err)
+	}
+	id := mustReadyID(t, fs.stdout.String())
+	if st, ok, err := loadSession(filepath.Join(fs.cfg.sessionsRoot(), id)); err != nil || !ok || st.State != stateEnded {
+		t.Fatalf("session = %+v %v %v, want kept as ended", st, ok, err)
+	}
+	cfg := *fs.cfg
+	cfg.Stdout = io.Discard
+	if err := RunChanges(&cfg, id); err == nil || CodeOf(err) != mcpwire.CodeRuntimeError || !strings.Contains(err.Error(), "read source hosts.yml") {
+		t.Fatalf("RunChanges: %v, want the RUNTIME_ERROR that stops the export", err)
+	}
+}
+
+// The changes stream is held to what the client reads.
+func TestEncodeChangesLimits(t *testing.T) {
+	state := SessionState{ID: strings.Repeat("a", 32), Env: "prod", Source: mcpwire.Source{CommitSHA: strings.Repeat("b", 40)}}
+	var many []mcpwire.Change
+	for i := range 4000 {
+		many = append(many, mcpwire.Change{Path: fmt.Sprintf("d/%0200d.yml", i), Op: mcpwire.OpDelete, BaseSHA256: strings.Repeat("c", 64)})
+	}
+	if _, err := encodeChanges(state, many, nil); CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("large manifest: %v", err)
+	}
+	var tooMany []mcpwire.Change
+	for i := range mcpwire.MaxFiles + 1 {
+		tooMany = append(tooMany, mcpwire.Change{Path: fmt.Sprintf("d/%d", i), Op: mcpwire.OpDelete})
+	}
+	if _, err := encodeChanges(state, tooMany, nil); CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), "changes, more than") {
+		t.Fatalf("too many changes: %v", err)
+	}
+}
+
 // The audit directory is the last thing a session needs; failing to create
 // it is a startup failure, reported before the ready line.
 func TestRunSessionAuditDirFailureIsReportedBeforeReady(t *testing.T) {
@@ -314,7 +432,7 @@ func TestRunSessionAuditDirFailureIsReportedBeforeReady(t *testing.T) {
 		mustWrite(t, fs.cfg.auditDir(), []byte("not a directory"))
 		fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", sessionFiles("prod")))
 		err := RunSession(context.Background(), fs.cfg)
-		if CodeOf(err) != mcpwire.CodeRuntimeError || !strings.Contains(err.Error(), "audit directory") {
+		if err == nil || CodeOf(err) != mcpwire.CodeRuntimeError || !strings.Contains(err.Error(), "audit directory") {
 			t.Fatalf("%s: err = %v, want RUNTIME_ERROR about the audit directory", mode, err)
 		}
 		if fs.stdout.Len() != 0 {

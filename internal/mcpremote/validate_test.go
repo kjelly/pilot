@@ -132,7 +132,7 @@ func TestCheckSecretPolicy(t *testing.T) {
 	if strings.Contains(err.Error(), "s3cr3t-value") {
 		t.Fatal("the violation message printed the secret value")
 	}
-	if err := CheckSecretPolicy(t.TempDir(), clean); CodeOf(err) != mcpwire.CodeRuntimeError {
+	if err := CheckSecretPolicy(t.TempDir(), clean); err == nil || CodeOf(err) != mcpwire.CodeRuntimeError {
 		t.Fatalf("missing contracts must fail closed, got %v", err)
 	}
 }

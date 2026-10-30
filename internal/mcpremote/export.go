@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,7 +75,10 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	if err := checkNextSnapshot(cfg, work, state, changes); err != nil {
+	if err := checkNextSnapshot(cfg, dir, state, changes, contents); err != nil {
+		return nil, nil, err
+	}
+	if _, err := encodeChanges(state, changes, contents); err != nil {
 		return nil, nil, err
 	}
 	return changes, contents, nil
@@ -84,12 +88,16 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 // config repository holds once they are committed, and so the next
 // session's snapshot) to the same checks a snapshot gets on import: the
 // file-list rules and the content checks. An exported change therefore
-// never makes every later session fail; the size limits also bound the
-// changes stream the client reads.
-func checkNextSnapshot(cfg *Config, work string, state SessionState, changes []mcpwire.Change) error {
+// never makes every later session fail. Unchanged files come from the
+// session's source/, changed ones from contents. A check the unchanged
+// source already fails with the same code (the image was upgraded since
+// the session started, for example) is not the changes' doing: it is
+// reported on stderr and the changes are exported.
+func checkNextSnapshot(cfg *Config, dir string, state SessionState, changes []mcpwire.Change, contents map[string][]byte) error {
 	if len(changes) == 0 {
 		return nil
 	}
+	sourceDir := filepath.Join(dir, "source")
 	next := make(map[string]bool, len(state.SourceFiles)+len(changes))
 	for p := range state.SourceFiles {
 		next[p] = true
@@ -104,16 +112,37 @@ func checkNextSnapshot(cfg *Config, work string, state SessionState, changes []m
 		}
 	}
 	sort.Strings(paths)
+	data := make(map[string][]byte, len(paths))
 	files := make([]mcpwire.FileEntry, 0, len(paths))
 	for _, p := range paths {
-		info, err := os.Lstat(filepath.Join(work, filepath.FromSlash(p)))
-		if err != nil || !info.Mode().IsRegular() {
-			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %s is not a regular file in the work tree", p)
+		b, changed := contents[p]
+		if !changed {
+			var err error
+			if b, err = os.ReadFile(filepath.Join(sourceDir, filepath.FromSlash(p))); err != nil {
+				return errorf(mcpwire.CodeRuntimeError, "next snapshot: read source %s: %v", p, err)
+			}
 		}
-		files = append(files, mcpwire.FileEntry{Path: p, Size: info.Size()})
+		data[p] = b
+		files = append(files, mcpwire.FileEntry{Path: p, Size: int64(len(b))})
 	}
+	sourcePaths := make([]string, 0, len(state.SourceFiles))
+	for p := range state.SourceFiles {
+		sourcePaths = append(sourcePaths, p)
+	}
+	sort.Strings(sourcePaths)
+
 	if err := checkFileSet(files); err != nil {
-		return refusedNextSnapshot(err)
+		return refusedNextSnapshot(cfg, err, sourceDir, func() error {
+			entries := make([]mcpwire.FileEntry, 0, len(sourcePaths))
+			for _, p := range sourcePaths {
+				info, err := os.Stat(filepath.Join(sourceDir, filepath.FromSlash(p)))
+				if err != nil {
+					return err
+				}
+				entries = append(entries, mcpwire.FileEntry{Path: p, Size: info.Size()})
+			}
+			return checkFileSet(entries)
+		})
 	}
 
 	parent := cfg.TmpDir
@@ -128,32 +157,39 @@ func checkNextSnapshot(cfg *Config, work string, state SessionState, changes []m
 	}
 	defer os.RemoveAll(root)
 	for _, p := range paths {
-		data, err := os.ReadFile(filepath.Join(work, filepath.FromSlash(p)))
-		if err != nil {
-			return errorf(mcpwire.CodeRuntimeError, "next snapshot: read %s: %v", p, err)
-		}
 		dst := filepath.Join(root, filepath.FromSlash(p))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %v", err)
 		}
-		if err := os.WriteFile(dst, data, 0o600); err != nil {
+		if err := os.WriteFile(dst, data[p], 0o600); err != nil {
 			return errorf(mcpwire.CodeRuntimeError, "next snapshot: %v", err)
 		}
 	}
 	if err := checkSnapshotContent(cfg, root, state.Env, paths); err != nil {
-		return refusedNextSnapshot(err)
+		return refusedNextSnapshot(cfg, err, sourceDir, func() error {
+			return checkSnapshotContent(cfg, sourceDir, state.Env, sourcePaths)
+		})
 	}
 	return nil
 }
 
 // refusedNextSnapshot reports a check the next snapshot fails as an
-// invalid changeset, naming the code the import would have returned.
-func refusedNextSnapshot(err error) error {
+// invalid changeset naming the code the import would return, unless the
+// session's unchanged source fails the same check with the same code.
+func refusedNextSnapshot(cfg *Config, err error, sourceDir string, sourceCheck func() error) error {
 	var e *Error
-	if errors.As(err, &e) && e.Code != mcpwire.CodeRuntimeError {
-		return errorf(mcpwire.CodeChangesetInvalid, "the next session would refuse these changes with %s: %v", e.Code, e.Err)
+	if !errors.As(err, &e) || e.Code == mcpwire.CodeRuntimeError {
+		return err
 	}
-	return err
+	if _, statErr := os.Stat(sourceDir); statErr == nil {
+		if srcErr := sourceCheck(); srcErr != nil && CodeOf(srcErr) == e.Code {
+			if cfg.Stderr != nil {
+				fmt.Fprintf(cfg.Stderr, "pilot mcp remote: warning: the session's base commit already fails %s (%v); exporting the changes anyway\n", e.Code, srcErr)
+			}
+			return nil
+		}
+	}
+	return errorf(mcpwire.CodeChangesetInvalid, "the next session would refuse the configuration with these changes: %s: %v", e.Code, e.Err)
 }
 
 // internalPathIn reports a session-internal location written into a file.
@@ -210,16 +246,33 @@ func RunChanges(cfg *Config, id string) error {
 	if err != nil {
 		return err
 	}
-	return writeChanges(cfg, state, changes, contents)
+	out, err := encodeChanges(state, changes, contents)
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.Stdout.Write(out); err != nil {
+		return errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
+	}
+	return nil
 }
 
-func writeChanges(cfg *Config, state SessionState, changes []mcpwire.Change, contents map[string][]byte) error {
+// encodeChanges builds the changes tar: the manifest, then the add and
+// modify files. It holds the result to what the client reads: at most
+// MaxFiles changes, a manifest of at most MaxManifestBytes and a stream of
+// at most MaxStreamBytes.
+func encodeChanges(state SessionState, changes []mcpwire.Change, contents map[string][]byte) ([]byte, error) {
+	if len(changes) > mcpwire.MaxFiles {
+		return nil, errorf(mcpwire.CodeChangesetInvalid, "%d changes, more than %d", len(changes), mcpwire.MaxFiles)
+	}
 	manifest, err := json.Marshal(mcpwire.ChangesManifest{
 		Protocol: mcpwire.Protocol, SessionID: state.ID, Env: state.Env,
 		BaseCommitSHA: state.Source.CommitSHA, Changes: changes,
 	})
 	if err != nil {
-		return errorf(mcpwire.CodeRuntimeError, "encode changes manifest: %v", err)
+		return nil, errorf(mcpwire.CodeRuntimeError, "encode changes manifest: %v", err)
+	}
+	if len(manifest) > mcpwire.MaxManifestBytes {
+		return nil, errorf(mcpwire.CodeChangesetInvalid, "changes manifest is %d bytes, more than %d", len(manifest), mcpwire.MaxManifestBytes)
 	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -231,21 +284,21 @@ func writeChanges(cfg *Config, state SessionState, changes []mcpwire.Change, con
 		return err
 	}
 	if err := write(mcpwire.ChangesManifestName, manifest); err != nil {
-		return errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
+		return nil, errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
 	}
 	for _, c := range changes {
 		if c.Op == mcpwire.OpDelete {
 			continue
 		}
 		if err := write(c.Path, contents[c.Path]); err != nil {
-			return errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
+			return nil, errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
+		return nil, errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
 	}
-	if _, err := cfg.Stdout.Write(buf.Bytes()); err != nil {
-		return errorf(mcpwire.CodeRuntimeError, "write changes: %v", err)
+	if buf.Len() > mcpwire.MaxStreamBytes {
+		return nil, errorf(mcpwire.CodeChangesetInvalid, "changes stream is %d bytes, more than %d", buf.Len(), mcpwire.MaxStreamBytes)
 	}
-	return nil
+	return buf.Bytes(), nil
 }
