@@ -173,7 +173,7 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 	}
 	stopIdx, restoreIdx, reloadIdx, enableIdx, restartIdx := idx("ROLLBACK — stop"), idx("ROLLBACK — restore the unit, config"), idx("ROLLBACK — reload systemd"), idx("ROLLBACK — re-enable"), idx("ROLLBACK — restart")
 	linksIdx := idx("ROLLBACK — restore the files that were symlinks")
-	if !(stopIdx < restoreIdx && restoreIdx < linksIdx && linksIdx < reloadIdx && reloadIdx < enableIdx && enableIdx < restartIdx) {
+	if stopIdx >= restoreIdx || restoreIdx >= linksIdx || linksIdx >= reloadIdx || reloadIdx >= enableIdx || enableIdx >= restartIdx {
 		t.Errorf("rescue order must be stop < restore files < restore links < daemon-reload < re-enable < restart, got %d %d %d %d %d %d", stopIdx, restoreIdx, linksIdx, reloadIdx, enableIdx, restartIdx)
 	}
 	for _, i := range []int{enableIdx, restartIdx} {
