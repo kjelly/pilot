@@ -10,7 +10,7 @@
 
 | 項目 | 狀態 |
 |---|---|
-| 最新驗證 | 2026-10-30，tested commit `e93443d`（tree `cbc1e461`），[evidence](../evidence/mcp-remote-access/2026-10-30-e93443d.md) |
+| 最新驗證 | 2026-10-30，tested commit `4ff4fc7`（tree `994e2354`），[evidence](../evidence/mcp-remote-access/2026-10-30-4ff4fc7.md) |
 | 驗證 target | 拋棄式 vm-target（Ubuntu 24.04 golden），已刪除；inventory 只有 `all` 一台 host |
 | 結果 | fixture `--check --diff` 對全新 VM 通過；fixture 冪等（第二次 `changed=0`）；E2E 4/4 PASS；`pilot-mcp doctor` 全部 pass；Claude Code `claude mcp get` 為 `✔ Connected` |
 | 真實 deploy node | 尚未依本 runbook 設定（由操作者決定時機，規格 §16） |
