@@ -172,19 +172,20 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 		return -1
 	}
 	stopIdx, restoreIdx, reloadIdx, enableIdx, restartIdx := idx("ROLLBACK — stop"), idx("ROLLBACK — restore the unit, config"), idx("ROLLBACK — reload systemd"), idx("ROLLBACK — re-enable"), idx("ROLLBACK — restart")
-	if !(stopIdx < restoreIdx && restoreIdx < reloadIdx && reloadIdx < enableIdx && enableIdx < restartIdx) {
-		t.Errorf("rescue order must be stop < restore files < daemon-reload < re-enable < restart, got %d %d %d %d %d", stopIdx, restoreIdx, reloadIdx, enableIdx, restartIdx)
+	linksIdx := idx("ROLLBACK — restore the files that were symlinks")
+	if !(stopIdx < restoreIdx && restoreIdx < linksIdx && linksIdx < reloadIdx && reloadIdx < enableIdx && enableIdx < restartIdx) {
+		t.Errorf("rescue order must be stop < restore files < restore links < daemon-reload < re-enable < restart, got %d %d %d %d %d %d", stopIdx, restoreIdx, linksIdx, reloadIdx, enableIdx, restartIdx)
 	}
 	for _, i := range []int{enableIdx, restartIdx} {
 		m := resc[i].(map[string]any)
 		when := strings.Join(whenStrings(m["when"]), " && ")
-		for _, reg := range []string{"detection_engine_rescue_restore_files is not failed", "detection_engine_rescue_remove_files is not failed", "detection_engine_rescue_reload is not failed"} {
+		for _, reg := range []string{"detection_engine_rescue_restore_files is not failed", "detection_engine_rescue_restore_links is not failed", "detection_engine_rescue_remove_files is not failed", "detection_engine_rescue_reload is not failed"} {
 			if !strings.Contains(when, reg) {
 				t.Errorf("%v: when %q must require %q (never restart into a config this run wrote)", m["name"], when, reg)
 			}
 		}
 	}
-	for _, i := range []int{restoreIdx, reloadIdx, idx("ROLLBACK — remove the files")} {
+	for _, i := range []int{restoreIdx, linksIdx, reloadIdx, idx("ROLLBACK — remove the files")} {
 		m := resc[i].(map[string]any)
 		if m["ignore_errors"] != true {
 			t.Errorf("%v must use ignore_errors with register (a failed restore has to reach the final message and stop the restart), not failed_when: false", m["name"])
@@ -192,6 +193,38 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 	}
 	if resc[restoreIdx].(map[string]any)["no_log"] != true {
 		t.Errorf("the restore task carries provider.env: it must be no_log")
+	}
+	// The snapshot reads provider.env (a secret): the slurp that holds it is no_log, and the
+	// stat must not add a checksum of it (-vvv would print the sha1).
+	for _, probe := range loadDetectionEngineProbes(t) {
+		m := probe.(map[string]any)
+		name, _ := m["name"].(string)
+		switch {
+		case strings.HasPrefix(name, "Step 0c:"):
+			if m["no_log"] != true {
+				t.Errorf("%s: the slurp holds provider.env, it must be no_log", name)
+			}
+		case strings.HasPrefix(name, "Step 0b:"):
+			args, _ := m["ansible.builtin.stat"].(map[string]any)
+			if args["get_checksum"] != false {
+				t.Errorf("%s: stat must set get_checksum: false (nothing consumes it and -vvv prints the sha1 of provider.env)", name)
+			}
+			// the restore consumes exactly these
+			for _, key := range []string{"mode", "uid", "gid", "lnk_target", "islnk"} {
+				found := false
+				for _, task := range resc {
+					rm := task.(map[string]any)
+					if n, _ := rm["name"].(string); strings.HasPrefix(n, "ROLLBACK — restore the") {
+						if b, _ := yaml.Marshal(rm); strings.Contains(string(b), "stat."+key) {
+							found = true
+						}
+					}
+				}
+				if !found {
+					t.Errorf("no restore task uses the original's stat.%s: the rescue must put back the file as it was", key)
+				}
+			}
+		}
 	}
 	// The rescue's mutating stop+disable must itself require the valid snapshot.
 	stop, _ := resc[0].(map[string]any)

@@ -52,13 +52,13 @@
     detection_engine_config_path: /etc/pilot/detection-engine/config.yaml
     detection_engine_feature_profile_dest: /etc/pilot/detection-engine/feature-profile.yaml
     detection_engine_unit_path: /etc/systemd/system/pilot-detection-engine.service
-    # Files Steps 8/9/9b/9c/11 rewrite or delete, and the mode the rescue puts back
-    # (Step 0b-0d snapshot them, the rescue restores them before restarting the service).
+    # Files Steps 8/9/9b/9c/11 rewrite or delete. Step 0b-0d snapshot them (content, mode,
+    # owner/group, symlink target) and the rescue restores them before restarting the service.
     detection_engine_rollback_files:
-      - { path: "{{ detection_engine_unit_path }}", mode: "0644" }
-      - { path: "{{ detection_engine_config_path }}", mode: "0644" }
-      - { path: "{{ detection_engine_feature_profile_dest }}", mode: "0644" }
-      - { path: "{{ detection_engine_config_dir }}/provider.env", mode: "0600" }
+      - { path: "{{ detection_engine_unit_path }}" }
+      - { path: "{{ detection_engine_config_path }}" }
+      - { path: "{{ detection_engine_feature_profile_dest }}" }
+      - { path: "{{ detection_engine_config_dir }}/provider.env" }
     detection_engine_feature_profile_src: "{{ playbook_dir }}/../../monitoring/detection/feature-profiles/linux-host-v1.yaml"
     detection_engine_data_dir: /var/lib/pilot/detection-engine
     detection_engine_db_path: /var/lib/pilot/detection-engine/state.db
@@ -556,6 +556,12 @@
       tags: [always]
       ansible.builtin.stat:
         path: "{{ item.path }}"
+        # Not a symlink follow: the restore needs the file's own mode/owner/group and, for a
+        # symlink, its target. No checksum/mime/attributes: nothing consumes them, and the
+        # sha1 of provider.env would be printed by -vvv (the slurp below is no_log).
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
       loop: "{{ detection_engine_rollback_files }}"
       loop_control:
         label: "{{ item.path }}"
@@ -568,7 +574,8 @@
       loop: "{{ detection_engine_prev_stat.results }}"
       loop_control:
         label: "{{ item.item.path }}"
-      when: item.stat.exists
+      # a symlink is restored as a link to its target (Step 0b), not by content
+      when: item.stat.exists and not item.stat.islnk
       no_log: true
       register: detection_engine_prev_content
 
@@ -993,15 +1000,39 @@
           ansible.builtin.copy:
             dest: "{{ item.0.item.path }}"
             content: "{{ item.1.content | b64decode }}"
-            mode: "{{ item.0.item.mode }}"
+            # the file's own mode and numeric owner/group from Step 0b, not the playbook's
+            # defaults (an operator may have a 0640 provider.env owned by another group)
+            mode: "{{ item.0.stat.mode }}"
+            owner: "{{ item.0.stat.uid }}"
+            group: "{{ item.0.stat.gid }}"
           loop: "{{ detection_engine_prev_stat.results | zip(detection_engine_prev_content.results) | list }}"
           loop_control:
             label: "{{ item.0.item.path }}"
           when:
             - detection_engine_prev_unit_existed | bool
             - item.0.stat.exists
+            - not item.0.stat.islnk
           no_log: true
           register: detection_engine_rescue_restore_files
+          ignore_errors: true
+
+        # A file that was a symlink comes back as the same symlink (the run's copy replaced
+        # it with a regular file), not as a regular file holding the target's content.
+        - name: "ROLLBACK — restore the files that were symlinks"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item.path }}"
+            src: "{{ item.stat.lnk_target }}"
+            state: link
+            force: true
+          loop: "{{ detection_engine_prev_stat.results }}"
+          loop_control:
+            label: "{{ item.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - item.stat.exists
+            - item.stat.islnk
+          register: detection_engine_rescue_restore_links
           ignore_errors: true
 
         - name: "ROLLBACK — remove the files this run created next to an existing unit"
@@ -1048,6 +1079,7 @@
             - detection_engine_service_before.rc == 0
             - "'UnitFileState=enabled' in detection_engine_service_before.stdout_lines"
             - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_restore_links is not failed
             - detection_engine_rescue_remove_files is not failed
             - detection_engine_rescue_reload is not failed
           register: detection_engine_rescue_reenable
@@ -1062,6 +1094,7 @@
             - detection_engine_service_before.rc == 0
             - detection_engine_service_before.stdout_lines | intersect(['ActiveState=active', 'ActiveState=reloading', 'ActiveState=activating']) | length > 0
             - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_restore_links is not failed
             - detection_engine_rescue_remove_files is not failed
             - detection_engine_rescue_reload is not failed
           register: detection_engine_rescue_restart
@@ -1080,6 +1113,7 @@
               already existed). A service that was not active before, or did not
               exist, stays stopped/disabled for inspection.
               {% if detection_engine_rescue_restore_files is failed
+                 or detection_engine_rescue_restore_links is failed
                  or detection_engine_rescue_remove_files is failed
                  or detection_engine_rescue_reload is failed %}
               WARNING: putting the previous unit/config.yaml/feature

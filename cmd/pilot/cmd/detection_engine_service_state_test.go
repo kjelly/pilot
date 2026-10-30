@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -47,6 +50,11 @@ func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 	for _, list := range [][]any{block, rescue} {
 		for _, task := range list {
 			m, _ := task.(map[string]any)
+			// the config restore passes the originals' uid/gid on purpose (tests chgrp to a
+			// group the unprivileged test user belongs to); every other task has root/pilot-detect
+			if name, _ := m["name"].(string); strings.HasPrefix(name, "ROLLBACK — restore the unit, config") {
+				continue
+			}
 			for _, module := range []string{"ansible.builtin.copy", "ansible.builtin.file"} {
 				if args, ok := m[module].(map[string]any); ok {
 					delete(args, "owner")
@@ -174,6 +182,9 @@ type harness struct {
 	healthMark  string            // the unit crash-loops unless config.yaml contains this
 	vars        map[string]any    // extra playbook vars
 	noBlockOnly bool              // run only probes (no block/rescue)
+	fileModes   map[string]os.FileMode
+	fileGIDs    map[string]int  // chgrp the seeded file to this gid
+	symlinks    map[string]bool // seed this file as a symlink to a real file with the content
 }
 
 type harnessResult struct {
@@ -185,6 +196,13 @@ type harnessResult struct {
 	files       map[string]string // unit, config, profile, provider after the run ("" and absent: see exists)
 	exists      map[string]bool
 	providerMod os.FileMode
+	stats       map[string]fileStat // Lstat of unit, config, profile, provider after the run
+}
+
+type fileStat struct {
+	mode     os.FileMode
+	uid, gid int
+	link     string // symlink target, "" for a regular file
 }
 
 const (
@@ -230,7 +248,27 @@ func (h harness) run(t *testing.T) harnessResult {
 		if name == "provider" {
 			mode = 0o600
 		}
-		write(paths[name], content, mode)
+		if m, ok := h.fileModes[name]; ok {
+			mode = m
+		}
+		target := paths[name]
+		if h.symlinks[name] {
+			target = filepath.Join(dir, "real-"+name)
+		}
+		write(target, content, mode)
+		if err := os.Chmod(target, mode); err != nil {
+			t.Fatal(err)
+		}
+		if gid, ok := h.fileGIDs[name]; ok {
+			if err := os.Chown(target, -1, gid); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if h.symlinks[name] {
+			if err := os.Symlink(target, paths[name]); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	write(filepath.Join(dir, "new-profile.yaml"), "NEW-PROFILE\n", 0o644)
 	bin, artifact, db := filepath.Join(dir, "bin"), filepath.Join(dir, "artifact"), filepath.Join(dir, "state.db")
@@ -312,6 +350,19 @@ func (h harness) run(t *testing.T) harnessResult {
 	for name, path := range paths {
 		if b, err := os.ReadFile(path); err == nil {
 			res.files[name], res.exists[name] = string(b), true
+		}
+	}
+	res.stats = map[string]fileStat{}
+	for name, path := range paths {
+		if fi, err := os.Lstat(path); err == nil {
+			st := fileStat{mode: fi.Mode().Perm()}
+			if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
+				st.uid, st.gid = int(sys.Uid), int(sys.Gid)
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				st.link, _ = os.Readlink(path)
+			}
+			res.stats[name] = st
 		}
 	}
 	if fi, err := os.Stat(paths["provider"]); err == nil {
@@ -664,6 +715,155 @@ func TestDetectionEngineStepZeroIsReadOnlyAndCheckModeSafe(t *testing.T) {
 				if regexp.MustCompile(`(?m)^` + mutating + ` `).MatchString(res.calls) {
 					t.Errorf("Step 0* called systemctl %s", mutating)
 				}
+			}
+		})
+	}
+}
+
+// The unit-existed guard on the restore matters: with no unit file there is no running
+// service to protect, and a failed first install leaves what it wrote for inspection. This
+// also holds when config.yaml/provider.env are already there (a unit file removed by hand,
+// a half-applied earlier run): they must stay exactly as this run wrote them, not be rolled
+// back to the older contents, and the service must not be touched.
+func TestDetectionEngineRescueLeavesWhatItWroteWithoutAUnitFile(t *testing.T) {
+	_, steps, rescue := detectionEngineRescueSteps(t)
+	probes, block, _ := loadDetectionEnginePlay(t)
+	steps = append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 8:", "Step 9:", "Step 9b:", "Step 9c:", "Step 10:", "Step 11:", "Step 12:")...)
+	const oldCfg, oldProvider = "OLD-GOOD-CONFIG\n", "OLD=1\n"
+	res := harness{probes: probes, steps: steps, inject: injectedFailure(nil), rescue: rescue, unit: fakeUnit{}, binary: "old", healthMark: "OLD-GOOD-CONFIG",
+		files: map[string]string{"config": oldCfg, "provider": oldProvider},
+		vars: map[string]any{"detection_model_provider_enabled": true, "detection_model_provider_base_url": "http://x", "detection_model_provider_model": "m",
+			"detection_model_provider_auth": "bearer", "detection_model_provider_api_key": "k"}}.run(t)
+	if res.err == nil {
+		t.Fatalf("the run must fail\n%s", res.log)
+	}
+	if res.unit != (fakeUnit{}) {
+		t.Errorf("service = %v, want it untouched\n%s", res.unit, res.log)
+	}
+	if !res.exists["config"] || res.files["config"] == oldCfg || !strings.Contains(res.files["config"], "metricsSourceBaseUrl") {
+		t.Errorf("config.yaml = %q: it must stay as the failed run wrote it, not be rolled back to %q", res.files["config"], oldCfg)
+	}
+	if !strings.Contains(res.files["provider"], "DETECTION_MODEL_API_KEY=k") {
+		t.Errorf("provider.env = %q: it must stay as the failed run wrote it, not be rolled back to %q", res.files["provider"], oldProvider)
+	}
+	if !res.exists["unit"] || !strings.Contains(res.files["unit"], "[Service]") {
+		t.Errorf("the unit file Step 11 wrote must stay for inspection, got %q", res.files["unit"])
+	}
+	for _, mutating := range []string{"restart", "start", "enable"} {
+		if regexp.MustCompile(`(?m)^` + mutating + ` `).MatchString(res.calls) {
+			t.Errorf("systemctl %s was called on a unit that did not exist before:\n%s", mutating, res.calls)
+		}
+	}
+}
+
+// What the rescue puts back must be the file as it was, not as the playbook would create it:
+// an operator's 0640 provider.env owned by another group, a 0600 config.yaml, a symlinked
+// config.yaml (the run's copy replaces the link with a regular file; it must come back as
+// the same link, with the target's content untouched). The test user need not be root: it
+// uses a group it belongs to (or gid 1 as root).
+func TestDetectionEngineRescueRestoresModeOwnerAndSymlinks(t *testing.T) {
+	_, steps, rescue := detectionEngineRescueSteps(t)
+	probes, block, _ := loadDetectionEnginePlay(t)
+	steps = append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 8:", "Step 9:", "Step 9b:", "Step 9c:", "Step 10:")...)
+	rejectBin := "#!/bin/sh\n[ \"$1 $2\" = \"config validate\" ] && { echo 'invalid config' >&2; exit 1; }\nexit 0\n"
+	plain := fakeUnit{loaded: true, active: true, enabled: true}
+	gid := -1
+	if os.Geteuid() == 0 {
+		gid = 1
+	} else if groups, err := os.Getgroups(); err == nil {
+		for _, g := range groups {
+			if g != os.Getgid() {
+				gid = g
+				break
+			}
+		}
+	}
+	if gid < 0 {
+		t.Skip("no secondary group to chgrp to")
+	}
+	files := map[string]string{"config": "OLD-GOOD-CONFIG\n", "profile": "OLD-PROFILE\n", "provider": "OLD=1\n", "unit": "OLD-UNIT\n"}
+	t.Run("mode and group are the originals, not the playbook's", func(t *testing.T) {
+		res := harness{probes: probes, steps: steps, rescue: rescue, unit: plain, binary: "old", artifact: rejectBin, healthMark: "OLD-GOOD-CONFIG", files: files,
+			fileModes: map[string]os.FileMode{"provider": 0o640, "config": 0o600, "profile": 0o664}, fileGIDs: map[string]int{"provider": gid, "profile": gid}}.run(t)
+		if res.err == nil {
+			t.Fatalf("the run must fail\n%s", res.log)
+		}
+		for name, want := range map[string]fileStat{"provider": {0o640, os.Getuid(), gid, ""}, "config": {0o600, os.Getuid(), os.Getgid(), ""}, "profile": {0o664, os.Getuid(), gid, ""}} {
+			if got := res.stats[name]; got != want {
+				t.Errorf("%s after the rescue = %+v, want %+v\n%s", name, got, want, res.log)
+			}
+			if res.files[name] != files[name] {
+				t.Errorf("%s content = %q, want %q", name, res.files[name], files[name])
+			}
+		}
+		if res.unit != plain {
+			t.Errorf("service = %v, want %v\n%s", res.unit, plain, res.log)
+		}
+	})
+	t.Run("a symlinked config.yaml comes back as the same symlink", func(t *testing.T) {
+		res := harness{probes: probes, steps: steps, rescue: rescue, unit: plain, binary: "old", artifact: rejectBin, healthMark: "OLD-GOOD-CONFIG", files: files,
+			symlinks: map[string]bool{"config": true}}.run(t)
+		if res.err == nil {
+			t.Fatalf("the run must fail\n%s", res.log)
+		}
+		link := res.stats["config"].link
+		if link == "" || !strings.HasSuffix(link, "real-config") {
+			t.Fatalf("config.yaml is not a symlink to its original target after the rescue: %+v\n%s", res.stats["config"], res.log)
+		}
+		if got, _ := os.ReadFile(link); string(got) != files["config"] {
+			t.Errorf("the symlink target's content = %q, want it untouched (%q)", got, files["config"])
+		}
+		if res.files["config"] != files["config"] || res.unit != plain {
+			t.Errorf("config via the link = %q, service = %v: want the old config and a healthy active service\n%s", res.files["config"], res.unit, res.log)
+		}
+	})
+}
+
+// Step 0c reads provider.env (a secret) into a fact and the rescue writes it back; neither
+// the content, its base64, nor the sha1 that `stat` would add may appear in the output, even
+// at -vvv with --diff (the slurp and the restore are no_log; the stat does not checksum).
+func TestDetectionEngineSnapshotDoesNotLeakProviderEnv(t *testing.T) {
+	_, steps, rescue := detectionEngineRescueSteps(t)
+	probes, block, _ := loadDetectionEnginePlay(t)
+	steps = append(append([]any{}, steps...), detectionEnginePick(t, block, "Step 8:", "Step 9:", "Step 9b:", "Step 9c:", "Step 10:")...)
+	rejectBin := "#!/bin/sh\n[ \"$1 $2\" = \"config validate\" ] && { echo 'invalid config' >&2; exit 1; }\nexit 0\n"
+	const secret = "sk-live-7Qp2ZxLeakCanary9d41"
+	content := "DETECTION_MODEL_API_KEY=" + secret + "\n"
+	sha := sha1.Sum([]byte(content))
+	needles := map[string]string{
+		"the secret": secret, "the file's base64": base64.StdEncoding.EncodeToString([]byte(content)),
+		"the secret's base64": base64.StdEncoding.EncodeToString([]byte(secret)), "the file's sha1": hex.EncodeToString(sha[:]),
+	}
+	plain := fakeUnit{loaded: true, active: true, enabled: true}
+	// Under --check the rejecting validator is a skipped command, so nothing fails and the
+	// rescue does not run: that variant covers the snapshot tasks alone.
+	for _, tt := range []struct {
+		args    []string
+		rescued bool
+	}{{[]string{"-vvv", "--diff"}, true}, {[]string{"-vvv", "--diff", "--check"}, false}} {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			res := harness{probes: probes, steps: steps, rescue: rescue, unit: plain, binary: "old", artifact: rejectBin, healthMark: "OLD-GOOD-CONFIG", args: tt.args,
+				files: map[string]string{"config": "OLD-GOOD-CONFIG\n", "provider": content, "unit": "OLD-UNIT\n"}}.run(t)
+			if (res.err != nil) != tt.rescued {
+				t.Fatalf("run failed = %v, want %v\n%s", res.err != nil, tt.rescued, res.log)
+			}
+			// the tasks that handle the secret really ran, or the absence below proves nothing
+			tasks := []string{"Step 0b", "Step 0c"}
+			if tt.rescued {
+				tasks = append(tasks, "ROLLBACK — restore the unit, config")
+			}
+			for _, task := range tasks {
+				if !strings.Contains(res.log, "TASK ["+task) {
+					t.Fatalf("task %q did not run\n%s", task, res.log)
+				}
+			}
+			for what, needle := range needles {
+				if strings.Contains(res.log, needle) {
+					t.Errorf("the output contains %s (%q)", what, needle)
+				}
+			}
+			if tt.rescued && res.files["provider"] != content {
+				t.Errorf("provider.env not restored: %q", res.files["provider"])
 			}
 		})
 	}
