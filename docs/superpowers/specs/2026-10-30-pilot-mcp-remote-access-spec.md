@@ -627,8 +627,8 @@ remote 錯誤時保留 remote 的 code（例：`pilot-mcp: REMOTE_REJECTED: ENV_
 cmd/pilot-mcp/main.go                 # 使用者端 binary（可移植）
 internal/mcpwire/                     # 兩端共用：container 路徑常數、manifest、header/ready 行、digest、錯誤行、工具名單（可移植）
 internal/mcpclient/
-  profile.go  git.go  snapshot.go  dockercmd.go  transport.go  bridge.go
-  doctor.go   changes.go  records.go
+  profile.go  repourl.go  git.go  snapshot.go  dockercmd.go  connect.go
+  doctor.go   changes.go  records.go  errors.go  sys_unix.go
 internal/mcpremote/
   remote.go  archive.go  validate.go  session.go  gc.go
   workspace.go  export.go  sys_unix.go

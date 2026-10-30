@@ -1,4 +1,4 @@
-.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image pilot-cli-test-image
+.PHONY: build test clean vet lint pilot-mcp-cross help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image pilot-cli-test-image
 
 BIN := pilot
 PKG := ./cmd/pilot
@@ -42,6 +42,14 @@ release:       	## Compile stripped release binary
 # -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
 	go test -count=1 -timeout 45m ./...
+
+# pilot-mcp runs on the user's machine, which may be macOS: cmd/pilot does
+# not build for darwin, so pilot-mcp must (spec 2026-10-30-pilot-mcp-remote-access §5.1).
+pilot-mcp-cross: ## Build pilot-mcp for linux and darwin (amd64, arm64)
+	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		echo "pilot-mcp $$t"; \
+		GOOS=$${t%/*} GOARCH=$${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/pilot-mcp || exit 1; \
+	done
 
 vet:           	## Run go vet
 	go vet ./...
