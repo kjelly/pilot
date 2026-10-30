@@ -63,6 +63,11 @@ func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Durati
 	// The cache is keyed by URL, but set it every time so a hand-edited
 	// cache cannot point elsewhere.
 	if _, err := r.git(ctx, nil, "config", "remote.origin.url", url); err != nil {
+		var e *Error
+		if ctx.Err() == nil && errors.As(err, &e) {
+			// valid() does not parse config; say which cache to delete.
+			return nil, &Error{Code: e.Code, Msg: e.Msg + " (git cache " + dir + "; delete it to rebuild it)"}
+		}
 		return nil, err
 	}
 	return r, nil
@@ -119,7 +124,9 @@ func (r *gitRepo) valid() bool {
 			return false
 		}
 	}
-	return true
+	head, err := os.ReadFile(filepath.Join(r.dir, "HEAD"))
+	h := strings.TrimSpace(string(head))
+	return err == nil && (strings.HasPrefix(h, "ref: refs/") || fullSHAPattern.MatchString(h))
 }
 
 // lock serializes the commands that change the cache (init, config, and a
@@ -166,8 +173,10 @@ func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]b
 	// --git-dir: git never searches upward from the cache for another
 	// repository (a broken cache inside ~/.git must not reach it).
 	// Automatic gc after a fetch runs in the foreground, under the cache
-	// lock: a detached gc would outlive it.
-	cmd := boundedCommand(ctx, "git", append([]string{"--git-dir=" + r.dir, "-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false"}, args...)...)
+	// lock: a detached gc would outlive it. It never prunes: another
+	// pilot-mcp may be about to read a commit that a later fetch made
+	// unreachable (every resolve moves refs/pilot/fetched).
+	cmd := boundedCommand(ctx, "git", append([]string{"--git-dir=" + r.dir, "-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", "-c", "gc.pruneExpire=never"}, args...)...)
 	cmd.Env = gitEnv()
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
@@ -191,6 +200,8 @@ func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]b
 var gitRepoEnv = map[string]bool{
 	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_OBJECT_DIRECTORY": true,
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_COMMON_DIR": true, "GIT_NAMESPACE": true,
+	"GIT_CONFIG": true, "GIT_SHALLOW_FILE": true, "GIT_GRAFT_FILE": true, "GIT_REPLACE_REF_BASE": true,
+	"GIT_NO_REPLACE_OBJECTS": true, "GIT_QUARANTINE_PATH": true,
 }
 
 // gitEnv is the environment for every git pilot-mcp runs: the user's,

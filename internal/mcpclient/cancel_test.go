@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,6 +366,83 @@ func TestGitCacheKeepsAHealthyCache(t *testing.T) {
 		}
 	})
 	untouched()
+}
+
+// Every resolve moves refs/pilot/fetched, so the commit another pilot-mcp
+// just resolved can become unreachable before it reads it. The cache's gc
+// must not prune it (reproduced with gc limits lowered and the objects
+// made three weeks old, past gc's default prune age).
+func TestGitCacheGcKeepsObjectsAnotherReaderNeeds(t *testing.T) {
+	allowLocalRepos(t)
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "fetch.unpackLimit")
+	t.Setenv("GIT_CONFIG_VALUE_0", "1")
+	t.Setenv("GIT_CONFIG_KEY_1", "gc.autoPackLimit")
+	t.Setenv("GIT_CONFIG_VALUE_1", "1")
+	bare, _ := makeRepo(t, map[string]string{"env/hosts.yml": "hosts: {}\n"})
+	work := t.TempDir()
+	git(t, work, "clone", "--quiet", bare, ".")
+	git(t, work, "checkout", "--quiet", "-b", "a")
+	writeTree(t, work, map[string]string{"env/a.yml": "only on a\n"})
+	git(t, work, "add", "-A")
+	git(t, work, "commit", "--quiet", "-m", "a")
+	git(t, work, "checkout", "--quiet", "main")
+	git(t, work, "checkout", "--quiet", "-b", "b")
+	writeTree(t, work, map[string]string{"env/b.yml": "only on b\n"})
+	git(t, work, "add", "-A")
+	git(t, work, "commit", "--quiet", "-m", "b")
+	git(t, work, "push", "--quiet", "origin", "refs/heads/a:refs/heads/a", "refs/heads/b:refs/heads/b")
+
+	ctx := context.Background()
+	repo, err := openGitCache(ctx, t.TempDir(), bare, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitA, err := repo.resolve(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-21 * 24 * time.Hour)
+	_ = filepath.WalkDir(filepath.Join(repo.dir, "objects"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil {
+			_ = os.Chtimes(p, old, old)
+		}
+		return nil
+	})
+	if _, err := repo.resolve(ctx, "b"); err != nil { // its fetch runs gc
+		t.Fatal(err)
+	}
+	if _, err := repo.listTree(ctx, commitA, "env"); err != nil {
+		t.Fatalf("a's commit is gone after b's fetch: %v", err)
+	}
+}
+
+// A cache whose HEAD is not a ref or a hash (disk corruption, a hand
+// edit) is rebuilt, and an inherited GIT_CONFIG file is neither read nor
+// written for the cache.
+func TestGitCacheRebuildsACorruptHeadAndIgnoresGitConfigFile(t *testing.T) {
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	ctx := context.Background()
+	cacheDir := t.TempDir()
+	repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(repo.dir, "HEAD"), "garbage\n")
+	userConfig := filepath.Join(t.TempDir(), "user.gitconfig")
+	mustWriteFile(t, userConfig, "")
+	t.Setenv("GIT_CONFIG", userConfig)
+	repo, err = openGitCache(ctx, cacheDir, bare, 30*time.Second)
+	if err != nil {
+		t.Fatalf("open with a corrupt HEAD: %v", err)
+	}
+	if got, err := repo.resolve(ctx, "main"); err != nil || got != commit {
+		t.Fatalf("resolve = %s, %v", got, err)
+	}
+	if data, _ := os.ReadFile(userConfig); len(data) != 0 {
+		t.Fatalf("the GIT_CONFIG file was written: %q", data)
+	}
 }
 
 // Cancelling at arbitrary points (a signal during startup) never leaves a

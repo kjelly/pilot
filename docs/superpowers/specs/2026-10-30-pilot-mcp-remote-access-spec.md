@@ -268,13 +268,17 @@ profiles:
      但 helper 還拿著管線時，視為成功。
    - cache 的 git 一律用 `--git-dir=<cache>`（不用 `-C`），git 不會從 cache 往上找到別的 repository（例如
      cache 在 `~/.git` 底下時）；fetch 後的自動 gc 在前景執行（`gc.autoDetach=false`、
-     `maintenance.autoDetach=false`），留在 cache 鎖內，不會有在背景活過鎖的 gc，cache 也不會無限長大。
+     `maintenance.autoDetach=false`），留在 cache 鎖內，不會有在背景活過鎖的 gc，cache 也不會無限長大；
+     gc 不 prune（`gc.pruneExpire=never`）：每次 resolve 都會移動 `refs/pilot/fetched`，另一個 pilot-mcp 剛
+     resolve 的 commit 可能已不可達，卻還沒讀完。
      所有 git（cache 與使用者 clone）都不繼承會指定 repository 的環境變數（`GIT_DIR`、`GIT_WORK_TREE`、
      `GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_COMMON_DIR`、
-     `GIT_NAMESPACE`）。被 SIGKILL 的 git 可能留下 lock 檔或只初始化一半的 cache：每次開 cache 時，在鎖內移除
+     `GIT_NAMESPACE`、`GIT_CONFIG`、`GIT_SHALLOW_FILE`、`GIT_GRAFT_FILE`、`GIT_REPLACE_REF_BASE`、
+     `GIT_NO_REPLACE_OBJECTS`、`GIT_QUARANTINE_PATH`；`GIT_CONFIG_GLOBAL`、`GIT_CONFIG_COUNT` 等使用者設定保留）。被 SIGKILL 的 git 可能留下 lock 檔或只初始化一半的 cache：每次開 cache 時，在鎖內移除
      cache 裡的 `*.lock`（沒有拿鎖就不會有 git 在 cache 裡寫入），缺少 `HEAD`、`config`、`objects/` 或
-     `refs/` 的 cache 會重建（在旁邊的暫存目錄初始化後 rename 進來）。這個檢查只看檔案、不執行 git，所以 git
-     失敗或逾時不會讓正常的 cache 被刪掉。使用者 clone 裡的 git 設 `GIT_OPTIONAL_LOCKS=0`，`git status` 不會拿
+     `refs/`、或 `HEAD` 不是 ref 也不是 hash 的 cache 會重建（在旁邊的暫存目錄初始化後 rename 進來）。這個檢查只看檔案、不執行 git，所以 git
+     失敗或逾時不會讓正常的 cache 被刪掉；git 無法解析的 `config`（只有手動修改或磁碟損壞才會出現）不會
+     自動重建，錯誤訊息寫出 cache 目錄，刪掉它就會重建。使用者 clone 裡的 git 設 `GIT_OPTIONAL_LOCKS=0`，`git status` 不會拿
      `index.lock`。
    - branch/tag：fetch `refs/heads/<ref>` 與 `refs/tags/<ref>`；兩者都存在時報錯（不猜）。
    - SHA：`git fetch origin <sha>`；失敗時 fetch 所有 heads/tags 後再檢查該 SHA 是否存在。
