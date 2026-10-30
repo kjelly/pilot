@@ -305,9 +305,13 @@ go run ./cmd/pilot vm-target down --name <client-vm>   # if multi-VM
 go run ./cmd/pilot vm-target down --name <server-vm>
 ```
 
-**Always down after the run**, even on failure. The VM overlay is a
-qcow2 that grows with every mutation; leaving it running clutters the
-host's `virsh list`.
+**Always down after the run**, even on failure, but **only the VMs this
+session created** (or that the user explicitly named as disposable). The VM
+overlay is a qcow2 that grows with every mutation; leaving it running clutters
+the host's `virsh list`. `vm-target list` is not "your" list: sibling clones and
+other sessions share the same pilot data dir (`~/.local/share/pilot`) and the
+same image directory, so it shows their VMs too. Record the names you `up` and
+tear down only those.
 
 **Iterating on a playbook that isn't green yet?** Don't `down`+`up`
 between attempts -- `pilot vm-target reset --name <name>` reverts to the
@@ -315,12 +319,16 @@ pristine post-`up` snapshot in seconds. Fix the playbook, `reset`, `run`
 again. Save `down` for when the spec is actually green (§9) or you're
 switching to a different base image/disk size.
 
-**If the apply playbook wrote shared state outside the VM's qcow2** (e.g.
-a bind-mounted `--data-dir`), remove it so the next run starts clean:
-
-```bash
-sudo rm -rf /var/lib/libvirt/images/pilot/<name>
-```
+`down` already deletes the per-target directory
+`/var/lib/libvirt/images/pilot/<name>/` (overlay, seed ISO, SSH key, run
+transcripts), the static DHCP reservation, the SSH control directory and the
+cached Ansible facts, so the next `up` of that name starts from a fresh overlay
+and key. Everything a playbook writes inside the VM, Docker bind mounts
+included, lives in that overlay; nothing is shared between host and VM.
+**Never `rm -rf` anything under `/var/lib/libvirt/images/pilot` by hand**: other
+sessions' VMs live in the same directory and `images/` holds the shared base
+images. If a directory survives a successful `down`, that is a teardown bug
+(AGENTS.md §5.14): report it with `ls -la` output, don't delete it.
 
 ## 9. After a green run: promote the spec
 

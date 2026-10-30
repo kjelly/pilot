@@ -56,20 +56,26 @@ docker exec <container> /usr/sbin/ipactl status
 docker exec <container> bash -lc 'ipactl status'
 ```
 
-## Trap 3: bind-mount survives vm-target down
+## Trap 3: bind-mounted state survives a re-run
 
 Playbooks that use `volumes: ["/host/path:/container/data:Z"]` write
-state **outside** the VM's qcow2. A subsequent `vm-target up` reuses
-the same host directory. This is great for idempotency (re-applying
-skips already-installed services) and terrible for debugging (a
-half-baked install silently masks the real failure).
+state to `/host/path` **on the VM**, outside the container. Recreating the
+container or re-running the playbook on the same VM reuses it. This is
+great for idempotency (re-applying skips already-installed services) and
+terrible for debugging (a half-baked install silently masks the real
+failure).
 
-**Pattern**: after a failed run, delete the per-target dir:
+**Pattern**: after a failed run, put the VM back to its post-`up` state
+before retrying:
 
 ```bash
-pilot vm-target down --name <name>
-sudo rm -rf /var/lib/libvirt/images/pilot/<name>
+pilot vm-target reset --name <name>   # revert to the pristine post-up snapshot
 ```
+
+`pilot vm-target down` also clears it: the VM's whole filesystem, bind-mounted
+paths included, lives in the per-target overlay that `down` deletes. Do not
+`rm -rf` under `/var/lib/libvirt/images/pilot` yourself; other sessions' VMs
+live there.
 
 ## Trap 4: community.docker.docker_container detach:false does not surface exit codes
 

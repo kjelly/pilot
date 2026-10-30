@@ -314,17 +314,25 @@ Key behaviors:
 
 ## Clean slate
 
-When you need a truly clean VM:
+When you need a truly clean VM of your own (one this session created):
 
 ```bash
-pilot vm-target down --name <name>                          # destroy + undefine
-sudo rm -rf /var/lib/libvirt/images/pilot/<name>            # delete qcow2 + seed + key
+pilot vm-target down --name <name>    # destroy, undefine, delete /var/lib/libvirt/images/pilot/<name>/
+pilot vm-target up   --name <name> ...
 ```
 
-Deleting the per-target dir ensures the next `up` gets a fresh overlay
-and a new SSH key -- necessary when the playbook wrote persistent state
-outside the VM's filesystem (e.g. bind-mounted data dirs, docker
-volumes on the host).
+`down` removes the per-target directory (overlay, seed ISO, SSH key, run
+transcripts), the static DHCP reservation, the SSH control directory and the
+cached facts, so the next `up` gets a fresh overlay and a new SSH key.
+Everything the VM wrote, Docker bind mounts and volumes included, is inside
+that overlay: no host directory is shared into the VM. To go back to the
+post-`up` state without re-provisioning, `pilot vm-target reset --name <name>`
+is faster.
+
+Never `rm -rf` under `/var/lib/libvirt/images/pilot` yourself. Every clone and
+session on the host shares that directory (and `images/` holds the base
+images); a hand delete can remove another session's running VM disk. A
+directory left behind after a successful `down` is a teardown bug to report.
 
 ## Useful diagnostics
 

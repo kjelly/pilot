@@ -121,8 +121,10 @@ go run ./cmd/pilot vm-target exec --name freeipa-client --     getent passwd pil
 ```bash
 go run ./cmd/pilot vm-target down --name freeipa-client
 go run ./cmd/pilot vm-target down --name freeipa-server
-sudo rm -rf /var/lib/libvirt/images/pilot/freeipa-server
 ```
+
+`down` deletes each VM's directory under `/var/lib/libvirt/images/pilot`;
+nothing else needs removing.
 
 ## Lessons extracted for future multi-VM specs
 
