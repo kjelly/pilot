@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,10 @@ func DefaultCacheDir() (string, error) {
 
 // openGitCache opens (creating it if needed) the bare cache of url. The
 // wait for the cache lock and the git commands observe ctx, so a signal
-// ends them.
+// ends them. A process killed while changing the cache can leave it with
+// stale lock files or half initialized; under the lock, which every
+// changing command runs under, such leftovers are removed and a cache that
+// is not a valid bare repository is rebuilt (it is only a cache).
 func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Duration) (*gitRepo, error) {
 	key := sha256.Sum256([]byte(url))
 	dir := filepath.Join(cacheDir, "git", hex.EncodeToString(key[:]))
@@ -52,13 +56,8 @@ func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Durati
 		return nil, err
 	}
 	defer unlock()
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, err
-		}
-		if _, err := r.git(ctx, nil, "init", "--bare", "--quiet"); err != nil {
-			return nil, err
-		}
+	if err := r.repair(ctx); err != nil {
+		return nil, err
 	}
 	// The cache is keyed by URL, but set it every time so a hand-edited
 	// cache cannot point elsewhere.
@@ -66,6 +65,60 @@ func openGitCache(ctx context.Context, cacheDir, url string, timeout time.Durati
 		return nil, err
 	}
 	return r, nil
+}
+
+// repair, run under the cache lock, removes what a killed git left behind
+// and (re)creates the cache when it is not a valid bare repository. A new
+// cache is initialized next to it and renamed into place, so it is never
+// seen half made.
+func (r *gitRepo) repair(ctx context.Context) error {
+	if old, _ := filepath.Glob(r.dir + ".init-*"); len(old) > 0 {
+		for _, p := range old {
+			_ = os.RemoveAll(p)
+		}
+	}
+	ok := r.valid(ctx)
+	if err := ctx.Err(); err != nil {
+		// A cancelled check says nothing about the cache; leave it.
+		return &Error{Code: CodeGitFailed, Msg: "check git cache: " + err.Error()}
+	}
+	if ok {
+		return filepath.WalkDir(r.dir, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".lock") {
+				_ = os.Remove(p) // no git runs in the cache without our lock
+			}
+			return nil
+		})
+	}
+	if err := os.RemoveAll(r.dir); err != nil {
+		return &Error{Code: CodeGitFailed, Msg: "remove broken git cache: " + err.Error()}
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(r.dir), filepath.Base(r.dir)+".init-")
+	if err != nil {
+		return &Error{Code: CodeGitFailed, Msg: "git cache: " + err.Error()}
+	}
+	init := &gitRepo{dir: tmp, url: r.url, timeout: r.timeout}
+	if _, err := init.git(ctx, nil, "init", "--bare", "--quiet"); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, r.dir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return &Error{Code: CodeGitFailed, Msg: "git cache: " + err.Error()}
+	}
+	return nil
+}
+
+// valid reports whether the cache directory is a bare repository git can
+// use as it is.
+func (r *gitRepo) valid(ctx context.Context) bool {
+	for _, p := range []string{"HEAD", "config", "objects", "refs"} {
+		if _, err := os.Stat(filepath.Join(r.dir, p)); err != nil {
+			return false
+		}
+	}
+	out, err := r.git(ctx, nil, "rev-parse", "--is-bare-repository")
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
 // lock serializes the commands that change the cache (init, config, and a
@@ -109,7 +162,10 @@ func (r *gitRepo) lock(parent context.Context) (func(), error) {
 func (r *gitRepo) git(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	cmd := boundedCommand(ctx, "git", append([]string{"-C", r.dir}, args...)...)
+	// --git-dir: git never searches upward from the cache for another
+	// repository (a broken cache inside ~/.git must not reach it). No
+	// automatic gc: a detached gc would outlive the cache lock.
+	cmd := boundedCommand(ctx, "git", append([]string{"--git-dir=" + r.dir, "-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GCM_INTERACTIVE=never")
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer

@@ -252,6 +252,109 @@ func TestChangesStopsOnCancelAfterStdoutCloses(t *testing.T) {
 	waitGone(t, pidFile, 3*time.Second)
 }
 
+// enclosingRepo returns a cache directory inside a fresh Git repository,
+// and a check that the repository was left alone (git must never search
+// upward from the cache into it).
+func enclosingRepo(t *testing.T) (string, func()) {
+	t.Helper()
+	outer := t.TempDir()
+	git(t, outer, "init", "--quiet")
+	return filepath.Join(outer, "cache"), func() {
+		t.Helper()
+		cmd := exec.Command("git", "-C", outer, "config", "--get", "remote.origin.url")
+		if out, err := cmd.Output(); err == nil {
+			t.Fatalf("the enclosing repository got remote.origin.url %q", strings.TrimSpace(string(out)))
+		}
+		if refs := git(t, outer, "for-each-ref", "refs/pilot"); refs != "" {
+			t.Fatalf("the enclosing repository got refs: %s", refs)
+		}
+	}
+}
+
+// A git killed while changing the cache can leave lock files or a half
+// initialized cache; the next open repairs it under the cache lock, and
+// git never reaches a repository around the cache.
+func TestGitCacheRepairsWhatAKilledGitLeft(t *testing.T) {
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	ctx := context.Background()
+
+	t.Run("stale lock files", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.resolve(ctx, "main"); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{"config.lock", "refs/pilot/fetched.lock"} {
+			mustWriteFile(t, filepath.Join(repo.dir, p), "")
+		}
+		repo, err = openGitCache(ctx, cacheDir, bare, 30*time.Second)
+		if err != nil {
+			t.Fatalf("open with stale locks: %v", err)
+		}
+		if got, err := repo.resolve(ctx, "main"); err != nil || got != commit {
+			t.Fatalf("resolve = %s, %v", got, err)
+		}
+	})
+
+	t.Run("half initialized inside a repository", func(t *testing.T) {
+		cacheDir, untouched := enclosingRepo(t)
+		repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// What a git init killed after writing HEAD leaves.
+		if err := os.RemoveAll(repo.dir); err != nil {
+			t.Fatal(err)
+		}
+		mustWriteFile(t, filepath.Join(repo.dir, "HEAD"), "ref: refs/heads/main\n")
+		repo, err = openGitCache(ctx, cacheDir, bare, 30*time.Second)
+		if err != nil {
+			t.Fatalf("open a half-initialized cache: %v", err)
+		}
+		if got, err := repo.resolve(ctx, "main"); err != nil || got != commit {
+			t.Fatalf("resolve = %s, %v", got, err)
+		}
+		untouched()
+	})
+}
+
+// Cancelling at arbitrary points (a signal during startup) never leaves a
+// cache the next run cannot use, and never reaches an enclosing repository.
+func TestGitCacheSurvivesCancellationAtRandomPoints(t *testing.T) {
+	allowLocalRepos(t)
+	bare, commit := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	cacheDir, untouched := enclosingRepo(t)
+	for i := range 200 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(i%40)*250*time.Microsecond)
+		if repo, err := openGitCache(ctx, cacheDir, bare, 30*time.Second); err == nil {
+			_, _ = repo.resolve(ctx, "main")
+		}
+		cancel()
+	}
+	repo, err := openGitCache(context.Background(), cacheDir, bare, 30*time.Second)
+	if err != nil {
+		t.Fatalf("open after cancellations: %v", err)
+	}
+	if got, err := repo.resolve(context.Background(), "main"); err != nil || got != commit {
+		t.Fatalf("resolve after cancellations = %s, %v", got, err)
+	}
+	untouched()
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {

@@ -54,9 +54,10 @@ func fakeSSH(scenario string) int {
 		time.Sleep(time.Minute)
 		return 0
 	case "close-linger":
-		// The remote closes stdout but ssh keeps running.
-		writeFakePID(os.Getpid())
+		// The remote closes stdout but ssh keeps running. The pid is
+		// written after the close, so the test cancels after the EOF.
 		_ = os.Stdout.Close()
+		writeFakePID(os.Getpid())
 		time.Sleep(time.Minute)
 		return 0
 	case "hang-child":
