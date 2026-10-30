@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -100,18 +101,34 @@ func step5Playbook(t *testing.T, dir string, withPreflight bool) string {
 	return filepath.Join(dir, name)
 }
 
+type step5Opts struct {
+	umask string   // "002": the whole run under that umask
+	env   []string // added to the environment
+}
+
 func runStep5(t *testing.T, dir, playbook string, extra ...string) step5Run {
+	t.Helper()
+	return runStep5With(t, dir, playbook, step5Opts{}, extra...)
+}
+
+func runStep5With(t *testing.T, dir, playbook string, o step5Opts, extra ...string) step5Run {
 	t.Helper()
 	scratch := filepath.Join(dir, "scratch")
 	if err := os.MkdirAll(scratch, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	args := append([]string{"-i", "localhost,", "-c", "local", playbook}, extra...)
-	cmd := exec.Command("ansible-playbook", args...)
+	var cmd *exec.Cmd
+	if o.umask != "" {
+		cmd = exec.Command("sh", append([]string{"-c", "umask " + o.umask + "; exec \"$@\"", "sh", "ansible-playbook"}, args...)...)
+	} else {
+		cmd = exec.Command("ansible-playbook", args...)
+	}
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "ANSIBLE_LOCALHOST_WARNING=False", "ANSIBLE_INVENTORY_UNPARSED_WARNING=False",
 		"ANSIBLE_LOCAL_TEMP="+filepath.Join(dir, "tmp"), "ANSIBLE_NOCOLOR=1", "ANSIBLE_FORCE_COLOR=0",
 		"TMPDIR="+scratch)
+	cmd.Env = append(cmd.Env, o.env...)
 	out, err := cmd.CombinedOutput()
 	r := step5Run{out: string(out)}
 	if err != nil {
@@ -212,6 +229,10 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 			policy: "/var/log/other\n{\n\trotate 7\n\t/var/log/syslog\n}\n", kept: true, fails: true},
 		{name: "a lone stanza that logrotate rejects (no endscript) stops the run",
 			policy: "/var/log/syslog\n{\n\trotate 7\n\tpostrotate\n\t\ttrue\n}\n", kept: true, fails: true},
+		// logrotate says "error: <file>:N unexpected }" for this one: the check of Step 1d's
+		// own "error:" line, not the unknown-option check, has to stop it
+		{name: "a rewrite that logrotate rejects with an error line stops the run",
+			policy: "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n}\n", kept: true, fails: true},
 		{name: "a rewrite that logrotate warns about (unknown option) stops the run",
 			policy: "/var/log/syslog\n/var/log/mail.log\n{\n\tbogus\n\trotate 4\n}\n", kept: true, fails: true},
 	} {
@@ -231,6 +252,10 @@ func TestAuditLogForwardingStep5ChainUnderAnsible(t *testing.T) {
 				}
 				if first.managedLive {
 					t.Fatalf("the managed stanza was written although the run failed (the distro file still declares the path):\n%s", first.managed)
+				}
+				// and it failed in the preflight, ahead of Step 5
+				if !strings.Contains(first.out, "TASK [Step 1d") || strings.Contains(first.out, "TASK [Step 5: Render") {
+					t.Fatalf("the failure is not at Step 1d:\n%s", first.out)
 				}
 				return
 			}
@@ -323,4 +348,100 @@ func TestAuditLogForwardingStep5cValidateRejectsAndKeepsTheFile(t *testing.T) {
 	if len(r.leftovers) > 0 {
 		t.Fatalf("the failed run left %v in the temp directory (the always section must remove it)", r.leftovers)
 	}
+}
+
+// The distro file keeps its mode, owner and group through Step 5c. A copy without them
+// takes the umask's mode (0664 under umask 002), and logrotate refuses a policy that is
+// "writable by group or others": the distro policy would silently be skipped.
+func TestAuditLogForwardingStep5cKeepsModeOwnerAndGroup(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	const policy = "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"
+	secondary := -1
+	if gids, err := os.Getgroups(); err == nil {
+		for _, g := range gids {
+			if g != os.Getgid() {
+				secondary = g
+				break
+			}
+		}
+	}
+	for _, umask := range []string{"002", "022", "077"} {
+		for _, mode := range []os.FileMode{0o644, 0o640, 0o600, 0o755, 0o444} {
+			t.Run(umask+"/"+mode.String(), func(t *testing.T) {
+				dir := newStep5Dir(t, policy)
+				rs := filepath.Join(dir, "rsyslog")
+				if err := os.Chmod(rs, mode); err != nil {
+					t.Fatal(err)
+				}
+				if secondary >= 0 {
+					if err := os.Chown(rs, os.Getuid(), secondary); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := runStep5With(t, dir, step5Playbook(t, dir, true), step5Opts{umask: umask})
+				if r.rc != 0 || !r.policyAlive || strings.Contains(r.policy, "/var/log/syslog") {
+					t.Fatalf("the apply did not rewrite the policy (rc %d):\n%q\n%s", r.rc, r.policy, r.out)
+				}
+				fi, err := os.Stat(rs)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fi.Mode().Perm() != mode {
+					t.Fatalf("mode %v after the apply, was %v", fi.Mode().Perm(), mode)
+				}
+				if secondary >= 0 {
+					if gid := int(fi.Sys().(*syscall.Stat_t).Gid); gid != secondary {
+						t.Fatalf("group %d after the apply, was %d", gid, secondary)
+					}
+				}
+			})
+		}
+	}
+}
+
+// A check-mode run on a host that has the policy but not logrotate yet (Step 1c does not
+// install it in check mode) must still work: the helper runs, only logrotate's check of
+// its output is skipped. A real run without logrotate fails, before any write.
+func TestAuditLogForwardingStep1dWithoutLogrotate(t *testing.T) {
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	var keep []string
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if _, err := os.Stat(filepath.Join(d, "logrotate")); err != nil {
+			keep = append(keep, d)
+		}
+	}
+	noLogrotate := step5Opts{env: []string{"PATH=" + strings.Join(keep, string(os.PathListSeparator))}}
+	const policy = "/var/log/syslog\n/var/log/mail.log\n{\n\trotate 4\n}\n"
+
+	t.Run("check mode", func(t *testing.T) {
+		dir := newStep5Dir(t, policy)
+		r := runStep5With(t, dir, step5Playbook(t, dir, true), noLogrotate, "--check")
+		if r.rc != 0 || r.policy != policy || r.managedLive || len(r.leftovers) > 0 {
+			t.Fatalf("check mode without logrotate: rc %d, policy changed=%v, managed written=%v, leftovers %v\n%s", r.rc, r.policy != policy, r.managedLive, r.leftovers, r.out)
+		}
+	})
+	t.Run("check mode still stops a policy the helper refuses", func(t *testing.T) {
+		dir := newStep5Dir(t, "/var/log/syslog /var/log/sys* {\n\trotate 4\n}\n")
+		r := runStep5With(t, dir, step5Playbook(t, dir, true), noLogrotate, "--check")
+		if r.rc == 0 || r.failed == 0 {
+			t.Fatalf("check mode did not fail on a glob that covers the path:\n%s", r.out)
+		}
+	})
+	t.Run("real run", func(t *testing.T) {
+		dir := newStep5Dir(t, policy)
+		r := runStep5With(t, dir, step5Playbook(t, dir, true), noLogrotate)
+		if r.rc == 0 || r.failed == 0 {
+			t.Fatalf("a real run without logrotate did not fail:\n%s", r.out)
+		}
+		if r.policy != policy || r.managedLive || len(r.leftovers) > 0 {
+			t.Fatalf("the failed run wrote something: policy changed=%v, managed written=%v, leftovers %v", r.policy != policy, r.managedLive, r.leftovers)
+		}
+		if !strings.Contains(r.out, "TASK [Step 1d") || strings.Contains(r.out, "TASK [Step 5: Render") {
+			t.Fatalf("the failure is not at Step 1d:\n%s", r.out)
+		}
+	})
 }
