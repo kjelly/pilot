@@ -125,6 +125,29 @@ func FoldPath(p string) string {
 	}, p)
 }
 
+// FoldCollision returns two different spellings among paths and all their
+// parent directories that FoldPath maps to one name, or two empty strings.
+// On a case-insensitive file system (macOS) such spellings are one file or
+// directory, and Git there records only one of them, so "host_vars/WEB/b"
+// collides with "host_vars/web/a" as "a.yml" does with "A.yml".
+func FoldCollision(paths []string) (string, string) {
+	seen := make(map[string]string, len(paths))
+	for _, p := range paths {
+		for i := 0; i <= len(p); i++ {
+			if i < len(p) && p[i] != '/' {
+				continue
+			}
+			prefix := p[:i]
+			key := FoldPath(prefix)
+			if other, ok := seen[key]; ok && other != prefix {
+				return other, prefix
+			}
+			seen[key] = prefix
+		}
+	}
+	return "", ""
+}
+
 // hfsIgnorable reports a code point HFS+ drops when it compares names (the
 // set Git's is_hfs_dotgit skips). Names may contain them, emoji sequences
 // do; they only matter when comparing against a reserved name.

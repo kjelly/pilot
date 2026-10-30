@@ -341,9 +341,9 @@ profiles:
    直接結束 ssh（remote 還在寫一個沒人讀的 pipe，等它結束會永遠卡住），報 `CHANGESET_INVALID`。
 3. 驗證 tar：第一個 entry 是 manifest；其餘 entry 只能是 regular file，路徑規則同 §6.2，必須正好是
    manifest 列出的 add/modify 路徑，SHA-256 必須等於 manifest 的 `new_sha256`；manifest 的所有路徑（含
-   delete）經 `mcpwire.FoldPath`（不分大小寫、忽略 HFS+ 略過的 code point）比較也不得重複：macOS 的 clone
-   上它們是同一個檔案，Git 在那裡（`core.ignorecase`）也不會記錄只改大小寫的改名。任何不符都報
-   `CHANGESET_INVALID`，一個檔案都不寫。
+   delete）與它們的上層目錄經 `mcpwire.FoldCollision` 比較也不得有兩種拼法：macOS 的 clone 上它們是同一個
+   名字，Git 在那裡（`core.ignorecase`）也只記錄其中一個。任何不符都報 `CHANGESET_INVALID`，一個檔案都
+   不寫。
 4. 檢查 `--into`：等於 `git rev-parse --show-toplevel`（是 repo 的最上層）、`origin` 的 URL 與 profile 的
    `source.url` 指向同一個 repo、`git status --porcelain` 為空，且 base commit（session 的 commit_sha）
    在本機存在（不存在就從 `origin` fetch）。「同一個 repo」的判斷：把兩個 URL 都解析成 host、owner、
@@ -352,7 +352,8 @@ profiles:
 6. `git check-ignore` 判定為忽略的路徑一律跳過，並在 stderr 列出。
 7. 對其餘每個變更的路徑，確認 `HEAD` 上的內容等於 base commit 上的內容
    （`git diff --quiet <base> HEAD -- <path>`）。任何一個不符就報 `CHANGESET_CONFLICT`，一個檔案都不寫。
-8. 寫入前對每個目標路徑的每一層既有元件做 `Lstat`，任何一層是 symlink 就報 `CHANGESET_CONFLICT`
+8. 寫入前對每個目標路徑的每一層既有元件做 `Lstat`，任何一層是 symlink、或上層是檔案（檔案換成目錄）
+   就報 `CHANGESET_CONFLICT`
    （`os.Root` 只防止寫出根目錄，仍會跟隨根目錄內的 symlink）。之後經 `os.Root`（以 `--into` 為根）
    在改動任何檔案之前，檢查每個 `add` 的路徑：它在 base 與 `HEAD` 都不存在、clone 也是乾淨的，所以若已
    存在於磁碟，代表它是目錄（不支援把目錄換成同名檔案），或指到另一個檔案（檔案系統不分大小寫或正規化
@@ -407,7 +408,8 @@ digest；內容、路徑或大小改變一定改變 digest。
 - 每個 entry 只接受 regular file（directory entry 忽略）。路徑必須：
   - 是相對路徑，且 `path.Clean(p) == p`；
   - 不含 `..`、`\`、NUL 或控制字元；
-  - 不重複，經 `mcpwire.FoldPath`（不分大小寫、忽略下面列的 HFS+ code point）比較後也不重複；
+  - 不重複；路徑與它們的上層目錄經 `mcpwire.FoldCollision`（以 `FoldPath` 比較：不分大小寫、忽略下面列
+    的 HFS+ code point）也不得有兩種拼法；
   - 不在 `.vault/`、`.pilot/`、`.pilot-data/`、`contracts/`、`docs/verification/` 之下，任何一層都不是 `.git`
     （與 Git 相同：巢狀的 `.git/config` 可以指定 Git 會執行的指令）。比對方式與不分大小寫的檔案系統（macOS
     預設）相同：不分大小寫，並忽略 HFS+ 比對名稱時略過的 code point（U+200C–U+200F、U+202A–U+202E、
@@ -522,9 +524,15 @@ pilot mcp remote changes --protocol v1 --env <env> <session-id>
   升級，新的 contract 把某個沒被修改的檔案標成明文 secret；訊息列出的檔案會說明這一點）：在設定 repo
   修正後，用新的 edit session 重做修改。不因 base 已經失敗而放行，否則 base 的失敗會蓋掉這些變更新增的
   失敗。session 照樣以 `ended` 保留，`changes` 每次都能說明原因。
-- 變更的路徑經 `mcpwire.FoldPath` 比較不得重複，否則回 `CHANGESET_INVALID`，訊息建議在設定 repo 用
-  `git mv` 改名：只改大小寫的改名在 macOS 的 clone 上無法正確套用（兩個名字是同一個檔案，Git 也不會記錄
-  改名），使用者端一定拒絕，不應讓 session 停在匯不出的狀態。
+- 使用者端無法照實套用到 base 的 clone 的變更，在匯出時就拒絕（`CHANGESET_INVALID`，訊息說明原因），
+  而不是匯出後才被使用者端拒絕：
+  - 變更的路徑與它們的上層目錄經 `mcpwire.FoldCollision` 比較有兩種拼法（只改大小寫的改名、
+    `host_vars/WEB/` 對 `host_vars/web/`）：macOS 的 clone 上它們是同一個名字，Git 在那裡也只記錄其中
+    一個；
+  - `add` 的路徑在 base 是目錄（目錄換成同名檔案），或它的上層在 base 是檔案（檔案換成目錄）。
+  這類修改無法經 `changes` 帶回，session 裡的其他修改也一起帶不回；要在設定 repo 直接做（改名用
+  `git mv`），再用新的 edit session 重做其他修改。只差在 Unicode 正規化（NFC/NFD）的改名，server 端
+  無法辨識（§16），使用者端會拒絕。
 - 匯出的 tar 也要符合使用者端讀取的上限：變更數 ≤ 10,000、manifest ≤ 1 MiB、整個 tar ≤ 80 MiB，否則回
   `CHANGESET_INVALID`。
 - stdout 輸出 tar：第一個 entry 是 manifest（`.pilot-mcp-changes.json`）
@@ -855,8 +863,11 @@ cmd/pilot/cmd/mcp.go                  # 抽出 serveMCP(ctx, mcpServeOptions, mc
 10. **roster 無法經 edit session 修改**：roster 在 GitHub，但 `pilot edit` 的 plan/MCP apply 只寫 `.vault/` 內的
     roster（§8）。要讓 agent 也能改 roster 並帶回 PR，需要另寫規格調整 `pilot edit` 的寫入範圍，並重新驗證
     AGENTS.md §5.11 的 roster 鎖與 rollback 規則。
-11. **Azure Key Vault**：未來改用時，邊界仍是 container 內的 `/pilot/vault`（或替代它的 secret 來源）；
+11. **只差在 Unicode 正規化的檔名**：`FoldPath` 不做 NFC/NFD 正規化（不為此加依賴），所以 NFC 與 NFD
+    拼法不同的改名會被 server 匯出，而在 macOS 的 clone 上被使用者端拒絕（已存在的檔案，§5.6），不會
+    寫錯檔案，但這次 session 的修改帶不回。設定 repo 的檔名實務上都是 ASCII。
+12. **Azure Key Vault**：未來改用時，邊界仍是 container 內的 `/pilot/vault`（或替代它的 secret 來源）；
    需另寫規格，不影響使用者端與傳輸方式。
-12. **上線後事項（使用者決定時機；不是本規格的工作包）**：以包含 WP2 的 commit build pilot-cli image 並
+13. **上線後事項（使用者決定時機；不是本規格的工作包）**：以包含 WP2 的 commit build pilot-cli image 並
     載入 deploy node、在 deploy node 建立 SSH 帳號並登記公鑰、用真實 GitHub repo 跑 `pilot-mcp doctor`、
     確認後再把 pilot repo 內 `.codex/config.toml` 與 `crush.json` 改成 `pilot-mcp connect`。

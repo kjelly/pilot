@@ -150,7 +150,8 @@ roster 直接在設定 repo 送 PR。
 | `REMOTE_REJECTED: ENV_MISMATCH` | profile 的 `env` 與設定裡主機的 `env` 不同 |
 | `REMOTE_REJECTED: SECRET_POLICY_VIOLATION` | 設定的 `group_vars`/`host_vars` 有明文 secret（訊息只列檔案、欄位與行號） |
 | `REMOTE_REJECTED: PATH_OUT_OF_SCOPE` | 設定裡有字面路徑指向 `/pilot/vault`、`/pilot/data` 或 `/tmp/pilot-mcp`；改用 `/pilot/config/...` |
-| `CHANGESET_CONFLICT` | `--into` 不是乾淨的最上層 clone、origin 不同，或 HEAD 在 base 之後改過同一個檔案 |
+| `CHANGESET_CONFLICT` | `--into` 不是乾淨的最上層 clone、origin 不同、HEAD 在 base 之後改過同一個檔案，或新增的路徑在 clone 裡已經存在（目錄，或 macOS 上大小寫／Unicode 拼法不同的同名檔） |
+| `CHANGESET_INVALID`（`changes`） | 修改後的設定會被下一個 session 拒絕（訊息列出 import 的 code 與檔案，包含沒被修改、但 image 升級後才被拒絕的檔案），或修改含只改大小寫的改名、目錄與檔案互換。這類修改帶不回：在設定 repo 修正或直接做，再用新的 edit session 重做 |
 
 ## 6. 測試
 

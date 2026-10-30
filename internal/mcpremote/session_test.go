@@ -377,6 +377,56 @@ func TestRunChangesRefusesACaseOnlyRename(t *testing.T) {
 	}
 }
 
+// Changes the client cannot apply faithfully to a clone of the base are
+// refused at export: a directory replaced by a file, a file replaced by a
+// directory, and a directory spelled differently only in case.
+func TestRunChangesRefusesLayoutChangesTheClientCannotApply(t *testing.T) {
+	cases := map[string]struct {
+		edit func(work string)
+		want string
+	}{
+		"directory to file": {func(work string) {
+			if err := os.RemoveAll(filepath.Join(work, "group_vars")); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(work, "group_vars"), []byte("a: 1\n"))
+		}, "replacing a directory with a file"},
+		"file to directory": {func(work string) {
+			p := filepath.Join(work, "group_vars", "all.yml")
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(p, "x.yml"), []byte("a: 1\n"))
+		}, "replacing a file with a directory"},
+		"directory case": {func(work string) {
+			if err := os.MkdirAll(filepath.Join(work, "host_vars", "WEB"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(work, "host_vars", "WEB", "b.yml"), []byte("b: 1\n"))
+		}, "differ only in case"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeSession(t, mcpwire.ModeEdit, "prod", tc.edit)
+			files := sessionFiles("prod")
+			files["host_vars/web/a.yml"] = "a: 1\n"
+			fs.cfg.Stdin = bytes.NewReader(snapshot(t, "prod", files))
+			if err := RunSession(context.Background(), fs.cfg); err != nil {
+				t.Fatal(err)
+			}
+			id := mustReadyID(t, fs.stdout.String())
+			cfg := *fs.cfg
+			cfg.Stdout = io.Discard
+			if err := RunChanges(&cfg, id); CodeOf(err) != mcpwire.CodeChangesetInvalid || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want CHANGESET_INVALID mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // A tracked inventory.yml is regenerated in the workspace and never
 // exported; deleting it must not break the export of the real changes.
 func TestRunChangesWithATrackedInventoryDeleted(t *testing.T) {

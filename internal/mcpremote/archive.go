@@ -65,8 +65,8 @@ func ReadSnapshot(br *bufio.Reader, dest, wantEnv string) (*mcpwire.Manifest, er
 }
 
 // checkFileSet applies the file-list rules of a snapshot (§6.2): each
-// path's rules, no path twice (also as a case-insensitive file system
-// compares them, mcpwire.FoldPath), and the
+// path's rules, no path twice (nor two spellings of one file or directory
+// on a case-insensitive file system, mcpwire.FoldCollision), and the
 // count and size limits. `changes` holds the next snapshot to the same
 // rules (computeChanges).
 func checkFileSet(files []mcpwire.FileEntry) error {
@@ -74,7 +74,7 @@ func checkFileSet(files []mcpwire.FileEntry) error {
 		return errorf(mcpwire.CodeSnapshotTooLarge, "snapshot has %d files, more than %d", len(files), mcpwire.MaxFiles)
 	}
 	seen := make(map[string]bool, len(files))
-	folded := make(map[string]string, len(files))
+	paths := make([]string, 0, len(files))
 	var total int64
 	for _, f := range files {
 		if err := mcpwire.CheckSnapshotPath(f.Path); err != nil {
@@ -84,11 +84,7 @@ func checkFileSet(files []mcpwire.FileEntry) error {
 			return errorf(mcpwire.CodeSnapshotInvalid, "manifest lists %q twice", f.Path)
 		}
 		seen[f.Path] = true
-		key := mcpwire.FoldPath(f.Path)
-		if other, dup := folded[key]; dup {
-			return errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case or ignorable characters", other, f.Path)
-		}
-		folded[key] = f.Path
+		paths = append(paths, f.Path)
 		if f.Size < 0 || f.Size > mcpwire.MaxFileBytes {
 			return errorf(mcpwire.CodeSnapshotTooLarge, "file %q is larger than %d bytes", f.Path, mcpwire.MaxFileBytes)
 		}
@@ -96,6 +92,9 @@ func checkFileSet(files []mcpwire.FileEntry) error {
 	}
 	if total > mcpwire.MaxTotalBytes {
 		return errorf(mcpwire.CodeSnapshotTooLarge, "snapshot files total %d bytes, more than %d", total, mcpwire.MaxTotalBytes)
+	}
+	if a, b := mcpwire.FoldCollision(paths); a != "" {
+		return errorf(mcpwire.CodeSnapshotInvalid, "manifest paths %q and %q differ only in case or ignorable characters", a, b)
 	}
 	return nil
 }

@@ -137,6 +137,24 @@ func TestFoldPath(t *testing.T) {
 	}
 }
 
+func TestFoldCollision(t *testing.T) {
+	for _, paths := range [][]string{
+		{"a.yml", "A.yml"},
+		{"host_vars/web/a.yml", "host_vars/WEB/b.yml"},
+		{"a", "A/b"},
+		{"x/a\u200cll.yml", "x/all.yml"},
+	} {
+		if a, b := FoldCollision(paths); a == "" || b == "" {
+			t.Errorf("FoldCollision(%q) found nothing", paths)
+		}
+	}
+	for _, paths := range [][]string{{"a/x", "a/y", "b"}, {"hosts.yml", "group_vars/all.yml", "group_vars/b.yml"}, {"a/b", "a/b"}} {
+		if a, b := FoldCollision(paths); a != "" {
+			t.Errorf("FoldCollision(%q) = %q, %q", paths, a, b)
+		}
+	}
+}
+
 func TestValidators(t *testing.T) {
 	for _, e := range []string{"sandbox", "staging", "prod"} {
 		if !ValidEnv(e) {

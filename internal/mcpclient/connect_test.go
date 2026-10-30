@@ -354,6 +354,57 @@ func TestChangesRefusesAnAddThatExistsOnDisk(t *testing.T) {
 	}
 }
 
+// The alias branch: an untracked file Git does not show (here through
+// status.showUntrackedFiles=no; on macOS, a case or normalization variant
+// of a tracked file) already sits at an added path.
+func TestChangesRefusesAnAddThatAliasesAFile(t *testing.T) {
+	allowLocalRepos(t)
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n"})
+	id := strings.Repeat("d", 32)
+	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
+		change("new.yml", mcpwire.OpAdd, "", "n: 1\n"),
+	}}
+	tarPath := changesTar(t, m, map[string]string{"new.yml": "n: 1\n"})
+	p := testProfile(bare, "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes", p)
+	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
+	clone := t.TempDir()
+	git(t, clone, "clone", "--quiet", bare, ".")
+	git(t, clone, "config", "status.showUntrackedFiles", "no")
+	writeTree(t, clone, map[string]string{"prod/new.yml": "someone else's\n"})
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	if _, err := Changes(context.Background(), o, id, clone); !hasCode(err, CodeChangesetConflict) || !strings.Contains(err.Error(), "already exists on disk as another file") {
+		t.Fatalf("err = %v, want CHANGESET_CONFLICT for an add over an existing file", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(clone, "prod", "new.yml")); string(got) != "someone else's\n" {
+		t.Fatalf("the existing file was overwritten: %q", got)
+	}
+}
+
+// A file replaced by a directory is refused with a message saying so.
+func TestChangesRefusesAFileReplacedByADirectory(t *testing.T) {
+	allowLocalRepos(t)
+	bare, base := makeRepo(t, map[string]string{"prod/hosts.yml": "hosts: {}\n", "prod/group_vars/all.yml": "a: 1\n"})
+	id := strings.Repeat("d", 32)
+	m := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: base, Changes: []mcpwire.Change{
+		change("group_vars/all.yml", mcpwire.OpDelete, "", ""),
+		change("group_vars/all.yml/x.yml", mcpwire.OpAdd, "", "a: 1\n"),
+	}}
+	tarPath := changesTar(t, m, map[string]string{"group_vars/all.yml/x.yml": "a: 1\n"})
+	p := testProfile(bare, "prod", mcpwire.ModeEdit)
+	useFakeSSH(t, "changes", p)
+	t.Setenv("PILOT_MCP_FAKE_CHANGES", tarPath)
+	clone := t.TempDir()
+	git(t, clone, "clone", "--quiet", bare, ".")
+	o := &Options{ProfileName: "prod-edit", Profile: p, Stderr: io.Discard, CacheDir: t.TempDir()}
+	if _, err := Changes(context.Background(), o, id, clone); !hasCode(err, CodeChangesetConflict) || !strings.Contains(err.Error(), "replacing a file with a directory") {
+		t.Fatalf("err = %v, want CHANGESET_CONFLICT for a file replaced by a directory", err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "prod", "group_vars", "all.yml")); err != nil {
+		t.Fatalf("the refused import already deleted a file: %v", err)
+	}
+}
+
 func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 	id := strings.Repeat("e", 32)
 	base := mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc",
@@ -377,6 +428,7 @@ func TestParseChangesRejectsTamperedOutput(t *testing.T) {
 		"reserved path": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".vault/main.yaml", mcpwire.OpAdd, "", "x")}}, map[string]string{".vault/main.yaml": "x"})),
 		// On a case-insensitive clone (macOS) this is the clone's .git.
 		"nested .git":      read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("x/.git/config", mcpwire.OpAdd, "", "x")}}, map[string]string{"x/.git/config": "x"})),
+		"directory case":   read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("WEB/b.yml", mcpwire.OpAdd, "", "x"), change("web/a.yml", mcpwire.OpDelete, "", "")}}, map[string]string{"WEB/b.yml": "x"})),
 		"case-only rename": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("A.yml", mcpwire.OpAdd, "", "x"), change("a.yml", mcpwire.OpDelete, "", "")}}, map[string]string{"A.yml": "x"})),
 		"folded duplicate": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change("a.yml", mcpwire.OpAdd, "", "x"), change("A.yml", mcpwire.OpAdd, "", "y")}}, map[string]string{"a.yml": "x", "A.yml": "y"})),
 		"case-folded .git": read(changesTar(t, mcpwire.ChangesManifest{Protocol: mcpwire.Protocol, SessionID: id, Env: "prod", BaseCommitSHA: "abc", Changes: []mcpwire.Change{change(".GIT/config", mcpwire.OpAdd, "", "x")}}, map[string]string{".GIT/config": "x"})),

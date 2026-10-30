@@ -103,7 +103,7 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		return m, nil, invalid("manifest does not belong to session %s in %s", sessionID, env)
 	}
 	want := map[string]mcpwire.Change{}
-	folded := map[string]string{}
+	paths := make([]string, 0, len(m.Changes))
 	for _, c := range m.Changes {
 		if err := mcpwire.CheckSnapshotPath(c.Path); err != nil {
 			return m, nil, invalid("%v", err)
@@ -111,18 +111,18 @@ func parseChanges(data []byte, sessionID, env string) (mcpwire.ChangesManifest, 
 		if _, dup := want[c.Path]; dup {
 			return m, nil, invalid("%s listed twice", c.Path)
 		}
-		// On a case-insensitive clone (macOS) these are one file, and Git
-		// there would not record a case-only rename (core.ignorecase).
-		if other, dup := folded[mcpwire.FoldPath(c.Path)]; dup {
-			return m, nil, invalid("%s and %s differ only in case or ignorable characters", other, c.Path)
-		}
-		folded[mcpwire.FoldPath(c.Path)] = c.Path
+		paths = append(paths, c.Path)
 		switch c.Op {
 		case mcpwire.OpAdd, mcpwire.OpModify, mcpwire.OpDelete:
 		default:
 			return m, nil, invalid("%s has unknown op %q", c.Path, c.Op)
 		}
 		want[c.Path] = c
+	}
+	// On a case-insensitive clone (macOS) these are one name, and Git there
+	// records only one of them (core.ignorecase).
+	if a, b := mcpwire.FoldCollision(paths); a != "" {
+		return m, nil, invalid("%s and %s differ only in case or ignorable characters", a, b)
 	}
 	contents := map[string][]byte{}
 	for {
@@ -319,6 +319,9 @@ func refuseSymlinkComponents(root *os.Root, p string) error {
 		}
 		if info.Mode()&fs.ModeSymlink != 0 {
 			return conflict("%s is a symlink; refusing to write through it", filepath.ToSlash(prefix))
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return conflict("%s is a file in the clone but a directory in the changes; replacing a file with a directory is not supported", filepath.ToSlash(prefix))
 		}
 	}
 	return nil

@@ -74,15 +74,8 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	folded := make(map[string]string, len(changes))
-	for _, c := range changes {
-		key := mcpwire.FoldPath(c.Path)
-		if other, dup := folded[key]; dup {
-			// A case-only rename: on a case-insensitive clone (macOS) the two
-			// are one file, and Git there does not record the rename.
-			return nil, nil, errorf(mcpwire.CodeChangesetInvalid, "%s and %s differ only in case or ignorable characters; a rename like this cannot be exported, rename it with git mv in the config repository", other, c.Path)
-		}
-		folded[key] = c.Path
+	if err := checkApplicable(state, changes); err != nil {
+		return nil, nil, err
 	}
 	if err := checkNextSnapshot(cfg, dir, state, changes, contents); err != nil {
 		return nil, nil, err
@@ -91,6 +84,52 @@ func computeChanges(cfg *Config, dir string, state SessionState) ([]mcpwire.Chan
 		return nil, nil, err
 	}
 	return changes, contents, nil
+}
+
+// checkApplicable refuses changes the client cannot apply faithfully to a
+// clone of the session's base, so a session never ends with changes that
+// can only be refused there:
+//   - two spellings of one file or directory under FoldCollision (a
+//     case-only rename): on a case-insensitive clone (macOS) they are one
+//     name, and Git there records only the old one;
+//   - an add where the base has a directory (a directory replaced by a
+//     file) or a file at a parent (a file replaced by a directory).
+//
+// Such a change cannot be exported; it is made in the config repository
+// directly (for a rename, with git mv).
+func checkApplicable(state SessionState, changes []mcpwire.Change) error {
+	paths := make([]string, len(changes))
+	for i, c := range changes {
+		paths[i] = c.Path
+	}
+	if a, b := mcpwire.FoldCollision(paths); a != "" {
+		return errorf(mcpwire.CodeChangesetInvalid, "%s and %s are one name on a case-insensitive clone (they differ only in case or ignorable characters), so these changes cannot be exported; make this change in the config repository (git mv for a rename)", a, b)
+	}
+	baseDirs := map[string]bool{}
+	for p := range state.SourceFiles {
+		for i := range len(p) {
+			if p[i] == '/' {
+				baseDirs[p[:i]] = true
+			}
+		}
+	}
+	for _, c := range changes {
+		if c.Op != mcpwire.OpAdd {
+			continue
+		}
+		if baseDirs[c.Path] {
+			return errorf(mcpwire.CodeChangesetInvalid, "%s is a directory at the base and a file in these changes; replacing a directory with a file cannot be exported, make this change in the config repository", c.Path)
+		}
+		for i := range len(c.Path) {
+			if c.Path[i] != '/' {
+				continue
+			}
+			if _, isFile := state.SourceFiles[c.Path[:i]]; isFile {
+				return errorf(mcpwire.CodeChangesetInvalid, "%s is a file at the base and a directory in these changes; replacing a file with a directory cannot be exported, make this change in the config repository", c.Path[:i])
+			}
+		}
+	}
+	return nil
 }
 
 // checkNextSnapshot holds the source with these changes applied (what the
