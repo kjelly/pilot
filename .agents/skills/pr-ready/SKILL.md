@@ -15,6 +15,11 @@ before reading shared files or taking the snapshot. Apply it
 before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
 per invocation; multiple/all targets require choosing one with the user. Checkout
 the selected branch in the current clean checkout; do not create per-item worktrees.
+Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (the
+target branch carries a different role file) dispatches with the snapshot as the
+binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
+the outcome, the contract's restore step switches back to the starting branch when that
+is safe, and otherwise stays and reports why.
 
 ## Project runtime configuration
 
@@ -86,7 +91,7 @@ Text-only changes need no unrelated VM run.
 5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD, and re-query GitHub until checks settle or an external blocker prevents completion.
 7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts. Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
-8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action. Do not claim READY if GitHub post-action verification failed.
+8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action, the branch the checkout ended on (restored to the starting branch, or why it stayed), and any role DRIFT (role, both hashes, model/effort pin change), which also goes into `assessment.rationale`. Do not claim READY if GitHub post-action verification failed.
 
 ## Quality / authority rules
 

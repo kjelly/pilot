@@ -27,6 +27,17 @@ def preflight(repo, target, branch=None, cwd=None):
     return p.returncode, json.loads(p.stdout) if p.stdout.strip() else None
 
 
+def restore(repo, start_sha, start_branch=None, checked_out_sha=None, cwd=None):
+    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path), "--restore-check",
+           "--start-sha", start_sha]
+    if start_branch:
+        cmd += ["--start-branch", start_branch]
+    if checked_out_sha:
+        cmd += ["--checked-out-sha", checked_out_sha]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=repo.env)
+    return p.returncode, json.loads(p.stdout) if p.stdout.strip() else None
+
+
 def checks(report):
     return sorted(p["check"] for p in report["problems"])
 
@@ -441,6 +452,157 @@ class OddPathsAndSubmodules(unittest.TestCase):
                 self.assertEqual("", r.out("status", "--porcelain"), "the setting hides it from status")
                 rc, report = preflight(r, "pr", "pr")
                 self.assertEqual((1, ["dirty"]), (rc, checks(report)))
+
+
+class RestoreCheck(unittest.TestCase):
+    """At the end of an invocation: may the checkout go back to where it started?"""
+
+    def on_selected_branch(self):
+        """Started on main; the selected branch `pr` is pushed (upstream set) and checked out."""
+        r = Repo(self)
+        r.write(".gitignore", "local.cfg\n")
+        r.write("a.txt")
+        start = r.commit("init")
+        r.add_origin()
+        r.branch_from_main("pr")
+        r.write("b.txt")
+        r.commit("pr work")
+        r.git("push", "-q", "-u", "origin", "pr")
+        return r, start
+
+    def test_clean_pushed_branch_may_return_and_the_command_works(self):
+        r, start = self.on_selected_branch()
+        before = r.out("rev-parse", "HEAD")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((0, "PASS", True), (rc, report["status"], report["restore_needed"]), report)
+        self.assertEqual(["git", "switch", "main"], report["switch_command"])
+        self.assertEqual("pr", r.out("branch", "--show-current"), "the check never switches")
+        self.assertEqual(before, r.out("rev-parse", "HEAD"))
+        r.git(*report["switch_command"][1:])
+        self.assertEqual(("main", start), (r.out("branch", "--show-current"), r.out("rev-parse", "HEAD")))
+
+    def test_unpushed_commits_keep_the_checkout_on_the_selected_branch(self):
+        r, start = self.on_selected_branch()
+        r.write("c.txt")
+        unpushed = r.commit("not pushed yet")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["unpushed_commits"]), (rc, checks(report)), report)
+        self.assertEqual([unpushed], report["problems"][0]["paths"])
+        self.assertIn("pr", report["problems"][0]["detail"])
+        self.assertIsNone(report["switch_command"])
+        self.assertEqual([unpushed], report["unpushed"])
+
+    def test_a_branch_without_an_upstream_cannot_be_shown_pushed(self):
+        r, start = self.on_selected_branch()
+        r.git("switch", "-q", "-c", "local-only", "main")
+        r.write("d.txt")
+        r.commit("local work")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), report)
+
+    def test_nothing_written_locally_needs_no_upstream_even_after_the_remote_branch_is_deleted(self):
+        """pr-review-merge: HEAD is still the reviewed commit; GitHub deleted the merged branch."""
+        r, start = self.on_selected_branch()
+        reviewed = r.out("rev-parse", "HEAD")
+        r.git("push", "-q", "origin", "--delete", "pr")  # deleteBranchOnMerge
+        r.git("fetch", "-q", "--prune", "origin")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), "without the checked-out SHA")
+        rc, report = restore(r, start, "main", checked_out_sha=reviewed)
+        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
+        r.write("e.txt")
+        r.commit("something was written locally after all")
+        rc, report = restore(r, start, "main", checked_out_sha=reviewed)
+        self.assertEqual((1, ["head_moved"]), (rc, checks(report)), report)
+
+    def test_a_detached_current_head_cannot_be_shown_pushed(self):
+        r, start = self.on_selected_branch()
+        tip = r.out("rev-parse", "HEAD")
+        r.git("switch", "-q", "--detach", "pr")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), report)
+        self.assertIn("detached", report["problems"][0]["detail"])
+        rc, report = restore(r, start, "main", checked_out_sha=tip)  # nothing written: fine
+        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
+
+    def test_dirty_checkout_stays(self):
+        r, start = self.on_selected_branch()
+        r.write("b.txt", "edited\n")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["dirty"]), (rc, checks(report)), report)
+
+    def test_ignored_file_that_the_start_branch_tracks_stops_the_way_back(self):
+        """The ignored-file guard also covers the return trip."""
+        r = Repo(self)
+        r.write(".gitignore", "local.cfg\n")
+        r.write("local.cfg", "tracked on main\n")
+        start = r.commit("main force-tracks local.cfg", "-f", ".gitignore", "local.cfg")
+        r.add_origin()
+        r.branch_from_main("pr")
+        r.git("rm", "-q", "local.cfg")
+        r.commit("pr stops tracking it")
+        r.git("push", "-q", "-u", "origin", "pr")
+        mine = r.write("local.cfg", "MY LOCAL SETTINGS\n")
+        self.assertEqual("", r.out("status", "--porcelain"))
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)), report)
+        self.assertEqual(["local.cfg"], report["problems"][0]["paths"])
+        self.assertIsNone(report["switch_command"])
+        self.assertEqual("MY LOCAL SETTINGS\n", mine.read_text())
+        # premise: the plain `git switch main` would have replaced it
+        r.git("switch", "-q", "main")
+        self.assertEqual("tracked on main\n", mine.read_text())
+
+    def test_a_moved_start_branch_tip_is_checked_too(self):
+        r, start = self.on_selected_branch()
+        r.git("switch", "-q", "main")
+        r.write("local.cfg", "tracked later\n")
+        r.commit("main moved on and tracks local.cfg", "-f", "local.cfg")
+        r.git("switch", "-q", "pr")
+        r.write("local.cfg", "MINE\n")
+        rc, report = restore(r, start, "main")  # start SHA alone is harmless; main's tip is not
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)), report)
+        self.assertEqual("refs/heads/main", report["problems"][0]["target"])
+        self.assertTrue(report["tip_moved"])
+
+    def test_a_detached_start_returns_to_the_sha(self):
+        r, start = self.on_selected_branch()
+        rc, report = restore(r, start)  # no --start-branch: HEAD started detached
+        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
+        self.assertEqual(["git", "switch", "--detach", start], report["switch_command"])
+        r.git(*report["switch_command"][1:])
+        self.assertEqual("", r.out("branch", "--show-current"))
+        self.assertEqual(start, r.out("rev-parse", "HEAD"))
+
+    def test_already_on_the_start_branch_needs_no_switch(self):
+        r = Repo(self)
+        r.write("a.txt")
+        start = r.commit("init")
+        rc, report = restore(r, start, "main")
+        self.assertEqual((0, "PASS", False, None), (rc, report["status"], report["restore_needed"],
+                                                    report["switch_command"]))
+
+    def test_start_branch_deleted_or_checked_out_elsewhere_stays(self):
+        r, start = self.on_selected_branch()
+        r.git("worktree", "add", "-q", str(r.base / "other"), "main")  # scratch repo only
+        rc, report = restore(r, start, "main")
+        self.assertEqual((1, ["checked_out_elsewhere"]), (rc, checks(report)), report)
+        r2, start2 = self.on_selected_branch()
+        r2.git("branch", "-q", "-D", "main")
+        rc, report = restore(r2, start2, "main")
+        self.assertEqual(1, rc)
+        self.assertIn("start_branch_missing", checks(report))
+
+    def test_unresolvable_start_and_bad_arguments_are_not_a_pass(self):
+        r, start = self.on_selected_branch()
+        rc, report = restore(r, "0" * 40, "main")
+        self.assertEqual(1, rc)
+        self.assertIn("unresolvable_target", checks(report))
+        for argv in (["--restore-check"], ["--restore-check", "--start-sha", start, "--target-ref", "main"],
+                     ["--start-sha", start, "--target-ref", "main"]):
+            p = subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(r.path), *argv],
+                               capture_output=True, text=True, env=r.env)
+            self.assertNotEqual(0, p.returncode, argv)
 
 
 if __name__ == "__main__":

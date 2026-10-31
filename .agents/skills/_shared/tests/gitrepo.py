@@ -67,3 +67,12 @@ class Repo:
             subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "n"], check=True,
                            capture_output=True, env=self.env)
         return path
+
+    def add_origin(self):
+        """A bare `origin` with main pushed (upstream set), like a clone of the real remote."""
+        bare = self.base / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True,
+                       capture_output=True, env=self.env)
+        self.git("remote", "add", "origin", str(bare))
+        self.git("push", "-q", "-u", "origin", "main")
+        return bare

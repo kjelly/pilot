@@ -27,7 +27,7 @@
   Use the current clean checkout; do not create per-PR worktrees. A tracking or temporary branch is for reading only; **the implementation must push back to the original PR head branch/ref**, with a verified repository/remote.
 
 - If branch is already checked out elsewhere, stop and identify that checkout; do not silently switch directories. Never use `--force`, `git reset --hard`, or discard user's work.
-- Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
+- Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, the starting branch/HEAD (for the restore step), any role DRIFT reported by the contract's role check (role, both hashes, pin change), iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
 - After new commit/push or remote movement, invalidate prior receipts and reviews. Do not treat older check results as reusable, even if the test command is unchanged.
 
 ## Delegation contract
@@ -51,6 +51,7 @@ Expected concise result: `{role, head_sha, status, root_causes, changed_files, c
 ## Loop and interruption
 
 - Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round.
+- Whatever the end state (READY, DRAFT-BLOCKED, pending CI), finish with the contract's restore step: switch back to the starting branch only if the checkout is clean, the PR head branch has no unpushed commits and the way back passes the preflight; otherwise stay on the PR head branch and report why.
 - After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and end this invocation without starting another PR.
 - Permission errors, rate limiting, pending CI, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
 - Do not poll indefinitely. When CI does not settle within the interactive execution or runtime is ending, persist checkpoint, leave Draft and report the specific pending checks; on future invocation resume after requerying current HEAD. This is not a quality relaxation.

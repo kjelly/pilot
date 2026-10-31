@@ -22,6 +22,21 @@ paths than the fetched head. Prints one JSON object. Exit 0 = PASS; exit 1 =
 STOP (a problem was found, or a check could not be run: fail closed). Any other
 exit code (argument errors) is also not a pass. The script changes nothing in
 the repository.
+
+Restore check, at the end of an invocation:
+    checkout_preflight.py --restore-check --start-sha SHA [--start-branch NAME]
+                          [--checked-out-sha SHA] [--repo DIR]
+
+Is it safe to switch the checkout back to where the invocation started
+(`--start-branch`, or the detached `--start-sha` when HEAD started detached)?
+PASS (exit 0) requires all of: the checkout is clean; the current branch has no
+unpushed commits (its upstream exists and `@{u}..HEAD` is empty, or HEAD is still
+`--checked-out-sha`, the commit the branch was checked out at, so nothing was
+written locally: always so for pr-review-merge, also after a merge whose remote
+branch GitHub deleted); and the ordinary preflight passes for the start SHA and
+the start branch's local tip (ignored-file collisions, checked out elsewhere,
+...). The report carries `switch_command`, which the caller runs itself; this
+script never switches.
 """
 from __future__ import annotations
 
@@ -241,15 +256,100 @@ def run_preflight(repo: Path, target_refs: list[str], branch: str | None) -> dic
     return report
 
 
+def check_unpushed(top: Path, branch: str | None, head: str | None,
+                   checked_out_sha: str | None) -> tuple[list[dict], list[str]]:
+    """Problems that mean commits of the selected branch could be lost by leaving it."""
+    if checked_out_sha:
+        if head == checked_out_sha:
+            return [], []  # nothing was written locally
+        return [problem("head_moved", f"HEAD is {head}, not the commit {checked_out_sha} the branch "
+                        "was checked out at: something was committed locally")], []
+    if not branch:
+        return [problem("no_upstream", "HEAD is detached: nothing shows its commits are pushed")], []
+    p = git(top, "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}",
+            ok=(0, 128))
+    if p.returncode:
+        return [problem("no_upstream", f"branch {branch} has no (or a deleted) upstream: nothing "
+                        "shows its commits are pushed")], []
+    ahead = git(top, "rev-list", f"{branch}@{{upstream}}..{branch}").stdout.decode().split()
+    if ahead:
+        return [problem("unpushed_commits", f"branch {branch} has commits its upstream "
+                        f"{p.stdout.decode().strip()} does not", ahead)], ahead
+    return [], []
+
+
+def run_restore_check(repo: Path, start_sha: str, start_branch: str | None,
+                      checked_out_sha: str | None) -> dict:
+    report: dict = {"status": "STOP", "mode": "restore-check", "repo": str(repo),
+                    "start_sha": start_sha, "start_branch": start_branch,
+                    "checked_out_sha": checked_out_sha, "problems": [], "restore_needed": True,
+                    "switch_command": None}
+    problems: list[dict] = report["problems"]
+    try:
+        top = Path(git(repo, "rev-parse", "--show-toplevel").stdout.decode().strip())
+        head = git(top, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", ok=(0, 1)).stdout.decode().strip()
+        cur = git(top, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1)).stdout.decode().strip() or None
+        report.update(toplevel=str(top), head=head or None, current_branch=cur)
+        start = git(top, "rev-parse", "--verify", "--quiet", f"{start_sha}^{{commit}}",
+                    ok=(0, 1)).stdout.decode().strip()
+        if not start:
+            problems.append(problem("unresolvable_target", f"start commit {start_sha} is not in "
+                                    "this repository"))
+        elif (start_branch and cur == start_branch) or (not start_branch and cur is None and head == start):
+            report.update(restore_needed=False, switch_command=None)  # already where it started
+            report["status"] = "PASS"
+            return report
+        if start_branch:
+            tip = git(top, "rev-parse", "--verify", "--quiet", f"refs/heads/{start_branch}^{{commit}}",
+                      ok=(0, 1)).stdout.decode().strip()
+            if not tip:
+                problems.append(problem("start_branch_missing", f"local branch {start_branch} no "
+                                        "longer exists; `git switch` could recreate it from a remote"))
+            report["start_branch_tip"] = tip or None
+            report["tip_moved"] = bool(tip and start and tip != start)
+            report["switch_command"] = ["git", "switch", start_branch]
+        else:
+            report["switch_command"] = ["git", "switch", "--detach", start]
+        unpushed, ahead = check_unpushed(top, cur, head or None, checked_out_sha)
+        problems += unpushed
+        report["unpushed"] = ahead
+        if start:
+            inner = run_preflight(repo, [start], start_branch)
+            problems += inner["problems"]
+    except (GitError, OSError) as exc:
+        problems.append(problem("unverifiable", str(exc)))
+    if not problems:
+        report["status"] = "PASS"
+    else:
+        report["switch_command"] = None  # not safe: the caller must stay on the branch
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=Path("."), help="the current checkout")
-    parser.add_argument("--target-ref", action="append", required=True,
+    parser.add_argument("--target-ref", action="append",
                         help="commit-ish that may be checked out (repeatable)")
     parser.add_argument("--branch", help="local branch that will be checked out; its local tip "
                         "is checked too")
+    parser.add_argument("--restore-check", action="store_true",
+                        help="is it safe to switch back to the starting branch/commit?")
+    parser.add_argument("--start-sha", help="restore check: the HEAD the invocation started at")
+    parser.add_argument("--start-branch", help="restore check: the branch it started on "
+                        "(omit when HEAD started detached)")
+    parser.add_argument("--checked-out-sha", help="restore check: the commit the selected branch "
+                        "was checked out at; HEAD still equal to it means nothing was written locally")
     args = parser.parse_args(argv)
-    report = run_preflight(args.repo, args.target_ref, args.branch)
+    if args.restore_check:
+        if not args.start_sha or args.target_ref or args.branch:
+            parser.error("--restore-check takes --start-sha [--start-branch] [--checked-out-sha], "
+                         "not --target-ref/--branch")
+        report = run_restore_check(args.repo, args.start_sha, args.start_branch, args.checked_out_sha)
+    else:
+        if not args.target_ref or args.start_sha or args.start_branch or args.checked_out_sha:
+            parser.error("--target-ref is required (and --start-*/--checked-out-sha belong to "
+                         "--restore-check)")
+        report = run_preflight(args.repo, args.target_ref, args.branch)
     json.dump(report, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0 if report["status"] == "PASS" else 1

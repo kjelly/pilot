@@ -15,6 +15,11 @@ before reading shared files or taking the snapshot. Apply it
 before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
 per invocation; multiple/all targets require choosing one with the user. Checkout
 the selected branch in the current clean checkout; do not create per-item worktrees.
+Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (the
+target branch carries a different role file) dispatches with the snapshot as the
+binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
+the outcome, the contract's restore step switches back to the starting branch when that
+is safe, and otherwise stays and reports why.
 
 ## Project runtime configuration
 
@@ -125,7 +130,7 @@ python3 "$SNAP/.agents/skills/issue-to-pr/scripts/issue_gate.py" \
 
 Maintain per-Issue checkpoint (`references/workflow.md`) so interrupted runs can resume without reproducing commits or creating duplicate PRs. Child agents return compact summaries, not full code diffs or raw test logs. Include paths to evidence artifacts and last verified HEAD. Root should complete permitted execution, not wait for an artificial check-in between normal steps.
 
-For **the selected Issue**, report: Issue number/URL, `READY_FOR_REVIEW` (converted after everything was done) / `DRAFT_PR_CREATED` (open as Draft, work still in progress) / `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` / `EXISTING_PR` / `EXISTING_WORK` / `BLOCKED` / `INVALID`, PR URL if present, root cause/fix, reviewer disposition, test results, latest SHA, remaining blockers, CI state (if known). Separate local test pass from GitHub CI pass. Do not claim success without corresponding verification.
+For **the selected Issue**, report: Issue number/URL, `READY_FOR_REVIEW` (converted after everything was done) / `DRAFT_PR_CREATED` (open as Draft, work still in progress) / `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` / `EXISTING_PR` / `EXISTING_WORK` / `BLOCKED` / `INVALID`, PR URL if present, root cause/fix, reviewer disposition, test results, latest SHA, remaining blockers, CI state (if known), the branch the checkout ended on (restored to the starting branch, or why it stayed), and any role DRIFT (role, both hashes, model/effort pin change) from the contract's role check, also in the Reviewer `review.summary` of `evidence.json`. Separate local test pass from GitHub CI pass. Do not claim success without corresponding verification.
 
 ## Supporting files
 

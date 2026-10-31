@@ -23,6 +23,7 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
            \-> EXISTING_PR / INVALID
 ```
 
+- Every end state (`READY_FOR_REVIEW`, `DRAFT_*`, `BLOCKED`, `EXISTING_PR`, `INVALID`) is followed by the contract's restore step: the checkout returns to the starting branch when clean, the Issue branch has no unpushed commits and the way back passes the preflight; otherwise it stays on the Issue branch and the report says why. The restore outcome is reported; it is not a state of the Issue.
 - A P0–P2 review finding returns `REVIEWED -> IMPLEMENTING`. A new commit invalidates `CHECKED` and `REVIEWED` receipts.
 - `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes.
 - `PUSHED` is not a completed task. Confirm PR exists and references the intended issue/HEAD.
@@ -58,13 +59,16 @@ Keep an Issue→status→branch→commit→gate timestamp→PR URL ledger outsid
   "branch": "issue/123-short-slug",
   "checkout": "/absolute/path/of/the/current/checkout",
   "head_sha": "<40-hex-digit commit>",
+  "start_branch": "main",
+  "start_sha": "<40-hex-digit commit>",
+  "role_drift": [],
   "dependents": [],
   "blockers": [],
   "pr_url": null
 }
 ```
 
-An agent may update the checkpoint atomically using temp-write/rename. Keep it separate from PR source files. A checkpoint is a hint, not the source of truth: re-verify with git/GitHub when resuming.
+`start_branch`/`start_sha` (or only `start_sha` when HEAD started detached) feed the restore step; `role_drift` lists each role the contract's role check reported as DRIFT (role, both sha256 hashes, `pins_differ`). An agent may update the checkpoint atomically using temp-write/rename. Keep it separate from PR source files. A checkpoint is a hint, not the source of truth: re-verify with git/GitHub when resuming.
 
 ## Three unsuccessful revisions
 

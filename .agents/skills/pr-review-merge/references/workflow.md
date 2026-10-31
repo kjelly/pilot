@@ -8,7 +8,8 @@
 6. Run read-only gate; a WAITING PR is left unchanged. For confirmed blockers, guarded actor posts findings + converts to Draft. For a clean PR, Root runs the actor with `--execute`.
 7. Before acting, **invalidate/review evidence if the selected PR Base SHA has changed**. Do not reuse a passing review against a prior base. After handling this PR, stop; no next-item scheduling.
 8. Re-check the selected PR's WAITING reason only if it can progress within this session; do not loop forever waiting for CI or approval. Otherwise report WAITING and stop.
-9. Final report includes exact state and evidence for the selected PR, including error cases and partial GitHub operations.
+9. Final report includes exact state and evidence for the selected PR, including error cases and partial GitHub operations. If the contract's role check reported DRIFT for a role, record the role, both hashes and any model/effort pin change in the evidence `summary` too.
+10. Finish with the contract's restore step. This skill never writes locally, so use `--checked-out-sha` (the reviewed HEAD): that also covers a merged PR whose remote branch GitHub deleted. Stay on the PR branch and say why if the checkout is dirty or the way back fails the preflight.
 
 # Expected reviewer return (compact)
 

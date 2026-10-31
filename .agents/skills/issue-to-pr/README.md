@@ -44,6 +44,7 @@ Supply one full URL or qualified `OWNER/REPO#N` ID. For multiple/all targets, as
 8. `pr_ci.py` inspects GitHub checks of the Draft PR for the exact head SHA. Pending CI does not mean success. If CI fails, repair on the same branch, repeat test/review, push and re-check CI; never open a second PR. Finish every other follow-up (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups) while it is still a Draft. Keep the Issue claim (`claim.py renew`) the whole time.
    `mark_ready.py` converts Draft → Ready **only** when the PR is an open Draft of the validated branch at the validated HEAD, the pre-PR gate still passes, CI is `CI_PASSED` on that HEAD, there are no merge conflicts, and `--confirm-complete` attests that nothing else is left. **Ready means merge-quality; a PR with anything outstanding stays Draft.**
 9. If blocked before PR creation, no PR is created. If CI or review is unresolved, the PR stays Draft and is reported `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` with evidence. No auto-merge, no branch-protection bypass.
+10. Whatever the outcome, the contract's restore step ends the invocation: the checkout returns to the starting branch only if it is clean, the Issue branch has no unpushed commits and the way back passes the preflight; otherwise it stays on the Issue branch and the report says why.
 
 ## Quality helper CLI
 

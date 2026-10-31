@@ -17,6 +17,11 @@ before reading shared files or taking the snapshot. Apply it
 before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
 per invocation; multiple/all targets require choosing one with the user. Checkout
 the selected branch in the current clean checkout; do not create per-item worktrees.
+Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (the
+target branch carries a different role file) dispatches with the snapshot as the
+binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
+the outcome, the contract's restore step switches back to the starting branch when that
+is safe, and otherwise stays and reports why.
 
 ## Project runtime configuration
 
@@ -133,7 +138,7 @@ Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live P
 
 ## 6. Final report (selected PR)
 
-Return `PR # / URL | MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action`.
+Return `PR # / URL | MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, pin change; also in the evidence `summary`)`.
 
 Keep Root context small: include structured findings and essential citations/paths, **not full diffs or raw logs**.
 

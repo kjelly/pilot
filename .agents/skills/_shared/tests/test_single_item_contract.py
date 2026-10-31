@@ -25,6 +25,7 @@ Three kinds of checks:
   `$REPO_ROOT`/`$SNAP` paths, and no skill document shows a bare
   `python3 scripts/...` or `/path/to/...` invocation.
 """
+import importlib.util
 import re
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ NAMES = ("issue-to-pr", "pr-ready", "pr-review-merge")
 SHARED = ".agents/skills/_shared/single-item-checkout.md"
 HISTORY = ".agents/skills/pilot-code-review/references/pilot-history-checks.md"
 PREFLIGHT = SKILLS / "_shared" / "scripts" / "checkout_preflight.py"
+SNAPSHOT = SKILLS / "_shared" / "scripts" / "skill_snapshot.py"
 
 # A strong negation earlier in the sentence exempts a negatable rule ("Do not create ...");
 # a weak one only directly before the match ("no per-item worktree"), so "If no sound
@@ -356,9 +358,34 @@ STOP_CONDITIONS = {
 }
 
 
+# The check ids reported by --restore-check only, and the phrase the restore section must state.
+RESTORE_CONDITIONS = {
+    "no_upstream": "its upstream exists",
+    "unpushed_commits": "git rev-list @{u}..HEAD is empty",
+    "head_moved": "nothing was ever written locally",
+    "start_branch_missing": "a start branch that no longer exists is a stop as well",
+}
+
+
 def preflight_step(contract):
     """The contract paragraph that runs the preflight (numbered step 3)."""
     return contract[contract.index("3. Preflight"):contract.index("4. Snapshot")]
+
+
+def role_step(contract):
+    """The contract paragraph that checks the role before dispatch (numbered step 7)."""
+    return contract[contract.index("7. Give every child"):contract.index("Known limitation")]
+
+
+def restore_section(contract):
+    return contract[contract.index("## Finish: restore the starting branch"):]
+
+
+def load_module(path):
+    spec = importlib.util.spec_from_file_location(path.stem + "_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class WordingTests(unittest.TestCase):
@@ -452,12 +479,16 @@ class ContractStructureTests(unittest.TestCase):
     def test_preflight_stop_conditions_match_the_script_check_ids(self):
         """Every check id the script can report is stated as a stop condition, and nothing else is."""
         ids = set(re.findall(r'problem\(\s*"([a-z_]+)"', PREFLIGHT.read_text()))
-        self.assertEqual(set(STOP_CONDITIONS), ids,
+        self.assertEqual(set(STOP_CONDITIONS) | set(RESTORE_CONDITIONS), ids,
                          "a check was added or removed in checkout_preflight.py: update the contract")
         step = preflight_step(self.contract)
         for check, phrase in STOP_CONDITIONS.items():
             with self.subTest(check=check):
                 self.assertIn(phrase, step)
+        restore = restore_section(self.contract)
+        for check, phrase in RESTORE_CONDITIONS.items():
+            with self.subTest(check=check):
+                self.assertIn(phrase, restore)
 
     def test_preflight_step_locks_collisions_and_every_checked_commit(self):
         step = preflight_step(self.contract)
@@ -474,10 +505,15 @@ class ContractStructureTests(unittest.TestCase):
                 self.assertIn(required, step)
 
     def test_helper_scripts_are_always_invoked_through_a_snapshot_or_repo_root_path(self):
-        for m in re.finditer(r"skill_snapshot\.py", self.contract):
-            before = self.contract[max(0, m.start() - 70):m.start()]
-            self.assertRegex(before, r'"\$(?:REPO_ROOT|SNAP)/\.agents/skills/_shared/scripts/$',
-                             f"bare skill_snapshot.py at {m.start()}")
+        for script in ("skill_snapshot", "checkout_preflight"):
+            for m in re.finditer(rf"{script}\.py", self.contract):
+                before = self.contract[max(0, m.start() - 70):m.start()]
+                self.assertRegex(before, r'"\$(?:REPO_ROOT|SNAP)/\.agents/skills/_shared/scripts/$',
+                                 f"bare {script}.py at {m.start()}")
+        # the preflight runs from the checkout before any switch; the restore check from the
+        # snapshot, because the selected branch may not carry the script
+        self.assertRegex(self.contract, r'"\$REPO_ROOT/\.agents/skills/_shared/scripts/checkout_preflight\.py" --repo "\$REPO_ROOT" --target-ref')
+        self.assertRegex(self.contract, r'"\$SNAP/\.agents/skills/_shared/scripts/checkout_preflight\.py" --repo "\$REPO_ROOT" --restore-check')
         for verb in ("create", "verify", "verify-role"):
             with self.subTest(verb=verb):
                 self.assertRegex(self.contract, rf'skill_snapshot\.py" {verb}\b')
@@ -510,6 +546,73 @@ class ContractStructureTests(unittest.TestCase):
                 with self.subTest(skill=name, needs=required):
                     self.assertIn(required, text)
             self.assertNotIn("pr-review-merge/tests/test_single_item_contract.py", text)
+
+    def test_a_differing_role_is_dispatched_under_the_snapshot_not_blocked(self):
+        """DRIFT (exit 3) dispatches with the binding statement; only STOP is BLOCKED."""
+        step = role_step(self.contract)
+        for required in ("Exit 0 (PASS)", "Exit 3 (DRIFT)", "dispatch the native role anyway",
+                         "the snapshot is the binding contract", "binding_statement",
+                         "where they conflict, the snapshot wins", "pins_differ",
+                         "never silent", "in the checkpoint and in the review report or evidence rationale",
+                         "Exit 1 (STOP) is BLOCKED", "the role file is missing in the checkout",
+                         "--platform claude|codex|agy", ".agents/agents/NAME.md", "both sha256 hashes"):
+            with self.subTest(required=required):
+                self.assertIn(required, step)
+        # the statement in the contract is the one the script prints
+        statement = flat(load_module(SNAPSHOT).BINDING.format(path="<absolute $SNAP role path>"))
+        self.assertIn(statement, step)
+        self.assertNotIn("different role file is BLOCKED", self.contract)
+        self.assertNotIn("missing or different role file", self.contract)
+        for sentence in sentences((REPO / SHARED).read_text()):
+            if re.search(r"\b(?:differs?|different)\b", sentence, re.I):
+                self.assertNotRegex(sentence, r"BLOCKED", sentence)
+
+    def test_restore_step_and_its_three_conditions_are_in_the_contract(self):
+        restore = restore_section(self.contract)
+        for required in ("whatever its outcome (success, Draft-blocked, WAITING or BLOCKED)",
+                         "starting branch recorded in step 1", "the detached starting SHA",
+                         "the checkout is clean", "no unpushed commits",
+                         "its upstream exists and git rev-list @{u}..HEAD is empty",
+                         "nothing was ever written locally",
+                         "including after a merge whose remote branch GitHub deleted",
+                         "the preflight passes for the way back",
+                         "ignored-file collision and stale-tip checks",
+                         "--restore-check --start-sha START_SHA [--start-branch START_BRANCH]",
+                         "[--checked-out-sha CHECKED_OUT_SHA]", "switch_command",
+                         "git switch START_BRANCH", "git switch --detach START_SHA",
+                         "Never use force, stash or reset", "git branch --show-current",
+                         "git rev-parse HEAD", "report the final branch",
+                         "stay on the selected branch and report why",
+                         "naming the branch and its unpushed commits or the preflight stop"):
+            with self.subTest(required=required):
+                self.assertIn(required, restore)
+        self.assertIn("starting branch (or the detached SHA when HEAD is detached)", self.contract)
+        self.assertIn("exits 0 only on PASS. Any other exit is a stop, except that verify-role exits 3 for DRIFT",
+                      self.contract)
+        for gone in ("Leave the checkout on that branch", "leave the checkout on that branch"):
+            self.assertNotIn(gone, self.contract)
+        self.assertLess(self.contract.index("## Finish only the selected item"),
+                        self.contract.index("## Finish: restore the starting branch"))
+
+    def test_every_skill_and_workflow_states_the_restore_and_role_drift_rules(self):
+        for name in NAMES:
+            skill = flat((SKILLS / name / "SKILL.md").read_text())
+            workflow = flat((SKILLS / name / "references" / "workflow.md").read_text())
+            readme = flat((SKILLS / name / "README.md").read_text())
+            with self.subTest(skill=name):
+                for text in (skill,):
+                    self.assertIn("DRIFT", text)
+                    self.assertIn("restore step", text)
+                    self.assertIn("binding contract", text)
+                    self.assertIn("pin", text)
+                self.assertIn("restore step", workflow)
+                self.assertIn("restore step", readme)
+                for gone in ("Leave the checkout on that branch", "leave the checkout on that branch"):
+                    self.assertNotIn(gone, skill + workflow + readme)
+        checkpoint = (SKILLS / "issue-to-pr/references/workflow.md").read_text()
+        for field in ('"start_branch": "main"', '"start_sha"', '"role_drift": []'):
+            self.assertIn(field, checkpoint)
+        self.assertIn("--checked-out-sha", flat((SKILLS / "pr-review-merge/references/workflow.md").read_text()))
 
     def test_the_history_reference_matches_the_contract(self):
         text = flat((REPO / HISTORY).read_text())

@@ -13,13 +13,25 @@ Usage:
         directory outside the checkout; write <dir>.manifest.json next to it.
     skill_snapshot.py verify --snapshot DIR
         The snapshot still matches its manifest.
-    skill_snapshot.py verify-role --snapshot DIR --repo DIR --platform claude|codex --role NAME
-        The role file the runtime will load from the checkout
-        (.claude/agents/NAME.md or .codex/agents/NAME.toml) exists, is a regular
-        file inside the checkout and is byte-identical to the snapshot's copy.
-        Run it before every child dispatch; anything but exit 0 means BLOCKED.
+    skill_snapshot.py verify-role --snapshot DIR --repo DIR --platform claude|codex|agy --role NAME
+        Compare the role file the runtime will load from the checkout
+        (.claude/agents/NAME.md, .codex/agents/NAME.toml, or for agy the copy
+        .agents/agents/NAME.md) with the snapshot's copy. Run it before every
+        child dispatch. Three outcomes:
+          PASS  (exit 0): byte-identical.
+          DRIFT (exit 3): the checkout has the role file but it differs (a branch
+              cut before this workflow, or one that changes the role). The
+              snapshot is the binding contract, so Root still dispatches, with
+              the printed `binding_statement` at the top of the task envelope,
+              and records the role, both hashes and any model/effort pin
+              difference. Pins: Claude/agy frontmatter `model`/`effort`, Codex
+              `model`/`model_reasoning_effort`.
+          STOP  (exit 1): the role file is missing in the checkout, the role
+              name is invalid, the snapshot fails `verify`, or the role resolves
+              outside the checkout. Nothing can be dispatched.
 
-Prints one JSON object. Exit 0 = PASS, 1 = STOP/BLOCKED (fail closed).
+Prints one JSON object. Exit 0 = PASS, 3 = DRIFT, 1 = STOP (fail closed). Any
+other non-zero exit (argument errors) is not a pass either.
 """
 from __future__ import annotations
 
@@ -42,7 +54,14 @@ BUNDLE_PATHS = (
     ".codex/agents",
     ".claude/agents",
 )
-ROLE_FILES = {"claude": ".claude/agents/{role}.md", "codex": ".codex/agents/{role}.toml"}
+# The role file the runtime loads from the checkout. agy definitions are copied into
+# .agents/agents/ when agy is used (the skills ship them under platforms/agy/agents/).
+ROLE_FILES = {"claude": ".claude/agents/{role}.md", "codex": ".codex/agents/{role}.toml",
+              "agy": ".agents/agents/{role}.md"}
+BINDING = ("Your native role definition on disk comes from the checked-out target branch and differs "
+           "from the invoking workflow. Read `{path}` now and follow it as your role contract; "
+           "where they conflict, the snapshot wins.")
+EXIT_DRIFT = 3
 ROLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
@@ -138,6 +157,35 @@ def verify(snapshot: Path) -> dict:
             "tree_id": manifest["source_tree"], "files": len(now)}
 
 
+def snapshot_role_file(snapshot: Path, platform: str, role: str) -> Path:
+    """The snapshot's copy of a role, as a real path under the snapshot."""
+    if platform != "agy":
+        return Path(os.path.realpath(snapshot / ROLE_FILES[platform].format(role=role)))
+    found = sorted((snapshot / ".agents" / "skills").glob(f"*/platforms/agy/agents/{role}.md"))
+    if len(found) != 1:
+        raise Stop(f"BLOCKED: expected one platforms/agy/agents/{role}.md in the snapshot, "
+                   f"found {len(found)}")
+    return Path(os.path.realpath(found[0]))
+
+
+def role_pins(path: Path, platform: str) -> dict:
+    """model / effort pins of a role definition (None when absent)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if platform == "codex":  # TOML header only: the prompt text may mention `model = ...`
+        header = text.split("developer_instructions", 1)[0]
+        keys = {"model": "model", "effort": "model_reasoning_effort"}
+        pattern = r'^\s*{key}\s*=\s*"([^"]*)"'
+    else:  # YAML frontmatter
+        header = text.split("\n---", 1)[0] if text.startswith("---\n") else ""
+        keys = {"model": "model", "effort": "effort"}
+        pattern = r'^{key}:\s*["\']?([^"\'\n]*?)["\']?\s*$'
+    pins = {}
+    for name, key in keys.items():
+        m = re.search(pattern.format(key=key), header, re.M)
+        pins[name] = m.group(1) if m else None
+    return pins
+
+
 def verify_role(snapshot: Path, repo: Path, platform: str, role: str) -> dict:
     if not ROLE_NAME.fullmatch(role) or ".." in role:
         raise Stop(f"BLOCKED: invalid role name {role!r}: a role is a plain file name such as "
@@ -151,14 +199,20 @@ def verify_role(snapshot: Path, repo: Path, platform: str, role: str) -> dict:
                    "the verified role. Do not install or substitute a role silently")
     if top != here and top not in here.parents:
         raise Stop(f"BLOCKED: {rel} resolves outside the checkout ({here})")
-    there = Path(os.path.realpath(Path(result["snapshot_dir"]) / rel))
-    if not there.is_file():
+    there = snapshot_role_file(Path(result["snapshot_dir"]), platform, role)
+    snapshot_dir = Path(result["snapshot_dir"])
+    if not there.is_file() or snapshot_dir not in there.parents:
         raise Stop(f"BLOCKED: {rel} is not in the snapshot")
-    if sha256(here) != sha256(there):
-        raise Stop(f"BLOCKED: {rel} in the checkout differs from the verified snapshot copy; "
-                   "the checked-out branch changed the role definition")
-    return {"role": role, "platform": platform, "file": rel, "sha256": sha256(here),
-            "snapshot_dir": result["snapshot_dir"]}
+    report = {"role": role, "platform": platform, "file": rel, "snapshot_dir": str(snapshot_dir),
+              "snapshot_role": str(there), "checkout_role": str(top / rel),
+              "snapshot_sha256": sha256(there), "checkout_sha256": sha256(here)}
+    if report["snapshot_sha256"] == report["checkout_sha256"]:
+        report["sha256"] = report["snapshot_sha256"]
+        return report
+    pins = {"snapshot": role_pins(there, platform), "checkout": role_pins(here, platform)}
+    report.update(status="DRIFT", pins=pins, pins_differ=pins["snapshot"] != pins["checkout"],
+                  binding_statement=BINDING.format(path=there))
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         report = {"status": "STOP", "error": str(exc)}
     json.dump(report, sys.stdout, indent=2)
     sys.stdout.write("\n")
-    return 0 if report["status"] == "PASS" else 1
+    return {"PASS": 0, "DRIFT": EXIT_DRIFT}.get(report["status"], 1)
 
 
 if __name__ == "__main__":

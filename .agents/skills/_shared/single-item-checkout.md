@@ -21,14 +21,17 @@ not a skill, so it cannot be linked there.
 ## Checkout before analysis, edits, review, tests or delegation
 
 Helper scripts live in `.agents/skills/_shared/scripts/` and are stdlib-only;
-each prints one JSON object and exits 0 only on PASS (any other exit is a stop).
+each prints one JSON object and exits 0 only on PASS. Any other exit is a stop,
+except that `verify-role` exits 3 for DRIFT (step 7).
 
 1. Resolve the skill directory physically before reading any shared file:
    `SKILL_DIR=$(realpath <directory of the invoked SKILL.md>)` (never the
    `.claude/skills/<name>` path) and `REPO_ROOT=$(git -C "$SKILL_DIR" rev-parse
    --show-toplevel)`; it must be the repository being worked on. Resolve the
    repository identity and the selected item's remote metadata. Record the
-   starting directory, branch, HEAD, target branch and base/head SHAs.
+   starting directory, starting branch (or the detached SHA when HEAD is
+   detached), HEAD, target branch and base/head SHAs: the restore step at the
+   end needs them.
 2. Fetch the exact target commit; this does not touch the working tree. For an
    existing PR: `git fetch origin refs/pull/N/head` (same-repository and fork
    PRs) and compare the fetched SHA with `headRefOid`. For an Issue with no
@@ -85,10 +88,23 @@ each prints one JSON object and exits 0 only on PASS (any other exit is a stop).
    dispatch the first role.
 7. Give every child the same verified checkout and target identity. Before each
    dispatch run `python3 "$SNAP/.agents/skills/_shared/scripts/skill_snapshot.py"
-   verify-role --snapshot "$SNAP" --repo "$REPO_ROOT" --platform claude|codex
-   --role NAME` for the role file the runtime will load
-   (`.claude/agents/NAME.md` or `.codex/agents/NAME.toml` in the checkout); a
-   missing or different role file is `BLOCKED`, never dispatched. In existing
+   verify-role --snapshot "$SNAP" --repo "$REPO_ROOT" --platform claude|codex|agy
+   --role NAME` for the role file the runtime will load (`.claude/agents/NAME.md`,
+   `.codex/agents/NAME.toml`, or for agy its copy `.agents/agents/NAME.md`).
+   Exit 0 (PASS): the file is identical to the snapshot's; dispatch. Exit 3
+   (DRIFT): the file exists in the checkout but differs, as on a branch cut
+   before this workflow; the snapshot is the binding contract, so dispatch the
+   native role anyway and start the task envelope with the output's
+   `binding_statement`: "Your native role definition on disk comes from the
+   checked-out target branch and differs from the invoking workflow. Read
+   `<absolute $SNAP role path>` now and follow it as your role contract; where
+   they conflict, the snapshot wins." Record the role, both sha256 hashes and
+   any model/effort pin difference (`pins_differ`; Claude/agy frontmatter
+   `model`/`effort`, Codex `model`/`model_reasoning_effort`) in the checkpoint and
+   in the review report or evidence rationale: a pin difference is reported, never
+   silent. Exit 1 (STOP) is `BLOCKED`: the role file is missing in the checkout,
+   the role name is invalid, the snapshot fails `verify`, or the role resolves
+   outside the checkout; nothing can be dispatched. In existing
    script flags and evidence schemas, `worktree` means this checkout directory; it
    does not require `git worktree add`. Recheck branch/HEAD before each handoff,
    check receipt and push; invalidate evidence when the relevant SHA changes.
@@ -114,5 +130,32 @@ writer worktree or branch.
 the existing PR's original head and never creates a replacement. `pr-review-merge`
 does not edit or publish a new PR; retain its gated merge/Draft/WAITING behavior.
 Preserve all existing claim, independent review, evidence, CI and permission gates.
-Checkpoint and report the selected item, checked-out branch and exact SHA. Leave
-the checkout on that branch and report it; do not switch to or process another item.
+Checkpoint and report the selected item, the branch and the exact SHA it ended on.
+Do not switch to or process another item; the only branch change after the item is
+the restore step below.
+
+## Finish: restore the starting branch
+
+At the end of the invocation, whatever its outcome (success, Draft-blocked,
+WAITING or BLOCKED), switch back to the starting branch recorded in step 1 (or to
+the detached starting SHA) only when all three hold:
+
+1. the checkout is clean (the preflight's dirty check);
+2. the selected branch has no unpushed commits: its upstream exists and
+   `git rev-list @{u}..HEAD` is empty, or nothing was ever written locally (HEAD is
+   still the commit the branch was checked out at, which is always so for
+   `pr-review-merge`, including after a merge whose remote branch GitHub deleted);
+3. the preflight passes for the way back, so the ignored-file collision and
+   stale-tip checks guard it too (a start branch that no longer exists is a stop
+   as well).
+
+`python3 "$SNAP/.agents/skills/_shared/scripts/checkout_preflight.py" --repo
+"$REPO_ROOT" --restore-check --start-sha START_SHA [--start-branch START_BRANCH]
+[--checked-out-sha CHECKED_OUT_SHA]` checks all three without changing anything
+(`--checked-out-sha` is the nothing-written form of the second condition) and
+prints the `switch_command`. Run it, then run `git switch START_BRANCH`, or
+`git switch --detach START_SHA` if HEAD started detached. Never use force, stash
+or reset. After switching, verify `git branch --show-current` (or
+`git rev-parse HEAD` for a detached start) equals the recorded start and report
+the final branch. If any condition fails, stay on the selected branch and report
+why, naming the branch and its unpushed commits or the preflight stop.
