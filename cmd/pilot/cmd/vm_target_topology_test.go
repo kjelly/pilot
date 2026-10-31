@@ -3,8 +3,12 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/statefile"
+	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
 func TestVMTargetTopologyCmdRegistered(t *testing.T) {
@@ -194,5 +198,66 @@ func TestPrintEphemeralDebugHints(t *testing.T) {
 		if !strings.Contains(got.String(), want) {
 			t.Errorf("debug hints missing %q:\n%s", want, got.String())
 		}
+	}
+}
+
+// TestTopologyUpFreshRefusesAnExistingNode: vm-target is shared by every
+// clone and session on the host. Plain `topology up` adopts a running VM
+// with a declared name, and scripts/topology-checkmode-test.sh then tore it
+// down on exit. `up --fresh` must refuse before touching libvirt and leave
+// that VM and its state alone.
+func TestTopologyUpFreshRefusesAnExistingNode(t *testing.T) {
+	isolateDataDirInputs(t)
+	dir := t.TempDir()
+	dataDir = filepath.Join(dir, "data")
+	oldVMDir, oldSpec, oldFresh := vtVMDir, vtTopoSpecPath, vtTopoUpFresh
+	t.Cleanup(func() { vtVMDir, vtTopoSpecPath, vtTopoUpFresh = oldVMDir, oldSpec, oldFresh })
+	vtVMDir = filepath.Join(dir, "vmdir")
+
+	// Another session's running VM named like a node of this topology.
+	saveVMTargetState(t, dataDir, "nexus")
+	virshLog := filepath.Join(dir, "virsh.log")
+	shim := filepath.Join(dir, "virsh")
+	script := "#!/bin/sh\necho \"$@\" >> " + virshLog + "\n[ \"$1\" = domstate ] && echo running\nexit 0\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PILOT_VIRSH_BIN", shim)
+	topo := filepath.Join(dir, "topology.yaml")
+	if err := os.WriteFile(topo, []byte("nodes:\n  - name: mine\n  - name: nexus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rootCmd.SetArgs([]string{"vm-target", "topology", "up", "--fresh", "--topology", topo})
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	t.Cleanup(func() { rootCmd.SetOut(nil); rootCmd.SetErr(nil); rootCmd.SetArgs(nil) })
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), `--fresh requires node "nexus" to be absent`) {
+		t.Fatalf("want the --fresh refusal for nexus, got %v", err)
+	}
+
+	calls, _ := os.ReadFile(virshLog)
+	for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+		if line != "" && !strings.HasPrefix(line, "domstate ") {
+			t.Errorf("--fresh touched libvirt before refusing: virsh %s", line)
+		}
+	}
+	store, err := statefile.New[vmtarget.Target](dataDir, "vm-targets.json", 1, "vmtarget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Name != "nexus" {
+		t.Fatalf("state changed: %+v", targets)
+	}
+}
+
+func TestTopologyUpFreshFlagRegistered(t *testing.T) {
+	if vtTopologyUpCmd.Flags().Lookup("fresh") == nil {
+		t.Fatal("topology up --fresh not registered")
 	}
 }

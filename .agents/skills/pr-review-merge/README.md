@@ -39,7 +39,7 @@ $pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不�
 
 **參數及預設策略：**最多 2 個獨立 Reviewer Subagents 並行、Merge 串行、預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft；`CHANGES_REQUESTED`（等原 reviewer 重新審查）、Reviewer 確認與本 PR 無關而失敗的 check、沒有新證據就重提已被反駁的 finding，也是 `WAITING`，否則 pr-ready 會再把它轉回 Ready。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
 
-**Actual-run 紀錄：**base branch 的 `.github/pr-evidence.json` 要求 `actual-run` 紀錄時，`review_gate.py` 以 GitHub API 在 PR 的 **base SHA** 讀這份 manifest（不讀 head，PR 不能放寬自己的要求），並檢查 reviewer evidence 的 `target_validation`：缺少或格式錯、`blocked`、PR 改到 manifest `required_paths`（`playbooks/**`、`docs/verification/**`、`contracts/**`）卻寫 `not-needed`、或 `required` 卻沒有 HEAD 上已提交且寫明 tested revision 的 `docs/evidence/**` 紀錄（tested revision 等於 HEAD，或是 HEAD 的祖先且之後只改 evidence-only 檔案），一律 `WAITING`，不會 merge。manifest 格式、glob 與 evidence-only delta 規則沿用 issue-to-pr 的 `scripts/repo_evidence.py`（依路徑載入）。轉 Draft 仍只來自 reviewer 對缺紀錄開的 blocking `P1` finding。
+**Actual-run 紀錄：**base branch 的 `.github/pr-evidence.json` 要求 `actual-run` 紀錄時，`review_gate.py` 以 GitHub API 在 PR 的 **base SHA** 讀這份 manifest（不讀 head，PR 不能放寬自己的要求），並檢查 reviewer evidence 的 `target_validation`：缺少或格式錯、`blocked`、PR 改到 manifest `required_paths`（`playbooks/**`、`contracts/**`）卻寫 `not-needed`、或 `required` 卻沒有 HEAD 上已提交且寫明 tested revision 的 `docs/evidence/**` 紀錄（tested revision 等於 HEAD，或是 HEAD 的祖先且之後只改 evidence-only 檔案），一律 `WAITING`，不會 merge。manifest 格式、glob 與 evidence-only delta 規則沿用 issue-to-pr 的 `scripts/repo_evidence.py`（依路徑載入）。轉 Draft 仍只來自 reviewer 對缺紀錄開的 blocking `P1` finding。
 
 ## 內部安全檢查（供 Agent 呼叫）
 

@@ -161,8 +161,11 @@ pilot vm-target topology test --topology docs/topologies/<scenario>.yaml --ephem
   carries VM shape and groups, not group_vars: pass inputs after `--`. A
   node IP is unknown before `--ephemeral` provisions;
   `scripts/topology-checkmode-test.sh` (`make poc-checkmode-test`) does
-  `topology up` → `status` → `test` → `down` instead. Those adopt, then
-  destroy, any existing VM with a declared name: check `vm-target list` first.
+  `topology up --fresh` → `status` → `test` → `down` instead. `--fresh`
+  refuses a declared name that already exists and, like `--ephemeral`, tears
+  down only what it created on failure, so the final `down` removes only this
+  run's VMs. Plain `topology up` adopts an existing VM with a declared name,
+  and a later `topology down` destroys it: never pair them on a shared host.
 
 ## 5. Formal run: candidate freeze and evidence
 

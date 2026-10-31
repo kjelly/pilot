@@ -13,8 +13,8 @@ import (
 // docs/topologies/pilot-access-transport-topology.yaml gives tx-target, and
 // the playbook defaults its hosts: pattern to it. That topology — not the
 // single-VM vm-target reference inventory — is where the spec is verified,
-// so TestRegression_SpecAndInventoryAgree's single-VM template does not
-// apply here.
+// so a comparison with the single-VM reference inventory (AGENTS.md §1.3)
+// does not apply here.
 
 const targetPolicySpecPath = "../../docs/verification/pilot-access-target-policy.md"
 const targetPolicyPlaybookPath = "../../playbooks/apply/pilot-access-target-policy-apply.yml"

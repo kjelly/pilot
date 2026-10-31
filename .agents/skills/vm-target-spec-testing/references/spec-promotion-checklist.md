@@ -36,13 +36,12 @@ when it and [AGENTS.md](../../../../AGENTS.md) disagree, AGENTS.md wins.
 - [ ] `internal/spec/<feature>_regression_test.go` exists and locks at least
       contiguous row IDs, no vague Expected values, and the cross-row
       invariants that would catch this spec's likely mistakes.
-- [ ] Spec-vs-inventory agreement follows AGENTS.md §3: either a test that
-      compares the spec's §1 groups with the reference inventory, or, for a
-      single-host `target_group` spec, the exception documented in the test
-      (template: `internal/spec/freeipa_client_regression_test.go`).
-      AGENTS.md also names `TestRegression_SpecAndInventoryAgree` as a
-      template; `git grep` it before copying, since no Go test function by
-      that name exists in `internal/spec/` as of 2026-10-31.
+- [ ] Spec-vs-inventory agreement follows AGENTS.md §1.3/§2.1: no test can
+      check it (the reference inventory needs a running VM), so read the
+      inventory before the run and record the A/B decision in the fact
+      snapshot. For a single-host `target_group` spec, document the exception
+      in the regression test (template:
+      `internal/spec/freeipa_client_regression_test.go`).
 
 ## D. Spec content updates to flip DRAFT
 
