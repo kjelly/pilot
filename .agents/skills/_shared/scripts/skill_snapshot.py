@@ -9,26 +9,23 @@ it, with a recorded tree ID and a sha256 manifest.
 
 Usage:
     skill_snapshot.py create --repo DIR [--out-parent DIR]
-        Refuse a dirty checkout; `git archive HEAD` the bundle paths into a new
+        Refuse uncommitted or untracked files under BUNDLE_PATHS (the rest of the tree is
+        not copied, so it does not matter here); `git archive HEAD` those paths into a new
         directory outside the checkout; write <dir>.manifest.json next to it.
     skill_snapshot.py verify --snapshot DIR
         The snapshot still matches its manifest.
     skill_snapshot.py verify-role --snapshot DIR --repo DIR --platform claude|codex|agy --role NAME
-        Compare the role file the runtime will load from the checkout
-        (.claude/agents/NAME.md, .codex/agents/NAME.toml, or for agy the copy
-        .agents/agents/NAME.md) with the snapshot's copy. Run it before every
-        child dispatch. Three outcomes:
+        Compare the role file the runtime loads from the checkout (.claude/agents/NAME.md,
+        .codex/agents/NAME.toml, or for agy the copy .agents/agents/NAME.md) with the
+        snapshot's copy. Run it before every child dispatch:
           PASS  (exit 0): byte-identical.
-          DRIFT (exit 3): the checkout has the role file but it differs (a branch
-              cut before this workflow, or one that changes the role). The
-              snapshot is the binding contract, so Root still dispatches, with
-              the printed `binding_statement` at the top of the task envelope,
-              and records the role, both hashes and any model/effort pin
-              difference. Pins: Claude/agy frontmatter `model`/`effort`, Codex
-              `model`/`model_reasoning_effort`.
-          STOP  (exit 1): the role file is missing in the checkout, the role
-              name is invalid, the snapshot fails `verify`, or the role resolves
-              outside the checkout. Nothing can be dispatched.
+          DRIFT (exit 3): the checkout has the role file but it differs. The snapshot is the
+              binding contract, so Root still dispatches with `binding_statement` at the top
+              of the task envelope and records the role, both hashes, `header_changes` (every
+              top-level header key that differs: model, effort, tools, ...) and `pins_differ`
+              (model/effort/model_reasoning_effort among them). Report-only, never a block.
+          STOP  (exit 1): the role file is missing in the checkout, the role name is invalid,
+              the snapshot fails `verify`, or the role resolves outside the checkout.
 
 Prints one JSON object. Exit 0 = PASS, 3 = DRIFT, 1 = STOP (fail closed). Any
 other non-zero exit (argument errors) is not a pass either.
@@ -58,9 +55,9 @@ BUNDLE_PATHS = (
 # .agents/agents/ when agy is used (the skills ship them under platforms/agy/agents/).
 ROLE_FILES = {"claude": ".claude/agents/{role}.md", "codex": ".codex/agents/{role}.toml",
               "agy": ".agents/agents/{role}.md"}
-BINDING = ("Your native role definition on disk comes from the checked-out target branch and differs "
-           "from the invoking workflow. Read `{path}` now and follow it as your role contract; "
-           "where they conflict, the snapshot wins.")
+BINDING = ("Your native role definition on disk differs from the invoking workflow's. Read `{path}` "
+           "now and follow it as your role contract; where they conflict, the snapshot wins.")
+PIN_KEYS = ("model", "effort", "model_reasoning_effort")
 EXIT_DRIFT = 3
 ROLE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
@@ -112,10 +109,12 @@ def manifest_path(snapshot: Path) -> Path:
 def create(repo: Path, out_parent: Path | None) -> dict:
     top = toplevel(repo)
     # --ignore-submodules=none: diff.ignoreSubmodules / .gitmodules `ignore` must not hide a dirty submodule
-    if git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-           "--ignore-submodules=none").stdout:
-        raise Stop("checkout is not clean: run checkout_preflight.py and resolve it first; "
-                   "the snapshot is taken only after the clean check")
+    # only the bundle must be clean: that is what `git archive HEAD` copies. The rest of the tree
+    # is the landing preflight's business, and an untracked agy copy must not block the snapshot.
+    if git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+           "--", *BUNDLE_PATHS).stdout:
+        raise Stop("the skill bundle has uncommitted or untracked files: commit or remove them; "
+                   "the snapshot copies the committed bundle")
     head = git(top, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
     tree = git(top, "rev-parse", "--verify", "HEAD^{tree}").stdout.decode().strip()
     missing = [p for p in BUNDLE_PATHS
@@ -168,22 +167,24 @@ def snapshot_role_file(snapshot: Path, platform: str, role: str) -> Path:
     return Path(os.path.realpath(found[0]))
 
 
-def role_pins(path: Path, platform: str) -> dict:
-    """model / effort pins of a role definition (None when absent)."""
+def role_header(path: Path, platform: str) -> dict:
+    """Top-level header keys of a role definition (Claude/agy frontmatter, Codex TOML keys
+    before developer_instructions) mapped to their values; the prompt text is never read."""
     text = path.read_text(encoding="utf-8", errors="replace")
-    if platform == "codex":  # TOML header only: the prompt text may mention `model = ...`
-        header = text.split("developer_instructions", 1)[0]
-        keys = {"model": "model", "effort": "model_reasoning_effort"}
-        pattern = r'^\s*{key}\s*=\s*"([^"]*)"'
-    else:  # YAML frontmatter
-        header = text.split("\n---", 1)[0] if text.startswith("---\n") else ""
-        keys = {"model": "model", "effort": "effort"}
-        pattern = r'^{key}:\s*["\']?([^"\'\n]*?)["\']?\s*$'
-    pins = {}
-    for name, key in keys.items():
-        m = re.search(pattern.format(key=key), header, re.M)
-        pins[name] = m.group(1) if m else None
-    return pins
+    if platform == "codex":
+        header, key = text.split("developer_instructions", 1)[0], r"(\w+)\s*="
+    else:
+        header, key = (text.split("\n---", 1)[0] if text.startswith("---\n") else ""), r"(\w+):"
+    found: dict = {}
+    last = None
+    for line in header.splitlines():
+        m = re.match(key, line)
+        if m:
+            last = m.group(1)
+            found[last] = line[m.end():].strip().strip("\"'")
+        elif last and line.strip() and line.strip() != "---":
+            found[last] += "\n" + line.strip()  # a list or multi-line value
+    return found
 
 
 def verify_role(snapshot: Path, repo: Path, platform: str, role: str) -> dict:
@@ -209,9 +210,11 @@ def verify_role(snapshot: Path, repo: Path, platform: str, role: str) -> dict:
     if report["snapshot_sha256"] == report["checkout_sha256"]:
         report["sha256"] = report["snapshot_sha256"]
         return report
-    pins = {"snapshot": role_pins(there, platform), "checkout": role_pins(here, platform)}
-    report.update(status="DRIFT", pins=pins, pins_differ=pins["snapshot"] != pins["checkout"],
-                  binding_statement=BINDING.format(path=there))
+    was, now = role_header(there, platform), role_header(here, platform)
+    changed = sorted(k for k in was.keys() | now.keys() if was.get(k) != now.get(k))
+    pin = lambda h: {"model": h.get("model"), "effort": h.get("effort") or h.get("model_reasoning_effort")}
+    report.update(status="DRIFT", header_changes=changed, pins={"snapshot": pin(was), "checkout": pin(now)},
+                  pins_differ=any(k in PIN_KEYS for k in changed), binding_statement=BINDING.format(path=there))
     return report
 
 

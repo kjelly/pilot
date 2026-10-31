@@ -8,7 +8,7 @@ declarations live beside it and are wired into each tool's discovery path by the
 |---|---|---|---|
 | OpenAI Codex | `.agents/skills/pr-review-merge` | `.codex/agents/prm-*.toml` (byte copies of `platforms/codex/agents/`) | `$pr-review-merge` |
 | Claude Code | `.claude/skills/pr-review-merge` (symlink) | `.claude/agents/prm-*.md` (symlinks to `platforms/claude/agents/`) | `/pr-review-merge` |
-| Antigravity CLI / IDE (`agy`) | `.agents/skills/pr-review-merge` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here) | `/pr-review-merge` |
+| Antigravity CLI / IDE (`agy`) | `.agents/skills/pr-review-merge` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here, and list `/.agents/agents/` in `$(git rev-parse --git-path info/exclude)`: the checkout contract explains why) | `/pr-review-merge` |
 
 Model pins live only in the role definitions (Codex `gpt-6.1-sol` / `high`, Claude
 `claude-sonnet-5-5` / `xhigh`); the orchestrator keeps the invoking session's model.

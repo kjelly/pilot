@@ -17,7 +17,7 @@ This skill is repository-local to pilot; nothing installs it elsewhere. The cano
 | --- | --- | --- |
 | Codex | `.agents/skills/issue-to-pr` | `.codex/agents/issue-{sa,coder,reviewer}.toml` (copies) |
 | Claude Code | `.claude/skills/issue-to-pr` (symlink) | `.claude/agents/issue-{sa,coder,reviewer}.md` (symlinks) |
-| agy CLI / App / IDE | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here) |
+| agy CLI / App / IDE | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here, and list `/.agents/agents/` in `$(git rev-parse --git-path info/exclude)`: the checkout contract explains why) |
 
 ## Invoke
 
@@ -44,7 +44,6 @@ Supply one full URL or qualified `OWNER/REPO#N` ID. For multiple/all targets, as
 8. `pr_ci.py` inspects GitHub checks of the Draft PR for the exact head SHA. Pending CI does not mean success. If CI fails, repair on the same branch, repeat test/review, push and re-check CI; never open a second PR. Finish every other follow-up (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups) while it is still a Draft. Keep the Issue claim (`claim.py renew`) the whole time.
    `mark_ready.py` converts Draft → Ready **only** when the PR is an open Draft of the validated branch at the validated HEAD, the pre-PR gate still passes, CI is `CI_PASSED` on that HEAD, there are no merge conflicts, and `--confirm-complete` attests that nothing else is left. **Ready means merge-quality; a PR with anything outstanding stays Draft.**
 9. If blocked before PR creation, no PR is created. If CI or review is unresolved, the PR stays Draft and is reported `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` with evidence. No auto-merge, no branch-protection bypass.
-10. Whatever the outcome, the contract's restore step ends the invocation: the checkout returns to the starting branch only if it is clean, the Issue branch has no unpushed commits and the way back passes the preflight; otherwise it stays on the Issue branch and the report says why.
 
 ## Quality helper CLI
 
@@ -52,22 +51,21 @@ The agent should choose *real* repo-specific commands, never invent them. `$SNAP
 
 ```bash
 STATE="$HOME/.cache/issue-to-pr/OWNER/REPO/123"
-WT="$(git rev-parse --show-toplevel)"   # the current checkout (the script flags are named --worktree)
 mkdir -p "$STATE"
 
 # run after git commit and verify git status is clean:
-python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$WT" --name regression \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$REPO_ROOT" --name regression \
   --out "$STATE/regression.json" -- go test ./...
-python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$WT" --name lint \
+python3 "$SNAP/.agents/skills/issue-to-pr/scripts/run_check.py" --worktree "$REPO_ROOT" --name lint \
   --out "$STATE/lint.json" -- golangci-lint run
 
 # Root Agent collects test receipts + Reviewer evidence into $STATE/evidence.json
 python3 "$SNAP/.agents/skills/issue-to-pr/scripts/issue_gate.py" --repo OWNER/REPO --issue 123 \
-  --worktree "$WT" --evidence "$STATE/evidence.json"
+  --worktree "$REPO_ROOT" --evidence "$STATE/evidence.json"
 
 # After gate passes: create the PR as a DRAFT (the default)
 python3 "$SNAP/.agents/skills/issue-to-pr/scripts/create_pr.py" --repo OWNER/REPO --issue 123 \
-  --worktree "$WT" --evidence "$STATE/evidence.json" \
+  --worktree "$REPO_ROOT" --evidence "$STATE/evidence.json" \
   --title "fix: correct issue 123 root cause" --body-file "$STATE/pr_body.md"
 
 # After PR creation; use the returned PR number and current SHA:
@@ -75,7 +73,7 @@ python3 "$SNAP/.agents/skills/issue-to-pr/scripts/pr_ci.py" --repo OWNER/REPO --
 
 # Only when CI is green on that SHA and ALL other follow-up work is finished:
 python3 "$SNAP/.agents/skills/issue-to-pr/scripts/mark_ready.py" --repo OWNER/REPO --issue 123 --pr 99 \
-  --worktree "$WT" --evidence "$STATE/evidence.json" --confirm-complete
+  --worktree "$REPO_ROOT" --evidence "$STATE/evidence.json" --confirm-complete
 ```
 
 If the user **explicitly** asks for a Ready PR from the start, `create_pr.py --ready` is available; it is never used by default. The `create_pr.py` helper protects its own side effects, but is not a fully automatic coding engine; it is invoked by a native agent after genuinely completing code changes and review.

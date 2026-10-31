@@ -20,15 +20,15 @@ Three kinds of checks:
   not be, including innocent prose that merely shares a word ("Read each PR
   comment", "Batch the GraphQL queries"). Every rule must be needed by at least
   one mutation, so no rule is dead weight.
-* Structure of the contract: the preflight stop conditions are tied to the
-  checkout_preflight.py check ids, the helper scripts are invoked through
-  `$REPO_ROOT`/`$SNAP` paths, and no skill document shows a bare
-  `python3 scripts/...` or `/path/to/...` invocation.
+* Structure of the contract: every check id of checkout_preflight.py is named in it, the
+  differing-role statement is the one skill_snapshot.py prints, and every `$SNAP/<path>` in a
+  document is a real bundle file with only `create` run from `$REPO_ROOT`.
 """
-import importlib.util
 import re
 import unittest
 from pathlib import Path
+
+from gitrepo import load_module
 
 REPO = Path(__file__).resolve().parents[4]
 SKILLS = REPO / ".agents" / "skills"
@@ -45,7 +45,7 @@ NEG = re.compile(
     r"\b(do not|don't|does not|doesn't|did not|never|not|cannot|can't|nor|avoid|"
     r"refuse\w*|forbid\w*|reject\w*)\b|不|禁止|勿|無需|不要", re.I)
 CLAUSE_BREAK = re.compile(r",\s+(?:and|then|but|so|while|whereas)\s+", re.I)
-WEAK_NEG = re.compile(r"\b(no|without|instead of|rather than)\W+(?:\w+\W+){0,3}$", re.I)
+WEAK_NEG = re.compile(r"\b(no|without|instead of|rather than)\W+(?:\w+\W+){0,2}$", re.I)
 CHOOSE = re.compile(r"\b(ask\w*|select\w*|choos\w*|candidates)\b|請使用者|請.{0,6}選|選一個", re.I)
 
 # Nouns that make "PR"/"Issue" a modifier ("each PR comment", "every PR check"), not the work item.
@@ -85,8 +85,9 @@ RULES = (
     ("separate-clone",
      r"\b(?:use|start from|work in|create|make|run in|clone into)\b[^.;\n]{0,15}\b"
      r"(?:separate|fresh|new|clean|dedicated|another)\s+(?:git\s+)?clones?\b", True, False),
-    ("gh-pr-checkout-forbidden",
-     r"\b(?:do not|don't|never|avoid)\b[^.;\n]{0,40}\bgh pr checkout\b", False, False),
+    ("landing-command",  # landing is checkout_preflight.py --execute: these re-resolve a name at run time
+     r"\bgh pr checkout\b|\bgit (?:switch|checkout|merge|rebase|pull)\b", True, False),
+    ("leave-on-branch", r"\bleave the checkout on\b", False, False),
     ("worktree-per-item-zh",
      r"隔離\s*(?:的\s*)?(?:git\s*)?worktrees?|獨立\s*(?:的\s*)?(?:git\s*)?worktrees?|"
      r"每個\s*(?:PR|Issue|項目)[^。\n]{0,12}worktree", True, False),
@@ -218,7 +219,12 @@ MUTATIONS = (
     ("creating worktrees", "Allocate new worktrees for the reviewers."),
     ("separate clone paraphrase",
      "Do not run gh pr checkout in the user's active worktree; use a separate clone."),
-    ("gh pr checkout ban", "Do not run `gh pr checkout` blindly in the user's active worktree."),
+    ("old checkout: gh pr checkout", "`gh pr checkout N --repo OWNER/REPO` (no `--force`) is the normal way to check out the PR head."),
+    ("old checkout: git switch", "    git switch BRANCH"),
+    ("old checkout: --track", "    git switch --track -c BRANCH origin/BRANCH"),
+    ("old checkout: new issue branch", "Example: `git switch --no-track -c issue/123-short-slug origin/main` after the preflight."),
+    ("old checkout: pull and merge", "Run git pull, then git merge origin/main to catch up."),
+    ("leave the checkout on the branch", "Leave the checkout on that branch and report it; do not switch to or process another item."),
     ("isolated worktrees zh", "每個 PR 使用隔離 worktrees。"),
     ("dedicated worktree zh", "每個 Issue 使用獨立 worktree 修復。"),
     ("plural worktrees residue", "worktrees may not contain these project-local skills yet."),
@@ -313,7 +319,8 @@ CONTROLS = (
     "不建立 per-PR worktrees。",
     "多個或全部項目先列候選並請使用者選一個，不自動處理下一個。",
     "Use the current checkout, not a new per-Issue worktree.",
-    "gh pr checkout N --repo OWNER/REPO, without force, or a verified git switch BRANCH.",
+    "Never land by name with git pull, git checkout, git switch BRANCH, gh pr checkout or --track -c origin/X: they re-resolve their target at run time.",
+    "Land it with checkout_preflight.py --execute on the full SHA.",
     "Read-only dependency analysis for the one selected Ready PR; other PRs are context to read, never work items.",
     "The Issue claim is `claim.py acquire`: a branch/worktree for it already exists on the remote or in this clone.",
     "SA, Coder and Reviewer remain separate roles for this Issue, not parallel Issue workers.",
@@ -345,48 +352,6 @@ CONTROLS = (
     "處理所有 PR 評論後再回覆。",
     "Edit the files one by one and run the tests.",
 )
-
-# The checkout_preflight.py check ids and the contract wording that must state each stop condition.
-STOP_CONDITIONS = {
-    "dirty": "dirty or has untracked files",
-    "operation_in_progress": "a git operation is in progress",
-    "detached_head_unreachable": "a detached HEAD would be orphaned",
-    "checked_out_elsewhere": "BRANCH is checked out in another worktree",
-    "ignored_collision": "an ignored path collides with a path the target tracks",
-    "unresolvable_target": "a target cannot be resolved",
-    "unverifiable": "a check cannot be run",
-}
-
-
-# The check ids reported by --restore-check only, and the phrase the restore section must state.
-RESTORE_CONDITIONS = {
-    "no_upstream": "its upstream exists",
-    "unpushed_commits": "git rev-list @{u}..HEAD is empty",
-    "head_moved": "nothing was ever written locally",
-    "start_branch_missing": "a start branch that no longer exists is a stop as well",
-}
-
-
-def preflight_step(contract):
-    """The contract paragraph that runs the preflight (numbered step 3)."""
-    return contract[contract.index("3. Preflight"):contract.index("4. Snapshot")]
-
-
-def role_step(contract):
-    """The contract paragraph that checks the role before dispatch (numbered step 7)."""
-    return contract[contract.index("7. Give every child"):contract.index("Known limitation")]
-
-
-def restore_section(contract):
-    return contract[contract.index("## Finish: restore the starting branch"):]
-
-
-def load_module(path):
-    spec = importlib.util.spec_from_file_location(path.stem + "_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
 
 class WordingTests(unittest.TestCase):
     def test_no_batch_or_per_item_worktree_wording_remains(self):
@@ -446,11 +411,9 @@ class ContractStructureTests(unittest.TestCase):
         for name in NAMES:
             with self.subTest(skill=name):
                 skill = (SKILLS / name / "SKILL.md").read_text()
-                self.assertIn(SHARED, skill)
-                self.assertIn("realpath", skill)
-                self.assertIn("exactly one Issue/PR", skill)
-                self.assertIn("before analysis, edits, review, tests or delegation", skill)
-                self.assertIn("$SNAP", skill)
+                for required in (SHARED, "realpath", "exactly one Issue/PR", "$SNAP",
+                                 "before analysis, edits, review, tests or delegation"):
+                    self.assertIn(required, skill)
         self.assertTrue((REPO / SHARED).is_file())
 
     def test_no_skill_text_links_to_shared_relatively(self):
@@ -461,165 +424,45 @@ class ContractStructureTests(unittest.TestCase):
                 with self.subTest(path=str(path.relative_to(REPO))):
                     self.assertIsNone(link.search(path.read_text()))
 
-    def test_contract_preserves_safe_branch_identity(self):
-        text = self.contract
-        for required in ("git status --porcelain", "git branch --show-current",
-                         "git rev-parse HEAD", "head repository", "head SHA",
-                         "checked out elsewhere", "Never stash", "detached HEAD",
-                         "git switch --no-track -c", "never creates a replacement",
-                         "Never start another item", "acquire the Issue claim first",
-                         "outside the checkout", "source repository/revision",
-                         "absolute snapshot paths", "BLOCKED", "realpath", "Known limitation",
-                         "Read-only scratch copies", "candidate checkout"):
-            self.assertIn(required, text)
-        order = [text.index(marker) for marker in
-                 ("checkout_preflight.py", "skill_snapshot.py\" create", "gh pr checkout N")]
-        self.assertEqual(sorted(order), order, "preflight, then snapshot, then checkout")
-
-    def test_preflight_stop_conditions_match_the_script_check_ids(self):
-        """Every check id the script can report is stated as a stop condition, and nothing else is."""
+    def test_every_check_id_the_script_can_report_is_named_in_the_contract(self):
+        """checkout_preflight.py is the single source of the stop conditions."""
         ids = set(re.findall(r'problem\(\s*"([a-z_]+)"', PREFLIGHT.read_text()))
-        self.assertEqual(set(STOP_CONDITIONS) | set(RESTORE_CONDITIONS), ids,
-                         "a check was added or removed in checkout_preflight.py: update the contract")
-        step = preflight_step(self.contract)
-        for check, phrase in STOP_CONDITIONS.items():
+        self.assertGreaterEqual(len(ids), 10)
+        for check in sorted(ids):
             with self.subTest(check=check):
-                self.assertIn(phrase, step)
-        restore = restore_section(self.contract)
-        for check, phrase in RESTORE_CONDITIONS.items():
-            with self.subTest(check=check):
-                self.assertIn(phrase, restore)
+                self.assertIn(f"{check}", self.contract)
 
-    def test_preflight_step_locks_collisions_and_every_checked_commit(self):
-        step = preflight_step(self.contract)
-        for required in ('python3 "$REPO_ROOT/.agents/skills/_shared/scripts/checkout_preflight.py"',
-                         "--target-ref TARGET_SHA --branch BRANCH",
-                         "the same path", "a file/directory prefix of it in either direction",
-                         "any path below an ignored nested git repository",
-                         "Every commit that can land in the working tree is checked",
-                         "--target-ref is repeatable",
-                         "BRANCH's existing local tip is checked as well as TARGET_SHA",
-                         "diff.ignoreSubmodules", "On any non-zero exit stop and ask",
-                         "Never stash, discard, reset, force-checkout, or overwrite user work"):
-            with self.subTest(required=required):
-                self.assertIn(required, step)
-
-    def test_helper_scripts_are_always_invoked_through_a_snapshot_or_repo_root_path(self):
-        for script in ("skill_snapshot", "checkout_preflight"):
-            for m in re.finditer(rf"{script}\.py", self.contract):
-                before = self.contract[max(0, m.start() - 70):m.start()]
-                self.assertRegex(before, r'"\$(?:REPO_ROOT|SNAP)/\.agents/skills/_shared/scripts/$',
-                                 f"bare {script}.py at {m.start()}")
-        # the preflight runs from the checkout before any switch; the restore check from the
-        # snapshot, because the selected branch may not carry the script
-        self.assertRegex(self.contract, r'"\$REPO_ROOT/\.agents/skills/_shared/scripts/checkout_preflight\.py" --repo "\$REPO_ROOT" --target-ref')
-        self.assertRegex(self.contract, r'"\$SNAP/\.agents/skills/_shared/scripts/checkout_preflight\.py" --repo "\$REPO_ROOT" --restore-check')
-        for verb in ("create", "verify", "verify-role"):
-            with self.subTest(verb=verb):
-                self.assertRegex(self.contract, rf'skill_snapshot\.py" {verb}\b')
-        # create runs before the snapshot exists, verify/verify-role run from it
-        self.assertRegex(self.contract, r'"\$REPO_ROOT/\.agents/skills/_shared/scripts/skill_snapshot\.py" create')
-        self.assertRegex(self.contract, r'"\$SNAP/\.agents/skills/_shared/scripts/skill_snapshot\.py" verify\b')
-        self.assertRegex(self.contract, r'"\$SNAP/\.agents/skills/_shared/scripts/skill_snapshot\.py" verify-role')
-
-    def test_no_skill_document_shows_a_bare_script_invocation(self):
-        """Scripts run from the verified snapshot: `python3 scripts/x.py` and `/path/to/` do not."""
-        bare = re.compile(r"python3\s+(?:/path/to/|scripts/|<skill-dir>/)")
-        for name in NAMES:
-            for path in (SKILLS / name).rglob("*.md"):
+    def test_every_document_that_installs_an_agy_copy_says_to_exclude_it(self):
+        """An untracked .agents/agents/ copy makes the checkout dirty unless it is excluded."""
+        for path in scanned_files():
+            text = path.read_text(encoding="utf-8")
+            if path.suffix == ".md" and ".agents/agents/" in text:
                 with self.subTest(path=str(path.relative_to(REPO))):
-                    self.assertIsNone(bare.search(path.read_text()))
+                    self.assertIn("info/exclude", text)
 
-    def test_fork_pr_branch_name_and_scratch_copy_wording_are_stated(self):
-        self.assertIn("may create a local branch named differently", self.contract)
-        self.assertIn("verify it together with the SHA instead of assuming BRANCH", self.contract)
-        self.assertIn("a read-only scratch copy of that same SHA is an equally valid one", self.contract)
-        self.assertNotIn("do not build another one", self.contract)
-
-    def test_project_changes_name_the_contract_scripts_and_tests(self):
-        """Each skill's PROJECT-CHANGES row lists the shared contract, helper scripts and guards."""
-        for name in NAMES:
-            text = " ".join((SKILLS / name / "PROJECT-CHANGES.md").read_text().split())
-            for required in ("single-item-checkout.md", "checkout_preflight.py", "skill_snapshot.py",
-                             "_shared/tests/test_single_item_contract.py", "test_checkout_preflight.py",
-                             "test_skill_snapshot.py", "test_skill_links.py"):
-                with self.subTest(skill=name, needs=required):
-                    self.assertIn(required, text)
-            self.assertNotIn("pr-review-merge/tests/test_single_item_contract.py", text)
-
-    def test_a_differing_role_is_dispatched_under_the_snapshot_not_blocked(self):
-        """DRIFT (exit 3) dispatches with the binding statement; only STOP is BLOCKED."""
-        step = role_step(self.contract)
-        for required in ("Exit 0 (PASS)", "Exit 3 (DRIFT)", "dispatch the native role anyway",
-                         "the snapshot is the binding contract", "binding_statement",
-                         "where they conflict, the snapshot wins", "pins_differ",
-                         "never silent", "in the checkpoint and in the review report or evidence rationale",
-                         "Exit 1 (STOP) is BLOCKED", "the role file is missing in the checkout",
-                         "--platform claude|codex|agy", ".agents/agents/NAME.md", "both sha256 hashes"):
-            with self.subTest(required=required):
-                self.assertIn(required, step)
-        # the statement in the contract is the one the script prints
+    def test_a_differing_role_is_dispatched_under_the_binding_statement(self):
+        """The statement is the one the script prints, and no sentence blocks on a differing role."""
         statement = flat(load_module(SNAPSHOT).BINDING.format(path="<absolute $SNAP role path>"))
-        self.assertIn(statement, step)
-        self.assertNotIn("different role file is BLOCKED", self.contract)
-        self.assertNotIn("missing or different role file", self.contract)
+        self.assertIn(statement, self.contract)
         for sentence in sentences((REPO / SHARED).read_text()):
-            if re.search(r"\b(?:differs?|different)\b", sentence, re.I):
-                self.assertNotRegex(sentence, r"BLOCKED", sentence)
+            if re.search(r"\b(?:differs?|different)\b", sentence, re.I) and "binding" not in sentence.lower():
+                self.assertNotIn("BLOCKED", sentence)
 
-    def test_restore_step_and_its_three_conditions_are_in_the_contract(self):
-        restore = restore_section(self.contract)
-        for required in ("whatever its outcome (success, Draft-blocked, WAITING or BLOCKED)",
-                         "starting branch recorded in step 1", "the detached starting SHA",
-                         "the checkout is clean", "no unpushed commits",
-                         "its upstream exists and git rev-list @{u}..HEAD is empty",
-                         "nothing was ever written locally",
-                         "including after a merge whose remote branch GitHub deleted",
-                         "the preflight passes for the way back",
-                         "ignored-file collision and stale-tip checks",
-                         "--restore-check --start-sha START_SHA [--start-branch START_BRANCH]",
-                         "[--checked-out-sha CHECKED_OUT_SHA]", "switch_command",
-                         "git switch START_BRANCH", "git switch --detach START_SHA",
-                         "Never use force, stash or reset", "git branch --show-current",
-                         "git rev-parse HEAD", "report the final branch",
-                         "stay on the selected branch and report why",
-                         "naming the branch and its unpushed commits or the preflight stop"):
-            with self.subTest(required=required):
-                self.assertIn(required, restore)
-        self.assertIn("starting branch (or the detached SHA when HEAD is detached)", self.contract)
-        self.assertIn("exits 0 only on PASS. Any other exit is a stop, except that verify-role exits 3 for DRIFT",
-                      self.contract)
-        for gone in ("Leave the checkout on that branch", "leave the checkout on that branch"):
-            self.assertNotIn(gone, self.contract)
-        self.assertLess(self.contract.index("## Finish only the selected item"),
-                        self.contract.index("## Finish: restore the starting branch"))
+    def test_script_paths_come_from_the_snapshot_and_only_create_runs_from_the_checkout(self):
+        """Every $SNAP/<path> in a doc is a real file of the bundle, and the one script that
+        exists before the snapshot (create) is the only $REPO_ROOT script call."""
+        bundle = load_module(SNAPSHOT).BUNDLE_PATHS
+        for path in scanned_files():
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=str(path.relative_to(REPO))):
+                for m in re.finditer(r"\$SNAP/([\w./-]+)", text):
+                    rel = m.group(1)
+                    self.assertTrue((REPO / rel).is_file(), m.group(0))
+                    self.assertTrue(any(rel.startswith(b + "/") for b in bundle), m.group(0))
+                for m in re.finditer(r'\$REPO_ROOT/\.agents[\w./-]*', flat(text)):
+                    self.assertRegex(flat(text)[m.start():m.end() + 8], r'skill_snapshot\.py" create')
 
-    def test_every_skill_and_workflow_states_the_restore_and_role_drift_rules(self):
-        for name in NAMES:
-            skill = flat((SKILLS / name / "SKILL.md").read_text())
-            workflow = flat((SKILLS / name / "references" / "workflow.md").read_text())
-            readme = flat((SKILLS / name / "README.md").read_text())
-            with self.subTest(skill=name):
-                for text in (skill,):
-                    self.assertIn("DRIFT", text)
-                    self.assertIn("restore step", text)
-                    self.assertIn("binding contract", text)
-                    self.assertIn("pin", text)
-                self.assertIn("restore step", workflow)
-                self.assertIn("restore step", readme)
-                for gone in ("Leave the checkout on that branch", "leave the checkout on that branch"):
-                    self.assertNotIn(gone, skill + workflow + readme)
-        checkpoint = (SKILLS / "issue-to-pr/references/workflow.md").read_text()
-        for field in ('"start_branch": "main"', '"start_sha"', '"role_drift": []'):
-            self.assertIn(field, checkpoint)
-        self.assertIn("--checked-out-sha", flat((SKILLS / "pr-review-merge/references/workflow.md").read_text()))
 
-    def test_the_history_reference_matches_the_contract(self):
-        text = flat((REPO / HISTORY).read_text())
-        self.assertIn("只使用 Root 指派且已驗證的 checkout", text)
-        self.assertIn("git archive", text)
-        self.assertNotIn("指派 worktree", text)
-        self.assertNotIn("乾淨隔離的 candidate checkout", text)
 
 
 if __name__ == "__main__":

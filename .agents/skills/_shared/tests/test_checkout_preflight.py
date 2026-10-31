@@ -1,40 +1,61 @@
-"""checkout_preflight.py: every silent-loss case stops, the controls pass.
+"""checkout_preflight.py: every silent-loss case stops, the controls pass, landing is exact.
 
-Every test drives the real command line against a scratch git repository. A
-STOP test also asserts the premise: what plain `git switch` would have done to
-the file the preflight protects, so a passing test proves the refusal is for
-the intended reason and not for some unrelated check.
+Every test drives the real command line against a scratch git repository. A STOP test also
+asserts the premise: what the plain git command would have done to the file the script
+protects, so a passing test proves the refusal is for the intended reason.
 """
 import json
+import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from gitrepo import Repo
+from gitrepo import Repo, load_module
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "checkout_preflight.py"
+PR_GATE = Path(__file__).resolve().parents[2] / "pr-ready" / "scripts" / "pr_gate.py"
+ORIGIN = ("--remote", "origin", "--merge", "refs/heads/pr")
 
 
-def preflight(repo, target, branch=None, cwd=None):
-    """`target` is one ref or a list of refs (each becomes its own --target-ref)."""
-    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path)]
-    for ref in ([target] if isinstance(target, str) else target):
-        cmd += ["--target-ref", ref]
-    if branch:
-        cmd += ["--branch", branch]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=repo.env)
-    return p.returncode, json.loads(p.stdout) if p.stdout.strip() else None
+def stale_world(case):
+    """origin/pr was P1 (it tracks local.cfg) when `work` cloned it, and is P2 (the PR head,
+    which does not) now: work's origin/pr is stale. The user's ignored local.cfg is on main."""
+    seed = Repo(case, "seed")
+    seed.write(".gitignore", "local.cfg\n")
+    seed.write("README", "base\n")
+    a = seed.commit("A")
+    origin = seed.add_origin()
+    seed.branch_from_main("pr")
+    seed.write("local.cfg", "TRACKED-BY-STALE-TIP\n")
+    seed.write("p", "p1\n")
+    p1 = seed.commit("P1", "-f", "local.cfg", "p")
+    seed.git("push", "-q", "origin", "pr")
+    work = Repo(case, "work", clone_of=origin)
+    seed.git("rm", "-q", "--cached", "local.cfg")
+    (seed.path / "local.cfg").unlink()
+    seed.write("p", "p2\n")
+    p2 = seed.commit("P2")
+    seed.git("push", "-q", "origin", "pr")
+    subprocess.run(["git", "--git-dir", str(origin), "update-ref", "refs/pull/1/head", p2], check=True,
+                   env=seed.env)
+    work.git("fetch", "-q", "origin", "refs/pull/1/head")
+    assert work.out("rev-parse", "FETCH_HEAD") == p2 and work.out("rev-parse", "origin/pr") == p1
+    mine = work.write("local.cfg", "USER-SECRET\n")
+    return SimpleNamespace(seed=seed, work=work, origin=origin, a=a, p1=p1, p2=p2, mine=mine)
 
 
-def restore(repo, start_sha, start_branch=None, checked_out_sha=None, cwd=None):
-    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path), "--restore-check",
-           "--start-sha", start_sha]
-    if start_branch:
-        cmd += ["--start-branch", start_branch]
-    if checked_out_sha:
-        cmd += ["--checked-out-sha", checked_out_sha]
-    p = subprocess.run(cmd, capture_output=True, text=True, env=repo.env)
+def sha(repo, ref):
+    return ref if len(ref) == 40 else repo.out("rev-parse", ref + "^{commit}")
+
+
+def preflight(repo, target, branch=None, cwd=None, *extra):
+    """Dry run for `target` (a ref name or a full SHA); extra arguments go to the command line."""
+    cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path), "--target", sha(repo, target)]
+    cmd += [f"--branch={branch}"] if branch is not None else []
+    p = subprocess.run(cmd + list(extra), capture_output=True, text=True, env=repo.env)
     return p.returncode, json.loads(p.stdout) if p.stdout.strip() else None
 
 
@@ -191,19 +212,21 @@ class OtherSilentLosses(unittest.TestCase):
         # git refuses too; the preflight names the other checkout before anything runs
         self.assertNotEqual(0, r.git("switch", "-q", "pr", check=False).returncode)
 
-    def test_branch_already_checked_out_here_passes(self):
+    def test_already_on_the_branch_at_the_target_needs_no_switch(self):
         r = self.two_branches()
         r.git("switch", "-q", "pr")
         rc, report = preflight(r, "pr", "pr")
-        self.assertEqual((0, "PASS"), (rc, report["status"]))
-        # another worktree on a different branch is not a conflict
+        self.assertEqual((0, "PASS", "none", []), (rc, report["status"], report["action"], report["commands"]))
+
+    def test_another_worktree_on_a_different_branch_is_not_a_conflict(self):
+        r = self.two_branches()
         r.git("worktree", "add", "-q", str(r.base / "other"), "-b", "unrelated", "main")
         rc, report = preflight(r, "pr", "pr")
         self.assertEqual((0, "PASS"), (rc, report["status"]))
 
     def test_unresolvable_target_stops(self):
         r = self.two_branches()
-        rc, report = preflight(r, "refs/remotes/origin/not-fetched", "pr")
+        rc, report = preflight(r, "0" * 40, "pr")
         self.assertEqual((1, ["unresolvable_target"]), (rc, checks(report)))
 
     def test_detached_head_on_an_orphaned_commit_stops(self):
@@ -242,9 +265,17 @@ class OtherSilentLosses(unittest.TestCase):
         rc, report = preflight(r, "pr", "pr", cwd=outside)
         self.assertEqual((1, ["unverifiable"]), (rc, checks(report)))
 
-    def test_missing_target_argument_is_not_a_pass(self):
-        p = subprocess.run([sys.executable, "-I", str(SCRIPT)], capture_output=True, text=True)
-        self.assertNotEqual(0, p.returncode)
+    def test_only_a_full_sha_is_accepted_as_the_target(self):
+        """A name or abbreviation would be re-resolved by git at run time: an argument error."""
+        r = self.two_branches()
+        full = r.out("rev-parse", "pr")
+        for bad in ("pr", "refs/heads/pr", full[:12], full.upper(), ""):
+            p = subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(r.path), "--target", bad],
+                               capture_output=True, text=True, env=r.env)
+            self.assertEqual(2, p.returncode, bad)
+        p = subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(r.path)],
+                           capture_output=True, text=True, env=r.env)
+        self.assertEqual(2, p.returncode)
 
 
 class NestedRepositories(unittest.TestCase):
@@ -324,65 +355,6 @@ class NestedRepositories(unittest.TestCase):
                 self.assertTrue((r.path / "vendor/x/file").is_file(), "preflight is read-only")
 
 
-class StaleLocalBranch(unittest.TestCase):
-    """`git switch BRANCH` / `gh pr checkout` land on the local tip first, not on the fetched SHA."""
-
-    def stale_pr(self):
-        """Local `pr` is stale and tracks local.cfg; the fetched new head `new` does not."""
-        r = Repo(self)
-        r.write(".gitignore", "local.cfg\n")
-        r.write("a.txt")
-        r.commit("init")
-        r.branch_from_main("pr")
-        r.write("local.cfg", "stale tip content\n")
-        r.commit("stale tip tracks local.cfg", "-f", "local.cfg")
-        r.git("switch", "-q", "main")
-        r.git("switch", "-q", "-c", "new", "main")
-        r.write("feature.txt")
-        new = r.commit("fetched head: no local.cfg")
-        r.git("switch", "-q", "main")
-        mine = r.write("local.cfg", "MY LOCAL SETTINGS\n")
-        self.assertEqual("", r.out("status", "--porcelain"))
-        return r, new, mine
-
-    def test_stale_local_branch_tip_is_checked_even_when_the_target_is_clean(self):
-        r, new, mine = self.stale_pr()
-        # the target commit alone is harmless...
-        rc, alone = preflight(r, new)
-        self.assertEqual((0, "PASS"), (rc, alone["status"]))
-        # ...but with the branch named, the local tip it would land on first is checked too
-        rc, report = preflight(r, new, "pr")
-        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
-        self.assertEqual(["local.cfg"], report["problems"][0]["paths"])
-        self.assertEqual("refs/heads/pr", report["problems"][0]["target"])
-        self.assertEqual({new, r.out("rev-parse", "pr")}, {t["sha"] for t in report["targets"]})
-        self.assertEqual("MY LOCAL SETTINGS\n", mine.read_text())
-        # premise: the switch to the stale local tip is what destroys the file
-        r.git("switch", "-q", "pr")
-        self.assertEqual("stale tip content\n", mine.read_text())
-
-    def test_every_repeated_target_ref_is_checked(self):
-        r, new, mine = self.stale_pr()
-        rc, report = preflight(r, [new, "refs/heads/pr"])
-        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
-        self.assertEqual("refs/heads/pr", report["problems"][0]["target"])
-
-    def test_local_tip_equal_to_the_target_or_absent_passes(self):
-        r, new, mine = self.stale_pr()
-        r.git("branch", "-f", "pr", new)  # the local branch already equals the fetched head
-        rc, report = preflight(r, new, "pr")
-        self.assertEqual((0, "PASS", 1), (rc, report["status"], len(report["targets"])))
-        rc, report = preflight(r, new, "not-yet-created")  # new branch: no local tip to check
-        self.assertEqual((0, "PASS", 1), (rc, report["status"], len(report["targets"])))
-
-    def test_fast_forwardable_stale_tip_without_the_tracked_path_passes(self):
-        """Control: a stale local tip that does not track the user's ignored file is fine."""
-        r, new, mine = self.stale_pr()
-        r.git("branch", "-f", "pr", "main")  # tip = main: tracks nothing the user has ignored
-        rc, report = preflight(r, new, "pr")
-        self.assertEqual((0, "PASS"), (rc, report["status"]))
-
-
 class OddPathsAndSubmodules(unittest.TestCase):
     ODD = ("with space.cfg", "new\nline.cfg", "設定.cfg", "dir with space/inner file.cfg",
            "tab\there.cfg")
@@ -454,155 +426,160 @@ class OddPathsAndSubmodules(unittest.TestCase):
                 self.assertEqual((1, ["dirty"]), (rc, checks(report)))
 
 
-class RestoreCheck(unittest.TestCase):
-    """At the end of an invocation: may the checkout go back to where it started?"""
+class Land(unittest.TestCase):
+    """The landing commands re-resolve names at run time; --execute lands on exactly one SHA."""
 
-    def on_selected_branch(self):
-        """Started on main; the selected branch `pr` is pushed (upstream set) and checked out."""
-        r = Repo(self)
-        r.write(".gitignore", "local.cfg\n")
-        r.write("a.txt")
-        start = r.commit("init")
-        r.add_origin()
-        r.branch_from_main("pr")
-        r.write("b.txt")
-        r.commit("pr work")
-        r.git("push", "-q", "-u", "origin", "pr")
-        return r, start
+    def land(self, w, target, branch, *extra):
+        return preflight(w.work, target, branch, None, *extra, "--execute")
 
-    def test_clean_pushed_branch_may_return_and_the_command_works(self):
-        r, start = self.on_selected_branch()
-        before = r.out("rev-parse", "HEAD")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((0, "PASS", True), (rc, report["status"], report["restore_needed"]), report)
-        self.assertEqual(["git", "switch", "main"], report["switch_command"])
-        self.assertEqual("pr", r.out("branch", "--show-current"), "the check never switches")
-        self.assertEqual(before, r.out("rev-parse", "HEAD"))
-        r.git(*report["switch_command"][1:])
-        self.assertEqual(("main", start), (r.out("branch", "--show-current"), r.out("rev-parse", "HEAD")))
+    def test_lands_on_the_verified_sha_not_on_the_stale_remote_tracking_ref(self):
+        w = stale_world(self)
+        rc, dry = preflight(w.work, w.p2, "pr", None, *ORIGIN)
+        self.assertEqual((0, "create"), (rc, dry["action"]))
+        self.assertEqual(("main", "USER-SECRET\n"), (w.work.out("branch", "--show-current"), w.mine.read_text()),
+                         "the dry run changes nothing")
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, "PASS", w.p2, "pr"), (rc, done["status"], done["head"], done["current_branch"]))
+        self.assertEqual("USER-SECRET\n", w.mine.read_text())
+        self.assertEqual(w.p2, w.work.out("rev-parse", "pr"))
+        self.assertEqual(("origin", "refs/heads/pr"), (w.work.out("config", "branch.pr.remote"),
+                                                       w.work.out("config", "branch.pr.merge")))
+        self.assertEqual("", w.work.out("status", "--porcelain"))
 
-    def test_unpushed_commits_keep_the_checkout_on_the_selected_branch(self):
-        r, start = self.on_selected_branch()
-        r.write("c.txt")
-        unpushed = r.commit("not pushed yet")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["unpushed_commits"]), (rc, checks(report)), report)
-        self.assertEqual([unpushed], report["problems"][0]["paths"])
-        self.assertIn("pr", report["problems"][0]["detail"])
-        self.assertIsNone(report["switch_command"])
-        self.assertEqual([unpushed], report["unpushed"])
+    def test_the_old_landing_loses_the_file_and_a_target_tracking_it_still_stops(self):
+        w = stale_world(self)  # premise: `git switch pr` creates pr from the stale origin/pr
+        w.work.git("switch", "-q", "pr")
+        self.assertEqual("TRACKED-BY-STALE-TIP\n", w.mine.read_text())
+        w = stale_world(self)  # control: the same script refuses when the SHA itself tracks it
+        rc, report = self.land(w, w.p1, "pr", *ORIGIN)
+        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)))
+        self.assertEqual(("main", "USER-SECRET\n"), (w.work.out("branch", "--show-current"), w.mine.read_text()))
+        self.assertEqual("", w.work.out("branch", "--list", "pr"))
 
-    def test_a_branch_without_an_upstream_cannot_be_shown_pushed(self):
-        r, start = self.on_selected_branch()
-        r.git("switch", "-q", "-c", "local-only", "main")
-        r.write("d.txt")
-        r.commit("local work")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), report)
+    def test_a_stale_local_branch_with_the_same_upstream_is_fast_forwarded_by_cas(self):
+        w = stale_world(self)
+        w.work.git("branch", "--track", "pr", "origin/pr")  # local pr at P1, upstream origin refs/heads/pr
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, "ff", w.p2, "pr"), (rc, done["action"], done["head"], done["current_branch"]))
+        self.assertEqual((w.p2, "USER-SECRET\n"), (w.work.out("rev-parse", "pr"), w.mine.read_text()))
 
-    def test_nothing_written_locally_needs_no_upstream_even_after_the_remote_branch_is_deleted(self):
-        """pr-review-merge: HEAD is still the reviewed commit; GitHub deleted the merged branch."""
-        r, start = self.on_selected_branch()
-        reviewed = r.out("rev-parse", "HEAD")
-        r.git("push", "-q", "origin", "--delete", "pr")  # deleteBranchOnMerge
-        r.git("fetch", "-q", "--prune", "origin")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), "without the checked-out SHA")
-        rc, report = restore(r, start, "main", checked_out_sha=reviewed)
-        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
-        r.write("e.txt")
-        r.commit("something was written locally after all")
-        rc, report = restore(r, start, "main", checked_out_sha=reviewed)
-        self.assertEqual((1, ["head_moved"]), (rc, checks(report)), report)
+    def test_a_diverged_or_foreign_local_branch_is_a_clash_and_nothing_moves(self):
+        for label, tamper in (("diverged", lambda w: w.work.git(
+                "branch", "-f", "pr", w.work.out("commit-tree", w.p1 + "^{tree}", "-p", w.p1, "-m", "local only"))),
+                              ("other upstream", lambda w: w.work.git("config", "branch.pr.remote", "elsewhere"))):
+            with self.subTest(label):
+                w = stale_world(self)
+                w.work.git("branch", "--track", "pr", "origin/pr")
+                tamper(w)
+                tip = w.work.out("rev-parse", "pr")
+                rc, report = self.land(w, w.p2, "pr", *ORIGIN)
+                self.assertEqual((1, ["branch_clash"]), (rc, checks(report)))
+                self.assertEqual((tip, "main", "USER-SECRET\n"), (w.work.out("rev-parse", "pr"),
+                                                                    w.work.out("branch", "--show-current"), w.mine.read_text()))
 
-    def test_a_detached_current_head_cannot_be_shown_pushed(self):
-        r, start = self.on_selected_branch()
-        tip = r.out("rev-parse", "HEAD")
-        r.git("switch", "-q", "--detach", "pr")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["no_upstream"]), (rc, checks(report)), report)
-        self.assertIn("detached", report["problems"][0]["detail"])
-        rc, report = restore(r, start, "main", checked_out_sha=tip)  # nothing written: fine
-        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
+    def test_the_fast_forward_is_a_compare_and_swap(self):
+        """The branch moves between the plan and the run: update-ref refuses, the branch is untouched."""
+        w = stale_world(self)
+        w.work.git("branch", "--track", "pr", "origin/pr")
+        script = load_module(SCRIPT)
+        with mock.patch.dict(os.environ, w.work.env, clear=True):
+            report = script.plan(w.work.path, w.p2, "pr", "origin", ["refs/heads/pr"], False, [])
+            self.assertEqual(("PASS", "ff"), (report["status"], report["action"]))
+            moved = w.work.out("commit-tree", w.p1 + "^{tree}", "-p", w.p1, "-m", "raced")
+            w.work.git("branch", "-f", "pr", moved)
+            report = script.execute(report)
+        self.assertEqual("STOP", report["status"])
+        self.assertEqual(moved, w.work.out("rev-parse", "pr"), "the raced branch was not overwritten")
+        self.assertEqual("USER-SECRET\n", w.mine.read_text())
 
-    def test_dirty_checkout_stays(self):
-        r, start = self.on_selected_branch()
-        r.write("b.txt", "edited\n")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["dirty"]), (rc, checks(report)), report)
+    def test_fork_head_named_like_the_users_main_is_a_clash_and_a_clean_name_is_created(self):
+        w = stale_world(self)
+        fork = w.work.base / "fork.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(fork)], check=True, env=w.work.env)
+        head = w.work.out("commit-tree", w.a + "^{tree}", "-p", w.a, "-m", "fork head")
+        w.work.git("push", "-q", str(fork), f"{head}:refs/heads/main", f"{head}:refs/heads/feature")
+        main = w.work.out("rev-parse", "main")
+        ident = ("--remote", str(fork), "--merge", "refs/pull/1/head")
+        rc, report = self.land(w, head, "main", *ident, "--merge", "refs/heads/main")
+        self.assertEqual((1, ["branch_clash"]), (rc, checks(report)))
+        self.assertEqual((main, "main"), (w.work.out("rev-parse", "main"), w.work.out("branch", "--show-current")))
+        rc, done = self.land(w, head, "feature", *ident, "--merge", "refs/heads/feature")
+        self.assertEqual((0, "feature"), (rc, done["current_branch"]))
+        self.assertEqual((str(fork), "refs/pull/1/head"), (w.work.out("config", "branch.feature.remote"),
+                                                           w.work.out("config", "branch.feature.merge")))
+        # pr_gate compares the local branch with the PR's headRefName: it holds by construction
+        self.assertEqual((head, "feature", []), tuple(load_module(PR_GATE).check_local(w.work.path)))
 
-    def test_ignored_file_that_the_start_branch_tracks_stops_the_way_back(self):
-        """The ignored-file guard also covers the return trip."""
-        r = Repo(self)
-        r.write(".gitignore", "local.cfg\n")
-        r.write("local.cfg", "tracked on main\n")
-        start = r.commit("main force-tracks local.cfg", "-f", ".gitignore", "local.cfg")
-        r.add_origin()
-        r.branch_from_main("pr")
-        r.git("rm", "-q", "local.cfg")
-        r.commit("pr stops tracking it")
-        r.git("push", "-q", "-u", "origin", "pr")
-        mine = r.write("local.cfg", "MY LOCAL SETTINGS\n")
-        self.assertEqual("", r.out("status", "--porcelain"))
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)), report)
-        self.assertEqual(["local.cfg"], report["problems"][0]["paths"])
-        self.assertIsNone(report["switch_command"])
-        self.assertEqual("MY LOCAL SETTINGS\n", mine.read_text())
-        # premise: the plain `git switch main` would have replaced it
-        r.git("switch", "-q", "main")
-        self.assertEqual("tracked on main\n", mine.read_text())
+    def test_issue_resume_after_the_stale_remote_tracking_ref_moved_back(self):
+        w = stale_world(self)
+        w.work.git("fetch", "-q", "origin", "refs/heads/pr")
+        w.work.git("update-ref", "refs/remotes/origin/pr", w.p1)  # the race: origin/pr is stale when we land
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, w.p2, "USER-SECRET\n"), (rc, done["head"], w.mine.read_text()))
+        w.work.git("switch", "-q", "main")  # control: the local branch is already at the verified tip
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, "attach", w.p2), (rc, done["action"], done["head"]))
 
-    def test_a_moved_start_branch_tip_is_checked_too(self):
-        r, start = self.on_selected_branch()
-        r.git("switch", "-q", "main")
-        r.write("local.cfg", "tracked later\n")
-        r.commit("main moved on and tracks local.cfg", "-f", "local.cfg")
-        r.git("switch", "-q", "pr")
-        r.write("local.cfg", "MINE\n")
-        rc, report = restore(r, start, "main")  # start SHA alone is harmless; main's tip is not
-        self.assertEqual((1, ["ignored_collision"]), (rc, checks(report)), report)
-        self.assertEqual("refs/heads/main", report["problems"][0]["target"])
-        self.assertTrue(report["tip_moved"])
+    def test_a_new_issue_branch_must_not_exist_and_tracks_nothing(self):
+        w = stale_world(self)
+        rc, done = self.land(w, w.a, "issue/7-fix", "--new")
+        self.assertEqual((0, "issue/7-fix", w.a), (rc, done["current_branch"], done["head"]))
+        self.assertEqual("", w.work.git("config", "--get", "branch.issue/7-fix.merge", check=False).stdout)
+        w.work.git("switch", "-q", "main")
+        rc, report = self.land(w, w.a, "issue/7-fix", "--new")
+        self.assertEqual((1, ["branch_clash"]), (rc, checks(report)))
 
-    def test_a_detached_start_returns_to_the_sha(self):
-        r, start = self.on_selected_branch()
-        rc, report = restore(r, start)  # no --start-branch: HEAD started detached
-        self.assertEqual((0, "PASS"), (rc, report["status"]), report)
-        self.assertEqual(["git", "switch", "--detach", start], report["switch_command"])
-        r.git(*report["switch_command"][1:])
-        self.assertEqual("", r.out("branch", "--show-current"))
-        self.assertEqual(start, r.out("rev-parse", "HEAD"))
+    def test_a_ref_named_like_the_sha_cannot_redirect_the_landing(self):
+        w = stale_world(self)
+        w.work.git("branch", w.p2, w.p1)  # a decoy branch named by the PR head's SHA, pointing at P1
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, w.p2, "USER-SECRET\n"), (rc, done["head"], w.mine.read_text()))
+        w = stale_world(self)  # premise: plain `git switch --detach <sha>` takes the decoy
+        w.work.git("branch", w.p2, w.p1)
+        w.work.git("switch", "-q", "--detach", w.p2)
+        self.assertEqual((w.p1, "TRACKED-BY-STALE-TIP\n"), (w.work.out("rev-parse", "HEAD"), w.mine.read_text()))
 
-    def test_already_on_the_start_branch_needs_no_switch(self):
-        r = Repo(self)
-        r.write("a.txt")
-        start = r.commit("init")
-        rc, report = restore(r, start, "main")
-        self.assertEqual((0, "PASS", False, None), (rc, report["status"], report["restore_needed"],
-                                                    report["switch_command"]))
+    def test_invalid_branch_names_stop_before_any_switch(self):
+        w = stale_world(self)
+        w.work.git("switch", "-q", "-c", "previous")  # so that `@{-1}` names a real branch ("previous")
+        w.work.git("switch", "-q", "main")
+        head = w.work.out("rev-parse", "HEAD")
+        for bad in ("-x", "a..b", "@{-1}", "HEAD", "", "a b", "x.lock"):
+            with self.subTest(bad):
+                rc, report = self.land(w, w.p2, bad, *ORIGIN)
+                self.assertEqual((1, ["invalid_branch_name"]), (rc, checks(report)))
+                self.assertEqual((head, "main"), (w.work.out("rev-parse", "HEAD"), w.work.out("branch", "--show-current")))
 
-    def test_start_branch_deleted_or_checked_out_elsewhere_stays(self):
-        r, start = self.on_selected_branch()
-        r.git("worktree", "add", "-q", str(r.base / "other"), "main")  # scratch repo only
-        rc, report = restore(r, start, "main")
-        self.assertEqual((1, ["checked_out_elsewhere"]), (rc, checks(report)), report)
-        r2, start2 = self.on_selected_branch()
-        r2.git("branch", "-q", "-D", "main")
-        rc, report = restore(r2, start2, "main")
-        self.assertEqual(1, rc)
-        self.assertIn("start_branch_missing", checks(report))
+    def landed(self):
+        w = stale_world(self)
+        self.assertEqual(0, self.land(w, w.p2, "pr", *ORIGIN)[0])
+        w.main = w.work.out("rev-parse", "main")
+        return w
 
-    def test_unresolvable_start_and_bad_arguments_are_not_a_pass(self):
-        r, start = self.on_selected_branch()
-        rc, report = restore(r, "0" * 40, "main")
-        self.assertEqual(1, rc)
-        self.assertIn("unresolvable_target", checks(report))
-        for argv in (["--restore-check"], ["--restore-check", "--start-sha", start, "--target-ref", "main"],
-                     ["--start-sha", start, "--target-ref", "main"]):
-            p = subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(r.path), *argv],
-                               capture_output=True, text=True, env=r.env)
-            self.assertNotEqual(0, p.returncode, argv)
+    def test_restore_returns_to_the_start_only_from_a_safe_head(self):
+        w = self.landed()
+        rc, done = self.land(w, w.main, "main", "--safe-sha", w.p2)
+        self.assertEqual((0, w.main, "main", "USER-SECRET\n"), (rc, done["head"], done["current_branch"], w.mine.read_text()))
+        w = self.landed()  # HEAD ahead of everything verified: its commits would be stranded
+        w.work.write("c", "local work\n")
+        ahead = w.work.commit("pushed to a fork, not to origin")
+        rc, report = self.land(w, w.main, "main", "--safe-sha", w.p2)
+        self.assertEqual((1, ["unpushed_commits"]), (rc, checks(report)))
+        self.assertEqual("pr", w.work.out("branch", "--show-current"))
+        rc, done = self.land(w, w.main, "main", "--safe-sha", w.p2, "--safe-sha", ahead)  # verified after the push
+        self.assertEqual((0, "main"), (rc, done["current_branch"]))
+
+    def test_restore_never_recreates_a_deleted_start_branch_from_origin(self):
+        w = self.landed()
+        w.work.git("branch", "-q", "-D", "main")
+        rc, report = self.land(w, w.main, "main", "--safe-sha", w.p2)
+        self.assertEqual((1, ["start_branch_missing"]), (rc, checks(report)))
+        self.assertEqual(("pr", ""), (w.work.out("branch", "--show-current"), w.work.out("branch", "--list", "main")))
+
+    def test_restore_to_a_detached_start_only_detaches(self):
+        w = self.landed()
+        rc, done = preflight(w.work, w.main, None, None, "--safe-sha", w.p2, "--execute")
+        self.assertEqual((0, w.main, None), (rc, done["head"], done["current_branch"]))
 
 
 if __name__ == "__main__":

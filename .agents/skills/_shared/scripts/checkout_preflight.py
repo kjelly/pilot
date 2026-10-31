@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
-"""Read-only preflight before switching the current checkout to another branch.
+"""Land the checkout on ONE verified commit and attach a branch only where that changes no tree.
 
-The single-item skills (issue-to-pr, pr-ready, pr-review-merge) switch the one
-clean checkout to the selected item's branch. `git status --porcelain` is not a
-sufficient guard for that: git treats *ignored* files as expendable, so a
-switch silently overwrites an ignored `local.cfg` that the target branch tracks
-(and deletes it again on the way back), and silently removes an ignored file
-that stands where the target needs a directory (or the reverse). This script
-refuses every case where that, or another silent loss, could happen.
+Why this exists. `git status --porcelain` cannot see *ignored* files, and git overwrites or
+deletes them on a switch without a warning. And the commands that land a branch (`git switch
+BRANCH`, `gh pr checkout`, `--track -c origin/X`, `git merge BRANCH`) re-resolve their target
+by name at run time: a stale local branch, a stale remote-tracking ref (DWIM), a fork head
+named like the user's `main`, a ref named like a SHA. So the invariant is built in: the
+caller resolves one full SHA, this script checks that object, lands on exactly it, and
+attaches a branch only when that moves no file.
 
 Usage:
-    checkout_preflight.py --target-ref SHA_OR_REF [--target-ref ...] [--branch NAME] [--repo DIR]
+    checkout_preflight.py --target SHA [--branch B] [--remote R --merge REF ...] [--new]
+                          [--safe-sha SHA ...] [--execute] [--repo DIR]
 
-`--target-ref` is a commit whose tree may be checked out (fetch it first). It
-is repeatable: every commit that can land in the working tree must be listed,
-because the preflight checks each one. `--branch` is the local branch that will
-be checked out. It is used for the "already checked out elsewhere" check, and
-its existing local tip is checked as one more target: `git switch BRANCH` and
-`gh pr checkout` first check out that tip, which can be stale and track other
-paths than the fetched head. Prints one JSON object. Exit 0 = PASS; exit 1 =
-STOP (a problem was found, or a check could not be run: fail closed). Any other
-exit code (argument errors) is also not a pass. The script changes nothing in
-the repository.
+Without --execute it is a read-only dry run that prints the plan. With --execute it re-runs
+every check and then runs exactly the planned commands (like apply_decision.py --execute).
+Exit 0 = PASS, 1 = STOP (a problem, or a check that could not run: fail closed); argument
+errors also exit non-zero.
 
-Restore check, at the end of an invocation:
-    checkout_preflight.py --restore-check --start-sha SHA [--start-branch NAME]
-                          [--checked-out-sha SHA] [--repo DIR]
+--target     full commit SHA (40 hex): the only tree that may land. Fetch it first.
+--branch     the branch to end on. Without it the checkout is only detached at the target.
+--remote/--merge   the upstream identity (a remote name or URL, and the accepted merge refs,
+             e.g. refs/heads/H [refs/pull/N/head]). It is stored on a created branch, and an
+             existing branch must carry it to be attached or fast-forwarded.
+--new        the branch must not exist (a new Issue branch).
+--safe-sha   restore mode: HEAD must be one of these (the commit the selected branch was
+             checked out at, or the remote head verified after the last push), else its local
+             commits would be stranded; and a missing branch is a stop, never created.
 
-Is it safe to switch the checkout back to where the invocation started
-(`--start-branch`, or the detached `--start-sha` when HEAD started detached)?
-PASS (exit 0) requires all of: the checkout is clean; the current branch has no
-unpushed commits (its upstream exists and `@{u}..HEAD` is empty, or HEAD is still
-`--checked-out-sha`, the commit the branch was checked out at, so nothing was
-written locally: always so for pr-review-merge, also after a merge whose remote
-branch GitHub deleted); and the ordinary preflight passes for the start SHA and
-the start branch's local tip (ignored-file collisions, checked out elsewhere,
-...). The report carries `switch_command`, which the caller runs itself; this
-script never switches.
+Plan, after the checks (dirty, git operation in progress, orphaned detached HEAD, branch
+checked out elsewhere, ignored-file collisions with the target tree, nested repositories
+included):
+    branch absent                          -> create it at the target
+    tip == target (identity matches)       -> attach
+    tip is an ancestor of the target and
+      the upstream identity matches        -> fast-forward by compare-and-swap, then attach
+    anything else                          -> STOP branch_clash (never reset, never force)
+Commands: `git switch --detach SHA^{commit}` is the only tree change; then create / attach /
+`git update-ref REF SHA OLD` + attach. If a later command fails, the checkout stays detached
+at the verified target.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 MAX_PATHS = 50
+HEX = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 IN_PROGRESS = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD",
                "REVERT_HEAD", "BISECT_LOG", "sequencer")
 
@@ -65,18 +69,19 @@ def git(repo: Path, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.Comple
     return p
 
 
+def out(repo: Path, *args: str, ok: tuple[int, ...] = (0, 1)) -> str:
+    return git(repo, *args, ok=ok).stdout.decode().strip()
+
+
 def split_z(data: bytes) -> list[str]:
     return [os.fsdecode(item) for item in data.split(b"\0") if item]
 
 
-def problem(check: str, detail: str, paths: list[str] | None = None, target: str | None = None) -> dict:
-    out: dict = {"check": check, "detail": detail}
-    if target:
-        out["target"] = target
+def problem(check: str, detail: str, paths: list[str] | None = None) -> dict:
+    found: dict = {"check": check, "detail": detail}
     if paths:
-        out["count"] = len(paths)
-        out["paths"] = sorted(paths)[:MAX_PATHS]
-    return out
+        found.update(count=len(paths), paths=sorted(paths)[:MAX_PATHS])
+    return found
 
 
 def proper_prefixes(path: str):
@@ -89,267 +94,203 @@ def check_dirty(top: Path) -> list[dict]:
     # --ignore-submodules=none: diff.ignoreSubmodules / .gitmodules `ignore` must not hide a dirty submodule
     entries = split_z(git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all",
                           "--ignore-submodules=none").stdout)
-    if not entries:
-        return []
     return [problem("dirty", "tracked changes or untracked files; never stash, discard or "
-                    "overwrite user work", entries)]
+                    "overwrite user work", entries)] if entries else []
 
 
 def check_in_progress(top: Path) -> list[dict]:
     found = []
     for name in IN_PROGRESS:
-        raw = git(top, "rev-parse", "--git-path", name).stdout.decode().strip()
-        path = Path(raw) if os.path.isabs(raw) else top / raw
-        if path.exists():
+        raw = out(top, "rev-parse", "--git-path", name)
+        if (Path(raw) if os.path.isabs(raw) else top / raw).exists():
             found.append(name)
-    if not found:
-        return []
-    return [problem("operation_in_progress", "finish or abort the git operation first", found)]
+    return [problem("operation_in_progress", "finish or abort the git operation first", found)] if found else []
 
 
 def check_detached(top: Path) -> list[dict]:
-    p = git(top, "symbolic-ref", "--quiet", "HEAD", ok=(0, 1))
-    if p.returncode == 0:
+    if git(top, "symbolic-ref", "--quiet", "HEAD", ok=(0, 1)).returncode == 0:
         return []
-    contained = git(top, "for-each-ref", "--contains", "HEAD", "--count=1",
-                    "--format=%(refname)").stdout.strip()
-    if contained:
+    if out(top, "for-each-ref", "--contains", "HEAD", "--count=1", "--format=%(refname)"):
         return []
-    return [problem("detached_head_unreachable",
-                    "HEAD is detached at a commit no branch or tag contains; switching away "
-                    "would orphan it")]
-
-
-def worktrees(top: Path) -> list[dict]:
-    blocks: list[dict] = []
-    current: dict = {}
-    for line in git(top, "worktree", "list", "--porcelain").stdout.decode(errors="replace").splitlines():
-        if not line.strip():
-            if current:
-                blocks.append(current)
-            current = {}
-            continue
-        key, _, value = line.partition(" ")
-        current[key] = value
-    if current:
-        blocks.append(current)
-    return blocks
+    return [problem("detached_head_unreachable", "HEAD is detached at a commit no branch or tag "
+                    "contains; switching away would orphan it")]
 
 
 def check_checked_out_elsewhere(top: Path, branch: str) -> list[dict]:
-    here = os.path.realpath(top)
-    ref = f"refs/heads/{branch}"
-    elsewhere = [w["worktree"] for w in worktrees(top)
-                 if w.get("branch") == ref and os.path.realpath(w["worktree"]) != here]
-    if not elsewhere:
-        return []
-    return [problem("checked_out_elsewhere", f"branch {branch} is checked out in another "
-                    "worktree; do not force it or silently switch directories", elsewhere)]
+    here, elsewhere, path = os.path.realpath(top), [], ""
+    for line in git(top, "worktree", "list", "--porcelain").stdout.decode(errors="replace").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}" and os.path.realpath(path) != here:
+            elsewhere.append(path)
+    return [problem("checked_out_elsewhere", f"branch {branch} is checked out in another worktree; "
+                    "do not force it or silently switch directories", elsewhere)] if elsewhere else []
 
 
 def ignored_entries(top: Path) -> tuple[set[str], set[str]]:
     """(ignored files, ignored directory-shaped entries) of the working tree.
 
-    `git ls-files --others --ignored --exclude-standard` lists every ignored file
-    and nothing else, except that a nested git repository (a directory with its
-    own .git, tracked or not by anyone) is listed as one entry with a trailing
-    slash (`vendor/x/`), whatever it contains. Empty directories are not listed.
+    `git ls-files --others --ignored --exclude-standard` lists every ignored file and nothing
+    else, except that a nested git repository is listed as one entry with a trailing slash
+    (`vendor/x/`), whatever it contains. Empty directories are not listed.
     """
-    files: set[str] = set()
-    dirs: set[str] = set()
-    for entry in split_z(git(top, "ls-files", "-z", "--others", "--ignored",
-                             "--exclude-standard").stdout):
-        if entry.endswith("/"):
-            dirs.add(entry.rstrip("/"))
-        else:
-            files.add(entry)
-    return files, dirs
+    entries = split_z(git(top, "ls-files", "-z", "--others", "--ignored", "--exclude-standard").stdout)
+    return ({e for e in entries if not e.endswith("/")}, {e.rstrip("/") for e in entries if e.endswith("/")})
 
 
-def check_ignored_collisions(top: Path, label: str, target: str,
-                             ignored: tuple[set[str], set[str]]) -> list[dict]:
+def check_ignored_collisions(top: Path, target: str) -> list[dict]:
     """Ignored paths the switch to `target` would overwrite, remove or write into.
 
-    With a clean `git status` every untracked path is ignored, so these are
-    exactly the paths git considers expendable. Ways to lose one:
-      * the target tracks the same path (it is overwritten);
-      * the target tracks a directory where the ignored file `a` stands
-        (the file is removed to make room: target tracks `a/b`);
-      * the target tracks a file where an ignored directory stands
-        (its ignored files are removed: ignored `a/b`, target tracks `a`);
-      * the target tracks any path below an ignored nested repository entry
-        (`vendor/x/`): its content is unknown, so every path under it counts.
+    With a clean `git status` every untracked path is ignored, so these are exactly the
+    paths git considers expendable: the target tracks the same path; tracks files below an
+    ignored file `a`; tracks a file where an ignored directory stands; or tracks any path
+    below an ignored nested repository (its content is unknown).
     """
-    files, dirs = ignored
+    files, dirs = ignored_entries(top)
     if not files and not dirs:
         return []
-    tracked = set(split_z(git(top, "ls-tree", "-r", "-z", "--name-only", "--full-tree",
-                              target).stdout))
+    tracked = set(split_z(git(top, "ls-tree", "-r", "-z", "--name-only", "--full-tree", target).stdout))
     tracked_dirs = {d for t in tracked for d in proper_prefixes(t)}
-    holding_dirs = {d for i in files for d in proper_prefixes(i)}
-    holding_dirs |= dirs | {d for e in dirs for d in proper_prefixes(e)}
-    found = []
-    for paths, detail in (
+    holding = {d for i in files for d in proper_prefixes(i)} | dirs | {d for e in dirs for d in proper_prefixes(e)}
+    return [problem("ignored_collision", detail, list(paths)) for paths, detail in (
         (files & tracked, "ignored file would be overwritten by a file the target tracks "
                           "(git does not warn about ignored files)"),
-        (files & tracked_dirs, "ignored file would be deleted: the target tracks files "
-                               "below that path"),
-        (tracked & holding_dirs, "ignored files below this path would be deleted: the target "
-                                 "tracks a file there"),
+        (files & tracked_dirs, "ignored file would be deleted: the target tracks files below that path"),
+        (tracked & holding, "ignored files below this path would be deleted: the target tracks a file there"),
         ({t for t in tracked if any(p in dirs for p in proper_prefixes(t))},
          "tracked path of the target lies inside an ignored nested repository or directory "
-         "entry; git writes into it and overwrites whatever is there"),
-    ):
-        if paths:
-            found.append(problem("ignored_collision", detail, list(paths), target=label))
-    return found
+         "entry; git writes into it and overwrites whatever is there")) if paths]
 
 
-def resolve_targets(top: Path, refs: list[str], branch: str | None,
-                    problems: list[dict]) -> list[dict]:
-    """Resolve every commit that may be checked out; the local branch tip is one of them."""
-    wanted = [(ref, "target-ref") for ref in refs]
-    if branch:
-        wanted.append((f"refs/heads/{branch}", "local branch tip"))
-    targets: list[dict] = []
-    for ref, source in wanted:
-        sha = git(top, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
-                  ok=(0, 1)).stdout.decode().strip()
-        if not sha:
-            if source == "target-ref":
-                problems.append(problem("unresolvable_target", f"{ref} is not a commit "
-                                        "in this repository; fetch it first"))
-            continue  # no local branch yet: nothing stale to check out
-        if all(t["sha"] != sha for t in targets):
-            targets.append({"ref": ref, "sha": sha, "source": source})
-    return targets
+def remote_id(top: Path, value: str) -> str:
+    url = out(top, "config", "--get", f"remote.{value}.url", ok=(0, 1, 128)) or value
+    return url.rstrip("/").removesuffix(".git")
 
 
-def run_preflight(repo: Path, target_refs: list[str], branch: str | None) -> dict:
-    report: dict = {"status": "STOP", "repo": str(repo), "target_refs": target_refs,
-                    "branch": branch, "problems": []}
-    problems: list[dict] = report["problems"]
+def upstream_matches(top: Path, branch: str, remote: str | None, merges: list[str]) -> bool:
+    got_remote = out(top, "config", "--get", f"branch.{branch}.remote", ok=(0, 1, 128))
+    got_merge = out(top, "config", "--get", f"branch.{branch}.merge", ok=(0, 1, 128))
+    return bool(remote and got_remote and got_merge in merges
+                and remote_id(top, got_remote) == remote_id(top, remote))
+
+
+def plan_branch(top: Path, sha: str, branch: str, remote: str | None, merges: list[str], new: bool,
+                restore: bool) -> tuple[str | None, str | None, list[dict]]:
+    """(action, old tip, problems) for ending on `branch` at `sha`."""
+    tip = out(top, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}")
+    if not tip:
+        if restore:
+            return None, None, [problem("start_branch_missing", f"local branch {branch} no longer "
+                                        "exists; it is never recreated from a remote-tracking ref")]
+        return "create", None, []
+    if not new and tip == sha and (not remote or upstream_matches(top, branch, remote, merges)):
+        return "attach", tip, []
+    if (not new and tip != sha and upstream_matches(top, branch, remote, merges)
+            and git(top, "merge-base", "--is-ancestor", tip, sha, ok=(0, 1)).returncode == 0):
+        return "ff", tip, []
+    return None, tip, [problem("branch_clash", f"local branch {branch} is at {tip}, not at the verified "
+                               f"{sha}, or its upstream differs (or a new branch was expected); ask the "
+                               "user, never reset or force")]
+
+
+def plan(repo: Path, sha: str, branch: str | None, remote: str | None, merges: list[str], new: bool,
+         safe: list[str]) -> dict:
+    report: dict = {"status": "STOP", "target": sha, "branch": branch, "action": None,
+                    "commands": [], "problems": []}
+    problems = report["problems"]
     try:
-        top = Path(git(repo, "rev-parse", "--show-toplevel").stdout.decode().strip())
-        report["toplevel"] = str(top)
-        head = git(top, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", ok=(0, 1))
-        report["head"] = head.stdout.decode().strip() or None
-        cur = git(top, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1))
-        report["current_branch"] = cur.stdout.decode().strip() or None
-        targets = resolve_targets(top, target_refs, branch, problems)
-        report["targets"] = targets
-        report["target"] = targets[0]["sha"] if targets else None
-        problems += check_dirty(top)
-        problems += check_in_progress(top)
-        if report["head"]:
-            problems += check_detached(top)
-        if branch:
-            problems += check_checked_out_elsewhere(top, branch)
-        if targets:
-            ignored = ignored_entries(top)
-            for t in targets:
-                problems += check_ignored_collisions(top, t["ref"], t["sha"], ignored)
-    except (GitError, OSError) as exc:
-        problems.append(problem("unverifiable", str(exc)))
-    if not problems:
-        report["status"] = "PASS"
-    return report
-
-
-def check_unpushed(top: Path, branch: str | None, head: str | None,
-                   checked_out_sha: str | None) -> tuple[list[dict], list[str]]:
-    """Problems that mean commits of the selected branch could be lost by leaving it."""
-    if checked_out_sha:
-        if head == checked_out_sha:
-            return [], []  # nothing was written locally
-        return [problem("head_moved", f"HEAD is {head}, not the commit {checked_out_sha} the branch "
-                        "was checked out at: something was committed locally")], []
-    if not branch:
-        return [problem("no_upstream", "HEAD is detached: nothing shows its commits are pushed")], []
-    p = git(top, "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}",
-            ok=(0, 128))
-    if p.returncode:
-        return [problem("no_upstream", f"branch {branch} has no (or a deleted) upstream: nothing "
-                        "shows its commits are pushed")], []
-    ahead = git(top, "rev-list", f"{branch}@{{upstream}}..{branch}").stdout.decode().split()
-    if ahead:
-        return [problem("unpushed_commits", f"branch {branch} has commits its upstream "
-                        f"{p.stdout.decode().strip()} does not", ahead)], ahead
-    return [], []
-
-
-def run_restore_check(repo: Path, start_sha: str, start_branch: str | None,
-                      checked_out_sha: str | None) -> dict:
-    report: dict = {"status": "STOP", "mode": "restore-check", "repo": str(repo),
-                    "start_sha": start_sha, "start_branch": start_branch,
-                    "checked_out_sha": checked_out_sha, "problems": [], "restore_needed": True,
-                    "switch_command": None}
-    problems: list[dict] = report["problems"]
-    try:
-        top = Path(git(repo, "rev-parse", "--show-toplevel").stdout.decode().strip())
-        head = git(top, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", ok=(0, 1)).stdout.decode().strip()
-        cur = git(top, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1)).stdout.decode().strip() or None
+        top = Path(out(repo, "rev-parse", "--show-toplevel", ok=(0,)))
+        head = out(top, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+        cur = out(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
         report.update(toplevel=str(top), head=head or None, current_branch=cur)
-        start = git(top, "rev-parse", "--verify", "--quiet", f"{start_sha}^{{commit}}",
-                    ok=(0, 1)).stdout.decode().strip()
-        if not start:
-            problems.append(problem("unresolvable_target", f"start commit {start_sha} is not in "
-                                    "this repository"))
-        elif (start_branch and cur == start_branch) or (not start_branch and cur is None and head == start):
-            report.update(restore_needed=False, switch_command=None)  # already where it started
-            report["status"] = "PASS"
+        resolved = out(top, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}") == sha
+        if not resolved:
+            problems.append(problem("unresolvable_target", f"{sha} is not a commit in this repository; "
+                                    "fetch it first"))
+        valid = False
+        if branch is not None:
+            named = git(top, "check-ref-format", "--branch", branch, ok=(0, 128, 129))
+            valid = named.returncode == 0 and named.stdout.decode().strip() == branch
+            if not valid:
+                problems.append(problem("invalid_branch_name", f"{branch!r} is not a valid branch name"))
+        if resolved and head == sha and (cur == branch if branch is not None else cur is None):
+            report.update(action="none", status="PASS")  # already there: nothing to switch
             return report
-        if start_branch:
-            tip = git(top, "rev-parse", "--verify", "--quiet", f"refs/heads/{start_branch}^{{commit}}",
-                      ok=(0, 1)).stdout.decode().strip()
-            if not tip:
-                problems.append(problem("start_branch_missing", f"local branch {start_branch} no "
-                                        "longer exists; `git switch` could recreate it from a remote"))
-            report["start_branch_tip"] = tip or None
-            report["tip_moved"] = bool(tip and start and tip != start)
-            report["switch_command"] = ["git", "switch", start_branch]
-        else:
-            report["switch_command"] = ["git", "switch", "--detach", start]
-        unpushed, ahead = check_unpushed(top, cur, head or None, checked_out_sha)
-        problems += unpushed
-        report["unpushed"] = ahead
-        if start:
-            inner = run_preflight(repo, [start], start_branch)
-            problems += inner["problems"]
+        if safe and head not in safe:
+            problems.append(problem("unpushed_commits", f"HEAD {head} is neither the commit the branch was "
+                                    "checked out at nor the remote head verified after the last push: "
+                                    "leaving now would strand local commits"))
+        problems += check_dirty(top) + check_in_progress(top) + (check_detached(top) if head else [])
+        if valid:
+            problems += check_checked_out_elsewhere(top, branch)
+        if resolved:
+            problems += check_ignored_collisions(top, sha)
+        action = tip = None
+        if valid and resolved:
+            action, tip, found = plan_branch(top, sha, branch, remote, merges, new, bool(safe))
+            problems += found
+        if not problems:
+            cmds = [["git", "switch", "--detach", f"{sha}^{{commit}}"]]
+            if action == "create":
+                cmds.append(["git", "switch", "--no-track", "-c", branch])
+                if remote:
+                    cmds += [["git", "config", f"branch.{branch}.remote", remote],
+                             ["git", "config", f"branch.{branch}.merge", merges[0]]]
+            elif action == "ff":
+                cmds.append(["git", "update-ref", "-m", "ff to verified head", f"refs/heads/{branch}", sha, tip])
+            if action in ("attach", "ff"):
+                cmds.append(["git", "switch", "--no-guess", branch])
+            report.update(action=action or "detach", commands=cmds)
     except (GitError, OSError) as exc:
         problems.append(problem("unverifiable", str(exc)))
     if not problems:
         report["status"] = "PASS"
-    else:
-        report["switch_command"] = None  # not safe: the caller must stay on the branch
     return report
+
+
+def execute(report: dict) -> dict:
+    """Run exactly the planned commands, then verify where HEAD ended up."""
+    top = Path(report["toplevel"])
+    try:
+        for cmd in report["commands"]:
+            git(top, *cmd[1:])
+        head = out(top, "rev-parse", "HEAD")
+        cur = out(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
+        report.update(executed=True, head=head, current_branch=cur)
+        if head != report["target"] or cur != report["branch"]:
+            raise GitError(f"landed on {cur or 'a detached HEAD'} at {head}, expected "
+                           f"{report['branch'] or 'detached'} at {report['target']}")
+    except GitError as exc:
+        report["status"] = "STOP"
+        report["problems"].append(problem("unverifiable", str(exc)))
+    return report
+
+
+def full_sha(value: str) -> str:
+    if not HEX.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a full lowercase commit SHA; "
+                                         "resolve the name to a SHA first")
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=Path("."), help="the current checkout")
-    parser.add_argument("--target-ref", action="append",
-                        help="commit-ish that may be checked out (repeatable)")
-    parser.add_argument("--branch", help="local branch that will be checked out; its local tip "
-                        "is checked too")
-    parser.add_argument("--restore-check", action="store_true",
-                        help="is it safe to switch back to the starting branch/commit?")
-    parser.add_argument("--start-sha", help="restore check: the HEAD the invocation started at")
-    parser.add_argument("--start-branch", help="restore check: the branch it started on "
-                        "(omit when HEAD started detached)")
-    parser.add_argument("--checked-out-sha", help="restore check: the commit the selected branch "
-                        "was checked out at; HEAD still equal to it means nothing was written locally")
+    parser.add_argument("--target", type=full_sha, required=True)
+    parser.add_argument("--branch")
+    parser.add_argument("--remote")
+    parser.add_argument("--merge", action="append", default=[])
+    parser.add_argument("--new", action="store_true")
+    parser.add_argument("--safe-sha", action="append", type=full_sha, default=[])
+    parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
-    if args.restore_check:
-        if not args.start_sha or args.target_ref or args.branch:
-            parser.error("--restore-check takes --start-sha [--start-branch] [--checked-out-sha], "
-                         "not --target-ref/--branch")
-        report = run_restore_check(args.repo, args.start_sha, args.start_branch, args.checked_out_sha)
-    else:
-        if not args.target_ref or args.start_sha or args.start_branch or args.checked_out_sha:
-            parser.error("--target-ref is required (and --start-*/--checked-out-sha belong to "
-                         "--restore-check)")
-        report = run_preflight(args.repo, args.target_ref, args.branch)
+    if bool(args.remote) != bool(args.merge) or (args.new and args.safe_sha) or (
+            (args.new or args.remote) and args.branch is None):
+        parser.error("--remote and --merge go together with --branch; --new needs --branch and "
+                     "excludes --safe-sha")
+    report = plan(args.repo, args.target, args.branch, args.remote, args.merge, args.new, args.safe_sha)
+    if args.execute and report["status"] == "PASS":
+        report = execute(report)
     json.dump(report, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0 if report["status"] == "PASS" else 1

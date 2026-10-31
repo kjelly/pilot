@@ -62,8 +62,8 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
    確認 hosts/groups/stage。只對自己建立的 VM/snapshot 注入故障與清理；
    使用者既有環境與真實主機不因 skill 自動取得 mutation 授權。延用已有授權，
    只有目標、風險或副作用超出範圍時才請使用者決定。
-2. 從乾淨的 candidate checkout 執行（凍結 candidate commit 後的乾淨目前 checkout，
-   或該 SHA 的唯讀 `git archive` scratch 複本），記 commit/tree、執行檔案 hashes、
+2. 從該 candidate SHA 的乾淨、唯讀 `git archive` scratch 複本執行（滿足 AGENTS.md §1.5；
+   不是 item 的 worktree，也不是目前 checkout），記 commit/tree、執行檔案 hashes、
    image digest、工具版本與 inventory facts。對外部合成 vars/fixtures/fault
    shim 也記錄內容 fingerprint 與用途，不能用修改 production source 的 overlay
    聲稱測過原始 HEAD。開發快測允許 dirty；正式證據不允許。

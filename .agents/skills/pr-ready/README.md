@@ -18,7 +18,7 @@ Codex 的角色定義是 `.codex/agents/pr-*.toml` 的位元組副本。
 |---|---|---|
 | Codex | `.agents/skills/pr-ready` | `.codex/agents/pr-*.toml`（副本） |
 | Claude Code | `.claude/skills/pr-ready`（symlink） | `.claude/agents/pr-*.md`（symlink） |
-| agy CLI / App / IDE | `.agents/skills/pr-ready` | `platforms/agy/agents/`（要用 agy 時複製到 `.agents/agents/`） |
+| agy CLI / App / IDE | `.agents/skills/pr-ready` | `platforms/agy/agents/`（要用 agy 時複製到 `.agents/agents/`，並把 `/.agents/agents/` 寫進 `$(git rev-parse --git-path info/exclude)`，原因見 checkout 契約） |
 
 共用 `SKILL.md`、`scripts/`、`references/`，不用每個平台維護三套 prompt。
 
@@ -54,7 +54,6 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 3. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。
 4. 僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads 及衝突後，才執行 `gh pr ready`。
 5. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。
-6. 不論結果，結束時依契約的 restore step 切回起始 branch：僅在 checkout 乾淨、該 PR branch 沒有未 push 的 commit、且回去的路徑通過 preflight 時才切；否則停在該 PR branch 並說明原因。
 
 ## Quality Gate 腳本（可單獨使用）
 

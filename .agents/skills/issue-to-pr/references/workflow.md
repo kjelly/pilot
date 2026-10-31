@@ -23,7 +23,6 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
            \-> EXISTING_PR / INVALID
 ```
 
-- Every end state (`READY_FOR_REVIEW`, `DRAFT_*`, `BLOCKED`, `EXISTING_PR`, `INVALID`) is followed by the contract's restore step: the checkout returns to the starting branch when clean, the Issue branch has no unpushed commits and the way back passes the preflight; otherwise it stays on the Issue branch and the report says why. The restore outcome is reported; it is not a state of the Issue.
 - A P0–P2 review finding returns `REVIEWED -> IMPLEMENTING`. A new commit invalidates `CHECKED` and `REVIEWED` receipts.
 - `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes.
 - `PUSHED` is not a completed task. Confirm PR exists and references the intended issue/HEAD.
@@ -41,10 +40,10 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
 
 - Fetch remote base; record `base_sha` in checkpoint.
 - Create branch from verified remote base, not from the current checkout's potentially dirty HEAD.
-- Example: `git switch --no-track -c issue/123-short-slug origin/main` after the contract's preflight and snapshot, verifying base, clean checkout and branch absence (`--no-track`: the Issue branch must not track the base branch). Do not create per-Issue worktrees.
+- Land it with the contract (steps 4-5): `--new` on the fetched base SHA creates `issue/123-short-slug` without tracking the base branch. Do not create per-Issue worktrees.
 - Keep one writer in the checkout. SA/Reviewer are read-only; never let two subagents write to it at the same time.
 - For check receipts: commit, confirm `git status --porcelain` empty, then run checks. Never run check receipts on a dirty/uncommitted tree.
-- On resume, rerun the contract's preflight (it reads `git worktree list --porcelain` and `git status`), check the branch mapping and open PR list before any commit/PR operation. Never force-delete or force-switch away from an existing branch, another checkout or user work.
+- On resume, land again with the contract's resume rule, and check the branch mapping and open PR list before any commit/PR operation. Never force-delete or force-switch away from an existing branch, another checkout or user work.
 - Stage intentional files explicitly; no blanket `git add -A` if it may include user files, state, secrets, or platform configs.
 
 ## Long-running execution
@@ -68,7 +67,7 @@ Keep an Issue→status→branch→commit→gate timestamp→PR URL ledger outsid
 }
 ```
 
-`start_branch`/`start_sha` (or only `start_sha` when HEAD started detached) feed the restore step; `role_drift` lists each role the contract's role check reported as DRIFT (role, both sha256 hashes, `pins_differ`). An agent may update the checkpoint atomically using temp-write/rename. Keep it separate from PR source files. A checkpoint is a hint, not the source of truth: re-verify with git/GitHub when resuming.
+`start_branch`/`start_sha` (or only `start_sha` when HEAD started detached) feed the restore step; `role_drift` lists each role the contract's role check reported as DRIFT (role, both sha256 hashes, `header_changes`). An agent may update the checkpoint atomically using temp-write/rename. Keep it separate from PR source files. A checkpoint is a hint, not the source of truth: re-verify with git/GitHub when resuming.
 
 ## Three unsuccessful revisions
 

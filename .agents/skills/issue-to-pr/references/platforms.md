@@ -6,7 +6,7 @@ The shared `SKILL.md` follows the Agent Skills YAML frontmatter contract; the sa
 | --- | --- | --- |
 | Codex CLI | `.agents/skills/issue-to-pr` | `.codex/agents/issue-*.toml` (byte copies of `platforms/codex/agents/`) |
 | Claude Code | `.claude/skills/issue-to-pr` (symlink) | `.claude/agents/issue-*.md` (symlinks to `platforms/claude/agents/`) |
-| Antigravity CLI / App / IDE (`agy`) | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here) |
+| Antigravity CLI / App / IDE (`agy`) | `.agents/skills/issue-to-pr` | `platforms/agy/agents/` (copy into `.agents/agents/` if agy is used here, and list `/.agents/agents/` in `$(git rev-parse --git-path info/exclude)`: the checkout contract explains why) |
 
 Call syntax: Codex `$issue-to-pr ...`; Claude Code `/issue-to-pr ...`; agy `/issue-to-pr ...`.
 

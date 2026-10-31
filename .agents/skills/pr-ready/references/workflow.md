@@ -9,25 +9,8 @@
 
 ## Checkout lifecycle
 
-- Work in the current clean checkout of the correct repository, after the contract's preflight (clean tree, no ignored-file collision, branch not checked out elsewhere) and snapshot. `gh pr checkout N --repo OWNER/REPO` (no `--force`) is the normal way to check out the PR head.
-- Confirm `headRepository`, `headRefName`, `headRefOid`, and writable remote. Fetch the branch/ref explicitly. Reuse an existing local branch only when its upstream matches the target PR; otherwise stop and ask.
-- Example **same-origin branch** sequence when not using `gh pr checkout`, to adapt after verifying refs and remote:
-
-  ```bash
-  git fetch origin refs/heads/BRANCH:refs/remotes/origin/BRANCH
-  # Stop first if the preflight did not PASS (dirty, ignored-file collision, owned by another writer, or checked out elsewhere).
-  if git show-ref --verify --quiet refs/heads/BRANCH; then
-    git switch BRANCH
-  else
-    git switch --track -c BRANCH origin/BRANCH
-  fi
-  # Verify HEAD equals remote PR headRefOid before making any edits.
-  ```
-
-  Use the current clean checkout; do not create per-PR worktrees. A tracking or temporary branch is for reading only; **the implementation must push back to the original PR head branch/ref**, with a verified repository/remote.
-
-- If branch is already checked out elsewhere, stop and identify that checkout; do not silently switch directories. Never use `--force`, `git reset --hard`, or discard user's work.
-- Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, the starting branch/HEAD (for the restore step), any role DRIFT reported by the contract's role check (role, both hashes, pin change), iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
+- Land the PR head with the contract (steps 4-5): fetch `refs/pull/N/head`, check the SHA against `headRepository`/`headRefName`/`headRefOid`, then land that exact SHA on `headRefName` with `checkout_preflight.py`. Never land by name; do not create per-PR worktrees. The implementation pushes back only to the original head ref (`git push origin HEAD:refs/heads/HEAD_NAME`, no force; a fork pushes to its head repository after the permission check). Never use `git reset --hard` or discard user's work.
+- Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, the starting branch/HEAD (for the restore step), any role DRIFT reported by the contract's role check (role, both hashes, `header_changes`), iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
 - After new commit/push or remote movement, invalidate prior receipts and reviews. Do not treat older check results as reusable, even if the test command is unchanged.
 
 ## Delegation contract
@@ -51,7 +34,6 @@ Expected concise result: `{role, head_sha, status, root_causes, changed_files, c
 ## Loop and interruption
 
 - Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round.
-- Whatever the end state (READY, DRAFT-BLOCKED, pending CI), finish with the contract's restore step: switch back to the starting branch only if the checkout is clean, the PR head branch has no unpushed commits and the way back passes the preflight; otherwise stay on the PR head branch and report why.
 - After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and end this invocation without starting another PR.
 - Permission errors, rate limiting, pending CI, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
 - Do not poll indefinitely. When CI does not settle within the interactive execution or runtime is ending, persist checkpoint, leave Draft and report the specific pending checks; on future invocation resume after requerying current HEAD. This is not a quality relaxation.

@@ -138,7 +138,7 @@ Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live P
 
 ## 6. Final report (selected PR)
 
-Return `PR # / URL | MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, pin change; also in the evidence `summary`)`.
+Return `PR # / URL | MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, `header_changes`; also in the evidence `summary`)`.
 
 Keep Root context small: include structured findings and essential citations/paths, **not full diffs or raw logs**.
 
