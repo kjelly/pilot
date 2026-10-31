@@ -514,6 +514,13 @@
     # block on purpose: a refusal here (systemctl missing, `show` failing, output we cannot
     # read) must not run the rescue, whose first task stops AND disables the unit. The
     # tasks are always-tagged like the rescue that reads them.
+    # Facts survive subsequent plays on the same host. Never inherit restore authority.
+    - name: "Step 0e: reset this invocation rollback authority"
+      tags: [always]
+      ansible.builtin.set_fact:
+        detection_engine_rollback: {binary_ready: false, db_ready: false, install_started: false}
+        detection_engine_rollback_failed: false
+
     - name: "Step 0: query the detection-engine service's original active/enabled state (read-only rollback material)"
       tags: [always]
       ansible.builtin.command:
@@ -621,17 +628,8 @@
         # backup while the binary stayed stale, and Step 4's changed_when: true made
         # the second apply fail the idempotency check.
         #
-        # The rescue below is `always`, so it cannot read what these C1-tagged tasks
-        # set. Its restore tasks run only when this run reached Step 6
-        # (detection_engine_binary_result is defined) and
-        # detection_engine_is_upgrade is defined and true; those `is defined` guards
-        # stay in the tasks' own bodies. The backups are then the ones Steps 4-5 just
-        # took, with two known exceptions that this change does not fix: Step 5 has
-        # failed_when: false, so a failed snapshot leaves an older .prev in place (#193),
-        # and an upgrade with no existing state.db takes no db backup, so an older
-        # pre-upgrade.db could be restored over a db created since (#194). The service,
-        # in contrast, is put back from Step 0's recorded original state, not from these
-        # facts.
+        # Restore authority is granted only after this invocation's private snapshots
+        # pass validation. The always-tagged reset above prevents reuse across plays.
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
           tags: [detection-engine-C1]
           ansible.builtin.stat:
@@ -666,6 +664,15 @@
             mode: "0700"
           when: detection_engine_is_upgrade
 
+        - name: "Step 3e: allocate a private directory for this upgrade only"
+          tags: [detection-engine-C1]
+          ansible.builtin.tempfile:
+            state: directory
+            path: "{{ detection_engine_backup_dir }}"
+            prefix: apply-
+          register: detection_engine_backup_run
+          when: detection_engine_is_upgrade and not ansible_check_mode
+
         - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO, spec §26/§40)"
           tags: [detection-engine-C1]
           ansible.builtin.command:
@@ -676,19 +683,95 @@
               - --db
               - "{{ detection_engine_db_path }}"
               - --output
-              - "{{ detection_engine_backup_dir }}/pre-upgrade.db"
-          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists
+              - "{{ detection_engine_backup_run.path }}/pre-upgrade.db"
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
+          register: detection_engine_db_backup_result
           changed_when: true
+
+        - name: "Step 4b: require the backup command to have produced a database file"
+          tags: [detection-engine-C1]
+          ansible.builtin.stat:
+            path: "{{ detection_engine_backup_run.path }}/pre-upgrade.db"
+            checksum_algorithm: sha256
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
+          register: detection_engine_db_backup_stat
+
+        - name: "Step 4c: require a regular nonempty database snapshot"
+          tags: [detection-engine-C1]
+          ansible.builtin.assert:
+            that:
+              - detection_engine_db_backup_stat.stat.isreg | default(false)
+              - not (detection_engine_db_backup_stat.stat.islnk | default(false))
+              - detection_engine_db_backup_stat.stat.size | default(0) | int > 0
+              - detection_engine_db_backup_stat.stat.checksum is defined
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
+
+        - name: "Step 4d: verify SQLite snapshot integrity before replacing the binary"
+          tags: [detection-engine-C1]
+          ansible.builtin.command:
+            argv: ["{{ detection_engine_bin_dest }}", db, check, --db, "{{ detection_engine_backup_run.path }}/pre-upgrade.db"]
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
+          register: detection_engine_db_backup_check
+          changed_when: false
+          failed_when: detection_engine_db_backup_check.rc != 0 or detection_engine_db_backup_check.stdout | trim != 'ok'
+
+        - name: "Step 4e: record the validated database snapshot checksum"
+          tags: [detection-engine-C1]
+          ansible.builtin.stat:
+            path: "{{ detection_engine_backup_run.path }}/pre-upgrade.db"
+            checksum_algorithm: sha256
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
+          register: detection_engine_db_backup_stat
+
+        - name: "Step 4f: grant this invocation database restore authority"
+          tags: [detection-engine-C1]
+          ansible.builtin.set_fact:
+            detection_engine_rollback: >-
+              {{ detection_engine_rollback | combine({'db_ready': true,
+                 'db_sha256': detection_engine_db_backup_stat.stat.checksum}) }}
+          when: detection_engine_is_upgrade and detection_engine_existing_db.stat.exists and not ansible_check_mode
 
         - name: "Step 5: snapshot the previously installed binary (rollback material, spec §26)"
           tags: [detection-engine-C1]
           ansible.builtin.copy:
             src: "{{ detection_engine_bin_dest }}"
-            dest: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
+            dest: "{{ detection_engine_backup_run.path }}/pilot-detection-engine.prev"
             remote_src: true
             mode: "0755"
-          when: detection_engine_is_upgrade
-          failed_when: false
+          when: detection_engine_is_upgrade and not ansible_check_mode
+          register: detection_engine_snapshot_result
+
+        - name: "Step 5b: checksum this invocation binary snapshot"
+          tags: [detection-engine-C1]
+          ansible.builtin.stat:
+            path: "{{ detection_engine_backup_run.path }}/pilot-detection-engine.prev"
+            checksum_algorithm: sha256
+          when: detection_engine_is_upgrade and not ansible_check_mode
+          register: detection_engine_binary_backup_stat
+
+        - name: "Step 5c: require an exact snapshot of the previously installed binary"
+          tags: [detection-engine-C1]
+          ansible.builtin.assert:
+            that:
+              - detection_engine_binary_backup_stat.stat.isreg | default(false)
+              - not (detection_engine_binary_backup_stat.stat.islnk | default(false))
+              - detection_engine_binary_backup_stat.stat.checksum | default('') == detection_engine_existing_binary_stat.stat.checksum
+          when: detection_engine_is_upgrade and not ansible_check_mode
+
+        - name: "Step 5d: grant this invocation binary restore authority"
+          tags: [detection-engine-C1]
+          ansible.builtin.set_fact:
+            detection_engine_rollback: >-
+              {{ detection_engine_rollback | combine({'binary_ready': true,
+                 'path': detection_engine_backup_run.path,
+                 'binary_sha256': detection_engine_existing_binary_stat.stat.checksum}) }}
+          when: detection_engine_is_upgrade and not ansible_check_mode
+
+        - name: "Step 5e: record that binary replacement is about to be attempted"
+          tags: [detection-engine-C1]
+          ansible.builtin.set_fact:
+            detection_engine_rollback: "{{ detection_engine_rollback | combine({'install_started': true}) }}"
+          when: not ansible_check_mode
 
         - name: "Step 6: copy the pinned binary to the target"
           tags: [detection-engine-C1]
@@ -959,33 +1042,118 @@
             state: stopped
             enabled: false
           when: detection_engine_service_before.rc == 0
-          failed_when: false
+          register: detection_engine_rescue_stop
+          ignore_errors: true
 
-        - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
+        # No search and no fallback to shared historical backup names. Revalidate both
+        # sources before copying either; stop failure also refuses every data mutation.
+        - name: "ROLLBACK — restore only this invocation's validated material"
           tags: [always]
-          ansible.builtin.copy:
-            src: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
-            dest: "{{ detection_engine_bin_dest }}"
-            remote_src: true
-            mode: "0755"
-          when:
-            - detection_engine_binary_result is defined
-            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
-          failed_when: false
+          when: detection_engine_rollback is defined and detection_engine_rollback.install_started and detection_engine_rollback.binary_ready
+          block:
+            - name: "ROLLBACK — require the service to have stopped before restoring data"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.assert:
+                that:
+                  - detection_engine_rescue_stop is succeeded
+                  - not (detection_engine_rescue_stop.skipped | default(false))
 
-        - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
-          tags: [always]
-          ansible.builtin.copy:
-            src: "{{ detection_engine_backup_dir }}/pre-upgrade.db"
-            dest: "{{ detection_engine_db_path }}"
-            remote_src: true
-            mode: "0600"
-            owner: "{{ detection_engine_user }}"
-            group: "{{ detection_engine_user }}"
-          when:
-            - detection_engine_binary_result is defined
-            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
-          failed_when: false
+            - name: "ROLLBACK — recheck the private binary snapshot"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.stat:
+                path: "{{ detection_engine_rollback.path }}/pilot-detection-engine.prev"
+                checksum_algorithm: sha256
+              register: detection_engine_rescue_binary_source
+
+            - name: "ROLLBACK — refuse a missing or changed binary snapshot"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.assert:
+                that:
+                  - detection_engine_rescue_binary_source.stat.isreg | default(false)
+                  - not (detection_engine_rescue_binary_source.stat.islnk | default(false))
+                  - detection_engine_rescue_binary_source.stat.checksum | default('') == detection_engine_rollback.binary_sha256
+
+            - name: "ROLLBACK — recheck the private database snapshot"
+              tags: [always]
+              ansible.builtin.stat:
+                path: "{{ detection_engine_rollback.path }}/pre-upgrade.db"
+                checksum_algorithm: sha256
+              register: detection_engine_rescue_db_source
+              when: detection_engine_rollback is defined and detection_engine_rollback.db_ready
+
+            - name: "ROLLBACK — refuse a missing or changed database snapshot"
+              tags: [always]
+              ansible.builtin.assert:
+                that:
+                  - detection_engine_rescue_db_source.stat.isreg | default(false)
+                  - not (detection_engine_rescue_db_source.stat.islnk | default(false))
+                  - detection_engine_rescue_db_source.stat.checksum | default('') == detection_engine_rollback.db_sha256
+              when: detection_engine_rollback is defined and detection_engine_rollback.db_ready
+
+            - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.copy:
+                src: "{{ detection_engine_rollback.path }}/pilot-detection-engine.prev"
+                dest: "{{ detection_engine_bin_dest }}"
+                remote_src: true
+                mode: "0755"
+
+            - name: "ROLLBACK — remove new database WAL and SHM before restoring the snapshot"
+              tags: [always]
+              ansible.builtin.file:
+                path: "{{ detection_engine_db_path }}{{ item }}"
+                state: absent
+              loop: [-wal, -shm]
+              when: detection_engine_rollback is defined and detection_engine_rollback.db_ready
+
+            - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
+              tags: [always]
+              ansible.builtin.copy:
+                src: "{{ detection_engine_rollback.path }}/pre-upgrade.db"
+                dest: "{{ detection_engine_db_path }}"
+                remote_src: true
+                mode: "0600"
+                owner: "{{ detection_engine_user }}"
+                group: "{{ detection_engine_user }}"
+              when: detection_engine_rollback is defined and detection_engine_rollback.db_ready
+
+            - name: "ROLLBACK — checksum the restored binary"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.stat:
+                path: "{{ detection_engine_bin_dest }}"
+                checksum_algorithm: sha256
+              register: detection_engine_rescue_binary_stat
+
+            - name: "ROLLBACK — verify the restored binary checksum"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.assert:
+                that:
+                  - detection_engine_rescue_binary_stat.stat.checksum | default('') == detection_engine_rollback.binary_sha256
+
+            - name: "ROLLBACK — verify the restored SQLite database"
+              become: true
+              become_user: "{{ detection_engine_user }}"
+              tags: [always]
+              ansible.builtin.command:
+                argv: ["{{ detection_engine_bin_dest }}", db, check, --db, "{{ detection_engine_db_path }}"]
+              register: detection_engine_rescue_db_check
+              changed_when: false
+              failed_when: detection_engine_rescue_db_check.rc != 0 or detection_engine_rescue_db_check.stdout | trim != 'ok'
+              when: detection_engine_rollback is defined and detection_engine_rollback.db_ready
+
+          rescue:
+            - name: "ROLLBACK — record that data restoration failed; keep service stopped"
+              when: detection_engine_rollback is defined
+              tags: [always]
+              ansible.builtin.set_fact:
+                detection_engine_rollback_failed: true
+
 
         # Put back the unit file, config.yaml, feature profile and provider.env as Step 0b-0d
         # found them (a file that did not exist then is removed), so the restart below runs
@@ -1082,6 +1250,8 @@
             - detection_engine_rescue_restore_links is not failed
             - detection_engine_rescue_remove_files is not failed
             - detection_engine_rescue_reload is not failed
+            - not detection_engine_rollback_failed
+            - detection_engine_rescue_stop is succeeded
           register: detection_engine_rescue_reenable
           ignore_errors: true
 
@@ -1097,6 +1267,8 @@
             - detection_engine_rescue_restore_links is not failed
             - detection_engine_rescue_remove_files is not failed
             - detection_engine_rescue_reload is not failed
+            - not detection_engine_rollback_failed
+            - detection_engine_rescue_stop is succeeded
           register: detection_engine_rescue_restart
           ignore_errors: true
 
@@ -1105,13 +1277,19 @@
           ansible.builtin.fail:
             msg: >-
               detection-engine apply FAILED (see task output above). If this
-              run had replaced the binary of a previous install, that binary
-              and state.db were restored. The service was then put back as
+              run attempted a binary replacement, restoration used only the
+              validated snapshots from this invocation. A database with no
+              pre-upgrade snapshot was left untouched. Service restoration follows
               Step 0 found it (restarted if it was active, re-enabled if it
               was enabled), after the unit file, config.yaml, feature profile and
               provider.env were put back as they were before the run (when a unit
               already existed). A service that was not active before, or did not
               exist, stays stopped/disabled for inspection.
+              {% if detection_engine_rollback_failed or detection_engine_rescue_stop is failed %}
+              WARNING: rollback material validation, service stop or data restore FAILED.
+              The service was NOT re-enabled/restarted. No historical backup fallback
+              was attempted. Inspect this run's backup directory and the task errors.
+              {% endif %}
               {% if detection_engine_rescue_restore_files is failed
                  or detection_engine_rescue_restore_links is failed
                  or detection_engine_rescue_remove_files is failed

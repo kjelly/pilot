@@ -55,6 +55,7 @@ func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 			if name, _ := m["name"].(string); strings.HasPrefix(name, "ROLLBACK — restore the unit, config") {
 				continue
 			}
+			stripDetectionEngineTestOwnership(m)
 			for _, module := range []string{"ansible.builtin.copy", "ansible.builtin.file"} {
 				if args, ok := m[module].(map[string]any); ok {
 					delete(args, "owner")
@@ -66,8 +67,8 @@ func loadDetectionEnginePlay(t *testing.T) (probes, block, rescue []any) {
 	if len(block) == 0 || len(rescue) == 0 {
 		t.Fatal("the install block or its rescue is gone from detection-engine-apply.yml")
 	}
-	if len(probes) != 5 {
-		t.Fatalf("found %d Step 0* tasks outside the install block, want 5 (the systemctl show probe, its assert, and the stat/slurp/unit-existed snapshot of the files the rescue restores): "+
+	if len(probes) != 6 {
+		t.Fatalf("found %d Step 0* tasks outside the install block, want 6 (the authority reset, systemctl show probe, its assert, and the stat/slurp/unit-existed snapshot of the files the rescue restores): "+
 			"the snapshots must be taken and validated before the block, whose rescue stops the service", len(probes))
 	}
 	return
@@ -207,7 +208,7 @@ type fileStat struct {
 }
 
 const (
-	deOldBin = "#!/bin/sh\n# old build\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
+	deOldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 	deNewBin = "#!/bin/sh\n# new build\n"
 )
 
@@ -436,14 +437,14 @@ func detectionEngineRescueSteps(t *testing.T) (probes, steps, rescue []any) {
 	probes, block, rescue := loadDetectionEnginePlay(t)
 	for _, task := range block {
 		name, _ := task.(map[string]any)["name"].(string)
-		for _, p := range []string{"Step 3:", "Step 3b:", "Step 3c:", "Step 3d:", "Step 4:", "Step 5:", "Step 6:"} {
+		for _, p := range []string{"Step 3", "Step 4", "Step 5", "Step 6:"} {
 			if strings.HasPrefix(name, p) {
 				steps = append(steps, task)
 			}
 		}
 	}
-	if len(steps) != 7 {
-		t.Fatalf("picked %d steps, want 7 (Steps 3-6)", len(steps))
+	if len(steps) != 17 {
+		t.Fatalf("picked %d steps, want 17 (Steps 3-6)", len(steps))
 	}
 	return
 }
@@ -705,10 +706,10 @@ func TestDetectionEngineStepZeroIsReadOnlyAndCheckModeSafe(t *testing.T) {
 		files       map[string]string
 		ok, skipped string
 	}{
-		{"apply, all files exist", nil, all, "5", "0"},
-		{"--check, all files exist", []string{"--check"}, all, "5", "0"},
-		{"apply, first install (no files; slurp has nothing to read)", nil, nil, "4", "1"},
-		{"--check, first install", []string{"--check"}, nil, "4", "1"},
+		{"apply, all files exist", nil, all, "6", "0"},
+		{"--check, all files exist", []string{"--check"}, all, "6", "0"},
+		{"apply, first install (no files; slurp has nothing to read)", nil, nil, "5", "1"},
+		{"--check, first install", []string{"--check"}, nil, "5", "1"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			res := harness{probes: probes, noBlockOnly: true, args: tt.args, files: tt.files, unit: fakeUnit{loaded: true, active: true, enabled: true}}.run(t)

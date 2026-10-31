@@ -48,7 +48,7 @@ func TestDetectionEngineBackupFollowsStep6TagSelection(t *testing.T) {
 		t.Fatal("the install block is gone from detection-engine-apply.yml")
 	}
 	var picked []any
-	prefixes := []string{"Step 3:", "Step 3b:", "Step 3c:", "Step 3d:", "Step 4:", "Step 5:", "Step 6:"}
+	prefixes := []string{"Step 3", "Step 4", "Step 5", "Step 6:"}
 	seen := map[string]bool{}
 	for _, task := range block { // in playbook order, every task of these steps
 		m, ok := task.(map[string]any)
@@ -99,7 +99,7 @@ func TestDetectionEngineBackupFollowsStep6TagSelection(t *testing.T) {
 			artifact := filepath.Join(dir, "artifact")
 			db := filepath.Join(dir, "state.db")
 			backups := filepath.Join(dir, "backups")
-			const oldBin = "#!/bin/sh\n# old build\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
+			const oldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 			const newBin = "#!/bin/sh\n# new build\n"
 			write := func(path, content string, mode os.FileMode) {
 				if err := os.WriteFile(path, []byte(content), mode); err != nil {
@@ -117,6 +117,8 @@ func TestDetectionEngineBackupFollowsStep6TagSelection(t *testing.T) {
 			play := []any{map[string]any{
 				"hosts": "localhost", "connection": "local", "gather_facts": false,
 				"vars": map[string]any{
+					"detection_engine_rollback":          map[string]any{"binary_ready": false, "db_ready": false, "install_started": false},
+					"detection_engine_rescue_stop":       map[string]any{"failed": false},
 					"detection_engine_db_path":           db,
 					"detection_engine_bin_dest":          bin,
 					"detection_engine_backup_dir":        backups,
@@ -144,8 +146,15 @@ func TestDetectionEngineBackupFollowsStep6TagSelection(t *testing.T) {
 				t.Fatal(err)
 			}
 			upgraded := string(got) == newBin
-			_, dbErr := os.Stat(filepath.Join(backups, "pre-upgrade.db"))
-			_, binErr := os.Stat(filepath.Join(backups, "pilot-detection-engine.prev"))
+			dbMatches, _ := filepath.Glob(filepath.Join(backups, "apply-*", "pre-upgrade.db"))
+			binMatches, _ := filepath.Glob(filepath.Join(backups, "apply-*", "pilot-detection-engine.prev"))
+			var dbErr, binErr error
+			if len(dbMatches) != 1 {
+				dbErr = os.ErrNotExist
+			}
+			if len(binMatches) != 1 {
+				binErr = os.ErrNotExist
+			}
 			backedUp := dbErr == nil && binErr == nil
 			anyBackup := dbErr == nil || binErr == nil
 			if upgraded != tt.step6 {

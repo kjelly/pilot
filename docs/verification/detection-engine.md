@@ -200,13 +200,52 @@ never makes a row PASS.
   `playbooks/apply/detection-engine-apply.yml`.
 - C11 is intentionally `verifyOnly` — see the note above and spec §49.
 
+## Rollback provenance acceptance (#193 / #194)
+
+The binary and database have independent acceptance criteria:
+
+- #193: failure to copy or SHA256-verify this apply's previous binary aborts
+  before Step 6. Rollback never reads a shared `.prev` from an earlier apply.
+- #194: an absent pre-existing state.db produces no database backup and grants
+  no database restore permission. A database created later in the failed apply
+  is preserved; a stale shared pre-upgrade.db is never restored.
+- Each real upgrade uses a new private backup directory. The SQLite snapshot
+  must exist as a regular, nonempty file and pass `db check` before Step 6.
+  The binary snapshot must match the SHA256 observed before the upgrade.
+- Restore permission is reset on every play invocation, including tag-scoped
+  runs. Successful backup commands alone do not grant restore permission.
+- After Step 6 is attempted, rescue revalidates the recorded snapshots before
+  restoring. Missing, changed or corrupt snapshots keep the service stopped;
+  no fallback to another directory is permitted. Restored binary SHA256 and
+  SQLite integrity must pass before the original service is re-enabled/restarted.
+- A stopped service is required before replacing SQLite or removing its WAL/SHM
+  sidecars. Settings, unit, profile and provider.env use PR #190's original-state
+  restore contract, including metadata and symlinks.
+- Normal upgrade, first install and the first subsequent apply must succeed;
+  the subsequent apply reports changed=0. Backup failures must leave the
+  pre-existing binary/database unchanged.
+
+Target acceptance is restricted to an isolated vm-target. Required fault cases:
+SQLite backup command failure, binary snapshot failure, corrupt/missing snapshots,
+no pre-existing database with stale backups, failure immediately after Step 6,
+normal upgrade, first install and repeated apply. Evidence must identify the
+candidate commit/tree, inventory and actual checksums/integrity/service/config
+outcomes. Current acceptance evidence is linked below.
+
 ## Actual-run evidence
 
-Latest install-block backup/rescue evidence:
+PR #190 predecessor install-block backup/rescue evidence:
 `docs/evidence/detection-engine/2026-10-30-ccde655b4d07.md` (candidate
 `ccde655b4d07`, PR #190: normal chain L1/L3/L4, C1-C12 12/12 PASS and L6
 `changed=0`, plus the backup-selection, fail-closed and rescue-availability
-arms against the base on the same snapshot).
+arms against the base on the same snapshot). The current-run backup provenance
+fix and its independent #193/#194 acceptance are recorded below.
+
+Latest rollback-provenance evidence: [2026-10-30-5adea80](../evidence/detection-engine/2026-10-30-5adea80.md).
+Candidate `5adea80`, tree `9367a31`, isolated vm-target: 19/19 PASS.
+Sanctioned first-install and upgrade chains each verified C1–C12:
+12 PASS / 0 FAIL / 0 SKIP, then changed=0. Native service-query/config/unit/tag
+failure cases also passed. No verification row or Expected value was changed.
 
 Latest notification-correctness evidence:
 `docs/evidence/detection-engine/2026-09-17-30d6b92.md` (candidate
@@ -223,3 +262,5 @@ evidence remains summarized in `docs/runbooks/detection-engine.md`.
 | 2026-08-28 | v1.0 | Real-lane + fake-lane actual-run evidence recorded (see docs/runbooks/detection-engine.md §2-§6.1); Stage A reaches VERIFICATION_READY. |
 | 2026-09-17 | v1.1 | Extend C11's fake-lane contract with actionable notification policy, valid resolve payloads, 60-second refresh, restart hydration/reconciliation, and warning absolute/composite gates; candidate `30d6b92` L1-L6 and runtime scenario evidence PASS. |
 | 2026-09-22 | v1.2 | Add contract point 8: `FeatureProfile.notifyByCategory` lets an operator override runbook/recommended-action/destinations per resource category instead of one profile-wide default; management-plane CLI `pilot detection-engine feature-profile show/set-notify` edits it without hand-editing YAML. No C-row added (same reasoning as C9/C10: exhaustive correctness is `internal/detection`'s own Go unit test suite, cited above); C1-C12 gate the deployed profile still parsing/loading unaffected. |
+
+| 2026-10-30 | v1.3 | Add independent #193/#194 rollback-provenance acceptance and link immutable-candidate VM evidence (13/13 PASS); C1–C12 unchanged. |

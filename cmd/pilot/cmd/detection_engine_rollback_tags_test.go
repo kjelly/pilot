@@ -55,6 +55,7 @@ func loadDetectionEngineSteps(t *testing.T) (steps, rescue, restart []any) {
 							delete(args, "group")
 						}
 					}
+					stripDetectionEngineTestOwnership(m)
 					out = append(out, m)
 					break
 				}
@@ -62,13 +63,33 @@ func loadDetectionEngineSteps(t *testing.T) (steps, rescue, restart []any) {
 		}
 		return out
 	}
-	steps = pick(block, []string{"Step 3:", "Step 3b:", "Step 3c:", "Step 3d:", "Step 4:", "Step 5:", "Step 6:"})
-	rescue = pick(resc, []string{"ROLLBACK — restore the previous binary", "ROLLBACK — restore the pre-upgrade database"})
+	steps = pick(block, []string{"Step 3", "Step 4", "Step 5", "Step 6:"})
+	rescue = pick(resc, []string{"ROLLBACK — restore only this invocation"})
 	restart = pick(resc, []string{"ROLLBACK — re-enable the service", "ROLLBACK — restart the service"})
-	if len(steps) != 7 || len(rescue) != 2 || len(restart) != 2 {
+	if len(steps) != 17 || len(rescue) != 1 || len(restart) != 2 {
 		t.Fatalf("steps=%d rescue=%d restart=%d: the install block or its rescue was renamed/restructured", len(steps), len(rescue), len(restart))
 	}
 	return
+}
+
+// stripDetectionEngineTestOwnership keeps file-only unit harnesses unprivileged.
+// The VM lane executes the production tasks with their real ownership and become.
+func stripDetectionEngineTestOwnership(m map[string]any) {
+	delete(m, "become")
+	delete(m, "become_user")
+	for _, module := range []string{"ansible.builtin.copy", "ansible.builtin.file"} {
+		if args, ok := m[module].(map[string]any); ok {
+			delete(args, "owner")
+			delete(args, "group")
+		}
+	}
+	for _, key := range []string{"block", "rescue", "always"} {
+		if tasks, ok := m[key].([]any); ok {
+			for _, task := range tasks {
+				stripDetectionEngineTestOwnership(task.(map[string]any))
+			}
+		}
+	}
 }
 
 func taskTags(t *testing.T, task any) []string {
@@ -112,11 +133,10 @@ func TestDetectionEngineBackupTagsEqualStep6Tags(t *testing.T) {
 			t.Errorf("%v has tags %v, want [always]: the rescue must run whenever its block does", m["name"], got)
 		}
 		when := strings.Join(whenStrings(m["when"]), " && ")
-		if !strings.Contains(when, "detection_engine_is_upgrade is defined") {
-			t.Errorf("%v: when %q must guard detection_engine_is_upgrade with `is defined`", m["name"], when)
-		}
-		if !strings.Contains(when, "detection_engine_binary_result is defined") {
-			t.Errorf("%v: when %q must require `detection_engine_binary_result is defined` (this run reached Step 6), or a stale backup of an earlier upgrade can be restored", m["name"], when)
+		for _, guard := range []string{"detection_engine_rollback.install_started", "detection_engine_rollback.binary_ready"} {
+			if !strings.Contains(when, guard) {
+				t.Errorf("restore block missing current-run guard %s", guard)
+			}
 		}
 	}
 	// The service's original state is restored from Step 0's read-only probe, never from
@@ -256,7 +276,7 @@ func TestDetectionEngineRollbackFollowsStep6(t *testing.T) {
 		t.Skip("ansible-playbook not installed")
 	}
 	steps, rescue, _ := loadDetectionEngineSteps(t)
-	const oldBin = "#!/bin/sh\n# old build\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
+	const oldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 	const newBin = "#!/bin/sh\n# new build\n"
 
 	for _, tt := range []struct {
@@ -313,6 +333,8 @@ func TestDetectionEngineRollbackFollowsStep6(t *testing.T) {
 			play := []any{map[string]any{
 				"hosts": "localhost", "connection": "local", "gather_facts": false,
 				"vars": map[string]any{
+					"detection_engine_rollback":          map[string]any{"binary_ready": false, "db_ready": false, "install_started": false},
+					"detection_engine_rescue_stop":       map[string]any{"failed": false},
 					"detection_engine_db_path":           db,
 					"detection_engine_bin_dest":          bin,
 					"detection_engine_backup_dir":        backups,
@@ -374,7 +396,7 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 		t.Skip("ansible-playbook not installed")
 	}
 	steps, _, _ := loadDetectionEngineSteps(t)
-	const oldBin = "#!/bin/sh\n# old build\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
+	const oldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 	const newBin = "#!/bin/sh\n# new build\n"
 	changed := regexp.MustCompile(`changed=(\d+)\b`)
 	backupStep := regexp.MustCompile(`TASK \[Step [3-6][:b-d]`) // Step 0* run on every apply
@@ -384,8 +406,8 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 		step6       bool // the selection reaches Step 6
 		wantChanged int  // changed tasks of the first apply: Steps 4, 5 and 6
 	}{
-		{"no tags", nil, true, 3},
-		{"tagged", []string{"--tags", "tagged"}, true, 3},
+		{"no tags", nil, true, 4},
+		{"tagged", []string{"--tags", "tagged"}, true, 4},
 		{"other component only (pilot deploy --limit), stale binary", []string{"--tags", "docker"}, false, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
