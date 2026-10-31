@@ -6,8 +6,11 @@ PASS (identical), DRIFT (the checkout's role file differs: dispatch with the sna
 binding contract, exit 3) and STOP (nothing can be dispatched).
 """
 import hashlib
+import importlib.util
 import json
 import os
+import py_compile
+import shutil
 import subprocess
 import sys
 import unittest
@@ -143,6 +146,107 @@ class Snapshot(unittest.TestCase):
                 rc, out = snap(r, "verify", "--snapshot", str(snapshot))
                 self.assertEqual((1, "STOP"), (rc, out["status"]))
                 self.assertIn("differs from its manifest", out["error"])
+
+
+class RunFromTheSnapshot(unittest.TestCase):
+    """Every documented script runs from $SNAP, and the snapshot still verifies afterwards.
+
+    `verify` counts any added file. CPython writes `__pycache__/*.pyc` next to a module a script
+    imports, so a bundle script that imports a sibling used to make every later verify and
+    verify-role STOP. `scan` stays strict (a `.pyc` is code CPython loads), so the scripts must
+    not write bytecode. The scripts run as `python -E` with every PYTHON* variable removed:
+    the Makefile's PYTHONDONTWRITEBYTECODE=1 must not be what keeps the snapshot clean. (Not
+    `-I`: it drops the script's own directory, and the sibling imports are the point.)
+    """
+
+    LIST_READY = ".agents/skills/pr-review-merge/scripts/list_ready.py"
+    GH_RUNTIME = ".agents/skills/pr-review-merge/scripts/gh_runtime.py"
+
+    def real_snapshot(self):
+        """(repo, snapshot): the real bundle committed in a scratch repository and snapshotted."""
+        r = Repo(self)
+        for path in BUNDLE:
+            shutil.copytree(REPO / path, r.path / path, symlinks=True,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        r.commit("the real bundle")
+        rc, out = create(r)
+        self.assertEqual((0, "PASS"), (rc, out["status"]), out)
+        return r, Path(out["snapshot_dir"])
+
+    def run_script(self, r, snapshot, rel, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        return subprocess.run([sys.executable, "-E", str(snapshot / rel), *args], capture_output=True,
+                              text=True, env=env, cwd=r.base)
+
+    def plant(self, r, source, cfile, mode=py_compile.PycInvalidationMode.UNCHECKED_HASH):
+        """Compile `source` (kept outside the snapshot) to the bytecode file `cfile`."""
+        src = r.base / "planted-source.py"
+        src.write_text(source)
+        Path(cfile).parent.mkdir(parents=True, exist_ok=True)
+        py_compile.compile(str(src), cfile=str(cfile), doraise=True, invalidation_mode=mode)
+
+    def bytecode_dirs(self, snapshot):
+        return sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("__pycache__"))
+
+    def test_every_bundle_script_runs_from_the_snapshot_and_the_snapshot_still_verifies(self):
+        r, snapshot = self.real_snapshot()
+        scripts = sorted(snapshot.glob(".agents/skills/*/scripts/*.py"))
+        self.assertGreaterEqual(len(scripts), 13, [p.name for p in scripts])
+        self.assertLessEqual({"list_ready.py", "issue_gate.py", "review_gate.py", "create_pr.py"},
+                             {p.name for p in scripts})
+        wrote = {}  # script -> the __pycache__ directories its run left in the snapshot
+        for script in scripts:
+            rel = script.relative_to(snapshot).as_posix()
+            with self.subTest(script=rel):
+                before = self.bytecode_dirs(snapshot)
+                p = self.run_script(r, snapshot, rel, "--help")
+                self.assertEqual(0, p.returncode, p.stderr)
+                if "__main__" in script.read_text():  # gh_runtime.py is a library: nothing to print
+                    self.assertIn("usage:", p.stdout, rel)
+                after = self.bytecode_dirs(snapshot)
+                if after != before:
+                    wrote[rel] = sorted(set(after) - set(before))
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        self.assertEqual((0, "PASS"), (rc, out["status"]), (out, wrote))
+        rc, out = snap(r, "verify-role", "--snapshot", str(snapshot), "--repo", str(r.path),
+                       "--platform", "claude", "--role=issue-coder")
+        self.assertEqual((0, "PASS"), (rc, out["status"]), (out, wrote))
+        self.assertEqual({}, wrote, "these scripts wrote bytecode into the snapshot")  # diagnostic: names them
+        self.assertEqual([], self.bytecode_dirs(snapshot))
+
+    def test_a_planted_bytecode_cache_is_loaded_and_counted_as_added(self):
+        """The reason scan() must not skip __pycache__: CPython runs an unchecked-hash .pyc
+        without looking at the source, so a planted one replaces the verified module."""
+        r, snapshot = self.real_snapshot()
+        cfile = importlib.util.cache_from_source(str(snapshot / self.GH_RUNTIME))
+        self.plant(r, "print('PLANTED-GH-RUNTIME-LOADED')\n"
+                      "class GitHubError(Exception): pass\n"
+                      "class Repo: pass\n"
+                      "def current_repo(): pass\n"
+                      "def list_open_prs(repo): pass\n", cfile)
+        p = self.run_script(r, snapshot, self.LIST_READY, "--help")
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertIn("PLANTED-GH-RUNTIME-LOADED", p.stdout, "premise: the planted bytecode is what ran")
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        planted = Path(cfile).relative_to(snapshot).as_posix()
+        self.assertEqual((1, "STOP"), (rc, out["status"]))
+        self.assertIn(f"added=['{planted}']", out["error"])
+        self.assertIn("run any other Python from the snapshot with -B", out["error"])
+        rc, out = snap(r, "verify-role", "--snapshot", str(snapshot), "--repo", str(r.path),
+                       "--platform", "claude", "--role=issue-coder")
+        self.assertEqual((1, "STOP"), (rc, out["status"]))
+        self.assertIn(planted, out["error"])
+
+    def test_a_sourceless_module_beside_a_script_shadows_the_standard_library(self):
+        r, snapshot = self.real_snapshot()
+        shadow = snapshot / ".agents/skills/pr-review-merge/scripts/json.pyc"
+        self.plant(r, "print('PLANTED-JSON-LOADED')\nraise SystemExit(0)\n", shadow)
+        p = self.run_script(r, snapshot, self.LIST_READY, "--help")
+        self.assertEqual((0, True), (p.returncode, "PLANTED-JSON-LOADED" in p.stdout), (p.stdout, p.stderr))
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        self.assertEqual((1, "STOP"), (rc, out["status"]))
+        self.assertIn(f"added=['{shadow.relative_to(snapshot).as_posix()}']", out["error"])
+        self.assertNotIn("__pycache__", out["error"], "no bytecode-cache hint for a plain added file")
 
 
 class RoleVerification(unittest.TestCase):

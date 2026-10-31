@@ -149,8 +149,13 @@ def verify(snapshot: Path) -> dict:
     added = sorted(now.keys() - was.keys())
     removed = sorted(was.keys() - now.keys())
     if changed or added or removed:
+        # scan() stays strict about bytecode: CPython loads a __pycache__/*.pyc that sits next to a
+        # module, so an added one is as untrusted as any other added file.
+        hint = ("; an added __pycache__ entry is bytecode Python wrote while running from the snapshot "
+                "(the bundle scripts do not write it: run any other Python from the snapshot with -B)"
+                if any("/__pycache__/" in f"/{p}" for p in added) else "")
         raise Stop(f"snapshot differs from its manifest: changed={changed[:10]} "
-                   f"added={added[:10]} removed={removed[:10]}")
+                   f"added={added[:10]} removed={removed[:10]}{hint}")
     return {"snapshot_dir": str(snapshot), "head": manifest["source_head"],
             "tree_id": manifest["source_tree"], "files": len(now)}
 

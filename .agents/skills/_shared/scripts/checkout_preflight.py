@@ -44,7 +44,8 @@ included):
 Commands: `git switch --detach SHA^{commit}` is the only tree change; then create / attach /
 `git update-ref REF SHA OLD` + attach. If a command fails the checkout is left wherever git
 stopped (detached at the verified target, or on the new branch when only `config` failed);
-the report re-reads HEAD and the branch and says so.
+the report re-reads HEAD and the branch and says so. A HEAD detached at the target or at a
+--safe-sha is not an orphan, so the retry and the restore after such a failure still run.
 """
 from __future__ import annotations
 
@@ -242,7 +243,11 @@ def plan(repo: Path, sha: str, branch: str | None, remote: str | None, merges: l
             problems.append(problem("unpushed_commits", f"HEAD {head} is neither the commit the branch was "
                                     "checked out at nor the remote head verified after the last push: "
                                     "leaving now would strand local commits"))
-        problems += check_dirty(top) + check_in_progress(top) + (check_detached(top) if head else [])
+        # A HEAD detached at the target or at a safe SHA is not an orphan: the target is the verified
+        # commit (a failed --execute leaves HEAD there, referenced only by FETCH_HEAD, and the retry
+        # and the restore must still run), and a safe SHA is exempt from unpushed_commits above.
+        orphan_possible = bool(head) and head != sha and head not in safe
+        problems += check_dirty(top) + check_in_progress(top) + (check_detached(top) if orphan_possible else [])
         if valid:
             problems += check_checked_out_elsewhere(top, branch)
         if resolved:

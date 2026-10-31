@@ -680,6 +680,43 @@ class Land(unittest.TestCase):
         rc, done = preflight(w.work, w.main, None, None, "--safe-sha", w.p2, "--execute")
         self.assertEqual((0, w.main, None), (rc, done["head"], done["current_branch"]))
 
+    def detached_at_the_target(self):
+        """A landing whose `git switch --detach` fails after detaching (a failing post-checkout
+        hook makes git return its status): HEAD stays at p2, which only FETCH_HEAD references."""
+        w = stale_world(self)
+        w.main = w.work.out("rev-parse", "main")
+        hook = w.work.path / ".git" / "hooks" / "post-checkout"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        rc, report = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((1, ["unverifiable"], None, w.p2), (rc, checks(report), report["current_branch"], report["head"]))
+        self.assertEqual(("", w.p2), (w.work.out("branch", "--show-current"), w.work.out("rev-parse", "HEAD")))
+        self.assertEqual("", w.work.out("for-each-ref", "--contains", w.p2), "no ref contains the target")
+        hook.unlink()
+        return w
+
+    def test_a_landing_that_stopped_detached_at_the_target_can_be_retried(self):
+        w = self.detached_at_the_target()
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, []), (rc, checks(done)))
+        self.assertEqual(("create", w.p2, "pr"), (done["action"], done["head"], done["current_branch"]))
+        self.assertEqual((w.p2, "USER-SECRET\n"), (w.work.out("rev-parse", "pr"), w.mine.read_text()))
+
+    def test_a_landing_that_stopped_detached_at_the_target_can_still_be_restored(self):
+        w = self.detached_at_the_target()
+        rc, done = self.land(w, w.main, "main", "--safe-sha", w.p2)
+        self.assertEqual((0, []), (rc, checks(done)))
+        self.assertEqual((w.main, "main", "USER-SECRET\n"), (done["head"], done["current_branch"], w.mine.read_text()))
+
+    def test_a_detached_head_that_is_neither_the_target_nor_a_safe_sha_is_still_an_orphan(self):
+        """Control for the two tests above: the same checkout, a different target or safe SHA."""
+        w = self.detached_at_the_target()
+        rc, report = preflight(w.work, w.main, "main")  # a landing: p2 is not its target
+        self.assertEqual((1, ["detached_head_unreachable"]), (rc, checks(report)))
+        rc, report = preflight(w.work, w.main, "main", None, "--safe-sha", w.main)  # a restore from another commit
+        self.assertEqual((1, ["detached_head_unreachable", "unpushed_commits"]), (rc, checks(report)))
+        self.assertEqual(("", w.p2), (w.work.out("branch", "--show-current"), w.work.out("rev-parse", "HEAD")))
+
 
 if __name__ == "__main__":
     unittest.main()

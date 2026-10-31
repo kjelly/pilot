@@ -36,7 +36,9 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
    records the source revision and a sha256 manifest. `SNAP` = its `snapshot_dir`.
    Every later script, reference and child prompt uses absolute `$SNAP` paths,
    because switching to another branch can replace the checkout's copy;
-   `skill_snapshot.py verify --snapshot "$SNAP"` re-checks it. Do not install or
+   `skill_snapshot.py verify --snapshot "$SNAP"` re-checks it and counts any added
+   file, bytecode included: the bundle scripts do not write `__pycache__`, so run any
+   other Python from `$SNAP` with `-B`. Do not install or
    change native role configuration silently; a missing role is blocked. agy loads a
    copy `.agents/agents/NAME.md`: list `/.agents/agents/` in
    `$(git rev-parse --git-path info/exclude)` next to `.pr-ready/` (not `.gitignore`:

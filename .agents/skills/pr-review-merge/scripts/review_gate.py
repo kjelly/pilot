@@ -8,6 +8,10 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 from gh_runtime import GitHubError, Repo, branch_rules, current_repo, pr_checks, pr_view, unresolved_threads
 
 COVERAGE = ("requirements", "correctness", "architecture", "security", "concurrency",
