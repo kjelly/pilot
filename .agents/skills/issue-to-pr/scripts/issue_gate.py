@@ -193,7 +193,7 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
     # `fixes` is the default when the key is absent: the PR body then closes the Issue.
     resolution = evidence.get("issue_resolution", "fixes")
     if resolution not in ISSUE_RESOLUTIONS:
-        errors.append("issue_resolution must be 'fixes' or 'partial'")
+        errors.append(resolution_problem(resolution))
     elif resolution == "partial" and not evidence.get("disputed_issue_claims"):
         errors.append("issue_resolution 'partial' needs the disputed_issue_claims that stay open")
     elif resolution == "fixes":
@@ -211,6 +211,10 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
 
 
 ISSUE_RESOLUTIONS = ("fixes", "partial")
+
+
+def resolution_problem(resolution: Any) -> str:
+    return f"issue_resolution must be 'fixes' or 'partial' (exactly, lower case), not {json.dumps(resolution)}"
 DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
 
 
@@ -232,7 +236,8 @@ def follow_up_number(item: dict[str, Any], repo: str, issue: int) -> tuple[int |
     url = item.get("follow_up_issue_url")
     if url is None:
         return None, None
-    found = re.fullmatch(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]*)",
+    # At most 10 digits (GitHub numbers are 32-bit), so int() never sees an oversized literal.
+    found = re.fullmatch(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]{0,9})",
                          url, re.IGNORECASE) if isinstance(url, str) else None
     if found is None:
         return None, f"follow_up_issue_url must be https://github.com/{repo}/issues/<number>"

@@ -328,6 +328,11 @@ sys.exit(reply["rc"])
 """
 
 
+# gh api graphql's answer for a PR without review threads (kjelly/pilot#201, gh 2.103.3).
+NO_REVIEW_THREADS = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+    "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}
+
+
 class DisputedIssueClaimTests(LocalGitFixture):
     """An Issue claim the PR does not act on must be answered on the Issue."""
 
@@ -445,9 +450,12 @@ class DisputedIssueClaimTests(LocalGitFixture):
         self.assertTrue(any("'partial' needs" in e for e in self.eval_with_thread()[0]))
 
     def test_unknown_resolution_blocks(self):
-        self.evidence["issue_resolution"] = "mostly"
-        self.save()
-        self.assertTrue(any("issue_resolution must be" in e for e in self.eval_with_thread()[0]))
+        for value in ("mostly", "Partial", "FIXES", None, 1):
+            with self.subTest(value=value):
+                self.evidence["issue_resolution"] = value
+                self.save()
+                errors = self.eval_with_thread()[0]
+                self.assertTrue(any("issue_resolution must be" in e and json.dumps(value) in e for e in errors), errors)
 
     # A claim that stays open after merge must not ride on a closing keyword
     # (references/issue-claims.md "Whole-Issue outcomes"): the converse of "partial needs a dispute".
@@ -519,6 +527,9 @@ class DisputedIssueClaimTests(LocalGitFixture):
                     "https://github.com/OWNER/REPO/issues/0124",
                     "https://github.com/OWNER/REPO/issues/",
                     "http://github.com/OWNER/REPO/issues/124",
+                    # Over 4300 digits int() raised ValueError and the CLI died with a traceback.
+                    "https://github.com/OWNER/REPO/issues/" + "9" * 4301,
+                    "https://github.com/OWNER/REPO/issues/12345678901",
                     "", 124, ["x"]):
             with self.subTest(url=url):
                 reply = f"Re {REPORTER_COMMENT}: tracked in {url}" if isinstance(url, str) else None
@@ -597,7 +608,8 @@ class DisputedIssueClaimTests(LocalGitFixture):
         with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
              patch.object(issue_gate, "gh_issue_thread", return_value=self.thread), \
              patch.object(issue_gate, "remote_head", return_value=self.sha), \
-             patch.object(mark_ready, "command", side_effect=[pr, {"isDraft": False, "headRefOid": self.sha, "url": "u"}]), \
+             patch.object(mark_ready, "command", side_effect=[pr, NO_REVIEW_THREADS,
+                                                              {"isDraft": False, "headRefOid": self.sha, "url": "u"}]), \
              patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
              patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
             result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,

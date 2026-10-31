@@ -18,7 +18,7 @@
 
 **After PR (PR is a Draft)** — GitHub CI runs on the Draft PR. Report CI state; a CI failure does **not** retroactively make the pre-PR gate pass. Retain the existing Draft PR, repair failures on the same branch and rerun checks; if blocked, leave it Draft and report `DRAFT_CI_BLOCKED` without falsely claiming CI success. Never claim CI passed if it is pending/not observed.
 
-**Before Ready** — all of: pre-PR gate still passes for the PR HEAD (`issue_gate.py --stage pushed --own-pr N`); the final full-diff independent review of the HEAD has no open P0–P2 (rubric: `severity.md`); `pr_ci.py` reports `CI_PASSED` on that exact SHA; no merge conflicts; PR body accurate; evidence/doc follow-ups done. `mark_ready.py --confirm-complete` enforces the mechanical parts.
+**Before Ready** — all of: pre-PR gate still passes for the PR HEAD (`issue_gate.py --stage pushed --own-pr N`); the final full-diff independent review of the HEAD has no open P0–P2 (rubric: `severity.md`); `pr_ci.py` reports `CI_PASSED` on that exact SHA; no merge conflicts; no unresolved review thread and no review requesting changes (feedback that arrives on the Draft is `pr-ready`'s job, since `mark_ready.py` does not triage it; `pr-review-merge` returns a PR with an unresolved thread to Draft); PR body accurate; evidence/doc follow-ups done. `mark_ready.py --confirm-complete` enforces the mechanical parts.
 
 `issue_gate.py` is an automated structural/remote-fact gate. It cannot prove that acceptance evidence is truthful, detect every linked PR, perform semantic code review, or guarantee future CI results. Root owns those judgments and must not represent file-based assertions as machine-proven correctness.
 

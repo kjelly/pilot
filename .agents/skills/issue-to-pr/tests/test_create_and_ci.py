@@ -129,6 +129,17 @@ class CreatePRTest(unittest.TestCase):
         self.assertEqual("DRAFT_PR_CREATED", result["status"])
         self.assertEqual("partial", check.call_args.kwargs["resolution"])
 
+    def test_a_mistyped_resolution_is_named_not_reported_as_a_missing_keyword(self):
+        # 'Partial' used to fall through to the 'fixes' branch: "must contain a genuine 'Fixes #123'".
+        for value in ("Partial", "fix", None):
+            for body in ("Refs #123", "Fixes #123"):
+                with self.subTest(value=value, body=body), patch.object(create_pr, "execute") as execute:
+                    self.evidence.write_text(json.dumps({"base_branch": "main", "issue_resolution": value}))
+                    self.body.write_text(body + "\n\n## Tests\n- regression passed\n")
+                    with self.assertRaisesRegex(create_pr.GateError, "issue_resolution must be 'fixes' or 'partial'"):
+                        self.invoke()
+                    execute.assert_not_called()
+
     def test_default_resolution_still_requires_a_closing_keyword(self):
         self.body.write_text("Refs #123\n\n## Tests\n- regression passed\n")
         with self.assertRaisesRegex(create_pr.GateError, "closing keyword"):

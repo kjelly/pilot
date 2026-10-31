@@ -16,7 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from issue_gate import GateError, closes_issue, command, evaluate, references_issue
+from issue_gate import (ISSUE_RESOLUTIONS, GateError, closes_issue, command, evaluate, references_issue,
+                        resolution_problem)
 
 
 def execute(args: list[str], cwd: Path) -> str:
@@ -32,6 +33,9 @@ def execute(args: list[str], cwd: Path) -> str:
 def issue_reference_problem(body: str, repo: str, issue: int, resolution: str) -> str | None:
     """A 'fixes' PR must close the Issue; a 'partial' one must reference it without closing it,
     so merging does not silently close the claims that stay open."""
+    if resolution not in ISSUE_RESOLUTIONS:
+        # Named first: a typo such as 'Partial' is otherwise reported as a missing 'Fixes #N'.
+        return resolution_problem(resolution)
     if resolution == "partial":
         if closes_issue(body, repo, issue):
             return f"issue_resolution is 'partial': the PR body must not close #{issue}; use 'Refs #{issue}'"

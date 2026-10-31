@@ -89,5 +89,5 @@ PR creation should be safe to rerun: it must detect and report an existing PR ra
 - If CI fails: Coder changes current Issue branch, commits; Root invalidates old evidence; checks/review on new SHA; push; verify same PR head and rerun CI.
 - If CI never starts or cannot be observed: report `DRAFT_PENDING` / CI unknown, not `CI_PASSED`, and keep the PR Draft.
 - Before any retry, query the existing PR using branch and Issue refs to prevent duplicates.
-- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW`. A new commit afterwards invalidates the Ready claim: re-verify immediately.
+- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, every review comment answered, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW`. A new commit afterwards invalidates the Ready claim: re-verify immediately.
 - Never auto-merge, request auto-merge, or bypass branch protection.
