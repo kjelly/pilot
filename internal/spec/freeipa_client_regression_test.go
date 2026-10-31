@@ -16,8 +16,8 @@ import (
 // Note on inventory alignment: like freeipa-server.md, this spec's §1 Targets
 // table declares group `freeipa-client`, but the vm-target reference
 // environment puts the single host in group `all` (run/verify with
-// `-e target_group=all`). We therefore do NOT assert SpecAndInventoryAgree
-// here — the alignment responsibility lives in the `-e target_group=` override
+// `-e target_group=all`). We therefore do NOT compare the §1 group with an
+// inventory here (AGENTS.md §3 exception) — the alignment responsibility lives in the `-e target_group=` override
 // documented in the spec, not in a fixed group name.
 func TestRegression_FreeipaClientSpec(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-client.md"

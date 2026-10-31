@@ -75,8 +75,8 @@ func TestRegression_OsPatchSlaSpec(t *testing.T) {
 // TestRegression_OsPatchSlaTargetsAreEnvironmentGroups locks the §1 targets
 // table of os-patch-sla.md to the stage vocabulary (issue #174).
 //
-// Why TestRegression_SpecAndInventoryAgree's template is NOT used here: that
-// template assumes the spec declares the group set of one concrete inventory.
+// Why the §1 groups are not compared with one inventory (AGENTS.md §1.3): that
+// comparison assumes the spec declares the group set of one concrete inventory.
 // os-patch-sla is applied per stage, each stage with its own inventory, so the
 // §1 rows are environment GROUPS (sandbox/staging/prod) resolved against
 // whatever inventory `pilot verify -i` is given. The vm-target reference
