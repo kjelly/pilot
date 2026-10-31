@@ -61,3 +61,13 @@ When there are no check runs, use `no_ci_rationale` only if no CI truly applies 
 The manifest schema, globs and the evidence-only delta rule are issue-to-pr's `scripts/repo_evidence.py`, loaded by path. The gate result carries `target_validation` (manifest state, required ids, accepted deltas). A missing or stale record is `WAITING` in the gate; it becomes `DRAFT` only through the reviewer's blocking `P1` finding at the changed path (AGENTS.md §1), like every other Draft.
 
 Evidence trust boundary: `independent: true` cannot cryptographically prove agent isolation, and SHA equality alone does not prove code correctness. The Orchestrator must really delegate and verify review evidence, and **must not fabricate fields to satisfy the gate**.
+
+### Target evidence after merging an advanced base
+
+For a base requirement with `kind: target-run`, `target_validation.target_reuse`
+may provide the separately reviewed proof described in the
+shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). This is the
+only additional alternative to the evidence-only candidate delta above. The
+original `tested_revision` is retained. It does not relax reviewed HEAD/base,
+current-HEAD tests or CI; the gate verifies complete trees, scoped modes/blobs
+and pure upstream imports using the shared implementation.

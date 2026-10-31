@@ -21,6 +21,12 @@ binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, w
 the outcome, the contract's restore step switches back to the starting branch when that
 is safe, and otherwise stays and reports why.
 
+For target evidence after integrating an advanced base, read
+`$SNAP/.agents/skills/_shared/target-evidence-reuse.md` from the verified snapshot,
+not from the branch being worked on (an older PR branch lacks it). This
+exception requires base-manifest `kind: target-run` and a fresh dependency review;
+it never reuses stale review judgments or CI receipts.
+
 ## Project runtime configuration
 
 This skill is repository-local: use the native `issue-sa`, `issue-coder`, and

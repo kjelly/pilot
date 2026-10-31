@@ -173,10 +173,12 @@ class RunFromTheSnapshot(unittest.TestCase):
         self.assertEqual((0, "PASS"), (rc, out["status"]), out)
         return r, Path(out["snapshot_dir"])
 
-    def run_script(self, r, snapshot, rel, *args):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    def run_script(self, r, snapshot, rel, *args, env=None):
+        """Run a snapshot script as `python -E` with every PYTHON* variable removed; `env` adds to that."""
+        environ = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        environ.update(env or {})
         return subprocess.run([sys.executable, "-E", str(snapshot / rel), *args], capture_output=True,
-                              text=True, env=env, cwd=r.base)
+                              text=True, env=environ, cwd=r.base)
 
     def plant(self, r, source, cfile, mode=py_compile.PycInvalidationMode.UNCHECKED_HASH):
         """Compile `source` (kept outside the snapshot) to the bytecode file `cfile`."""
@@ -213,6 +215,53 @@ class RunFromTheSnapshot(unittest.TestCase):
         self.assertEqual((0, "PASS"), (rc, out["status"]), (out, wrote))
         self.assertEqual({}, wrote, "these scripts wrote bytecode into the snapshot")  # diagnostic: names them
         self.assertEqual([], self.bytecode_dirs(snapshot))
+
+    FAKE_GH = r'''#!/usr/bin/env python3
+import base64, json, sys
+a = sys.argv[1:]
+sha, base = "1" * 40, "2" * 40
+if a[:2] == ["pr", "view"]:
+    print(json.dumps({"number": 7, "url": "https://github.com/acme/repo/pull/7", "headRefOid": sha,
+                      "headRefName": "fix-one", "baseRefOid": base, "baseRefName": "main", "state": "OPEN",
+                      "isDraft": True, "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED"}))
+elif a[:2] == ["pr", "checks"]:
+    print(json.dumps([{"name": "go test", "bucket": "pass", "state": "SUCCESS"}]))
+elif a[:2] == ["api", "graphql"]:
+    field = "reviewThreads"
+    print(json.dumps({"data": {"repository": {"pullRequest": {field: {
+        "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}))
+elif a[0] == "api" and "/contents/" in a[-1]:
+    manifest = {"schema_version": 1, "required_evidence": [
+        {"id": "actual-run", "kind": "target-run", "source": "AGENTS.md actual-run rule",
+         "artifact_glob": "docs/evidence/**/*.md"}]}
+    print(json.dumps({"type": "file", "path": ".github/pr-evidence.json", "encoding": "base64",
+                      "content": base64.b64encode(json.dumps(manifest).encode()).decode()}))
+else:
+    print("unsupported fake gh call", a, file=sys.stderr)
+    sys.exit(1)
+'''
+
+    def test_pr_gate_target_check_from_the_snapshot_writes_no_bytecode(self):
+        """pr_gate.py imports pr-review-merge's review_gate (which loads gh_runtime and repo_evidence)
+        only when it checks the target evidence. --help never gets there, so the test below it
+        would not notice a pr_gate that lets CPython cache those modules inside the snapshot."""
+        r, snapshot = self.real_snapshot()
+        bin_dir = r.base / "fake-bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text(self.FAKE_GH)
+        (bin_dir / "gh").chmod(0o755)
+        evidence = r.base / "evidence.json"
+        evidence.write_text(json.dumps({"schema_version": 1, "repo": "acme/repo", "pr": 7, "head_sha": "1" * 40}))
+        path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        p = self.run_script(r, snapshot, ".agents/skills/pr-ready/scripts/pr_gate.py",
+                            "--repo", "acme/repo", "--pr", "7", "--evidence", str(evidence), env={"PATH": path})
+        # Premise: the gate got as far as the base manifest, so review_gate really was loaded.
+        self.assertEqual(2, p.returncode, p.stdout + p.stderr)
+        self.assertIn("target_validation is missing", p.stdout)
+        self.assertEqual([], self.bytecode_dirs(snapshot), "pr_gate.py wrote bytecode into the snapshot")
+        self.assertEqual([], sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*.pyc")))
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        self.assertEqual((0, "PASS"), (rc, out["status"]), out)
 
     def test_a_planted_bytecode_cache_is_loaded_and_counted_as_added(self):
         """The reason scan() must not skip __pycache__: CPython runs an unchecked-hash .pyc

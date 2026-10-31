@@ -82,3 +82,12 @@ The mechanism is the same everywhere; only the manifest differs. `evidence_only_
 | Manifest schema, validation, base-branch loading | `evidence_only_paths` and `required_evidence` content |
 | Delta calculation, evidence entry checks | What a live run is and how to perform it (runbook, `AGENTS.md`, or a repo skill) |
 | Ordering guidance, dispatching a worker for the run | Where artifacts live and what they must contain |
+
+## Base integration and target-run records
+
+A base requirement may opt in with `kind: target-run`. Only that kind may use
+`target_reuse` on a `repo_required_evidence[]` entry after integrating an advanced
+base. Follow the shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot)
+for the exact schema, dependency review, provenance proof and failure conditions.
+General check receipts, review judgments and disputed claims continue to use the
+strict `Context.accepts()` rule.
