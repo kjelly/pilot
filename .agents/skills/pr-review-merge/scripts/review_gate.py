@@ -67,7 +67,10 @@ class RemoteContext(repo_evidence.Context):
     def base_revision(self) -> str:
         if not self.base_name:
             raise ValueError("Live base branch name unavailable for target reuse")
-        return self.client.branch_head(self.repo, self.base_name)
+        live = self.client.branch_head(self.repo, self.base_name)
+        if live != self.base_ref:
+            raise ValueError("PR base metadata is stale; independent review base must match live base")
+        return live
 
     def comparison(self, base: str, head: str) -> dict[str, Any] | None:
         return self.client.compare(self.repo, base, head)

@@ -89,7 +89,19 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh.branch_head = lambda repo, name: A
         r = evaluate(REPO, 42, e, client=gh)
         self.assertEqual("WAITING", r["decision"])
-        self.assertIn("base SHA does not match current base", " ".join(r["reasons"]))
+        self.assertIn("PR base metadata is stale", " ".join(r["reasons"]))
+
+    def test_fresh_target_attestation_cannot_hide_stale_overall_review_base(self):
+        gh, e, trees = self.fixture()
+        current = "e" * 40
+        trees[current] = trees[B].copy()
+        gh.branch_head = lambda repo, name: current
+        gh.compares[(current, H)] = {"ancestor": True, "merge_base": current, "files": [ART, APP]}
+        gh.compares[(R, current)] = {"ancestor": False, "merge_base": A, "files": [OTHER]}
+        e["target_validation"]["target_reuse"]["base_sha"] = current
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"])
+        self.assertIn("independent review base must match live base", " ".join(r["reasons"]))
 
     def test_untyped_base_manifest_cannot_be_weakened_from_pr(self):
         gh, e, _ = self.fixture()
