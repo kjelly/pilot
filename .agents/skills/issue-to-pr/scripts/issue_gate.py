@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 import repo_evidence  # noqa: E402
 
 SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
