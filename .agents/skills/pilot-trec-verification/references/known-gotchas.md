@@ -215,8 +215,8 @@ into evidence and call the run done.
 
 What is known (2026-10-31):
 
-- **The root cause is unknown.** Do not state one in a report or evidence
-  record.
+- **Tracked in #214. The root cause is unknown.** Do not state one in a report
+  or evidence record.
 - `freeipa-identity-apply.yml` already runs `sss_cache -E` on enrolled clients
   after authorization changes (task `Refresh SSSD caches on enrolled FreeIPA
   clients`, added in `c45ed559` on 2026-08-05). Rounds 23 and 31 came later and
@@ -238,11 +238,12 @@ When you hit it:
    OS and `sssd --version`, the time since the apply or rule change, and whether
    the apply ran the refresh task above or printed
    `Report deferred authorization cache refresh` instead.
-2. **Look for an existing issue:** `gh issue list --state all --search sssd`
-   and `--search sss_cache`; read #95 and #114.
-3. **File or report the bug** per `filing-policy.md`: add your facts to a
-   matching open issue or open a new one. If you may not create issues, give the
-   user the facts and a draft.
+2. **Read #214**, which tracks this symptom, and #95 and #114 for the related
+   cases. If #214 is closed, `gh issue list --state all --search sssd` for a
+   newer one.
+3. **Report the bug** per `filing-policy.md`: add your facts to #214 (or a newer
+   open issue). If you may not comment on issues, give the user the facts and a
+   draft.
 4. **The run that needed the workaround is not passing evidence.** If you flush
    to keep diagnosing, record it in the evidence record as a deviation (what
    failed, what you ran, what passed afterwards) and keep that check's verdict
