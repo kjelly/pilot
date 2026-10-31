@@ -55,8 +55,8 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   manifest at the PR's base SHA through the GitHub API (never the head, so a PR cannot
   weaken its own requirement) and checks `target_validation` with issue-to-pr's
   `repo_evidence.py` rules. Missing or malformed, `blocked`, `not-needed` on a PR that
-  changes the manifest's `required_paths` (`playbooks/**`, `docs/verification/**`,
-  `contracts/**`), or `required` without a committed `docs/evidence/**` record that names
+  changes the manifest's `required_paths` (`playbooks/**`, `contracts/**`; a spec edit
+  is the reviewer's call, since only some need a run), or `required` without a committed `docs/evidence/**` record that names
   a tested revision covering HEAD (same SHA, or an ancestor whose delta to HEAD is
   evidence-only) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
   reviewer still files a blocking `P1` at the changed path when a change needs a record

@@ -201,10 +201,13 @@ class TargetValidationTests(unittest.TestCase):
         tv = record('not-needed', reason='Docs-only change; no playbook, spec or contract touched.')
         gh = self.gh(repo_manifest())
         self.assertEqual('MERGE', self.gate(tv, gh=gh)['decision'])
-        for path in ('playbooks/apply/os-patch-sla-apply.yml', 'docs/verification/dns.md', 'contracts/dns.yaml'):
+        for path in ('playbooks/apply/os-patch-sla-apply.yml', 'contracts/dns.yaml'):
             gh.compares[(B, H)] = {'status': 'diverged', 'ancestor': False, 'files': ['README.md', path]}
             with self.subTest(path=path):
                 self.assertWaits(self.gate(tv, gh=gh), f'not-needed, but the PR changes {path}')
+        # A spec edit is the reviewer's call: prose-only edits need no run (docs/actual-run-evidence.md §4).
+        gh.compares[(B, H)] = {'status': 'diverged', 'ancestor': False, 'files': ['docs/verification/dns.md']}
+        self.assertEqual('MERGE', self.gate(tv, gh=gh)['decision'])
         gh.compares[(B, H)] = None
         self.assertWaits(self.gate(tv, gh=gh), 'could not compare')
 
@@ -322,9 +325,9 @@ class RepositoryManifestTests(unittest.TestCase):
         manifest = json.loads(repo_manifest())
         self.assertEqual([], review_gate.repo_evidence.validate_manifest(manifest))
         paths = manifest['required_evidence'][0]['required_paths']
-        for path in ('playbooks/apply/dns-apply.yml', 'docs/verification/dns.md', 'contracts/dns.yaml'):
+        for path in ('playbooks/apply/dns-apply.yml', 'contracts/dns.yaml'):
             self.assertTrue(any(review_gate.repo_evidence.glob_regex(p).match(path) for p in paths), path)
-        for path in ('docs/runbooks/dns.md', '.agents/skills/x/SKILL.md', 'docs/evidence/dns/a.md'):
+        for path in ('docs/verification/dns.md', 'docs/runbooks/dns.md', '.agents/skills/x/SKILL.md', 'docs/evidence/dns/a.md'):
             self.assertFalse(any(review_gate.repo_evidence.glob_regex(p).match(path) for p in paths), path)
 
     def test_the_gate_uses_issue_to_pr_repo_evidence(self):
