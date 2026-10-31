@@ -34,16 +34,17 @@ Supply one full URL or qualified `OWNER/REPO#N` ID. For multiple/all targets, as
 
 ## Execution protocol
 
-1. `claim.py` takes a per-Issue claim before any work so a second session or clone cannot start the same Issue.
-2. Follow the checkout contract (`.agents/skills/_shared/single-item-checkout.md`, a repo-root path; Claude Code reaches this skill through the `.claude/skills/issue-to-pr` symlink, where a relative `../_shared` link does not resolve): preflight, snapshot, then checkout the selected Issue's dedicated branch in the current clean checkout, before any analysis or implementation. No per-Issue worktrees.
-3. SA independently analyzes root cause, acceptance criteria, dependencies and impacted areas. Root checks this Issue’s dependencies without starting another item; retain one writer. Coder fixes real root cause, adds regression tests and commits.
-4. `repo_evidence.py` loads the repository's `.github/pr-evidence.json` from the base branch (evidence-only paths and mandated evidence such as a live run); the gate then accepts receipts across an evidence-only commit and requires `repo_required_evidence`. See `references/repo-evidence.md`.
-5. `run_check.py` records clean-HEAD, SHA-bound test/lint/static-check receipts in a state folder *outside the checkout*.
-6. Fresh independent `issue-reviewer` reviews the committed HEAD. P0–P2 findings require changes and repeat verification.
-7. `issue_gate.py` enforces the local pre-PR gate and duplicate-PR lookup. `create_pr.py` repeats the gate, pushes to the verified remote, verifies remote SHA, and opens a **Draft PR by default**.
-8. `pr_ci.py` inspects GitHub checks of the Draft PR for the exact head SHA. Pending CI does not mean success. If CI fails, repair on the same branch, repeat test/review, push and re-check CI; never open a second PR. Finish every other follow-up (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups) while it is still a Draft. Keep the Issue claim (`claim.py renew`) the whole time.
+1. Follow the checkout contract (`.agents/skills/_shared/single-item-checkout.md`, a repo-root path; Claude Code reaches this skill through the `.claude/skills/issue-to-pr` symlink, where a relative `../_shared` link does not resolve). First the snapshot: the skill scripts below run from it, not from the checked-out branch.
+2. `claim.py` takes a per-Issue claim before any work so a second session or clone cannot start the same Issue; `repo_evidence.py` loads the repository's rules.
+3. Land the Issue's dedicated branch by its exact verified SHA with `checkout_preflight.py` (never by branch name, no per-Issue worktrees); only then does SA analyze.
+4. SA independently analyzes root cause, acceptance criteria, dependencies and impacted areas. Root checks this Issue’s dependencies without starting another item; retain one writer. Coder fixes real root cause, adds regression tests and commits.
+5. `repo_evidence.py` loads the repository's `.github/pr-evidence.json` from the base branch (evidence-only paths and mandated evidence such as a live run); the gate then accepts receipts across an evidence-only commit and requires `repo_required_evidence`. See `references/repo-evidence.md`.
+6. `run_check.py` records clean-HEAD, SHA-bound test/lint/static-check receipts in a state folder *outside the checkout*.
+7. Fresh independent `issue-reviewer` reviews the committed HEAD. P0–P2 findings require changes and repeat verification.
+8. `issue_gate.py` enforces the local pre-PR gate and duplicate-PR lookup. `create_pr.py` repeats the gate, pushes to the verified remote, verifies remote SHA, and opens a **Draft PR by default**.
+9. `pr_ci.py` inspects GitHub checks of the Draft PR for the exact head SHA. Pending CI does not mean success. If CI fails, repair on the same branch, repeat test/review, push and re-check CI; never open a second PR. Finish every other follow-up (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups) while it is still a Draft. Keep the Issue claim (`claim.py renew`) the whole time.
    `mark_ready.py` converts Draft → Ready **only** when the PR is an open Draft of the validated branch at the validated HEAD, the pre-PR gate still passes, CI is `CI_PASSED` on that HEAD, there are no merge conflicts, and `--confirm-complete` attests that nothing else is left. **Ready means merge-quality; a PR with anything outstanding stays Draft.**
-9. If blocked before PR creation, no PR is created. If CI or review is unresolved, the PR stays Draft and is reported `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` with evidence. No auto-merge, no branch-protection bypass.
+10. If blocked before PR creation, no PR is created. If CI or review is unresolved, the PR stays Draft and is reported `DRAFT_CI_BLOCKED` / `DRAFT_PENDING` with evidence. No auto-merge, no branch-protection bypass.
 
 ## Quality helper CLI
 

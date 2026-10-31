@@ -49,29 +49,35 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
    `git checkout`, `git switch BRANCH`, `gh pr checkout` or `--track -c origin/X`:
    they re-resolve their target at run time (a stale local branch, a stale
    remote-tracking ref, a fork head named like the user's `main`, a ref named like a
-   SHA) and can put an unchecked tree on disk. `HEAD_NAME` below is the PR's
-   `headRefName`.
+   SHA) and can put an unchecked tree on disk. `$HEAD_NAME` below is the PR's
+   `headRefName`. Pass every ref, branch name and URL quoted (`--branch="$B"`,
+   `"HEAD:refs/heads/$HEAD_NAME"`): `git check-ref-format` accepts names such as `x$(id)`.
    - PR in this repository: `git fetch origin refs/pull/N/head`; SHA =
      `git rev-parse FETCH_HEAD`, which must equal `headRefOid`; upstream
-     `--remote origin --merge refs/heads/HEAD_NAME`. Push with
-     `git push origin HEAD:refs/heads/HEAD_NAME` (no force).
-   - PR from a fork: the same fetch and checks; upstream `--remote HEAD_REPO_URL
-     --merge refs/heads/HEAD_NAME --merge refs/pull/N/head` (the second accepts a
-     branch an earlier checkout created). The local name is always `HEAD_NAME`; a
-     clash stops and asks the user. Push with `git push HEAD_REPO_URL
-     HEAD:refs/heads/HEAD_NAME` after verifying write permission; read-only review
-     needs none.
+     `--remote origin --merge "refs/heads/$HEAD_NAME"`. Push with
+     `git push origin "HEAD:refs/heads/$HEAD_NAME"` (no force).
+   - PR from a fork: the same fetch and checks; upstream `--remote "$HEAD_REPO_URL"
+     --merge "refs/heads/$HEAD_NAME" --merge refs/pull/N/head` (the second accepts a
+     branch an earlier checkout created). `$HEAD_REPO_URL` is
+     `https://github.com/OWNER/NAME` from `gh pr view N --json
+     headRepository,headRepositoryOwner`; URLs are compared literally after a trailing
+     `/` and `.git` are stripped, so ssh and https forms of one repository differ: use
+     one form every time. The local name is always `$HEAD_NAME`; a clash stops and
+     asks the user. Push with `git push "$HEAD_REPO_URL" "HEAD:refs/heads/$HEAD_NAME"`
+     after verifying write permission; read-only review needs none.
    - New Issue branch: acquire the claim first; `git fetch origin refs/heads/BASE`;
      SHA = FETCH_HEAD, cross-checked with `git ls-remote origin refs/heads/BASE`;
      branch `issue/N-short-slug` with `--new`. Push later with `git push -u origin`.
    - Issue resume: if the local branch exists its tip is the SHA (local work is the
-     truth) with upstream `--remote origin --merge refs/heads/B`; if the remote is
-     ahead, fetch it and use its SHA, which fast-forwards the branch when the local tip
-     is an ancestor. A missing local branch is fetched (`refs/heads/B`) and created.
+     truth) with upstream `--remote origin --merge "refs/heads/$B"`. A branch with no
+     upstream yet (made by `--new`, never pushed) is attached as it is; one tracking
+     something else is a clash. If the remote is ahead, fetch it and use its SHA,
+     which fast-forwards the branch when the local tip is an ancestor and the upstream
+     matches. A missing local branch is fetched (`refs/heads/$B`) and created.
 5. Land: `python3 "$SNAP/.agents/skills/_shared/scripts/checkout_preflight.py" --repo
-   "$REPO_ROOT" --target SHA --branch B [--remote R --merge REF ...] [--new]` prints
-   the plan and changes nothing; add `--execute` to re-run every check and run exactly
-   the planned commands. It stops (`invalid_branch_name`, `unresolvable_target`,
+   "$REPO_ROOT" --target "$SHA" --branch="$B" [--remote "$R" --merge "$REF" ...] [--new]`
+   prints the plan and changes nothing; add `--execute` to re-run every check and run
+   exactly the planned commands. It stops (`invalid_branch_name`, `unresolvable_target`,
    `dirty`, `operation_in_progress`, `detached_head_unreachable`,
    `checked_out_elsewhere`, `ignored_collision`, `branch_clash`, `unverifiable`) when
    the name is invalid, the SHA is not a commit here, the checkout is dirty or has
@@ -80,8 +86,9 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
    **ignored** path collides with the SHA's tree (the same path, a file/directory
    prefix of it, or any path below an ignored nested repository: `git status` cannot
    see ignored files and git overwrites them without warning), the existing local
-   branch is neither at the SHA nor a fast-forwardable branch with the same upstream
-   (or `--new` and it exists), or a check cannot be run. Landing
+   branch is at the SHA but tracks another upstream, or is not at the SHA and not a
+   fast-forwardable branch with the same upstream (or `--new` and it exists), or a
+   check cannot be run. Landing
    detaches at the SHA (the only tree change), then creates the branch, attaches it, or
    fast-forwards it by compare-and-swap, never reset or forced. On any non-zero exit
    stop and ask. Never stash, discard, reset, force-checkout, or overwrite user work
@@ -89,8 +96,9 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
 6. Verify `git branch --show-current` and `git rev-parse HEAD` against the selected
    branch and SHA (`--execute` already did); stop on mismatch or remote movement. Only
    then dispatch the first role. A Coder that merges, rebases or pulls an incoming
-   commit first runs the dry run on that full SHA (`--target SHA`, no `--branch`) and
-   merges exactly that SHA, never a branch or remote-tracking name.
+   commit first runs the dry run on that full SHA (`--target "$SHA"`, no `--branch`; a
+   bare target is a dry run only, `--execute` needs `--branch` or a restore's
+   `--safe-sha`) and merges exactly that SHA, never a branch or remote-tracking name.
 7. Give every child the same verified checkout and target identity. Before each dispatch
    run `python3 "$SNAP/.agents/skills/_shared/scripts/skill_snapshot.py" verify-role
    --snapshot "$SNAP" --repo "$REPO_ROOT" --platform claude|codex|agy --role NAME`.
@@ -132,17 +140,16 @@ to or process another item; the only branch change after the item is the restore
 
 At the end, whatever the outcome (success, Draft-blocked, WAITING or BLOCKED), return
 to the starting branch recorded in step 1 (or the detached starting SHA) with the same
-landing: `checkout_preflight.py --target START_SHA --branch START_BRANCH --safe-sha S
-[--safe-sha S2] --execute`, where START_SHA is `git rev-parse refs/heads/START_BRANCH`
-(the branch is never recreated from a remote-tracking ref: a start branch that no
-longer exists is a stop, `start_branch_missing`), or the recorded detached SHA with no `--branch`. `--safe-sha`
-lists the commits HEAD may be at without stranding local work: the commit the selected
-branch was checked out at (always the case for `pr-review-merge`, even after a merge
-whose remote branch GitHub deleted) and the remote head verified after the last push
-(a fork push included). HEAD at any other commit has unpushed commits and is a stop
-(`unpushed_commits`).
-The switch also needs a clean checkout and the same preflight for the way back, so
-ignored files are guarded there too. Never use force, stash or reset. Verify the
-branch (or SHA) equals the recorded start and report the final branch. If the script
-stops, stay on the selected branch and report why, naming the branch and its unpushed
-commits or the stop.
+landing: `checkout_preflight.py --target "$START_SHA" --branch="$START_BRANCH"
+--safe-sha "$S" [--safe-sha "$S2"] --execute`, where START_SHA is `git rev-parse
+refs/heads/START_BRANCH` (the branch is never recreated from a remote-tracking ref: a
+start branch that no longer exists is a stop, `start_branch_missing`), or the recorded
+detached SHA with no `--branch`. `--safe-sha` lists the commits HEAD may be at without
+stranding local work: the commit the selected branch was checked out at (always the
+case for `pr-review-merge`, even after a merge whose remote branch GitHub deleted) and
+the remote head verified after the last push (a fork push included). HEAD at any other
+commit has unpushed commits and is a stop (`unpushed_commits`). The switch also needs a
+clean checkout and the same preflight for the way back, so ignored files are guarded
+there too. Never use force, stash or reset. Verify the branch (or SHA) equals the
+recorded start and report the final branch. If the script stops, stay on the selected
+branch and report why, naming the branch and its unpushed commits or the stop.

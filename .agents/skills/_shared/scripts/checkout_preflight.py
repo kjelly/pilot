@@ -19,10 +19,14 @@ Exit 0 = PASS, 1 = STOP (a problem, or a check that could not run: fail closed);
 errors also exit non-zero.
 
 --target     full commit SHA (40 hex): the only tree that may land. Fetch it first.
---branch     the branch to end on. Without it the checkout is only detached at the target.
+--branch     the branch to end on. Without it the checkout is only detached at the target: that
+             is a dry run (a merge preflight), and --execute then needs --safe-sha (a restore).
 --remote/--merge   the upstream identity (a remote name or URL, and the accepted merge refs,
-             e.g. refs/heads/H [refs/pull/N/head]). It is stored on a created branch, and an
-             existing branch must carry it to be attached or fast-forwarded.
+             e.g. refs/heads/H [refs/pull/N/head]). It is stored on a created branch. An existing
+             branch at the target is attached if it carries it or has no upstream at all (a branch
+             never pushed yet); one with a different upstream is a clash. Fast-forwarding needs it.
+             URLs are compared literally after a trailing `/` and `.git` are stripped (ssh and
+             https forms of one repository differ), so pass the same form every time.
 --new        the branch must not exist (a new Issue branch).
 --safe-sha   restore mode: HEAD must be one of these (the commit the selected branch was
              checked out at, or the remote head verified after the last push), else its local
@@ -32,13 +36,15 @@ Plan, after the checks (dirty, git operation in progress, orphaned detached HEAD
 checked out elsewhere, ignored-file collisions with the target tree, nested repositories
 included):
     branch absent                          -> create it at the target
-    tip == target (identity matches)       -> attach
+    tip == target (identity matches or
+      no upstream configured)              -> attach
     tip is an ancestor of the target and
       the upstream identity matches        -> fast-forward by compare-and-swap, then attach
     anything else                          -> STOP branch_clash (never reset, never force)
 Commands: `git switch --detach SHA^{commit}` is the only tree change; then create / attach /
-`git update-ref REF SHA OLD` + attach. If a later command fails, the checkout stays detached
-at the verified target.
+`git update-ref REF SHA OLD` + attach. If a command fails the checkout is left wherever git
+stopped (detached at the verified target, or on the new branch when only `config` failed);
+the report re-reads HEAD and the branch and says so.
 """
 from __future__ import annotations
 
@@ -167,11 +173,14 @@ def remote_id(top: Path, value: str) -> str:
     return url.rstrip("/").removesuffix(".git")
 
 
-def upstream_matches(top: Path, branch: str, remote: str | None, merges: list[str]) -> bool:
-    got_remote = out(top, "config", "--get", f"branch.{branch}.remote", ok=(0, 1, 128))
-    got_merge = out(top, "config", "--get", f"branch.{branch}.merge", ok=(0, 1, 128))
-    return bool(remote and got_remote and got_merge in merges
-                and remote_id(top, got_remote) == remote_id(top, remote))
+def branch_upstream(top: Path, branch: str) -> tuple[str, str]:
+    cfg = lambda key: out(top, "config", "--get", f"branch.{branch}.{key}", ok=(0, 1, 128))
+    return cfg("remote"), cfg("merge")
+
+
+def same_upstream(top: Path, have: tuple[str, str], remote: str | None, merges: list[str]) -> bool:
+    return bool(remote and have[0] and have[1] in merges
+                and remote_id(top, have[0]) == remote_id(top, remote))
 
 
 def plan_branch(top: Path, sha: str, branch: str, remote: str | None, merges: list[str], new: bool,
@@ -183,14 +192,22 @@ def plan_branch(top: Path, sha: str, branch: str, remote: str | None, merges: li
             return None, None, [problem("start_branch_missing", f"local branch {branch} no longer "
                                         "exists; it is never recreated from a remote-tracking ref")]
         return "create", None, []
-    if not new and tip == sha and (not remote or upstream_matches(top, branch, remote, merges)):
-        return "attach", tip, []
-    if (not new and tip != sha and upstream_matches(top, branch, remote, merges)
-            and git(top, "merge-base", "--is-ancestor", tip, sha, ok=(0, 1)).returncode == 0):
+    have = branch_upstream(top, branch)
+    matches = same_upstream(top, have, remote, merges)
+    if new:
+        why = "it exists but a new branch was expected"
+    elif tip == sha:
+        if not remote or matches or not any(have):  # no upstream yet: never pushed, nothing to contradict
+            return "attach", tip, []
+        why = f"it is at the verified commit but tracks {have[0]} {have[1]}, not the expected upstream"
+    elif matches and git(top, "merge-base", "--is-ancestor", tip, sha, ok=(0, 1)).returncode == 0:
         return "ff", tip, []
-    return None, tip, [problem("branch_clash", f"local branch {branch} is at {tip}, not at the verified "
-                               f"{sha}, or its upstream differs (or a new branch was expected); ask the "
-                               "user, never reset or force")]
+    elif matches:
+        why = f"it is at {tip}, not an ancestor of the verified commit {sha} (diverged or ahead)"
+    else:
+        why = f"it is at {tip}, not at the verified commit {sha}, and does not track the expected upstream"
+    return None, tip, [problem("branch_clash", f"local branch {branch}: {why}; ask the user, never "
+                               "reset or force")]
 
 
 def plan(repo: Path, sha: str, branch: str | None, remote: str | None, merges: list[str], new: bool,
@@ -214,7 +231,12 @@ def plan(repo: Path, sha: str, branch: str | None, remote: str | None, merges: l
             if not valid:
                 problems.append(problem("invalid_branch_name", f"{branch!r} is not a valid branch name"))
         if resolved and head == sha and (cur == branch if branch is not None else cur is None):
-            report.update(action="none", status="PASS")  # already there: nothing to switch
+            if not safe:  # landing: already there is fine only for a clean checkout and the right upstream
+                problems += check_dirty(top) + check_in_progress(top)
+                if valid and not problems:
+                    problems += plan_branch(top, sha, branch, remote, merges, new, False)[2]
+            if not problems:
+                report.update(action="none", status="PASS")  # nothing to switch
             return report
         if safe and head not in safe:
             problems.append(problem("unpushed_commits", f"HEAD {head} is neither the commit the branch was "
@@ -249,20 +271,23 @@ def plan(repo: Path, sha: str, branch: str | None, remote: str | None, merges: l
 
 
 def execute(report: dict) -> dict:
-    """Run exactly the planned commands, then verify where HEAD ended up."""
+    """Run exactly the planned commands, verify where HEAD ended up, and say where it is."""
     top = Path(report["toplevel"])
+    failure = None
     try:
         for cmd in report["commands"]:
             git(top, *cmd[1:])
-        head = out(top, "rev-parse", "HEAD")
-        cur = out(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
-        report.update(executed=True, head=head, current_branch=cur)
-        if head != report["target"] or cur != report["branch"]:
-            raise GitError(f"landed on {cur or 'a detached HEAD'} at {head}, expected "
-                           f"{report['branch'] or 'detached'} at {report['target']}")
     except GitError as exc:
+        failure = str(exc)
+    head = out(top, "rev-parse", "--verify", "--quiet", "HEAD")
+    cur = out(top, "symbolic-ref", "--quiet", "--short", "HEAD") or None
+    report.update(executed=True, head=head or None, current_branch=cur)
+    if failure is None and (head != report["target"] or cur != report["branch"]):
+        failure = f"expected {report['branch'] or 'a detached HEAD'} at {report['target']}"
+    if failure:
         report["status"] = "STOP"
-        report["problems"].append(problem("unverifiable", str(exc)))
+        report["problems"].append(problem("unverifiable", f"{failure}; the checkout is now "
+                                          f"{'on ' + cur if cur else 'detached'} at {head}"))
     return report
 
 
@@ -288,6 +313,9 @@ def main(argv: list[str] | None = None) -> int:
             (args.new or args.remote) and args.branch is None):
         parser.error("--remote and --merge go together with --branch; --new needs --branch and "
                      "excludes --safe-sha")
+    if args.execute and args.branch is None and not args.safe_sha:
+        parser.error("--execute without --branch is a restore to a detached start and needs "
+                     "--safe-sha; a bare --target is a dry run (the merge preflight)")
     report = plan(args.repo, args.target, args.branch, args.remote, args.merge, args.new, args.safe_sha)
     if args.execute and report["status"] == "PASS":
         report = execute(report)

@@ -6,6 +6,7 @@ protects, so a passing test proves the refusal is for the intended reason.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -51,11 +52,11 @@ def sha(repo, ref):
     return ref if len(ref) == 40 else repo.out("rev-parse", ref + "^{commit}")
 
 
-def preflight(repo, target, branch=None, cwd=None, *extra):
+def preflight(repo, target, branch=None, cwd=None, *extra, env=None):
     """Dry run for `target` (a ref name or a full SHA); extra arguments go to the command line."""
     cmd = [sys.executable, "-I", str(SCRIPT), "--repo", str(cwd or repo.path), "--target", sha(repo, target)]
     cmd += [f"--branch={branch}"] if branch is not None else []
-    p = subprocess.run(cmd + list(extra), capture_output=True, text=True, env=repo.env)
+    p = subprocess.run(cmd + list(extra), capture_output=True, text=True, env=env or repo.env)
     return p.returncode, json.loads(p.stdout) if p.stdout.strip() else None
 
 
@@ -549,6 +550,104 @@ class Land(unittest.TestCase):
                 rc, report = self.land(w, w.p2, bad, *ORIGIN)
                 self.assertEqual((1, ["invalid_branch_name"]), (rc, checks(report)))
                 self.assertEqual((head, "main"), (w.work.out("rev-parse", "HEAD"), w.work.out("branch", "--show-current")))
+
+    def test_a_never_pushed_new_branch_can_be_resumed_but_a_foreign_upstream_clashes(self):
+        """--new creates it without an upstream; after an interruption the documented resume
+        arguments must attach it (tip == SHA, nothing to contradict), not dead-end."""
+        w = stale_world(self)
+        resume = ("--remote", "origin", "--merge", "refs/heads/issue/7-fix")
+        self.assertEqual(0, self.land(w, w.a, "issue/7-fix", "--new")[0])
+        w.work.write("fix.txt", "work\n")
+        tip = w.work.commit("fix, never pushed")
+        self.assertEqual(0, self.land(w, w.a, "main", "--safe-sha", tip)[0])  # the restore
+        rc, done = self.land(w, tip, "issue/7-fix", *resume)
+        self.assertEqual((0, "attach", tip, "issue/7-fix"), (rc, done["action"], done["head"], done["current_branch"]))
+        w.work.git("switch", "-q", "main")  # control: the same branch with someone else's upstream
+        w.work.git("config", "branch.issue/7-fix.remote", "elsewhere")
+        w.work.git("config", "branch.issue/7-fix.merge", "refs/heads/other")
+        rc, report = self.land(w, tip, "issue/7-fix", *resume)
+        self.assertEqual((1, ["branch_clash"]), (rc, checks(report)))
+        self.assertIn("tracks elsewhere refs/heads/other", report["problems"][0]["detail"])
+
+    def test_an_upstream_that_differs_in_remote_or_merge_ref_is_a_clash_even_at_the_sha(self):
+        for label, remote, merge in (("other remote", "elsewhere", "refs/heads/pr"),
+                                     ("same remote, other merge ref", "origin", "refs/heads/other"),
+                                     ("other URL", "https://example.com/o/other", "refs/heads/pr")):
+            with self.subTest(label):
+                w = stale_world(self)
+                w.work.git("branch", "pr", w.p2)
+                w.work.git("config", "branch.pr.remote", remote)
+                w.work.git("config", "branch.pr.merge", merge)
+                rc, report = self.land(w, w.p2, "pr", *ORIGIN)
+                self.assertEqual((1, ["branch_clash"], "main"), (rc, checks(report), w.work.out("branch", "--show-current")))
+
+    def test_remote_urls_are_compared_after_normalising_a_trailing_slash_and_dot_git(self):
+        for label, configured, given in (("dot git and slash", "https://example.com/o/r.git", "https://example.com/o/r/"),
+                                         ("name against its URL", "origin", None)):
+            with self.subTest(label):
+                w = stale_world(self)
+                given = given or str(w.origin)
+                w.work.git("branch", "pr", w.p2)
+                w.work.git("config", "branch.pr.remote", configured)
+                w.work.git("config", "branch.pr.merge", "refs/heads/pr")
+                rc, plan = preflight(w.work, w.p2, "pr", None, "--remote", given, "--merge", "refs/heads/pr")
+                self.assertEqual((0, "attach"), (rc, plan["action"]))
+
+    def test_a_new_branch_is_never_fast_forwarded(self):
+        w = stale_world(self)
+        w.work.git("branch", "--track", "pr", "origin/pr")  # an ancestor with the right upstream: ff-able
+        rc, report = self.land(w, w.p2, "pr", "--new", *ORIGIN)
+        self.assertEqual((1, ["branch_clash"], w.p1), (rc, checks(report), w.work.out("rev-parse", "pr")))
+        self.assertIn("new branch was expected", report["problems"][0]["detail"])
+
+    def fake_git(self, w, body):
+        """A `git` that runs `body` first (a shell case that may exit) and then the real one."""
+        bin_dir = w.work.base / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "git").write_text(f'#!/bin/sh\n{body}\nexec "{shutil.which("git")}" "$@"\n')
+        (bin_dir / "git").chmod(0o755)
+        return dict(w.work.env, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    def test_a_failed_execute_says_where_the_checkout_is(self):
+        w = stale_world(self)
+        env = self.fake_git(w, 'case " $* " in *" config branch."*) echo boom >&2; exit 1;; esac')
+        rc, report = preflight(w.work, w.p2, "pr", None, *ORIGIN, "--execute", env=env)
+        self.assertEqual((1, ["unverifiable"], "pr", w.p2), (rc, checks(report), report["current_branch"], report["head"]))
+        self.assertIn("the checkout is now on pr", report["problems"][0]["detail"])
+        self.assertEqual((w.p2, "USER-SECRET\n"), (w.work.out("rev-parse", "HEAD"), w.mine.read_text()))
+
+    def test_a_switch_that_did_nothing_is_not_reported_as_landed(self):
+        w = stale_world(self)
+        main = w.work.out("rev-parse", "HEAD")
+        env = self.fake_git(w, 'case " $* " in *" switch "*) exit 0;; esac')
+        rc, report = preflight(w.work, w.p2, "pr", None, *ORIGIN, "--execute", env=env)
+        self.assertEqual((1, ["unverifiable"], main), (rc, checks(report), report["head"]))
+        self.assertIn(f"expected pr at {w.p2}", report["problems"][0]["detail"])
+
+    def test_already_on_the_branch_at_the_sha_still_needs_a_clean_checkout_to_land(self):
+        w = stale_world(self)
+        self.assertEqual(0, self.land(w, w.p2, "pr", *ORIGIN)[0])
+        rc, done = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((0, "none"), (rc, done["action"]))
+        w.work.write("p", "edited\n")
+        rc, report = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((1, ["dirty"]), (rc, checks(report)))
+        w.work.git("checkout", "-q", "--", "p")
+        w.work.git("config", "branch.pr.remote", "elsewhere")  # on the branch, but its upstream is foreign
+        rc, report = self.land(w, w.p2, "pr", *ORIGIN)
+        self.assertEqual((1, ["branch_clash"]), (rc, checks(report)))
+        w.work.write("p", "edited\n")  # a restore keeps the no-op: it is not leaving a dirty tree behind
+        rc, done = self.land(w, w.p2, "pr", "--safe-sha", w.p2)
+        self.assertEqual((0, "none"), (rc, done["action"]))
+
+    def test_a_bare_target_is_a_dry_run_only(self):
+        """The merge preflight (no --branch) must not detach the Coder's checkout."""
+        w = stale_world(self)
+        rc, plan = preflight(w.work, w.p2)
+        self.assertEqual((0, "detach"), (rc, plan["action"]))
+        p = subprocess.run([sys.executable, "-I", str(SCRIPT), "--repo", str(w.work.path), "--target", w.p2,
+                            "--execute"], capture_output=True, text=True, env=w.work.env)
+        self.assertEqual((2, "main"), (p.returncode, w.work.out("branch", "--show-current")))
 
     def landed(self):
         w = stale_world(self)

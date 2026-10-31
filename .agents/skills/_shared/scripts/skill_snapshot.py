@@ -97,8 +97,7 @@ def scan(root: Path) -> dict[str, dict]:
             if path.is_symlink():
                 files[rel] = {"type": "symlink", "target": os.readlink(path)}
             elif path.is_file():
-                files[rel] = {"type": "file", "sha256": sha256(path),
-                              "executable": os.access(path, os.X_OK)}
+                files[rel] = {"type": "file", "sha256": sha256(path)}
     return dict(sorted(files.items()))
 
 

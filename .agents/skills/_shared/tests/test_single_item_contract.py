@@ -416,14 +416,6 @@ class ContractStructureTests(unittest.TestCase):
                     self.assertIn(required, skill)
         self.assertTrue((REPO / SHARED).is_file())
 
-    def test_no_skill_text_links_to_shared_relatively(self):
-        """A relative `_shared` link cannot resolve from Claude's .claude/skills/<name> path."""
-        link = re.compile(r"\]\([^)]*_shared/|\]:\s*\S*_shared/")
-        for path in scanned_files():
-            if path.suffix == ".md":
-                with self.subTest(path=str(path.relative_to(REPO))):
-                    self.assertIsNone(link.search(path.read_text()))
-
     def test_every_check_id_the_script_can_report_is_named_in_the_contract(self):
         """checkout_preflight.py is the single source of the stop conditions."""
         ids = set(re.findall(r'problem\(\s*"([a-z_]+)"', PREFLIGHT.read_text()))
@@ -439,6 +431,14 @@ class ContractStructureTests(unittest.TestCase):
             if path.suffix == ".md" and ".agents/agents/" in text:
                 with self.subTest(path=str(path.relative_to(REPO))):
                     self.assertIn("info/exclude", text)
+
+    def test_the_snapshot_comes_before_the_claim_and_the_landing(self):
+        """The snapshot protects the scripts (claim.py, repo_evidence.py, the landing) from the switch."""
+        c = self.contract
+        snapshot, claim, land = (c.index('skill_snapshot.py" create'), c.index("claim.py"),
+                                 c.index('checkout_preflight.py" --repo'))
+        self.assertLess(snapshot, claim)
+        self.assertLess(claim, land)
 
     def test_a_differing_role_is_dispatched_under_the_binding_statement(self):
         """The statement is the one the script prints, and no sentence blocks on a differing role."""

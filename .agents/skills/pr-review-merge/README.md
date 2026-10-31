@@ -20,7 +20,7 @@ Codex 的角色定義是 `.codex/agents/prm-*.toml` 的位元組副本。
 ## 使用
 
 每次只處理一個 PR。多個或全部項目先列候選並請使用者選一個，不自動處理下一個。
-依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-review-merge` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）做 preflight 與 snapshot，在目前乾淨 checkout 切到該 PR 原始 head branch，再審查與測試；不建立 per-PR worktrees。
+依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-review-merge` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）先做 snapshot，再選定 PR，最後用 `checkout_preflight.py` 以完整 SHA 在目前乾淨 checkout 精確 land 該 PR 的原始 head branch（不以名稱 checkout、不建立 per-PR worktrees），之後才審查與測試。
 
 **Codex CLI**
 
