@@ -260,7 +260,7 @@
         state: present
       when: ansible_os_family == "RedHat"
 
-    # Steps 4, 5 and 5c render or edit logrotate policies and validate them
+    # Steps 1d, 4, 5 and 5c render or edit logrotate policies and validate them
     # with logrotate, and the policies do nothing without it; minimal images
     # such as pilot-target-ubuntu do not ship it. Tagged with those steps'
     # rows so a tag-scoped run installs it too.
@@ -285,6 +285,49 @@
         name: logrotate
         state: present
       when: ansible_os_family == "RedHat"
+
+    # Step 1d: nothing below may write until the distro rsyslog policy rewrite of
+    # Step 5b-5d is known to work. Step 5 renders /etc/logrotate.d/syslog, and from
+    # then on logrotate sees audit_syslog_path declared twice (that file and the
+    # distro's /etc/logrotate.d/rsyslog) until Step 5c/5d has run: a failure between
+    # the two leaves every log on the host unrotated ("duplicate log entry"; the
+    # rescue below does not restore logrotate policies). So the helper runs here
+    # first, on a private temporary copy, and so does logrotate's own check of its
+    # output (the same check Step 5c's validate makes); any failure, the helper's exit
+    # 3 included, fails the play before the first config write (the package installs
+    # of Step 0a-1c come earlier and are not undone). Read-only: check_mode: false
+    # because it only reads, the temporary directory (0700) is removed on every exit.
+    # Known and accepted: the policy is read again in Step 5b, so a change to it between
+    # Step 1d and Step 5b is not covered by this check.
+    - name: "Step 1d: Preflight the distro rsyslog policy rewrite of {{ audit_syslog_path }} (spec C20)"
+      tags: [C20]
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          f=/etc/logrotate.d/rsyslog
+          test -e "$f" || exit 0
+          d=$(mktemp -d) || exit 1
+          trap 'rm -rf "$d"' EXIT
+          awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin "$f" > "$d/policy" || exit $?
+          # nothing but blanks and comments left: Step 5d removes the file, nothing to check
+          LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' "$d/policy" || exit 0
+          # logrotate's own check of the result. Step 1b/1c install logrotate, except in
+          # check mode: there it may be missing, and only this check is skipped (the
+          # helper above has run). A real run without logrotate fails.
+          if ! command -v logrotate >/dev/null; then
+            test "$PILOT_CHECK_MODE" = True && exit 0
+            exit 1
+          fi
+          output=$(LC_ALL=C logrotate -d "$d/policy" 2>&1); status=$?
+          case "$status" in 0|1) ;; *) exit "$status";; esac
+          if printf '%s\n' "$output" | grep -aF -e "error: $d/policy:" >/dev/null; then exit 1; fi
+          ! printf '%s\n' "$output" | grep -aF -e "warning: $d/policy:" | grep -aF -e "unknown option " >/dev/null
+        executable: /bin/bash
+        stdin: "{{ lookup('file', playbook_dir ~ '/files/logrotate-drop-path.awk') }}"
+      environment:
+        PILOT_CHECK_MODE: "{{ ansible_check_mode | bool }}"
+      changed_when: false
+      check_mode: false
 
     - block:
         - name: "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)"
@@ -372,57 +415,112 @@
           tags: [C20]
           ansible.builtin.stat:
             path: /etc/logrotate.d/rsyslog
+            # A symlinked policy (config management, stow) is the file logrotate reads:
+            # follow it, so the mode taken below is the target's and Step 5c edits the
+            # target instead of replacing the link with a regular file.
+            follow: true
+            get_checksum: false
+            get_mime: false
+            get_attributes: false
           register: distro_rsyslog_logrotate
 
-        - name: "Step 5b: Count paths the distro rsyslog policy rotates OTHER than {{ audit_syslog_path }}"
-          tags: [C20]
-          # Both Debian and RedHat family ship their rsyslog package's
-          # logrotate policy under this exact filename (Debian: mail.log,
-          # kern.log, auth.log, ...; RHEL/AlmaLinux via rsyslog-logrotate:
-          # cron, maillog, messages, secure, spooler), each as one shared
-          # block also listing audit_syslog_path. Since Step 5 above renders
-          # our own /etc/logrotate.d/syslog for the same path, logrotate
-          # finds that path declared in two policy files and aborts the
-          # ENTIRE run with "duplicate log entry", silently breaking
-          # rotation for every log on the host — this is the root cause of
-          # the C20 regression (see docs/runbooks/audit-log-forwarding.md
-          # §5.5). Only the count is needed here to decide whether removing
-          # our path leaves other paths behind.
-          ansible.builtin.shell:
-            cmd: >-
-              set -o pipefail;
-              grep -vFx {{ audit_syslog_path | quote }} /etc/logrotate.d/rsyslog
-              | grep -cE '^/' || true
-            executable: /bin/bash
-          register: distro_rsyslog_other_paths
-          changed_when: false
-          check_mode: false
-          when: distro_rsyslog_logrotate.stat.exists | default(false)
+        # Step 5b-5d work from what logrotate itself would read: logrotate-drop-path.awk
+        # splits the stanza headers the way logrotate does (quoted, indented, ~ and
+        # globbed paths included), removes audit_syslog_path from the one stanza that
+        # declares it, and drops that stanza whole when the path was its only one
+        # (the Ubuntu 20.04 default policy, rsyslog 8.2001, ships "/var/log/syslog" alone
+        # before its "{", and so does a host upgraded from 20.04 that kept the old
+        # conffile; Ubuntu 22.04 and 24.04 ship one shared stanza. Deleting just that
+        # line would leave a stanza with no filename and logrotate would reject
+        # the whole file, "lines must begin with a keyword or a filename"). Other
+        # paths stay with the distro's own file. Since Step 5 above renders our own
+        # /etc/logrotate.d/syslog for the same path, logrotate would otherwise find
+        # that path declared in two policy files and abort the ENTIRE run with
+        # "duplicate log entry", silently breaking rotation for every log on the
+        # host: this is the root cause of the C20 regression (see
+        # docs/runbooks/audit-log-forwarding.md section 5.5).
+        #
+        # The helper exits 3 when it cannot do that without guessing (a policy
+        # logrotate itself rejects, a path spelled so that the logrotate versions
+        # disagree on it, a glob that would still match the path). Step 1d has already
+        # run it, before the first config write of this play, so that failure stops the run
+        # before any config is written. The computed policy goes to a file, never through
+        # a task result: a policy may hold bytes that are not UTF-8 and Ansible could not
+        # carry those. The file lives in a private (0700) directory that the always
+        # section removes on every path out, failures included.
+        # check_mode: false on the tasks that only read or only handle that directory.
+        - block:
+            - name: "Step 5b: Create a private directory for the computed distro rsyslog policy"
+              tags: [C20]
+              ansible.builtin.tempfile:
+                state: directory
+                prefix: pilot-rsyslog-
+              register: distro_rsyslog_tmp
+              changed_when: false
+              check_mode: false
+              when: distro_rsyslog_logrotate.stat.exists | default(false)
 
-        - name: "Step 5c: Drop {{ audit_syslog_path }} from the distro rsyslog policy, keeping its other paths (spec C20)"
-          tags: [C20]
-          ansible.builtin.lineinfile:
-            path: /etc/logrotate.d/rsyslog
-            regexp: '^{{ audit_syslog_path | regex_escape }}$'
-            state: absent
-            # See Step 4: this distro policy relies on the global `su`.
-            validate: >-
-              /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
-              output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
-              if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
-              ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
-          when:
-            - distro_rsyslog_logrotate.stat.exists | default(false)
-            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) > 0
+            # Prints "keep" when a line that is neither blank nor a comment is left (the
+            # computed policy replaces the file, Step 5c) and "empty" when nothing is (the
+            # file is removed, Step 5d). Decided on the file's content, not from a count
+            # of lines that start with "/": quoted, indented and ~ paths are paths too.
+            - name: "Step 5b: Compute the distro rsyslog policy without {{ audit_syslog_path }} (spec C20)"
+              tags: [C20]
+              ansible.builtin.shell:
+                cmd: |
+                  awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin /etc/logrotate.d/rsyslog > {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} &&
+                  { LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} && echo keep || echo empty; }
+                executable: /bin/bash
+                stdin: "{{ lookup('file', playbook_dir ~ '/files/logrotate-drop-path.awk') }}"
+              register: distro_rsyslog_without_audit_path
+              changed_when: false
+              check_mode: false
+              when: distro_rsyslog_logrotate.stat.exists | default(false)
 
-        - name: "Step 5d: Remove the distro rsyslog policy entirely if it only rotated {{ audit_syslog_path }} (avoids leaving an orphan block with no filename)"
-          tags: [C20]
-          ansible.builtin.file:
-            path: /etc/logrotate.d/rsyslog
-            state: absent
-          when:
-            - distro_rsyslog_logrotate.stat.exists | default(false)
-            - (distro_rsyslog_other_paths.stdout | default('0') | trim | int) == 0
+            - name: "Step 5c: Drop {{ audit_syslog_path }} from the distro rsyslog policy, keeping its other paths (spec C20)"
+              tags: [C20]
+              ansible.builtin.copy:
+                src: "{{ distro_rsyslog_tmp.path }}/policy"
+                dest: /etc/logrotate.d/rsyslog
+                remote_src: true
+                follow: true
+                # The file keeps the mode, owner and group it had (from Step 5a), as it
+                # would with an in-place edit: without them the copy takes the umask's
+                # mode (0664 under umask 002, which logrotate refuses: "writable by group
+                # or others", the policy is then skipped) and the private temp file's
+                # attributes never reach the destination. The mode is never wider than the
+                # original's; a stat without a mode (not possible for an existing file)
+                # falls back to 0644, the distro default.
+                mode: "{{ distro_rsyslog_logrotate.stat.mode | default('0644') }}"
+                owner: "{{ distro_rsyslog_logrotate.stat.uid | default(omit) }}"
+                group: "{{ distro_rsyslog_logrotate.stat.gid | default(omit) }}"
+                # See Step 4: this distro policy relies on the global `su`.
+                validate: >-
+                  /bin/sh -c 'command -v logrotate >/dev/null && command -v grep >/dev/null && test -r "$0" || exit 1;
+                  output=$(LC_ALL=C logrotate -d "$0" 2>&1); status=$?; printf "%%s\n" "$output"; case "$status" in 0|1) ;; *) exit "$status";; esac;
+                  if printf "%%s\n" "$output" | grep -F -e "error: $0:" >/dev/null; then exit 1; fi;
+                  ! printf "%%s\n" "$output" | grep -F -e "warning: $0:" | grep -F -e "unknown option " >/dev/null' %s
+              when:
+                - distro_rsyslog_logrotate.stat.exists | default(false)
+                - (distro_rsyslog_without_audit_path.stdout | default('') | trim) == 'keep'
+
+            - name: "Step 5d: Remove the distro rsyslog policy entirely if it only rotated {{ audit_syslog_path }} (avoids leaving an orphan block with no filename)"
+              tags: [C20]
+              ansible.builtin.file:
+                path: /etc/logrotate.d/rsyslog
+                state: absent
+              when:
+                - distro_rsyslog_logrotate.stat.exists | default(false)
+                - (distro_rsyslog_without_audit_path.stdout | default('') | trim) == 'empty'
+          always:
+            - name: "Step 5e: Remove the private directory of the computed distro rsyslog policy"
+              tags: [C20]
+              ansible.builtin.file:
+                path: "{{ distro_rsyslog_tmp.path }}"
+                state: absent
+              changed_when: false
+              check_mode: false
+              when: distro_rsyslog_tmp.path is defined
 
         - name: "Step 6a: Resolve this host's canonical FQDN before pinning SIEM aliases"
           tags: [C15]

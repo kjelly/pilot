@@ -556,7 +556,7 @@ internal/repair.BuildReapplyPlan(catalog, resolved, deps, preview, repoRoot, ...
    phase — just two tests that happened to share an assumption about a
    third file. Fixed by moving that test onto a component that
    genuinely still has no diagnostics block (`dns`), and by keeping
-   `docs/tmp/future/contracts/docker.yaml` (a local review-mirror
+   `internal/contract/testdata/review-fixtures/docker.yaml` (a review-mirror
    fixture, regression-checked byte-for-byte-semantically against the
    canonical file) in sync.
 

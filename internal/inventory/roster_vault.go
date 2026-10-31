@@ -93,6 +93,32 @@ func ViewEncryptedRoster(path, vaultPasswordFile string) ([]byte, error) {
 	return ansibleVaultView(path, vaultPasswordFile)
 }
 
+// ReadRosterPlaintext reads the roster at path once and returns its
+// plaintext: the file's own bytes, or, when the file is ansible-vault
+// encrypted, its content decrypted in memory with vaultPasswordFile
+// (ansibleVaultView, the decryption planRosterMigration uses; never a
+// plaintext file on disk). encrypted reports which. An encrypted roster
+// with no vaultPasswordFile returns ErrRosterEncrypted unchanged;
+// vaultPasswordFile is not read for a plaintext roster. It writes nothing
+// and takes no lock. Callers must not print or log the plaintext.
+func ReadRosterPlaintext(path, vaultPasswordFile string) (plaintext []byte, encrypted bool, err error) {
+	data, err := readSecretSourceFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+		return data, false, nil
+	}
+	if vaultPasswordFile == "" {
+		return nil, true, ErrRosterEncrypted
+	}
+	plaintext, err = ansibleVaultView(path, vaultPasswordFile)
+	if err != nil {
+		return nil, true, fmt.Errorf("decrypt roster %s: %w", path, err)
+	}
+	return plaintext, true, nil
+}
+
 // ReadRosterAsMapWithVault reads the roster at path as a plain map,
 // transparently decrypting in memory via vaultPasswordFile when the file
 // is ansible-vault-encrypted (ReadRosterAsMapFile alone returns

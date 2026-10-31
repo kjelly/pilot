@@ -23,6 +23,7 @@ record fresh check/apply/verify/idempotency plus relevant selector/probe-error/r
 Unavailable required validation is blocked, not PASS; coordinate shared VM ownership with Root.
 Reconfirm branch, base, scope, instructions, and accepted task envelope before writing.
 Fix real root cause and retain correct architecture and observable behavior; add genuine regression tests.
+If evidence shows an Issue claim or SA's diagnosis does not hold, stop and report it to Root instead of coding around it.
 Avoid workaround-only fixes, weakening assertions, disabling tests, error swallowing, and hardcoded passes.
 Run appropriate tests/lint/static checks and commit focused changes; provide commands and evidence.
 For SHA-bound receipts, use the skill's scripts/run_check.py after the clean commit;

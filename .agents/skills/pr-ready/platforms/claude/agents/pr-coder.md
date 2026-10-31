@@ -15,6 +15,7 @@ and relevant tag/probe-error/recovery paths separately, and record effective sta
 Missing required validation stays Draft; coordinate exclusive target/snapshot ownership with Root.
 Verify the branch/head_sha and current changes in the assigned checkout before editing; do not modify other checkouts.
 Use SA findings critically, repair the true root cause, and add adequate regression tests.
+If evidence shows a finding or review comment does not hold, stop and report it to Root instead of coding around it.
 Never skip meaningful tests, weaken assertions, silence errors, fabricate outcomes or hardcode passes.
 Run appropriate tests, lint, static analysis, and integration checks for the affected code.
 Produce reproducible HEAD-bound validation receipts; commit only focused work for this PR.

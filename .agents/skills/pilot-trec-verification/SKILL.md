@@ -57,7 +57,8 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
   `ansible-playbook`), treat that as a hard constraint for this session
   even if not restated — it is the point of this skill.
 - Confirm the `pilot` binary in `$PATH` is freshly built
-  (`go build -o ./pilot ./cmd/pilot`) before driving it. A stale binary
+  (`go build -o ./pilot ./cmd/pilot`; for a formal run, in the candidate
+  checkout, §0a) before driving it. A stale binary
   silently missing a feature (e.g. the `.vault/` menu) looks identical
   to a wizard bug and wastes a debugging cycle.
 - Confirm `trec` is installed (`which trec`); it is the recorder +
@@ -83,6 +84,25 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
   (gitignored — see `.gitignore`), **never** loose inside the tracked
   project tree (e.g. never a top-level `demo-3vm/`-style dir), unless
   the user explicitly says otherwise.
+
+### 0a. A formal evidence run starts from a frozen candidate
+
+Exploration and script debugging may run from your normal, possibly dirty
+worktree. A run whose result will be cited as evidence follows
+[AGENTS.md](../../../AGENTS.md) §1.5 and
+[docs/actual-run-evidence.md](../../../docs/actual-run-evidence.md) §2–§4:
+
+1. Commit everything that affects the run as a local candidate commit.
+2. Make a clean, isolated checkout of it (for example
+   `git worktree add --detach <path> <candidate>`), build `pilot` there, and
+   drive every checkpoint from that checkout and binary. Record
+   `git rev-parse HEAD` and `git rev-parse 'HEAD^{tree}'` there.
+3. A fix found during the run is a new candidate: the old candidate's casts and
+   verdicts stop counting, and the chain restarts from the beginning.
+4. After a passing run, commit the sanitized evidence record and the runbook
+   summary update as a separate evidence-only commit that names the tested
+   commit and tree. Cast paths and filenames, the recording manifest and the
+   drivers stay out of it (AGENTS.md, *Evidence recordings are disposable*).
 
 ---
 
@@ -406,8 +426,9 @@ because you have not read its reference.**
 |---|---|---|
 | 27 | Add `-o StrictHostKeyChecking=accept-new` (or `ssh-keygen -R <ip>`) to every raw `ssh` after a VM rebuild. | `references/known-gotchas.md` |
 | 28 | Add `-o ControlMaster=no` to any live-SSH re-auth check meant to prove a credential/policy state changed — a multiplexed session silently reuses the old authentication. | `references/known-gotchas.md` |
-| 29 | Before reporting a "Real bug" against a playbook or the wizard, cross-verify three ways: read the surrounding code, replay the cast with `trec transcript`, and `grep` the on-disk files your report claims were written. | `references/known-gotchas.md` |
+| 29 | Before reporting a "Real bug" against a playbook or the wizard, cross-verify three ways: read the surrounding code, replay the affected step with `trec transcript` (search it, don't read it end to end), and `grep` the on-disk files your report claims were written. | `references/known-gotchas.md` |
 | 30 | Drive `pilot portal` / `pilot directory` sessions (Connect → target shell → back to the menu) with `trec`, not plain `expect`: under `expect` the menu redrawn after the SSH child returns renders but ignores every key. For Kerberos prompts, spawn `ssh` under a tiny `expect … interact` wrapper that reads the password from a file and answers only `Kerberos password for …:`, so no secret appears in a keystroke or tool argument. A Portal y/n confirm submits on the single `y` (row 22 applies here too). | — |
+| 31 | A check that passes only after clearing a cache (`sss_cache`), restarting a service or syncing by hand is a bug symptom (AGENTS.md §5.9 point 5), not a fix: capture the facts, look for an existing issue, file or report the bug, and record that run as a deviation, not passing evidence. | `references/known-gotchas.md`, `references/filing-policy.md` |
 
 ## 5. Choose the deploy strategy: one-shot vs per-component
 
@@ -462,9 +483,10 @@ trec -o "$SCRATCH/casts/evidence/0N-verify.cast" --title "Re-verify: <what>" -- 
 command — no keystroke script needed since these are read-only checks,
 not TUI prompts. Put all the verification commands in one shell script
 with `echo "=== section ==="` headers so the resulting transcript reads
-like the runbook's own §4, then feed the real output back into the
-runbook using `verified-runbook`'s rules (real output only, no
-"expected").
+like the runbook's own §4. Put the real, sanitized verdicts in the
+evidence record from §0a and replace the runbook's current-result summary
+and link; never append the transcript to the runbook (AGENTS.md §1.2,
+and `verified-runbook`'s rules: real output only, no "expected").
 
 ---
 

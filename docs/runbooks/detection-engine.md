@@ -142,6 +142,8 @@ PLAY RECAP: detect-central : ok=47 changed=4 failed=0
 PLAY RECAP: detect-central : ok=44 changed=0 failed=0
 ```
 
+（升級備份與失敗回復：Step 3–5 的備份只在這次執行會做 Step 6（換 binary）時才跑，所以 `--tags docker` 這類不選 Step 6 的執行不會改動主機、第二次 `changed=0`；install block 失敗時 rescue 依 Step 0 記錄的原狀，把 service 與 unit、`config.yaml`、feature profile、`provider.env` 一併還原，再重啟。最新 vm-target 實跑摘要見 [`docs/evidence/detection-engine/2026-10-30-ccde655b4d07.md`](../evidence/detection-engine/2026-10-30-ccde655b4d07.md)。）
+
 ## 4. §51 real metrics-chain 最終證據
 
 ```bash

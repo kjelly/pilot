@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from typing import Any
 
 from issue_gate import GateError, command
 
-# `gh pr checks --required` exits 1 with this plain-text message (no JSON) when the repository has
-# no branch protection / rulesets, i.e. there are zero required checks.
-NO_REQUIRED_CHECKS = "no required checks reported"
+# `gh pr checks --required` on a branch without required checks (no branch protection or ruleset
+# requiring any) exits 1 with nothing on stdout and, on stderr, exactly this line (gh 2.103.3):
+#   no required checks reported on the 'chore/pr-ready-dispute-review-comments' branch\n
+# Case-sensitive and anchored: a failing required check named "no required checks reported" arrives
+# as JSON on stdout and must stay a failure. pr-ready's pr_gate.py has the same constant and rule
+# (pr-ready/tests/test_required_checks_parity.py keeps the two identical).
+NO_REQUIRED_CHECKS = re.compile(r"no required checks reported on the '[^\n]+' branch\n?")
 
 
 def checks(repo: str, number: int, required: bool) -> list[dict[str, Any]]:

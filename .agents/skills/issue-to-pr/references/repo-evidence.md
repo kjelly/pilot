@@ -19,6 +19,7 @@ Some facts about "valid evidence" belong to the repository, not to these skills:
 - **Read from the base branch** (`origin/<base>`), never from the PR head. A change cannot grant itself an exemption. If the manifest is itself part of the change, it takes effect only after it is merged.
 - `evidence_only_paths`: globs (`*`, `**`, `?`) for files that hold evidence only. Default is none, meaning strict SHA binding. A glob that would cover all code of a language or all build files (`**`, `**/*.go`, `*`) is rejected. Only list paths no test, build step or runtime reads. If a test reads `AGENTS.md` or a docs file, that file is behaviour, not evidence.
 - `required_evidence[].artifact_glob`: where the committed artifact for that item must live. These paths are also treated as evidence-only.
+- `required_evidence[].required_paths` (optional): repository-relative globs whose change always needs that evidence. When the change (from the merge base with the base branch to HEAD, both names of a rename) touches one, `not-applicable` is refused and only a `pass` entry satisfies the gate. A broad glob only makes the rule stricter, so the whole-tree check above does not apply. pr-review-merge refuses `not-needed` for the same paths, so an Issue PR does not reach Ready only to wait at the merge gate.
 - Check the manifest the way the gate sees it: `python3 "$SNAP/.agents/skills/issue-to-pr/scripts/repo_evidence.py" --worktree "$REPO_ROOT" --base-ref origin/main`.
 
 ## Evidence-only delta
@@ -44,7 +45,7 @@ For every `required_evidence` id (and any extra requirement you list from `AGENT
 The gate requires one entry per declared id, `status` `pass` or `not-applicable`; for `pass`: `head_sha` covers HEAD (same commit or evidence-only delta), a `summary` of what was observed, and where the evidence lives:
 
 - a repository-relative `artifact` that is **committed at HEAD** (and inside `artifact_glob` when the manifest declares one), or
-- an `https://` `url`, only when the manifest item declares no `artifact_glob`: for evidence kept outside the repository such as a CI run, a test-management record or a wiki page. `not-applicable` needs a specific reason (30+ chars) and `reviewer_confirmed: true`.
+- an `https://` `url`, only when the manifest item declares no `artifact_glob`: for evidence kept outside the repository such as a CI run, a test-management record or a wiki page. `not-applicable` needs a specific reason (30+ chars) and `reviewer_confirmed: true`, and is refused when the change touches the item's `required_paths`.
 
 ## No manifest
 

@@ -194,25 +194,74 @@ carry over to a new session or rebuild — expect to ask again via
 
 ## Two misdiagnosis traps
 
-### SSSD sudo on a fresh FreeIPA client: flush the cache, don't edit `services=`
+### Live sudo passes only after an SSSD flush: a bug symptom, not a fix
 
-The first `sudo` attempt failing is the known cache-staleness gotcha. The fix is
-`sss_cache -E && systemctl restart sssd` on the client, and **only** that.
+**Symptom:** on a FreeIPA client, a live `sudo` or `sudo -n` is denied
+(`sudo: a password is required`, or "not allowed"), although
+`ipa hbactest --service=sudo` allows it and `ipa sudorule-show` shows the rule,
+with `!authenticate` where the check needs it. It was seen on the first sudo
+after enrollment and after a sudo-rule change, in minimal-poc rounds 13, 23 and
+31 (`docs/evidence/minimal-poc-architecture/2026-07-23-round-13.md`,
+`2026-08-13-round-23.md`, `2026-09-10-round-31.md`). Each time the check passed
+right after a client-side `sss_cache -E` (rounds 23 and 31 also ran
+`systemctl restart sssd`), with no roster change, and the round was recorded as
+a pass.
 
-Do **not** "fix" it by adding `sudo` to `sssd.conf`'s `services=` line.
-`freeipa-client-apply.yml`'s C8 task deliberately writes
-`services = nss, pam, ssh` because SSSD ≥ 2.3 socket-activates the sudo
-responder; listing `sudo` there puts `sssd-sudo.socket` into a permanent
-`failed` state (the responder then only survives via monitor mode). The task's
-own comment block documents this with the live confirmation.
+Earlier versions of this file called that flush "the fix". It is not.
+[AGENTS.md](../../../../AGENTS.md) §5.9 point 5: a result that is correct only
+after clearing a cache, restarting a service or syncing by hand is a bug
+symptom. Open it as a bug and find the root cause; do not write the workaround
+into evidence and call the run done.
+
+What is known (2026-10-31):
+
+- **The root cause is unknown.** Do not state one in a report or evidence
+  record.
+- `freeipa-identity-apply.yml` already runs `sss_cache -E` on enrolled clients
+  after authorization changes (task `Refresh SSSD caches on enrolled FreeIPA
+  clients`, added in `c45ed559` on 2026-08-05). Rounds 23 and 31 came later and
+  still needed the client-side flush and restart.
+- Issue #95 (closed by PR #107) covered the same symptom in the FreeIPA sim
+  fixtures only. They now wait, with a bound, until
+  `sudo -n -l -U <user> -- <command>` allows the command, and fail with
+  `SUDO_POLICY_NOT_READY` otherwise. That does not cover a runbook's own live
+  checks.
+- Issue #114 (open) is the SSH-key counterpart: after a revocation, SSSD keeps
+  serving the old key for an unpredictable time.
+- `f1d1552` (`identity.PeerInGroup`) fixed a different cache bug, in the
+  gateway and session-store group checks. It does not touch sudo.
+
+When you hit it:
+
+1. **Capture the facts before you touch the cache:** the exact command and
+   output, `ipa hbactest` and `ipa sudorule-show` for the rule, the client's
+   OS and `sssd --version`, the time since the apply or rule change, and whether
+   the apply ran the refresh task above or printed
+   `Report deferred authorization cache refresh` instead.
+2. **Look for an existing issue:** `gh issue list --state all --search sssd`
+   and `--search sss_cache`; read #95 and #114.
+3. **File or report the bug** per `filing-policy.md`: add your facts to a
+   matching open issue or open a new one. If you may not create issues, give the
+   user the facts and a draft.
+4. **The run that needed the workaround is not passing evidence.** If you flush
+   to keep diagnosing, record it in the evidence record as a deviation (what
+   failed, what you ran, what passed afterwards) and keep that check's verdict
+   failed.
+
+Do **not** hand-edit `sssd.conf`'s `services=` line either.
+`freeipa-client-apply.yml`'s C8 task sets it per OS family, and its comment
+block documents both live confirmations. On Debian/Ubuntu it omits `sudo`,
+because SSSD ≥ 2.3 socket-activates the sudo responder and listing `sudo`
+breaks `sssd-sudo.socket`. On RedHat it keeps `sudo` as an explicit responder,
+because the socket-activated one failed on AlmaLinux 9 (`dfb58a5f`).
 
 Two non-evidence traps that caused a live misdiagnosis `[2026-07-17, v8]`:
 
 - `sssd_sudo` being absent from `ps` proves nothing — a socket-activated
   responder only appears after the first sudo lookup.
 - If you apply `sss_cache` *and* a config change in the same debugging step, the
-  cache flush is almost certainly what fixed it. Change one variable at a time
-  before attributing the fix.
+  cache flush is almost certainly what changed the result. Change one variable
+  at a time before attributing it.
 
 ### Cross-verify three ways before reporting a "Real bug"
 
@@ -221,8 +270,10 @@ Against a playbook or the wizard:
 1. **Read the code** around the alleged bug. An in-code comment saying the
    behavior is deliberate (like C8 above) means your finding is a misdiagnosis
    until you can refute the comment's stated evidence.
-2. **Replay the cast** with `trec transcript` and confirm your keystrokes landed
-   where your script assumed. The v8 vault incident reported phantom "string
+2. **Replay the affected step** with `trec transcript` and confirm your
+   keystrokes landed where your script assumed. Search the transcript for that
+   step rather than reading it end to end (AGENTS.md, *Evidence recordings are
+   disposable*: summary first). The v8 vault incident reported phantom "string
    concatenation in the write path" that the transcript plainly showed never
    happened.
 3. **`grep` the on-disk files** your report claims the wizard wrote. The v8

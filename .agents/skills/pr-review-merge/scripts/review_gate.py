@@ -2,8 +2,10 @@
 """Read-only, fail-closed GitHub pull-request review quality gate."""
 from __future__ import annotations
 import argparse
+import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 from gh_runtime import GitHubError, Repo, branch_rules, current_repo, pr_checks, pr_view, unresolved_threads
@@ -11,6 +13,170 @@ from gh_runtime import GitHubError, Repo, branch_rules, current_repo, pr_checks,
 COVERAGE = ("requirements", "correctness", "architecture", "security", "concurrency",
             "edge_cases", "semantic_regression", "tests")
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
+TARGET_DECISIONS = ("required", "not-needed", "blocked")
+# Same floor as issue-to-pr's `not-applicable` reason and `unrelated_failing_checks`.
+TARGET_REASON_MIN = 30
+REPO_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "repo_evidence.py"
+
+
+def _load_repo_evidence() -> Any:
+    """issue-to-pr's repo_evidence.py, loaded by path from the sibling skill.
+
+    Both gates must read `.github/pr-evidence.json` the same way: one manifest schema, one
+    glob dialect, one evidence-only delta rule. The skills ship together in this repository
+    (`.claude/skills/*` are symlinks into `.agents/skills/`), so the sibling is always there.
+    """
+    name = "issue_to_pr_repo_evidence"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, REPO_EVIDENCE_PATH)
+    if spec is None or spec.loader is None or not REPO_EVIDENCE_PATH.is_file():
+        raise ImportError(f"pr-review-merge needs {REPO_EVIDENCE_PATH} (the issue-to-pr skill)")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+repo_evidence = _load_repo_evidence()
+
+
+class RemoteContext(repo_evidence.Context):
+    """repo_evidence.Context whose delta comes from GitHub's compare API, not a local checkout.
+
+    `accepts`, `stale_reason` and `report` are issue-to-pr's: evidence taken at R covers HEAD
+    when R is HEAD, or an ancestor and every file changed since matches the base manifest's
+    evidence-only globs (`evidence_only_paths` plus each `artifact_glob`).
+    """
+
+    def __init__(self, client: Any, repo: Repo, head: str, manifest: dict[str, Any]):
+        super().__init__(None, head, manifest, [], [])
+        self.client, self.repo = client, repo
+
+    def delta_files(self, sha: str) -> list[str] | None:
+        if sha in self._cache:
+            return self._cache[sha]
+        result = None
+        if isinstance(sha, str) and repo_evidence.SHA.fullmatch(sha):
+            cmp = self.client.compare(self.repo, sha, self.head)
+            if cmp is not None and cmp["ancestor"]:
+                result = list(cmp["files"])
+        self._cache[sha] = result
+        return result
+
+
+def _safe_relative(path: Any) -> bool:
+    return isinstance(path, str) and bool(path.strip()) and not path.startswith("/") \
+        and ".." not in path.split("/") and "\\" not in path
+
+
+def _names_revision(text: str, rev: str) -> bool:
+    """The record names `rev`: the full SHA or an abbreviation of at least 7 hex digits."""
+    return any(rev.startswith(token.lower())
+               for token in re.findall(r"(?<![0-9A-Za-z])[0-9a-fA-F]{7,40}(?![0-9A-Za-z])", text))
+
+
+def check_target_validation(client: Any, repo: Repo, head: str, base: str,
+                            evidence: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Gaps that keep the PR from MERGE under the base branch's `.github/pr-evidence.json`.
+
+    The manifest is read at the PR's base SHA, never the head, so a PR cannot weaken its own
+    requirement. No manifest means no requirement. Every gap is a WAITING reason: a missing
+    record is a DRAFT only through the reviewer's blocking P1 finding.
+    """
+    path = repo_evidence.MANIFEST_PATH
+    head, base = head.lower(), base.lower()
+    report: dict[str, Any] = {"manifest": "unreadable", "read_at": base}
+    try:
+        raw = client.file_at(repo, path, base)
+    except (GitHubError, ValueError, KeyError) as exc:
+        return [f"Cannot read {path} at base {base[:12]}: {exc}"], report
+    if raw is None:
+        report["manifest"] = "absent"
+        return [], report
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        report["manifest"] = "invalid"
+        return [f"{path} at base {base[:12]} is not valid JSON: {exc}"], report
+    errors = repo_evidence.validate_manifest(manifest)
+    if errors:
+        report["manifest"] = "invalid"
+        return [f"{path} at base {base[:12]}: {e}" for e in errors], report
+    ctx = RemoteContext(client, repo, head, manifest)
+    report["manifest"] = "loaded"
+    tv = evidence.get("target_validation")
+    gaps = _check_record(client, repo, head, base, ctx, tv)
+    report.update(ctx.report(), decision=tv.get("decision") if isinstance(tv, dict) else None)
+    return gaps, report
+
+
+def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: Any) -> list[str]:
+    required = list(ctx.required.values())
+    if not required:
+        return []
+    if len(required) > 1:
+        return [f"{repo_evidence.MANIFEST_PATH} requires {len(required)} records "
+                f"({', '.join(sorted(ctx.required))}); target_validation records one, so a person decides"]
+    item = required[0]
+    need = f"The base branch requires the '{item['id']}' record ({item['source']})"
+    if not isinstance(tv, dict):
+        return [f"{need}; target_validation is missing or not an object"]
+    decision, reason = tv.get("decision"), tv.get("reason")
+    if decision not in TARGET_DECISIONS:
+        return [f"target_validation.decision must be one of {', '.join(TARGET_DECISIONS)}, got {decision!r}"]
+    if not isinstance(reason, str) or len(reason.strip()) < TARGET_REASON_MIN:
+        return [f"target_validation.reason must state why it is {decision} ({TARGET_REASON_MIN}+ characters)"]
+    if decision == "blocked":
+        return [f"{need}; target validation is blocked: {reason.strip()[:300]}"]
+    if decision == "not-needed":
+        patterns = [repo_evidence.glob_regex(p) for p in item.get("required_paths", [])]
+        if not patterns:
+            return []
+        try:
+            cmp = client.compare(repo, base, head)
+        except (GitHubError, ValueError, KeyError) as exc:
+            return [f"target_validation is not-needed, but the PR's changed files cannot be listed: {exc}"]
+        if cmp is None:
+            return ["target_validation is not-needed, but GitHub could not compare the PR's base and HEAD"]
+        hits = sorted({p for p in cmp["files"] if any(rx.match(p) for rx in patterns)})
+        if hits:
+            return [f"{need}: target_validation says not-needed, but the PR changes {', '.join(hits[:5])}, "
+                    f"which the manifest's required_paths always cover"]
+        return []
+    gaps: list[str] = []
+    rev, art = tv.get("tested_revision"), tv.get("artifact")
+    glob = item.get("artifact_glob")
+    if not isinstance(rev, str) or not repo_evidence.SHA.fullmatch(rev.lower()):
+        gaps.append(f"{need}; tested_revision must be the full 40-hex SHA of the tested candidate, got {rev!r}")
+        rev = None
+    else:
+        rev = rev.lower()
+        try:
+            if not ctx.accepts(rev, "target_validation"):
+                gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.stale_reason(rev)})")
+        except (GitHubError, ValueError, KeyError) as exc:
+            gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")
+    if not _safe_relative(art):
+        gaps.append(f"{need}; target_validation.artifact must be a repository-relative path, got {art!r}")
+        return gaps
+    if glob and not repo_evidence.glob_regex(glob).match(art):
+        gaps.append(f"{need}; artifact {art} is outside the required location {glob}")
+        return gaps
+    try:
+        content = client.file_at(repo, art, head)
+    except (GitHubError, ValueError, KeyError) as exc:
+        return gaps + [f"{need}; cannot read artifact {art} at HEAD: {exc}"]
+    if content is None:
+        gaps.append(f"{need}; artifact {art} is not committed at HEAD {head[:12]}")
+    elif rev and not _names_revision(content.decode("utf-8", "replace"), rev):
+        gaps.append(f"{need}; artifact {art} does not name the tested revision {rev[:12]}")
+    return gaps
 
 
 def _sha(s: Any) -> bool:
@@ -53,7 +219,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     result: dict[str, Any] = {"repository": repo.raw, "pr": number, "decision": "WAITING",
                                "reasons": [], "head_sha": None, "base_sha": None, "url": None,
                                "checks": {"passed": 0, "failed": 0, "pending": 0, "skipped": 0},
-                               "unresolved_threads": None, "merge_queue": None}
+                               "unresolved_threads": None, "merge_queue": None, "target_validation": None}
     reasons: list[str] = result["reasons"]
     try:
         view = client.pr_view(repo, number)
@@ -86,6 +252,11 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     defects: list[str] = []
     missing: list[str] = []
+    # A reply disputing an earlier finding is a conversation comment or an inline
+    # reply on this PR (pr-ready's references/review-comments.md).
+    reply_url = re.compile(rf"https://github\.com/{re.escape(repo.raw)}/pull/{number}"
+                           r"#(?:issuecomment-|discussion_r)\d+", re.IGNORECASE)
+    repeated_disputes = 0
     findings = evidence.get("findings")
     if not isinstance(findings, list):
         missing.append("Reviewer findings array missing")
@@ -95,7 +266,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
             missing.append("Invalid finding object")
             continue
         sev = finding.get("severity")
-        if sev not in ("P0", "P1", "P2", "P3"):
+        if sev not in SEVERITIES:
             missing.append("Invalid finding severity")
             continue
         if not all(isinstance(finding.get(key), str) and finding[key].strip()
@@ -104,11 +275,27 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
             continue
         loc = f"{finding['path']}:{finding.get('line', '?')}"
         if sev in ("P0", "P1", "P2") or finding.get("blocking") is True:
-            defects.append(f"{sev} {loc}: {finding['reason']} | Fix: {finding['recommendation']}")
+            text = f"{sev} {loc}: {finding['reason']} | Fix: {finding['recommendation']}"
+            disputed = finding.get("disputed_reply_url")
+            if disputed is not None:
+                # The finding repeats a claim already disputed on the PR. Only new
+                # evidence sends it back to Draft; otherwise two reviewers disagree
+                # and a person decides, instead of another Draft/Ready round.
+                if not isinstance(disputed, str) or not reply_url.fullmatch(disputed):
+                    missing.append(f"{sev} {loc}: disputed_reply_url is not a comment on this PR: {disputed!r}")
+                    continue
+                new = finding.get("new_evidence")
+                if not isinstance(new, str) or len(new.strip()) < 30:
+                    repeated_disputes += 1
+                    missing.append(f"{text} | Repeats the claim disputed in {disputed} without new evidence; "
+                                   "a person decides between the finding and the dispute")
+                    continue
+                text += f" | Disputed in {disputed}; new evidence: {new.strip()}"
+            defects.append(text)
     test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), result["head_sha"])
     defects.extend(test_defects)
     missing.extend(test_gaps)
-    if evidence.get("verdict") == "BLOCK" and not defects:
+    if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes:
         missing.append("BLOCK verdict needs a specific finding or failed test")
     elif evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
         missing.append("Invalid reviewer verdict")
@@ -127,6 +314,28 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     if not isinstance(deps, dict) or deps.get("resolved") is not True or \
        not isinstance(deps.get("evidence"), str) or len(deps["evidence"].strip()) < 12:
         missing.append("Unresolved/unverified inter-PR dependencies")
+
+    # A failing check the reviewer confirmed unrelated to this PR (for example the
+    # same failure on the base branch) is not something the PR can fix: it keeps the
+    # PR Ready and WAITING for a rerun instead of sending it back to Draft, which
+    # pr-ready would undo with the same exemption. It never allows a merge.
+    unrelated: dict[str, dict[str, Any]] = {}
+    items = evidence.get("unrelated_failing_checks", [])
+    if not isinstance(items, list):
+        missing.append("unrelated_failing_checks malformed")
+        items = []
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"] \
+                and isinstance(item.get("reason"), str) and len(item["reason"].strip()) >= 30 \
+                and item.get("reviewer_confirmed") is True:
+            unrelated[item["name"]] = item
+        else:
+            missing.append("Invalid unrelated_failing_checks entry (needs exact name, reason, reviewer_confirmed)")
+
+    # Actual-run record the base branch's .github/pr-evidence.json mandates: gaps are WAITING.
+    target_gaps, result["target_validation"] = check_target_validation(
+        client, repo, result["head_sha"], result["base_sha"], evidence)
+    missing.extend(target_gaps)
 
     # Live remote evidence: failures are recorded as WAITING instead of inferred success.
     try:
@@ -148,7 +357,12 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                 result["checks"]["skipped"] += 1
             elif bucket in ("fail", "cancel"):
                 result["checks"]["failed"] += 1
-                defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
+                if name in unrelated:
+                    missing.append(f"GitHub CI check {name} is {bucket}, unrelated to this PR per the reviewer "
+                                   f"({unrelated[name]['reason'].strip()[:300]}); rerun it once the cause is fixed: "
+                                   f"{check.get('link', '')}")
+                else:
+                    defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
             elif bucket == "pending":
                 result["checks"]["pending"] += 1
                 missing.append(f"GitHub CI check pending: {name}")
@@ -183,7 +397,10 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":
-        defects.append("GitHub reviewDecision is CHANGES_REQUESTED")
+        # pr-ready marks a PR Ready once the requested changes are fixed or disputed,
+        # without waiting for the reviewer to re-approve; drafting it again would only
+        # restart that loop. Objections still open come back as reviewer findings.
+        missing.append("GitHub reviewDecision is CHANGES_REQUESTED: waiting for that reviewer to re-review")
     elif decision == "REVIEW_REQUIRED":
         missing.append("Human approval required by repository rules")
     elif decision not in ("APPROVED", None, ""):

@@ -6,11 +6,14 @@
 > 一組 Shape 3（client+server）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
-> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
-> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
-> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
-> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+> 最後驗證（TCP 鏈與 C20 distro policy 改寫，PR #188）：2026-10-30，candidate
+> `c97caf38cb0694274b65a5e2a07537fafe69421e`，tree `c13922899fc1bfaa26ec5f496c3d626b3202f86a`。
+> 全新三機 L3/L4 通過，receiver 11/11、sender 66/66、L6 三台 changed=0；單獨的
+> `/var/log/syslog` stanza（BASE 重現事故、本版不會）、glob 在 Step 1d 拒絕（真實與 `--check`）、
+> EL 只剩一個路徑時移除檔案、保留 mode/owner/group 與 symlink 均通過。
+> [完整驗證摘要](../evidence/audit-log-forwarding/2026-10-30-c97caf38cb06.md)。
+> RELP/mTLS 最後驗證於 `34cfabea416eb9645aaa323e541198ae39bbbe96`，本輪未重跑，
+> [該次摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 目標系統
 
@@ -244,7 +247,7 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 | C15 | `lineinfile /etc/hosts` pin `siem-log-server` | 必須在轉送設定 render 之前（同 freeipa-client `/etc/hosts` 先於 enroll 的教訓） |
 | C16, C17 | 建立私有 spool、安裝 runtime probe、render `99-siem-forward.conf`、驗證並載入設定 | 兩個獨立的 `omfwd` TCP action；單獨 `--tags C16` 或 `C17` 也會驗證與重啟；中斷後重跑會依寫入/啟動時間修復未載入的設定 |
 | C18, C19 | `ensure auditd + rsyslog enabled+restarted` | rsyslog 只在轉送設定真的變更時才 restart |
-| C20 | `stat` + `shell`（計算 distro rsyslog 檔還剩幾個其他路徑）+ `lineinfile`/`file`（Step 5a–5d，Debian 與 RedHat family 都跑，只看 `/etc/logrotate.d/rsyslog` 是否存在，不再用 `ansible_os_family` 額外過濾） | 只移除 `{{ audit_syslog_path }}` 這一行，其他路徑（Debian：`mail.log`/`kern.log`/`auth.log`...；RHEL：`cron`/`maillog`/`secure`/`spooler`...）留給 distro 自己的檔案繼續管；如果那份檔案原本就只列這一個路徑，改成整份移除，避免留下沒有檔名的空 block 讓 logrotate 解析失敗 |
+| C20 | `stat` + `shell`（用 `files/logrotate-drop-path.awk` 依 logrotate 自己的解析規則算出拿掉該路徑後的 distro rsyslog policy，含引號/縮排/`~` 路徑）+ `copy`/`file`（Step 5a–5d，Debian 與 RedHat family 都跑，只看 `/etc/logrotate.d/rsyslog` 是否存在，不再用 `ansible_os_family` 額外過濾） | 只移除 `{{ audit_syslog_path }}` 這個路徑，其他路徑（Debian：`mail.log`/`kern.log`/`auth.log`...；RHEL：`cron`/`maillog`/`secure`/`spooler`...）留給 distro 自己的檔案繼續管；如果那個 stanza 只列這一個路徑就整個 stanza 移除；整份檔案除了空白與註解已無內容時才刪檔，避免留下沒有檔名的空 block 讓 logrotate 解析失敗。無法安全改寫（policy 本身 logrotate 就拒絕、路徑寫法讓各版 logrotate 解讀不同、保留的 glob 或尾端加斜線的同名路徑仍會比對到該路徑）時 task 失敗；這個檢查在 Step 1d 的 preflight 先跑一次，失敗發生在第一次設定檔寫入之前（Step 0a–1c 的套件安裝更早，不在此限）。計算結果寫進 0700 暫存目錄的檔案（不經 task result，所以 policy 內有非 UTF-8 位元組也照常套用），Step 5e 在任何結束路徑都會移除該目錄 |
 | C21 | `lineinfile`（Step 6e/6f，打開 `active` + 釘死 `args` facility，兩者都在 `--check` 模式下跳過）+ `command`（Step 8c 用 `pgrep` 確認 plugin process 是否真的在跑）+ Step 8a（Debian，`systemd: state: restarted`）/ Step 8b（RedHat，`pkill -HUP -x auditd`，見上方 v1.5 說明為何不能用 `systemctl restart` 或 `service`） | RedHat family 的 Step 1a 同步補裝 `audispd-plugins`（EL9 上這是 `audit` 套件以外的獨立 RPM）；Step 8a/8b 的觸發條件同時看「這次有沒有改到檔案」跟「plugin process 是否真的在跑」，避免前一輪失敗的 apply 留下「檔案已對、但從未 reload」的殘留狀態 |
 | C22 | 無獨立 apply task（轉送連線的功能性自證，verify 時送一筆 `logger` 測試訊息）；SELinux 主機上由 `tasks/rsyslog-selinux-tcp-port.yml`（Step 6g）把非預設的 `siem_forward_port` 標成 `syslogd_port_t` | rsyslogd（`syslogd_t`）只能連 `syslogd_port_t`/`rsh_port_t`（tcp/514） |
 
