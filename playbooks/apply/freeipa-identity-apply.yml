@@ -3988,11 +3988,38 @@
         # existing rule, host added to a hostgroup a rule names) reaches the
         # client only through SSSD's smart/full refresh (15 min / 6 h) or
         # start-up, so the helper restarts SSSD and waits until the client's
-        # own sudoLastFullRefreshTime is at or after the restart (issue #214).
+        # own sudoLastFullRefreshTime is a new value later than the restart
+        # (issue #214), not merely not older than it: the stopping SSSD
+        # instance's own write in the restart's second must not count.
         # ipa_identity_sudo_refresh_timeout is the per-client bound (default
         # 60 s; about 10 s measured on SSSD 2.9.4 and 2.9.8). It is read with
         # default() where used, not declared in play vars, so an inventory
         # value is honoured.
+        #
+        # The clients to refresh are resolved once, here, and both the loop
+        # and the gate below read that result. pilot passes the deferred hosts
+        # as `-e pilot_deferred_hosts=["a","b"]` (key=value), which Ansible
+        # types as a string: `reject('in', <that string>)` is then a substring
+        # test, so a deferred `client-10` also hid `client-1` from the refresh
+        # and from the gate. A string is therefore parsed as JSON; a list (from
+        # `-e @file` or a JSON `-e`) is used as is. A value that cannot be read
+        # as a host list fails here, before any client is touched.
+        - name: "Resolve the enrolled clients for the sudo full refresh"
+          ansible.builtin.set_fact:
+            ipa_sudo_refresh_clients: >-
+              {{ groups.get('freeipa-client', []) |
+                 reject('in', ipa_sudo_deferred_hosts) | list }}
+          vars:
+            ipa_sudo_deferred_hosts: >-
+              {{ (pilot_deferred_hosts | default([]) | from_json)
+                 if (pilot_deferred_hosts | default([])) is string
+                 else (pilot_deferred_hosts | default([])) }}
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+            - (ipa_auth_cache_settle.stdout | from_json).dirty
+          tags: [identity, client-cache]
+
         - name: "Refresh SSSD caches on enrolled FreeIPA clients"
           ansible.builtin.command:
             argv:
@@ -4010,9 +4037,7 @@
           # `--limit` does not constrain delegated connections.  pilot passes
           # pilot_deferred_hosts after availability resolution so intentionally
           # offline optional clients are not re-contacted by this cross-host task.
-          loop: >-
-            {{ groups.get('freeipa-client', []) |
-               reject('in', pilot_deferred_hosts | default([])) | list }}
+          loop: "{{ ipa_sudo_refresh_clients }}"
           loop_control:
             label: "{{ item }}"
           register: ipa_sudo_refresh_results
@@ -4040,9 +4065,7 @@
             # registers no `results` at all and must not read as success. An
             # unreachable item has no rc, and reading it directly raises, so
             # only finished items with rc 0 count as done.
-            ipa_sudo_refresh_expected: >-
-              {{ groups.get('freeipa-client', []) |
-                 reject('in', pilot_deferred_hosts | default([])) | list }}
+            ipa_sudo_refresh_expected: "{{ ipa_sudo_refresh_clients }}"
             ipa_sudo_refresh_unfinished: >-
               {{ ipa_sudo_refresh_expected
                  | difference(ipa_sudo_refresh_results.results | default([])

@@ -17,6 +17,7 @@ const (
 	sudoRefreshFixtures = "testdata/sssd-sudo-refresh"
 	sudoRefreshProgram  = "../../playbooks/apply/files/freeipa-sssd-sudo-refresh.py"
 	sudoRefreshGate     = "Gate: every enrolled client finished a sudo full refresh"
+	sudoRefreshResolve  = "Resolve the enrolled clients for the sudo full refresh"
 )
 
 // withSudoRefresh adds the sudo full-refresh helper to a harness's extra vars.
@@ -248,7 +249,7 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 			task := value.(map[string]any)
 			switch task["name"] {
 			case "Prepare legacy authorization cache recovery", userMod, "Settle legacy authorization cache recovery",
-				"Report deferred authorization cache refresh", "Refresh SSSD caches on enrolled FreeIPA clients",
+				"Report deferred authorization cache refresh", sudoRefreshResolve, "Refresh SSSD caches on enrolled FreeIPA clients",
 				sudoRefreshGate, "Acknowledge legacy authorization cache recovery":
 				delete(task, "become") // test runs unprivileged; production uses root
 				if task["name"] == "Refresh SSSD caches on enrolled FreeIPA clients" {
@@ -267,7 +268,7 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 		}
 	}
 	collect(plays[0]["tasks"].([]any))
-	if len(tasks) != 9 || len(userModTags) == 0 {
+	if len(tasks) != 10 || len(userModTags) == 0 {
 		t.Fatalf("production recovery tasks not found: %d tasks, user-mod tags %v", len(tasks), userModTags)
 	}
 	statePath := filepath.Join(dir, "journal.json")
@@ -362,6 +363,32 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 		step("full retry", "no", true, refreshed)
 		step("completed no-op after retry", "no", true, nil)
 	}
+
+	// The stopping SSSD instance records a refresh in the restart's second and
+	// the new instance never refreshes (the race the review of #222 found). The
+	// client has not received the new sudo rules, so the apply fails PARTIAL
+	// naming it and the obligation is not cleared; the next apply contacts every
+	// client again and settles it.
+	reset()
+	write("stale-refresh-client-b", "")
+	write("no-refresh-client-b", "")
+	stale := step("stale marker, no start-up refresh", "yes", false, refreshed)
+	if got := unfinishedClients(stale.failures); !strings.Contains(got, `[\"client-b\"]`) || !strings.Contains(got, "PARTIAL") {
+		t.Fatalf("stale marker: gate did not report PARTIAL naming client-b: %v", stale.failures)
+	}
+	if !pending() {
+		t.Fatal("stale marker: the obligation was cleared although client-b never completed a refresh")
+	}
+	for _, name := range []string{"stale-refresh-client-b", "no-refresh-client-b"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step("retry after a stale marker contacts every client", "no", true, refreshed)
+	if pending() {
+		t.Fatal("stale marker: the retry did not settle the obligation")
+	}
+	step("completed no-op after the stale-marker retry", "no", true, nil)
 
 	// Skipping the refresh defers it; skipping the mutation's own tag still
 	// delivers an earlier obligation; `--tags tagged` selects everything.
@@ -463,14 +490,30 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 `)
 	// The sudo full-refresh oracle: `ldbsearch` prints the real captured
 	// output (testdata/sssd-sudo-refresh) with dir/marker-<host> substituted
-	// for the epoch; a restart advances it to now unless dir/no-refresh-<host>
-	// exists (SSSD cannot reach FreeIPA). dir/ldb-mode-<host> picks another
-	// capture. Restarts are logged to dir/restarts.
+	// for the epoch. dir/ldb-mode-<host> picks another capture. Restarts are
+	// logged to dir/restarts.
+	//
+	// A restart does not write the marker itself: the new SSSD instance
+	// schedules its start-up full refresh later (live backend log: "Task [SUDO
+	// Full Refresh]: scheduling task 10 seconds from now"; the fake uses 1.5 s).
+	// The first ldbsearch that finds the refresh due materializes the write,
+	// with the due time as the epoch, which is what a read at that moment would
+	// have seen. Control files per host:
+	//   no-refresh-<host>            SSSD cannot reach FreeIPA: no start-up refresh
+	//   stale-refresh-<host>         the stopping instance records a refresh that
+	//                                was already running, in the second after the
+	//                                restart began (not the start-up refresh)
+	//   absent-until-refresh-<host>  the container has no marker until a refresh
+	//   marker-<host>                the epoch before the restart (default 1)
 	write("ldbsearch", `#!/usr/bin/env python3
-import os,re,sys
+import os,re,sys,time
 from pathlib import Path
 d=Path(os.environ['CACHE_TEST_DIR']); host=os.environ.get('CACHE_TEST_HOST',''); fx=Path(os.environ['SUDO_REFRESH_FIXTURES'])
+due=d.joinpath('refresh-due-'+host)
+if due.exists() and time.time() >= float(due.read_text()):
+ d.joinpath('marker-'+host).write_text(str(int(float(due.read_text())))); due.unlink()
 mode=d.joinpath('ldb-mode-'+host).read_text() if d.joinpath('ldb-mode-'+host).exists() else 'ldbsearch-marker-ubuntu-2.9.4'
+if d.joinpath('absent-until-refresh-'+host).exists() and not d.joinpath('marker-'+host).exists(): mode='ldbsearch-no-container'
 marker=d.joinpath('marker-'+host).read_text() if d.joinpath('marker-'+host).exists() else '1'
 # The real command line the helper must send (captured on both OS families):
 # the domain's cache database, the sudorules container, base scope, the marker.
@@ -491,7 +534,14 @@ d=Path(os.environ['CACHE_TEST_DIR']); host=os.environ.get('CACHE_TEST_HOST','')
 if sys.argv[1:] != ['restart','sssd']: sys.exit(0)
 with d.joinpath('restarts').open('a') as f: f.write(host+'\n')
 if d.joinpath('fail-restart-'+host).exists(): sys.exit(5)
-if not d.joinpath('no-refresh-'+host).exists(): d.joinpath('marker-'+host).write_text(str(int(time.time())))
+# The old instance stops in the next second and records the refresh it was
+# running; restart returns right after, so the helper reads the same second.
+if d.joinpath('stale-refresh-'+host).exists():
+ time.sleep(1.05 - time.time() % 1); d.joinpath('marker-'+host).write_text(str(int(time.time())))
+# The new instance's start-up refresh, scheduled from now. 1.5 s keeps the
+# marker's second at least one after the second the helper reads when restart
+# returns, even if that return is delayed by up to 0.5 s.
+if not d.joinpath('no-refresh-'+host).exists(): d.joinpath('refresh-due-'+host).write_text(str(time.time()+1.5))
 `)
 	for _, binary := range []string{"ipa", "sss_cache", "sss_ssh_authorizedkeys", "ldbsearch", "systemctl"} {
 		if err := os.Chmod(filepath.Join(dir, binary), 0o755); err != nil {
@@ -576,7 +626,7 @@ func TestRegression_IdentitySSHCacheRuntime(t *testing.T) {
 			task := value.(map[string]any)
 			name, _ := task["name"].(string)
 			tags, _ := task["tags"].([]any)
-			if slices.Contains(tags, any("sshkeys")) || strings.Contains(name, "legacy authorization cache recovery") || name == "Refresh SSSD caches on enrolled FreeIPA clients" || name == sudoRefreshGate {
+			if slices.Contains(tags, any("sshkeys")) || strings.Contains(name, "legacy authorization cache recovery") || name == sudoRefreshResolve || name == "Refresh SSSD caches on enrolled FreeIPA clients" || name == sudoRefreshGate {
 				delete(task, "become") // test runs unprivileged; production uses root
 				if strings.HasPrefix(name, "Invalidate and verify") {
 					task["environment"] = map[string]any{"CACHE_TEST_HOST": "{{ item.host }}", "CACHE_TEST_DIR": dir}

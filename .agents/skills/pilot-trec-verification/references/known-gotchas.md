@@ -214,8 +214,10 @@ a user added to an existing rule, a host added to a hostgroup a rule names)
 reaches the client only through SSSD's smart refresh (15 min), full refresh
 (6 h) or start-up. `freeipa-identity-apply.yml` therefore now restarts SSSD on
 every enrolled client after an authorization change and waits, 60 s per client,
-until `sudoLastFullRefreshTime` in the client's cache is at or after the
-restart. It fails `Authorization cache refresh PARTIAL` naming the clients that
+until `sudoLastFullRefreshTime` in the client's cache is a new value later
+than the second the restart finished (the stopping SSSD instance's own write
+in the restart's second, or an older marker after a clock step back, does not
+count). It fails `Authorization cache refresh PARTIAL` naming the clients that
 did not finish; the next identical apply repeats it.
 
 So: run the live sudo checks **after** a reconcile that exited 0. Do not flush

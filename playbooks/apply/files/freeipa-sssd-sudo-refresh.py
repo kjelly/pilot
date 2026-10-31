@@ -6,8 +6,16 @@ handles passwords. `sss_cache -E` only expires rules the host already holds:
 a rule that newly applies to a user or host reaches the cache through the
 smart/full refresh ptask (15 min / 6 h) or SSSD start-up. So this expires the
 cache, restarts SSSD (start-up runs a full refresh) and waits until
-sudoLastFullRefreshTime in the domain cache is at or after the restart.
-Time is compared on this host's clock only. Child output is never printed.
+sudoLastFullRefreshTime in the domain cache is a value that was not there
+before and is later than the second the restart finished. Time is compared on
+this host's clock only. Child output is never printed.
+
+"Not older than the restart" is not enough. The old SSSD instance can record a
+refresh that was already running while it stopped (in the restart's own
+second), and a clock stepped back leaves an older marker newer than the
+restart; neither is the start-up refresh. `systemctl restart` returns once the
+old instance has stopped, so whatever it wrote is at or before the second read
+after the restart returns, while the start-up refresh runs about 10 s later.
 """
 
 import json
@@ -54,22 +62,26 @@ def converge(data):
     start = time.monotonic()
     deadline = start + timeout
 
-    # Fail on a missing reader before touching SSSD.
-    marker(domain, deadline)
-    began = int(time.time())
+    # Read before touching SSSD: a missing reader fails here, and the value is
+    # what a refresh that predates the restart would leave behind.
+    before = marker(domain, deadline)
     for argv in (["sss_cache", "-E"], ["systemctl", "restart", "sssd"]):
         done = run(argv, deadline)
         if done.returncode != 0:
             raise RuntimeError("%s failed (rc=%d)" % (argv[0], done.returncode))
+    # After both returned: the old instance has stopped, so its last write is
+    # at or before this second.
+    restarted = int(time.time())
     while True:
         seen = marker(domain, deadline)
-        if seen is not None and seen >= began:
+        if seen is not None and seen != before and seen > restarted:
             return {"converged": True, "waited": round(time.monotonic() - start, 1)}
         if time.monotonic() + interval >= deadline:
             raise RuntimeError(
                 "SSSD sudo full refresh did not complete within %ds "
-                "(restarted at %d, last refresh %s); is the host offline from FreeIPA?"
-                % (timeout, began, seen))
+                "(sudoLastFullRefreshTime before=%s, restarted at %d, now=%s); "
+                "is the host offline from FreeIPA?"
+                % (timeout, before, restarted, seen))
         time.sleep(interval)
 
 

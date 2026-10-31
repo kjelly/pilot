@@ -287,8 +287,10 @@ ansible-playbook -i inventory-freeipa.yaml \
 非金鑰的授權變更（使用者資料、群組、HBAC、sudo…）要等 client 的 SSSD 快取更新才生效。
 只有選到 `identity` 或 `client-cache` 的 run（含不帶 tags 的完整 apply）會對 enrolled
 clients 執行快取更新：`sss_cache -E`、重啟 SSSD，並等到該 client 自己的
-`sudoLastFullRefreshTime` 不早於重啟時間（每台上限 60 秒，`ipa_identity_sudo_refresh_timeout`；
-只有 `sss_cache -E` 不會讓新套用的 sudo 規則出現，見 issue #214）。任何一台沒完成就以
+`sudoLastFullRefreshTime` 變成一個重啟前沒有的新值、且晚於重啟完成的那一秒（每台上限 60 秒，
+`ipa_identity_sudo_refresh_timeout`；只有 `sss_cache -E` 不會讓新套用的 sudo 規則出現，見
+issue #214。舊的 SSSD 實例在重啟當秒寫入的值、或時鐘往回調之後比重啟時間還新的舊值，都不算完成）。
+任何一台沒完成就以
 `Authorization cache refresh PARTIAL` 失敗並列出那些 client，下一次相同的 apply 會重做。
 client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client 沒有它時，這一步會以
 `ldbsearch not found; … re-run freeipa-client-apply.yml` 失敗並列為 PARTIAL，重跑一次 client apply 即可）。
