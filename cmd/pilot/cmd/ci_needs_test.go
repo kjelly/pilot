@@ -151,19 +151,19 @@ func TestCIImageNeedsCheckCatchesDrift(t *testing.T) {
 		}
 		return strings.Replace(ci, old, new, 1)
 	}
-	const imageNeeds = "    needs: [test, playbook-lint, root-tests, thanos-retention, lint]\n"
+	const imageNeeds = "    needs: [test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"
 	cases := []struct{ name, ci, want string }{
 		{"current", ci, ""},
-		{"transitive path through another job", strings.Replace(edit(imageNeeds, "    needs: [test, playbook-lint, thanos-retention, lint]\n"), "  lint:\n", "  lint:\n    needs: root-tests\n", 1), ""},
-		{"image needs one job as a string", strings.Replace(edit(imageNeeds, "    needs: lint\n"), "  lint:\n", "  lint:\n    needs: [test, playbook-lint, root-tests, thanos-retention]\n", 1), ""},
+		{"transitive path through another job", strings.Replace(edit(imageNeeds, "    needs: [test, playbook-lint, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "  lint:\n", "  lint:\n    needs: root-tests\n", 1), ""},
+		{"image needs one job as a string", strings.Replace(edit(imageNeeds, "    needs: lint\n"), "  lint:\n", "  lint:\n    needs: [test, playbook-lint, root-tests, thanos-retention, pilot-mcp-cross, mcp-remote]\n", 1), ""},
 		{"promote lists image", edit("    needs: image\n", "    needs: [image]\n"), ""},
 		// The state of main after PR #148 added root-tests.
-		{"root-tests missing", edit(imageNeeds, "    needs: [test, playbook-lint, thanos-retention, lint]\n"), "image does not (transitively) need root-tests"},
-		{"test missing", edit(imageNeeds, "    needs: [playbook-lint, root-tests, thanos-retention, lint]\n"), "image does not (transitively) need test"},
+		{"root-tests missing", edit(imageNeeds, "    needs: [test, playbook-lint, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "image does not (transitively) need root-tests"},
+		{"test missing", edit(imageNeeds, "    needs: [playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "image does not (transitively) need test"},
 		{"a new job omitted", ci + "\n  docs:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo docs\n", "image does not (transitively) need docs"},
 		{"a new job after image is not a dependency", ci + "\n  notify:\n    needs: promote\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo notify\n", ""},
 		{"promote does not need image", edit("    needs: image\n", "    needs: test\n"), "want exactly 1"},
-		{"unknown needs name", edit(imageNeeds, "    needs: [test, playbook-lint, root-tests, thanos-retention, lint, roots-tests]\n"), `unknown job "roots-tests"`},
+		{"unknown needs name", edit(imageNeeds, "    needs: [test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, roots-tests]\n"), `unknown job "roots-tests"`},
 		{"validation job with if", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    if: github.event_name == 'push'\n", 1), "validation job root-tests has if:"},
 		{"validation job continue-on-error", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    continue-on-error: true\n", 1), "validation job root-tests has continue-on-error"},
 		{"continue-on-error false", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    continue-on-error: false\n", 1), ""},

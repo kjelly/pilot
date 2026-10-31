@@ -1,0 +1,211 @@
+// Package mcpwire holds what pilot-mcp (the client) and pilot mcp remote
+// (inside the pilot-cli container) must agree on byte for byte: container
+// paths, the snapshot manifest and its digest, the stdin/stdout framing,
+// error lines and the tool names each mode exposes. It imports nothing
+// Linux-only, so cmd/pilot-mcp builds for darwin.
+//
+// Spec: docs/superpowers/specs/2026-10-30-pilot-mcp-remote-access-spec.md.
+package mcpwire
+
+import (
+	"fmt"
+	"path"
+	"regexp"
+	"slices"
+	"strings"
+	"unicode"
+)
+
+// Protocol identifies this wire format in manifests and ready lines.
+const Protocol = "pilot-mcp-remote/v1"
+
+// ProtocolFlag is the value of `pilot mcp remote --protocol`.
+const ProtocolFlag = "v1"
+
+// Container paths. pilot-mcp builds the docker run mounts from them and
+// pilot mcp remote reads from them, so both sides use these constants.
+const (
+	// ContainerPilotBinary is the pilot binary inside the pilot-cli image.
+	ContainerPilotBinary = "/usr/local/bin/pilot"
+	// ContainerPilotRoot is the image's WORKDIR, holding contracts/ and group_vars/.
+	ContainerPilotRoot = "/pilot"
+	// ContainerVaultDir is where one environment's .vault is mounted read-only.
+	ContainerVaultDir = "/pilot/vault"
+	// ContainerDataDir is where one environment's .pilot-data is mounted.
+	ContainerDataDir = "/pilot/data"
+	// ContainerConfigLink is the symlink to the session workspace, matching
+	// the /pilot/config paths the Deploy workflow uses.
+	ContainerConfigLink = "/pilot/config"
+	// ContainerTmpDir holds observe sessions; it disappears with the container.
+	ContainerTmpDir = "/tmp/pilot-mcp"
+)
+
+// DataMCPDir is the directory, relative to the data dir, holding MCP state.
+const DataMCPDir = "mcp"
+
+// Limits on an uploaded snapshot.
+const (
+	MaxFileBytes     = 8 << 20
+	MaxTotalBytes    = 64 << 20
+	MaxFiles         = 10000
+	MaxStreamBytes   = 80 << 20
+	MaxManifestBytes = 1 << 20
+	MaxHeaderLine    = 64
+	// MaxPathBytes and MaxNameBytes are Linux's PATH_MAX and NAME_MAX: a
+	// longer path could not be written on the deploy node anyway, and the
+	// cap keeps every path check cheap.
+	MaxPathBytes = 4096
+	MaxNameBytes = 255
+)
+
+// Modes and environments.
+const (
+	ModeObserve = "observe"
+	ModeEdit    = "edit"
+)
+
+// Envs lists the environment names pilot's inventory accepts.
+var Envs = []string{"sandbox", "staging", "prod"}
+
+// ValidEnv reports whether env is one of Envs.
+func ValidEnv(env string) bool {
+	for _, e := range Envs {
+		if env == e {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidMode reports whether mode is observe or edit.
+func ValidMode(mode string) bool { return mode == ModeObserve || mode == ModeEdit }
+
+var sessionIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// ValidSessionID reports whether id is 32 lowercase hex characters.
+func ValidSessionID(id string) bool { return sessionIDPattern.MatchString(id) }
+
+// ReservedPaths are directories a snapshot never carries: secrets and
+// pilot state come from the deploy node; contracts and the verification
+// specs their autoDeploy entries reference come from the image.
+var ReservedPaths = []string{".vault", ".pilot", ".pilot-data", "contracts", "docs/verification", ".git"}
+
+// IsReserved reports whether a clean relative path is a reserved directory
+// or lies under one, or has a .git component anywhere (Git refuses those
+// too: a nested .git/config can name a command Git runs). Components are
+// compared through FoldPath, the way a case-insensitive file system (the
+// macOS default) compares them, so ".GIT/config" and ".g\u200cit/config"
+// are ".git/config" there.
+func IsReserved(p string) bool {
+	segs := strings.Split(FoldPath(p), "/")
+	dotGit := FoldPath(".git")
+	for _, seg := range segs {
+		if seg == dotGit {
+			return true
+		}
+	}
+	for _, r := range ReservedPaths {
+		rs := strings.Split(FoldPath(r), "/")
+		if len(segs) >= len(rs) && slices.Equal(segs[:len(rs)], rs) {
+			return true
+		}
+	}
+	return false
+}
+
+// FoldPath is p as a case-insensitive file system sees it: case folded
+// (Unicode simple folding, as strings.EqualFold) and without the code
+// points HFS+ ignores. Two paths with the same FoldPath name one file
+// there.
+func FoldPath(p string) string {
+	return strings.Map(func(r rune) rune {
+		if hfsIgnorable(r) {
+			return -1
+		}
+		folded := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			folded = min(folded, f)
+		}
+		return folded
+	}, p)
+}
+
+// FoldCollision returns two different spellings among paths and all their
+// parent directories that FoldPath maps to one name, or two empty strings.
+// On a case-insensitive file system (macOS) such spellings are one file or
+// directory, and Git there records only one of them, so "host_vars/WEB/b"
+// collides with "host_vars/web/a" as "a.yml" does with "A.yml". Each
+// component is folded and hashed once (a tree keyed by parent and folded
+// name), so the cost is linear in the total length of paths.
+func FoldCollision(paths []string) (string, string) {
+	type key struct {
+		parent int
+		name   string
+	}
+	type node struct {
+		id        int
+		component string
+		prefix    string
+	}
+	nodes := map[key]node{}
+	for _, p := range paths {
+		parent, start := 0, 0
+		for i := 0; i <= len(p); i++ {
+			if i < len(p) && p[i] != '/' {
+				continue
+			}
+			component := p[start:i]
+			k := key{parent, FoldPath(component)}
+			n, ok := nodes[k]
+			switch {
+			case !ok:
+				n = node{id: len(nodes) + 1, component: component, prefix: p[:i]}
+				nodes[k] = n
+			case n.component != component:
+				return n.prefix, p[:i]
+			}
+			parent, start = n.id, i+1
+		}
+	}
+	return "", ""
+}
+
+// hfsIgnorable reports a code point HFS+ drops when it compares names (the
+// set Git's is_hfs_dotgit skips). Names may contain them, emoji sequences
+// do; they only matter when comparing against a reserved name.
+func hfsIgnorable(r rune) bool {
+	return (r >= 0x200c && r <= 0x200f) || (r >= 0x202a && r <= 0x202e) || (r >= 0x206a && r <= 0x206f) || r == 0xfeff
+}
+
+// CheckSnapshotPath validates one file path inside a snapshot or changeset:
+// relative, already clean, at most MaxPathBytes long with components of at
+// most MaxNameBytes (the Linux limits), no "..", backslash, NUL or control
+// characters, and not reserved (see IsReserved).
+func CheckSnapshotPath(p string) error {
+	if p == "" || strings.HasPrefix(p, "/") {
+		return fmt.Errorf("path %q must be relative", p)
+	}
+	if len(p) > MaxPathBytes {
+		return fmt.Errorf("path %.40q… is longer than %d bytes", p, MaxPathBytes)
+	}
+	if path.Clean(p) != p || p == "." {
+		return fmt.Errorf("path %q is not clean", p)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("path %q contains a parent-directory segment", p)
+		}
+		if len(seg) > MaxNameBytes {
+			return fmt.Errorf("path %.40q… has a component longer than %d bytes", p, MaxNameBytes)
+		}
+	}
+	for _, r := range p {
+		if r == '\\' || r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path %q contains a backslash or control character", p)
+		}
+	}
+	if IsReserved(p) {
+		return fmt.Errorf("path %q is under a reserved directory", p)
+	}
+	return nil
+}
