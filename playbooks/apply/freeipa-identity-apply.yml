@@ -230,6 +230,7 @@
       - C23
       - C24
     ipa_ssh_cache_program: "{{ lookup('file', playbook_dir ~ '/files/freeipa-ssh-key-cache.py') }}"
+    ipa_sudo_refresh_program: "{{ lookup('file', playbook_dir ~ '/files/freeipa-sssd-sudo-refresh.py') }}"
 
   pre_tasks:
     - name: "Load canonical roster under a namespace"
@@ -3144,16 +3145,13 @@
         # — no hand-authored sudo.rules entry ever has this key.
         #
         # v3.1 §24.2 SSSD cache-propagation note: a client's SSSD sudo-provider
-        # cache does NOT necessarily reflect a rule mutation the instant this
-        # task applies it — confirmed live on a two-node fixture
-        # (docs/runbooks/archived/freeipa-hostauthz-test-plan.md §5.2): after
-        # the server-side rule changed, `sudo -n` on the client kept hitting
-        # the stale cached decision until `systemctl restart sssd` (or the
-        # cache's own natural expiry). The same propagation delay applies to a
-        # sudoNotBefore/sudoNotAfter boundary crossing, not just an
-        # enable/disable flip — a sudo command issued exactly at the boundary
-        # may observe the previous decision for a short window. This is SSSD
-        # cache behavior, not a Pilot defect, and is out of Pilot's control.
+        # cache does NOT reflect a rule mutation the instant this task applies
+        # it (docs/runbooks/archived/freeipa-hostauthz-test-plan.md §5.2).
+        # "Refresh SSSD caches on enrolled FreeIPA clients" below closes that
+        # window at the end of the apply by forcing a sudo full refresh on
+        # every enrolled client (issue #214). A sudoNotBefore/sudoNotAfter
+        # boundary crossing between applies is not covered: SSSD evaluates it
+        # when the command runs, from whatever it last cached.
         - name: "Set native timed-sudo attributes for v3.0 sudo grants (spec.md §10)"
           ansible.builtin.command:
             argv: >-
@@ -3985,20 +3983,106 @@
           tags: [always]
 
         # ── Release ticket ─────────────────────────────────────────────────
+        # `sss_cache -E` alone only expires rules a client already holds. A rule
+        # that newly applies to a user or host (new rule, user added to an
+        # existing rule, host added to a hostgroup a rule names) reaches the
+        # client only through SSSD's smart/full refresh (15 min / 6 h) or
+        # start-up, so the helper restarts SSSD and waits until the client's
+        # own sudoLastFullRefreshTime is a new value later than the restart
+        # (issue #214), not merely not older than it: the stopping SSSD
+        # instance's own write in the restart's second must not count.
+        # ipa_identity_sudo_refresh_timeout is the per-client bound (default
+        # 60 s; about 10 s measured on SSSD 2.9.4 and 2.9.8). It is read with
+        # default() where used, not declared in play vars, so an inventory
+        # value is honoured.
+        #
+        # The clients to refresh are resolved once, here, and both the loop
+        # and the gate below read that result. pilot passes the deferred hosts
+        # as `-e pilot_deferred_hosts=["a","b"]` (key=value), which Ansible
+        # types as a string: `reject('in', <that string>)` is then a substring
+        # test, so a deferred `client-10` also hid `client-1` from the refresh
+        # and from the gate, and `intersect(<that string>)` is a character-set
+        # intersection that is always empty, so the acknowledgement below ran
+        # with a client deferred. A string is therefore parsed as JSON; a list
+        # (from `-e @file` or a JSON `-e`) is used as is. A value that cannot be
+        # read as a host list fails here, before any client is touched.
+        #
+        # The acknowledgement also reads this list, and it runs when nothing was
+        # dirty (the refresh and the gate do not). So this task carries only the
+        # conditions all three share (tags, check mode, the refresh option), not
+        # the dirty one: wherever the acknowledgement runs, the list is defined.
+        - name: "Resolve the enrolled clients for the sudo full refresh"
+          ansible.builtin.set_fact:
+            ipa_sudo_refresh_clients: >-
+              {{ groups.get('freeipa-client', []) |
+                 reject('in', ipa_sudo_deferred_hosts) | list }}
+          vars:
+            ipa_sudo_deferred_hosts: >-
+              {{ (pilot_deferred_hosts | default([]) | from_json)
+                 if (pilot_deferred_hosts | default([])) is string
+                 else (pilot_deferred_hosts | default([])) }}
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+          tags: [identity, client-cache]
+
         - name: "Refresh SSSD caches on enrolled FreeIPA clients"
-          ansible.builtin.command: sss_cache -E
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - "{{ ipa_sudo_refresh_program }}"
+            stdin: "{{ {'domain': ipa_domain, 'timeout': ipa_identity_sudo_refresh_timeout | default(60) | int} | to_json }}"
           delegate_to: "{{ item }}"
           become: true
           become_method: ansible.builtin.sudo
+          vars:
+            ansible_connect_timeout: 5
+            ansible_ssh_timeout: 5
+          timeout: "{{ (ipa_identity_sudo_refresh_timeout | default(60) | int) + 30 }}"
           # `--limit` does not constrain delegated connections.  pilot passes
           # pilot_deferred_hosts after availability resolution so intentionally
           # offline optional clients are not re-contacted by this cross-host task.
-          loop: >-
-            {{ groups.get('freeipa-client', []) |
-               reject('in', pilot_deferred_hosts | default([])) | list }}
+          # default([]): the resolving task is skipped in --check and with the
+          # refresh option off, and an undefined loop makes this task fail with
+          # "'item' is undefined" before `when` is read (ignored here, but a
+          # failure in every preview). With the list empty the task is skipped.
+          # The gate has no default: if its list is missing it fails, closed.
+          loop: "{{ ipa_sudo_refresh_clients | default([]) }}"
           loop_control:
             label: "{{ item }}"
+          register: ipa_sudo_refresh_results
           changed_when: false
+          ignore_errors: true
+          ignore_unreachable: true
+          when:
+            - not ansible_check_mode
+            - ipa_identity_refresh_sssd_cache | bool
+            - (ipa_auth_cache_settle.stdout | from_json).dirty
+          tags: [identity, client-cache]
+
+        - name: "Gate: every enrolled client finished a sudo full refresh"
+          ansible.builtin.assert:
+            that: ipa_sudo_refresh_unfinished | length == 0
+            fail_msg: >-
+              Authorization cache refresh PARTIAL; FreeIPA changes are retained
+              and the next apply that selects identity or client-cache repeats
+              the refresh on every enrolled client. Clients without a completed
+              sudo full refresh (see the ignored failures above):
+              {{ ipa_sudo_refresh_unfinished | to_json }}
+          vars:
+            # What was expected is derived from the loop's own inputs, not
+            # from the shape of the registered result: a task-level failure
+            # registers no `results` at all and must not read as success. An
+            # unreachable item has no rc, and reading it directly raises, so
+            # only finished items with rc 0 count as done.
+            ipa_sudo_refresh_expected: "{{ ipa_sudo_refresh_clients }}"
+            ipa_sudo_refresh_unfinished: >-
+              {{ ipa_sudo_refresh_expected
+                 | difference(ipa_sudo_refresh_results.results | default([])
+                  | rejectattr('skipped', 'defined') | rejectattr('unreachable', 'defined')
+                  | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0)
+                  | map(attribute='item') | list) }}
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
@@ -4022,7 +4106,10 @@
             # The global receipt covers every enrolled client. A deferred
             # client has not received it; retain the dirty bit until a retry
             # delivers to all clients (failures already abort before this task).
-            - groups.get('freeipa-client', []) | intersect(pilot_deferred_hosts | default([])) | length == 0
+            # The clients refreshed are the resolved list above, which is
+            # defined whenever this task runs (same tags and the first two
+            # conditions of the resolving task).
+            - groups.get('freeipa-client', []) | difference(ipa_sudo_refresh_clients) | length == 0
           tags: [identity, client-cache]
 
         - name: "Gate: every SSH key cache pair converged"

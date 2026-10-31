@@ -18,7 +18,23 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-27，PR #138 review 修正）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
+- 最新驗證（2026-10-31，issue #214 clients 的 sudo 快取更新）：candidate
+  `077052112eb306ca3cd9ce6a502789e0b657f1ff`，tree `71094bda565ddb56c9a4493c717f76d9d53ef08b`；
+  在乾淨、隔離的 `git archive` 複本執行。AlmaLinux 9.8 provider，兩台 enrolled clients（Ubuntu
+  24.04／SSSD 2.9.4、AlmaLinux 9.8／SSSD 2.9.8），另有一組以 `pilot reconcile` 執行的 entry point 拓樸。
+  `topology test --ephemeral`（全新主機，apply 為 dirty）identity verify **24/24 PASS（fail=0 skip=0）**，
+  冪等 `changed=0`；同一個 snapshot、同一份名冊透過 playbook 比對 base 與 candidate：新規則與
+  主機加進 hostgroup 在 base 仍拒絕（25 秒後也是）、candidate 立即允許，撤銷與規則刪除兩邊都立即
+  拒絕（使用者加進既有規則在 `sss_cache -E` 就會生效，兩邊都允許）。SSSD 啟動後約 10 秒才寫
+  `sudoLastFullRefreshTime`，28 次重啟中有 27 次剛好是重啟後第 10 秒，所以新規則（嚴格晚於
+  重啟完成那一秒）不會與重啟同一秒競爭；舊規則（`>=` 重啟前取的秒）在同一秒競爭與時鐘調回時
+  誤判完成 6/6，candidate 兩者都 fail closed。client 無回應、被暫停、SSSD 連不上 FreeIPA、`restart`
+  失敗與卡住都以 `PARTIAL` 列出並可重試；`pilot reconcile` 帶 deferred optional client（別名互為前綴）
+  時略過它並保留待更新狀態；`--check`、`--tags sudo`／`client-cache`、`refresh=false`、沒有 `ldb-tools`
+  的舊 client 皆通過。未涵蓋：非 root 的 `become`、超過兩台 client、replica 延遲、自然（非注入）
+  故障、marker 欄位不存在的原生狀態、FreeIPA server／replica 不更新。見
+  [evidence](../evidence/freeipa-identity-sudo-cache/2026-10-31-0770521.md)。
+- SSH key 快取驗證（2026-10-27，PR #138 review 修正；其後 refresh task 已由 #214 變更）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
   tree `eba8be23b181597da990e1517c35d28c525a464e`；在乾淨、隔離 checkout 執行。
 - 實際目標為三台拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 VM：`freeipa-server` group
   一台 provider，`freeipa-client` group 兩台已 enroll clients（`ansible-inventory --graph`
@@ -276,7 +292,24 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 非金鑰的授權變更（使用者資料、群組、HBAC、sudo…）要等 client 的 SSSD 快取更新才生效。
 只有選到 `identity` 或 `client-cache` 的 run（含不帶 tags 的完整 apply）會對 enrolled
-clients 執行 `sss_cache -E`。其他 tags（例如 `--tags sudo`、`--tags C9`）或
+clients 執行快取更新：`sss_cache -E`、重啟 SSSD，並等到該 client 自己的
+`sudoLastFullRefreshTime` 變成一個重啟前沒有的新值、且晚於重啟完成的那一秒（每台上限 60 秒，
+`ipa_identity_sudo_refresh_timeout`；只有 `sss_cache -E` 不會讓新套用的 sudo 規則出現，見
+issue #214。舊的 SSSD 實例在重啟當秒寫入的值、或時鐘往回調之後比重啟時間還新的舊值，都不算完成）。
+任何一台沒完成就以
+`Authorization cache refresh PARTIAL` 失敗並列出那些 client，下一次相同的 apply 會重做。
+client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client 沒有它時，這一步會以
+`ldbsearch not found; … re-run freeipa-client-apply.yml` 失敗並列為 PARTIAL，重跑一次 client apply 即可）。
+成本：clients 是逐台序列處理，每台約 10 秒（SSSD 啟動後約 10 秒才做 sudo full refresh）；一台無回應
+最多 90 秒、SSSD 連不上 FreeIPA 最多 60 秒。`sss_cache -E` 或重啟失敗（含逾時）時，helper 會再用
+`systemctl is-active sssd` 檢查 SSSD 的實際狀態，沒在跑就啟動它，並把結果寫進錯誤訊息
+（`SSSD is active`、`SSSD was inactive and was started`、`… could not be started`）；該 client 仍然列為
+PARTIAL，不會因此被當成已完成。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
+（Ubuntu 24.04、AlmaLinux 9.8，各約 1 200 次對已快取使用者的 `getent`／`id`）沒有失敗；SSH 金鑰登入、
+root 的 `sudo -l -U` 與第一次對尚未快取使用者的 `getent` 在 SSSD 重啟前後約 0.2 秒內各有 1–3 次失敗，
+之後全部成功（密碼登入沒有測），clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
+FreeIPA server 與 replica 不會被重啟（它們的 sudo 快取仍照 SSSD 自己的週期）。
+其他 tags（例如 `--tags sudo`、`--tags C9`）或
 `--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
 並印出 `Report deferred authorization cache refresh` 提示；下一次選到 `identity`/
 `client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。`-e
@@ -1021,13 +1054,12 @@ ssh alice@<enrolled-host>        # 無需該主機上有 authorized_keys 即可�
 同一次 play 內所有後續 `ipa` 指令都用這個 ticket，不受影響）。
 
 **改完 sudo rule 的屬性（host/cmd/runas category、attach 的 host/command/使用者）後，
-已經 enroll 過的 client 不會馬上反映**——SSSD 的 sudo provider 有自己的快取
-TTL，即使 server 端 LDAP 已經是新值，client 上跑 `sudo` 可能還是照舊規則判斷，
-在快取過期前一直看到（錯誤的）結果。要立刻驗證，在該 client 上執行：
-
-```bash
-sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server 拉 sudo 規則
-```
+已經 enroll 過的 client 的 SSSD sudo 快取不會自己馬上更新**（smart refresh 15 分鐘、
+full refresh 6 小時）。不需要手動清快取：選到 `identity` 或 `client-cache` 的 apply 在結束前
+會對每台 enrolled client 做完上面的 sudo full refresh，exit 0 之後 `sudo -n` 就反映新規則
+（新增與撤銷都是）。若 apply 因 `--tags` 縮小而只印出 `Report deferred authorization cache
+refresh`，或以 `PARTIAL` 失敗，重跑相同的 apply（或 `--tags client-cache`）即可，不要手動
+`sss_cache -E && systemctl restart sssd` 然後把結果記成通過。
 
 ---
 

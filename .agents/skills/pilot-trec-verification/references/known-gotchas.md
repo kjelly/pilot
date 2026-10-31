@@ -194,52 +194,45 @@ carry over to a new session or rebuild — expect to ask again via
 
 ## Two misdiagnosis traps
 
-### Live sudo passes only after an SSSD flush: a bug symptom, not a fix
+### Live sudo denied after the identity reconcile: a defect, not a flush step
 
 **Symptom:** on a FreeIPA client, a live `sudo` or `sudo -n` is denied
 (`sudo: a password is required`, or "not allowed"), although
 `ipa hbactest --service=sudo` allows it and `ipa sudorule-show` shows the rule,
-with `!authenticate` where the check needs it. It was seen on the first sudo
-after enrollment and after a sudo-rule change, in minimal-poc rounds 13, 23 and
-31 (`docs/evidence/minimal-poc-architecture/2026-07-23-round-13.md`,
-`2026-08-13-round-23.md`, `2026-09-10-round-31.md`). Each time the check passed
-right after a client-side `sss_cache -E` (rounds 23 and 31 also ran
-`systemctl restart sssd`), with no roster change, and the round was recorded as
-a pass.
+with `!authenticate` where the check needs it. It was seen in minimal-poc
+rounds 13, 23 and 31
+(`docs/evidence/minimal-poc-architecture/2026-07-23-round-13.md`,
+`2026-08-13-round-23.md`, `2026-09-10-round-31.md`); each passed only after a
+client-side `sss_cache -E` (rounds 23 and 31 also `systemctl restart sssd`).
 
-Earlier versions of this file called that flush "the fix". It is not.
 [AGENTS.md](../../../../AGENTS.md) §5.9 point 5: a result that is correct only
 after clearing a cache, restarting a service or syncing by hand is a bug
-symptom. Open it as a bug and find the root cause; do not write the workaround
-into evidence and call the run done.
+symptom. Issue #214 found and fixed the cause (live on Ubuntu 24.04 / SSSD
+2.9.4 and AlmaLinux 9.8 / SSSD 2.9.8): `sss_cache -E` only expires rules a
+client already holds. A rule that newly applies to a user or host (a new rule,
+a host added to a hostgroup a rule names) reaches the client only through
+SSSD's smart refresh (15 min), full refresh (6 h) or start-up; a user added to
+a rule the client already caches is delivered by `sss_cache -E` alone. `freeipa-identity-apply.yml` therefore now restarts SSSD on
+every enrolled client after an authorization change and waits, 60 s per client,
+until `sudoLastFullRefreshTime` in the client's cache is a new value later
+than the second the restart finished (the stopping SSSD instance's own write
+in the restart's second, or an older marker after a clock step back, does not
+count). It fails `Authorization cache refresh PARTIAL` naming the clients that
+did not finish; the next identical apply repeats it.
 
-What is known (2026-10-31):
-
-- **The root cause is unknown.** Do not state one in a report or evidence
-  record.
-- `freeipa-identity-apply.yml` already runs `sss_cache -E` on enrolled clients
-  after authorization changes (task `Refresh SSSD caches on enrolled FreeIPA
-  clients`, added in `c45ed559` on 2026-08-05). Rounds 23 and 31 came later and
-  still needed the client-side flush and restart.
-- Issue #95 (closed by PR #107) covered the same symptom in the FreeIPA sim
-  fixtures only. They now wait, with a bound, until
-  `sudo -n -l -U <user> -- <command>` allows the command, and fail with
-  `SUDO_POLICY_NOT_READY` otherwise. That does not cover a runbook's own live
-  checks.
-- Issue #114 (open) is the SSH-key counterpart: after a revocation, SSSD keeps
-  serving the old key for an unpredictable time.
-- `f1d1552` (`identity.PeerInGroup`) fixed a different cache bug, in the
-  gateway and session-store group checks. It does not touch sudo.
-
-When you hit it:
+So: run the live sudo checks **after** a reconcile that exited 0. Do not flush
+by hand first. If a check is still denied:
 
 1. **Capture the facts before you touch the cache:** the exact command and
-   output, `ipa hbactest` and `ipa sudorule-show` for the rule, the client's
-   OS and `sssd --version`, the time since the apply or rule change, and whether
-   the apply ran the refresh task above or printed
-   `Report deferred authorization cache refresh` instead.
-2. **Look for an existing issue:** `gh issue list --state all --search sssd`
-   and `--search sss_cache`; read #95 and #114.
+   output, root's `sudo -l -U <user> -- <command>` on the client, `ipa
+   hbactest` and `ipa sudorule-show`, the client's OS and `sssd --version`, the
+   reconcile's exit status, and whether it printed `Report deferred
+   authorization cache refresh` (a narrowing `--tags`: run the identical apply,
+   or `--tags client-cache`, to deliver it) or `Authorization cache refresh
+   PARTIAL`.
+2. **Look for an existing issue:** `gh issue list --state all --search sssd`;
+   read #95, #114 and #214. Clients enrolled before #214 lack `ldb-tools`, which
+   the refresh needs; re-run `freeipa-client-apply.yml` on them.
 3. **File or report the bug** per `filing-policy.md`: add your facts to a
    matching open issue or open a new one. If you may not create issues, give the
    user the facts and a draft.
@@ -247,6 +240,11 @@ When you hit it:
    to keep diagnosing, record it in the evidence record as a deviation (what
    failed, what you ran, what passed afterwards) and keep that check's verdict
    failed.
+
+Not covered, and still SSSD behavior rather than a flush step: a revoked SSH key
+(#114), a rule changed outside Pilot, a client that is offline from FreeIPA (the
+gate reports it PARTIAL), and IPA servers and replicas, which this refresh does
+not restart.
 
 Do **not** hand-edit `sssd.conf`'s `services=` line either.
 `freeipa-client-apply.yml`'s C8 task sets it per OS family, and its comment

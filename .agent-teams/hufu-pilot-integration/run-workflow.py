@@ -48,7 +48,6 @@ for name in ("freeipa-dns-client", "freeipa-ca-trust", "reverse-proxy"):
     kind = json.loads((root / "actions" / file).read_text())["steps"][0]["action"]
     recap(scenario(file, kind, "component-" + name + "-pass-1"))
 recap(scenario("reconcile/internal-endpoint.json", "reconcile", "reconcile-internal-endpoint-pass-1"))
-remote("sudo-cache-prerequisite", "nexus", "sss_cache -E && systemctl restart sssd")
 checks = Checks()
 checks.authorization()
 checks.observability()
