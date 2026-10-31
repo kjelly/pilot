@@ -561,7 +561,9 @@
         apply:
           tags: [freeipa-client, C8]
       vars:
-        pilot_apt_packages: [sssd-tools]
+        # ldb-tools: freeipa-identity-apply reads sudoLastFullRefreshTime from
+        # the SSSD cache to prove a sudo full refresh finished (issue #214).
+        pilot_apt_packages: [sssd-tools, ldb-tools]
         pilot_apt_policy: tolerant
         pilot_apt_component: freeipa-client-sssd-tools
         pilot_apt_required_sources:
@@ -574,7 +576,7 @@
 
     - name: "FreeIPA client — install SSSD cache tools (RedHat)"
       ansible.builtin.dnf:
-        name: sssd-tools
+        name: [sssd-tools, ldb-tools]
         state: present
       when:
         - not ansible_check_mode

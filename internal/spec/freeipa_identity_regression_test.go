@@ -182,7 +182,10 @@ func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
 	for _, want := range []string{
 		"ipa_identity_refresh_sssd_cache: true",
 		`name: "Refresh SSSD caches on enrolled FreeIPA clients"`,
-		"ansible.builtin.command: sss_cache -E",
+		`- "{{ ipa_sudo_refresh_program }}"`,
+		`name: "Gate: every enrolled client finished a sudo full refresh"`,
+		"ignore_unreachable: true",
+		"ansible_connect_timeout: 5",
 		`delegate_to: "{{ item }}"`,
 		"pilot_deferred_hosts",
 		"reject('in', pilot_deferred_hosts | default([]))",

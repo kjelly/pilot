@@ -18,7 +18,17 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-27，PR #138 review 修正）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
+- 最新驗證（2026-10-31，issue #214 clients 的 sudo 快取更新）：candidate
+  `311af1003eea9ed88e9e009809c2a3de74ba3a7a`，tree `5eecafc52cb748f98653613198e3d7c2ccd2c874`；
+  在乾淨、隔離 checkout 執行。一台 AlmaLinux 9.8 provider，兩台 enrolled clients（Ubuntu
+  24.04／SSSD 2.9.4、AlmaLinux 9.8／SSSD 2.9.8）。同一個 snapshot、同一份名冊：base 在 apply
+  exit 0 後兩台 client 的 `sudo` 仍拒絕（25 秒後也是），candidate 立即允許；撤銷、直接新增使用者、
+  相同名冊零 client 操作、client 無回應與 SSSD 連不上 FreeIPA（`PARTIAL` 後重試收斂）、
+  `--check`、`--tags sudo`／`client-cache`、沒有 `ldb-tools` 的舊 client 皆通過。最後 topology
+  test identity verify **24/24 PASS（fail=0 skip=0）**，apply／冪等 `changed=0`。未涵蓋：
+  hostgroup 成員與「規則被刪」只用 `ipa` CLI 手動觀察、FreeIPA server／replica 不更新、
+  非 root 的 `become`。見 [evidence](../evidence/freeipa-identity-sudo-cache/2026-10-31-311af10.md)。
+- SSH key 快取驗證（2026-10-27，PR #138 review 修正；其後 refresh task 已由 #214 變更）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
   tree `eba8be23b181597da990e1517c35d28c525a464e`；在乾淨、隔離 checkout 執行。
 - 實際目標為三台拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 VM：`freeipa-server` group
   一台 provider，`freeipa-client` group 兩台已 enroll clients（`ansible-inventory --graph`
@@ -276,7 +286,18 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 非金鑰的授權變更（使用者資料、群組、HBAC、sudo…）要等 client 的 SSSD 快取更新才生效。
 只有選到 `identity` 或 `client-cache` 的 run（含不帶 tags 的完整 apply）會對 enrolled
-clients 執行 `sss_cache -E`。其他 tags（例如 `--tags sudo`、`--tags C9`）或
+clients 執行快取更新：`sss_cache -E`、重啟 SSSD，並等到該 client 自己的
+`sudoLastFullRefreshTime` 不早於重啟時間（每台上限 60 秒，`ipa_identity_sudo_refresh_timeout`；
+只有 `sss_cache -E` 不會讓新套用的 sudo 規則出現，見 issue #214）。任何一台沒完成就以
+`Authorization cache refresh PARTIAL` 失敗並列出那些 client，下一次相同的 apply 會重做。
+client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client 沒有它時，這一步會以
+`ldbsearch not found; … re-run freeipa-client-apply.yml` 失敗並列為 PARTIAL，重跑一次 client apply 即可）。
+成本：clients 是逐台序列處理，每台約 10 秒（SSSD 啟動後約 10 秒才做 sudo full refresh）；一台無回應
+最多 90 秒、SSSD 連不上 FreeIPA 最多 60 秒。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
+（Ubuntu 24.04、AlmaLinux 9.8，各約 680 次對已快取使用者的 `getent`／`id`，間隔 50 毫秒）沒有失敗；
+PAM／SSH 登入與尚未快取的使用者沒有測，clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
+FreeIPA server 與 replica 不會被重啟（它們的 sudo 快取仍照 SSSD 自己的週期）。
+其他 tags（例如 `--tags sudo`、`--tags C9`）或
 `--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
 並印出 `Report deferred authorization cache refresh` 提示；下一次選到 `identity`/
 `client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。`-e
@@ -1021,13 +1042,12 @@ ssh alice@<enrolled-host>        # 無需該主機上有 authorized_keys 即可�
 同一次 play 內所有後續 `ipa` 指令都用這個 ticket，不受影響）。
 
 **改完 sudo rule 的屬性（host/cmd/runas category、attach 的 host/command/使用者）後，
-已經 enroll 過的 client 不會馬上反映**——SSSD 的 sudo provider 有自己的快取
-TTL，即使 server 端 LDAP 已經是新值，client 上跑 `sudo` 可能還是照舊規則判斷，
-在快取過期前一直看到（錯誤的）結果。要立刻驗證，在該 client 上執行：
-
-```bash
-sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server 拉 sudo 規則
-```
+已經 enroll 過的 client 的 SSSD sudo 快取不會自己馬上更新**（smart refresh 15 分鐘、
+full refresh 6 小時）。不需要手動清快取：選到 `identity` 或 `client-cache` 的 apply 在結束前
+會對每台 enrolled client 做完上面的 sudo full refresh，exit 0 之後 `sudo -n` 就反映新規則
+（新增與撤銷都是）。若 apply 因 `--tags` 縮小而只印出 `Report deferred authorization cache
+refresh`，或以 `PARTIAL` 失敗，重跑相同的 apply（或 `--tags client-cache`）即可，不要手動
+`sss_cache -E && systemctl restart sssd` 然後把結果記成通過。
 
 ---
 

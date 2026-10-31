@@ -1295,13 +1295,13 @@ for the `ALICE_PASSWORD` env var in the repeatable form. No roster edit is neede
   wrong-password attempt never gets past `pam_sss(sshd:auth): authentication failure` in the first
   place, and only proves the password was wrong.
 
-If `ipa hbactest` allows sudo but the first live sudo lookup is denied, use the SSSD cache recovery
-in §6 and repeat both checks. **Expect this on every fresh run, not occasionally** (round 23: the
-spotcheck scored 6/8 with both alice-sudo rows failing `sudo: a password is required`, then 8/8
-immediately after `sss_cache -E && systemctl restart sssd` on `nexus`, with no roster change in
-between). Confirm it is the cache and not the NOPASSWD authoring gap first — `ipa sudorule-show`
-showing `Sudo Option: !authenticate` already attached means cache; no options at all means §6's
-NOPASSWD row.
+The identity reconcile now converges the clients' sudo rules itself (issue #214): when it changed
+authorization data it expires the SSSD cache on every enrolled client, restarts SSSD there and waits,
+with a bound of 60 s per client, until that client's sudo full refresh finished. Run the checks below
+**after the reconcile exited 0**, with no manual cache step. If `ipa hbactest` allows sudo but the
+live sudo lookup is still denied after a successful reconcile, that is a defect, not a step to
+skip: capture the facts in §6's SSSD row and report it. Do not flush by hand and record a pass.
+(Rounds 13, 23 and 31 recorded the old flush as a gotcha; their evidence records are unchanged.)
 
 Repeatable form: `ALICE_PASSWORD='...' ./scripts/minimal-poc-section4-spotcheck.sh` (see the
 script's own header for the full env var list — `ALICE_SUDO_CMD` in particular must match whatever
@@ -1463,16 +1463,14 @@ documents for Loki's `host` label. Grepping the snapshot list for the literal st
 2. Confirm `ipa hbactest` and live login/authorization both lose the intended grant without
    changing the user's personalized password state.
 3. Restore membership and add one new allowed sudo command in the same roster edit; reconcile.
-4. Confirm both membership and command drift are corrected in effective state. A newly-added sudo
-   command may need a client-side `sss_cache -E && systemctl restart sssd` before it takes effect
-   live (§6) — that is a cache-staleness gotcha, not evidence the reconcile itself failed. **A
-   second, easily-confused failure mode, confirmed live 2026-08-12**: the roster grants an
+4. Confirm both membership and command drift are corrected in effective state; the reconcile
+   refreshes the clients' sudo rules before it exits (§4.1), so no client-side cache step belongs
+   here. **A different, easily-confused failure mode, confirmed live 2026-08-12**: the roster grants an
    exact-match (non-wildcarded) command string, and sudoers matches the full command line —
    testing with any extra CLI argument the roster didn't grant (e.g. adding `--no-pager` to a
    granted `systemctl status <unit>`) produces the identical `sudo: a password is required`
-   symptom as real cache staleness. Distinguish with `sudo -n -l` (shows the rule as `NOPASSWD`
-   regardless of which symptom you're hitting) and by retrying with the exact declared command
-   string before concluding the cache needs a flush.
+   symptom as a missing rule. Distinguish with root's `sudo -l -U <user>` (it lists the rule only when
+   the client has it) and by retrying with the exact declared command string.
 5. Reconcile again without changing the roster and record the real changed count.
 
 Do not round residual changes down to zero. Explain every repeatable non-idempotent task in the
@@ -1592,7 +1590,7 @@ fixed upstream — on a current checkout you can skip it entirely.
 |---|---|---|
 | `pilot vm-target topology up` fails with `services: Harbor is unreachable: ... connection refused`, moments after `pilot services status` reported `running=true` | **Suspected implementation defect, reported not fixed (round 19, 2026-08-06).** The dev-lite Harbor containers had actually exited (`Exited (128)` ~28h earlier) but `services status`'s health signal did not reflect it; the first real signal came from `topology up`'s own consumer-side connectivity check. | `./pilot services down && ./pilot services up --profile dev-lite` (full recreate), then retry. To tell a real outage from this reporting gap, check container state directly — `docker ps --format '{{.Names}}\t{{.Status}}' \| grep dev-lite` — and expect every Harbor container plus `pulp` and `apt-cacher-ng` to read `Up ... (healthy)`; the round-19 incident showed `Exited (128)` there while `services status` still said `running=true`. Round 22 confirmed a genuinely healthy stack this way. Don't probe an HTTP health path for this — the earlier wording said to, without naming one, and a guessed path returns 404 on a healthy Harbor. `topology up` with `services: local` is fail-closed, so it is the authoritative test either way. A future round should investigate `services status`'s health-check implementation. |
 | Site-wide deploy's real apply fails `nexus`'s `freeipa-client` with `Joining realm failed: Operations error: Error checking for attribute uniqueness` | Transient FreeIPA/389-ds LDAP contention when two `freeipa-client` hosts run `ipa-client-install` concurrently against the same server (default `ANSIBLE_FORKS=20` runs both in one play). The losing host is then excluded from every later play in that run, cascading into unrelated-looking failures on it (e.g. `wazuh-fim` agent-auth failing because `wazuh-manager` never applied). | Re-run `pilot deploy` — site-wide is idempotent, already-applied hosts report `changed=0`, and only one host is left to enroll so it no longer races. Not a topology/bring-up defect. |
-| First live sudo is denied although `ipa hbactest --service=sudo` allows it — **or** a *newly applied* sudo rule fails `sudo: a password is required` even though `ipa sudorule-show`/`sudo -n -l` show it attached with `!authenticate` | Stale SSSD sudo cache. Applies both on first enrollment and after every sudo-rule change. | `sss_cache -E && systemctl restart sssd` on the **client host being sudo'd into** (not the FreeIPA server), then repeat the live and authoritative checks. Do **not** add `sudo` to `sssd.conf` `services=` — the sudo responder is socket-activated and that edit breaks its socket. |
+| `sudo -n` is denied (`sudo: a password is required`) although `ipa hbactest --service=sudo` allows it and `ipa sudorule-show` shows the rule with `!authenticate` — **after** the identity reconcile exited 0 | A defect (issue #214 fixed the known cause: `sss_cache -E` does not fetch a rule that newly applies, so the reconcile now also restarts SSSD and waits for the sudo full refresh). Other causes: the exact-command mismatch in §4.1 step 4, or the reconcile ran with a narrowing `--tags` and printed `Report deferred authorization cache refresh` | Capture first: the command and output, `sudo -l -U <user>` as root on the client, `ipa sudorule-show`, `sssd --version`, and the reconcile's exit status and whether it printed `Authorization cache refresh PARTIAL` or the deferred-refresh notice. If it was deferred or PARTIAL, run the identical reconcile again (or `--tags client-cache`): it repeats the refresh on every enrolled client. Do **not** flush by hand and record a pass; report the facts. Do **not** add `sudo` to `sssd.conf` `services=` — the sudo responder is socket-activated and that edit breaks its socket. |
 | `pilot deploy --dir ...` is rejected | `deploy` takes an inventory with `-i`; `--dir` belongs to authoring commands such as `pilot edit` | Use the §3.4 invocation. |
 | Site deploy asks to confirm auto-detected host variables | Derived from inventory; distinct from the manual extra-`-e` field | Accept the detected values; keep the manual field empty. If a required value is not derived, stop and fix inputs. |
 | Identity reconcile reports `failed=0` but all mutation tasks skip | `freeipa_roster_file` is not set as a host var on the target (§2). Independent of the vars-file prompt — selecting `.vault/main.yaml` there is correct for a canonical roster on either schema version and does not by itself cause a skip. | Confirm `freeipa_roster_file` is set on the managed host, not just which file was picked at the prompt. |
