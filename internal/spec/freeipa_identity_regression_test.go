@@ -191,7 +191,7 @@ func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
 		`name: "Resolve the enrolled clients for the sudo full refresh"`,
 		"reject('in', ipa_sudo_deferred_hosts)",
 		"from_json)",
-		`loop: "{{ ipa_sudo_refresh_clients }}"`,
+		`loop: "{{ ipa_sudo_refresh_clients | default([]) }}"`,
 		"become: true",
 		"become_method: ansible.builtin.sudo",
 		"- not ansible_check_mode",

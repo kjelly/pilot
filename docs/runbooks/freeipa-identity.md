@@ -295,7 +295,10 @@ issue #214。舊的 SSSD 實例在重啟當秒寫入的值、或時鐘往回調�
 client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client 沒有它時，這一步會以
 `ldbsearch not found; … re-run freeipa-client-apply.yml` 失敗並列為 PARTIAL，重跑一次 client apply 即可）。
 成本：clients 是逐台序列處理，每台約 10 秒（SSSD 啟動後約 10 秒才做 sudo full refresh）；一台無回應
-最多 90 秒、SSSD 連不上 FreeIPA 最多 60 秒。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
+最多 90 秒、SSSD 連不上 FreeIPA 最多 60 秒。`sss_cache -E` 或重啟失敗（含逾時）時，helper 會再用
+`systemctl is-active sssd` 檢查 SSSD 的實際狀態，沒在跑就啟動它，並把結果寫進錯誤訊息
+（`SSSD is active`、`SSSD was inactive and was started`、`… could not be started`）；該 client 仍然列為
+PARTIAL，不會因此被當成已完成。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
 （Ubuntu 24.04、AlmaLinux 9.8，各約 680 次對已快取使用者的 `getent`／`id`，間隔 50 毫秒）沒有失敗；
 PAM／SSH 登入與尚未快取的使用者沒有測，clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
 FreeIPA server 與 replica 不會被重啟（它們的 sudo 快取仍照 SSSD 自己的週期）。

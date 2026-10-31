@@ -73,6 +73,19 @@ func readSudoRefreshProgram(t *testing.T) string {
 	return string(program)
 }
 
+// systemctlCallsOf returns the fake systemctl's calls in order, as "<host> <args>".
+func systemctlCallsOf(t *testing.T, dir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "systemctl-calls"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
 // restartsOf returns the hosts whose SSSD the fake systemctl restarted.
 func restartsOf(t *testing.T, dir string) []string {
 	t.Helper()
@@ -132,8 +145,8 @@ func TestRegression_IdentitySSHCacheSudoRefreshHelper(t *testing.T) {
 			"did not complete within 3s (sudoLastFullRefreshTime before=1, restarted at", true},
 		{"no full refresh ever completed: container has no marker", func(w func(string, string)) { w("ldb-mode-h", "ldbsearch-no-container") },
 			"now=None", true},
-		{"restart fails", func(w func(string, string)) { w("fail-restart-h", "") }, "systemctl failed (rc=5)", true},
-		{"cache expiry fails", func(w func(string, string)) { w("fail-global-h", "") }, "sss_cache failed (rc=9)", false},
+		{"restart fails", func(w func(string, string)) { w("fail-restart-h", "") }, "systemctl restart sssd failed (rc=5)", true},
+		{"cache expiry fails", func(w func(string, string)) { w("fail-global-h", "") }, "sss_cache -E failed (rc=9)", false},
 		// The race behind the review of #222: the stopping instance records a
 		// refresh in the restart's second and the new one never refreshes.
 		// "Not older than the restart" read that as the start-up refresh.
@@ -193,6 +206,98 @@ func TestRegression_IdentitySSHCacheSudoRefreshHelper(t *testing.T) {
 			}
 		})
 	}
+
+	// A restart that fails or is killed by the helper's own timeout can leave
+	// SSSD stopped, and the restart job may go on after systemctl is killed. So
+	// the helper reads the unit state after the failure, starts SSSD again when
+	// it is down, says which in the error, and still fails (PARTIAL).
+	for _, tc := range []struct {
+		name  string
+		setup func(write func(name, value string))
+		want  string
+		calls []string // systemctl calls after the failure
+		down  bool     // SSSD is still stopped afterwards
+	}{
+		{"the restart fails and SSSD is running", func(w func(string, string)) { w("fail-restart-h", "") },
+			"systemctl restart sssd failed (rc=5); SSSD is active", []string{"h is-active sssd"}, false},
+		{"the restart fails and leaves SSSD stopped: it is started again", func(w func(string, string)) { w("fail-restart-h", "down") },
+			"systemctl restart sssd failed (rc=5); SSSD was inactive and was started", []string{"h is-active sssd", "h start sssd"}, false},
+		{"the restart fails, SSSD is stopped and cannot be started", func(w func(string, string)) { w("fail-restart-h", "down"); w("fail-start-h", "") },
+			"SSSD was inactive and could not be started (systemctl start rc=1)", []string{"h is-active sssd", "h start sssd"}, true},
+		{"the restart hangs until the helper kills it: the state is read afterwards", func(w func(string, string)) { w("hang-restart-h", "down") },
+			"systemctl restart sssd timed out; SSSD was inactive and was started", []string{"h is-active sssd", "h start sssd"}, false},
+	} {
+		t.Run("sssd state/"+tc.name, func(t *testing.T) {
+			dir, write := setup(t)
+			tc.setup(write)
+			stdout, stderr, rc := runSudoRefreshHelper(t, program, "h", input)
+			if rc != 1 || !strings.Contains(stderr, tc.want) || strings.Contains(stdout, "converged") {
+				t.Fatalf("rc=%d stdout=%q stderr=%q; want exit 1 with %q", rc, stdout, stderr, tc.want)
+			}
+			calls := systemctlCallsOf(t, dir)
+			if len(calls) < 1 || calls[0] != "h restart sssd" || !slices.Equal(calls[1:], tc.calls) {
+				t.Fatalf("systemctl calls = %q; want a restart then %q", calls, tc.calls)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "sssd-down-h")); (err == nil) != tc.down {
+				t.Fatalf("SSSD stopped afterwards = %v; want %v", err == nil, tc.down)
+			}
+		})
+	}
+	t.Run("sssd state/the cache expiry fails: SSSD was never touched and is checked", func(t *testing.T) {
+		dir, write := setup(t)
+		write("fail-global-h", "")
+		_, stderr, rc := runSudoRefreshHelper(t, program, "h", input)
+		if rc != 1 || !strings.Contains(stderr, "sss_cache -E failed (rc=9); SSSD is active") {
+			t.Fatalf("rc=%d stderr=%q", rc, stderr)
+		}
+		if got := systemctlCallsOf(t, dir); !slices.Equal(got, []string{"h is-active sssd"}) {
+			t.Fatalf("systemctl calls = %q; want only the state check, no restart", got)
+		}
+	})
+
+	// Only the read before the restart fails fast. While SSSD comes up a read
+	// can fail; that is retried until the deadline, and the last error is
+	// reported when the refresh never shows.
+	pollsOf := func(t *testing.T, dir string) int {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "ldb-polls-h"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	t.Run("reads that fail while SSSD comes up are retried", func(t *testing.T) {
+		dir, write := setup(t)
+		write("ldb-fail-after-restart-h", "3")
+		stdout, stderr, rc := runSudoRefreshHelper(t, program, "h", input)
+		if rc != 0 || !strings.Contains(stdout, `"converged": true`) {
+			t.Fatalf("rc=%d stdout=%q stderr=%q", rc, stdout, stderr)
+		}
+		if n := pollsOf(t, dir); n < 4 {
+			t.Fatalf("ldbsearch ran %d times after the restart; want the 3 failures and then the polls that converged", n)
+		}
+	})
+	t.Run("reads that keep failing after the restart end at the deadline with the last error", func(t *testing.T) {
+		dir, write := setup(t)
+		write("ldb-fail-after-restart-h", "always")
+		stdout, stderr, rc := runSudoRefreshHelper(t, program, "h", input)
+		for _, want := range []string{"did not complete within 3s", "before=1, restarted at",
+			"last read error: cannot read the SSSD sudo cache (ldbsearch rc=1)"} {
+			if rc != 1 || !strings.Contains(stderr, want) {
+				t.Fatalf("rc=%d stdout=%q stderr=%q; want exit 1 with %q", rc, stdout, stderr, want)
+			}
+		}
+		if n := pollsOf(t, dir); n < 5 {
+			t.Fatalf("only %d reads after the restart: the helper gave up at the first error", n)
+		}
+		if got := restartsOf(t, dir); !slices.Equal(got, []string{"h"}) {
+			t.Fatalf("restarts = %v", got)
+		}
+	})
 
 	// Mutation: the pre-#214 behaviour (expire only, no restart) must be
 	// rejected by the helper's own check, because the marker never moves.
@@ -335,12 +440,14 @@ func TestRegression_IdentitySSHCacheSudoRefreshTaskShape(t *testing.T) {
 	if _, shadowed := plays[0]["vars"].(map[string]any)["ipa_identity_sudo_refresh_timeout"]; shadowed {
 		t.Error("ipa_identity_sudo_refresh_timeout is a play var: it would shadow an inventory value (AGENTS.md 4.5 item 3)")
 	}
-	var resolve, refresh, gate map[string]any
+	var resolve, refresh, gate, ack map[string]any
 	var walk func([]any)
 	walk = func(all []any) {
 		for _, value := range all {
 			task, _ := value.(map[string]any)
 			switch task["name"] {
+			case "Acknowledge legacy authorization cache recovery":
+				ack = task
 			case sudoRefreshResolve:
 				resolve = task
 			case "Refresh SSSD caches on enrolled FreeIPA clients":
@@ -372,8 +479,11 @@ func TestRegression_IdentitySSHCacheSudoRefreshTaskShape(t *testing.T) {
 	// (a substring test on the deferred hosts hid client-1 behind client-10 in
 	// both). The resolving task is a setter for tasks carrying the same tags
 	// and conditions, so it runs whenever they do (AGENTS.md 4.4).
-	if got := strings.TrimSpace(fmt.Sprint(refresh["loop"])); got != "{{ ipa_sudo_refresh_clients }}" {
-		t.Errorf("refresh loop must read the resolved client list, got %q", got)
+	// default([]) on the loop only: an undefined loop fails the task with
+	// "'item' is undefined" even when its `when` is false (--check, option off).
+	// The gate must stay strict so a missing list fails the apply.
+	if got := strings.TrimSpace(fmt.Sprint(refresh["loop"])); got != "{{ ipa_sudo_refresh_clients | default([]) }}" {
+		t.Errorf("refresh loop must read the resolved client list (empty when it was not resolved), got %q", got)
 	}
 	gateVars, _ := gate["vars"].(map[string]any)
 	if got := strings.TrimSpace(fmt.Sprint(gateVars["ipa_sudo_refresh_expected"])); got != "{{ ipa_sudo_refresh_clients }}" {
@@ -396,9 +506,37 @@ func TestRegression_IdentitySSHCacheSudoRefreshTaskShape(t *testing.T) {
 			t.Errorf("deferred hosts passed as a string must be parsed as JSON (missing %q): %s", want, deferred)
 		}
 	}
-	for _, key := range []string{"tags", "when"} {
-		if fmt.Sprint(resolve[key]) != fmt.Sprint(refresh[key]) || fmt.Sprint(resolve[key]) != fmt.Sprint(gate[key]) {
-			t.Errorf("resolve, refresh and gate must share %s: %v / %v / %v", key, resolve[key], refresh[key], gate[key])
+	// The acknowledgement clears the obligation only when no client was left
+	// out, judged from the same list. It runs without the dirty condition the
+	// refresh and the gate have, so the resolving task must not have it either
+	// (the list would be undefined for the acknowledgement), and every
+	// condition of the resolving task must be one the acknowledgement also has.
+	if ack == nil {
+		t.Fatal("the acknowledgement task is missing")
+	}
+	ackWhen := fmt.Sprint(ack["when"])
+	if !strings.Contains(ackWhen, "difference(ipa_sudo_refresh_clients)") || strings.Contains(ackWhen, "pilot_deferred_hosts") {
+		t.Errorf("the acknowledgement must judge deferred clients from the resolved list, got %s", ackWhen)
+	}
+	for _, key := range []string{"tags"} {
+		for name, task := range map[string]map[string]any{"refresh": refresh, "gate": gate, "acknowledgement": ack} {
+			if fmt.Sprint(resolve[key]) != fmt.Sprint(task[key]) {
+				t.Errorf("resolve and %s must share %s: %v / %v", name, key, resolve[key], task[key])
+			}
+		}
+	}
+	resolveWhen, _ := resolve["when"].([]any)
+	if len(resolveWhen) == 0 {
+		t.Fatal("the resolving task has no conditions")
+	}
+	for _, condition := range resolveWhen {
+		for name, task := range map[string]map[string]any{"refresh": refresh, "gate": gate, "acknowledgement": ack} {
+			if conditions, _ := task["when"].([]any); !slices.Contains(conditions, condition) {
+				t.Errorf("resolve has the condition %v that the %s task does not: the %s task could run without the list", condition, name, name)
+			}
+		}
+		if strings.Contains(fmt.Sprint(condition), "dirty") {
+			t.Errorf("the resolving task must not wait for dirty (the acknowledgement does not): %v", condition)
 		}
 	}
 	if !strings.Contains(fmt.Sprint(gateVars["ipa_sudo_refresh_unfinished"]), "difference(") {
@@ -509,6 +647,12 @@ func TestRegression_IdentitySSHCacheSudoRefreshPlaybook(t *testing.T) {
 		t.Helper()
 		if (result.rc == 0) != success {
 			t.Fatalf("%s: rc=%d failures=%v\n%s", label, result.rc, result.failures, result.raw)
+		}
+		// The refresh task ignores its own errors for the gate to collect, so a
+		// run that succeeds must not have recorded any: a preview that prints
+		// "'item' is undefined" and goes on is not a clean preview.
+		if success && len(result.failures) != 0 {
+			t.Fatalf("%s: succeeded but recorded failures %v\n%s", label, result.failures, result.raw)
 		}
 		if got := restartsOf(t, dir); !slices.Equal(got, restarted) {
 			t.Fatalf("%s: restarted %v; want %v\n%s", label, got, restarted, result.raw)
@@ -630,15 +774,26 @@ func TestRegression_IdentitySSHCacheSudoRefreshPlaybook(t *testing.T) {
 // task and gate run through real Ansible with colliding host names and that
 // exact argv form; the refresh helper itself is a stand-in here (it is covered
 // by TestRegression_IdentitySSHCacheSudoRefreshHelper and the playbook test),
-// so a run costs milliseconds, not seconds per client.
+// so a run costs milliseconds, not seconds per client. The acknowledgement that
+// clears the durable obligation is the production task with the production
+// journal helper: it must not run while a client is deferred (the same string
+// made `intersect` always empty, so it always ran), and must run, reading a
+// defined client list, when nothing was dirty.
 func TestRegression_IdentitySSHCacheSudoRefreshDeferredHosts(t *testing.T) {
 	dir := t.TempDir()
 	write := installSSHCacheFakes(t, dir)
 	hosts := []string{"client-1", "client-10", "client-2"}
 	tasks := localSudoRefreshClients(hosts...)
-	tasks = append(tasks, sudoRefreshProductionTasks(t, dir, sudoRefreshResolve, "Refresh SSSD caches on enrolled FreeIPA clients", sudoRefreshGate)...)
+	tasks = append(tasks, sudoRefreshProductionTasks(t, dir, sudoRefreshResolve, "Refresh SSSD caches on enrolled FreeIPA clients",
+		sudoRefreshGate, "Acknowledge legacy authorization cache recovery")...)
+	cacheHelper, err := os.ReadFile("../../playbooks/apply/files/freeipa-ssh-key-cache.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "journal.json")
 	vars := withSudoRefresh(t, map[string]any{"ipa_domain": "ipa.pilot.internal", "stage": "sandbox",
-		"ipa_identity_refresh_sssd_cache": true, "sudo_test_dirty": true})
+		"ipa_identity_refresh_sssd_cache": true, "sudo_test_dirty": true,
+		"ipa_ssh_cache_program": string(cacheHelper), "ipa_identity_ssh_cache_state_file": statePath})
 	// A refresh that records the host it ran on and fails when no-refresh-<host>
 	// exists, standing in for the helper (same stdin, same exit contract).
 	vars["ipa_sudo_refresh_program"] = `import json, os, sys
@@ -648,10 +803,21 @@ with open(d + '/restarts', 'a') as f:
     f.write(host + '\n')
 sys.exit(1 if os.path.exists(d + '/no-refresh-' + host) else 0)
 `
-	run := func(args ...string) ag82Run {
+	// Every run starts with the obligation recorded, as after a change.
+	runFrom := func(pending bool, args ...string) ag82Run {
 		t.Helper()
 		_ = os.Remove(filepath.Join(dir, "restarts"))
+		write("journal.json", fmt.Sprintf(`{"version": 1, "domain": "ipa.pilot.internal", "users": {}, "auth_pending": %v}`, pending))
 		return runGatewayTasks(t, dir, tasks, vars, nil, args...)
+	}
+	run := func(args ...string) ag82Run { t.Helper(); return runFrom(true, args...) }
+	pending := func() bool {
+		t.Helper()
+		state, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(state), `"auth_pending": true`)
 	}
 	// pilotForm is pilot's argv for a deferred set: sorted, compact JSON, one
 	// key=value extra var.
@@ -673,6 +839,9 @@ sys.exit(1 if os.path.exists(d + '/no-refresh-' + host) else 0)
 		t.Helper()
 		if (result.rc == 0) != success {
 			t.Fatalf("%s: rc=%d failures=%v\n%s", label, result.rc, result.failures, result.raw)
+		}
+		if success && len(result.failures) != 0 {
+			t.Fatalf("%s: succeeded but recorded (ignored) failures %v\n%s", label, result.failures, result.raw)
 		}
 		if got := restartsOf(t, dir); !slices.Equal(got, want) {
 			t.Fatalf("%s: refreshed %v; want %v (failures=%v)", label, got, want, result.failures)
@@ -696,10 +865,19 @@ sys.exit(1 if os.path.exists(d + '/no-refresh-' + host) else 0)
 		if deferred == nil {
 			deferred = []string{}
 		}
-		contacted(label+" (pilot's key=value form)", run(pilotForm(deferred...)...), true, tc.want...)
-		contacted(label+" (list)", run(listForm(deferred...)...), true, tc.want...)
+		// The obligation is cleared only when every enrolled client was
+		// refreshed: with any client deferred it stays for a later apply.
+		for form, args := range map[string][]string{"pilot's key=value form": pilotForm(deferred...), "list": listForm(deferred...)} {
+			contacted(label+" ("+form+")", run(args...), true, tc.want...)
+			if got := pending(); got != (len(tc.deferred) > 0) {
+				t.Fatalf("%s (%s): auth_pending=%v after the apply; want %v", label, form, got, len(tc.deferred) > 0)
+			}
+		}
 	}
 	contacted("pilot_deferred_hosts not given", run(), true, "client-1", "client-10", "client-2")
+	if pending() {
+		t.Fatal("nothing deferred: the obligation must be cleared")
+	}
 
 	// The gate expects exactly the clients the loop was given: client-1 fails
 	// its refresh while client-10 is deferred. It was silently dropped by the
@@ -716,8 +894,25 @@ sys.exit(1 if os.path.exists(d + '/no-refresh-' + host) else 0)
 	if !strings.Contains(got, `[\"client-1\"]`) || strings.Contains(got, "client-10") || !strings.Contains(got, "PARTIAL") {
 		t.Fatalf("gate must name exactly client-1: %v", failed.failures)
 	}
+	if !pending() {
+		t.Fatal("a client failed its refresh: the obligation must stay")
+	}
 	if err := os.Remove(filepath.Join(dir, "no-refresh-client-1")); err != nil {
 		t.Fatal(err)
+	}
+
+	// Nothing dirty: the refresh and the gate do not run, the acknowledgement
+	// does. It reads the resolved list, so that must be defined here too, and
+	// with a client deferred it still does not run.
+	for _, args := range [][]string{
+		{"-e", `{"sudo_test_dirty": false}`},
+		append(pilotForm("client-10"), "-e", `{"sudo_test_dirty": false}`),
+	} {
+		clean := runFrom(false, args...)
+		contacted("nothing dirty", clean, true)
+		if pending() {
+			t.Fatal("nothing dirty: no obligation may appear")
+		}
 	}
 
 	// A value that cannot be read as a host list fails before any client is
@@ -735,6 +930,9 @@ sys.exit(1 if os.path.exists(d + '/no-refresh-' + host) else 0)
 		}
 		if got := restartsOf(t, dir); len(got) != 0 {
 			t.Fatalf("%s: refreshed %v before failing", label, got)
+		}
+		if !pending() {
+			t.Fatalf("%s: the obligation was cleared although nothing was refreshed", label)
 		}
 	}
 }

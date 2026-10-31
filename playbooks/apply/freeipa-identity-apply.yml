@@ -4001,9 +4001,16 @@
         # as `-e pilot_deferred_hosts=["a","b"]` (key=value), which Ansible
         # types as a string: `reject('in', <that string>)` is then a substring
         # test, so a deferred `client-10` also hid `client-1` from the refresh
-        # and from the gate. A string is therefore parsed as JSON; a list (from
-        # `-e @file` or a JSON `-e`) is used as is. A value that cannot be read
-        # as a host list fails here, before any client is touched.
+        # and from the gate, and `intersect(<that string>)` is a character-set
+        # intersection that is always empty, so the acknowledgement below ran
+        # with a client deferred. A string is therefore parsed as JSON; a list
+        # (from `-e @file` or a JSON `-e`) is used as is. A value that cannot be
+        # read as a host list fails here, before any client is touched.
+        #
+        # The acknowledgement also reads this list, and it runs when nothing was
+        # dirty (the refresh and the gate do not). So this task carries only the
+        # conditions all three share (tags, check mode, the refresh option), not
+        # the dirty one: wherever the acknowledgement runs, the list is defined.
         - name: "Resolve the enrolled clients for the sudo full refresh"
           ansible.builtin.set_fact:
             ipa_sudo_refresh_clients: >-
@@ -4017,7 +4024,6 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
-            - (ipa_auth_cache_settle.stdout | from_json).dirty
           tags: [identity, client-cache]
 
         - name: "Refresh SSSD caches on enrolled FreeIPA clients"
@@ -4037,7 +4043,12 @@
           # `--limit` does not constrain delegated connections.  pilot passes
           # pilot_deferred_hosts after availability resolution so intentionally
           # offline optional clients are not re-contacted by this cross-host task.
-          loop: "{{ ipa_sudo_refresh_clients }}"
+          # default([]): the resolving task is skipped in --check and with the
+          # refresh option off, and an undefined loop makes this task fail with
+          # "'item' is undefined" before `when` is read (ignored here, but a
+          # failure in every preview). With the list empty the task is skipped.
+          # The gate has no default: if its list is missing it fails, closed.
+          loop: "{{ ipa_sudo_refresh_clients | default([]) }}"
           loop_control:
             label: "{{ item }}"
           register: ipa_sudo_refresh_results
@@ -4095,7 +4106,10 @@
             # The global receipt covers every enrolled client. A deferred
             # client has not received it; retain the dirty bit until a retry
             # delivers to all clients (failures already abort before this task).
-            - groups.get('freeipa-client', []) | intersect(pilot_deferred_hosts | default([])) | length == 0
+            # The clients refreshed are the resolved list above, which is
+            # defined whenever this task runs (same tags and the first two
+            # conditions of the resolving task).
+            - groups.get('freeipa-client', []) | difference(ipa_sudo_refresh_clients) | length == 0
           tags: [identity, client-cache]
 
         - name: "Gate: every SSH key cache pair converged"

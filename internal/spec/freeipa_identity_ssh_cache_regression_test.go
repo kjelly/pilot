@@ -289,6 +289,11 @@ func TestRegression_IdentitySSHCacheTaggedNonKeyRecovery(t *testing.T) {
 		if (result.rc == 0) != success {
 			t.Fatalf("%s %v: rc=%d failures=%v\n%s", label, args, result.rc, result.failures, result.raw)
 		}
+		// The refresh task ignores its own errors for the gate to collect: a
+		// succeeding run that recorded one is hiding a defect.
+		if success && len(result.failures) != 0 {
+			t.Fatalf("%s %v: succeeded but recorded failures %v\n%s", label, args, result.failures, result.raw)
+		}
 		if got := readSSHCacheCalls(t, dir); !slices.Equal(got, want) {
 			t.Fatalf("%s %v: cache calls=%v; want %v; failures=%v\n%s", label, args, got, want, result.failures, result.raw)
 		}
@@ -505,6 +510,16 @@ print(d.joinpath('cache',host+'-'+user).read_text(), end='')
 	//                                restart began (not the start-up refresh)
 	//   absent-until-refresh-<host>  the container has no marker until a refresh
 	//   marker-<host>                the epoch before the restart (default 1)
+	//   ldb-fail-after-restart-<host>  ldbsearch fails (rc 1) after the restart:
+	//                                the first N polls (content N) or every one
+	//                                ("always"); polls are counted in ldb-polls-<host>
+	//   fail-restart-<host>          the restart exits 5; content "down" leaves
+	//                                SSSD stopped, anything else leaves it running
+	//   hang-restart-<host>          the restart never returns (the helper kills
+	//                                it); content "down" leaves SSSD stopped
+	//   fail-start-<host>            `systemctl start sssd` exits 1
+	// Every systemctl call is logged to dir/systemctl-calls as "<host> <args>";
+	// `is-active sssd` answers from dir/sssd-down-<host>.
 	write("ldbsearch", `#!/usr/bin/env python3
 import os,re,sys,time
 from pathlib import Path
@@ -512,6 +527,12 @@ d=Path(os.environ['CACHE_TEST_DIR']); host=os.environ.get('CACHE_TEST_HOST','');
 due=d.joinpath('refresh-due-'+host)
 if due.exists() and time.time() >= float(due.read_text()):
  d.joinpath('marker-'+host).write_text(str(int(float(due.read_text())))); due.unlink()
+fails=d.joinpath('ldb-fail-after-restart-'+host); log=d.joinpath('restarts')
+if fails.exists() and log.exists() and host in log.read_text().split():
+ polls=d.joinpath('ldb-polls-'+host); n=int(polls.read_text()) if polls.exists() else 0
+ polls.write_text(str(n+1))
+ if fails.read_text().strip() == 'always' or n < int(fails.read_text()):
+  print('ldbsearch: simulated read error', file=sys.stderr); sys.exit(1)
 mode=d.joinpath('ldb-mode-'+host).read_text() if d.joinpath('ldb-mode-'+host).exists() else 'ldbsearch-marker-ubuntu-2.9.4'
 if d.joinpath('absent-until-refresh-'+host).exists() and not d.joinpath('marker-'+host).exists(): mode='ldbsearch-no-container'
 marker=d.joinpath('marker-'+host).read_text() if d.joinpath('marker-'+host).exists() else '1'
@@ -531,9 +552,22 @@ sys.exit(1 if mode == 'ldbsearch-no-db' else 0)
 import os,sys,time
 from pathlib import Path
 d=Path(os.environ['CACHE_TEST_DIR']); host=os.environ.get('CACHE_TEST_HOST','')
+with d.joinpath('systemctl-calls').open('a') as f: f.write(host+' '+' '.join(sys.argv[1:])+'\n')
+down=d.joinpath('sssd-down-'+host)
+if sys.argv[1:] == ['is-active','sssd']:
+ print('inactive' if down.exists() else 'active'); sys.exit(3 if down.exists() else 0)
+if sys.argv[1:] == ['start','sssd']:
+ if d.joinpath('fail-start-'+host).exists(): sys.exit(1)
+ if down.exists(): down.unlink()
+ sys.exit(0)
 if sys.argv[1:] != ['restart','sssd']: sys.exit(0)
 with d.joinpath('restarts').open('a') as f: f.write(host+'\n')
-if d.joinpath('fail-restart-'+host).exists(): sys.exit(5)
+for mode in ('hang-restart-', 'fail-restart-'):
+ flag=d.joinpath(mode+host)
+ if flag.exists():
+  if flag.read_text() == 'down': down.write_text('')
+  if mode == 'hang-restart-': time.sleep(30)
+  sys.exit(5)
 # The old instance stops in the next second and records the refresh it was
 # running; restart returns right after, so the helper reads the same second.
 if d.joinpath('stale-refresh-'+host).exists():
@@ -668,6 +702,15 @@ func TestRegression_IdentitySSHCacheRuntime(t *testing.T) {
 		t.Helper()
 		if (result.rc == 0) != success {
 			t.Fatalf("rc=%d failures=%v\n%s", result.rc, result.failures, result.raw)
+		}
+		if success {
+			for _, failure := range result.failures {
+				// Only the sudo refresh task's own ignored errors: the SSH key
+				// cache tasks record expected failures of their own retries.
+				if strings.HasPrefix(failure, "Refresh SSSD caches on enrolled FreeIPA clients:") {
+					t.Fatalf("succeeded but the sudo refresh recorded %v\n%s", failure, result.raw)
+				}
+			}
 		}
 		lines := readSSHCacheCalls(t, dir)
 		slices.Sort(hosts)
