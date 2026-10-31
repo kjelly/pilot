@@ -210,9 +210,9 @@ after clearing a cache, restarting a service or syncing by hand is a bug
 symptom. Issue #214 found and fixed the cause (live on Ubuntu 24.04 / SSSD
 2.9.4 and AlmaLinux 9.8 / SSSD 2.9.8): `sss_cache -E` only expires rules a
 client already holds. A rule that newly applies to a user or host (a new rule,
-a user added to an existing rule, a host added to a hostgroup a rule names)
-reaches the client only through SSSD's smart refresh (15 min), full refresh
-(6 h) or start-up. `freeipa-identity-apply.yml` therefore now restarts SSSD on
+a host added to a hostgroup a rule names) reaches the client only through
+SSSD's smart refresh (15 min), full refresh (6 h) or start-up; a user added to
+a rule the client already caches is delivered by `sss_cache -E` alone. `freeipa-identity-apply.yml` therefore now restarts SSSD on
 every enrolled client after an authorization change and waits, 60 s per client,
 until `sudoLastFullRefreshTime` in the client's cache is a new value later
 than the second the restart finished (the stopping SSSD instance's own write

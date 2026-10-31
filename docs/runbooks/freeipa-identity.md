@@ -19,15 +19,21 @@
 ## 0.5 目前有效的事實快照
 
 - 最新驗證（2026-10-31，issue #214 clients 的 sudo 快取更新）：candidate
-  `311af1003eea9ed88e9e009809c2a3de74ba3a7a`，tree `5eecafc52cb748f98653613198e3d7c2ccd2c874`；
-  在乾淨、隔離 checkout 執行。一台 AlmaLinux 9.8 provider，兩台 enrolled clients（Ubuntu
-  24.04／SSSD 2.9.4、AlmaLinux 9.8／SSSD 2.9.8）。同一個 snapshot、同一份名冊：base 在 apply
-  exit 0 後兩台 client 的 `sudo` 仍拒絕（25 秒後也是），candidate 立即允許；撤銷、直接新增使用者、
-  相同名冊零 client 操作、client 無回應與 SSSD 連不上 FreeIPA（`PARTIAL` 後重試收斂）、
-  `--check`、`--tags sudo`／`client-cache`、沒有 `ldb-tools` 的舊 client 皆通過。最後 topology
-  test identity verify **24/24 PASS（fail=0 skip=0）**，apply／冪等 `changed=0`。未涵蓋：
-  hostgroup 成員與「規則被刪」只用 `ipa` CLI 手動觀察、FreeIPA server／replica 不更新、
-  非 root 的 `become`。見 [evidence](../evidence/freeipa-identity-sudo-cache/2026-10-31-311af10.md)。
+  `077052112eb306ca3cd9ce6a502789e0b657f1ff`，tree `71094bda565ddb56c9a4493c717f76d9d53ef08b`；
+  在乾淨、隔離的 `git archive` 複本執行。AlmaLinux 9.8 provider，兩台 enrolled clients（Ubuntu
+  24.04／SSSD 2.9.4、AlmaLinux 9.8／SSSD 2.9.8），另有一組以 `pilot reconcile` 執行的 entry point 拓樸。
+  `topology test --ephemeral`（全新主機，apply 為 dirty）identity verify **24/24 PASS（fail=0 skip=0）**，
+  冪等 `changed=0`；同一個 snapshot、同一份名冊透過 playbook 比對 base 與 candidate：新規則與
+  主機加進 hostgroup 在 base 仍拒絕（25 秒後也是）、candidate 立即允許，撤銷與規則刪除兩邊都立即
+  拒絕（使用者加進既有規則在 `sss_cache -E` 就會生效，兩邊都允許）。SSSD 啟動後約 10 秒才寫
+  `sudoLastFullRefreshTime`，28 次重啟中有 27 次剛好是重啟後第 10 秒，所以新規則（嚴格晚於
+  重啟完成那一秒）不會與重啟同一秒競爭；舊規則（`>=` 重啟前取的秒）在同一秒競爭與時鐘調回時
+  誤判完成 6/6，candidate 兩者都 fail closed。client 無回應、被暫停、SSSD 連不上 FreeIPA、`restart`
+  失敗與卡住都以 `PARTIAL` 列出並可重試；`pilot reconcile` 帶 deferred optional client（別名互為前綴）
+  時略過它並保留待更新狀態；`--check`、`--tags sudo`／`client-cache`、`refresh=false`、沒有 `ldb-tools`
+  的舊 client 皆通過。未涵蓋：非 root 的 `become`、超過兩台 client、replica 延遲、自然（非注入）
+  故障、marker 欄位不存在的原生狀態、FreeIPA server／replica 不更新。見
+  [evidence](../evidence/freeipa-identity-sudo-cache/2026-10-31-0770521.md)。
 - SSH key 快取驗證（2026-10-27，PR #138 review 修正；其後 refresh task 已由 #214 變更）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
   tree `eba8be23b181597da990e1517c35d28c525a464e`；在乾淨、隔離 checkout 執行。
 - 實際目標為三台拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 VM：`freeipa-server` group
@@ -299,8 +305,9 @@ client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client
 `systemctl is-active sssd` 檢查 SSSD 的實際狀態，沒在跑就啟動它，並把結果寫進錯誤訊息
 （`SSSD is active`、`SSSD was inactive and was started`、`… could not be started`）；該 client 仍然列為
 PARTIAL，不會因此被當成已完成。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
-（Ubuntu 24.04、AlmaLinux 9.8，各約 680 次對已快取使用者的 `getent`／`id`，間隔 50 毫秒）沒有失敗；
-PAM／SSH 登入與尚未快取的使用者沒有測，clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
+（Ubuntu 24.04、AlmaLinux 9.8，各約 1 200 次對已快取使用者的 `getent`／`id`）沒有失敗；SSH 金鑰登入、
+root 的 `sudo -l -U` 與第一次對尚未快取使用者的 `getent` 在 SSSD 重啟前後約 0.2 秒內各有 1–3 次失敗，
+之後全部成功（密碼登入沒有測），clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
 FreeIPA server 與 replica 不會被重啟（它們的 sudo 快取仍照 SSSD 自己的週期）。
 其他 tags（例如 `--tags sudo`、`--tags C9`）或
 `--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
