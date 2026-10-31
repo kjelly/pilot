@@ -66,7 +66,7 @@ Evidence trust boundary: `independent: true` cannot cryptographically prove agen
 
 For a base requirement with `kind: target-run`, `target_validation.target_reuse`
 may provide the separately reviewed proof described in the
-[shared target evidence rule](../../_shared/target-evidence-reuse.md). This is the
+shared target evidence rule at `.agents/skills/_shared/target-evidence-reuse.md` (repo-root path). This is the
 only additional alternative to the evidence-only candidate delta above. The
 original `tested_revision` is retained. It does not relax reviewed HEAD/base,
 current-HEAD tests or CI; the gate verifies complete trees, scoped modes/blobs

@@ -16,6 +16,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 from issue_gate import (ISSUE_RESOLUTIONS, GateError, closes_issue, command, evaluate, references_issue,
                         resolution_problem)
 

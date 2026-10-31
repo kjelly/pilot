@@ -12,6 +12,7 @@ import json
 import re
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
