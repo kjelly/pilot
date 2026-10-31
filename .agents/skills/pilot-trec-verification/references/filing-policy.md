@@ -43,15 +43,19 @@ while driving an interactive wizard via `trec`. AGENTS.md v1.15 codifies the rul
 | Bug in a playbook (Ansible/YAML) | `playbooks/apply/*.yml` |
 | Bug in a spec row (e.g. the v6.0 / v18.0 Real bugs about row-dedup collapse) | the relevant spec file + `pilot spec --lint` |
 | Bug in a group's topology / group_vars wiring | the group_vars / inventory editor |
+| A result that is correct only after clearing a cache, restarting a service or syncing by hand ([AGENTS.md](../../../../AGENTS.md) §5.9 point 5) | a GitHub issue: search `gh issue list --state all --search <terms>` first, then add to the match or open one; if you may not create issues, report the facts to the user. Never a gotcha that names the workaround as the fix. |
 
 When a `trec` session uncovers something that turns out to be a bug in `pilot`, a
 playbook, or a spec, file it in the right place **but classify the entry as bug,
 not as trec-driver finding**. The `trec` session is the *how you found it*, not the
-*what you found*.
+*what you found*. A run that needed the bug's workaround to pass is not passing
+evidence; record the deviation and the failed verdict.
 
 ## Runbooks document the run, not the driver
 
-Operational runbooks (`docs/runbooks/*.md`) may include the
-`trec drive --script` command that was used, the `Y` keys that were pressed, and
-the real output that resulted — but **not** the driver issues encountered. Those
-go here.
+Operational runbooks (`docs/runbooks/*.md`) may say which wizard was driven and
+what was answered (for example the `Y` keys pressed), and keep a sanitized
+summary of the real result — but **not** the driver issues encountered (those go
+here), and not the per-run driver or recording itself: no link to or copy of the
+driver script, no cast filenames or paths (AGENTS.md, *Evidence recordings are
+disposable* and *Per-run wizard drivers and path removal*).

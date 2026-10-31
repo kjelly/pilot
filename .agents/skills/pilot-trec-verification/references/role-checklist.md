@@ -46,10 +46,10 @@ across multiple independent from-scratch rebuilds:
 `docs/runbooks/minimal-poc-architecture.md` v5.2, v6.0 and v7.0 each built a
 multi-host, ~19-role `hosts.yml` this way with zero hand-edited YAML.
 
-`hosts.yml` has **no** tool-endorsed hand-edit exception — unlike the vault's
-nested-YAML refusal. Treating it as one without first ruling out the proven
-method violates this skill's §0 precondition as much as silently hand-editing
-would.
+`hosts.yml` has **no** hand-edit exception — unlike the few roster fields no
+screen covers (`pilot-edit-wizard.md`). Treating it as one without first
+ruling out the proven method violates this skill's §0 precondition as much as
+silently hand-editing would.
 
 Those rounds succeeded because they toggled each role with `DOWN <n>` then
 `SPACE`. That matters structurally, not stylistically:

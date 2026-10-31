@@ -47,10 +47,12 @@ Expected concise result: `{role, head_sha, status, root_causes, changed_files, c
 - SA/Reviewer: analytical roles; no code edits, commit, push or Ready transition.
 - Coder: can edit/test/commit only its assigned worktree. Parent owns Github mutations (push/Ready) after verification.
 - Reviewer must inspect the actual current diff, not just Coder's claims, and independently assess whether the stated acceptance criteria are met.
+- Review comments Root would dispute go to the reviewer as `{url, text, path/line}` without Root's disposition or counter-evidence; compare its verdict with Root's afterwards ([review comments](review-comments.md)).
 
 ## Loop and interruption
 
 - Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round.
 - After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and move on to independent PRs.
 - Permission errors, rate limiting, pending CI, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
+- A review claim raised again without new evidence after a reviewer-confirmed dispute, or a Root/reviewer disagreement that a fresh SA diagnosis does not settle, is a **human decision**: leave Draft and report both comment URLs.
 - Do not poll indefinitely. When CI does not settle within the interactive execution or runtime is ending, persist checkpoint, leave Draft and report the specific pending checks; on future invocation resume after requerying current HEAD. This is not a quality relaxation.

@@ -11,7 +11,7 @@ Missing Issue IDs are not permission to process every open Issue.
 
 ## Claims across sessions
 
-`scripts/claim.py` keeps one claim per Issue in `$GH_WORKFLOW_CLAIM_DIR` (default `~/.cache/gh-workflow-claims/OWNER__REPO/issue-N.json`), outside every clone, so any session on the machine sees it. A claim lasts 240 minutes unless renewed; a dead session's claim expires by itself. Acquire it at `DISCOVERED`, before creating a branch. `acquire` also refuses when the remote or the scanned clone already has a branch whose name contains the Issue number (whole number: `157` matches `fix/157-x`, not `1570`) unless it is your own `--branch`. Record `token` in `checkpoint.json` next to the Issue state; a resumed run passes it back with `--token`. Keep (and `renew`) the claim while the PR is a Draft waiting for CI or follow-ups; release on `READY_FOR_REVIEW`, `DRAFT_CI_BLOCKED`/`DRAFT_PENDING` (when you stop and hand the Draft back), `EXISTING_PR`, `BLOCKED` or `INVALID`. Limits: claims only bind sessions that use this script, and the branch scan covers one clone plus the remote, so a session that never claims and never pushed is invisible; the user remains the arbiter.
+`scripts/claim.py` keeps one claim per Issue in `$GH_WORKFLOW_CLAIM_DIR` (default `~/.cache/gh-workflow-claims/OWNER__REPO/issue-N.json`), outside every clone, so any session on the machine sees it. A claim lasts 240 minutes unless renewed; a dead session's claim expires by itself. Acquire it at `DISCOVERED`, before creating a branch. `acquire` also refuses when the remote or the scanned clone already has a branch whose name contains the Issue number (whole number: `157` matches `fix/157-x`, not `1570`) unless it is your own `--branch`. Record `token` in `checkpoint.json` next to the Issue state; a resumed run passes it back with `--token`. Keep (and `renew`) the claim while the PR is a Draft waiting for CI or follow-ups; release on `READY_FOR_REVIEW`, `DRAFT_CI_BLOCKED`/`DRAFT_PENDING` (when you stop and hand the Draft back), `EXISTING_PR`, `BLOCKED`, `INVALID` or `NEEDS_DECISION`. Limits: claims only bind sessions that use this script, and the branch scan covers one clone plus the remote, so a session that never claims and never pushed is invisible; the user remains the arbiter.
 
 ## Issue-oriented state machine
 
@@ -20,12 +20,13 @@ DISCOVERED -> ANALYZED -> QUEUED -> WORKTREE_READY -> IMPLEMENTING
          -> COMMITTED -> CHECKED -> REVIEWED -> GATE_PASS
          -> PUSHED -> DRAFT_PR_CREATED -> (CI green + follow-ups done) -> READY_FOR_REVIEW
            \-> BLOCKED  (any stage; preserve evidence)
-           \-> EXISTING_PR / INVALID
+           \-> EXISTING_PR / INVALID / NEEDS_DECISION  (no PR; Issue answered, see issue-claims.md)
 ```
 
 - A P0–P2 review finding returns `REVIEWED -> IMPLEMENTING`. A new commit invalidates `CHECKED` and `REVIEWED` receipts.
 - `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes.
 - `PUSHED` is not a completed task. Confirm PR exists and references the intended issue/HEAD.
+- `INVALID` and `NEEDS_DECISION` need the reviewer's independent verdict and a reply on the Issue first ([Issue claims](issue-claims.md)). A claim raised again without new evidence after a confirmed dispute is `NEEDS_DECISION`, not another implementation or reply round.
 - If a post-PR CI check fails, repair on the same Draft PR branch; if unresolved report DRAFT_CI_BLOCKED and leave it Draft. Do not claim CI success. Only `mark_ready.py` moves a PR to Ready, and only after CI_PASSED on the exact HEAD with all follow-ups done.
 
 ## Dependency decisions
@@ -88,5 +89,5 @@ PR creation should be safe to rerun: it must detect and report an existing PR ra
 - If CI fails: Coder changes current Issue branch, commits; Root invalidates old evidence; checks/review on new SHA; push; verify same PR head and rerun CI.
 - If CI never starts or cannot be observed: report `DRAFT_PENDING` / CI unknown, not `CI_PASSED`, and keep the PR Draft.
 - Before any retry, query the existing PR using branch and Issue refs to prevent duplicates.
-- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW`. A new commit afterwards invalidates the Ready claim: re-verify immediately.
+- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, every review comment answered, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW`. A new commit afterwards invalidates the Ready claim: re-verify immediately.
 - Never auto-merge, request auto-merge, or bypass branch protection.

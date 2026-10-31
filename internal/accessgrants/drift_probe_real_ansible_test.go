@@ -32,6 +32,14 @@ const (
 	probeKinitSecret  = "K1nit-Leak-Sentinel-77"
 )
 
+// unresolvableHostSuffix turns the templated ansible_host into a name no
+// resolver answers: .invalid is reserved (RFC 6761) and the trailing dot
+// stops the search list. The bare single-label password got past name
+// resolution on a CI runner (ssh printed no "Could not resolve hostname",
+// run 41076444653), so the diagnosis assertion depended on runner DNS.
+// cmd/pilot/cmd/drift_probe_real_ansible_cli_test.go uses the same suffix.
+const unresolvableHostSuffix = ".invalid."
+
 func requireRealAnsible(t *testing.T, tools ...string) {
 	t.Helper()
 	for _, tool := range append([]string{"ansible-playbook"}, tools...) {
@@ -353,7 +361,7 @@ func TestRegression_IdentitySecretDriftProbeNeverEchoesExpandedVaultValues(t *te
 			want: []string{"ansible_connection names a connection plugin ansible does not have", "the value is withheld"}},
 		{name: "templated ansible_python_interpreter", vault: pw + "ansible_python_interpreter: \"/nonexistent/{{ ipa_admin_password }}\"\n", wantErr: true,
 			want: []string{"ansible_python_interpreter points at an interpreter that does not exist"}},
-		{name: "templated ansible_host over ssh", inventory: sshInventory, vault: pw + "ansible_host: \"{{ ipa_admin_password }}\"\n", wantErr: true,
+		{name: "templated ansible_host over ssh", inventory: sshInventory, vault: pw + "ansible_host: \"{{ ipa_admin_password }}" + unresolvableHostSuffix + "\"\n", wantErr: true,
 			want: []string{"ipa1 is unreachable", "Could not resolve hostname (check ansible_host)"}},
 		// Controls: the same shapes with values that work, and the gate.
 		{name: "control: valid ansible_connection", vault: pw + "ansible_connection: local\n"},

@@ -216,6 +216,14 @@ func TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup(t *tes
 	}
 }
 
+// unresolvableHostSuffix turns the templated ansible_host into a name no
+// resolver answers: .invalid is reserved (RFC 6761) and the trailing dot
+// stops the search list. The bare single-label password got past name
+// resolution on a CI runner (ssh printed no "Could not resolve hostname",
+// run 41076444653), so the diagnosis assertion depended on runner DNS.
+// internal/accessgrants/drift_probe_real_ansible_test.go uses the same suffix.
+const unresolvableHostSuffix = ".invalid."
+
 // TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues drives the three
 // real cobra commands (access health with --format json too) with REAL
 // ansible-playbook and an auto-detected .vault/main.yaml whose keys are
@@ -249,7 +257,7 @@ func TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues(t *testing.T) {
 			[]string{"ansible_connection names a connection plugin ansible does not have", "the value is withheld"}},
 		{"templated ansible_python_interpreter", local, pw + "ansible_python_interpreter: \"/nonexistent/{{ ipa_admin_password }}\"\n", true,
 			[]string{"ansible_python_interpreter points at an interpreter that does not exist"}},
-		{"templated ansible_host over ssh", ssh, pw + "ansible_host: \"{{ ipa_admin_password }}\"\n", true,
+		{"templated ansible_host over ssh", ssh, pw + "ansible_host: \"{{ ipa_admin_password }}" + unresolvableHostSuffix + "\"\n", true,
 			[]string{"ipa1 is unreachable", "Could not resolve hostname (check ansible_host)"}},
 		{"control: valid ansible_connection", local, pw + "ansible_connection: local\n", false, nil},
 		{"control: no password names both sources", local, "unrelated: 1\n", true,

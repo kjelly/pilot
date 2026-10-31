@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """Small, stdlib-only and testable GitHub CLI adapter for pr-review-merge."""
 from __future__ import annotations
+import base64
+import binascii
 import json
 import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
+
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+# GitHub's compare API lists at most 300 changed files for the whole comparison and says
+# nothing when it cuts the list (a 1554-commit compare of kjelly/pilot returned exactly 300).
+COMPARE_FILE_LIMIT = 300
 
 
 class GitHubError(RuntimeError):
@@ -130,6 +137,82 @@ def branch_rules(repo: Repo, base_name: str) -> list[dict[str, Any]]:
     if not all(isinstance(rule, dict) and isinstance(rule.get("type"), str) for rule in rules):
         raise GitHubError("Invalid active branch rules")
     return rules
+
+
+def _not_found(cp: subprocess.CompletedProcess[str]) -> bool:
+    """True only for gh's exact answer to a path or commit GitHub does not have.
+
+    Captured from `gh api` against kjelly/pilot: exit status 1, stdout
+    {"message":"Not Found",...,"status":"404"}, stderr "gh: Not Found (HTTP 404)". An
+    unknown ref for the contents API answers "No commit found for the ref ..." instead,
+    and every other failure (auth, rate limit, 5xx) also differs: those raise.
+    """
+    if cp.returncode != 1 or cp.stderr.strip() != "gh: Not Found (HTTP 404)":
+        return False
+    try:
+        body = json.loads(cp.stdout)
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("message") == "Not Found" and body.get("status") == "404"
+
+
+def file_at(repo: Repo, path: str, ref: str) -> bytes | None:
+    """Content of a regular file at commit `ref`, or None when GitHub has no such path there."""
+    if not COMMIT_SHA.fullmatch(ref):
+        raise ValueError(f"file_at needs a full lowercase commit SHA, got {ref!r}")
+    endpoint = f"repos/{repo.owner}/{repo.name}/contents/{quote(path, safe='/')}?ref={ref}"
+    cp = run_gh(["api", *host_args(repo), endpoint], check=False)
+    if cp.returncode != 0:
+        if _not_found(cp):
+            return None
+        raise GitHubError(f"gh api contents {path} at {ref[:12]} failed ({cp.returncode}): {cp.stderr.strip()[:300]}")
+    data = parse_json(cp.stdout, "contents")
+    if isinstance(data, list):
+        raise GitHubError(f"{path} is a directory at {ref[:12]}, not a file")
+    if not isinstance(data, dict) or data.get("type") != "file" or data.get("path") != path:
+        raise GitHubError(f"{path} at {ref[:12]} is not a regular file at that path")
+    if data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+        raise GitHubError(f"GitHub did not return the content of {path} at {ref[:12]} (file too large?)")
+    try:
+        return base64.b64decode(data["content"])
+    except (ValueError, binascii.Error) as exc:
+        raise GitHubError(f"Undecodable content for {path} at {ref[:12]}") from exc
+
+
+def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
+    """Files changed from the merge base of `base` and `head` to `head`, and whether `base` is an
+    ancestor of `head`; None when GitHub does not know one of the commits.
+
+    `files` lists both names of a rename (`previous_filename` too), like `git diff --no-renames`.
+    A comparison GitHub may have cut at COMPARE_FILE_LIMIT files raises: it cannot be verified.
+    """
+    if not (COMMIT_SHA.fullmatch(base) and COMMIT_SHA.fullmatch(head)):
+        raise ValueError("compare needs two full lowercase commit SHAs")
+    cp = run_gh(["api", *host_args(repo), f"repos/{repo.owner}/{repo.name}/compare/{base}...{head}"], check=False)
+    if cp.returncode != 0:
+        if _not_found(cp):
+            return None
+        raise GitHubError(f"gh api compare {base[:12]}...{head[:12]} failed ({cp.returncode}): {cp.stderr.strip()[:300]}")
+    data = parse_json(cp.stdout, "compare")
+    try:
+        status, behind, merge_base = data["status"], data["behind_by"], data["merge_base_commit"]["sha"]
+        entries = data["files"]
+        if status not in ("ahead", "behind", "identical", "diverged") or not isinstance(behind, int) \
+                or not isinstance(merge_base, str) or not isinstance(entries, list):
+            raise TypeError("compare fields")
+        files: list[str] = []
+        for entry in entries:
+            names = [entry["filename"]] + ([entry["previous_filename"]] if "previous_filename" in entry else [])
+            if not all(isinstance(name, str) and name for name in names):
+                raise TypeError("file name")
+            files.extend(names)
+    except (KeyError, TypeError) as exc:
+        raise GitHubError("Invalid compare response") from exc
+    if len(entries) >= COMPARE_FILE_LIMIT:
+        raise GitHubError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
+                          "the full delta cannot be verified")
+    return {"status": status, "files": files,
+            "ancestor": status in ("ahead", "identical") and behind == 0 and merge_base.lower() == base}
 
 
 def list_open_prs(repo: Repo) -> list[dict[str, Any]]:

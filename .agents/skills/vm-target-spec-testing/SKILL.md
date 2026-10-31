@@ -1,418 +1,261 @@
 ---
 name: vm-target-spec-testing
 description: |
-  Use `pilot vm-target` to test any spec (`docs/verification/<x>.md`) and
-  apply-playbook (`playbooks/apply/<x>.yml`) pair on disposable KVM VMs
-  before committing. Covers single-VM testing (one spec, one target),
-  multi-VM testing (server+client enrolled against each other), and spec
-  promotion from DRAFT to v1.0 per AGENTS.md §1/§2/§3. Use when the task
-  involves: (1) writing or modifying a verification spec that targets a
-  real host, (2) running `pilot vm-target up/run/verify/down` on a
-  playbook that has never been exercised on a VM before, (3) promoting a
-  spec out of DRAFT status, or (4) debugging `skipping: no hosts matched`
-  or spec-vs-inventory misalignment on any vm-target.
+  Test a docs/verification spec and its playbooks/apply playbook on disposable
+  KVM VMs: `pilot vm-target test` for one VM, `vm-target topology test`
+  (`--ephemeral` for fresh hosts) for multi-host or cross-playbook runs, then
+  record candidate-bound evidence. Not for feature design
+  (spec-driven-feature-workflow), runbook re-verification
+  (pilot-trec-verification), docker-target or real hosts.
 ---
 
 # vm-target-spec-testing
 
-> Generic recipe for exercising **any** spec + apply playbook pair against
-> `pilot vm-target` KVM targets. The freeipa-server/client work is the
-> first case study; the patterns here are extracted from that experience.
+Run a spec + apply-playbook pair on disposable libvirt/KVM VMs and turn the
+result into evidence that meets AGENTS.md §1. The rules live in
+[AGENTS.md](../../../AGENTS.md) and
+[docs/actual-run-evidence.md](../../../docs/actual-run-evidence.md) and win
+over this skill. Flags were checked against `--help` and
+`cmd/pilot/cmd/vm_target*.go`; re-check `--help` before relying on one.
+`pilot` means `go run ./cmd/pilot` in the checkout under test.
 
-## 0. Hard preconditions (always)
+## 0. Before you start
 
-Read `AGENTS.md` §0, §1, §2, §4. These are non-negotiable:
+Read the AGENTS.md sections your change touches; do not work from copies.
 
-- **§1.1 actual-run**: every command you write into a runbook / spec must
-  have been executed on the target environment and must have the real
-  captured output.
-- **§0.1 read inventory facts, not spec intentions**: always `show-inventory`
-  before every `run` or `verify`. The `spec-vs-inventory` regression test
-  exists for a reason.
-- **§2 fact snapshot**: every runbook gets a §0.5 fact snapshot with
-  `vm-target list`, `show-inventory`, vault keys, and an alignment decision
-  (A: fix inventory, B: fix spec).
-- **§4 playbook gate**: `ansible-playbook --syntax-check` + `--list-tags`
-  + `--check --diff` on the target before any commit.
+| Your change touches | Read |
+|---|---|
+| a command you will write into `docs/runbooks/` or `docs/verification/` | §1.1–§1.3, §2 |
+| how to run the test | §1.4 |
+| the formal evidence run | §1.2, §1.5, §7 "Evidence recordings are disposable" |
+| a new or changed spec | §3.0, §3, `docs/verification-spec-template.md` |
+| `playbooks/apply/*.yml` | §4.0 fresh-host check mode, §4.3 stage gate, §4.4 tags, §4.5 traps |
+| state another host must provide (users, sudo rules) | §4.1 fixtures |
+| a role that leaves data behind | §4.2 backup scope |
+| parsing CLI output; a gate, matcher or `changed_when` | §5.6, §5.12 |
+| a removal, revoke or cleanup path | §5.14 |
 
-The host must have `/dev/kvm`, `virsh`, `qemu-img`, `qemu-system-x86_64`,
-`cloud-localds`, an active `default` libvirt network, and the user in the
-`libvirt` group with ownership of `/var/lib/libvirt/images/pilot`.
+Host: `/dev/kvm`, `virsh`, `qemu-img`, `qemu-system-x86_64`, `cloud-localds`,
+`ssh-keygen`, an active libvirt network and a writable `--vm-dir`
+([docs/runbooks/vm-target.md](../../../docs/runbooks/vm-target.md) §2).
+`test` and `topology test` run the host's `ansible-playbook` (from `PATH`)
+and have no sandbox mode: install the collections CI installs
+(`.github/workflows/ci.yml`) and run from the checkout root so its
+`ansible.cfg` applies.
 
-### 0.1 Start host cache services once, reuse across every `up`
+### 0.1 Host-local cache services
 
-If you'll bring the same VM(s) up/down more than once in this session
-(iterating on a playbook, retrying a failed run), start the host-local
-cache stack **before** the first `vm-target up` so every VM boots against
-it instead of hitting the public internet on each `apt install`/`docker
-pull`:
+Bringing VMs up more than once? Run `pilot services up --profile dev-lite`
+(apt-cacher-ng, Pulp RPM, Harbor) and `pilot services status` once, keep the
+stack up all session, and pass `--services local` to `vm-target up` or set
+`services: local` at a topology YAML's root. It is fail-closed: a down stack
+fails `up`; fix it rather than using `--services none`. The VM-side path is
+not acceptance-tested ([vm-target.md](../../../docs/runbooks/vm-target.md)
+§2.2): do not cite it as verified in a spec.
 
-```bash
-pilot services up --profile dev-lite   # one-time, long-lived; apt-cacher-ng + Pulp RPM + Harbor
-pilot services status                  # confirm running=true before the first `up`
-```
+### 0.2 The host is shared
 
-Then pass `--services local` to every `vm-target up` (or set root-level
-`services: local` in a topology YAML — see
-`references/vm-target-basics.md`'s "Host-local cache services" section).
-It is fail-closed: if the stack isn't running/healthy, `up` errors out
-instead of silently falling back to public upstreams. A one-shot VM you
-won't reset/reiterate on can skip this and use the default `--services
-none`. **Do not `pilot services down`/`purge` between iterations of the
-same session** — `down` only stops containers (data persists, cheap to
-restart) but there's no reason to churn it while you're still using it;
-leave the stack running until you're done testing.
+`vm-target list` shows every session's VMs, not yours: clones and sessions
+share libvirt, `--vm-dir` and, by default, the data dir. Use names unique to
+this session (for example `<branch-abbrev>-<role>`) and write down every
+name you `up`. `up` refuses a name already in pilot state or libvirt.
 
-## 1. Decide the test shape
+## 1. Pick the path
 
-Every spec test fits one of three shapes. Pick the right one before
-allocating VMs.
+| Situation | Use |
+|---|---|
+| one spec, one apply playbook, one host | `up` a fresh VM, then `vm-target test` (§3) |
+| several hosts in one play, `site.yml`, specs on different groups | `topology test` (§4) |
+| fresh hosts required (new playbook; a check-mode-gated action in one playbook feeds another's gate) | `topology test --ephemeral` (§4); one node is fine |
+| a spec with no apply playbook | `vm-target verify` (§6) |
+| finding out why a run failed | `reset`/`run`/`verify` by hand (§6), then rerun the chain |
 
-### Shape 1: single-target, spec→verify only
+AGENTS.md §4.0 wants `--check --diff` against a target that never had the
+playbook. `vm-target test` checks the VM as it is and never provisions: `up`
+a new VM (or `reset` one of yours) just before it. Cross-playbook ordering
+bugs only show with `--ephemeral`. Manual `run`/`verify` has no L3, no L6
+and no rollback, so its output is not the evidence chain.
 
-You have `docs/verification/<spec>.md` but no dedicated apply playbook.
-The spec's commands run directly via `vm-target verify`.
+## 2. Read the inventory facts first
 
-```
-pilot vm-target up    --name <name> ...
-pilot vm-target verify --name <name> docs/verification/<spec>.md
-pilot vm-target down  --name <name>
-```
-
-No playbook is run; every check in the spec must be achievable from a
-fresh cloud image (or the spec must list preconditions).
-
-### Shape 2: apply playbook → verify spec (single VM)
-
-Most common. You have `playbooks/apply/<role>-apply.yml` paired with
-`docs/verification/<role>.md`. The playbook mutates the VM, then you
-verify the spec.
-
-```
-pilot vm-target up    --name <name> --disk <N> ...
-pilot vm-target run   --name <name> --sandbox playbooks/apply/<role>-apply.yml -e ...
-pilot vm-target verify --name <name> docs/verification/<role>.md
-pilot vm-target down  --name <name>
-```
-
-`--sandbox` (default for every `run` -- see "Best practices" below)
-runs `ansible-playbook` inside a throwaway Docker container instead of
-requiring ansible + collections installed on the host driving `pilot`.
-
-### Shape 3: multi-VM (server + enrolled client)
-
-Two or more VMs must be alive simultaneously, with cross-VM networking
-(server exposes a service, client enrolls against it). See
-`references/case-study-freeipa.md` for the canonical example. The
-pattern extends to any pair: database server + app, DNS server + client,
-etc.
-
-```
-pilot vm-target up --name <server-vm> --disk <N> ...
-pilot vm-target up --name <client-vm> --disk <M> ...
-
-# pin each VM's IP into the other's /etc/hosts (idempotent; safe to
-# re-run after a `vm-target reset`) — see references/multi-vm-networking.md
-pilot vm-target wire --name <server-vm> --peer <client-vm>
-pilot vm-target wire --name <client-vm> --peer <server-vm>
-
-# apply playbook to server, then enroll client against server IP
-pilot vm-target run  --name <server-vm> --sandbox playbooks/apply/<server>.yml ...
-# (client install — may be a playbook, may be exec steps copied from the spec)
-
-# verify both independently, then run cross-check (getent / curl / sudo -l)
-pilot vm-target verify --name <server-vm> docs/verification/<server>.md
-# cross-check from client against server
-pilot vm-target exec  --name <client-vm> -- <curl/getent/...>
-
-pilot vm-target down --name <client-vm>
-pilot vm-target down --name <server-vm>
-```
-
-If instead the playbook itself needs to run **against both nodes in one
-play** (e.g. `hosts: "{{ target_group | default('ipa_masters') }}"` on a
-primary+replica install), combine them into one grouped inventory
-instead of two separate `run`s:
+AGENTS.md §0.1, §1.3, §2: read the inventory you will run against, not what
+the spec intends.
 
 ```bash
-pilot vm-target run --group masters=<server-vm> --group replicas=<client-vm> \
-  --sandbox -- playbooks/apply/<role>-replica-apply.yml -e target_group=masters ...
+pilot vm-target show-inventory --name <vm>
+pilot vm-target topology status    --topology <file>
+pilot vm-target topology inventory --topology <file> --out tmp/<scenario>.inv.yaml
+yq 'keys' ~/.vault/<role>-sandbox.yaml      # key names only, never values
 ```
 
-See `references/vm-target-basics.md`'s `--group` section.
+`show-inventory` has one host, the VM name; each `--hosts` alias is a group
+holding it. `topology inventory` needs every node running; with
+`--ephemeral`, record the topology file's `groups:`. Every `-l`,
+`target_group` and `--verify` limit must name a group or host from that
+output. If the spec's §1 targets disagree, choose A or B (AGENTS.md §2.1).
 
-**3+ named roles, or a scenario you'll bring up/reset more than once**
-(e.g. FreeIPA primary+replica+client): don't hand-assemble the `up`/
-`wire`/`--group` sequence above — declare it once as a
-`vm-target topology` spec instead. See
-`references/multi-vm-networking.md`'s "Declarative topology" section.
+## 3. One VM: `vm-target test`
 
 ```bash
-pilot vm-target topology up        --topology <scenario>.yaml   # concurrent, idempotent
-pilot vm-target topology inventory --topology <scenario>.yaml   # real ansible groups
-pilot vm-target topology down      --topology <scenario>.yaml
-pilot vm-target topology reset     --topology <scenario>.yaml   # every node back to clean + re-wired, in one call
+pilot vm-target up   --name <vm> --base-image almalinux-9 --memory 4096 --hosts <group>
+pilot vm-target test --name <vm> \
+    --playbook playbooks/apply/<role>-apply.yml \
+    --spec docs/verification/<role>.md --verify-timeout 40 \
+    -- -e target_group=<group> -e @~/.vault/<role>-sandbox.yaml
 ```
 
-`snapshot`/`rollback`/`reset` also work at the topology level — every
-node concurrently, with `rollback`/`reset` auto-re-wiring afterward
-(the `clean` snapshot predates wiring). Don't `vm-target reset --name`
-each node by hand and re-run `wire` yourself to test "does this rerun
-cleanly from scratch" — that's exactly what `topology reset` automates.
+`--base-image` defaults to `ubuntu-24.04`; it also takes `ubuntu-22.04`,
+`fedora-40`, `almalinux-9`, `centos-9` or a local qcow2 path. The chain:
 
-## 2. Before every run: fact snapshot (AGENTS.md §2)
+1. L1 `ansible-playbook --syntax-check` (`--skip-lint` skips it).
+2. L3 `--check --diff` on the current state, before any snapshot.
+   `--skip-checkmode` only for a playbook that cannot run in check mode;
+   write the reason into the spec or runbook.
+3. Snapshot `pre-test-<unix-seconds>`, then L4 apply.
+4. L5 `pilot verify <spec> -i <inv> -l <limit> --allow-isolated-mutation`;
+   the limit is the VM name (a Spec v2's declared roles if it has them).
+   `--verify-timeout` is the per-row timeout; verify's default is 15 s.
+5. L6 apply again; fails unless the PLAY RECAP `changed` counts sum to 0.
+6. A failure in L4–L6 rolls back to the snapshot (`--no-rollback` keeps
+   the failed state for inspection).
+
+Arguments after `--` reach the L3, apply and idempotency runs verbatim;
+`-e target_group=<g>` drops the automatic `-l <vm>`. The VM must be running.
+After a pass it keeps the applied state and the snapshot. `test` writes no
+transcript: capture its output (§5).
+
+## 4. Several VMs or fresh hosts: `vm-target topology test`
+
+```yaml
+# docs/topologies/<scenario>.yaml
+services: local                   # optional, §0.1
+nodes:
+  - name: <abbrev>-server
+    base_image: almalinux-9       # default ubuntu-24.04
+    memory: 4096
+    groups: [<server-group>]      # the group names the playbooks and specs target
+  - name: <abbrev>-client
+    groups: [<client-group>]
+    wire: ["<abbrev>-server=<server-fqdn>"]
+```
 
 ```bash
-# 2a. Inventory facts (one per VM)
-go run ./cmd/pilot vm-target list
-go run ./cmd/pilot vm-target show-inventory --name <name>
-# for real hosts: ansible-inventory -i <inventory> --graph
-
-# 2b. Vault / external state
-yq 'keys' ~/.vault/<role>-sandbox.yaml
-
-# 2c. Alignment decision
-# If the spec's {section}1 target group set does not match the inventory's host set,
-# explicitly choose A (fix inventory by re-provisioning with the right --hosts
-# or editing the inventory file) or B (fix the spec). Write the choice in the
-# runbook. Never "pretend they align" (AGENTS.md §2.1).
+pilot vm-target topology test --topology docs/topologies/<scenario>.yaml --ephemeral \
+    --playbook playbooks/site.yml \
+    --verify docs/verification/<server>.md=<server-group> \
+    --verify docs/verification/<client>.md=<client-group> \
+    --verify-timeout 40 -- -e stage=sandbox -e @~/.vault/<scenario>-sandbox.yaml
 ```
 
-Paste these five facts into the runbook _before_ you run any ansible
-command. If the snapshot changes mid-run, update the runbook, not the
-other way around.
+- Same chain over the rendered grouped inventory. No `-l` is added; L6 sums
+  `changed` over every host. `--verify` is required and repeatable; a spec
+  without `=<limit>` is verified against the whole inventory.
+- Without `--ephemeral` it tests an existing topology (`topology up` first);
+  a failure rolls every node back and re-wires `/etc/hosts`.
+- `--ephemeral` refuses to start if a declared node name exists, provisions
+  and wires every node, runs the chain, then tears down the nodes it created,
+  pass or fail. It never rolls back. `--keep-on-failure` (only with
+  `--ephemeral`) leaves failed nodes up for you to `topology down` later.
+- The topology file (all fields:
+  [references/multi-vm-networking.md](references/multi-vm-networking.md))
+  carries VM shape and groups, not group_vars: pass inputs after `--`. A
+  node IP is unknown before `--ephemeral` provisions;
+  `scripts/topology-checkmode-test.sh` (`make poc-checkmode-test`) does
+  `topology up` → `status` → `test` → `down` instead. Those adopt, then
+  destroy, any existing VM with a declared name: check `vm-target list` first.
 
-## 3. Bring up the VMs
+## 5. Formal run: candidate freeze and evidence
 
-### 3.1 Pick the right vm-target flags
+Rules: AGENTS.md §1.2, §1.5; steps and record fields:
+[docs/actual-run-evidence.md](../../../docs/actual-run-evidence.md) §2–§3.
+Quick runs in a dirty worktree are fine while iterating.
 
-| Parameter     | Default       | When to override                                  |
-|---------------|--------------|--------------------------------------------------|
-| `--disk`      | 30 GiB        | Every spec run; 30 for servers, 20 for clients    |
-| `--memory`    | 2048 MiB      | 4096 for database / Java / container-heavy roles  |
-| `--vcpus`     | 2             | Heavy compiles -> 4                                |
-| `--ssh-user`  | root          | Set to `ubuntu` for ubuntu-24.04 cloud image       |
-| `--ssh-timeout` | 2m          | First boot -> 8m; subsequent boots -> default fine  |
-| `--boot-timeout` | 3m         | First boot -> 8m                                   |
+1. Commit the spec, playbook, regression test, fixtures and topology file as
+   a local candidate commit (no push). The topology fixes images and groups,
+   so it is execution-affecting.
+2. Check out exactly that commit, clean and isolated, and record its IDs:
+   ```bash
+   git worktree add --detach <dir> <candidate-sha>
+   cd <dir> && git status --short        # must print nothing
+   git rev-parse HEAD 'HEAD^{tree}'
+   ```
+3. From that root, read the facts (§2) and run §3 or §4 against fresh
+   targets, keeping raw output in the gitignored `.verification/`:
+   ```bash
+   mkdir -p .verification
+   go run ./cmd/pilot vm-target test ... 2>&1 | tee .verification/<feature>-test.log
+   echo "rc=${PIPESTATUS[0]}"
+   ```
+   `pilot verify` adds `.verification/<spec-stem>-<UTC>.{ndjson,md}`.
+4. Read the summary first: exit code, both PLAY RECAPs, `verdict:` lines.
+   On failure, search `FAILED!`, `fatal:`, `unreachable`, `PLAY RECAP`
+   before reading more (AGENTS.md §7).
+5. A fix means a new candidate and a rerun from step 2; old evidence is void.
+6. On a pass, commit `docs/evidence/<feature>/<date>-<short-sha>.md`
+   ([example](../../../docs/evidence/vm-target/2026-10-01-198fb03.md)) as an
+   evidence-only commit, then replace the spec's and runbook's last-verified
+   summary and link. No transcripts, no links to `.verification/`
+   (AGENTS.md §7 link rule).
+
+## 6. Debugging by hand (not evidence)
 
 ```bash
-# single VM: generic (add --services local if you started `pilot services up` per §0.1)
-go run ./cmd/pilot vm-target up     --name <name>     --ssh-user ubuntu     --disk 30 --memory 4096 --vcpus 2     --ssh-timeout 8m --boot-timeout 8m     --services local
+pilot vm-target reset  --name <vm>       # post-up "clean" checkpoint, in seconds
+pilot vm-target run    --name <vm> playbooks/apply/<role>-apply.yml --tags C3 -e ...
+pilot vm-target verify --name <vm> docs/verification/<role>.md --timeout 40
+pilot vm-target exec   --name <vm> -- sh -c '<cmd> | <filter>'   # or: ssh --name <vm>
+pilot verify --probe '<cmd>' --probe-expected '<expected>' -i tmp/<vm>.inv.yaml -l <vm>
 ```
 
-### 3.2 First-up warnings you will see (ignore them)
+- `run` takes the playbook as its first argument and adds `-i`/`-l` itself.
+  Flag parsing is off: do not pass `-i`, and do not put `--` before the
+  playbook (it becomes the playbook path). It runs `--syntax-check` with the
+  host's `ansible-playbook` first and writes a transcript in
+  `<vm-dir>/<vm>/runs/`. `--sandbox`, `--group`, `--json`:
+  [references/vm-target-basics.md](references/vm-target-basics.md).
+- `vm-target verify` does not add `--allow-isolated-mutation`; pass it for a
+  Spec v2 with isolatedMutation rows. For `--probe`, save `show-inventory`
+  output to `tmp/<vm>.inv.yaml`.
+- `reset` and `rollback` keep cached Ansible facts. `reset` also drops `wire`
+  blocks (the clean checkpoint predates wiring); `topology reset` re-wires.
 
-- `libguestfs ... supermin exited with error status 1` -- harmless; the
-  fallback uncustomized image boots fine and has python3/sudo.
-- `no active lease for MAC ...` for 20-30 s -- normal; dnsmasq takes a
-  moment.
-- `--ssh-timeout` exceeded -> the domain gets **destroyed**. Retry with
-  longer timeout the first time only.
+## 7. Cross-host behaviour
 
-### 3.3 Verify the VM is truly ready
-
-```bash
-go run ./cmd/pilot vm-target exec --name <name> -- uname -a
-go run ./cmd/pilot vm-target exec --name <name> -- sudo -n id   # passwordless sudo
-```
-
-For **Shape 3** (multi-VM), also verify cross-VM ping before applying
-any playbook:
-
-```bash
-go run ./cmd/pilot vm-target exec --name <server> -- ping -c1 <client-ip>
-go run ./cmd/pilot vm-target exec --name <client> -- ping -c1 <server-ip>
-```
-
-## 4. Dry-run the apply playbook (AGENTS.md §1.1, §4)
-
-```bash
-go run ./cmd/pilot vm-target run --name <name> --sandbox     playbooks/apply/<role>-apply.yml     -e <key>=<value> ...     -e @/home/ubuntu/.vault/<role>-sandbox.yaml     --check --diff
-```
-
-(`--check`/`--diff` forward straight through to `ansible-playbook`
-regardless of `--sandbox` — see AGENTS.md §4.)
-
-Expected in `--check`:
-- All `assert`/gate tasks: `ok`
-- `/etc/hosts` / data-dir tasks: `changed` on first run, `ok` thereafter
-- Mutate tasks under `when: not ansible_check_mode`: all `skipping`
-- `PLAY RECAP: failed=0 skipped>=0`
-
-**If `changed` > expected on a re-run, stop.** Something is not
-idempotent. Investigate the task's `regexp` / `state:` args.
-
-**Debug tip**: the playbook path is a positional arg, not a flag.  
-`pilot vm-target run --name <n> <playbook> [extra args...]` -- correct.  
-`pilot vm-target run --name <n> -i <inv> <playbook>` -- wrong (cobra
-parses `-i` as the playbook path).
-
-## 5. Real apply
-
-```bash
-go run ./cmd/pilot vm-target run --name <name> --sandbox     playbooks/apply/<role>-apply.yml     -e <key>=<value> ...     -e @/home/ubuntu/.vault/<role>-sandbox.yaml
-```
-
-Capture the full PLAY RECAP output. If the playbook fails, capture the
-failed task output and the rescue dump (if the playbook uses
-`block/rescue` per AGENTS.md §4). **Paste the real output into the
-runbook as the evidence block** -- never paste a hand-written
-"expected" version.
-
-Every run also writes the exact same output to
-`<vm-dir>/<name>/runs/<timestamp>-<playbook>.log` (path printed on
-stderr) -- `cat` that file for the evidence block instead of
-re-transcribing terminal scrollback by hand; it is the actual bytes
-ansible produced, not a paraphrase. Add `--json` if you first want a
-quick ok/changed/failed/unreachable triage line before deciding whether
-the full recap is worth capturing (not combinable with `--sandbox` in
-the same invocation -- run once with `--json` to triage, then without
-it to capture the real evidence, if you need both).
-
-## 6. Verify (spec checklist run)
-
-```bash
-go run ./cmd/pilot vm-target verify --name <name>     docs/verification/<spec>.md
-```
-
-The verify playbook is generated by `pilot spec --generate`. It is
-auto-tagged with spec row IDs (C1, C2, ...). Run it, capture the
-`.verification/<spec>-<UTC>.ndjson` output, and paste the `status=pass`
-rows into the spec's evidence-collection block.
-
-If any row is `status=fail`, consult the spec's PASS/FAIL rules and
-known deviations. **If the failure is a real bug, fix the playbook
-and re-run from §5** -- do not hand-edit the spec to pretend the fail is
-expected.
-
-## 7. Cross-check (Shape 3 only)
-
-For multi-VM specs, run the end-to-end check from the client against the
-server:
-
-```bash
-go run ./cmd/pilot vm-target exec --name <client> --     <cross-check command from the spec's SOP section>
-```
-
-The check must exercise the real service path -- e.g. `getent passwd`,
-`curl`, `sudo -l` -- not just port-listening. If the cross-check fails,
-the server's spec is not actually green, even if §6 passed all rows.
+Specs test effective behaviour (AGENTS.md §0.2): put the client-to-server
+round trip (`getent passwd`, `sudo -l`, `curl`) in a spec row verified with
+`--verify <client-spec>=<client-group>`; an ad-hoc `exec` is not evidence.
+`wire`, time sync, NAT: [multi-vm-networking.md](references/multi-vm-networking.md).
 
 ## 8. Tear down
 
-```bash
-go run ./cmd/pilot vm-target down --name <client-vm>   # if multi-VM
-go run ./cmd/pilot vm-target down --name <server-vm>
-```
+Tear down after the run, pass or fail, but only VMs this session created (or
+that the user named as disposable): `vm-target down --name <vm>`, or
+`topology down --topology <file>`, which downs every declared node.
+`--ephemeral` cleans up unless `--keep-on-failure` was set. While a playbook
+is not green, `reset` instead of `down` + `up`.
 
-**Always down after the run**, even on failure. The VM overlay is a
-qcow2 that grows with every mutation; leaving it running clutters the
-host's `virsh list`.
+`down` deletes `/var/lib/libvirt/images/pilot/<vm>/` (overlay, seed ISO, SSH
+key, run transcripts), the static DHCP reservation, the SSH control
+directory and the cached Ansible facts. Everything a playbook writes inside
+the VM, Docker bind mounts included, lives in that overlay; nothing is
+shared between host and VM, and `vm-target reset` clears state that survives
+a re-run. **Never `rm -rf` under `/var/lib/libvirt/images/pilot` by hand**:
+other sessions' VMs and the shared base images (`images/`) live there. A
+directory that survives a successful `down` is a teardown bug (AGENTS.md
+§5.14): report it with `ls -la` output; do not delete it.
 
-**Iterating on a playbook that isn't green yet?** Don't `down`+`up`
-between attempts -- `pilot vm-target reset --name <name>` reverts to the
-pristine post-`up` snapshot in seconds. Fix the playbook, `reset`, `run`
-again. Save `down` for when the spec is actually green (§9) or you're
-switching to a different base image/disk size.
+## 9. Promotion and references
 
-**If the apply playbook wrote shared state outside the VM's qcow2** (e.g.
-a bind-mounted `--data-dir`), remove it so the next run starts clean:
+After a green formal run, promote the spec with
+[references/spec-promotion-checklist.md](references/spec-promotion-checklist.md).
 
-```bash
-sudo rm -rf /var/lib/libvirt/images/pilot/<name>
-```
-
-## 9. After a green run: promote the spec
-
-When _all_ rows in §6 pass and the cross-check (if multi-VM) is green,
-promote the spec from DRAFT to v1.0. See
-`references/spec-promotion-checklist.md` -- the checklist is identical
-for every spec.
-
-## 10. Best practices (quick reference)
-
-- **Default every `run` to `--sandbox`.** Set `sandbox.image` once in
-  `~/.config/pilot/config.yaml` (e.g.
-  `geerlingguy/docker-ubuntu2204-ansible:latest`, which ships
-  `ansible-playbook` on `$PATH`) instead of repeating `--sandbox-image`
-  on every command. This keeps the host driving `pilot` free of
-  ansible/collection version drift — the container is the only thing
-  that needs to match what the playbook requires. See
-  `references/vm-target-basics.md`'s "Sandbox mode" section for the
-  `--json` incompatibility and the multi-key mount behavior under
-  `--group`.
-- **Don't hand-transcribe run output into a runbook.** Every `run`
-  writes the exact bytes to `<vm-dir>/<name>/runs/<timestamp>-<x>.log`
-  (path printed on stderr) — `cat` that for the AGENTS.md §1.1 evidence
-  block. Use `--json` only for a quick triage line, not as the evidence
-  itself.
-- **Multi-VM hostname resolution: use `vm-target wire`, not a
-  hand-typed `>> /etc/hosts`.** It resolves peer IPs from vm-target's
-  own state (never stale, never hand-copied) and replaces its block
-  idempotently, so it's safe to call again after a `reset`. Reserve the
-  `lineinfile`+`delegate_to` playbook pattern for playbooks that must
-  also run unchanged against real, already-networked hosts.
-- **A single playbook that must run against several named nodes at
-  once → `run --group`, not several separate `run`s.** Only reach for
-  it when the playbook's own `hosts:` pattern needs to see more than
-  one vm-target VM in the same play (e.g. a primary+replica install);
-  independent per-node applies (plain client/server enrollment) don't
-  need it.
-- **A named multi-VM scenario you'll bring up more than once → a
-  `vm-target topology` spec, not a hand-typed `up`/`wire`/`--group`
-  sequence.** One YAML file lists every node's image, ansible groups,
-  and wire peers; `topology up` is idempotent and provisions every
-  not-yet-running node **concurrently** (safe since the 2026-07-06
-  state-race fix — see the `pilot-vm-target-up-concurrency-race`
-  memory and AGENTS.md §5.1), and `topology inventory` gives real
-  ansible groups without a `target_group=all` workaround.
-- **Testing "does this reinstall cleanly from scratch?" on a multi-VM
-  scenario → `topology reset`, not per-VM `reset` + manual re-`wire`.**
-  `reset`/`rollback` at the topology level revert every node concurrently
-  and automatically re-apply each node's `wire:` peers afterward (the
-  `clean` snapshot predates wiring, so a bare per-VM `reset` silently
-  drops it). See `docs/runbooks/freeipa-server-replica-ha-drill.md` §11
-  for real captured output.
-- **Prefer `reset` over `down`+`up` while iterating** on a playbook
-  that isn't green yet (§8) — seconds instead of a full reprovision +
-  boot wait.
-- **Bringing the same VM(s) up more than once in a session → start
-  `pilot services up` first and pass `--services local` to every `up`**
-  (§0.1). Fail-closed, so a missing/unhealthy stack fails the `up`
-  loudly instead of quietly falling back to public upstreams — don't
-  work around a failure here by dropping to `--services none`, fix the
-  stack (`pilot services status`) instead.
-- **`--skip-syntax-check`/`--skip-lint` are for speed during rapid
-  iteration only.** Leave the (default-on) `ansible-playbook
-  --syntax-check` + `ansible-lint` preflight enabled for the run whose
-  output becomes runbook evidence, so a trivially broken playbook
-  doesn't waste a full VM round-trip before failing.
-
-## 11. Reference index
-
-1. `references/vm-target-basics.md` -- vm-target lifecycle,
-   `show-inventory` contract, timeout defaults, first-boot costs,
-   `libguestfs` supermin warning, `dnsmasq` lease behaviour, **`--sandbox`
-   mode (the default for `run`), `--json`, run transcripts, `--group`
-   multi-host inventories, and host-local cache services (`pilot
-   services` + `--services local`, §0.1 above)**.
-2. `references/spec-promotion-checklist.md` -- the AGENTS.md §3
-   checklist that applies to any spec: lint, `bash -n`, regression
-   test, evidence swap, version bump.
-3. `references/case-study-freeipa.md` -- the canonical Shape 3
-   example: freeipa-server install + client enroll. Read this before
-   tackling your first multi-VM spec (note: predates `wire`/`--group`;
-   see its superseded-steps callout and
-   `docs/runbooks/freeipa-server-replica-ha-drill.md` for the current
-   `wire`-based drill).
-4. `references/container-in-vmtesting.md` -- when your apply playbook
-   runs `community.docker.docker_container` inside a vm-target, the
-   image entrypoint, bind-mount, PATH, and pid-1 traps you will hit.
-   Not to be confused with `--sandbox` (see file 1).
-5. `references/multi-vm-networking.md` -- cross-VM `/etc/hosts` via
-   **`vm-target wire`** (recommended) or a `delegate_to` playbook task,
-   `--group` for combined multi-node inventories, **`vm-target
-   topology` for declarative multi-node scenarios** (one YAML spec ->
-   concurrent idempotent bring-up + auto-wire + grouped inventory),
-   time sync for Kerberos, libvirt `default` network pool, hostname
-   resolution in a two-node setup.
+- [vm-target-basics.md](references/vm-target-basics.md): command map,
+  inventory contract, `--sandbox`, `--json`, transcripts, `--group`, disk,
+  timeouts, first-boot warnings, host cache, clean slate, fact cache.
+- [multi-vm-networking.md](references/multi-vm-networking.md): `wire`,
+  `--group`, topology files, time sync, NAT reachability.
+- [container-in-vmtesting.md](references/container-in-vmtesting.md): traps
+  when the playbook starts containers inside the VM.
+- [case-study-freeipa.md](references/case-study-freeipa.md): the first
+  multi-VM attempt; the current drill is
+  [freeipa-server-replica-ha-drill.md](../../../docs/runbooks/freeipa-server-replica-ha-drill.md).

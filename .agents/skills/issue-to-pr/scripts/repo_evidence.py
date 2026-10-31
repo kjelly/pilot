@@ -107,6 +107,13 @@ def validate_manifest(data: Any) -> list[str]:
             errors.append(f"{label}: source (where the repository mandates it) is required")
         if "artifact_glob" in item and (e := check_glob(item["artifact_glob"], f"{label}.artifact_glob")):
             errors.append(e)
+        # Paths whose change always needs this evidence. Unlike evidence_only_paths a broad glob only
+        # makes the rule stricter, so check_glob's whole-tree probe does not apply.
+        paths = item.get("required_paths", [])
+        if not isinstance(paths, list) or not all(
+                isinstance(p, str) and p.strip() and not p.startswith("/") and ".." not in p.split("/")
+                and "\\" not in p for p in paths):
+            errors.append(f"{label}.required_paths must be a list of repository-relative globs")
     return errors
 
 
@@ -114,8 +121,8 @@ class Context:
     """Evidence rules for one gate run at a fixed HEAD."""
 
     def __init__(self, worktree: Path, head: str, manifest: dict[str, Any] | None,
-                 errors: list[str], warnings: list[str]):
-        self.worktree, self.head, self.manifest = worktree, head, manifest
+                 errors: list[str], warnings: list[str], base_ref: str | None = None):
+        self.worktree, self.head, self.manifest, self.base_ref = worktree, head, manifest, base_ref
         self.errors, self.warnings = errors, warnings
         self.accepted: list[dict[str, Any]] = []
         self._cache: dict[str, list[str] | None] = {}
@@ -151,7 +158,7 @@ class Context:
                         if bad:
                             errors += [f"{MANIFEST_PATH} on {base_ref}: {e}" for e in bad]
                             manifest = None
-        return cls(worktree, head, manifest, errors, warnings)
+        return cls(worktree, head, manifest, errors, warnings, base_ref)
 
     def delta_files(self, sha: str) -> list[str] | None:
         """Files changed from `sha` to HEAD, or None when `sha` is not an ancestor."""
@@ -166,6 +173,14 @@ class Context:
                     result = [p for p in out.split("\0") if p]
         self._cache[sha] = result
         return result
+
+    def change_files(self) -> list[str] | None:
+        """Files the change touches (merge base of the base ref to HEAD, both names of a rename), or
+        None when they cannot be listed."""
+        if not self.base_ref:
+            return None
+        rc, out = git(self.worktree, "diff", "--name-only", "--no-renames", "-z", f"{self.base_ref}...{self.head}")
+        return None if rc else [p for p in out.split("\0") if p]
 
     def accepts(self, sha: Any, label: str) -> bool:
         """True if evidence taken at `sha` still covers HEAD."""
@@ -215,7 +230,7 @@ class Context:
             reason = entry.get("reason")
             if not isinstance(reason, str) or len(reason.strip()) < 30 or entry.get("reviewer_confirmed") is not True:
                 return [f"{label}: not-applicable needs a specific reason (30+ chars) and reviewer_confirmed true"]
-            return []
+            return self._required_paths_touched(rid, label)
         if status != "pass":
             return [f"{label}: status must be 'pass' or 'not-applicable'"]
         errors: list[str] = []
@@ -240,6 +255,23 @@ class Context:
             if glob and not glob_regex(glob).match(art):
                 errors.append(f"{label}: artifact {art} is outside the required location {glob}")
         return errors
+
+    def _required_paths_touched(self, rid: str, label: str) -> list[str]:
+        """not-applicable is refused when the change touches the manifest's required_paths for this
+        evidence (pr-review-merge refuses not-needed for them the same way)."""
+        paths = self.required.get(rid, {}).get("required_paths") or []
+        if not paths:
+            return []
+        changed = self.change_files()
+        if changed is None:
+            return [f"{label}: not-applicable cannot be checked against required_paths: "
+                    f"the changed files against {self.base_ref} cannot be listed"]
+        patterns = [glob_regex(p) for p in paths]
+        hits = sorted({p for p in changed if any(rx.match(p) for rx in patterns)})
+        if hits:
+            return [f"{label}: not-applicable is refused: the change touches {', '.join(hits[:5])}, which "
+                    f"required_paths on the base branch always cover; run it and record status 'pass'"]
+        return []
 
     def report(self) -> dict[str, Any]:
         return {"manifest_loaded": self.manifest is not None,

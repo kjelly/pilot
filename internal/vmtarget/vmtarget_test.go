@@ -250,6 +250,11 @@ func TestDown_RemovesState(t *testing.T) {
 	if len(all) != 0 {
 		t.Fatalf("List after Down: %+v", all)
 	}
+	// The vm-target skills tell agents that down deletes the per-target dir and
+	// never to rm -rf under the shared image directory themselves.
+	if _, err := os.Stat(filepath.Join(m.vmDir, "doomed")); !os.IsNotExist(err) {
+		t.Fatalf("Down left the target dir behind: %v", err)
+	}
 }
 
 func TestDown_UnknownNameIsIdempotent(t *testing.T) {

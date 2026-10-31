@@ -27,12 +27,15 @@ class GateError(RuntimeError):
 
 
 def command(argv: list[str], *, cwd: Path | None = None, allow_nonzero_json: bool = False,
-            empty_if: str | None = None) -> Any:
+            empty_if: re.Pattern[str] | None = None) -> Any:
+    """Run argv and parse its stdout as JSON. `empty_if` is the one tolerated failure: exit 1 with
+    nothing on stdout and stderr that is exactly that message means "empty list". It is never matched
+    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output."""
     try:
         p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
     except OSError as exc:
         raise GateError(f"Missing executable {argv[0]}: {exc}") from exc
-    if empty_if and p.returncode and empty_if in f"{p.stdout}\n{p.stderr}".lower():
+    if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
         return []
     if p.returncode and not allow_nonzero_json:
         raise GateError(f"{argv[:4]} failed: {(p.stderr or p.stdout).strip()[:500]}")
@@ -187,6 +190,162 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
                     errors.append(f"Unresolved blocking review finding: {f.get('description', f['severity'])}")
     if ctx is not None:
         errors.extend(ctx.check_required(evidence.get("repo_required_evidence")))
+    # `fixes` is the default when the key is absent: the PR body then closes the Issue.
+    resolution = evidence.get("issue_resolution", "fixes")
+    if resolution not in ISSUE_RESOLUTIONS:
+        errors.append(resolution_problem(resolution))
+    elif resolution == "partial" and not evidence.get("disputed_issue_claims"):
+        errors.append("issue_resolution 'partial' needs the disputed_issue_claims that stay open")
+    elif resolution == "fixes":
+        # The converse (references/issue-claims.md "Whole-Issue outcomes"): a claim that stays open
+        # after merge must not ride on a closing keyword. any(), not all(): one open claim is enough.
+        items = evidence.get("disputed_issue_claims")
+        still_open = [f"disputed_issue_claims[{i}] ({item['disposition']})"
+                      for i, item in enumerate(items if isinstance(items, list) else [])
+                      if isinstance(item, dict) and leaves_issue_open(item)]
+        if still_open:
+            errors.append("issue_resolution is 'fixes' (the default when absent), but " + ", ".join(still_open)
+                          + " stays open after merge: set issue_resolution 'partial' (Refs #N), or for an "
+                          "out_of_scope claim record the follow-up Issue in follow_up_issue_url")
+    return errors
+
+
+ISSUE_RESOLUTIONS = ("fixes", "partial")
+DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
+
+
+def resolution_problem(resolution: Any) -> str:
+    return f"issue_resolution must be 'fixes' or 'partial' (exactly, lower case), not {json.dumps(resolution)}"
+
+
+def leaves_issue_open(item: dict[str, Any]) -> bool:
+    """True if this dispute keeps part of the Issue open after merge: `needs_evidence` always does,
+    `out_of_scope` unless it carries a follow_up_issue_url (whether that is valid is checked
+    separately). An `invalid` claim, answered with evidence, does not."""
+    if item.get("disposition") == "needs_evidence":
+        return True
+    return item.get("disposition") == "out_of_scope" and item.get("follow_up_issue_url") is None
+
+
+def follow_up_number(item: dict[str, Any], repo: str, issue: int) -> tuple[int | None, str | None]:
+    """The follow-up Issue number named by `follow_up_issue_url`, or an error message.
+
+    Only `https://github.com/<this repo>/issues/<M>` (repo compared case-insensitively) with M
+    different from this Issue is accepted; (None, None) when the field is absent.
+    """
+    url = item.get("follow_up_issue_url")
+    if url is None:
+        return None, None
+    # At most 10 digits (GitHub numbers are 32-bit), so int() never sees an oversized literal.
+    found = re.fullmatch(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]{0,9})",
+                         url, re.IGNORECASE) if isinstance(url, str) else None
+    if found is None:
+        return None, f"follow_up_issue_url must be https://github.com/{repo}/issues/<number>"
+    if int(found.group(1)) == issue:
+        return None, f"follow_up_issue_url must be a different Issue than #{issue}"
+    return int(found.group(1)), None
+
+
+def gh_issue_thread(repo: str, issue: int) -> dict[str, Any]:
+    """The Issue's URL, creation time and every comment (gh pages through all of them)."""
+    value = command(["gh", "issue", "view", str(issue), "-R", repo, "--json", "number,url,createdAt,comments"])
+    if not isinstance(value, dict) or value.get("number") != issue or not isinstance(value.get("comments"), list):
+        raise GateError("Issue comments unavailable")
+    return value
+
+
+def check_disputed_claims(evidence: dict[str, Any], thread: dict[str, Any] | None, *, repo: str,
+                          issue: int, sha: str, ctx: "repo_evidence.Context | None" = None) -> list[str]:
+    """Verify each Issue claim the PR does not act on was answered on the Issue.
+
+    The gate cannot judge whether the dispute is right; it checks that the claim's
+    source is this Issue or one of its comments, that a later comment on the Issue
+    answers it (linking the source comment when the claim came from a comment, and the
+    follow-up Issue of an out_of_scope claim), and that the independent reviewer
+    confirmed it for the current HEAD. That the follow-up Issue exists is `check_follow_ups`.
+    """
+    items = evidence.get("disputed_issue_claims", [])
+    if not isinstance(items, list):
+        return ["disputed_issue_claims malformed"]
+    if not items:
+        return []
+    if thread is None:
+        return ["Issue comments not fetched; cannot verify disputed Issue claims"]
+    errors: list[str] = []
+    issue_url = thread.get("url")
+    comments: dict[str, tuple[str, str]] = {}
+    for c in thread.get("comments") or []:
+        if isinstance(c, dict) and isinstance(c.get("url"), str) and isinstance(c.get("createdAt"), str):
+            comments[c["url"]] = (c["createdAt"], c.get("body") if isinstance(c.get("body"), str) else "")
+    for i, item in enumerate(items):
+        label = f"disputed_issue_claims[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} malformed")
+            continue
+        if item.get("disposition") not in DISPUTE_DISPOSITIONS:
+            errors.append(f"{label}.disposition must be one of {', '.join(DISPUTE_DISPOSITIONS)}")
+        follow_up = None
+        if item.get("follow_up_issue_url") is not None:
+            if item.get("disposition") != "out_of_scope":
+                errors.append(f"{label}.follow_up_issue_url only applies to an out_of_scope claim")
+            else:
+                number, problem = follow_up_number(item, repo, issue)
+                follow_up = item["follow_up_issue_url"] if number is not None else None
+                if problem:
+                    errors.append(f"{label}.{problem}")
+        for key, minimum in (("claim", 20), ("counter_evidence", 30)):
+            if not nontrivial(item.get(key), minimum):
+                errors.append(f"{label}.{key} missing or lacks specific detail")
+        if not covers_head(ctx, item.get("head_sha"), sha, label):
+            errors.append(f"{label} is for another HEAD")
+        if item.get("reviewer_confirmed") is not True:
+            errors.append(f"{label} not confirmed by the independent reviewer")
+        source, reply = item.get("source_url"), item.get("reply_url")
+        if not isinstance(source, str) or not isinstance(reply, str):
+            errors.append(f"{label} needs source_url and reply_url")
+            continue
+        if source == issue_url and isinstance(thread.get("createdAt"), str):
+            source_time: str | None = thread["createdAt"]
+        else:
+            source_time = comments[source][0] if source in comments else None
+        if source_time is None:
+            errors.append(f"{label}.source_url is not this Issue or one of its comments: {source}")
+        if reply not in comments:
+            errors.append(f"{label}.reply_url is not a comment on this Issue: {reply}")
+            continue
+        if source_time is not None and comments[reply][0] <= source_time:
+            errors.append(f"{label} reply was not posted after the disputed claim")
+        if source != issue_url and source not in comments[reply][1]:
+            errors.append(f"{label} reply does not link the disputed comment ({source})")
+        if follow_up and not re.search(re.escape(follow_up) + r"(?!\w)", comments[reply][1], re.IGNORECASE):
+            errors.append(f"{label} reply does not link the follow-up Issue ({follow_up})")
+    return errors
+
+
+def gh_follow_up_issue(repo: str, number: int) -> None:
+    """Raise GateError unless `number` is an Issue (not a PR) of `repo`; read-only. Open or closed."""
+    value = command(["gh", "issue", "view", str(number), "-R", repo, "--json", "number,url"])
+    # `gh issue view` also resolves a PR number, answering with its /pull/ URL: the URL tells them apart.
+    if (not isinstance(value, dict) or value.get("number") != number or not isinstance(value.get("url"), str)
+            or not re.fullmatch(re.escape(f"https://github.com/{repo}/issues/{number}"), value["url"], re.IGNORECASE)):
+        raise GateError(f"#{number} is not an Issue of {repo}: {str(value)[:200]}")
+
+
+def check_follow_ups(evidence: dict[str, Any], *, repo: str, issue: int) -> list[str]:
+    """Confirm every follow-up Issue named by an out_of_scope claim exists. gh is only called for
+    a well-formed follow_up_issue_url; a failed lookup is an error, never a pass."""
+    errors: list[str] = []
+    items = evidence.get("disputed_issue_claims")
+    for i, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict) or item.get("disposition") != "out_of_scope":
+            continue
+        number, _ = follow_up_number(item, repo, issue)
+        if number is None:
+            continue
+        try:
+            gh_follow_up_issue(repo, number)
+        except GateError as exc:
+            errors.append(f"disputed_issue_claims[{i}].follow_up_issue_url cannot be verified: {exc}")
     return errors
 
 
@@ -196,6 +355,23 @@ def _strip_code(text: str) -> str:
     text = re.sub(r"(?s)(`{3,}|~{3,}).*?(?:\1|\Z)", " ", text)
     text = re.sub(r"(?s)<!--.*?-->", " ", text)
     return re.sub(r"(`+)[^`\n]*?\1", " ", text)
+
+
+def closes_issue(body: str, repo: str, issue: int) -> bool:
+    """True if `body` has a GitHub closing keyword for the Issue outside code."""
+    mention = re.compile(
+        r"(?<![A-Za-z0-9])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:"
+        + re.escape(repo) + r"#|https://github\.com/" + re.escape(repo) + r"/issues/|#)" + str(issue)
+        + r"\b", re.IGNORECASE)
+    return bool(mention.search(_strip_code(body)))
+
+
+def references_issue(body: str, repo: str, issue: int) -> bool:
+    """True if `body` mentions the Issue (#N, OWNER/REPO#N or its URL) outside code."""
+    mention = re.compile(
+        r"(?:(?<![\w&])|" + re.escape(repo) + r")#" + str(issue) + r"\b|https://github\.com/"
+        + re.escape(repo) + r"/issues/" + str(issue) + r"\b", re.IGNORECASE)
+    return bool(mention.search(_strip_code(body)))
 
 
 def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | None = None) -> list[str]:
@@ -231,10 +407,6 @@ def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | No
         # Catch closing references even if GitHub does not yet register the closing relationship.
         # Only a closing keyword (Fixes/Closes/Resolves ...) makes another PR a duplicate: a plain
         # "#N" / "Related: #N" / "see #N" in its body is a cross-reference, not a competing fix.
-        mention = re.compile(
-            r"(?<![A-Za-z0-9])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:"
-            + re.escape(repo) + r"#|https://github\.com/" + re.escape(repo) + r"/issues/|#)" + str(issue)
-            + r"\b", re.IGNORECASE)
         for pr in open_prs:
             if not isinstance(pr, dict):
                 errors.append("Malformed GitHub PR response")
@@ -247,7 +419,7 @@ def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | No
                 for x in closing)
             if own_pr is not None and pr.get("number") == own_pr:
                 continue
-            if linked_issue or mention.search(_strip_code(pr.get("body") or "")):
+            if linked_issue or closes_issue(pr.get("body") or "", repo, issue):
                 errors.append(f"Potential duplicate PR already references Issue #{issue}: {pr.get('url')}")
     return errors
 
@@ -312,6 +484,14 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     ctx = repo_evidence.Context.load(worktree, sha, f"refs/remotes/{remote}/{base}" if base else None)
     errors.extend(check_evidence(evidence, repo=repo, issue=issue, sha=sha,
                                  branch=branch, base=base, evidence_dir=evidence_path.parent, ctx=ctx))
+    if evidence.get("disputed_issue_claims"):
+        thread = None
+        try:
+            thread = gh_issue_thread(repo, issue)
+        except GateError as exc:
+            errors.append(f"GitHub Issue comments unavailable: {exc}")
+        errors.extend(check_disputed_claims(evidence, thread, repo=repo, issue=issue, sha=sha, ctx=ctx))
+        errors.extend(check_follow_ups(evidence, repo=repo, issue=issue))
     try:
         if not remote_identity(worktree, remote, repo):
             errors.append(f"Git remote '{remote}' does not identify {repo} (forks require manual handling)")
@@ -329,6 +509,7 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     except GateError as exc:
         errors.append(f"GitHub duplicate/issue validation unavailable: {exc}")
     return errors, {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
+                    "issue_resolution": evidence.get("issue_resolution", "fixes"),
                     "repo_evidence": ctx.report()}
 
 

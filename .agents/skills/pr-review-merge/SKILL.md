@@ -51,17 +51,40 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
-  orchestration (AGENTS.md §1.4/§1.5). A PR that needs one and has no
-  `docs/evidence/<feature>/<date>-<tested-revision>.md` covering the reviewed HEAD
-  (or an evidence-only delta from the tested revision) carries a blocking `P1`
-  finding at the changed playbook/spec path: that is a confirmed violation of a hard
-  repository rule, not a `WAITING` gap. Docs-, skill- or pure-Go changes proven by
-  native-tool tests need no VM run; the reviewer says so in `target_validation`.
+  orchestration (AGENTS.md §1.4/§1.5). `review_gate.py` enforces it: it reads the
+  manifest at the PR's base SHA through the GitHub API (never the head, so a PR cannot
+  weaken its own requirement) and checks `target_validation` with issue-to-pr's
+  `repo_evidence.py` rules. Missing or malformed, `blocked`, `not-needed` on a PR that
+  changes the manifest's `required_paths` (`playbooks/**`, `docs/verification/**`,
+  `contracts/**`), or `required` without a committed `docs/evidence/**` record that names
+  a tested revision covering HEAD (same SHA, or an ancestor whose delta to HEAD is
+  evidence-only) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
+  reviewer still files a blocking `P1` at the changed path when a change needs a record
+  and has none: that is a confirmed violation of a hard repository rule and the only way
+  this becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
+  no VM run; the reviewer says so in `target_validation` with the reason.
 - **Cost.** The full Go suite takes about 45 minutes in CI. Reviewers run the
   packages the diff touches (and `make skill-test` for `.agents/skills` changes)
   locally and rely on the `Go test` check for the whole suite.
 - **Serial merges.** After each merge every remaining PR's base moves; re-fetch
   base/HEAD and arrange a new independent review before acting on the next one.
+- **Hand-off with `pr-ready`.** `pr-ready` marks a PR Ready only when every review
+  thread is resolved; it may leave a reviewer-confirmed unrelated failing check, a
+  `CHANGES_REQUESTED` review awaiting re-review, findings it disputed on the PR, and
+  (its `pr_gate.py` does not read `.github/pr-evidence.json`) no actual-run record.
+  On their own these states are not a reason to return the PR to Draft (that only
+  starts another round): the gate decides `WAITING` for them and never `MERGE`.
+  `tests/test_pr_ready_handoff.py` runs both gates over the same GitHub states with no
+  reviewer findings and fails if a state `pr-ready` accepts is drafted here. A
+  reviewer's blocking finding still drafts, as anywhere else: for a missing actual-run
+  record that is the `P1` described above, the one route from this state to `DRAFT`.
+- **Disputed findings.** Before dispatching a reviewer, collect the earlier
+  findings on the PR (`Automated PR review: Draft required` comments, reviews,
+  threads) and every reply disputing one: a conversation comment containing the
+  finding's URL, or a reply in the finding's thread. Give the reviewer each disputed
+  finding with its reply, not your opinion of it. A finding the reviewer repeats
+  carries `disputed_reply_url`; without `new_evidence` the gate decides `WAITING`
+  and the final report asks a person to decide between the finding and the dispute.
 
 ## 1. Scope and trust
 
@@ -73,17 +96,17 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 
 1. Root inventories PR number, URL, author, HEAD/Base SHA, CI, dependencies, overlap, and current state. Map PR-to-PR dependencies and shared test infrastructure; block PRs with unmet dependencies or unreviewed interactions. **Merge serially** even if reviews run concurrently.
 2. Spawn up to **2 independent `prm-reviewer` subagents** simultaneously, one **fresh context per PR**. Use `prm-dependency` if overlapping PRs/stacked branches need separate analysis. If the runtime lacks true subagents, process sequentially and **say so** rather than simulating independence via one context.
-3. Each reviewer reads *actual full diff* (`gh pr diff`, and source/context for impacted modules), PR description/issues/reviews, CI and tests; inspect correctness, requirements, architecture, security, concurrency, edge cases, semantic regression, migration/rollback implications, and test coverage. Fetch large diffs to local files; do not stuff raw code or logs into Root context.
-4. Reviewer must return compact typed findings (`P0`–`P3`, path/line, rationale, reproducible evidence, blocking flag), relevant tests/check URLs, summary, **reviewed HEAD + BASE commit SHAs**, verdict `PASS` / `BLOCK` / `NEEDS_MORE_EVIDENCE`, and explicit review scope. A reviewer's verbal `LGTM` is insufficient.
+3. Each reviewer reads *actual full diff* (`gh pr diff`, and source/context for impacted modules), PR description/issues/reviews, the disputed earlier findings Root supplies with their replies, CI and tests; inspect correctness, requirements, architecture, security, concurrency, edge cases, semantic regression, migration/rollback implications, and test coverage. Fetch large diffs to local files; do not stuff raw code or logs into Root context.
+4. Reviewer must return compact typed findings (`P0`–`P4`, path/line, rationale, reproducible evidence, blocking flag; `disputed_reply_url` and `new_evidence` when it repeats a disputed finding), relevant tests/check URLs, summary, **reviewed HEAD + BASE commit SHAs**, verdict `PASS` / `BLOCK` / `NEEDS_MORE_EVIDENCE`, and explicit review scope. A reviewer's verbal `LGTM` is insufficient.
 5. Root handles triage, writes one JSON evidence file **per PR** outside tracked worktrees (see `references/evidence-contract.md`), and runs the deterministic gate. The gate checks consistency and GitHub metadata, **not proof of semantic correctness or true subagent isolation**; Root remains accountable for independent substantive review.
 
 ## 3. Decision semantics
 
 | Decision | Conditions | GitHub action |
 |---|---|---|
-| `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
-| `DRAFT` | Confirmed blocking defect, failed CI, failing tests, substantive review finding, merge conflict, unresolved review thread or rejected review | Post actionable findings and `gh pr ready --undo` |
-| `WAITING` | Pending CI, pending required approval, unknown GitHub status, evidence incomplete, HEAD/Base changed, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
+| `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
+| `DRAFT` | Confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict or unresolved review thread | Post actionable findings and `gh pr ready --undo` |
+| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, HEAD/Base changed, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.
