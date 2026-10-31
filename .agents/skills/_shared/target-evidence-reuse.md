@@ -34,10 +34,15 @@ closure cannot be established, keep WAITING and obtain a new target run.
 
 The shared verifier checks:
 
-1. The reviewer attestation names the current full HEAD and base SHAs. The candidate
-   and current base are ancestors of HEAD, with a common fork predating both. The remote
-   verifier resolves the live base branch too; stale PR `baseRefOid` metadata is
-   not accepted as proof of the current base.
+1. The reviewer attestation has `reviewer_confirmed: true`, a `dependency_review` of
+   at least 60 characters (after trimming), and names the current full HEAD and base
+   SHAs. The candidate and current base are ancestors of HEAD, with a common fork
+   predating both: a candidate that is itself on the base, or a base that never advanced
+   past the candidate's fork, is refused. The remote verifier resolves the live base
+   branch too; stale PR `baseRefOid` metadata is not accepted as proof of the current
+   base. The local verifier also refuses a candidate and base with more than one merge
+   base (criss-cross merges); GitHub's compare API reports a single merge base, so the
+   remote verifier cannot see that case and the rejection is enforced locally only.
 2. `execution_paths` lists unique exact regular files, including dependencies.
    Every scoped file has identical Git blob **and mode** at candidate and HEAD.
    A changed, added, deleted, renamed or symlinked scoped input requires a new run.

@@ -24,7 +24,8 @@ the outcome, the contract's restore step switches back to the starting branch wh
 is safe, and otherwise stays and reports why.
 
 For target evidence after integrating an advanced base, read
-`.agents/skills/_shared/target-evidence-reuse.md` from the repo root. This
+`$SNAP/.agents/skills/_shared/target-evidence-reuse.md` from the verified snapshot,
+not from the branch being worked on (an older PR branch lacks it). This
 exception requires base-manifest `kind: target-run` and a fresh dependency review;
 it never reuses stale review judgments or CI receipts.
 
