@@ -25,9 +25,8 @@ empty `grants: []`.
 1. Inspect repository sources before writing:
 
    - `playbooks/apply/freeipa-identity.roster.example.yaml` for field shape.
-     It is still a v2 document: after copying it, upgrade the copy with
-     `pilot roster lint --upgrade <copy>` (step 5) instead of editing the
-     version.
+     It is already at the current schema (`schema_version: 3`, with an empty
+     `grants: []`), so a copy of it needs no upgrade.
    - `internal/inventory/roster_validate.go`, `internal/inventory/roster_netgroup.go`,
      and `cmd/pilot/cmd/roster_lint.go` for enforced rules.
    - `docs/runbooks/freeipa-identity.md` and
@@ -139,7 +138,7 @@ empty `grants: []`.
    `ansible-vault view` decryption `pilot roster migrate` uses), writes no
    plaintext file, and prints the same report as for the plaintext roster.
    Real run against an ansible-vault-encrypted copy of the example roster,
-   with a throwaway vault password, after `--upgrade`:
+   with a throwaway vault password:
 
    ```text
    $ go run ./cmd/pilot roster lint --vault-password-file <vault-pass> <encrypted-copy>

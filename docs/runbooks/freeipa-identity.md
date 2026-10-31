@@ -38,6 +38,10 @@
   驗收後本次三台 disposable VM 已清理，非現存部署 inventory。Image digest、執行輸入
   hashes、真實失敗與恢復見
   [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
+- 範例名冊 `freeipa-identity.roster.example.yaml` 目前為 schema v3（2026-10-31 由 v2 升級：
+  只改版本號並加上空的 `grants: []`，與 `pilot roster lint --upgrade` 的結果相同）。§3 第 5 步
+  `pilot roster lint --vault-password-file` 同日只在本機對該範例的加密副本實跑（`ok: schema v3;
+  no issues found`），不涉及目標主機；上方的 apply 驗證未因此重跑。
 
 已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
 deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
@@ -88,12 +92,28 @@ ansible-vault encrypt ~/.vault/ipa-identity.yaml
 # 4.（選）把 vault 密碼寫進檔案，之後免手打
 printf '%s' 'YOUR-VAULT-PASSWORD' > ~/.vault/vault-pass
 chmod 600 ~/.vault/vault-pass
+
+# 5. 在 repo 根目錄驗證加密名冊（記憶體內解密，不寫出明文檔）
+go run ./cmd/pilot roster lint --vault-password-file ~/.vault/vault-pass ~/.vault/ipa-identity.yaml
 ```
+
+第 5 步要求 exit 0 與 `ok: schema v3; no issues found`。2026-10-31 在本機照第 1、4、5 步
+實跑（HOME 指向拋棄式目錄、拋棄式 vault 密碼；第 2 步略過，直接驗證未修改的 example；
+第 3 步改用 `--vault-password-file` 非互動加密）的真實輸出：
+
+```text
+$ go run ./cmd/pilot roster lint --vault-password-file ~/.vault/vault-pass ~/.vault/ipa-identity.yaml
+ok: schema v3; no issues found
+```
+
+不帶 `--vault-password-file` 時，加密名冊會 exit 1：`<file> is ansible-vault encrypted;
+rerun with --vault-password-file <path>`。lint 通過只代表名冊結構正確，不取代 §4.2 的
+`--check --diff` 與實際 apply／verify。
 
 Canonical schema（完整範例見 `freeipa-identity.roster.example.yaml`）：
 
 ```yaml
-schema_version: 2
+schema_version: 3
 freeipa:
   server: ipa1.ipa.pilot.internal
   admin:
@@ -124,17 +144,18 @@ hosts: []
 hostgroups: []    # membership.hostgroups (nested) is authoritative too
 hbac: {}
 sudo: {}
-netgroups: []     # optional, v2-only — see freeipa-identity.roster.example.yaml
+netgroups: []     # optional (schema v2 and later) — see freeipa-identity.roster.example.yaml
+grants: []        # schema v3 access grants (pilot edit → Access governance)
 ```
 
-新的 roster 直接寫 `schema_version: 2`；既有的 `schema_version: 1` roster
+新的 roster 直接寫 `schema_version: 3`；既有的 `schema_version: 1` 或 `2` roster
 不需要手動改版本號——`pilot edit`/MCP roster driver/`pilot deploy`/`pilot
 reconcile` 的 preflight 一開啟 roster 就會自動呼叫 `EnsureRosterCurrent`
 升級（已驗證、有備份、atomic），或用 `pilot roster migrate <file>`
 （加密 roster 補 `--vault-password-file <path>`）手動觸發。
 
 `freeipa_domain` 唯一設定於 inventory 的 `group_vars/freeipa.yml`；roster
-只保存 FreeIPA 身分、群組與授權規則（新 v2 roster 不要再寫
+只保存 FreeIPA 身分、群組與授權規則（新 roster 不要再寫
 `freeipa.domain`/`freeipa.realm`——那兩個欄位只為了相容舊 v1 roster 保留）。
 `realm` 由 domain 大寫推導，server FQDN 由 inventory/target facts 或 roster
 的驗證欄位提供。
@@ -204,6 +225,8 @@ ipa_hbac_rules:                     # 控制「誰能登入哪些主機」，見
 ```bash
 ansible-vault edit ~/.vault/ipa-identity.yaml
 ```
+
+改完先跑 §3 第 5 步的 `pilot roster lint --vault-password-file`，再做 §4.2。
 
 ### 4.2 先 dry-run 看差異（強烈建議）
 
@@ -1048,3 +1071,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
 | 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1`、`22cad092` 與 `09119dd` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測、MCP plan/apply 與暫存目錄清掃沒有實機觸發） | pilot |
+| 2026-10-31 | v1.6 | §3 名冊範例與說明改為 schema v3（`schema_version: 3`、`grants: []`，netgroups 註明 v2 起支援），新增第 5 步 `pilot roster lint --vault-password-file`（加密名冊在記憶體內解密），附本機實跑輸出；§4.1 編輯後先跑該步；§0.5 補上範例名冊與該步的事實。未重跑目標主機：v2 → v3 只改版本號並加空的 `grants: []`，與 `EnsureRosterCurrent` 載入時套用的升級相同，apply playbook 對 v2/v3 的差別只在允許的頂層 key | pilot |
