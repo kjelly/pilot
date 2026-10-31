@@ -5,6 +5,11 @@ description: Fix specified GitHub Issues with isolated Git worktrees, parallel r
 
 # GitHub Issue → PR (multi-agent, multi-repository)
 
+For target evidence after integrating an advanced base, use the
+[shared target evidence rule](../_shared/target-evidence-reuse.md). This exception
+requires base-manifest `kind: target-run` and a fresh dependency review; it never
+reuses stale review judgments or CI receipts.
+
 ## Project runtime configuration
 
 This skill is repository-local: use the native `issue-sa`, `issue-coder`, and

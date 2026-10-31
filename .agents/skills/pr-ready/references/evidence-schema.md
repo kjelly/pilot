@@ -67,3 +67,18 @@ python3 /path/to/pr-ready/scripts/pr_gate.py --repo OWNER/REPO --pr 123 --eviden
 ```
 
 `run_check.py` prints a JSON receipt on stdout and stores it under `.pr-ready/receipts/` even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that worktree.
+
+## Repository-required target evidence
+
+The gate reads `.github/pr-evidence.json` at the current base SHA and validates
+`target_validation` with the same read-only verifier as `pr-review-merge`, before
+Ready and again immediately before mutation. Use the
+[merge workflow target schema](../../pr-review-merge/references/evidence-contract.md).
+A missing manifest preserves the generic workflow; an unreadable base/manifest
+or missing mandated target record blocks Ready. This does not weaken
+`local_validation` or `independent_review`, which remain current-HEAD-specific.
+
+After integrating an advanced base, a base requirement with `kind: target-run`
+may accept `target_validation.target_reuse` under the
+[shared target evidence rule](../../_shared/target-evidence-reuse.md). A changed
+execution/dependency input still needs a new target run.

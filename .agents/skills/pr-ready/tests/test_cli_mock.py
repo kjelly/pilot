@@ -27,7 +27,7 @@ if (state / "phrase_check").exists():
     checks[0].update(name="Build (no required checks reported)", state="FAILURE", bucket="fail")
 if args[:2] == ["pr", "view"]:
     print(json.dumps({"number": 7, "url": "https://github.com/acme/repo/pull/7",
-        "headRefOid": sha, "headRefName": "fix-one", "state": "OPEN",
+        "headRefOid": sha, "headRefName": "fix-one", "baseRefOid": sha, "baseRefName": "main", "state": "OPEN",
         "isDraft": not (state / "ready").exists(), "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED"}))
 elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "checks_error").exists():
     print("HTTP 502: Bad Gateway", file=sys.stderr)
@@ -40,6 +40,16 @@ elif args[:2] == ["pr", "checks"]:
     print(json.dumps(checks[:1] if "--required" in args else checks))
     # Real gh exits 1 when a check failed, with the JSON still on stdout.
     sys.exit(1 if checks[0]["bucket"] == "fail" else 0)
+elif args[0] == "api" and "/contents/" in args[-1]:
+    manifest = state / "manifest.json"
+    if manifest.exists():
+        import base64
+        print(json.dumps({"type": "file", "path": ".github/pr-evidence.json", "encoding": "base64",
+                          "content": base64.b64encode(manifest.read_bytes()).decode()}))
+    else:
+        print(json.dumps({"message": "Not Found", "status": "404"}))
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        sys.exit(1)
 elif args[:2] == ["api", "graphql"]:
     query = next(a[len("query="):] for a in args if a.startswith("query="))
     field = re.search(r"pullRequest\(number:\$number\)\s*\{\s*(\w+)", query).group(1)
@@ -136,6 +146,18 @@ class CLIMockTests(unittest.TestCase):
             ready = self.gate(repo, evidence, env, "--ready")
             self.assertEqual(0, ready.returncode, ready.stdout)
             self.assertEqual("READY", json.loads(ready.stdout)["status"])
+
+    def test_base_required_target_evidence_cannot_be_omitted_at_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.make_pr(t)
+            (t / "manifest.json").write_text(json.dumps({"schema_version": 1,
+                "required_evidence": [{"id": "actual-run", "source": "AGENTS.md actual-run rule",
+                                       "artifact_glob": "docs/evidence/**/*.md"}]}))
+            blocked = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            self.assertIn("target_validation is missing", " ".join(json.loads(blocked.stdout)["errors"]))
+            self.assertFalse((t / "ready").exists())
 
     def test_failing_required_check_named_like_the_no_required_message_still_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:

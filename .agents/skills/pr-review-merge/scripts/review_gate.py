@@ -54,9 +54,22 @@ class RemoteContext(repo_evidence.Context):
     evidence-only globs (`evidence_only_paths` plus each `artifact_glob`).
     """
 
-    def __init__(self, client: Any, repo: Repo, head: str, manifest: dict[str, Any]):
-        super().__init__(None, head, manifest, [], [])
+    def __init__(self, client: Any, repo: Repo, head: str, manifest: dict[str, Any], base: str,
+                 base_name: str | None = None):
+        super().__init__(None, head, manifest, [], [], base)
         self.client, self.repo = client, repo
+        self.base_name = base_name
+
+    def base_revision(self) -> str:
+        if not self.base_name:
+            raise ValueError("Live base branch name unavailable for target reuse")
+        return self.client.branch_head(self.repo, self.base_name)
+
+    def comparison(self, base: str, head: str) -> dict[str, Any] | None:
+        return self.client.compare(self.repo, base, head)
+
+    def tree_entries(self, revision: str) -> dict[str, tuple[str, str]]:
+        return self.client.tree_entries(self.repo, revision)
 
     def delta_files(self, sha: str) -> list[str] | None:
         if sha in self._cache:
@@ -82,7 +95,7 @@ def _names_revision(text: str, rev: str) -> bool:
 
 
 def check_target_validation(client: Any, repo: Repo, head: str, base: str,
-                            evidence: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+                            evidence: dict[str, Any], *, base_name: str | None = None) -> tuple[list[str], dict[str, Any]]:
     """Gaps that keep the PR from MERGE under the base branch's `.github/pr-evidence.json`.
 
     The manifest is read at the PR's base SHA, never the head, so a PR cannot weaken its own
@@ -108,7 +121,7 @@ def check_target_validation(client: Any, repo: Repo, head: str, base: str,
     if errors:
         report["manifest"] = "invalid"
         return [f"{path} at base {base[:12]}: {e}" for e in errors], report
-    ctx = RemoteContext(client, repo, head, manifest)
+    ctx = RemoteContext(client, repo, head, manifest, base, base_name)
     report["manifest"] = "loaded"
     tv = evidence.get("target_validation")
     gaps = _check_record(client, repo, head, base, ctx, tv)
@@ -150,6 +163,8 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
                     f"which the manifest's required_paths always cover"]
         return []
     gaps: list[str] = []
+    if tv.get("target_reuse") is not None and item.get("kind") != "target-run":
+        return [f"{need}; target_reuse requires kind: target-run on the base manifest"]
     rev, art = tv.get("tested_revision"), tv.get("artifact")
     glob = item.get("artifact_glob")
     if not isinstance(rev, str) or not repo_evidence.SHA.fullmatch(rev.lower()):
@@ -158,8 +173,8 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     else:
         rev = rev.lower()
         try:
-            if not ctx.accepts(rev, "target_validation"):
-                gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.stale_reason(rev)})")
+            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse")):
+                gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
         except (GitHubError, ValueError, KeyError) as exc:
             gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")
     if not _safe_relative(art):
@@ -334,7 +349,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     # Actual-run record the base branch's .github/pr-evidence.json mandates: gaps are WAITING.
     target_gaps, result["target_validation"] = check_target_validation(
-        client, repo, result["head_sha"], result["base_sha"], evidence)
+        client, repo, result["head_sha"], result["base_sha"], evidence, base_name=view.get("baseRefName"))
     missing.extend(target_gaps)
 
     # Live remote evidence: failures are recorded as WAITING instead of inferred success.

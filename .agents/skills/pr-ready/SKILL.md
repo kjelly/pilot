@@ -5,6 +5,11 @@ description: Repair and verify existing GitHub Draft pull requests until merge-r
 
 # PR Ready — multi-agent Draft PR remediation
 
+For target evidence after integrating an advanced base, use the
+[shared target evidence rule](../_shared/target-evidence-reuse.md). This exception
+requires base-manifest `kind: target-run` and a fresh dependency review; it never
+reuses stale review judgments or CI receipts.
+
 ## Project runtime configuration
 
 This skill is repository-local: use the native `pr-sa`, `pr-coder`, and `pr-reviewer`

@@ -7,6 +7,11 @@ description: Review open non-draft GitHub pull requests with independent paralle
 
 Execute on real GitHub PRs using **GitHub CLI (`gh`)**. When explicitly invoked, the user authorizes actual merge and Draft conversion **subject to the strict gates below**, not indiscriminate merging. Root Agent is the **only writer** of GitHub PR state. This skill is independent from `issue-to-pr` (new PRs) and `pr-ready` (repair existing Draft PRs).
 
+For target evidence after integrating an advanced base, use the
+[shared target evidence rule](../_shared/target-evidence-reuse.md). This exception
+requires base-manifest `kind: target-run` and a fresh dependency review; it never
+reuses stale review judgments or CI receipts.
+
 ## Project runtime configuration
 
 This skill is repository-local: use the native `prm-reviewer` / `prm-dependency`
