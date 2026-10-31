@@ -71,7 +71,11 @@ lost-state-entry race for good (AGENTS.md §5.1;
 TestUp_ConcurrentDifferentNames_BothPersist). An already-running node
 (matching name) is left alone (idempotent — safe to re-run 'up' after
 adding a node to the spec). Wiring runs after every node is up, since
-it needs every peer's final IP.
+it needs every peer's final IP. With --fresh, 'up' instead requires every
+node to be absent and creates all of them, and on failure tears down only
+the nodes it created: use it when a later 'down' of the same spec must
+not remove a VM this run did not create (every clone and session on the
+host shares vm-target; scripts/topology-checkmode-test.sh).
 
 'snapshot'/'rollback'/'reset' apply the equivalent single-VM operation to
 every node in the spec concurrently, so you can checkpoint or restore an
@@ -87,6 +91,7 @@ var (
 	vtTopoSpecPath string
 	vtTopoOut      string
 	vtTopoTag      string
+	vtTopoUpFresh  bool
 )
 
 func init() {
@@ -108,6 +113,7 @@ func init() {
 		c.Flags().StringVar(&vtTopoSpecPath, "topology", "", "path to the topology YAML spec (required)")
 		_ = c.MarkFlagRequired("topology")
 	}
+	vtTopologyUpCmd.Flags().BoolVar(&vtTopoUpFresh, "fresh", false, "require every node to be absent and create them all (never adopt an existing VM); on failure tear down only the nodes this run created")
 	vtTopologyInventoryCmd.Flags().StringVar(&vtTopoOut, "out", "", "write the rendered inventory here instead of stdout")
 	vtTopologySnapshotCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to create on every node (required)")
 	_ = vtTopologySnapshotCmd.MarkFlagRequired("tag")
@@ -200,6 +206,9 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 	}
 	ctx := context.Background()
 	out := cmd.OutOrStdout()
+	if vtTopoUpFresh {
+		return runFreshTopologyUp(ctx, cmd, m, spec, serviceBootstrap)
+	}
 	var outMu sync.Mutex
 	printf := func(format string, a ...any) {
 		outMu.Lock()
@@ -265,6 +274,43 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if order, _ := spec.Groups(); len(order) > 0 {
+		fmt.Fprintf(out, "\ninventory : `pilot vm-target topology inventory --topology %s`\n", vtTopoSpecPath)
+	}
+	return nil
+}
+
+// runFreshTopologyUp is `topology up --fresh`: --ephemeral's provisioning
+// without the test. Every node must be absent and is created by this run
+// (Manager.Up refuses a name already in pilot state or libvirt, so a node
+// another process creates meanwhile fails the run instead of being
+// adopted). If provisioning or wiring fails, only the nodes this run
+// created are torn down. On success every node belongs to the caller, so a
+// later `topology down` of the same spec removes only the caller's VMs.
+func runFreshTopologyUp(ctx context.Context, cmd *cobra.Command, m *vmtarget.Manager, spec *vmtarget.TopologySpec, serviceBootstrap *vmtarget.ServiceBootstrap) error {
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	if err := requireTopologyAbsent(ctx, m, spec, "--fresh", "tear it down if it is yours, or give this run's nodes names no other session uses"); err != nil {
+		return err
+	}
+	owned, err := provisionEphemeralTopology(ctx, spec, out, false, serviceBootstrap)
+	if err == nil {
+		for _, n := range spec.Nodes {
+			if len(n.Wire) == 0 {
+				continue
+			}
+			if werr := wireTargetToPeers(ctx, m, out, n.Name, n.Wire); werr != nil {
+				err = fmt.Errorf("wire %q: %w", n.Name, werr)
+				break
+			}
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(errOut, "❌ topology up --fresh failed: %v. Tearing down the %d node(s) this run created...\n", err, len(owned))
+		if cerr := teardownEphemeralTopology(ctx, m, out, errOut, owned); cerr != nil {
+			return fmt.Errorf("%w (cleanup also failed: %v)", err, cerr)
+		}
+		return err
+	}
 	if order, _ := spec.Groups(); len(order) > 0 {
 		fmt.Fprintf(out, "\ninventory : `pilot vm-target topology inventory --topology %s`\n", vtTopoSpecPath)
 	}
@@ -615,9 +661,10 @@ func runTopologySyntaxCheck(cmd *cobra.Command) error {
 	return nil
 }
 
-// requireEphemeralTopologyAbsent prevents --ephemeral from adopting or later
-// destroying a VM that existed before this invocation.
-func requireEphemeralTopologyAbsent(ctx context.Context, m *vmtarget.Manager, spec *vmtarget.TopologySpec) error {
+// requireTopologyAbsent prevents --ephemeral (topology test) and --fresh
+// (topology up) from adopting or later destroying a VM that existed before
+// this invocation. hint says what the operator can do instead.
+func requireTopologyAbsent(ctx context.Context, m *vmtarget.Manager, spec *vmtarget.TopologySpec, flag, hint string) error {
 	targets, err := m.List(ctx)
 	if err != nil {
 		return err
@@ -628,7 +675,7 @@ func requireEphemeralTopologyAbsent(ctx context.Context, m *vmtarget.Manager, sp
 	}
 	for _, n := range spec.Nodes {
 		if t, ok := byName[n.Name]; ok {
-			return fmt.Errorf("--ephemeral requires node %q to be absent, but it already exists (status=%s); use topology test without --ephemeral or tear it down first", n.Name, t.Status)
+			return fmt.Errorf("%s requires node %q to be absent, but it already exists (status=%s); %s", flag, n.Name, t.Status, hint)
 		}
 	}
 	return nil
@@ -898,7 +945,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 		return runTopologyTestPipeline(cmd, spec, verifies, invPath, args, !vtTopoTestNoRollback)
 	}
 
-	if err := requireEphemeralTopologyAbsent(ctx, m, spec); err != nil {
+	if err := requireTopologyAbsent(ctx, m, spec, "--ephemeral", "use topology test without --ephemeral or tear it down first"); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "=== [Ephemeral setup] Provisioning %d fresh node(s) ===\n", len(spec.Nodes))
