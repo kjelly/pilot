@@ -455,6 +455,7 @@ class ContractStructureTests(unittest.TestCase):
         for path in scanned_files():
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=str(path.relative_to(REPO))):
+                self.assertNotRegex(text, r"python3\s+(?:/path/to/|scripts/)")  # a bare path is not the snapshot
                 for m in re.finditer(r"\$SNAP/([\w./-]+)", text):
                     rel = m.group(1)
                     self.assertTrue((REPO / rel).is_file(), m.group(0))
