@@ -1,0 +1,110 @@
+{
+  "provenance": "Captured 2026-10-31 on a FreeIPA 4.13.4 server (vm-target): each \"in\" run through the real ipapython.ssh.SSHPublicKey(in).openssh() and through `ipa user-mod --sshpubkey` (ipalib in-process) on a test user, then read back with user_find. \"openssh\" is the real output, \"error\" the real exception class (ValueError) when SSHPublicKey refused the input. \"user_mod\" is what user-mod answered: \"applied\" (the stored value changed), \"EmptyModlist\" (the input normalized to the value already stored, so FreeIPA had nothing to modify) or \"ValidationError\" (refused, stored value unchanged). \"stored\" is the ipasshpubkey FreeIPA stored for an accepted input; it always equals \"openssh\". All keys are throwaway public keys generated for this capture. The test double ipapython/ssh.py must reproduce every case (playbooks/check/files/test_identity_object_observer.py, KeyNormalizerModelTests).",
+  "cases": [
+    {
+      "in": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "applied",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "user_mod": "applied",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1"
+    },
+    {
+      "in": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 comment with spaces",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 comment with spaces",
+      "user_mod": "applied",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 comment with spaces"
+    },
+    {
+      "in": "ssh-ed25519  AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1   kA@test  ",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "applied",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test\n",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "EmptyModlist",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "openssh": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "applied",
+      "stored": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "no-pty,from=\"10.0.0.1\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "openssh": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "EmptyModlist",
+      "stored": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "NO-PTY,FROM=\"10.0.0.1\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "openssh": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "user_mod": "EmptyModlist",
+      "stored": "from=\"10.0.0.1\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test"
+    },
+    {
+      "in": "no-pty, from=\"10.0.0.1\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1 kA@test",
+      "error": "ValueError",
+      "user_mod": "ValidationError"
+    },
+    {
+      "in": "command=\"echo hi there\",no-port-forwarding ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test",
+      "openssh": "command=\"echo hi there\",no-port-forwarding ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test",
+      "user_mod": "applied",
+      "stored": "command=\"echo hi there\",no-port-forwarding ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test"
+    },
+    {
+      "in": "environment=\"A=B c\",from=\"10.*,!10.1.1.1\" ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test",
+      "openssh": "environment=\"A=B c\",from=\"10.*,!10.1.1.1\" ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test",
+      "user_mod": "applied",
+      "stored": "environment=\"A=B c\",from=\"10.*,!10.1.1.1\" ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test"
+    },
+    {
+      "in": "from=10.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "error": "ValueError",
+      "user_mod": "ValidationError"
+    },
+    {
+      "in": "no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "openssh": "no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "user_mod": "applied",
+      "stored": "no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1"
+    },
+    {
+      "in": "AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1",
+      "user_mod": "applied",
+      "stored": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIzkQUd2y+OJbDz47NxiaU7TW7wQPqLRBUyzTZOQ2dL1"
+    },
+    {
+      "in": "ssh-ed25519 notbase64!! x",
+      "error": "ValueError",
+      "user_mod": "ValidationError"
+    },
+    {
+      "in": "cert-authority ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB",
+      "openssh": "cert-authority ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB",
+      "user_mod": "applied",
+      "stored": "cert-authority ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB"
+    },
+    {
+      "in": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test",
+      "openssh": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test",
+      "user_mod": "applied",
+      "stored": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCh/hF4e9KZbVhZT62+Raw3pbdtjHAuAAJMGtOqVvJVFcI7JMbgi7FVekhT5Ly3T23hmpKKoRAc/tPagsBEl0aVH31ZAjBBYAIEyUiayjckSE+NpxIR5SvwaRwlB+7Nckzo6AQT1Ii2gV8EoAg0FipX9MqAZE+f7wijjKQSpmw3RsHMfBNQ3dnMrI9Grr/TSULC0UxXxIOLxEo+WOy/x/hUx9BY/cAMU3EgdTY1mfIKyyMammRH2AdrVH90FN7Knbu+UTfLtaNzpll/Q5LpWbC0FqArcgrUmrweRFTO3cX2Bva+k5LUZsSwIuZqVbUnYwl6gXoCq4AO+RKwCCxyCiYB kB@test"
+    },
+    {
+      "in": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test",
+      "openssh": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test",
+      "user_mod": "applied",
+      "stored": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLyBztyrxQEaOuNgdAfZyTicBzupauo20e9q9MiywSdA+S9mvVWDPwXgXZspSZgoHXVsDBCdWYR3CEKwUVBmpc0= kC@test"
+    }
+  ]
+}

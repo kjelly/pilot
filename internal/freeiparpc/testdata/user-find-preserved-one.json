@@ -1,0 +1,19 @@
+{
+  "result": {
+    "result": [
+      {
+        "uid": [
+          "pv-capture"
+        ],
+        "dn": "uid=pv-capture,cn=deleted users,cn=accounts,cn=provisioning,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 user matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

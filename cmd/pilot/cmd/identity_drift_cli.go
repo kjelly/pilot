@@ -27,6 +27,8 @@ var (
 	identityDriftVaultPasswordFile string
 	identityDriftVarsFile          string
 	identityDriftRepairManaged     bool
+	identityDriftIncludeObjects    bool
+	identityDriftExitCode          bool
 )
 
 var identityDriftCmd = &cobra.Command{
@@ -37,6 +39,29 @@ against the roster's desired compiled state for every axis this delivery
 covers: HBAC/sudo grants, auth_policies indicators, account_policies
 expiration, password_policies, and per-user authentication types. It runs
 once and exits — no recurring loop (spec.md v3.2 §1).
+
+--include-users-groups enables the staged object observer using apply's shared
+normalization: create/delete, enabled state, attributes, SSH public-key sets
+(compared as FreeIPA stores them, so a changed comment or option counts, exactly
+as it would make apply modify the user) and direct group memberships. Extra
+members of additive groups and objects outside the roster are report-only.
+Without the flag users and groups are not inspected and are listed as not
+inspected.
+
+--format json is the version 1 envelope {schema_version, complete, covered,
+uncovered, items}; items are sorted, have category/name/action/detail and are
+[] rather than null. The action is create, delete, update, add_member or
+remove_member (what apply would do), manual (apply cannot resolve it and would
+fail: an operator must act first, e.g. a preserved user) or report (apply never
+touches it). This replaces the earlier {"Items": [...]} shape for every
+use of 'identity drift --format json'. Coverage remains partial while rule
+attachments, host objects and password actions are pending, so complete is false
+and an empty report is not full parity.
+
+--exit-code returns 2 for actionable drift, 3 for partial coverage or report-only
+differences, and 1 on failure. Zero is reserved for a fully covered clean state,
+which is not reachable yet: coverage is partial, so even a clean run returns 3.
+--repair-managed cannot be combined with --include-users-groups or --exit-code.
 
 --repair-managed additionally reconciles any drift found via the same
 apply path 'pilot access reconcile' uses — it only ever touches
@@ -66,10 +91,18 @@ func init() {
 	identityDriftCmd.Flags().StringVar(&identityDriftVaultPasswordFile, "vault-password-file", "", driftVaultPasswordFlagHelp)
 	identityDriftCmd.Flags().StringVar(&identityDriftVarsFile, "vars-file", "", driftVarsFileFlagHelp)
 	identityDriftCmd.Flags().BoolVar(&identityDriftRepairManaged, "repair-managed", false, "explicitly repair any drift found (Pilot-owned managed constructs only)")
+	identityDriftCmd.Flags().BoolVar(&identityDriftIncludeObjects, "include-users-groups", false, "include staged users/groups observer (requires FreeIPA Python client on target)")
+	identityDriftCmd.Flags().BoolVar(&identityDriftExitCode, "exit-code", false, "CI status: 0 fully covered and clean (not reachable yet: coverage is partial, so a clean run returns 3), 1 error, 2 actionable drift, 3 partial coverage or report-only differences")
 	identityCmd.AddCommand(identityDriftCmd)
 }
 
 func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
+	// Repair reconciles only what the grants-era probe covers (RepairManaged
+	// does not repair users/groups), and --exit-code describes an inspection;
+	// refuse both flags rather than let a repair run look like a full check.
+	if identityDriftRepairManaged && (identityDriftIncludeObjects || identityDriftExitCode) {
+		return fmt.Errorf("--repair-managed cannot be combined with --include-users-groups or --exit-code; inspect and apply separately")
+	}
 	path := args[0]
 	readPath, cleanup, err := resolveGrantsReadPath(path, identityDriftVaultPasswordFile)
 	if err != nil {
@@ -98,13 +131,14 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	driftOpts := accessgrants.DriftProbeOptions{
-		RosterFile:        readPath,
-		Inventory:         identityDriftInventory,
-		TargetGroup:       identityDriftTargetGroup,
-		VaultPasswordFile: identityDriftVaultPasswordFile,
-		VarsFile:          varsFile,
-		StateDir:          resolveStateDir(accessStateFiles...),
-		Now:               time.Now(),
+		IncludeIdentityObjects: identityDriftIncludeObjects,
+		RosterFile:             readPath,
+		Inventory:              identityDriftInventory,
+		TargetGroup:            identityDriftTargetGroup,
+		VaultPasswordFile:      identityDriftVaultPasswordFile,
+		VarsFile:               varsFile,
+		StateDir:               resolveStateDir(accessStateFiles...),
+		Now:                    time.Now(),
 	}
 
 	out := cmd.OutOrStdout()
@@ -114,7 +148,13 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return printIdentityDriftReport(out, report)
+		if err := printIdentityDriftReport(out, report); err != nil {
+			return err
+		}
+		if identityDriftExitCode {
+			return identityDriftStatus(report)
+		}
+		return nil
 	}
 
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
@@ -139,17 +179,19 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 }
 
 func printIdentityDriftReport(out io.Writer, report accessgrants.DriftReport) error {
+	view := identityDriftJSON(report, identityDriftIncludeObjects)
 	if identityDriftFormat == "json" {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(report)
+		return enc.Encode(view)
 	}
+	fmt.Fprintf(out, "partial coverage; not inspected: %v\n", view.Uncovered)
 	if report.Empty() {
-		fmt.Fprintln(out, "no drift found")
+		fmt.Fprintln(out, "no drift found within inspected scope")
 		return nil
 	}
-	for _, item := range report.Items {
-		fmt.Fprintf(out, "%s\tname=%s\tdetail=%s\n", item.Category, item.Name, item.Detail)
+	for _, item := range view.Items {
+		fmt.Fprintf(out, "%s\tname=%s\taction=%s\tdetail=%s\n", item.Category, item.Name, item.Action, item.Detail)
 	}
 	return nil
 }

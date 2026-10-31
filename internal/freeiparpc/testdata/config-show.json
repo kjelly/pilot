@@ -1,0 +1,82 @@
+{
+  "result": {
+    "result": {
+      "ipaconfigstring": [
+        "AllowNThash",
+        "KDC:Disable Last Success"
+      ],
+      "ipadefaultloginshell": [
+        "/bin/sh"
+      ],
+      "ipakrbauthzdata": [
+        "MS-PAC",
+        "nfs:NONE"
+      ],
+      "ipadefaultemaildomain": [
+        "ipa.pilot.internal"
+      ],
+      "ipamaxhostnamelength": [
+        "64"
+      ],
+      "ipaselinuxusermapdefault": [
+        "unconfined_u:s0-s0:c0.c1023"
+      ],
+      "ipausersearchfields": [
+        "uid,givenname,sn,telephonenumber,ou,title"
+      ],
+      "ipadefaultprimarygroup": [
+        "ipausers"
+      ],
+      "ipacertificatesubjectbase": [
+        "O=IPA.PILOT.INTERNAL"
+      ],
+      "ipamaxusernamelength": [
+        "32"
+      ],
+      "ipahomesrootdir": [
+        "/home"
+      ],
+      "ipasearchtimelimit": [
+        "2"
+      ],
+      "ipapwdexpadvnotify": [
+        "4"
+      ],
+      "ipamigrationenabled": [
+        false
+      ],
+      "ipagroupsearchfields": [
+        "cn,description"
+      ],
+      "ipaservicekeytypesize": [
+        "rsa:2048"
+      ],
+      "ipaselinuxusermaporder": [
+        "guest_u:s0$xguest_u:s0$user_u:s0$staff_u:s0-s0:c0.c1023$sysadm_u:s0-s0:c0.c1023$unconfined_u:s0-s0:c0.c1023"
+      ],
+      "ipasearchrecordslimit": [
+        "100"
+      ],
+      "ca_server_server": [
+        "ipa1.ipa.pilot.internal"
+      ],
+      "ca_renewal_master_server": "ipa1.ipa.pilot.internal",
+      "ipa_master_server": [
+        "ipa1.ipa.pilot.internal"
+      ],
+      "pkinit_server_server": [
+        "ipa1.ipa.pilot.internal"
+      ],
+      "dns_server_server": [
+        "ipa1.ipa.pilot.internal"
+      ],
+      "dn": "cn=ipaConfig,cn=etc,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": null,
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

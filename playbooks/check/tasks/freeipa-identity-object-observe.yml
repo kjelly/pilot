@@ -1,0 +1,179 @@
+# Requires the caller's private Kerberos cache. Pure reads; no stage gate needed.
+#
+# Included by freeipa-access-drift-probe.yml with the same tags as the kinit
+# that makes the observer's ticket (`identity`, `drift`): the observation runs
+# exactly when the ticket exists.
+#
+# The kinit is `run_once`, so it exists only in the first host's private cache.
+# Everything that needs the ticket is therefore run_once too, on the same host;
+# the facts it sets reach every host of the batch.
+#
+# Failure is reported through fixed text only. The observer prints one error
+# class (PILOT_IDENTITY_OBSERVER_ERROR=<class>, see its ERROR_CLASSES) and the
+# probe runs under no_log, so the gates below turn the class into one of our own
+# literal messages (each is registered in internal/accessgrants/probe_failure.go;
+# a test keeps the two lists equal). A raw exception text is never printed.
+- name: "Normalize canonical users and groups (shared with apply)"
+  ansible.builtin.include_tasks:
+    file: ../../apply/tasks/freeipa-identity-normalize-users-groups.yml
+    apply:
+      tags: [always]
+  vars:
+    # A read-only comparison needs no credential (and an initial-password
+    # template may not render outside apply).
+    pilot_identity_normalize_credentials: false
+  tags: [always]
+
+- name: "Project the desired users and groups for the observer"
+  ansible.builtin.set_fact:
+    # Exactly the non-credential fields the shared normalization produced. The
+    # observer refuses any input that carries a credential field.
+    pilot_identity_object_input: "{{ {'users': ipa_users, 'groups': ipa_groups} | to_json }}"
+  no_log: true
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Observe complete FreeIPA users and groups without credentials in output"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('file', playbook_dir ~ '/files/freeipa-identity-object-observer.py') }}"
+    stdin: "{{ pilot_identity_object_input }}"
+  register: pilot_identity_object_observation
+  changed_when: false
+  # The gates below report a failure with our own text; no_log hides the rest.
+  failed_when: false
+  check_mode: false
+  no_log: true
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Classify the users/groups observation result"
+  ansible.builtin.set_fact:
+    pilot_identity_object_error: >-
+      {{ '' if (observer_rc == 0 and (observer_classes | length) == 0)
+         else (observer_classes[0] if ((observer_classes | length) > 0 and observer_classes[0] in observer_known)
+               else 'unclassified') }}
+  vars:
+    observer_rc: "{{ pilot_identity_object_observation.rc | default(1) }}"
+    observer_classes: >-
+      {{ (pilot_identity_object_observation.stdout | default(''))
+         | regex_findall('(?m)^PILOT_IDENTITY_OBSERVER_ERROR=([a-z_]+)$') }}
+    observer_known:
+      - bad_input
+      - ipalib_unavailable
+      - desired_key_invalid
+      - kerberos
+      - rpc_failed
+      - incomplete_search
+      - account_state_missing
+      - invalid_response
+  no_log: true
+  run_once: true
+  tags: [identity, drift]
+
+# One literal message per class: a templated fail_msg could carry a value.
+- name: "Gate: the users/groups observer got well-formed input"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'bad_input'
+    fail_msg: >-
+      The users/groups observer rejected its input (internal error: the desired
+      state handed to it was malformed or carried a credential field). No
+      complete users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: the FreeIPA Python client is installed on the probed host"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'ipalib_unavailable'
+    fail_msg: >-
+      The FreeIPA Python client (ipalib and ipapython) could not be imported on
+      the probed host; install the FreeIPA client packages there. No complete
+      users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: every roster ssh_keys value is a valid SSH public key"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'desired_key_invalid'
+    fail_msg: >-
+      A roster user's ssh_keys value is not a valid SSH public key (FreeIPA would
+      reject it on apply); fix the roster. No complete users/groups plan is
+      available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: the observer had usable Kerberos credentials"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'kerberos'
+    fail_msg: >-
+      The users/groups observer had no usable Kerberos credentials for FreeIPA
+      (the admin ticket was missing, expired or rejected). No complete
+      users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: the observer completed its FreeIPA API calls"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'rpc_failed'
+    fail_msg: >-
+      The users/groups observer could not complete a FreeIPA API call
+      (connection or request failed; the detail is withheld). No complete
+      users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: the FreeIPA user and group searches were complete"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'incomplete_search'
+    fail_msg: >-
+      FreeIPA returned a truncated or inconsistent user or group search result.
+      No complete users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: FreeIPA reported every account lock state"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'account_state_missing'
+    fail_msg: >-
+      FreeIPA did not report the account lock state (nsaccountlock) of a user,
+      so enabled and disabled drift cannot be evaluated. No complete
+      users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: FreeIPA user and group records had the expected shape"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error != 'invalid_response'
+    fail_msg: >-
+      FreeIPA returned a user or group record in an unexpected shape (the detail
+      is withheld). No complete users/groups plan is available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Gate: the users/groups observation succeeded"
+  ansible.builtin.assert:
+    that:
+      - pilot_identity_object_error == ''
+    fail_msg: >-
+      The users/groups observer failed for a reason outside its fixed error
+      classes (the detail is withheld). No complete users/groups plan is
+      available.
+  run_once: true
+  tags: [identity, drift]
+
+- name: "Decode the credential-free identity observation"
+  ansible.builtin.set_fact:
+    pilot_identity_objects: "{{ pilot_identity_object_observation.stdout | from_json }}"
+  no_log: true
+  run_once: true
+  tags: [identity, drift]

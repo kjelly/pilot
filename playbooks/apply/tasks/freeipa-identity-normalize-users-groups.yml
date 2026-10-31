@@ -1,0 +1,89 @@
+# Canonical desired state shared by apply and the read-only drift observer.
+# Reset per-include accumulators; repeated includes must not retain old users.
+#
+# pilot_identity_normalize_credentials (default true) decides whether the
+# credential fields of a user (password, force_password, preserve_existing)
+# are produced at all. Apply leaves it unset and gets them exactly as before.
+# The drift probe sets it false: its observer never needs a credential, and an
+# initial-password template that renders only with apply's vars must not make
+# a read-only comparison fail, nor ship the password to the probed host.
+# With it false the password template is never evaluated.
+- name: "Reset canonical users and groups"
+  ansible.builtin.set_fact:
+    ipa_users: []
+    ipa_groups: []
+  when: freeipa_roster.schema_version is defined
+  no_log: true
+  tags: [always]
+
+# `ssh_keys` below MUST use `.get('values', none)`, never `['values']` or
+# `.values`. On a roster user with no `ssh_keys` field at all (exactly what
+# `pilot edit`'s roster manager "➕ 新增 User" produces), a bracket lookup for
+# the key 'values' on an empty dict hits Jinja2's item-then-attribute
+# fallback and resolves to the dict's own bound `.values` METHOD instead of
+# raising Undefined — `set_fact` then fails with
+# "Type 'method' is unsupported for variable storage", masked by no_log.
+# Found live round 16 (2026-07-25) on ansible-core 2.19.2; do not "simplify"
+# this back to a subscript. Full writeup:
+# docs/evidence/minimal-poc-architecture/2026-07-25-round-16.md
+# Ansible renders every template string inside a loop's items before the first
+# iteration, so looping over the users themselves evaluates `password.initial`
+# (and fails on a template this play cannot render) even when the credential
+# fields are not wanted. With credentials on that is exactly apply's behaviour
+# and stays: an unrenderable initial password fails the run (a lazy read would
+# be swallowed by `default(none)` and silently set no password). With
+# credentials off the loop is over INDEXES and the user is reached lazily
+# through the roster, so only the fields this task reads are rendered and the
+# password is never touched.
+- name: "Normalize canonical users for the compatibility reconciler"
+  ansible.builtin.set_fact:
+    ipa_users: >-
+      {{ ipa_users + [{
+        'name': pilot_identity_roster_user.name,
+        'state': pilot_identity_roster_user.state | default('present'),
+        'first': pilot_identity_roster_user.first | default(pilot_identity_roster_user.name),
+        'last': pilot_identity_roster_user.last | default(pilot_identity_roster_user.name),
+        'display_name': pilot_identity_roster_user.display_name | default(none),
+        'email': pilot_identity_roster_user.email | default(none),
+        'uid': pilot_identity_roster_user.uid | default(none),
+        'gid': pilot_identity_roster_user.gid | default(none),
+        'login_shell': pilot_identity_roster_user.login_shell | default('/bin/bash'),
+        'home_directory': pilot_identity_roster_user.home_directory | default('/home/' + pilot_identity_roster_user.name),
+        'enabled': pilot_identity_roster_user.enabled | default(pilot_identity_roster_user.state | default('present') != 'disabled')
+      } | combine(
+        {
+          'password': (pilot_identity_roster_user.password | default({})).initial | default(none),
+          'force_password': (pilot_identity_roster_user.password | default({})).force_change | default(false),
+          'preserve_existing': (pilot_identity_roster_user.password | default({})).preserve_existing | default(true)
+        } if pilot_identity_with_credentials else {}
+      ) | combine({
+        'ssh_keys': (pilot_identity_roster_user.ssh_keys | default({})).get('values', none)
+      })] }}
+  vars:
+    pilot_identity_with_credentials: "{{ pilot_identity_normalize_credentials | default(true) | bool }}"
+    pilot_identity_roster_user: "{{ item if pilot_identity_with_credentials else freeipa_roster.users[item] }}"
+  loop: >-
+    {{ (freeipa_roster.users | default([])) if pilot_identity_with_credentials
+       else (range(freeipa_roster.users | default([]) | length) | list) }}
+  loop_control:
+    label: "{{ pilot_identity_roster_user.name }}"
+  when: freeipa_roster.schema_version is defined
+  no_log: true
+  tags: [always]
+
+- name: "Normalize canonical groups for the compatibility reconciler"
+  ansible.builtin.set_fact:
+    ipa_groups: >-
+      {{ ipa_groups + [{
+        'name': item.name,
+        'state': item.state | default('present'),
+        'desc': item.description | default(item.name),
+        'type': item.type | default('posix'),
+        'gid': item.gid | default(none),
+        'membership': item.membership | default({})
+      }] }}
+  loop: "{{ freeipa_roster.groups | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: freeipa_roster.schema_version is defined
+  tags: [always]
