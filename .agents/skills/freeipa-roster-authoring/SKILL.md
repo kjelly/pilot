@@ -122,35 +122,45 @@ empty `grants: []`.
 
    ```bash
    go run ./cmd/pilot roster lint <roster-file>
+   # an ansible-vault-encrypted roster:
+   go run ./cmd/pilot roster lint --vault-password-file <vault-pass> <roster-file>
    ```
 
    Require exit 0 and `ok: schema v3; no issues found`, then inspect YAML and
    all references. An older roster prints `ok: schema v2 is valid` and a
    `notice:` line pointing at `pilot roster migrate <file>`; `--upgrade`
    upgrades it in place and leaves a backup of the original beside it
-   (`<file>.v2.<UTC time>.<sha>.bak`, plaintext if the roster was) plus
+   (`<file>.v2.<UTC time>.<sha>.bak`, encrypted if the roster was) plus
    `<file>.pilot-migrate.lock` / `.pilot-remove.lock`. `warning:` lines do not
    fail lint, but a dangling host reference makes the outbound webhook
    snapshot fail closed, so fix it.
 
-   **Lint cannot read an encrypted roster.** It has no vault option: on an
-   ansible-vault file it exits 1 with "is ansible-vault encrypted; decrypt it
-   first". It also reads the path more than once, so a pipe or `<(...)` fails
-   ("cannot resolve secret source path"). Lint a decrypted copy in a private
-   directory and delete it whatever the result; never under the repository or
-   `./tmp`, never printed:
+   With `--vault-password-file`, lint decrypts the roster in memory (the
+   `ansible-vault view` decryption `pilot roster migrate` uses), writes no
+   plaintext file, and prints the same report as for the plaintext roster.
+   Real run against an ansible-vault-encrypted copy of the example roster,
+   with a throwaway vault password, after `--upgrade`:
 
-   ```bash
-   d=$(mktemp -d) && chmod 700 "$d"
-   (umask 077; ansible-vault view --vault-password-file <vault-pass> <roster> > "$d/roster.yaml")
-   go run ./cmd/pilot roster lint "$d/roster.yaml"; rm -rf "$d"
+   ```text
+   $ go run ./cmd/pilot roster lint --vault-password-file <vault-pass> <encrypted-copy>
+   ok: schema v3; no issues found
    ```
 
-   `pilot roster migrate --vault-password-file` decrypts in memory, but on a
-   roster already at v3 it only reports "already schema v3; nothing to do"
-   without validating anything, so it is not a lint. Lint success does not
-   replace target `--check --diff` or apply/verify when deployment evidence is
-   requested.
+   Without the flag an encrypted roster exits 1 with `<file> is ansible-vault
+   encrypted; rerun with --vault-password-file <path>`. A wrong or missing
+   password file exits 1 with `decrypt roster <file>: ansible-vault view
+   <file>: exit status 1:` followed by ansible-vault's own message
+   (`Decryption failed ...` or `The vault password file <path> was not
+   found`), and prints nothing from the roster.
+   The flag is not read for a plaintext roster. `--upgrade` on an encrypted
+   roster re-encrypts the result with the same password file, as `pilot
+   roster migrate --vault-password-file` does; without `--upgrade` lint only
+   reads. Pass the roster file itself: a pipe or `<(...)` is refused ("cannot
+   resolve secret source path"). Never decrypt a roster to a file under the
+   repository or `./tmp` to lint it.
+
+   Lint success does not replace target `--check --diff` or apply/verify when
+   deployment evidence is requested.
 
 6. Report what was generated, placeholders or confirmations still required,
    and the namespaced loading contract:
