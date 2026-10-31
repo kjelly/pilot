@@ -211,11 +211,11 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
 
 
 ISSUE_RESOLUTIONS = ("fixes", "partial")
+DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
 
 
 def resolution_problem(resolution: Any) -> str:
     return f"issue_resolution must be 'fixes' or 'partial' (exactly, lower case), not {json.dumps(resolution)}"
-DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
 
 
 def leaves_issue_open(item: dict[str, Any]) -> bool:

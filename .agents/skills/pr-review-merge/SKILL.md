@@ -72,10 +72,12 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   thread is resolved; it may leave a reviewer-confirmed unrelated failing check, a
   `CHANGES_REQUESTED` review awaiting re-review, findings it disputed on the PR, and
   (its `pr_gate.py` does not read `.github/pr-evidence.json`) no actual-run record.
-  None of these is a reason to return the PR to Draft (that only starts another
-  round): the gate decides `WAITING` for them and never `MERGE`.
-  `tests/test_pr_ready_handoff.py` runs both gates over the same GitHub states and
-  fails if a state `pr-ready` accepts is drafted here.
+  On their own these states are not a reason to return the PR to Draft (that only
+  starts another round): the gate decides `WAITING` for them and never `MERGE`.
+  `tests/test_pr_ready_handoff.py` runs both gates over the same GitHub states with no
+  reviewer findings and fails if a state `pr-ready` accepts is drafted here. A
+  reviewer's blocking finding still drafts, as anywhere else: for a missing actual-run
+  record that is the `P1` described above, the one route from this state to `DRAFT`.
 - **Disputed findings.** Before dispatching a reviewer, collect the earlier
   findings on the PR (`Automated PR review: Draft required` comments, reviews,
   threads) and every reply disputing one: a conversation comment containing the

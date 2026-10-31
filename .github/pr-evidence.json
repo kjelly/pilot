@@ -13,7 +13,7 @@
         "docs/verification/**",
         "contracts/**"
       ],
-      "description": "Candidate-bound target run (syntax, check/diff, apply, spec verify, second apply changed=0, plus the failure paths the change touches) on a disposable vm-target/docker-target, with the sanitized summary committed as docs/evidence/<feature>/<date>-<tested-revision>.md. Required for any change to playbooks, specs, contracts, inventory handling or deploy orchestration; not-applicable, with the reason, for docs/skill-only changes or pure Go changes proven by native-tool tests. required_paths lists the paths whose change always needs it (pr-review-merge's gate does not accept not-needed for them); Go inventory handling and deploy orchestration are left to the reviewer, because a pure Go change proven by native-tool tests is exempt."
+      "description": "Candidate-bound target run (syntax, check/diff, apply, spec verify, second apply changed=0, plus the failure paths the change touches) on a disposable vm-target/docker-target, with the sanitized summary committed as docs/evidence/<feature>/<date>-<tested-revision>.md. Required for any change to playbooks, specs, contracts, inventory handling or deploy orchestration; not-applicable, with the reason, for docs/skill-only changes or pure Go changes proven by native-tool tests. required_paths lists the paths whose change always needs it (pr-review-merge's gate refuses not-needed and issue-to-pr's gate refuses not-applicable for them); Go inventory handling and deploy orchestration are left to the reviewer, because a pure Go change proven by native-tool tests is exempt."
     }
   ]
 }

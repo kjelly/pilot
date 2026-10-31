@@ -321,7 +321,6 @@ class RepositoryManifestTests(unittest.TestCase):
         import review_gate
         manifest = json.loads(repo_manifest())
         self.assertEqual([], review_gate.repo_evidence.validate_manifest(manifest))
-        self.assertEqual([], review_gate._manifest_errors(manifest))
         paths = manifest['required_evidence'][0]['required_paths']
         for path in ('playbooks/apply/dns-apply.yml', 'docs/verification/dns.md', 'contracts/dns.yaml'):
             self.assertTrue(any(review_gate.repo_evidence.glob_regex(p).match(path) for p in paths), path)

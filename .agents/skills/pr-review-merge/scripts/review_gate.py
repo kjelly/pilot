@@ -75,18 +75,6 @@ def _safe_relative(path: Any) -> bool:
         and ".." not in path.split("/") and "\\" not in path
 
 
-def _manifest_errors(manifest: Any) -> list[str]:
-    """issue-to-pr's validation plus `required_paths`, a key only this gate reads."""
-    errors = repo_evidence.validate_manifest(manifest)
-    if errors:
-        return errors
-    for i, item in enumerate(manifest.get("required_evidence", [])):
-        paths = item.get("required_paths", [])
-        if not isinstance(paths, list) or not all(_safe_relative(p) for p in paths):
-            errors.append(f"required_evidence[{i}].required_paths must be a list of repository-relative globs")
-    return errors
-
-
 def _names_revision(text: str, rev: str) -> bool:
     """The record names `rev`: the full SHA or an abbreviation of at least 7 hex digits."""
     return any(rev.startswith(token.lower())
@@ -116,7 +104,7 @@ def check_target_validation(client: Any, repo: Repo, head: str, base: str,
     except (UnicodeDecodeError, ValueError) as exc:
         report["manifest"] = "invalid"
         return [f"{path} at base {base[:12]} is not valid JSON: {exc}"], report
-    errors = _manifest_errors(manifest)
+    errors = repo_evidence.validate_manifest(manifest)
     if errors:
         report["manifest"] = "invalid"
         return [f"{path} at base {base[:12]}: {e}" for e in errors], report
