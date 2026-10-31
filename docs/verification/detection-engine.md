@@ -202,6 +202,12 @@ never makes a row PASS.
 
 ## Actual-run evidence
 
+Latest install-block backup/rescue evidence:
+`docs/evidence/detection-engine/2026-10-30-ccde655b4d07.md` (candidate
+`ccde655b4d07`, PR #190: normal chain L1/L3/L4, C1-C12 12/12 PASS and L6
+`changed=0`, plus the backup-selection, fail-closed and rescue-availability
+arms against the base on the same snapshot).
+
 Latest notification-correctness evidence:
 `docs/evidence/detection-engine/2026-09-17-30d6b92.md` (candidate
 `30d6b92`, fake-protocol topology L1-L6 PASS, C1-C12 12/12 PASS,

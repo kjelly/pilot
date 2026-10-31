@@ -51,6 +51,14 @@
     detection_engine_config_dir: /etc/pilot/detection-engine
     detection_engine_config_path: /etc/pilot/detection-engine/config.yaml
     detection_engine_feature_profile_dest: /etc/pilot/detection-engine/feature-profile.yaml
+    detection_engine_unit_path: /etc/systemd/system/pilot-detection-engine.service
+    # Files Steps 8/9/9b/9c/11 rewrite or delete. Step 0b-0d snapshot them (content, mode,
+    # owner/group, symlink target) and the rescue restores them before restarting the service.
+    detection_engine_rollback_files:
+      - { path: "{{ detection_engine_unit_path }}" }
+      - { path: "{{ detection_engine_config_path }}" }
+      - { path: "{{ detection_engine_feature_profile_dest }}" }
+      - { path: "{{ detection_engine_config_dir }}/provider.env" }
     detection_engine_feature_profile_src: "{{ playbook_dir }}/../../monitoring/detection/feature-profiles/linux-host-v1.yaml"
     detection_engine_data_dir: /var/lib/pilot/detection-engine
     detection_engine_db_path: /var/lib/pilot/detection-engine/state.db
@@ -499,6 +507,86 @@
         fail_msg: "missing or empty {{ detection_engine_feature_profile_src }}"
       run_once: true
 
+    # Read-only snapshot of the service as it is BEFORE this run changes anything. It is
+    # the only thing the rescue below can put the service back from (facts like
+    # detection_engine_is_upgrade belong to Step 6's tag and are undefined under other
+    # selections), so it must be VALID before the first mutation, and it sits OUTSIDE the
+    # block on purpose: a refusal here (systemctl missing, `show` failing, output we cannot
+    # read) must not run the rescue, whose first task stops AND disables the unit. The
+    # tasks are always-tagged like the rescue that reads them.
+    - name: "Step 0: query the detection-engine service's original active/enabled state (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.command:
+        argv: [systemctl, show, --property=ActiveState, --property=UnitFileState, pilot-detection-engine.service]
+      register: detection_engine_service_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # `systemctl show` exits 0 for a unit that does not exist (LoadState=not-found,
+    # ActiveState=inactive, UnitFileState= empty), so a first install passes this. Anything
+    # else that is not a clean answer with both properties present stops the play here,
+    # before Steps 1-17 touch anything and before the rescue exists.
+    - name: "Step 0: assert the original service state was read (fail closed before any change)"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - detection_engine_service_before.rc == 0
+          - detection_engine_service_before.stdout_lines | select('match', '^ActiveState=.+$') | list | length == 1
+          - detection_engine_service_before.stdout_lines | select('match', '^UnitFileState=') | list | length == 1
+        fail_msg: >-
+          cannot read the original state of pilot-detection-engine.service
+          (`systemctl show` rc={{ detection_engine_service_before.rc | default('n/a') }},
+          stdout={{ detection_engine_service_before.stdout | default('') | to_json }},
+          stderr={{ detection_engine_service_before.stderr | default(detection_engine_service_before.msg | default('')) | to_json }}).
+          Refusing to change anything: the rollback needs to know whether the
+          service was active/enabled to put it back. Nothing was modified; fix
+          systemd/systemctl on the host and re-run.
+
+    # The rescue puts the service back by restarting it, and Steps 8-12 rewrite what it
+    # runs from (feature profile, config.yaml, provider.env, the unit file) BEFORE Step 10's
+    # `config validate` and Step 15's health check can reject them: restarting into a
+    # configuration this run wrote is a crash loop that a state-based check calls "active".
+    # So the files' original contents are read here, read-only (stat + slurp: never
+    # changed, fine under --check), always-tagged like the rescue that restores them, and
+    # outside the block like Step 0 so a failure here is a refusal before any change.
+    # Held in memory only: no backup files to go stale or to make the second apply
+    # report changed.
+    - name: "Step 0b: record which of the files this apply rewrites exist now (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+        # Not a symlink follow: the restore needs the file's own mode/owner/group and, for a
+        # symlink, its target. No checksum/mime/attributes: nothing consumes them, and the
+        # sha1 of provider.env would be printed by -vvv (the slurp below is no_log).
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      loop: "{{ detection_engine_rollback_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: detection_engine_prev_stat
+
+    - name: "Step 0c: read the existing ones' contents (read-only rollback material)"
+      tags: [always]
+      ansible.builtin.slurp:
+        src: "{{ item.item.path }}"
+      loop: "{{ detection_engine_prev_stat.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      # a symlink is restored as a link to its target (Step 0b), not by content
+      when: item.stat.exists and not item.stat.islnk
+      no_log: true
+      register: detection_engine_prev_content
+
+    - name: "Step 0d: record whether the unit file existed (a first install has nothing to put back)"
+      tags: [always]
+      ansible.builtin.set_fact:
+        detection_engine_prev_unit_existed: >-
+          {{ (detection_engine_prev_stat.results
+              | selectattr('item.path', 'equalto', detection_engine_unit_path)
+              | first).stat.exists }}
+
     - name: "Detection Engine install + systemd service"
       block:
         - name: "Step 1: create dedicated system user (spec §8)"
@@ -523,14 +611,35 @@
             - { path: "{{ detection_engine_data_dir }}", owner: "{{ detection_engine_user }}", group: "{{ detection_engine_user }}", mode: "0700" }
             - { path: "{{ detection_engine_backup_dir }}", owner: root, group: root, mode: "0700" }
 
+        # Steps 3-5 take Step 6's own tag (detection-engine-C1; the observability and
+        # detection-engine tags come from site.yml's import for all of them), not
+        # `always`. Backup and upgrade detection must run exactly when Step 6
+        # replaces the binary, under every selection Ansible makes (--tags tagged,
+        # --skip-tags, ...), and not otherwise: with `always`, a run that never
+        # reaches Step 6 (pilot deploy --limit passes only the limited hosts'
+        # component tags and still pulls in it-core) kept taking a "pre-upgrade"
+        # backup while the binary stayed stale, and Step 4's changed_when: true made
+        # the second apply fail the idempotency check.
+        #
+        # The rescue below is `always`, so it cannot read what these C1-tagged tasks
+        # set. Its restore tasks run only when this run reached Step 6
+        # (detection_engine_binary_result is defined) and
+        # detection_engine_is_upgrade is defined and true; those `is defined` guards
+        # stay in the tasks' own bodies. The backups are then the ones Steps 4-5 just
+        # took, with two known exceptions that this change does not fix: Step 5 has
+        # failed_when: false, so a failed snapshot leaves an older .prev in place (#193),
+        # and an upgrade with no existing state.db takes no db backup, so an older
+        # pre-upgrade.db could be restored over a db created since (#194). The service,
+        # in contrast, is put back from Step 0's recorded original state, not from these
+        # facts.
         - name: "Step 3: check whether a previous state.db exists (spec §26: skip backup on first install)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.stat:
             path: "{{ detection_engine_db_path }}"
           register: detection_engine_existing_db
 
         - name: "Step 3b: check whether a previous binary exists and would actually change (spec §26 upgrade detection)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.stat:
             path: "{{ detection_engine_bin_dest }}"
             checksum_algorithm: sha256
@@ -541,14 +650,14 @@
         # "second apply: changed=0"), so this must not be true just
         # because a previous binary happens to exist.
         - name: "Step 3c: determine whether this apply is an upgrade"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.set_fact:
             detection_engine_is_upgrade: >-
               {{ detection_engine_existing_binary_stat.stat.exists
                  and detection_engine_existing_binary_stat.stat.checksum != detection_engine_artifact_sha256 }}
 
         - name: "Step 3d: ensure the backup directory exists before taking rollback material"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.file:
             path: "{{ detection_engine_backup_dir }}"
             state: directory
@@ -558,7 +667,7 @@
           when: detection_engine_is_upgrade
 
         - name: "Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO, spec §26/§40)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.command:
             argv:
               - "{{ detection_engine_bin_dest }}"
@@ -572,7 +681,7 @@
           changed_when: true
 
         - name: "Step 5: snapshot the previously installed binary (rollback material, spec §26)"
-          tags: [always]
+          tags: [detection-engine-C1]
           ansible.builtin.copy:
             src: "{{ detection_engine_bin_dest }}"
             dest: "{{ detection_engine_backup_dir }}/pilot-detection-engine.prev"
@@ -704,7 +813,7 @@
         - name: "Step 11: render pilot-detection-engine.service (spec §8 systemd hardening)"
           tags: [detection-engine-C5]
           ansible.builtin.copy:
-            dest: /etc/systemd/system/pilot-detection-engine.service
+            dest: "{{ detection_engine_unit_path }}"
             mode: "0644"
             content: |
               [Unit]
@@ -832,12 +941,24 @@
           when: not ansible_check_mode
 
       rescue:
+        # The stop below lets the restores replace the binary/state.db safely; the last
+        # tasks then put the service back as Step 0 found it. Behaviour note: a service
+        # that was active is restarted even when the failed run never replaced the binary
+        # (it used to be left stopped and disabled); the config files are restored first.
+        #
+        # The stop is guarded by a valid Step 0 snapshot: without one nothing could put
+        # the service back, so it must not be stopped. Step 0 is outside this block and
+        # fails the play when it cannot read the state, so the guard only matters if the
+        # snapshot is missing altogether (`when` on the undefined register then fails this
+        # rescue before the service is touched). No `is defined` here on purpose: the
+        # always-tag prerequisite lint then keeps Step 0 always-tagged.
         - name: "ROLLBACK — stop the newly (mis)configured service"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: stopped
             enabled: false
+          when: detection_engine_service_before.rc == 0
           failed_when: false
 
         - name: "ROLLBACK — restore the previous binary, if one was snapshotted"
@@ -847,7 +968,9 @@
             dest: "{{ detection_engine_bin_dest }}"
             remote_src: true
             mode: "0755"
-          when: detection_engine_is_upgrade | default(false)
+          when:
+            - detection_engine_binary_result is defined
+            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
         - name: "ROLLBACK — restore the pre-upgrade database, if one was backed up"
@@ -859,27 +982,154 @@
             mode: "0600"
             owner: "{{ detection_engine_user }}"
             group: "{{ detection_engine_user }}"
-          when: detection_engine_is_upgrade | default(false)
+          when:
+            - detection_engine_binary_result is defined
+            - detection_engine_is_upgrade is defined and detection_engine_is_upgrade
           failed_when: false
 
-        - name: "ROLLBACK — restart with the restored previous binary, if any"
+        # Put back the unit file, config.yaml, feature profile and provider.env as Step 0b-0d
+        # found them (a file that did not exist then is removed), so the restart below runs
+        # the configuration that was running, not one this run wrote and Step 10 or a later
+        # check rejected. Only when the unit already existed: after a failed first install
+        # the files are left for inspection with the service stopped, as before. Restoring a
+        # file the failed run never touched rewrites identical bytes. Failures are recorded
+        # (not swallowed): if the old files cannot be put back the service is NOT
+        # re-enabled/restarted, and the final message says so.
+        - name: "ROLLBACK — restore the unit, config, feature profile and provider.env this run may have rewritten"
+          tags: [always]
+          ansible.builtin.copy:
+            dest: "{{ item.0.item.path }}"
+            content: "{{ item.1.content | b64decode }}"
+            # the file's own mode and numeric owner/group from Step 0b, not the playbook's
+            # defaults (an operator may have a 0640 provider.env owned by another group)
+            mode: "{{ item.0.stat.mode }}"
+            owner: "{{ item.0.stat.uid }}"
+            group: "{{ item.0.stat.gid }}"
+          loop: "{{ detection_engine_prev_stat.results | zip(detection_engine_prev_content.results) | list }}"
+          loop_control:
+            label: "{{ item.0.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - item.0.stat.exists
+            - not item.0.stat.islnk
+          no_log: true
+          register: detection_engine_rescue_restore_files
+          ignore_errors: true
+
+        # A file that was a symlink comes back as the same symlink (the run's copy replaced
+        # it with a regular file), not as a regular file holding the target's content.
+        - name: "ROLLBACK — restore the files that were symlinks"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item.path }}"
+            src: "{{ item.stat.lnk_target }}"
+            state: link
+            force: true
+          loop: "{{ detection_engine_prev_stat.results }}"
+          loop_control:
+            label: "{{ item.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - item.stat.exists
+            - item.stat.islnk
+          register: detection_engine_rescue_restore_links
+          ignore_errors: true
+
+        - name: "ROLLBACK — remove the files this run created next to an existing unit"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ item.item.path }}"
+            state: absent
+          loop: "{{ detection_engine_prev_stat.results }}"
+          loop_control:
+            label: "{{ item.item.path }}"
+          when:
+            - detection_engine_prev_unit_existed | bool
+            - not item.stat.exists
+          register: detection_engine_rescue_remove_files
+          ignore_errors: true
+
+        - name: "ROLLBACK — reload systemd after putting the unit file back"
+          tags: [always]
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: detection_engine_prev_unit_existed | bool
+          register: detection_engine_rescue_reload
+          ignore_errors: true
+
+        # The stop above disabled the unit too; put back what Step 0 found, whichever tags
+        # selected the failing step. A unit that did not exist before (first install) or
+        # was inactive/disabled stays stopped/disabled. Restore semantics per state:
+        #   UnitFileState=enabled          -> `systemctl enable` (persistent).
+        #   enabled-runtime, static, ...   -> not re-enabled: the stop's `systemctl disable`
+        #                                     does not remove a /run (runtime) link, and
+        #                                     the others have no enable state to put back.
+        #   ActiveState=active|reloading|activating
+        #                                  -> restart (activating is a unit that is meant to
+        #                                     run: starting, or waiting out Restart=on-failure).
+        #   inactive|failed|deactivating   -> left stopped.
+        # ignore_errors (not failed_when: false) so a failed restore does not abort the
+        # remaining rescue tasks but is still visible to the final message below.
+        - name: "ROLLBACK — re-enable the service if it was enabled before this run"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-detection-engine.service
+            enabled: true
+          when:
+            - detection_engine_service_before.rc == 0
+            - "'UnitFileState=enabled' in detection_engine_service_before.stdout_lines"
+            - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_restore_links is not failed
+            - detection_engine_rescue_remove_files is not failed
+            - detection_engine_rescue_reload is not failed
+          register: detection_engine_rescue_reenable
+          ignore_errors: true
+
+        - name: "ROLLBACK — restart the service if it was active before this run (with the restored binary, if any)"
           tags: [always]
           ansible.builtin.systemd:
             name: pilot-detection-engine.service
             state: restarted
-            enabled: true
-          when: detection_engine_is_upgrade | default(false)
-          failed_when: false
+          when:
+            - detection_engine_service_before.rc == 0
+            - detection_engine_service_before.stdout_lines | intersect(['ActiveState=active', 'ActiveState=reloading', 'ActiveState=activating']) | length > 0
+            - detection_engine_rescue_restore_files is not failed
+            - detection_engine_rescue_restore_links is not failed
+            - detection_engine_rescue_remove_files is not failed
+            - detection_engine_rescue_reload is not failed
+          register: detection_engine_rescue_restart
+          ignore_errors: true
 
         - name: "ROLLBACK — surface the original failure (evidence preserved, spec §26)"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              detection-engine apply FAILED (see task output above). If a
-              previous install existed, its binary/state.db were restored
-              and the service was restarted with them; otherwise the
-              service was stopped/disabled and left in place for
-              inspection.
+              detection-engine apply FAILED (see task output above). If this
+              run had replaced the binary of a previous install, that binary
+              and state.db were restored. The service was then put back as
+              Step 0 found it (restarted if it was active, re-enabled if it
+              was enabled), after the unit file, config.yaml, feature profile and
+              provider.env were put back as they were before the run (when a unit
+              already existed). A service that was not active before, or did not
+              exist, stays stopped/disabled for inspection.
+              {% if detection_engine_rescue_restore_files is failed
+                 or detection_engine_rescue_restore_links is failed
+                 or detection_engine_rescue_remove_files is failed
+                 or detection_engine_rescue_reload is failed %}
+              WARNING: putting the previous unit/config.yaml/feature
+              profile/provider.env back FAILED (that task's output is
+              censored: it carries provider.env); the service was NOT
+              re-enabled or restarted so it does not run a configuration this
+              run wrote. It is stopped and disabled: fix the files in
+              {{ detection_engine_config_dir }} and
+              {{ detection_engine_unit_path }}, then re-run.
+              {% endif %}
+              {% if detection_engine_rescue_reenable is failed %}
+              WARNING: re-enabling the service FAILED; it was enabled before this run and is now disabled.
+              {% endif %}
+              {% if detection_engine_rescue_restart is failed %}
+              WARNING: restarting the service FAILED; it was active before this run and is now stopped.
+              {% endif %}
 
     - name: "Publish detection-engine health metrics via the textfile collector"
       ansible.builtin.wait_for:
