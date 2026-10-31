@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from test_gate import Fake, sample, B, H
-from test_target_validation import R, ART, RECORD, MANIFEST, REPO, repo_manifest
+from test_target_validation import API, R, ART, RECORD, MANIFEST, REPO, repo_manifest, replay
 import gh_runtime
 from review_gate import evaluate
 
@@ -103,6 +103,47 @@ class TargetReuseRemoteTests(unittest.TestCase):
         self.assertEqual("WAITING", r["decision"])
         self.assertIn("independent review base must match live base", " ".join(r["reasons"]))
 
+    def reasons(self, gh, e):
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        return " ".join(r["reasons"])
+
+    def test_symlinked_scoped_input_waits(self):
+        gh, e, trees = self.fixture()
+        target = "internal/shared/target.go"
+        # DEP is an unchanged symlink at every revision; main changed the file it points at.
+        for rev, n in ((A, 6), (R, 6), (B, 7), (H, 7)):
+            trees[rev][target] = blob(n)
+            if DEP in trees[rev]:
+                trees[rev][DEP] = ("120000", "1" * 40)
+        self.assertIn("execution input changed, missing or not a regular file: " + DEP, self.reasons(gh, e))
+
+    def test_candidate_edit_replaced_by_base_version_waits(self):
+        gh, e, trees = self.fixture()
+        # The candidate edited an unscoped file, then the merge kept main's version: HEAD == base there.
+        trees[A][OTHER], trees[R][OTHER] = blob(5), blob(7)
+        self.assertEqual(trees[B][OTHER], trees[H][OTHER])
+        self.assertIn("neither a pure base import nor an audited non-execution change: " + OTHER,
+                      self.reasons(gh, e))
+
+    def test_non_ancestor_candidate_waits(self):
+        gh, e, _ = self.fixture()
+        gh.compares[(R, H)] = {"ancestor": False, "merge_base": A, "files": [ART, OTHER]}
+        self.assertIn("tested candidate is not an ancestor of HEAD", self.reasons(gh, e))
+
+    def test_candidate_on_base_waits(self):
+        # merge_base == R: the candidate is on main. merge_base == B: main never advanced past it.
+        for merge_base in (R, B):
+            with self.subTest(merge_base=merge_base[:7]):
+                gh, e, _ = self.fixture()
+                gh.compares[(R, B)] = {"ancestor": merge_base == R, "merge_base": merge_base, "files": [OTHER]}
+                self.assertIn("target reuse requires a candidate branch and an advanced base", self.reasons(gh, e))
+
+    def test_missing_live_base_name_waits(self):
+        gh, e, _ = self.fixture()
+        del gh.v["baseRefName"]
+        self.assertIn("Live base branch name unavailable", self.reasons(gh, e))
+
     def test_untyped_base_manifest_cannot_be_weakened_from_pr(self):
         gh, e, _ = self.fixture()
         manifest = json.loads(gh.files[(MANIFEST, B)])
@@ -140,6 +181,23 @@ class GitTreeAdapterTests(unittest.TestCase):
             with self.subTest(data=data), mock.patch.object(gh_runtime, "gh_json", return_value=data):
                 with self.assertRaises(gh_runtime.GitHubError):
                     gh_runtime.branch_head(REPO, "main")
+        for name in ("", None):
+            with self.subTest(name=name), mock.patch.object(gh_runtime, "gh_json", return_value={"commit": {"sha": B}}):
+                with self.assertRaisesRegex(gh_runtime.GitHubError, "branch name unavailable"):
+                    gh_runtime.branch_head(REPO, name)
+
+    def test_compare_needs_the_merge_base_commit_id(self):
+        capture = API["compare"]["ahead_evidence_only"]
+        run_gh, _ = replay(capture)
+        with mock.patch.object(gh_runtime, "run_gh", run_gh):
+            got = gh_runtime.compare(REPO, *capture["args"])
+        self.assertRegex(got["merge_base"], r"[0-9a-f]{40}\Z")
+        body = json.loads(capture["stdout"])
+        body["merge_base_commit"]["sha"] = "main"
+        run_gh, _ = replay(dict(capture, stdout=json.dumps(body)))
+        with mock.patch.object(gh_runtime, "run_gh", run_gh):
+            with self.assertRaisesRegex(gh_runtime.GitHubError, "Invalid compare response"):
+                gh_runtime.compare(REPO, *capture["args"])
 
     def test_blob_modes_symlinks_and_submodules_are_preserved_without_following(self):
         rows = [{"path": p, "mode": mode, "type": typ, "sha": str(n)*40}
@@ -158,7 +216,8 @@ class GitTreeAdapterTests(unittest.TestCase):
                  {"truncated": False, "tree": [row, row]},
                  {"truncated": False, "tree": [dict(row, mode="040000")]},
                  {"truncated": False, "tree": [dict(row, sha="bad")]},
-                 {"truncated": False, "tree": [dict(row, type="commit")]}]
+                 {"truncated": False, "tree": [dict(row, type="commit")]},
+                 {"truncated": False, "tree": [dict(row, mode="100664")]}]
         for data in cases:
             with self.subTest(data=data), mock.patch.object(gh_runtime, "gh_json", return_value=data):
                 with self.assertRaises(gh_runtime.GitHubError):
