@@ -18,6 +18,9 @@ from gh_runtime import Repo  # noqa: E402
 from review_gate import evaluate as prm_evaluate  # noqa: E402
 from test_gate import Fake, sample  # noqa: E402
 
+MANIFEST = '.github/pr-evidence.json'
+REQUIRES_RECORD = (HERE.parents[3] / MANIFEST).read_bytes()
+
 spec = importlib.util.spec_from_file_location(
     'pr_ready_gate', HERE.parents[1] / 'pr-ready' / 'scripts' / 'pr_gate.py')
 pr_ready = importlib.util.module_from_spec(spec)
@@ -74,8 +77,12 @@ class HandoffTests(unittest.TestCase):
                                    repo='acme/demo', number=42, local=None)
         return not errors, checks, failing, len(unresolved)
 
-    def prm_decision(self, st, checks, failing, unresolved):
+    def prm_decision(self, st, checks, failing, unresolved, manifest=None):
         gh = Fake()
+        if manifest is not None:
+            # pr-ready's gate does not read .github/pr-evidence.json, so a PR it marks Ready may
+            # have no actual-run record at all; that must wait here, not go back to Draft.
+            gh.files[(MANIFEST, gh.v['baseRefOid'])] = manifest
         gh.v['reviewDecision'] = st['decision']
         gh.v['headRefOid'] = H
         gh.c = checks
@@ -101,6 +108,16 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(any(st['bucket'] == 'fail' for st, _ in accepted))
         self.assertTrue(any(st['decision'] == 'CHANGES_REQUESTED' for st, _ in accepted))
         self.assertFalse(any(not st['thread_resolved'] for st, _ in accepted))
+
+    def test_a_ready_pr_without_the_mandated_record_waits(self):
+        reached = 0
+        for st in self.states():
+            passes, checks, failing, unresolved = self.pr_ready_passes(st)
+            if not passes:
+                continue
+            reached += 1
+            self.assertEqual('WAITING', self.prm_decision(st, checks, failing, unresolved, REQUIRES_RECORD), st)
+        self.assertGreater(reached, 0)
 
     def test_a_ready_pr_never_merges_with_a_failing_check(self):
         for st in self.states():

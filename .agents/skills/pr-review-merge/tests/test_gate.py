@@ -37,6 +37,19 @@ class Fake:
         self.r = []
         self.t = 0
         self.counter = 0
+        # {(path, ref): bytes}; no entry is GitHub's 404, so no .github/pr-evidence.json.
+        self.files = {}
+        # {(base, head): compare result as gh_runtime.compare returns it}
+        self.compares = {}
+        self.calls = []
+
+    def file_at(self, repo, path, ref):
+        self.calls.append(('file_at', path, ref))
+        return self.files.get((path, ref))
+
+    def compare(self, repo, base, head):
+        self.calls.append(('compare', base, head))
+        return self.compares.get((base, head))
 
     def pr_view(self, repo, number):
         self.counter += 1

@@ -51,12 +51,18 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
-  orchestration (AGENTS.md §1.4/§1.5). A PR that needs one and has no
-  `docs/evidence/<feature>/<date>-<tested-revision>.md` covering the reviewed HEAD
-  (or an evidence-only delta from the tested revision) carries a blocking `P1`
-  finding at the changed playbook/spec path: that is a confirmed violation of a hard
-  repository rule, not a `WAITING` gap. Docs-, skill- or pure-Go changes proven by
-  native-tool tests need no VM run; the reviewer says so in `target_validation`.
+  orchestration (AGENTS.md §1.4/§1.5). `review_gate.py` enforces it: it reads the
+  manifest at the PR's base SHA through the GitHub API (never the head, so a PR cannot
+  weaken its own requirement) and checks `target_validation` with issue-to-pr's
+  `repo_evidence.py` rules. Missing or malformed, `blocked`, `not-needed` on a PR that
+  changes the manifest's `required_paths` (`playbooks/**`, `docs/verification/**`,
+  `contracts/**`), or `required` without a committed `docs/evidence/**` record that names
+  a tested revision covering HEAD (same SHA, or an ancestor whose delta to HEAD is
+  evidence-only) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
+  reviewer still files a blocking `P1` at the changed path when a change needs a record
+  and has none: that is a confirmed violation of a hard repository rule and the only way
+  this becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
+  no VM run; the reviewer says so in `target_validation` with the reason.
 - **Cost.** The full Go suite takes about 45 minutes in CI. Reviewers run the
   packages the diff touches (and `make skill-test` for `.agents/skills` changes)
   locally and rely on the `Go test` check for the whole suite.
@@ -64,7 +70,8 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   base/HEAD and arrange a new independent review before acting on the next one.
 - **Hand-off with `pr-ready`.** `pr-ready` marks a PR Ready only when every review
   thread is resolved; it may leave a reviewer-confirmed unrelated failing check, a
-  `CHANGES_REQUESTED` review awaiting re-review, and findings it disputed on the PR.
+  `CHANGES_REQUESTED` review awaiting re-review, findings it disputed on the PR, and
+  (its `pr_gate.py` does not read `.github/pr-evidence.json`) no actual-run record.
   None of these is a reason to return the PR to Draft (that only starts another
   round): the gate decides `WAITING` for them and never `MERGE`.
   `tests/test_pr_ready_handoff.py` runs both gates over the same GitHub states and
@@ -95,9 +102,9 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 
 | Decision | Conditions | GitHub action |
 |---|---|---|
-| `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
+| `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
 | `DRAFT` | Confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict or unresolved review thread | Post actionable findings and `gh pr ready --undo` |
-| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, unknown GitHub status, evidence incomplete, HEAD/Base changed, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
+| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, HEAD/Base changed, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.

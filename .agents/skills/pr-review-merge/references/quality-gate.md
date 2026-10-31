@@ -8,7 +8,8 @@
 | Active rules include `merge_queue` | WAITING | `gh pr merge` may enqueue or enable auto-merge without a final merge; do not trigger automatically |
 | Empty CI, no documented rationale or no positive test evidence | WAITING | Absent checks are not an implicit pass |
 | Every gate clear, no unresolved threads, base/HEAD unchanged, branch mergeability `MERGEABLE`, merge state `CLEAN`, tests/CI passed | MERGE | Attempt `gh pr merge --merge --match-head-commit SHA` (merge commits are this repository's practice); verify state `MERGED` |
-| Repository-mandated actual-run evidence missing for a change that needs it (`.github/pr-evidence.json`, AGENTS.md §1) | DRAFT | Hard repository rule violated; the reviewer files a `P1` at the changed path naming the missing `docs/evidence` record |
+| The base branch's `.github/pr-evidence.json` requires a record and `target_validation` is missing, malformed, `blocked`, `not-needed` for a `required_paths` change, or `required` without a committed `docs/evidence` record that names a tested revision covering HEAD (same SHA or evidence-only delta); the manifest cannot be read | WAITING | Checked by the gate against GitHub at the base/HEAD SHAs; the gate has no finding of its own, so it never merges and never drafts |
+| The reviewer's blocking `P1` at the changed path for a missing mandated actual-run record (AGENTS.md §1) | DRAFT | Hard repository rule violated; the finding names the missing `docs/evidence` record |
 | Closed, already merged or Draft | SKIP | Out of scope |
 
 Additional rules:

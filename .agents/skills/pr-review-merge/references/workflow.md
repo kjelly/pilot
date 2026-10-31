@@ -2,7 +2,7 @@
 
 1. Inventory (paginated) open Ready PRs via `python3 scripts/list_ready.py --repo OWNER/REPO`; include individual PR targets exactly when specified.
 2. Resolve PR DAG (stacked PRs, explicit depends-on text, related Issues, shared touching files, migrations). Cross-PR interactions require a separate dependency review. Do not assume issue references imply hard dependencies.
-3. Read the pilot history reference (`../../pilot-code-review/references/pilot-history-checks.md`) and the base branch's `.github/pr-evidence.json`; for each PR note which changed paths need an actual-run record and whether a `docs/evidence/**` record covers its HEAD or tested revision. Pass the absolute reference path and the relevant earlier findings to every reviewer.
+3. Read the pilot history reference (`../../pilot-code-review/references/pilot-history-checks.md`) and the base branch's `.github/pr-evidence.json`; for each PR note which changed paths need an actual-run record (the manifest's `required_paths` always do) and whether a `docs/evidence/**` record covers its HEAD or tested revision. Pass the absolute reference path and the relevant earlier findings to every reviewer. The gate re-reads the manifest at the PR's base SHA through the GitHub API and checks `target_validation` itself (`evidence-contract.md`); no local checkout is needed.
 4. Collect the earlier findings disputed on each PR and the replies disputing them (SKILL.md, "Disputed findings"); they go to that PR's reviewer.
 5. Allocate up to two independent PR reviewer subagents. They review the actual diff at a captured Head/Base SHA and may run sandboxed, trusted tests in isolated worktrees without touching PR state. Use capped log artifacts and include only summary/paths in Root context.
 6. Save each reviewed PR evidence JSON according to `evidence-contract.md`. If reviewer returned findings without exact location/evidence, ask reviewer for targeted verification before classification.
@@ -22,7 +22,7 @@ Coverage: requirements, correctness, architecture, security, concurrency, edge_c
 Findings: [severity, path:line, concrete evidence, suggested fix, disputed_reply_url + new_evidence when repeating a disputed finding]
 Tests: [name, status, evidence URL or artifact path]
 Dependencies: resolved? rationale
-Target validation: required | not-needed | blocked, invariant, docs/evidence artifact + tested revision
+Target validation: required | not-needed | blocked, reason (30+ chars) with the invariant, docs/evidence artifact + full 40-hex tested revision it names
 Risks or unknowns: ...
 ```
 
