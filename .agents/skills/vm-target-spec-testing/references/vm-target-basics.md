@@ -1,316 +1,182 @@
 # vm-target-basics.md -- the disposable KVM lifecycle
 
-Everything you need that `pilot vm-target --help` does not tell you
-about cost, failure modes, and the inventory contract.
+What `pilot vm-target --help` does not tell you about cost, failure modes
+and the inventory contract. Checked against `cmd/pilot/cmd/vm_target*.go`
+and `internal/vmtarget`; re-check `--help` when in doubt. The operator
+runbook is [docs/runbooks/vm-target.md](../../../../docs/runbooks/vm-target.md).
 
-## Lifecycle commands
+## Command map
 
-| Command | What it does | Idempotent? |
-|---------|-------------|-------------|
-| `up`    | Provision VM from cloud image, wait for SSH | No -- creates new overlay each time |
-| `list`  | Print JSON/table of all known targets | Read-only |
-| `show-inventory` | Print the SSH inventory vm-target would pass to ansible | Read-only |
-| `run`   | Execute an ansible playbook against a running target | Yes (ansible idempotency) |
-| `wire`  | Idempotently pin a peer target's IP into this target's `/etc/hosts` | Yes (marker-block replace) |
-| `topology up/down/inventory/status` | Bring up/tear down/inventory/inspect an entire named multi-VM scenario from one YAML spec | `up` yes (skips already-running nodes) |
-| `exec`  | Run a single command via SSH on the target | No |
-| `verify`| Run `pilot verify` against a spec file | Yes for spec checks |
-| `snapshot` | Snapshot the VM's qcow2 under a tag | No (additive) |
-| `rollback` | Restore qcow2 to a tagged snapshot | Destructive |
-| `reset` | Roll back to the pristine post-`up` snapshot (fast dev/test loop) | Destructive |
-| `down`  | Destroy + undefine + delete overlay + clear state | Destructive |
+| Command | What it does | Notes |
+|---------|-------------|-------|
+| `up` | Provision a VM from a base image, wait for a DHCP lease and SSH | Refuses a name already in state or libvirt. Takes the `clean` checkpoint `reset` returns to |
+| `test` | L1 syntax → L3 `--check --diff` → snapshot → L4 apply → L5 verify → L6 idempotency, rollback on failure | Needs a running VM; never provisions |
+| `topology up/status/inventory/down` | Bring up, inspect, render or tear down a whole multi-VM scenario | See `multi-vm-networking.md` |
+| `topology test` | `test` over a topology; `--ephemeral` provisions fresh nodes and tears them down | See `multi-vm-networking.md` |
+| `topology snapshot/rollback/reset` | The single-VM operation on every node, concurrently; `rollback`/`reset` re-wire | |
+| `list` | Every VM in pilot state, with live status | Shows other sessions' VMs too |
+| `show-inventory` | The SSH inventory `run`/`verify` pass to Ansible | Read-only |
+| `run` | `ansible-playbook` against a running VM | Debugging; preflight syntax check |
+| `verify` | `pilot verify <spec>` against the VM | Adds `-l <vm>` unless you pass `-l` |
+| `exec` / `ssh` / `shell` | One command / an interactive session over SSH | `exec` runs no host shell |
+| `wire` | Pin peer VMs' IPs into this VM's `/etc/hosts` | Idempotent marker block |
+| `snapshot` / `rollback` | libvirt qcow2 snapshot under a tag / revert to it | `rollback` is destructive |
+| `reset` | Revert to the `clean` checkpoint from `up` | Seconds; drops `wire` blocks |
+| `resize-disk` | Grow the root disk (`--disk <GiB>`, grow only) | Online if running |
+| `down` | Destroy, undefine, delete the per-target directory, clear state | Destructive |
 
 ## The inventory contract
 
-`vm-target show-inventory` prints a YAML inventory like:
+`vm-target show-inventory --name <vm>` prints (abridged):
 
 ```yaml
 all:
   hosts:
-    <target-name>:
+    <vm>:
       ansible_connection: ssh
       ansible_host: <dhcp-ip>
       ansible_user: <ssh-user>
       ansible_port: 22
-      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/<name>/id_ed25519
-      ansible_ssh_common_args: -o StrictHostKeyChecking=no ... -o ControlMaster=auto ...
+      ansible_ssh_private_key_file: /var/lib/libvirt/images/pilot/<vm>/id_ed25519
+      ansible_ssh_args: -o ControlMaster=auto -o ControlPath="/tmp/pilot-vmt-<uid>-<hash>/%C" -o ControlPersist=60s
+      ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
       ansible_ssh_pipelining: true
+  children:
+    <alias>:            # one per --hosts alias given at `up`
+      hosts:
+        <vm>: {}
 ```
 
-Key invariants:
-- The **only host key** is the target name itself (no extra groups).
-- `ansible_ssh_private_key_file` is per-target, per-up (a new keypair is
-  generated and the public half is injected via cloud-init seed).
-- `ansible_ssh_common_args` includes `ControlMaster=auto`. Do not copy
-  this line into a hand-written inventory -- it will clash with `pilot`'s
-  connection multiplexing.
-- `pilot vm-target run` automatically adds `-l <target-name>`. This is
-  how the playbook's `hosts:` pattern matches: the single host key is
-  sufficient to satisfy the group pattern.
-- This single-target contract only holds for a plain `run --name <n>`.
-  `run --group <name>=<t1>,<t2>` (below) produces a *different* shape —
-  real `children:` groups spanning multiple target names — and skips the
-  `-l` auto-limit entirely, since there is no longer one obvious host.
+- The VM is exactly one host, keyed by its name. A `--hosts` alias is a
+  group holding that host, so `-l <alias>`, `-e target_group=<alias>` and a
+  spec whose targets are that group all select this VM
+  ([vm-target.md](../../../../docs/runbooks/vm-target.md) §5.4).
+- The private key is per VM and per `up`; cloud-init injects the public half.
+- The ControlPath sits in `ansible_ssh_args` (Ansible puts `ssh_args`
+  first and OpenSSH keeps the first value), in a per-VM directory under
+  `/tmp` (`$PILOT_SSH_CONTROL_BASE` overrides `/tmp`). `show-inventory`
+  creates it; `down` removes it. Do not copy these lines into a hand-written
+  inventory.
+- `run --name <vm>` and `test` add `-l <vm>` unless the extra args set
+  `target_group`. `run --group` renders real multi-host groups and adds no
+  `-l` (below).
+- `--ssh-user` defaults to `root`; cloud-init sets `disable_root: false` and
+  writes the key, so root works on the stock images.
 
-## Sandbox mode (`--sandbox`) -- the default way to run playbooks
+## Running Ansible: host or `--sandbox`
 
-`pilot vm-target run --sandbox` runs `ansible-playbook` **inside a Docker
-container** on the host (via `docker cp` + `docker exec`), instead of
-requiring `ansible-playbook`/collections installed directly on the host
-running `pilot`. This is the `docker-exec` sandbox mode documented in
-`README.md`'s "兩種 sandbox 執行模式" section -- the container must ship
-its own `ansible-playbook` on `$PATH`.
-
-**Default to `--sandbox` for every `vm-target run` in a spec test**, so
-the host driving `pilot` never needs its own ansible install/collections
-kept in sync with whatever the playbook needs:
+`test` and `topology test` always run the host's `ansible-playbook`. Only
+`run` has a sandbox mode:
 
 ```bash
-pilot vm-target run --name <name> --sandbox \
-  --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest \
-  playbooks/apply/<role>-apply.yml -e ...
+pilot vm-target run --name <vm> --sandbox --sandbox-image pilot-cli:latest \
+  playbooks/apply/<role>-apply.yml -e @~/.vault/<role>-sandbox.yaml
 ```
 
-Or set it once in `~/.config/pilot/config.yaml` so `--sandbox-image`
-never needs repeating:
+- The image comes from `--sandbox-image` or `sandbox.image` in
+  `~/.config/pilot/config.yaml`. It must ship `ansible-playbook`, the
+  collections and an **ssh client**. Build the repo's control-node image
+  once: `docker build -t pilot-cli:latest -f images/Dockerfile.pilot-cli .`.
+  `geerlingguy/docker-ubuntu2204-ansible` has no ssh client and cannot
+  reach the VM ([freeipa-dns-client.md](../../../../docs/runbooks/freeipa-dns-client.md)).
+- `run`'s syntax-check preflight still uses the host `ansible-playbook`;
+  pass `--skip-syntax-check` on a host without Ansible.
+- The container gets the nearest enclosing `playbooks/` tree (so includes
+  across `apply/`, `check/`, `decommission/` resolve), the inventory with
+  key paths rewritten, every referenced VM's key (read-only), and each
+  `-e @file` (a leading `~` is expanded on the host first).
+- `--json` cannot be combined with `--sandbox`; the CLI refuses.
 
-```yaml
-sandbox:
-  image: geerlingguy/docker-ubuntu2204-ansible:latest
-```
+`references/container-in-vmtesting.md` is a different topic: containers the
+playbook starts inside the VM.
 
-Caveats:
-- `--json` (below) is **not supported together with `--sandbox`** --
-  the CLI errors out immediately rather than silently ignoring one.
-  Use plain-text mode (drop `--sandbox`, or drop `--json`) when you need
-  the structured summary.
-- The VM's SSH key(s) are auto-mounted read-only into the container; you
-  never need to copy keys around by hand.
-- `run --group ... --sandbox` mounts **every** referenced target's own
-  key (each vm-target VM gets its own generated keypair), so multi-node
-  `--group` runs work the same way under sandbox as single-target runs.
+## `--json`
 
-Do not confuse this with `references/container-in-vmtesting.md` --
-that file is about containers your *playbook* starts **inside** the VM
-under test (e.g. a FreeIPA server container). `--sandbox` is about
-where `ansible-playbook` itself runs (on the host, inside a throwaway
-container) -- it has nothing to do with what the playbook does once it
-connects to the VM over SSH.
+`pilot vm-target run --name <vm> <playbook> --json` prints one
+`<host>: ok=… changed=… failed=… unreachable=… skipped=…` line per host and
+keeps the raw JSON in the transcript. Use it for triage, not as evidence.
 
-## `--json`: structured pass/fail instead of scrollback-parsing
+## Run transcripts
+
+Every `vm-target run` writes `<vm-dir>/<vm>/runs/<UTC>-<playbook>.log` and
+prints the path after the run. `down` deletes that directory, so copy a
+transcript you need into `.verification/` first. `test` and `topology test`
+write no transcript; tee their output (SKILL.md §5). A transcript is raw
+output: it belongs in `.verification/`, never in a runbook or spec
+(AGENTS.md §1.2).
+
+## `--group`: real groups across several running VMs
 
 ```bash
-pilot vm-target run --name <name> playbooks/apply/<role>-apply.yml --json
+pilot vm-target run --name ipa-ha-client \
+  --group freeipa-server=ipa-primary \
+  --group freeipa-client=ipa-ha-client \
+  --sandbox --sandbox-image pilot-cli:latest \
+  playbooks/apply/freeipa-client-apply.yml -e target_group=freeipa-client
 ```
 
-Parses ansible's built-in `json` stdout callback into one line per host:
+- Each value is `group=target1,target2`; repeatable; every member must be
+  running.
+- `--name` only picks whose `runs/` directory gets the transcript and must
+  be a member. No `-l` is added: `-e target_group=<group>` or the playbook's
+  `hosts:` decides.
+- Use the production role-group names the playbook reads (for example
+  `groups['freeipa-server']`), not ad-hoc labels; see
+  [freeipa-server-replica-ha-drill.md](../../../../docs/runbooks/freeipa-server-replica-ha-drill.md) §1.
+- A scenario you will rerun belongs in a topology file instead
+  (`multi-vm-networking.md`).
 
-```
-  <host>: ok=6 changed=2 failed=0 unreachable=0 skipped=1
-```
+## Disk, memory, timeouts
 
-Use this when you just need a fast triage signal (did anything fail /
-change unexpectedly) rather than the full scrollback. For the evidence
-you actually paste into a runbook (AGENTS.md §1.1 actual-run), prefer the
-plain-text run's PLAY RECAP or the transcript file below -- `--json`'s
-raw document is not meant for a human reader.
+Defaults: 30 GiB disk, 2048 MiB, 2 vCPUs, network `default`, SSH user
+`root`. `--disk` is a sparse qcow2 overlay, so a large value costs little
+until written. Raise `--memory` for Java, database and FreeIPA roles. On
+`no space left on device`, grow the disk with
+`pilot vm-target resize-disk --name <vm> --disk <GiB>`; the guest still has
+to grow its partition and filesystem (`--help` shows the commands).
 
-## Every run writes a transcript -- use it instead of copy-pasting scrollback
+`--boot-timeout` (default 3m) bounds the wait for a DHCP lease;
+`--ssh-timeout` (default 2m) bounds the wait for SSH after that. Slow first
+boots need more (the FreeIPA topology uses `8m` for both). When either runs
+out, `up` tears the VM down unless you passed `--keep-on-failure`.
 
-Every `vm-target run` (with or without `--sandbox`/`--json`) writes the
-full output to `<vm-dir>/<name>/runs/<timestamp>-<playbook>.log` and
-prints the path on stderr after the run. When AGENTS.md §1.1 requires
-"the real captured output" in a runbook, `cat` this file instead of
-manually re-transcribing terminal scrollback -- it is guaranteed to be
-the exact, complete bytes ansible produced, including anything that
-scrolled past your terminal's buffer.
-
-## `--group`: real ansible groups across multiple vm-target VMs
-
-`show-inventory`/plain `run --name <n>` only ever produce a single-host
-inventory (see "The inventory contract" above). Some playbooks need
-real cross-host groups instead -- e.g. a FreeIPA primary+replica apply
-playbook with `hosts: "{{ target_group | default('ipa_masters') }}"`
-that must resolve a `[ipa_masters]`/`[ipa_replicas]` group spanning two
-already-`up` VMs. For that:
-
-```bash
-pilot vm-target run \
-  --group masters=ipa-primary --group replicas=ipa-replica \
-  --sandbox --sandbox-image geerlingguy/docker-ubuntu2204-ansible:latest -- \
-  playbooks/apply/freeipa-server-replica-apply.yml -e target_group=masters ...
-```
-
-- `--name` becomes optional and, if given, only picks which target's
-  directory the run transcript is written under -- it does **not**
-  restrict which hosts the play runs against.
-- No `-l` limit is auto-added; the playbook's own `hosts:` pattern (via
-  `-e target_group=<group>`) decides the subset.
-- See `references/multi-vm-networking.md` for pairing `--group` with
-  `vm-target wire` when the playbook also needs hostname resolution
-  between the nodes.
-- `--group` is for combining VMs you already brought up ad hoc. If the
-  same named scenario (which nodes, which groups, which wire pairs)
-  gets reused across resets or CI runs, declare it once instead as a
-  `vm-target topology` spec -- see below.
-
-## `vm-target topology`: one spec file for an entire multi-VM scenario
-
-`up`/`wire`/`--group` compose, but hand-assembling their sequence means
-parsing each step's printed IP to build the next command, and
-re-deriving the same sequence by hand every time the scenario resets.
-`vm-target topology` makes the scenario declarative:
-
-```yaml
-# ha-topology.yaml
-nodes:
-  - name: ipa-primary
-    base_image: rocky9
-    groups: [ipa_masters]
-    wire: [ipa-replica, ipa-ha-client]
-  - name: ipa-replica
-    base_image: rocky9
-    groups: [ipa_replicas]
-    wire: ["ipa-primary=ipa1.ipa.pilot.internal"]
-```
-
-```bash
-pilot vm-target topology up        --topology ha-topology.yaml
-pilot vm-target topology status    --topology ha-topology.yaml
-pilot vm-target topology inventory --topology ha-topology.yaml
-pilot vm-target topology down      --topology ha-topology.yaml
-pilot vm-target topology snapshot  --topology ha-topology.yaml --tag pre-drill
-pilot vm-target topology rollback  --topology ha-topology.yaml --tag pre-drill
-pilot vm-target topology reset     --topology ha-topology.yaml
-```
-
-- `up` provisions every not-yet-running node **concurrently** -- one
-  `*vmtarget.Manager` per node, all pointed at the same state dir.
-  Concurrent `vm-target up` calls used to race and lose a VM's state;
-  the 2026-07-06 fix (see the `pilot-vm-target-up-concurrency-race`
-  memory, AGENTS.md §5.1) closed that for good -- `Manager.Up` reserves
-  its name via `Store.Mutate` (cross-process flock) before touching
-  disk/libvirt, so concurrent `Up` for different names is safe
-  (`TestUp_ConcurrentDifferentNames_BothPersist`). It's one `Manager`
-  per goroutine, not several goroutines sharing one `Manager` --
-  `Manager.Up` holds an in-process lock for its entire call (including
-  the multi-minute boot/SSH wait), so goroutines on a shared `Manager`
-  would just queue instead of overlapping.
-- `up` is idempotent at the node level: an already-running node (same
-  name) is skipped, so re-running `up` after adding a node to the spec
-  only provisions the new one.
-- After bring-up, `up` wires every node's declared `wire:` peers
-  automatically (same mechanism as `vm-target wire --peer`) -- no
-  manual IP copy-paste between steps.
-- `inventory` renders the same grouped inventory `run --group` does
-  (`RenderGroupedInventory`), from the `groups:` each node declares --
-  requires every node to already be `running`.
-- `status` prints a name/status/ip/groups/wire table for just this
-  spec's nodes, without needing to grep `vm-target list`.
-- `snapshot`/`rollback`/`reset` apply the single-VM operation of the same
-  name to every node in the spec concurrently -- for checkpointing or
-  restoring an entire scenario at once (e.g. "can replica-install rerun
-  from a clean cluster?") instead of resetting each VM by hand and
-  re-running `wire` yourself. Because the "clean" snapshot `up` captures
-  automatically predates wiring, `rollback`/`reset` re-apply every node's
-  declared `wire:` peers afterward; `snapshot` doesn't need to, since it
-  never touches disk state.
-
-## Disk sizing
-
-The ubuntu-24.04 cloud image root is **2.4 GiB**. Every `--disk N` adds
-a qcow2 overlay with virtual size N GiB (sparse, grows on write). Rule
-of thumb:
-
-| Role                        | Minimum disk |
-|-----------------------------|-------------|
-| Config-only (files, systemd)| 20 GiB      |
-| Docker / container heavy    | 30 GiB      |
-| Database (postgres, mysql)  | 30 GiB      |
-| Java (keycloak, jenkins)    | 40 GiB      |
-
-If you hit `no space left on device` during `apt install` or `docker
-pull`, the disk was too small. Bump it, `down`, and `up` again.
-
-## ssh timeout vs boot timeout
-
-`--ssh-timeout` (default 2m): how long to wait after the DHCP lease
-appears before declaring the VM unreachable.
-`--boot-timeout` (default 3m): how long to wait for *any* DHCP lease
-at all.
-
-First-time `up` needs longer on both because the cloud image's
-`virt-customize` step (pre-installing python3) can take 4-6 minutes
-on a cold cache. Pass `--ssh-timeout 8m --boot-timeout 8m` for the
-first up of a new image.
+The first `up` of an image alias downloads it into `<vm-dir>/images/` and
+builds a golden copy with `virt-customize` before any VM boots; neither
+timeout covers that step.
 
 ## The libguestfs / supermin warning
 
 ```
 ▶ customizing ubuntu-24.04 cloud image to create golden image...
 ▶ running virt-customize to pre-install dependencies...
-[   0.0] Examining the guest ...
 virt-customize: error: libguestfs error: /usr/bin/supermin exited with error status 1.
 warning: virt-customize failed: exit status 1. Falling back to uncustomized image.
 ```
 
-This is the optional image-customisation step failing in a chroot-style
-environment. The fallback image boots fine and has python3/sudo already.
-**Do not chase this warning.**
+The optional golden-image customisation failed and pilot fell back to the
+plain cloud image, which boots fine. **Do not chase this warning.**
 
 ## dnsmasq lease never appears
 
-Symptom: `... waiting for IP (elapsed 30s) (no active lease for MAC ...)`
-forever. Most likely the `default` libvirt network is down:
+Symptom: `waiting for IP ... (no active lease for MAC ...)` until the boot
+timeout. The libvirt network is usually down:
 
 ```bash
 sudo virsh net-start default
 sudo virsh net-autostart default
 ```
 
-Also check the host firewall is not blocking DHCP (dnsmasq on port 67).
+A short wait for the first lease is normal. Also check that the host
+firewall does not block DHCP (dnsmasq, port 67).
 
-## Host-local cache services (`pilot services` + `--services local`)
+## Host-local cache services
 
-`vm-target up`/`topology up` default to `--services none` (no cache; each
-VM's `apt install`/`docker pull` hits the public internet directly). If
-you're bringing the same VM(s) up more than once in a session, start the
-host-side cache stack first and reuse it across every `up`:
-
-```bash
-pilot services up --profile dev-lite   # long-lived; apt-cacher-ng + Pulp RPM + Harbor on the host
-pilot services status                  # confirm running=true / bind_ip before the first `up`
-```
-
-Then add `--services local` to `vm-target up`, or a root-level
-`services: local` field to a topology YAML (applies to every node in that
-spec) -- see `docs/runbooks/vm-target.md` §2.2. From first boot, cloud-init
-points the VM's APT/DNF repos and Docker Hub/Harbor proxy config at the
-host stack instead of upstream.
-
-Key behaviors:
-- **Fail-closed, no silent fallback.** If the stack isn't running,
-  unhealthy, or the selected libvirt network's gateway can't be probed,
-  `up --services local` errors out before creating the VM -- it never
-  substitutes an uncached VM. If you hit this, run `pilot services
-  status` and fix/restart the stack; don't work around it by switching to
-  `--services none` unless you actually intend an uncached run.
-- **Cache data lives on the host**, separate from any VM's qcow2/state
-  (`~/.local/share/pilot/cache/` by default). `vm-target down` never
-  touches it; `pilot services down` stops the containers but keeps the
-  data; only `pilot services purge --confirm` deletes it.
-- **Don't churn `services down`/`purge` between iterations** of the same
-  testing session -- there's no benefit to stopping/restarting the cache
-  stack while you're still using it, and `purge` throws away the warmed
-  cache you were trying to avoid re-downloading.
-- **Not yet acceptance-tested end-to-end on a disposable VM** (as of
-  2026-07-23): host-side lifecycle and the fail-closed `vm-target`
-  preflight are implemented and verified, but a VM actually installing a
-  package / pulling an image through the cache is still pending real
-  evidence -- see `docs/superpowers/specs/2026-07-23-host-local-services-design.md`
-  Task 8. Treat `--services local` as a bandwidth-saving default, not yet
-  a fully proven path; don't cite it as verified in a spec's Expected
-  behavior until that evidence lands.
+See SKILL.md §0.1 for when to use it and
+[vm-target.md](../../../../docs/runbooks/vm-target.md) §2.2 for detail.
+Cache data lives on the host (`~/.local/share/pilot/cache/` by default),
+apart from any VM. `vm-target down` never touches it; `pilot services down`
+stops the containers and keeps the data; only `pilot services purge --confirm`
+deletes it.
 
 ## Clean slate
 
@@ -334,6 +200,15 @@ session on the host shares that directory (and `images/` holds the base
 images); a hand delete can remove another session's running VM disk. A
 directory left behind after a successful `down` is a teardown bug to report.
 
+## Fact cache after `reset` or `rollback`
+
+The repo `ansible.cfg` caches facts (`gathering = smart`, jsonfile cache in
+`~/.ansible/pilot-factcache`, 3600 s). `up` and `down` drop the VM's
+entries; `reset` and `rollback` do not, so a reverted VM can still be
+served facts gathered before the revert. If the playbook branches on facts,
+delete your VM's `s1_<name>` entry before the next run
+([vm-target.md](../../../../docs/runbooks/vm-target.md) §5.4).
+
 ## Useful diagnostics
 
 ```bash
@@ -343,6 +218,6 @@ virsh list --all
 # what IP did dnsmasq actually assign?
 sudo virsh net-dhcp-leases default
 
-# does the per-target dir still have the old qcow2?
+# does your VM's per-target dir still exist?
 ls -lh /var/lib/libvirt/images/pilot/<name>/
 ```

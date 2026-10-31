@@ -1,68 +1,65 @@
 # spec-promotion-checklist.md -- DRAFT -> v1.0 for any spec
 
-AGENTS.md §1.1 and §3 require that any spec promoted out of DRAFT
-state must be backed by a real actual-run. This file is the
-concrete checklist for promoting **any** `docs/verification/<spec>.md`
-out of DRAFT.
+AGENTS.md §1 and §3 require a real actual-run before any
+`docs/verification/<spec>.md` leaves DRAFT. This list points at the rules;
+when it and [AGENTS.md](../../../../AGENTS.md) disagree, AGENTS.md wins.
 
-## A. The run itself
+## A. The run itself (AGENTS.md §1.2, §1.4, §1.5)
 
-- [ ] A runbook exists under `docs/runbooks/<spec>.md` (or a sibling
-      runbook for the role) that opens with a one-line goal, includes
-      the §0.5 fact snapshot, and every shell block in §3+ has a real
-      PLAY RECAP / check output excerpt captured from a vm-target or
-      real-host run.
-- [ ] The runbook reaches the end with `pilot verify
-      docs/verification/<spec>.md -i <inventory>` returning the
-      expected PASS row count (or the spec's known-deviations section
-      properly applied).
-- [ ] If multi-VM, the cross-check (e.g. `getent passwd`, `curl`,
-      `sudo -l`) returns the real round-trip result, captured in the
-      runbook.
+- [ ] A formal run (SKILL.md §5) passed on a frozen candidate from a clean,
+      isolated checkout: `vm-target test`, or `vm-target topology test`
+      (with `--ephemeral` when fresh hosts or cross-playbook ordering
+      matter, AGENTS.md §4.0). L3 `--check --diff` was not skipped, or the
+      spec/runbook states why the playbook cannot run in check mode.
+- [ ] A sanitized record exists at
+      `docs/evidence/<feature>/<date>-<tested-revision>.md` with the fields in
+      [docs/actual-run-evidence.md](../../../../docs/actual-run-evidence.md)
+      §3: tested commit and tree, target and inventory summary, real
+      dry-run/apply/verify/idempotency verdicts.
+- [ ] Nothing that affects execution changed after that run
+      (actual-run-evidence.md §4); otherwise there is a new candidate and a
+      new run.
+- [ ] If multi-VM, the client-side round trip (`getent passwd`, `curl`,
+      `sudo -l`) is a spec row that passed against the client group.
 
-## B. Lint and syntax gates (AGENTS.md §3)
+## B. Lint and syntax gates (AGENTS.md §3, §4.0)
 
-- [ ] `go run ./cmd/pilot spec docs/verification/<spec>.md --lint`
-      exits 0 with zero errors.
-- [ ] `go test -count=1 -run TestShellSyntax ./internal/spec/`
-      passes. (The shell syntax test scans every fenced bash block
-      in every spec for `bash -n`-style parse errors.)
+- [ ] `go run ./cmd/pilot spec docs/verification/<spec>.md --lint` exits 0.
+- [ ] `go test -count=1 -run TestShellSyntax ./internal/spec/` passes
+      (`bash -n` over every row command).
+- [ ] `go test -count=1 -run TestSpecPlaybookTagAlignment ./cmd/pilot/cmd/`
+      passes: every row has a tagged task in the apply playbook, or an
+      exemption with a reason.
 
 ## C. Regression test (AGENTS.md §3)
 
-- [ ] `internal/spec/<feature>_regression_test.go` exists and locks,
-      at minimum:
-      - row IDs are contiguous (C1..Cn), no gaps, no vague `expected`
-        column.
-      - cross-row invariants relevant to the spec (e.g. realm suffix,
-        domain name, port numbers that must appear in multiple rows).
-      - **spec-vs-inventory agreement**: if the spec has a §1 Targets
-        table with group names, a test that runs `show-inventory` (or
-        `ansible-inventory --graph` for real hosts) and asserts the
-        spec's group set equals the inventory's host set. Use
-        `TestRegression_SpecAndInventoryAgree` in
-        `internal/spec/core_infra_provider_db_regression_test.go` as
-        the template.
+- [ ] `internal/spec/<feature>_regression_test.go` exists and locks at least
+      contiguous row IDs, no vague Expected values, and the cross-row
+      invariants that would catch this spec's likely mistakes.
+- [ ] Spec-vs-inventory agreement follows AGENTS.md §3: either a test that
+      compares the spec's §1 groups with the reference inventory, or, for a
+      single-host `target_group` spec, the exception documented in the test
+      (template: `internal/spec/freeipa_client_regression_test.go`).
+      AGENTS.md also names `TestRegression_SpecAndInventoryAgree` as a
+      template; `git grep` it before copying, since no Go test function by
+      that name exists in `internal/spec/` as of 2026-10-31.
 
 ## D. Spec content updates to flip DRAFT
 
-- [ ] The §0 "status" block is removed or rewritten to point at the
-      runbook.
-- [ ] The evidence-collection block (usually §3) replaces the DRAFT
-      hand-written examples with the real
-      `.verification/<spec>-<UTC>.ndjson` row output from the
-      actual-run.
-- [ ] The changelog (usually the last section) gets a new row dated
-      the day of promotion, version bumped to v1.0.
-- [ ] The playbook-mapping table (usually §6) is updated to match
-      the current state of the apply playbook (task names, module
-      choices, entrypoint overrides, block/rescue structure).
+- [ ] The §0 status block is removed or rewritten to point at the runbook.
+- [ ] The evidence section keeps only the latest tested revision and tree,
+      the real verdict and a link to the `docs/evidence/` record
+      (`docs/verification-spec-template.md` §3). No pasted transcripts or
+      NDJSON rows, and no link to `.verification/` (AGENTS.md §7).
+- [ ] The runbook's fact snapshot (AGENTS.md §2) and last-verified summary
+      point at the same record.
+- [ ] The changelog gets a row dated the day of promotion, version v1.0.
+- [ ] The playbook-mapping table (if the spec has one) matches the current
+      apply playbook (task names, tags, block/rescue structure).
 
 ## E. What this does NOT require
 
-- Promoting the server spec does **not** require also writing the
-  corresponding client spec or client apply playbook. The client is a
-  separate spec.
+- Promoting a server spec does **not** require also writing the client spec
+  or client apply playbook. The client is a separate spec.
 - Promotion does **not** require hardening (e.g. replacing
-  `privileged: true` with a cap set). Hardening can land in a
-  follow-up PR.
+  `privileged: true` with a cap set). Hardening can land in a follow-up PR.

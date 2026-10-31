@@ -1,18 +1,22 @@
 # container-in-vmtesting.md -- docker/podman inside a vm-target
 
 > **Not to be confused with `vm-target run --sandbox`.** This file is
-> about containers your *playbook* starts **inside the VM under test**
-> (e.g. a FreeIPA server container). `--sandbox` is a different thing:
-> it runs `ansible-playbook` itself inside a throwaway container **on
-> the host**, targeting the VM over SSH -- see
-> `references/vm-target-basics.md`'s "Sandbox mode" section. The traps
-> below apply regardless of whether the *outer* ansible-playbook run
-> used `--sandbox` or not.
+> about containers your *playbook* starts **inside the VM under test**.
+> `--sandbox` is a different thing: it runs `ansible-playbook` itself
+> inside a throwaway container **on the host**, targeting the VM over
+> SSH -- see `vm-target-basics.md`'s "Running Ansible: host or
+> `--sandbox`" section. The traps below apply either way.
 
 When your apply playbook runs `community.docker.docker_container`
-inside a `pilot vm-target` host, you add an extra layer of indirection
-that breaks several assumptions. This file documents the traps and the
-patterns.
+inside a `pilot vm-target` host (several `playbooks/apply/*.yml` do:
+`git grep -l community.docker.docker_container playbooks/apply`), you add
+an extra layer of indirection that breaks several assumptions. This file
+documents the traps and the patterns.
+
+The FreeIPA examples come from an abandoned attempt to run the FreeIPA
+server as a container. `freeipa-server-apply.yml` now installs natively on
+an EL9 host, and its header explains why the container path must not come
+back. The traps are general.
 
 ## Trap 1: image entrypoint is often missing or broken
 
@@ -72,6 +76,8 @@ before retrying:
 pilot vm-target reset --name <name>   # revert to the pristine post-up snapshot
 ```
 
+A failed `vm-target test` rolls back to its `pre-test-*` snapshot, which only
+removes what that run wrote; state from earlier runs on the same VM stays.
 `pilot vm-target down` also clears it: the VM's whole filesystem, bind-mounted
 paths included, lives in the per-target overlay that `down` deletes. Do not
 `rm -rf` under `/var/lib/libvirt/images/pilot` yourself; other sessions' VMs
