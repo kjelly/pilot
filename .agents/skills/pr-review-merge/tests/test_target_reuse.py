@@ -76,13 +76,17 @@ class TargetReuseRemoteTests(unittest.TestCase):
         self.assertEqual("MERGE", evaluate(REPO, 42, e, client=gh)["decision"])
 
     def test_missing_stale_or_unconfirmed_attestation_waits(self):
-        for kw in ({"reviewer_confirmed": False}, {"base_sha": A}, {"head_sha": R}):
-            gh, e, _ = self.fixture()
-            e["target_validation"]["target_reuse"].update(kw)
-            self.assertEqual("WAITING", evaluate(REPO, 42, e, client=gh)["decision"])
+        for kw, reason in (({"reviewer_confirmed": False}, "independent reviewer confirmation at current HEAD"),
+                           ({"base_sha": A}, "target reuse base SHA does not match current base"),
+                           ({"head_sha": R}, "independent reviewer confirmation at current HEAD")):
+            with self.subTest(kw=kw):
+                gh, e, _ = self.fixture()
+                e["target_validation"]["target_reuse"].update(kw)
+                self.assertIn(reason, self.reasons(gh, e))
+        # Without an attestation the strict evidence-only delta applies: the imported main file is not.
         gh, e, _ = self.fixture()
         del e["target_validation"]["target_reuse"]
-        self.assertEqual("WAITING", evaluate(REPO, 42, e, client=gh)["decision"])
+        self.assertIn("files outside evidence_only_paths changed: " + OTHER, self.reasons(gh, e))
 
     def test_stale_pr_base_metadata_does_not_prove_live_base(self):
         gh, e, _ = self.fixture()
@@ -158,9 +162,9 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh, e, _ = self.fixture()
         stale = copy.deepcopy(e)
         stale["head_sha"] = R
-        self.assertEqual("WAITING", evaluate(REPO, 42, stale, client=gh)["decision"])
+        self.assertIn("Stale review evidence: reviewed HEAD/Base does not match GitHub", self.reasons(gh, stale))
         e["tests"][0]["sha"] = R
-        self.assertEqual("WAITING", evaluate(REPO, 42, e, client=gh)["decision"])
+        self.assertIn("Test evidence is not bound to current PR HEAD: unit", self.reasons(gh, e))
 
     def test_missing_or_truncated_tree_waits(self):
         gh, e, _ = self.fixture()
