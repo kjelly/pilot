@@ -668,7 +668,7 @@ func runTopologySyntaxCheck(cmd *cobra.Command, sess *evidenceSession) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "=== [Step 1/6] L1 Syntax Check ===")
 	if err := sess.stepStreams("L1 syntax check", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
-		return execExternalStreams(w, ew, "ansible-playbook", vtTopoTestPlaybook, "--syntax-check")
+		return sess.runAnsible("L1 syntax check", w, ew, vtTopoTestPlaybook, "--syntax-check")
 	}); err != nil {
 		return fmt.Errorf("syntax check failed: %w", err)
 	}
@@ -808,6 +808,14 @@ func withTopologyInventoryInput(invPath string, fn func() error) error {
 
 func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool, sess *evidenceSession, recOutcome *string) error {
 	out := cmd.OutOrStdout()
+	if err := sess.prepareInventory(invPath); err != nil {
+		return err
+	}
+	if sess != nil && sess.controller != nil {
+		if err := runTopologySyntaxCheck(cmd, sess); err != nil {
+			return err
+		}
+	}
 	if sess != nil {
 		// The record names every node with its groups, IP and base image; a
 		// node that cannot be read is still listed by name.
@@ -837,7 +845,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		fmt.Fprintln(out, "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
 		checkArgs := append(append([]string{vtTopoTestPlaybook, "-i", invPath}, args...), "--check", "--diff")
 		if err := sess.stepStreams("L3 check-mode dry-run", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
-			return execExternalStreams(w, ew, "ansible-playbook", checkArgs...)
+			return sess.runAnsible("L3 check-mode dry-run", w, ew, checkArgs...)
 		}); err != nil {
 			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the topology's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
 		}
@@ -884,7 +892,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	transaction := delivery.Transaction{
 		Apply: func(context.Context) error {
 			if err := sess.stepStreams("L4 apply", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
-				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
+				return sess.runAnsible("L4 apply", w, ew, ansibleArgs...)
 			}); err != nil {
 				return fmt.Errorf("playbook apply failed: %w", err)
 			}
@@ -904,7 +912,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 							pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
 						}
 						var one bytes.Buffer
-						verr := execPilotStreams(io.MultiWriter(w, &one), ew, pilotArgs...)
+						verr := sess.runVerify(io.MultiWriter(w, &one), ew, pilotArgs...)
 						sess.verify(v.spec, v.limit, one.String())
 						if verr != nil {
 							return fmt.Errorf("verification failed (%s): %w", v.spec, verr)
@@ -918,7 +926,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")
 			if err := runRecordedIdempotencyStreams(sess, out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
-				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
+				return sess.runAnsible("L6 idempotency", w, ew, ansibleArgs...)
 			}); err != nil {
 				return err
 			}
@@ -990,8 +998,10 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Syntax is intentionally first so --ephemeral does not allocate VMs for
 	// a playbook that cannot parse.
-	if err := runTopologySyntaxCheck(cmd, sess); err != nil {
-		return err
+	if sess == nil || sess.controller == nil {
+		if err := runTopologySyntaxCheck(cmd, sess); err != nil {
+			return err
+		}
 	}
 
 	if !vtTopoTestEphemeral {

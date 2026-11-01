@@ -100,18 +100,38 @@ committed evidence summary。
   JSON/YAML mapping 仍由正式 parser 處理。
   repository 的所有 native plugin directory（含 connection/become/strategy/module_utils 等）
   都記 membership pattern，present code hash 後仍 unresolved。外部 default plugin roots、
-  collection/Python discovery paths 沒有受控 fingerprint，故每份 record 另標固定
+  collection/Python discovery paths 預設沒有受控 fingerprint，因此預設 record 標固定
   `ambient Ansible plugin discovery` unresolved；literal copy/debug 本身不代表可沿用。
-  目前產生的 record 因此不能自動 reuse，exact-candidate/evidence-only 驗收仍照常。
-  不嘗試執行 Jinja。`resolution_version: 6` 區分這個保守解析邊界。
+  opt-in `--evidence-controller=pinned` 由 committed digest-pinned OCI recipe 建置並解析
+  immutable image ID，L1/L3/L4/L6 及整個 L5 pilot child 都在相同 image 內執行。
+  每個 subprocess 使用新的 private HOME/tmp、read-only candidate/binary/inventory/key、
+  固定 Ansible config 與清除 host ANSIBLE/PYTHON environment 的 launcher。
+  這個 profile 需要 matching repository source checkout、Docker daemon 及已存在且可驗證的
+  Go module cache；只含 bundled playbooks/docs 的 runtime image 不支援完整 source closure。
+  native pre/post probe 證明 Python/Ansible origin、effective config、所有 plugin loader、
+  role/collection/sys.path 與 pinned Go toolchain 一致，才可清除 ambient refusal。
+  `controller` 保存 typed proof、image/config/profile/binary/inventory hashes、native probe
+  與實際 routed stage counts；selection flag 或 supplied boolean 不構成證明。
+  inventory-aware group_vars/host_vars 依實際 rendered host/group/ancestor 集合記候選 membership，
+  無關 example 檔案不會成為輸入。V1 spec、已證明的 pilot SSH inventory 與 literal task subset
+  才支援這個初始 profile；不支援的 context 仍正常執行並明示 unresolved。
+  不嘗試執行 Jinja。`resolution_version: 7` 區分這個解析與 controller 證明邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
-  Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
-  證明。這份清單就是 reviewer 做 `target_reuse` 盤點時的 `execution_paths`，不必再手列；
+  pinned profile 另讀取實際執行 binary 的 BuildInfo，要求固定 Go1.26.8/linux/amd64/v1、
+  CGO=0、workspace off 與無自訂 tags/compiler flags。由相同 image 的 Go toolchain 以
+  offline readonly mode 驗證 module cache，確認 listed module version/sum 與 binary 一致，
+  再記錄 cmd/pilot 的 transitive repository packages、Go/assembly/syso source、每個 package
+  的新增檔案 membership、embed package subtree 及 go.mod/go.sum。workspace/vendor/replace、
+  cgo/未知 build setting 或 partial/error listing 一律 unresolved；無 import 的新 package
+  不在執行圖內。BuildInfo/settings/module identity 以 typed 欄位與 hash 保存。
+  這份清單就是 reviewer 做 `target_reuse` 盤點時的 `execution_paths`，不必再手列；
 - `redaction`：掃描每個步驟擷取的輸出，找 `-e @file`（明文 YAML）裡 secret 命名的
   key 與 inline extra-vars（含多個 key=value、JSON 與 compact `-e`）的 secret 值；
   command 隱藏整個 inline payload，`@file` reference 保留。已知 secret 也從 persisted
-  metadata/error note 中遮蔽。stdout/stderr 都擷取掃描，並維持原有輸出 channel；
+  metadata/error note 中遮蔽。經驗證的 schema/outcome/step status 等 typed protocol identity、
+  以及實際對應 candidate bytes/mode/blob/SHA 的 execution file path 保持完整；相同字串若在
+  operator/note/dynamic map 仍遮蔽，沒有 global secret-value 白名單。stdout/stderr 都擷取掃描，並維持原有輸出 channel；
   secret container 下的 scalar（含 numeric/bool）保留原始及 canonical spelling，
   plain YAML 1.1 yes/no/on/off 另掃描 Ansible 的 boolean spelling，quoted/explicit string 保持原值；未證明的 float/timestamp/null/tag 與 sexagesimal
   scalar 明示 payload-free skipped，僅保留已知候選值的部分偵測，

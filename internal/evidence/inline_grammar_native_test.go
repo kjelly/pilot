@@ -38,6 +38,23 @@ func nativeAnsiblePython(t *testing.T) (string, []string) {
 // may still execute, but must never be admitted as a complete Go parse.
 func TestEvidenceNativeInlineGrammarDifferential(t *testing.T) {
 	python, prefix := nativeAnsiblePython(t)
+	nativeInlineGrammarDifferential(t, func(program string, raw []byte) []byte {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, python, append(prefix, "-c", program)...)
+		cmd.Stdin = bytes.NewReader(raw)
+		cmd.Dir = t.TempDir()
+		cmd.Env = append(os.Environ(), "ANSIBLE_LOCAL_TEMP="+cmd.Dir+"/ansible-tmp")
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("native parser batch failed: %v", err)
+		}
+		return output
+	})
+}
+
+func nativeInlineGrammarDifferential(t *testing.T, run func(string, []byte) []byte) {
+	t.Helper()
 	alphabet := []byte{'a', ' ', '=', '\'', '"'}
 	var suffixes []string
 	var enumerate func(string, int)
@@ -79,16 +96,7 @@ for raw in json.load(sys.stdin):
     except Exception:
         results.append(None)
 json.dump(results, sys.stdout)`
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, python, append(prefix, "-c", program)...)
-	cmd.Stdin = bytes.NewReader(raw)
-	cmd.Dir = t.TempDir()
-	cmd.Env = append(os.Environ(), "ANSIBLE_LOCAL_TEMP="+cmd.Dir+"/ansible-tmp")
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("native parser batch failed: %v", err)
-	}
+	output := run(program, raw)
 	var native []map[string]string
 	if err := json.Unmarshal(output, &native); err != nil {
 		t.Fatal(err)

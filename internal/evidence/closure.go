@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 6
+const ResolutionVersion = 7
 
 // Native Ansible get_all_plugin_loaders().subdir, with each loader's default
 // ~/.ansible/plugins and /usr/share/ansible/plugins suffix. shell_plugins is
@@ -73,11 +73,12 @@ type Closure struct {
 
 // ClosureInput names what the run executed. Paths are relative to Root or absolute.
 type ClosureInput struct {
-	Root      string   // repository root the run executed from (a checkout or a `git archive` copy)
-	Playbooks []string // the playbooks the chain ran
-	Specs     []string // the verification specs it verified
-	Inputs    []string // additional execution inputs, such as the topology YAML
-	ExtraArgs []string // the forwarded ansible-playbook arguments (`-e @file` names extra-vars files)
+	Root       string      // repository root the run executed from (a checkout or a `git archive` copy)
+	Playbooks  []string    // the playbooks the chain ran
+	Specs      []string    // the verification specs it verified
+	Inputs     []string    // additional execution inputs, such as the topology YAML
+	Controller *Controller // live runner context; a zero value cannot clear ambient refusal
+	ExtraArgs  []string    // the forwarded ansible-playbook arguments (`-e @file` names extra-vars files)
 }
 
 const maxIncludeDepth = 12
@@ -121,9 +122,13 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		dirs = append(dirs, dir)
 	}
 	implicitDirectories := []string{"group_vars", "host_vars"}
+	if in.Controller.Ready() {
+		implicitDirectories = nil
+	}
 	for _, plugin := range ansiblePluginDirectories {
 		implicitDirectories = append(implicitDirectories, plugin.subdir)
 	}
+	implicitDirectories = append(implicitDirectories, "collections", "ansible_collections", "roles")
 	for _, dir := range dirs {
 		for _, name := range implicitDirectories {
 			abs := filepath.Join(dir, name)
@@ -136,52 +141,104 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			}
 		}
 	}
-	// Native loader defaults can contain custom code even without ANSIBLE_*
-	// overrides or ansible.cfg. Existing external defaults cannot be hashed as
-	// repository inputs, so record them and refuse automatic reuse.
-	pluginRoots := []string{"/usr/share/ansible/plugins"}
-	if home, err := os.UserHomeDir(); err == nil {
-		pluginRoots = append(pluginRoots, filepath.Join(home, ".ansible", "plugins"))
-	}
-	for _, base := range pluginRoots {
-		for _, plugin := range ansiblePluginDirectories {
-			if plugin.defaultSuffix == "" {
-				continue
+	if in.Controller.Ready() {
+		if err := in.Controller.addGoSourceClosure(r); err != nil {
+			r.dispatchUnresolved("controller", "unproved Go build closure", err.Error())
+		}
+		if !in.Controller.InventoryProven() {
+			r.dispatchUnresolved("inventory", "unsupported controlled inventory", "automatic reuse requires validated rendered SSH inventory")
+		}
+		inv := in.Controller.Inventory()
+		for _, dir := range dirs {
+			groups := []string{"all", "ungrouped"}
+			for group, members := range inv.Groups {
+				if len(members) > 0 && group != "all" && group != "ungrouped" {
+					groups = append(groups, group)
+				}
 			}
-			abs := filepath.Join(base, plugin.defaultSuffix)
-			if _, err := os.Stat(abs); err == nil {
-				r.addPath(abs, "", false, "ambient Ansible plugin input")
-				r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths contain custom controller inputs")
-			} else if !os.IsNotExist(err) {
-				r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths could not be inspected")
+			for _, kind := range []struct {
+				dir   string
+				names []string
+			}{{"group_vars", groups}, {"host_vars", inv.Hosts}} {
+				for _, name := range kind.names {
+					if !safeInventoryName(name) {
+						r.dispatchUnresolved("inventory", "unsupported inventory names", "vars discovery requires literal safe host/group names")
+						continue
+					}
+					for _, suffix := range []string{"", ".yml", ".yaml", ".json"} {
+						abs := filepath.Join(dir, kind.dir, name+suffix)
+						r.patterns[r.rel(abs)] = true
+						if suffix == "" {
+							r.patterns[r.rel(abs)+"/**"] = true
+						}
+						if _, err := os.Lstat(abs); err == nil {
+							r.addPath(abs, "", false, "inventory-matched vars")
+						}
+					}
+				}
 			}
 		}
-	}
-	// Git cannot prove absent external loader roots/collection paths/sys.path stay
-	// absent at reuse time. Until there is a controlled-controller fingerprint,
-	// even the literal task subset does not prove a complete reusable closure.
-	r.dispatchUnresolved("environment", "ambient Ansible plugin discovery", "external plugin, collection and Python discovery paths are not fingerprinted")
-	// Ambient Ansible configuration can change lookup/plugin/vars behavior.
-	// Name unsupported environment settings without persisting their values.
-	for _, item := range os.Environ() {
-		key, value, _ := strings.Cut(item, "=")
-		if strings.HasPrefix(key, "ANSIBLE_") && value != "" {
-			if key == "ANSIBLE_CONFIG" {
-				r.addPath(r.abs(value), "", false, "ANSIBLE_CONFIG")
+		for _, name := range controllerProfileFiles {
+			abs := filepath.Join(root, ControllerProfile, name)
+			r.patterns[r.rel(abs)] = true
+			// Profile configuration is proved by the native image probe, rather
+			// than interpreted as arbitrary repository Ansible configuration.
+			raw, err := os.ReadFile(abs)
+			if err != nil {
+				return nil, err
 			}
-			r.unresolved = append(r.unresolved, Reference{From: "environment", Ref: key, Reason: "ambient Ansible configuration is not statically resolved"})
+			r.files[r.rel(abs)] = &File{Path: r.rel(abs), Mode: "100644", Blob: GitBlobOID(raw), SHA256: digestBytes(raw), Size: int64(len(raw)), Via: "pinned controller profile"}
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "ansible.cfg")); os.Getenv("ANSIBLE_CONFIG") == "" && os.IsNotExist(err) {
-		configs := []string{"/etc/ansible/ansible.cfg"}
+	if !in.Controller.Ready() {
+		// Native loader defaults can contain custom code even without ANSIBLE_*
+		// overrides or ansible.cfg. Existing external defaults cannot be hashed as
+		// repository inputs, so record them and refuse automatic reuse.
+		pluginRoots := []string{"/usr/share/ansible/plugins"}
 		if home, err := os.UserHomeDir(); err == nil {
-			configs = append(configs, filepath.Join(home, ".ansible.cfg"))
+			pluginRoots = append(pluginRoots, filepath.Join(home, ".ansible", "plugins"))
 		}
-		for _, cfg := range configs {
-			if _, err := os.Stat(cfg); err == nil {
-				r.addPath(cfg, "", false, "ambient Ansible configuration")
+		for _, base := range pluginRoots {
+			for _, plugin := range ansiblePluginDirectories {
+				if plugin.defaultSuffix == "" {
+					continue
+				}
+				abs := filepath.Join(base, plugin.defaultSuffix)
+				if _, err := os.Stat(abs); err == nil {
+					r.addPath(abs, "", false, "ambient Ansible plugin input")
+					r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths contain custom controller inputs")
+				} else if !os.IsNotExist(err) {
+					r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths could not be inspected")
+				}
 			}
 		}
+		// Git cannot prove absent external loader roots/collection paths/sys.path stay
+		// absent at reuse time. Until there is a controlled-controller fingerprint,
+		// even the literal task subset does not prove a complete reusable closure.
+		r.dispatchUnresolved("environment", "ambient Ansible plugin discovery", "external plugin, collection and Python discovery paths are not fingerprinted")
+		// Ambient Ansible configuration can change lookup/plugin/vars behavior.
+		// Name unsupported environment settings without persisting their values.
+		for _, item := range os.Environ() {
+			key, value, _ := strings.Cut(item, "=")
+			if strings.HasPrefix(key, "ANSIBLE_") && value != "" {
+				if key == "ANSIBLE_CONFIG" {
+					r.addPath(r.abs(value), "", false, "ANSIBLE_CONFIG")
+				}
+				r.unresolved = append(r.unresolved, Reference{From: "environment", Ref: key, Reason: "ambient Ansible configuration is not statically resolved"})
+			}
+		}
+		if _, err := os.Stat(filepath.Join(root, "ansible.cfg")); os.Getenv("ANSIBLE_CONFIG") == "" && os.IsNotExist(err) {
+			configs := []string{"/etc/ansible/ansible.cfg"}
+			if home, err := os.UserHomeDir(); err == nil {
+				configs = append(configs, filepath.Join(home, ".ansible.cfg"))
+			}
+			for _, cfg := range configs {
+				if _, err := os.Stat(cfg); err == nil {
+					r.addPath(cfg, "", false, "ambient Ansible configuration")
+				}
+			}
+		}
+
 	}
 
 	for _, sp := range in.Specs {
@@ -195,6 +252,11 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		names := []string{strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))}
 		if parsed, err := spec.Parse(abs); err == nil {
 			names = append(names, parsed.Roles...)
+			if in.Controller.Ready() && parsed.SchemaVersion != 1 {
+				r.dispatchUnresolved(sp, "unsupported verification schema", "controlled reuse initially supports V1 verification only")
+			}
+		} else if in.Controller.Ready() {
+			r.dispatchUnresolved(sp, "unsupported verification schema", "verification schema could not be proved")
 		}
 		for _, name := range names {
 			contract := filepath.Join(root, "contracts", name+".yaml")
@@ -236,7 +298,11 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		}
 		r.addPath(abs, "", false, "extra-vars")
 	}
-	for _, name := range []string{"ansible.cfg", "requirements.yml"} {
+	configFiles := []string{"ansible.cfg", "requirements.yml"}
+	if in.Controller.Ready() {
+		configFiles = nil
+	}
+	for _, name := range configFiles {
 		r.patterns[name] = true
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			r.addPath(filepath.Join(root, name), "", false, "repository")
@@ -1092,4 +1158,16 @@ func supportedPlayValue(name string, value *yaml.Node) bool {
 	default:
 		return false
 	}
+}
+
+func safeInventoryName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, ch := range name {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-", rune(ch)) {
+			return false
+		}
+	}
+	return true
 }

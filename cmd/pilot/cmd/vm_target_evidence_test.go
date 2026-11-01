@@ -51,10 +51,10 @@ func copyFixtureTree(t *testing.T) string {
 
 func withEvidenceFlags(t *testing.T, record string) {
 	t.Helper()
-	old := []string{vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator}
-	vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator = record, "", "", "run-1", "tester"
+	old := []string{vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator, vtEvidenceController}
+	vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator, vtEvidenceController = record, "", "", "run-1", "tester", ""
 	t.Cleanup(func() {
-		vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator = old[0], old[1], old[2], old[3], old[4]
+		vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree, vtEvidenceRunID, vtEvidenceOperator, vtEvidenceController = old[0], old[1], old[2], old[3], old[4], old[5]
 	})
 }
 
@@ -240,6 +240,16 @@ func TestEvidenceSessionFlagValidation(t *testing.T) {
 	if err != nil || !flagged.rec.Candidate.Dirty {
 		t.Fatalf("explicit candidate flags must preserve dirty status: %v", err)
 	}
+	vtEvidenceController = "unknown"
+	if _, err := newEvidenceSession(nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "evidence-controller") {
+		t.Fatalf("unknown controller must be refused: %v", err)
+	}
+	vtEvidenceRecord = ""
+	vtEvidenceController = "pinned"
+	if _, err := newEvidenceSession(nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "requires --evidence-record") {
+		t.Fatalf("controller without record must be refused: %v", err)
+	}
+	vtEvidenceController = ""
 	vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree = "", "", ""
 	if sess, err := newEvidenceSession(nil, nil, nil, nil); err != nil || sess != nil {
 		t.Fatalf("no flag, no session: %v %v", sess, err)

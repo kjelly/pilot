@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import hashlib
 import re
 import subprocess
 import sys
@@ -139,6 +140,84 @@ def validate_manifest(data: Any) -> list[str]:
                 and "\\" not in p for p in paths):
             errors.append(f"{label}.required_paths must be a list of repository-relative globs")
     return errors
+
+
+CONTROLLER_PROFILE = "images/evidence-controller/"
+CONTROLLER_FILES = {"Dockerfile": "recipe_sha256", "profile.lock.json": "lock_sha256", "ansible.cfg": "config_sha256", "launch.py": "launch_sha256", "probe.py": "probe_sha256"}
+CONTROLLER_STAGES = ("L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency")
+CONTROLLER_PLUGINS = ("action_plugins", "become_plugins", "cache_plugins", "callback_plugins", "cliconf_plugins", "connection_plugins", "doc_fragments", "filter_plugins", "httpapi_plugins", "inventory_plugins", "library", "lookup_plugins", "module_utils", "netconf_plugins", "shell_plugins", "strategy_plugins", "terminal_plugins", "test_plugins", "vars_plugins")
+
+
+def validate_controller(record: dict, files: list, read_profile) -> None:
+    """Typed native boundary proof; no flag or supplied execution path list can replace it."""
+    def require(condition, reason):
+        if not condition:
+            raise ValueError("controller proof: " + reason)
+    digest = re.compile(r"[0-9a-f]{64}")
+    proof = record.get("controller")
+    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v1", "missing current OCI proof")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof.get("image_id"))), "immutable image ID required")
+    require(proof.get("inventory_kind") == "pilot-rendered-ssh/v1", "unsupported rendered inventory")
+    for key in ("config_sha256", "inventory_sha256", "rendered_inventory_sha256", "binary_sha256", "pre_probe_sha256", "post_probe_sha256"):
+        require(isinstance(proof.get(key), str) and digest.fullmatch(proof[key]), "invalid " + key)
+    require(proof["binary_sha256"] == record.get("pilot_binary", {}).get("sha256"), "binary identity differs")
+    require(proof["pre_probe_sha256"] == proof["post_probe_sha256"], "native pre/post context differs")
+    profile = proof.get("profile", {})
+    scoped = {entry.get("path"): entry for entry in files if isinstance(entry, dict)}
+    for name, key in CONTROLLER_FILES.items():
+        path = CONTROLLER_PROFILE + name
+        raw = read_profile(path)
+        require(isinstance(raw, bytes) and raw, "profile missing from tested candidate: " + path)
+        value = hashlib.sha256(raw).hexdigest()
+        require(profile.get(key) == value and scoped.get(path, {}).get("sha256") == value,
+                "profile identity differs from closure: " + path)
+    require(profile.get("config_sha256") == proof["config_sha256"], "effective config differs from profile")
+    lock = json.loads(read_profile(CONTROLLER_PROFILE + "profile.lock.json"))
+    require(lock.get("schema") == "pilot-controller-profile/v1" and lock.get("ansible") == "2.21.5" and lock.get("python") == "3.14.8" and lock.get("platform") == "linux/amd64", "unsupported profile lock")
+    require(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", str(lock.get("base"))), "base is not digest pinned")
+    require(lock.get("go")=="go1.26.8" and re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}",str(lock.get("go_base"))), "Go toolchain lock differs")
+    recipe=read_profile(CONTROLLER_PROFILE + "Dockerfile")
+    require(recipe.startswith(("FROM "+lock["go_base"]+" AS go_toolchain\n").encode()) and ("\nFROM "+lock["base"]+"\n").encode() in recipe, "recipe/base lock differs")
+    native = proof.get("native_probe")
+    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v1", "missing native origin/config probe")
+    raw = json.dumps(native, sort_keys=True, separators=(",", ":")).encode()
+    require(hashlib.sha256(raw).hexdigest() == proof["pre_probe_sha256"], "native probe digest differs")
+    require(native.get("go")=="go version go1.26.8 linux/amd64" and native.get("ansible") == lock["ansible"] and native.get("python") == lock["python"] and
+            native.get("ansible_origin") == "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" and
+            native.get("python_executable") == "/usr/bin/python3.14" and
+            native.get("config_file") == "/opt/pilot-controller/ansible.cfg" and
+            native.get("config_sha256") == proof["config_sha256"], "native effective origins/config differ")
+    require(native.get("collections_scan_sys_path") is False and
+            native.get("collections") == ["/opt/pilot-controller/empty"] and
+            native.get("roles") == ["/opt/pilot-controller/empty"], "uncontrolled collection/role discovery")
+    require(native.get("sys_path") == ["/usr/local/lib64/python3.14/site-packages", "/usr/local/lib/python3.14/site-packages", "/usr/lib64/python314.zip", "/usr/lib64/python3.14", "/usr/lib64/python3.14/lib-dynload", "/usr/lib64/python3.14/site-packages", "/usr/lib/python3.14/site-packages"], "uncontrolled Python discovery")
+    loaders = native.get("loaders", {})
+    require(isinstance(loaders, dict) and set(loaders) == set(CONTROLLER_PLUGINS), "native loader inventory differs")
+    for name, loader in loaders.items():
+        expected = ["/opt/pilot-controller/empty"]
+        if name == "shell_plugins":
+            expected = ["shell_plugins"]
+        elif name == "doc_fragments":
+            expected = ["/tmp/controller/home/.ansible/plugins/doc_fragments", "/usr/share/ansible/plugins/doc_fragments"]
+        require(isinstance(loader, dict) and loader.get("config") == expected and isinstance(loader.get("paths"), list) and loader["paths"], "uncontrolled loader config: " + name)
+        for path in loader["paths"]:
+            require(isinstance(path, str) and (path in ("/opt/pilot-controller/empty", "$CANDIDATE/shell_plugins", "/tmp/controller/home/.ansible/plugins/doc_fragments", "/usr/share/ansible/plugins/doc_fragments") or path.startswith("/usr/local/lib/python3.14/site-packages/ansible/")), "uncontrolled loader origin: " + name)
+    build=proof.get("build",{})
+    require(isinstance(build,dict) and build.get("go_version")=="go1.26.8" and build.get("path")=="github.com/kjelly/pilot/cmd/pilot" and build.get("module")=="github.com/kjelly/pilot", "unproved Go binary identity")
+    require(all(build.get(key)==value for key,value in {"goos":"linux","goarch":"amd64","goamd64":"v1","cgo":"0"}.items()), "unsupported Go build context")
+    require(all(isinstance(build.get(key),str) and digest.fullmatch(build[key]) for key in ("settings_sha256","modules_sha256")), "missing Go build/module fingerprints")
+    require(all(path in scoped for path in ("go.mod","go.sum","cmd/pilot/main.go")), "compiled Go source closure missing")
+    counts = proof.get("steps", {})
+    require(isinstance(counts, dict) and set(counts) == set(CONTROLLER_STAGES), "routed stage identities missing")
+    for name in CONTROLLER_STAGES:
+        value = counts.get(name)
+        require(type(value) is int and (value >= 1 if name == "L5 verify" else value == 1), "stage was not routed through OCI: " + name)
+    recorded = record.get("steps", [])
+    for name in CONTROLLER_STAGES:
+        matching = [step for step in recorded if isinstance(step, dict) and step.get("name") == name]
+        require(len(matching) == 1 and matching[0].get("status") == "pass", "required recorded stage did not pass: " + name)
+    verdicts = record.get("verify", [])
+    require(len(verdicts) == counts["L5 verify"] and all(isinstance(v, dict) and v.get("verdict") == "PASS" and type(v.get("pass")) is int and v["pass"] > 0 and v.get("fail") == 0 for v in verdicts), "whole L5 verification evidence missing or failed")
 
 
 class Context:
@@ -280,7 +359,7 @@ class Context:
             closure = record.get("closure")
             if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
                 raise ValueError("closure has unresolved or external inputs")
-            if closure.get("resolution_version") != 6 or closure.get("frozen") is not True:
+            if closure.get("resolution_version") != 7 or closure.get("frozen") is not True:
                 raise ValueError("closure needs current resolution version and frozen pre-run inputs")
             files, patterns = closure.get("files"), closure.get("patterns")
             if not isinstance(files, list) or not files or not isinstance(patterns, list):
@@ -298,6 +377,7 @@ class Context:
                 if path in scope or tested.get(path) != (entry["mode"], entry["blob"]):
                     raise ValueError("closure blob/mode differs from candidate: " + path)
                 scope.append(path)
+            validate_controller(record, files, lambda path: self.read_file(sha, path))
             for pattern in patterns:
                 if (not isinstance(pattern, str) or not pattern or pattern.startswith("/") or
                         ".." in pattern.split("/") or "\\" in pattern or "\0" in pattern):

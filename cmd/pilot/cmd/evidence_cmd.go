@@ -32,9 +32,11 @@ and prints them with Git blob ids as JSON. This is the same list
 blob ids with HEAD instead of trusting a hand-written dependency list.
 Templated references are matched as globs and marked dynamic; references the
 resolver cannot follow are listed under "unresolved". External plugin, collection
-and Python discovery paths are not fingerprinted, so current records always mark
-ambient discovery unresolved and cannot qualify for automatic reuse. Exact-candidate
-evidence remains usable.`,
+and Python discovery paths are not fingerprinted by this inspection command, so
+its closure marks ambient discovery unresolved. Target test can opt into
+--evidence-controller=pinned: actual OCI execution, native pre/post probes and
+compiled Go source closure can prove the controlled boundary. A flag alone cannot
+clear unresolved inputs. Exact-candidate evidence remains usable.`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(evidenceClosurePlaybooks) == 0 {

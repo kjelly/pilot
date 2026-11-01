@@ -377,7 +377,11 @@ func Sanitize(value string, sources []SecretSource) string {
 // SanitizeRecord visits string data without renaming the record schema's field
 // names. Dynamic map keys are data too. Working on decoded Go strings preserves
 // JSON escaping correctly and avoids short secrets deleting fields such as note.
-func SanitizeRecord(record *Record, sources []SecretSource) error {
+func SanitizeRecord(record *Record, sources []SecretSource, identityRoot ...string) error {
+	root := ""
+	if len(identityRoot) == 1 {
+		root = identityRoot[0]
+	}
 	if _, err := json.Marshal(record); err != nil {
 		return err
 	}
@@ -385,20 +389,6 @@ func SanitizeRecord(record *Record, sources []SecretSource) error {
 	clean = func(v reflect.Value, key string) reflect.Value {
 		if !v.IsValid() {
 			return v
-		}
-		if v.Kind() == reflect.String {
-			size := 0
-			switch key {
-			case "commit", "tree", "blob":
-				size = 40
-			case "sha256", "base_image_sha256":
-				size = 64
-			}
-			if size > 0 && len(v.String()) == size {
-				if _, err := hex.DecodeString(v.String()); err == nil {
-					return v
-				}
-			}
 		}
 		out := reflect.New(v.Type()).Elem()
 		out.Set(v)
@@ -414,6 +404,9 @@ func SanitizeRecord(record *Record, sources []SecretSource) error {
 			for i := 0; i < v.NumField(); i++ {
 				field := v.Type().Field(i)
 				if field.IsExported() {
+					if typedProtocolString(v.Type(), field.Name, v.Field(i), v, root) {
+						continue
+					}
 					name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 					out.Field(i).Set(clean(v.Field(i), name))
 				}
@@ -438,4 +431,134 @@ func SanitizeRecord(record *Record, sources []SecretSource) error {
 	}
 	*record = clean(reflect.ValueOf(*record), "").Interface().(Record)
 	return nil
+}
+
+// Only validated protocol fields are exempt. Their spellings are still secret
+// data when present in operator notes, command text or dynamic map keys/values.
+func typedProtocolString(owner reflect.Type, field string, value reflect.Value, parent reflect.Value, root string) bool {
+	if owner == reflect.TypeOf(Closure{}) && field == "Patterns" && root != "" {
+		for _, pattern := range value.Interface().([]string) {
+			if !safeClosureIdentityPath(pattern) {
+				return false
+			}
+		}
+		return true
+	}
+	if owner == reflect.TypeOf(ControllerProof{}) && field == "NativeProbe" && !value.IsNil() {
+		return validNativeProbe(value.Interface().(*ControllerNativeProbe))
+	}
+	if value.Kind() != reflect.String {
+		return false
+	}
+	text := value.String()
+	oneOf := func(allowed ...string) bool {
+		for _, item := range allowed {
+			if text == item {
+				return true
+			}
+		}
+		return false
+	}
+	hash := func(size int) bool {
+		if len(text) != size {
+			return false
+		}
+		_, err := hex.DecodeString(text)
+		return err == nil
+	}
+	switch owner {
+	case reflect.TypeOf(ControllerBuild{}):
+		switch field {
+		case "GoVersion":
+			return text == "go1.26.8"
+		case "Path":
+			return text == pilotMain
+		case "Module":
+			return text == pilotModule
+		case "GOOS":
+			return text == "linux"
+		case "GOARCH":
+			return text == "amd64"
+		case "GOAMD64":
+			return text == "v1"
+		case "CGO":
+			return text == "0"
+		case "SettingsSHA256", "ModulesSHA256":
+			return hash(64)
+		}
+	case reflect.TypeOf(ControllerProfileProof{}):
+		return hash(64)
+	case reflect.TypeOf(ControllerProof{}):
+		switch field {
+		case "Schema":
+			return text == ControllerSchema
+		case "InventoryKind":
+			return text == "pilot-rendered-ssh/v1" || text == "unsupported"
+		case "ImageID":
+			return validImageID(text)
+		case "ConfigSHA256", "InventorySHA256", "RenderedInventorySHA256", "BinarySHA256", "PreProbeSHA256", "PostProbeSHA256":
+			return hash(64)
+		}
+	case reflect.TypeOf(Record{}):
+		switch field {
+		case "Schema":
+			return text == Schema
+		case "FailedStep":
+			return oneOf("L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency", "rollback")
+		case "Outcome":
+			return oneOf("success", "failed", "rolled_back", "rollback_failed", "invalid-inputs", "cleanup_failed", "partial_success", "partial_failed", "cancelled", "evidence_failed", "authorization_required")
+		}
+	case reflect.TypeOf(Candidate{}):
+		switch field {
+		case "Source":
+			return oneOf("git", "flag", "unknown")
+		case "Commit", "Tree":
+			return hash(40)
+		}
+	case reflect.TypeOf(Step{}):
+		switch field {
+		case "Status":
+			return oneOf("pass", "fail", "skipped", "not-run")
+		case "Name":
+			return oneOf("L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency", "rollback")
+		}
+	case reflect.TypeOf(VerifyVerdict{}):
+		return field == "Verdict" && oneOf("PASS", "FAIL")
+	case reflect.TypeOf(File{}):
+		switch field {
+		case "Path":
+			if root == "" || !safeClosureIdentityPath(text) || strings.ContainsAny(text, "*?[]") {
+				return false
+			}
+			actual, err := rawClosureFile(root, filepath.Join(root, text), "")
+			if err != nil {
+				return false
+			}
+			entry := parent.Interface().(File)
+			return (entry.Mode == "100644" || entry.Mode == "100755") && entry.Mode == actual.Mode && entry.Blob == actual.Blob && entry.SHA256 == actual.SHA256
+		case "Mode":
+			return oneOf("100644", "100755", "120000")
+		case "Blob":
+			return hash(40)
+		case "SHA256":
+			return hash(64)
+		}
+	case reflect.TypeOf(Binary{}):
+		return field == "SHA256" && hash(64)
+	case reflect.TypeOf(Target{}):
+		return field == "BaseImageSHA256" && hash(64)
+	}
+	return false
+}
+
+func safeClosureIdentityPath(path string) bool {
+	if path == "" || filepath.IsAbs(path) || strings.ContainsAny(path, "\\\x00\r\n[]") {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == ".." || part == "." || part == "" {
+			return false
+		}
+	}
+	return true
 }

@@ -86,7 +86,7 @@ new include glob match, copied directory member or earlier search-path match
 requires a new run even when all old files are unchanged.
 
 Unresolved references, external inputs, malformed records and older machine
-records without `closure.patterns`, `closure.resolution_version: 6`, or
+records without `closure.patterns`, `closure.resolution_version: 7`, or
 `closure.frozen: true` fail closed. Run again with resolved inputs
 instead of overriding the machine result with a manual list. Legacy hand-written
 records retain the full manual dependency review above. The independent reviewer
@@ -95,16 +95,35 @@ changes outside the closure must pass the pure-base-import proof. A changed spec
 in the closure cannot be waived as prose. New records keep LATEST outside specs,
 so retests do not change their blobs.
 
-Resolver version 6 additionally refuses backslash-bearing key=value payloads (the
+Resolver version 7 additionally refuses backslash-bearing key=value payloads (the
 Ansible escape grammar is not evaluated); JSON/YAML mappings use their parser.
-Version 5 records are not eligible for automatic reuse.
+Version 6 and older records are not eligible for automatic reuse.
 
-Resolver version 6 proves the task dispatch subset only for direct copy with
+Resolver version 7 proves the task dispatch subset only for direct copy with
 proved literal argument mappings and debug with a literal scalar `msg` (optional
 literal integer verbosity). Templates, implicit/free-form expressions, other
 actions and unproved metadata remain unresolved even when known source files
-are hashed. Every currently generated record also marks ambient plugin/collection/Python discovery
-unresolved because external membership is not fingerprinted by Git. Thus the literal
-subset alone never qualifies a current generated record for automatic reuse. The
-zero-unresolved gate stays mandatory; synthetic complete-scope fixtures exercise the
-gate contract only. Execution and exact-candidate target evidence still work normally.
+are hashed. Default ambient records retain unresolved plugin/collection/Python discovery;
+exact-candidate evidence remains usable. The opt-in `--evidence-controller=pinned`
+profile builds the committed digest-pinned recipe, resolves its immutable image ID,
+and actually routes all L1/L3/L4/L6 Ansible subprocesses and the whole L5 pilot child
+through that image. Fresh private HOME/tmp, read-only mounts, fixed config and a
+scrubbed environment isolate each subprocess. Native pre/post probes must agree on
+effective origins, config and search paths. The shared local/remote gate validates
+the typed profile hashes against candidate closure blobs, image/binary/inventory
+identities, native probe fingerprint, all required routed stages and successful
+recorded verdicts. A selection flag or boolean alone never clears ambient refusal.
+
+Eligible controlled records also bind the actual static pilot binary BuildInfo to
+Go1.26.8/linux/amd64/v1/CGO=0 and the pinned OCI toolchain. Offline readonly module
+verification and complete `go list` output must match actual binary dependency
+versions/sums. Scope includes transitive repository package sources, package source
+membership, embed subtrees, go.mod/go.sum and workspace/vendor absence. Replacements,
+workspace/cgo/custom build contexts and partial listings remain unresolved. A new
+unimported package remains outside the execution graph. Initial eligibility is
+limited to V1 verification and proved pilot-rendered SSH inventory; actual matched
+host/group/ancestor vars candidates and missing memberships are tracked.
+
+The zero-unresolved/external gate stays mandatory. Synthetic typed proof fixtures
+exercise adapter mechanics only; real OCI constructor/source-graph tests and actual
+generated target records separately demonstrate the supported positive path.
