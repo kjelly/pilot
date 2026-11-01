@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 3
+const ResolutionVersion = 4
 
 // Closure is the set of repository files whose content decided what the run
 // did: the playbooks, every statically or dynamically included task file,
@@ -109,6 +109,9 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			r.patterns[r.rel(abs)+"/**"] = true
 			if _, err := os.Stat(abs); err == nil {
 				r.addPath(abs, "", false, "implicit Ansible input")
+				if name != "group_vars" && name != "host_vars" {
+					r.dispatchUnresolved("repository", "custom Ansible code", "custom modules/plugins can read additional controller inputs")
+				}
 			}
 		}
 	}
@@ -155,6 +158,9 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			}
 		}
 	}
+	if forwardedDispatchOptions(in.ExtraArgs) {
+		r.dispatchUnresolved("extra-vars", "forwarded Ansible options", "forwarded options can change input paths or module/plugin dispatch")
+	}
 	// Extra-vars values are lazy Jinja expressions too. Without evaluating Jinja,
 	// the resolver cannot know their runtime file dependencies. Never serialize
 	// the inline payload: it can contain secret literals or lookup arguments.
@@ -163,7 +169,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			continue
 		}
 		if inlineVarsNeedRuntimeResolution(payload) {
-			r.unresolved = append(r.unresolved, Reference{From: "extra-vars", Ref: "inline extra-vars expression", Reason: "inline templating or lookup/query/q requires runtime resolution"})
+			r.unresolved = append(r.unresolved, Reference{From: "extra-vars", Ref: "inline extra-vars expression", Reason: "inline templating, lookup/query/q or dispatch variables require runtime resolution"})
 		}
 	}
 	for _, f := range extraVarsFiles(in.ExtraArgs) {
@@ -200,8 +206,20 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		if out.Unresolved[i].From != out.Unresolved[j].From {
 			return out.Unresolved[i].From < out.Unresolved[j].From
 		}
-		return out.Unresolved[i].Ref < out.Unresolved[j].Ref
+		if out.Unresolved[i].Ref != out.Unresolved[j].Ref {
+			return out.Unresolved[i].Ref < out.Unresolved[j].Ref
+		}
+		return out.Unresolved[i].Reason < out.Unresolved[j].Reason
 	})
+	// A YAML input is inspected both as text and as decoded scalars. Keep one
+	// stable marker per boundary instead of duplicating the same refusal.
+	unique := out.Unresolved[:0]
+	for _, ref := range out.Unresolved {
+		if len(unique) == 0 || unique[len(unique)-1] != ref {
+			unique = append(unique, ref)
+		}
+	}
+	out.Unresolved = unique
 	for p := range r.external {
 		out.External = append(out.External, p)
 	}
@@ -328,6 +346,15 @@ func (r *resolver) addPath(abs, from string, dynamic bool, via string) {
 	if f.Mode != "120000" && via != "spec" {
 		r.scanExpressions(string(content), rel, filepath.Dir(abs), filepath.Dir(abs))
 	}
+	// Decode loaded YAML once so aliases/merge keys cannot hide dispatch or
+	// dependency fields, and escaped scalars cannot hide file-reading expressions.
+	// This walk is linear in parser nodes and never follows Alias pointers.
+	if f.Mode != "120000" && via != "spec" {
+		var document yaml.Node
+		if err := yaml.Unmarshal(content, &document); err == nil && len(document.Content) > 0 && (document.Content[0].Kind == yaml.SequenceNode || document.Content[0].Kind == yaml.MappingNode) {
+			r.inspectYAMLLayout(&document, rel, filepath.Dir(abs))
+		}
+	}
 	if filepath.Base(abs) == "ansible.cfg" {
 		r.unresolved = append(r.unresolved, Reference{From: rel, Ref: "ansible.cfg", Reason: "custom Ansible configuration may select plugins or external paths; automatic reuse requires independent resolution"})
 	}
@@ -373,12 +400,18 @@ func (r *resolver) visitPlaybook(abs string, depth int) {
 	dir := filepath.Dir(abs)
 	for _, play := range root.Content {
 		if play.Kind != yaml.MappingNode {
+			r.dispatchUnresolved(rel, "unsupported play layout", "play dispatch or attributes require runtime Ansible resolution")
 			continue
 		}
+		r.checkPlayLayout(play, rel)
 		for i := 0; i+1 < len(play.Content); i += 2 {
 			key, val := play.Content[i].Value, play.Content[i+1]
 			switch key {
 			case "import_playbook", "ansible.builtin.import_playbook":
+				r.dispatchUnresolved(rel, "unsupported play layout", "imported playbook execution requires full runtime Ansible search context")
+				if val.Kind != yaml.ScalarNode || val.Tag == "!!null" {
+					continue
+				}
 				for _, target := range r.resolveRef(rel, val.Value, "tasks", dir, dir) {
 					r.visitPlaybook(target.abs, depth+1)
 				}
@@ -422,12 +455,15 @@ func (r *resolver) visitTaskFile(abs, playbookDir string, depth int) {
 // reference it knows about.
 func (r *resolver) visitTasks(list *yaml.Node, from, fileDir, playbookDir string, depth int) {
 	if list == nil || list.Kind != yaml.SequenceNode {
+		r.dispatchUnresolved(from, "unsupported task layout", "task dispatch or arguments require runtime Ansible resolution")
 		return
 	}
 	for _, task := range list.Content {
 		if task.Kind != yaml.MappingNode {
+			r.dispatchUnresolved(from, "unsupported task layout", "task dispatch or arguments require runtime Ansible resolution")
 			continue
 		}
+		r.checkTaskDispatch(task, from)
 		for i := 0; i+1 < len(task.Content); i += 2 {
 			key, val := task.Content[i].Value, task.Content[i+1]
 			switch strings.TrimPrefix(key, "ansible.builtin.") {
@@ -545,6 +581,9 @@ var literalLookupRe = regexp.MustCompile(`^\s*['"](?:ansible\.builtin\.)?(file|t
 var jinjaIncludeRe = regexp.MustCompile(`\{%[-+]?\s*(?:include|import|from|extends)\b`)
 
 func (r *resolver) scanExpressions(raw, from, fileDir, playbookDir string) {
+	if strings.Contains(raw, "{{") || strings.Contains(raw, "{%") {
+		r.dispatchUnresolved(from, "unsupported expression", "automatic reuse requires proven file-independent expressions")
+	}
 	for _, loc := range lookupCallRe.FindAllStringIndex(raw, -1) {
 		rest := raw[loc[1]:]
 		m := literalLookupRe.FindStringSubmatch(rest)
@@ -681,6 +720,13 @@ func inlineVarsNeedRuntimeResolution(payload string) bool {
 			if node.Kind == yaml.AliasNode {
 				return true
 			}
+			if node.Kind == yaml.MappingNode {
+				for i := 0; i+1 < len(node.Content); i += 2 {
+					if strings.HasPrefix(node.Content[i].Value, "ansible_") {
+						return true
+					}
+				}
+			}
 			if node.Kind == yaml.ScalarNode && isExpression(node.Value) {
 				return true
 			}
@@ -698,10 +744,253 @@ func inlineVarsNeedRuntimeResolution(payload string) bool {
 		return true
 	}
 	for _, field := range fields {
-		_, value, _ := strings.Cut(field, "=")
-		if isExpression(value) {
+		key, value, _ := strings.Cut(field, "=")
+		if strings.HasPrefix(key, "ansible_") || isExpression(value) {
 			return true
 		}
 	}
 	return false
+}
+
+// These are parser boundaries, not execution restrictions. Tasks outside this
+// deliberately small subset still run; their records cannot be reused by a
+// machine without an independent resolution of the omitted runtime behavior.
+func (r *resolver) dispatchUnresolved(from, label, reason string) {
+	r.unresolved = append(r.unresolved, Reference{From: from, Ref: label, Reason: reason})
+}
+
+var taskMetadata = map[string]bool{
+	"name": true, "when": true, "vars": true, "tags": true, "register": true,
+	"changed_when": true, "failed_when": true, "no_log": true, "run_once": true,
+	"ignore_errors": true, "ignore_unreachable": true, "become": true, "become_user": true,
+	"check_mode": true, "diff": true, "notify": true, "listen": true, "until": true,
+	"retries": true, "delay": true, "timeout": true, "throttle": true, "any_errors_fatal": true,
+}
+var supportedDirectActions = map[string]bool{
+	"copy": true, "template": true, "script": true, "include_tasks": true,
+	"import_tasks": true, "include_vars": true,
+	// These builtins have no implicit controller-file input; scalar expressions
+	// inside their arguments are scanned separately for lookup/query calls.
+	"debug": true, "set_fact": true, "assert": true, "fail": true,
+}
+
+func (r *resolver) checkPlayLayout(play *yaml.Node, from string) {
+	allowed := map[string]bool{
+		"name": true, "hosts": true, "vars": true, "vars_files": true, "gather_facts": true,
+		"become": true, "become_user": true, "remote_user": true, "serial": true, "tags": true,
+		"check_mode": true, "force_handlers": true, "any_errors_fatal": true, "max_fail_percentage": true,
+		"pre_tasks": true, "tasks": true, "post_tasks": true, "handlers": true,
+		"import_playbook": true, "ansible.builtin.import_playbook": true,
+	}
+	for i := 0; i+1 < len(play.Content); i += 2 {
+		key, value := play.Content[i], play.Content[i+1]
+		if key.Kind != yaml.ScalarNode || !allowed[key.Value] || value.Kind == yaml.AliasNode || key.Value == "vars_files" && !plainScalarList(value) || (key.Value == "import_playbook" || key.Value == "ansible.builtin.import_playbook") && (value.Kind != yaml.ScalarNode || value.Tag == "!!null" || strings.TrimSpace(value.Value) == "") {
+			r.dispatchUnresolved(from, "unsupported play layout", "play dispatch or attributes require runtime Ansible resolution")
+		}
+	}
+}
+
+func (r *resolver) checkTaskDispatch(task *yaml.Node, from string) {
+	actions, blocks := 0, 0
+	layoutBad := false
+	for i := 0; i+1 < len(task.Content); i += 2 {
+		key, value := task.Content[i], task.Content[i+1]
+		if key.Kind != yaml.ScalarNode {
+			layoutBad = true
+			continue
+		}
+		name := key.Value
+		if taskMetadata[name] {
+			continue
+		}
+		if name == "block" || name == "rescue" || name == "always" {
+			blocks++
+			continue
+		}
+		if strings.HasPrefix(name, "with_") {
+			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only recognized direct builtin actions")
+			continue
+		}
+		module := strings.TrimPrefix(name, "ansible.builtin.")
+		if !supportedDirectActions[module] {
+			actions++
+			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only recognized direct builtin actions")
+			continue
+		}
+		actions++
+		if module == "include_tasks" || module == "import_tasks" {
+			r.dispatchUnresolved(from, "unsupported task dispatch", "included task execution requires full runtime Ansible search context")
+		}
+		if module == "script" {
+			r.dispatchUnresolved(from, "unsupported task dispatch", "opaque executable input requires runtime dependency resolution")
+		}
+		if !supportedActionArguments(module, value) {
+			layoutBad = true
+		}
+	}
+	if (actions != 1 && blocks == 0) || (actions > 0 && blocks > 0) || actions > 1 {
+		layoutBad = true
+	}
+	if layoutBad {
+		r.dispatchUnresolved(from, "unsupported task layout", "task dispatch or arguments require runtime Ansible resolution")
+	}
+}
+
+func supportedActionArguments(module string, value *yaml.Node) bool {
+	if value == nil || value.Kind == yaml.AliasNode {
+		return false
+	}
+	if module == "debug" || module == "set_fact" || module == "assert" || module == "fail" {
+		return value.Kind == yaml.MappingNode || value.Kind == yaml.ScalarNode && value.Tag != "!!null"
+	}
+	if (module == "include_tasks" || module == "import_tasks") && value.Kind == yaml.ScalarNode {
+		return value.Tag != "!!null" && strings.TrimSpace(value.Value) != "" && !strings.Contains(value.Value, "=")
+	}
+	if module == "script" && value.Kind == yaml.ScalarNode {
+		return simpleScriptArgument(value.Value)
+	}
+	if value.Kind != yaml.MappingNode {
+		return false
+	}
+	args := map[string]*yaml.Node{}
+	allowed := map[string]bool{}
+	switch module {
+	case "copy":
+		for _, k := range []string{"src", "dest", "content", "owner", "group", "mode", "backup", "force", "remote_src"} {
+			allowed[k] = true
+		}
+	case "template":
+		for _, k := range []string{"src", "dest", "owner", "group", "mode", "backup", "force"} {
+			allowed[k] = true
+		}
+	case "script":
+		allowed["cmd"], allowed["_raw_params"] = true, true
+	case "include_tasks":
+		allowed["file"], allowed["apply"] = true, true
+	case "import_tasks":
+		allowed["file"] = true
+	case "include_vars":
+		allowed["file"], allowed["dir"], allowed["name"] = true, true, true
+	default:
+		return false
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key, val := value.Content[i], value.Content[i+1]
+		if key.Kind != yaml.ScalarNode || !allowed[key.Value] || args[key.Value] != nil {
+			return false
+		}
+		if key.Value == "apply" {
+			if val.Kind != yaml.MappingNode {
+				return false
+			}
+			for j := 0; j+1 < len(val.Content); j += 2 {
+				if !taskMetadata[val.Content[j].Value] {
+					return false
+				}
+			}
+		} else if val.Kind != yaml.ScalarNode || val.Tag == "!!null" {
+			return false
+		}
+		args[key.Value] = val
+	}
+	has := func(k string) bool { return args[k] != nil && strings.TrimSpace(args[k].Value) != "" }
+	switch module {
+	case "copy":
+		return has("src") != has("content") && (!has("remote_src") || args["remote_src"].Value == "false")
+	case "template":
+		return has("src")
+	case "script":
+		if has("cmd") == has("_raw_params") {
+			return false
+		}
+		if has("cmd") {
+			return simpleScriptArgument(args["cmd"].Value)
+		}
+		return simpleScriptArgument(args["_raw_params"].Value)
+	case "include_tasks", "import_tasks":
+		return has("file")
+	case "include_vars":
+		return has("file") != has("dir")
+	}
+	return false
+}
+
+func simpleScriptArgument(value string) bool {
+	fields := strings.Fields(value)
+	return len(fields) > 0 && !strings.ContainsAny(fields[0], "\"'\\")
+}
+
+func forwardedDispatchOptions(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-e" || arg == "--extra-vars" {
+			if i+1 >= len(args) {
+				return true
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--extra-vars=") || strings.HasPrefix(arg, "-e") && len(arg) > 2 {
+			continue
+		}
+		// Only extra-vars forms are understood here. Other forwarded options may
+		// replace inventories, secrets providers, connections or module search paths.
+		return true
+	}
+	return false
+}
+
+func plainScalarList(value *yaml.Node) bool {
+	if value.Kind == yaml.ScalarNode {
+		return value.Tag != "!!null" && strings.TrimSpace(value.Value) != ""
+	}
+	if value.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, child := range value.Content {
+		if child.Kind != yaml.ScalarNode || child.Tag == "!!null" {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *resolver) inspectYAMLLayout(node *yaml.Node, from, dir string) {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if strings.HasPrefix(key, "ansible_") {
+				r.dispatchUnresolved(from, "unsupported YAML layout", "custom Ansible dispatch variables require runtime resolution")
+			}
+			if (key == "when" || key == "until" || key == "changed_when" || key == "failed_when" || key == "that") && !literalBooleanCondition(value) {
+				r.dispatchUnresolved(from, "unsupported expression", "automatic reuse requires proven file-independent expressions")
+			}
+		}
+	}
+
+	if node.Kind == yaml.AliasNode || node.Tag == "!!merge" {
+		r.dispatchUnresolved(from, "unsupported YAML layout", "YAML aliases or merge keys require runtime dependency resolution")
+		return
+	}
+	if node.Kind == yaml.ScalarNode {
+		r.scanExpressions(node.Value, from, dir, dir)
+	}
+	for _, child := range node.Content {
+		r.inspectYAMLLayout(child, from, dir)
+	}
+}
+
+func literalBooleanCondition(value *yaml.Node) bool {
+	if value.Kind == yaml.ScalarNode {
+		return value.Tag == "!!bool"
+	}
+	if value.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, child := range value.Content {
+		if child.Kind != yaml.ScalarNode || child.Tag != "!!bool" {
+			return false
+		}
+	}
+	return true
 }

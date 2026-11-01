@@ -506,3 +506,26 @@ func TestEvidenceInterleavingCannotSplitASecretForScanning(t *testing.T) {
 		t.Fatalf("interleaved warning hid a stdout secret: %+v", red)
 	}
 }
+
+func TestEvidenceUnsupportedDispatchOmitsSecretPayload(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	const sentinel = "UnsupportedDispatchSecretSentinel225"
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("- hosts: all\n  tasks:\n    - action: copy src=payload.txt dest=/tmp/out api_token="+sentinel+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(root, "docs/evidence/demo/dispatch.md")
+	withEvidenceFlags(t, record)
+	sess, err := newEvidenceSession([]string{"action.yml"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.finish(io.Discard, io.Discard, "success", nil)
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), sentinel) || !strings.Contains(string(raw), "unsupported task dispatch") {
+		t.Fatalf("unsupported dispatch must have a payload-free refusal marker: %s", raw)
+	}
+}
