@@ -449,10 +449,29 @@
           run_once: true
           tags: [identity, drift]
 
+        # Same tags as the kinit above: the observer needs that ticket, so it
+        # runs exactly when the kinit does (its inner tasks are run_once for the
+        # same reason; see the included file).
+        - name: "Read the complete users/groups object model for identity drift"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-identity-object-observe.yml
+            apply:
+              tags: [identity, drift]
+          when: pilot_drift_identity_objects | default(false) | bool
+          tags: [identity, drift]
+
+        # no_log: this fact carries the observed and desired users/groups
+        # (names, e-mail addresses, attributes), which `-v`, a JSON/YAML stdout
+        # callback or a callback log would print for any set_fact. pilot reads
+        # the result from the file the next task writes, never from this task's
+        # callback output, so hiding it costs only the message of a templating
+        # failure here (every variable below has a default or is set by an
+        # earlier task).
         - name: "Build machine-readable drift-probe result"
           ansible.builtin.set_fact:
             pilot_drift_result:
               schema_version: 1
+              identity_objects: "{{ pilot_identity_objects | default(none) }}"
               live_hbac_names: >-
                 {{ pilot_drift_hbac_find.stdout | default('') |
                    regex_findall('(?m)^\s*cn:\s*(\S+)\s*$') }}
@@ -466,6 +485,7 @@
               user_auth_type: "{{ pilot_drift_user_auth_type }}"
               password_policy: "{{ pilot_drift_password_policy }}"
           changed_when: false
+          no_log: true
           run_once: true
           tags: [identity, drift]
 
