@@ -46,7 +46,7 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh, e, trees = self.fixture()
         record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
                   "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
-                  "closure": {"resolution_version": 4, "frozen": True, "files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
+                  "closure": {"resolution_version": 5, "frozen": True, "files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
                               "patterns": ["playbooks/apply/*.yml"]}}
         gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
         gh.commit_tree = lambda repo, revision: "e" * 40
@@ -59,10 +59,14 @@ class TargetReuseRemoteTests(unittest.TestCase):
                 (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
                 (lambda r: r["closure"].update(resolution_version=2), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
                 (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
                 (lambda r: r["closure"].update(unresolved=[{"ref": "lookup/query expression"}]), "unresolved"),
                 (lambda r: r["closure"].update(external=["/outside/input"]), "external"),
             (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task layout", "reason": "debug argument proof failed"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "template execution is opaque to automatic reuse"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "automatic reuse supports only literal copy and debug.msg actions"}]), "unresolved"),
                 (lambda r: r.update(outcome="invalid-inputs"), "did not succeed")):
             bad = copy.deepcopy(record)
             change(bad)

@@ -86,7 +86,7 @@ new include glob match, copied directory member or earlier search-path match
 requires a new run even when all old files are unchanged.
 
 Unresolved references, external inputs, malformed records and older machine
-records without `closure.patterns`, `closure.resolution_version: 4`, or
+records without `closure.patterns`, `closure.resolution_version: 5`, or
 `closure.frozen: true` fail closed. Run again with resolved inputs
 instead of overriding the machine result with a manual list. Legacy hand-written
 records retain the full manual dependency review above. The independent reviewer
@@ -94,3 +94,9 @@ still confirms the current HEAD/base and audits non-execution changes; runtime
 changes outside the closure must pass the pure-base-import proof. A changed spec
 in the closure cannot be waived as prose. New records keep LATEST outside specs,
 so retests do not change their blobs.
+
+Resolver version 5 deliberately allows automatic reuse only for direct copy with
+proved literal argument mappings and debug with a literal scalar `msg` (optional
+literal integer verbosity). Templates, implicit/free-form expressions, other
+actions and unproved metadata remain unresolved even when known source files
+are hashed. Execution and exact-candidate target evidence still work normally.

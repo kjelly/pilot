@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 4
+const ResolutionVersion = 5
 
 // Closure is the set of repository files whose content decided what the run
 // did: the playbooks, every statically or dynamically included task file,
@@ -766,11 +766,11 @@ var taskMetadata = map[string]bool{
 	"check_mode": true, "diff": true, "notify": true, "listen": true, "until": true,
 	"retries": true, "delay": true, "timeout": true, "throttle": true, "any_errors_fatal": true,
 }
-var supportedDirectActions = map[string]bool{
+var knownDirectActions = map[string]bool{
 	"copy": true, "template": true, "script": true, "include_tasks": true,
 	"import_tasks": true, "include_vars": true,
-	// These builtins have no implicit controller-file input; scalar expressions
-	// inside their arguments are scanned separately for lookup/query calls.
+	// Known actions remain available for diagnostic source discovery. Only copy
+	// and debug.msg can pass the separate argument proof below.
 	"debug": true, "set_fact": true, "assert": true, "fail": true,
 }
 
@@ -784,6 +784,9 @@ func (r *resolver) checkPlayLayout(play *yaml.Node, from string) {
 	}
 	for i := 0; i+1 < len(play.Content); i += 2 {
 		key, value := play.Content[i], play.Content[i+1]
+		if !supportedPlayValue(key.Value, value) {
+			r.dispatchUnresolved(from, "unsupported play layout", "play dispatch or attributes require runtime Ansible resolution")
+		}
 		if key.Kind != yaml.ScalarNode || !allowed[key.Value] || value.Kind == yaml.AliasNode || key.Value == "vars_files" && !plainScalarList(value) || (key.Value == "import_playbook" || key.Value == "ansible.builtin.import_playbook") && (value.Kind != yaml.ScalarNode || value.Tag == "!!null" || strings.TrimSpace(value.Value) == "") {
 			r.dispatchUnresolved(from, "unsupported play layout", "play dispatch or attributes require runtime Ansible resolution")
 		}
@@ -801,6 +804,9 @@ func (r *resolver) checkTaskDispatch(task *yaml.Node, from string) {
 		}
 		name := key.Value
 		if taskMetadata[name] {
+			if !supportedTaskMetadata(name, value) {
+				layoutBad = true
+			}
 			continue
 		}
 		if name == "block" || name == "rescue" || name == "always" {
@@ -808,24 +814,29 @@ func (r *resolver) checkTaskDispatch(task *yaml.Node, from string) {
 			continue
 		}
 		if strings.HasPrefix(name, "with_") {
-			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only recognized direct builtin actions")
+			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only literal copy and debug.msg actions")
 			continue
 		}
 		module := strings.TrimPrefix(name, "ansible.builtin.")
-		if !supportedDirectActions[module] {
+		if !knownDirectActions[module] {
 			actions++
-			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only recognized direct builtin actions")
+			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only literal copy and debug.msg actions")
 			continue
 		}
 		actions++
-		if module == "include_tasks" || module == "import_tasks" {
+		switch module {
+		case "copy", "debug":
+			if !supportedActionArguments(module, value) {
+				layoutBad = true
+			}
+		case "template":
+			r.dispatchUnresolved(from, "unsupported task dispatch", "template execution is opaque to automatic reuse")
+		case "include_tasks", "import_tasks":
 			r.dispatchUnresolved(from, "unsupported task dispatch", "included task execution requires full runtime Ansible search context")
-		}
-		if module == "script" {
+		case "script":
 			r.dispatchUnresolved(from, "unsupported task dispatch", "opaque executable input requires runtime dependency resolution")
-		}
-		if !supportedActionArguments(module, value) {
-			layoutBad = true
+		default:
+			r.dispatchUnresolved(from, "unsupported task dispatch", "automatic reuse supports only literal copy and debug.msg actions")
 		}
 	}
 	if (actions != 1 && blocks == 0) || (actions > 0 && blocks > 0) || actions > 1 {
@@ -836,88 +847,109 @@ func (r *resolver) checkTaskDispatch(task *yaml.Node, from string) {
 	}
 }
 
+// No implicit expression field is accepted here. In particular debug.var,
+// free-form arguments and every template execution remain outside the subset.
 func supportedActionArguments(module string, value *yaml.Node) bool {
-	if value == nil || value.Kind == yaml.AliasNode {
-		return false
-	}
-	if module == "debug" || module == "set_fact" || module == "assert" || module == "fail" {
-		return value.Kind == yaml.MappingNode || value.Kind == yaml.ScalarNode && value.Tag != "!!null"
-	}
-	if (module == "include_tasks" || module == "import_tasks") && value.Kind == yaml.ScalarNode {
-		return value.Tag != "!!null" && strings.TrimSpace(value.Value) != "" && !strings.Contains(value.Value, "=")
-	}
-	if module == "script" && value.Kind == yaml.ScalarNode {
-		return simpleScriptArgument(value.Value)
-	}
-	if value.Kind != yaml.MappingNode {
+	if value == nil || value.Kind != yaml.MappingNode {
 		return false
 	}
 	args := map[string]*yaml.Node{}
-	allowed := map[string]bool{}
-	switch module {
-	case "copy":
-		for _, k := range []string{"src", "dest", "content", "owner", "group", "mode", "backup", "force", "remote_src"} {
-			allowed[k] = true
-		}
-	case "template":
-		for _, k := range []string{"src", "dest", "owner", "group", "mode", "backup", "force"} {
-			allowed[k] = true
-		}
-	case "script":
-		allowed["cmd"], allowed["_raw_params"] = true, true
-	case "include_tasks":
-		allowed["file"], allowed["apply"] = true, true
-	case "import_tasks":
-		allowed["file"] = true
-	case "include_vars":
-		allowed["file"], allowed["dir"], allowed["name"] = true, true, true
-	default:
-		return false
-	}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		key, val := value.Content[i], value.Content[i+1]
-		if key.Kind != yaml.ScalarNode || !allowed[key.Value] || args[key.Value] != nil {
-			return false
-		}
-		if key.Value == "apply" {
-			if val.Kind != yaml.MappingNode {
-				return false
-			}
-			for j := 0; j+1 < len(val.Content); j += 2 {
-				if !taskMetadata[val.Content[j].Value] {
-					return false
-				}
-			}
-		} else if val.Kind != yaml.ScalarNode || val.Tag == "!!null" {
+		if key.Kind != yaml.ScalarNode || args[key.Value] != nil {
 			return false
 		}
 		args[key.Value] = val
 	}
-	has := func(k string) bool { return args[k] != nil && strings.TrimSpace(args[k].Value) != "" }
-	switch module {
-	case "copy":
-		return has("src") != has("content") && (!has("remote_src") || args["remote_src"].Value == "false")
-	case "template":
-		return has("src")
-	case "script":
-		if has("cmd") == has("_raw_params") {
+	if module == "debug" {
+		for key, val := range args {
+			switch key {
+			case "msg":
+				if !literalScalar(val) {
+					return false
+				}
+			case "verbosity":
+				if val.Kind != yaml.ScalarNode || val.Tag != "!!int" {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return args["msg"] != nil
+	}
+	if module != "copy" {
+		return false
+	}
+	for key, val := range args {
+		switch key {
+		case "src", "dest", "content", "owner", "group":
+			if !literalString(val) {
+				return false
+			}
+		case "mode":
+			if !literalString(val) && (val.Kind != yaml.ScalarNode || val.Tag != "!!int") {
+				return false
+			}
+		case "backup", "force", "remote_src":
+			if val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
+				return false
+			}
+		default:
 			return false
 		}
-		if has("cmd") {
-			return simpleScriptArgument(args["cmd"].Value)
-		}
-		return simpleScriptArgument(args["_raw_params"].Value)
-	case "include_tasks", "import_tasks":
-		return has("file")
-	case "include_vars":
-		return has("file") != has("dir")
 	}
-	return false
+	has := func(key string) bool { return args[key] != nil }
+	return has("dest") && strings.TrimSpace(args["dest"].Value) != "" && has("src") != has("content") && (!has("src") || strings.TrimSpace(args["src"].Value) != "") && (!has("remote_src") || args["remote_src"].Value == "false")
 }
 
-func simpleScriptArgument(value string) bool {
-	fields := strings.Fields(value)
-	return len(fields) > 0 && !strings.ContainsAny(fields[0], "\"'\\")
+func literalScalar(value *yaml.Node) bool {
+	if value == nil || value.Kind != yaml.ScalarNode {
+		return false
+	}
+	switch value.Tag {
+	case "!!str", "!!int", "!!float", "!!bool":
+	default:
+		return false
+	}
+	return !strings.Contains(value.Value, "{{") && !strings.Contains(value.Value, "{%")
+}
+func literalString(value *yaml.Node) bool { return literalScalar(value) && value.Tag == "!!str" }
+func literalStringList(value *yaml.Node) bool {
+	if literalString(value) {
+		return true
+	}
+	if value == nil || value.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, child := range value.Content {
+		if !literalString(child) {
+			return false
+		}
+	}
+	return true
+}
+func literalNumber(value *yaml.Node) bool {
+	return value != nil && value.Kind == yaml.ScalarNode && (value.Tag == "!!int" || value.Tag == "!!float")
+}
+
+func supportedTaskMetadata(name string, value *yaml.Node) bool {
+	switch name {
+	case "name", "register", "become_user":
+		return literalString(value)
+	case "tags", "notify", "listen":
+		return literalStringList(value)
+	case "vars":
+		return value.Kind == yaml.MappingNode
+	case "when", "until", "changed_when", "failed_when":
+		return literalBooleanCondition(value)
+	case "no_log", "run_once", "ignore_errors", "ignore_unreachable", "become", "check_mode", "diff", "any_errors_fatal":
+		return value.Kind == yaml.ScalarNode && value.Tag == "!!bool"
+	case "retries", "delay", "timeout", "throttle":
+		return literalNumber(value)
+	default:
+		return false
+	}
 }
 
 func forwardedDispatchOptions(args []string) bool {
@@ -993,4 +1025,25 @@ func literalBooleanCondition(value *yaml.Node) bool {
 		}
 	}
 	return true
+}
+
+func supportedPlayValue(name string, value *yaml.Node) bool {
+	switch name {
+	case "name", "become_user", "remote_user", "import_playbook", "ansible.builtin.import_playbook":
+		return literalString(value)
+	case "hosts", "tags":
+		return literalStringList(value)
+	case "vars":
+		return value.Kind == yaml.MappingNode
+	case "vars_files":
+		return plainScalarList(value)
+	case "gather_facts", "become", "check_mode", "force_handlers", "any_errors_fatal":
+		return value.Kind == yaml.ScalarNode && value.Tag == "!!bool"
+	case "serial", "max_fail_percentage":
+		return literalNumber(value)
+	case "pre_tasks", "tasks", "post_tasks", "handlers":
+		return value.Kind == yaml.SequenceNode
+	default:
+		return false
+	}
 }
