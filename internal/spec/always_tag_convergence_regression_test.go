@@ -1,9 +1,12 @@
 package spec
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -156,8 +159,9 @@ func TestRegression_AlwaysTaggedTasksConverge(t *testing.T) {
 // the tests below include, under <dir>/tasks, and returns <dir>:
 //   - child.yml: an untagged command with changed_when: true;
 //   - child-always.yml: the same command tagged `always`;
-//   - outer.yml: an untagged include of child-always.yml named `inner`, to
-//     see whether a line inherits an enclosing include's `apply` tags;
+//   - outer.yml, outer-plain.yml: an untagged include named `inner` of
+//     child-always.yml or child.yml, to see whether a line (and its children)
+//     inherit an enclosing include's `apply` tags;
 //   - chain0.yml ... chain7.yml: chainN.yml holds an include line named `cN`
 //     (no tags) of chain<N+1>.yml, and chain7.yml an always-tagged command
 //     named `leaf` with changed_when: true. With `always` apply tags on each
@@ -172,6 +176,7 @@ func writeConvergenceTaskFiles(t *testing.T) string {
 		"child.yml":        "- name: child\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
 		"child-always.yml": "- name: child\n  tags: [always]\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
 		"outer.yml":        "- name: inner\n  ansible.builtin.include_tasks: child-always.yml\n",
+		"outer-plain.yml":  "- name: inner\n  ansible.builtin.include_tasks: child.yml\n",
 		"chain7.yml":       "- name: leaf\n  tags: [always]\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
 	}
 	for i := 0; i < 7; i++ {
@@ -342,14 +347,45 @@ func TestFindAlwaysTaggedNonConvergent(t *testing.T) {
       tags: [C1]
       ansible.builtin.include_tasks: tasks/child-always.yml
 `, nil},
-		{"include_tasks reached through an always block inherits only apply tags", `
+		{"include_tasks in an always block: the children inherit the block's tags, not the line's", `
 - hosts: all
   tasks:
     - tags: [always]
       block:
         - name: inc
           ansible.builtin.include_tasks: tasks/child.yml
+`, []string{pb + "inc -> child"}},
+		{"include_tasks in an always play: the children inherit the play's tags", `
+- hosts: all
+  tags: [always]
+  tasks:
+    - name: inc
+      ansible.builtin.include_tasks: tasks/child.yml
+`, []string{pb + "inc -> child"}},
+		{"include_tasks in a play tagged C1: nothing inherited is always", `
+- hosts: all
+  tags: [C1]
+  tasks:
+    - name: inc
+      ansible.builtin.include_tasks: tasks/child.yml
+    - name: inc always
+      tags: [always]
+      ansible.builtin.include_tasks: tasks/child.yml
 `, nil},
+		{"include_tasks line tagged always without apply in a plain play: the children are not selected", `
+- hosts: all
+  tasks:
+    - name: inc
+      tags: [always]
+      ansible.builtin.include_tasks: tasks/child.yml
+`, nil},
+		{"a nested include line's untagged child inherits the enclosing include's apply tags", `
+- hosts: all
+  tasks:
+    - name: outer
+      tags: [always]
+      ansible.builtin.include_tasks: {file: tasks/outer-plain.yml, apply: {tags: [always]}}
+`, []string{pb + "outer -> inner -> child"}},
 		{"include_tasks inside an always block, with apply always", `
 - hosts: all
   tasks:
@@ -458,9 +494,12 @@ func TestFindAlwaysTaggedNonConvergent(t *testing.T) {
 // TestAlwaysTaggedConvergenceFailsClosed checks that the scan reports what
 // it cannot follow instead of passing over it: a task file it cannot read, a
 // templated include of an always-run line, includes nested deeper than the
-// depth limit, and the constructs it does not model (roles, import_playbook,
-// action:, merge keys, the legacy spellings of include_tasks/import_tasks and
-// `include:`).
+// depth limit, and every construct it does not model (convergenceUnsupported:
+// roles, import_playbook, include_role/import_role, action:, merge keys, the
+// legacy spellings of include_tasks/import_tasks and `include:`). The
+// unsupported keys are listed here by hand, not read from the table, so that
+// dropping an entry from the table fails a case; a table entry missing from
+// the list fails too.
 func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
 	dir := writeConvergenceTaskFiles(t)
 	cases := []struct {
@@ -478,33 +517,6 @@ func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
   tasks:
     - {name: inc, tags: [always], include_tasks: "{{ which }}.yml"}
 `, "templated"},
-		{"role", "- hosts: all\n  roles: [common]\n", "roles"},
-		{"import_playbook", "- import_playbook: other.yml\n", "import_playbook"},
-		{"include_role", `
-- hosts: all
-  tasks:
-    - {name: r, tags: [always], ansible.builtin.include_role: {name: common}}
-`, "include_role"},
-		{"action", `
-- hosts: all
-  tasks:
-    - {name: a, tags: [always], action: command x}
-`, "action"},
-		{"ansible.legacy.include_tasks", `
-- hosts: all
-  tasks:
-    - {name: i, tags: [always], ansible.legacy.include_tasks: {file: tasks/child.yml, apply: {tags: [always]}}}
-`, "ansible.legacy.include_tasks"},
-		{"ansible.legacy.import_tasks", `
-- hosts: all
-  tasks:
-    - {name: i, tags: [always], ansible.legacy.import_tasks: tasks/child.yml}
-`, "ansible.legacy.import_tasks"},
-		{"legacy include:", `
-- hosts: all
-  tasks:
-    - {name: i, tags: [always], include: tasks/child.yml}
-`, "uses include,"},
 		{"includes nested deeper than 6", `
 - hosts: all
   tasks:
@@ -512,13 +524,6 @@ func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
       tags: [always]
       ansible.builtin.include_tasks: {file: tasks/chain1.yml, apply: {tags: [always]}}
 `, "deeper than 6"},
-		{"merge key", `
-- hosts: all
-  tasks:
-    - name: a
-      <<: {tags: [always]}
-      command: x
-`, "merge key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -527,6 +532,40 @@ func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
 				t.Fatalf("err = %v, want one naming %q", err, tc.want)
 			}
 		})
+	}
+
+	// key is the mapping key, named what the error calls it
+	unsupported := []struct{ key, named string }{
+		{"roles", "roles"}, {"action", "action:"}, {"local_action", "local_action:"}, {"<<", "merge key (<<:)"},
+		{"include", "include"}, {"ansible.builtin.include", "ansible.builtin.include"}, {"ansible.legacy.include", "ansible.legacy.include"},
+		{"ansible.legacy.include_tasks", "ansible.legacy.include_tasks"}, {"ansible.legacy.import_tasks", "ansible.legacy.import_tasks"},
+		{"import_playbook", "import_playbook"}, {"ansible.builtin.import_playbook", "ansible.builtin.import_playbook"}, {"ansible.legacy.import_playbook", "ansible.legacy.import_playbook"},
+		{"include_role", "include_role"}, {"ansible.builtin.include_role", "ansible.builtin.include_role"}, {"ansible.legacy.include_role", "ansible.legacy.include_role"},
+		{"import_role", "import_role"}, {"ansible.builtin.import_role", "ansible.builtin.import_role"}, {"ansible.legacy.import_role", "ansible.legacy.import_role"},
+	}
+	listed := map[string]bool{}
+	for _, u := range unsupported {
+		listed[u.key] = true
+		value := "x"
+		if u.key == "<<" {
+			value = "{a: b}"
+		}
+		for placement, doc := range map[string]string{
+			"task": "- hosts: all\n  tasks:\n    - name: t\n      tags: [always]\n      " + u.key + ": " + value + "\n",
+			"play": "- hosts: all\n  " + u.key + ": " + value + "\n",
+		} {
+			t.Run(placement+"/"+u.key, func(t *testing.T) {
+				_, err := scanAlwaysTaggedConvergence("p.yml", []byte(doc), dir)
+				if want := "uses " + u.named + ","; err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v, want one containing %q", err, want)
+				}
+			})
+		}
+	}
+	for key := range convergenceUnsupported {
+		if !listed[key] {
+			t.Errorf("convergenceUnsupported has %q, which this test does not cover; add it to the list above", key)
+		}
 	}
 }
 
@@ -570,6 +609,296 @@ func TestAlwaysTaggedConvergenceFlagsThePre190Playbook(t *testing.T) {
 			t.Errorf("with the pre-#190 `always` tags back, the scan does not flag %q; flagged: %v", want, reverted)
 		}
 	}
+}
+
+// convergenceTagShapesPlaybook is the playbook of
+// TestAlwaysTaggedConvergenceTagModelMatchesAnsible: one play per tag shape,
+// each with a leaf task (or an included file with one) named leaf-s<N>.
+// @CW@ stands for the leaf's changed_when. The task files are
+// convergenceTagShapeFiles, next to the playbook.
+const convergenceTagShapesPlaybook = `
+- name: s1 include tagged always, apply always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s1-child.yml, apply: {tags: [always]}}
+
+- name: s2 include tagged always, no apply
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s2-child.yml
+
+- name: s3 untagged include in an always block
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - tags: [always]
+      block:
+        - name: include
+          ansible.builtin.include_tasks: s3-child.yml
+
+- name: s4 untagged include in an always play
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: include
+      ansible.builtin.include_tasks: s4-child.yml
+
+- name: s5 nested include in a file included with apply always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s5-outer.yml, apply: {tags: [always]}}
+
+- name: s6 nested include in a file included without apply
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s6-outer.yml
+
+- name: s7 import_tasks under an always block
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - tags: [always]
+      block:
+        - name: import
+          ansible.builtin.import_tasks: s7-child.yml
+
+- name: s8 plain task tagged always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: leaf-s8
+      tags: [always]
+      ansible.builtin.command: /bin/true
+      changed_when: @CW@
+
+- name: s9 plain task tagged x
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: leaf-s9
+      tags: [x]
+      ansible.builtin.command: /bin/true
+      changed_when: @CW@
+
+- name: s10 include tagged x in an always block
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - tags: [always]
+      block:
+        - name: include
+          tags: [x]
+          ansible.builtin.include_tasks: s10-child.yml
+
+- name: s11 include tagged x, apply always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [x]
+      ansible.builtin.include_tasks: {file: s11-child.yml, apply: {tags: [always]}}
+
+- name: s12 include tagged always, child tagged always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s12-child.yml
+
+- name: s13 import tagged x, child tagged always
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: import
+      tags: [x]
+      ansible.builtin.import_tasks: s13-child.yml
+
+- name: s14 include tagged always, apply x
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s14-child.yml, apply: {tags: [x]}}
+
+- name: s15 block tagged x with an always section
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - tags: [x]
+      block:
+        - name: leaf-s15a
+          ansible.builtin.command: /bin/true
+          changed_when: @CW@
+      always:
+        - name: leaf-s15b
+          tags: [always]
+          ansible.builtin.command: /bin/true
+          changed_when: @CW@
+
+- name: s16 include tagged always in a play tagged x
+  hosts: localhost
+  gather_facts: false
+  tags: [x]
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s16-child.yml
+`
+
+// convergenceTagShapeFiles are the task files convergenceTagShapesPlaybook
+// includes (@CW@ as above).
+var convergenceTagShapeFiles = func() map[string]string {
+	leaf := func(name, tags string) string {
+		task := "- name: " + name + "\n"
+		if tags != "" {
+			task += "  tags: " + tags + "\n"
+		}
+		return task + "  ansible.builtin.command: /bin/true\n  changed_when: @CW@\n"
+	}
+	inner := func(file string) string {
+		return "- name: inner\n  ansible.builtin.include_tasks: " + file + "\n"
+	}
+	return map[string]string{
+		"s1-child.yml": leaf("leaf-s1", ""), "s2-child.yml": leaf("leaf-s2", ""), "s3-child.yml": leaf("leaf-s3", ""),
+		"s4-child.yml": leaf("leaf-s4", ""), "s5-outer.yml": inner("s5-child.yml"), "s5-child.yml": leaf("leaf-s5", ""),
+		"s6-outer.yml": inner("s6-child.yml"), "s6-child.yml": leaf("leaf-s6", ""), "s7-child.yml": leaf("leaf-s7", ""),
+		"s10-child.yml": leaf("leaf-s10", ""), "s11-child.yml": leaf("leaf-s11", ""),
+		"s12-child.yml": leaf("leaf-s12", "[always]"), "s13-child.yml": leaf("leaf-s13", "[always]"),
+		"s14-child.yml": leaf("leaf-s14", ""), "s16-child.yml": leaf("leaf-s16", ""),
+	}
+}()
+
+// TestAlwaysTaggedConvergenceTagModelMatchesAnsible pins the walker's tag
+// model against the real tool: for each shape in convergenceTagShapesPlaybook
+// (include lines with and without `apply`, includes in always blocks and
+// plays, nested includes, import_tasks, plain tasks, a block's always:
+// section) the leaf tasks that ansible-playbook actually runs under `--tags
+// nonexistent` are exactly the leaf tasks the lint reports as always-run.
+// The oracle is Ansible's own run (JSON callback), not the walker: the same
+// playbook is run with the leaves' changed_when false, and scanned with it
+// true so the lint names every always-run leaf. A hand-written model of
+// Ansible's tag inheritance drifts silently; it did once, when the walker
+// gave a dynamic include only its `apply` tags and missed the tags of the
+// include line's ancestors (always blocks and plays), which Ansible 2.19.2
+// does pass down. Skipped without ansible-playbook, as the other
+// real-Ansible tests here are (CI's Go test job may skip it too, #198).
+func TestAlwaysTaggedConvergenceTagModelMatchesAnsible(t *testing.T) {
+	ansible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	render := func(dir, changedWhen string) {
+		files := map[string]string{"p.yml": convergenceTagShapesPlaybook}
+		for name, body := range convergenceTagShapeFiles {
+			files[name] = body
+		}
+		for name, body := range files {
+			body = strings.ReplaceAll(body, "@CW@", changedWhen)
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	root := t.TempDir()
+	ansibleDir, walkerDir := filepath.Join(root, "ansible"), filepath.Join(root, "walker")
+	for _, dir := range []string{ansibleDir, walkerDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	render(ansibleDir, "false")
+	render(walkerDir, "true")
+
+	// Ansible's side: the leaf tasks that ran.
+	cmd := exec.Command(ansible, "-i", "localhost,", "-c", "local", "--tags", "nonexistent", filepath.Join(ansibleDir, "p.yml"))
+	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
+		"ANSIBLE_LOCAL_TEMP="+filepath.Join(root, "local-tmp"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(root, "remote-tmp"), "ANSIBLE_CACHE_PLUGIN=memory")
+	out, runErr := cmd.Output()
+	var callback struct {
+		Plays []struct {
+			Tasks []struct {
+				Task struct {
+					Name string `json:"name"`
+				} `json:"task"`
+			} `json:"tasks"`
+		} `json:"plays"`
+	}
+	if err := json.Unmarshal(out, &callback); err != nil {
+		t.Fatalf("parse the JSON callback output (ansible-playbook: %v): %v\n%s", runErr, err, out)
+	}
+	if runErr != nil {
+		t.Fatalf("ansible-playbook: %v\n%s", runErr, out)
+	}
+	leafName := regexp.MustCompile(`leaf-s[0-9]+[a-z]?`)
+	ran := map[string]bool{}
+	for _, play := range callback.Plays {
+		for _, task := range play.Tasks {
+			if name := leafName.FindString(task.Task.Name); name != "" {
+				ran[name] = true
+			}
+		}
+	}
+
+	// The lint's side: the leaf tasks it reports as always-run.
+	raw, err := os.ReadFile(filepath.Join(walkerDir, "p.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := scanAlwaysTaggedConvergence("p.yml", raw, walkerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walked := map[string]bool{}
+	for _, v := range scan.Violations {
+		walked[leafName.FindString(v.Key)] = true
+	}
+
+	universe := map[string]bool{}
+	for _, body := range append([]string{convergenceTagShapesPlaybook}, mapValues(convergenceTagShapeFiles)...) {
+		for _, name := range leafName.FindAllString(body, -1) {
+			universe[name] = true
+		}
+	}
+	names := make([]string, 0, len(universe))
+	for name := range universe {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if ran[name] != walked[name] {
+			t.Errorf("%s: ansible-playbook --tags nonexistent ran it = %v, the lint reports it always-run = %v; the walker's tag model no longer matches Ansible's (see the shape named s%s in convergenceTagShapesPlaybook)",
+				name, ran[name], walked[name], strings.TrimPrefix(strings.TrimRight(name, "ab"), "leaf-s"))
+		}
+	}
+	// the run must have separated the shapes: the plain always task ran, the
+	// plain x task did not (a run that fails to load the playbook proves nothing)
+	if !ran["leaf-s8"] || ran["leaf-s9"] || len(ran) < 5 || len(ran) >= len(universe) {
+		t.Fatalf("the Ansible run did not separate the shapes: ran %v of %v", ran, names)
+	}
+}
+
+// mapValues returns the values of m.
+func mapValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
 }
 
 // convergenceKind is what a module needs from its changed_when.
@@ -648,18 +977,22 @@ type convergenceWalker struct {
 //
 // A task is always-run when its effective tags contain `always` and every
 // include on the way to it is selected by every --tags. The tag rules, as
-// includedTaskTags in tagged_prerequisite_regression_test.go models them for
-// setters (the two agree on the `always` question; this walk carries the
-// context down instead of folding tag sets back up, so an include nested in
-// an `apply: {tags: [always]}` file inherits the apply tag like any other
-// task of that file):
+// ansible-core 2.19.2 applies them (pinned against a real run by
+// TestAlwaysTaggedConvergenceTagModelMatchesAnsible; this walk carries the
+// context down, unlike includedTaskTags in
+// tagged_prerequisite_regression_test.go, which folds tag sets back up and
+// does not see the ancestors' tags):
 //   - block, rescue and always: sections inherit the block's tags;
 //   - import_tasks is static: its children inherit the line's tags, and a
 //     child tagged `always` runs whatever the line's tags are;
-//   - include_tasks is dynamic: its children inherit only `apply` tags, and
-//     run only if the include line itself is selected, so they are
-//     always-run only when the line is `always` AND their apply/own tags
-//     contain `always`;
+//   - include_tasks is dynamic: the line itself runs only if it is selected,
+//     and its children inherit the tags of the line's ancestors (the play,
+//     enclosing blocks, an enclosing include's `apply`) plus their own and
+//     the line's `apply` tags, but NOT the line's own tags. A child is
+//     therefore always-run when the line is `always` AND the ancestors', apply
+//     or its own tags contain `always`: an untagged include line in an
+//     `always` block or play runs its untagged children under every --tags,
+//     an `always` include line with no `apply` in a plain play does not;
 //   - a rescue stays a rescue for everything below it, includes included.
 //
 // includedFile reads `apply: {tags: ...}` without following YAML aliases;
@@ -761,7 +1094,11 @@ func (w *convergenceWalker) include(item *yaml.Node, eff map[string]bool, ctx co
 	if static {
 		child.tags = eff
 	} else {
-		child.tags = apply
+		// ansible-core passes the tags of the include line's ancestors (play,
+		// blocks, an enclosing include's apply) down to the included tasks;
+		// only the line's own tags are not inherited, so ctx.tags (which does
+		// not hold them) joins the apply tags.
+		child.tags = unionTags(ctx.tags, apply)
 		child.reach = eff["always"]
 	}
 	if !child.reach {
