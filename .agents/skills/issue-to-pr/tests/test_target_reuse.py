@@ -398,5 +398,68 @@ class TargetReuseGuardTests(ReuseHelpers):
         self.assertTrue(self.accepts(reuse)[0])
 
 
+class MachineRecordTests(TargetReuseTests):
+    def machine(self):
+        ctx = self.ctx()
+        tree = ctx.tree_entries(self.candidate)
+        return {"schema": "pilot-evidence-record/v1", "outcome": "success",
+                "candidate": {"commit": self.candidate, "tree": ctx.commit_tree(self.candidate), "source": "git"},
+                "closure": {"files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
+                                      for p in ("src/app.go", "src/dependency.go")],
+                            "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}}
+
+    def machine_accepts(self, record):
+        import json
+        artifact = "qa/runs/2026/run.md"
+        commit(self.wt, artifact, "<!-- pilot-evidence-record v1 -->\n\n```json\n" + json.dumps(record) + "\n```\n")
+        reuse = self.reuse()
+        del reuse["execution_paths"]
+        ctx = self.ctx()
+        result = ctx.accepts_target(self.candidate, "target", reuse, artifact)
+        return result, ctx.target_stale_reason(self.candidate)
+
+    def test_machine_closure_needs_no_manual_paths(self):
+        self.assertTrue(self.machine_accepts(self.machine())[0])
+
+    def test_machine_blob_mode_tree_dirty_and_partial_records_fail_closed(self):
+        import copy
+        good = self.machine()
+        mutations = [
+            (lambda r: r["candidate"].update(tree="0" * 40), "candidate/tree"),
+            (lambda r: r["candidate"].update(dirty=True), "dirty candidate"),
+            (lambda r: r.update(outcome="failed"), "did not succeed"),
+            (lambda r: r["closure"]["files"][0].update(blob="0" * 40), "blob/mode"),
+            (lambda r: r["closure"].pop("patterns"), "search patterns"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unknown"}]), "unresolved"),
+            (lambda r: r["closure"].update(external=["/vault/file"]), "external"),
+        ]
+        for change, reason in mutations:
+            with self.subTest(reason=reason):
+                record = copy.deepcopy(good)
+                change(record)
+                accepted, why = self.machine_accepts(record)
+                self.assertFalse(accepted)
+                self.assertIn(reason, why)
+        self.assertTrue(self.machine_accepts(good)[0])
+
+    def test_machine_search_detects_new_upstream_glob_member(self):
+        record = self.machine()
+        git(self.wt, "checkout", "-q", "main")
+        self.base = commit(self.wt, "src/dependency-new.go", "package dependency\n")
+        git(self.wt, "update-ref", "refs/remotes/origin/main", self.base)
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        git(self.wt, "merge", "-q", "main", "-m", "new input")
+        accepted, why = self.machine_accepts(record)
+        self.assertFalse(accepted)
+        self.assertIn("search membership changed", why)
+
+    def test_machine_scope_cannot_be_narrowed_by_attestation(self):
+        record = self.machine()
+        commit(self.wt, "src/dependency.go", "package changed\n")
+        accepted, why = self.machine_accepts(record)
+        self.assertFalse(accepted)
+        self.assertIn("execution input changed", why)
+
+
 if __name__ == "__main__":
     unittest.main()

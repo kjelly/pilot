@@ -25,6 +25,7 @@ gate sees it.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import subprocess
@@ -244,7 +245,72 @@ class Context:
                 entries[path] = (mode, oid)
         return entries
 
-    def accepts_target(self, sha: Any, label: str, reuse: Any = None) -> bool:
+    def read_file(self, revision: str, path: str) -> bytes | None:
+        if not safe_path(path):
+            return None
+        proc = subprocess.run(["git", "-C", str(self.worktree), "show", f"{revision}:{path}"],
+                              capture_output=True, check=False)
+        return None if proc.returncode else proc.stdout
+
+    def commit_tree(self, revision: str) -> str | None:
+        rc, out = git(self.worktree, "rev-parse", f"{revision}^{{tree}}")
+        return None if rc else out.strip()
+
+    def _machine_scope(self, sha: str, artifact: Any) -> tuple[dict[str, Any] | None, list[str]]:
+        """Read committed bytes, never an uncommitted worktree record or a supplied path list."""
+        if not safe_path(artifact):
+            return None, ["machine record artifact must be a safe repository path"]
+        text = self.read_file(self.head, artifact)
+        if text is None:
+            return None, ["machine record artifact is not committed at HEAD"]
+        if b"<!-- pilot-evidence-record" not in text:
+            return None, []  # legacy manual records keep the independent closure review
+        match = re.search(rb"<!-- pilot-evidence-record[^>]*-->\s*```json\n(.*?)\n```", text, re.S)
+        try:
+            record = json.loads(match[1]) if match else None
+            if not isinstance(record, dict) or record.get("schema") != "pilot-evidence-record/v1":
+                raise ValueError("unsupported schema or missing machine block")
+            candidate = record.get("candidate", {})
+            if (candidate.get("commit") != sha or candidate.get("dirty") or
+                    candidate.get("source") not in ("git", "flag") or
+                    candidate.get("tree") != self.commit_tree(sha)):
+                raise ValueError("candidate/tree mismatch or dirty candidate")
+            if record.get("outcome") != "success":
+                raise ValueError("target chain did not succeed")
+            closure = record.get("closure")
+            if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
+                raise ValueError("closure has unresolved or external inputs")
+            files, patterns = closure.get("files"), closure.get("patterns")
+            if not isinstance(files, list) or not files or not isinstance(patterns, list):
+                raise ValueError("closure needs files and machine search patterns")
+            tested, head = self.tree_entries(sha), self.tree_entries(self.head)
+            if tested is None or head is None:
+                raise ValueError("complete Git trees unavailable")
+            scope = []
+            for entry in files:
+                if (not isinstance(entry, dict) or not safe_path(entry.get("path")) or
+                        entry.get("mode") not in ("100644", "100755") or
+                        not isinstance(entry.get("blob"), str) or not SHA.fullmatch(entry["blob"])):
+                    raise ValueError("invalid closure file")
+                path = entry["path"]
+                if path in scope or tested.get(path) != (entry["mode"], entry["blob"]):
+                    raise ValueError("closure blob/mode differs from candidate: " + path)
+                scope.append(path)
+            for pattern in patterns:
+                if (not isinstance(pattern, str) or not pattern or pattern.startswith("/") or
+                        ".." in pattern.split("/") or "\\" in pattern or "\0" in pattern):
+                    raise ValueError("invalid closure search pattern")
+                # filepath.Glob supports brackets; fail closed until the shared matcher does too.
+                if "[" in pattern or "]" in pattern:
+                    raise ValueError("unsupported closure search pattern")
+                rx = glob_regex(pattern)
+                if {p for p in tested if rx.match(p)} != {p for p in head if rx.match(p)}:
+                    raise ValueError("closure search membership changed: " + pattern)
+            return {"execution_paths": scope}, []
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            return None, ["machine record: " + str(exc)]
+
+    def accepts_target(self, sha: Any, label: str, reuse: Any = None, artifact: Any = None) -> bool:
         """Target-run reuse only. Never call this for reviews or general check receipts.
 
         A fresh independent reviewer supplies the complete execution/dependency scope.
@@ -254,6 +320,17 @@ class Context:
         """
         if reuse is None:
             return self.accepts(sha, label)
+        reuse = copy.deepcopy(reuse)
+        if artifact is not None:
+            machine, errors = self._machine_scope(sha, artifact)
+            if errors:
+                self._target_errors[str(sha)] = "; ".join(errors)
+                return False
+            if machine is not None:
+                if not isinstance(reuse, dict):
+                    self._target_errors[str(sha)] = "target reuse must be an object"
+                    return False
+                reuse.update(machine)
         errors = self._target_reuse_errors(sha, reuse)
         if errors:
             self._target_errors[str(sha)] = "; ".join(errors)
@@ -384,7 +461,7 @@ class Context:
         if reuse is not None and self.required.get(rid, {}).get("kind") != "target-run":
             errors.append(f"{label}: target_reuse requires kind: target-run on the base manifest")
             reuse = None
-        if not self.accepts_target(sha, label, reuse):
+        if not self.accepts_target(sha, label, reuse, entry.get("artifact")):
             errors.append(f"{label}: run was taken at {str(sha)[:12]}, not HEAD ({self.target_stale_reason(sha)})")
         summary = entry.get("summary")
         if not isinstance(summary, str) or len(summary.strip()) < 20:

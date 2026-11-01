@@ -74,3 +74,22 @@ The shared local implementation lives in `issue-to-pr/scripts/repo_evidence.py`.
 The remote verifier in `pr-review-merge/scripts/review_gate.py` supplies complete
 GitHub trees to the same algorithm; `pr-ready` calls that same read-only target
 validator before Ready, and checks it again immediately before mutation.
+
+## Machine-generated records
+
+When the committed artifact has the `pilot-evidence-record` marker, all three
+workflows read its JSON directly. The reviewer omits `execution_paths`; supplied
+paths cannot narrow the machine closure. The gate binds candidate commit/tree,
+clean status, successful outcome and every recorded mode/blob to the candidate,
+then compares those files with HEAD. Search patterns also bind membership, so a
+new include glob match, copied directory member or earlier search-path match
+requires a new run even when all old files are unchanged.
+
+Unresolved references, external inputs, malformed records and older machine
+records without `closure.patterns` fail closed. Run again with resolved inputs
+instead of overriding the machine result with a manual list. Legacy hand-written
+records retain the full manual dependency review above. The independent reviewer
+still confirms the current HEAD/base and audits non-execution changes; runtime
+changes outside the closure must pass the pure-base-import proof. A changed spec
+in the closure cannot be waived as prose. New records keep LATEST outside specs,
+so retests do not change their blobs.

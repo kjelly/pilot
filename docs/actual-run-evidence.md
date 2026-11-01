@@ -12,8 +12,10 @@
 | Sanitized evidence 摘要 | `docs/evidence/<feature>/<change>.md`（一個變更一份，例如 `issue-214.md`）與 `docs/evidence/<feature>/LATEST.md` | 同一變更的每個 candidate **就地覆寫**同一份 record；被取代的 candidate 由 Git history 保存。`LATEST.md` 由 pilot 在鏈成功時改寫，指向目前有效的 record；spec/runbook 只連到 `LATEST.md`，重新驗證就不必再改 spec/runbook。既有的 `<date>-<tested-revision>.md` 不必改名 |
 | 完整原始輸出 | Gitignored `.verification/` 或暫時的受控驗收儲存 | 不提交 Git；只在一次性驗收與診斷期間保存 |
 
-Runbook 與 spec 不得當成 chronological test journal。重跑時更新「最後驗證」摘要與
-latest evidence link；舊結果留在獨立 evidence record 或 Git history。
+Runbook 與 spec 不得當成 chronological test journal。兩者只放靜態的
+`../evidence/<feature>/LATEST.md` 連結；重測只改 evidence 目錄，日期、revision、數字
+由 LATEST 與 record 提供。變更紀錄採不編號的 `## 變更紀錄`，欄位為「日期、PR、
+驗收語意變更」；只記 contract 變更，不記重測，既有歷史保留。
 
 ## 2. Candidate-first 工作流
 
@@ -70,7 +72,9 @@ committed evidence summary。
 - `closure`：執行閉包——playbook、`import_playbook`、`include_tasks`/`import_tasks`、
   `template`/`copy`/`script` 的來源、`vars_files`/`include_vars`、`lookup('file'|
   'template'|'fileglob')`、spec、對應的 contract、repo 內的 `-e @file`、`ansible.cfg`／
-  `requirements.yml`，每個檔案附 mode、Git blob id 與 SHA-256。含模板的路徑展開成 glob
+  `requirements.yml`，每個檔案附 mode、Git blob id 與 SHA-256。`patterns` 同時記錄檔案搜尋路徑
+  （含未命中的優先路徑）、glob 與目錄範圍，gate 比較 candidate/HEAD 的匹配集合，
+  防止新增輸入漏出原本的檔案清單。含模板的路徑展開成 glob
   並標 `dynamic`；整個 basename 都是變數的引用（例如 `{{ freeipa_roster_file }}`）
   列在 `unresolved`，repo 外的檔案（vault）只列路徑在 `external`，不讀也不 hash。
   Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
@@ -127,3 +131,8 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
   record 保存。
 - Coding agent 預設只讀 command result、compact summary 與 sanitized evidence，不讀 raw
   artifact；只有 audit、failure diagnosis、baseline comparison 或使用者明確要求時才載入。
+
+機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
+成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
+未解析引用、外部執行檔案或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。
