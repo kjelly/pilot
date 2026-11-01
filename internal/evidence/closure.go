@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 8
+const ResolutionVersion = 9
 
 // Native Ansible get_all_plugin_loaders().subdir, with each loader's default
 // ~/.ansible/plugins and /usr/share/ansible/plugins suffix. shell_plugins is
@@ -252,6 +252,12 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		names := []string{strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))}
 		if parsed, err := spec.Parse(abs); err == nil {
 			names = append(names, parsed.Roles...)
+			for _, row := range parsed.Rows {
+				if hasJinjaSyntax(row.Command) || strings.Contains(row.Command, `\`) {
+					r.dispatchUnresolved(sp, "unsupported verification expression", "decoded verification command requires controller template or argument-escape evaluation")
+				}
+			}
+
 			if in.Controller.Ready() && parsed.SchemaVersion != 1 {
 				r.dispatchUnresolved(sp, "unsupported verification schema", "controlled reuse initially supports V1 verification only")
 			}

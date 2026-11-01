@@ -155,7 +155,7 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
             raise ValueError("controller proof: " + reason)
     digest = re.compile(r"[0-9a-f]{64}")
     proof = record.get("controller")
-    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v2", "missing current OCI proof")
+    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v3", "missing current OCI proof")
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof.get("image_id"))), "immutable image ID required")
     require(proof.get("inventory_kind") == "pilot-rendered-ssh/v1", "unsupported rendered inventory")
     for key in ("config_sha256", "inventory_sha256", "rendered_inventory_sha256", "binary_sha256", "pre_probe_sha256", "post_probe_sha256"):
@@ -179,7 +179,7 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
     recipe=read_profile(CONTROLLER_PROFILE + "Dockerfile")
     require(recipe.startswith(("FROM "+lock["go_base"]+" AS go_toolchain\n").encode()) and ("\nFROM "+lock["base"]+"\n").encode() in recipe, "recipe/base lock differs")
     native = proof.get("native_probe")
-    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v2", "missing native origin/config probe")
+    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v3", "missing native origin/config probe")
     raw = json.dumps(native, sort_keys=True, separators=(",", ":")).encode()
     require(hashlib.sha256(raw).hexdigest() == proof["pre_probe_sha256"], "native probe digest differs")
     require(native.get("go")=="go version go1.26.8 linux/amd64" and native.get("ansible") == lock["ansible"] and native.get("python") == lock["python"] and
@@ -188,8 +188,13 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
             native.get("config_file") == "/opt/pilot-controller/ansible.cfg" and
             native.get("config_sha256") == proof["config_sha256"], "native effective origins/config differ")
     require(type(native.get("uid")) is int and native["uid"] == 1000 and type(native.get("gid")) is int and native["gid"] == 1000 and native.get("user") == "pilot-controller" and native.get("group") == "pilot-controller" and native.get("ssh_identity") == "ssh-config/v1", "unproved native NSS/OpenSSH identity")
+    callback = {"version":"2.1.0","origin":"/opt/pilot-controller/collections/ansible_collections/ansible/posix/plugins/callback/json.py","sha256":"cc2f6a845b1b7d8d87e16b7fed79b860e10ea9e9b372dd0bdcbd850b9654a032","manifest_sha256":"3899df5b1b390f51a7fc95ad8997c7e7030daf4f5265898f96977ef9ed8d4df5","execution":"json-command/v1"}
+    require(native.get("callback") == callback, "native verifier callback origin/execution differs")
+    posix=lock.get("ansible_posix",{})
+    require(posix == {"version":"2.1.0","url":"https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-posix-2.1.0.tar.gz","sha256":"5ff232cf69492a991f2a0990dbb23ef25a600b7e9209de6e33377a6ff08a8a29","manifest_sha256":callback["manifest_sha256"],"callback_sha256":callback["sha256"]}, "unproved verifier collection lock")
+    require(("ADD --checksum=sha256:"+posix["sha256"]+" "+posix["url"]+" ").encode() in recipe, "verifier collection recipe/lock differs")
     require(native.get("collections_scan_sys_path") is False and
-            native.get("collections") == ["/opt/pilot-controller/empty"] and
+            native.get("collections") == ["/opt/pilot-controller/collections"] and
             native.get("roles") == ["/opt/pilot-controller/empty"], "uncontrolled collection/role discovery")
     require(native.get("sys_path") == ["/usr/local/lib64/python3.14/site-packages", "/usr/local/lib/python3.14/site-packages", "/usr/lib64/python314.zip", "/usr/lib64/python3.14", "/usr/lib64/python3.14/lib-dynload", "/usr/lib64/python3.14/site-packages", "/usr/lib/python3.14/site-packages"], "uncontrolled Python discovery")
     loaders = native.get("loaders", {})
@@ -220,6 +225,25 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
         require(len(matching) == 1 and matching[0].get("status") == "pass", "required recorded stage did not pass: " + name)
     verdicts = record.get("verify", [])
     require(len(verdicts) == counts["L5 verify"] and all(isinstance(v, dict) and v.get("verdict") == "PASS" and type(v.get("pass")) is int and v["pass"] > 0 and v.get("fail") == 0 for v in verdicts), "whole L5 verification evidence missing or failed")
+    inventory=record.get("inventory",{})
+    hosts=inventory.get("hosts",[])
+    require(isinstance(hosts,list) and hosts and all(isinstance(h,str) and h for h in hosts) and len(set(hosts))==len(hosts), "native verification inventory host identities missing")
+    groups=inventory.get("groups",{})
+    for verdict in verdicts:
+        require(verdict.get("diagnostics_schema")=="pilot-verify-diagnostics/v1" and verdict.get("diagnostics_complete") is True, "whole L5 row diagnostic export missing or incomplete")
+        rows=verdict.get("rows",[])
+        require(isinstance(rows,list) and len(rows)==verdict["pass"] and verdict.get("skip",0)==0, "L5 row counts differ from summary")
+        limit=verdict.get("limit","")
+        expected=hosts if limit in ("","all") else groups.get(limit,[limit] if limit in hosts else [])
+        require(isinstance(expected,list) and expected and set(expected)<=set(hosts), "unproved verification host limit")
+        seen=set();by_id={}
+        for row in rows:
+            require(isinstance(row,dict) and isinstance(row.get("id"),str) and row["id"] and row.get("host") in expected and row.get("status")=="pass" and row.get("probe_status")=="ok" and type(row.get("exit_code")) is int and row["exit_code"]==0, "native successful verifier row identity/status missing")
+            key=(row["id"],row["host"])
+            require(key not in seen,"duplicate native verifier row")
+            seen.add(key);by_id.setdefault(row["id"],set()).add(row["host"])
+        require(by_id and all(selected==set(expected) for selected in by_id.values()),"native verifier rows omit selected hosts")
+
 
 
 class Context:
@@ -361,7 +385,7 @@ class Context:
             closure = record.get("closure")
             if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
                 raise ValueError("closure has unresolved or external inputs")
-            if closure.get("resolution_version") != 8 or closure.get("frozen") is not True:
+            if closure.get("resolution_version") != 9 or closure.get("frozen") is not True:
                 raise ValueError("closure needs current resolution version and frozen pre-run inputs")
             files, patterns = closure.get("files"), closure.get("patterns")
             if not isinstance(files, list) or not files or not isinstance(patterns, list):

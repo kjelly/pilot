@@ -368,6 +368,8 @@ func TestPinnedControllerActualPilotGraph(t *testing.T) {
 		}
 	}
 	t.Logf("actual pilot closure files=%d patterns=%d unresolved=0 external=0 build=%s/%s/%s cgo=%s image=%s", len(closure.Files), len(closure.Patterns), proof.Build.GoVersion, proof.Build.GOOS, proof.Build.GOAMD64, proof.Build.CGO, proof.ImageID)
+	testPinnedWholeVerifier(t, root, exe)
+	testPinnedVerificationExpression(t, root, exe, c)
 	nativeInlineGrammarDifferential(t, func(program string, raw []byte) []byte {
 		args := []string{"run", "--rm", "-i", "--read-only", "--entrypoint", "/usr/bin/python3", "--env", "PYTHONPATH=/usr/local/lib64/python3.14/site-packages:/usr/local/lib/python3.14/site-packages", c.image, "-P", "-c", program}
 		cmd := exec.Command("docker", args...)
@@ -378,4 +380,228 @@ func TestPinnedControllerActualPilotGraph(t *testing.T) {
 		}
 		return out
 	})
+}
+
+// Whole actual pilot child exercises host resolution, ansible.posix.json,
+// SQLite/report generation and post-child diagnostic extraction. The local
+// connection inventory is intentionally ineligible for automatic reuse.
+func testPinnedWholeVerifier(t *testing.T, root, exe string) {
+	t.Helper()
+	var log bytes.Buffer
+	c, err := NewPinnedController(root, exe, &log)
+	if err != nil {
+		t.Fatalf("whole verifier constructor: %v %s", err, log.String())
+	}
+	defer c.Close()
+	inv := filepath.Join(t.TempDir(), "local.yml")
+	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    whole-probe:\n      ansible_connection: local\n      ansible_python_interpreter: /usr/bin/python3.14\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PrepareInventory(inv); err != nil {
+		t.Fatal(err)
+	}
+	if c.InventoryProven() {
+		t.Fatal("local synthetic target unexpectedly qualified as SSH reuse proof")
+	}
+	for _, control := range []struct {
+		spec, status string
+		success      bool
+	}{{"controller-local-spec.md", "pass", true}, {"controller-local-fail-spec.md", "fail", false}} {
+		var stdout, stderr bytes.Buffer
+		args := []string{"verify", "internal/evidence/testdata/actual-run/" + control.spec, "-i", inv, "-l", "whole-probe", "--timeout", "15"}
+		err := c.Run("L5 verify", "pilot", args, &stdout, &stderr)
+		rows := c.VerifyDiagnostics()
+		if (err == nil) != control.success || !rows.Complete || rows.Schema != VerifyDiagnosticsSchema || len(rows.Rows) != 1 {
+			t.Fatalf("whole actual verifier %s: err=%v diagnostics=%+v stdout=%s stderr=%s", control.spec, err, rows, stdout.String(), stderr.String())
+		}
+		row := rows.Rows[0]
+		if row.ID != "C1" || row.Host != "whole-probe" || row.ExitCode != 0 || row.ProbeStatus != "ok" || row.Status != control.status || row.Stdout != "ControllerRowDiagnosticSentinel" {
+			t.Fatalf("actual row semantics lost: %+v", row)
+		}
+		if control.success && !strings.Contains(stdout.String(), "verdict: **PASS**") || !control.success && !strings.Contains(stdout.String(), "verdict: **FAIL**") || !strings.Contains(stderr.String(), verifyRowPrefix) {
+			t.Fatalf("stdout/diagnostic channel changed: stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+		sources, _ := SecretSources(root, []string{"-e", "api_token=ControllerRowDiagnosticSentinel"})
+		if len(Scan(map[string]string{"L5 verify": stderr.String()}, sources)) == 0 {
+			t.Fatal("actual exported row escaped secret scan")
+		}
+		record := &Record{Verify: []VerifyResult{{DiagnosticsSchema: rows.Schema, DiagnosticsComplete: rows.Complete, Rows: rows.Rows}}}
+		if err := SanitizeRecord(record, sources); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(record)
+		if strings.Contains(string(raw), "ControllerRowDiagnosticSentinel") || record.Verify[0].Rows[0].Status != control.status {
+			t.Fatalf("persisted diagnostic sanitation/protocol failed: %s", raw)
+		}
+		t.Logf("whole actual pilot %s: child_success=%v C1/whole-probe rc0 probeok status%s; raw frame retained and sanitized row persisted", control.spec, control.success, control.status)
+	}
+	// Mask only the immutable collection root for this explicit native fault
+	// invocation; no production selector or proof bypass is introduced.
+	args := c.dockerArgs("pilot", []string{"verify", "internal/evidence/testdata/actual-run/controller-local-spec.md", "-i", c.inventory, "-l", "whole-probe", "--timeout", "15"})
+	index := 0
+	for i, arg := range args {
+		if arg == c.image {
+			index = i
+			break
+		}
+	}
+	args = append(append(append([]string{}, args[:index]...), "--mount", "type=tmpfs,destination=/opt/pilot-controller/collections"), args[index:]...)
+	cmd := exec.Command("docker", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	diagnostics, parseErr := ParseControllerVerifyDiagnostics(stderr.String())
+	if err == nil || parseErr != nil || len(diagnostics.Rows) != 1 || diagnostics.Rows[0].Status != "fail" || diagnostics.Rows[0].ProbeStatus != "runner_error" || !strings.Contains(diagnostics.Rows[0].Detail, "callback") {
+		t.Fatalf("missing callback fault not diagnosed specifically after whole child: err=%v parse=%v rows=%+v stdout=%s stderr=%s", err, parseErr, diagnostics, stdout.String(), stderr.String())
+	}
+	t.Log("whole actual pilot missing callback: child failed specifically with retained runner_error/callback detail after container removal")
+	// Child success is insufficient when its private report cannot be exported.
+	launcher, err := os.ReadFile(filepath.Join(root, ControllerProfile, "launch.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher = []byte(strings.Replace(string(launcher), `files = sorted(pathlib.Path(base + "/reports").glob("*.ndjson"))`, `files = []`, 1))
+	fault := filepath.Join(t.TempDir(), "launch.py")
+	if err := os.WriteFile(fault, launcher, 0600); err != nil {
+		t.Fatal(err)
+	}
+	args = c.dockerArgs("pilot", []string{"verify", "internal/evidence/testdata/actual-run/controller-local-spec.md", "-i", c.inventory, "-l", "whole-probe", "--timeout", "15"})
+	index = 0
+	for i, arg := range args {
+		if arg == c.image {
+			index = i
+			break
+		}
+	}
+	args = append(append(append([]string{}, args[:index]...), "--mount", "type=bind,src="+fault+",dst=/opt/pilot-controller/launch.py,readonly"), args[index:]...)
+	cmd = exec.Command("docker", args...)
+	stdout.Reset()
+	stderr.Reset()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	_, parseErr = ParseControllerVerifyDiagnostics(stderr.String())
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 74 || parseErr == nil || !strings.Contains(stdout.String(), "verdict: **PASS**") || !strings.Contains(stderr.String(), `"complete":false`) {
+		t.Fatalf("successful child lost diagnostics without evidence failure: err=%v parse=%v stdout=%s stderr=%s", err, parseErr, stdout.String(), stderr.String())
+	}
+	t.Log("whole actual pilot success with missing private report: original stdoutPASS preserved; explicit export failure74/incomplete footer")
+
+}
+
+func testPinnedVerificationExpression(t *testing.T, root, exe string, scope *Controller) {
+	t.Helper()
+	parent := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(parent, "pr225-native-expression-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	payload := filepath.Join(dir, "payload.txt")
+	if err := os.WriteFile(payload, []byte("NativeControllerLookupSentinel"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "expression.md")
+	command := "printf '{{ lookup(\"ansible.builtin.file\", \"" + payload + "\") }}'"
+	body := "# Native decoded V1 expression control\n\n## 2. Checklist\n\n| ID | Category | Check | Expected | Command |\n| --- | --- | --- | --- | --- |\n| C1 | command | Actual lazy controller lookup | NativeControllerLookupSentinel | `" + command + "` |\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	c, err := NewPinnedController(root, exe, &log)
+	if err != nil {
+		t.Fatalf("native expression constructor: %v %s", err, log.String())
+	}
+	defer c.Close()
+	inv := filepath.Join(dir, "inventory.yml")
+	if err := os.WriteFile(inv, []byte("all:\n  hosts:\n    expression-probe:\n      ansible_connection: local\n      ansible_python_interpreter: /usr/bin/python3.14\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PrepareInventory(inv); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := c.Run("L5 verify", "pilot", []string{"verify", path, "-i", inv, "-l", "expression-probe", "--timeout", "15"}, &stdout, &stderr); err != nil {
+		t.Fatalf("native decoded command lookup failed: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	rows := c.VerifyDiagnostics()
+	if !rows.Complete || len(rows.Rows) != 1 || rows.Rows[0].Stdout != "NativeControllerLookupSentinel" {
+		t.Fatalf("native controller file read not established: %+v", rows)
+	}
+	closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"internal/evidence/testdata/actual-run/reuse-apply.yml"}, Specs: []string{path}, Controller: scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, u := range closure.Unresolved {
+		if u.Ref == "unsupported verification expression" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("decoded V1 controller lookup falsely omitted its unresolved dependency: %+v", closure.Unresolved)
+	}
+	t.Log("whole actual V1 command controller file lookup executed; decoded-command closure refusal retained payload-free")
+	if err := os.WriteFile(payload, []byte("/tmp/controller"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	escaped := `printf NativeEscapedLookupSentinel chdir='\x7b\x7b lookup(\x22ansible.builtin.file\x22, \x22` + payload + `\x22) \x7d\x7d'`
+	escapedBody := strings.Replace(strings.Replace(body, command, escaped, 1), "| NativeControllerLookupSentinel |", "| NativeEscapedLookupSentinel |", 1)
+	if err := os.WriteFile(path, []byte(escapedBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := c.Run("L5 verify", "pilot", []string{"verify", path, "-i", inv, "-l", "expression-probe", "--timeout", "15"}, &stdout, &stderr); err != nil {
+		t.Fatalf("native escaped controller-option lookup failed: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	rows = c.VerifyDiagnostics()
+	if !rows.Complete || len(rows.Rows) != 1 || rows.Rows[0].Stdout != "NativeEscapedLookupSentinel" {
+		t.Fatalf("native escaped argument lookup not established: %+v", rows)
+	}
+	closure, err = ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"internal/evidence/testdata/actual-run/reuse-apply.yml"}, Specs: []string{path}, Controller: scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, u := range closure.Unresolved {
+		if u.Ref == "unsupported verification expression" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("escaped V1 controller lookup falsely omitted its unresolved dependency: %+v", closure.Unresolved)
+	}
+	t.Log("whole actual V1 escaped chdir option synthesized controller lookup; argument-escape closure refusal retained")
+
+}
+
+func TestPinnedControllerRejectsUnusableCallbackExecution(t *testing.T) {
+	if os.Getenv("PILOT_REQUIRE_CONTROLLER_TESTS") != "1" {
+		t.Skip("explicit Docker controller integration not requested")
+	}
+	root := t.TempDir()
+	copyControllerProfile(t, root)
+	path := filepath.Join(root, ControllerProfile, "probe.py")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), `ANSIBLE_STDOUT_CALLBACK="ansible.posix.json"`, `ANSIBLE_STDOUT_CALLBACK="ansible.posix.not_present"`, 1))
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	if _, err := NewPinnedController(root, exe, &log); err == nil || !strings.Contains(err.Error(), "native verifier callback execution failed") {
+		t.Fatalf("native constructor accepted unusable callback execution or wrong refusal: %v %s", err, log.String())
+	}
+	t.Log("native callback origin/manifest present; deliberately unavailable execution callback specifically refused")
 }

@@ -225,6 +225,15 @@ func (s *evidenceSession) verify(spec, limit, output string) {
 	if verdict, ok := evidence.ParseVerifyVerdict(output); ok {
 		v.VerifyVerdict = verdict
 	}
+	if s.controller != nil {
+		diagnostics := s.controller.VerifyDiagnostics()
+		v.DiagnosticsSchema = diagnostics.Schema
+		v.DiagnosticsComplete = diagnostics.Complete
+		v.Rows = diagnostics.Rows
+		if !diagnostics.Complete {
+			s.skipped = append(s.skipped, "controlled verifier diagnostics incomplete")
+		}
+	}
 	s.rec.Verify = append(s.rec.Verify, v)
 }
 
