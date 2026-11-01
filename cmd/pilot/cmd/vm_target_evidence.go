@@ -280,21 +280,19 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 		return
 	}
 
-	if err := r.WriteFile(s.path); err != nil {
-		fmt.Fprintf(errOut, "⚠️ evidence record not written to %s: %v\n", s.path, err)
+	if err := r.Publish(s.path); err != nil {
+		fmt.Fprintf(errOut, "⚠️ evidence publication failed for %s: %v\n", s.path, err)
 		return
 	}
 	fmt.Fprintf(out, "📄 Evidence record written: %s (candidate %s, outcome %s)\n", s.path, shortSHA(r.Candidate.Commit), r.Outcome)
 	if len(r.Redaction.Hits) > 0 {
 		fmt.Fprintf(errOut, "⚠️ evidence record: %d secret value hit(s) in the captured output; do not commit the raw output (see the Redaction section)\n", len(r.Redaction.Hits))
 	}
+	if len(r.Redaction.Skipped) > 0 {
+		fmt.Fprintln(errOut, "⚠️ evidence record: redaction scan INCOMPLETE; some supplied inputs were not scanned (see the Redaction section)")
+	}
 	if r.Candidate.Source == "unknown" {
 		fmt.Fprintf(errOut, "⚠️ evidence record: tested revision unknown (%s); no gate will accept it\n", r.Candidate.Note)
-	}
-	if r.Outcome == "success" {
-		if err := evidence.UpdateLatest(filepath.Dir(s.path), r, s.path); err != nil {
-			fmt.Fprintf(errOut, "⚠️ evidence record: LATEST.md not updated: %v\n", err)
-		}
 	}
 }
 

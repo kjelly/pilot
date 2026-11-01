@@ -1,10 +1,12 @@
 package evidence
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -31,9 +33,11 @@ type Hit struct {
 type Redaction struct {
 	Sources int      `json:"sources"`           // secret values scanned for
 	Keys    []string `json:"keys,omitempty"`    // their names (never values)
-	Skipped []string `json:"skipped,omitempty"` // extra-vars files that could not be read as plaintext YAML (ansible-vault encrypted, missing)
-	Hits    []Hit    `json:"hits"`              // empty when the output is clean
+	Skipped []string `json:"skipped,omitempty"` // inputs not completely scanned (unsupported syntax, encrypted, missing)
+	Hits    []Hit    `json:"hits"`              // empty means no known value found; Skipped may still be nonempty
 }
+
+var yaml11Sexagesimal = regexp.MustCompile(`^[+-]?[0-9][0-9_]*(?::[0-5]?[0-9])+(?:\.[0-9_]*)?$`)
 
 var secretKeyRe = regexp.MustCompile(`(?i)(password|passwd|secret|token|credential|private_key|api_key|master_key|_pass$|_pw$)`)
 
@@ -104,7 +108,11 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 		}
 		fields, ok := splitInlineVars(payload)
 		if !ok {
-			skipped = append(skipped, "inline extra-vars (unsupported quoting or assignments)")
+			if strings.Contains(payload, `\`) {
+				skipped = append(skipped, "inline extra-vars (backslash escape syntax not scanned)")
+			} else {
+				skipped = append(skipped, "inline extra-vars (unsupported quoting or assignments)")
+			}
 			continue
 		}
 		for _, field := range fields {
@@ -186,6 +194,28 @@ func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth 
 			return
 		}
 		values := []string{node.Value}
+		// These YAML native-type conversions are not proved equivalent to
+		// Ansible's loader/serialization. Preserve partial raw detection, but
+		// never report a complete scan of their possible effective values.
+		switch node.Tag {
+		case "!!str", "!!bool", "!!int":
+		default:
+			*skipped = append(*skipped, "YAML secret scalar type (runtime value not scanned)")
+		}
+		// Ansible's YAML 1.1 loader resolves these plain spellings as booleans,
+		// whereas yaml.v3 keeps them as strings. Quoted/explicit strings retain
+		// their literal value; collecting both forms is safe and bounded.
+		if node.Style == 0 && node.Tag == "!!str" {
+			if yaml11Sexagesimal.MatchString(node.Value) {
+				*skipped = append(*skipped, "YAML 1.1 sexagesimal secret scalar (runtime value not scanned)")
+			}
+			switch strings.ToLower(node.Value) {
+			case "yes", "on":
+				values = append(values, "true", "True")
+			case "no", "off":
+				values = append(values, "false", "False")
+			}
+		}
 		if strings.Contains(node.Value, "{{") || strings.Contains(node.Value, "{%") {
 			*skipped = append(*skipped, "templated secret value (runtime result not scanned)")
 		}
@@ -264,10 +294,14 @@ func Redact(outputs map[string]string, sources []SecretSource, skipped []string)
 // splitInlineVars supports Ansible's quoted key=value terms, without evaluating
 // Jinja or shell code. Anything outside this grammar is explicitly unscanned.
 func splitInlineVars(raw string) ([]string, bool) {
+	// Ansible decodes escapes before unquoting, including within single quotes.
+	// Shell escape rules are not equivalent; reject this entire grammar boundary.
+	if strings.Contains(raw, `\`) {
+		return nil, false
+	}
 	var fields []string
 	var word strings.Builder
 	var quote rune
-	escaped := false
 	flush := func() bool {
 		if word.Len() == 0 {
 			return true
@@ -282,15 +316,6 @@ func splitInlineVars(raw string) ([]string, bool) {
 		return true
 	}
 	for _, ch := range raw {
-		if escaped {
-			word.WriteRune(ch)
-			escaped = false
-			continue
-		}
-		if ch == '\\' && quote != '\'' {
-			escaped = true
-			continue
-		}
 		if quote != 0 {
 			if ch == quote {
 				quote = 0
@@ -307,7 +332,7 @@ func splitInlineVars(raw string) ([]string, bool) {
 			word.WriteRune(ch)
 		}
 	}
-	if quote != 0 || escaped || !flush() {
+	if quote != 0 || !flush() {
 		return nil, false
 	}
 	return fields, len(fields) > 0
@@ -325,46 +350,68 @@ func Sanitize(value string, sources []SecretSource) string {
 	return value
 }
 
-// SanitizeRecord handles every string field, including error notes, caller flags,
-// paths and inventory identifiers. Decode first so JSON escaping cannot hide a
-// known value from replacement or make replacement corrupt the encoded record.
+// SanitizeRecord visits string data without renaming the record schema's field
+// names. Dynamic map keys are data too. Working on decoded Go strings preserves
+// JSON escaping correctly and avoids short secrets deleting fields such as note.
 func SanitizeRecord(record *Record, sources []SecretSource) error {
-	raw, err := json.Marshal(record)
-	if err != nil {
+	if _, err := json.Marshal(record); err != nil {
 		return err
 	}
-	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return err
-	}
-	var clean func(any, string) any
-	clean = func(v any, key string) any {
-		switch node := v.(type) {
-		case string:
-			// Derived cryptographic identities are public fingerprints, not secret payloads.
-			switch key {
-			case "commit", "tree", "blob", "sha256", "base_image_sha256":
-				return node
-			}
-			return Sanitize(node, sources)
-		case []any:
-			for i := range node {
-				node[i] = clean(node[i], key)
-			}
-			return node
-		case map[string]any:
-			out := make(map[string]any, len(node))
-			for k, val := range node {
-				out[Sanitize(k, sources)] = clean(val, k)
-			}
-			return out
-		default:
+	var clean func(reflect.Value, string) reflect.Value
+	clean = func(v reflect.Value, key string) reflect.Value {
+		if !v.IsValid() {
 			return v
 		}
+		if v.Kind() == reflect.String {
+			size := 0
+			switch key {
+			case "commit", "tree", "blob":
+				size = 40
+			case "sha256", "base_image_sha256":
+				size = 64
+			}
+			if size > 0 && len(v.String()) == size {
+				if _, err := hex.DecodeString(v.String()); err == nil {
+					return v
+				}
+			}
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		switch v.Kind() {
+		case reflect.String:
+			out.SetString(Sanitize(v.String(), sources))
+		case reflect.Pointer:
+			if !v.IsNil() {
+				out.Set(reflect.New(v.Type().Elem()))
+				out.Elem().Set(clean(v.Elem(), key))
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				field := v.Type().Field(i)
+				if field.IsExported() {
+					name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+					out.Field(i).Set(clean(v.Field(i), name))
+				}
+			}
+		case reflect.Slice:
+			if !v.IsNil() {
+				out.Set(reflect.MakeSlice(v.Type(), v.Len(), v.Len()))
+				for i := 0; i < v.Len(); i++ {
+					out.Index(i).Set(clean(v.Index(i), key))
+				}
+			}
+		case reflect.Map:
+			if !v.IsNil() {
+				out.Set(reflect.MakeMapWithSize(v.Type(), v.Len()))
+				iter := v.MapRange()
+				for iter.Next() {
+					out.SetMapIndex(clean(iter.Key(), ""), clean(iter.Value(), key))
+				}
+			}
+		}
+		return out
 	}
-	raw, err = json.Marshal(clean(decoded, ""))
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(raw, record)
+	*record = clean(reflect.ValueOf(*record), "").Interface().(Record)
+	return nil
 }

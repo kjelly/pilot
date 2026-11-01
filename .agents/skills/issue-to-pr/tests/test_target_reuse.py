@@ -404,7 +404,7 @@ class MachineRecordTests(TargetReuseTests):
         tree = ctx.tree_entries(self.candidate)
         return {"schema": "pilot-evidence-record/v1", "outcome": "success",
                 "candidate": {"commit": self.candidate, "tree": ctx.commit_tree(self.candidate), "source": "git"},
-                "closure": {"resolution_version": 5, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
+                "closure": {"resolution_version": 6, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
                                       for p in ("src/app.go", "src/dependency.go")],
                             "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}}
 
@@ -424,6 +424,8 @@ class MachineRecordTests(TargetReuseTests):
     def test_machine_blob_mode_tree_dirty_and_partial_records_fail_closed(self):
         import copy
         good = self.machine()
+        # Synthetic complete scope exercises gate mechanics; generated v6
+        # records always retain an unresolved ambient discovery marker.
         mutations = [
             (lambda r: r["candidate"].update(tree="0" * 40), "candidate/tree"),
             (lambda r: r["candidate"].update(dirty=True), "dirty candidate"),
@@ -431,9 +433,11 @@ class MachineRecordTests(TargetReuseTests):
             (lambda r: r["closure"]["files"][0].update(blob="0" * 40), "blob/mode"),
             (lambda r: r["closure"].pop("patterns"), "search patterns"),
             (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"from": "environment", "ref": "ambient Ansible plugin discovery", "reason": "unfingerprinted controller paths"}]), "unresolved"),
             (lambda r: r["closure"].update(resolution_version=2), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=5), "resolution version"),
             (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
             (lambda r: r.update(outcome="invalid-inputs"), "did not succeed"),
             (lambda r: r["closure"].update(unresolved=[{"ref": "unknown"}]), "unresolved"),

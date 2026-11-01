@@ -23,7 +23,7 @@ var evidenceCmd = &cobra.Command{
 
 var evidenceClosureCmd = &cobra.Command{
 	Use:   "closure [-- <ansible extra-vars>...]",
-	Short: "Print the execution closure of a run: every repository file whose content decided what the playbooks did",
+	Short: "Print discovered execution inputs and unresolved closure limits",
 	Long: `Resolves the playbooks (import_playbook, include_tasks/import_tasks, template
 and copy sources, scripts, vars files, lookup('file'|'template'|'fileglob')),
 the verification specs, their contracts and the -e @files inside the repository,
@@ -31,7 +31,10 @@ and prints them with Git blob ids as JSON. This is the same list
 'vm-target test --evidence-record' writes into a record; a gate compares the
 blob ids with HEAD instead of trusting a hand-written dependency list.
 Templated references are matched as globs and marked dynamic; references the
-resolver cannot follow are listed under "unresolved".`,
+resolver cannot follow are listed under "unresolved". External plugin, collection
+and Python discovery paths are not fingerprinted, so current records always mark
+ambient discovery unresolved and cannot qualify for automatic reuse. Exact-candidate
+evidence remains usable.`,
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(evidenceClosurePlaybooks) == 0 {

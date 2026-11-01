@@ -35,7 +35,24 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 5
+const ResolutionVersion = 6
+
+// Native Ansible get_all_plugin_loaders().subdir, with each loader's default
+// ~/.ansible/plugins and /usr/share/ansible/plugins suffix. shell_plugins is
+// relative to the run root and is covered by the repository search below.
+// Native parity tests reject additions rather than silently losing discovery.
+var ansiblePluginDirectories = []struct{ subdir, defaultSuffix string }{
+	{"action_plugins", "action"}, {"become_plugins", "become"},
+	{"cache_plugins", "cache"}, {"callback_plugins", "callback"},
+	{"cliconf_plugins", "cliconf"}, {"connection_plugins", "connection"},
+	{"doc_fragments", "doc_fragments"}, {"filter_plugins", "filter"},
+	{"httpapi_plugins", "httpapi"}, {"inventory_plugins", "inventory"},
+	{"library", "modules"}, {"lookup_plugins", "lookup"},
+	{"module_utils", "module_utils"}, {"netconf_plugins", "netconf"},
+	{"shell_plugins", ""}, {"strategy_plugins", "strategy"},
+	{"terminal_plugins", "terminal"}, {"test_plugins", "test"},
+	{"vars_plugins", "vars"},
+}
 
 // Closure is the set of repository files whose content decided what the run
 // did: the playbooks, every statically or dynamically included task file,
@@ -103,8 +120,12 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 	for dir := range r.playbookDirs {
 		dirs = append(dirs, dir)
 	}
+	implicitDirectories := []string{"group_vars", "host_vars"}
+	for _, plugin := range ansiblePluginDirectories {
+		implicitDirectories = append(implicitDirectories, plugin.subdir)
+	}
 	for _, dir := range dirs {
-		for _, name := range []string{"group_vars", "host_vars", "library", "filter_plugins", "action_plugins", "lookup_plugins", "vars_plugins", "callback_plugins"} {
+		for _, name := range implicitDirectories {
 			abs := filepath.Join(dir, name)
 			r.patterns[r.rel(abs)+"/**"] = true
 			if _, err := os.Stat(abs); err == nil {
@@ -115,6 +136,31 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			}
 		}
 	}
+	// Native loader defaults can contain custom code even without ANSIBLE_*
+	// overrides or ansible.cfg. Existing external defaults cannot be hashed as
+	// repository inputs, so record them and refuse automatic reuse.
+	pluginRoots := []string{"/usr/share/ansible/plugins"}
+	if home, err := os.UserHomeDir(); err == nil {
+		pluginRoots = append(pluginRoots, filepath.Join(home, ".ansible", "plugins"))
+	}
+	for _, base := range pluginRoots {
+		for _, plugin := range ansiblePluginDirectories {
+			if plugin.defaultSuffix == "" {
+				continue
+			}
+			abs := filepath.Join(base, plugin.defaultSuffix)
+			if _, err := os.Stat(abs); err == nil {
+				r.addPath(abs, "", false, "ambient Ansible plugin input")
+				r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths contain custom controller inputs")
+			} else if !os.IsNotExist(err) {
+				r.dispatchUnresolved("environment", "ambient Ansible plugin code", "default plugin search paths could not be inspected")
+			}
+		}
+	}
+	// Git cannot prove absent external loader roots/collection paths/sys.path stay
+	// absent at reuse time. Until there is a controlled-controller fingerprint,
+	// even the literal task subset does not prove a complete reusable closure.
+	r.dispatchUnresolved("environment", "ambient Ansible plugin discovery", "external plugin, collection and Python discovery paths are not fingerprinted")
 	// Ambient Ansible configuration can change lookup/plugin/vars behavior.
 	// Name unsupported environment settings without persisting their values.
 	for _, item := range os.Environ() {
@@ -169,7 +215,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			continue
 		}
 		if inlineVarsNeedRuntimeResolution(payload) {
-			r.unresolved = append(r.unresolved, Reference{From: "extra-vars", Ref: "inline extra-vars expression", Reason: "inline templating, lookup/query/q or dispatch variables require runtime resolution"})
+			r.unresolved = append(r.unresolved, Reference{From: "extra-vars", Ref: "inline extra-vars expression", Reason: "inline syntax, templating or dispatch variables require unsupported runtime resolution"})
 		}
 	}
 	for _, f := range extraVarsFiles(in.ExtraArgs) {
