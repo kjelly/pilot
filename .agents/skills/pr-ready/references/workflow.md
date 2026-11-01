@@ -11,7 +11,7 @@
 
 - Land the PR head with the contract (steps 4-5): fetch `refs/pull/N/head`, check the SHA against `headRepository`/`headRefName`/`headRefOid`, then land that exact SHA on `headRefName` with `checkout_preflight.py`. Never land by name; do not create per-PR worktrees. The implementation pushes back only to the original head ref (`git push origin HEAD:refs/heads/HEAD_NAME`, no force; a fork pushes to its head repository after the permission check). Never use `git reset --hard` or discard user's work.
 - Set the per-PR checkpoint under `.pr-ready/<N>/` in the checkout (N = PR number; ensure ignored locally and not committed). Never reuse another PR's directory. Add `.pr-ready/` to `$(git rev-parse --git-path info/exclude)` if needed; avoid changing project `.gitignore` solely for this workflow. The final gate rejects committed `.pr-ready/` artifacts. A checkpoint should contain PR URL, repo, head SHA, the starting branch/HEAD (for the restore step), any role DRIFT reported by the contract's role check (role, both hashes, `header_changes`), iteration count, acceptance criteria, findings, dependency status, test receipts, current blocker, and next action.
-- After new commit/push or remote movement, invalidate prior receipts and reviews. Do not treat older check results as reusable, even if the test command is unchanged.
+- After a new commit or push, a receipt or review stays valid only when `pr_gate.py` accepts its SHA as an evidence-only ancestor of HEAD (every file changed since matches the base manifest's `evidence_only_paths`; the gate runs `git diff` itself and reports `receipt_reuse`). Any other delta, and any remote movement, invalidates prior receipts and reviews, even if the test command is unchanged.
 
 ## Delegation contract
 
@@ -34,7 +34,7 @@ Expected concise result: `{role, head_sha, status, root_causes, changed_files, c
 
 ## Loop and interruption
 
-- Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round.
+- Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round. A reviewer PASS with only P3/P4 remarks ends the round: answer them on the PR, do not dispatch a Coder for them (SKILL.md, cycle-time rule 3).
 - After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and end this invocation without starting another PR.
 - Permission errors, rate limiting, pending CI, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
 - A review claim raised again without new evidence after a reviewer-confirmed dispute, or a Root/reviewer disagreement that a fresh SA diagnosis does not settle, is a **human decision**: leave Draft and report both comment URLs.

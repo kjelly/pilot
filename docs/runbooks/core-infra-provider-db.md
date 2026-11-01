@@ -38,7 +38,7 @@ $ go run ./cmd/pilot spec docs/verification/core-infra-provider-db.md --lint
 spec Verification Spec — core-infra-provider-db (PostgreSQL backing store for Keycloak): 11 rows, 0 findings (0 errors)
 
 $ go test -count=1 ./internal/spec/...
-ok  	github.com/anomalyco/pilot/internal/spec	0.388s   ← 含 TestRegression_SpecAndInventoryAgree
+ok  	github.com/anomalyco/pilot/internal/spec	0.388s
 ```
 
 > **VM `core` 已是「6 個 sibling alias」狀態** — `vm-target up --hosts core,dns,ntp,keycloak,keycloak-db,db` 啟動。
@@ -84,8 +84,9 @@ verdict: **PASS**  (pass=11 fail=0 skip=0)
 | **A. 改 inventory** | `vm-target down` + `vm-target up --hosts core,dns,ntp,keycloak,keycloak-db,infra-provider,db` | 想嚴格對齊 spec 設計的 4 個 role，願意重跑 dns/ntp apply |
 
 > **B 已落地**：spec §1 改為 `keycloak-db / db` 並列兩個 row（一個是 spec 設計的命名、一個是當下
-> inventory 裡實際有的 alias），regression test `TestRegression_SpecAndInventoryAgree` 會在
-> 任何時候都抓 `keycloak-db` 跟 `db` 兩個 alias 都在 inventory 裡。`infra-db-1`、`infra-provider`
+> inventory 裡實際有的 alias）。沒有測試會檢查這兩個 alias 是否都在 inventory 裡（原文寫的
+> `TestRegression_SpecAndInventoryAgree` 從未存在，見 AGENTS.md §1.3），每次執行前要先用
+> `show-inventory` 確認。`infra-db-1`、`infra-provider`
 > 因為**現在沒對應 vm-target sibling**，從 spec §1 拿掉（避免下一個讀者又被誤導）。
 
 ## 1. 為什麼把 DB 拉成獨立的 `infra_role=db`

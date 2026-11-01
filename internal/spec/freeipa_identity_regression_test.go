@@ -11,7 +11,7 @@ import (
 
 // TestRegression_FreeipaIdentitySpec locks the single-host + target_group
 // contract. The spec names freeipa-server while vm-target evidence uses an
-// explicit target_group override, so SpecAndInventoryAgree does not apply.
+// explicit target_group override, so its group is not compared with an inventory.
 func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-identity.md"
 	s, err := Parse(specPath)

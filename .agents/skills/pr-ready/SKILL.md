@@ -74,6 +74,59 @@ semantic assertions: Root must inspect target artifacts and put their paths and
 limits into the review report and `assessment.rationale` before `--ready`.
 Text-only changes need no unrelated VM run.
 
+## Pilot: cycle-time rules
+
+Measured on this repository (2026-10-28 to 2026-11-01), a `pr-ready` round took about half a
+day, and the time went to re-verification rather than to fixing: a full local
+`go test ./...` (35 to 60 minutes beside other sessions) plus CI (30 to 47 minutes) plus a
+fresh review for every new HEAD, evidence-only commits and base-branch merges included;
+Coder rounds that polished P3/P4 remarks; and hours blocked on a question nobody was awake
+to answer. These rules remove that cost without weakening a gate:
+
+1. **Local receipts cover what the diff touches.** Run `go vet` and the tests of the Go
+   packages the diff changes (plus the packages that import a changed shared helper), the
+   regressions the fix adds, `make skill-test` for `.agents/skills` changes, and
+   `make lint` (CI pins golangci-lint v2.12.1; `make lint` refuses a v1 binary). The whole
+   suite is CI's `Go test` job: do not run `go test ./...` or `-race ./...` locally unless
+   the user asks or CI is unavailable, and never beside a live vm-target run. A failure in
+   a package the diff does not touch is rerun alone once; if it passes, record both
+   receipts and the flake's issue number; if it fails again, it is a finding.
+2. **Receipts and the review survive an evidence-only delta.** `pr_gate.py` accepts a
+   receipt or an independent review taken at an ancestor of HEAD when every file changed
+   since matches the base manifest's `evidence_only_paths` (the rule `issue_gate.py` already
+   applies; the gate lists accepted deltas under `receipt_reuse`). Order the work
+   accordingly: freeze the code, review it, run the target evidence on that commit, commit
+   the record, let the receipts carry over. `evidence.head_sha` still names HEAD.
+3. **P3/P4 close the round; they do not start another.** When the reviewer returns PASS
+   with only P3/P4 remarks, do not dispatch a Coder: reply, resolve the thread, and record
+   them under "Not in this PR" in the PR body or in a follow-up issue. Fix one in the same
+   round only when the user asks for it.
+4. **One reviewer per round over the whole diff**; a delta review only for a delta. Two
+   reviewers split by layer doubled the cost and still missed the defects the merge review
+   found afterwards.
+5. **Integrate the base branch only when forced**: when GitHub reports the PR
+   `CONFLICTING` (no `pull_request` CI runs then) or when the user asks, never
+   proactively. A conflict confined to Markdown (changelog rows, runbook wording) is a
+   non-execution edit: keep the target evidence through `target_reuse`
+   (`$SNAP/.agents/skills/_shared/target-evidence-reuse.md`), rerun the touched-package
+   receipts and a delta review. A conflict in an execution-affecting file is a new
+   candidate.
+6. **A bounced PR gets the merge reviewer's rubric before Ready.** When the PR carries an
+   `Automated PR review: Draft required` comment, the final review round also follows
+   [the merge gate's reviewer definition](../pr-review-merge/platforms/claude/agents/prm-reviewer.md):
+   it lists every earlier finding's class with the regression that now covers it and
+   checks the base manifest's required record against HEAD. A second finding of the same
+   class goes to SA for a class-level fix before another Coder round.
+7. **Do not block on a question that has a conservative answer.** Ask the user only for a
+   destructive or irreversible step, a scope change, or an authorization (staging/prod).
+   Otherwise take the conservative default, record it in the checkpoint and the final
+   report, and go on: pending CI means checkpoint and end the invocation; an unrelated
+   failing check goes into `unrelated_failing_checks` with the reviewer's confirmation; a
+   force-pushed or moved head means stop with `DRAFT-BLOCKED` and the facts.
+8. **Mind the machine.** Before a test run longer than a few minutes, check for other
+   `go test` processes (`pgrep -fc 'go test'`); when there are any, pass `-p` at or below
+   half the cores. Never start one beside a live vm-target chain.
+
 ## Inputs and preflight
 
 - Accept one PR number/URL. Multiple targets or **all Draft PRs** require asking the user to select one; never process a batch. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
@@ -92,11 +145,11 @@ Text-only changes need no unrelated VM run.
 
 1. **Analyze first.** Gather GitHub context; derive acceptance criteria and reproduce reported failures. Triage every review comment as a claim (`valid`, `invalid`, `needs_evidence`, `nonblocking`) per [review comments](references/review-comments.md); only `valid` findings go to Coder. Check whether the PR already passes the entire quality gate.
 2. **SA (`pr-sa`)** independently diagnose root cause, architectural impact, design options, and regressions. Produce a concise evidence-backed diagnosis.
-3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis as applicable. Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
+3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis for the packages the diff touches (cycle-time rule 1; the whole suite is CI's job). Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
 4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof. Give it each review comment Root would dispute with the comment and the code only, not Root's conclusion; the dispute stands only if the reviewer's own verdict agrees.
-5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
+5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. A PASS with only P3/P4 remarks ends the round (cycle-time rule 3). After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD, and re-query GitHub until checks settle or an external blocker prevents completion.
-7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts. Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
+7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts; receipts and the review taken before an evidence-only commit stay valid (cycle-time rule 2). Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
 8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action, the branch the checkout ended on (restored to the starting branch, or why it stayed), and any role DRIFT (role, both hashes, `header_changes`), which also goes into `assessment.rationale`. Do not claim READY if GitHub post-action verification failed.
 
 ## Quality / authority rules
