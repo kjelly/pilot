@@ -16,8 +16,32 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect evidence-only changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      evidence_only: ${{ steps.diff.outputs.evidence_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Compare with PR base
+        id: diff
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci-evidence-only.sh "$PR_BASE" "$PR_HEAD" >> "$GITHUB_OUTPUT"
+
   test:
-    name: Go test
+    name: Go test (${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.evidence_only != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [spec, cmd, rest]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -43,6 +67,13 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: Select Go packages
+        env:
+          PILOT_TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          packages=$(bash scripts/ci-go-test-packages.sh "$PILOT_TEST_SHARD")
+          echo "GO_TEST_PACKAGES=$(printf '%s\n' "$packages" | paste -sd ' ' -)" >> "$GITHUB_ENV"
+
       - name: go test
         # The flags, including go test's -timeout (45m), live in the Makefile.
         # -timeout counts from when a test binary starts, so this job's
@@ -54,9 +85,11 @@ jobs:
         run: make test-race
 
       - name: Install PyYAML
+        if: matrix.shard == 'rest'
         run: python3 -m pip install pyyaml
 
       - name: ansible_callback unit tests
+        if: matrix.shard == 'rest'
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
@@ -65,9 +98,11 @@ jobs:
       # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
       # that drifts).
       - name: Agent skill unit tests (make skill-test)
+        if: matrix.shard == 'rest'
         run: make skill-test
 
       - name: Duplicate YAML key check (repo-wide)
+        if: matrix.shard == 'rest'
         run: python3 scripts/check-yaml-duplicate-keys.py
 
   playbook-lint:
@@ -240,7 +275,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
+    needs: [changes, test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20

@@ -112,6 +112,24 @@ func TestComputeClosureIsSortedAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestClosureRecordsSearchMembershipIncludingMisses(t *testing.T) {
+	c := fixtureClosure(t)
+	patterns := map[string]bool{}
+	for _, p := range c.Patterns {
+		patterns[p] = true
+	}
+	for _, want := range []string{
+		"playbooks/apply/tasks/distro-*.yml",
+		"playbooks/apply/files/rules/**",
+		"playbooks/apply/tasks/does-not-exist.yml",
+		"contracts/demo.yaml", "ansible.cfg", "requirements.yml",
+	} {
+		if !patterns[want] {
+			t.Errorf("missing searched pattern %s: %v", want, c.Patterns)
+		}
+	}
+}
+
 func TestComputeClosureRejectsAMissingPlaybook(t *testing.T) {
 	if _, err := ComputeClosure(ClosureInput{Root: filepath.Join("testdata", "closure"), Playbooks: []string{"playbooks/nope.yml"}}); err == nil {
 		t.Fatal("expected an error for a missing playbook")

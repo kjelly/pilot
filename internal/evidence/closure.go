@@ -45,6 +45,7 @@ type Reference struct {
 // rule (.agents/skills/_shared/target-evidence-reuse.md).
 type Closure struct {
 	Files      []File      `json:"files"`
+	Patterns   []string    `json:"patterns"` // searched paths, including misses; detect new inputs at reuse time
 	Unresolved []Reference `json:"unresolved,omitempty"`
 	External   []string    `json:"external,omitempty"` // referenced files outside the repository (vault files); path only, never hashed
 }
@@ -65,6 +66,7 @@ type resolver struct {
 	unresolved []Reference
 	external   map[string]bool
 	visiting   map[string]bool
+	patterns   map[string]bool
 }
 
 // ComputeClosure resolves the execution closure of a run. It never fails on
@@ -78,7 +80,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("closure root %s is not a directory", in.Root)
 	}
-	r := &resolver{root: root, files: map[string]*File{}, external: map[string]bool{}, visiting: map[string]bool{}}
+	r := &resolver{root: root, files: map[string]*File{}, external: map[string]bool{}, visiting: map[string]bool{}, patterns: map[string]bool{}}
 	for _, pb := range in.Playbooks {
 		abs := r.abs(pb)
 		if _, err := os.Stat(abs); err != nil {
@@ -100,6 +102,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		}
 		for _, name := range names {
 			contract := filepath.Join(root, "contracts", name+".yaml")
+			r.patterns[r.rel(contract)] = true
 			if _, err := os.Stat(contract); err == nil {
 				r.addPath(contract, "", false, sp)
 			}
@@ -124,11 +127,12 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		r.addPath(abs, "", false, "extra-vars")
 	}
 	for _, name := range []string{"ansible.cfg", "requirements.yml"} {
+		r.patterns[name] = true
 		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
 			r.addPath(filepath.Join(root, name), "", false, "repository")
 		}
 	}
-	out := &Closure{}
+	out := &Closure{Patterns: []string{}}
 	for _, f := range r.files {
 		out.Files = append(out.Files, *f)
 	}
@@ -143,6 +147,10 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 	for p := range r.external {
 		out.External = append(out.External, p)
 	}
+	for p := range r.patterns {
+		out.Patterns = append(out.Patterns, p)
+	}
+	sort.Strings(out.Patterns)
 	sort.Strings(out.External)
 	return out, nil
 }
@@ -206,6 +214,7 @@ func (r *resolver) addPath(abs, from string, dynamic bool, via string) {
 		return
 	}
 	if st.IsDir() {
+		r.patterns[rel+"/**"] = true
 		_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
@@ -269,7 +278,11 @@ func loadYAML(abs string) (*yaml.Node, error) {
 
 func (r *resolver) visitPlaybook(abs string, depth int) {
 	rel := r.rel(abs)
-	if rel == "" || r.visiting[abs] || depth > maxIncludeDepth {
+	if depth > maxIncludeDepth {
+		r.unresolved = append(r.unresolved, Reference{From: rel, Ref: rel, Reason: "maximum include depth exceeded"})
+		return
+	}
+	if rel == "" || r.visiting[abs] {
 		return
 	}
 	r.visiting[abs] = true
@@ -308,7 +321,11 @@ func (r *resolver) visitPlaybook(abs string, depth int) {
 
 func (r *resolver) visitTaskFile(abs, playbookDir string, depth int) {
 	rel := r.rel(abs)
-	if rel == "" || depth > maxIncludeDepth {
+	if depth > maxIncludeDepth {
+		r.unresolved = append(r.unresolved, Reference{From: rel, Ref: rel, Reason: "maximum include depth exceeded"})
+		return
+	}
+	if rel == "" {
 		return
 	}
 	if r.visiting[abs] {
@@ -536,6 +553,9 @@ func (r *resolver) resolveRef(from, ref, kind, fileDir, playbookDir string) []re
 		full := pattern
 		if d != "" {
 			full = filepath.Join(d, pattern)
+		}
+		if rel := r.rel(full); rel != "" {
+			r.patterns[rel] = true
 		}
 		matches, err := filepath.Glob(full)
 		if err != nil || len(matches) == 0 {

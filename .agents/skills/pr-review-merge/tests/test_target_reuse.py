@@ -42,6 +42,20 @@ class TargetReuseRemoteTests(unittest.TestCase):
                                       "dependency_review": "Reviewed complete target dependency closure; the unrelated service is not called by this target or its shared helpers."}}
         return gh, e, trees
 
+    def test_remote_machine_record_uses_shared_closure_validator(self):
+        gh, e, trees = self.fixture()
+        record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
+                  "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
+                  "closure": {"files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
+                              "patterns": ["playbooks/apply/*.yml"]}}
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
+        gh.commit_tree = lambda repo, revision: "e" * 40
+        del e["target_validation"]["target_reuse"]["execution_paths"]
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        trees[H]["playbooks/apply/new.yml"] = blob(8)
+        self.assertIn("search membership changed", self.reasons(gh, e))
+
     def test_remote_gate_accepts_reviewed_main_import(self):
         gh, e, _ = self.fixture()
         r = evaluate(REPO, 42, e, client=gh)

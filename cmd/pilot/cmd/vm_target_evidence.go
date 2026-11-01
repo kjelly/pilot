@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -81,13 +82,21 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string) (*e
 	}
 	candidate := evidence.DetectCandidate(root)
 	if vtEvidenceCandidate != "" || vtEvidenceTree != "" {
-		if len(vtEvidenceCandidate) != 40 || len(vtEvidenceTree) != 40 {
+		sha := regexp.MustCompile(`^[0-9a-f]{40}$`)
+		if !sha.MatchString(vtEvidenceCandidate) || !sha.MatchString(vtEvidenceTree) {
 			return nil, fmt.Errorf("--evidence-candidate and --evidence-tree must both be full 40-hex ids")
 		}
 		if candidate.Source == "git" && candidate.Commit != vtEvidenceCandidate {
 			return nil, fmt.Errorf("--evidence-candidate %s does not match the checkout's HEAD %s", vtEvidenceCandidate[:12], candidate.Commit[:12])
 		}
-		candidate = evidence.Candidate{Commit: vtEvidenceCandidate, Tree: vtEvidenceTree, Source: "flag"}
+		if candidate.Source == "git" && candidate.Tree != vtEvidenceTree {
+			return nil, fmt.Errorf("--evidence-tree does not match the checkout's HEAD tree")
+		}
+		note := ""
+		if candidate.Source == "git" {
+			note = candidate.Note
+		}
+		candidate = evidence.Candidate{Commit: vtEvidenceCandidate, Tree: vtEvidenceTree, Source: "flag", Dirty: candidate.Dirty, Note: note}
 	}
 	rec := &evidence.Record{
 		Schema:      evidence.Schema,

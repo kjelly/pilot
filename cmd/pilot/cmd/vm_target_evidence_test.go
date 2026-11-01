@@ -221,6 +221,23 @@ func TestEvidenceSessionFlagValidation(t *testing.T) {
 	if _, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, nil, nil); err == nil {
 		t.Fatal("candidate without tree must be refused")
 	}
+	candidate := evidence.DetectCandidate(root)
+	vtEvidenceCandidate, vtEvidenceTree = candidate.Commit, strings.Repeat("z", 40)
+	if _, err := newEvidenceSession(nil, nil, nil, nil); err == nil {
+		t.Fatal("non-hex tree must be refused")
+	}
+	vtEvidenceTree = strings.Repeat("0", 40)
+	if _, err := newEvidenceSession(nil, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "HEAD tree") {
+		t.Fatalf("a contradictory tree must be refused: %v", err)
+	}
+	vtEvidenceTree = candidate.Tree
+	if err := os.WriteFile(filepath.Join(root, "playbooks", "site.yml"), []byte("# modified during development\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flagged, err := newEvidenceSession(nil, nil, nil, nil)
+	if err != nil || !flagged.rec.Candidate.Dirty {
+		t.Fatalf("explicit candidate flags must preserve dirty status: %v", err)
+	}
 	vtEvidenceRecord, vtEvidenceCandidate, vtEvidenceTree = "", "", ""
 	if sess, err := newEvidenceSession(nil, nil, nil, nil); err != nil || sess != nil {
 		t.Fatalf("no flag, no session: %v %v", sess, err)
