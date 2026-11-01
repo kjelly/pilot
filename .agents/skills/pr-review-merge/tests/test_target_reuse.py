@@ -48,13 +48,25 @@ class TargetReuseRemoteTests(unittest.TestCase):
                   "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
                   "closure": {"resolution_version": 6, "frozen": True, "files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
                               "patterns": ["playbooks/apply/*.yml"]}}
+        # Reuse the explicitly synthetic proof builder; native execution lives
+        # in Go integration tests, this fixture proves shared adapter parity.
+        import importlib.util
+        from pathlib import Path
+        helper = Path(__file__).resolve().parents[2] / "issue-to-pr/tests/controller_fixture.py"
+        spec = importlib.util.spec_from_file_location("controller_fixture", helper)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        fixture.add_controller(record)
+        for path, raw in fixture.fixture_files().items():
+            entry = fixture.descriptor(path, raw)
+            trees[R][path] = trees[H][path] = ("100644", entry["blob"])
+            gh.files[(path,R)] = raw
         gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
         gh.commit_tree = lambda repo, revision: "e" * 40
         del e["target_validation"]["target_reuse"]["execution_paths"]
         r = evaluate(REPO, 42, e, client=gh)
         self.assertEqual("MERGE", r["decision"], r["reasons"])
-        # This synthetic controlled-scope record tests the gate only; generated
-        # v6 records also carry unresolved ambient controller discovery.
+        # This synthetic typed controlled-scope record tests the gate only.
         # Local and remote must reject the same unsafe machine attestations,
         # including old resolver records that silently omitted file expressions.
         for change, reason in (
@@ -64,6 +76,11 @@ class TargetReuseRemoteTests(unittest.TestCase):
                 (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
                 (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
                 (lambda r: r["closure"].update(resolution_version=5), "resolution version"),
+                (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
+                (lambda r: r.pop("controller"), "current OCI proof"),
+                (lambda r: r["controller"].update(image_id="tag:latest"), "immutable image ID"),
+                (lambda r: r["controller"]["steps"].update({"L5 verify":0}), "stage was not routed"),
+                (lambda r: r["controller"]["build"].update(goamd64="v2"), "unsupported Go build context"),
                 (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
                 (lambda r: r["closure"].update(unresolved=[{"ref": "lookup/query expression"}]), "unresolved"),
                 (lambda r: r["closure"].update(external=["/outside/input"]), "external"),

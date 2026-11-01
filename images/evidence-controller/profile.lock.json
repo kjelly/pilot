@@ -1,0 +1,9 @@
+{
+  "schema": "pilot-controller-profile/v1",
+  "base": "ghcr.io/ansible-community/community-ee-minimal@sha256:41c6c5eeb9915fec5a97de241b2f91a269234942eaa0d78ac5bcead95a0d91b1",
+  "ansible": "2.21.5",
+  "python": "3.14.8",
+  "platform": "linux/amd64",
+  "go": "go1.26.8",
+  "go_base": "golang@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107"
+}

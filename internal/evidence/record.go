@@ -100,6 +100,7 @@ type Record struct {
 	Steps       []Step            `json:"steps"`
 	Verify      []VerifyResult    `json:"verify"`
 	Closure     *Closure          `json:"closure"`
+	Controller  *ControllerProof  `json:"controller,omitempty"`
 	Redaction   Redaction         `json:"redaction"`
 }
 

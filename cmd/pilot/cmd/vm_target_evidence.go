@@ -23,14 +23,16 @@ import (
 // actual-run evidence record (docs/actual-run-evidence.md §3): the operator
 // adds only the failure-path arms and the limits.
 var (
-	vtEvidenceRecord    string
-	vtEvidenceCandidate string
-	vtEvidenceTree      string
-	vtEvidenceRunID     string
-	vtEvidenceOperator  string
+	vtEvidenceRecord     string
+	vtEvidenceCandidate  string
+	vtEvidenceTree       string
+	vtEvidenceRunID      string
+	vtEvidenceOperator   string
+	vtEvidenceController string
 )
 
 func addEvidenceFlags(c *cobra.Command) {
+	c.Flags().StringVar(&vtEvidenceController, "evidence-controller", "", "controller boundary: pinned builds and runs the committed immutable OCI profile (requires --evidence-record)")
 	c.Flags().StringVar(&vtEvidenceRecord, "evidence-record", "", "write the machine-generated actual-run record to this Markdown file (rewritten in place; its directory's LATEST.md is updated on success)")
 	c.Flags().StringVar(&vtEvidenceCandidate, "evidence-candidate", "", "tested commit SHA for the record when the run root is not a Git work tree (a `git archive` copy)")
 	c.Flags().StringVar(&vtEvidenceTree, "evidence-tree", "", "tested tree id for the record when the run root is not a Git work tree")
@@ -55,12 +57,19 @@ type evidenceSession struct {
 	sources       []evidence.SecretSource
 	skipped       []string
 	expected      []string
+	controller    *evidence.Controller
 }
 
 // newEvidenceSession returns nil when --evidence-record is unset.
 func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inputs ...string) (*evidenceSession, error) {
 	if vtEvidenceRecord == "" {
+		if vtEvidenceController != "" {
+			return nil, fmt.Errorf("--evidence-controller requires --evidence-record")
+		}
 		return nil, nil
+	}
+	if vtEvidenceController != "" && vtEvidenceController != "pinned" {
+		return nil, fmt.Errorf("--evidence-controller supports only pinned")
 	}
 	root, err := os.Getwd()
 	if err != nil {
@@ -107,6 +116,17 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inp
 	if err != nil {
 		return nil, fmt.Errorf("freeze execution closure before run: %w", err)
 	}
+	var controller *evidence.Controller
+	if vtEvidenceController == "pinned" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		controller, err = evidence.NewPinnedController(root, exe, os.Stderr)
+		if err != nil {
+			return nil, err
+		}
+	}
 	sources, skipped := evidence.SecretSources(root, extraArgs)
 	rec := &evidence.Record{
 		Closure:     closure,
@@ -121,7 +141,7 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inp
 		Tooling:     map[string]string{},
 	}
 	return &evidenceSession{path: path, root: root, rec: rec, outputs: map[string]string{}, stdoutOutputs: map[string]string{},
-		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps}, nil
+		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps, controller: controller}, nil
 }
 
 // step runs fn with a writer that also captures the step's output, and
@@ -214,6 +234,9 @@ func (s *evidenceSession) targets(targets []evidence.Target, inventoryYAML strin
 	defer s.mu.Unlock()
 	s.rec.Targets = targets
 	s.rec.Inventory = evidence.ParseInventoryYAML(inventoryYAML)
+	if s.controller != nil && s.controller.Ready() {
+		s.rec.Inventory = s.controller.Inventory()
+	}
 	s.rec.Inventory.Source = "rendered by pilot for this run"
 }
 
@@ -226,6 +249,16 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.rec
+	if s.controller != nil {
+		defer s.controller.Close()
+		proof, err := s.controller.Finalize()
+		if err != nil {
+			outcome = "invalid-inputs"
+			r.Closure.Unresolved = append(r.Closure.Unresolved, evidence.Reference{From: "controller", Ref: "controller proof", Reason: "native controller or input identity changed or could not be proved"})
+		} else {
+			r.Controller = proof
+		}
+	}
 	r.FinishedAt = time.Now().UTC()
 	r.Outcome = outcome
 	if chainErr != nil {
@@ -252,8 +285,12 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 		}
 		r.PilotBinary.Version = rootCmd.Version
 	}
-	if v, err := exec.Command("ansible-playbook", "--version").Output(); err == nil {
-		r.Tooling["ansible-playbook"] = firstLine(string(v))
+	if s.controller == nil {
+		if v, err := exec.Command("ansible-playbook", "--version").Output(); err == nil {
+			r.Tooling["ansible-playbook"] = firstLine(string(v))
+		}
+	} else {
+		r.Tooling["controller"] = "pinned OCI (native origins in controller.native_probe)"
 	}
 	for i := range r.Targets {
 		if r.Targets[i].BaseImage != "" && r.Targets[i].BaseImageSHA256 == "" {
@@ -264,7 +301,7 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 			}
 		}
 	}
-	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: s.root, Playbooks: s.playbooks, Specs: s.specs, ExtraArgs: s.extraArgs, Inputs: s.inputs})
+	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: s.root, Playbooks: s.playbooks, Specs: s.specs, ExtraArgs: s.extraArgs, Inputs: s.inputs, Controller: s.controller})
 	if err != nil || !reflect.DeepEqual(closure, r.Closure) {
 		// Retain the pre-run hashes: post-run bytes are not what was tested.
 		r.Closure.Unresolved = append(r.Closure.Unresolved, evidence.Reference{From: "execution closure", Ref: "run inputs", Reason: "execution inputs changed during the run or could not be rechecked"})
@@ -275,7 +312,7 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 		r.Closure.Frozen = true
 	}
 	r.Redaction = evidence.Redact(s.outputs, s.sources, s.skipped)
-	if err := evidence.SanitizeRecord(r, s.sources); err != nil {
+	if err := evidence.SanitizeRecord(r, s.sources, s.root); err != nil {
 		fmt.Fprintf(errOut, "⚠️ evidence record metadata could not be sanitized: %v\n", err)
 		return
 	}
@@ -334,4 +371,31 @@ func runRecordedIdempotencyStreams(sess *evidenceSession, out, errOut io.Writer,
 		}
 		return nil
 	})
+}
+
+func (s *evidenceSession) prepareInventory(path string) error {
+	if s == nil || s.controller == nil {
+		return nil
+	}
+	if err := s.controller.PrepareInventory(path); err != nil {
+		return err
+	}
+	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: s.root, Playbooks: s.playbooks, Specs: s.specs, ExtraArgs: s.extraArgs, Inputs: s.inputs, Controller: s.controller})
+	if err != nil {
+		return err
+	}
+	s.rec.Closure = closure
+	return nil
+}
+func (s *evidenceSession) runAnsible(step string, stdout, stderr io.Writer, args ...string) error {
+	if s == nil || s.controller == nil {
+		return execExternalStreams(stdout, stderr, "ansible-playbook", args...)
+	}
+	return s.controller.Run(step, "ansible-playbook", args, stdout, stderr)
+}
+func (s *evidenceSession) runVerify(stdout, stderr io.Writer, args ...string) error {
+	if s == nil || s.controller == nil {
+		return execPilotStreams(stdout, stderr, args...)
+	}
+	return s.controller.Run("L5 verify", "pilot", args, stdout, stderr)
 }

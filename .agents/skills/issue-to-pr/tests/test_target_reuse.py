@@ -399,14 +399,25 @@ class TargetReuseGuardTests(ReuseHelpers):
 
 
 class MachineRecordTests(TargetReuseTests):
+    def setUp(self):
+        super().setUp()
+        from controller_fixture import fixture_files
+        # Add the synthetic proof inputs at the tested candidate, then import
+        # that branch into the already advanced head (real scratch Git graph).
+        git(self.wt, "checkout", "-q", "--detach", self.candidate)
+        self.candidate = commit_files(self.wt, {p:raw.decode() for p,raw in fixture_files().items()}, "synthetic controller inputs")
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        git(self.wt, "merge", "-q", self.candidate, "-m", "import controller candidate")
+
     def machine(self):
         ctx = self.ctx()
         tree = ctx.tree_entries(self.candidate)
-        return {"schema": "pilot-evidence-record/v1", "outcome": "success",
+        from controller_fixture import add_controller
+        return add_controller({"schema": "pilot-evidence-record/v1", "outcome": "success",
                 "candidate": {"commit": self.candidate, "tree": ctx.commit_tree(self.candidate), "source": "git"},
                 "closure": {"resolution_version": 6, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
                                       for p in ("src/app.go", "src/dependency.go")],
-                            "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}}
+                            "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}})
 
     def machine_accepts(self, record):
         import json
@@ -424,8 +435,8 @@ class MachineRecordTests(TargetReuseTests):
     def test_machine_blob_mode_tree_dirty_and_partial_records_fail_closed(self):
         import copy
         good = self.machine()
-        # Synthetic complete scope exercises gate mechanics; generated v6
-        # records always retain an unresolved ambient discovery marker.
+        # Synthetic typed proof exercises gate mechanics. Native constructor,
+        # routing and source closure are tested independently against real OCI.
         mutations = [
             (lambda r: r["candidate"].update(tree="0" * 40), "candidate/tree"),
             (lambda r: r["candidate"].update(dirty=True), "dirty candidate"),
@@ -438,6 +449,14 @@ class MachineRecordTests(TargetReuseTests):
             (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=5), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
+            (lambda r: r.pop("controller"), "current OCI proof"),
+            (lambda r: r["controller"].update(image_id="mutable:latest"), "immutable image ID"),
+            (lambda r: r["controller"].update(post_probe_sha256="0"*64), "pre/post context"),
+            (lambda r: r["controller"]["steps"].update({"L5 verify":0}), "stage was not routed"),
+            (lambda r: r["steps"][0].update(status="skipped"), "required recorded stage"),
+            (lambda r: r["controller"]["build"].update(goamd64="v2"), "unsupported Go build context"),
+            (lambda r: r["controller"]["profile"].update(config_sha256="0"*64), "profile identity differs"),
             (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
             (lambda r: r.update(outcome="invalid-inputs"), "did not succeed"),
             (lambda r: r["closure"].update(unresolved=[{"ref": "unknown"}]), "unresolved"),
