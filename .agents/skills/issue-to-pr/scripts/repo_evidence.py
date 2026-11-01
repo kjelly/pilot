@@ -385,7 +385,7 @@ class Context:
             closure = record.get("closure")
             if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
                 raise ValueError("closure has unresolved or external inputs")
-            if closure.get("resolution_version") != 9 or closure.get("frozen") is not True:
+            if closure.get("resolution_version") != 10 or closure.get("frozen") is not True:
                 raise ValueError("closure needs current resolution version and frozen pre-run inputs")
             files, patterns = closure.get("files"), closure.get("patterns")
             if not isinstance(files, list) or not files or not isinstance(patterns, list):

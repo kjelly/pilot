@@ -3,6 +3,7 @@ package evidence
 import (
 	"bytes"
 	"debug/buildinfo"
+	"debug/elf"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,12 +42,13 @@ type listedModule struct {
 	Replace                 *listedModule
 }
 type listedPackage struct {
-	ImportPath, Dir                                                                                                                                    string
-	Standard, Incomplete                                                                                                                               bool
-	Error                                                                                                                                              *struct{ Err string }
-	DepsErrors                                                                                                                                         []any
-	Module                                                                                                                                             *listedModule
-	GoFiles, CgoFiles, IgnoredGoFiles, SFiles, SysoFiles, CFiles, CXXFiles, MFiles, HFiles, FFiles, SwigFiles, SwigCXXFiles, EmbedFiles, EmbedPatterns []string
+	ControllerAssembly                                                                                                                                                    string
+	ImportPath, Dir                                                                                                                                                       string
+	Standard, Incomplete                                                                                                                                                  bool
+	Error                                                                                                                                                                 *struct{ Err string }
+	DepsErrors                                                                                                                                                            []any
+	Module                                                                                                                                                                *listedModule
+	GoFiles, CgoFiles, IgnoredGoFiles, IgnoredOtherFiles, SFiles, SysoFiles, CFiles, CXXFiles, MFiles, HFiles, FFiles, SwigFiles, SwigCXXFiles, EmbedFiles, EmbedPatterns []string
 }
 
 func validateBuildInfo(info *debug.BuildInfo) (*ControllerBuild, error) {
@@ -115,6 +117,31 @@ func validateBuildInfo(info *debug.BuildInfo) (*ControllerBuild, error) {
 	return build, nil
 }
 
+// BuildInfo CGO=0 does not prove static linkage: compiler directives can add
+// native loader dependencies even to a Go-only module. Inspect the executable
+// that actually runs, independently of directive/package spellings.
+func validateStaticPilotELF(binary string) error {
+	file, err := elf.Open(binary)
+	if err != nil {
+		return fmt.Errorf("unsupported pilot ELF identity")
+	}
+	defer func() { _ = file.Close() }()
+	if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB || file.Machine != elf.EM_X86_64 || file.Type != elf.ET_EXEC {
+		return fmt.Errorf("unsupported pilot ELF identity")
+	}
+	for _, program := range file.Progs {
+		if program.Type == elf.PT_INTERP || program.Type == elf.PT_DYNAMIC {
+			return fmt.Errorf("dynamic pilot ELF is unsupported")
+		}
+	}
+	for _, section := range file.Sections {
+		if section.Type == elf.SHT_DYNAMIC {
+			return fmt.Errorf("dynamic pilot ELF is unsupported")
+		}
+	}
+	return nil
+}
+
 // addGoSourceClosure uses the pinned OCI Go tool with exactly the supported
 // build context. A partial/error listing or unverified cache never produces a
 // partial accepted graph. Source files are hashed as binary inputs, not scanned
@@ -122,6 +149,11 @@ func validateBuildInfo(info *debug.BuildInfo) (*ControllerBuild, error) {
 func (c *Controller) addGoSourceClosure(r *resolver) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	previous := c.proof.Build
+	c.proof.Build = nil // No accepted partial/old proof survives a failed fresh audit.
+	if err := validateStaticPilotELF(c.binary); err != nil {
+		return err
+	}
 	info, err := buildinfo.ReadFile(c.binary)
 	if err != nil {
 		return err
@@ -186,7 +218,6 @@ func (c *Controller) addGoSourceClosure(r *resolver) error {
 		Settings, Modules string
 	}{identities, patterns, build.SettingsSHA256, build.ModulesSHA256})
 	build.SourcesSHA256 = digestBytes(bound)
-	previous := c.proof.Build
 	if previous != nil && previous.SourcesSHA256 == build.SourcesSHA256 && previous.RebuiltBinarySHA256 == c.proof.BinarySHA256 {
 		build.RebuiltBinarySHA256 = previous.RebuiltBinarySHA256
 	} else {
@@ -249,7 +280,13 @@ func parseGoSourceListing(root string, stream io.Reader) ([]string, []string, ma
 			if p.Module == nil || !strings.HasPrefix(p.Dir, "/opt/pilot-modcache/") {
 				return nil, nil, nil, fmt.Errorf("go source outside candidate/verified module cache")
 			}
+			if len(p.SysoFiles) > 0 || (len(p.SFiles) > 0 && (len(p.HFiles) > 0 || p.ControllerAssembly != "verified-module-literal-includes/v1")) {
+				return nil, nil, nil, fmt.Errorf("unproved module assembly context")
+			}
 			continue
+		}
+		if len(p.SFiles) > 0 || len(p.SysoFiles) > 0 {
+			return nil, nil, nil, fmt.Errorf("candidate assembly/system objects are unsupported")
 		}
 		if p.Module == nil || p.Module.Path != pilotModule {
 			return nil, nil, nil, fmt.Errorf("unexpected repository Go module")
@@ -261,13 +298,14 @@ func parseGoSourceListing(root string, stream io.Reader) ([]string, []string, ma
 		if dir == "." {
 			dir = ""
 		}
-		for _, ext := range []string{"*.go", "*.s", "*.S", "*.syso", "*.c", "*.cc", "*.cpp", "*.h", "*.hh", "*.hpp", "*.m", "*.mm", "*.f", "*.F", "*.pgo"} {
+		for _, ext := range []string{"*", "*.go", "*.s", "*.S", "*.syso", "*.c", "*.cc", "*.cpp", "*.h", "*.hh", "*.hpp", "*.m", "*.mm", "*.f", "*.F", "*.pgo"} {
 			patterns = append(patterns, filepath.ToSlash(filepath.Join(dir, ext)))
 		}
 		if _, err := os.Stat(filepath.Join(p.Dir, "default.pgo")); err == nil {
 			return nil, nil, nil, fmt.Errorf("unmodeled Go PGO build context")
 		}
-		selected := append(append(append(append(append([]string{}, p.GoFiles...), p.IgnoredGoFiles...), p.SFiles...), p.SysoFiles...), p.EmbedFiles...)
+		selected := append(append(append([]string{}, p.GoFiles...), p.IgnoredGoFiles...), p.IgnoredOtherFiles...)
+		selected = append(selected, p.EmbedFiles...)
 		for _, name := range selected {
 			path := filepath.Join(p.Dir, name)
 			relative, err := filepath.Rel(root, path)

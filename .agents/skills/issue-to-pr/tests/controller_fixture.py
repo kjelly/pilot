@@ -33,6 +33,6 @@ def add_controller(record):
     record.update(controller=proof,pilot_binary={"sha256":"d"*64},steps=[{"name":name,"status":"pass"} for name in STAGES],verify=[{"verdict":"PASS","pass":1,"fail":0}])
     record["inventory"]={"hosts":["synthetic-host"],"groups":{"all":["synthetic-host"]}}
     record["verify"][0].update(diagnostics_schema="pilot-verify-diagnostics/v1",diagnostics_complete=True,rows=[{"id":"C1","host":"synthetic-host","status":"pass","exit_code":0,"probe_status":"ok"}])
-    record["closure"]["resolution_version"]=9
+    record["closure"]["resolution_version"]=10
     record["closure"]["files"].extend(descriptor(path,raw) for path,raw in files.items())
     return record

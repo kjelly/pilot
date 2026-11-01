@@ -5,6 +5,81 @@ import subprocess
 import json
 import pathlib
 import sys
+import re
+import stat
+
+def regular_canonical(path, root):
+    # No lexical symlink or path outside the verified immutable boundary.
+    path, root = pathlib.Path(path), pathlib.Path(root)
+    if not path.is_absolute() or not root.is_absolute() or path.resolve(strict=True) != path:
+        raise ValueError("noncanonical assembly input")
+    path.relative_to(root.resolve(strict=True))
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("nonregular assembly input")
+    return path.read_bytes()
+
+
+def audit_sdk_headers(include):
+    # The pinned SDK supplies the final include search root. Prove its whole
+    # flat header tree is closed, including macro continuations, not two names.
+    headers = list(pathlib.Path(include).iterdir())
+    if not headers:
+        raise ValueError("missing pinned assembly header boundary")
+    for path in headers:
+        if path.suffix != ".h":
+            raise ValueError("unsupported pinned assembly header context")
+        raw = regular_canonical(path, include)
+        continuation = False
+        for line in raw.split(b"\n"):
+            stripped = line.strip(b" ")
+            if b"#" in line:
+                # A full-line comment cannot synthesize a directive. Inside a
+                # macro continuation even that spelling is conservatively refused.
+                if not continuation and stripped.startswith(b"//"):
+                    continue
+                if continuation or not re.fullmatch(rb" *#(?:define|ifdef|ifndef|if|else|elif|endif|undef)(?: +[^#\r\n]*)? *", line):
+                    raise ValueError("unclosed pinned assembly header context")
+            continuation = line.rstrip(b" ").endswith(b"\\")
+        if continuation:
+            raise ValueError("unfinished pinned assembly macro")
+
+
+def audit_module_assembly(packages, modcache="/opt/pilot-modcache", include="/opt/go/pkg/include"):
+    audit_sdk_headers(include)
+    for package in packages:
+        if package.get("Standard") or not (package.get("SFiles") or package.get("SysoFiles")):
+            continue
+        directory = pathlib.Path(package["Dir"])
+        # Candidate assembly is refused atomically by the Go listing consumer.
+        if not directory.is_relative_to(modcache):
+            continue
+        module = package.get("Module") or {}
+        module_dir = pathlib.Path(module.get("Dir", ""))
+        if (not module_dir.is_absolute() or not module_dir.is_relative_to(modcache)
+                or module_dir.resolve(strict=True) != module_dir
+                or not directory.is_relative_to(module_dir) or directory.resolve(strict=True) != directory
+                or module.get("Replace") or not module.get("Sum")
+                or package.get("HFiles") or package.get("SysoFiles")):
+            raise ValueError("unproved verified-module assembly context")
+        for name in package.get("SFiles", []):
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.[sS]", name):
+                raise ValueError("unsupported assembly source identity")
+            raw = regular_canonical(directory / name, module_dir)
+            for line in raw.split(b"\n"):
+                if b"#" not in line:
+                    continue
+                match = re.fullmatch(rb' *#include "([A-Za-z0-9_.-]+\.h)" *', line)
+                if not match:
+                    raise ValueError("unsupported module assembly preprocessor syntax")
+                basename = match[1].decode("ascii")
+                # CWD and original .s directory coincide in the Go builder.
+                # HFiles would introduce renamed object-directory shadows; the
+                # generated object header is never admitted by this subset.
+                if basename == "go_asm.h" or os.path.lexists(directory / basename):
+                    raise ValueError("module assembly include shadow")
+                regular_canonical(pathlib.Path(include) / basename, include)
+        package["ControllerAssembly"] = "verified-module-literal-includes/v1"
+
 
 base = "/tmp/controller"
 for name in ("home", "tmp", "data", "reports", "local"):
@@ -85,7 +160,27 @@ elif args[0] == "go-rebuild":
     print(digest.hexdigest())
     raise SystemExit(0)
 elif args[0] == "go-list":
-    args = ["/opt/go/bin/go", "list", "-mod=readonly", "-deps", "-json", "./cmd/pilot"]
+    result = subprocess.run(["/opt/go/bin/go", "list", "-mod=readonly", "-deps", "-json", "./cmd/pilot"], env=env, stdout=subprocess.PIPE)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    try:
+        decoder, packages, offset = json.JSONDecoder(), [], 0
+        text = result.stdout.decode("utf-8")
+        while offset < len(text):
+            while offset < len(text) and text[offset].isspace():
+                offset += 1
+            if offset == len(text):
+                break
+            package, offset = decoder.raw_decode(text, offset)
+            if not isinstance(package, dict):
+                raise ValueError("invalid Go package")
+            packages.append(package)
+        audit_module_assembly(packages)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise SystemExit("unproved native module assembly/header context")
+    for package in packages:
+        print(json.dumps(package, separators=(",", ":")))
+    raise SystemExit(0)
 elif args[0] == "go-verify":
     args = ["/opt/go/bin/go", "mod", "verify"]
 elif args[0] == "inventory":

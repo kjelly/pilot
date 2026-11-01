@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 9
+const ResolutionVersion = 10
 
 // Native Ansible get_all_plugin_loaders().subdir, with each loader's default
 // ~/.ansible/plugins and /usr/share/ansible/plugins suffix. shell_plugins is
