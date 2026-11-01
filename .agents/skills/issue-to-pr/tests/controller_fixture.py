@@ -19,17 +19,17 @@ def descriptor(path, raw):
 def add_controller(record):
     files=fixture_files()
     profile={key:hashlib.sha256(files[PROFILE+name]).hexdigest() for name,key in NAMES.items()}
-    native={"schema":"pilot-controller-probe/v1", "go":"go version go1.26.8 linux/amd64", "ansible":"2.21.5", "python":"3.14.8", "ansible_origin":"/usr/local/lib/python3.14/site-packages/ansible/__init__.py", "python_executable":"/usr/bin/python3.14", "config_file":"/opt/pilot-controller/ansible.cfg", "config_sha256":profile["config_sha256"], "collections":["/opt/pilot-controller/empty"], "collections_scan_sys_path":False, "roles":["/opt/pilot-controller/empty"], "sys_path":["/usr/local/lib64/python3.14/site-packages", "/usr/local/lib/python3.14/site-packages", "/usr/lib64/python314.zip", "/usr/lib64/python3.14", "/usr/lib64/python3.14/lib-dynload", "/usr/lib64/python3.14/site-packages", "/usr/lib/python3.14/site-packages"], "loaders":{}}
+    native={"uid":1000,"gid":1000,"user":"pilot-controller","group":"pilot-controller","ssh_identity":"ssh-config/v1","schema":"pilot-controller-probe/v2", "go":"go version go1.26.8 linux/amd64", "ansible":"2.21.5", "python":"3.14.8", "ansible_origin":"/usr/local/lib/python3.14/site-packages/ansible/__init__.py", "python_executable":"/usr/bin/python3.14", "config_file":"/opt/pilot-controller/ansible.cfg", "config_sha256":profile["config_sha256"], "collections":["/opt/pilot-controller/empty"], "collections_scan_sys_path":False, "roles":["/opt/pilot-controller/empty"], "sys_path":["/usr/local/lib64/python3.14/site-packages", "/usr/local/lib/python3.14/site-packages", "/usr/lib64/python314.zip", "/usr/lib64/python3.14", "/usr/lib64/python3.14/lib-dynload", "/usr/lib64/python3.14/site-packages", "/usr/lib/python3.14/site-packages"], "loaders":{}}
     for name in PLUGINS:
         paths=["/opt/pilot-controller/empty"]
         if name=="shell_plugins": paths=["shell_plugins"]
         if name=="doc_fragments": paths=["/tmp/controller/home/.ansible/plugins/doc_fragments","/usr/share/ansible/plugins/doc_fragments"]
         native["loaders"][name]={"config":paths,"paths":["$CANDIDATE/shell_plugins"] if name=="shell_plugins" else paths}
     digest=hashlib.sha256(json.dumps(native,sort_keys=True,separators=(",",":")).encode()).hexdigest()
-    proof={"schema":"pilot-controller/v1", "image_id":"sha256:"+"a"*64, "profile":profile, "native_probe":native, "inventory_kind":"pilot-rendered-ssh/v1", "steps":dict.fromkeys(STAGES,1), "build":{"go_version":"go1.26.8", "path":"github.com/kjelly/pilot/cmd/pilot", "module":"github.com/kjelly/pilot", "goos":"linux", "goarch":"amd64", "goamd64":"v1", "cgo":"0", "settings_sha256":"b"*64, "modules_sha256":"c"*64}}
+    proof={"schema":"pilot-controller/v2", "image_id":"sha256:"+"a"*64, "profile":profile, "native_probe":native, "inventory_kind":"pilot-rendered-ssh/v1", "steps":dict.fromkeys(STAGES,1), "build":{"go_version":"go1.26.8", "path":"github.com/kjelly/pilot/cmd/pilot", "module":"github.com/kjelly/pilot", "goos":"linux", "goarch":"amd64", "goamd64":"v1", "cgo":"0", "settings_sha256":"b"*64, "modules_sha256":"c"*64,"sources_sha256":"e"*64,"rebuilt_binary_sha256":"d"*64}}
     for key in ("inventory_sha256","rendered_inventory_sha256","binary_sha256"): proof[key]="d"*64
     proof.update(config_sha256=profile["config_sha256"],pre_probe_sha256=digest,post_probe_sha256=digest)
     record.update(controller=proof,pilot_binary={"sha256":"d"*64},steps=[{"name":name,"status":"pass"} for name in STAGES],verify=[{"verdict":"PASS","pass":1,"fail":0}])
-    record["closure"]["resolution_version"]=7
+    record["closure"]["resolution_version"]=8
     record["closure"]["files"].extend(descriptor(path,raw) for path,raw in files.items())
     return record

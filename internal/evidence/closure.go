@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 7
+const ResolutionVersion = 8
 
 // Native Ansible get_all_plugin_loaders().subdir, with each loader's default
 // ~/.ansible/plugins and /usr/share/ansible/plugins suffix. shell_plugins is
@@ -59,9 +59,9 @@ var ansiblePluginDirectories = []struct{ subdir, defaultSuffix string }{
 // the templates, files and scripts they ship, the vars files, the
 // verification specs, the contracts of the roles those specs declare, the
 // extra-vars files inside the repository, and ansible.cfg/requirements.yml
-// when present. Go code is not listed: the pilot binary's hash is recorded
-// separately and the gates prove Go changes through the pure-base-import
-// rule (.agents/skills/_shared/target-evidence-reuse.md).
+// when present. The pinned controller also binds the executed binary to a
+// reproducible rebuild and records its transitive Go source/embed closure.
+// Default ambient records retain unresolved controller context.
 type Closure struct {
 	ResolutionVersion int         `json:"resolution_version"`
 	Frozen            bool        `json:"frozen"` // pre-run closure matched the post-run inputs

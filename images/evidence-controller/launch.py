@@ -1,5 +1,7 @@
 """Fixed process boundary; no host environment or writable source inheritance."""
 import os
+import hashlib
+import subprocess
 import sys
 
 base = "/tmp/controller"
@@ -23,7 +25,7 @@ env = {
     "HOME": base + "/home",
     "TMPDIR": base + "/tmp",
     "LANG": "C.UTF-8",
-    "USER": "root",
+    "USER": "pilot-controller",
     "PYTHONNOUSERSITE": "1",
     "PYTHONSAFEPATH": "1",
     "PYTHONPATH": "/usr/local/lib64/python3.14/site-packages:/usr/local/lib/python3.14/site-packages",
@@ -40,6 +42,17 @@ if args[0] == "probe":
     args = ["/usr/bin/python3", "-P", "/opt/pilot-controller/probe.py"]
 elif args[0] == "pilot":
     args = ["/opt/pilot-bin/pilot", "--data-dir", base + "/data"] + args[1:] + ["--report-dir", base + "/reports"]
+elif args[0] == "go-rebuild":
+    output = base + "/pilot-rebuilt"
+    result = subprocess.run(["/opt/go/bin/go", "build", "-trimpath", "-buildvcs=false", "-mod=readonly", "-o", output, "./cmd/pilot"], env=env)
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    digest = hashlib.sha256()
+    with open(output, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024*1024), b""):
+            digest.update(chunk)
+    print(digest.hexdigest())
+    raise SystemExit(0)
 elif args[0] == "go-list":
     args = ["/opt/go/bin/go", "list", "-mod=readonly", "-deps", "-json", "./cmd/pilot"]
 elif args[0] == "go-verify":

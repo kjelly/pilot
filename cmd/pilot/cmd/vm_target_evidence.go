@@ -44,20 +44,21 @@ func addEvidenceFlags(c *cobra.Command) {
 // end. A nil session is valid and records nothing, so the chain code calls it
 // unconditionally.
 type evidenceSession struct {
-	mu            sync.Mutex
-	path          string
-	root          string
-	rec           *evidence.Record
-	outputs       map[string]string
-	stdoutOutputs map[string]string
-	playbooks     []string
-	specs         []string
-	extraArgs     []string
-	inputs        []string
-	sources       []evidence.SecretSource
-	skipped       []string
-	expected      []string
-	controller    *evidence.Controller
+	mu               sync.Mutex
+	path             string
+	root             string
+	rec              *evidence.Record
+	outputs          map[string]string
+	stdoutOutputs    map[string]string
+	playbooks        []string
+	specs            []string
+	extraArgs        []string
+	inputs           []string
+	sources          []evidence.SecretSource
+	skipped          []string
+	expected         []string
+	controller       *evidence.Controller
+	controllerOutput *strings.Builder
 }
 
 // newEvidenceSession returns nil when --evidence-record is unset.
@@ -117,12 +118,14 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inp
 		return nil, fmt.Errorf("freeze execution closure before run: %w", err)
 	}
 	var controller *evidence.Controller
+	var controllerOutput strings.Builder
+	var controllerMu sync.Mutex
 	if vtEvidenceController == "pinned" {
 		exe, err := os.Executable()
 		if err != nil {
 			return nil, err
 		}
-		controller, err = evidence.NewPinnedController(root, exe, os.Stderr)
+		controller, err = evidence.NewPinnedController(root, exe, evidenceCaptureWriter{&controllerMu, &controllerOutput, os.Stderr})
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +144,7 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inp
 		Tooling:     map[string]string{},
 	}
 	return &evidenceSession{path: path, root: root, rec: rec, outputs: map[string]string{}, stdoutOutputs: map[string]string{},
-		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps, controller: controller}, nil
+		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps, controller: controller, controllerOutput: &controllerOutput}, nil
 }
 
 // step runs fn with a writer that also captures the step's output, and
@@ -310,6 +313,9 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 	}
 	if r.Outcome != "invalid-inputs" {
 		r.Closure.Frozen = true
+	}
+	if s.controllerOutput != nil {
+		s.outputs["controller proof"] = s.controllerOutput.String()
 	}
 	r.Redaction = evidence.Redact(s.outputs, s.sources, s.skipped)
 	if err := evidence.SanitizeRecord(r, s.sources, s.root); err != nil {

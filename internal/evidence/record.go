@@ -213,7 +213,7 @@ func (r *Record) Markdown(previous []byte) ([]byte, error) {
 	if r.Closure == nil {
 		b.WriteString("Not computed.\n")
 	} else {
-		fmt.Fprintf(&b, "%d execution input files were discovered. Unresolved references below limit completeness. A gate compares their Git blob ids with HEAD; Go code is covered by the pilot binary hash above and the pure-base-import rule.\n\n| File | Mode | Git blob | SHA-256 | Note |\n|---|---|---|---|---|\n", len(r.Closure.Files))
+		fmt.Fprintf(&b, "%d execution input files were discovered. Unresolved references below limit completeness. A gate compares their Git blob ids with HEAD; Pinned-controller records bind the exact executed pilot binary to a reproducible rebuild and include transitive Go sources, package membership and embed inputs.\n\n| File | Mode | Git blob | SHA-256 | Note |\n|---|---|---|---|---|\n", len(r.Closure.Files))
 		for _, f := range r.Closure.Files {
 			note := ""
 			if f.Dynamic {

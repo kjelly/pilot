@@ -155,7 +155,7 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
             raise ValueError("controller proof: " + reason)
     digest = re.compile(r"[0-9a-f]{64}")
     proof = record.get("controller")
-    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v1", "missing current OCI proof")
+    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v2", "missing current OCI proof")
     require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof.get("image_id"))), "immutable image ID required")
     require(proof.get("inventory_kind") == "pilot-rendered-ssh/v1", "unsupported rendered inventory")
     for key in ("config_sha256", "inventory_sha256", "rendered_inventory_sha256", "binary_sha256", "pre_probe_sha256", "post_probe_sha256"):
@@ -179,7 +179,7 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
     recipe=read_profile(CONTROLLER_PROFILE + "Dockerfile")
     require(recipe.startswith(("FROM "+lock["go_base"]+" AS go_toolchain\n").encode()) and ("\nFROM "+lock["base"]+"\n").encode() in recipe, "recipe/base lock differs")
     native = proof.get("native_probe")
-    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v1", "missing native origin/config probe")
+    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v2", "missing native origin/config probe")
     raw = json.dumps(native, sort_keys=True, separators=(",", ":")).encode()
     require(hashlib.sha256(raw).hexdigest() == proof["pre_probe_sha256"], "native probe digest differs")
     require(native.get("go")=="go version go1.26.8 linux/amd64" and native.get("ansible") == lock["ansible"] and native.get("python") == lock["python"] and
@@ -187,6 +187,7 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
             native.get("python_executable") == "/usr/bin/python3.14" and
             native.get("config_file") == "/opt/pilot-controller/ansible.cfg" and
             native.get("config_sha256") == proof["config_sha256"], "native effective origins/config differ")
+    require(type(native.get("uid")) is int and native["uid"] == 1000 and type(native.get("gid")) is int and native["gid"] == 1000 and native.get("user") == "pilot-controller" and native.get("group") == "pilot-controller" and native.get("ssh_identity") == "ssh-config/v1", "unproved native NSS/OpenSSH identity")
     require(native.get("collections_scan_sys_path") is False and
             native.get("collections") == ["/opt/pilot-controller/empty"] and
             native.get("roles") == ["/opt/pilot-controller/empty"], "uncontrolled collection/role discovery")
@@ -205,7 +206,8 @@ def validate_controller(record: dict, files: list, read_profile) -> None:
     build=proof.get("build",{})
     require(isinstance(build,dict) and build.get("go_version")=="go1.26.8" and build.get("path")=="github.com/kjelly/pilot/cmd/pilot" and build.get("module")=="github.com/kjelly/pilot", "unproved Go binary identity")
     require(all(build.get(key)==value for key,value in {"goos":"linux","goarch":"amd64","goamd64":"v1","cgo":"0"}.items()), "unsupported Go build context")
-    require(all(isinstance(build.get(key),str) and digest.fullmatch(build[key]) for key in ("settings_sha256","modules_sha256")), "missing Go build/module fingerprints")
+    require(all(isinstance(build.get(key),str) and digest.fullmatch(build[key]) for key in ("settings_sha256","modules_sha256","sources_sha256","rebuilt_binary_sha256")), "missing Go build/module fingerprints")
+    require(build["rebuilt_binary_sha256"] == proof["binary_sha256"], "executed binary differs from reproducible source rebuild")
     require(all(path in scoped for path in ("go.mod","go.sum","cmd/pilot/main.go")), "compiled Go source closure missing")
     counts = proof.get("steps", {})
     require(isinstance(counts, dict) and set(counts) == set(CONTROLLER_STAGES), "routed stage identities missing")
@@ -359,7 +361,7 @@ class Context:
             closure = record.get("closure")
             if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
                 raise ValueError("closure has unresolved or external inputs")
-            if closure.get("resolution_version") != 7 or closure.get("frozen") is not True:
+            if closure.get("resolution_version") != 8 or closure.get("frozen") is not True:
                 raise ValueError("closure needs current resolution version and frozen pre-run inputs")
             files, patterns = closure.get("files"), closure.get("patterns")
             if not isinstance(files, list) or not files or not isinstance(patterns, list):
