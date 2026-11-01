@@ -81,7 +81,7 @@ committed evidence summary。
   YAML 及自動載入的 `group_vars`/`host_vars`。無法靜態證明的 expression、動態路徑、
   Jinja include/import、自訂或 ambient Ansible configuration 與 symlink 都列為 unresolved；
   inline extra-vars 裡的 Jinja/lookup/query/q 也以不含 payload 的固定標籤列為 unresolved。
-  自動 reuse 的 positive subset 刻意只保留 direct copy 的已知 literal argument mapping，
+  task dispatch 的 positive subset 刻意只保留 direct copy 的已知 literal argument mapping，
   以及 debug mapping 的 literal scalar msg（可選 literal integer verbosity）。debug.var、
   scalar/free-form args 與未知 key 一律 unresolved；template 不論 delimiter/header 一律
   opaque，但仍記 source hash。assert/set_fact/fail/meta 與其他 actions 同樣拒絕自動 reuse。
@@ -94,7 +94,13 @@ committed evidence summary。
   任何 Jinja interpolation 與非 literal boolean 的 when/until/changed_when/failed_when/
   assert expression 都以 `unsupported expression` 拒絕自動 reuse；不假設任意 filter/test
   沒有 filesystem input。明示的 ansible_* dispatch context variables 同樣列為 unresolved。
-  不嘗試執行 Jinja。`resolution_version: 5` 區分這個保守解析邊界。
+  含 backslash escape 的 key=value inline payload 也不解譯，改以固定標籤 unresolved；JSON/YAML mapping 仍由正式 parser 處理。
+  repository 的所有 native plugin directory（含 connection/become/strategy/module_utils 等）
+  都記 membership pattern，present code hash 後仍 unresolved。外部 default plugin roots、
+  collection/Python discovery paths 沒有受控 fingerprint，故每份 record 另標固定
+  `ambient Ansible plugin discovery` unresolved；literal copy/debug 本身不代表可沿用。
+  目前產生的 record 因此不能自動 reuse，exact-candidate/evidence-only 驗收仍照常。
+  不嘗試執行 Jinja。`resolution_version: 6` 區分這個保守解析邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
   Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
@@ -104,12 +110,22 @@ committed evidence summary。
   command 隱藏整個 inline payload，`@file` reference 保留。已知 secret 也從 persisted
   metadata/error note 中遮蔽。stdout/stderr 都擷取掃描，並維持原有輸出 channel；
   secret container 下的 scalar（含 numeric/bool）保留原始及 canonical spelling，
+  plain YAML 1.1 yes/no/on/off 另掃描 Ansible 的 boolean spelling，quoted/explicit string 保持原值；未證明的 float/timestamp/null/tag 與 sexagesimal
+  scalar 明示 payload-free skipped，僅保留已知候選值的部分偵測，
   並掃描標準 JSON 對 quote、backslash、換行等字元的 escaping（不推測任意編碼）。
   secret 的 `/`、`~` 等前綴不作為豁免，只有明示 `*_file` key 視為檔案 reference。
   YAML secret traversal 有 node/depth budget 與 cycle guard；超限時丟棄該 input 的
   部分掃描結果，僅留下不含 payload 的 skipped marker，普通 alias 仍支援。
   不能解析的 inline syntax、templated secret 的 runtime 結果與加密的 vault 檔列在
-  `skipped`。命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
+  `skipped`。key=value 的 backslash escape syntax 全部標 skipped，不套用 shell escape 規則；
+  人類摘要在有未掃描 input 時明示 INCOMPLETE，不把零 hit 說成完整 clean。
+  命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
+
+record 與 `LATEST.md` 由同一個 directory process lock 序列化發布。覆寫目前被
+`LATEST.md` 指向的 record 前先移除並同步 pointer，再以同目錄 temporary file、fsync 與
+atomic rename 替換 record；只有成功且 record 已 durable 時，才原子發布新的 pointer。
+同路徑失敗會留下失敗 record 而沒有 LATEST；不同路徑失敗保留原本成功 pointer。
+中斷或寫入失敗可以留下沒有 pointer 的狀態，不能留下指向已被覆寫失敗 record 的舊成功宣告。
 
 操作者只寫兩段：`## Failure paths and arms (fill in)`（鏈外另外跑的失敗路徑／對照
 arm：注入的故障、預期 rc、復原後狀態、artifact）與 `## Not covered / limits (fill in)`。
@@ -162,5 +178,5 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 5`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+未解析引用、外部執行檔案、缺少 `resolution_version: 6`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。

@@ -274,3 +274,65 @@ password: [*common, *common]
 		}
 	})
 }
+
+func TestSanitizeRecordPreservesSchemaAndRedactsShortSecretData(t *testing.T) {
+	sources := []SecretSource{{Key: "secret", value: "no"}, {Key: "other", value: "false"}, {Key: "fingerprint-part", value: "ab"}}
+	rec := &Record{Schema: Schema, Feature: "no", Outcome: "success", Error: "false", Operator: "no", Steps: []Step{{Name: "L4", Note: "no false"}}, Candidate: Candidate{Commit: strings.Repeat("ab", 20), Tree: strings.Repeat("ab", 20)}, PilotBinary: Binary{Path: "no", SHA256: strings.Repeat("ab", 32)}, Targets: []Target{{BaseImageSHA256: "no"}}, Tooling: map[string]string{"no": "false"}, Inventory: Inventory{Groups: map[string][]string{"no": {"false"}}}}
+	if err := SanitizeRecord(rec, sources); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Schema != Schema || rec.Steps[0].Name != "L4" || rec.Steps[0].Note != "<redacted> <redacted>" {
+		t.Fatalf("schema field lost or note secret survived: %+v", rec)
+	}
+	if rec.Feature != "<redacted>" || rec.Error != "<redacted>" || rec.Operator != "<redacted>" || rec.PilotBinary.Path != "<redacted>" {
+		t.Fatalf("metadata survived: %+v", rec)
+	}
+	if rec.Candidate.Commit != strings.Repeat("ab", 20) || rec.Candidate.Tree != strings.Repeat("ab", 20) || rec.PilotBinary.SHA256 != strings.Repeat("ab", 32) {
+		t.Fatal("fingerprint identity changed")
+	}
+	if rec.Targets[0].BaseImageSHA256 != "<redacted>" {
+		t.Fatal("arbitrary string under fingerprint field escaped sanitization")
+	}
+	if rec.Tooling["<redacted>"] != "<redacted>" || rec.Inventory.Groups["<redacted>"][0] != "<redacted>" {
+		t.Fatal("dynamic map key/value escaped sanitization")
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"note":`) {
+		t.Fatalf("schema key renamed: %s", raw)
+	}
+}
+
+func TestSecretBackslashPayloadsRefuseAllForwardedForms(t *testing.T) {
+	root := t.TempDir()
+	for _, payload := range []string{`api_token=Sentinel\Password225`, `api_token='Sentinel\nPassword225'`, `api_token="Sentinel\\Password225" other=literal`} {
+		for _, args := range [][]string{{"-e", payload}, {"-e" + payload}, {"-e=" + payload}, {"--extra-vars", payload}, {"--extra-vars=" + payload}} {
+			sources, skipped := SecretSources(root, args)
+			if len(sources) != 0 || len(skipped) != 1 || skipped[0] != "inline extra-vars (backslash escape syntax not scanned)" {
+				t.Fatalf("unsupported escape syntax falsely scanned as complete: sources=%d skipped=%v", len(sources), skipped)
+			}
+			closure, err := ComputeClosure(ClosureInput{Root: root, ExtraArgs: args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, ref := range closure.Unresolved {
+				if ref.From == "extra-vars" && ref.Ref == "inline extra-vars expression" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("unsupported escape grammar missing explicit inline closure refusal")
+			}
+			raw, err := json.Marshal(closure)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "Sentinel") || strings.Contains(RedactCommandLine(args), "Sentinel") {
+				t.Fatal("unsupported escape payload leaked")
+			}
+		}
+	}
+}

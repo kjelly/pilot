@@ -179,10 +179,10 @@ func TestClosureFileExpressionsNeverDisappear(t *testing.T) {
 				}
 			}
 			if tc.unresolved {
-				if len(c.Unresolved) == 0 {
+				if len(nonAmbientReferences(c)) == 0 {
 					t.Fatalf("unsupported reading expression was silently omitted: %+v", c)
 				}
-			} else if _, ok := closurePaths(c)["files/input.txt"]; !ok || len(c.Unresolved) != 0 {
+			} else if _, ok := closurePaths(c)["files/input.txt"]; !ok || len(nonAmbientReferences(c)) != 0 {
 				t.Fatalf("literal input was not captured: %+v", c)
 			}
 		})
@@ -245,7 +245,7 @@ func TestClosureReadsImplicitWhenExpressions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Unresolved) == 0 {
+	if len(nonAmbientReferences(c)) == 0 {
 		t.Fatalf("implicit Ansible expression silently omitted: %+v", c)
 	}
 }
@@ -317,7 +317,7 @@ func TestClosureInlineExpressionsCannotClaimCompleteResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(closure.Unresolved) != 0 {
+	if len(nonAmbientReferences(closure)) != 0 {
 		t.Fatalf("plain literal inline vars unnecessarily unresolved: %+v", closure)
 	}
 }
@@ -373,7 +373,7 @@ func TestClosureDispatchHasAnExplicitSafeSubset(t *testing.T) {
 					t.Fatalf("supported reader source omitted: %+v", closure)
 				}
 			}
-			if tc.unresolved != (len(closure.Unresolved) > 0) {
+			if tc.unresolved != (len(nonAmbientReferences(closure)) > 0) {
 				t.Fatalf("unsupported dispatch omitted input without refusal: %+v", closure)
 			}
 			raw, _ := json.Marshal(closure)
@@ -397,7 +397,7 @@ func TestClosureCustomCodeAndForwardedDispatchOptionsRefuseReuse(t *testing.T) {
 		if _, ok := closurePaths(closure)["action_plugins/reader.py"]; !ok {
 			t.Fatal("custom code hash omitted")
 		}
-		if len(closure.Unresolved) == 0 {
+		if len(nonAmbientReferences(closure)) == 0 {
 			t.Fatalf("custom code omitted dependency claims complete closure: %+v", closure)
 		}
 	})
@@ -409,7 +409,7 @@ func TestClosureCustomCodeAndForwardedDispatchOptionsRefuseReuse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(closure.Unresolved) != 1 || closure.Unresolved[0].Ref != "forwarded Ansible options" {
+			if len(nonAmbientReferences(closure)) != 1 || nonAmbientReferences(closure)[0].Ref != "forwarded Ansible options" {
 				t.Fatalf("forwarded dispatch path omitted: %+v", closure)
 			}
 		})
@@ -473,7 +473,7 @@ func TestClosureNonliteralExpressionsCannotClaimFileIndependence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(closure.Unresolved) != 0 {
+	if len(nonAmbientReferences(closure)) != 0 {
 		t.Fatalf("literal booleans should remain supported: %+v", closure)
 	}
 	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - assert: {that: [\"'payload.txt' is file\"]}\n")
@@ -481,7 +481,7 @@ func TestClosureNonliteralExpressionsCannotClaimFileIndependence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(closure.Unresolved) == 0 {
+	if len(nonAmbientReferences(closure)) == 0 {
 		t.Fatal("assert expression was silently ignored")
 	}
 }
@@ -494,7 +494,7 @@ func TestClosureInlineDispatchVariablesRefuseReuse(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(closure.Unresolved) == 0 {
+		if len(nonAmbientReferences(closure)) == 0 {
 			t.Fatalf("inline context variables were assumed file independent: %+v", closure)
 		}
 		raw, _ := json.Marshal(closure)
@@ -504,7 +504,7 @@ func TestClosureInlineDispatchVariablesRefuseReuse(t *testing.T) {
 	}
 }
 
-func TestClosureOnlyLiteralCopyAndDebugArgumentsAreReusable(t *testing.T) {
+func TestClosureOnlyLiteralCopyAndDebugArgumentsHaveProvedDispatch(t *testing.T) {
 	cases := []struct {
 		name, task string
 		reusable   bool
@@ -536,7 +536,7 @@ func TestClosureOnlyLiteralCopyAndDebugArgumentsAreReusable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.reusable != (len(closure.Unresolved) == 0) {
+			if tc.reusable != onlyAmbientDiscoveryUnresolved(t, closure) {
 				t.Fatalf("implicit action argument cannot claim literal-only closure: %+v", closure)
 			}
 			if tc.name == "literal copy" {
@@ -596,9 +596,135 @@ func TestClosureTaskMetadataRequiresLiteralSemanticTypes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.reusable != (len(closure.Unresolved) == 0) {
+			if tc.reusable != onlyAmbientDiscoveryUnresolved(t, closure) {
 				t.Fatalf("task metadata semantic type was not proved: %+v", closure)
 			}
 		})
+	}
+}
+
+func TestClosureAllNativePluginDirectoriesRefuseAndTrackMembership(t *testing.T) {
+	for _, plugin := range ansiblePluginDirectories {
+		t.Run(plugin.subdir, func(t *testing.T) {
+			root := t.TempDir()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			pb := "playbooks/apply/literal.yml"
+			full := filepath.Join(root, pb)
+			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("- hosts: all\n  gather_facts: false\n  tasks:\n    - debug:\n        msg: literal\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			input := ClosureInput{Root: root, Playbooks: []string{pb}}
+			before, err := ComputeClosure(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, base := range []string{"", "playbooks/apply"} {
+				expected := filepath.ToSlash(filepath.Join(base, plugin.subdir)) + "/**"
+				found := false
+				for _, pattern := range before.Patterns {
+					if pattern == expected {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("native plugin discovery missing membership pattern %s", expected)
+				}
+			}
+			file := filepath.Join("playbooks/apply", plugin.subdir, "override.py")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, file)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, file), []byte("# arbitrary controller input reader\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			after, err := ComputeClosure(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := closurePaths(after)[filepath.ToSlash(file)]; !ok {
+				t.Fatalf("native plugin discovery omitted code %s", file)
+			}
+			found := false
+			for _, u := range after.Unresolved {
+				if u.Ref == "custom Ansible code" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("native plugin discovery falsely complete despite custom controller code")
+			}
+		})
+	}
+}
+
+func TestClosureAmbientPluginDefaultsRefuseReuse(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".ansible/plugins/connection")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ssh.py"), []byte("# custom\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := ComputeClosure(ClosureInput{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, u := range c.Unresolved {
+		if u.Ref == "ambient Ansible plugin code" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("default external controller plugin input falsely reusable")
+	}
+}
+
+// Proves only the literal dispatch subset. Ambient controller discovery is
+// intentionally still unresolved, so no generated record claims complete reuse.
+func onlyAmbientDiscoveryUnresolved(t *testing.T, c *Closure) bool {
+	t.Helper()
+	ambient := false
+	other := false
+	for _, u := range c.Unresolved {
+		if u.From == "environment" && u.Ref == "ambient Ansible plugin discovery" {
+			ambient = true
+		} else {
+			other = true
+		}
+	}
+	if !ambient {
+		t.Fatal("unfingerprinted ambient discovery was falsely claimed complete")
+	}
+	return !other
+}
+
+func nonAmbientReferences(c *Closure) []Reference {
+	var out []Reference
+	for _, u := range c.Unresolved {
+		if u.From != "environment" || u.Ref != "ambient Ansible plugin discovery" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func TestClosureUnverifiedAmbientDiscoveryAlwaysRefusesReuse(t *testing.T) {
+	c, err := ComputeClosure(ClosureInput{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onlyAmbientDiscoveryUnresolved(t, c) {
+		t.Fatalf("unexpected extra refusal: %+v", c.Unresolved)
+	}
+	if len(c.Unresolved) == 0 {
+		t.Fatal("uncontrolled ambient plugin discovery falsely reusable")
 	}
 }

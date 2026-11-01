@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -211,7 +212,7 @@ func (r *Record) Markdown(previous []byte) ([]byte, error) {
 	if r.Closure == nil {
 		b.WriteString("Not computed.\n")
 	} else {
-		fmt.Fprintf(&b, "%d files decided what this run did. A gate compares their Git blob ids with HEAD; Go code is covered by the pilot binary hash above and the pure-base-import rule.\n\n| File | Mode | Git blob | SHA-256 | Note |\n|---|---|---|---|---|\n", len(r.Closure.Files))
+		fmt.Fprintf(&b, "%d execution input files were discovered. Unresolved references below limit completeness. A gate compares their Git blob ids with HEAD; Go code is covered by the pilot binary hash above and the pure-base-import rule.\n\n| File | Mode | Git blob | SHA-256 | Note |\n|---|---|---|---|---|\n", len(r.Closure.Files))
 		for _, f := range r.Closure.Files {
 			note := ""
 			if f.Dynamic {
@@ -239,9 +240,17 @@ func (r *Record) Markdown(previous []byte) ([]byte, error) {
 		fmt.Fprintf(&b, " (%s)", strings.Join(backtick(r.Redaction.Keys), ", "))
 	}
 	if len(r.Redaction.Hits) == 0 {
-		b.WriteString(": no hit.\n")
+		if len(r.Redaction.Skipped) > 0 {
+			b.WriteString(": **INCOMPLETE**; some supplied inputs were not scanned.\n")
+		} else {
+			b.WriteString(": no hit among scanned values.\n")
+		}
 	} else {
-		b.WriteString(": **HITS**, the raw output must not be committed:\n\n")
+		if len(r.Redaction.Skipped) > 0 {
+			b.WriteString(": **HITS**; scan **INCOMPLETE**, the raw output must not be committed:\n\n")
+		} else {
+			b.WriteString(": **HITS**, the raw output must not be committed:\n\n")
+		}
 		for _, h := range r.Redaction.Hits {
 			fmt.Fprintf(&b, "- step %s: `%s` × %d\n", h.Step, h.Key, h.Count)
 		}
@@ -336,10 +345,39 @@ func ParseMachineBlock(doc []byte) (*Record, error) {
 	return &r, nil
 }
 
-// WriteFile renders the record over any existing file at path (carrying the
-// operator sections) and writes it atomically.
-func (r *Record) WriteFile(path string) error {
-	previous, err := os.ReadFile(path)
+// WriteFile publishes a record and its success pointer as one locked operation.
+// Kept as the original API name; callers must not perform a separate update.
+func (r *Record) WriteFile(path string) error { return r.Publish(path) }
+
+type publicationOps struct {
+	atomicWrite   func(string, []byte) error
+	syncDirectory func(*os.File) error
+}
+
+func defaultPublicationOps() publicationOps {
+	return publicationOps{atomicWrite: atomicEvidenceWrite, syncDirectory: func(dir *os.File) error { return dir.Sync() }}
+}
+
+// Publish serializes all record/LATEST changes in the directory. The pointer is
+// removed before replacing the advertised record, and success is advertised
+// only after its complete record is durable. Crashes can leave no pointer, never
+// an old success pointer that now resolves to a different or failed run.
+func (r *Record) Publish(path string) error { return r.publish(path, defaultPublicationOps()) }
+
+func (r *Record) publish(path string, ops publicationOps) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if filepath.Base(abs) == "LATEST.md" {
+		return fmt.Errorf("LATEST.md is reserved for the evidence pointer")
+	}
+	dir, err := lockEvidenceDirectory(filepath.Dir(abs))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	previous, err := os.ReadFile(abs)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -347,15 +385,84 @@ func (r *Record) WriteFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	latestPath := filepath.Join(filepath.Dir(abs), "LATEST.md")
+	advertised, err := latestAdvertises(latestPath, abs)
+	if err != nil {
 		return err
 	}
+	if advertised {
+		if err := os.Remove(latestPath); err != nil {
+			return fmt.Errorf("invalidate evidence pointer: %w", err)
+		}
+		if err := ops.syncDirectory(dir); err != nil {
+			return fmt.Errorf("sync invalidated evidence pointer: %w", err)
+		}
+	}
+	if err := ops.atomicWrite(abs, out); err != nil {
+		return fmt.Errorf("replace evidence record: %w", err)
+	}
+	if err := ops.syncDirectory(dir); err != nil {
+		return fmt.Errorf("sync evidence record: %w", err)
+	}
+	if r.Outcome != "success" {
+		return nil
+	}
+	if err := ops.atomicWrite(latestPath, latestMarkdown(filepath.Dir(abs), r, abs)); err != nil {
+		return fmt.Errorf("publish evidence pointer: %w", err)
+	}
+	return ops.syncDirectory(dir)
+}
+
+func lockEvidenceDirectory(path string) (*os.File, error) {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return nil, err
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	// Lock the directory inode itself: no tracked sidecar and the same lock for
+	// symlink spellings of this directory. Closing releases it, including on exit.
+	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX); err != nil {
+		dir.Close()
+		return nil, fmt.Errorf("lock evidence directory: %w", err)
+	}
+	return dir, nil
+}
+
+var latestRecordLink = regexp.MustCompile(`(?m)^\| \[([^\]]+)\]\(([^)]+)\) \|`)
+
+func latestAdvertises(latestPath, recordPath string) (bool, error) {
+	raw, err := os.ReadFile(latestPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	match := latestRecordLink.FindSubmatch(raw)
+	if len(match) != 3 {
+		return false, fmt.Errorf("cannot identify the record advertised by LATEST.md; refusing to overwrite evidence")
+	}
+	target := filepath.Clean(filepath.Join(filepath.Dir(latestPath), string(match[2])))
+	return target == filepath.Clean(recordPath), nil
+}
+
+func atomicEvidenceWrite(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(out); err != nil {
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -365,9 +472,52 @@ func (r *Record) WriteFile(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// UpdateLatest rewrites <dir>/LATEST.md so the spec and runbook can link to
-// one stable, evidence-only file that names the current record.
+// UpdateLatest is a compatibility entry point. It cannot advertise an obsolete
+// in-memory record after another publisher replaced the path. New callers use
+// Publish, which owns record replacement and pointer publication together.
 func UpdateLatest(dir string, r *Record, recordPath string) error {
+	abs, err := filepath.Abs(recordPath)
+	if err != nil {
+		return err
+	}
+	directory, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if filepath.Dir(abs) != directory {
+		return fmt.Errorf("evidence pointer and record must share a directory")
+	}
+	lock, err := lockEvidenceDirectory(directory)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	current, err := ParseMachineBlock(raw)
+	if err != nil {
+		return err
+	}
+	expected, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	actual, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	if r.Outcome != "success" || !bytes.Equal(expected, actual) {
+		return fmt.Errorf("record changed or is not successful; refusing stale evidence pointer")
+	}
+	if err := atomicEvidenceWrite(filepath.Join(directory, "LATEST.md"), latestMarkdown(directory, r, abs)); err != nil {
+		return err
+	}
+	return lock.Sync()
+}
+
+func latestMarkdown(dir string, r *Record, recordPath string) []byte {
 	rel, err := filepath.Rel(dir, recordPath)
 	if err != nil {
 		rel = filepath.Base(recordPath)
@@ -385,7 +535,7 @@ func UpdateLatest(dir string, r *Record, recordPath string) error {
 	}
 	fmt.Fprintf(&b, "| [%s](%s) | `%s` | %s | %s | %s |\n\n", rel, rel, orUnknown(r.Candidate.Commit), r.Outcome, r.FinishedAt.UTC().Format("2006-01-02 15:04"), verify)
 	fmt.Fprintf(&b, "Written by `%s`. Specs and runbooks link here; the record above is rewritten in place for each candidate of a change, and `git log -- %s` is the history.\n", r.GeneratedBy, filepath.ToSlash(relOrSelf(dir)))
-	return os.WriteFile(filepath.Join(dir, "LATEST.md"), b.Bytes(), 0o644)
+	return b.Bytes()
 }
 
 func relOrSelf(dir string) string {
