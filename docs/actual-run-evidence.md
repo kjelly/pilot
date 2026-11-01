@@ -80,7 +80,8 @@ committed evidence summary。
   resolver 也掃描 play vars、載入的 vars/template 內的 `lookup`/`query`，並納入 topology
   YAML 及自動載入的 `group_vars`/`host_vars`。無法靜態證明的 expression、動態路徑、
   Jinja include/import、自訂或 ambient Ansible configuration 與 symlink 都列為 unresolved；
-  不嘗試執行 Jinja。`resolution_version: 2` 區分這個保守解析邊界。
+  inline extra-vars 裡的 Jinja/lookup/query/q 也以不含 payload 的固定標籤列為 unresolved。
+  不嘗試執行 Jinja。`resolution_version: 3` 區分這個保守解析邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
   Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
@@ -88,7 +89,11 @@ committed evidence summary。
 - `redaction`：掃描每個步驟擷取的輸出，找 `-e @file`（明文 YAML）裡 secret 命名的
   key 與 inline extra-vars（含多個 key=value、JSON 與 compact `-e`）的 secret 值；
   command 隱藏整個 inline payload，`@file` reference 保留。已知 secret 也從 persisted
-  metadata/error note 中遮蔽。不能解析的 inline syntax 與加密的 vault 檔列在
+  metadata/error note 中遮蔽。stdout/stderr 都擷取掃描，並維持原有輸出 channel；
+  secret container 下的 scalar（含 numeric/bool）保留原始及 canonical spelling，
+  並掃描標準 JSON 對 quote、backslash、換行等字元的 escaping（不推測任意編碼）。
+  secret 的 `/`、`~` 等前綴不作為豁免，只有明示 `*_file` key 視為檔案 reference。
+  不能解析的 inline syntax、templated secret 的 runtime 結果與加密的 vault 檔列在
   `skipped`。命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
 
 操作者只寫兩段：`## Failure paths and arms (fill in)`（鏈外另外跑的失敗路徑／對照
@@ -142,5 +147,5 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 2`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+未解析引用、外部執行檔案、缺少 `resolution_version: 3`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。

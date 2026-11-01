@@ -42,18 +42,19 @@ func addEvidenceFlags(c *cobra.Command) {
 // end. A nil session is valid and records nothing, so the chain code calls it
 // unconditionally.
 type evidenceSession struct {
-	mu        sync.Mutex
-	path      string
-	root      string
-	rec       *evidence.Record
-	outputs   map[string]string
-	playbooks []string
-	specs     []string
-	extraArgs []string
-	inputs    []string
-	sources   []evidence.SecretSource
-	skipped   []string
-	expected  []string
+	mu            sync.Mutex
+	path          string
+	root          string
+	rec           *evidence.Record
+	outputs       map[string]string
+	stdoutOutputs map[string]string
+	playbooks     []string
+	specs         []string
+	extraArgs     []string
+	inputs        []string
+	sources       []evidence.SecretSource
+	skipped       []string
+	expected      []string
 }
 
 // newEvidenceSession returns nil when --evidence-record is unset.
@@ -119,28 +120,51 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inp
 		Candidate:   candidate,
 		Tooling:     map[string]string{},
 	}
-	return &evidenceSession{path: path, root: root, rec: rec, outputs: map[string]string{},
+	return &evidenceSession{path: path, root: root, rec: rec, outputs: map[string]string{}, stdoutOutputs: map[string]string{},
 		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps}, nil
 }
 
 // step runs fn with a writer that also captures the step's output, and
 // records the step's status and duration. With a nil session it just runs fn.
 func (s *evidenceSession) step(name string, out io.Writer, fn func(io.Writer) error) error {
+	return s.stepStreams(name, out, io.Discard, func(stdout, _ io.Writer) error { return fn(stdout) })
+}
+
+type evidenceCaptureWriter struct {
+	mu      *sync.Mutex
+	capture *strings.Builder
+	output  io.Writer
+}
+
+func (w evidenceCaptureWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// stdout and stderr copy concurrently in os/exec. Serialize both the shared
+	// capture and downstream destinations, preserving their distinct channels.
+	w.capture.Write(p)
+	return w.output.Write(p)
+}
+
+func (s *evidenceSession) stepStreams(name string, stdout, stderr io.Writer, fn func(io.Writer, io.Writer) error) error {
 	if s == nil {
-		return fn(out)
+		return fn(stdout, stderr)
 	}
-	var buf strings.Builder
+	var stdoutBuf, stderrBuf strings.Builder
+	var captureMu sync.Mutex
 	start := time.Now()
-	err := fn(io.MultiWriter(out, &buf))
+	err := fn(evidenceCaptureWriter{&captureMu, &stdoutBuf, stdout}, evidenceCaptureWriter{&captureMu, &stderrBuf, stderr})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.outputs[name] += buf.String()
+	// Scan contiguous per-channel bytes: interleaving stderr must not split a
+	// secret emitted across multiple stdout writes (or vice versa).
+	s.outputs[name] += stdoutBuf.String() + "\n" + stderrBuf.String()
+	s.stdoutOutputs[name] += stdoutBuf.String()
 	st := evidence.Step{Name: name, Status: "pass", StartedAt: start.UTC(), DurationSeconds: time.Since(start).Seconds()}
 	if err != nil {
 		st.Status = "fail"
 		st.Note = firstLine(err.Error())
 	}
-	if recap, ok := evidence.ParseRecap(buf.String()); ok {
+	if recap, ok := evidence.ParseRecap(stdoutBuf.String()); ok {
 		st.Recap = recap
 	}
 	s.rec.Steps = append(s.rec.Steps, st)
@@ -155,6 +179,16 @@ func (s *evidenceSession) output(name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.outputs[name]
+}
+
+// stdoutOutput is used only for semantic parsers; stderr is scanned separately.
+func (s *evidenceSession) stdoutOutput(name string) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stdoutOutputs[name]
 }
 
 // verify records one `pilot verify` run from its captured output.
@@ -284,9 +318,13 @@ func shortSHA(s string) string {
 
 // Include semantic validation in the recorded step: rc=0 alone is insufficient.
 func runRecordedIdempotency(sess *evidenceSession, out io.Writer, run func(io.Writer) error) error {
-	return sess.step("L6 idempotency", out, func(w io.Writer) error {
+	return runRecordedIdempotencyStreams(sess, out, io.Discard, func(stdout, _ io.Writer) error { return run(stdout) })
+}
+
+func runRecordedIdempotencyStreams(sess *evidenceSession, out, errOut io.Writer, run func(io.Writer, io.Writer) error) error {
+	return sess.stepStreams("L6 idempotency", out, errOut, func(w, ew io.Writer) error {
 		var captured strings.Builder
-		if err := run(io.MultiWriter(w, &captured)); err != nil {
+		if err := run(io.MultiWriter(w, &captured), ew); err != nil {
 			return fmt.Errorf("idempotency run failed: %w", err)
 		}
 		changed, ok := idempotencyChangedCount(captured.String())

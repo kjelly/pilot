@@ -35,7 +35,7 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
-const ResolutionVersion = 2
+const ResolutionVersion = 3
 
 // Closure is the set of repository files whose content decided what the run
 // did: the playbooks, every statically or dynamically included task file,
@@ -153,6 +153,17 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			if _, err := os.Stat(contract); err == nil {
 				r.addPath(contract, "", false, sp)
 			}
+		}
+	}
+	// Extra-vars values are lazy Jinja expressions too. Without evaluating Jinja,
+	// the resolver cannot know their runtime file dependencies. Never serialize
+	// the inline payload: it can contain secret literals or lookup arguments.
+	for _, payload := range extraVarsPayloads(in.ExtraArgs) {
+		if strings.HasPrefix(payload, "@") {
+			continue
+		}
+		if inlineVarsNeedRuntimeResolution(payload) {
+			r.unresolved = append(r.unresolved, Reference{From: "extra-vars", Ref: "inline extra-vars expression", Reason: "inline templating or lookup/query/q requires runtime resolution"})
 		}
 	}
 	for _, f := range extraVarsFiles(in.ExtraArgs) {
@@ -649,4 +660,48 @@ func (r *resolver) resolveRef(from, ref, kind, fileDir, playbookDir string) []re
 	}
 	r.unresolved = append(r.unresolved, Reference{From: from, Ref: ref, Reason: reason})
 	return nil
+}
+
+// Inspect decoded scalar values as well: JSON Unicode escapes and quoted
+// assignments must not hide a lazy Jinja expression from the closure boundary.
+func inlineVarsNeedRuntimeResolution(payload string) bool {
+	isExpression := func(value string) bool {
+		return strings.Contains(value, "{{") || strings.Contains(value, "{%") || lookupCallRe.MatchString(value)
+	}
+	if isExpression(payload) {
+		return true
+	}
+	if strings.HasPrefix(strings.TrimSpace(payload), "{") {
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(payload), &doc); err != nil {
+			return true
+		}
+		var walk func(*yaml.Node) bool
+		walk = func(node *yaml.Node) bool {
+			if node.Kind == yaml.AliasNode {
+				return true
+			}
+			if node.Kind == yaml.ScalarNode && isExpression(node.Value) {
+				return true
+			}
+			for _, child := range node.Content {
+				if walk(child) {
+					return true
+				}
+			}
+			return false
+		}
+		return walk(&doc)
+	}
+	fields, ok := splitInlineVars(payload)
+	if !ok {
+		return true
+	}
+	for _, field := range fields {
+		_, value, _ := strings.Cut(field, "=")
+		if isExpression(value) {
+			return true
+		}
+	}
+	return false
 }

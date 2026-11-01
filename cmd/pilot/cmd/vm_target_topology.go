@@ -667,8 +667,8 @@ func runTopologySyntaxCheck(cmd *cobra.Command, sess *evidenceSession) error {
 	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "=== [Step 1/6] L1 Syntax Check ===")
-	if err := sess.step("L1 syntax check", out, func(w io.Writer) error {
-		return execAnsiblePlaybook(w, vtTopoTestPlaybook, "--syntax-check")
+	if err := sess.stepStreams("L1 syntax check", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+		return execExternalStreams(w, ew, "ansible-playbook", vtTopoTestPlaybook, "--syntax-check")
 	}); err != nil {
 		return fmt.Errorf("syntax check failed: %w", err)
 	}
@@ -836,8 +836,8 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	if !vtTopoTestSkipCheckmode {
 		fmt.Fprintln(out, "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
 		checkArgs := append(append([]string{vtTopoTestPlaybook, "-i", invPath}, args...), "--check", "--diff")
-		if err := sess.step("L3 check-mode dry-run", out, func(w io.Writer) error {
-			return execExternal(w, "ansible-playbook", checkArgs...)
+		if err := sess.stepStreams("L3 check-mode dry-run", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return execExternalStreams(w, ew, "ansible-playbook", checkArgs...)
 		}); err != nil {
 			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the topology's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
 		}
@@ -883,8 +883,8 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	}
 	transaction := delivery.Transaction{
 		Apply: func(context.Context) error {
-			if err := sess.step("L4 apply", out, func(w io.Writer) error {
-				return execExternal(w, "ansible-playbook", ansibleArgs...)
+			if err := sess.stepStreams("L4 apply", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
 				return fmt.Errorf("playbook apply failed: %w", err)
 			}
@@ -893,7 +893,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		},
 		Verify: func(context.Context) error {
 			fmt.Fprintf(out, "=== [Step 5/6] L5 Verification Specs (%d) ===\n", len(verifies))
-			return sess.step("L5 verify", out, func(w io.Writer) error {
+			return sess.stepStreams("L5 verify", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
 				return withTopologyInventoryInput(invPath, func() error {
 					for _, v := range verifies {
 						pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
@@ -904,7 +904,7 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 							pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
 						}
 						var one bytes.Buffer
-						verr := execPilot(io.MultiWriter(w, &one), pilotArgs...)
+						verr := execPilotStreams(io.MultiWriter(w, &one), ew, pilotArgs...)
 						sess.verify(v.spec, v.limit, one.String())
 						if verr != nil {
 							return fmt.Errorf("verification failed (%s): %w", v.spec, verr)
@@ -917,8 +917,8 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")
-			if err := runRecordedIdempotency(sess, out, func(w io.Writer) error {
-				return execExternal(w, "ansible-playbook", ansibleArgs...)
+			if err := runRecordedIdempotencyStreams(sess, out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
 				return err
 			}
