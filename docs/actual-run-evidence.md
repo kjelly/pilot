@@ -94,7 +94,10 @@ committed evidence summary。
   任何 Jinja interpolation 與非 literal boolean 的 when/until/changed_when/failed_when/
   assert expression 都以 `unsupported expression` 拒絕自動 reuse；不假設任意 filter/test
   沒有 filesystem input。明示的 ansible_* dispatch context variables 同樣列為 unresolved。
-  含 backslash escape 的 key=value inline payload 也不解譯，改以固定標籤 unresolved；JSON/YAML mapping 仍由正式 parser 處理。
+  inline key=value 只接受 ASCII identifier key、緊接等號、ASCII space 分隔，以及無 quote 的
+  value 或完整單一 quote pair 的 value（保留相反 quote）。embedded/concatenated quote、
+  quoted key/whole assignment、等號旁空白、backslash 與 TAB/CR/LF 等 whitespace 一律 unresolved；
+  JSON/YAML mapping 仍由正式 parser 處理。
   repository 的所有 native plugin directory（含 connection/become/strategy/module_utils 等）
   都記 membership pattern，present code hash 後仍 unresolved。外部 default plugin roots、
   collection/Python discovery paths 沒有受控 fingerprint，故每份 record 另標固定
@@ -117,7 +120,8 @@ committed evidence summary。
   YAML secret traversal 有 node/depth budget 與 cycle guard；超限時丟棄該 input 的
   部分掃描結果，僅留下不含 payload 的 skipped marker，普通 alias 仍支援。
   不能解析的 inline syntax、templated secret 的 runtime 結果與加密的 vault 檔列在
-  `skipped`。key=value 的 backslash escape syntax 全部標 skipped，不套用 shell escape 規則；
+  `skipped`。inline grammar 外的 payload 全部標 skipped，不套用 shell quote/escape 規則；
+  三個 Jinja opener `{{`、`{%`、`{#` 都標 runtime result not scanned，含 decoded JSON/YAML。
   人類摘要在有未掃描 input 時明示 INCOMPLETE，不把零 hit 說成完整 clean。
   命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
 

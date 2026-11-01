@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -119,7 +120,7 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 			key, val, _ := strings.Cut(field, "=")
 			if isSecretKey(key) && !secretFileKey(key) && secretValue(val) {
 				appendSecretSources(&sources, "-e "+key, val)
-				if strings.Contains(val, "{{") || strings.Contains(val, "{%") {
+				if hasJinjaSyntax(val) {
 					skipped = append(skipped, "templated secret value (runtime result not scanned)")
 				}
 			}
@@ -216,7 +217,7 @@ func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth 
 				values = append(values, "false", "False")
 			}
 		}
-		if strings.Contains(node.Value, "{{") || strings.Contains(node.Value, "{%") {
+		if hasJinjaSyntax(node.Value) {
 			*skipped = append(*skipped, "templated secret value (runtime result not scanned)")
 		}
 		if node.Tag != "!!str" {
@@ -291,51 +292,74 @@ func Redact(outputs map[string]string, sources []SecretSource, skipped []string)
 	return red
 }
 
-// splitInlineVars supports Ansible's quoted key=value terms, without evaluating
-// Jinja or shell code. Anything outside this grammar is explicitly unscanned.
+// hasJinjaSyntax covers every standard Jinja opener. Comments can transform a
+// value just as interpolation and statements can; no runtime result is inferred.
+func hasJinjaSyntax(value string) bool {
+	return strings.Contains(value, "{{") || strings.Contains(value, "{%") || strings.Contains(value, "{#")
+}
+
+// splitInlineVars admits only a native-checked subset of Ansible assignments:
+// bare ASCII identifier keys, ASCII-space-separated terms, and either unquoted
+// values or one whole quoted value. Opposite quotes inside that pair are literal.
+// Concatenated quotes, escaped syntax and other whitespace are unproved, so the
+// entire payload is refused rather than partly scanned using shell semantics.
 func splitInlineVars(raw string) ([]string, bool) {
-	// Ansible decodes escapes before unquoting, including within single quotes.
-	// Shell escape rules are not equivalent; reject this entire grammar boundary.
-	if strings.Contains(raw, `\`) {
+	if strings.ContainsAny(raw, "\\\t\r\n\v\f") || strings.IndexFunc(raw, func(ch rune) bool { return ch != ' ' && unicode.IsSpace(ch) }) >= 0 {
 		return nil, false
 	}
 	var fields []string
-	var word strings.Builder
-	var quote rune
-	flush := func() bool {
-		if word.Len() == 0 {
-			return true
+	for i := 0; i < len(raw); {
+		for i < len(raw) && raw[i] == ' ' {
+			i++
 		}
-		field := word.String()
-		word.Reset()
-		key, _, ok := strings.Cut(field, "=")
-		if !ok || key == "" {
-			return false
+		if i == len(raw) {
+			break
 		}
-		fields = append(fields, field)
-		return true
-	}
-	for _, ch := range raw {
-		if quote != 0 {
-			if ch == quote {
-				quote = 0
-			} else {
-				word.WriteRune(ch)
+		start := i
+		if !asciiIdentifierStart(raw[i]) {
+			return nil, false
+		}
+		i++
+		for i < len(raw) && (asciiIdentifierStart(raw[i]) || raw[i] >= '0' && raw[i] <= '9') {
+			i++
+		}
+		if i == len(raw) || raw[i] != '=' {
+			return nil, false
+		}
+		key := raw[start:i]
+		i++
+		var value string
+		if i < len(raw) && (raw[i] == '\'' || raw[i] == '"') {
+			quote := raw[i]
+			i++
+			start = i
+			for i < len(raw) && raw[i] != quote {
+				i++
 			}
-		} else if ch == '\'' || ch == '"' {
-			quote = ch
-		} else if ch == ' ' || ch == '\n' || ch == '\t' {
-			if !flush() {
+			if i == len(raw) {
+				return nil, false
+			}
+			value = raw[start:i]
+			i++
+			if i < len(raw) && raw[i] != ' ' {
 				return nil, false
 			}
 		} else {
-			word.WriteRune(ch)
+			start = i
+			for i < len(raw) && raw[i] != ' ' {
+				if raw[i] == '\'' || raw[i] == '"' {
+					return nil, false
+				}
+				i++
+			}
+			value = raw[start:i]
 		}
-	}
-	if quote != 0 || !flush() {
-		return nil, false
+		fields = append(fields, key+"="+value)
 	}
 	return fields, len(fields) > 0
+}
+func asciiIdentifierStart(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch == '_'
 }
 
 // Sanitize replaces known secret values in persisted metadata as well as errors.

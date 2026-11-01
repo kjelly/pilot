@@ -627,7 +627,7 @@ var literalLookupRe = regexp.MustCompile(`^\s*['"](?:ansible\.builtin\.)?(file|t
 var jinjaIncludeRe = regexp.MustCompile(`\{%[-+]?\s*(?:include|import|from|extends)\b`)
 
 func (r *resolver) scanExpressions(raw, from, fileDir, playbookDir string) {
-	if strings.Contains(raw, "{{") || strings.Contains(raw, "{%") {
+	if hasJinjaSyntax(raw) {
 		r.dispatchUnresolved(from, "unsupported expression", "automatic reuse requires proven file-independent expressions")
 	}
 	for _, loc := range lookupCallRe.FindAllStringIndex(raw, -1) {
@@ -751,7 +751,7 @@ func (r *resolver) resolveRef(from, ref, kind, fileDir, playbookDir string) []re
 // assignments must not hide a lazy Jinja expression from the closure boundary.
 func inlineVarsNeedRuntimeResolution(payload string) bool {
 	isExpression := func(value string) bool {
-		return strings.Contains(value, "{{") || strings.Contains(value, "{%") || lookupCallRe.MatchString(value)
+		return hasJinjaSyntax(value) || lookupCallRe.MatchString(value)
 	}
 	if isExpression(payload) {
 		return true
@@ -958,7 +958,7 @@ func literalScalar(value *yaml.Node) bool {
 	default:
 		return false
 	}
-	return !strings.Contains(value.Value, "{{") && !strings.Contains(value.Value, "{%")
+	return !hasJinjaSyntax(value.Value)
 }
 func literalString(value *yaml.Node) bool { return literalScalar(value) && value.Tag == "!!str" }
 func literalStringList(value *yaml.Node) bool {
