@@ -83,7 +83,9 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 			skipped = append(skipped, f+" (not YAML)")
 			continue
 		}
-		collectSecrets(f, "", &doc, false, 0, &sources, &skipped)
+		found, unscanned := collectSecretDocument(f, &doc)
+		sources = append(sources, found...)
+		skipped = append(skipped, unscanned...)
 	}
 	for _, payload := range extraVarsPayloads(extraArgs) {
 		if payload == "" || strings.HasPrefix(payload, "@") {
@@ -94,7 +96,9 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 			if err := yaml.Unmarshal([]byte(payload), &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 				skipped = append(skipped, "inline extra-vars (unsupported JSON/YAML mapping)")
 			} else {
-				collectSecrets("-e", "", &doc, false, 0, &sources, &skipped)
+				found, unscanned := collectSecretDocument("-e", &doc)
+				sources = append(sources, found...)
+				skipped = append(skipped, unscanned...)
 			}
 			continue
 		}
@@ -118,21 +122,50 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 	return sources, skipped
 }
 
-func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth int, out *[]SecretSource, skipped *[]string) {
-	if node == nil {
+// A depth limit alone cannot bound alias fan-out. Count every visit (including
+// repeated alias targets) and track the active path to reject cycles promptly.
+const maxSecretTraversalNodes = 16384
+
+type secretTraversal struct {
+	remaining int
+	active    map[*yaml.Node]bool
+	failed    bool
+}
+
+func collectSecretDocument(file string, node *yaml.Node) ([]SecretSource, []string) {
+	var sources []SecretSource
+	var skipped []string
+	traversal := secretTraversal{remaining: maxSecretTraversalNodes, active: map[*yaml.Node]bool{}}
+	collectSecrets(file, "", node, false, 0, &sources, &skipped, &traversal)
+	if traversal.failed {
+		// A partial scan must never look complete. Discard all results for this input,
+		// including any values/notes visited before the excessive expansion or cycle.
+		return nil, []string{file + " (secret source traversal limit or cyclic alias)"}
+	}
+	return sources, skipped
+}
+
+func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth int, out *[]SecretSource, skipped *[]string, traversal *secretTraversal) {
+	if node == nil || traversal.failed {
 		return
 	}
-	if depth > 64 {
-		*skipped = append(*skipped, "secret scalar traversal exceeds supported depth")
+	if depth > 64 || traversal.remaining <= 0 || traversal.active[node] {
+		traversal.failed = true
 		return
 	}
+	traversal.remaining--
+	traversal.active[node] = true
+	defer delete(traversal.active, node)
 	switch node.Kind {
 	case yaml.DocumentNode, yaml.SequenceNode:
 		for _, item := range node.Content {
-			collectSecrets(file, prefix, item, inherited, depth+1, out, skipped)
+			collectSecrets(file, prefix, item, inherited, depth+1, out, skipped, traversal)
+			if traversal.failed {
+				return
+			}
 		}
 	case yaml.AliasNode:
-		collectSecrets(file, prefix, node.Alias, inherited, depth+1, out, skipped)
+		collectSecrets(file, prefix, node.Alias, inherited, depth+1, out, skipped, traversal)
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(node.Content); i += 2 {
 			key := node.Content[i].Value
@@ -143,7 +176,10 @@ func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth 
 			if prefix != "" {
 				path = prefix + "." + key
 			}
-			collectSecrets(file, path, node.Content[i+1], inherited || isSecretKey(key), depth+1, out, skipped)
+			collectSecrets(file, path, node.Content[i+1], inherited || isSecretKey(key), depth+1, out, skipped, traversal)
+			if traversal.failed {
+				return
+			}
 		}
 	case yaml.ScalarNode:
 		if !inherited || prefix == "" {
