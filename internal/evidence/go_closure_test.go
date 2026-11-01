@@ -43,16 +43,16 @@ func TestGoSourceListingIsAtomicAndTracksEmbedMembership(t *testing.T) {
 	root := t.TempDir()
 	writeClosureFile(t, root, "cmd/pilot/main.go", "package main\n")
 	writeClosureFile(t, root, "cmd/pilot/assets/a.txt", "embedded\n")
-	p := listedPackage{ImportPath: pilotMain, Dir: filepath.Join(root, "cmd/pilot"), Module: &listedModule{Path: pilotModule}, GoFiles: []string{"main.go"}, EmbedFiles: []string{"assets/a.txt"}, EmbedPatterns: []string{"assets/*.txt"}}
+	p := listedPackage{ImportPath: pilotMain, Dir: filepath.Join(root, "cmd/pilot"), Module: &listedModule{Path: pilotModule}, GoFiles: []string{"main.go"}, IgnoredOtherFiles: []string{"ignored.s", "ignored.c", "ignored.syso"}, EmbedFiles: []string{"assets/a.txt"}, EmbedPatterns: []string{"assets/*.txt"}}
 	raw, _ := json.Marshal(p)
 	files, patterns, _, err := parseGoSourceListing(root, bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) < 2 {
+	if len(files) < 5 {
 		t.Fatal("selected Go/embed files missing")
 	}
-	for _, want := range []string{"cmd/pilot/*.go", "cmd/pilot/*.s", "cmd/pilot/*.syso", "cmd/pilot/**"} {
+	for _, want := range []string{"cmd/pilot/*", "cmd/pilot/*.go", "cmd/pilot/*.s", "cmd/pilot/*.syso", "cmd/pilot/**"} {
 		found := false
 		for _, got := range patterns {
 			if got == want {
@@ -123,4 +123,52 @@ func TestSanitizeBoundExecutionIdentitiesOnly(t *testing.T) {
 		})
 	}
 	_ = os.Remove(filepath.Join(root, path))
+}
+
+func TestGoSourceListingRefusesAssemblyAtomically(t *testing.T) {
+	root := t.TempDir()
+	good := listedPackage{ImportPath: pilotMain, Dir: filepath.Join(root, "cmd/pilot"), Module: &listedModule{Path: pilotModule}, GoFiles: []string{"main.go"}}
+	for _, name := range []string{"value.s", "nested.s", "macro.S", "object.syso"} {
+		t.Run(name, func(t *testing.T) {
+			bad := good
+			if strings.HasSuffix(name, "syso") {
+				bad.SysoFiles = []string{name}
+			} else {
+				bad.SFiles = []string{name}
+			}
+			var stream bytes.Buffer
+			_ = json.NewEncoder(&stream).Encode(good)
+			_ = json.NewEncoder(&stream).Encode(bad)
+			files, patterns, modules, err := parseGoSourceListing(root, &stream)
+			if err == nil || !strings.Contains(err.Error(), "candidate assembly/system objects") || files != nil || patterns != nil || modules != nil {
+				t.Fatalf("candidate assembly refusal must be atomic: %v files=%v patterns=%v modules=%v", err, files, patterns, modules)
+			}
+		})
+	}
+	for _, context := range []string{"missing", "wrong", "headers", "objects", "proved"} {
+		t.Run("module-"+context, func(t *testing.T) {
+			module := listedPackage{ImportPath: "example.org/dep", Dir: "/opt/pilot-modcache/example.org/dep@v1.0.0", Module: &listedModule{Path: "example.org/dep", Version: "v1.0.0", Sum: "h1:locked"}, SFiles: []string{"value.s"}, ControllerAssembly: "verified-module-literal-includes/v1"}
+			switch context {
+			case "missing":
+				module.ControllerAssembly = ""
+			case "wrong":
+				module.ControllerAssembly = "caller-true"
+			case "headers":
+				module.HFiles = []string{"value_linux_amd64.h"}
+			case "objects":
+				module.SysoFiles = []string{"value.syso"}
+			}
+			var stream bytes.Buffer
+			_ = json.NewEncoder(&stream).Encode(good)
+			_ = json.NewEncoder(&stream).Encode(module)
+			files, _, _, err := parseGoSourceListing(root, &stream)
+			if context == "proved" {
+				if err != nil || len(files) != 1 {
+					t.Fatalf("native audited module subset refused: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "unproved module assembly context") || files != nil {
+				t.Fatalf("unaudited module assembly accepted: %v", err)
+			}
+		})
+	}
 }

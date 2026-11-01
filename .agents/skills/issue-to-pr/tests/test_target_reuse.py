@@ -285,6 +285,51 @@ class TargetReuseGuardTests(ReuseHelpers):
         commit_files(wt, post or {}, "after the run")
         commit(wt, "qa/runs/2026/run.md", "Tested " + self.candidate)
 
+    def test_existing_assembly_header_pure_base_import_cannot_reuse_old_scope(self):
+        import json
+        from controller_fixture import add_controller, fixture_files
+        # Historical resolver-9 shape deliberately omitted an already-existing
+        # consumed header. This is not a purported complete current record.
+        header = "src/value.h"
+        self.build(fork={header: "#define VALUE 225\n"},
+                   candidate={"src/app.go": "package app\n", **{p:r.decode() for p,r in fixture_files().items()}},
+                   main={header: "#define VALUE 226\n"})
+        ctx = self.ctx()
+        self.assertNotEqual(ctx.tree_entries(self.candidate)[header], ctx.tree_entries(self.base)[header])
+        self.assertEqual(ctx.tree_entries(self.base)[header], ctx.tree_entries(git(self.wt,"rev-parse","HEAD"))[header])
+        tree = ctx.tree_entries(self.candidate)
+        record = add_controller({"schema":"pilot-evidence-record/v1", "outcome":"success",
+            "candidate":{"commit":self.candidate,"tree":ctx.commit_tree(self.candidate),"source":"git"},
+            "closure":{"frozen":True,"files":[{"path":"src/app.go","mode":tree["src/app.go"][0],"blob":tree["src/app.go"][1]}],"patterns":["src/*.h"]}})
+        for version, unresolved, reason in ((9, [], "resolution version"), (10, [{"ref":"unproved Go build closure", "reason":"candidate assembly/system objects are unsupported"}], "unresolved")):
+            record["closure"].update(resolution_version=version, unresolved=unresolved)
+            artifact="qa/runs/2026/run.md"
+            commit(self.wt,artifact,"<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n")
+            reuse=self.reuse(); del reuse["execution_paths"]
+            ctx=self.ctx()
+            self.assertFalse(ctx.accepts_target(self.candidate,"actual-run",reuse,artifact))
+            self.assertIn(reason,ctx.target_stale_reason(self.candidate))
+
+    def test_bound_ignored_native_activation_import_changes_input(self):
+        import json
+        from controller_fixture import add_controller, fixture_files
+        source="src/value.s"
+        self.build(fork={source:"//go:build never\n\nDATA value, $226\n"},
+                   candidate={"src/app.go":"package app\n",**{p:r.decode() for p,r in fixture_files().items()}},
+                   main={source:"//go:build linux && amd64\n\nDATA value, $226\n"})
+        ctx=self.ctx();tree=ctx.tree_entries(self.candidate)
+        # Synthetic adapter mechanics for the ignored-source bytes actually
+        # collected by the native producer test; source name membership is equal.
+        record=add_controller({"schema":"pilot-evidence-record/v1","outcome":"success",
+            "candidate":{"commit":self.candidate,"tree":ctx.commit_tree(self.candidate),"source":"git"},
+            "closure":{"frozen":True,"patterns":["src/*"],"files":[{"path":p,"mode":tree[p][0],"blob":tree[p][1]} for p in ("src/app.go",source)]}})
+        artifact="qa/runs/2026/run.md"
+        commit(self.wt,artifact,"<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n")
+        reuse=self.reuse();del reuse["execution_paths"]
+        ctx=self.ctx()
+        self.assertFalse(ctx.accepts_target(self.candidate,"actual-run",reuse,artifact))
+        self.assertIn("execution input changed, missing or not a regular file: "+source,ctx.target_stale_reason(self.candidate))
+
     def test_symlinked_scoped_input_requires_new_run(self):
         reason = "execution input changed, missing or not a regular file: playbooks/x.yml"
         scope = ["src/app.go", "src/dependency.go"]
@@ -452,6 +497,8 @@ class MachineRecordTests(TargetReuseTests):
             (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=7), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=8), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=9), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unproved Go build closure", "reason": "candidate assembly/system objects are unsupported"}]), "unresolved"),
             (lambda r: r["controller"].update(schema="pilot-controller/v2"), "current OCI proof"),
             (lambda r: r["verify"][0].pop("rows"), "row counts differ"),
             (lambda r: r["verify"][0].update(diagnostics_complete=False), "diagnostic export"),

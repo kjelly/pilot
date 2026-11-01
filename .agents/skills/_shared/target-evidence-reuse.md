@@ -86,7 +86,7 @@ new include glob match, copied directory member or earlier search-path match
 requires a new run even when all old files are unchanged.
 
 Unresolved references, external inputs, malformed records and older machine
-records without `closure.patterns`, `closure.resolution_version: 9`, or
+records without `closure.patterns`, `closure.resolution_version: 10`, or
 `closure.frozen: true` fail closed. Run again with resolved inputs
 instead of overriding the machine result with a manual list. Legacy hand-written
 records retain the full manual dependency review above. The independent reviewer
@@ -95,11 +95,11 @@ changes outside the closure must pass the pure-base-import proof. A changed spec
 in the closure cannot be waived as prose. New records keep LATEST outside specs,
 so retests do not change their blobs.
 
-Resolver version 9 additionally refuses backslash-bearing key=value payloads (the
+Resolver version 10 additionally refuses backslash-bearing key=value payloads (the
 Ansible escape grammar is not evaluated); JSON/YAML mappings use their parser.
-Version 8 and older records are not eligible for automatic reuse.
+Version 9 and older records are not eligible for automatic reuse.
 
-Resolver version 9 proves the task dispatch subset only for direct copy with
+Resolver version 10 proves the task dispatch subset only for direct copy with
 proved literal argument mappings and debug with a literal scalar `msg` (optional
 literal integer verbosity). Templates, implicit/free-form expressions, other
 actions and unproved metadata remain unresolved even when known source files
@@ -117,9 +117,16 @@ recorded verdicts. A selection flag or boolean alone never clears ambient refusa
 Eligible controlled records also bind the actual static pilot binary BuildInfo to
 Go1.26.8/linux/amd64/v1/CGO=0, -trimpath and -buildvcs=false and the pinned OCI toolchain. Offline readonly module
 verification and complete `go list` output must match actual binary dependency
-versions/sums. A reproducible pinned-Go rebuild must match the entire actual executed binary SHA-256; source/settings/module identity alone cannot certify a stale executable. The controller/v3 proof includes that rebuilt identity and source graph fingerprint. Scope includes transitive repository package sources, package source
-membership, embed subtrees, go.mod/go.sum and workspace/vendor absence. Replacements,
-workspace/cgo/custom build contexts and partial listings remain unresolved. A new
+versions/sums. The actual ELF must have no interpreter, dynamic segment or dynamic section; CGO=0 alone does not exclude native loader dependencies. A reproducible pinned-Go rebuild must match the entire actual executed binary SHA-256; source/settings/module identity alone cannot certify a stale executable. The controller/v3 proof includes that rebuilt identity and source graph fingerprint. Scope includes transitive repository package sources, package source
+membership (all direct names), ignored Go/native-source bytes (including build-tag activation), embed subtrees, go.mod/go.sum and workspace/vendor absence. Replacements,
+workspace/cgo/custom build contexts and partial listings remain unresolved.
+Candidate-selected assembly and system objects are unsupported, with no accepted
+partial Go proof. Verified module assembly is admitted only after the profile's
+native audit proves every raw `#` is a whole-line literal basename include,
+without package/CWD, renamed HFiles or generated-header shadows. Module HFiles,
+SysoFiles, other preprocessor syntax and a non-closed pinned SDK header tree
+remain unresolved. Standard-library assembly stays within the pinned SDK trust
+boundary. Resolver 9 records omitted consumed assembly headers and cannot be reused. A new
 unimported package remains outside the execution graph. Initial eligibility is
 limited to V1 verification and proved pilot-rendered SSH inventory; actual matched
 host/group/ancestor vars candidates and missing memberships are tracked.

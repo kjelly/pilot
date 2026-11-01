@@ -79,6 +79,8 @@ class TargetReuseRemoteTests(unittest.TestCase):
                 (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=7), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=8), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=9), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unproved Go build closure", "reason": "candidate assembly/system objects are unsupported"}]), "unresolved"),
             (lambda r: r["controller"].update(schema="pilot-controller/v2"), "current OCI proof"),
             (lambda r: r["verify"][0].pop("rows"), "row counts differ"),
             (lambda r: r["verify"][0].update(diagnostics_complete=False), "diagnostic export"),
@@ -105,6 +107,46 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
         trees[H]["playbooks/apply/new.yml"] = blob(8)
         self.assertIn("search membership changed", self.reasons(gh, e))
+
+    def test_remote_existing_assembly_header_import_refuses_old_resolution(self):
+        # The fake GitHub graph represents a genuine existing-header base
+        # import: unchanged candidate bytes become the advanced-base bytes at H.
+        gh,e,trees=self.fixture()
+        header="src/value.h"
+        trees[A][header]=trees[R][header]=blob(5)
+        trees[B][header]=trees[H][header]=blob(6)
+        gh.compares[(R,H)]["files"].append(header)
+        gh.compares[(R,B)]["files"].append(header)
+        record={"schema":"pilot-evidence-record/v1","outcome":"success",
+                "candidate":{"commit":R,"tree":"e"*40,"source":"git"},
+                "closure":{"frozen":True,"files":[{"path":APP,"mode":"100644","blob":trees[R][APP][1]}],"patterns":["src/*.h"]}}
+        import importlib.util
+        from pathlib import Path
+        spec=importlib.util.spec_from_file_location("controller_fixture",Path(__file__).resolve().parents[2]/"issue-to-pr/tests/controller_fixture.py")
+        fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        fixture.add_controller(record)
+        for path,raw in fixture.fixture_files().items():
+            entry=fixture.descriptor(path,raw)
+            trees[R][path]=trees[H][path]=("100644",entry["blob"])
+            gh.files[(path,R)]=raw
+        gh.commit_tree=lambda repo,revision:"e"*40
+        del e["target_validation"]["target_reuse"]["execution_paths"]
+        for version,unresolved,reason in ((9,[],"resolution version"),(10,[{"ref":"unproved Go build closure","reason":"candidate assembly/system objects are unsupported"}],"unresolved")):
+            record["closure"].update(resolution_version=version,unresolved=unresolved)
+            gh.files[(ART,H)]=("<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n").encode()
+            self.assertIn(reason,self.reasons(gh,e))
+
+        # Same-path ignored assembly activation is content-bound in resolver10.
+        # This adapter-only fixture represents that producer's collected bytes.
+        source="src/value.s"
+        trees[A][source]=trees[R][source]=blob(7)
+        trees[B][source]=trees[H][source]=blob(8)
+        gh.compares[(R,H)]["files"].append(source)
+        gh.compares[(R,B)]["files"].append(source)
+        record["closure"].update(resolution_version=10,unresolved=[],patterns=["src/*"])
+        record["closure"]["files"].append({"path":source,"mode":"100644","blob":trees[R][source][1]})
+        gh.files[(ART,H)]=("<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n").encode()
+        self.assertIn("execution input changed, missing or not a regular file: "+source,self.reasons(gh,e))
 
     def test_remote_gate_accepts_reviewed_main_import(self):
         gh, e, _ = self.fixture()
