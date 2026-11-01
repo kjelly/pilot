@@ -112,8 +112,17 @@ func resolveVMDir() string {
 	return "/var/lib/libvirt/images/pilot"
 }
 
+// vtManagerHostSeams, when non-nil, replaces the host-dependent steps of every
+// Manager vtNewManager returns (see vmtarget.HostSeams). Only tests set it, so
+// the real command can run against shim binaries on a host without libvirt.
+var vtManagerHostSeams *vmtarget.HostSeams
+
 func vtNewManager() (*vmtarget.Manager, error) {
-	return vmtarget.NewManager(resolveStateDir(vmTargetStateFiles...), resolveVMDir())
+	stateDir, vmDir := resolveStateDir(vmTargetStateFiles...), resolveVMDir()
+	if s := vtManagerHostSeams; s != nil {
+		return vmtarget.NewManagerWithHostSeams(stateDir, vmDir, *s)
+	}
+	return vmtarget.NewManager(stateDir, vmDir)
 }
 
 // ---- up -------------------------------------------------------------------

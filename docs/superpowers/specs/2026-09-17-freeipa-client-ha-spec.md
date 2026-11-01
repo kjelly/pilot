@@ -1240,7 +1240,7 @@ SRV consistency across authorities
 
 # 20. 實作階段
 
-每個 Phase 除了自己的 exit gate 外，一律必須通過 AGENTS.md §3.0 既有的機器強制 gate：`cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`（spec row 與 playbook tag 對齊）與 `TestRegression_SpecAndInventoryAgree`（spec 宣告的 group 與測試 inventory 對齊；本 spec 的 client/server-replica 屬於 AGENTS.md §3.0 例外，走 `-e target_group=` override 時比照 `freeipa_client_regression_test.go` 的既有作法處理）。不得只憑本 spec 自訂的 exit gate 就視為完成。
+每個 Phase 除了自己的 exit gate 外，一律必須通過 AGENTS.md §3.0 既有的機器強制 gate：`cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`（spec row 與 playbook tag 對齊）；spec 宣告的 group 與測試 inventory 的對齊沒有測試可擋（AGENTS.md §1.3；原文列的 `TestRegression_SpecAndInventoryAgree` 從未存在），本 spec 的 client/server-replica 屬於 AGENTS.md §3 例外，走 `-e target_group=` override 時比照 `freeipa_client_regression_test.go` 的既有作法處理。不得只憑本 spec 自訂的 exit gate 就視為完成。
 
 ## Phase 0 — Golden behavior spike ✅ 完成（2026-09-17）
 
