@@ -13,12 +13,11 @@ PILOT_ACCESS_GATEWAY_VERSION ?= 0.0.0-dev
 PILOT_GIT_SHA ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 PILOT_GIT_DIRTY ?= $(shell if git diff --quiet --ignore-submodules HEAD -- 2>/dev/null; then echo false; else echo true; fi)
 
-# `go list ./...` also sees Go files under the gitignored tmp/ (scratch checkouts of other
-# PRs, loose test programs). They are not part of the module and fail `make test` for
-# reasons unrelated to the change, so the Go targets below list the module's own packages.
-# CI checkouts have no tmp/, so CI runs are unchanged.
-GO_MODULE := $(shell go list -m 2>/dev/null)
-GO_PKGS = $(shell go list ./... | grep -v '^$(GO_MODULE)/tmp/')
+# `./...` stops at tmp/: tmp/go.mod makes the gitignored scratch directory (checkouts
+# of other PRs, loose test programs) a separate module, so `make test`, `make vet` and
+# `make lint` never compile it (AGENTS.md §5). Keep the literal `./...` in the Go targets:
+# TestCompleteTestSuitesRunSequentially drives them with a stub `go` that checks the
+# exact arguments.
 # golangci-lint v1 cannot read this repository's v2 config and reports it as a config
 # error; CI pins v2.12.1 (.github/workflows/ci.yml). Override the binary with GOLANGCI_LINT=.
 GOLANGCI_LINT ?= golangci-lint
@@ -51,7 +50,7 @@ release:       	## Compile stripped release binary
 
 # -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
-	go test -count=1 -timeout 45m $(GO_PKGS)
+	go test -count=1 -timeout 45m ./...
 
 # pilot-mcp runs on the user's machine, which may be macOS: cmd/pilot does
 # not build for darwin, so pilot-mcp must (spec 2026-10-30-pilot-mcp-remote-access §5.1).
@@ -68,12 +67,12 @@ mcp-remote-test: ## Run the pilot-mcp integration tests against a local sshd
 	PILOT_REQUIRE_SSHD_TESTS=1 go test -count=1 -timeout 10m -run 'TestIntegration' ./internal/mcpclient
 
 vet:           	## Run go vet
-	go vet $(GO_PKGS)
+	go vet ./...
 
 lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 	@v=$$($(GOLANGCI_LINT) version 2>&1 | head -n 1); \
 	  echo "$$v" | grep -Eq 'version v?2\.' || { echo "make lint: golangci-lint v2 required (CI pins v2.12.1 in .github/workflows/ci.yml; go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.1); found: $$v" >&2; exit 1; }
-	$(GOLANGCI_LINT) run $(GO_PKGS)
+	$(GOLANGCI_LINT) run ./...
 
 # -timeout: go test's default is 10m per package. Under -race on GitHub
 # runners, internal/spec takes 12-15m when it passes (738-895 s on
@@ -86,7 +85,7 @@ lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 # target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 test-race:     	## Run tests with the race detector (CI runs this target)
-	go test -race -count=1 -timeout 45m $(GO_PKGS)
+	go test -race -count=1 -timeout 45m ./...
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
