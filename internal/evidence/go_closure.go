@@ -17,17 +17,19 @@ const pilotModule = "github.com/kjelly/pilot"
 const pilotMain = pilotModule + "/cmd/pilot"
 
 type ControllerBuild struct {
-	GoVersion      string `json:"go_version"`
-	Path           string `json:"path"`
-	Module         string `json:"module"`
-	GOOS           string `json:"goos"`
-	GOARCH         string `json:"goarch"`
-	GOAMD64        string `json:"goamd64"`
-	CGO            string `json:"cgo"`
-	SettingsSHA256 string `json:"settings_sha256"`
-	ModulesSHA256  string `json:"modules_sha256"`
-	settings       map[string]string
-	modules        []ControllerModule
+	SourcesSHA256       string `json:"sources_sha256"`
+	RebuiltBinarySHA256 string `json:"rebuilt_binary_sha256"`
+	GoVersion           string `json:"go_version"`
+	Path                string `json:"path"`
+	Module              string `json:"module"`
+	GOOS                string `json:"goos"`
+	GOARCH              string `json:"goarch"`
+	GOAMD64             string `json:"goamd64"`
+	CGO                 string `json:"cgo"`
+	SettingsSHA256      string `json:"settings_sha256"`
+	ModulesSHA256       string `json:"modules_sha256"`
+	settings            map[string]string
+	modules             []ControllerModule
 }
 type ControllerModule struct {
 	Path    string `json:"path"`
@@ -90,7 +92,7 @@ func validateBuildInfo(info *debug.BuildInfo) (*ControllerBuild, error) {
 		}
 		build.settings[setting.Key] = setting.Value
 	}
-	for key, value := range map[string]string{"GOOS": "linux", "GOARCH": "amd64", "GOAMD64": "v1", "CGO_ENABLED": "0", "-compiler": "gc", "-buildmode": "exe"} {
+	for key, value := range map[string]string{"GOOS": "linux", "GOARCH": "amd64", "GOAMD64": "v1", "CGO_ENABLED": "0", "-compiler": "gc", "-buildmode": "exe", "-trimpath": "true"} {
 		if build.settings[key] != value {
 			return nil, fmt.Errorf("missing fixed Go build setting")
 		}
@@ -139,11 +141,14 @@ func (c *Controller) addGoSourceClosure(r *resolver) error {
 			return err
 		}
 	}
-	var listing, diagnostics bytes.Buffer
-	if err := c.execute("go-verify", nil, io.Discard, &diagnostics); err != nil {
+	var listing, verification, diagnostics bytes.Buffer
+	if err := c.execute("go-verify", nil, &verification, &diagnostics); err != nil {
+		c.writeGoDiagnostics(&verification)
+		c.writeGoDiagnostics(&diagnostics)
 		return fmt.Errorf("go module cache verification failed")
 	}
 	if err := c.execute("go-list", nil, &listing, &diagnostics); err != nil {
+		c.writeGoDiagnostics(&diagnostics)
 		return fmt.Errorf("go dependency listing failed or incomplete")
 	}
 	files, patterns, modules, err := parseGoSourceListing(c.root, &listing)
@@ -166,6 +171,34 @@ func (c *Controller) addGoSourceClosure(r *resolver) error {
 			return err
 		}
 		pending[entry.Path] = entry
+	}
+	// Prove that the exact executable which orchestrates the chain was built
+	// from these source bytes. Module/settings identity alone is insufficient.
+	var identities []File
+	for _, entry := range pending {
+		identities = append(identities, *entry)
+	}
+	sort.Slice(identities, func(i, j int) bool { return identities[i].Path < identities[j].Path })
+	sort.Strings(patterns)
+	bound, _ := json.Marshal(struct {
+		Files             []File
+		Patterns          []string
+		Settings, Modules string
+	}{identities, patterns, build.SettingsSHA256, build.ModulesSHA256})
+	build.SourcesSHA256 = digestBytes(bound)
+	previous := c.proof.Build
+	if previous != nil && previous.SourcesSHA256 == build.SourcesSHA256 && previous.RebuiltBinarySHA256 == c.proof.BinarySHA256 {
+		build.RebuiltBinarySHA256 = previous.RebuiltBinarySHA256
+	} else {
+		var rebuilt bytes.Buffer
+		if err := c.execute("go-rebuild", nil, &rebuilt, &diagnostics); err != nil {
+			c.writeGoDiagnostics(&diagnostics)
+			return fmt.Errorf("pinned source rebuild failed")
+		}
+		build.RebuiltBinarySHA256 = strings.TrimSpace(rebuilt.String())
+		if build.RebuiltBinarySHA256 != c.proof.BinarySHA256 {
+			return fmt.Errorf("executed pilot binary differs from reproducible source rebuild")
+		}
 	}
 	for name, entry := range pending {
 		r.files[name] = entry
@@ -287,4 +320,12 @@ func rawClosureFile(root, path, via string) (*File, error) {
 		mode = "100755"
 	}
 	return &File{Path: filepath.ToSlash(rel), Mode: mode, Blob: GitBlobOID(raw), SHA256: digestBytes(raw), Size: int64(len(raw)), Via: via}, nil
+}
+
+// Raw native diagnostics belong in the operator's run log, not the machine
+// closure where they could contain untrusted source payloads.
+func (c *Controller) writeGoDiagnostics(diagnostics *bytes.Buffer) {
+	if c.diagnostics != nil {
+		_, _ = c.diagnostics.Write(diagnostics.Bytes())
+	}
 }

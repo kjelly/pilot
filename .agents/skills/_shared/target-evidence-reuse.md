@@ -86,7 +86,7 @@ new include glob match, copied directory member or earlier search-path match
 requires a new run even when all old files are unchanged.
 
 Unresolved references, external inputs, malformed records and older machine
-records without `closure.patterns`, `closure.resolution_version: 7`, or
+records without `closure.patterns`, `closure.resolution_version: 8`, or
 `closure.frozen: true` fail closed. Run again with resolved inputs
 instead of overriding the machine result with a manual list. Legacy hand-written
 records retain the full manual dependency review above. The independent reviewer
@@ -95,11 +95,11 @@ changes outside the closure must pass the pure-base-import proof. A changed spec
 in the closure cannot be waived as prose. New records keep LATEST outside specs,
 so retests do not change their blobs.
 
-Resolver version 7 additionally refuses backslash-bearing key=value payloads (the
+Resolver version 8 additionally refuses backslash-bearing key=value payloads (the
 Ansible escape grammar is not evaluated); JSON/YAML mappings use their parser.
-Version 6 and older records are not eligible for automatic reuse.
+Version 7 and older records are not eligible for automatic reuse.
 
-Resolver version 7 proves the task dispatch subset only for direct copy with
+Resolver version 8 proves the task dispatch subset only for direct copy with
 proved literal argument mappings and debug with a literal scalar `msg` (optional
 literal integer verbosity). Templates, implicit/free-form expressions, other
 actions and unproved metadata remain unresolved even when known source files
@@ -108,16 +108,16 @@ exact-candidate evidence remains usable. The opt-in `--evidence-controller=pinne
 profile builds the committed digest-pinned recipe, resolves its immutable image ID,
 and actually routes all L1/L3/L4/L6 Ansible subprocesses and the whole L5 pilot child
 through that image. Fresh private HOME/tmp, read-only mounts, fixed config and a
-scrubbed environment isolate each subprocess. Native pre/post probes must agree on
+scrubbed environment isolate each subprocess. The fixed image account and supported host UID/GID1000 avoid host NSS database mounts; actual NSS and non-connecting OpenSSH probes must succeed. Native pre/post probes must agree on
 effective origins, config and search paths. The shared local/remote gate validates
 the typed profile hashes against candidate closure blobs, image/binary/inventory
 identities, native probe fingerprint, all required routed stages and successful
 recorded verdicts. A selection flag or boolean alone never clears ambient refusal.
 
 Eligible controlled records also bind the actual static pilot binary BuildInfo to
-Go1.26.8/linux/amd64/v1/CGO=0 and the pinned OCI toolchain. Offline readonly module
+Go1.26.8/linux/amd64/v1/CGO=0, -trimpath and -buildvcs=false and the pinned OCI toolchain. Offline readonly module
 verification and complete `go list` output must match actual binary dependency
-versions/sums. Scope includes transitive repository package sources, package source
+versions/sums. A reproducible pinned-Go rebuild must match the entire actual executed binary SHA-256; source/settings/module identity alone cannot certify a stale executable. The controller/v2 proof includes that rebuilt identity and source graph fingerprint. Scope includes transitive repository package sources, package source
 membership, embed subtrees, go.mod/go.sum and workspace/vendor absence. Replacements,
 workspace/cgo/custom build contexts and partial listings remain unresolved. A new
 unimported package remains outside the execution graph. Initial eligibility is

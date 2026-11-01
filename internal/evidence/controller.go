@@ -19,7 +19,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const ControllerSchema = "pilot-controller/v1"
+const ControllerSchema = "pilot-controller/v2"
 const ControllerProfile = "images/evidence-controller"
 
 var controllerProfileFiles = []string{"Dockerfile", "profile.lock.json", "ansible.cfg", "launch.py", "probe.py"}
@@ -62,6 +62,11 @@ type ControllerLoader struct {
 	Paths  []string `json:"paths"`
 }
 type ControllerNativeProbe struct {
+	UID                    int                         `json:"uid"`
+	GID                    int                         `json:"gid"`
+	User                   string                      `json:"user"`
+	Group                  string                      `json:"group"`
+	SSHIdentity            string                      `json:"ssh_identity"`
 	Go                     string                      `json:"go"`
 	Schema                 string                      `json:"schema"`
 	Ansible                string                      `json:"ansible"`
@@ -88,6 +93,7 @@ type Controller struct {
 	mu                                                          sync.Mutex
 	root, binary, image, inventory, originalInventory, stageDir string
 	moduleCache                                                 string
+	diagnostics                                                 io.Writer
 	files                                                       map[string]string
 	lock                                                        controllerLock
 	probe                                                       []byte
@@ -112,7 +118,10 @@ func NewPinnedController(root, binary string, log io.Writer) (*Controller, error
 	if !safeControllerMount(root) {
 		return nil, fmt.Errorf("candidate path overlaps controller runtime")
 	}
-	c := &Controller{root: root, binary: binary, files: map[string]string{}, proof: ControllerProof{Schema: ControllerSchema, Steps: ControllerStages{}}}
+	if os.Getuid() != 1000 || os.Getgid() != 1000 {
+		return nil, fmt.Errorf("pinned controller profile requires local UID/GID 1000")
+	}
+	c := &Controller{diagnostics: log, root: root, binary: binary, files: map[string]string{}, proof: ControllerProof{Schema: ControllerSchema, Steps: ControllerStages{}}}
 	for _, name := range controllerProfileFiles {
 		path := filepath.Join(root, ControllerProfile, name)
 		st, err := os.Lstat(path)
@@ -502,7 +511,7 @@ func (c *Controller) Close() {
 }
 
 func validNativeProbe(p *ControllerNativeProbe) bool {
-	if p == nil || p.Go != "go version go1.26.8 linux/amd64" || p.Schema != "pilot-controller-probe/v1" || p.Ansible != "2.21.5" || p.Python != "3.14.8" || p.AnsibleOrigin != "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" || p.PythonExecutable != "/usr/bin/python3.14" || p.ConfigFile != "/opt/pilot-controller/ansible.cfg" || len(p.ConfigSHA256) != 64 || p.CollectionsScanSysPath || !reflect.DeepEqual(p.Collections, []string{"/opt/pilot-controller/empty"}) || !reflect.DeepEqual(p.Roles, []string{"/opt/pilot-controller/empty"}) || len(p.Loaders) != len(ansiblePluginDirectories) {
+	if p == nil || p.Go != "go version go1.26.8 linux/amd64" || p.Schema != "pilot-controller-probe/v2" || p.UID != 1000 || p.GID != 1000 || p.User != "pilot-controller" || p.Group != "pilot-controller" || p.SSHIdentity != "ssh-config/v1" || p.Ansible != "2.21.5" || p.Python != "3.14.8" || p.AnsibleOrigin != "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" || p.PythonExecutable != "/usr/bin/python3.14" || p.ConfigFile != "/opt/pilot-controller/ansible.cfg" || len(p.ConfigSHA256) != 64 || p.CollectionsScanSysPath || !reflect.DeepEqual(p.Collections, []string{"/opt/pilot-controller/empty"}) || !reflect.DeepEqual(p.Roles, []string{"/opt/pilot-controller/empty"}) || len(p.Loaders) != len(ansiblePluginDirectories) {
 		return false
 	}
 	if _, err := hex.DecodeString(p.ConfigSHA256); err != nil {

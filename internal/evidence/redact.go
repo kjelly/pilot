@@ -483,7 +483,7 @@ func typedProtocolString(owner reflect.Type, field string, value reflect.Value, 
 			return text == "v1"
 		case "CGO":
 			return text == "0"
-		case "SettingsSHA256", "ModulesSHA256":
+		case "SettingsSHA256", "ModulesSHA256", "SourcesSHA256", "RebuiltBinarySHA256":
 			return hash(64)
 		}
 	case reflect.TypeOf(ControllerProfileProof{}):

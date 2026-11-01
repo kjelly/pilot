@@ -104,10 +104,10 @@ committed evidence summary。
   `ambient Ansible plugin discovery` unresolved；literal copy/debug 本身不代表可沿用。
   opt-in `--evidence-controller=pinned` 由 committed digest-pinned OCI recipe 建置並解析
   immutable image ID，L1/L3/L4/L6 及整個 L5 pilot child 都在相同 image 內執行。
-  每個 subprocess 使用新的 private HOME/tmp、read-only candidate/binary/inventory/key、
+  每個 subprocess 使用新的 private HOME/tmp、固定 UID/GID 1000 的 image account、read-only candidate/binary/inventory/key、
   固定 Ansible config 與清除 host ANSIBLE/PYTHON environment 的 launcher。
   這個 profile 需要 matching repository source checkout、Docker daemon 及已存在且可驗證的
-  Go module cache；只含 bundled playbooks/docs 的 runtime image 不支援完整 source closure。
+  Go module cache，且目前 profile 要求 host UID/GID 1000（不掛載 host identity database）。native probe 包含 NSS identity 與實際 ssh -G 檢查；只含 bundled playbooks/docs 的 runtime image 不支援完整 source closure。
   native pre/post probe 證明 Python/Ansible origin、effective config、所有 plugin loader、
   role/collection/sys.path 與 pinned Go toolchain 一致，才可清除 ambient refusal。
   `controller` 保存 typed proof、image/config/profile/binary/inventory hashes、native probe
@@ -115,13 +115,13 @@ committed evidence summary。
   inventory-aware group_vars/host_vars 依實際 rendered host/group/ancestor 集合記候選 membership，
   無關 example 檔案不會成為輸入。V1 spec、已證明的 pilot SSH inventory 與 literal task subset
   才支援這個初始 profile；不支援的 context 仍正常執行並明示 unresolved。
-  不嘗試執行 Jinja。`resolution_version: 7` 區分這個解析與 controller 證明邊界。
+  不嘗試執行 Jinja。`resolution_version: 8` 區分這個解析與 controller 證明邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
   pinned profile 另讀取實際執行 binary 的 BuildInfo，要求固定 Go1.26.8/linux/amd64/v1、
-  CGO=0、workspace off 與無自訂 tags/compiler flags。由相同 image 的 Go toolchain 以
+  CGO=0、trimpath、buildvcs=false、workspace off 與無自訂 tags/compiler flags。由相同 image 的 Go toolchain 以
   offline readonly mode 驗證 module cache，確認 listed module version/sum 與 binary 一致，
-  再記錄 cmd/pilot 的 transitive repository packages、Go/assembly/syso source、每個 package
+  再由 pinned toolchain 對相同 source 做 reproducible rebuild，完整 binary SHA-256 必須與實際執行檔一致，才記錄 cmd/pilot 的 transitive repository packages、Go/assembly/syso source、每個 package
   的新增檔案 membership、embed package subtree 及 go.mod/go.sum。workspace/vendor/replace、
   cgo/未知 build setting 或 partial/error listing 一律 unresolved；無 import 的新 package
   不在執行圖內。BuildInfo/settings/module identity 以 typed 欄位與 hash 保存。
@@ -202,5 +202,5 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 6`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+未解析引用、外部執行檔案、缺少 `resolution_version: 8`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。

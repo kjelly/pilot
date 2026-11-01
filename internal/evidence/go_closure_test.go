@@ -11,7 +11,7 @@ import (
 )
 
 func supportedBuildInfo() *debug.BuildInfo {
-	return &debug.BuildInfo{GoVersion: "go1.26.8", Path: pilotMain, Main: debug.Module{Path: pilotModule}, Settings: []debug.BuildSetting{{Key: "GOOS", Value: "linux"}, {Key: "GOARCH", Value: "amd64"}, {Key: "GOAMD64", Value: "v1"}, {Key: "CGO_ENABLED", Value: "0"}, {Key: "-compiler", Value: "gc"}, {Key: "-buildmode", Value: "exe"}}}
+	return &debug.BuildInfo{GoVersion: "go1.26.8", Path: pilotMain, Main: debug.Module{Path: pilotModule}, Settings: []debug.BuildSetting{{Key: "GOOS", Value: "linux"}, {Key: "GOARCH", Value: "amd64"}, {Key: "GOAMD64", Value: "v1"}, {Key: "CGO_ENABLED", Value: "0"}, {Key: "-compiler", Value: "gc"}, {Key: "-buildmode", Value: "exe"}, {Key: "-trimpath", Value: "true"}}}
 }
 func TestGoBuildContextRefusesUnmodeledInputs(t *testing.T) {
 	good := supportedBuildInfo()

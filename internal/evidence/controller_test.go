@@ -46,7 +46,7 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	writeClosureFile(t, root, "go.sum", "")
 	writeClosureFile(t, root, "cmd/pilot/main.go", "package main\nfunc main() {}\n")
 	exe := filepath.Join(t.TempDir(), "pilot")
-	buildCommand := exec.Command("go", "build", "-buildvcs=false", "-o", exe, "./cmd/pilot")
+	buildCommand := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", exe, "./cmd/pilot")
 	buildCommand.Dir = root
 	buildCommand.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off", "GOENV=off", "GOFLAGS=", "GOTOOLCHAIN=local")
 	if output, err := buildCommand.CombinedOutput(); err != nil {
@@ -89,7 +89,7 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proof.PreProbeSHA256 != proof.PostProbeSHA256 || proof.Steps.Syntax != 1 || !validNativeProbe(proof.NativeProbe) {
+	if proof.PreProbeSHA256 != proof.PostProbeSHA256 || proof.Steps.Syntax != 1 || !validNativeProbe(proof.NativeProbe) || proof.NativeProbe.UID != 1000 || proof.NativeProbe.User != "pilot-controller" || proof.NativeProbe.SSHIdentity != "ssh-config/v1" || proof.Build == nil || proof.Build.RebuiltBinarySHA256 != proof.BinarySHA256 {
 		t.Fatalf("actual routed proof invalid: %+v", proof)
 	}
 	t.Logf("actual image=%s config=%s native=%s/%s pre/post=%s routed=%+v", proof.ImageID, proof.ConfigSHA256, proof.NativeProbe.Ansible, proof.NativeProbe.Python, proof.PreProbeSHA256, proof.Steps)
@@ -170,7 +170,51 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 		t.Fatalf("native module verification failure was lost: %+v", bad.Unresolved)
 	}
 	t.Log("owned cache clean PASS; modified dependency specifically rejected by native go mod verify and closure guard")
+	// A different module's metadata is absent from the owned cache. Offline
+	// lookup refusal must remain visible, with no attempted cache repair.
+	writeClosureFile(t, root, "go.mod", "module github.com/kjelly/pilot\n\ngo 1.26.8\nrequire github.com/hashicorp/go-uuid v1.0.2\n")
+	build.Reset()
+	missing, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"apply.yml"}, Controller: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard = false
+	for _, u := range missing.Unresolved {
+		if u.Ref == "unproved Go build closure" && strings.Contains(u.Reason, "cache verification failed") {
+			guard = true
+		}
+	}
+	if !guard || !strings.Contains(build.String(), "module lookup disabled by GOPROXY=off") {
+		t.Fatalf("offline missing-cache refusal/diagnostics lost: unresolved=%+v raw=%s", missing.Unresolved, build.String())
+	}
+	t.Log("owned missing module metadata explicitly refused offline; native diagnostic preserved in raw log")
 	c.moduleCache = originalCache
+	// The source may change without rebuilding the already running outer pilot.
+	// BuildInfo/module equality must not certify such a stale executable.
+	writeClosureFile(t, root, "go.mod", "module github.com/kjelly/pilot\n\ngo 1.26.8\n")
+	writeClosureFile(t, root, "cmd/pilot/main.go", "package main\nfunc init(){panic(\"changed source never used by old binary\")}\nfunc main() {}\n")
+	if output, err := exec.Command(exe).CombinedOutput(); err != nil {
+		t.Fatalf("old binary control did not remain rc0: %v %s", err, output)
+	}
+	stale, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"apply.yml"}, Controller: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatch := false
+	for _, u := range stale.Unresolved {
+		if u.Ref == "unproved Go build closure" && strings.Contains(u.Reason, "binary differs from reproducible source rebuild") {
+			mismatch = true
+		}
+	}
+	if !mismatch {
+		t.Fatalf("stale executed binary falsely claimed changed source: %+v", stale.Unresolved)
+	}
+	for _, file := range stale.Files {
+		if file.Path == "cmd/pilot/main.go" {
+			t.Fatal("stale binary exposed partial accepted source graph")
+		}
+	}
+	t.Log("old executed binary rc0; changed source panic init specifically refused by reproducible SHA mismatch")
 	// The read-only root is real, and a changed profile invalidates postflight.
 	if err := os.WriteFile(filepath.Join(root, ControllerProfile, "ansible.cfg"), []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
@@ -247,7 +291,7 @@ func TestPinnedControllerActualPilotGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe := filepath.Join(t.TempDir(), "pilot")
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", exe, "./cmd/pilot")
+	cmd := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", exe, "./cmd/pilot")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off", "GOENV=off", "GOFLAGS=", "GOOS=linux", "GOARCH=amd64", "GOAMD64=v1", "GOEXPERIMENT=", "GOFIPS140=off", "GOTOOLCHAIN=local")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -308,7 +352,7 @@ func TestPinnedControllerActualPilotGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proof.Build == nil || proof.Build.GOAMD64 != "v1" || proof.PreProbeSHA256 != proof.PostProbeSHA256 {
+	if proof.Build == nil || proof.Build.RebuiltBinarySHA256 != proof.BinarySHA256 || len(proof.Build.SourcesSHA256) != 64 || proof.Build.GOAMD64 != "v1" || proof.PreProbeSHA256 != proof.PostProbeSHA256 {
 		t.Fatalf("actual build proof invalid: %+v", proof)
 	}
 	rec := &Record{Closure: closure, Controller: proof}

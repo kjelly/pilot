@@ -539,3 +539,35 @@ func TestEvidenceUnsupportedDispatchOmitsSecretPayload(t *testing.T) {
 		t.Fatalf("unsupported dispatch must have a payload-free refusal marker: %s", raw)
 	}
 }
+
+func TestEvidenceCapturesControllerDiagnosticsForRedaction(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	path := filepath.Join(root, "docs/evidence/demo/controller.md")
+	withEvidenceFlags(t, path)
+	sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, []string{"-e", "api_token=ControllerDiagnosticSentinel"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capture strings.Builder
+	capture.WriteString("native compiler diagnostic: ControllerDiagnosticSentinel")
+	sess.controllerOutput = &capture
+	sess.finish(io.Discard, io.Discard, "success", nil)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := evidence.ParseMachineBlock(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, hit := range rec.Redaction.Hits {
+		if hit.Step == "controller proof" {
+			found = true
+		}
+	}
+	if !found || strings.Contains(string(raw), "ControllerDiagnosticSentinel") {
+		t.Fatalf("controller diagnostic not captured/sanitized: %+v", rec.Redaction)
+	}
+}
