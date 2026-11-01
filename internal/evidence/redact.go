@@ -522,6 +522,15 @@ func typedProtocolString(owner reflect.Type, field string, value reflect.Value, 
 		case "Name":
 			return oneOf("L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency", "rollback")
 		}
+	case reflect.TypeOf(VerifyResult{}):
+		return field == "DiagnosticsSchema" && text == VerifyDiagnosticsSchema
+	case reflect.TypeOf(VerifyRowDiagnostic{}):
+		switch field {
+		case "Status":
+			return oneOf("pass", "fail", "skip", "not_applicable")
+		case "ProbeStatus":
+			return oneOf("ok", "timeout", "unreachable", "module_error", "runner_error", "missing")
+		}
 	case reflect.TypeOf(VerifyVerdict{}):
 		return field == "Verdict" && oneOf("PASS", "FAIL")
 	case reflect.TypeOf(File{}):

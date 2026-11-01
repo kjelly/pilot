@@ -108,14 +108,26 @@ committed evidence summary。
   固定 Ansible config 與清除 host ANSIBLE/PYTHON environment 的 launcher。
   這個 profile 需要 matching repository source checkout、Docker daemon 及已存在且可驗證的
   Go module cache，且目前 profile 要求 host UID/GID 1000（不掛載 host identity database）。native probe 包含 NSS identity 與實際 ssh -G 檢查；只含 bundled playbooks/docs 的 runtime image 不支援完整 source closure。
+  profile 另以 SHA-256 pin 完整 ansible.posix 2.1.0 collection，僅從 image 內固定 collection
+  root 載入 verifier 所需的 ansible.posix.json callback。native probe 驗證 callback resolved
+  origin、file/manifest hash 與 version，並用真實 Ansible command 執行測試 rc/stdout；
+  不以 ansible-doc 存在代替 runtime 相容性。
   native pre/post probe 證明 Python/Ansible origin、effective config、所有 plugin loader、
   role/collection/sys.path 與 pinned Go toolchain 一致，才可清除 ambient refusal。
   `controller` 保存 typed proof、image/config/profile/binary/inventory hashes、native probe
   與實際 routed stage counts；selection flag 或 supplied boolean 不構成證明。
+  controller/v3 的 whole L5 child 結束後，launcher 把 private NDJSON rows 以固定 compact JSON
+  frame 寫到 stderr，保留原 child rc 與 stdout verdict；原始 frame 留在 run log 並參與 redaction
+  scan。machine `verify[].rows` 保存 sanitized ID/host/status/rc/probe/stdout/stderr/mismatch，
+  `diagnostics_schema`/`diagnostics_complete` 明示完整性。16MiB/10000-row bounded export、strict
+  parser 或 summary counts 不完整時 evidence 失敗；不把 container removal 後消失的報告當作證據。
+  record/gate 要求完整成功 row 與明確 host/group limit；row failure 保留其 rc、probe 與 mismatch
+  差異，不能只靠 aggregate FAIL 判斷失敗原因。decoded V1 row command 的 Jinja expression 或 backslash argument escape
+  同樣 unresolved，避免 Ansible 的 controller-side lookup 漏掉檔案依賴。
   inventory-aware group_vars/host_vars 依實際 rendered host/group/ancestor 集合記候選 membership，
   無關 example 檔案不會成為輸入。V1 spec、已證明的 pilot SSH inventory 與 literal task subset
   才支援這個初始 profile；不支援的 context 仍正常執行並明示 unresolved。
-  不嘗試執行 Jinja。`resolution_version: 8` 區分這個解析與 controller 證明邊界。
+  不嘗試執行 Jinja。`resolution_version: 9` 區分這個解析與 controller 證明邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
   pinned profile 另讀取實際執行 binary 的 BuildInfo，要求固定 Go1.26.8/linux/amd64/v1、
@@ -202,5 +214,5 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 8`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+未解析引用、外部執行檔案、缺少 `resolution_version: 9`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。

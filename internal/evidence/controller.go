@@ -19,7 +19,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const ControllerSchema = "pilot-controller/v2"
+const ControllerSchema = "pilot-controller/v3"
 const ControllerProfile = "images/evidence-controller"
 
 var controllerProfileFiles = []string{"Dockerfile", "profile.lock.json", "ansible.cfg", "launch.py", "probe.py"}
@@ -61,7 +61,16 @@ type ControllerLoader struct {
 	Config []string `json:"config"`
 	Paths  []string `json:"paths"`
 }
+type ControllerCallback struct {
+	Version        string `json:"version"`
+	Origin         string `json:"origin"`
+	SHA256         string `json:"sha256"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Execution      string `json:"execution"`
+}
+
 type ControllerNativeProbe struct {
+	Callback               ControllerCallback          `json:"callback"`
 	UID                    int                         `json:"uid"`
 	GID                    int                         `json:"gid"`
 	User                   string                      `json:"user"`
@@ -82,7 +91,15 @@ type ControllerNativeProbe struct {
 	Loaders                map[string]ControllerLoader `json:"loaders"`
 }
 
+type controllerPosixLock struct {
+	Version        string `json:"version"`
+	URL            string `json:"url"`
+	SHA256         string `json:"sha256"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	CallbackSHA256 string `json:"callback_sha256"`
+}
 type controllerLock struct {
+	Posix                                       controllerPosixLock `json:"ansible_posix"`
 	Schema, Base, Ansible, Python, Platform, Go string
 	GoBase                                      string `json:"go_base"`
 }
@@ -100,6 +117,7 @@ type Controller struct {
 	proof                                                       ControllerProof
 	groups                                                      Inventory
 	ready                                                       bool
+	verifyDiagnostics                                           VerifyDiagnostics
 }
 
 func digestBytes(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
@@ -160,6 +178,9 @@ func NewPinnedController(root, binary string, log io.Writer) (*Controller, error
 	c.moduleCache = cache
 	if c.lock.Go != "go1.26.8" || !strings.Contains(c.lock.GoBase, "@sha256:") || !strings.HasPrefix(string(recipe), "FROM "+c.lock.GoBase+" AS go_toolchain\n") || c.lock.Schema != "pilot-controller-profile/v1" || !strings.Contains(c.lock.Base, "@sha256:") || c.lock.Platform != "linux/amd64" || !strings.Contains(string(recipe), "\nFROM "+c.lock.Base+"\n") {
 		return nil, fmt.Errorf("controller recipe and pinned lock disagree")
+	}
+	if c.lock.Posix.Version != "2.1.0" || c.lock.Posix.SHA256 != "5ff232cf69492a991f2a0990dbb23ef25a600b7e9209de6e33377a6ff08a8a29" || c.lock.Posix.CallbackSHA256 != "cc2f6a845b1b7d8d87e16b7fed79b860e10ea9e9b372dd0bdcbd850b9654a032" || c.lock.Posix.ManifestSHA256 != "3899df5b1b390f51a7fc95ad8997c7e7030daf4f5265898f96977ef9ed8d4df5" || c.lock.Posix.URL != "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-posix-2.1.0.tar.gz" || !strings.Contains(string(recipe), "ADD --checksum=sha256:"+c.lock.Posix.SHA256+" "+c.lock.Posix.URL+" ") {
+		return nil, fmt.Errorf("controller collection recipe and pinned lock disagree")
 	}
 	cmd := exec.Command("docker", "build", "--quiet", "--platform", c.lock.Platform, filepath.Join(root, ControllerProfile))
 	cmd.Stderr = log
@@ -482,8 +503,28 @@ func (c *Controller) Run(step, tool string, args []string, stdout, stderr io.Wri
 	if (step == "L5 verify") != (tool == "pilot") {
 		return fmt.Errorf("controlled step/tool mismatch")
 	}
+	var output, diagnostics bytes.Buffer
+	if tool == "pilot" {
+		stdout = io.MultiWriter(stdout, &output)
+		stderr = io.MultiWriter(stderr, &diagnostics)
+	}
 	err := c.execute(tool, args, stdout, stderr)
 	*count++
+	if tool == "pilot" {
+		parsed, parseErr := ParseControllerVerifyDiagnostics(diagnostics.String())
+		c.verifyDiagnostics = parsed
+		if err == nil && parseErr != nil {
+			return fmt.Errorf("controlled verifier diagnostic export incomplete")
+		}
+		if err == nil {
+			verdict, ok := ParseVerifyVerdict(output.String())
+			pass, fail, skip := parsed.Counts()
+			if !ok || verdict.Pass != pass || verdict.Fail != fail || verdict.Skip != skip {
+				c.verifyDiagnostics.Complete = false
+				return fmt.Errorf("controlled verifier rows differ from summary")
+			}
+		}
+	}
 	return err
 }
 func (c *Controller) Finalize() (*ControllerProof, error) {
@@ -511,7 +552,10 @@ func (c *Controller) Close() {
 }
 
 func validNativeProbe(p *ControllerNativeProbe) bool {
-	if p == nil || p.Go != "go version go1.26.8 linux/amd64" || p.Schema != "pilot-controller-probe/v2" || p.UID != 1000 || p.GID != 1000 || p.User != "pilot-controller" || p.Group != "pilot-controller" || p.SSHIdentity != "ssh-config/v1" || p.Ansible != "2.21.5" || p.Python != "3.14.8" || p.AnsibleOrigin != "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" || p.PythonExecutable != "/usr/bin/python3.14" || p.ConfigFile != "/opt/pilot-controller/ansible.cfg" || len(p.ConfigSHA256) != 64 || p.CollectionsScanSysPath || !reflect.DeepEqual(p.Collections, []string{"/opt/pilot-controller/empty"}) || !reflect.DeepEqual(p.Roles, []string{"/opt/pilot-controller/empty"}) || len(p.Loaders) != len(ansiblePluginDirectories) {
+	if p == nil || p.Go != "go version go1.26.8 linux/amd64" || p.Schema != "pilot-controller-probe/v3" || p.UID != 1000 || p.GID != 1000 || p.User != "pilot-controller" || p.Group != "pilot-controller" || p.SSHIdentity != "ssh-config/v1" || p.Ansible != "2.21.5" || p.Python != "3.14.8" || p.AnsibleOrigin != "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" || p.PythonExecutable != "/usr/bin/python3.14" || p.ConfigFile != "/opt/pilot-controller/ansible.cfg" || len(p.ConfigSHA256) != 64 || p.CollectionsScanSysPath || !reflect.DeepEqual(p.Collections, []string{"/opt/pilot-controller/collections"}) || !reflect.DeepEqual(p.Roles, []string{"/opt/pilot-controller/empty"}) || len(p.Loaders) != len(ansiblePluginDirectories) {
+		return false
+	}
+	if p.Callback != (ControllerCallback{Version: "2.1.0", Origin: "/opt/pilot-controller/collections/ansible_collections/ansible/posix/plugins/callback/json.py", SHA256: "cc2f6a845b1b7d8d87e16b7fed79b860e10ea9e9b372dd0bdcbd850b9654a032", ManifestSHA256: "3899df5b1b390f51a7fc95ad8997c7e7030daf4f5265898f96977ef9ed8d4df5", Execution: "json-command/v1"}) {
 		return false
 	}
 	if _, err := hex.DecodeString(p.ConfigSHA256); err != nil {
@@ -559,4 +603,12 @@ func safeControllerMount(path string) bool {
 		}
 	}
 	return true
+}
+
+func (c *Controller) VerifyDiagnostics() VerifyDiagnostics {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.verifyDiagnostics
+	out.Rows = append([]VerifyRowDiagnostic(nil), out.Rows...)
+	return out
 }

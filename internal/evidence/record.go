@@ -67,8 +67,11 @@ type Step struct {
 
 // VerifyResult is one `pilot verify` run of the chain.
 type VerifyResult struct {
-	Spec  string `json:"spec"`
-	Limit string `json:"limit,omitempty"`
+	DiagnosticsSchema   string                `json:"diagnostics_schema,omitempty"`
+	DiagnosticsComplete bool                  `json:"diagnostics_complete,omitempty"`
+	Rows                []VerifyRowDiagnostic `json:"rows,omitempty"`
+	Spec                string                `json:"spec"`
+	Limit               string                `json:"limit,omitempty"`
 	VerifyVerdict
 }
 
@@ -206,6 +209,15 @@ func (r *Record) Markdown(previous []byte) ([]byte, error) {
 		b.WriteString("\n| Verify spec | Limit | Verdict | pass | fail | skip |\n|---|---|---|---|---|---|\n")
 		for _, v := range r.Verify {
 			fmt.Fprintf(&b, "| `%s` | %s | %s | %d | %d | %d |\n", v.Spec, orDash(v.Limit), orUnknown(v.Verdict), v.Pass, v.Fail, v.Skip)
+		}
+		for _, v := range r.Verify {
+			if len(v.Rows) > 0 {
+				b.WriteString("\n| Verify row | Host | Status | rc | Probe | Detail |\n|---|---|---|---|---|---|\n")
+				for _, row := range v.Rows {
+					detail := strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ").Replace(row.Detail)
+					fmt.Fprintf(&b, "| %s | %s | %s | %d | %s | %s |\n", row.ID, row.Host, row.Status, row.ExitCode, row.ProbeStatus, detail)
+				}
+			}
 		}
 	}
 
