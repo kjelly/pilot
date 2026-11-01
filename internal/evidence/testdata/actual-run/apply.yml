@@ -1,0 +1,27 @@
+---
+# Only for disposable PR 225 targets; VM snapshots exercise chain rollback.
+- name: Bounded evidence recording fixture
+  hosts: "{{ target_group | default('all') }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Reconcile the effective fixture file
+      ansible.builtin.copy:
+        dest: /etc/pilot-pr225-evidence.conf
+        content: "{{ evidence_value | default('pr225-evidence-v1') }}\n"
+        owner: root
+        group: root
+        mode: '0644'
+      tags: [C1]
+
+    - name: Inject an apply failure after the file mutation
+      ansible.builtin.fail:
+        msg: PR225 intentional failure after managed-file mutation
+      when:
+        - not ansible_check_mode
+        - evidence_fail_after_mutation | default(false) | bool
+
+    - name: Inject a changed-only idempotency failure
+      ansible.builtin.command: /usr/bin/true
+      changed_when: true
+      when: evidence_non_idempotent | default(false) | bool

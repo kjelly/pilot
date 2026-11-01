@@ -78,6 +78,12 @@ class RemoteContext(repo_evidence.Context):
     def tree_entries(self, revision: str) -> dict[str, tuple[str, str]]:
         return self.client.tree_entries(self.repo, revision)
 
+    def read_file(self, revision: str, path: str) -> bytes | None:
+        return self.client.file_at(self.repo, path, revision)
+
+    def commit_tree(self, revision: str) -> str | None:
+        return self.client.commit_tree(self.repo, revision)
+
     def delta_files(self, sha: str) -> list[str] | None:
         if sha in self._cache:
             return self._cache[sha]
@@ -180,7 +186,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     else:
         rev = rev.lower()
         try:
-            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse")):
+            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art):
                 gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
         except (GitHubError, ValueError, KeyError) as exc:
             gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")

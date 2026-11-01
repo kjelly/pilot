@@ -1,0 +1,4 @@
+ipa_admin_password: Sup3rS3cretPw!
+ipa_domain: ipa.pilot.internal
+ssh_private_key_file: /home/x/.ssh/id
+short_pw: abc

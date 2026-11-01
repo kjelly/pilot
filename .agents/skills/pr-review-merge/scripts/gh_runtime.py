@@ -228,6 +228,17 @@ def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
             "ancestor": status in ("ahead", "identical") and behind == 0 and merge_base.lower() == base}
 
 
+def commit_tree(repo: Repo, revision: str) -> str:
+    if not COMMIT_SHA.fullmatch(revision):
+        raise ValueError("commit_tree needs a full lowercase commit SHA")
+    cp = run_gh(["api", *host_args(repo), f"repos/{repo.owner}/{repo.name}/git/commits/{revision}"])
+    data = parse_json(cp.stdout, "commit")
+    tree = data.get("tree", {}).get("sha") if isinstance(data, dict) else None
+    if not isinstance(tree, str) or not COMMIT_SHA.fullmatch(tree):
+        raise GitHubError("Invalid commit tree response")
+    return tree
+
+
 def tree_entries(repo: Repo, revision: str) -> dict[str, tuple[str, str]]:
     """Complete path -> (mode, object id) map; no content decoding or symlink following.
 

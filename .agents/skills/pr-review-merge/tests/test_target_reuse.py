@@ -42,6 +42,112 @@ class TargetReuseRemoteTests(unittest.TestCase):
                                       "dependency_review": "Reviewed complete target dependency closure; the unrelated service is not called by this target or its shared helpers."}}
         return gh, e, trees
 
+    def test_remote_machine_record_uses_shared_closure_validator(self):
+        gh, e, trees = self.fixture()
+        record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
+                  "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
+                  "closure": {"resolution_version": 6, "frozen": True, "files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
+                              "patterns": ["playbooks/apply/*.yml"]}}
+        # Reuse the explicitly synthetic proof builder; native execution lives
+        # in Go integration tests, this fixture proves shared adapter parity.
+        import importlib.util
+        from pathlib import Path
+        helper = Path(__file__).resolve().parents[2] / "issue-to-pr/tests/controller_fixture.py"
+        spec = importlib.util.spec_from_file_location("controller_fixture", helper)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        fixture.add_controller(record)
+        for path, raw in fixture.fixture_files().items():
+            entry = fixture.descriptor(path, raw)
+            trees[R][path] = trees[H][path] = ("100644", entry["blob"])
+            gh.files[(path,R)] = raw
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
+        gh.commit_tree = lambda repo, revision: "e" * 40
+        del e["target_validation"]["target_reuse"]["execution_paths"]
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        # This synthetic typed controlled-scope record tests the gate only.
+        # Local and remote must reject the same unsafe machine attestations,
+        # including old resolver records that silently omitted file expressions.
+        for change, reason in (
+                (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
+                (lambda r: r["closure"].update(unresolved=[{"from": "environment", "ref": "ambient Ansible plugin discovery", "reason": "unfingerprinted controller paths"}]), "unresolved"),
+                (lambda r: r["closure"].update(resolution_version=2), "resolution version"),
+                (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
+                (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
+                (lambda r: r["closure"].update(resolution_version=5), "resolution version"),
+                (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=7), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=8), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=9), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unproved Go build closure", "reason": "candidate assembly/system objects are unsupported"}]), "unresolved"),
+            (lambda r: r["controller"].update(schema="pilot-controller/v2"), "current OCI proof"),
+            (lambda r: r["verify"][0].pop("rows"), "row counts differ"),
+            (lambda r: r["verify"][0].update(diagnostics_complete=False), "diagnostic export"),
+            (lambda r: r["verify"][0]["rows"][0].update(probe_status="runner_error"), "verifier row identity/status"),
+            (lambda r: r["controller"].update(schema="pilot-controller/v1"), "current OCI proof"),
+            (lambda r: r["controller"]["build"].pop("sources_sha256"), "missing Go build/module fingerprints"),
+            (lambda r: r["controller"]["build"].update(rebuilt_binary_sha256="0"*64), "reproducible source rebuild"),
+                (lambda r: r.pop("controller"), "current OCI proof"),
+                (lambda r: r["controller"].update(image_id="tag:latest"), "immutable image ID"),
+                (lambda r: r["controller"]["steps"].update({"L5 verify":0}), "stage was not routed"),
+                (lambda r: r["controller"]["build"].update(goamd64="v2"), "unsupported Go build context"),
+                (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "lookup/query expression"}]), "unresolved"),
+                (lambda r: r["closure"].update(external=["/outside/input"]), "external"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch"}]), "unresolved"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task layout", "reason": "debug argument proof failed"}]), "unresolved"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "template execution is opaque to automatic reuse"}]), "unresolved"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "automatic reuse supports only literal copy and debug.msg actions"}]), "unresolved"),
+                (lambda r: r.update(outcome="invalid-inputs"), "did not succeed")):
+            bad = copy.deepcopy(record)
+            change(bad)
+            gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(bad) + "\n```\n").encode()
+            self.assertIn(reason, self.reasons(gh, e))
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
+        trees[H]["playbooks/apply/new.yml"] = blob(8)
+        self.assertIn("search membership changed", self.reasons(gh, e))
+
+    def test_remote_existing_assembly_header_import_refuses_old_resolution(self):
+        # The fake GitHub graph represents a genuine existing-header base
+        # import: unchanged candidate bytes become the advanced-base bytes at H.
+        gh,e,trees=self.fixture()
+        header="src/value.h"
+        trees[A][header]=trees[R][header]=blob(5)
+        trees[B][header]=trees[H][header]=blob(6)
+        gh.compares[(R,H)]["files"].append(header)
+        gh.compares[(R,B)]["files"].append(header)
+        record={"schema":"pilot-evidence-record/v1","outcome":"success",
+                "candidate":{"commit":R,"tree":"e"*40,"source":"git"},
+                "closure":{"frozen":True,"files":[{"path":APP,"mode":"100644","blob":trees[R][APP][1]}],"patterns":["src/*.h"]}}
+        import importlib.util
+        from pathlib import Path
+        spec=importlib.util.spec_from_file_location("controller_fixture",Path(__file__).resolve().parents[2]/"issue-to-pr/tests/controller_fixture.py")
+        fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+        fixture.add_controller(record)
+        for path,raw in fixture.fixture_files().items():
+            entry=fixture.descriptor(path,raw)
+            trees[R][path]=trees[H][path]=("100644",entry["blob"])
+            gh.files[(path,R)]=raw
+        gh.commit_tree=lambda repo,revision:"e"*40
+        del e["target_validation"]["target_reuse"]["execution_paths"]
+        for version,unresolved,reason in ((9,[],"resolution version"),(10,[{"ref":"unproved Go build closure","reason":"candidate assembly/system objects are unsupported"}],"unresolved")):
+            record["closure"].update(resolution_version=version,unresolved=unresolved)
+            gh.files[(ART,H)]=("<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n").encode()
+            self.assertIn(reason,self.reasons(gh,e))
+
+        # Same-path ignored assembly activation is content-bound in resolver10.
+        # This adapter-only fixture represents that producer's collected bytes.
+        source="src/value.s"
+        trees[A][source]=trees[R][source]=blob(7)
+        trees[B][source]=trees[H][source]=blob(8)
+        gh.compares[(R,H)]["files"].append(source)
+        gh.compares[(R,B)]["files"].append(source)
+        record["closure"].update(resolution_version=10,unresolved=[],patterns=["src/*"])
+        record["closure"]["files"].append({"path":source,"mode":"100644","blob":trees[R][source][1]})
+        gh.files[(ART,H)]=("<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n").encode()
+        self.assertIn("execution input changed, missing or not a regular file: "+source,self.reasons(gh,e))
+
     def test_remote_gate_accepts_reviewed_main_import(self):
         gh, e, _ = self.fixture()
         r = evaluate(REPO, 42, e, client=gh)

@@ -285,6 +285,51 @@ class TargetReuseGuardTests(ReuseHelpers):
         commit_files(wt, post or {}, "after the run")
         commit(wt, "qa/runs/2026/run.md", "Tested " + self.candidate)
 
+    def test_existing_assembly_header_pure_base_import_cannot_reuse_old_scope(self):
+        import json
+        from controller_fixture import add_controller, fixture_files
+        # Historical resolver-9 shape deliberately omitted an already-existing
+        # consumed header. This is not a purported complete current record.
+        header = "src/value.h"
+        self.build(fork={header: "#define VALUE 225\n"},
+                   candidate={"src/app.go": "package app\n", **{p:r.decode() for p,r in fixture_files().items()}},
+                   main={header: "#define VALUE 226\n"})
+        ctx = self.ctx()
+        self.assertNotEqual(ctx.tree_entries(self.candidate)[header], ctx.tree_entries(self.base)[header])
+        self.assertEqual(ctx.tree_entries(self.base)[header], ctx.tree_entries(git(self.wt,"rev-parse","HEAD"))[header])
+        tree = ctx.tree_entries(self.candidate)
+        record = add_controller({"schema":"pilot-evidence-record/v1", "outcome":"success",
+            "candidate":{"commit":self.candidate,"tree":ctx.commit_tree(self.candidate),"source":"git"},
+            "closure":{"frozen":True,"files":[{"path":"src/app.go","mode":tree["src/app.go"][0],"blob":tree["src/app.go"][1]}],"patterns":["src/*.h"]}})
+        for version, unresolved, reason in ((9, [], "resolution version"), (10, [{"ref":"unproved Go build closure", "reason":"candidate assembly/system objects are unsupported"}], "unresolved")):
+            record["closure"].update(resolution_version=version, unresolved=unresolved)
+            artifact="qa/runs/2026/run.md"
+            commit(self.wt,artifact,"<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n")
+            reuse=self.reuse(); del reuse["execution_paths"]
+            ctx=self.ctx()
+            self.assertFalse(ctx.accepts_target(self.candidate,"actual-run",reuse,artifact))
+            self.assertIn(reason,ctx.target_stale_reason(self.candidate))
+
+    def test_bound_ignored_native_activation_import_changes_input(self):
+        import json
+        from controller_fixture import add_controller, fixture_files
+        source="src/value.s"
+        self.build(fork={source:"//go:build never\n\nDATA value, $226\n"},
+                   candidate={"src/app.go":"package app\n",**{p:r.decode() for p,r in fixture_files().items()}},
+                   main={source:"//go:build linux && amd64\n\nDATA value, $226\n"})
+        ctx=self.ctx();tree=ctx.tree_entries(self.candidate)
+        # Synthetic adapter mechanics for the ignored-source bytes actually
+        # collected by the native producer test; source name membership is equal.
+        record=add_controller({"schema":"pilot-evidence-record/v1","outcome":"success",
+            "candidate":{"commit":self.candidate,"tree":ctx.commit_tree(self.candidate),"source":"git"},
+            "closure":{"frozen":True,"patterns":["src/*"],"files":[{"path":p,"mode":tree[p][0],"blob":tree[p][1]} for p in ("src/app.go",source)]}})
+        artifact="qa/runs/2026/run.md"
+        commit(self.wt,artifact,"<!-- pilot-evidence-record v1 -->\n```json\n"+json.dumps(record)+"\n```\n")
+        reuse=self.reuse();del reuse["execution_paths"]
+        ctx=self.ctx()
+        self.assertFalse(ctx.accepts_target(self.candidate,"actual-run",reuse,artifact))
+        self.assertIn("execution input changed, missing or not a regular file: "+source,ctx.target_stale_reason(self.candidate))
+
     def test_symlinked_scoped_input_requires_new_run(self):
         reason = "execution input changed, missing or not a regular file: playbooks/x.yml"
         scope = ["src/app.go", "src/dependency.go"]
@@ -396,6 +441,113 @@ class TargetReuseGuardTests(ReuseHelpers):
         self.assertRejected(reuse, "duplicate or overlapping non-execution change: " + PROSE)
         reuse["non_execution_changes"] = []
         self.assertTrue(self.accepts(reuse)[0])
+
+
+class MachineRecordTests(TargetReuseTests):
+    def setUp(self):
+        super().setUp()
+        from controller_fixture import fixture_files
+        # Add the synthetic proof inputs at the tested candidate, then import
+        # that branch into the already advanced head (real scratch Git graph).
+        git(self.wt, "checkout", "-q", "--detach", self.candidate)
+        self.candidate = commit_files(self.wt, {p:raw.decode() for p,raw in fixture_files().items()}, "synthetic controller inputs")
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        git(self.wt, "merge", "-q", self.candidate, "-m", "import controller candidate")
+
+    def machine(self):
+        ctx = self.ctx()
+        tree = ctx.tree_entries(self.candidate)
+        from controller_fixture import add_controller
+        return add_controller({"schema": "pilot-evidence-record/v1", "outcome": "success",
+                "candidate": {"commit": self.candidate, "tree": ctx.commit_tree(self.candidate), "source": "git"},
+                "closure": {"resolution_version": 6, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
+                                      for p in ("src/app.go", "src/dependency.go")],
+                            "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}})
+
+    def machine_accepts(self, record):
+        import json
+        artifact = "qa/runs/2026/run.md"
+        commit(self.wt, artifact, "<!-- pilot-evidence-record v1 -->\n\n```json\n" + json.dumps(record) + "\n```\n")
+        reuse = self.reuse()
+        del reuse["execution_paths"]
+        ctx = self.ctx()
+        result = ctx.accepts_target(self.candidate, "target", reuse, artifact)
+        return result, ctx.target_stale_reason(self.candidate)
+
+    def test_machine_closure_needs_no_manual_paths(self):
+        self.assertTrue(self.machine_accepts(self.machine())[0])
+
+    def test_machine_blob_mode_tree_dirty_and_partial_records_fail_closed(self):
+        import copy
+        good = self.machine()
+        # Synthetic typed proof exercises gate mechanics. Native constructor,
+        # routing and source closure are tested independently against real OCI.
+        mutations = [
+            (lambda r: r["candidate"].update(tree="0" * 40), "candidate/tree"),
+            (lambda r: r["candidate"].update(dirty=True), "dirty candidate"),
+            (lambda r: r.update(outcome="failed"), "did not succeed"),
+            (lambda r: r["closure"]["files"][0].update(blob="0" * 40), "blob/mode"),
+            (lambda r: r["closure"].pop("patterns"), "search patterns"),
+            (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"from": "environment", "ref": "ambient Ansible plugin discovery", "reason": "unfingerprinted controller paths"}]), "unresolved"),
+            (lambda r: r["closure"].update(resolution_version=2), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=5), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=6), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=7), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=8), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=9), "resolution version"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unproved Go build closure", "reason": "candidate assembly/system objects are unsupported"}]), "unresolved"),
+            (lambda r: r["controller"].update(schema="pilot-controller/v2"), "current OCI proof"),
+            (lambda r: r["verify"][0].pop("rows"), "row counts differ"),
+            (lambda r: r["verify"][0].update(diagnostics_complete=False), "diagnostic export"),
+            (lambda r: r["verify"][0]["rows"][0].update(probe_status="runner_error"), "verifier row identity/status"),
+            (lambda r: r["controller"].update(schema="pilot-controller/v1"), "current OCI proof"),
+            (lambda r: r["controller"]["build"].pop("sources_sha256"), "missing Go build/module fingerprints"),
+            (lambda r: r["controller"]["build"].update(rebuilt_binary_sha256="0"*64), "reproducible source rebuild"),
+            (lambda r: r.pop("controller"), "current OCI proof"),
+            (lambda r: r["controller"].update(image_id="mutable:latest"), "immutable image ID"),
+            (lambda r: r["controller"].update(post_probe_sha256="0"*64), "pre/post context"),
+            (lambda r: r["controller"]["steps"].update({"L5 verify":0}), "stage was not routed"),
+            (lambda r: r["steps"][0].update(status="skipped"), "required recorded stage"),
+            (lambda r: r["controller"]["build"].update(goamd64="v2"), "unsupported Go build context"),
+            (lambda r: r["controller"]["profile"].update(config_sha256="0"*64), "profile identity differs"),
+            (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
+            (lambda r: r.update(outcome="invalid-inputs"), "did not succeed"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unknown"}]), "unresolved"),
+            (lambda r: r["closure"].update(external=["/vault/file"]), "external"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task layout", "reason": "debug argument proof failed"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "template execution is opaque to automatic reuse"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "automatic reuse supports only literal copy and debug.msg actions"}]), "unresolved"),
+        ]
+        for change, reason in mutations:
+            with self.subTest(reason=reason):
+                record = copy.deepcopy(good)
+                change(record)
+                accepted, why = self.machine_accepts(record)
+                self.assertFalse(accepted)
+                self.assertIn(reason, why)
+        self.assertTrue(self.machine_accepts(good)[0])
+
+    def test_machine_search_detects_new_upstream_glob_member(self):
+        record = self.machine()
+        git(self.wt, "checkout", "-q", "main")
+        self.base = commit(self.wt, "src/dependency-new.go", "package dependency\n")
+        git(self.wt, "update-ref", "refs/remotes/origin/main", self.base)
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        git(self.wt, "merge", "-q", "main", "-m", "new input")
+        accepted, why = self.machine_accepts(record)
+        self.assertFalse(accepted)
+        self.assertIn("search membership changed", why)
+
+    def test_machine_scope_cannot_be_narrowed_by_attestation(self):
+        record = self.machine()
+        commit(self.wt, "src/dependency.go", "package changed\n")
+        accepted, why = self.machine_accepts(record)
+        self.assertFalse(accepted)
+        self.assertIn("execution input changed", why)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+- name: helper fact
+  ansible.builtin.set_fact: { helper: 1 }
+- name: helper includes a second file
+  ansible.builtin.include_tasks: helpers-inner.yml

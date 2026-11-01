@@ -1,0 +1,13 @@
+- name: Establish the literal reuse acceptance state
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Manage the externally verified file
+      ansible.builtin.copy:
+        dest: /etc/pilot-pr225-reuse.conf
+        content: "pr225-reuse-v1\n"
+        owner: root
+        group: root
+        mode: '0644'
+      tags: [C1]
