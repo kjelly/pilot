@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/accessgrants/fakeipatest"
 )
 
 // TestIdentitySecretDriftCommandsShowTheGateAndHideTheVault drives the three
@@ -42,6 +44,11 @@ func TestIdentitySecretDriftCommandsShowTheGateAndHideTheVault(t *testing.T) {
 		}},
 		{"identity drift", func(ws driftWorkspace, extra ...string) []string {
 			return append([]string{"identity", "drift", ws.roster, "-i", ws.inventory}, extra...)
+		}},
+		// The opt-in users/groups observer must not change what an operator
+		// sees when the probe stops at its own gates.
+		{"identity drift --include-users-groups", func(ws driftWorkspace, extra ...string) []string {
+			return append([]string{"identity", "drift", ws.roster, "-i", ws.inventory, "--include-users-groups"}, extra...)
 		}},
 		{"access health", func(ws driftWorkspace, extra ...string) []string {
 			return append([]string{"access", "health", ws.roster, "-i", ws.inventory}, extra...)
@@ -151,15 +158,21 @@ func TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup(t *tes
 
 	commands := []struct {
 		name string
-		args func(ws driftWorkspace, extra ...string) []string
+		// objects: the command reads users and groups, so the run reaches the
+		// observer and needs the fake FreeIPA client.
+		objects bool
+		args    func(ws driftWorkspace, extra ...string) []string
 	}{
-		{"access drift", func(ws driftWorkspace, extra ...string) []string {
+		{"access drift", false, func(ws driftWorkspace, extra ...string) []string {
 			return append([]string{"access", "drift", ws.roster, "-i", ws.inventory}, extra...)
 		}},
-		{"identity drift", func(ws driftWorkspace, extra ...string) []string {
+		{"identity drift", false, func(ws driftWorkspace, extra ...string) []string {
 			return append([]string{"identity", "drift", ws.roster, "-i", ws.inventory}, extra...)
 		}},
-		{"access health", func(ws driftWorkspace, extra ...string) []string {
+		{"identity drift --include-users-groups", true, func(ws driftWorkspace, extra ...string) []string {
+			return append([]string{"identity", "drift", ws.roster, "-i", ws.inventory, "--include-users-groups"}, extra...)
+		}},
+		{"access health", false, func(ws driftWorkspace, extra ...string) []string {
 			return append([]string{"access", "health", ws.roster, "-i", ws.inventory}, extra...)
 		}},
 	}
@@ -188,6 +201,11 @@ func TestIdentitySecretDriftCommandsDefaultScopeSurvivesAVaultTargetGroup(t *tes
 					}
 				}
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				if c.objects {
+					// Installed after the shims above: its kinit leaves a ticket the
+					// fake FreeIPA client accepts.
+					fakeipatest.Captured(t).Install(t)
+				}
 				ws := newDriftWorkspace(t, tc.vault)
 				rosterNoPassword := strings.Replace(accessCLIFixtureRoster, "{principal: admin, password: x}", "{principal: admin}", 1)
 				for path, body := range map[string]string{ws.inventory: tc.inventory, ws.roster: rosterNoPassword} {
@@ -264,14 +282,18 @@ func TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues(t *testing.T) {
 			[]string{"No usable FreeIPA admin password", "ipa_admin_password", "freeipa.admin.password", "Both are missing or too short"}},
 	}
 	commands := []struct {
-		name  string
-		args  func(ws driftWorkspace) []string
-		isRun bool // true when a probe failure is the command's error
+		name    string
+		objects bool // the run reaches the users/groups observer (needs the fake FreeIPA client)
+		args    func(ws driftWorkspace) []string
+		isRun   bool // true when a probe failure is the command's error
 	}{
-		{"access drift", func(ws driftWorkspace) []string { return []string{"access", "drift", ws.roster, "-i", ws.inventory} }, true},
-		{"identity drift", func(ws driftWorkspace) []string { return []string{"identity", "drift", ws.roster, "-i", ws.inventory} }, true},
-		{"access health", func(ws driftWorkspace) []string { return []string{"access", "health", ws.roster, "-i", ws.inventory} }, false},
-		{"access health --format json", func(ws driftWorkspace) []string {
+		{"access drift", false, func(ws driftWorkspace) []string { return []string{"access", "drift", ws.roster, "-i", ws.inventory} }, true},
+		{"identity drift", false, func(ws driftWorkspace) []string { return []string{"identity", "drift", ws.roster, "-i", ws.inventory} }, true},
+		{"identity drift --include-users-groups", true, func(ws driftWorkspace) []string {
+			return []string{"identity", "drift", ws.roster, "-i", ws.inventory, "--include-users-groups"}
+		}, true},
+		{"access health", false, func(ws driftWorkspace) []string { return []string{"access", "health", ws.roster, "-i", ws.inventory} }, false},
+		{"access health --format json", false, func(ws driftWorkspace) []string {
 			return []string{"access", "health", ws.roster, "-i", ws.inventory, "--format", "json"}
 		}, false},
 	}
@@ -287,6 +309,9 @@ func TestIdentitySecretDriftCommandsNeverEchoExpandedVaultValues(t *testing.T) {
 					}
 				}
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				if c.objects {
+					fakeipatest.Captured(t).Install(t)
+				}
 				ws := newDriftWorkspace(t, tc.vault)
 				for path, body := range map[string]string{ws.inventory: tc.inventory, ws.roster: rosterNoPassword} {
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

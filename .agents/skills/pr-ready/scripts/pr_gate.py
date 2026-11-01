@@ -7,10 +7,12 @@ It cannot prove the truth of a reviewer's semantic assessment; do not fabricate 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,11 +44,42 @@ def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Patte
 
 
 def gh_pr(repo: str, pr: int) -> dict[str, Any]:
-    fields = "number,url,title,isDraft,state,headRefOid,headRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
+    fields = "number,url,title,isDraft,state,headRefOid,headRefName,baseRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
     value = cmd(["gh", "pr", "view", str(pr), "-R", repo, "--json", fields])
     if not isinstance(value, dict):
         raise GateError("Expected a GitHub PR JSON object")
     return value
+
+
+def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
+    """Use the same base-manifest/target-run verifier as the final merge gate.
+
+    This does not relax this workflow's HEAD-bound local receipts or independent
+    review. All three workflows ship together in this repository.
+    """
+    scripts = Path(__file__).resolve().parents[2] / "pr-review-merge" / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        name = "pr_ready_target_gate"
+        module = sys.modules.get(name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(name, scripts / "review_gate.py")
+            if spec is None or spec.loader is None:
+                raise ImportError("target evidence verifier unavailable")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        head, base = pr.get("headRefOid"), pr.get("baseRefOid")
+        if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(base, str) or not SHA.fullmatch(base):
+            return ["Current HEAD/base SHA unavailable for target evidence validation"]
+        import gh_runtime
+        gaps, _ = module.check_target_validation(gh_runtime, gh_runtime.Repo.parse(repo), head, base, evidence,
+                                                base_name=pr.get("baseRefName"))
+        return gaps
+    except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
+        return [f"Target evidence validation unavailable: {exc}"]
+    finally:
+        sys.path.pop(0)
 
 
 # `gh pr checks --required` on a branch without required checks (no branch protection or ruleset
@@ -482,6 +515,7 @@ def main() -> int:
         local = check_local(args.worktree) if args.worktree else None
         errors = evaluate(before, evidence, repo=args.repo, number=args.pr, local=local,
                           log_base=args.worktree)
+        errors.extend(target_evidence_errors(before.pr, evidence, args.repo))
         if errors:
             json_line({"status": "DRAFT-BLOCKED", "pr": before.pr.get("url"),
                        "head_sha": before.pr.get("headRefOid"), "errors": errors}, compact=args.compact)
@@ -497,6 +531,7 @@ def main() -> int:
         latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
         errors = evaluate(latest, evidence, repo=args.repo, number=args.pr,
                           local=check_local(args.worktree), log_base=args.worktree)
+        errors.extend(target_evidence_errors(latest.pr, evidence, args.repo))
         if errors:
             json_line({"status": "DRAFT-BLOCKED", "errors": errors}, compact=args.compact)
             return 2

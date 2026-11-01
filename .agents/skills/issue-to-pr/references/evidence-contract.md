@@ -1,6 +1,6 @@
 # Evidence contract for issue_gate.py
 
-For each Issue use an external directory (e.g. `~/.cache/issue-to-pr/myorg/myrepo/123/`), not tracked source paths.
+For the selected Issue use an external directory (e.g. `~/.cache/issue-to-pr/myorg/myrepo/123/`), not tracked source paths.
 
 1. Commit fix and tests to the Issue branch.
 2. Run `scripts/run_check.py --worktree ... --name NAME --out /absolute/path/NAME.json -- COMMAND [ARGS...]` on a **clean** committed HEAD. Capture at least a targeted `regression` check; include other relevant commands.

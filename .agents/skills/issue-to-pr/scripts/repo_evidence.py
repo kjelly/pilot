@@ -42,6 +42,27 @@ PROBES = (("a.go", "cmd/main.go", "internal/x/y_test.go"), ("a.py", "src/lib/z.p
           ("a.sh", "scripts/x.sh"), ("a.yml", "playbooks/x.yml"), ("Makefile", "go.mod", "package.json"))
 
 
+def safe_path(path: Any) -> bool:
+    return (isinstance(path, str) and bool(path) and not path.startswith("/") and
+            all(p not in ("", ".", "..") for p in path.split("/")) and
+            not any(c in path for c in "\\\0*?[]"))
+
+
+def non_runtime_path(path: Any) -> bool:
+    """Eligibility only, never an automatic exemption; the reviewer audits each edit.
+
+    CI/Makefile can affect actual runs too. Their explanation must establish that
+    the changed targets/steps were outside the recorded target execution.
+    Production code, playbooks, locks and inventory cannot be waived this way.
+    """
+    return safe_path(path) and (
+        (path.startswith(("docs/", ".agents/")) and path.endswith(".md")) or
+        path.endswith("_test.go") or
+        (path.rsplit("/", 1)[-1].startswith("test_") and path.endswith(".py")) or
+        path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml")) or
+        path == "Makefile")
+
+
 def glob_regex(pattern: str) -> re.Pattern[str]:
     out, i = "", 0
     while i < len(pattern):
@@ -105,6 +126,8 @@ def validate_manifest(data: Any) -> list[str]:
         seen.add(item["id"])
         if not isinstance(item.get("source"), str) or not item["source"].strip():
             errors.append(f"{label}: source (where the repository mandates it) is required")
+        if "kind" in item and item["kind"] != "target-run":
+            errors.append(f"{label}.kind must be target-run when present")
         if "artifact_glob" in item and (e := check_glob(item["artifact_glob"], f"{label}.artifact_glob")):
             errors.append(e)
         # Paths whose change always needs this evidence. Unlike evidence_only_paths a broad glob only
@@ -126,6 +149,7 @@ class Context:
         self.errors, self.warnings = errors, warnings
         self.accepted: list[dict[str, Any]] = []
         self._cache: dict[str, list[str] | None] = {}
+        self._target_errors: dict[str, str] = {}
         manifest = manifest or {}
         self.required = {r["id"]: r for r in manifest.get("required_evidence", [])}
         globs = list(manifest.get("evidence_only_paths", []))
@@ -194,6 +218,127 @@ class Context:
         self.accepted.append({"label": label, "from": sha, "head": self.head, "changed": changed})
         return True
 
+    def comparison(self, base: str, head: str) -> dict[str, Any] | None:
+        rc, out = git(self.worktree, "merge-base", "--all", base, head)
+        ancestors = out.splitlines()
+        if rc or len(ancestors) != 1:
+            return None
+        ancestor = ancestors[0]
+        return {"merge_base": ancestor, "ancestor": ancestor == base}
+
+    def base_revision(self) -> str | None:
+        if not self.base_ref:
+            return None
+        rc, out = git(self.worktree, "rev-parse", "--verify", f"{self.base_ref}^{{commit}}")
+        return None if rc else out.strip()
+
+    def tree_entries(self, revision: str) -> dict[str, tuple[str, str]] | None:
+        rc, out = git(self.worktree, "ls-tree", "-r", "-z", "--full-tree", revision)
+        if rc:
+            return None
+        entries = {}
+        for row in out.split("\0"):
+            if row:
+                metadata, path = row.split("\t", 1)
+                mode, _, oid = metadata.split()
+                entries[path] = (mode, oid)
+        return entries
+
+    def accepts_target(self, sha: Any, label: str, reuse: Any = None) -> bool:
+        """Target-run reuse only. Never call this for reviews or general check receipts.
+
+        A fresh independent reviewer supplies the complete execution/dependency scope.
+        Git verifies unchanged scoped blobs AND modes, and proves that every other
+        change is imported unchanged from base, or an individually audited non-runtime
+        file. It cannot prove the semantic completeness of the reviewer's scope.
+        """
+        if reuse is None:
+            return self.accepts(sha, label)
+        errors = self._target_reuse_errors(sha, reuse)
+        if errors:
+            self._target_errors[str(sha)] = "; ".join(errors)
+            return False
+        self.accepted.append({"label": label, "from": sha, "head": self.head,
+                              "method": "reviewed-base-integration", "base": reuse["base_sha"],
+                              "execution_paths": reuse["execution_paths"],
+                              "non_execution_changes": reuse["non_execution_changes"]})
+        return True
+
+    def _target_reuse_errors(self, sha: Any, reuse: Any) -> list[str]:
+        if not isinstance(reuse, dict):
+            return ["target reuse must be an object"]
+        if not isinstance(sha, str) or not SHA.fullmatch(sha):
+            return ["target reuse needs a full tested candidate SHA"]
+        if reuse.get("head_sha") != self.head or reuse.get("reviewer_confirmed") is not True:
+            return ["target reuse needs independent reviewer confirmation at current HEAD"]
+        reason = reuse.get("dependency_review")
+        if not isinstance(reason, str) or len(reason.strip()) < 60:
+            return ["target reuse needs a dependency review (60+ characters)"]
+        base = reuse.get("base_sha")
+        if not isinstance(base, str) or not SHA.fullmatch(base) or not self.base_ref:
+            return ["target reuse needs the current full base SHA"]
+        if self.base_revision() != base:
+            return ["target reuse base SHA does not match current base"]
+        return self._verify_target_trees(sha, base, reuse)
+
+    def _verify_target_trees(self, sha: str, base: str, reuse: dict[str, Any]) -> list[str]:
+        old_to_head = self.comparison(sha, self.head)
+        base_to_head = self.comparison(base, self.head)
+        fork = self.comparison(sha, base)
+        if not old_to_head or not old_to_head["ancestor"]:
+            return ["tested candidate is not an ancestor of HEAD"]
+        if not base_to_head or not base_to_head["ancestor"]:
+            return ["current base has not been integrated into HEAD"]
+        if not fork or fork["merge_base"] in (sha, base):
+            return ["target reuse requires a candidate branch and an advanced base"]
+        scope = reuse.get("execution_paths")
+        if (not isinstance(scope, list) or not scope or
+                any(not safe_path(p) for p in scope) or len(set(scope)) != len(scope)):
+            return ["execution_paths must list unique exact files, including all execution dependencies"]
+        audited = reuse.get("non_execution_changes")
+        if not isinstance(audited, list):
+            return ["non_execution_changes must be a list"]
+        exemptions = {}
+        for item in audited:
+            if (not isinstance(item, dict) or not non_runtime_path(item.get("path")) or
+                    not isinstance(item.get("reason"), str) or len(item["reason"].strip()) < 30):
+                return ["each non-execution change needs an eligible exact path and a 30+ character explanation"]
+            path = item["path"]
+            if path in exemptions or path in scope:
+                return ["duplicate or overlapping non-execution change: " + path]
+            exemptions[path] = item
+        trees = [self.tree_entries(r) for r in (sha, self.head, base, fork["merge_base"])]
+        if any(t is None for t in trees):
+            return ["complete Git trees unavailable for target reuse"]
+        tested, head, upstream, ancestor = trees
+        for path in scope:
+            before, after = tested.get(path), head.get(path)
+            if not before or before[0] not in ("100644", "100755") or before != after:
+                return ["execution input changed, missing or not a regular file: " + path]
+        changed = sorted(p for p in tested.keys() | head.keys() if tested.get(p) != head.get(p))
+        for path in exemptions:
+            if path not in changed:
+                return ["non-execution audit names an unchanged path: " + path]
+        for path in changed:
+            if any(rx.match(path) for rx in self.patterns):
+                continue
+            if path in exemptions:
+                # A symlink/submodule is not a documentation or test text edit.
+                if any(t.get(path) and t[path][0] not in ("100644", "100755") for t in (tested, head)):
+                    return ["non-execution audit cannot exempt a symlink or submodule: " + path]
+                continue
+            # Pure upstream import: candidate had no local edit, and HEAD kept base
+            # byte for byte. This rejects unreviewed blends/conflict resolutions,
+            # candidate code deletion, renames into evidence, and local runtime edits.
+            if tested.get(path) != ancestor.get(path) or head.get(path) != upstream.get(path):
+                return ["change is neither a pure base import nor an audited non-execution change: " + path]
+        return []
+
+    def target_stale_reason(self, sha: Any) -> str:
+        if str(sha) in self._target_errors:
+            return self._target_errors[str(sha)]
+        return self.stale_reason(sha)
+
     def stale_reason(self, sha: Any) -> str:
         if not self.patterns:
             return "no evidence_only_paths declared on the base branch"
@@ -235,8 +380,12 @@ class Context:
             return [f"{label}: status must be 'pass' or 'not-applicable'"]
         errors: list[str] = []
         sha = entry.get("head_sha")
-        if not self.accepts(sha, label):
-            errors.append(f"{label}: run was taken at {str(sha)[:12]}, not HEAD ({self.stale_reason(sha)})")
+        reuse = entry.get("target_reuse")
+        if reuse is not None and self.required.get(rid, {}).get("kind") != "target-run":
+            errors.append(f"{label}: target_reuse requires kind: target-run on the base manifest")
+            reuse = None
+        if not self.accepts_target(sha, label, reuse):
+            errors.append(f"{label}: run was taken at {str(sha)[:12]}, not HEAD ({self.target_stale_reason(sha)})")
         summary = entry.get("summary")
         if not isinstance(summary, str) or len(summary.strip()) < 20:
             errors.append(f"{label}: summary of what was observed is required")

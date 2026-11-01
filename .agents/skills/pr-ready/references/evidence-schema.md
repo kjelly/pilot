@@ -1,6 +1,6 @@
 # Evidence JSON (v1)
 
-Create one evidence file *per PR per latest HEAD*. A new commit always invalidates old review and validation receipts. This is an example only; replace every value with observed facts. Store in `.pr-ready/evidence.json` (gitignored, **not committed**).
+Create one evidence file *per PR per latest HEAD*. A new commit always invalidates old review and validation receipts. This is an example only; replace every value with observed facts. Store in `.pr-ready/<N>/evidence.json`, N = the PR number (gitignored, **not committed**; one checkout serves different PRs over time, so keep a separate directory per PR).
 
 ```json
 {
@@ -26,14 +26,17 @@ Create one evidence file *per PR per latest HEAD*. A new commit always invalidat
     "report": "Path to real review report or factual summary"
   },
   "local_validation": {
-    "tests": [{"command": "go test ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/tests.log"}],
-    "lint": [{"command": "golangci-lint run", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/lint.log"}],
-    "static_analysis": [{"command": "go vet ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/logs/static-analysis.log"}]
+    "tests": [{"command": "go test ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/123/logs/tests.log"}],
+    "lint": [{"command": "golangci-lint run", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/123/logs/lint.log"}],
+    "static_analysis": [{"command": "go vet ./...", "exit_code": 0, "head_sha": "0123456789abcdef0123456789abcdef01234567", "log": ".pr-ready/123/logs/static-analysis.log"}]
   },
   "unrelated_failing_checks": [],
-  "disputed_review_comments": []
+  "disputed_review_comments": [],
+  "target_validation": {"decision": "not-needed", "reason": "Docs and skill-only change; no playbook, spec, contract, inventory or Go code touched.", "artifact": "", "tested_revision": ""}
 }
 ```
+
+`target_validation` is read only when the base branch's `.github/pr-evidence.json` requires a record (see [Repository-required target evidence](#repository-required-target-evidence)); the gate ignores it otherwise. A `required` decision names the committed `artifact` and the full `tested_revision` SHA instead.
 
 Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. The exemption only lets the PR become Ready: `pr-review-merge` never merges with a failing check, and with the same entry in its evidence it waits for a rerun instead of returning the PR to Draft. There is no exemption for review threads: resolve each one after fixing or disputing it (the upstream `unresolved_nonblocking_threads` field is rejected).
 
@@ -55,15 +58,30 @@ A review comment the PR does not act on (see [review comments](review-comments.m
 
 A `run_check.py` execution prints/writes a receipt with `command`, `exit_code`, `head_sha`, and `log`; the orchestrator can append it to `local_validation.<category>` in the evidence. Do not carry receipts forward after any commit, and do not change a failed exit code to 0.
 
-Example commands (from PR worktree):
+Example commands (from the verified checkout of PR 123's head branch; state under `.pr-ready/<N>/`):
 
 ```bash
-python3 /path/to/pr-ready/scripts/run_check.py --category tests --log-dir .pr-ready/logs -- go test ./...
-python3 /path/to/pr-ready/scripts/run_check.py --category lint --log-dir .pr-ready/logs -- golangci-lint run
-python3 /path/to/pr-ready/scripts/run_check.py --category static_analysis --log-dir .pr-ready/logs -- go vet ./...
-python3 /path/to/pr-ready/scripts/pr_gate.py --repo OWNER/REPO --pr 123 --evidence .pr-ready/evidence.json --worktree .
+python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category tests --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- go test ./...
+python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category lint --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- golangci-lint run
+python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category static_analysis --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- go vet ./...
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree .
 # After every gate succeeds, and ONLY to change the PR lifecycle:
-python3 /path/to/pr-ready/scripts/pr_gate.py --repo OWNER/REPO --pr 123 --evidence .pr-ready/evidence.json --worktree . --ready
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --ready
 ```
 
-`run_check.py` prints a JSON receipt on stdout and stores it under `.pr-ready/receipts/` even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that worktree.
+`run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that checkout directory.
+
+## Repository-required target evidence
+
+The gate reads `.github/pr-evidence.json` at the current base SHA and validates
+`target_validation` with the same read-only verifier as `pr-review-merge`, before
+Ready and again immediately before mutation. Use the
+[merge workflow target schema](../../pr-review-merge/references/evidence-contract.md).
+A missing manifest preserves the generic workflow; an unreadable base/manifest
+or missing mandated target record blocks Ready. This does not weaken
+`local_validation` or `independent_review`, which remain current-HEAD-specific.
+
+After integrating an advanced base, a base requirement with `kind: target-run`
+may accept `target_validation.target_reuse` under the
+shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). A changed
+execution/dependency input still needs a new target run.

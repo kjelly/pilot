@@ -139,6 +139,19 @@ def branch_rules(repo: Repo, base_name: str) -> list[dict[str, Any]]:
     return rules
 
 
+def branch_head(repo: Repo, name: str) -> str:
+    """Resolve the live branch; pullRequest.baseRefOid can lag after another PR merges."""
+    if not isinstance(name, str) or not name:
+        raise GitHubError("Live base branch name unavailable")
+    data = gh_json(["api", *host_args(repo),
+                    f"repos/{repo.owner}/{repo.name}/branches/{quote(name, safe='')}"])
+    commit = data.get("commit") if isinstance(data, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
+        raise GitHubError("Live base branch SHA unavailable")
+    return sha
+
+
 def _not_found(cp: subprocess.CompletedProcess[str]) -> bool:
     """True only for gh's exact answer to a path or commit GitHub does not have.
 
@@ -198,7 +211,7 @@ def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
         status, behind, merge_base = data["status"], data["behind_by"], data["merge_base_commit"]["sha"]
         entries = data["files"]
         if status not in ("ahead", "behind", "identical", "diverged") or not isinstance(behind, int) \
-                or not isinstance(merge_base, str) or not isinstance(entries, list):
+                or not isinstance(merge_base, str) or not COMMIT_SHA.fullmatch(merge_base) or not isinstance(entries, list):
             raise TypeError("compare fields")
         files: list[str] = []
         for entry in entries:
@@ -211,8 +224,39 @@ def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
     if len(entries) >= COMPARE_FILE_LIMIT:
         raise GitHubError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
                           "the full delta cannot be verified")
-    return {"status": status, "files": files,
+    return {"status": status, "files": files, "merge_base": merge_base,
             "ancestor": status in ("ahead", "identical") and behind == 0 and merge_base.lower() == base}
+
+
+def tree_entries(repo: Repo, revision: str) -> dict[str, tuple[str, str]]:
+    """Complete path -> (mode, object id) map; no content decoding or symlink following.
+
+    GitHub returns truncated=true for oversized recursive trees. Never compare a
+    partial tree: deletions/renames and omitted dependencies must remain visible.
+    """
+    if not COMMIT_SHA.fullmatch(revision):
+        raise ValueError("tree_entries needs a full lowercase commit SHA")
+    data = gh_json(["api", *host_args(repo),
+                    f"repos/{repo.owner}/{repo.name}/git/trees/{revision}?recursive=1"])
+    if not isinstance(data, dict) or data.get("truncated") is not False or not isinstance(data.get("tree"), list):
+        raise GitHubError("Complete Git tree unavailable (truncated or invalid response)")
+    result = {}
+    seen = set()
+    for entry in data["tree"]:
+        if not isinstance(entry, dict):
+            raise GitHubError("Invalid Git tree entry")
+        path, mode, oid = entry.get("path"), entry.get("mode"), entry.get("sha")
+        kind = {"040000": "tree", "160000": "commit"}.get(mode, "blob")
+        if (not isinstance(path, str) or not path or path in seen or
+                mode not in ("040000", "100644", "100755", "120000", "160000") or
+                entry.get("type") != kind or
+                not isinstance(oid, str) or not COMMIT_SHA.fullmatch(oid)):
+            raise GitHubError("Invalid Git tree path, mode or object id")
+        seen.add(path)
+        if kind == "tree":
+            continue
+        result[path] = (mode, oid)
+    return result
 
 
 def list_open_prs(repo: Repo) -> list[dict[str, Any]]:

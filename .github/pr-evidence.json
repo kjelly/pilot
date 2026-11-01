@@ -6,6 +6,7 @@
   "required_evidence": [
     {
       "id": "actual-run",
+      "kind": "target-run",
       "source": "AGENTS.md §1 (actual-run rule: §1.4 vm-target test / topology test chain, §1.5 frozen candidate) and docs/actual-run-evidence.md",
       "artifact_glob": "docs/evidence/**/*.md",
       "required_paths": [

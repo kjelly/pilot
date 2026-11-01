@@ -2,6 +2,11 @@
 """Paginated read-only list of all open, non-draft PRs in a GitHub repository."""
 import argparse
 import json
+import sys
+
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 from gh_runtime import GitHubError, Repo, current_repo, list_open_prs
 
 

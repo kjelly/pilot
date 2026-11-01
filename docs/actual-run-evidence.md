@@ -76,6 +76,14 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 只修改拼字、說明文字、latest link 或 evidence metadata，且 execution-affecting file hash
 沒有改變時，可以只補 evidence-only commit，不必重跑。
 
+合入較新的 base 不會自動讓既有 actual-run 有效或失效。只有 base manifest 明確
+標為 `kind: target-run`、獨立 reviewer 對最新 HEAD/base 完成執行依賴盤點、
+且 gate 證明盤點範圍的 Git blob/mode 未變，並驗證其他差異是純 upstream 匯入
+或逐項確認不影響執行的變更，才可沿用原 candidate 的 target evidence。
+新增或改動執行依賴、無法建立完整依賴範圍時仍需重跑；不改寫 tested revision，
+也不沿用舊 review/CI。欄位與機器判定見
+[共用 target evidence 規則](../.agents/skills/_shared/target-evidence-reuse.md)。
+
 ## 5. 文件內容預算
 
 - runbook 保留 current procedure，不保留逐版完整測試輸出。

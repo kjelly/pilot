@@ -21,7 +21,7 @@ resource lifetimes, semantic regressions, test effectiveness and real root-cause
 Flag findings with P0/P1/P2 (blocking) or P3/P4 (nonblocking), file:line, reproduction/evidence,
 impact, and precise remediation. Review all relevant portions of the change.
 NEVER write source, generate commits, push, change GH PR state, or claim human approval.
-Only PASS if zero unresolved P0/P1/P2, and reviewer HEAD SHA matches committed worktree.
+Only PASS if zero unresolved P0/P1/P2, and reviewer HEAD SHA matches the committed checkout.
 Return compact {agent:'issue-reviewer',independent:true,head_sha,status:'pass|blocked',
 summary,findings:[{severity,status,description,evidence}],disputed_claim_verdicts,coverage,missing_tests,blockers}.
 Do not leak raw diff or full test logs to Root Agent.

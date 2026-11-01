@@ -11,7 +11,7 @@
 | Tests | A targeted regression check exists and passes on committed HEAD. Additional relevant tests/integration pass. |
 | Static checks | Lint passes if applicable; static/security analysis passes if applicable or has justified N/A. |
 | Independent review | Fresh Reviewer, not the implementer; exactly matching HEAD; no unresolved P0/P1/P2 as defined in [severity.md](severity.md) (`pre-existing` findings cap at P3). |
-| Git hygiene | No unstaged/staged/untracked artifacts, no secrets, correct branch/worktree, no invalid base. |
+| Git hygiene | No unstaged/staged/untracked artifacts, no secrets, correct branch/checkout, no invalid base. |
 | Evidence | Actual `run_check.py` receipts, correct SHA (or an evidence-only delta per the base branch manifest), no stale check or stale reviewer verdict. |
 | Repository-required evidence | Every applicable repository mandate (base manifest or the recorded list from `AGENTS.md`) is in `repo_required_evidence`, committed and current. See [repo-evidence.md](repo-evidence.md). |
 | Remote | Correct Issue state, known-PR duplication screened, branch push matches validated commit before `gh pr create`. Each disputed claim has a later reply on the Issue; the PR body closes the Issue only when `issue_resolution` is `fixes`, and `fixes` (also the default) is refused while a `needs_evidence` claim, or an `out_of_scope` claim without a verified, reply-linked `follow_up_issue_url`, stays open. `mark_ready.py` re-checks the PR body against `issue_resolution` before Ready. |

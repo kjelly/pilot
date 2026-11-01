@@ -20,7 +20,7 @@ Some facts about "valid evidence" belong to the repository, not to these skills:
 - `evidence_only_paths`: globs (`*`, `**`, `?`) for files that hold evidence only. Default is none, meaning strict SHA binding. A glob that would cover all code of a language or all build files (`**`, `**/*.go`, `*`) is rejected. Only list paths no test, build step or runtime reads. If a test reads `AGENTS.md` or a docs file, that file is behaviour, not evidence.
 - `required_evidence[].artifact_glob`: where the committed artifact for that item must live. These paths are also treated as evidence-only.
 - `required_evidence[].required_paths` (optional): repository-relative globs whose change always needs that evidence. When the change (from the merge base with the base branch to HEAD, both names of a rename) touches one, `not-applicable` is refused and only a `pass` entry satisfies the gate. A broad glob only makes the rule stricter, so the whole-tree check above does not apply. pr-review-merge refuses `not-needed` for the same paths, so an Issue PR does not reach Ready only to wait at the merge gate.
-- Check the manifest the way the gate sees it: `python3 scripts/repo_evidence.py --worktree WT --base-ref origin/main`.
+- Check the manifest the way the gate sees it: `python3 "$SNAP/.agents/skills/issue-to-pr/scripts/repo_evidence.py" --worktree "$REPO_ROOT" --base-ref origin/main`.
 
 ## Evidence-only delta
 
@@ -82,3 +82,12 @@ The mechanism is the same everywhere; only the manifest differs. `evidence_only_
 | Manifest schema, validation, base-branch loading | `evidence_only_paths` and `required_evidence` content |
 | Delta calculation, evidence entry checks | What a live run is and how to perform it (runbook, `AGENTS.md`, or a repo skill) |
 | Ordering guidance, dispatching a worker for the run | Where artifacts live and what they must contain |
+
+## Base integration and target-run records
+
+A base requirement may opt in with `kind: target-run`. Only that kind may use
+`target_reuse` on a `repo_required_evidence[]` entry after integrating an advanced
+base. Follow the shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot)
+for the exact schema, dependency review, provenance proof and failure conditions.
+General check receipts, review judgments and disputed claims continue to use the
+strict `Context.accepts()` rule.

@@ -9,6 +9,9 @@ import sys
 import time
 from typing import Any
 
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 from issue_gate import GateError, command
 
 # `gh pr checks --required` on a branch without required checks (no branch protection or ruleset

@@ -4,12 +4,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 import hashlib
 import fcntl
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
+
+# Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
+# counts any added file and would STOP every later step. Set before the first sibling import.
+sys.dont_write_bytecode = True
 from gh_runtime import GitHubError, Repo, pr_view, run_gh
 from review_gate import evaluate, load_evidence, resolve_repo
 

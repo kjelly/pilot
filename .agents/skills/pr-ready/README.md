@@ -18,7 +18,7 @@ Codex 的角色定義是 `.codex/agents/pr-*.toml` 的位元組副本。
 |---|---|---|
 | Codex | `.agents/skills/pr-ready` | `.codex/agents/pr-*.toml`（副本） |
 | Claude Code | `.claude/skills/pr-ready`（symlink） | `.claude/agents/pr-*.md`（symlink） |
-| agy CLI / App / IDE | `.agents/skills/pr-ready` | `platforms/agy/agents/`（要用 agy 時複製到 `.agents/agents/`） |
+| agy CLI / App / IDE | `.agents/skills/pr-ready` | `platforms/agy/agents/`（要用 agy 時複製到 `.agents/agents/`，並把 `/.agents/agents/` 寫進 `$(git rev-parse --git-path info/exclude)`，原因見 checkout 契約） |
 
 共用 `SKILL.md`、`scripts/`、`references/`，不用每個平台維護三套 prompt。
 
@@ -30,7 +30,7 @@ Codex 的角色定義是 `.codex/agents/pr-*.toml` 的位元組副本。
 
 ```text
 $pr-ready 處理 https://github.com/OWNER/REPO/pull/123
-$pr-ready 處理目前 repo 所有 Draft PR，最多同時兩個
+$pr-ready 處理目前 branch 對應的單一 Draft PR
 ```
 
 **Claude Code**
@@ -49,7 +49,7 @@ $pr-ready 處理目前 repo 所有 Draft PR，最多同時兩個
 
 ## 流程
 
-1. 主 Agent 讀取 PR/CI/Issue/review，建立依賴 DAG，隔離 worktrees。
+1. 每次只處理一個 PR；多個或全部項目先請使用者選一個。主 Agent 先依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-ready` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）先做 snapshot，再選定 PR 與蒐集證據規則，最後用 `checkout_preflight.py` 以完整 SHA 在目前乾淨 checkout 精確 land 該 PR 的原始 head branch（不以名稱 checkout、不建立 per-PR worktrees），之後才分析 PR/CI/Issue/review。
 2. 每則 review 意見（人、bot 或之前的自動審查）都先當成待驗證的主張分類（`valid`/`invalid`/`needs_evidence`/`nonblocking`），只有成立的才交給 Coder。不成立的意見不改 code：獨立 Reviewer 在看不到主 Agent 結論的情況下確認後，主 Agent 在 GitHub 回覆反證，記錄在 evidence 的 `disputed_review_comments`（見 `references/review-comments.md`）。同一主張沒有新證據又被提出時交給人決定，不再來回修改或回覆。
 3. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。
 4. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。
@@ -58,17 +58,17 @@ $pr-ready 處理目前 repo 所有 Draft PR，最多同時兩個
 
 ## Quality Gate 腳本（可單獨使用）
 
-已存在 `.pr-ready/evidence.json`（格式見 `references/evidence-schema.md`）時，從原 PR branch worktree 執行：
+每個 PR 的狀態放在 `.pr-ready/<N>/`（N 為 PR 編號；同一個 checkout 會依序服務不同 PR）。已存在 `.pr-ready/<N>/evidence.json`（格式見 `references/evidence-schema.md`）時，在已切到原 PR head branch 的目前 checkout 執行（`$SNAP` 是 checkout 契約取得的 snapshot 目錄；單獨使用時可改用 `.agents/skills/pr-ready` 的實體路徑）：
 
 ```bash
-python3 /path/to/pr-ready/scripts/pr_gate.py \
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/evidence.json --worktree .
+  --evidence .pr-ready/123/evidence.json --worktree .
 
 # 狀態為 GATE-PASS 後，準備將 Draft 轉成 Ready for Review：
-python3 /path/to/pr-ready/scripts/pr_gate.py \
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/evidence.json --worktree . --ready
+  --evidence .pr-ready/123/evidence.json --worktree . --ready
 ```
 
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。
