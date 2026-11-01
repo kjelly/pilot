@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/evidence"
 	"github.com/kjelly/pilot/internal/vmtarget"
 )
 
@@ -122,6 +123,7 @@ func init() {
 	_ = vtTopologyRollbackCmd.MarkFlagRequired("tag")
 
 	vtTopologyTestCmd.Flags().StringVar(&vtTopoTestPlaybook, "playbook", "", "path to the playbook to run against the topology (required; e.g. playbooks/site.yml)")
+	addEvidenceFlags(vtTopologyTestCmd)
 	vtTopologyTestCmd.Flags().StringArrayVar(&vtTopoTestVerify, "verify", nil, "verification spec to run after apply, as 'docs/verification/<x>.md' or 'docs/verification/<x>.md=<ansible-limit>'; repeatable, at least one required")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipLint, "skip-lint", false, "skip syntax check pre-flight")
 	vtTopologyTestCmd.Flags().BoolVar(&vtTopoTestSkipCheckmode, "skip-checkmode", false, "skip the --check --diff dry-run pre-flight (only for a playbook that cannot run in check mode)")
@@ -612,6 +614,16 @@ so each spec is verified only against the group it applies to:
       --verify docs/verification/freeipa-client.md=ipa_clients \
       -- -e stage=sandbox
 
+--evidence-record <dir>/<change>.md writes the machine-generated part of the
+actual-run evidence record (docs/actual-run-evidence.md §3) when the chain ends,
+whatever the outcome: tested commit and tree (from the checkout, or
+--evidence-candidate/--evidence-tree for a git archive copy), the execution
+closure of the playbooks and specs with Git blob ids, the targets and rendered
+inventory, every step's PLAY RECAP, the verify verdicts, and a scan of the
+captured output for the secret-named values the run was given. The file is
+rewritten in place for each candidate; the two sections marked (fill in) are
+the operator's and survive the rewrite. On success <dir>/LATEST.md is updated.
+
 Everything after '--' is forwarded VERBATIM to the apply AND idempotency
 runs. Unlike single-VM 'test', no '-l <name>' limit is ever added: the
 rendered topology inventory's groups own targeting (that is the point of
@@ -649,13 +661,15 @@ func parseTopoVerifyArgs(raw []string) ([]topoVerify, error) {
 	return out, nil
 }
 
-func runTopologySyntaxCheck(cmd *cobra.Command) error {
+func runTopologySyntaxCheck(cmd *cobra.Command, sess *evidenceSession) error {
 	if vtTopoTestSkipLint {
 		return nil
 	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "=== [Step 1/6] L1 Syntax Check ===")
-	if err := execAnsiblePlaybook(out, vtTopoTestPlaybook, "--syntax-check"); err != nil {
+	if err := sess.stepStreams("L1 syntax check", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+		return sess.runAnsible("L1 syntax check", w, ew, vtTopoTestPlaybook, "--syntax-check")
+	}); err != nil {
 		return fmt.Errorf("syntax check failed: %w", err)
 	}
 	fmt.Fprintln(out, "✓ Syntax check passed")
@@ -792,8 +806,33 @@ func withTopologyInventoryInput(invPath string, fn func() error) error {
 	return fn()
 }
 
-func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool) error {
+func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, verifies []topoVerify, invPath string, args []string, rollbackOnFailure bool, sess *evidenceSession, recOutcome *string) error {
 	out := cmd.OutOrStdout()
+	if err := sess.prepareInventory(invPath); err != nil {
+		return err
+	}
+	if sess != nil && sess.controller != nil {
+		if err := runTopologySyntaxCheck(cmd, sess); err != nil {
+			return err
+		}
+	}
+	if sess != nil {
+		// The record names every node with its groups, IP and base image; a
+		// node that cannot be read is still listed by name.
+		var targets []evidence.Target
+		nm, merr := vtNewManager()
+		for _, n := range spec.Nodes {
+			tgt := evidence.Target{Name: n.Name, Groups: n.Groups}
+			if merr == nil {
+				if t, err := nm.Get(context.Background(), n.Name); err == nil {
+					tgt.IP, tgt.BaseImage = t.IP, t.BaseImage
+				}
+			}
+			targets = append(targets, tgt)
+		}
+		inv, _ := os.ReadFile(invPath)
+		sess.targets(targets, string(inv))
+	}
 
 	// L3 dry-run against the topology's CURRENT state, before any node is
 	// mutated. This is what catches check-mode/fresh-host ordering bugs: a
@@ -805,7 +844,9 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	if !vtTopoTestSkipCheckmode {
 		fmt.Fprintln(out, "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
 		checkArgs := append(append([]string{vtTopoTestPlaybook, "-i", invPath}, args...), "--check", "--diff")
-		if err := execExternal(out, "ansible-playbook", checkArgs...); err != nil {
+		if err := sess.stepStreams("L3 check-mode dry-run", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return sess.runAnsible("L3 check-mode dry-run", w, ew, checkArgs...)
+		}); err != nil {
 			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the topology's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
 		}
 		fmt.Fprintln(out, "✓ Check-mode dry-run passed")
@@ -828,11 +869,13 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	rollbackPolicy := delivery.RollbackSnapshot
 	rollback := delivery.StepFunc(func(context.Context) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed. Rolling back every node to %s...\n", snapTag)
-		if err := runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
-			if err := nm.Rollback(context.Background(), n.Name, snapTag); err != nil {
-				return fmt.Errorf("node %q: %w", n.Name, err)
-			}
-			return nil
+		if err := sess.step("rollback", out, func(io.Writer) error {
+			return runTopologyNodesConcurrently(spec, func(nm *vmtarget.Manager, n vmtarget.TopologyNode) error {
+				if err := nm.Rollback(context.Background(), n.Name, snapTag); err != nil {
+					return fmt.Errorf("node %q: %w", n.Name, err)
+				}
+				return nil
+			})
 		}); err != nil {
 			return err
 		}
@@ -848,7 +891,9 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 	}
 	transaction := delivery.Transaction{
 		Apply: func(context.Context) error {
-			if err := execExternal(out, "ansible-playbook", ansibleArgs...); err != nil {
+			if err := sess.stepStreams("L4 apply", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return sess.runAnsible("L4 apply", w, ew, ansibleArgs...)
+			}); err != nil {
 				return fmt.Errorf("playbook apply failed: %w", err)
 			}
 			fmt.Fprintln(out, "✓ Playbook apply completed")
@@ -856,35 +901,34 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		},
 		Verify: func(context.Context) error {
 			fmt.Fprintf(out, "=== [Step 5/6] L5 Verification Specs (%d) ===\n", len(verifies))
-			return withTopologyInventoryInput(invPath, func() error {
-				for _, v := range verifies {
-					pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
-					if v.limit != "" {
-						pilotArgs = append(pilotArgs, "-l", v.limit)
+			return sess.stepStreams("L5 verify", out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return withTopologyInventoryInput(invPath, func() error {
+					for _, v := range verifies {
+						pilotArgs := []string{"verify", v.spec, "-i", invPath, "--allow-isolated-mutation"}
+						if v.limit != "" {
+							pilotArgs = append(pilotArgs, "-l", v.limit)
+						}
+						if vtTopoTestVerifyTimeout > 0 {
+							pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
+						}
+						var one bytes.Buffer
+						verr := sess.runVerify(io.MultiWriter(w, &one), ew, pilotArgs...)
+						sess.verify(v.spec, v.limit, one.String())
+						if verr != nil {
+							return fmt.Errorf("verification failed (%s): %w", v.spec, verr)
+						}
 					}
-					if vtTopoTestVerifyTimeout > 0 {
-						pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTopoTestVerifyTimeout))
-					}
-					if err := execPilot(out, pilotArgs...); err != nil {
-						return fmt.Errorf("verification failed (%s): %w", v.spec, err)
-					}
-				}
-				fmt.Fprintln(out, "✓ Verification checks passed")
-				return nil
+					fmt.Fprintln(w, "✓ Verification checks passed")
+					return nil
+				})
 			})
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")
-			var idemBuf bytes.Buffer
-			if err := execExternal(io.MultiWriter(out, &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
-				return fmt.Errorf("idempotency run failed: %w", err)
-			}
-			changed, ok := idempotencyChangedCount(idemBuf.String())
-			if !ok {
-				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
-			}
-			if changed > 0 {
-				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+			if err := runRecordedIdempotencyStreams(sess, out, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return sess.runAnsible("L6 idempotency", w, ew, ansibleArgs...)
+			}); err != nil {
+				return err
 			}
 			fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
 			return nil
@@ -893,9 +937,12 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		Rollback:          rollback,
 		RollbackPolicy:    rollbackPolicy,
 	}
-	outcome, err := transaction.Run(context.Background())
+	txOutcome, err := transaction.Run(context.Background())
+	if recOutcome != nil {
+		*recOutcome = string(txOutcome)
+	}
 	if err != nil {
-		return fmt.Errorf("topology test transaction %s: %w", outcome, err)
+		return fmt.Errorf("topology test transaction %s: %w", txOutcome, err)
 	}
 	fmt.Fprintln(out, "🎉 ALL TESTS PASSED SUCCESSFULLY!")
 	return nil
@@ -908,7 +955,7 @@ func validateTopologyTestMode(ephemeral, keepOnFailure bool) error {
 	return nil
 }
 
-func runVtTopologyTest(cmd *cobra.Command, args []string) error {
+func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 	if err := validateTopologyTestMode(vtTopoTestEphemeral, vtTopoTestKeepOnFailure); err != nil {
 		return err
 	}
@@ -924,6 +971,24 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	specs := make([]string, 0, len(verifies))
+	for _, v := range verifies {
+		specs = append(specs, v.spec)
+	}
+	sess, err := newEvidenceSession([]string{vtTopoTestPlaybook}, specs, args, vtTestEvidenceSteps, vtTopoSpecPath)
+	if err != nil {
+		return err
+	}
+	// outcome is the transaction's result once the pipeline runs; a failure
+	// before it (provisioning, wiring) stays "failed", and a teardown failure
+	// after a passing chain is named as such.
+	outcome := "failed"
+	defer func() {
+		if retErr != nil && outcome == "success" {
+			outcome = "cleanup_failed"
+		}
+		sess.finish(cmd.OutOrStdout(), cmd.ErrOrStderr(), outcome, retErr)
+	}()
 	m, err := vtNewManager()
 	if err != nil {
 		return err
@@ -933,8 +998,10 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 
 	// Syntax is intentionally first so --ephemeral does not allocate VMs for
 	// a playbook that cannot parse.
-	if err := runTopologySyntaxCheck(cmd); err != nil {
-		return err
+	if sess == nil || sess.controller == nil {
+		if err := runTopologySyntaxCheck(cmd, sess); err != nil {
+			return err
+		}
 	}
 
 	if !vtTopoTestEphemeral {
@@ -950,7 +1017,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 		if vtTopoTestNoRollback {
 			fmt.Fprintln(errOut, "⚠️ Auto-rollback is disabled via --no-rollback")
 		}
-		return runTopologyTestPipeline(cmd, spec, verifies, invPath, args, !vtTopoTestNoRollback)
+		return runTopologyTestPipeline(cmd, spec, verifies, invPath, args, !vtTopoTestNoRollback, sess, &outcome)
 	}
 
 	if err := requireTopologyAbsent(ctx, m, spec, "--ephemeral", "use topology test without --ephemeral or tear it down first"); err != nil {
@@ -1011,7 +1078,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	err = runTopologyTestPipeline(cmd, spec, verifies, invPath, args, false)
+	err = runTopologyTestPipeline(cmd, spec, verifies, invPath, args, false, sess, &outcome)
 	if err != nil {
 		if vtTopoTestKeepOnFailure {
 			printEphemeralDebugHints(errOut, vtTopoSpecPath)

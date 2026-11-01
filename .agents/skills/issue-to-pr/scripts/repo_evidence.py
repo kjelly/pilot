@@ -25,7 +25,9 @@ gate sees it.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import hashlib
 import re
 import subprocess
 import sys
@@ -140,6 +142,110 @@ def validate_manifest(data: Any) -> list[str]:
     return errors
 
 
+CONTROLLER_PROFILE = "images/evidence-controller/"
+CONTROLLER_FILES = {"Dockerfile": "recipe_sha256", "profile.lock.json": "lock_sha256", "ansible.cfg": "config_sha256", "launch.py": "launch_sha256", "probe.py": "probe_sha256"}
+CONTROLLER_STAGES = ("L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency")
+CONTROLLER_PLUGINS = ("action_plugins", "become_plugins", "cache_plugins", "callback_plugins", "cliconf_plugins", "connection_plugins", "doc_fragments", "filter_plugins", "httpapi_plugins", "inventory_plugins", "library", "lookup_plugins", "module_utils", "netconf_plugins", "shell_plugins", "strategy_plugins", "terminal_plugins", "test_plugins", "vars_plugins")
+
+
+def validate_controller(record: dict, files: list, read_profile) -> None:
+    """Typed native boundary proof; no flag or supplied execution path list can replace it."""
+    def require(condition, reason):
+        if not condition:
+            raise ValueError("controller proof: " + reason)
+    digest = re.compile(r"[0-9a-f]{64}")
+    proof = record.get("controller")
+    require(isinstance(proof, dict) and proof.get("schema") == "pilot-controller/v3", "missing current OCI proof")
+    require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof.get("image_id"))), "immutable image ID required")
+    require(proof.get("inventory_kind") == "pilot-rendered-ssh/v1", "unsupported rendered inventory")
+    for key in ("config_sha256", "inventory_sha256", "rendered_inventory_sha256", "binary_sha256", "pre_probe_sha256", "post_probe_sha256"):
+        require(isinstance(proof.get(key), str) and digest.fullmatch(proof[key]), "invalid " + key)
+    require(proof["binary_sha256"] == record.get("pilot_binary", {}).get("sha256"), "binary identity differs")
+    require(proof["pre_probe_sha256"] == proof["post_probe_sha256"], "native pre/post context differs")
+    profile = proof.get("profile", {})
+    scoped = {entry.get("path"): entry for entry in files if isinstance(entry, dict)}
+    for name, key in CONTROLLER_FILES.items():
+        path = CONTROLLER_PROFILE + name
+        raw = read_profile(path)
+        require(isinstance(raw, bytes) and raw, "profile missing from tested candidate: " + path)
+        value = hashlib.sha256(raw).hexdigest()
+        require(profile.get(key) == value and scoped.get(path, {}).get("sha256") == value,
+                "profile identity differs from closure: " + path)
+    require(profile.get("config_sha256") == proof["config_sha256"], "effective config differs from profile")
+    lock = json.loads(read_profile(CONTROLLER_PROFILE + "profile.lock.json"))
+    require(lock.get("schema") == "pilot-controller-profile/v1" and lock.get("ansible") == "2.21.5" and lock.get("python") == "3.14.8" and lock.get("platform") == "linux/amd64", "unsupported profile lock")
+    require(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", str(lock.get("base"))), "base is not digest pinned")
+    require(lock.get("go")=="go1.26.8" and re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}",str(lock.get("go_base"))), "Go toolchain lock differs")
+    recipe=read_profile(CONTROLLER_PROFILE + "Dockerfile")
+    require(recipe.startswith(("FROM "+lock["go_base"]+" AS go_toolchain\n").encode()) and ("\nFROM "+lock["base"]+"\n").encode() in recipe, "recipe/base lock differs")
+    native = proof.get("native_probe")
+    require(isinstance(native, dict) and native.get("schema") == "pilot-controller-probe/v3", "missing native origin/config probe")
+    raw = json.dumps(native, sort_keys=True, separators=(",", ":")).encode()
+    require(hashlib.sha256(raw).hexdigest() == proof["pre_probe_sha256"], "native probe digest differs")
+    require(native.get("go")=="go version go1.26.8 linux/amd64" and native.get("ansible") == lock["ansible"] and native.get("python") == lock["python"] and
+            native.get("ansible_origin") == "/usr/local/lib/python3.14/site-packages/ansible/__init__.py" and
+            native.get("python_executable") == "/usr/bin/python3.14" and
+            native.get("config_file") == "/opt/pilot-controller/ansible.cfg" and
+            native.get("config_sha256") == proof["config_sha256"], "native effective origins/config differ")
+    require(type(native.get("uid")) is int and native["uid"] == 1000 and type(native.get("gid")) is int and native["gid"] == 1000 and native.get("user") == "pilot-controller" and native.get("group") == "pilot-controller" and native.get("ssh_identity") == "ssh-config/v1", "unproved native NSS/OpenSSH identity")
+    callback = {"version":"2.1.0","origin":"/opt/pilot-controller/collections/ansible_collections/ansible/posix/plugins/callback/json.py","sha256":"cc2f6a845b1b7d8d87e16b7fed79b860e10ea9e9b372dd0bdcbd850b9654a032","manifest_sha256":"3899df5b1b390f51a7fc95ad8997c7e7030daf4f5265898f96977ef9ed8d4df5","execution":"json-command/v1"}
+    require(native.get("callback") == callback, "native verifier callback origin/execution differs")
+    posix=lock.get("ansible_posix",{})
+    require(posix == {"version":"2.1.0","url":"https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-posix-2.1.0.tar.gz","sha256":"5ff232cf69492a991f2a0990dbb23ef25a600b7e9209de6e33377a6ff08a8a29","manifest_sha256":callback["manifest_sha256"],"callback_sha256":callback["sha256"]}, "unproved verifier collection lock")
+    require(("ADD --checksum=sha256:"+posix["sha256"]+" "+posix["url"]+" ").encode() in recipe, "verifier collection recipe/lock differs")
+    require(native.get("collections_scan_sys_path") is False and
+            native.get("collections") == ["/opt/pilot-controller/collections"] and
+            native.get("roles") == ["/opt/pilot-controller/empty"], "uncontrolled collection/role discovery")
+    require(native.get("sys_path") == ["/usr/local/lib64/python3.14/site-packages", "/usr/local/lib/python3.14/site-packages", "/usr/lib64/python314.zip", "/usr/lib64/python3.14", "/usr/lib64/python3.14/lib-dynload", "/usr/lib64/python3.14/site-packages", "/usr/lib/python3.14/site-packages"], "uncontrolled Python discovery")
+    loaders = native.get("loaders", {})
+    require(isinstance(loaders, dict) and set(loaders) == set(CONTROLLER_PLUGINS), "native loader inventory differs")
+    for name, loader in loaders.items():
+        expected = ["/opt/pilot-controller/empty"]
+        if name == "shell_plugins":
+            expected = ["shell_plugins"]
+        elif name == "doc_fragments":
+            expected = ["/tmp/controller/home/.ansible/plugins/doc_fragments", "/usr/share/ansible/plugins/doc_fragments"]
+        require(isinstance(loader, dict) and loader.get("config") == expected and isinstance(loader.get("paths"), list) and loader["paths"], "uncontrolled loader config: " + name)
+        for path in loader["paths"]:
+            require(isinstance(path, str) and (path in ("/opt/pilot-controller/empty", "$CANDIDATE/shell_plugins", "/tmp/controller/home/.ansible/plugins/doc_fragments", "/usr/share/ansible/plugins/doc_fragments") or path.startswith("/usr/local/lib/python3.14/site-packages/ansible/")), "uncontrolled loader origin: " + name)
+    build=proof.get("build",{})
+    require(isinstance(build,dict) and build.get("go_version")=="go1.26.8" and build.get("path")=="github.com/kjelly/pilot/cmd/pilot" and build.get("module")=="github.com/kjelly/pilot", "unproved Go binary identity")
+    require(all(build.get(key)==value for key,value in {"goos":"linux","goarch":"amd64","goamd64":"v1","cgo":"0"}.items()), "unsupported Go build context")
+    require(all(isinstance(build.get(key),str) and digest.fullmatch(build[key]) for key in ("settings_sha256","modules_sha256","sources_sha256","rebuilt_binary_sha256")), "missing Go build/module fingerprints")
+    require(build["rebuilt_binary_sha256"] == proof["binary_sha256"], "executed binary differs from reproducible source rebuild")
+    require(all(path in scoped for path in ("go.mod","go.sum","cmd/pilot/main.go")), "compiled Go source closure missing")
+    counts = proof.get("steps", {})
+    require(isinstance(counts, dict) and set(counts) == set(CONTROLLER_STAGES), "routed stage identities missing")
+    for name in CONTROLLER_STAGES:
+        value = counts.get(name)
+        require(type(value) is int and (value >= 1 if name == "L5 verify" else value == 1), "stage was not routed through OCI: " + name)
+    recorded = record.get("steps", [])
+    for name in CONTROLLER_STAGES:
+        matching = [step for step in recorded if isinstance(step, dict) and step.get("name") == name]
+        require(len(matching) == 1 and matching[0].get("status") == "pass", "required recorded stage did not pass: " + name)
+    verdicts = record.get("verify", [])
+    require(len(verdicts) == counts["L5 verify"] and all(isinstance(v, dict) and v.get("verdict") == "PASS" and type(v.get("pass")) is int and v["pass"] > 0 and v.get("fail") == 0 for v in verdicts), "whole L5 verification evidence missing or failed")
+    inventory=record.get("inventory",{})
+    hosts=inventory.get("hosts",[])
+    require(isinstance(hosts,list) and hosts and all(isinstance(h,str) and h for h in hosts) and len(set(hosts))==len(hosts), "native verification inventory host identities missing")
+    groups=inventory.get("groups",{})
+    for verdict in verdicts:
+        require(verdict.get("diagnostics_schema")=="pilot-verify-diagnostics/v1" and verdict.get("diagnostics_complete") is True, "whole L5 row diagnostic export missing or incomplete")
+        rows=verdict.get("rows",[])
+        require(isinstance(rows,list) and len(rows)==verdict["pass"] and verdict.get("skip",0)==0, "L5 row counts differ from summary")
+        limit=verdict.get("limit","")
+        expected=hosts if limit in ("","all") else groups.get(limit,[limit] if limit in hosts else [])
+        require(isinstance(expected,list) and expected and set(expected)<=set(hosts), "unproved verification host limit")
+        seen=set();by_id={}
+        for row in rows:
+            require(isinstance(row,dict) and isinstance(row.get("id"),str) and row["id"] and row.get("host") in expected and row.get("status")=="pass" and row.get("probe_status")=="ok" and type(row.get("exit_code")) is int and row["exit_code"]==0, "native successful verifier row identity/status missing")
+            key=(row["id"],row["host"])
+            require(key not in seen,"duplicate native verifier row")
+            seen.add(key);by_id.setdefault(row["id"],set()).add(row["host"])
+        require(by_id and all(selected==set(expected) for selected in by_id.values()),"native verifier rows omit selected hosts")
+
+
+
 class Context:
     """Evidence rules for one gate run at a fixed HEAD."""
 
@@ -244,7 +350,75 @@ class Context:
                 entries[path] = (mode, oid)
         return entries
 
-    def accepts_target(self, sha: Any, label: str, reuse: Any = None) -> bool:
+    def read_file(self, revision: str, path: str) -> bytes | None:
+        if not safe_path(path):
+            return None
+        proc = subprocess.run(["git", "-C", str(self.worktree), "show", f"{revision}:{path}"],
+                              capture_output=True, check=False)
+        return None if proc.returncode else proc.stdout
+
+    def commit_tree(self, revision: str) -> str | None:
+        rc, out = git(self.worktree, "rev-parse", f"{revision}^{{tree}}")
+        return None if rc else out.strip()
+
+    def _machine_scope(self, sha: str, artifact: Any) -> tuple[dict[str, Any] | None, list[str]]:
+        """Read committed bytes, never an uncommitted worktree record or a supplied path list."""
+        if not safe_path(artifact):
+            return None, ["machine record artifact must be a safe repository path"]
+        text = self.read_file(self.head, artifact)
+        if text is None:
+            return None, ["machine record artifact is not committed at HEAD"]
+        if b"<!-- pilot-evidence-record" not in text:
+            return None, []  # legacy manual records keep the independent closure review
+        match = re.search(rb"<!-- pilot-evidence-record[^>]*-->\s*```json\n(.*?)\n```", text, re.S)
+        try:
+            record = json.loads(match[1]) if match else None
+            if not isinstance(record, dict) or record.get("schema") != "pilot-evidence-record/v1":
+                raise ValueError("unsupported schema or missing machine block")
+            candidate = record.get("candidate", {})
+            if (candidate.get("commit") != sha or candidate.get("dirty") or
+                    candidate.get("source") not in ("git", "flag") or
+                    candidate.get("tree") != self.commit_tree(sha)):
+                raise ValueError("candidate/tree mismatch or dirty candidate")
+            if record.get("outcome") != "success":
+                raise ValueError("target chain did not succeed")
+            closure = record.get("closure")
+            if not isinstance(closure, dict) or closure.get("unresolved") or closure.get("external"):
+                raise ValueError("closure has unresolved or external inputs")
+            if closure.get("resolution_version") != 10 or closure.get("frozen") is not True:
+                raise ValueError("closure needs current resolution version and frozen pre-run inputs")
+            files, patterns = closure.get("files"), closure.get("patterns")
+            if not isinstance(files, list) or not files or not isinstance(patterns, list):
+                raise ValueError("closure needs files and machine search patterns")
+            tested, head = self.tree_entries(sha), self.tree_entries(self.head)
+            if tested is None or head is None:
+                raise ValueError("complete Git trees unavailable")
+            scope = []
+            for entry in files:
+                if (not isinstance(entry, dict) or not safe_path(entry.get("path")) or
+                        entry.get("mode") not in ("100644", "100755") or
+                        not isinstance(entry.get("blob"), str) or not SHA.fullmatch(entry["blob"])):
+                    raise ValueError("invalid closure file")
+                path = entry["path"]
+                if path in scope or tested.get(path) != (entry["mode"], entry["blob"]):
+                    raise ValueError("closure blob/mode differs from candidate: " + path)
+                scope.append(path)
+            validate_controller(record, files, lambda path: self.read_file(sha, path))
+            for pattern in patterns:
+                if (not isinstance(pattern, str) or not pattern or pattern.startswith("/") or
+                        ".." in pattern.split("/") or "\\" in pattern or "\0" in pattern):
+                    raise ValueError("invalid closure search pattern")
+                # filepath.Glob supports brackets; fail closed until the shared matcher does too.
+                if "[" in pattern or "]" in pattern:
+                    raise ValueError("unsupported closure search pattern")
+                rx = glob_regex(pattern)
+                if {p for p in tested if rx.match(p)} != {p for p in head if rx.match(p)}:
+                    raise ValueError("closure search membership changed: " + pattern)
+            return {"execution_paths": scope}, []
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            return None, ["machine record: " + str(exc)]
+
+    def accepts_target(self, sha: Any, label: str, reuse: Any = None, artifact: Any = None) -> bool:
         """Target-run reuse only. Never call this for reviews or general check receipts.
 
         A fresh independent reviewer supplies the complete execution/dependency scope.
@@ -254,6 +428,17 @@ class Context:
         """
         if reuse is None:
             return self.accepts(sha, label)
+        reuse = copy.deepcopy(reuse)
+        if artifact is not None:
+            machine, errors = self._machine_scope(sha, artifact)
+            if errors:
+                self._target_errors[str(sha)] = "; ".join(errors)
+                return False
+            if machine is not None:
+                if not isinstance(reuse, dict):
+                    self._target_errors[str(sha)] = "target reuse must be an object"
+                    return False
+                reuse.update(machine)
         errors = self._target_reuse_errors(sha, reuse)
         if errors:
             self._target_errors[str(sha)] = "; ".join(errors)
@@ -384,7 +569,7 @@ class Context:
         if reuse is not None and self.required.get(rid, {}).get("kind") != "target-run":
             errors.append(f"{label}: target_reuse requires kind: target-run on the base manifest")
             reuse = None
-        if not self.accepts_target(sha, label, reuse):
+        if not self.accepts_target(sha, label, reuse, entry.get("artifact")):
             errors.append(f"{label}: run was taken at {str(sha)[:12]}, not HEAD ({self.target_stale_reason(sha)})")
         summary = entry.get("summary")
         if not isinstance(summary, str) or len(summary.strip()) < 20:
