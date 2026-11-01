@@ -105,20 +105,41 @@ func TestTopologyCheckmodeScriptInstallsItsTrapOnlyAfterUpFresh(t *testing.T) {
 	}
 }
 
-// TestTopologyCheckmodeScriptCheckerCatchesRegressions runs the checker on the
-// real script with one regression applied each, so it is known to fail for the
-// reason it names and not to pass on any script with the same words in it.
+// checkmodeScriptFixture has the shape of the real script: the lines the
+// checker looks at, with the same text, in the same order.
+const checkmodeScriptFixture = `#!/usr/bin/env bash
+# discovers each node's real IP after ` + "`topology up`" + ` and forwards them as extra vars
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+echo "=== provisioning topology: $TOPOLOGY ==="
+# --fresh: every node must be absent and is created by this run.
+./pilot vm-target topology up --fresh --topology "$TOPOLOGY"
+
+cleanup() {
+  echo "=== tearing down topology: $TOPOLOGY ==="
+  ./pilot vm-target topology down --topology "$TOPOLOGY" || true
+}
+trap cleanup EXIT
+
+NEXUS_IP="$(./pilot vm-target topology status --topology "$TOPOLOGY" | awk '{print $3}')"
+./pilot vm-target topology test --topology "$TOPOLOGY" --playbook "$PLAYBOOK"
+`
+
+// TestTopologyCheckmodeScriptCheckerCatchesRegressions runs the checker on a
+// fixture shaped like the script with one regression applied each, so it is
+// known to fail for the reason it names, and to pass on the unmutated fixture,
+// instead of passing any script that has the same words in it. It does not read
+// the real script: the test above does, and fails on its own regressions.
 func TestTopologyCheckmodeScriptCheckerCatchesRegressions(t *testing.T) {
-	real := readCheckmodeScript(t)
+	if problems := checkmodeScriptProblems(checkmodeScriptFixture); len(problems) > 0 {
+		t.Fatalf("the unmutated fixture must pass the checker, got:\n  %s", strings.Join(problems, "\n  "))
+	}
 	const (
 		up   = `./pilot vm-target topology up --fresh --topology "$TOPOLOGY"`
 		trap = "trap cleanup EXIT\n"
+		errx = "set -euo pipefail"
 	)
-	for _, line := range []string{up, trap, "set -euo pipefail"} {
-		if strings.Count(real, line) != 1 {
-			t.Fatalf("the script no longer has exactly one %q; update this test with it:\n%s", line, real)
-		}
-	}
 	cases := []struct {
 		name   string
 		mutate func(string) string
@@ -134,7 +155,7 @@ func TestTopologyCheckmodeScriptCheckerCatchesRegressions(t *testing.T) {
 			return strings.Replace(s, up, up+"\n./pilot vm-target up --name extra --base-image rocky9", 1)
 		}, "runs between"},
 		{"no set -e to stop at a failed up", func(s string) string {
-			return strings.Replace(s, "set -euo pipefail", "set -uo pipefail", 1)
+			return strings.Replace(s, errx, "set -uo pipefail", 1)
 		}, "set -e must come before"},
 		{"a second, plain up", func(s string) string {
 			return s + "\n./pilot vm-target topology up --topology other.yaml\n"
@@ -143,8 +164,8 @@ func TestTopologyCheckmodeScriptCheckerCatchesRegressions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mutated := tc.mutate(real)
-			if mutated == real {
+			mutated := tc.mutate(checkmodeScriptFixture)
+			if mutated == checkmodeScriptFixture {
 				t.Fatal("the mutation changed nothing")
 			}
 			problems := strings.Join(checkmodeScriptProblems(mutated), "\n")
