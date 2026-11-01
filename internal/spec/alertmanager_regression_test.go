@@ -55,11 +55,9 @@ import (
 // pattern (AGENTS.md §3) — spec lists only the `alertmanager` group while
 // real inventory sites the role on whatever host the operator wants
 // (typically co-located with thanos-query), via -e target_group=... on
-// real hosts. Therefore this test does NOT apply
-// TestRegression_SpecAndInventoryAgree (that helper assumes the spec
-// group's host set equals the inventory's group host set, which would
-// force a 1:1 mapping that contradicts the documented co-location
-// flexibility).
+// real hosts. Comparing the spec group's host set with an inventory's
+// (AGENTS.md §1.3; no test does that) would force a 1:1 mapping that
+// contradicts the documented co-location flexibility.
 func TestRegression_AlertmanagerSpec(t *testing.T) {
 	const specPath = "../../docs/verification/alertmanager.md"
 	s, err := Parse(specPath)
