@@ -73,9 +73,10 @@ TestUp_ConcurrentDifferentNames_BothPersist). An already-running node
 adding a node to the spec). Wiring runs after every node is up, since
 it needs every peer's final IP. With --fresh, 'up' instead requires every
 node to be absent and creates all of them, and on failure tears down only
-the nodes it created: use it when a later 'down' of the same spec must
-not remove a VM this run did not create (every clone and session on the
-host shares vm-target; scripts/topology-checkmode-test.sh).
+the nodes it created (a node's keep_on_failure: true is ignored): use it
+when a later 'down' of the same spec must not remove a VM this run did not
+create (every clone and session on the host shares vm-target;
+scripts/topology-checkmode-test.sh).
 
 'snapshot'/'rollback'/'reset' apply the equivalent single-VM operation to
 every node in the spec concurrently, so you can checkpoint or restore an
@@ -113,7 +114,7 @@ func init() {
 		c.Flags().StringVar(&vtTopoSpecPath, "topology", "", "path to the topology YAML spec (required)")
 		_ = c.MarkFlagRequired("topology")
 	}
-	vtTopologyUpCmd.Flags().BoolVar(&vtTopoUpFresh, "fresh", false, "require every node to be absent and create them all (never adopt an existing VM); on failure tear down only the nodes this run created")
+	vtTopologyUpCmd.Flags().BoolVar(&vtTopoUpFresh, "fresh", false, "require every node to be absent and create them all (never adopt an existing VM); on failure tear down only the nodes this run created, ignoring any node-level keep_on_failure")
 	vtTopologyInventoryCmd.Flags().StringVar(&vtTopoOut, "out", "", "write the rendered inventory here instead of stdout")
 	vtTopologySnapshotCmd.Flags().StringVar(&vtTopoTag, "tag", "", "snapshot tag to create on every node (required)")
 	_ = vtTopologySnapshotCmd.MarkFlagRequired("tag")
