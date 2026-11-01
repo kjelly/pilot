@@ -516,7 +516,15 @@ func TestTopologyTestEphemeralFailureTearsDownOnlyThisRunsNodes(t *testing.T) {
 		wantStderr  string
 		wantState   []string
 		wantGone    []string
+		readOnly    bool // nothing but status reads may reach libvirt
 	}{
+		{
+			name:      "a declared node already exists",
+			nodes:     func(h *freshHost) [][2]string { return [][2]string{{freshGood, h.base}, {freshForeign, h.base}} },
+			wantErr:   []string{fmt.Sprintf("--ephemeral requires node %q to be absent", freshForeign)},
+			wantState: []string{freshForeign},
+			readOnly:  true,
+		},
 		{
 			name:       "failing node before the good one",
 			nodes:      func(h *freshHost) [][2]string { return [][2]string{{freshBad, h.missing}, {freshGood, h.base}} },
@@ -572,6 +580,13 @@ func TestTopologyTestEphemeralFailureTearsDownOnlyThisRunsNodes(t *testing.T) {
 			h.wantUntouched(freshForeign)
 			h.wantFactsKept(freshForeign)
 			h.wantUntouched(freshRacer)
+			if tc.readOnly {
+				for _, c := range h.virshCalls() {
+					if c[0] != "domstate" {
+						t.Errorf("the refused run touched libvirt: virsh %v", c)
+					}
+				}
+			}
 		})
 	}
 }
