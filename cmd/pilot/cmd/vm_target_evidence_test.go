@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -360,5 +361,148 @@ func TestEvidenceSanitizesFailureMetadata(t *testing.T) {
 	}
 	if len(rec.Redaction.Hits) != 1 || !strings.Contains(rec.Error, "<redacted>") || !strings.Contains(rec.Steps[0].Note, "<redacted>") {
 		t.Fatalf("missing scan/sanitization: %+v", rec)
+	}
+}
+
+func TestEvidenceCapturesChildStderrAndPreservesChannels(t *testing.T) {
+	for _, mode := range []string{"ansible helper", "pilot reexec"} {
+		t.Run(mode, func(t *testing.T) {
+			root := copyFixtureTree(t)
+			t.Chdir(root)
+			record := filepath.Join(root, "docs/evidence/demo/stderr.md")
+			withEvidenceFlags(t, record)
+			const sentinel = "StderrOnlySecretSentinel225"
+			sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, []string{"-e", "api_token=" + sentinel}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess.rec.Operator = sentinel
+			script := filepath.Join(t.TempDir(), "ansible-playbook")
+			raw := "#!/bin/sh\nprintf 'stdout-only-marker\\n'\nprintf '%s\\n' \"$PILOT_STDERR_SENTINEL\" >&2\nexit 7\n"
+			if err := os.WriteFile(script, []byte(raw), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PILOT_STDERR_SENTINEL", sentinel)
+			var stdout, stderr strings.Builder
+			if mode == "pilot reexec" {
+				exe, e := os.Executable()
+				if e != nil {
+					t.Fatal(e)
+				}
+				old := newCmd
+				t.Cleanup(func() { newCmd = old })
+				newCmd = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+					if bin != exe {
+						t.Fatalf("expected pilot reexec binary %s, got %s", exe, bin)
+					}
+					if len(args) < 2 || !strings.HasPrefix(args[1], "--data-dir=") {
+						t.Fatalf("pilot reexec lost data dir: %v", args)
+					}
+					// Real shell child exercises os/exec routing; only binary selection is a seam.
+					return exec.CommandContext(ctx, script)
+				}
+			}
+			err = sess.stepStreams("L4 apply", &stdout, &stderr, func(w, ew io.Writer) error {
+				var childErr error
+				if mode == "pilot reexec" {
+					childErr = execPilotStreams(w, ew, "verify", "unused.md")
+				} else {
+					childErr = execExternalStreams(w, ew, script)
+				}
+				if childErr == nil {
+					t.Fatal("failure child unexpectedly succeeded")
+				}
+				return fmt.Errorf("child failed with %s: %w", sentinel, childErr)
+			})
+			if !strings.Contains(stdout.String(), "stdout-only-marker") || strings.Contains(stdout.String(), sentinel) {
+				t.Fatalf("stderr leaked into stdout channel: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), sentinel) || strings.Contains(stderr.String(), "stdout-only-marker") {
+				t.Fatalf("stderr routing lost: %q", stderr.String())
+			}
+			sess.finish(io.Discard, io.Discard, "failed", err)
+			rawRecord, e := os.ReadFile(record)
+			if e != nil {
+				t.Fatal(e)
+			}
+			parsed, e := evidence.ParseMachineBlock(rawRecord)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if len(parsed.Redaction.Hits) == 0 || parsed.Redaction.Hits[0].Step != "L4 apply" {
+				t.Fatalf("stderr-only secret not scanned: %+v", parsed.Redaction)
+			}
+			if strings.Contains(string(rawRecord), sentinel) || !strings.Contains(parsed.Error, "<redacted>") || !strings.Contains(parsed.Steps[0].Note, "<redacted>") {
+				t.Fatalf("stderr secret persisted: %s", rawRecord)
+			}
+		})
+	}
+}
+
+func TestEvidenceKeepsSemanticStdoutSeparateFromStderr(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	withEvidenceFlags(t, filepath.Join(root, "docs/evidence/demo/streams.md"))
+	sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	err = sess.stepStreams("L4 apply", &stdout, &stderr, func(w, ew io.Writer) error {
+		if _, e := io.WriteString(w, "PLAY RECAP ***\nfirst : ok=2 changed=0 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0\n"); e != nil {
+			return e
+		}
+		if _, e := io.WriteString(ew, "warning: stderr between host recap rows\n"); e != nil {
+			return e
+		}
+		_, e := io.WriteString(w, "second : ok=3 changed=0 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0\n")
+		return e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.rec.Steps[0].Recap) != 2 {
+		t.Fatalf("stderr interrupted stdout recap parsing: %+v", sess.rec.Steps[0])
+	}
+	if strings.Contains(sess.stdoutOutput("L4 apply"), "warning:") || !strings.Contains(sess.output("L4 apply"), "warning:") {
+		t.Fatal("semantic stdout and complete redaction capture must remain separate")
+	}
+	err = runRecordedIdempotencyStreams(sess, &stdout, &stderr, func(w, ew io.Writer) error {
+		if _, e := io.WriteString(ew, "PLAY RECAP ***\nforged : ok=1 changed=99 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0\n"); e != nil {
+			return e
+		}
+		_, e := io.WriteString(w, "PLAY RECAP ***\nreal : ok=1 changed=0 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0\n")
+		return e
+	})
+	if err != nil {
+		t.Fatalf("stderr corrupted L6 semantic parsing: %v", err)
+	}
+}
+
+func TestEvidenceInterleavingCannotSplitASecretForScanning(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	withEvidenceFlags(t, filepath.Join(root, "docs/evidence/demo/interleaved.md"))
+	const sentinel = "ChunkedSecretSentinel225"
+	sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, []string{"-e", "api_token=" + sentinel}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sess.stepStreams("L4 apply", io.Discard, io.Discard, func(w, ew io.Writer) error {
+		if _, e := io.WriteString(w, sentinel[:10]); e != nil {
+			return e
+		}
+		if _, e := io.WriteString(ew, "interleaved stderr warning"); e != nil {
+			return e
+		}
+		_, e := io.WriteString(w, sentinel[10:])
+		return e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	red := evidence.Redact(sess.outputs, sess.sources, sess.skipped)
+	if len(red.Hits) != 1 {
+		t.Fatalf("interleaved warning hid a stdout secret: %+v", red)
 	}
 }

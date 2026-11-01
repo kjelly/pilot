@@ -1,6 +1,8 @@
 package evidence
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,5 +263,56 @@ func TestClosureConfigurationAndSymlinksFailClosed(t *testing.T) {
 	}
 	if !unresolved["ansible.cfg"] || !unresolved["linked.txt"] {
 		t.Fatalf("unsupported configuration/symlink claims complete resolution: %+v", c)
+	}
+}
+
+func TestClosureInlineExpressionsCannotClaimCompleteResolution(t *testing.T) {
+	root := t.TempDir()
+	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks: []\n")
+	const sentinel = "InlineClosureSentinel225"
+	payloads := []string{
+		`value="{{ lookup('file', 'input.txt') }}" api_token=` + sentinel,
+		`value="{{ query('file', 'input.txt') }}" api_token=` + sentinel,
+		`value="{{ q('file', input_path) }}" api_token=` + sentinel,
+		`{"value":"{{ lookup('file', 'input.txt') }}","api_token":"` + sentinel + `"}`,
+		`value="{% include 'input.txt' %}" api_token=` + sentinel,
+		`{"value":"\u007b\u007b \u006cookup('file', 'input.txt') }}","api_token":"` + sentinel + `"}`,
+	}
+	forms := []func(string) []string{
+		func(v string) []string { return []string{"-e", v} },
+		func(v string) []string { return []string{"-e" + v} },
+		func(v string) []string { return []string{"-e=" + v} },
+		func(v string) []string { return []string{"--extra-vars", v} },
+		func(v string) []string { return []string{"--extra-vars=" + v} },
+	}
+	for i, payload := range payloads {
+		for j, form := range forms {
+			t.Run(fmt.Sprintf("payload%d-form%d", i, j), func(t *testing.T) {
+				closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}, ExtraArgs: form(payload)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, ref := range closure.Unresolved {
+					if ref.From == "extra-vars" && ref.Ref == "inline extra-vars expression" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("inline runtime input silently omitted: %+v", closure)
+				}
+				raw, _ := json.Marshal(closure)
+				if strings.Contains(string(raw), sentinel) || strings.Contains(string(raw), "input.txt") {
+					t.Fatalf("inline payload leaked to closure metadata: %s", raw)
+				}
+			})
+		}
+	}
+	closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}, ExtraArgs: []string{"-e", "target_group=all api_token=" + sentinel}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closure.Unresolved) != 0 {
+		t.Fatalf("plain literal inline vars unnecessarily unresolved: %+v", closure)
 	}
 }

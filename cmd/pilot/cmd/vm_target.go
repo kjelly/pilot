@@ -1693,8 +1693,8 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 	if !vtTestSkipLint {
 		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/6] L1 Syntax Check ===")
 		syntaxArgs := []string{vtTestPlaybook, "--syntax-check"}
-		if err := sess.step("L1 syntax check", cmd.OutOrStdout(), func(w io.Writer) error {
-			return execAnsiblePlaybook(w, syntaxArgs...)
+		if err := sess.stepStreams("L1 syntax check", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return execExternalStreams(w, ew, "ansible-playbook", syntaxArgs...)
 		}); err != nil {
 			return fmt.Errorf("syntax check failed: %w", err)
 		}
@@ -1720,8 +1720,8 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 	if !vtTestSkipCheckmode {
 		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
 		checkArgs := append(buildApplyArgs(vtTestPlaybook, invPath, t.Name, args), "--check", "--diff")
-		if err := sess.step("L3 check-mode dry-run", cmd.OutOrStdout(), func(w io.Writer) error {
-			return execExternal(w, "ansible-playbook", checkArgs...)
+		if err := sess.stepStreams("L3 check-mode dry-run", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return execExternalStreams(w, ew, "ansible-playbook", checkArgs...)
 		}); err != nil {
 			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the target's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
 		}
@@ -1765,8 +1765,8 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 	}
 	transaction := delivery.Transaction{
 		Apply: func(context.Context) error {
-			if err := sess.step("L4 apply", mw, func(w io.Writer) error {
-				return execExternal(w, "ansible-playbook", ansibleArgs...)
+			if err := sess.stepStreams("L4 apply", mw, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
 				return fmt.Errorf("playbook apply failed: %w", err)
 			}
@@ -1783,10 +1783,10 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 			if vtTestVerifyTimeout > 0 {
 				pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
 			}
-			verr := sess.step("L5 verify", cmd.OutOrStdout(), func(w io.Writer) error {
-				return execPilot(w, pilotArgs...)
+			verr := sess.stepStreams("L5 verify", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return execPilotStreams(w, ew, pilotArgs...)
 			})
-			sess.verify(vtTestSpec, limit, sess.output("L5 verify"))
+			sess.verify(vtTestSpec, limit, sess.stdoutOutput("L5 verify"))
 			if verr != nil {
 				return fmt.Errorf("verification failed: %w", verr)
 			}
@@ -1795,8 +1795,8 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 6/6] L6 Idempotency Check ===")
-			if err := runRecordedIdempotency(sess, cmd.OutOrStdout(), func(w io.Writer) error {
-				return execExternal(w, "ansible-playbook", ansibleArgs...)
+			if err := runRecordedIdempotencyStreams(sess, cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return execExternalStreams(w, ew, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
 				return err
 			}

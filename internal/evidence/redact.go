@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,9 +37,8 @@ type Redaction struct {
 
 var secretKeyRe = regexp.MustCompile(`(?i)(password|passwd|secret|token|credential|private_key|api_key|master_key|_pass$|_pw$)`)
 
-// isSecretKey reports whether a variable name sounds like a secret. Path
-// variables that happen to mention a key file (`ssh_private_key_file`) are
-// excluded by the value filter in secretValue.
+// isSecretKey classifies a key name. Container secrecy is propagated by the
+// traversal, so credentials.value and password list entries stay secret.
 func isSecretKey(key string) bool {
 	last := key
 	if i := strings.LastIndex(key, "."); i >= 0 {
@@ -47,15 +47,12 @@ func isSecretKey(key string) bool {
 	return secretKeyRe.MatchString(last)
 }
 
-// secretValue reports whether a value is worth scanning for: it must
-// be nonempty and not a file path. Short inline secrets still need metadata redaction.
-func secretValue(v string) bool {
-	v = strings.TrimSpace(v)
-	if len(v) == 0 || strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~") || strings.HasPrefix(v, "{{") {
-		return false
-	}
-	return true
+// Only explicit file-reference keys are exempt. A secret literal beginning
+// with /, ~ or {{ is still a secret value, not evidence of a file reference.
+func secretFileKey(key string) bool {
+	return strings.HasSuffix(strings.ToLower(key), "_file")
 }
+func secretValue(v string) bool { return v != "" }
 
 // SecretSources collects the secret-named values the run was given: the
 // scalars under secret-named keys of every plaintext `-e @file`, and every
@@ -81,23 +78,23 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 			skipped = append(skipped, f+" (ansible-vault encrypted)")
 			continue
 		}
-		var doc any
+		var doc yaml.Node
 		if err := yaml.Unmarshal(raw, &doc); err != nil {
 			skipped = append(skipped, f+" (not YAML)")
 			continue
 		}
-		collectSecrets(f, "", doc, &sources)
+		collectSecrets(f, "", &doc, false, 0, &sources, &skipped)
 	}
 	for _, payload := range extraVarsPayloads(extraArgs) {
 		if payload == "" || strings.HasPrefix(payload, "@") {
 			continue
 		}
 		if strings.HasPrefix(strings.TrimSpace(payload), "{") {
-			var doc map[string]any
-			if err := yaml.Unmarshal([]byte(payload), &doc); err != nil || doc == nil {
+			var doc yaml.Node
+			if err := yaml.Unmarshal([]byte(payload), &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 				skipped = append(skipped, "inline extra-vars (unsupported JSON/YAML mapping)")
 			} else {
-				collectSecrets("-e", "", doc, &sources)
+				collectSecrets("-e", "", &doc, false, 0, &sources, &skipped)
 			}
 			continue
 		}
@@ -108,8 +105,11 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 		}
 		for _, field := range fields {
 			key, val, _ := strings.Cut(field, "=")
-			if isSecretKey(key) && secretValue(val) {
-				sources = append(sources, SecretSource{Key: "-e " + key, value: val})
+			if isSecretKey(key) && !secretFileKey(key) && secretValue(val) {
+				appendSecretSources(&sources, "-e "+key, val)
+				if strings.Contains(val, "{{") || strings.Contains(val, "{%") {
+					skipped = append(skipped, "templated secret value (runtime result not scanned)")
+				}
 			}
 		}
 	}
@@ -118,28 +118,78 @@ func SecretSources(root string, extraArgs []string) (sources []SecretSource, ski
 	return sources, skipped
 }
 
-func collectSecrets(file, prefix string, node any, out *[]SecretSource) {
-	switch v := node.(type) {
-	case map[string]any:
-		keys := make([]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
+func collectSecrets(file, prefix string, node *yaml.Node, inherited bool, depth int, out *[]SecretSource, skipped *[]string) {
+	if node == nil {
+		return
+	}
+	if depth > 64 {
+		*skipped = append(*skipped, "secret scalar traversal exceeds supported depth")
+		return
+	}
+	switch node.Kind {
+	case yaml.DocumentNode, yaml.SequenceNode:
+		for _, item := range node.Content {
+			collectSecrets(file, prefix, item, inherited, depth+1, out, skipped)
 		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			p := k
-			if prefix != "" {
-				p = prefix + "." + k
+	case yaml.AliasNode:
+		collectSecrets(file, prefix, node.Alias, inherited, depth+1, out, skipped)
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i].Value
+			if secretFileKey(key) {
+				continue
 			}
-			collectSecrets(file, p, v[k], out)
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			collectSecrets(file, path, node.Content[i+1], inherited || isSecretKey(key), depth+1, out, skipped)
 		}
-	case []any:
-		for _, item := range v {
-			collectSecrets(file, prefix, item, out)
+	case yaml.ScalarNode:
+		if !inherited || prefix == "" {
+			return
 		}
-	case string:
-		if prefix != "" && isSecretKey(prefix) && secretValue(v) {
-			*out = append(*out, SecretSource{Key: file + ":" + prefix, value: strings.TrimSpace(v)})
+		values := []string{node.Value}
+		if strings.Contains(node.Value, "{{") || strings.Contains(node.Value, "{%") {
+			*skipped = append(*skipped, "templated secret value (runtime result not scanned)")
+		}
+		if node.Tag != "!!str" {
+			var canonical any
+			if err := node.Decode(&canonical); err != nil {
+				*skipped = append(*skipped, "secret scalar cannot be decoded")
+				return
+			}
+			values = append(values, fmt.Sprint(canonical))
+			if raw, err := json.Marshal(canonical); err == nil {
+				values = append(values, string(raw))
+			}
+			if v, ok := canonical.(bool); ok {
+				if v {
+					values = append(values, "True")
+				} else {
+					values = append(values, "False")
+				}
+			}
+		}
+		seen := map[string]bool{}
+		for _, value := range values {
+			if secretValue(value) && !seen[value] {
+				appendSecretSources(out, file+":"+prefix, value)
+				seen[value] = true
+			}
+		}
+	}
+}
+
+// JSON callbacks encode quotes, slashes and line breaks inside a scalar. Scan
+// their standard JSON spelling too; this is a bounded encoding boundary rather
+// than an attempt to guess every transformation of a secret.
+func appendSecretSources(out *[]SecretSource, key, value string) {
+	*out = append(*out, SecretSource{Key: key, value: value})
+	if raw, err := json.Marshal(value); err == nil && len(raw) >= 2 {
+		escaped := string(raw[1 : len(raw)-1])
+		if escaped != value {
+			*out = append(*out, SecretSource{Key: key, value: escaped})
 		}
 	}
 }

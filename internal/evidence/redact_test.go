@@ -2,6 +2,8 @@ package evidence
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,5 +104,98 @@ func TestShortSecretsSanitizeMetadataWithoutCorruptingFingerprints(t *testing.T)
 	}
 	if rec.Error != "failed <redacted>" || rec.PilotBinary.SHA256 != hash {
 		t.Fatalf("metadata/fingerprint sanitization: %+v", rec)
+	}
+}
+
+func TestSecretKeyAncestryAndScalarSpellings(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "vars.yaml")
+	raw := `api_token: /SlashLiteralSentinel225
+admin_password: ~TildeLiteralSentinel225
+client_secret: '{{BraceLiteralSentinel225}}'
+credentials:
+  value: NestedCredentialSentinel225
+password:
+  - value: ListedPasswordSentinel225
+numeric_token: 0x75BCD15
+boolean_secret: true
+ssh_private_key_file: /tmp/explicit-key-reference
+`
+	if err := os.WriteFile(file, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sources, skipped := SecretSources(root, []string{"-e", "@vars.yaml"})
+	expected := []string{"/SlashLiteralSentinel225", "~TildeLiteralSentinel225", "{{BraceLiteralSentinel225}}", "NestedCredentialSentinel225", "ListedPasswordSentinel225", "0x75BCD15", "123456789", "true", "True"}
+	for _, sentinel := range expected {
+		if hits := Scan(map[string]string{"stderr": sentinel}, sources); len(hits) == 0 {
+			t.Errorf("known literal/scalar secret was omitted: %q sources=%+v", sentinel, sources)
+		}
+		record := &Record{Error: "failed " + sentinel, Operator: sentinel, Steps: []Step{{Note: sentinel}}}
+		if err := SanitizeRecord(record, sources); err != nil {
+			t.Fatal(err)
+		}
+		doc, _ := json.Marshal(record)
+		if strings.Contains(string(doc), sentinel) {
+			t.Errorf("secret persisted in metadata: %s", doc)
+		}
+	}
+	if len(skipped) == 0 || !strings.Contains(strings.Join(skipped, " "), "runtime result not scanned") {
+		t.Fatalf("templated secret runtime uncertainty hidden: %v", skipped)
+	}
+	for _, source := range sources {
+		if strings.Contains(source.Key, "ssh_private_key_file") {
+			t.Fatalf("explicit file reference should remain a reference: %+v", source)
+		}
+	}
+	jsonArgs := []string{"--extra-vars", `{"credentials":{"value":"NestedJsonSentinel225"},"password":[{"value":"ListJsonSentinel225"}],"numeric_token":123456789,"boolean_secret":true}`}
+	sources, skipped = SecretSources(root, jsonArgs)
+	if len(skipped) != 0 {
+		t.Fatal(skipped)
+	}
+	for _, sentinel := range []string{"NestedJsonSentinel225", "ListJsonSentinel225", "123456789", "true"} {
+		if len(Scan(map[string]string{"out": sentinel}, sources)) == 0 {
+			t.Errorf("JSON scalar secret omitted: %s", sentinel)
+		}
+	}
+	// All supported inline forms retain literal prefixes instead of inferring a path.
+	for _, prefix := range []string{"/", "~", "{{"} {
+		sentinel := prefix + "InlineLiteralSentinel225"
+		for _, args := range [][]string{{"-e", "api_token=" + sentinel}, {"-eapi_token=" + sentinel}, {"-e=api_token=" + sentinel}, {"--extra-vars=api_token=" + sentinel}} {
+			got, _ := SecretSources(root, args)
+			if len(Scan(map[string]string{"out": sentinel}, got)) == 0 {
+				t.Errorf("inline literal omitted: %s", fmt.Sprint(args))
+			}
+		}
+	}
+}
+
+func TestJSONEncodedSecretDisclosureIsScannedAndSanitized(t *testing.T) {
+	for _, sentinel := range []string{`Sentinel\Password225`, `Sentinel"Password225`, "Sentinel\nPassword225", "Sentinel<Password>225"} {
+		t.Run(sentinel, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]string{"api_token": sentinel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sources, skipped := SecretSources(t.TempDir(), []string{"--extra-vars", string(payload)})
+			if len(skipped) != 0 {
+				t.Fatal(skipped)
+			}
+			// Native producer, rather than a test imitation of the escape algorithm.
+			output, err := json.Marshal(map[string]string{"msg": sentinel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(Scan(map[string]string{"stderr": string(output)}, sources)) == 0 {
+				t.Fatalf("JSON-encoded secret disclosure was reported clean: %s", output)
+			}
+			rec := &Record{Error: string(output), Steps: []Step{{Note: string(output)}}}
+			if err := SanitizeRecord(rec, sources); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(rec)
+			if strings.Contains(rec.Error, sentinel) || strings.Contains(rec.Error, string(output)) || !strings.Contains(rec.Error, "<redacted>") {
+				t.Fatalf("encoded secret persisted: %s", raw)
+			}
+		})
 	}
 }
