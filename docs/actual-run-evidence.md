@@ -106,6 +106,13 @@ committed evidence summary。
   immutable image ID，L1/L3/L4/L6 及整個 L5 pilot child 都在相同 image 內執行。
   每個 subprocess 使用新的 private HOME/tmp、固定 UID/GID 1000 的 image account、read-only candidate/binary/inventory/key、
   固定 Ansible config 與清除 host ANSIBLE/PYTHON environment 的 launcher。
+  rendered inventory 與其 SSH key bytes 在測試前 materialize 到 controller-owned private
+  staging（directory 0700、key 0600），effective inventory 只引用這些 snapshot。
+  重複 key reference 共用一份 snapshot；rendered/effective inventory hashes 分別保留。
+  ephemeral teardown 可先刪除 manager-owned 原始 inventory/key，之後的 native postprobe
+  與 closure 比較仍檢查真正執行的 staged bytes。原始來源在 capture 後的改變不影響執行；
+  staged inventory/key、profile 或 binary drift 仍 fail closed。finish 後只清除 controller
+  自己的 staging，cleanup failure 仍記錄為失敗，不提前宣告 evidence success。
   這個 profile 需要 matching repository source checkout、Docker daemon 及已存在且可驗證的
   Go module cache，且目前 profile 要求 host UID/GID 1000（不掛載 host identity database）。native probe 包含 NSS identity 與實際 ssh -G 檢查；只含 bundled playbooks/docs 的 runtime image 不支援完整 source closure。
   profile 另以 SHA-256 pin 完整 ansible.posix 2.1.0 collection，僅從 image 內固定 collection

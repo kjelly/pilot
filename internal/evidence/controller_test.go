@@ -62,13 +62,66 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	if err := os.WriteFile(key, []byte("synthetic native-parser key (no SSH invocation)"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	key2 := filepath.Join(t.TempDir(), "key-two")
+	key2Bytes := []byte("distinct captured second SSH key (no SSH invocation)")
+	if err := os.WriteFile(key2, key2Bytes, 0600); err != nil {
+		t.Fatal(err)
+	}
 	inv := filepath.Join(t.TempDir(), "inventory.yml")
-	raw := "all:\n  children:\n    parent:\n      children:\n        evidence_nodes:\n          hosts:\n            native-probe:\n              ansible_connection: ssh\n              ansible_host: 192.0.2.1\n              ansible_user: ubuntu\n              ansible_port: 22\n              ansible_ssh_private_key_file: " + key + "\n"
+	raw := "all:\n  vars:\n    ansible_ssh_private_key_file: " + key + "\n  hosts:\n    other-probe:\n      ansible_connection: ssh\n      ansible_host: 192.0.2.2\n      ansible_user: ubuntu\n      ansible_port: 22\n      ansible_ssh_private_key_file: " + key2 + "\n  children:\n    parent:\n      children:\n        evidence_nodes:\n          hosts:\n            native-probe:\n              ansible_connection: ssh\n              ansible_host: 192.0.2.1\n              ansible_user: ubuntu\n              ansible_port: 22\n              ansible_ssh_private_key_file: " + key + "\n"
 	if err := os.WriteFile(inv, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.PrepareInventory(inv); err != nil {
 		t.Fatal(err)
+	}
+	owned := c.stageDir
+	if info, err := os.Stat(owned); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("private controller stage mode: %v %+v", err, info)
+	}
+	stagedKeys := map[string][]byte{}
+	for path := range c.files {
+		if filepath.Dir(path) == owned && strings.HasPrefix(filepath.Base(path), "ssh-key-") {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+				t.Fatalf("snapshot key mode/type: %v %+v", err, info)
+			}
+			stagedKeys[path] = data
+		}
+	}
+	if len(stagedKeys) != 2 {
+		t.Fatalf("duplicate key refs not deduplicated or distinct key lost: %d", len(stagedKeys))
+	}
+	seenFirst, seenSecond := false, false
+	for _, data := range stagedKeys {
+		if string(data) == "synthetic native-parser key (no SSH invocation)" {
+			seenFirst = true
+		}
+		if bytes.Equal(data, key2Bytes) {
+			seenSecond = true
+		}
+	}
+	if !seenFirst || !seenSecond {
+		t.Fatal("snapshot key bytes differ from their captured sources")
+	}
+	effective, err := os.ReadFile(c.inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.proof.RenderedInventorySHA256 != digestBytes([]byte(raw)) || c.proof.InventorySHA256 != digestBytes(effective) || strings.Contains(string(effective), key) || strings.Contains(string(effective), key2) {
+		t.Fatal("rendered/effective inventory identities or key rewrite incorrect")
+	}
+	if err := c.PrepareInventory(inv); err == nil || !strings.Contains(err.Error(), "already prepared") || c.stageDir != owned {
+		t.Fatalf("repeated preparation orphaned/replaced ownership: %v", err)
+	}
+	for _, source := range []string{key, key2, inv} {
+		if err := os.Remove(source); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if !c.InventoryProven() || len(c.Inventory().Groups["parent"]) != 1 {
 		t.Fatalf("actual native inventory ancestry not proved: inventory=%+v kind=%s", c.Inventory(), c.proof.InventoryKind)
@@ -77,6 +130,12 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := c.Run("L1 syntax check", "ansible-playbook", []string{"apply.yml", "--syntax-check"}, &stdout, &stderr); err != nil {
 		t.Fatalf("native syntax routing: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	mounts := strings.Join(c.dockerArgs("probe", nil), "\n")
+	for _, source := range []string{key, key2, inv} {
+		if strings.Contains(mounts, "src="+source+",") {
+			t.Fatalf("manager-owned source still mounted after capture: %s", source)
+		}
 	}
 	closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"apply.yml"}, Controller: c})
 	if err != nil {
@@ -91,6 +150,76 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	}
 	if proof.PreProbeSHA256 != proof.PostProbeSHA256 || proof.Steps.Syntax != 1 || !validNativeProbe(proof.NativeProbe) || proof.NativeProbe.UID != 1000 || proof.NativeProbe.User != "pilot-controller" || proof.NativeProbe.SSHIdentity != "ssh-config/v1" || proof.Build == nil || proof.Build.RebuiltBinarySHA256 != proof.BinarySHA256 {
 		t.Fatalf("actual routed proof invalid: %+v", proof)
+	}
+	after, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"apply.yml"}, Controller: c})
+	if err != nil || len(after.Unresolved) != 0 || len(after.External) != 0 {
+		t.Fatalf("post-proof closure depends on removed manager inputs: %v %+v", err, after)
+	}
+	beforeJSON, _ := json.Marshal(closure)
+	afterJSON, _ := json.Marshal(after)
+	if !bytes.Equal(beforeJSON, afterJSON) {
+		t.Fatal("removed-source lifecycle changed frozen execution closure")
+	}
+	t.Log("native source inventory and both keys removed after capture: Run, Finalize and post-run closure remain complete")
+	// Sources may be recreated or changed after capture; commands still use
+	// the same owned bytes and Close never removes manager-owned paths.
+	if err := os.WriteFile(key, []byte("source changed after capture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inv, []byte("source inventory changed after capture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.checkInputs(); err != nil {
+		t.Fatalf("unused source mutation invalidated executed snapshots: %v", err)
+	}
+	for path, data := range stagedKeys {
+		if err := os.WriteFile(path, []byte("staged key drift"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Run("L1 syntax check", "ansible-playbook", []string{"apply.yml", "--syntax-check"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "input changed") {
+			t.Fatalf("staged key mutation was not refused: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Finalize(); err == nil || !strings.Contains(err.Error(), "input changed") {
+			t.Fatalf("staged key deletion was not refused: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(c.inventory, append(append([]byte{}, effective...), []byte("# staged drift\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Finalize(); err == nil || !strings.Contains(err.Error(), "input changed") {
+		t.Fatalf("staged inventory drift was not refused: %v", err)
+	}
+	if err := os.WriteFile(c.inventory, effective, 0600); err != nil {
+		t.Fatal(err)
+	}
+	binaryInfo, err := os.Stat(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryFile, err := os.OpenFile(exe, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := binaryFile.Write([]byte("binary drift")); err != nil {
+		t.Fatal(err)
+	}
+	if err := binaryFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Finalize(); err == nil || !strings.Contains(err.Error(), "input changed") {
+		t.Fatalf("binary drift was not refused: %v", err)
+	}
+	if err := os.Truncate(exe, binaryInfo.Size()); err != nil {
+		t.Fatal(err)
 	}
 	t.Logf("actual image=%s config=%s native=%s/%s pre/post=%s routed=%+v", proof.ImageID, proof.ConfigSHA256, proof.NativeProbe.Ansible, proof.NativeProbe.Python, proof.PreProbeSHA256, proof.Steps)
 	// Inventory-aware missing candidates, untouched examples, custom-code denial.
@@ -221,6 +350,17 @@ func TestPinnedControllerNativeBoundary(t *testing.T) {
 	}
 	if _, err := c.Finalize(); err == nil || !strings.Contains(err.Error(), "input changed") {
 		t.Fatalf("profile mutation was not rejected specifically: %v", err)
+	}
+	c.Close()
+	c.Close()
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
+		t.Fatalf("owned key snapshots survived Close: %v", err)
+	}
+	if data, err := os.ReadFile(key); err != nil || string(data) != "source changed after capture" {
+		t.Fatalf("Close touched source key: %v %s", err, data)
+	}
+	if data, err := os.ReadFile(inv); err != nil || string(data) != "source inventory changed after capture" {
+		t.Fatalf("Close touched source inventory: %v %s", err, data)
 	}
 }
 
@@ -604,4 +744,41 @@ func TestPinnedControllerRejectsUnusableCallbackExecution(t *testing.T) {
 		t.Fatalf("native constructor accepted unusable callback execution or wrong refusal: %v %s", err, log.String())
 	}
 	t.Log("native callback origin/manifest present; deliberately unavailable execution callback specifically refused")
+}
+
+func TestControllerPrepareFailureRemovesOnlyOwnedStage(t *testing.T) {
+	inputs := t.TempDir()
+	stages := t.TempDir()
+	t.Setenv("TMPDIR", stages)
+	key := filepath.Join(inputs, "source-key")
+	if err := os.WriteFile(key, []byte("private captured source bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(inputs, "not-a-key")
+	if err := os.Mkdir(invalid, 0700); err != nil {
+		t.Fatal(err)
+	}
+	inventory := filepath.Join(inputs, "inventory.yml")
+	raw := "all:\n  hosts:\n    a:\n      ansible_ssh_private_key_file: " + key + "\n    b:\n      ansible_ssh_private_key_file: " + invalid + "\n"
+	if err := os.WriteFile(inventory, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Controller{root: inputs, files: map[string]string{}}
+	for i := 0; i < 2; i++ {
+		if err := c.PrepareInventory(inventory); err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("prepare did not reject invalid key specifically: %v", err)
+		}
+		entries, err := os.ReadDir(stages)
+		if err != nil || len(entries) != 0 || c.stageDir != "" || c.ready || len(c.files) != 0 {
+			t.Fatalf("failed preparation orphaned owned secret input: %v entries=%v files=%v", err, entries, c.files)
+		}
+	}
+	c.Close()
+	c.Close()
+	if data, err := os.ReadFile(key); err != nil || string(data) != "private captured source bytes" {
+		t.Fatalf("failed prepare/Close touched original key: %v", err)
+	}
+	if _, err := os.Stat(inventory); err != nil {
+		t.Fatal("failed prepare/Close removed original inventory")
+	}
 }
