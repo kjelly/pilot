@@ -45,8 +45,8 @@ type freshHost struct {
 	network  string
 	virshLog string
 	sshLog   string
-	racer    bool // the shim blocks `virsh dominfo racer-node` until released
-	dropped  *nameLog
+	dropped  *nameLog // hosts whose Ansible fact cache pilot was about to drop
+	granted  *nameLog // targets whose QEMU overlay ACL pilot was about to grant
 }
 
 type nameLog struct {
@@ -79,7 +79,7 @@ func (l *nameLog) has(name string) bool {
 func newFreshHost(t *testing.T, wiringFails bool) *freshHost {
 	t.Helper()
 	isolateDataDirInputs(t)
-	h := &freshHost{t: t, dir: t.TempDir(), dropped: &nameLog{}}
+	h := &freshHost{t: t, dir: t.TempDir(), dropped: &nameLog{}, granted: &nameLog{}}
 	dataDir = filepath.Join(h.dir, "data")
 
 	oldVMDir, oldSpec, oldFresh, oldSeams := vtVMDir, vtTopoSpecPath, vtTopoUpFresh, vtManagerHostSeams
@@ -95,7 +95,10 @@ func newFreshHost(t *testing.T, wiringFails bool) *freshHost {
 	})
 	vtVMDir = filepath.Join(h.dir, "vmdir")
 	vtManagerHostSeams = &vmtarget.HostSeams{
-		GrantQEMUOverlayAccess: func(context.Context, string) error { return nil },
+		GrantQEMUOverlayAccess: func(_ context.Context, overlayPath string) error {
+			h.granted.add(filepath.Base(filepath.Dir(overlayPath)))
+			return nil
+		},
 		DropFacts: func(_ context.Context, hosts []string) error {
 			h.dropped.add(hosts...)
 			return nil
@@ -469,6 +472,12 @@ func TestTopologyUpFreshSuccessOwnsEveryNode(t *testing.T) {
 	}
 	wantOutputHas(t, "stdout", stdout, "fresh-a up", "fresh-b up", "wired fresh-b -> fresh-a", "wired fresh-a -> fresh-b")
 	h.wantState(freshForeign, "fresh-a", "fresh-b")
+	// The host-dependent steps ran through the seams, not on this machine.
+	for _, name := range []string{"fresh-a", "fresh-b"} {
+		if !h.granted.has(name) || !h.dropped.has(name) {
+			t.Errorf("%s: the ACL grant and fact-cache seams were not used (granted=%v dropped=%v): the test ran host-dependent steps for real", name, h.granted.has(name), h.dropped.has(name))
+		}
+	}
 	if raw, _ := os.ReadFile(h.sshLog); strings.Count(string(raw), "cat >> /etc/hosts") != 2 {
 		t.Errorf("want one /etc/hosts wiring command per node, ssh calls:\n%s", raw)
 	}
