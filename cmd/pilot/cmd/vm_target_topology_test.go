@@ -223,8 +223,13 @@ func TestTopologyUpFreshRefusesAnExistingNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PILOT_VIRSH_BIN", shim)
+	// A base image that does not exist, as a local path: if the guard were
+	// gone, provisioning fails at once here instead of downloading a cloud
+	// image for the default alias.
+	missing := filepath.Join(dir, "no-such-base.qcow2")
 	topo := filepath.Join(dir, "topology.yaml")
-	if err := os.WriteFile(topo, []byte("nodes:\n  - name: mine\n  - name: nexus\n"), 0o600); err != nil {
+	spec := "nodes:\n  - name: mine\n    base_image: " + missing + "\n  - name: nexus\n    base_image: " + missing + "\n"
+	if err := os.WriteFile(topo, []byte(spec), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
