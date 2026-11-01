@@ -1,0 +1,2 @@
+- import_playbook: apply/demo-apply.yml
+- import_playbook: test/fixtures/demo-fixtures.yml

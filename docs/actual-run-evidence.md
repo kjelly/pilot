@@ -9,7 +9,7 @@
 |---|---|---|
 | Acceptance contract | `docs/verification/<feature>.md` | 只在需求或驗收語意改變時更新 |
 | 目前操作流程 | `docs/runbooks/<feature>.md` | 只保留現在可執行的步驟、rollback 與有效 gotcha |
-| Sanitized evidence 摘要 | `docs/evidence/<feature>/<date>-<tested-revision>.md` | 每個被接受的 candidate 一份，不混入 runbook |
+| Sanitized evidence 摘要 | `docs/evidence/<feature>/<change>.md`（一個變更一份，例如 `issue-214.md`）與 `docs/evidence/<feature>/LATEST.md` | 同一變更的每個 candidate **就地覆寫**同一份 record；被取代的 candidate 由 Git history 保存。`LATEST.md` 由 pilot 在鏈成功時改寫，指向目前有效的 record；spec/runbook 只連到 `LATEST.md`，重新驗證就不必再改 spec/runbook。既有的 `<date>-<tested-revision>.md` 不必改名 |
 | 完整原始輸出 | Gitignored `.verification/` 或暫時的受控驗收儲存 | 不提交 Git；只在一次性驗收與診斷期間保存 |
 
 Runbook 與 spec 不得當成 chronological test journal。重跑時更新「最後驗證」摘要與
@@ -26,8 +26,11 @@ latest evidence link；舊結果留在獨立 evidence record 或 Git history。
    idempotency 與必要的 rollback/failure path。
 5. inventory/spec 不一致時，無論選 A 改環境或 B 改 spec，都要重讀 facts 並從正式鏈
    起點重跑。失敗就修改原工作樹並產生新 candidate；舊 candidate 的 evidence 不得沿用。
-6. 成功後產生 sanitized evidence record，以後續 evidence-only commit 提交。它必須引用
-   tested commit、tested tree 與 execution-affecting file hashes。
+6. 跑鏈時帶 `--evidence-record docs/evidence/<feature>/<change>.md`（`vm-target test` 與
+   `vm-target topology test` 都支援），pilot 在鏈結束時寫出 record 的機器產生部分（§3.1），
+   操作者只補兩段手寫內容，再以後續 evidence-only commit 提交；成功時 pilot 同步改寫
+   `LATEST.md`。record 引用的 tested commit、tested tree 與執行閉包的檔案 hash 由 pilot
+   算出，不手抄。
 7. 若 rebase/squash 改寫 commit ID，必須重新證明 execution-affecting file hashes 未變；
    任何內容差異都需要新 candidate 與新 evidence run。
 
@@ -49,6 +52,38 @@ latest evidence link；舊結果留在獨立 evidence record 或 Git history。
 
 完整 stdout/stderr、逐 row payload、秘密值與內部 operational identifiers 不放入
 committed evidence summary。
+
+### 3.1 機器產生與手寫的分界
+
+`pilot vm-target test --evidence-record <file>`（topology test 同）寫出的 record 以
+`<!-- pilot-evidence-record v1 … -->` 標記開頭，接一個 ```json 區塊（schema
+`pilot-evidence-record/v1`），之後的表格只是同一份資料的人類可讀版。pilot 填的欄位：
+
+- `candidate`：tested commit、tree 與來源（`git`：從執行所在的 checkout 讀，checkout
+  有修改或未追蹤檔案時標 `dirty`；`flag`：從 `git archive` 複本執行時用
+  `--evidence-candidate`/`--evidence-tree` 提供；`unknown` 的 record 沒有 gate 會接受）；
+- `pilot_binary` 的 SHA-256 與版本、`tooling` 的 ansible-playbook 版本；
+- `targets`（節點、group、IP、base image 路徑與 SHA-256）與 `inventory`（pilot 這次
+  render 出的 host/group 名稱，不含連線變數）；
+- `steps`：L1/L3/L4/L5/L6 與 rollback 各自的狀態、時間與每台主機的 PLAY RECAP 計數，
+  沒跑到的步驟標 `not-run`；`verify`：每份 spec 的 verdict 與 pass/fail/skip；
+- `closure`：執行閉包——playbook、`import_playbook`、`include_tasks`/`import_tasks`、
+  `template`/`copy`/`script` 的來源、`vars_files`/`include_vars`、`lookup('file'|
+  'template'|'fileglob')`、spec、對應的 contract、repo 內的 `-e @file`、`ansible.cfg`／
+  `requirements.yml`，每個檔案附 mode、Git blob id 與 SHA-256。含模板的路徑展開成 glob
+  並標 `dynamic`；整個 basename 都是變數的引用（例如 `{{ freeipa_roster_file }}`）
+  列在 `unresolved`，repo 外的檔案（vault）只列路徑在 `external`，不讀也不 hash。
+  Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
+  證明。這份清單就是 reviewer 做 `target_reuse` 盤點時的 `execution_paths`，不必再手列；
+- `redaction`：掃描每個步驟擷取的輸出，找 `-e @file`（明文 YAML）裡 secret 命名的
+  key 與 `-e key=value` 的 secret 值；只記 key 與命中次數，不記值；加密的 vault 檔列在
+  `skipped`。命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
+
+操作者只寫兩段：`## Failure paths and arms (fill in)`（鏈外另外跑的失敗路徑／對照
+arm：注入的故障、預期 rc、復原後狀態、artifact）與 `## Not covered / limits (fill in)`。
+同一變更的下一個 candidate 覆寫 record 時，這兩段會帶著「carried over from <舊
+candidate>」註記保留下來，重新檢查後改寫即可。`pilot evidence closure --playbook …
+--spec … -- -e @…` 可以單獨印出閉包，給 reviewer 或 gate 對照。
 
 `.verification/` 是一次性驗收與診斷的 staging location，不是 durable archive。接受
 candidate 的前提是提交一份可獨立判讀的 sanitized evidence summary，不是封存 raw
