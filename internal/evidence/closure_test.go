@@ -329,7 +329,7 @@ func TestClosureDispatchHasAnExplicitSafeSubset(t *testing.T) {
 		unresolved bool
 	}{
 		{"direct copy", "- hosts: all\n  tasks:\n    - copy: {src: payload.txt, dest: /tmp/out}\n", true, false},
-		{"direct template", "- hosts: all\n  tasks:\n    - ansible.builtin.template: {src: payload.txt, dest: /tmp/out}\n", true, false},
+		{"direct template", "- hosts: all\n  tasks:\n    - ansible.builtin.template: {src: payload.txt, dest: /tmp/out}\n", true, true},
 		{"action scalar", "- hosts: all\n  tasks:\n    - action: copy src=payload.txt dest=/tmp/out api_token=DispatchSecretSentinel225\n", false, true},
 		{"action mapping", "- hosts: all\n  tasks:\n    - action: {module: copy, src: payload.txt, dest: /tmp/out}\n", false, true},
 		{"local action scalar", "- hosts: all\n  tasks:\n    - local_action: copy src=payload.txt dest=/tmp/out\n", false, true},
@@ -468,7 +468,7 @@ func TestClosureNonliteralExpressionsCannotClaimFileIndependence(t *testing.T) {
 		})
 	}
 	root := t.TempDir()
-	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - assert: {that: [true]}\n      when: true\n")
+	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - debug: {msg: literal}\n      when: true\n")
 	closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
 	if err != nil {
 		t.Fatal(err)
@@ -501,5 +501,104 @@ func TestClosureInlineDispatchVariablesRefuseReuse(t *testing.T) {
 		if strings.Contains(string(raw), "ContextSecretSentinel225") {
 			t.Fatalf("dispatch variable payload leaked: %s", raw)
 		}
+	}
+}
+
+func TestClosureOnlyLiteralCopyAndDebugArgumentsAreReusable(t *testing.T) {
+	cases := []struct {
+		name, task string
+		reusable   bool
+	}{
+		{"literal debug msg", "debug: {msg: \"'payload.txt' is file\"}", true},
+		{"literal debug scalar number", "debug: {msg: 42, verbosity: 1}", true},
+		{"literal copy", "copy: {src: payload.txt, dest: /tmp/out, backup: false, force: true}", true},
+		{"literal empty copy content", "ansible.builtin.copy: {content: '', dest: /tmp/out}", true},
+		{"debug var implicit expression", `debug: {var: "1 / (1 if 'payload.txt' is file else 0)"}`, false},
+		{"debug raw params expression", `debug: "var=1/(1 if 'payload.txt' is file else 0)"`, false},
+		{"debug unknown argument", `debug: {msg: hello, var: payload}`, false},
+		{"debug nonliteral verbosity", `debug: {msg: hello, verbosity: "1 if 'payload.txt' is file else 0"}`, false},
+		{"freeform assert implicit expression", `assert: that="'payload.txt' is file"`, false},
+		{"mapping assert implicit expression", `assert: {that: "'payload.txt' is file"}`, false},
+		{"literal assert still opaque", `assert: {that: true}`, false},
+		{"set fact remains opaque", `set_fact: {value: literal}`, false},
+		{"fail remains opaque", `fail: {msg: literal}`, false},
+		{"meta remains opaque", `meta: noop`, false},
+		{"copy freeform arguments", `copy: src=payload.txt dest=/tmp/out`, false},
+		{"copy string boolean", `copy: {src: payload.txt, dest: /tmp/out, force: "'payload.txt' is file"}`, false},
+		{"copy unknown argument", `copy: {src: payload.txt, dest: /tmp/out, decrypt: true}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeClosureFile(t, root, "play.yml", "- hosts: all\n  gather_facts: false\n  tasks:\n    - "+tc.task+"\n")
+			writeClosureFile(t, root, "payload.txt", "literal payload\n")
+			closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.reusable != (len(closure.Unresolved) == 0) {
+				t.Fatalf("implicit action argument cannot claim literal-only closure: %+v", closure)
+			}
+			if tc.name == "literal copy" {
+				if _, ok := closurePaths(closure)["payload.txt"]; !ok {
+					t.Fatal("literal copy source must remain hashed")
+				}
+			}
+		})
+	}
+}
+
+func TestClosureTemplateExecutionIsAlwaysOpaque(t *testing.T) {
+	root := t.TempDir()
+	writeClosureFile(t, root, "play.yml", "- hosts: all\n  gather_facts: false\n  tasks:\n    - template: {src: test.j2, dest: /tmp/out}\n")
+	writeClosureFile(t, root, "test.j2", "#jinja2: variable_start_string:'[[', variable_end_string:']]'\n[[ 1 / (1 if 'payload.txt' is file else 0) ]]\n")
+	writeClosureFile(t, root, "payload.txt", "implicit template input\n")
+	closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := closurePaths(closure)["test.j2"]; !ok {
+		t.Fatal("opaque template source must remain hashed")
+	}
+	found := false
+	for _, ref := range closure.Unresolved {
+		if ref.Ref == "unsupported task dispatch" && ref.Reason == "template execution is opaque to automatic reuse" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("alternate-delimiter template cannot claim complete closure: %+v", closure)
+	}
+}
+
+func TestClosureTaskMetadataRequiresLiteralSemanticTypes(t *testing.T) {
+	cases := []struct {
+		metadata string
+		reusable bool
+	}{
+		{"when: true", true}, {"when: [true, false]", true},
+		{"no_log: true", true}, {"check_mode: false", true}, {"run_once: false", true},
+		{"retries: 2", true}, {"delay: 0.5", true}, {"timeout: 30", true}, {"throttle: 1", true},
+		{`check_mode: "'payload.txt' is file"`, false},
+		{`run_once: "'payload.txt' is file"`, false},
+		{`ignore_errors: "'payload.txt' is file"`, false},
+		{`no_log: "'payload.txt' is file"`, false},
+		{`retries: "1 if 'payload.txt' is file else 0"`, false},
+		{`delay: "1 if 'payload.txt' is file else 0"`, false},
+		{`timeout: "1 if 'payload.txt' is file else 0"`, false},
+		{`tags: [1]`, false}, {`loop_control: {label: item}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.metadata, func(t *testing.T) {
+			root := t.TempDir()
+			writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - debug: {msg: literal}\n      "+tc.metadata+"\n")
+			closure, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.reusable != (len(closure.Unresolved) == 0) {
+				t.Fatalf("task metadata semantic type was not proved: %+v", closure)
+			}
+		})
 	}
 }

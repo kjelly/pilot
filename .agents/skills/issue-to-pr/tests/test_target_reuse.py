@@ -404,7 +404,7 @@ class MachineRecordTests(TargetReuseTests):
         tree = ctx.tree_entries(self.candidate)
         return {"schema": "pilot-evidence-record/v1", "outcome": "success",
                 "candidate": {"commit": self.candidate, "tree": ctx.commit_tree(self.candidate), "source": "git"},
-                "closure": {"resolution_version": 4, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
+                "closure": {"resolution_version": 5, "frozen": True, "files": [{"path": p, "mode": tree[p][0], "blob": tree[p][1]}
                                       for p in ("src/app.go", "src/dependency.go")],
                             "patterns": ["src/dependency*.go"], "unresolved": [], "external": []}}
 
@@ -433,11 +433,15 @@ class MachineRecordTests(TargetReuseTests):
             (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=2), "resolution version"),
             (lambda r: r["closure"].update(resolution_version=3), "resolution version"),
+            (lambda r: r["closure"].update(resolution_version=4), "resolution version"),
             (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
             (lambda r: r.update(outcome="invalid-inputs"), "did not succeed"),
             (lambda r: r["closure"].update(unresolved=[{"ref": "unknown"}]), "unresolved"),
             (lambda r: r["closure"].update(external=["/vault/file"]), "external"),
             (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task layout", "reason": "debug argument proof failed"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "template execution is opaque to automatic reuse"}]), "unresolved"),
+            (lambda r: r["closure"].update(unresolved=[{"ref": "unsupported task dispatch", "reason": "automatic reuse supports only literal copy and debug.msg actions"}]), "unresolved"),
         ]
         for change, reason in mutations:
             with self.subTest(reason=reason):

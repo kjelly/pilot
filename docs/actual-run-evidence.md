@@ -81,19 +81,20 @@ committed evidence summary。
   YAML 及自動載入的 `group_vars`/`host_vars`。無法靜態證明的 expression、動態路徑、
   Jinja include/import、自訂或 ambient Ansible configuration 與 symlink 都列為 unresolved；
   inline extra-vars 裡的 Jinja/lookup/query/q 也以不含 payload 的固定標籤列為 unresolved。
-  自動 reuse 只接受明確識別的 direct builtin subset：copy/template、靜態 vars
-  include 與 debug/set_fact/assert/fail。其他 dispatch/layout（含 action/local_action、
-  args augmentation、legacy/custom module、shell/command/raw、loop reader、custom
-  collections/module_defaults、controller context 與 forwarded CLI options）皆以固定
-  label 列為 unresolved。task/playbook import/include 仍記來源 hash，但 include
-  ancestry 的完整 search context 需要 runtime，故執行同樣列為 unresolved。
-  script source 仍記 hash，但 executable/plugin/module code
-  可能另讀檔案，因此同樣拒絕自動 reuse；不做程式碼推論。unsupported 的 task
-  仍正常執行，exact-candidate evidence 不因此失效。
+  自動 reuse 的 positive subset 刻意只保留 direct copy 的已知 literal argument mapping，
+  以及 debug mapping 的 literal scalar msg（可選 literal integer verbosity）。debug.var、
+  scalar/free-form args 與未知 key 一律 unresolved；template 不論 delimiter/header 一律
+  opaque，但仍記 source hash。assert/set_fact/fail/meta 與其他 actions 同樣拒絕自動 reuse。
+  task metadata 必須有明確 semantic type：boolean flag 是 YAML bool、condition 是 bool/
+  bool-list、numeric control 是 number，不能把字串當成已證明安全的 implicit expression。
+  其他 dispatch/layout、custom configuration/plugin/module、controller context、CLI options、
+  task/playbook import/include 與 script executable 都保留固定 unresolved label；已知來源
+  仍可記 hash 供診斷，但不從程式碼或 runtime context 猜測完整依賴。
+  unsupported 的 task 仍正常執行，exact-candidate evidence 不因此失效。
   任何 Jinja interpolation 與非 literal boolean 的 when/until/changed_when/failed_when/
   assert expression 都以 `unsupported expression` 拒絕自動 reuse；不假設任意 filter/test
   沒有 filesystem input。明示的 ansible_* dispatch context variables 同樣列為 unresolved。
-  不嘗試執行 Jinja。`resolution_version: 4` 區分這個保守解析邊界。
+  不嘗試執行 Jinja。`resolution_version: 5` 區分這個保守解析邊界。
   closure 在任何測試步驟前凍結，結束後重新比較；一致才標 `frozen: true`。
   中途改動輸入保留原 hash，outcome 改為 `invalid-inputs`，不更新 LATEST。
   Go code 不列：它以 `pilot_binary` 的 hash 代表，gate 另以「純 base import」規則
@@ -161,5 +162,5 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 4`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+未解析引用、外部執行檔案、缺少 `resolution_version: 5`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。
