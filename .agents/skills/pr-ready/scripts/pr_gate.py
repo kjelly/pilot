@@ -51,6 +51,65 @@ def gh_pr(repo: str, pr: int) -> dict[str, Any]:
     return value
 
 
+REPO_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "repo_evidence.py"
+
+
+def load_repo_evidence() -> Any:
+    """issue-to-pr's repo_evidence.py, loaded by path from the sibling skill.
+
+    Both gates read the base branch's `.github/pr-evidence.json` the same way, so a receipt or
+    review taken at an ancestor of HEAD is accepted here exactly when issue_gate.py would
+    accept it: every file changed since matches `evidence_only_paths`. Missing module means
+    no reuse (strict SHA binding), never a crash.
+    """
+    name = "pr_ready_repo_evidence"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, REPO_EVIDENCE_PATH)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def evidence_context(worktree: Path | None, head: Any, base_name: Any, remote: str) -> Any:
+    """repo_evidence.Context for this gate run, or None when reuse cannot be checked.
+
+    None keeps the strict rule (every receipt and the review must name HEAD). The context is
+    only ever built from the verified checkout and the PR's base branch as fetched from
+    `remote`; a base ref missing locally yields a context with no patterns, which accepts
+    nothing but HEAD.
+    """
+    if worktree is None or not isinstance(head, str) or not SHA.fullmatch(head):
+        return None
+    if not isinstance(base_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", base_name) or ".." in base_name:
+        return None
+    module = load_repo_evidence()
+    if module is None:
+        return None
+    try:
+        return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}")
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
+    """Evidence taken at `value` covers HEAD: same SHA, or only evidence-only files changed since."""
+    return value == sha or (ctx is not None and ctx.accepts(value, label))
+
+
+def stale_detail(ctx: Any, value: Any) -> str:
+    if ctx is None or not isinstance(value, str):
+        return ""
+    try:
+        return " (" + ctx.stale_reason(value) + ")"
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
 def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
     """Use the same base-manifest/target-run verifier as the final merge gate.
 
@@ -222,7 +281,8 @@ def fail_bool(section: dict[str, Any], key: str, errors: list[str]) -> None:
         errors.append(f"assessment.{key} is not attested true")
 
 
-def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path | None = None) -> None:
+def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path | None = None,
+                        ctx: Any = None) -> None:
     if not isinstance(value, dict):
         errors.append("local_validation missing or malformed")
         return
@@ -245,8 +305,8 @@ def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path 
                 errors.append(f"{loc} has no command")
             if type(item.get("exit_code")) is not int or item["exit_code"] != 0:
                 errors.append(f"{loc} did not pass")
-            if item.get("head_sha") != sha:
-                errors.append(f"{loc} stale/missing SHA")
+            if not covers_head(ctx, item.get("head_sha"), sha, loc):
+                errors.append(f"{loc} stale/missing SHA{stale_detail(ctx, item.get('head_sha'))}")
             logfile = item.get("log")
             if not isinstance(logfile, str) or not logfile.strip():
                 errors.append(f"{loc} lacks a log artifact")
@@ -357,7 +417,7 @@ def check_disputes(s: Snapshot, evidence: dict[str, Any], sha: Any, errors: list
 
 def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
              local: tuple[str, str, list[str]] | None = None,
-             log_base: Path | None = None) -> list[str]:
+             log_base: Path | None = None, ctx: Any = None) -> list[str]:
     errs: list[str] = []
     pr = s.pr
     sha = pr.get("headRefOid")
@@ -401,14 +461,16 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     else:
         if r.get("agent") != "pr-reviewer":
             errs.append("Independent pr-reviewer agent is not identified")
-        if r.get("head_sha") != sha:
-            errs.append("Independent reviewer result stale for current HEAD")
+        if not covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
+            errs.append("Independent reviewer result stale for current HEAD" + stale_detail(ctx, r.get("head_sha")))
         if r.get("status") != "PASS" or r.get("blocking_findings") != []:
             errs.append("Independent review has not passed / still has blocking findings")
         if not isinstance(r.get("report"), str) or len(r["report"].strip()) < 12:
             errs.append("Independent review needs a report reference/summary")
 
-    validate_validation(evidence.get("local_validation"), sha, errs, log_base=log_base)
+    validate_validation(evidence.get("local_validation"), sha, errs, log_base=log_base, ctx=ctx)
+    if ctx is not None:
+        errs.extend(ctx.errors)
 
     if local:
         local_sha, local_branch, dirty = local
@@ -500,6 +562,8 @@ def main() -> int:
     parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
     parser.add_argument("--compact", action="store_true", help="One-line JSON output")
+    parser.add_argument("--base-remote", default="origin",
+                        help="Remote whose fetched base branch carries .github/pr-evidence.json (default origin)")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo) or args.pr <= 0:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
@@ -513,25 +577,31 @@ def main() -> int:
         conversation = bool(evidence.get("disputed_review_comments"))
         before = fetch_snapshot(args.repo, args.pr, conversation=conversation)
         local = check_local(args.worktree) if args.worktree else None
+        ctx = evidence_context(args.worktree, before.pr.get("headRefOid"), before.pr.get("baseRefName"),
+                               args.base_remote)
         errors = evaluate(before, evidence, repo=args.repo, number=args.pr, local=local,
-                          log_base=args.worktree)
+                          log_base=args.worktree, ctx=ctx)
         errors.extend(target_evidence_errors(before.pr, evidence, args.repo))
+        reuse = list(ctx.accepted) if ctx is not None else []
         if errors:
             json_line({"status": "DRAFT-BLOCKED", "pr": before.pr.get("url"),
                        "head_sha": before.pr.get("headRefOid"), "errors": errors}, compact=args.compact)
             return 2
         if not args.ready:
             json_line({"status": "GATE-PASS", "pr": before.pr.get("url"),
-                       "head_sha": before.pr.get("headRefOid"),
+                       "head_sha": before.pr.get("headRefOid"), "receipt_reuse": reuse,
                        "message": "Use --ready after final review to transition Draft -> Ready for Review"}, compact=args.compact)
             return 0
 
         # Re-read GitHub and the worktree immediately before the irreversible
         # lifecycle change. Any change causes us to refuse rather than guessing.
         latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
+        ctx = evidence_context(args.worktree, latest.pr.get("headRefOid"), latest.pr.get("baseRefName"),
+                               args.base_remote)
         errors = evaluate(latest, evidence, repo=args.repo, number=args.pr,
-                          local=check_local(args.worktree), log_base=args.worktree)
+                          local=check_local(args.worktree), log_base=args.worktree, ctx=ctx)
         errors.extend(target_evidence_errors(latest.pr, evidence, args.repo))
+        reuse = list(ctx.accepted) if ctx is not None else []
         if errors:
             json_line({"status": "DRAFT-BLOCKED", "errors": errors}, compact=args.compact)
             return 2
@@ -543,7 +613,7 @@ def main() -> int:
         if after.get("isDraft") is not False or after.get("headRefOid") != evidence["head_sha"]:
             raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
         json_line({"status": "READY", "pr": after.get("url"), "head_sha": after["headRefOid"],
-                   "message": "Ready for Review; no merge performed"}, compact=args.compact)
+                   "receipt_reuse": reuse, "message": "Ready for Review; no merge performed"}, compact=args.compact)
         return 0
     except (GateError, OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
         json_line({"status": "DRAFT-BLOCKED", "errors": [str(exc)]}, compact=args.compact)

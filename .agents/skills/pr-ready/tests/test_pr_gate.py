@@ -15,6 +15,23 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 SHA = "0123456789abcdef0123456789abcdef01234567"
+OLD = "89abcdef0123456789abcdef0123456789abcdef"
+
+
+class FakeContext:
+    """The parts of issue-to-pr's repo_evidence.Context that pr_gate.evaluate uses."""
+
+    def __init__(self, accept):
+        self.accept, self.accepted, self.errors = set(accept), [], []
+
+    def accepts(self, sha, label):
+        if sha in self.accept:
+            self.accepted.append({"label": label, "from": sha, "head": SHA, "changed": ["docs/evidence/x.md"]})
+            return True
+        return False
+
+    def stale_reason(self, sha):
+        return "files outside evidence_only_paths changed: internal/x.go"
 
 
 def good():
@@ -135,6 +152,44 @@ class GateTests(unittest.TestCase):
         errs = self.check(s, e)
         self.assertTrue(any("root_cause_fixed" in x for x in errs))
         self.assertTrue(any("did not pass" in x for x in errs))
+
+    def test_receipts_and_review_at_an_evidence_only_ancestor_are_accepted(self):
+        s, e = good()
+        for key in ("tests", "lint", "static_analysis"):
+            e["local_validation"][key][0]["head_sha"] = OLD
+        e["independent_review"]["head_sha"] = OLD
+        ctx = FakeContext(accept={OLD})
+        self.assertEqual([], module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=ctx))
+        self.assertEqual({"local_validation.tests[0]", "local_validation.lint[0]",
+                          "local_validation.static_analysis[0]", "independent_review"},
+                         {a["label"] for a in ctx.accepted})
+
+    def test_an_unaccepted_ancestor_is_stale_and_says_why(self):
+        s, e = good()
+        e["local_validation"]["tests"][0]["head_sha"] = OLD
+        e["independent_review"]["head_sha"] = OLD
+        errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=FakeContext(accept=set()))
+        self.assertTrue(any("tests[0] stale/missing SHA (files outside evidence_only_paths changed" in x for x in errs), errs)
+        self.assertTrue(any(x.startswith("Independent reviewer result stale") and "evidence_only_paths" in x for x in errs), errs)
+
+    def test_without_a_context_only_head_receipts_count(self):
+        s, e = good()
+        e["local_validation"]["tests"][0]["head_sha"] = OLD
+        errs = self.check(s, e)
+        self.assertEqual(["local_validation.tests[0] stale/missing SHA"], [x for x in errs if "tests[0]" in x])
+
+    def test_the_top_level_evidence_sha_must_still_be_head(self):
+        s, e = good()
+        e["head_sha"] = OLD
+        errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=FakeContext(accept={OLD}))
+        self.assertTrue(any("Evidence SHA" in x for x in errs), errs)
+
+    def test_manifest_errors_from_the_context_block(self):
+        s, e = good()
+        ctx = FakeContext(accept=set())
+        ctx.errors.append(".github/pr-evidence.json on refs/remotes/origin/main is not valid JSON: x")
+        errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=ctx)
+        self.assertEqual(ctx.errors, errs)
 
     def test_run_check_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:

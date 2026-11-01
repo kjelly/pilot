@@ -25,6 +25,7 @@ edge cases, semantic regressions, acceptance criteria and test assertions.
 Reproduce important suspicious cases using read-only commands/tests when safe.
 Report precise actionable P0/P1/P2 blockers (file:line, evidence, impact, remediation).
 P3/P4 observations must be justified separately; review existing unresolved GitHub comments.
+P3/P4 remarks never block and never ask for another fix round; Root answers them on the PR.
 For each review comment Root sends for a dispute, judge the claim from code and tests yourself:
 holds|does_not_hold|undetermined with evidence, and a severity when it holds.
 No file edits, commits, push, Ready transition, fake approvals or review-thread resolution.
