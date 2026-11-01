@@ -526,6 +526,52 @@ gate 的通過、失敗與手動修正後的復原都已驗證；`pilot edit --a
 [3b4bdb1](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)。`playbooks/apply/freeipa-nfs-server-apply.yml` 的
 sha256 在 `3b4bdb1` 是 `88247b6e…`，之後是 `945657769b99…`，差別只在 no_log 名冊 gate 的 `fail_msg` 文字與註解。
 
+### 4.6 比對名冊與 FreeIPA 現況：`pilot identity drift`
+
+`pilot identity drift <名冊> -i <inventory>` 唯讀地比對名冊與 FreeIPA 現況，涵蓋 HBAC/sudo grants、`auth_policies`、
+`account_policies`、`password_policies`、使用者驗證類型；加上 `--include-users-groups` 後另外比對名冊的 users/groups
+（見下）。admin 密碼的來源與失敗訊息見 §4.5。它不會修改 FreeIPA（`--repair-managed` 除外，且不併用下面兩個新旗標）。
+
+輸出（**這一節描述目前有效的契約；`--format json` 的形狀對所有使用者都變了**）：
+
+- table：每列 `<category>\tname=<名稱>\taction=<動作>\tdetail=<說明>`，開頭一行
+  `partial coverage; not inspected: [...]` 列出尚未涵蓋的項目；沒有差異時印 `no drift found within inspected scope`
+  （不是「完全一致」：未涵蓋的項目沒有被檢查）。
+- `--format json`：版本化 envelope
+  `{"schema_version": 1, "complete": false, "covered": [...], "uncovered": [...], "items": [{"category","name","action","detail"}]}`。
+  `items` 依 category、name、action、detail 排序，沒有差異時是 `[]`（不是 `null`）；`complete` 在 phase 1 一律是 `false`
+  （還有手寫 HBAC/sudo 規則附件、hosts/hostgroups/netgroups、密碼動作沒有比對）。這取代了舊的 `{"Items": [...]}`
+  （沒有差異時是 `{"Items": null}`）：讀舊形狀的腳本要改讀 `items`。
+- `--exit-code`（CI 用）：`0` 完整涵蓋且沒有差異（phase 1 還到不了：涵蓋不完整，所以乾淨的執行也回傳 `3`）、`1` 錯誤、`2` 有 apply 會處理或需要人工處理的差異
+  （任何 action 不是 `report`）、`3` 只有 report-only 的差異，或涵蓋不完整。沒有這個旗標時，有差異也回傳 `0`。
+- action 詞彙：`create`、`delete`、`update`、`add_member`、`remove_member` 是 apply 會做的事；`manual` 是 apply 會失敗、
+  要人工處理的狀態；`report` 是 apply 不會碰的物件（只報告）。
+
+`--include-users-groups`（opt-in）比對的範圍與語意：
+
+- user：不存在（`user_missing`）、roster `state: absent` 但還在（`user_should_be_absent`）、停用/啟用（`user_enabled`）、
+  屬性（`user_attribute`，只列欄位名稱）、SSH 公鑰集合（`user_ssh_keys`，只列數量）、roster 沒有的使用者
+  （`user_unexpected`，report-only）。
+- SSH 公鑰以 FreeIPA 自己的正規化後整串比對（options、type、blob、comment 都算）：只改 comment 或只改 options，
+  apply 也會改寫該使用者，drift 同樣報告；只有 roster 管理 `ssh_keys` 的使用者才會解析金鑰。輸出只有雜湊與數量，
+  不含金鑰內容。
+- `email` 沒有 `@` 時，比對前先補上 FreeIPA 的預設 e-mail domain（FreeIPA 也是這樣儲存）。
+- preserved 使用者（`ipa user-del --preserve`，`user-find` 預設看不到）：roster `state: absent` 的會被 apply 永久刪除
+  （`user_should_be_absent`/`delete`）；roster `present` 的 apply 無法建立（`user-add` 回 already exists，之後
+  `group-add-member` 失敗），回報 `user_preserved`/`manual`，要先還原（`ipa user-undel`）或刪除；roster 沒有的只報告。
+- group：不存在（`group_missing`）、成員缺少（`group_member_missing`）、成員多出（authoritative 群組是
+  `group_member_extra`，apply 會移除；累加式群組是 `group_member_unmanaged`，只報告）、roster 沒有的群組
+  （`group_unexpected`，report-only）。只看直接成員，不看 `memberof`（巢狀間接成員）。Pilot 自己的
+  `pilot-internal-history-g-<sha256>` 歷史 marker group 不列入。
+- 需要探測主機（預設 `freeipa-server` 群組的第一台）上有 FreeIPA Python client（`ipalib`、`ipapython`）與
+  `/usr/bin/python3`。observer 失敗時錯誤訊息是固定文字，指名哪一類失敗（缺 Python client、沒有 Kerberos 憑證、
+  API 呼叫失敗、搜尋被截斷、roster 的公鑰無效…），不含例外文字；失敗是錯誤，不是空報告。
+
+`--repair-managed` 的行為不變（印出 apply 的輸出，可搭配 `--format json`），但不能與 `--include-users-groups` 或
+`--exit-code` 併用：repair 只修 grants 時代那幾類，不修 users/groups。
+
+實跑摘要（2026-10-30，candidate `3a40ee11`，tree `4056b686`，單台拋棄式 vm-target 上的 FreeIPA 4.13.4）：從安裝後 snapshot 還原的 realm 上（先套用 legacy 與 v2 fixture，再跑 `vm-target test`）identity apply 的 `vm-target test` verify **24/24 PASS**、冪等 `changed=0`；tag-scoped apply 皆 `failed=0`；drift 的 perturb → drift（exit 2）→ apply → drift（exit 3、0 個 actionable）→ 重跑 `changed=0` 全部通過，含 preserved 使用者、沒有 `@` 的 e-mail、只改 comment／options 的公鑰；drift 前後 FreeIPA 狀態相同；drift 輸出（含 `-vvv`）沒有任何密碼或 sentinel。observer 自己的失敗類別都沒有在實機觸發（只有 fake ipalib 的 real-Ansible 測試涵蓋）；實機走過的失敗只有名冊公鑰 gate 與既有 probe task。見 [evidence](../evidence/identity-drift-178/2026-10-30-3a40ee1.md)。
+
 ---
 
 ## 5. 冪等性
