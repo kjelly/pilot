@@ -1,0 +1,45 @@
+- name: demo
+  hosts: "{{ target_group | default('demo') }}"
+  vars_files:
+    - vars/demo.yml
+  pre_tasks:
+    - name: Load helpers
+      ansible.builtin.include_tasks:
+        file: tasks/helpers.yml
+        apply: { tags: [always] }
+      tags: [always]
+  tasks:
+    - name: Render config
+      ansible.builtin.template:
+        src: demo.conf.j2
+        dest: /etc/demo.conf
+    - name: Ship rules directory
+      ansible.builtin.copy:
+        src: rules/
+        dest: /etc/demo/rules/
+    - name: Run helper script
+      ansible.builtin.script: files/helper.sh --flag
+    - name: Inline content copy needs no file
+      ansible.builtin.copy:
+        content: "x"
+        dest: /etc/demo/inline
+    - name: Read a file through lookup
+      ansible.builtin.debug:
+        msg: "{{ lookup('file', 'files/banner.txt') }}"
+    - name: Read a helper through playbook_dir
+      ansible.builtin.set_fact:
+        helper_program: "{{ lookup('file', playbook_dir ~ '/files/helper.sh') }}"
+    - name: Load a roster named by a variable
+      ansible.builtin.include_vars:
+        file: "{{ demo_roster_file }}"
+    - name: Per-distro tasks
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/distro-{{ ansible_os_family | lower }}.yml"
+    - name: Missing include
+      ansible.builtin.include_tasks: tasks/does-not-exist.yml
+    - block:
+        - name: Nested import
+          ansible.builtin.import_tasks: tasks/nested.yml
+      rescue:
+        - name: Rescue script
+          ansible.builtin.script:
+            cmd: files/rescue.sh
