@@ -199,3 +199,78 @@ func TestJSONEncodedSecretDisclosureIsScannedAndSanitized(t *testing.T) {
 		})
 	}
 }
+
+func TestSecretAliasExpansionIsBoundedAndAtomic(t *testing.T) {
+	for _, levels := range []int{12, 16} {
+		t.Run(fmt.Sprint(levels), func(t *testing.T) {
+			root := t.TempDir()
+			var raw strings.Builder
+			raw.WriteString("api_token: PartialSecretSentinel225\na0: &a0 [AliasLeafSecretSentinel225]\n")
+			for i := 1; i <= levels; i++ {
+				fmt.Fprintf(&raw, "a%d: &a%d [*a%d, *a%d]\n", i, i, i-1, i-1)
+			}
+			fmt.Fprintf(&raw, "credentials: *a%d\n", levels)
+			if err := os.WriteFile(filepath.Join(root, "vars.yaml"), []byte(raw.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			sources, skipped := SecretSources(root, []string{"-e", "@vars.yaml"})
+			if len(sources) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], "traversal limit") {
+				t.Fatalf("alias expansion guard must discard partial file scan: sources=%d skipped=%v", len(sources), skipped)
+			}
+			if strings.Contains(skipped[0], "Sentinel225") {
+				t.Fatalf("payload leaked in skipped marker: %v", skipped)
+			}
+		})
+	}
+}
+
+func TestSecretAliasCyclesAndOrdinaryAliases(t *testing.T) {
+	t.Run("cyclic input is discarded", func(t *testing.T) {
+		root := t.TempDir()
+		raw := "api_token: PartialSecretSentinel225\ncredentials: &loop [*loop]\n"
+		if err := os.WriteFile(filepath.Join(root, "vars.yaml"), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		sources, skipped := SecretSources(root, []string{"-e", "@vars.yaml", "-e", "api_token=IndependentFileSentinel225"})
+		if len(sources) != 1 || sources[0].value != "IndependentFileSentinel225" || len(skipped) != 1 || !strings.Contains(skipped[0], "cyclic alias") {
+			t.Fatalf("cyclic input must discard only its own sources: %+v %v", sources, skipped)
+		}
+	})
+	t.Run("inline mapping uses the same atomic guard", func(t *testing.T) {
+		payload := `{api_token: InlinePartialSecretSentinel225, credentials: &loop [*loop]}`
+		sources, skipped := SecretSources(t.TempDir(), []string{"--extra-vars", payload})
+		if len(sources) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], "cyclic alias") || strings.Contains(skipped[0], "Sentinel225") {
+			t.Fatalf("inline cyclic scan must be atomically skipped: %+v %v", sources, skipped)
+		}
+	})
+	t.Run("ordinary aliases preserve secrecy ancestry and scalar spellings", func(t *testing.T) {
+		root := t.TempDir()
+		raw := `common: &common
+  value: AnchoredSecretSentinel225
+  numeric: 0x75BCD15
+  boolean: true
+credentials: *common
+password: [*common, *common]
+`
+		if err := os.WriteFile(filepath.Join(root, "vars.yaml"), []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		sources, skipped := SecretSources(root, []string{"-e", "@vars.yaml"})
+		if len(skipped) != 0 {
+			t.Fatalf("valid aliases must remain supported: %v", skipped)
+		}
+		for _, value := range []string{"AnchoredSecretSentinel225", "0x75BCD15", "123456789", "true", "True"} {
+			hits := Scan(map[string]string{"output": value}, sources)
+			if len(hits) == 0 {
+				t.Errorf("valid alias lost inherited secret scalar %q", value)
+			}
+		}
+		parents := map[string]bool{}
+		for _, source := range sources {
+			parents[source.Key] = true
+		}
+		if !parents["vars.yaml:credentials.value"] || !parents["vars.yaml:password.value"] {
+			t.Fatalf("alias result lost parent secrecy: %+v", parents)
+		}
+	})
+}

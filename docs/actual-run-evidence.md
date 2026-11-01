@@ -93,6 +93,8 @@ committed evidence summary。
   secret container 下的 scalar（含 numeric/bool）保留原始及 canonical spelling，
   並掃描標準 JSON 對 quote、backslash、換行等字元的 escaping（不推測任意編碼）。
   secret 的 `/`、`~` 等前綴不作為豁免，只有明示 `*_file` key 視為檔案 reference。
+  YAML secret traversal 有 node/depth budget 與 cycle guard；超限時丟棄該 input 的
+  部分掃描結果，僅留下不含 payload 的 skipped marker，普通 alias 仍支援。
   不能解析的 inline syntax、templated secret 的 runtime 結果與加密的 vault 檔列在
   `skipped`。命中時 record 仍會寫出，但 pilot 在 stderr 警告，原始輸出不得提交。
 
