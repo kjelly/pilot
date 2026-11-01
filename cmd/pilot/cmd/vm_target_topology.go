@@ -681,9 +681,10 @@ func requireTopologyAbsent(ctx context.Context, m *vmtarget.Manager, spec *vmtar
 	return nil
 }
 
-// provisionEphemeralTopology returns only nodes successfully created by this
-// invocation. The returned names are the cleanup ownership boundary if another
-// pilot process races one of the topology names.
+// provisionEphemeralTopology returns every node successfully created by this
+// invocation, whether or not another node failed, and only those. The returned
+// names are the cleanup ownership boundary if another pilot process races one
+// of the topology names. On failure the error is the first one in spec order.
 func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec, out io.Writer, keepOnFailure bool, serviceBootstrap *vmtarget.ServiceBootstrap) ([]string, error) {
 	var outMu sync.Mutex
 	printf := func(format string, a ...any) {
@@ -725,16 +726,22 @@ func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec
 	}
 	wg.Wait()
 
+	// Every node is visited even after one failed: the nodes created by the
+	// goroutines that did not fail are this run's too, wherever the failing
+	// node sits in the spec, and the caller tears down exactly this list.
+	// Returning at the first error leaked every node created after it. The
+	// error returned is the first one in spec order.
 	owned := make([]string, 0, len(created))
-	for i, err := range errs {
+	var firstErr error
+	for i := range spec.Nodes {
 		if created[i] != "" {
 			owned = append(owned, created[i])
 		}
-		if err != nil {
-			return owned, err
+		if firstErr == nil && errs[i] != nil {
+			firstErr = errs[i]
 		}
 	}
-	return owned, nil
+	return owned, firstErr
 }
 
 func teardownEphemeralTopology(ctx context.Context, m *vmtarget.Manager, out, errOut io.Writer, names []string) error {
