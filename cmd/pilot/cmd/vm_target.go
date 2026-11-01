@@ -1795,18 +1795,10 @@ func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 6/6] L6 Idempotency Check ===")
-			var idemBuf bytes.Buffer
-			if err := sess.step("L6 idempotency", io.MultiWriter(cmd.OutOrStdout(), &idemBuf), func(w io.Writer) error {
+			if err := runRecordedIdempotency(sess, cmd.OutOrStdout(), func(w io.Writer) error {
 				return execExternal(w, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
-				return fmt.Errorf("idempotency run failed: %w", err)
-			}
-			changed, ok := idempotencyChangedCount(idemBuf.String())
-			if !ok {
-				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
-			}
-			if changed > 0 {
-				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
 			return nil
@@ -1856,12 +1848,13 @@ func idempotencyChangedCount(output string) (total int, ok bool) {
 	if idx < 0 {
 		return 0, false
 	}
-	for _, m := range recapChangedRe.FindAllStringSubmatch(output[idx:], -1) {
+	matches := recapChangedRe.FindAllStringSubmatch(output[idx:], -1)
+	for _, m := range matches {
 		n, err := strconv.Atoi(m[1])
 		if err != nil {
 			continue
 		}
 		total += n
 	}
-	return total, true
+	return total, len(matches) > 0
 }

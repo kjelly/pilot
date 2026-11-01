@@ -82,7 +82,7 @@ test-race:     	## Run tests with the race detector (CI selects a package shard)
 # Stop after a failed normal suite; a successful validation requires both runs.
 test-all:      	## Run complete normal and race suites sequentially
 	$(MAKE) test
-	$(MAKE) test-race
+	$(MAKE) test-race GO_TEST_PACKAGES=./...
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)

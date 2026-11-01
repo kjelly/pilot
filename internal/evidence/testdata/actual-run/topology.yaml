@@ -1,0 +1,21 @@
+# Unique disposable targets; root owns provisioning and cleanup.
+services: local
+nodes:
+  - name: pr225-ev-a
+    base_image: ubuntu-24.04
+    memory: 1024
+    vcpus: 1
+    disk: 12
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [evidence_nodes]
+  - name: pr225-ev-b
+    base_image: ubuntu-24.04
+    memory: 1024
+    vcpus: 1
+    disk: 12
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [evidence_nodes]
