@@ -52,7 +52,7 @@ func TestParseInventoryYAML(t *testing.T) {
 
 func TestRedactCommandLine(t *testing.T) {
 	got := RedactCommandLine([]string{"pilot", "vm-target", "test", "--name", "x", "--", "-e", "target_group=all", "-e", "ipa_admin_password=Sup3r", "-e=api_token=abc", "-e", "@~/.vault/s.yaml", "--extra-vars=db_password=pw"})
-	want := "pilot vm-target test --name x -- -e target_group=all -e ipa_admin_password=<redacted> -e=api_token=<redacted> -e @~/.vault/s.yaml --extra-vars=db_password=<redacted>"
+	want := "pilot vm-target test --name x -- -e <redacted> -e <redacted> -e=<redacted> -e @~/.vault/s.yaml --extra-vars=<redacted>"
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}

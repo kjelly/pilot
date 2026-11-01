@@ -46,13 +46,26 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh, e, trees = self.fixture()
         record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
                   "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
-                  "closure": {"files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
+                  "closure": {"resolution_version": 2, "frozen": True, "files": [{"path": APP, "mode": "100644", "blob": trees[R][APP][1]}],
                               "patterns": ["playbooks/apply/*.yml"]}}
         gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
         gh.commit_tree = lambda repo, revision: "e" * 40
         del e["target_validation"]["target_reuse"]["execution_paths"]
         r = evaluate(REPO, 42, e, client=gh)
         self.assertEqual("MERGE", r["decision"], r["reasons"])
+        # Local and remote must reject the same unsafe machine attestations,
+        # including old resolver records that silently omitted file expressions.
+        for change, reason in (
+                (lambda r: r["closure"].pop("resolution_version"), "resolution version"),
+                (lambda r: r["closure"].update(frozen=False), "frozen pre-run"),
+                (lambda r: r["closure"].update(unresolved=[{"ref": "lookup/query expression"}]), "unresolved"),
+                (lambda r: r["closure"].update(external=["/outside/input"]), "external"),
+                (lambda r: r.update(outcome="invalid-inputs"), "did not succeed")):
+            bad = copy.deepcopy(record)
+            change(bad)
+            gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(bad) + "\n```\n").encode()
+            self.assertIn(reason, self.reasons(gh, e))
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
         trees[H]["playbooks/apply/new.yml"] = blob(8)
         self.assertIn("search membership changed", self.reasons(gh, e))
 

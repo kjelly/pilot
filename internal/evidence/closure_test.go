@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,5 +142,124 @@ func TestExtraVarsFiles(t *testing.T) {
 	want := []string{"a.yml", "b.yml", "c.yml", "d.yml", "e.yml"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestClosureFileExpressionsNeverDisappear(t *testing.T) {
+	cases := []struct {
+		name, expression string
+		unresolved       bool
+	}{
+		{"lookup variable", "{{ lookup('file', input_path) }}", true},
+		{"query variable", "{{ query('file', input_path) }}", true},
+		{"query literal", "{{ query('file', 'input.txt') }}", false},
+		{"lookup play vars", "{{ lookup('file', 'input.txt') }}", false},
+		{"lookup multiple terms", "{{ lookup('file', 'input.txt', 'other.txt') }}", true},
+		{"lookup transformed path", "{{ lookup('file', 'input.txt' ~ suffix) }}", true},
+		{"dynamic plugin", "{{ lookup(plugin_name, 'input.txt') }}", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, raw := range map[string]string{
+				"play.yml":        "- hosts: all\n  vars:\n    value: \"" + tc.expression + "\"\n  tasks: []\n",
+				"files/input.txt": "original input\n", "files/other.txt": "second\n",
+			} {
+				writeClosureFile(t, root, name, raw)
+			}
+			c, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.unresolved {
+				if len(c.Unresolved) == 0 {
+					t.Fatalf("unsupported reading expression was silently omitted: %+v", c)
+				}
+			} else if _, ok := closurePaths(c)["files/input.txt"]; !ok || len(c.Unresolved) != 0 {
+				t.Fatalf("literal input was not captured: %+v", c)
+			}
+		})
+	}
+}
+
+func writeClosureFile(t *testing.T, root, name, raw string) {
+	t.Helper()
+	abs := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(abs), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClosureLoadedInputsAndImplicitVars(t *testing.T) {
+	root := t.TempDir()
+	for name, raw := range map[string]string{
+		"play.yml":           "- hosts: all\n  vars_files: [vars/settings.yml]\n  tasks:\n    - template: {src: outer.j2, dest: /tmp/out}\n",
+		"vars/settings.yml":  `value: "{{ lookup('file', input_path) }}"`,
+		"templates/outer.j2": `{{ query('file', nested_input) }}`,
+		"group_vars/all":     "feature: enabled\n",
+		"host_vars/host.yml": "mode: test\n",
+		"topology.yaml":      "nodes: []\n",
+	} {
+		writeClosureFile(t, root, name, raw)
+	}
+	c, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}, Inputs: []string{"topology.yaml"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := closurePaths(c)
+	for _, path := range []string{"vars/settings.yml", "templates/outer.j2", "group_vars/all", "host_vars/host.yml", "topology.yaml"} {
+		if _, ok := paths[path]; !ok {
+			t.Errorf("missing execution input %s", path)
+		}
+	}
+	unresolved := map[string]bool{}
+	for _, ref := range c.Unresolved {
+		unresolved[ref.From] = true
+	}
+	for _, path := range []string{"vars/settings.yml", "templates/outer.j2"} {
+		if !unresolved[path] {
+			t.Errorf("file-reading expression in %s was silently omitted: %+v", path, c)
+		}
+	}
+	for _, want := range []string{"group_vars/**", "host_vars/**"} {
+		if !strings.Contains(strings.Join(c.Patterns, "\n"), want) {
+			t.Errorf("missing implicit membership %s", want)
+		}
+	}
+}
+
+func TestClosureReadsImplicitWhenExpressions(t *testing.T) {
+	root := t.TempDir()
+	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - debug: {msg: hello}\n      when: lookup('file', input_path) == 'enabled'\n")
+	c, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Unresolved) == 0 {
+		t.Fatalf("implicit Ansible expression silently omitted: %+v", c)
+	}
+}
+
+func TestClosureConfigurationAndSymlinksFailClosed(t *testing.T) {
+	root := t.TempDir()
+	writeClosureFile(t, root, "play.yml", "- hosts: all\n  tasks:\n    - copy: {src: linked.txt, dest: /tmp/out}\n")
+	writeClosureFile(t, root, "ansible.cfg", "[defaults]\nlookup_plugins=/outside/plugins\n")
+	writeClosureFile(t, root, "input.txt", "input\n")
+	if err := os.Symlink("input.txt", filepath.Join(root, "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := ComputeClosure(ClosureInput{Root: root, Playbooks: []string{"play.yml"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unresolved := map[string]bool{}
+	for _, ref := range c.Unresolved {
+		unresolved[ref.Ref] = true
+	}
+	if !unresolved["ansible.cfg"] || !unresolved["linked.txt"] {
+		t.Fatalf("unsupported configuration/symlink claims complete resolution: %+v", c)
 	}
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -149,7 +150,7 @@ func TestEvidenceSessionWritesARecordAndLatest(t *testing.T) {
 			t.Errorf("closure lacks %s: %v", want, paths)
 		}
 	}
-	if r.Redaction.Sources != 2 || len(r.Redaction.Hits) != 0 {
+	if r.Redaction.Sources != 3 || len(r.Redaction.Hits) != 0 {
 		t.Fatalf("redaction = %+v", r.Redaction)
 	}
 	latest, err := os.ReadFile(filepath.Join(root, "docs", "evidence", "demo", "LATEST.md"))
@@ -176,7 +177,7 @@ func TestEvidenceSessionFailureRecordsTheStepAndSkipsLatest(t *testing.T) {
 	}
 	var sink strings.Builder
 	leak := "TASK [kinit]\nfatal: [d]: FAILED! => {\"stdin\": \"Sup3rS3cretPw!\"}\n\nPLAY RECAP ****\nd : ok=3 changed=1 unreachable=0 failed=1 skipped=0 rescued=0 ignored=0\n"
-	_ = sess.step("L4 apply", &sink, func(w io.Writer) error { io.WriteString(w, leak); return io.ErrUnexpectedEOF })
+	_ = sess.step("L4 apply", &sink, func(w io.Writer) error { _, _ = io.WriteString(w, leak); return io.ErrUnexpectedEOF })
 	_ = sess.step("rollback", &sink, func(io.Writer) error { return nil })
 	var out, errOut strings.Builder
 	sess.finish(&out, &errOut, "rolled_back", io.ErrUnexpectedEOF)
@@ -248,4 +249,116 @@ func TestEvidenceSessionFlagValidation(t *testing.T) {
 		t.Fatal("a nil session must still run the step")
 	}
 	sess.finish(io.Discard, io.Discard, "success", nil)
+}
+
+func TestEvidenceFreezesInputsBeforeRunAndRejectsDrift(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	record := filepath.Join(root, "docs/evidence/demo/drift.md")
+	withEvidenceFlags(t, record)
+	sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := sess.rec.Closure.Files[0]
+	target := filepath.Join(root, original.Path)
+	if err := os.WriteFile(target, []byte("# changed during execution\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sess.finish(io.Discard, io.Discard, "success", nil)
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := evidence.ParseMachineBlock(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Outcome != "invalid-inputs" || rec.Closure.Frozen || rec.Closure.Files[0].Blob != original.Blob {
+		t.Fatalf("drift must invalidate evidence and preserve pre-run hashes: %+v", rec)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs/evidence/demo/LATEST.md")); !os.IsNotExist(err) {
+		t.Fatal("drifted evidence cannot update LATEST")
+	}
+}
+
+func TestRecordedIdempotencySemanticsAndRollbackAttribution(t *testing.T) {
+	for _, tc := range []struct{ name, output, want string }{
+		{"changed", fakeApplyOutput, "2 changed task(s)"},
+		{"missing recap", "playbook returned rc=0\n", "no PLAY RECAP"},
+		{"empty recap", "PLAY RECAP ****************\n", "no PLAY RECAP"},
+		{"zero changes", strings.Replace(fakeApplyOutput, "changed=2", "changed=0", 1), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := copyFixtureTree(t)
+			t.Chdir(root)
+			record := filepath.Join(root, "docs/evidence/demo/l6.md")
+			withEvidenceFlags(t, record)
+			sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, nil, vtTestEvidenceSteps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = runRecordedIdempotency(sess, io.Discard, func(w io.Writer) error { _, e := io.WriteString(w, tc.output); return e })
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected semantic failure %q, got %v", tc.want, err)
+			}
+			outcome := "success"
+			if err != nil {
+				outcome = "rollback_failed"
+				_ = sess.step("rollback", io.Discard, func(io.Writer) error { return fmt.Errorf("rollback also failed") })
+			}
+			sess.finish(io.Discard, io.Discard, outcome, err)
+			raw, e := os.ReadFile(record)
+			if e != nil {
+				t.Fatal(e)
+			}
+			rec, e := evidence.ParseMachineBlock(raw)
+			if e != nil {
+				t.Fatal(e)
+			}
+			st := rec.Steps[0]
+			if tc.want != "" {
+				if st.Status != "fail" || !strings.Contains(st.Note, tc.want) || rec.FailedStep != "L6 idempotency" {
+					t.Fatalf("semantic failure misreported: %+v", rec)
+				}
+				if rec.Steps[1].Status != "fail" || rec.Steps[1].Name != "rollback" {
+					t.Fatalf("rollback failure must remain separate: %+v", rec.Steps)
+				}
+			} else if st.Status != "pass" || rec.FailedStep != "" || !rec.Closure.Frozen {
+				t.Fatalf("clean zero-change run: %+v", rec)
+			}
+		})
+	}
+}
+
+func TestEvidenceSanitizesFailureMetadata(t *testing.T) {
+	root := copyFixtureTree(t)
+	t.Chdir(root)
+	record := filepath.Join(root, "docs/evidence/demo/secret.md")
+	withEvidenceFlags(t, record)
+	const sentinel = "SentinelMetadata225"
+	sess, err := newEvidenceSession([]string{"playbooks/site.yml"}, nil, []string{"-e", "target_group=all api_token=" + sentinel}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sess.step("L4 apply", io.Discard, func(w io.Writer) error { fmt.Fprint(w, sentinel); return fmt.Errorf("failed: %s", sentinel) })
+	sess.finish(io.Discard, io.Discard, "failed", err)
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), sentinel) {
+		t.Fatalf("secret leaked to metadata: %s", raw)
+	}
+	rec, err := evidence.ParseMachineBlock(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Redaction.Hits) != 1 || !strings.Contains(rec.Error, "<redacted>") || !strings.Contains(rec.Steps[0].Note, "<redacted>") {
+		t.Fatalf("missing scan/sanitization: %+v", rec)
+	}
 }

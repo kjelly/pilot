@@ -917,18 +917,10 @@ func runTopologyTestPipeline(cmd *cobra.Command, spec *vmtarget.TopologySpec, ve
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(out, "=== [Step 6/6] L6 Idempotency Check ===")
-			var idemBuf bytes.Buffer
-			if err := sess.step("L6 idempotency", io.MultiWriter(out, &idemBuf), func(w io.Writer) error {
+			if err := runRecordedIdempotency(sess, out, func(w io.Writer) error {
 				return execExternal(w, "ansible-playbook", ansibleArgs...)
 			}); err != nil {
-				return fmt.Errorf("idempotency run failed: %w", err)
-			}
-			changed, ok := idempotencyChangedCount(idemBuf.String())
-			if !ok {
-				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
-			}
-			if changed > 0 {
-				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+				return err
 			}
 			fmt.Fprintln(out, "✓ Idempotency check passed (changed=0)")
 			return nil
@@ -975,7 +967,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 	for _, v := range verifies {
 		specs = append(specs, v.spec)
 	}
-	sess, err := newEvidenceSession([]string{vtTopoTestPlaybook}, specs, args, vtTestEvidenceSteps)
+	sess, err := newEvidenceSession([]string{vtTopoTestPlaybook}, specs, args, vtTestEvidenceSteps, vtTopoSpecPath)
 	if err != nil {
 		return err
 	}

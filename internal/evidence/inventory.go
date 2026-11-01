@@ -55,35 +55,34 @@ func ParseInventoryYAML(text string) Inventory {
 	return inv
 }
 
-// RedactCommandLine joins a command line for the record, replacing the value
-// of every `-e key=value` whose key sounds like a secret, so the record never
-// carries a password that was passed inline.
+// RedactCommandLine hides the whole inline extra-vars payload. Payloads can
+// contain multiple assignments or JSON; inspecting only the first key leaks.
+// File references remain useful for reproducing the command.
 func RedactCommandLine(args []string) string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case (a == "-e" || a == "--extra-vars") && i+1 < len(args):
-			out = append(out, a, redactKV(args[i+1]))
 			i++
-		case strings.HasPrefix(a, "-e="):
-			out = append(out, "-e="+redactKV(a[3:]))
+			out = append(out, a, redactPayload(args[i]))
 		case strings.HasPrefix(a, "--extra-vars="):
-			out = append(out, "--extra-vars="+redactKV(a[len("--extra-vars="):]))
+			out = append(out, "--extra-vars="+redactPayload(strings.TrimPrefix(a, "--extra-vars=")))
+		case strings.HasPrefix(a, "-e") && len(a) > 2:
+			prefix := "-e"
+			if a[2] == '=' {
+				prefix += "="
+			}
+			out = append(out, prefix+redactPayload(strings.TrimPrefix(a[2:], "=")))
 		default:
 			out = append(out, a)
 		}
 	}
 	return strings.Join(out, " ")
 }
-
-func redactKV(kv string) string {
-	if strings.HasPrefix(kv, "@") {
-		return kv
+func redactPayload(value string) string {
+	if strings.HasPrefix(value, "@") {
+		return value
 	}
-	key, _, ok := strings.Cut(kv, "=")
-	if ok && isSecretKey(key) {
-		return key + "=<redacted>"
-	}
-	return kv
+	return "<redacted>"
 }

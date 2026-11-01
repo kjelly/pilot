@@ -35,6 +35,8 @@ type Reference struct {
 	Reason string `json:"reason"`
 }
 
+const ResolutionVersion = 2
+
 // Closure is the set of repository files whose content decided what the run
 // did: the playbooks, every statically or dynamically included task file,
 // the templates, files and scripts they ship, the vars files, the
@@ -44,10 +46,12 @@ type Reference struct {
 // separately and the gates prove Go changes through the pure-base-import
 // rule (.agents/skills/_shared/target-evidence-reuse.md).
 type Closure struct {
-	Files      []File      `json:"files"`
-	Patterns   []string    `json:"patterns"` // searched paths, including misses; detect new inputs at reuse time
-	Unresolved []Reference `json:"unresolved,omitempty"`
-	External   []string    `json:"external,omitempty"` // referenced files outside the repository (vault files); path only, never hashed
+	ResolutionVersion int         `json:"resolution_version"`
+	Frozen            bool        `json:"frozen"` // pre-run closure matched the post-run inputs
+	Files             []File      `json:"files"`
+	Patterns          []string    `json:"patterns"` // searched paths, including misses; detect new inputs at reuse time
+	Unresolved        []Reference `json:"unresolved,omitempty"`
+	External          []string    `json:"external,omitempty"` // referenced files outside the repository (vault files); path only, never hashed
 }
 
 // ClosureInput names what the run executed. Paths are relative to Root or absolute.
@@ -55,18 +59,20 @@ type ClosureInput struct {
 	Root      string   // repository root the run executed from (a checkout or a `git archive` copy)
 	Playbooks []string // the playbooks the chain ran
 	Specs     []string // the verification specs it verified
+	Inputs    []string // additional execution inputs, such as the topology YAML
 	ExtraArgs []string // the forwarded ansible-playbook arguments (`-e @file` names extra-vars files)
 }
 
 const maxIncludeDepth = 12
 
 type resolver struct {
-	root       string
-	files      map[string]*File
-	unresolved []Reference
-	external   map[string]bool
-	visiting   map[string]bool
-	patterns   map[string]bool
+	root         string
+	files        map[string]*File
+	unresolved   []Reference
+	external     map[string]bool
+	visiting     map[string]bool
+	playbookDirs map[string]bool
+	patterns     map[string]bool
 }
 
 // ComputeClosure resolves the execution closure of a run. It never fails on
@@ -80,7 +86,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("closure root %s is not a directory", in.Root)
 	}
-	r := &resolver{root: root, files: map[string]*File{}, external: map[string]bool{}, visiting: map[string]bool{}, patterns: map[string]bool{}}
+	r := &resolver{root: root, files: map[string]*File{}, external: map[string]bool{}, visiting: map[string]bool{}, patterns: map[string]bool{}, playbookDirs: map[string]bool{}}
 	for _, pb := range in.Playbooks {
 		abs := r.abs(pb)
 		if _, err := os.Stat(abs); err != nil {
@@ -88,6 +94,47 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 		}
 		r.visitPlaybook(abs, 0)
 	}
+	for _, input := range in.Inputs {
+		r.addPath(r.abs(input), "", false, "execution input")
+	}
+	// Ansible loads these implicitly beside inventory/playbooks. Hash entire
+	// directories and record missing search paths so newly added inputs matter.
+	dirs := []string{root}
+	for dir := range r.playbookDirs {
+		dirs = append(dirs, dir)
+	}
+	for _, dir := range dirs {
+		for _, name := range []string{"group_vars", "host_vars", "library", "filter_plugins", "action_plugins", "lookup_plugins", "vars_plugins", "callback_plugins"} {
+			abs := filepath.Join(dir, name)
+			r.patterns[r.rel(abs)+"/**"] = true
+			if _, err := os.Stat(abs); err == nil {
+				r.addPath(abs, "", false, "implicit Ansible input")
+			}
+		}
+	}
+	// Ambient Ansible configuration can change lookup/plugin/vars behavior.
+	// Name unsupported environment settings without persisting their values.
+	for _, item := range os.Environ() {
+		key, value, _ := strings.Cut(item, "=")
+		if strings.HasPrefix(key, "ANSIBLE_") && value != "" {
+			if key == "ANSIBLE_CONFIG" {
+				r.addPath(r.abs(value), "", false, "ANSIBLE_CONFIG")
+			}
+			r.unresolved = append(r.unresolved, Reference{From: "environment", Ref: key, Reason: "ambient Ansible configuration is not statically resolved"})
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "ansible.cfg")); os.Getenv("ANSIBLE_CONFIG") == "" && os.IsNotExist(err) {
+		configs := []string{"/etc/ansible/ansible.cfg"}
+		if home, err := os.UserHomeDir(); err == nil {
+			configs = append(configs, filepath.Join(home, ".ansible.cfg"))
+		}
+		for _, cfg := range configs {
+			if _, err := os.Stat(cfg); err == nil {
+				r.addPath(cfg, "", false, "ambient Ansible configuration")
+			}
+		}
+	}
+
 	for _, sp := range in.Specs {
 		abs := r.abs(sp)
 		if _, err := os.Stat(abs); err != nil {
@@ -132,7 +179,7 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 			r.addPath(filepath.Join(root, name), "", false, "repository")
 		}
 	}
-	out := &Closure{Patterns: []string{}}
+	out := &Closure{ResolutionVersion: ResolutionVersion, Patterns: []string{}}
 	for _, f := range r.files {
 		out.Files = append(out.Files, *f)
 	}
@@ -155,26 +202,28 @@ func ComputeClosure(in ClosureInput) (*Closure, error) {
 	return out, nil
 }
 
-// extraVarsFiles returns the files named by `-e @file`, `-e=@file`,
-// `--extra-vars @file` and `--extra-vars=@file`.
-func extraVarsFiles(args []string) []string {
+// extraVarsPayloads recognizes Ansible's separated, equals and compact -e forms.
+func extraVarsPayloads(args []string) []string {
 	var out []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		var val string
 		switch {
 		case a == "-e" || a == "--extra-vars":
 			if i+1 < len(args) {
 				i++
-				val = args[i]
+				out = append(out, args[i])
 			}
-		case strings.HasPrefix(a, "-e="):
-			val = a[len("-e="):]
 		case strings.HasPrefix(a, "--extra-vars="):
-			val = a[len("--extra-vars="):]
-		case strings.HasPrefix(a, "-e@"):
-			val = a[len("-e"):]
+			out = append(out, strings.TrimPrefix(a, "--extra-vars="))
+		case strings.HasPrefix(a, "-e") && len(a) > 2:
+			out = append(out, strings.TrimPrefix(a[2:], "="))
 		}
+	}
+	return out
+}
+func extraVarsFiles(args []string) []string {
+	var out []string
+	for _, val := range extraVarsPayloads(args) {
 		if strings.HasPrefix(val, "@") {
 			out = append(out, val[1:])
 		}
@@ -216,7 +265,11 @@ func (r *resolver) addPath(abs, from string, dynamic bool, via string) {
 	if st.IsDir() {
 		r.patterns[rel+"/**"] = true
 		_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
+				r.unresolved = append(r.unresolved, Reference{From: from, Ref: r.rel(p), Reason: "input directory could not be read"})
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			r.addPath(p, from, dynamic, via)
@@ -238,6 +291,7 @@ func (r *resolver) addPath(abs, from string, dynamic bool, via string) {
 			return
 		}
 		f.Mode = "120000"
+		r.unresolved = append(r.unresolved, Reference{From: from, Ref: rel, Reason: "symlink target requires independent execution-input resolution"})
 		content = []byte(target)
 	default:
 		if !st.Mode().IsRegular() {
@@ -258,6 +312,14 @@ func (r *resolver) addPath(abs, from string, dynamic bool, via string) {
 	f.SHA256 = SHA256Hex(content)
 	f.Size = int64(len(content))
 	r.files[rel] = f
+	// Scan every loaded YAML/template, including play vars, included vars and
+	// templates loaded by other templates. Unsupported expressions fail closed.
+	if f.Mode != "120000" && via != "spec" {
+		r.scanExpressions(string(content), rel, filepath.Dir(abs), filepath.Dir(abs))
+	}
+	if filepath.Base(abs) == "ansible.cfg" {
+		r.unresolved = append(r.unresolved, Reference{From: rel, Ref: "ansible.cfg", Reason: "custom Ansible configuration may select plugins or external paths; automatic reuse requires independent resolution"})
+	}
 }
 
 // loadYAML parses a YAML file into its document node.
@@ -282,10 +344,15 @@ func (r *resolver) visitPlaybook(abs string, depth int) {
 		r.unresolved = append(r.unresolved, Reference{From: rel, Ref: rel, Reason: "maximum include depth exceeded"})
 		return
 	}
-	if rel == "" || r.visiting[abs] {
+	if rel == "" {
+		r.external[abs] = true
+		return
+	}
+	if r.visiting[abs] {
 		return
 	}
 	r.visiting[abs] = true
+	r.playbookDirs[filepath.Dir(abs)] = true
 	r.addPath(abs, "", false, "playbook")
 	root, err := loadYAML(abs)
 	if err != nil || root.Kind != yaml.SequenceNode {
@@ -385,20 +452,13 @@ func (r *resolver) visitTasks(list *yaml.Node, from, fileDir, playbookDir string
 						r.addPath(target.abs, from, target.dynamic, from)
 					}
 				}
+			case "with_file", "with_fileglob", "with_first_found", "with_template":
+				r.unresolved = append(r.unresolved, Reference{From: from, Ref: key, Reason: "implicit file-reading lookup requires runtime resolution"})
 			case "import_role", "include_role":
 				r.unresolved = append(r.unresolved, Reference{From: from, Ref: key, Reason: "roles are not resolved by the closure"})
 			}
 		}
-		// lookup('file'|'template'|'fileglob', 'path') anywhere in the task.
-		for _, ref := range lookupRefs(task) {
-			kind := "files"
-			if ref.plugin == "template" {
-				kind = "templates"
-			}
-			for _, target := range r.resolveRef(from, ref.path, kind, fileDir, playbookDir) {
-				r.addPath(target.abs, from, target.dynamic || ref.plugin == "fileglob", from)
-			}
-		}
+
 	}
 }
 
@@ -466,36 +526,40 @@ func scalarList(val *yaml.Node) []string {
 	return nil
 }
 
-type lookupRef struct{ plugin, path string }
+// Recognize calls even when their arguments cannot be statically resolved.
+// Only a single literal path (optionally playbook_dir-relative) is supported;
+// expressions, multiple terms and unknown plugins remain unresolved.
+var lookupCallRe = regexp.MustCompile(`\b(?:lookup|query|q)\s*\(`)
+var literalLookupRe = regexp.MustCompile(`^\s*['"](?:ansible\.builtin\.)?(file|template|fileglob)['"]\s*,\s*(playbook_dir\s*~\s*)?['"]([^'"]+)['"]\s*\)`)
+var jinjaIncludeRe = regexp.MustCompile(`\{%[-+]?\s*(?:include|import|from|extends)\b`)
 
-// lookup('file', 'x'), lookup('template', 'x'), lookup('fileglob', 'x*'), and the
-// `playbook_dir ~ '/files/x'` spelling of a playbook-relative path.
-var lookupRe = regexp.MustCompile(`lookup\(\s*['"](?:ansible\.builtin\.)?(file|template|fileglob)['"]\s*,\s*(playbook_dir\s*~\s*)?['"]([^'"]+)['"]`)
-
-// lookupRefs finds file-reading lookups in every scalar of a task.
-func lookupRefs(task *yaml.Node) []lookupRef {
-	var out []lookupRef
-	var walk func(n *yaml.Node)
-	walk = func(n *yaml.Node) {
-		if n == nil {
-			return
+func (r *resolver) scanExpressions(raw, from, fileDir, playbookDir string) {
+	for _, loc := range lookupCallRe.FindAllStringIndex(raw, -1) {
+		rest := raw[loc[1]:]
+		m := literalLookupRe.FindStringSubmatch(rest)
+		if m == nil {
+			// Do not persist expression text: inline lookup arguments can be secrets.
+			r.unresolved = append(r.unresolved, Reference{From: from, Ref: "lookup/query expression", Reason: "lookup plugin or arguments cannot be resolved statically"})
+			continue
 		}
-		if n.Kind == yaml.ScalarNode {
-			for _, m := range lookupRe.FindAllStringSubmatch(n.Value, -1) {
-				path := m[3]
-				if m[2] != "" {
-					path = "{{ playbook_dir }}/" + strings.TrimPrefix(path, "/")
-				}
-				out = append(out, lookupRef{plugin: m[1], path: path})
-			}
-			return
+		if !r.playbookDirs[fileDir] {
+			r.unresolved = append(r.unresolved, Reference{From: from, Ref: "lookup search context", Reason: "lookup in a loaded vars/template/task file requires runtime Ansible search-path resolution"})
 		}
-		for _, c := range n.Content {
-			walk(c)
+		ref := m[3]
+		if m[2] != "" {
+			ref = "{{ playbook_dir }}/" + strings.TrimPrefix(ref, "/")
+		}
+		kind := "files"
+		if m[1] == "template" {
+			kind = "templates"
+		}
+		for _, target := range r.resolveRef(from, ref, kind, fileDir, playbookDir) {
+			r.addPath(target.abs, from, target.dynamic || m[1] == "fileglob", from)
 		}
 	}
-	walk(task)
-	return out
+	if jinjaIncludeRe.MatchString(raw) {
+		r.unresolved = append(r.unresolved, Reference{From: from, Ref: "Jinja template import", Reason: "Jinja imports/includes require runtime resolution"})
+	}
 }
 
 type resolved struct {
@@ -528,6 +592,7 @@ func (r *resolver) resolveRef(from, ref, kind, fileDir, playbookDir string) []re
 	dynamic := jinjaRe.MatchString(ref)
 	pattern := ref
 	if dynamic {
+		r.unresolved = append(r.unresolved, Reference{From: from, Ref: ref, Reason: "dynamic path is a conservative glob; runtime variable values can escape its membership"})
 		pattern = jinjaRe.ReplaceAllString(ref, "*")
 		// A basename that is nothing but wildcards ("{{ roster_file }}", "{{ item }}")
 		// names a value that comes from inventory or extra-vars, not a set of files

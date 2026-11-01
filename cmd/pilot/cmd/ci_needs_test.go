@@ -122,7 +122,7 @@ func checkCIImageNeeds(ciYAML string) string {
 		switch {
 		case !imageDeps[name]:
 			return fmt.Sprintf("%s does not (transitively) need %s", image, name)
-		case job.If != "" && !(name == "test" && job.If == "needs.changes.outputs.evidence_only != 'true'" && slices.Contains(ciNeedsList(job.Needs), "changes")):
+		case job.If != "" && (name != "test" || job.If != "needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes")):
 			return fmt.Sprintf("validation job %s has if: %q; when it is skipped, the jobs that need it are skipped too, and when it is not run a failure does not stop %s", name, job.If, image)
 		case job.ContinueOnError != nil && fmt.Sprint(job.ContinueOnError) != "false":
 			return fmt.Sprintf("validation job %s has continue-on-error: %v, so %s runs when it fails", name, job.ContinueOnError, image)

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -49,11 +50,14 @@ type evidenceSession struct {
 	playbooks []string
 	specs     []string
 	extraArgs []string
+	inputs    []string
+	sources   []evidence.SecretSource
+	skipped   []string
 	expected  []string
 }
 
 // newEvidenceSession returns nil when --evidence-record is unset.
-func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string) (*evidenceSession, error) {
+func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string, inputs ...string) (*evidenceSession, error) {
 	if vtEvidenceRecord == "" {
 		return nil, nil
 	}
@@ -98,7 +102,13 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string) (*e
 		}
 		candidate = evidence.Candidate{Commit: vtEvidenceCandidate, Tree: vtEvidenceTree, Source: "flag", Dirty: candidate.Dirty, Note: note}
 	}
+	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: root, Playbooks: playbooks, Specs: specs, ExtraArgs: extraArgs, Inputs: inputs})
+	if err != nil {
+		return nil, fmt.Errorf("freeze execution closure before run: %w", err)
+	}
+	sources, skipped := evidence.SecretSources(root, extraArgs)
 	rec := &evidence.Record{
+		Closure:     closure,
 		Schema:      evidence.Schema,
 		Feature:     feature,
 		RunID:       runID,
@@ -110,7 +120,7 @@ func newEvidenceSession(playbooks, specs, extraArgs, expectedSteps []string) (*e
 		Tooling:     map[string]string{},
 	}
 	return &evidenceSession{path: path, root: root, rec: rec, outputs: map[string]string{},
-		playbooks: playbooks, specs: specs, extraArgs: extraArgs, expected: expectedSteps}, nil
+		playbooks: playbooks, specs: specs, extraArgs: extraArgs, inputs: inputs, sources: sources, skipped: skipped, expected: expectedSteps}, nil
 }
 
 // step runs fn with a writer that also captures the step's output, and
@@ -187,7 +197,7 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 	if chainErr != nil {
 		r.Error = firstLine(chainErr.Error())
 		for _, st := range r.Steps {
-			if st.Status == "fail" {
+			if st.Status == "fail" && r.FailedStep == "" {
 				r.FailedStep = st.Name
 			}
 		}
@@ -220,26 +230,34 @@ func (s *evidenceSession) finish(out, errOut io.Writer, outcome string, chainErr
 			}
 		}
 	}
-	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: s.root, Playbooks: s.playbooks, Specs: s.specs, ExtraArgs: s.extraArgs})
-	if err != nil {
-		fmt.Fprintf(errOut, "⚠️ evidence record: execution closure not computed: %v\n", err)
-	} else {
-		r.Closure = closure
+	closure, err := evidence.ComputeClosure(evidence.ClosureInput{Root: s.root, Playbooks: s.playbooks, Specs: s.specs, ExtraArgs: s.extraArgs, Inputs: s.inputs})
+	if err != nil || !reflect.DeepEqual(closure, r.Closure) {
+		// Retain the pre-run hashes: post-run bytes are not what was tested.
+		r.Closure.Unresolved = append(r.Closure.Unresolved, evidence.Reference{From: "execution closure", Ref: "run inputs", Reason: "execution inputs changed during the run or could not be rechecked"})
+		r.Outcome = "invalid-inputs"
+		fmt.Fprintln(errOut, "⚠️ evidence record: execution inputs changed during the run; evidence is not reusable")
 	}
-	sources, skipped := evidence.SecretSources(s.root, s.extraArgs)
-	r.Redaction = evidence.Redact(s.outputs, sources, skipped)
+	if r.Outcome != "invalid-inputs" {
+		r.Closure.Frozen = true
+	}
+	r.Redaction = evidence.Redact(s.outputs, s.sources, s.skipped)
+	if err := evidence.SanitizeRecord(r, s.sources); err != nil {
+		fmt.Fprintf(errOut, "⚠️ evidence record metadata could not be sanitized: %v\n", err)
+		return
+	}
+
 	if err := r.WriteFile(s.path); err != nil {
 		fmt.Fprintf(errOut, "⚠️ evidence record not written to %s: %v\n", s.path, err)
 		return
 	}
-	fmt.Fprintf(out, "📄 Evidence record written: %s (candidate %s, outcome %s)\n", s.path, shortSHA(r.Candidate.Commit), outcome)
+	fmt.Fprintf(out, "📄 Evidence record written: %s (candidate %s, outcome %s)\n", s.path, shortSHA(r.Candidate.Commit), r.Outcome)
 	if len(r.Redaction.Hits) > 0 {
 		fmt.Fprintf(errOut, "⚠️ evidence record: %d secret value hit(s) in the captured output; do not commit the raw output (see the Redaction section)\n", len(r.Redaction.Hits))
 	}
 	if r.Candidate.Source == "unknown" {
 		fmt.Fprintf(errOut, "⚠️ evidence record: tested revision unknown (%s); no gate will accept it\n", r.Candidate.Note)
 	}
-	if outcome == "success" {
+	if r.Outcome == "success" {
 		if err := evidence.UpdateLatest(filepath.Dir(s.path), r, s.path); err != nil {
 			fmt.Fprintf(errOut, "⚠️ evidence record: LATEST.md not updated: %v\n", err)
 		}
@@ -262,4 +280,22 @@ func shortSHA(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// Include semantic validation in the recorded step: rc=0 alone is insufficient.
+func runRecordedIdempotency(sess *evidenceSession, out io.Writer, run func(io.Writer) error) error {
+	return sess.step("L6 idempotency", out, func(w io.Writer) error {
+		var captured strings.Builder
+		if err := run(io.MultiWriter(w, &captured)); err != nil {
+			return fmt.Errorf("idempotency run failed: %w", err)
+		}
+		changed, ok := idempotencyChangedCount(captured.String())
+		if !ok {
+			return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
+		}
+		if changed > 0 {
+			return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+		}
+		return nil
+	})
 }
