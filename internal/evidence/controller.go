@@ -117,6 +117,7 @@ type Controller struct {
 	proof                                                       ControllerProof
 	groups                                                      Inventory
 	ready                                                       bool
+	closed                                                      bool
 	verifyDiagnostics                                           VerifyDiagnostics
 }
 
@@ -271,10 +272,14 @@ func (c *Controller) probeNative() error {
 }
 
 // PrepareInventory validates the actual rendered inventory and mounts only its
-// explicit SSH keys. Native inventory parsing supplies group ancestors too.
+// explicit SSH keys into its private lifetime. Native inventory parsing supplies
+// group ancestors too; manager-owned source paths are never mounted afterward.
 func (c *Controller) PrepareInventory(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed || c.ready || c.stageDir != "" {
+		return fmt.Errorf("controlled inventory is already prepared or controller closed")
+	}
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -288,6 +293,30 @@ func (c *Controller) PrepareInventory(path string) error {
 		return err
 	}
 	c.proof.RenderedInventorySHA256 = digestBytes(raw)
+	stage, err := os.MkdirTemp("", "pilot-evidence-inventory-")
+	if err != nil {
+		return err
+	}
+	c.stageDir = stage
+	stagedInputs := map[string]bool{}
+	prepared := false
+	defer func() {
+		if !prepared {
+			_ = os.RemoveAll(stage)
+			for path := range stagedInputs {
+				delete(c.files, path)
+			}
+			c.stageDir = ""
+			c.inventory = ""
+			c.originalInventory = ""
+			c.groups = Inventory{}
+			c.ready = false
+			c.proof.InventorySHA256 = ""
+			c.proof.RenderedInventorySHA256 = ""
+			c.proof.InventoryKind = ""
+		}
+	}()
+	keys := map[string]string{}
 	supported := true
 	var visit func(*yaml.Node) error
 	visit = func(n *yaml.Node) error {
@@ -310,11 +339,24 @@ func (c *Controller) PrepareInventory(path string) error {
 					if !safeControllerMount(val.Value) {
 						return fmt.Errorf("SSH key mount overlaps controller runtime")
 					}
-					sum, err := SHA256File(val.Value)
-					if err != nil {
-						return err
+					original := filepath.Clean(val.Value)
+					staged, ok := keys[original]
+					if !ok {
+						key, err := readControllerKey(original)
+						if err != nil {
+							return err
+						}
+						staged = filepath.Join(stage, fmt.Sprintf("ssh-key-%03d", len(keys)))
+						if err := os.WriteFile(staged, key, 0600); err != nil {
+							return err
+						}
+						c.files[staged] = digestBytes(key)
+						stagedInputs[staged] = true
+						keys[original] = staged
 					}
-					c.files[val.Value] = sum
+					// Only the snapshot is executed and bound after preparation;
+					// manager cleanup may remove the source target's key safely.
+					val.Value = staged
 				}
 			}
 		}
@@ -332,16 +374,13 @@ func (c *Controller) PrepareInventory(path string) error {
 	if err != nil {
 		return err
 	}
-	c.stageDir, err = os.MkdirTemp("", "pilot-evidence-inventory-")
-	if err != nil {
-		return err
-	}
 	c.originalInventory = path
 	c.inventory = filepath.Join(c.stageDir, "inventory.yml")
 	if err := os.WriteFile(c.inventory, raw, 0600); err != nil {
 		return err
 	}
 	c.files[c.inventory] = digestBytes(raw)
+	stagedInputs[c.inventory] = true
 	c.proof.InventorySHA256 = digestBytes(raw)
 	var out, errOut bytes.Buffer
 	if err := c.execute("inventory", []string{"-i", c.inventory, "--list"}, &out, &errOut); err != nil {
@@ -442,8 +481,12 @@ func (c *Controller) PrepareInventory(path string) error {
 		c.proof.InventoryKind = "pilot-rendered-ssh/v1"
 	}
 	c.groups = inv
+	if err := c.checkInputs(); err != nil {
+		return err
+	}
 	c.ready = true
-	return c.checkInputs()
+	prepared = true
+	return nil
 }
 func (c *Controller) checkInputs() error {
 	for path, before := range c.files {
@@ -546,9 +589,41 @@ func (c *Controller) Finalize() (*ControllerProof, error) {
 }
 
 func (c *Controller) Close() {
-	if c != nil && c.stageDir != "" {
-		_ = os.RemoveAll(c.stageDir)
+	if c == nil {
+		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stageDir != "" {
+		owned := c.stageDir
+		_ = os.RemoveAll(owned)
+		for path := range c.files {
+			if strings.HasPrefix(path, owned+string(filepath.Separator)) {
+				delete(c.files, path)
+			}
+		}
+	}
+	c.stageDir = ""
+	c.inventory = ""
+	c.originalInventory = ""
+	c.ready = false
+	c.closed = true
+}
+
+func readControllerKey(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("controlled SSH key must be a regular file")
+	}
+	return io.ReadAll(file)
 }
 
 func validNativeProbe(p *ControllerNativeProbe) bool {
