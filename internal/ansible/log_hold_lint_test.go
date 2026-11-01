@@ -1,6 +1,7 @@
 package ansible
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -78,10 +79,15 @@ type logHold struct {
 	pos              token.Pos
 }
 
+type logHoldReporter interface {
+	Helper()
+	Errorf(string, ...any)
+}
+
 // checkLogHolds checks one function body, not the function literals
 // inside it (they are checked on their own), and returns how many Ansible
 // commands it found.
-func checkLogHolds(t *testing.T, fset *token.FileSet, body *ast.BlockStmt) int {
+func checkLogHolds(t logHoldReporter, fset *token.FileSet, body *ast.BlockStmt) int {
 	t.Helper()
 	var creations, runs, releaseCalls []positioned
 	var holds []logHold
@@ -274,27 +280,152 @@ func TestAnsibleExecWrappersHoldTheLog(t *testing.T) {
 	newCmdBinaryIsAnsible = true
 	defer func() { newCmdBinaryIsAnsible = false }()
 	fset := token.NewFileSet()
-	for file, wrapper := range map[string]string{
-		"../../cmd/pilot/cmd/docker_target.go":       "execExternal",
-		"../../cmd/pilot/cmd/ansible_json_result.go": "execAnsiblePlaybookCaptured",
+	for file, contract := range map[string]struct{ entry, terminal string }{
+		"../../cmd/pilot/cmd/docker_target.go":       {"execExternal", "execExternalStreams"},
+		"../../cmd/pilot/cmd/ansible_json_result.go": {"execAnsiblePlaybookCaptured", "execAnsiblePlaybookCaptured"},
 	} {
 		parsed, err := parser.ParseFile(fset, file, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		found := false
-		for _, decl := range parsed.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Name.Name != wrapper || fn.Body == nil {
-				continue
-			}
-			found = true
-			if n := checkLogHolds(t, fset, fn.Body); n == 0 {
-				t.Errorf("%s: found no command to check in %s", file, wrapper)
-			}
+		checkExecWrapperContract(t, fset, parsed, contract.entry, contract.terminal)
+	}
+}
+
+// Check the terminal creator with the original hold analyzer. A forwarding
+// entry must be exactly the known unconditional call, so a new bypass cannot
+// disappear behind a zero-command wrapper or an opaque call graph.
+func checkExecWrapperContract(t logHoldReporter, fset *token.FileSet, file *ast.File, entry, terminal string) int {
+	t.Helper()
+	functions := map[string]*ast.FuncDecl{}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil && fn.Recv == nil {
+			functions[fn.Name.Name] = fn
 		}
-		if !found {
-			t.Errorf("%s: %s not found; update this test if it moved", file, wrapper)
+	}
+	wrapper, target := functions[entry], functions[terminal]
+	if wrapper == nil {
+		t.Errorf("%s not found; update this test if it moved", entry)
+		return 0
+	}
+	if target == nil {
+		t.Errorf("%s not found; update this test if it moved", terminal)
+		return 0
+	}
+	if entry != terminal {
+		if reason := execExternalForwardingProblem(wrapper, terminal); reason != "" {
+			t.Errorf("%s: %s: %s", fset.Position(wrapper.Pos()), entry, reason)
 		}
+	}
+	n := checkLogHolds(t, fset, target.Body)
+	if n == 0 {
+		t.Errorf("%s: found no command to check in %s", fset.Position(target.Pos()), terminal)
+	}
+	return n
+}
+
+func execExternalForwardingProblem(fn *ast.FuncDecl, terminal string) string {
+	var parameters []string
+	for _, field := range fn.Type.Params.List {
+		for _, name := range field.Names {
+			parameters = append(parameters, name.Name)
+		}
+	}
+	if strings.Join(parameters, ",") != "stdout,bin,args" {
+		return "forwarding parameter contract must remain stdout, bin, args"
+	}
+	if len(fn.Body.List) != 1 {
+		return "must be a single unconditional forwarding return"
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return "must be a single unconditional forwarding return"
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok {
+		return "must be a single unconditional forwarding return"
+	}
+	target, ok := call.Fun.(*ast.Ident)
+	if !ok || target.Name != terminal {
+		return "must delegate to " + terminal
+	}
+	valid := len(call.Args) == 4 && call.Ellipsis.IsValid()
+	if valid {
+		stderr, ok := call.Args[1].(*ast.SelectorExpr)
+		valid = ok && identName(stderr.X) == "os" && stderr.Sel.Name == "Stderr" && identName(call.Args[0]) == "stdout" && identName(call.Args[2]) == "bin" && identName(call.Args[3]) == "args"
+	}
+	if !valid {
+		return "must forward stdout, os.Stderr, bin, args... unchanged"
+	}
+	return ""
+}
+
+type logHoldProblems struct{ messages []string }
+
+func (*logHoldProblems) Helper() {}
+func (p *logHoldProblems) Errorf(format string, args ...any) {
+	p.messages = append(p.messages, fmt.Sprintf(format, args...))
+}
+
+func TestAnsibleExecWrapperContractCatchesUnsafeRefactors(t *testing.T) {
+	const source = `package fixture
+func execExternal(stdout io.Writer,bin string,args ...string)error{
+ return execExternalStreams(stdout,os.Stderr,bin,args...)
+}
+func execExternalStreams(stdout,stderr io.Writer,bin string,args ...string)error{
+ c:=newCmd(ctx,bin,args...)
+ release,err:=ansible.HoldCommandLog(ctx,c)
+ if err!=nil{return err}
+ err=c.Run()
+ release()
+ return err
+}
+`
+	cases := []struct{ name, old, replacement, want string }{
+		{"guarded terminal and thin forwarder", "", "", ""},
+		{"missing hold", "ansible.HoldCommandLog(ctx,c)", "noHold(ctx,c)", "without holding the Ansible log until it is done"},
+		{"missing release", "release()", "_ = release", "without holding the Ansible log until it is done"},
+		{"early release", "err=c.Run()\n release()", "release()\n err=c.Run()", "without holding the Ansible log until it is done"},
+		{"wrapper bypass", "return execExternalStreams(stdout,os.Stderr,bin,args...)", "newCmd(ctx,bin,args...).Run(); return execExternalStreams(stdout,os.Stderr,bin,args...)", "single unconditional forwarding return"},
+		{"conditional forwarding", "return execExternalStreams(stdout,os.Stderr,bin,args...)", "if enabled {return execExternalStreams(stdout,os.Stderr,bin,args...)}; return nil", "single unconditional forwarding return"},
+		{"wrong helper", "return execExternalStreams(stdout,os.Stderr,bin,args...)", "return otherHelper(stdout,os.Stderr,bin,args...)", "must delegate to execExternalStreams"},
+		{"binary substitution", "return execExternalStreams(stdout,os.Stderr,bin,args...)", "return execExternalStreams(stdout,os.Stderr,other,args...)", "must forward stdout, os.Stderr, bin, args... unchanged"},
+		{"argument rewriting", "return execExternalStreams(stdout,os.Stderr,bin,args...)", "return execExternalStreams(stdout,os.Stderr,bin,append(args,extra)...)", "must forward stdout, os.Stderr, bin, args... unchanged"},
+		{"missing terminal", "func execExternalStreams(", "func renamedHelper(", "execExternalStreams not found"},
+		{"delegate cycle", ` c:=newCmd(ctx,bin,args...)
+ release,err:=ansible.HoldCommandLog(ctx,c)
+ if err!=nil{return err}
+ err=c.Run()
+ release()
+ return err`, " return execExternal(stdout,bin,args...)", "found no command to check in execExternalStreams"},
+		{"second unguarded terminal command", "return err\n}", "d:=newCmd(ctx,bin,args...); d.Run(); return err\n}", "without holding the Ansible log until it is done"},
+	}
+	newCmdBinaryIsAnsible = true
+	defer func() { newCmdBinaryIsAnsible = false }()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := source
+			if tc.old != "" {
+				if !strings.Contains(input, tc.old) {
+					t.Fatalf("mutation precondition missing %q", tc.old)
+				}
+				input = strings.Replace(input, tc.old, tc.replacement, 1)
+			}
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "wrapper.go", input, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			problems := &logHoldProblems{}
+			n := checkExecWrapperContract(problems, fset, file, "execExternal", "execExternalStreams")
+			joined := strings.Join(problems.messages, "\n")
+			if tc.want == "" {
+				if n != 1 || joined != "" {
+					t.Fatalf("valid forwarding/hold contract rejected: checked=%d problems=%s", n, joined)
+				}
+			} else if !strings.Contains(joined, tc.want) {
+				t.Fatalf("unsafe wrapper refactor escaped its invariant: want %q, checked=%d problems=%s", tc.want, n, joined)
+			}
+		})
 	}
 }
