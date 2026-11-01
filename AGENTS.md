@@ -602,7 +602,8 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   `fail` 卻沒有,rescue 會「成功」,整個 run 反而回報成功。規則:block 裡有帶
   tag 的 task,rescue 每個 task 都標 `always`;rescue 讀的 snapshot/fact(備份檔、
   `*_is_upgrade` 這類升級判斷、備份目錄)也要標 `always`(上面第一點,
-  `AlwaysTagPrerequisite` lint 會抓)。只還原「這次 run 改過的東西」的 rescue
+  `AlwaysTagPrerequisite` lint 會抓;備份/升級偵測本身是例外,見本節最後一點)。
+  只還原「這次 run 改過的東西」的 rescue
   可以改用 `x is defined` 檢查 setter 有沒有跑(audit-log-forwarding 的
   audit.rules 還原),lint 接受這種寫法,但不接受單純的 `| default`。
   block 的 `always:` 區段同理。
@@ -658,6 +659,30 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   關係無法從 YAML 推導,逐一用測試鎖住
   (`internal/spec/pilot_access_gateway_ag82_regression_test.go::TestRegression_GatewayWritesFollowTheirChecks`,
   另有對每個 tag 實際跑一次的行為測試)。
+- 備份/快照/升級偵測要跟著「真正換掉東西」的 task 的 tag,不是 `always`;
+  `always` 的 task 也不准每次 run 都回報 changed。`pilot deploy --limit` 把只因
+  依賴展開才進來的主機也交給每個被 import 的 play,沒選到的元件的 `always`
+  task 在那台主機上照樣會跑,第二次 apply 的 `changed=0` 檢查就永遠過不了。
+  detection-engine 的 Step 3–5(state.db 備份、舊 binary 快照、
+  `detection_engine_is_upgrade`)曾標 `always`(v1.41,為了讓 rescue 讀得到):
+  it-core 只是 provider host,Step 6 沒被選到、binary 沒換,`is_upgrade` 永遠為真,
+  Step 4 的 `changed_when: true` 讓每一次 apply 都 changed(kjelly/pilot#189,
+  #190 修正)。現在 Step 3–5e 與 Step 6 帶同一組 tag(`detection-engine-C1`),
+  備份恰好在 Step 6 會跑的 run 才跑。`always` 的 rescue 不靠備份 task 的 tag
+  決定能不能還原:授權還原的 fact(`detection_engine_rollback`)由 `always` 的
+  Step 0e 先重設(fact 會活過 play,不准繼承上一個 play 的授權),帶 Step 6 tag
+  的 Step 4f/5d/5e 在快照驗證過之後才授予,rescue 以 `is defined` 讀它(#203)。
+  規則:`always` 的 command/shell/raw/script 必須有不是 `true` 的 `changed_when`
+  (沒寫也算違規:預設每次都 changed),tempfile 必須 `changed_when: false`;
+  block 的 `always:` 區段要檢查,`rescue:` 不用(只在失敗後才跑)。
+  `internal/spec/always_tag_convergence_regression_test.go::TestRegression_AlwaysTaggedTasksConverge`
+  對全部 `playbooks/apply/*.yml` 與它們 include 的 task 檔鎖住。#190 之前的 tag
+  放回去時,前面幾條 `always`/tag lint 全部仍然通過,因為沒有一條看 `always` task
+  回報什麼。ratchet allowlist 兩筆,不再違規的 task 會讓測試要求刪掉那一筆:
+  agent-controller 的 Step 4(跟 #190 之前的 detection-engine 同型,待
+  kjelly/pilot#195)、freeipa-realm-replacement 的 trust snapshot(一次性遷移,
+  prior-state 檔存在就拒絕重跑,也不在 `site.yml`)。這一點原本由 #190 寫進本節,
+  #203 合併時被刪掉,v1.58 補回並改寫成 class 層級的規則。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -1816,7 +1841,7 @@ git status --short
 | 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |
 | 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
 | 2026-10-01 | v1.40 | §4.4 補一點：assert/fail 檢查本身也要能在 `--tags` run 執行——輸入檢查標 `always`，流程中間的驗證標所屬步驟的 row tag。修正 10 支 playbook 共 20 個沒有 tag 的檢查，新增全 repo lint `TestRegression_NoUntaggedChecksInTaggedPlays`；`preTaskGateNotAlwaysAllowlist` 清空 | pilot |
-| 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
+| 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄；其中 detection-engine 的 Step 3–5 已在 #190 改標 Step 6 的 tag、agent-controller 的待 #195，見 v1.58）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
 | 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查；兩支前置 lint 都會展開 `include_tasks`/`import_tasks` 檔案裡設的 fact，抓到並修正 5 支 playbook 的 `/etc/hosts` pin 讀未標 tag 的 resolver include（wazuh-manager C10、wazuh-fim C7、audit-log-forwarding C15、log-shipping C5、restic-backup C10） | pilot |
 | 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
@@ -1835,3 +1860,4 @@ git status --short
 | 2026-10-31 | v1.57 | §1.3、§2.1、§3：移除 `TestRegression_SpecAndInventoryAgree` 的引用。這個測試在 Git 歷史裡從未存在（名字只出現在文件與測試註解），§1.3「spec 與 inventory 不一致 CI 會 fail」並不成立；vm-target 的參考 inventory 要有 VM 在跑才讀得到，CI 也無法比對。改為寫明沒有測試會抓這件事，對齊靠執行前讀 inventory 與事實快照裡的 A/B 決定；範本檔名更正為 `core_infra_provider_db_regression_test.go`；`internal/spec` 七個測試的註解、`core-infra-provider-db` runbook 與 freeipa-client HA 設計文件一併更正 | pilot |
 | 2026-11-01 | v1.58 | §5：凍結 candidate 前本機只跑 diff 觸及的 package 與新增 regression，完整 `go test ./...` 與 `-race` 交給 CI 的 `Go test` job；§5.7 第 4 點同步改寫。起因：回顧 10-28～11-01 的 13 個 pr-ready session，一輪約半天，時間花在每個 HEAD（含 evidence-only commit 與 merge main）重跑本機全套（同機 3–17 個 session 時 35–60 分鐘）、CI（30–47 分鐘）與 reviewer，以及 P3/P4 polish 輪與過夜等待的提問；pr-ready skill 新增「Pilot: cycle-time rules」，`pr_gate.py` 比照 `issue_gate.py` 接受 evidence-only delta 上的 receipt 與 review（`receipt_reuse`），`tmp/go.mod` 把 gitignored `tmp/` 隔成另一個 module 讓 `./...` 不再編譯 scratch checkout，`make lint` 拒絕 golangci-lint v1 | pilot |
 | 2026-11-01 | v1.59 | §1.2、§1.4、§6：evidence record 改為 pilot 產生機器部分——`pilot vm-target test`／`topology test` 加 `--evidence-record`，寫出 tested commit/tree、執行閉包（playbook、include、template/copy/script、vars、spec、contract、repo 內 `-e @file`）的 Git blob id 與 SHA-256、target 與 rendered inventory、每步 PLAY RECAP、verify verdict、secret 掃描；操作者只補「失敗路徑」與「未涵蓋」兩段。record 改成一個變更一份（`docs/evidence/<feature>/<change>.md`）、每個 candidate 就地覆寫，手寫段落自動帶到新 candidate；pilot 同步改寫 `LATEST.md`，spec/runbook 改連 `LATEST.md`（evidence-only），重新驗證不再動 spec/runbook。新增 `pilot evidence closure` 單獨印閉包；`internal/evidence` 套件。起因：10-28～11-01 的 record 全部手寫（7–38KB、一支 PR 3–4 份），reviewer 要對 raw artifact 核數字，PR 204 為修 record 數字多兩個 commit。v1.58 是 PR #223 的列 | pilot |
+| 2026-11-01 | v1.60 | §4.4 補回 #190 寫進來、在 #203 合併時連同它的 changelog 列(當時編號 v1.57)一起被刪掉的規則:備份/快照/升級偵測要跟著替換 task 的 tag,不是 `always`,而且 `always` 的 task 不准每次 run 都回報 changed;改寫成 class 層級(kjelly/pilot#189),並依 #203 之後的現況說明 rescue 靠 `always` 的 Step 0e 重設、Step 6 tag 的 Step 4f/5d/5e 授予的 `detection_engine_rollback` fact 還原。新增全 repo lint `TestRegression_AlwaysTaggedTasksConverge`(`internal/spec/always_tag_convergence_regression_test.go`):`playbooks/apply/*.yml` 與 include 的 task 檔裡,`always` 的 command/shell/raw/script 要有不是 `true` 的 `changed_when`、tempfile 要 `changed_when: false`,rescue 除外;ratchet allowlist 兩筆:agent-controller 的 Step 4(待 #195)與 freeipa-realm-replacement 的 trust snapshot(一次性遷移)。既有五個 `always`/tag lint 在 #190 之前的 tag 放回去時都仍通過。順手修 `detection_engine_rollback_tags_test.go` 三處測不到問題的地方:沒選到 Step 6 的 run 沒有斷言 `changed=0`、備份檢查找舊路徑 `backups/pre-upgrade.db`(Step 4 現在寫在 `backups/apply-*/`)、Step 3–6 的 regex 漏掉 3e/4e/4f/5e。agent-controller 的同型寫法仍待 #195,沒有改 playbook | pilot |
