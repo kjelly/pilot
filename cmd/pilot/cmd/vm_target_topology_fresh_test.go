@@ -500,23 +500,78 @@ func TestTopologyUpFreshSuccessOwnsEveryNode(t *testing.T) {
 	h.wantFactsKept(freshForeign)
 }
 
-// TestTopologyTestEphemeralProvisionFailureTearsDownOnlyThisRunsNodes: the
-// --ephemeral path of `topology test` shares provisionEphemeralTopology with
-// `up --fresh` and had the same leak. --skip-lint makes the command stop at
-// provisioning without running ansible-playbook.
-func TestTopologyTestEphemeralProvisionFailureTearsDownOnlyThisRunsNodes(t *testing.T) {
-	h := newFreshHost(t, false)
-	topo := h.spec(false, [2]string{freshBad, h.missing}, [2]string{freshGood, h.base})
-
-	_, stderr, err := h.run("vm-target", "topology", "test", "--ephemeral", "--skip-lint",
-		"--playbook", "playbooks/test/hello-localhost.yml", "--verify", "docs/verification/none.md",
-		"--topology", topo)
-	if err == nil || !strings.Contains(err.Error(), "ephemeral topology provisioning failed") || !strings.Contains(err.Error(), fmt.Sprintf("node %q", freshBad)) {
-		t.Fatalf("want the provisioning failure of %s, got %v", freshBad, err)
+// TestTopologyTestEphemeralFailureTearsDownOnlyThisRunsNodes: the --ephemeral
+// path of `topology test` shares provisionEphemeralTopology with `up --fresh`
+// and had the same leak, and it has its own teardown calls for a provisioning
+// and a wiring failure. --skip-lint makes the command stop before it would run
+// ansible-playbook, so only the provisioning and wiring steps are exercised.
+func TestTopologyTestEphemeralFailureTearsDownOnlyThisRunsNodes(t *testing.T) {
+	cases := []struct {
+		name        string
+		wiringFails bool
+		wire        bool
+		racer       bool
+		nodes       func(h *freshHost) [][2]string
+		wantErr     []string
+		wantStderr  string
+		wantState   []string
+		wantGone    []string
+	}{
+		{
+			name:       "failing node before the good one",
+			nodes:      func(h *freshHost) [][2]string { return [][2]string{{freshBad, h.missing}, {freshGood, h.base}} },
+			wantErr:    []string{"ephemeral topology provisioning failed", fmt.Sprintf("node %q", freshBad)},
+			wantStderr: "Tearing down 1 created node(s)",
+			wantState:  []string{freshForeign},
+			wantGone:   []string{freshGood},
+		},
+		{
+			name:       "name claimed by another session before the good one",
+			racer:      true,
+			nodes:      func(h *freshHost) [][2]string { return [][2]string{{freshRacer, h.base}, {freshGood, h.base}} },
+			wantErr:    []string{"ephemeral topology provisioning failed", fmt.Sprintf("node %q", freshRacer)},
+			wantStderr: "Tearing down 1 created node(s)",
+			wantState:  []string{freshForeign, freshRacer},
+			wantGone:   []string{freshGood},
+		},
+		{
+			name:        "wiring failure after every node booted",
+			wiringFails: true,
+			wire:        true,
+			nodes:       func(h *freshHost) [][2]string { return [][2]string{{"wire-a", h.base}, {"wire-b", h.base}} },
+			wantErr:     []string{`wire "wire-a"`, "wiring refused by the shim"},
+			wantStderr:  "Ephemeral wiring failed",
+			wantState:   []string{freshForeign},
+			wantGone:    []string{"wire-a", "wire-b"},
+		},
 	}
-	wantOutputHas(t, "stderr", stderr, "Tearing down 1 created node(s)")
-	h.wantState(freshForeign)
-	h.wantTornDown(freshGood)
-	h.wantUntouched(freshForeign)
-	h.wantFactsKept(freshForeign)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFreshHost(t, tc.wiringFails)
+			if tc.racer {
+				h.enableRacer()
+			}
+			topo := h.spec(tc.wire, tc.nodes(h)...)
+
+			_, stderr, err := h.run("vm-target", "topology", "test", "--ephemeral", "--skip-lint",
+				"--playbook", "playbooks/test/hello-localhost.yml", "--verify", "docs/verification/none.md",
+				"--topology", topo)
+			if err == nil {
+				t.Fatal("topology test --ephemeral succeeded although provisioning or wiring fails")
+			}
+			for _, w := range tc.wantErr {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error missing %q: %v", w, err)
+				}
+			}
+			wantOutputHas(t, "stderr", stderr, tc.wantStderr)
+			h.wantState(tc.wantState...)
+			for _, name := range tc.wantGone {
+				h.wantTornDown(name)
+			}
+			h.wantUntouched(freshForeign)
+			h.wantFactsKept(freshForeign)
+			h.wantUntouched(freshRacer)
+		})
+	}
 }
