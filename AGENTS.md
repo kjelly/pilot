@@ -674,7 +674,9 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   的 Step 4f/5d/5e 在快照驗證過之後才授予,rescue 以 `is defined` 讀它(#203)。
   規則:`always` 的 command/shell/raw/script 必須有不是 `true` 的 `changed_when`
   (沒寫也算違規:預設每次都 changed),tempfile 必須 `changed_when: false`;
-  block 的 `always:` 區段要檢查,`rescue:` 不用(只在失敗後才跑)。
+  block 的 `always:` 區段要檢查,`rescue:` 不用(只在失敗後才跑)。這條 lint 只涵蓋
+  上面這幾個模組:`file`/`copy`/`service`/`systemd`/`docker_container` 等其他模組若每次
+  run 都 changed,它不檢查(審查掃過 882 個 always 的 task,沒有現成的案例)。
   `internal/spec/always_tag_convergence_regression_test.go::TestRegression_AlwaysTaggedTasksConverge`
   對全部 `playbooks/apply/*.yml` 與它們 include 的 task 檔鎖住。#190 之前的 tag
   放回去時,前面幾條 `always`/tag lint 全部仍然通過,因為沒有一條看 `always` task

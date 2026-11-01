@@ -20,8 +20,10 @@ import (
 // behind.
 var alwaysTagConvergenceAllowlist = map[string]string{
 	"agent-controller-apply.yml::Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO)": "" +
-		"same shape detection-engine had before kjelly/pilot#190: Steps 3-5 are `always` and Step 4 is changed_when: true, " +
-		"so a pilot deploy --limit run that pulls the host in only by dependency expansion changes it on every apply; " +
+		"same shape detection-engine had before kjelly/pilot#190: Steps 3-5 are `always` and Step 4 is changed_when: true. " +
+		"agent-controller is not imported by site.yml (contract site.include: false), so a pilot deploy --limit dependency " +
+		"expansion cannot reach it; the reachable trigger is a tag-scoped single-component deploy that does not select Step 6, " +
+		"which still takes the backup on a stale binary and changes it on every apply; " +
 		"tracked by https://github.com/kjelly/pilot/issues/195, remove this entry when #195 lands",
 	"freeipa-realm-replacement-apply.yml::Realm replacement — snapshot old client trust before mutation": "" +
 		"one-off migration: it refuses to run again once its prior-state file exists (the `Gate: prior migration state " +
@@ -80,6 +82,12 @@ type convergenceScan struct {
 //     every run; an expression or false is fine);
 //   - tempfile must declare changed_when: false (it creates a new path on
 //     every run).
+//
+// The lint models only those modules. file, copy, service, systemd,
+// docker_container and any other module whose changed result could be true on
+// every run are not checked by it; a one-off sweep of the 882 always-run
+// tasks in playbooks/apply (2026-11-01, during the #189 review) found no live
+// instance.
 //
 // A `rescue:` only runs after a failure, so it cannot break the second
 // apply. agent-controller's Step 4 has the same shape detection-engine had
@@ -144,23 +152,46 @@ func TestRegression_AlwaysTaggedTasksConverge(t *testing.T) {
 	}
 }
 
+// writeConvergenceTaskFiles writes the task files the synthetic playbooks of
+// the tests below include, under <dir>/tasks, and returns <dir>:
+//   - child.yml: an untagged command with changed_when: true;
+//   - child-always.yml: the same command tagged `always`;
+//   - outer.yml: an untagged include of child-always.yml named `inner`, to
+//     see whether a line inherits an enclosing include's `apply` tags;
+//   - chain0.yml ... chain7.yml: chainN.yml holds an include line named `cN`
+//     (no tags) of chain<N+1>.yml, and chain7.yml an always-tagged command
+//     named `leaf` with changed_when: true. With `always` apply tags on each
+//     hop the chain reaches 7 includes deep from chain0 and 6 from chain2.
+func writeConvergenceTaskFiles(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"child.yml":        "- name: child\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
+		"child-always.yml": "- name: child\n  tags: [always]\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
+		"outer.yml":        "- name: inner\n  ansible.builtin.include_tasks: child-always.yml\n",
+		"chain7.yml":       "- name: leaf\n  tags: [always]\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n",
+	}
+	for i := 0; i < 7; i++ {
+		files[fmt.Sprintf("chain%d.yml", i)] = fmt.Sprintf("- name: c%d\n  tags: [always]\n  ansible.builtin.include_tasks: {file: chain%d.yml, apply: {tags: [always]}}\n", i, i+1)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, "tasks", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 // TestFindAlwaysTaggedNonConvergent checks scanAlwaysTaggedConvergence
 // against synthetic playbooks, each case asserting the exact violation keys:
 // the pre-#190 shape is flagged, the same tasks under a row tag, in a
 // rescue or with a real changed_when are not, and the tag rules of
 // block/always:/include_tasks/import_tasks decide what counts as always-run.
 func TestFindAlwaysTaggedNonConvergent(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	child := "- name: child\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n"
-	childAlways := "- name: child\n  tags: [always]\n  ansible.builtin.command: {argv: [x]}\n  changed_when: true\n"
-	for name, body := range map[string]string{"child.yml": child, "child-always.yml": childAlways} {
-		if err := os.WriteFile(filepath.Join(dir, "tasks", name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	dir := writeConvergenceTaskFiles(t)
 	const (
 		backupAlways = `
     - name: Step 4 backup
@@ -360,6 +391,40 @@ func TestFindAlwaysTaggedNonConvergent(t *testing.T) {
   tasks:
     - {name: imp, tags: [C1], import_tasks: tasks/child-always.yml}
 `, []string{pb + "imp -> child"}},
+		{"a nested include line inherits the enclosing include's apply tags", `
+- hosts: all
+  tasks:
+    - name: outer
+      tags: [always]
+      ansible.builtin.include_tasks: {file: tasks/outer.yml, apply: {tags: [always]}}
+`, []string{pb + "outer -> inner -> child"}},
+		{"a nested include line of a file included without apply is not selected by every --tags", `
+- hosts: all
+  tasks:
+    - name: outer
+      tags: [always]
+      ansible.builtin.include_tasks: tasks/outer.yml
+`, nil},
+		{"a comma separated tags string", `
+- hosts: all
+  tasks:
+    - {name: csv, tags: "always, x", command: x, changed_when: true}
+    - {name: csv without always, tags: "x, y", command: x, changed_when: true}
+`, []string{pb + "csv"}},
+		{"an alias as an element of the tags list", `
+- hosts: all
+  vars: {t: &a always}
+  tasks:
+    - {name: aliased element, tags: [*a], command: x}
+    - {name: plain element, tags: [x], command: x}
+`, []string{pb + "aliased element"}},
+		{"six includes deep is still followed", `
+- hosts: all
+  tasks:
+    - name: start
+      tags: [always]
+      ansible.builtin.include_tasks: {file: tasks/chain2.yml, apply: {tags: [always]}}
+`, []string{pb + "start -> c2 -> c3 -> c4 -> c5 -> c6 -> leaf"}},
 		{"unnamed task is keyed by its line", `
 - hosts: all
   tasks:
@@ -392,10 +457,12 @@ func TestFindAlwaysTaggedNonConvergent(t *testing.T) {
 
 // TestAlwaysTaggedConvergenceFailsClosed checks that the scan reports what
 // it cannot follow instead of passing over it: a task file it cannot read, a
-// templated include of an always-run line, and the constructs it does not
-// model (roles, import_playbook, action:, merge keys).
+// templated include of an always-run line, includes nested deeper than the
+// depth limit, and the constructs it does not model (roles, import_playbook,
+// action:, merge keys, the legacy spellings of include_tasks/import_tasks and
+// `include:`).
 func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
-	dir := t.TempDir()
+	dir := writeConvergenceTaskFiles(t)
 	cases := []struct {
 		name string
 		yaml string
@@ -423,6 +490,28 @@ func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
   tasks:
     - {name: a, tags: [always], action: command x}
 `, "action"},
+		{"ansible.legacy.include_tasks", `
+- hosts: all
+  tasks:
+    - {name: i, tags: [always], ansible.legacy.include_tasks: {file: tasks/child.yml, apply: {tags: [always]}}}
+`, "ansible.legacy.include_tasks"},
+		{"ansible.legacy.import_tasks", `
+- hosts: all
+  tasks:
+    - {name: i, tags: [always], ansible.legacy.import_tasks: tasks/child.yml}
+`, "ansible.legacy.import_tasks"},
+		{"legacy include:", `
+- hosts: all
+  tasks:
+    - {name: i, tags: [always], include: tasks/child.yml}
+`, "uses include,"},
+		{"includes nested deeper than 6", `
+- hosts: all
+  tasks:
+    - name: start
+      tags: [always]
+      ansible.builtin.include_tasks: {file: tasks/chain1.yml, apply: {tags: [always]}}
+`, "deeper than 6"},
 		{"merge key", `
 - hosts: all
   tasks:
@@ -510,14 +599,27 @@ var convergenceModules = func() map[string]convergenceKind {
 }()
 
 // convergenceUnsupported are the keys the scan does not model. Meeting one
-// is an error, not a pass: a role, an imported playbook, an action: string
-// or a merge key could hide an always-run task from it.
-var convergenceUnsupported = map[string]string{
-	"roles": "roles", "import_playbook": "import_playbook", "ansible.builtin.import_playbook": "import_playbook",
-	"include_role": "include_role", "ansible.builtin.include_role": "include_role",
-	"import_role": "import_role", "ansible.builtin.import_role": "import_role",
-	"action": "action:", "local_action": "local_action:", "<<": "merge key (<<:)",
-}
+// is an error, not a pass: a role, an imported playbook, an action: string,
+// a merge key or a legacy spelling of an include could hide an always-run
+// task from it.
+var convergenceUnsupported = func() map[string]string {
+	m := map[string]string{
+		"roles": "roles", "action": "action:", "local_action": "local_action:", "<<": "merge key (<<:)",
+		// The removed legacy `include:` loaded a task file like include_tasks.
+		"include": "include", "ansible.builtin.include": "ansible.builtin.include", "ansible.legacy.include": "ansible.legacy.include",
+		// includedFile follows include_tasks/import_tasks and ansible.builtin.*
+		// only; the legacy collection spelling would be skipped silently, so it
+		// is refused like the other spellings (the module table above accepts
+		// ansible.legacy.command and tempfile).
+		"ansible.legacy.include_tasks": "ansible.legacy.include_tasks", "ansible.legacy.import_tasks": "ansible.legacy.import_tasks",
+	}
+	for _, name := range []string{"import_playbook", "include_role", "import_role"} {
+		for _, prefix := range []string{"", "ansible.builtin.", "ansible.legacy."} {
+			m[prefix+name] = prefix + name
+		}
+	}
+	return m
+}()
 
 // convergenceCtx is the state of one task list during the walk.
 type convergenceCtx struct {
