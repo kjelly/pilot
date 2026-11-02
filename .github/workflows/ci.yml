@@ -85,7 +85,21 @@ jobs:
         # (warm cache) those took 32 s and about 155 s. A hung test then ends
         # in a Go stack dump that names it, not a silent job cancellation
         # (TestCIGoTestTimeoutFiresBeforeJobLimit).
+        env:
+          PILOT_TEST_SHARD: ${{ matrix.shard }}
+          GO_TEST_JSON: '1'
+          GO_TEST_REPORT_DIR: .verification/go-baseline-${{ matrix.shard }}
         run: make test-race
+
+      - name: Upload Go baseline evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-baseline-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: .verification/go-baseline-${{ matrix.shard }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Install PyYAML
         if: matrix.shard == 'rest'
@@ -107,6 +121,10 @@ jobs:
       - name: Duplicate YAML key check (repo-wide)
         if: matrix.shard == 'rest'
         run: python3 scripts/check-yaml-duplicate-keys.py
+
+      - name: Go CI evidence runtime tests
+        if: matrix.shard == 'rest'
+        run: make ci-go-runtime-test
 
   playbook-lint:
     # L1 syntax (blocking) + duplicate-key check + L2 ansible-lint (advisory)

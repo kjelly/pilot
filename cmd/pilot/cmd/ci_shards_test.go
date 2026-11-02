@@ -187,3 +187,65 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 		t.Fatal("receipt must wait for full image validation")
 	}
 }
+
+func checkCIGoBaselineEvidence(ci string) error {
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string
+				Run  string
+				Uses string
+				If   string
+				Env  map[string]string
+				With map[string]any
+			}
+		}
+	}
+	if err := yaml.Unmarshal([]byte(ci), &wf); err != nil {
+		return err
+	}
+	foundTest, foundUpload, foundRuntime := false, false, false
+	for _, step := range wf.Jobs["test"].Steps {
+		switch step.Name {
+		case "go test":
+			foundTest = step.Run == "make test-race" && step.Env["GO_TEST_JSON"] == "1" &&
+				step.Env["PILOT_TEST_SHARD"] == "${{ matrix.shard }}" &&
+				step.Env["GO_TEST_REPORT_DIR"] == ".verification/go-baseline-${{ matrix.shard }}"
+		case "Upload Go baseline evidence":
+			foundUpload = step.Uses == "actions/upload-artifact@v4" && step.If == "always()" &&
+				step.With["name"] == "go-baseline-${{ github.run_attempt }}-${{ matrix.shard }}" &&
+				step.With["path"] == ".verification/go-baseline-${{ matrix.shard }}/" &&
+				step.With["if-no-files-found"] == "error" && step.With["include-hidden-files"] == true &&
+				fmt.Sprint(step.With["retention-days"]) == "7"
+		case "Go CI evidence runtime tests":
+			foundRuntime = step.If == "matrix.shard == 'rest'" && step.Run == "make ci-go-runtime-test"
+		}
+	}
+	if !foundTest || !foundUpload || !foundRuntime {
+		return fmt.Errorf("Go baseline evidence contract: test=%v upload=%v runtime=%v", foundTest, foundUpload, foundRuntime)
+	}
+	return nil
+}
+
+func TestCIGoBaselineEvidence(t *testing.T) {
+	if err := checkCIGoBaselineEvidence(readCIYAML(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCIGoBaselineEvidenceCatchesDrift(t *testing.T) {
+	ci := readCIYAML(t)
+	for _, mutation := range []struct{ old, replacement string }{
+		{"GO_TEST_JSON: '1'", "GO_TEST_JSON: '0'"},
+		{"go-baseline-${{ github.run_attempt }}-${{ matrix.shard }}", "shared-evidence"},
+		{"if-no-files-found: error", "if-no-files-found: warn"},
+		{"run: make ci-go-runtime-test", "run: true"},
+	} {
+		if !strings.Contains(ci, mutation.old) {
+			t.Fatalf("missing mutation anchor %q", mutation.old)
+		}
+		if err := checkCIGoBaselineEvidence(strings.Replace(ci, mutation.old, mutation.replacement, 1)); err == nil {
+			t.Fatalf("accepted drift: %s", mutation.old)
+		}
+	}
+}

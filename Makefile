@@ -86,7 +86,7 @@ lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 GO_TEST_PACKAGES ?= ./...
 test-race:     	## Run tests with the race detector (CI selects a package shard)
-	go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)
+	$(if $(GO_TEST_REPORT_DIR),python3 scripts/ci-go-test-shards.py record -- )go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)$(if $(filter 1,$(GO_TEST_JSON)), -json)
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
@@ -129,6 +129,11 @@ test-callback: ## Run Python callback unit tests
 .PHONY: ci-workflow-test
 ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards.py'
+
+.PHONY: ci-go-runtime-test
+ci-go-runtime-test: ## Verify Go CI evidence against small real race binaries
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards_runtime.py'
 
 skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
 	@for skill in .agents/skills/*/; do \

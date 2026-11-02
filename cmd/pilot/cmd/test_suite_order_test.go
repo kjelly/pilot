@@ -19,6 +19,8 @@ func TestCompleteTestSuitesRunSequentially(t *testing.T) {
 	}
 	// CI exports a shard; this harness intentionally exercises both full suites.
 	t.Setenv("GO_TEST_PACKAGES", "./internal/evidence")
+	t.Setenv("GO_TEST_REPORT_DIR", "")
+	t.Setenv("GO_TEST_JSON", "")
 	root := repoRootForTest(t)
 	for _, failNormal := range []bool{false, true} {
 		name := "success"
@@ -83,7 +85,7 @@ func TestRaceSuiteRetainsShardSelection(t *testing.T) {
 	}
 	command := exec.Command(makePath, "--no-print-directory", "--dry-run", "test-race", "GO_TEST_PACKAGES=./internal/evidence")
 	command.Dir = repoRootForTest(t)
-	command.Env = append(os.Environ(), "MAKEFLAGS=", "MFLAGS=")
+	command.Env = append(os.Environ(), "MAKEFLAGS=", "MFLAGS=", "GO_TEST_REPORT_DIR=", "GO_TEST_JSON=")
 	out, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("make test-race: %v\n%s", err, out)
