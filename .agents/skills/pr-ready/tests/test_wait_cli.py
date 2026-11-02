@@ -50,6 +50,32 @@ elif args[:2] == ["pr", "checks"]:
     checks = plan.get("required", plan["checks"][:1]) if "--required" in args else plan["checks"]
     print(json.dumps(checks))
     sys.exit(8 if any(c.get("bucket") == "pending" for c in checks if isinstance(c, dict)) else 0)
+elif args[0] == "api" and "/actions/runs" in args[1]:
+    endpoint = args[1]
+    with (root / "workflow-queries.log").open("a") as out:
+        out.write(endpoint + "\n")
+    if plan.get("workflow_error"):
+        print("HTTP 502: Bad Gateway", file=sys.stderr)
+        sys.exit(1)
+    if "/attempts/" in endpoint:
+        key = endpoint.split("/actions/runs/", 1)[1]
+        payload = plan.get("attempts", {}).get(key)
+        if payload is None:
+            print("missing attempt", file=sys.stderr)
+            sys.exit(1)
+    else:
+        assert "--paginate" in args and "--slurp" in args
+        assert "head_sha=" + plan.get("pr", {}).get("headRefOid", sha) in endpoint
+        runs = plan.get("runs", [])
+        payload = plan.get("workflow_pages", [{"total_count": len(runs), "workflow_runs": runs}])
+    def bind(value):
+        if isinstance(value, dict):
+            return {k: plan.get("pr", {}).get("headRefOid", sha) if k == "head_sha" and v == "HEAD" else bind(v)
+                    for k,v in value.items()}
+        if isinstance(value, list):
+            return [bind(v) for v in value]
+        return value
+    print(json.dumps(bind(payload)))
 elif args[:2] == ["api", "graphql"]:
     query = next(a[6:] for a in args if a.startswith("query="))
     field = re.search(r"pullRequest\(number:\$number\)\s*\{\s*(\w+)", query).group(1)
@@ -83,6 +109,14 @@ def plan(*checks, **kwargs):
 def comment(body="Reviewed feedback"):
     return {"url": "https://github.com/acme/repo/pull/7#issuecomment-1",
             "createdAt": "2026-11-02T01:00:00Z", "updatedAt": "2026-11-02T01:00:00Z", "body": body}
+
+
+def workflow(run_id=11, attempt=1, status="in_progress", conclusion=None, **overrides):
+    return {"id": run_id, "workflow_id": 101, "head_sha": "HEAD", "head_branch": "fix-one",
+            "event": "pull_request", "path": ".github/workflows/ci.yml", "run_number": run_id,
+            "run_attempt": attempt, "status": status, "conclusion": conclusion,
+            "created_at": "2026-11-02T01:00:00Z", "updated_at": "2026-11-02T02:00:00Z",
+            "check_suite_id": run_id + 1000, **overrides}
 
 
 class WaitCLITests(unittest.TestCase):
@@ -344,6 +378,143 @@ class WaitCLITests(unittest.TestCase):
                     if proc.poll() is None:
                         proc.kill()
                         proc.communicate()
+
+    def test_green_prerequisites_wait_for_workflow_and_delayed_dependent_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            # Multiple all-green snapshots can precede dependent check registration,
+            # including both final preflight and post-action reads of a broken gate.
+            scenarios = [plan(PASS, runs=[workflow()]), plan(PASS, runs=[workflow()]),
+                         plan(PASS, runs=[workflow()]),
+                         plan(PASS, {**PENDING, "name": "image"}, runs=[workflow()]),
+                         plan(PASS, {**PASS, "name": "image"},
+                              runs=[workflow(status="completed", conclusion="success")])]
+            proc, events, _ = self.run_gate(t, scenarios)
+            self.assertEqual(["5"], (t / "ready.log").read_text().splitlines(),
+                             "Ready must wait for workflow completion and delayed dependent jobs")
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI"] * 4 + ["READY"], [e["status"] for e in events])
+            self.assertTrue(all("Active GitHub workflow run" in " ".join(e["pending_checks"])
+                                for e in events[:-1]))
+            self.assertTrue((t / "workflow-queries.log").exists())
+
+    def test_workflow_active_in_final_preflight_returns_to_wait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            done = workflow(status="completed", conclusion="success")
+            proc, events, _ = self.run_gate(t, [plan(PASS, runs=[]), plan(PASS, runs=[workflow()]),
+                                               plan(PASS, runs=[done])])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+
+    def test_new_workflow_run_cannot_hide_an_earlier_active_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            old = workflow()
+            done = workflow(status="completed", conclusion="success")
+            new_done = workflow(run_id=12, status="completed", conclusion="success")
+            proc, events, _ = self.run_gate(t, [plan(PASS, runs=[old]),
+                plan(PASS, runs=[new_done, old]), plan(PASS, runs=[new_done, done])])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
+
+    def test_rerun_cannot_hide_an_earlier_active_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            rerun_done = workflow(attempt=2, status="completed", conclusion="success")
+            old_done = workflow(status="completed", conclusion="failure")
+            proc, events, _ = self.run_gate(t, [plan(PASS, runs=[workflow()]),
+                plan(PASS, runs=[rerun_done], attempts={"11/attempts/1": workflow()}),
+                plan(PASS, runs=[rerun_done], attempts={"11/attempts/1": old_done})])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
+            self.assertIn("11/attempts/1", (t / "workflow-queries.log").read_text())
+
+    def test_historical_terminal_failure_does_not_replace_current_check_quality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            old = workflow(status="completed", conclusion="failure")
+            new = workflow(run_id=12, status="completed", conclusion="success")
+            proc, events, _ = self.run_gate(t, [plan(PASS, runs=[old, new])])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("READY", events[-1]["status"])
+
+    def test_all_known_active_workflow_states_wait(self):
+        for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                proc, events, _ = self.run_gate(t, [plan(PASS, runs=[workflow(status=status)]),
+                    plan(PASS, runs=[workflow(status="completed", conclusion="success")])])
+                self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+
+    def test_workflow_unavailable_missing_unknown_or_malformed_blocks(self):
+        bad_runs = [None, {}, workflow(status="mystery"), workflow(status="completed"),
+                    workflow(status="completed", conclusion="unknown"), workflow(status=[]),
+                    workflow(conclusion="success"), workflow(head_sha="f" * 40),
+                    workflow(run_attempt=True), workflow(created_at="invalid")]
+        missing = workflow()
+        del missing["conclusion"]
+        bad_runs.append(missing)
+        cases = [plan(PASS, workflow_error=True), plan(PASS, workflow_pages=[]),
+                 plan(PASS, workflow_pages=[{}]), plan(PASS, workflow_pages=[{"total_count": True, "workflow_runs": []}]),
+                 plan(PASS, workflow_pages=[{"total_count": 2, "workflow_runs": [workflow()]}]),
+                 plan(PASS, runs=[workflow(), workflow()])]
+        cases.extend(plan(PASS, runs=[run]) for run in bad_runs)
+        for first in cases:
+            with self.subTest(first=first), tempfile.TemporaryDirectory() as tmp:
+                proc, events, _ = self.run_gate(Path(tmp), [first])
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertFalse((Path(tmp) / "ready").exists())
+
+    def test_paginated_workflow_runs_are_complete_and_all_observed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            done = workflow(status="completed", conclusion="success")
+            active = workflow(run_id=12)
+            pages = [{"total_count": 2, "workflow_runs": [done]},
+                     {"total_count": 2, "workflow_runs": [active]}]
+            proc, events, _ = self.run_gate(t, [plan(PASS, workflow_pages=pages),
+                plan(PASS, runs=[done, workflow(run_id=12, status="completed", conclusion="success")])])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+            self.assertEqual(2, len(events[-1]["workflow_runs"]))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assert_blocked(Path(tmp), [plan(PASS, workflow_pages=[
+                {"total_count": 1, "workflow_runs": [workflow()]},
+                {"total_count": 2, "workflow_runs": []}])], "pagination changed")
+
+    def test_workflow_disappearance_identity_drift_attempt_regression_blocks(self):
+        cases = [([], "disappeared"), ([workflow(workflow_id=102)], "identity/metadata"),
+                 ([workflow(attempt=1)], "attempt regressed")]
+        for runs, needle in cases:
+            with self.subTest(needle=needle), tempfile.TemporaryDirectory() as tmp:
+                self.assert_blocked(Path(tmp), [plan(PASS, runs=[workflow(attempt=2)]),
+                    plan(PASS, runs=runs)], needle)
+
+    def test_unverifiable_superseded_active_attempt_blocks(self):
+        for previous in (None, workflow(run_id=12), workflow(attempt=2), workflow(status="unknown")):
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as tmp:
+                second = plan(PASS, runs=[workflow(attempt=2, status="completed", conclusion="success")])
+                if previous is not None:
+                    second["attempts"] = {"11/attempts/1": previous}
+                proc, events, _ = self.run_gate(Path(tmp), [plan(PASS, runs=[workflow()]), second])
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertFalse((Path(tmp) / "ready").exists())
+
+    def test_post_action_new_active_workflow_never_claims_validated_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            proc, events, _ = self.run_gate(t, [plan(PASS), plan(PASS), plan(PASS, runs=[workflow()])])
+            self.assertEqual(2, proc.returncode, proc.stdout)
+            self.assertTrue(events[-1]["ready_invoked"])
+            self.assertIn("post-action verification failed", " ".join(events[-1]["errors"]))
+            self.assertEqual(["1"], (t / "ready.log").read_text().splitlines())
 
     def test_wait_requires_worktree_and_bounded_poll_interval(self):
         for extra in (("--wait",), ("--wait", "--worktree", ".", "--poll-interval", "61"),

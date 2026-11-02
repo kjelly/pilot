@@ -168,6 +168,33 @@ def gh_checks(repo: str, pr: int, *, required: bool) -> list[dict[str, Any]]:
     return checks
 
 
+def gh_workflow_runs(repo: str, head: Any) -> list[dict[str, Any]]:
+    """Read every Actions run for this exact head, including delayed/dependent jobs.
+
+    An empty, complete response is valid for repositories using external checks. gh follows
+    Link pagination; total_count prevents an incomplete/truncated result becoming green.
+    """
+    if not isinstance(head, str) or not SHA.fullmatch(head):
+        raise GateError("Cannot query workflow runs without a valid current HEAD")
+    pages = cmd(["gh", "api", f"repos/{repo}/actions/runs?head_sha={head}&per_page=100",
+                 "--paginate", "--slurp"])
+    if not isinstance(pages, list) or not pages:
+        raise GateError("Missing/malformed workflow run pages")
+    runs = []
+    total = None
+    for page in pages:
+        if not isinstance(page, dict) or type(page.get("total_count")) is not int \
+                or page["total_count"] < 0 or not isinstance(page.get("workflow_runs"), list):
+            raise GateError("Missing/malformed workflow run metadata")
+        if total is not None and page["total_count"] != total:
+            raise GateError("Workflow run pagination changed; requery before resuming")
+        total = page["total_count"]
+        runs.extend(page["workflow_runs"])
+    if len(runs) != total:
+        raise GateError("Incomplete workflow run pagination (total_count mismatch)")
+    return runs
+
+
 CONNECTION_QUERY = """
 query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
   repository(owner:$owner,name:$repo) {
@@ -242,16 +269,19 @@ class Snapshot:
     # None means "not fetched": only needed to verify disputed review comments.
     comments: list[dict[str, Any]] | None = None
     reviews: list[dict[str, Any]] | None = None
+    workflow_runs: list[dict[str, Any]] | None = None
 
 
-def fetch_snapshot(repo: str, pr: int, *, conversation: bool = False) -> Snapshot:
+def fetch_snapshot(repo: str, pr: int, *, conversation: bool = False, workflows: bool = False) -> Snapshot:
+    view = gh_pr(repo, pr)
     return Snapshot(
-        pr=gh_pr(repo, pr),
+        pr=view,
         checks=gh_checks(repo, pr, required=False),
         required_checks=gh_checks(repo, pr, required=True),
         threads=gh_threads(repo, pr),
         comments=gh_connection(repo, pr, "comments") if conversation else None,
         reviews=gh_connection(repo, pr, "reviews") if conversation else None,
+        workflow_runs=gh_workflow_runs(repo, view.get("headRefOid")) if workflows else None,
     )
 
 
@@ -502,6 +532,97 @@ def classify_ci(s: Snapshot, evidence: dict[str, Any]) -> CIResult:
     return result
 
 
+WORKFLOW_ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
+WORKFLOW_CONCLUSIONS = {"success", "failure", "neutral", "cancelled", "skipped", "timed_out",
+                        "action_required", "stale", "startup_failure"}
+WORKFLOW_IDENTITY = ("id", "workflow_id", "head_sha", "head_branch", "event", "path",
+                     "run_number", "created_at", "check_suite_id")
+
+
+def workflow_identity(run: Any, head: str) -> dict[str, Any]:
+    if not isinstance(run, dict):
+        raise GateError("Malformed workflow run")
+    for key in ("id", "workflow_id", "run_attempt", "run_number", "check_suite_id"):
+        if type(run.get(key)) is not int or run[key] <= 0:
+            raise GateError(f"Missing/malformed workflow run {key}")
+    for key in ("head_branch", "event", "path", "created_at", "updated_at"):
+        if not isinstance(run.get(key), str) or not run[key].strip():
+            raise GateError(f"Missing/malformed workflow run {key}")
+    if run.get("head_sha") != head:
+        raise GateError("Workflow run is not bound to current HEAD")
+    if "conclusion" not in run:
+        raise GateError("Missing workflow run conclusion metadata")
+    for key in ("created_at", "updated_at"):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", run[key]):
+            raise GateError(f"Malformed workflow run {key}")
+    status, conclusion = run.get("status"), run.get("conclusion")
+    if not isinstance(status, str) or status not in WORKFLOW_ACTIVE | {"completed"}:
+        raise GateError("Unknown/missing workflow run status")
+    if status == "completed":
+        if not isinstance(conclusion, str) or conclusion not in WORKFLOW_CONCLUSIONS:
+            raise GateError("Unknown/missing completed workflow conclusion")
+    elif conclusion is not None:
+        raise GateError("Active workflow run has unexpected conclusion")
+    return {key: run[key] for key in WORKFLOW_IDENTITY}
+
+
+@dataclass
+class WorkflowHistory:
+    identities: dict[int, dict[str, Any]] = field(default_factory=dict)
+    attempts: dict[int, int] = field(default_factory=dict)
+    active: set[tuple[int, int]] = field(default_factory=set)
+    states: list[dict[str, Any]] = field(default_factory=list)
+
+    def inspect(self, snapshot: Snapshot, repo: str) -> CIResult:
+        """Settlement is independent of check quality/exemptions. Never lose an active run.
+
+        Run identities stay pinned. A new run or higher attempt is observed conservatively;
+        if a rerun supersedes a previously active attempt, query that exact old attempt until
+        it is verifiably completed. Historical failed conclusions are not new quality gates:
+        current visible/required checks retain their existing terminal exemption policy.
+        """
+        if snapshot.workflow_runs is None:
+            raise GateError("Workflow lifecycle metadata not fetched")
+        head = snapshot.pr.get("headRefOid")
+        latest = {}
+        for run in snapshot.workflow_runs:
+            identity = workflow_identity(run, head)
+            run_id = run["id"]
+            if run_id in latest:
+                raise GateError("Duplicate workflow run in paginated response")
+            if run_id in self.identities and identity != self.identities[run_id]:
+                raise GateError("Workflow run identity/metadata changed during wait")
+            if run["run_attempt"] < self.attempts.get(run_id, 0):
+                raise GateError("Workflow run attempt regressed during wait")
+            latest[run_id] = run
+        if self.identities.keys() - latest.keys():
+            raise GateError("Previously observed workflow run disappeared; cannot prove settlement")
+        observed = list(latest.values())
+        for run_id, attempt in sorted(self.active):
+            if latest[run_id]["run_attempt"] == attempt:
+                continue
+            previous = cmd(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}"])
+            if workflow_identity(previous, head) != self.identities[run_id] \
+                    or previous["run_attempt"] != attempt:
+                raise GateError("Historical active workflow attempt identity changed")
+            observed.append(previous)
+        result = CIResult()
+        self.states = []
+        for run in observed:
+            run_id, attempt = run["id"], run["run_attempt"]
+            key = run_id, attempt
+            self.states.append({k: run[k] for k in ("id", "workflow_id", "run_attempt", "status", "conclusion", "path")})
+            if run["status"] in WORKFLOW_ACTIVE:
+                self.active.add(key)
+                result.pending.append(f"Active GitHub workflow run: {run_id} attempt {attempt} ({run['status']})")
+            else:
+                self.active.discard(key)
+        for run_id, run in latest.items():
+            self.identities[run_id] = workflow_identity(run, head)
+            self.attempts[run_id] = run["run_attempt"]
+        return result
+
+
 def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
              local: tuple[str, str, list[str]] | None = None,
              log_base: Path | None = None, ctx: Any = None, allow_pending: bool = False) -> list[str]:
@@ -729,11 +850,14 @@ def main() -> int:
     pins = None
     ready_invoked = False
     handlers = {}
+    workflows = WorkflowHistory() if args.wait else None
 
     def emit(result: dict[str, Any]) -> None:
         if status_path is not None:
             result.update(pr_number=args.pr, elapsed_seconds=round(time.monotonic() - started, 3),
                           polls=polls, ready_invoked=ready_invoked)
+            if workflows is not None:
+                result["workflow_runs"] = workflows.states
             if pins is not None:
                 result["head_sha"] = pins.identity["headRefOid"]
                 result["pinned_artifacts"] = pins.artifacts
@@ -772,14 +896,18 @@ def main() -> int:
             errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr, local=local,
                               log_base=args.worktree, ctx=ctx, allow_pending=args.wait)
             errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
+            pending = classify_ci(snapshot, evidence).pending
+            if workflows is not None:
+                lifecycle = workflows.inspect(snapshot, args.repo)
+                errors.extend(lifecycle.errors)
+                pending.extend(lifecycle.pending)
             if pins is not None:
                 errors.extend(pins.verify(snapshot, args.evidence, evidence, args.worktree, args.base_remote))
-            pending = classify_ci(snapshot, evidence).pending
             return errors, pending, list(ctx.accepted) if ctx is not None else []
 
         while True:
             deadline()
-            before = fetch_snapshot(args.repo, args.pr, conversation=conversation)
+            before = fetch_snapshot(args.repo, args.pr, conversation=conversation, workflows=args.wait)
             polls += 1
             if args.wait and pins is None:
                 pins = WaitPins.capture(before, args.evidence, evidence, args.worktree, args.base_remote)
@@ -798,7 +926,7 @@ def main() -> int:
                 return 0
             if not pending:
                 # Fresh final preflight, including all wait pins. CI may become pending again.
-                latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
+                latest = fetch_snapshot(args.repo, args.pr, conversation=conversation, workflows=args.wait)
                 errors, pending, reuse = inspect(latest)
                 if errors:
                     emit({"status": "DRAFT-BLOCKED", "errors": errors})
@@ -810,7 +938,7 @@ def main() -> int:
                                             capture_output=True, text=True, check=False)
                     if action.returncode:
                         raise GateError(f"gh pr ready failed: {(action.stderr or action.stdout).strip()[:700]}")
-                    after = fetch_snapshot(args.repo, args.pr, conversation=True) if args.wait else None
+                    after = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=True) if args.wait else None
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
@@ -821,6 +949,8 @@ def main() -> int:
                             errors.append("Local worktree changed during Ready transition")
                         ci = classify_ci(after, evidence)
                         errors.extend(ci.errors + ci.pending)
+                        lifecycle = workflows.inspect(after, args.repo)
+                        errors.extend(lifecycle.errors + lifecycle.pending)
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],

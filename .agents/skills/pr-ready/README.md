@@ -87,7 +87,7 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/*.py
 ```
 
-wait 模式也會固定 evidence JSON 與引用的本機 report/log/artifact bytes、PR HEAD/base/branch、fetched base policy ref、title/body；任何變動均停止。pending exemption 仍持續等待；真正的 non-CI blocker、未知 metadata/API error 則立即停止。主 Agent 必須持續監看 attached process，不可把 local attestations 搬進 GitHub Actions 或背景放著就結束。
+wait 模式也會固定 evidence JSON 與引用的本機 report/log/artifact bytes、PR HEAD/base/branch、fetched base policy ref、title/body；任何變動均停止。同時查詢完整 current-HEAD Actions runs，workflow 尚未完成（即使可見 checks 全綠、dependent jobs 還沒建立）仍等待；new run/rerun 不得遮掉之前 active run/attempt，API/metadata 不完整則阻擋，確定空清單支援無 Actions 的 repo。歷史 terminal workflow 結論只證明已結束，仍以 current checks/exemption 決定品質。pending exemption 仍持續等待；真正的 non-CI blocker、未知 metadata/API error 則立即停止。主 Agent 必須持續監看 attached process，不可把 local attestations 搬進 GitHub Actions 或背景放著就結束。
 
 純單元測試不會連接 GitHub，亦不會更動任何真實 PR。需在實際 repo/authenticated `gh` 環境驗證 end-to-end。
 
