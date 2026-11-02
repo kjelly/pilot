@@ -46,8 +46,9 @@ Codex invocation:
 - Delegate by the configured native role name, with a fresh independent context.
   For Codex, follow `.agents/skills/_shared/codex-role-dispatch.md` from the verified
   snapshot: an explicit unavailable-agent-type error permits the documented
-  `default` transport with the same verified role contract and explicit model/effort
-  pins. Report and record this transport; never silently substitute models, inherit
+  `default` transport only after verifying effective selection and model/effort
+  pins under that contract; unknown or conflicting settings block it. Report and
+  record this transport; never silently substitute models, inherit
   the parent conversation, or bypass independent review. Other dispatch failures
   remain blockers.
 - Run packaged scripts and read references from the verified snapshot (`$SNAP`) the

@@ -119,8 +119,9 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
    SHA changes.
    For Codex custom-name dispatch failures, follow
    `.agents/skills/_shared/codex-role-dispatch.md` in the verified snapshot. Its
-   explicit compatibility transport preserves the snapshot role and pins; it does
-   not waive STOP, DRIFT reporting, checkout identity or independent review.
+   compatibility transport requires effective-selection/pin verification before
+   dispatch; unknown or conflicting host settings block it. It does not waive
+   STOP, DRIFT reporting, checkout identity or independent review.
 
 Known limitation: nothing holds a lock for the whole invocation. Two invocations must
 not share a checkout; the branch/HEAD recheck before each handoff detects one

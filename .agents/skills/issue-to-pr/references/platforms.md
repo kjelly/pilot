@@ -12,8 +12,10 @@ Call syntax: Codex `$issue-to-pr ...`; Claude Code `/issue-to-pr ...`; agy `/iss
 
 Subagent dispatch is a **host feature**. This skill tells the Root how to delegate but cannot enable disabled subagent capabilities, override permissions, force a fixed amount of true parallelism, or install the CLIs. For Codex custom-name dispatch failures, use the explicit compatibility transport
 in `.agents/skills/_shared/codex-role-dispatch.md` from the verified snapshot. It
-keeps the original role contract, model/effort pins and fresh context. If genuine
-subagent machinery is unavailable, **do not pretend an independent review
+requires verification of effective transport selection and pins before dispatch,
+and keeps the original role contract and fresh context. Unknown or conflicting
+host settings block compatibility. If genuine subagent machinery is unavailable,
+**do not pretend an independent review
 happened**; stop before the gate.
 
 Root passes an absolute `pilot_history_checks` reference path, applicable past

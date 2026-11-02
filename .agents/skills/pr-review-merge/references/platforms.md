@@ -18,10 +18,11 @@ runs `tests/`.
 
 The subagent declarations are platform-specific, but business rules, review evidence
 schema, GitHub action scripts and Quality Gate are shared. For Codex custom-name dispatch failures, follow
-`.agents/skills/_shared/codex-role-dispatch.md` in the verified snapshot, preserving
-the verified role contract and explicit model/effort pins. Other platform/runtime
-failures remain blockers. If no genuine isolated context exists, report `WAITING`
-rather than simulating an independent review in one context.
+`.agents/skills/_shared/codex-role-dispatch.md` in the verified snapshot, verifying
+effective transport selection and pins before dispatch and preserving the verified
+role contract. Unknown or conflicting host settings block compatibility. Other
+platform/runtime failures remain blockers. If no genuine isolated context exists,
+report `WAITING` rather than simulating an independent review in one context.
 
 Dependencies: `bash`, `python3 >= 3.10`, `gh`, `git` for repository review, and
 `gh auth login`/permissions. No Python PyPI dependencies.
