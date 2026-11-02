@@ -41,7 +41,8 @@ The large `cmd/pilot/cmd` and `internal/spec` packages require explicit
 `--regression PACKAGE=REGEX` selectors. `NEEDS_SELECTION` means the plan is
 incomplete, not permission to omit that package. Select the changed tests and
 tests of the affected behavior; include shared invariants and real runtime
-controls where relevant. CI/workflow edits normally include `TestCI` checks;
+controls where relevant. CI/workflow edits normally include `TestCI` checks
+and `TestAnsible` when toolchain installation or job boundaries change;
 role changes include `TestAgentSkill`. Document why the selected tests cover the
 diff. The planner is advisory: generated files, non-Go dependencies, deleted
 packages and dynamic runtime dependencies still need human/Reviewer assessment.
