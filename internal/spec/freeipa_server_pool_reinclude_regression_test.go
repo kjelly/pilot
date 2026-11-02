@@ -227,25 +227,36 @@ func TestRegression_FreeIPAServerPoolCIRequiresAnsible(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
-			Steps []struct{ Run, Uses string }
+			Strategy struct{ Matrix struct{ Target []string } }
+			Steps    []struct{ Run, Uses string }
 		}
 	}
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatal(err)
 	}
 	ansible, goSetup, recipe := -1, -1, -1
-	for i, step := range workflow.Jobs["playbook-lint"].Steps {
+	job := workflow.Jobs["playbook-integration"]
+	listed := false
+	for _, target := range job.Strategy.Matrix.Target {
+		if target == "freeipa-server-pool-test" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatal("required integration matrix omits freeipa-server-pool-test")
+	}
+	for i, step := range job.Steps {
 		if strings.Contains(step.Run, "pip install") && strings.Contains(step.Run, "ansible-core") {
 			ansible = i
 		}
 		if strings.HasPrefix(step.Uses, "actions/setup-go@") {
 			goSetup = i
 		}
-		if strings.TrimSpace(step.Run) == "make freeipa-server-pool-test" {
+		if strings.TrimSpace(step.Run) == `make "$TARGET"` {
 			recipe = i
 		}
 	}
 	if recipe < 0 || ansible < 0 || goSetup < 0 || recipe <= ansible || recipe <= goSetup {
-		t.Fatalf("CI's Playbook lint job must run make freeipa-server-pool-test after installing Ansible and Go: ansible=%d go=%d recipe=%d", ansible, goSetup, recipe)
+		t.Fatalf("CI's integration job must run the selected target after installing Ansible and Go: ansible=%d go=%d recipe=%d", ansible, goSetup, recipe)
 	}
 }
