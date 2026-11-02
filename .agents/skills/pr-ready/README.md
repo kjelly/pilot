@@ -53,7 +53,7 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 2. 每則 review 意見（人、bot 或之前的自動審查）都先當成待驗證的主張分類（`valid`/`invalid`/`needs_evidence`/`nonblocking`），只有成立的才交給 Coder。不成立的意見不改 code：獨立 Reviewer 在看不到主 Agent 結論的情況下確認後，主 Agent 在 GitHub 回覆反證，記錄在 evidence 的 `disputed_review_comments`（見 `references/review-comments.md`）。同一主張沒有新證據又被提出時交給人決定，不再來回修改或回覆。
 3. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。Coder 的本機測試只跑 diff 觸及的 package 與新增的 regression，全套 `go test ./...` 交給 CI 的 `Go test` job（SKILL.md「Pilot: cycle-time rules」）。
 4. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。Reviewer 只剩 P3/P4 時這一輪就結束：主 Agent 回覆並 resolve thread、記進 PR body 或 follow-up issue，不再派 Coder。
-5. 僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
+5. push 與 evidence 準備好後，主 Agent 保持 session 執行 `pr_gate.py --wait --ready` 持續等待 CI；每次重新確認 HEAD、review/evidence 未變與所有 gate。CI 完成後自動 fresh final preflight → Ready → post-action verification。pending 本身不結束 invocation；只有明確 timeout、取消、runtime 限制或真正 blocker 才 checkpoint。僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
 6. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。
 
 ## Quality Gate 腳本（可單獨使用）
@@ -65,18 +65,20 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
   --evidence .pr-ready/123/evidence.json --worktree .
 
-# 狀態為 GATE-PASS 後，準備將 Draft 轉成 Ready for Review：
+# push、review 與 evidence 準備好後的預設流程；保持 session 等到自動 Ready：
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/123/evidence.json --worktree . --ready
+  --evidence .pr-ready/123/evidence.json --worktree . --wait --ready
 ```
 
+- `WAITING-CI`：其他 gate 通過，保持 session 等待 CI；每 30 秒重新驗證 pins 與全部 gate。`--poll-interval` 上限 60 秒。
+- `WAIT-INTERRUPTED`：明確 `--wait-timeout` 或 SIGINT/SIGTERM 中斷；預設無 timeout。狀態保存在 `.pr-ready/N/wait-status.json`，不覆寫 Root checkpoint；`ready_invoked` 表示是否已嘗試 Ready，若為 true 必須重查遠端狀態。
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。
 - `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變。
 - `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。
 - `receipt_reuse`：receipt 或獨立 review 的 SHA 是 HEAD 的祖先、且中間只改了 base branch `.github/pr-evidence.json` 的 `evidence_only_paths`（例如 `docs/evidence/**` 的 evidence commit）時，gate 自己跑 `git diff` 判斷後接受，並在這個欄位列出；base branch 從 `refs/remotes/<--base-remote>/<base>` 讀（預設 `origin`），本機沒有 fetch 到就回到嚴格的 HEAD 綁定。其他任何 delta 都要重跑。
 
-驗證命令可由 `scripts/run_check.py` 執行並產生 SHA-bound receipt；腳本不會自動編造 acceptance criteria / reviewer 結論。`gh pr checks --required` 和 GraphQL reviewThreads 資訊不可存取時採 **fail-closed**；branch 沒有 required checks 時 `--required` 以 exit 1、stdout 為空、stderr 恰為 `no required checks reported on the '<branch>' branch` 結束，gate 只在這個完全吻合的情況視為 0 個 required checks，其餘 checks 仍須全部通過；stdout 有 JSON 就一律照 JSON 判斷（名稱含這段文字的 required check 失敗仍然是失敗），訊息混在其他輸出、大小寫不同或其他 exit status 一律 fail-closed。evidence 有 `disputed_review_comments` 時，gate 另外讀取 PR 的 conversation comments 與 reviews，確認被反駁的意見與回覆都在這個 PR 上、回覆在意見之後、inline 回覆在同一個 thread 且仍是最新一則、其他回覆內含原意見的 URL；反駁本身對不對由獨立 Reviewer 判斷，gate 判斷不了。
+驗證命令可由 `scripts/run_check.py` 執行並產生 SHA-bound receipt；腳本不會自動編造 acceptance criteria / reviewer 結論。`gh pr checks --required` 和 GraphQL reviewThreads 資訊不可存取時採 **fail-closed**；branch 沒有 required checks 時 `--required` 以 exit 1、stdout 為空、stderr 恰為 `no required checks reported on the '<branch>' branch` 結束，gate 只在這個完全吻合的情況視為 0 個 required checks，其餘 checks 仍須全部通過；stdout 有 JSON 就一律照 JSON 判斷（名稱含這段文字的 required check 失敗仍然是失敗），訊息混在其他輸出、大小寫不同或其他 exit status 一律 fail-closed。wait 模式一律讀取完整 review/comment body 與 edit metadata，新增或修改就停下交給 Root triage；非 wait 模式 evidence 有 `disputed_review_comments` 時，gate 另外讀取 PR 的 conversation comments 與 reviews，確認被反駁的意見與回覆都在這個 PR 上、回覆在意見之後、inline 回覆在同一個 thread 且仍是最新一則、其他回覆內含原意見的 URL；反駁本身對不對由獨立 Reviewer 判斷，gate 判斷不了。
 
 ## 本機測試
 
@@ -84,6 +86,8 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/*.py
 ```
+
+wait 模式也會固定 evidence JSON 與引用的本機 report/log/artifact bytes、PR HEAD/base/branch、fetched base policy ref、title/body；任何變動均停止。pending exemption 仍持續等待；真正的 non-CI blocker、未知 metadata/API error 則立即停止。主 Agent 必須持續監看 attached process，不可把 local attestations 搬進 GitHub Actions 或背景放著就結束。
 
 純單元測試不會連接 GitHub，亦不會更動任何真實 PR。需在實際 repo/authenticated `gh` 環境驗證 end-to-end。
 

@@ -38,7 +38,7 @@ Create one evidence file *per PR per latest HEAD*. A new commit invalidates old 
 
 `target_validation` is read only when the base branch's `.github/pr-evidence.json` requires a record (see [Repository-required target evidence](#repository-required-target-evidence)); the gate ignores it otherwise. A `required` decision names the committed `artifact` and the full `tested_revision` SHA instead.
 
-Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. The exemption only lets the PR become Ready: `pr-review-merge` never merges with a failing check, and with the same entry in its evidence it waits for a rerun instead of returning the PR to Draft. There is no exemption for review threads: resolve each one after fixing or disputing it (the upstream `unresolved_nonblocking_threads` field is rejected).
+Use a **category object** like `{ "not_applicable": "Project has no linter; examined Makefile, CI and language tooling." }` only if no applicable command exists. This is not a way to excuse a failing command. Where a failing GitHub check is demonstrably unrelated, `unrelated_failing_checks` can list objects `{ "name": "check name", "reason": "specific independently verified reason", "reviewer_confirmed": true }`; required checks are **never exempted**. A pending check is never exempted either: `--wait` keeps waiting until it becomes terminal. The exemption only lets the PR become Ready: `pr-review-merge` never merges with a failing check, and with the same entry in its evidence it waits for a rerun instead of returning the PR to Draft. There is no exemption for review threads: resolve each one after fixing or disputing it (the upstream `unresolved_nonblocking_threads` field is rejected).
 
 A review comment the PR does not act on (see [review comments](review-comments.md)) gets one `disputed_review_comments` entry per disputed claim:
 
@@ -66,8 +66,8 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category tests --
 python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category lint --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- golangci-lint run
 python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category static_analysis --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- go vet ./...
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree .
-# After every gate succeeds, and ONLY to change the PR lifecycle:
-python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --ready
+# Default after push/review/evidence: keep this session active through CI and Ready:
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --wait --ready
 ```
 
 `run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that checkout directory.
@@ -86,3 +86,5 @@ After integrating an advanced base, a base requirement with `kind: target-run`
 may accept `target_validation.target_reuse` under the
 shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). A changed
 execution/dependency input still needs a new target run.
+
+In wait mode the helper pins the evidence JSON bytes, referenced local reports/logs/artifacts (including untracked `.pr-ready` files), PR HEAD/base/branch, fetched base policy ref, title/body and complete review/comment content. Existing evidence-only ancestor receipts/review remain accepted at wait start; no top-level HEAD movement or artifact edit is accepted during the wait. A legacy inline review summary remains supported; path-shaped local report references must exist. `wait-status.json` stores progress and hashes under `.pr-ready/N/`, leaving Root's `checkpoint.json` alone. Do not edit evidence while the helper is waiting; stop, revalidate and start a fresh session.

@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
+import math
+import signal
+import time
 import json
 import re
 import subprocess
 import sys
-sys.dont_write_bytecode = True
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -34,7 +39,7 @@ def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Patte
         raise GateError(f"Cannot execute {argv[0]}: {exc}") from exc
     if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
         return []
-    if p.returncode and not allow_nonzero_json:
+    if p.returncode and (not allow_nonzero_json or p.returncode not in (1, 8)):
         raise GateError(f"{' '.join(argv[:4])}: exit {p.returncode}: {(p.stderr or p.stdout).strip()[:700]}")
     try:
         val = json.loads(p.stdout)
@@ -44,7 +49,7 @@ def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Patte
 
 
 def gh_pr(repo: str, pr: int) -> dict[str, Any]:
-    fields = "number,url,title,isDraft,state,headRefOid,headRefName,baseRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
+    fields = "number,url,title,body,isDraft,state,headRefOid,headRefName,baseRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
     value = cmd(["gh", "pr", "view", str(pr), "-R", repo, "--json", fields])
     if not isinstance(value, dict):
         raise GateError("Expected a GitHub PR JSON object")
@@ -182,10 +187,10 @@ query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
 # the evidence disputes a review comment.
 CONNECTIONS = {
     "reviewThreads": ("id isResolved isOutdated "
-                      "comments(first:100) { nodes { url createdAt } pageInfo { hasNextPage } }",
+                      "comments(first:100) { nodes { url createdAt updatedAt body } pageInfo { hasNextPage } }",
                       "review threads"),
-    "comments": ("url createdAt body", "conversation comments"),
-    "reviews": ("url createdAt", "reviews"),
+    "comments": ("url createdAt updatedAt body", "conversation comments"),
+    "reviews": ("url createdAt updatedAt body state", "reviews"),
 }
 
 
@@ -205,7 +210,7 @@ def gh_connection(repo: str, pr: int, field: str) -> list[dict[str, Any]]:
             argv.extend(["-f", f"cursor={cursor}"])
         payload = cmd(argv)
         if not isinstance(payload, dict) or payload.get("errors"):
-            raise GateError(f"GraphQL {label} query failed: {str(payload.get('errors'))[:300]}")
+            raise GateError(f"GraphQL {label} query failed: {str(payload)[:300]}")
         try:
             connection = payload["data"]["repository"]["pullRequest"][field]
             nodes, page = connection["nodes"], connection["pageInfo"]
@@ -415,9 +420,91 @@ def check_disputes(s: Snapshot, evidence: dict[str, Any], sha: Any, errors: list
             errors.append(f"{loc} reply does not link the disputed comment ({source})")
 
 
+@dataclass
+class CIResult:
+    errors: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+
+
+def valid_check(value: Any) -> bool:
+    # gh exposes CheckRunState and StatusState through one state field.
+    states = {"ACTION_REQUIRED", "CANCELLED", "COMPLETED", "ERROR", "EXPECTED", "FAILURE",
+              "IN_PROGRESS", "NEUTRAL", "PENDING", "QUEUED", "REQUESTED", "SKIPPED",
+              "STALE", "STARTUP_FAILURE", "SUCCESS", "TIMED_OUT", "WAITING"}
+    return (isinstance(value, dict) and isinstance(value.get("name"), str)
+            and bool(value["name"].strip()) and isinstance(value.get("state"), str)
+            and isinstance(value.get("bucket"), str) and value["state"] in states
+            and value.get("bucket") in {"pass", "fail", "pending", "cancel", "skipping"})
+
+
+def classify_ci(s: Snapshot, evidence: dict[str, Any]) -> CIResult:
+    """Separate actual pending checks from blockers; exemptions never hide pending."""
+    result = CIResult()
+    if not s.checks:
+        result.errors.append("No CI checks visible; cannot verify required/related checks (fail closed)")
+    required_names: set[str] = set()
+    for c in s.required_checks:
+        if not valid_check(c):
+            result.errors.append("Malformed/unknown required GitHub check metadata")
+            continue
+        name = c.get("name")
+        if not isinstance(name, str) or not name:
+            result.errors.append("Required check missing name")
+            continue
+        required_names.add(name)
+        if c.get("bucket") == "pending":
+            result.pending.append(f"Required GitHub check not passing: {name} ({c.get('state')}, pending)")
+        elif c.get("bucket") != "pass":
+            result.errors.append(f"Required GitHub check not passing: {name} ({c.get('state')}, {c.get('bucket')})")
+
+    observed_names: set[str] = set()
+    unrelated = evidence.get("unrelated_failing_checks", [])
+    if not isinstance(unrelated, list):
+        result.errors.append("unrelated_failing_checks malformed")
+        unrelated = []
+    exemptions = {}
+    for item in unrelated:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) \
+                and isinstance(item.get("reason"), str) and len(item["reason"].strip()) >= 30 \
+                and item.get("reviewer_confirmed") is True:
+            exemptions[item["name"]] = item
+        else:
+            result.errors.append("Invalid unrelated GitHub check exemption (needs exact name, reason, reviewer_confirmed)")
+
+    for c in s.checks:
+        if not valid_check(c):
+            result.errors.append("Malformed/unknown GitHub check metadata")
+            continue
+        name, bucket = c.get("name"), c.get("bucket")
+        if not isinstance(name, str) or not name:
+            result.errors.append("Unnamed GitHub CI check")
+            continue
+        observed_names.add(name)
+        if bucket == "pending":
+            result.pending.append(f"Nonpassing GitHub check: {name} ({c.get('state')}, {bucket})")
+        elif name in required_names and bucket != "pass":
+            result.errors.append(f"Required GitHub check not successful: {name}")
+        elif bucket == "pass":
+            continue
+        elif name not in required_names and bucket == "skipping":
+            # GitHub regards a *non-required* neutral/skip as nonblocking.
+            continue
+        elif bucket in ("fail", "cancel", "skipping") and name in exemptions and name not in required_names:
+            continue
+        else:
+            result.errors.append(f"Nonpassing GitHub check: {name} ({c.get('state')}, {bucket})")
+
+    for name in required_names - observed_names:
+        result.errors.append(f"Required GitHub check missing from full check rollup: {name}")
+    for name in exemptions.keys() - observed_names:
+        result.errors.append(f"Claimed unrelated check does not exist on HEAD: {name}")
+
+    return result
+
+
 def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
              local: tuple[str, str, list[str]] | None = None,
-             log_base: Path | None = None, ctx: Any = None) -> list[str]:
+             log_base: Path | None = None, ctx: Any = None, allow_pending: bool = False) -> list[str]:
     errs: list[str] = []
     pr = s.pr
     sha = pr.get("headRefOid")
@@ -481,54 +568,10 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
         if dirty:
             errs.append(f"Local worktree has uncommitted/untracked edits: {dirty[:4]}")
 
-    if not s.checks:
-        errs.append("No CI checks visible; cannot verify required/related checks (fail closed)")
-    required_names: set[str] = set()
-    for c in s.required_checks:
-        name = c.get("name")
-        if not isinstance(name, str) or not name:
-            errs.append("Required check missing name")
-            continue
-        required_names.add(name)
-        if c.get("bucket") != "pass":
-            errs.append(f"Required GitHub check not passing: {name} ({c.get('state')}, {c.get('bucket')})")
-
-    observed_names: set[str] = set()
-    unrelated = evidence.get("unrelated_failing_checks", [])
-    if not isinstance(unrelated, list):
-        errs.append("unrelated_failing_checks malformed")
-        unrelated = []
-    exemptions = {}
-    for item in unrelated:
-        if isinstance(item, dict) and isinstance(item.get("name"), str) \
-                and isinstance(item.get("reason"), str) and len(item["reason"].strip()) >= 30 \
-                and item.get("reviewer_confirmed") is True:
-            exemptions[item["name"]] = item
-        else:
-            errs.append("Invalid unrelated GitHub check exemption (needs exact name, reason, reviewer_confirmed)")
-
-    for c in s.checks:
-        name, bucket = c.get("name"), c.get("bucket")
-        if not isinstance(name, str) or not name:
-            errs.append("Unnamed GitHub CI check")
-            continue
-        observed_names.add(name)
-        if name in required_names and bucket != "pass":
-            errs.append(f"Required GitHub check not successful: {name}")
-        elif bucket == "pass":
-            continue
-        elif name not in required_names and bucket == "skipping":
-            # GitHub regards a *non-required* neutral/skip as nonblocking.
-            continue
-        elif bucket in ("fail", "cancel", "pending", "skipping") and name in exemptions and name not in required_names:
-            continue
-        else:
-            errs.append(f"Nonpassing GitHub check: {name} ({c.get('state')}, {bucket})")
-
-    for name in required_names - observed_names:
-        errs.append(f"Required GitHub check missing from full check rollup: {name}")
-    for name in exemptions.keys() - observed_names:
-        errs.append(f"Claimed unrelated check does not exist on HEAD: {name}")
+    ci = classify_ci(s, evidence)
+    errs.extend(ci.errors)
+    if not allow_pending:
+        errs.extend(ci.pending)
 
     # Every thread must be resolved: pr-review-merge returns a PR with any unresolved
     # thread to Draft, so a Ready PR with one would only bounce back. A P3/P4 thread
@@ -550,8 +593,111 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     return errs
 
 
+class WaitStopped(GateError):
+    pass
+
+
+def file_pin(path: Path) -> tuple[str, str]:
+    target = path.resolve(strict=True)
+    if not target.is_file():
+        raise GateError(f"Wait artifact is not a file: {path}")
+    return str(target), hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path) -> dict[str, tuple[str, str]]:
+    """Pin evidence bytes and local files it references, including excluded .pr-ready logs.
+
+    A report may remain a legacy inline summary. Path-shaped report references must exist;
+    a report that existed when waiting began cannot disappear or change into a summary.
+    """
+    paths = {str(evidence_path.absolute())}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"log", "report", "artifact", "receipt"} and isinstance(item, str) and item:
+                    path = Path(item)
+                    path = path if path.is_absolute() else root / path
+                    if path.is_file() or key == "log" or item.startswith((".", "/")) \
+                            or (" " not in item and "://" not in item
+                                and ("/" in item or Path(item).suffix in {".md", ".json", ".log", ".txt"})):
+                        paths.add(str(path.absolute()))
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(evidence)
+    return {path: file_pin(Path(path)) for path in sorted(paths)}
+
+
+def fetched_base(worktree: Path, remote: str, base: str) -> str | None:
+    p = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify",
+                        f"refs/remotes/{remote}/{base}"], capture_output=True, text=True)
+    if p.returncode:
+        # A missing fetched base keeps the existing strict HEAD-only policy.
+        return None
+    return p.stdout.strip()
+
+
+def review_pin(s: Snapshot) -> str:
+    """Fail closed on incomplete review content, even when no dispute was recorded."""
+    for label, nodes in (("comments", s.comments), ("reviews", s.reviews)):
+        if not isinstance(nodes, list):
+            raise GateError(f"Wait requires complete PR {label}")
+        for node in nodes:
+            if not isinstance(node, dict) or any(not isinstance(node.get(key), str)
+                                               for key in ("url", "createdAt", "updatedAt", "body")):
+                raise GateError(f"Wait requires complete PR {label} content")
+    for thread in s.threads:
+        conn = thread.get("comments") if isinstance(thread, dict) else None
+        if not isinstance(conn, dict) or not isinstance(conn.get("pageInfo"), dict) \
+                or conn["pageInfo"].get("hasNextPage") is not False \
+                or not isinstance(conn.get("nodes"), list):
+            raise GateError("Wait requires complete review thread comments")
+        for node in conn["nodes"]:
+            if not isinstance(node, dict) or any(not isinstance(node.get(key), str)
+                                               for key in ("url", "createdAt", "updatedAt", "body")):
+                raise GateError("Wait requires complete review thread content")
+    return json.dumps([s.threads, s.comments, s.reviews], sort_keys=True)
+
+
+@dataclass
+class WaitPins:
+    identity: dict[str, Any]
+    reviews: str
+    artifacts: dict[str, tuple[str, str]]
+    base: str | None
+
+    @classmethod
+    def capture(cls, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
+                root: Path, remote: str) -> WaitPins:
+        keys = ("number", "url", "headRefOid", "headRefName", "baseRefOid", "baseRefName", "title", "body")
+        if any(not isinstance(s.pr.get(key), str) for key in keys if key != "number"):
+            raise GateError("Wait requires complete PR identity/title/body")
+        if not SHA.fullmatch(s.pr["baseRefOid"]):
+            raise GateError("Wait requires a valid base SHA")
+        return cls({key: s.pr[key] for key in keys}, review_pin(s),
+                   artifact_pins(evidence_path, evidence, root),
+                   fetched_base(root, remote, s.pr["baseRefName"]))
+
+    def verify(self, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
+               root: Path, remote: str) -> list[str]:
+        errors = []
+        for key, value in self.identity.items():
+            if s.pr.get(key) != value:
+                errors.append(f"Wait pin changed: PR {key}; revalidate evidence/review")
+        if review_pin(s) != self.reviews:
+            errors.append("Wait pin changed: PR review/comment content; triage again")
+        if artifact_pins(evidence_path, evidence, root) != self.artifacts:
+            errors.append("Wait pin changed: evidence/report/log artifact bytes or paths")
+        if fetched_base(root, remote, self.identity["baseRefName"]) != self.base:
+            errors.append("Wait pin changed: fetched base policy ref")
+        return errors
+
+
 def json_line(result: dict[str, Any], *, compact: bool) -> None:
-    print(json.dumps(result, ensure_ascii=False, indent=None if compact else 2))
+    print(json.dumps(result, ensure_ascii=False, indent=None if compact else 2), flush=True)
 
 
 def main() -> int:
@@ -561,63 +707,143 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, required=True, help="HEAD-specific evidence JSON")
     parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
+    parser.add_argument("--wait", action="store_true", help="Keep polling actual pending CI; with --ready transition automatically")
+    parser.add_argument("--poll-interval", type=float, default=30, help="Wait poll interval in seconds, >0 and <=60 (default 30)")
+    parser.add_argument("--wait-timeout", type=float, help="Explicit optional wait limit in seconds; default waits until settled or cancelled")
     parser.add_argument("--compact", action="store_true", help="One-line JSON output")
     parser.add_argument("--base-remote", default="origin",
                         help="Remote whose fetched base branch carries .github/pr-evidence.json (default origin)")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo) or args.pr <= 0:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
-    if args.ready and not args.worktree:
-        parser.error("--ready requires --worktree to verify branch/clean tree")
+    if (args.ready or args.wait) and not args.worktree:
+        parser.error("--ready/--wait requires --worktree to verify branch/clean tree")
+    if not math.isfinite(args.poll_interval) or not 0 < args.poll_interval <= 60:
+        parser.error("--poll-interval must be >0 and <=60 seconds")
+    if args.wait_timeout is not None and (not args.wait or not math.isfinite(args.wait_timeout) or args.wait_timeout <= 0):
+        parser.error("--wait-timeout requires --wait and a positive finite duration")
+
+    status_path = args.worktree.resolve() / ".pr-ready" / str(args.pr) / "wait-status.json" if args.wait else None
+    started = time.monotonic()
+    polls = 0
+    pins = None
+    ready_invoked = False
+    handlers = {}
+
+    def emit(result: dict[str, Any]) -> None:
+        if status_path is not None:
+            result.update(pr_number=args.pr, elapsed_seconds=round(time.monotonic() - started, 3),
+                          polls=polls, ready_invoked=ready_invoked)
+            if pins is not None:
+                result["head_sha"] = pins.identity["headRefOid"]
+                result["pinned_artifacts"] = pins.artifacts
+                result["pinned_branch"] = pins.identity["headRefName"]
+                result["pinned_base_sha"] = pins.identity["baseRefOid"]
+                result["pinned_fetched_base"] = pins.base
+                result["pinned_review_sha256"] = hashlib.sha256(pins.reviews.encode()).hexdigest()
+                result["pinned_pr_sha256"] = hashlib.sha256(json.dumps(pins.identity, sort_keys=True).encode()).hexdigest()
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = status_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(status_path)
+        json_line(result, compact=args.compact)
+
+    def deadline() -> None:
+        if args.wait_timeout is not None and time.monotonic() - started >= args.wait_timeout:
+            raise WaitStopped("Explicit wait timeout reached; Draft retained unless ready_invoked is true")
+
+    def interrupted(signum: int, _frame: Any) -> None:
+        raise WaitStopped(f"Wait interrupted by {signal.Signals(signum).name}; requery before resuming")
 
     try:
-        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+        if args.wait:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                handlers[sig] = signal.signal(sig, interrupted)
+        evidence_bytes = args.evidence.read_bytes()
+        evidence = json.loads(evidence_bytes)
         if not isinstance(evidence, dict):
             raise GateError("Evidence JSON must be an object")
-        conversation = bool(evidence.get("disputed_review_comments"))
-        before = fetch_snapshot(args.repo, args.pr, conversation=conversation)
-        local = check_local(args.worktree) if args.worktree else None
-        ctx = evidence_context(args.worktree, before.pr.get("headRefOid"), before.pr.get("baseRefName"),
-                               args.base_remote)
-        errors = evaluate(before, evidence, repo=args.repo, number=args.pr, local=local,
-                          log_base=args.worktree, ctx=ctx)
-        errors.extend(target_evidence_errors(before.pr, evidence, args.repo))
-        reuse = list(ctx.accepted) if ctx is not None else []
-        if errors:
-            json_line({"status": "DRAFT-BLOCKED", "pr": before.pr.get("url"),
-                       "head_sha": before.pr.get("headRefOid"), "errors": errors}, compact=args.compact)
-            return 2
-        if not args.ready:
-            json_line({"status": "GATE-PASS", "pr": before.pr.get("url"),
-                       "head_sha": before.pr.get("headRefOid"), "receipt_reuse": reuse,
-                       "message": "Use --ready after final review to transition Draft -> Ready for Review"}, compact=args.compact)
-            return 0
+        conversation = args.wait or bool(evidence.get("disputed_review_comments"))
 
-        # Re-read GitHub and the worktree immediately before the irreversible
-        # lifecycle change. Any change causes us to refuse rather than guessing.
-        latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
-        ctx = evidence_context(args.worktree, latest.pr.get("headRefOid"), latest.pr.get("baseRefName"),
-                               args.base_remote)
-        errors = evaluate(latest, evidence, repo=args.repo, number=args.pr,
-                          local=check_local(args.worktree), log_base=args.worktree, ctx=ctx)
-        errors.extend(target_evidence_errors(latest.pr, evidence, args.repo))
-        reuse = list(ctx.accepted) if ctx is not None else []
-        if errors:
-            json_line({"status": "DRAFT-BLOCKED", "errors": errors}, compact=args.compact)
-            return 2
-        action = subprocess.run(["gh", "pr", "ready", str(args.pr), "-R", args.repo],
-                                capture_output=True, text=True, check=False)
-        if action.returncode:
-            raise GateError(f"gh pr ready failed: {(action.stderr or action.stdout).strip()[:700]}")
-        after = gh_pr(args.repo, args.pr)
-        if after.get("isDraft") is not False or after.get("headRefOid") != evidence["head_sha"]:
-            raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
-        json_line({"status": "READY", "pr": after.get("url"), "head_sha": after["headRefOid"],
-                   "receipt_reuse": reuse, "message": "Ready for Review; no merge performed"}, compact=args.compact)
-        return 0
-    except (GateError, OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
-        json_line({"status": "DRAFT-BLOCKED", "errors": [str(exc)]}, compact=args.compact)
+        def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
+            local = check_local(args.worktree) if args.worktree else None
+            ctx = evidence_context(args.worktree, snapshot.pr.get("headRefOid"), snapshot.pr.get("baseRefName"),
+                                   args.base_remote)
+            errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr, local=local,
+                              log_base=args.worktree, ctx=ctx, allow_pending=args.wait)
+            errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
+            if pins is not None:
+                errors.extend(pins.verify(snapshot, args.evidence, evidence, args.worktree, args.base_remote))
+            pending = classify_ci(snapshot, evidence).pending
+            return errors, pending, list(ctx.accepted) if ctx is not None else []
+
+        while True:
+            deadline()
+            before = fetch_snapshot(args.repo, args.pr, conversation=conversation)
+            polls += 1
+            if args.wait and pins is None:
+                pins = WaitPins.capture(before, args.evidence, evidence, args.worktree, args.base_remote)
+                if pins.artifacts[str(args.evidence.absolute())][1] != hashlib.sha256(evidence_bytes).hexdigest():
+                    raise GateError("Evidence bytes changed during initial wait preflight")
+            errors, pending, reuse = inspect(before)
+            if errors:
+                emit({"status": "DRAFT-BLOCKED", "pr": before.pr.get("url"),
+                      "head_sha": before.pr.get("headRefOid"), "errors": errors})
+                return 2
+            deadline()
+            if not pending and not args.ready:
+                emit({"status": "GATE-PASS", "pr": before.pr.get("url"),
+                      "head_sha": before.pr.get("headRefOid"), "receipt_reuse": reuse,
+                      "message": "Use --ready after final review to transition Draft -> Ready for Review"})
+                return 0
+            if not pending:
+                # Fresh final preflight, including all wait pins. CI may become pending again.
+                latest = fetch_snapshot(args.repo, args.pr, conversation=conversation)
+                errors, pending, reuse = inspect(latest)
+                if errors:
+                    emit({"status": "DRAFT-BLOCKED", "errors": errors})
+                    return 2
+                deadline()
+                if not pending:
+                    ready_invoked = True
+                    action = subprocess.run(["gh", "pr", "ready", str(args.pr), "-R", args.repo],
+                                            capture_output=True, text=True, check=False)
+                    if action.returncode:
+                        raise GateError(f"gh pr ready failed: {(action.stderr or action.stdout).strip()[:700]}")
+                    after = fetch_snapshot(args.repo, args.pr, conversation=True) if args.wait else None
+                    after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
+                    if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
+                        raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
+                    if pins is not None:
+                        errors = pins.verify(after, args.evidence, evidence, args.worktree, args.base_remote)
+                        sha, branch, dirty = check_local(args.worktree)
+                        if sha != pins.identity["headRefOid"] or branch != pins.identity["headRefName"] or dirty:
+                            errors.append("Local worktree changed during Ready transition")
+                        ci = classify_ci(after, evidence)
+                        errors.extend(ci.errors + ci.pending)
+                        if errors:
+                            raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
+                    emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],
+                          "receipt_reuse": reuse, "message": "Ready for Review; no merge performed"})
+                    return 0
+            if not args.wait:
+                # inspect() normally rejects pending outside wait mode.
+                raise GateError("Pending CI prevents Ready")
+            emit({"status": "WAITING-CI", "pr": before.pr.get("url"), "pending_checks": pending,
+                  "message": "HEAD/review/evidence pins valid; waiting for CI before final gate"})
+            delay = args.poll_interval
+            if args.wait_timeout is not None:
+                delay = min(delay, max(0, args.wait_timeout - (time.monotonic() - started)))
+            time.sleep(delay)
+    except WaitStopped as exc:
+        emit({"status": "WAIT-INTERRUPTED", "errors": [str(exc)]})
         return 2
+    except (GateError, OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        emit({"status": "DRAFT-BLOCKED", "errors": [str(exc)]})
+        return 2
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
