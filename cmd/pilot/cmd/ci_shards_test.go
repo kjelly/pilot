@@ -229,10 +229,9 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 func checkCIGoShardEvidence(ci string) error {
 	var wf struct {
 		Jobs map[string]struct {
-			Needs    any
-			If       string
-			Strategy struct{ Matrix yaml.Node }
-			Steps    []struct {
+			Needs any
+			If    string
+			Steps []struct {
 				Name            string
 				Run             string
 				Uses            string
@@ -285,36 +284,6 @@ func checkCIGoShardEvidence(ci string) error {
 	if !verified || !downloaded || !slices.Contains(ciNeedsList(wf.Jobs["image"].Needs), "go-test-results") {
 		return fmt.Errorf("image must wait for downloaded and independently verified shard events")
 	}
-	// Full controls exist only during rollout, and must run exactly the unfiltered suite.
-	if control, exists := wf.Jobs["go-test-control"]; exists {
-		var controlMatrix struct{ Group []string }
-		if err := control.Strategy.Matrix.Decode(&controlMatrix); err != nil {
-			return err
-		}
-		if !slices.Equal(controlMatrix.Group, []string{"spec", "cmd"}) || control.If != "needs.changes.outputs.evidence_only != 'true'" {
-			return fmt.Errorf("full comparison requires both complete package controls")
-		}
-		full := false
-		for _, step := range control.Steps {
-			if step.Name == "go test" && step.Run == "make test-race" && step.Env["GO_TEST_JSON"] == "1" &&
-				step.Env["PILOT_TEST_SHARD"] == "${{ matrix.group }}" && step.Env["CI_SHARD_INDEX"] == "" &&
-				step.Env["GO_TEST_REPORT_DIR"] == ".verification/go-control-${{ matrix.group }}" {
-				full = true
-			}
-		}
-		comparison := wf.Jobs["go-test-comparison"]
-		compared := false
-		for _, step := range comparison.Steps {
-			if strings.HasPrefix(step.Run, "python3 scripts/ci-go-test-shards.py compare --shards ") && step.If == "" && step.ContinueOnError == nil {
-				compared = true
-			}
-		}
-		if !full || !compared || comparison.If != "" || !slices.Contains(ciNeedsList(comparison.Needs), "go-test-control") ||
-			!slices.Contains(ciNeedsList(comparison.Needs), "go-test-results") ||
-			!slices.Contains(ciNeedsList(wf.Jobs["image"].Needs), "go-test-comparison") {
-			return fmt.Errorf("image must wait for actual same-candidate full/shard comparison")
-		}
-	}
 	for _, step := range wf.Jobs["changes"].Steps {
 		if strings.Contains(step.Run, "scripts/ci-go-test-shards.py matrix --github-output") {
 			return nil
@@ -324,6 +293,7 @@ func checkCIGoShardEvidence(ci string) error {
 }
 
 func TestCIGoShardEvidence(t *testing.T) {
+	t.Fatal("intentional PR #231 single-shard failure: image and receipt must remain blocked")
 	if err := checkCIGoShardEvidence(readCIYAML(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +301,7 @@ func TestCIGoShardEvidence(t *testing.T) {
 
 func TestCIGoShardEvidenceCatchesDrift(t *testing.T) {
 	ci := readCIYAML(t)
-	mutations := []struct{ old, replacement string }{
+	for _, mutation := range []struct{ old, replacement string }{
 		{"GO_TEST_JSON: '1'", "GO_TEST_JSON: '0'"},
 		{"go-shard-${{ github.run_attempt }}-${{ matrix.shard }}", "shared-evidence"},
 		{"if-no-files-found: error", "if-no-files-found: warn"},
@@ -340,16 +310,7 @@ func TestCIGoShardEvidenceCatchesDrift(t *testing.T) {
 		{"needs: [changes, test]", "needs: changes"},
 		{"scripts/ci-go-test-shards.py verify-run", "scripts/ci-go-test-shards.py summarize"},
 		{"run: python3 scripts/ci-go-test-shards.py verify-run", "run: echo python3 scripts/ci-go-test-shards.py verify-run"},
-	}
-	if strings.Contains(ci, "  go-test-control:\n") {
-		mutations = append(mutations, []struct{ old, replacement string }{
-			{"group: [spec, cmd]", "group: [spec]"},
-			{".verification/go-control-${{ matrix.group }}", ".verification/wrong-control"},
-			{"needs: [changes, test, go-test-control, go-test-results]", "needs: [changes, test, go-test-results]"},
-			{"run: python3 scripts/ci-go-test-shards.py compare --shards", "run: echo python3 scripts/ci-go-test-shards.py compare --shards"},
-		}...)
-	}
-	for _, mutation := range mutations {
+	} {
 		if !strings.Contains(ci, mutation.old) {
 			t.Fatalf("missing mutation anchor %q", mutation.old)
 		}

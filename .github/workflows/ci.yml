@@ -159,83 +159,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  go-test-control:
-    name: Go full control (${{ matrix.group }})
-    needs: changes
-    if: needs.changes.outputs.evidence_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [spec, cmd]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Download Go modules
-        run: go mod download
-      - name: go vet
-        run: go vet ./...
-      - name: go build
-        run: go build ./...
-      - name: Select full Go package
-        env:
-          PILOT_TEST_SHARD: ${{ matrix.group }}
-        run: |
-          packages=$(bash scripts/ci-go-test-packages.sh "$PILOT_TEST_SHARD")
-          echo "GO_TEST_PACKAGES=$(printf '%s\n' "$packages" | paste -sd ' ' -)" >> "$GITHUB_ENV"
-      - name: go test
-        env:
-          PILOT_TEST_SHARD: ${{ matrix.group }}
-          GO_TEST_JSON: '1'
-          GO_TEST_REPORT_DIR: .verification/go-control-${{ matrix.group }}
-        run: make test-race
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: go-control-${{ github.run_attempt }}-${{ matrix.group }}
-          path: .verification/go-control-${{ matrix.group }}/
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-  go-test-comparison:
-    name: Compare full and sharded Go suites
-    needs: [changes, test, go-test-control, go-test-results]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: go-shard-${{ github.run_attempt }}-*
-          path: .verification/go-compare-shards
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: go-control-${{ github.run_attempt }}-*
-          path: .verification/go-controls
-      - name: Compare actual observations
-        run: python3 scripts/ci-go-test-shards.py compare --shards .verification/go-compare-shards --artifact-prefix "go-shard-${GITHUB_RUN_ATTEMPT}-" --controls ".verification/go-controls/go-control-${GITHUB_RUN_ATTEMPT}-spec/report.json" ".verification/go-controls/go-control-${GITHUB_RUN_ATTEMPT}-cmd/report.json" --output .verification/go-comparison.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: go-comparison-${{ github.run_attempt }}
-          path: .verification/go-comparison.json
-          if-no-files-found: error
-          retention-days: 7
-
   playbook-lint:
     # L1 syntax (blocking) + duplicate-key check + L2 ansible-lint (advisory)
     # over every playbook — mirrors `make playbook-lint`, which local dev only
@@ -398,7 +321,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [changes, test, go-test-results, go-test-comparison, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
+    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
