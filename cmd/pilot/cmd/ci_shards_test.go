@@ -293,7 +293,6 @@ func checkCIGoShardEvidence(ci string) error {
 }
 
 func TestCIGoShardEvidence(t *testing.T) {
-	t.Fatal("intentional PR #231 single-shard failure: image and receipt must remain blocked")
 	if err := checkCIGoShardEvidence(readCIYAML(t)); err != nil {
 		t.Fatal(err)
 	}

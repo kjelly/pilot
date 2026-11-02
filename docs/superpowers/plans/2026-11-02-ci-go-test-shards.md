@@ -2,7 +2,7 @@
 
 - **版本**：2026-11-02，依目前程式現況修訂。
 - **Repository**：https://github.com/kjelly/pilot
-- **狀態**：階段 A 完整 CI 已成功；階段 B 功能已提交為 `899fbd61`，本機 33 項快速測試、4 項真實 Go fixtures 與相關 Go CI 合約測試通過。階段 C 已配置完整套件對照及 blocking comparison，正式 CI 待執行；D 尚未完成。
+- **狀態**：A 的完整 baseline、B 的分片及 C 的同 candidate 完整/分片對照均已通過正式 CI。D 移除暫時對照 jobs，保留 spec 2 + cmd 2 + rest 1；單一 shard 失敗閘門及最終 candidate 的驗收狀態、revision/tree 與量測統一見[最新證據](../../evidence/ci-go-test-shards/LATEST.md)。
 - **C 候選修正**：對照導入後補上完整入口回歸：`make test-all` 必須清除繼承的 selector/JSON/report/shard 範圍，包含 GNU Make 命令列變數；此修正形成新 candidate，前一個對照 run 不作為修正後的證據。
 - **交付範圍**：coding agent 在 repository 內完成耗時量測、Go top-level test 分片、執行結果核對、CI 發布閘門與回歸測試。
 - **預期效益**：縮短大型 Go package 的測試等待時間，保留完整測試涵蓋及既有發布條件；同時量測新增 runner 成本，避免只改善單一 test step。
@@ -139,6 +139,8 @@ B 的功能實作與 C 的對照設定各自 commit；可推送 C 的完整 cand
 契約測試必須包含故意放回錯誤的案例，證明漏 shard、漏 dependency、遺漏 artifact 或錯誤 selector 會導致失敗。真實 GitHub 驗證在不發布 image 的 PR 上，暫時令單一 shard 非零退出，觀察 image/ci-receipt 被阻擋；修復後以新 candidate 跑成功鏈。cancel/missing 等分支以自動化負向 fixture 驗證，不要求取消他人的工作或建立真實 release。
 
 ## 6. 量測與接受條件
+
+以下是驗收契約；各項的實際通過狀態與未涵蓋範圍以[驗收紀錄](../../evidence/ci-go-test-shards/LATEST.md)為準。
 
 ### 6.1 正確性：全部必達
 
