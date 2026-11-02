@@ -1,4 +1,7 @@
-# Current PR #222 evidence
+# freeipa-identity-sudo-cache — latest actual-run evidence
 
-- [Current-source native authorization, failure/retry and deferred-client matrix](2026-11-02-b9ed3f2.md) — tested `b9ed3f207b6dc5380bac75557528779526e92ff4`, nine bounded arms passed; server bootstrap 20/20.
-- [Fresh identity L1–L6 chain](2026-11-01-f6adf41.md) — tested `f6adf41465b905d0161e5909ecf760d7008bc987`, identity verification 24/24, idempotency changed0; execution content unchanged at the bounded candidate.
+| Record | Tested commit | Outcome | Finished (UTC) | Verify |
+|---|---|---|---|---|
+| [issue-214.md](issue-214.md) | `522c192917c7a0747aaa7dfc20473dbbfd6303b2` | success | 2026-11-02 01:44 | PASS 20/0/0; PASS 24/0/0 |
+
+Written by `pilot 0.2.0 vm-target topology --evidence-record`. Specs and runbooks link here; the record above is rewritten in place for each candidate of a change, and `git log -- docs/evidence/freeipa-identity-sudo-cache` is the history.
