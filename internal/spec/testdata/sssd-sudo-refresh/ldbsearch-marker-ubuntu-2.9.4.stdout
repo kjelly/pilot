@@ -1,0 +1,7 @@
+# record 1
+dn: cn=sudorules,cn=custom,cn=ipa.pilot.internal,cn=sysdb
+sudoLastFullRefreshTime: 1793426299
+
+# returned 1 records
+# 1 entries
+# 0 referrals

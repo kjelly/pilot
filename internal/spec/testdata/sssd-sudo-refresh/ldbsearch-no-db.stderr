@@ -1,0 +1,5 @@
+ltdb: tdb(/var/lib/sss/db/cache_nosuch.ldb): tdb_open_ex: could not open file /var/lib/sss/db/cache_nosuch.ldb: No such file or directory
+
+Unable to open tdb '/var/lib/sss/db/cache_nosuch.ldb': No such file or directory
+Failed to connect to '/var/lib/sss/db/cache_nosuch.ldb' with backend 'tdb': Unable to open tdb '/var/lib/sss/db/cache_nosuch.ldb': No such file or directory
+Failed to connect to /var/lib/sss/db/cache_nosuch.ldb - Unable to open tdb '/var/lib/sss/db/cache_nosuch.ldb': No such file or directory
