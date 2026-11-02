@@ -43,9 +43,14 @@ Codex invocation:
   `xhigh`. `cmd/pilot/cmd/agent_skill_consistency_test.go` keeps the three
   platform copies of each role and the installed `.codex/agents` /
   `.claude/agents` files identical.
-- Delegate by the configured native role name, with a fresh independent context;
-  do not override its model/effort or use a conversation fork that inherits another
-  model. Report unavailable roles/models rather than silently substituting them.
+- Delegate by the configured native role name, with a fresh independent context.
+  For Codex, follow `.agents/skills/_shared/codex-role-dispatch.md` from the verified
+  snapshot: an explicit unavailable-agent-type error permits the documented
+  `default` transport only after verifying effective selection and model/effort
+  pins under that contract; unknown or conflicting settings block it. Report and
+  record this transport; never silently substitute models, inherit
+  the parent conversation, or bypass independent review. Other dispatch failures
+  remain blockers.
 - Run packaged scripts and read references from the verified snapshot (`$SNAP`) the
   checkout contract takes, by absolute snapshot paths, never from the branch being
   worked on: it may predate or replace them. `$REPO_ROOT` is the current checkout.
