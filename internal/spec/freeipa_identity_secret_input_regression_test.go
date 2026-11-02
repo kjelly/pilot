@@ -163,7 +163,7 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
-			Strategy struct{ Matrix struct{ Target []string } }
+			Strategy struct{ Matrix yaml.Node }
 			Steps    []struct{ Run, Uses string }
 		}
 	}
@@ -172,8 +172,12 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 	}
 	ansible, setupGo, recipe := -1, -1, -1
 	job := workflow.Jobs["playbook-integration"]
+	var integrationMatrix struct{ Target []string }
+	if err := job.Strategy.Matrix.Decode(&integrationMatrix); err != nil {
+		t.Fatal(err)
+	}
 	listed := false
-	for _, target := range job.Strategy.Matrix.Target {
+	for _, target := range integrationMatrix.Target {
 		if target == "identity-secret-test" {
 			listed = true
 		}

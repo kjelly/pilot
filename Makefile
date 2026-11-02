@@ -86,7 +86,7 @@ lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 GO_TEST_PACKAGES ?= ./...
 test-race:     	## Run tests with the race detector (CI selects a package shard)
-	$(if $(GO_TEST_REPORT_DIR),python3 scripts/ci-go-test-shards.py record -- )go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)$(if $(filter 1,$(GO_TEST_JSON)), -json)
+	$(if $(or $(GO_TEST_REPORT_DIR),$(filter-out undefined,$(origin GO_TEST_RUN_REGEX))),python3 scripts/ci-go-test-shards.py record -- )go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)$(if $(filter 1,$(GO_TEST_JSON)), -json)
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.

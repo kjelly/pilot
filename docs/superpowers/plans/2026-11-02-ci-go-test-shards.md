@@ -2,7 +2,7 @@
 
 - **版本**：2026-11-02，依目前程式現況修訂。
 - **Repository**：https://github.com/kjelly/pilot
-- **狀態**：可開始實作；新增工具與 CI 行為均待實作、待實測，不代表功能已通過驗收。
+- **狀態**：階段 A 完整 CI 已成功；階段 B 已完成本機實作與測試，正式分片/對照驗證由階段 C 的同一 candidate 執行；C/D 尚未完成。
 - **交付範圍**：coding agent 在 repository 內完成耗時量測、Go top-level test 分片、執行結果核對、CI 發布閘門與回歸測試。
 - **預期效益**：縮短大型 Go package 的測試等待時間，保留完整測試涵蓋及既有發布條件；同時量測新增 runner 成本，避免只改善單一 test step。
 
@@ -25,6 +25,10 @@
 
 開始實作前已確認 `eabddff48ebe0f619053f168a60f050437d97e57` 的 main push CI [run 41442066295](https://github.com/kjelly/pilot/actions/runs/41442066295) 為 completed/success（2026-11-02，12:07:01–12:46:55 UTC）。這證明實作前的完整 CI 為綠燈；逐測試 JSON 與權重仍由階段 A 補齊，不能從 package 總時間反推。
 
+階段 A 的 [run 41458621354](https://github.com/kjelly/pilot/actions/runs/41458621354) 已成功，測試 branch HEAD `322caae2cac589f24aafcfada68e2d48c8dc05cd` 的 frozen merge `e7394188c1821a3b1445d0fa7c5c65a61d85f555`、tree `e8233dbeea91e0eba190ffe98fc7147c269142da`。Go 為 1.26.8/linux-amd64；spec/cmd/rest 的 Go 執行時間分別為 2,142.253 / 1,381.102 / 420.386 秒，top-level tests 分別為 539 / 1,371 / 2,781。權重由這次成功完整 race 結果產生，沒有以分片數推估耗時。
+
+此 run 整體 wall time 為 2,380 秒（39 分 40 秒），所有有配置 runner 的 job 執行時間合計 114.333 runner minutes；未配置 runner 的 skipped promote 不以異常時間戳推算為負值或零秒執行。
+
 ## 2. 範圍與必要契約
 
 本次只改 CI orchestration 與其測試工具，不新增 runner、不改帳號額度或 repository 管理設定，也不導入需要額外秘密或私人 VM 的驗收工作。
@@ -41,11 +45,11 @@
 
 ### 3.1 工具與檔案責任
 
-以下新檔案及介面均為待實作契約，並非已驗證的操作指令。
+以下列出本次新增/修改的檔案與介面；驗收狀態以上方進度及實測結果為準，不代表所有介面都已通過正式 CI。
 
 | 檔案 | 責任 |
 |---|---|
-| `scripts/ci-go-test-shards.py`（新增） | Python 標準函式庫工具；提供 matrix、discover、plan、run、verify、summarize、weights 功能，使用 subprocess 呼叫 Go 並保留退出碼 |
+| `scripts/ci-go-test-shards.py` | Python 標準函式庫工具；CLI 為 matrix、record、verify-run、compare、summarize、weights；record 內執行 discovery/plan，再用 subprocess 呼叫 Go 並保留退出碼 |
 | `scripts/ci-go-test-shards.json`（新增） | 唯一的 package/group/shard 數設定；spec、cmd 固定對應現有兩個 package，rest 由現有 package selector 推導 |
 | `scripts/ci-go-test-weights.json`（新增） | 從成功的完整 race run 產生的逐 package/test 耗時權重、來源 candidate/run 及版本；由明確工具操作更新後提交 |
 | `scripts/tests/test_ci_go_test_shards.py`（新增） | 不需要 Go 的分派、事件核對、耗時彙整及錯誤處理單元測試 |
@@ -111,6 +115,8 @@ CI artifacts 設定保留 7 天，agent 在到期前取回驗收資料；到期�
 | D：正式收斂 | 移除暫時對照 jobs，形成新 candidate，再跑正式完整 CI；依量測決定保留 2 shards 或各增為 3 | 最終 candidate 的全部正式 shards、結果核對及既有 validations 成功；附前後量測 |
 
 階段可分為量測與分片導入兩個變更，不要求為每項量測另開 PR。暫時對照 jobs 的新增/移除須同步 image dependencies 與契約測試；不可為了對照在本機重跑兩個大型 package 全套。階段 D 若調整設定/權重，須重跑受影響 CI，不能沿用前一份 partition 的成功結果。
+
+B 的功能實作與 C 的對照設定各自 commit；可推送 C 的完整 candidate，用同一次正式 CI 驗證 B 的全部分片與 C 的完整對照，避免另跑一次相同的全套。證據須綁定實際測試的 C revision/tree，不把它宣稱為對 B commit 單獨執行的結果。
 
 導入對照只能證明所測 candidate 的涵蓋、觀察結果與隔離情形；不保證所有可能測試順序下的 race 行為都一致。有跨測試依賴時先修正隔離並補回歸；無法在本次修妥就保留原 package 執行方式，不以放寬 skip 或刪除測試交付。
 

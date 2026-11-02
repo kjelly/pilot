@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,7 +100,7 @@ func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 		}
 		return string(out)
 	}
-	all := strings.Fields(run("go", "list", "./..."))
+	all := strings.Fields(run("go", "list", "-race", "./..."))
 	var got []string
 	for _, shard := range []string{"spec", "cmd", "rest"} {
 		packages := strings.Fields(run("bash", "scripts/ci-go-test-packages.sh", shard))
@@ -118,15 +119,48 @@ func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 	}
 	var wf struct {
 		Jobs map[string]struct {
-			Strategy struct{ Matrix struct{ Shard []string } }
-			If       string
+			Strategy struct {
+				Matrix      yaml.Node
+				MaxParallel string `yaml:"max-parallel"`
+			}
+			Outputs map[string]string
+			If      string
 		}
 	}
 	if err := yaml.Unmarshal([]byte(readCIYAML(t)), &wf); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(wf.Jobs["test"].Strategy.Matrix.Shard, []string{"spec", "cmd", "rest"}) {
-		t.Fatal("CI must run all three package shards")
+	if wf.Jobs["test"].Strategy.Matrix.Value != "${{ fromJSON(needs.changes.outputs.go_test_matrix) }}" ||
+		wf.Jobs["test"].Strategy.MaxParallel != "${{ fromJSON(needs.changes.outputs.go_test_max_parallel) }}" ||
+		wf.Jobs["changes"].Outputs["go_test_matrix"] != "${{ steps.go_matrix.outputs.matrix }}" ||
+		wf.Jobs["changes"].Outputs["go_test_max_parallel"] != "${{ steps.go_matrix.outputs.max_parallel }}" {
+		t.Fatal("CI must consume the generated matrix and matching parallel limit")
+	}
+	var generated struct {
+		Include []struct {
+			Shard, Group string
+			Index, Total int
+		}
+	}
+	if err := json.Unmarshal([]byte(run("python3", "scripts/ci-go-test-shards.py", "matrix")), &generated); err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	ids := map[string]bool{}
+	for _, entry := range generated.Include {
+		if ids[entry.Shard] || entry.Index != counts[entry.Group] || entry.Total < 1 {
+			t.Fatalf("invalid matrix entry: %+v", entry)
+		}
+		counts[entry.Group]++
+		ids[entry.Shard] = true
+	}
+	for _, entry := range generated.Include {
+		if counts[entry.Group] != entry.Total {
+			t.Fatalf("incomplete matrix group: %+v", entry)
+		}
+	}
+	if len(counts) != 3 || counts["spec"] == 0 || counts["cmd"] == 0 || counts["rest"] != 1 {
+		t.Fatalf("matrix lost a required group: %v", counts)
 	}
 	if wf.Jobs["test"].If != "needs.changes.outputs.evidence_only != 'true'" {
 		t.Fatal("Go suite skip must depend only on evidence diff")
@@ -141,7 +175,7 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 			Timeout  int `yaml:"timeout-minutes"`
 			Strategy struct {
 				FailFast bool `yaml:"fail-fast"`
-				Matrix   struct{ Target []string }
+				Matrix   yaml.Node
 			}
 			Steps []struct{ Run string }
 		}
@@ -150,8 +184,12 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := wf.Jobs["playbook-integration"]
+	var integrationMatrix struct{ Target []string }
+	if err := job.Strategy.Matrix.Decode(&integrationMatrix); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"alert-rules-test", "identity-noop-test", "identity-ssh-cache-test", "identity-secret-test", "freeipa-server-pool-test"}
-	if !slices.Equal(job.Strategy.Matrix.Target, want) || job.Strategy.FailFast {
+	if !slices.Equal(integrationMatrix.Target, want) || job.Strategy.FailFast {
 		t.Fatal("each required runtime suite must run in its own non-fail-fast matrix job")
 	}
 	if job.If != "needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes") {
@@ -188,16 +226,19 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 	}
 }
 
-func checkCIGoBaselineEvidence(ci string) error {
+func checkCIGoShardEvidence(ci string) error {
 	var wf struct {
 		Jobs map[string]struct {
+			Needs any
+			If    string
 			Steps []struct {
-				Name string
-				Run  string
-				Uses string
-				If   string
-				Env  map[string]string
-				With map[string]any
+				Name            string
+				Run             string
+				Uses            string
+				If              string
+				Env             map[string]string
+				With            map[string]any
+				ContinueOnError any `yaml:"continue-on-error"`
 			}
 		}
 	}
@@ -209,42 +250,70 @@ func checkCIGoBaselineEvidence(ci string) error {
 		switch step.Name {
 		case "go test":
 			foundTest = step.Run == "make test-race" && step.Env["GO_TEST_JSON"] == "1" &&
-				step.Env["PILOT_TEST_SHARD"] == "${{ matrix.shard }}" &&
-				step.Env["GO_TEST_REPORT_DIR"] == ".verification/go-baseline-${{ matrix.shard }}"
-		case "Upload Go baseline evidence":
+				step.Env["PILOT_TEST_SHARD"] == "${{ matrix.group }}" &&
+				step.Env["CI_SHARD_INDEX"] == "${{ matrix.index }}" &&
+				step.Env["GO_TEST_REPORT_DIR"] == ".verification/go-shard-${{ matrix.shard }}" &&
+				(step.ContinueOnError == nil || fmt.Sprint(step.ContinueOnError) == "false")
+		case "Upload Go shard evidence":
 			foundUpload = step.Uses == "actions/upload-artifact@v4" && step.If == "always()" &&
-				step.With["name"] == "go-baseline-${{ github.run_attempt }}-${{ matrix.shard }}" &&
-				step.With["path"] == ".verification/go-baseline-${{ matrix.shard }}/" &&
+				step.With["name"] == "go-shard-${{ github.run_attempt }}-${{ matrix.shard }}" &&
+				step.With["path"] == ".verification/go-shard-${{ matrix.shard }}/" &&
 				step.With["if-no-files-found"] == "error" && step.With["include-hidden-files"] == true &&
 				fmt.Sprint(step.With["retention-days"]) == "7"
 		case "Go CI evidence runtime tests":
-			foundRuntime = step.If == "matrix.shard == 'rest'" && step.Run == "make ci-go-runtime-test"
+			foundRuntime = step.If == "matrix.group == 'rest'" && step.Run == "make ci-go-runtime-test"
 		}
 	}
 	if !foundTest || !foundUpload || !foundRuntime {
-		return fmt.Errorf("Go baseline evidence contract: test=%v upload=%v runtime=%v", foundTest, foundUpload, foundRuntime)
+		return fmt.Errorf("Go shard evidence contract: test=%v upload=%v runtime=%v", foundTest, foundUpload, foundRuntime)
 	}
-	return nil
+	gate := wf.Jobs["go-test-results"]
+	if gate.If != "" || !slices.Contains(ciNeedsList(gate.Needs), "test") || !slices.Contains(ciNeedsList(gate.Needs), "changes") {
+		return fmt.Errorf("result gate must depend unconditionally on the entire test matrix and changes")
+	}
+	verified, downloaded := false, false
+	for _, step := range gate.Steps {
+		if step.Run == `python3 scripts/ci-go-test-shards.py verify-run .verification/go-shards --artifact-prefix "go-shard-${GITHUB_RUN_ATTEMPT}-" --output .verification/go-shards-summary.json` && step.If == "" &&
+			(step.ContinueOnError == nil || fmt.Sprint(step.ContinueOnError) == "false") {
+			verified = true
+		}
+		if step.Uses == "actions/download-artifact@v4" && step.With["pattern"] == "go-shard-${{ github.run_attempt }}-*" {
+			downloaded = true
+		}
+	}
+	if !verified || !downloaded || !slices.Contains(ciNeedsList(wf.Jobs["image"].Needs), "go-test-results") {
+		return fmt.Errorf("image must wait for downloaded and independently verified shard events")
+	}
+	for _, step := range wf.Jobs["changes"].Steps {
+		if strings.Contains(step.Run, "scripts/ci-go-test-shards.py matrix --github-output") {
+			return nil
+		}
+	}
+	return fmt.Errorf("missing matrix generator")
 }
 
-func TestCIGoBaselineEvidence(t *testing.T) {
-	if err := checkCIGoBaselineEvidence(readCIYAML(t)); err != nil {
+func TestCIGoShardEvidence(t *testing.T) {
+	if err := checkCIGoShardEvidence(readCIYAML(t)); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestCIGoBaselineEvidenceCatchesDrift(t *testing.T) {
+func TestCIGoShardEvidenceCatchesDrift(t *testing.T) {
 	ci := readCIYAML(t)
 	for _, mutation := range []struct{ old, replacement string }{
 		{"GO_TEST_JSON: '1'", "GO_TEST_JSON: '0'"},
-		{"go-baseline-${{ github.run_attempt }}-${{ matrix.shard }}", "shared-evidence"},
+		{"go-shard-${{ github.run_attempt }}-${{ matrix.shard }}", "shared-evidence"},
 		{"if-no-files-found: error", "if-no-files-found: warn"},
 		{"run: make ci-go-runtime-test", "run: true"},
+		{"CI_SHARD_INDEX: ${{ matrix.index }}", "CI_SHARD_INDEX: '0'"},
+		{"needs: [changes, test]", "needs: changes"},
+		{"scripts/ci-go-test-shards.py verify-run", "scripts/ci-go-test-shards.py summarize"},
+		{"run: python3 scripts/ci-go-test-shards.py verify-run", "run: echo python3 scripts/ci-go-test-shards.py verify-run"},
 	} {
 		if !strings.Contains(ci, mutation.old) {
 			t.Fatalf("missing mutation anchor %q", mutation.old)
 		}
-		if err := checkCIGoBaselineEvidence(strings.Replace(ci, mutation.old, mutation.replacement, 1)); err == nil {
+		if err := checkCIGoShardEvidence(strings.Replace(ci, mutation.old, mutation.replacement, 1)); err == nil {
 			t.Fatalf("accepted drift: %s", mutation.old)
 		}
 	}

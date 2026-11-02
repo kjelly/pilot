@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "groups": {
+    "spec": {"package": "github.com/kjelly/pilot/internal/spec", "shards": 2},
+    "cmd": {"package": "github.com/kjelly/pilot/cmd/pilot/cmd", "shards": 2},
+    "rest": {"package": null, "shards": 1}
+  }
+}
