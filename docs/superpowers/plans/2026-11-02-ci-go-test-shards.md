@@ -3,6 +3,7 @@
 - **版本**：2026-11-02，依目前程式現況修訂。
 - **Repository**：https://github.com/kjelly/pilot
 - **狀態**：階段 A 完整 CI 已成功；階段 B 功能已提交為 `899fbd61`，本機 33 項快速測試、4 項真實 Go fixtures 與相關 Go CI 合約測試通過。階段 C 已配置完整套件對照及 blocking comparison，正式 CI 待執行；D 尚未完成。
+- **C 候選修正**：對照導入後補上完整入口回歸：`make test-all` 必須清除繼承的 selector/JSON/report/shard 範圍，包含 GNU Make 命令列變數；此修正形成新 candidate，前一個對照 run 不作為修正後的證據。
 - **交付範圍**：coding agent 在 repository 內完成耗時量測、Go top-level test 分片、執行結果核對、CI 發布閘門與回歸測試。
 - **預期效益**：縮短大型 Go package 的測試等待時間，保留完整測試涵蓋及既有發布條件；同時量測新增 runner 成本，避免只改善單一 test step。
 

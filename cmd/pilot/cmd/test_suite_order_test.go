@@ -19,8 +19,10 @@ func TestCompleteTestSuitesRunSequentially(t *testing.T) {
 	}
 	// CI exports a shard; this harness intentionally exercises both full suites.
 	t.Setenv("GO_TEST_PACKAGES", "./internal/evidence")
-	t.Setenv("GO_TEST_REPORT_DIR", "")
-	t.Setenv("GO_TEST_JSON", "")
+	t.Setenv("GO_TEST_REPORT_DIR", filepath.Join(t.TempDir(), "must-not-report"))
+	t.Setenv("GO_TEST_JSON", "1")
+	t.Setenv("GO_TEST_RUN_REGEX", "^TestMustNotFilterCompleteSuites$")
+	t.Setenv("CI_SHARD_INDEX", "0")
 	root := repoRootForTest(t)
 	for _, failNormal := range []bool{false, true} {
 		name := "success"
@@ -75,6 +77,31 @@ printf '%s finish\n' "$mode" >> "$PILOT_SUITE_EVENTS"
 				t.Fatalf("suite execution = %q, want %q\n%s", strings.TrimSpace(string(events)), strings.TrimSpace(want), out)
 			}
 		})
+	}
+}
+
+// Command-line variables flow through MAKEOVERRIDES, beyond env -u's reach.
+func TestCompleteTestSuitesIgnoreCommandLineSelector(t *testing.T) {
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not installed")
+	}
+	dir := t.TempDir()
+	stub := `#!/bin/sh
+set -eu
+[ "$*" = "test -count=1 -timeout 45m ./..." ] || [ "$*" = "test -race -count=1 -timeout 45m ./..." ]
+`
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, makePath, "--no-print-directory", "test-all",
+		"GO_TEST_RUN_REGEX=^TestSubset$", "GO_TEST_JSON=1", "GO_TEST_REPORT_DIR=must-not-report", "CI_SHARD_INDEX=0")
+	command.Dir = repoRootForTest(t)
+	command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "MAKEFLAGS=", "MFLAGS=")
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("full suites inherited a command-line filter: %v\n%s", err, out)
 	}
 }
 

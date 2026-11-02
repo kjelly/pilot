@@ -62,6 +62,10 @@ go run ./cmd/pilot vm-target test --name <vm> \
 - **完整 normal + race**：`make test-all` 依序執行兩份完整測試，即使帶 `-j`
   也不會重疊；normal 失敗會立即停止。請勿另外同時啟動完整測試或其他大量
   Ansible 測試，以免 subprocess 與 CPU 互相爭用耗盡每套測試的時間預算。
+  這個完整入口會清除 `GO_TEST_RUN_REGEX`、`GO_TEST_REPORT_DIR`、`GO_TEST_JSON`
+  與 `CI_SHARD_INDEX` 的選擇範圍，包括透過 recursive Make 繼承的命令列變數；
+  其他業務環境與工具可用性維持原狀。GNU Make harness 同時鎖住環境變數與
+  命令列變數兩條路徑，避免正常測試全跑、race 卻只跑到某個 shard。
 - **時間預算**：`make test` 與 `make test-race` 均使用 `-count=1 -timeout 45m`，
   normal 的預設 10 分鐘不足以完成安裝了 Ansible 的本機整合測試；`internal/spec`
   已長到超過原本的 30 分鐘上限（本機約 29.3 分鐘、CI runner 上更久），所以兩者
