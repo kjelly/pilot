@@ -68,10 +68,14 @@ go run ./cmd/pilot vm-target test --name <vm> \
   都放寬到 45 分鐘，CI 的 `Go test` job 預算隨之是 60 分鐘。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
 - **race detector**：`make test-race` 執行完整 race suite，CI 跑的就是這個 target。
 - **Python callback**：`make test-callback`。
-- **CI evidence-only 沿用**：同 repo、同 PR、同 base，且 24 小時內已有完整成功
+- **CI evidence-only 沿用**：同 repo、同 PR、同實際測試的 base parent，且 24 小時內已有完整成功
   workflow 的 ancestor candidate，才可沿用 Go 與 playbook integration 結果。
-  candidate 到 HEAD 的差異只能是 `docs/evidence/**`，receipt 必須對得上成功
-  run 的 attempt；程式、依賴、workflow 或 base 改動都不沿用。沒有 receipt、
+  raw candidate 到 PR HEAD 的差異只能是 `docs/evidence/**`，兩次 merge tree 的
+  差異也只能是 evidence（或空差異）。schema v2 receipt 記錄 frozen `GITHUB_SHA`
+  merge、tree、兩個實際 parent 與成功 run 的 attempt；merge 第二個 parent 必須
+  等於當次 PR head，checkout 必須等於 frozen merge。PR event 的原始 base 欄位
+  不能代替實際 base parent，移動中的 main ref 也不能代替當次測試輸入。
+  程式、依賴、workflow 或實際 base 改動都不沿用。舊 schema、缺少 merge object、沒有 receipt、
   artifact 過期、API 失敗或不明狀態就跑完整 CI；不串接沿用結果。快速驗證仍會
   重跑。這代表沿用既有成功結果，不保證浮動 runner／套件來源此刻完全相同。
   PR 的首次完整驗證與 main／release 發布都照常執行。

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,80 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+// The receipt and reuse jobs must observe the same frozen merge as validation.
+// Default actions/checkout uses github.sha; explicit refs must preserve it.
+func checkCIFrozenMergeCheckouts(ciYAML string) error {
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string
+				With map[string]any
+			}
+		}
+	}
+	if err := yaml.Unmarshal([]byte(ciYAML), &wf); err != nil {
+		return err
+	}
+	required := map[string]bool{"changes": false, "ci-receipt": false}
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/checkout@") {
+				continue
+			}
+			ref, explicit := step.With["ref"]
+			if explicit && ref != "${{ github.sha }}" {
+				return fmt.Errorf("%s checkout must use the frozen github.sha", name)
+			}
+			if _, needsHistory := required[name]; needsHistory {
+				if !explicit || fmt.Sprint(step.With["fetch-depth"]) != "0" {
+					return fmt.Errorf("%s checkout must explicitly pin github.sha and fetch full history", name)
+				}
+				required[name] = true
+			}
+		}
+	}
+	for _, name := range []string{"changes", "ci-receipt"} {
+		if !required[name] {
+			return fmt.Errorf("%s must check out the frozen merge", name)
+		}
+	}
+	return nil
+}
+
+func TestCIFrozenMergeCheckouts(t *testing.T) {
+	if err := checkCIFrozenMergeCheckouts(readCIYAML(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCIFrozenMergeCheckoutCheckCatchesDrift(t *testing.T) {
+	const checkout = "    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n"
+	for _, name := range []string{"changes", "ci-receipt"} {
+		for _, mutation := range []struct{ name, body string }{
+			{"raw head", strings.ReplaceAll(checkout, "${{ github.sha }}", "${{ github.event.pull_request.head.sha }}")},
+			{"moving ref", strings.ReplaceAll(checkout, "${{ github.sha }}", "refs/pull/7/merge")},
+			{"implicit ref", strings.ReplaceAll(checkout, "          ref: ${{ github.sha }}\n", "")},
+			{"shallow", strings.ReplaceAll(checkout, "fetch-depth: 0", "fetch-depth: 1")},
+			{"no checkout", "    steps: []\n"},
+		} {
+			t.Run(name+"/"+mutation.name, func(t *testing.T) {
+				ci := "jobs:\n"
+				for _, job := range []string{"changes", "ci-receipt"} {
+					ci += "  " + job + ":\n"
+					if job == name {
+						ci += mutation.body
+					} else {
+						ci += checkout
+					}
+				}
+				if err := checkCIFrozenMergeCheckouts(ci); err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("got %v, want checkout rejection for %s", err, name)
+				}
+			})
+		}
+	}
+}
 
 func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 	root := repoRootForTest(t)
