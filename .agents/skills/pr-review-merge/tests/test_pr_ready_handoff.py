@@ -65,7 +65,8 @@ class HandoffTests(unittest.TestCase):
 
     def pr_ready_passes(self, st):
         checks = [{'name': 'Go test', 'bucket': 'pass', 'state': 'SUCCESS'},
-                  {'name': 'Playbook lint', 'bucket': st['bucket'], 'state': st['bucket'].upper()}]
+                  {'name': 'Playbook lint', 'bucket': st['bucket'], 'state': {'pass': 'SUCCESS', 'fail': 'FAILURE',
+                           'cancel': 'CANCELLED', 'skipping': 'SKIPPED'}[st['bucket']]}]
         pr = {'number': 42, 'url': 'https://github.com/acme/demo/pull/42', 'headRefOid': H,
               'headRefName': 'fix', 'state': 'OPEN', 'isDraft': True, 'mergeable': 'MERGEABLE',
               'reviewDecision': st['decision']}

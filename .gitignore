@@ -82,6 +82,8 @@ workspace
 # excludes the same direct contents by pattern instead, which DOES allow
 # the two Detection Engine topology examples below to be re-included.
 tmp/*
+# tmp/go.mod is tracked: it keeps `./...` out of the scratch directory (see the file).
+!tmp/go.mod
 # ...except the committed Detection Engine topology examples (spec §49) —
 # tmp/ is the canonical home for vm-target topology scenario files, and
 # these two are schema examples meant to be copied, same reasoning as

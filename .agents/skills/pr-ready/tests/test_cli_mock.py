@@ -279,6 +279,75 @@ class CLIMockTests(unittest.TestCase):
             self.assertIn("files outside evidence_only_paths changed", " ".join(json.loads(blocked.stdout)["errors"]))
             self.assertFalse((t / "ready").exists())
 
+    def evidence_only_pr(self, t):
+        """make_pr, then: `main` (fetched as origin/main) carries the manifest; the PR branch adds an
+        evidence-only commit on top of the commit the receipts and review were taken at."""
+        repo, candidate, evidence, env = self.make_pr(t)
+
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+        git("branch", "main")
+        git("checkout", "--quiet", "main")
+        (repo / ".github").mkdir()
+        (repo / ".github" / "pr-evidence.json").write_text(json.dumps(TARGET_MANIFEST), encoding="utf-8")
+        git("add", ".github")
+        git("commit", "--quiet", "-m", "manifest")
+        git("update-ref", "refs/remotes/origin/main", "main")
+        git("checkout", "--quiet", "fix-one")
+        record = repo / ART
+        record.parent.mkdir(parents=True)
+        record.write_text("# tested " + candidate, encoding="utf-8")
+        git("add", ART)
+        git("commit", "--quiet", "-m", "evidence")
+        head = git("rev-parse", "HEAD")
+        evidence["head_sha"] = head
+        env["FAKE_GH_SHA"] = head
+        return repo, candidate, head, evidence, env
+
+    def test_receipts_and_review_carry_over_an_evidence_only_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, candidate, head, evidence, env = self.evidence_only_pr(t)
+            passed = self.gate(repo, evidence, env)
+            self.assertEqual(0, passed.returncode, passed.stdout + passed.stderr)
+            out = json.loads(passed.stdout)
+            self.assertEqual("GATE-PASS", out["status"])
+            self.assertEqual({"from": candidate, "head": head, "changed": [ART]},
+                             {k: out["receipt_reuse"][0][k] for k in ("from", "head", "changed")})
+            self.assertEqual({"independent_review", "local_validation.tests[0]", "local_validation.lint[0]",
+                              "local_validation.static_analysis[0]"}, {r["label"] for r in out["receipt_reuse"]})
+            ready = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(0, ready.returncode, ready.stdout + ready.stderr)
+            self.assertEqual("READY", json.loads(ready.stdout)["status"])
+            self.assertTrue((t / "ready").exists())
+
+    def test_a_code_commit_after_the_receipts_still_needs_new_receipts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, candidate, head, evidence, env = self.evidence_only_pr(t)
+            (repo / "file").write_text("changed", encoding="utf-8")
+            subprocess.run(["git", "commit", "--quiet", "-am", "code"], cwd=repo, check=True)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+            evidence["head_sha"] = head
+            env["FAKE_GH_SHA"] = head
+            blocked = self.gate(repo, evidence, env)
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            errors = " ".join(json.loads(blocked.stdout)["errors"])
+            self.assertIn("local_validation.tests[0] stale/missing SHA (files outside evidence_only_paths changed: file)", errors)
+            self.assertIn("Independent reviewer result stale for current HEAD (files outside evidence_only_paths changed: file)", errors)
+
+    def test_without_the_fetched_base_the_strict_rule_applies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, candidate, head, evidence, env = self.evidence_only_pr(t)
+            subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=repo, check=True)
+            blocked = self.gate(repo, evidence, env)
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            errors = " ".join(json.loads(blocked.stdout)["errors"])
+            self.assertIn("stale/missing SHA (no evidence_only_paths declared on the base branch)", errors)
+            self.assertFalse((t / "ready").exists())
+
     def test_stale_live_base_blocks_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)

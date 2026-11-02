@@ -14,7 +14,8 @@ Verify the branch/head_sha and current changes in the assigned checkout before e
 Use SA findings critically, repair the true root cause, and add adequate regression tests.
 If evidence shows a finding or review comment does not hold, stop and report it to Root instead of coding around it.
 Never skip meaningful tests, weaken assertions, silence errors, fabricate outcomes or hardcode passes.
-Run appropriate tests, lint, static analysis, and integration checks for the affected code.
+Run tests, lint, static analysis and integration checks for the packages the change touches and the regressions it adds;
+the whole suite is CI's job: no `go test ./...` or `-race ./...` unless Root asks, never beside a live vm-target run.
 Produce reproducible HEAD-bound validation receipts; commit only focused work for this PR.
 Do not push branches, change PR lifecycle, create a new PR, change branch protection or merge.
 Return compact {head_sha, commits, changes, validation, remaining_risks, blockers, next_action}.
