@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -159,6 +160,31 @@ func TestDeferredHostNames(t *testing.T) {
 	}
 	if emptyExtraVar != "pilot_deferred_hosts=[]" {
 		t.Fatalf("deferredHostsExtraVar(nil) = %q", emptyExtraVar)
+	}
+}
+
+// The deferred hosts reach ansible-playbook as one key=value extra var whose
+// value is JSON text. Ansible types such a value as a string (not a list), so a
+// playbook that tests `host in pilot_deferred_hosts` runs a substring test: with
+// client-10 deferred, client-1 would match as well. Playbooks therefore parse
+// the string; internal/spec's
+// TestRegression_IdentitySSHCacheSudoRefreshDeferredHosts runs the production
+// freeipa-identity tasks with exactly this argv form. If pilot changes the form
+// (an @file, a JSON object), this fails: revisit that test and the playbooks
+// that read pilot_deferred_hosts.
+func TestDeferredHostsReachAnsibleAsAKeyValueExtraVar(t *testing.T) {
+	deferred := []delivery.DeferredHost{{Host: "client-10"}, {Host: "client-1"}}
+	extra, err := deferredHostsExtraVar(deferred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ansibleExtraVarArgs([]string{"stage=sandbox", extra}, vaultInput{})
+	want := []string{
+		"-e", "stage=sandbox",
+		"-e", `pilot_deferred_hosts=["client-1","client-10"]`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %q\nwant %q", got, want)
 	}
 }
 
