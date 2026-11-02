@@ -574,6 +574,10 @@ func execAnsiblePlaybook(stdout io.Writer, args ...string) error {
 // as --data-dir, so a --data-dir given here reaches it too (args[0] is
 // the subcommand).
 func execPilot(stdout io.Writer, args ...string) error {
+	return execPilotStreams(stdout, os.Stderr, args...)
+}
+
+func execPilotStreams(stdout, stderr io.Writer, args ...string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate pilot binary: %w", err)
@@ -581,12 +585,17 @@ func execPilot(stdout io.Writer, args ...string) error {
 	if len(args) > 0 {
 		args = append([]string{args[0], "--data-dir=" + resolvePilotDataDir()}, args[1:]...)
 	}
-	return execExternal(stdout, exe, args...)
+	return execExternalStreams(stdout, stderr, exe, args...)
 }
 
 // execExternal runs a binary with stdout/stderr wired to the caller's
 // writers. Honors $PILOT_BIN override so tests can intercept.
 func execExternal(stdout io.Writer, bin string, args ...string) error {
+	return execExternalStreams(stdout, os.Stderr, bin, args...)
+}
+
+// execExternalStreams keeps channels separate while allowing evidence to scan both.
+func execExternalStreams(stdout, stderr io.Writer, bin string, args ...string) error {
 	if envBin := os.Getenv("PILOT_BIN_OVERRIDE"); envBin != "" && (bin == "ansible-playbook" || filepath.Base(bin) == filepath.Base(os.Args[0])) {
 		// Only honor for the in-process re-invocation. ansible-playbook
 		// always comes from PATH.
@@ -596,7 +605,7 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 	c := newCmd(ctx, bin, args...)
 	var capturedOut, capturedErr bytes.Buffer
 	c.Stdout = io.MultiWriter(stdout, &capturedOut)
-	c.Stderr = io.MultiWriter(os.Stderr, &capturedErr)
+	c.Stderr = io.MultiWriter(stderr, &capturedErr)
 	// An Ansible command here inherits this process's environment, which
 	// may name the controller Ansible log (ANSIBLE_LOG_PATH); hold it as
 	// every Ansible run does (a no-op when it does not).
@@ -607,7 +616,7 @@ func execExternal(stdout io.Writer, bin string, args ...string) error {
 	err = c.Run()
 	release()
 	if err != nil && filepath.Base(bin) == "ansible-playbook" {
-		fmt.Fprint(os.Stderr, ansible.FailureSummary(capturedOut.String()+"\n"+capturedErr.String()))
+		fmt.Fprint(stderr, ansible.FailureSummary(capturedOut.String()+"\n"+capturedErr.String()))
 	}
 	return err
 }

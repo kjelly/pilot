@@ -18,6 +18,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/evidence"
 	"github.com/kjelly/pilot/internal/sandbox"
 	"github.com/kjelly/pilot/internal/services"
 	"github.com/kjelly/pilot/internal/spec"
@@ -1601,6 +1602,16 @@ Steps executed:
   7. Auto-rollback: if any step after the dry-run fails, automatically rolls
      back to 'pre-test'
 
+--evidence-record <dir>/<change>.md writes the machine-generated part of the
+actual-run evidence record (docs/actual-run-evidence.md §3) when the chain ends,
+whatever the outcome: tested commit and tree (from the checkout, or
+--evidence-candidate/--evidence-tree for a git archive copy), the execution
+closure of the playbooks and specs with Git blob ids, the targets and rendered
+inventory, every step's PLAY RECAP, the verify verdicts, and a scan of the
+captured output for the secret-named values the run was given. The file is
+rewritten in place for each candidate; the two sections marked (fill in) are
+the operator's and survive the rewrite. On success <dir>/LATEST.md is updated.
+
 Everything after '--' is forwarded VERBATIM to the apply AND idempotency
 ansible-playbook runs — this is how you pass playbook variables the run needs:
 
@@ -1627,6 +1638,7 @@ func init() {
 	vtTestCmd.Flags().BoolVar(&vtTestSkipCheckmode, "skip-checkmode", false, "skip the --check --diff dry-run pre-flight (only for a playbook that cannot run in check mode)")
 	vtTestCmd.Flags().BoolVar(&vtTestNoRollback, "no-rollback", false, "disable automatic rollback on failure")
 	vtTestCmd.Flags().IntVar(&vtTestVerifyTimeout, "verify-timeout", 0, "per-row timeout (seconds) forwarded to `pilot verify` (0 = verify's own default)")
+	addEvidenceFlags(vtTestCmd)
 
 	_ = vtTestCmd.MarkFlagRequired("name")
 	_ = vtTestCmd.MarkFlagRequired("playbook")
@@ -1646,6 +1658,10 @@ func buildApplyArgs(playbook, invPath, limitName string, extras []string) []stri
 	return append(out, extras...)
 }
 
+// vtTestEvidenceSteps are the chain steps an evidence record lists; a step
+// the chain never reached is recorded as not-run.
+var vtTestEvidenceSteps = []string{"L1 syntax check", "L3 check-mode dry-run", "L4 apply", "L5 verify", "L6 idempotency"}
+
 func runVtTest(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	m, err := vtNewManager()
@@ -1659,22 +1675,43 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	if t.Status != vmtarget.StatusRunning {
 		return fmt.Errorf("target %q is not running; bring it up first", vtName)
 	}
-
-	// Step 1: L1 Syntax Check
-	if !vtTestSkipLint {
-		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/6] L1 Syntax Check ===")
-		syntaxArgs := []string{vtTestPlaybook, "--syntax-check"}
-		if err := execAnsiblePlaybook(cmd.OutOrStdout(), syntaxArgs...); err != nil {
-			return fmt.Errorf("syntax check failed: %w", err)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "✓ Syntax check passed")
+	sess, err := newEvidenceSession([]string{vtTestPlaybook}, []string{vtTestSpec}, args, vtTestEvidenceSteps)
+	if err != nil {
+		return err
 	}
+	outcome := "failed"
+	chainErr := runVtTestChain(cmd, args, m, sess, &outcome)
+	sess.finish(cmd.OutOrStdout(), cmd.ErrOrStderr(), outcome, chainErr)
+	return chainErr
+}
 
+// runVtTestChain is the L1..L6 chain of `vm-target test`. recOutcome receives
+// the transaction's result (success, rolled_back, ...) for the evidence record.
+func runVtTestChain(cmd *cobra.Command, args []string, m *vmtarget.Manager, sess *evidenceSession, recOutcome *string) error {
+	ctx := context.Background()
 	t, cleanup, invPath, err := vtStageInventory()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+	if err := sess.prepareInventory(invPath); err != nil {
+		return err
+	}
+	if inv, rerr := os.ReadFile(invPath); rerr == nil {
+		sess.targets([]evidence.Target{{Name: t.Name, Groups: t.Hosts, IP: t.IP, BaseImage: t.BaseImage}}, string(inv))
+	}
+
+	// Step 1: L1 Syntax Check
+	if !vtTestSkipLint {
+		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 1/6] L1 Syntax Check ===")
+		syntaxArgs := []string{vtTestPlaybook, "--syntax-check"}
+		if err := sess.stepStreams("L1 syntax check", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return sess.runAnsible("L1 syntax check", w, ew, syntaxArgs...)
+		}); err != nil {
+			return fmt.Errorf("syntax check failed: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "✓ Syntax check passed")
+	}
 
 	// Step 2: L3 dry-run (--check --diff) against the target's CURRENT state.
 	// This is the step that catches check-mode/fresh-host ordering bugs (e.g.
@@ -1686,7 +1723,9 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	if !vtTestSkipCheckmode {
 		fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 2/6] L3 Dry-run (--check --diff) ===")
 		checkArgs := append(buildApplyArgs(vtTestPlaybook, invPath, t.Name, args), "--check", "--diff")
-		if err := execExternal(cmd.OutOrStdout(), "ansible-playbook", checkArgs...); err != nil {
+		if err := sess.stepStreams("L3 check-mode dry-run", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+			return sess.runAnsible("L3 check-mode dry-run", w, ew, checkArgs...)
+		}); err != nil {
 			return fmt.Errorf("check-mode dry-run failed: %w (see AGENTS.md §1.4 — a playbook must apply cleanly in --check mode against the target's current state, not just for real; if this playbook is a legitimate exception, rerun with --skip-checkmode)", err)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "✓ Check-mode dry-run passed")
@@ -1714,7 +1753,9 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	rollbackPolicy := delivery.RollbackSnapshot
 	rollback := delivery.StepFunc(func(context.Context) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "❌ Test failed. Rolling back VM to %s...\n", snapTag)
-		if err := m.Rollback(ctx, vtName, snapTag); err != nil {
+		if err := sess.step("rollback", cmd.OutOrStdout(), func(io.Writer) error {
+			return m.Rollback(ctx, vtName, snapTag)
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "✓ Rollback successful. Target VM restored to pre-test state.")
@@ -1727,7 +1768,9 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 	}
 	transaction := delivery.Transaction{
 		Apply: func(context.Context) error {
-			if err := execExternal(mw, "ansible-playbook", ansibleArgs...); err != nil {
+			if err := sess.stepStreams("L4 apply", mw, cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return sess.runAnsible("L4 apply", w, ew, ansibleArgs...)
+			}); err != nil {
 				return fmt.Errorf("playbook apply failed: %w", err)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓ Playbook apply completed")
@@ -1743,24 +1786,22 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 			if vtTestVerifyTimeout > 0 {
 				pilotArgs = append(pilotArgs, "--timeout", strconv.Itoa(vtTestVerifyTimeout))
 			}
-			if err := execPilot(cmd.OutOrStdout(), pilotArgs...); err != nil {
-				return fmt.Errorf("verification failed: %w", err)
+			verr := sess.stepStreams("L5 verify", cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return sess.runVerify(w, ew, pilotArgs...)
+			})
+			sess.verify(vtTestSpec, limit, sess.stdoutOutput("L5 verify"))
+			if verr != nil {
+				return fmt.Errorf("verification failed: %w", verr)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓ Verification checks passed")
 			return nil
 		},
 		Idempotency: func(context.Context) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "=== [Step 6/6] L6 Idempotency Check ===")
-			var idemBuf bytes.Buffer
-			if err := execExternal(io.MultiWriter(cmd.OutOrStdout(), &idemBuf), "ansible-playbook", ansibleArgs...); err != nil {
-				return fmt.Errorf("idempotency run failed: %w", err)
-			}
-			changed, ok := idempotencyChangedCount(idemBuf.String())
-			if !ok {
-				return fmt.Errorf("idempotency check: no PLAY RECAP found in ansible output (unable to confirm changed=0)")
-			}
-			if changed > 0 {
-				return fmt.Errorf("idempotency check failed: playbook reported %d changed task(s) on second run", changed)
+			if err := runRecordedIdempotencyStreams(sess, cmd.OutOrStdout(), cmd.ErrOrStderr(), func(w, ew io.Writer) error {
+				return sess.runAnsible("L6 idempotency", w, ew, ansibleArgs...)
+			}); err != nil {
+				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "✓ Idempotency check passed (changed=0)")
 			return nil
@@ -1769,9 +1810,10 @@ func runVtTest(cmd *cobra.Command, args []string) error {
 		Rollback:          rollback,
 		RollbackPolicy:    rollbackPolicy,
 	}
-	outcome, err := transaction.Run(ctx)
+	txOutcome, err := transaction.Run(ctx)
+	*recOutcome = string(txOutcome)
 	if err != nil {
-		return fmt.Errorf("vm-target test transaction %s: %w", outcome, err)
+		return fmt.Errorf("vm-target test transaction %s: %w", txOutcome, err)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "🎉 ALL TESTS PASSED SUCCESSFULLY!")
 	return nil
@@ -1809,12 +1851,13 @@ func idempotencyChangedCount(output string) (total int, ok bool) {
 	if idx < 0 {
 		return 0, false
 	}
-	for _, m := range recapChangedRe.FindAllStringSubmatch(output[idx:], -1) {
+	matches := recapChangedRe.FindAllStringSubmatch(output[idx:], -1)
+	for _, m := range matches {
 		n, err := strconv.Atoi(m[1])
 		if err != nil {
 			continue
 		}
 		total += n
 	}
-	return total, true
+	return total, len(matches) > 0
 }

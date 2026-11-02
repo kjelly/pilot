@@ -1,0 +1,16 @@
+{
+  "schema": "pilot-controller-profile/v1",
+  "base": "ghcr.io/ansible-community/community-ee-minimal@sha256:41c6c5eeb9915fec5a97de241b2f91a269234942eaa0d78ac5bcead95a0d91b1",
+  "ansible": "2.21.5",
+  "python": "3.14.8",
+  "platform": "linux/amd64",
+  "go": "go1.26.8",
+  "go_base": "golang@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107",
+  "ansible_posix": {
+    "version": "2.1.0",
+    "url": "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/artifacts/ansible-posix-2.1.0.tar.gz",
+    "sha256": "5ff232cf69492a991f2a0990dbb23ef25a600b7e9209de6e33377a6ff08a8a29",
+    "manifest_sha256": "3899df5b1b390f51a7fc95ad8997c7e7030daf4f5265898f96977ef9ed8d4df5",
+    "callback_sha256": "cc2f6a845b1b7d8d87e16b7fed79b860e10ea9e9b372dd0bdcbd850b9654a032"
+  }
+}

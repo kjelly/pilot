@@ -17,6 +17,8 @@ func TestCompleteTestSuitesRunSequentially(t *testing.T) {
 	if err != nil {
 		t.Skip("make not installed")
 	}
+	// CI exports a shard; this harness intentionally exercises both full suites.
+	t.Setenv("GO_TEST_PACKAGES", "./internal/evidence")
 	root := repoRootForTest(t)
 	for _, failNormal := range []bool{false, true} {
 		name := "success"
@@ -71,5 +73,22 @@ printf '%s finish\n' "$mode" >> "$PILOT_SUITE_EVENTS"
 				t.Fatalf("suite execution = %q, want %q\n%s", strings.TrimSpace(string(events)), strings.TrimSpace(want), out)
 			}
 		})
+	}
+}
+
+func TestRaceSuiteRetainsShardSelection(t *testing.T) {
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not installed")
+	}
+	command := exec.Command(makePath, "--no-print-directory", "--dry-run", "test-race", "GO_TEST_PACKAGES=./internal/evidence")
+	command.Dir = repoRootForTest(t)
+	command.Env = append(os.Environ(), "MAKEFLAGS=", "MFLAGS=")
+	out, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make test-race: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "go test -race -count=1 -timeout 45m ./internal/evidence") || strings.Contains(string(out), "./...") {
+		t.Fatalf("direct race target lost shard selection: %s", out)
 	}
 }
