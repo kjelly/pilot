@@ -10,7 +10,11 @@ The shared `SKILL.md` follows the Agent Skills YAML frontmatter contract; the sa
 
 Call syntax: Codex `$issue-to-pr ...`; Claude Code `/issue-to-pr ...`; agy `/issue-to-pr ...`.
 
-Subagent dispatch is a **host feature**. This skill tells the Root how to delegate but cannot enable disabled subagent capabilities, override permissions, force a fixed amount of true parallelism, or install the CLIs. If no native subagent machinery is available, **do not pretend an independent review happened**; stop before the gate or use an actually independent review process and document its evidence.
+Subagent dispatch is a **host feature**. This skill tells the Root how to delegate but cannot enable disabled subagent capabilities, override permissions, force a fixed amount of true parallelism, or install the CLIs. For Codex custom-name dispatch failures, use the explicit compatibility transport
+in `.agents/skills/_shared/codex-role-dispatch.md` from the verified snapshot. It
+keeps the original role contract, model/effort pins and fresh context. If genuine
+subagent machinery is unavailable, **do not pretend an independent review
+happened**; stop before the gate.
 
 Root passes an absolute `pilot_history_checks` reference path, applicable past
 fix/review links, finding ledger and target-validation plan to native roles.

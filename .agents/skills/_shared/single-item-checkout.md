@@ -104,9 +104,9 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
 7. Give every child the same verified checkout and target identity. Before each dispatch
    run `python3 "$SNAP/.agents/skills/_shared/scripts/skill_snapshot.py" verify-role
    --snapshot "$SNAP" --repo "$REPO_ROOT" --platform claude|codex|agy --role NAME`.
-   Exit 0 (PASS): identical; dispatch. Exit 3 (DRIFT): the role file differs, as on a
+   Exit 0 (PASS): identical; dispatch using the verified role contract. Exit 3 (DRIFT): the role file differs, as on a
    branch cut before this workflow; the snapshot is the binding contract, so dispatch
-   the native role anyway and start the task envelope with the output's
+   the verified role anyway and start the task envelope with the output's
    `binding_statement` ("Your native role definition on disk differs from the invoking
    workflow's. Read `<absolute $SNAP role path>` now and follow it as your role
    contract; where they conflict, the snapshot wins."). Record the role, both sha256
@@ -117,6 +117,10 @@ one JSON object and exits 0 only on PASS. Any other exit is a stop, except that
    evidence schemas, `worktree` means this checkout directory. Recheck branch/HEAD
    before each handoff, check receipt and push; invalidate evidence when the relevant
    SHA changes.
+   For Codex custom-name dispatch failures, follow
+   `.agents/skills/_shared/codex-role-dispatch.md` in the verified snapshot. Its
+   explicit compatibility transport preserves the snapshot role and pins; it does
+   not waive STOP, DRIFT reporting, checkout identity or independent review.
 
 Known limitation: nothing holds a lock for the whole invocation. Two invocations must
 not share a checkout; the branch/HEAD recheck before each handoff detects one
