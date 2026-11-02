@@ -53,21 +53,32 @@ func TestRegression_IdentityNoopCISelectsEveryCase(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
-			Steps []struct{ Run, Uses string }
+			Strategy struct{ Matrix struct{ Target []string } }
+			Steps    []struct{ Run, Uses string }
 		}
 	}
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatal(err)
 	}
 	ansible, goSetup, selected := -1, -1, -1
-	for i, step := range workflow.Jobs["playbook-lint"].Steps {
+	job := workflow.Jobs["playbook-integration"]
+	listed := false
+	for _, target := range job.Strategy.Matrix.Target {
+		if target == "identity-noop-test" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatal("required integration matrix omits identity-noop-test")
+	}
+	for i, step := range job.Steps {
 		if strings.Contains(step.Run, "pip install") && strings.Contains(step.Run, "ansible-core") {
 			ansible = i
 		}
 		if strings.HasPrefix(step.Uses, "actions/setup-go@") {
 			goSetup = i
 		}
-		if strings.TrimSpace(step.Run) == "make identity-noop-test" {
+		if strings.TrimSpace(step.Run) == `make "$TARGET"` {
 			selected = i
 		}
 	}

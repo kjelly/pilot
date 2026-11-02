@@ -126,6 +126,10 @@ uninstall-callback: ## Remove installed callback plugin
 test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
+.PHONY: ci-workflow-test
+ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
+
 skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
 	@for skill in .agents/skills/*/; do \
 	  [ -d "$$skill/tests" ] || continue; \

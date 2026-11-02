@@ -40,7 +40,7 @@ rm -rf .verification/ ~/.local/share/pilot/history.db
 ## 1. 測試分層
 
 ```bash
-# L1 — Go 單元/整合測試（PTY subprocess 的 CI=1 由測試自行設定）
+# L1 — 完整 Go 單元/整合測試入口（完整套件交給 CI；本地範圍見 §3）
 make test
 
 # L2 — 靜態分析
@@ -68,6 +68,19 @@ go run ./cmd/pilot vm-target test --name <vm> \
   都放寬到 45 分鐘，CI 的 `Go test` job 預算隨之是 60 分鐘。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
 - **race detector**：`make test-race` 執行完整 race suite，CI 跑的就是這個 target。
 - **Python callback**：`make test-callback`。
+- **CI evidence-only 沿用**：同 repo、同 PR、同實際測試的 base parent，且 24 小時內已有完整成功
+  workflow 的 ancestor candidate，才可沿用 Go 與 playbook integration 結果。
+  raw candidate 到 PR HEAD 的差異只能是 `docs/evidence/**`，兩次 merge tree 的
+  差異也只能是 evidence（或空差異）。schema v2 receipt 記錄 frozen `GITHUB_SHA`
+  merge、tree、兩個實際 parent 與成功 run 的 attempt；merge 第二個 parent 必須
+  等於當次 PR head，checkout 必須等於 frozen merge。PR event 的原始 base 欄位
+  不能代替實際 base parent，移動中的 main ref 也不能代替當次測試輸入。
+  程式、依賴、workflow 或實際 base 改動都不沿用。舊 schema、缺少 merge object、沒有 receipt、
+  artifact 過期、API 失敗或不明狀態就跑完整 CI；不串接沿用結果。快速驗證仍會
+  重跑。這代表沿用既有成功結果，不保證浮動 runner／套件來源此刻完全相同。
+  PR 的首次完整驗證與 main／release 發布都照常執行。
+- **Playbook runtime suites**：alert rules、identity noop、SSH cache、secret 與
+  server pool 分別跑在獨立的 matrix jobs；映像發布仍依賴全部驗證成功。
 - **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /
   `mcp_test.go` 用真的 MCP client（非 mock handler）對編譯出的 `pilot` binary
   跑 capabilities/inspect/plan/apply 全流程,含 workspace revision 前後比對、
@@ -83,12 +96,19 @@ make test-prereq     # go / docker / ansible 一鍵檢查
 ./pilot doctor       # ansible 工具鏈 + vm-target（KVM/virt-customize）前置
 ```
 
-## 3. 交付前 SOP checklist（新增/修改功能一律照跑）
+## 3. 交付前 SOP checklist
+
+本地驗證依 [共用驗證流程](.agents/skills/_shared/local-validation.md) 建立本次
+candidate 的測試計畫：只跑受影響的 regression 與必要的 runtime checks，包含
+shared helper 的 importers。`cmd/pilot/cmd` 與 `internal/spec` 是大型套件，必須
+明確選擇 regression，不能因為修改其中一個測試就重跑整包。完整 normal/race
+套件由 CI 負責；使用者明確要求或 CI 不可用時才在本地擴大，並記錄理由。
+角色檔案檢查與實際啟動確認也使用同一份流程，避免到昂貴驗證階段才發現角色不可用。
 
 ```bash
 go build ./...                      # 1) 編譯
 go vet ./...                        # 2) 靜態分析
-make test-all                      # 3) 依序跑完整 normal 與 race，任一失敗即停止
+# 3) 執行本次 candidate 測試計畫選定的 regression，完整套件結果由 CI 確認
 make playbook-lint                  # 4) playbook 有動的話
 # 5) spec/playbook 有動的話：vm-target test 真跑一輪（見 AGENTS.md §1.4）
 ```

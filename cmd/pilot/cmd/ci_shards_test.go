@@ -1,15 +1,91 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
+
+// The receipt and reuse jobs must observe the same frozen merge as validation.
+// Default actions/checkout uses github.sha; explicit refs must preserve it.
+func checkCIFrozenMergeCheckouts(ciYAML string) error {
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string
+				With map[string]any
+			}
+		}
+	}
+	if err := yaml.Unmarshal([]byte(ciYAML), &wf); err != nil {
+		return err
+	}
+	required := map[string]bool{"changes": false, "ci-receipt": false}
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/checkout@") {
+				continue
+			}
+			ref, explicit := step.With["ref"]
+			if explicit && ref != "${{ github.sha }}" {
+				return fmt.Errorf("%s checkout must use the frozen github.sha", name)
+			}
+			if _, needsHistory := required[name]; needsHistory {
+				if !explicit || fmt.Sprint(step.With["fetch-depth"]) != "0" {
+					return fmt.Errorf("%s checkout must explicitly pin github.sha and fetch full history", name)
+				}
+				required[name] = true
+			}
+		}
+	}
+	for _, name := range []string{"changes", "ci-receipt"} {
+		if !required[name] {
+			return fmt.Errorf("%s must check out the frozen merge", name)
+		}
+	}
+	return nil
+}
+
+func TestCIFrozenMergeCheckouts(t *testing.T) {
+	if err := checkCIFrozenMergeCheckouts(readCIYAML(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCIFrozenMergeCheckoutCheckCatchesDrift(t *testing.T) {
+	const checkout = "    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          ref: ${{ github.sha }}\n"
+	for _, name := range []string{"changes", "ci-receipt"} {
+		for _, mutation := range []struct{ name, body string }{
+			{"raw head", strings.ReplaceAll(checkout, "${{ github.sha }}", "${{ github.event.pull_request.head.sha }}")},
+			{"moving ref", strings.ReplaceAll(checkout, "${{ github.sha }}", "refs/pull/7/merge")},
+			{"implicit ref", strings.ReplaceAll(checkout, "          ref: ${{ github.sha }}\n", "")},
+			{"shallow", strings.ReplaceAll(checkout, "fetch-depth: 0", "fetch-depth: 1")},
+			{"no checkout", "    steps: []\n"},
+		} {
+			t.Run(name+"/"+mutation.name, func(t *testing.T) {
+				ci := "jobs:\n"
+				for _, job := range []string{"changes", "ci-receipt"} {
+					ci += "  " + job + ":\n"
+					if job == name {
+						ci += mutation.body
+					} else {
+						ci += checkout
+					}
+				}
+				if err := checkCIFrozenMergeCheckouts(ci); err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("got %v, want checkout rejection for %s", err, name)
+				}
+			})
+		}
+	}
+}
 
 func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 	root := repoRootForTest(t)
@@ -57,55 +133,57 @@ func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestCIEvidenceOnlyDiff(t *testing.T) {
-	root := repoRootForTest(t)
-	dir := t.TempDir()
-	git := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Test", "GIT_COMMITTER_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.org", "GIT_COMMITTER_EMAIL=test@example.org")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	git("init", "-q")
-	git("commit", "--allow-empty", "-qm", "base")
-	base := git("rev-parse", "HEAD")
-	check := func(base, head, want string) {
-		t.Helper()
-		cmd := exec.Command("bash", filepath.Join(root, "scripts/ci-evidence-only.sh"), base, head)
-		cmd.Dir = dir
-		out, err := cmd.CombinedOutput()
-		if err != nil || strings.TrimSpace(string(out)) != "evidence_only="+want {
-			t.Fatalf("diff: %q %v, want %s", out, err, want)
+func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
+	var wf struct {
+		Jobs map[string]struct {
+			Needs    any
+			If       string
+			Timeout  int `yaml:"timeout-minutes"`
+			Strategy struct {
+				FailFast bool `yaml:"fail-fast"`
+				Matrix   struct{ Target []string }
+			}
+			Steps []struct{ Run string }
 		}
 	}
-	check("", "", "false")
-	check(base, base, "false")
-	commit := func(path string) {
-		t.Helper()
-		abs := filepath.Join(dir, path)
-		if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte("record"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		git("add", ".")
-		git("commit", "-qm", "change")
+	if err := yaml.Unmarshal([]byte(readCIYAML(t)), &wf); err != nil {
+		t.Fatal(err)
 	}
-	commit("docs/evidence/feature/a space\nand newline.md")
-	check(base, "HEAD", "true")
-	git("rm", "-qr", "docs")
-	git("commit", "-qm", "delete evidence")
-	check("HEAD~1", "HEAD", "true")
-	commit("docs/evidence/feature/record.md")
-	commit("app.go")
-	check(base, "HEAD", "false")
-	git("mv", "app.go", "docs/evidence/runtime.md")
-	git("commit", "-qm", "rename runtime into evidence")
-	check("HEAD~1", "HEAD", "false")
+	job := wf.Jobs["playbook-integration"]
+	want := []string{"alert-rules-test", "identity-noop-test", "identity-ssh-cache-test", "identity-secret-test", "freeipa-server-pool-test"}
+	if !slices.Equal(job.Strategy.Matrix.Target, want) || job.Strategy.FailFast {
+		t.Fatal("each required runtime suite must run in its own non-fail-fast matrix job")
+	}
+	if job.If != "needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes") {
+		t.Fatal("runtime reuse must depend on candidate validation")
+	}
+	mk, err := os.ReadFile(filepath.Join(repoRootForTest(t), "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range want {
+		if time.Duration(job.Timeout)*time.Minute < makeTargetTimeoutCaps(t, string(mk), target)+ciGoTestSetupMargin {
+			t.Fatalf("integration job budget does not cover %s and setup", target)
+		}
+		for _, step := range wf.Jobs["playbook-lint"].Steps {
+			if strings.Contains(step.Run, target) {
+				t.Fatalf("%s is still serialized in lint", target)
+			}
+		}
+	}
+	found := false
+	for _, step := range job.Steps {
+		if step.Run == `make "$TARGET"` {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("matrix target must actually execute")
+	}
+	if !slices.Contains(ciNeedsList(wf.Jobs["image"].Needs), "playbook-integration") {
+		t.Fatal("image must wait for integration")
+	}
+	if !slices.Contains(ciNeedsList(wf.Jobs["ci-receipt"].Needs), "image") {
+		t.Fatal("receipt must wait for full image validation")
+	}
 }

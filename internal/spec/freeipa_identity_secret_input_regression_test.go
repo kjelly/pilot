@@ -163,21 +163,32 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
-			Steps []struct{ Run, Uses string }
+			Strategy struct{ Matrix struct{ Target []string } }
+			Steps    []struct{ Run, Uses string }
 		}
 	}
 	if err := yaml.Unmarshal(body, &workflow); err != nil {
 		t.Fatal(err)
 	}
 	ansible, setupGo, recipe := -1, -1, -1
-	for i, step := range workflow.Jobs["playbook-lint"].Steps {
+	job := workflow.Jobs["playbook-integration"]
+	listed := false
+	for _, target := range job.Strategy.Matrix.Target {
+		if target == "identity-secret-test" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatal("required integration matrix omits identity-secret-test")
+	}
+	for i, step := range job.Steps {
 		if strings.Contains(step.Run, "pip install") && strings.Contains(step.Run, "ansible-core") {
 			ansible = i
 		}
 		if strings.HasPrefix(step.Uses, "actions/setup-go@") {
 			setupGo = i
 		}
-		if strings.TrimSpace(step.Run) == "make identity-secret-test" {
+		if strings.TrimSpace(step.Run) == `make "$TARGET"` {
 			recipe = i
 		}
 	}
