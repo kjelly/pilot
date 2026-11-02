@@ -35,6 +35,7 @@ Go packages and their transitive importers, including test imports; go.mod/go.su
 changes expand scope to all packages. Workflow/build/skill changes also select
 the command package's repository consistency tests. Skill changes add
 `make skill-test`.
+Test-only Go changes select their own package without expanding to importers.
 
 The large `cmd/pilot/cmd` and `internal/spec` packages require explicit
 `--regression PACKAGE=REGEX` selectors. `NEEDS_SELECTION` means the plan is

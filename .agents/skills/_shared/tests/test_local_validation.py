@@ -29,6 +29,10 @@ PACKAGES = [{"name": "shared", "dir": "internal/shared", "imports": []},
 
 
 class LocalPlanTests(unittest.TestCase):
+    def test_test_only_changes_do_not_expand_to_importers(self):
+        result = planner.plan(["internal/shared/a_test.go"], PACKAGES, {})
+        self.assertEqual(["shared"], result["packages"])
+
     def test_shared_helper_selects_transitive_importers_not_unrelated_packages(self):
         result = planner.plan(["internal/shared/a.go"], PACKAGES, {CMD: "TestAffected"})
         self.assertEqual(sorted(["shared", "mid", CMD]), result["packages"])

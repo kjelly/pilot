@@ -15,12 +15,17 @@ LARGE = {"github.com/kjelly/pilot/cmd/pilot/cmd", "github.com/kjelly/pilot/inter
 def scope(paths, packages):
     direct = {p["name"] for p in packages if any(
         f.endswith(".go") and str(Path(f).parent) == p["dir"] for f in paths)}
-    affected = set(direct)
+    # Test-only edits do not change the package imported by its consumers.
+    # Propagating them can turn a CI consistency edit into 20+ package runs.
+    propagated = {p["name"] for p in packages if any(
+        f.endswith(".go") and not f.endswith("_test.go")
+        and str(Path(f).parent) == p["dir"] for f in paths)}
     while True:
-        expanded = affected | {p["name"] for p in packages if set(p["imports"]) & affected}
-        if expanded == affected:
+        expanded = propagated | {p["name"] for p in packages if set(p["imports"]) & propagated}
+        if expanded == propagated:
             break
-        affected = expanded
+        propagated = expanded
+    affected = direct | propagated
     if any(f in ("go.mod", "go.sum") for f in paths):
         affected = {p["name"] for p in packages}
     if any(f.startswith((".github/", "scripts/", ".codex/", ".claude/", ".agents/"))
