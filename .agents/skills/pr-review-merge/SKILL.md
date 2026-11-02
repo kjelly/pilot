@@ -31,6 +31,10 @@ it never reuses stale review judgments or CI receipts.
 
 ## Project runtime configuration
 
+Before implementation or expensive validation, follow the snapshot's repo-root
+`.agents/skills/_shared/local-validation.md` for the shared role startup check
+and candidate-specific local test plan. Static role checks do not prove launchability.
+
 This skill is repository-local: use the native `prm-reviewer` / `prm-dependency`
 definitions shipped beside it; there is no personal installation. Codex invocation:
 `$pr-review-merge`; Claude Code invocation: `/pr-review-merge`.

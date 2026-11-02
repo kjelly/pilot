@@ -14,25 +14,28 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   changes:
-    name: Detect evidence-only changes
+    name: Check candidate CI validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       evidence_only: ${{ steps.diff.outputs.evidence_only }}
+      reused_run_id: ${{ steps.diff.outputs.reused_run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Compare with PR base
+      - name: Verify candidate reuse controls
+        run: make ci-workflow-test
+      - name: Find a successful full candidate run
         id: diff
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/ci-evidence-only.sh "$PR_BASE" "$PR_HEAD" >> "$GITHUB_OUTPUT"
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-validation-reuse.py >> "$GITHUB_OUTPUT"
 
   test:
     name: Go test (${{ matrix.shard }})
@@ -113,18 +116,8 @@ jobs:
     # delivery image.
     name: Playbook lint
     runs-on: ubuntu-latest
-    # The Go -timeout values in the Makefile targets these steps run
-    # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m +
-    # 10m + 8m, freeipa-server-pool 5m = 53m) are hang caps: a hung step fails
-    # at its own cap, with go test's stack dump naming the test, and the job
-    # normally takes about 30 minutes (the users/groups drift tests run real
-    # ansible-playbook about 40 times, near 4 s each). The job budget must not
-    # be below the sum of those caps, so a step is never cut off by an
-    # anonymous job cancellation; 60 is that 53m plus room for the toolchain
-    # setup, the syntax-check loop and the alert-rules suite (no explicit cap).
-    # TestCIJobTimeoutCoversMakeTargetCaps keeps this in step with the
-    # Makefile.
-    timeout-minutes: 60
+    # Runtime suites run independently below; syntax/lint remains a quick job.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -141,33 +134,35 @@ jobs:
       - name: make playbook-lint
         run: make playbook-lint
 
-      # promtool unit tests of the host-health/login-probe alert rules and
-      # the Alertmanager inhibit behaviour (docs/verification/alertmanager.md
-      # §1.7), with the Prometheus/Alertmanager images the playbooks pin.
-      # They render the rules with the ansible-core installed above; the Go
-      # test job skips them (no images, no ansible-playbook), so here
-      # PILOT_REQUIRE_CONTAINER_TESTS=1 pulls the images and turns a skip
-      # into a failure.
+  playbook-integration:
+    name: Playbook integration (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.evidence_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [alert-rules-test, identity-noop-test, identity-ssh-cache-test, identity-secret-test, freeipa-server-pool-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ansible toolchain
+        run: |
+          python3 -m pip install "ansible-core==2.19.*" ansible-lint pyyaml requests
+          ansible-galaxy collection install ansible.posix community.docker community.postgresql community.general
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: make alert-rules-test
-        run: make alert-rules-test
-
-      - name: make identity-noop-test
-        run: make identity-noop-test
-
-      - name: make identity-ssh-cache-test
-        run: make identity-ssh-cache-test
-
-      - name: make identity-secret-test
-        run: make identity-secret-test
-
-      - name: make freeipa-server-pool-test
-        run: make freeipa-server-pool-test
+      # Each Make target retains its required-container flags and assertions.
+      - name: Run integration suite
+        env:
+          TARGET: ${{ matrix.target }}
+        run: make "$TARGET"
 
   root-tests:
     # The roster ownership tests need root: pilot-cli runs pilot as root
@@ -275,7 +270,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [changes, test, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
+    needs: [changes, test, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
@@ -348,6 +343,27 @@ jobs:
             PILOT_SESSION_STORE_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  ci-receipt:
+    name: Record full candidate validation
+    needs: [changes, image]
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.evidence_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Record PR base and validated head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-validation-reuse.py --record ci-validation.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-validation-${{ github.run_attempt }}
+          path: ci-validation.json
+          if-no-files-found: error
+          retention-days: 7
 
   promote:
     # Points :latest at this run's image while its commit is still main's
