@@ -58,8 +58,9 @@
 
 - 工具：`pilot verify docs/verification/<name>.md -i inv.yaml`
 - 原始輸出：gitignored `.verification/<name>-<UTC>.{ndjson,md}` 或 pilot evidence store
-- Sanitized 摘要：`docs/evidence/<name>/<date>-<tested-revision>.md`
-- 本節只保留最新 tested revision/tree、真實 verdict 與摘要連結，不貼完整 transcript
+- Sanitized 摘要：`docs/evidence/<name>/<change>.md`（同 PR 就地覆寫）
+- 靜態連結：[最新驗證](../evidence/<name>/LATEST.md)；日期、tested revision/tree、verdict 只更新在 evidence
+- 不貼完整 transcript，重測不改 spec
 - Row 數：N（等於 checklist row 數）
 
 ## 4. PASS / FAIL 規則
@@ -73,11 +74,11 @@
 |----|---------|---------|------|
 | C2 | dev 環境允許 PermitRootLogin yes | dev | 無 |
 
-## 6. 變更紀錄
+## 變更紀錄
 
-| 日期 | 版本 | 變更 | 變更者 |
-|------|------|------|--------|
-| 2026-06-30 | v1.0 | 初版 | alice |
+| 日期 | PR | 驗收語意變更 |
+|------|----|--------------|
+| 2026-06-30 | #123 | 初版 |
 ```
 
 ---
@@ -258,8 +259,8 @@ Spec-driven 工作流把 **inspect 跟 mutate 分開**：
 
 - 工具：`pilot verify docs/verification/bastion-host.md -i inv.yaml`
 - 原始輸出：gitignored `.verification/bastion-host-<UTC>.{ndjson,md}`
-- Sanitized 摘要：`docs/evidence/bastion-host/<date>-<tested-revision>.md`
-- Spec 只保留最新 revision/tree、真實 verdict 與摘要連結，不累積完整 transcript
+- Sanitized 摘要：`docs/evidence/bastion-host/<change>.md`（同 PR 就地覆寫）
+- 靜態連結：[最新驗證](../evidence/bastion-host/LATEST.md)；日期、revision/tree、verdict 只更新在 evidence
 - Row 數：12
 
 ## 4. PASS / FAIL 規則
@@ -273,9 +274,9 @@ Spec-driven 工作流把 **inspect 跟 mutate 分開**：
 |----|------|------|------|
 | C2 | dev 環境允許 PermitRootLogin yes | dev | 無 |
 
-## 6. 變更紀錄
+## 變更紀錄
 
-| 日期 | 版本 | 變更 | 變更者 |
-|------|------|------|--------|
-| 2026-06-30 | v1.0 | 初版 | infra-team |
+| 日期 | PR | 驗收語意變更 |
+|------|----|--------------|
+| 2026-06-30 | #123 | 初版 |
 ```

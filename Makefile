@@ -84,15 +84,16 @@ lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 # about 1.5x over the 29.3 m local figure for the slowest package. CI runs this
 # target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
-test-race:     	## Run tests with the race detector (CI runs this target)
-	go test -race -count=1 -timeout 45m ./...
+GO_TEST_PACKAGES ?= ./...
+test-race:     	## Run tests with the race detector (CI selects a package shard)
+	go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
 # Stop after a failed normal suite; a successful validation requires both runs.
 test-all:      	## Run complete normal and race suites sequentially
 	$(MAKE) test
-	$(MAKE) test-race
+	$(MAKE) test-race GO_TEST_PACKAGES=./...
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
