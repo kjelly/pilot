@@ -107,6 +107,8 @@ def retirement_plan(state, data):
                 selected.setdefault(alias, {k: receipt[k] for k in
                     ("alias", "fqdn", "stage", "reason", "origin")})
     for alias, item in selected.items():
+        if not item["fqdn"].endswith("." + state["domain"]):
+            raise ValueError("retirement target outside journal domain")
         for h in inventory:
             if h["alias"] == alias and (h.get("fqdn", "").lower() != item["fqdn"]
                                        or h["stage"] != item["stage"]):

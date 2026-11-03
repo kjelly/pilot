@@ -42,9 +42,13 @@ func TestFreeIPAProvider_InterruptedRetirementRequiresJournalReceipt(t *testing.
 
 func TestFreeIPAProvider_RetirementAliasSurvivesPlanSerialization(t *testing.T) {
 	p, _ := testProvider(t, func(args []string) (*ansible.Result, error) {
+		if queryKind(args) == "host_object" && !hasArgs(args, []string{"-e", "pilot_decommission_target_fqdn=web1.ipa.pilot.internal"}) {
+			t.Fatalf("Plan queried transport alias instead of actual inventory FQDN: %v", args)
+		}
 		return &ansible.Result{Stdout: hostShowClean}, nil
 	})
-	steps, err := p.Plan(context.Background(), PlanInput{HostName: "transport-alias", FQDN: "web1.ipa.pilot.internal"})
+	p.cfg.InventoryFQDN = "web1.ipa.pilot.internal"
+	steps, err := p.Plan(context.Background(), PlanInput{HostName: "transport-alias", FQDN: "transport-alias"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,5 +102,9 @@ func TestFreeIPAProvider_OldRetirementPlanNeedsTrustedAlias(t *testing.T) {
 		if alias == "" && !strings.Contains(err.Error(), "original inventory alias missing") {
 			t.Fatalf("wrong recovery refusal: %v", err)
 		}
+	}
+	p := NewFreeIPAClientProvider(FreeIPAClientProviderConfig{InventoryAlias: "transport-old", InventoryFQDN: "retired.ipa.test"})
+	if _, err := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "transport-old"}); err == nil || !strings.Contains(err.Error(), "persisted FQDN differs") {
+		t.Fatalf("old fallback identity silently remapped instead of requiring re-plan: %v", err)
 	}
 }

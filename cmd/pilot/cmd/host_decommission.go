@@ -577,10 +577,18 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 	if err != nil {
 		return nil, err
 	}
+	var retirementFQDN string
+	for _, host := range hf.Hosts {
+		if host.Name == hostName {
+			retirementFQDN = host.Extra["ipa_client_fqdn"]
+			break
+		}
+	}
 
 	freeipaClient := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
 		Executor:              runner,
 		InventoryAlias:        hostName,
+		InventoryFQDN:         retirementFQDN,
 		RetirementStage:       retirementStage,
 		ClientInventory:       invPath,
 		ServerInventory:       invPath,

@@ -92,6 +92,9 @@ type FreeIPAClientProviderConfig struct {
 	// InventoryAlias is the original plan host key, supplied by the trusted
 	// workspace caller; it recovers pre-retirement-schema persisted steps.
 	InventoryAlias string
+	// InventoryFQDN is an explicit ipa_client_fqdn from the actual workspace,
+	// never a connection address or an inferred alias expansion.
+	InventoryFQDN string
 	// RetirementStage is the retiring host's actual inventory environment.
 	RetirementStage string
 
@@ -197,7 +200,7 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 		}
 	}
 	hostName := in.HostName
-	fqdn := firstNonEmpty(in.FQDN, hostName)
+	fqdn := strings.ToLower(strings.TrimSuffix(firstNonEmpty(p.cfg.InventoryFQDN, firstNonEmpty(in.FQDN, hostName)), "."))
 
 	// Resolve the host's real, authoritative FQDN from a live query FIRST
 	// (see resolveAuthoritativeFQDN's doc comment) — fqdn above may be no
@@ -259,6 +262,10 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 		return &freeipaRosterAbsentStep{provider: p, fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPAIdentityApplyConverge:
 		alias := firstNonEmpty(step.Params["inventory_alias"], p.cfg.InventoryAlias)
+		if p.cfg.InventoryFQDN != "" &&
+			strings.ToLower(strings.TrimSuffix(step.TargetIdentity, ".")) != strings.ToLower(strings.TrimSuffix(p.cfg.InventoryFQDN, ".")) {
+			return nil, fmt.Errorf("freeipa-client: persisted FQDN differs from explicit current inventory identity; re-plan retirement without guessing the old alias mapping")
+		}
 		if step.Params["retirement_stage"] != "" && step.Params["retirement_stage"] != p.retirementStage() {
 			return nil, fmt.Errorf("freeipa-client: retirement stage changed; re-plan against current inventory")
 		}

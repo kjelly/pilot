@@ -168,6 +168,11 @@ class JournalTest(unittest.TestCase):
         data["retirements"][0]["stage"] = "prod"
         with self.assertRaisesRegex(ValueError, "authorized stage"):
             cache.update(self.state, "plan", data)
+        foreign = copy.deepcopy(data)
+        foreign["retirements"][0].update(stage="sandbox", fqdn="retired.other.test")
+        foreign["absent"] = [{"name": "retired.other.test"}]
+        with self.assertRaisesRegex(ValueError, "outside journal domain"):
+            cache.update(self.state, "plan", foreign)
         self.assertEqual(["a", "b"], self.state["users"]["alice"]["pending"])
 
     def test_readonly_inspection_and_atomic_retirement_recovery(self):
