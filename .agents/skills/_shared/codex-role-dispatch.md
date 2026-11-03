@@ -23,25 +23,29 @@ the verified role contract even when the host cannot dispatch its custom name.
    permissions, thread limits or an agent's task failure as a missing role.
    If the result is ambiguous, inspect agent status before retrying; never launch
    a second writer when the first dispatch may have started.
-4. Before using `default`, verify its effective selection from the live host
-   catalog and active configuration. A custom agent named `default` shadows the
-   built-in, and its model/effort settings override explicit spawn values. Inspect
-   the applicable personal/project role definitions by their `name` field (any
-   filename), plus active configuration/profile/override sources; absence of a
-   `default.toml` file alone is insufficient. Record host/version, catalog evidence
-   and configuration provenance (paths/hashes or confirmed absence), including how
-   they establish the host's loaded selection rather than merely files on disk.
-   Proceed only if the selected transport is the built-in and the host honors the
-   explicit pins below, or authoritative host evidence establishes that the
-   selected custom transport enforces the exact required pins, role contract and
-   runtime capabilities/restrictions. Unknown selection, conflicting instructions,
-   overridden pins or unenforceable capabilities are BLOCKED; do not edit personal
-   configuration to make this gate pass.
+4. Before using `default`, inspect the live tool declaration and applicable
+   personal/project agent definitions and active configuration for conflicting
+   selection or pins. Inspect custom roles by their `name` field, regardless of
+   filename; absence of `default.toml` alone is insufficient. Do not assume a
+   custom role overrides spawn arguments unless the host contract says so.
+
+   The current session's `spawn_agent` declaration is authoritative evidence of
+   supported transport and model/effort arguments. When it exposes `default` and
+   explicit model/effort overrides, and no applicable configuration or host
+   evidence conflicts, use those documented arguments. Record this as
+   `tool-contract` evidence, including inspected configuration paths and limits.
+   Hidden runtime telemetry or loaded-configuration introspection is not a
+   prerequisite when the host does not expose it.
+
+   Check effective selection/settings too when the host exposes them. Known
+   conflicting overrides, unsupported required pins, unknown transport semantics
+   or unenforceable role capabilities remain BLOCKED. Do not edit personal
+   configuration to make dispatch pass.
 5. Announce the failed native dispatch and the compatibility transport. Spawn
    `agent_type="default"`, `fork_turns="none"`, with `model` and `reasoning_effort`
    set explicitly to the snapshot role's `model` and `model_reasoning_effort`.
    This is the authorized exception to the native-dispatch no-override rule;
-   the preceding effective-selection check must establish that these pins apply.
+   the preceding tool/configuration check must support these explicit pins.
    Prepend the following to the task envelope, replacing the placeholders:
 
    > You are acting as `<role>` through the default compatibility transport.
@@ -59,22 +63,24 @@ the verified role contract even when the host cannot dispatch its custom name.
    model/effort, known effective model/effort and their host/configuration evidence,
    effective-selection preflight provenance and child identifier in the checkpoint;
    include compatibility dispatch and any evidence limits in `review.summary`
-   when used for review. Requested arguments, a successful spawn, the task envelope
-   and child self-report do not prove effective model identity. If host evidence
-   cannot establish the required effective settings, report BLOCKED rather than
-   recording requested pins as effective. A successful spawn is not a completed
-   analysis/review: inspect the child's result and require the usual SHA-bound
-   evidence. If default dispatch, pinned model or a genuine independent context
-   is unavailable, stop as BLOCKED/WAITING; never substitute another model or
-   simulate the review in Root.
+   when used for review. Keep requested pins separate from observed runtime
+   identity: with `tool-contract` evidence, record effective model/effort as
+   unobserved unless the host supplies them. Lack of unexposed telemetry alone
+   does not block dispatch. A successful spawn is not a completed analysis/review:
+   inspect the child's result and require the usual SHA-bound evidence. If the
+   tool rejects the pinned model, independent context or default transport, stop
+   as BLOCKED/WAITING; never silently substitute or simulate review in Root.
 
-Negative control: with a personal role file (even `custom.toml`) declaring
-`name = "default"`, `model = "gpt-6-luna"`, `model_reasoning_effort = "low"` and
-valid description/instructions, an unavailable native role followed by explicit
-`gpt-6.1-sol` / `high` spawn arguments must be BLOCKED before compatibility
-dispatch. The custom file wins despite those arguments. A verified built-in
-`default` that honors both explicit arguments remains eligible. Evaluate this
-scenario from configuration/host evidence without installing it in user config.
+Behavior checks (read-only; do not install conflicting configuration):
+
+- Native role unavailable, live tool exposes `default` and both override
+  arguments, no conflicting configuration, runtime identity not exposed:
+  dispatch with snapshot pins and record `tool-contract` / unobserved identity.
+- Same inputs, but host evidence says a custom `default` forces different pins
+  despite explicit arguments: BLOCKED before dispatch.
+- Native dispatch fails for authentication, permissions or capacity: report that
+  failure; the compatibility path is not authorized by this error.
+- Default dispatch rejects a required pin: BLOCKED; do not retry another model.
 
 `verify-role` proves file integrity, not runtime availability. A listed role and
 a byte-identical file can still be rejected by the host. Do not install roles,
