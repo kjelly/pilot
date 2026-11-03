@@ -39,6 +39,7 @@
   loop: "{{ siem_tls_snapshot_stat.results | selectattr('stat.exists') | list }}"
   register: siem_tls_snapshot
   no_log: true
+  diff: false
   tags: [always]
 
 - name: "RELP: record this snapshot's role"
@@ -117,6 +118,8 @@
   when: siem_tls_enabled | bool and siem_tls_role != 'receiver'
 
 - name: "RELP: retain sender module declarations for rollback"
+  no_log: true
+  diff: false
   ansible.builtin.slurp:
     src: "{{ item.item }}"
   loop: "{{ siem_module_snapshot_stat.results | default([]) | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
@@ -124,6 +127,8 @@
   when: siem_tls_enabled | bool and siem_tls_role != 'receiver'
 
 - name: "RELP: migrate the legacy audit-owned output module declaration"
+  no_log: true
+  diff: false
   ansible.builtin.replace:
     path: /etc/rsyslog.d/99-siem-forward.conf
     regexp: '^\s*module\(load="omrelp" tls.tlsLib="gnutls"\)\s*$'

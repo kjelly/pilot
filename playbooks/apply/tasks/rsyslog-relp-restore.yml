@@ -1,5 +1,7 @@
 ---
 - name: "RELP rollback: restore previous sender module declarations"
+  no_log: true
+  diff: false
   ansible.builtin.copy:
     dest: "{{ item.item.item }}"
     content: "{{ item.content | b64decode }}"

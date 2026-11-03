@@ -7,6 +7,9 @@
   when: siem_forwarding_enabled | bool
 
 - name: "Wazuh: inspect the actual container logs mount"
+  # Container Config.Env can contain indexer/API credentials.
+  no_log: true
+  diff: false
   community.docker.docker_container_info:
     name: single-node-wazuh.manager-1
   register: wazuh_forward_container

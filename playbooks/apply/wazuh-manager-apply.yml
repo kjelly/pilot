@@ -322,6 +322,8 @@
 
         - name: "Snapshot: retain existing configuration content"
           tags: [always]
+          no_log: true
+          diff: false
           ansible.builtin.slurp:
             src: "{{ item.item }}"
           loop: "{{ wazuh_forward_snapshot_stat.results | selectattr('stat.exists') | list }}"
@@ -353,6 +355,8 @@
 
         - name: "Step 7: Remove the legacy managed UDP syslog_output on migration or disable"
           tags: [C11]
+          no_log: true
+          diff: false
           ansible.builtin.blockinfile:
             path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
@@ -361,6 +365,8 @@
 
         - name: "Step 7a: Retire the managed development-only delivery localfile"
           tags: [C11]
+          no_log: true
+          diff: false
           ansible.builtin.blockinfile:
             path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} PILOT WAZUH DELIVERY PROBE -->"
@@ -382,6 +388,8 @@
         # Drift comparison covers migration, disable and interrupted earlier runs.
         - name: "Step 9: Read the live manager configuration"
           tags: [C11]
+          no_log: true
+          diff: false
           ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
           register: wazuh_live_config
           changed_when: false
@@ -403,6 +411,8 @@
 
         - name: "Step 9b: Verify legacy UDP forwarding is absent in the live configuration"
           tags: [C11]
+          no_log: true
+          diff: false
           ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
           register: wazuh_live_converged
           changed_when: false
@@ -444,6 +454,8 @@
       rescue:
         - name: "ROLLBACK — restore the previous files with their original metadata"
           tags: [always]
+          no_log: true
+          diff: false
           ansible.builtin.copy:
             dest: "{{ item.item.item }}"
             content: "{{ item.content | b64decode }}"
@@ -470,7 +482,11 @@
 
         - name: "ROLLBACK — restore the Wazuh transport material"
           tags: [always]
-          ansible.builtin.include_tasks: tasks/rsyslog-relp-restore.yml
+          ansible.builtin.include_tasks:
+            file: tasks/rsyslog-relp-restore.yml
+            apply:
+              no_log: true
+              diff: false
           when: siem_tls_snapshot_role | default('') == 'wazuh-sender'
 
         - name: "ROLLBACK — reload restored AppArmor permissions"
