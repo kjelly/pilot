@@ -59,3 +59,7 @@ summary of the real result — but **not** the driver issues encountered (those 
 here), and not the per-run driver or recording itself: no link to or copy of the
 driver script, no cast filenames or paths (AGENTS.md, *Evidence recordings are
 disposable* and *Per-run wizard drivers and path removal*).
+
+## Creating a new GitHub issue
+
+Follow `.agents/skills/issue-filing/SKILL.md` for current label discovery, selection, creation and readback verification.
