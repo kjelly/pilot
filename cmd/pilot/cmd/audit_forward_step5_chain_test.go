@@ -161,6 +161,22 @@ func step5SourceTasks(raw []byte, withPreflight bool) ([]any, error) {
 	if prePosition >= chains[0].position {
 		return nil, fmt.Errorf("policy preflight must precede the caller mutation block")
 	}
+	preArgs := preflight["ansible.builtin.shell"].(map[string]any)
+	preCmd := preArgs["cmd"].(string)
+	if !strings.Contains(preCmd, "trap 'cat >/dev/null' EXIT") || strings.Index(preCmd, "trap 'cat >/dev/null' EXIT") > strings.Index(preCmd, "test -e") || !strings.Contains(preCmd, `trap 'cat >/dev/null; rm -rf "$d"' EXIT`) {
+		return nil, fmt.Errorf("preflight must drain input before early exits and retain cleanup")
+	}
+	var computeDrain bool
+	step5Walk(chains[0].tasks, func(task map[string]any) {
+		if task["register"] == "distro_rsyslog_without_audit_path" {
+			args, _ := task["ansible.builtin.shell"].(map[string]any)
+			cmd, _ := args["cmd"].(string)
+			computeDrain = strings.Contains(cmd, "trap 'cat >/dev/null' EXIT") && strings.Index(cmd, "trap 'cat >/dev/null' EXIT") < strings.Index(cmd, "awk -v")
+		}
+	})
+	if !computeDrain {
+		return nil, fmt.Errorf("computed policy must drain input on early failure")
+	}
 	var tasks []any
 	if withPreflight {
 		tasks = append(tasks, preflight)
@@ -223,7 +239,7 @@ func TestAuditLogForwardingStep5TaskExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"renamed-and-inserted", "missing-preflight", "duplicate-preflight", "late-preflight", "missing-render", "missing-stat", "missing-cleanup"} {
+	for _, mode := range []string{"renamed-and-inserted", "missing-preflight", "duplicate-preflight", "late-preflight", "missing-render", "missing-stat", "missing-cleanup", "missing-preflight-drain", "missing-compute-drain"} {
 		t.Run(mode, func(t *testing.T) {
 			var plays []map[string]any
 			if err := yaml.Unmarshal(raw, &plays); err != nil {
@@ -276,6 +292,18 @@ func TestAuditLogForwardingStep5TaskExtraction(t *testing.T) {
 						delete(child, "always")
 					}
 				}
+			}
+			if mode == "missing-preflight-drain" {
+				args := preflight["ansible.builtin.shell"].(map[string]any)
+				args["cmd"] = strings.ReplaceAll(args["cmd"].(string), "trap 'cat >/dev/null' EXIT", ":")
+			}
+			if mode == "missing-compute-drain" {
+				step5Walk(caller["block"], func(task map[string]any) {
+					if task["register"] == "distro_rsyslog_without_audit_path" {
+						args := task["ansible.builtin.shell"].(map[string]any)
+						args["cmd"] = strings.ReplaceAll(args["cmd"].(string), "trap 'cat >/dev/null' EXIT", ":")
+					}
+				})
 			}
 			// Round-tripping removes all comments; labels and unrelated early
 			// tasks may change without losing the real module-action chain.

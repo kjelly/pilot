@@ -310,10 +310,13 @@
       ansible.builtin.shell:
         cmd: |
           set -u
+          # Ansible writes the complete helper to stdin even on early exits.
+          # Drain it without replacing the original shell exit status.
+          trap 'cat >/dev/null' EXIT
           f=/etc/logrotate.d/rsyslog
           test -e "$f" || exit 0
           d=$(mktemp -d) || exit 1
-          trap 'rm -rf "$d"' EXIT
+          trap 'cat >/dev/null; rm -rf "$d"' EXIT
           awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin "$f" > "$d/policy" || exit $?
           # nothing but blanks and comments left: Step 5d removes the file, nothing to check
           LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' "$d/policy" || exit 0
@@ -533,6 +536,8 @@
               tags: [C20]
               ansible.builtin.shell:
                 cmd: |
+                  # A failed redirection/awk must still consume Ansible's input.
+                  trap 'cat >/dev/null' EXIT
                   awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin /etc/logrotate.d/rsyslog > {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} &&
                   { LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} && echo keep || echo empty; }
                 executable: /bin/bash
