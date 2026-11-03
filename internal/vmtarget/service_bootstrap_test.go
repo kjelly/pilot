@@ -30,11 +30,15 @@ func testServiceBootstrap(t *testing.T) ServiceBootstrap {
 
 func TestServiceBootstrapRenderCloudInit(t *testing.T) {
 	service := testServiceBootstrap(t)
+	service.InstanceID, service.Generation = "shared-instance", 4
 	got, err := service.RenderCloudInit()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		"/etc/pilot/service-instance.json",
+		`"instance_id":"shared-instance"`,
+		`"generation":4`,
 		"/usr/local/share/ca-certificates/pilot-services.crt",
 		"/etc/apt/apt.conf.d/99pilot-services",
 		"/etc/yum.repos.d/pilot-services.repo",

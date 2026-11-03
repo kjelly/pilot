@@ -14,6 +14,32 @@ func TestDefaultHBACServices(t *testing.T) {
 	}
 }
 
+func TestServicesDirectoryIndependentOfDataDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	want := Default().ServicesDir
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("data_dir: /a/disposable/vm/root\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServicesDir != want || cfg.ServicesDir == cfg.DataDir {
+		t.Fatalf("services followed VM state: %+v", cfg)
+	}
+	if err := os.WriteFile(path, []byte("services_dir: /a/shared/service/root\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServicesDir != "/a/shared/service/root" {
+		t.Fatalf("services config ignored: %+v", cfg)
+	}
+}
+
 func TestLoadReadsConfiguredHBACServices(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

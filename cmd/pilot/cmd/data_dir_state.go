@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -8,7 +9,30 @@ import (
 	"sync"
 
 	"github.com/kjelly/pilot/internal/config"
+	"github.com/kjelly/pilot/internal/services"
 )
+
+// newServiceManager is shared by every lifecycle command and VM consumer.
+func newServiceManager() (*services.Manager, error) {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return nil, fmt.Errorf("services: load config: %w", err)
+	}
+	dir := cfg.ServicesDir
+	if env := os.Getenv("PILOT_SERVICES_DIR"); env != "" {
+		dir = env
+	}
+	if servicesDir != "" {
+		dir = servicesDir
+	}
+	options := services.DiscoveryOptions{Directory: dir, AdoptFrom: servicesAdoptFrom}
+	// An explicit isolated registry must never adopt the user's default live
+	// cache accidentally. Migration there requires an explicit source.
+	if servicesDir == "" && os.Getenv("PILOT_SERVICES_DIR") == "" && cfg.ServicesDir == config.Default().ServicesDir {
+		options.LegacyDirectories = []string{config.Default().DataDir, resolvePilotDataDir(), cfg.DataDir}
+	}
+	return services.NewSharedManager(options, nil)
+}
 
 // The local state files each command family keeps in the data dir.
 var (
@@ -130,6 +154,12 @@ func fileExists(path string) bool {
 // pilot verify.
 func applyRootFlags(args []string) []string {
 	var v string
+	if args, v = extractValueFlag(args, "--services-dir"); v != "" {
+		servicesDir = v
+	}
+	if args, v = extractValueFlag(args, "--services-adopt-from"); v != "" {
+		servicesAdoptFrom = v
+	}
 	if args, v = extractValueFlag(args, "--data-dir"); v != "" {
 		dataDir = v
 	}

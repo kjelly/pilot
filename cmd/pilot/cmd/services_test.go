@@ -30,6 +30,7 @@ func TestServicesSubcommandsRegistered(t *testing.T) {
 }
 
 func TestServicesPurgeRequiresConfirmFlag(t *testing.T) {
+	t.Setenv("PILOT_SERVICES_DIR", t.TempDir())
 	rootCmd.SetArgs([]string{"services", "purge", "--data-dir", t.TempDir()})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})
