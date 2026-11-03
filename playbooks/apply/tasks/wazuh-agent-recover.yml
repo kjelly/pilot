@@ -43,7 +43,7 @@
 
 - name: "Observe the restored native agent and original enrollment identity"
   ansible.builtin.command:
-    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-runtime, --family, "{{ ansible_os_family }}"]
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-runtime, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
   register: wazuh_agent_restored_runtime
   changed_when: false
   when: (wazuh_agent_recovery_result.stdout | from_json).need_commit
@@ -57,7 +57,7 @@
       --agent-name {{ (wazuh_agent_restored_runtime.stdout | from_json).name | quote }}
       --version {{ (wazuh_agent_restored_runtime.stdout | from_json).version | quote }}
     executable: python3
-  delegate_to: "{{ (wazuh_agent_recovery_result.stdout | from_json).manager_host }}"
+  delegate_to: "{{ (wazuh_agent_recovery_result.stdout | from_json).manager_host | default(inventory_hostname, true) }}"
   register: wazuh_agent_recovered_registry
   changed_when: false
   until: wazuh_agent_recovered_registry is succeeded

@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 
@@ -63,6 +65,15 @@ class PolicyTests(unittest.TestCase):
             w.agent_plan('', '4.14.1', '4.14.9')
         self.assertEqual(w.agent_plan('', '4.14.9')['package'], '4.14.9-1')
 
+    def test_standalone_retention_and_fresh_install_do_not_authorize_unobserved_upgrade(self):
+        for family in ('Debian', 'RedHat'):
+            with tempfile.TemporaryDirectory() as temporary:
+                agent = w.Agent(family, root=Path(temporary) / 'private', runner=Commands(family, '4.14.1-1'))
+                self.assertFalse(agent.check('')['change'])
+                with self.assertRaisesRegex(w.Refused, 'requires an observed manager version'):
+                    agent.check('', '4.14.9', True)
+        self.assertEqual(w.agent_plan('', '')['package'], '4.14.1-1')
+
 
 class NativeComposeControlTests(unittest.TestCase):
     """Real Compose parser/config hashing; no daemon, containers or network."""
@@ -99,6 +110,97 @@ class NativeComposeControlTests(unittest.TestCase):
             with self.assertRaisesRegex(w.Refused, 'differs from the running container'):
                 central.validate_compose_transition(state, pending, pending.replace(':4.14.1', ':4.14.9'), '4.14.9')
             self.assertFalse(central.root.exists())
+
+
+class DiscoveryFilesystemTests(unittest.TestCase):
+    """Production discover call chain with real filesystem ownership aliases.
+
+    Docker service facts are an explicit native-command harness. No discovery
+    guard or health method is replaced, so removing the hardlink guard lets the
+    alias case traverse every later check and incorrectly succeed.
+    """
+    def central(self, root):
+        managed = root / 'managed'
+        project = managed / 'wazuh-docker-4.14.1/single-node'
+        project.mkdir(parents=True)
+        compose = project / 'docker-compose.yml'
+        compose.write_text('services: {}\n')
+        docker = root / 'docker-data'
+        containers, images, volumes = [], {}, {}
+        for number, service in enumerate(w.SERVICES):
+            identifier = 'container-' + str(number)
+            image = 'sha256:' + str(number + 1) * 64
+            name = 'single-node_volume_' + str(number)
+            mount = docker / 'volumes' / name / '_data'
+            mount.mkdir(parents=True)
+            containers.append({'Id': identifier, 'Image': image, 'State': {'Running': True},
+                               'Config': {'Image': 'wazuh/' + service.replace('.', '-') + ':4.14.1',
+                                          'Labels': {'com.docker.compose.project': 'single-node',
+                                                     'com.docker.compose.service': service,
+                                                     'com.docker.compose.project.working_dir': str(project),
+                                                     'com.docker.compose.project.config_files': str(compose),
+                                                     'com.docker.compose.config-hash': 'a' * 64}},
+                               'Mounts': [{'Type': 'volume', 'Name': name, 'Source': str(mount)}]})
+            images[image] = {'Id': image, 'Size': 1024,
+                             'RepoDigests': ['wazuh/' + service.replace('.', '-') + '@' + image]}
+            volumes[name] = {'Driver': 'local', 'Options': None, 'Mountpoint': str(mount),
+                              'Labels': {'com.docker.compose.project': 'single-node'}}
+        class Native:
+            def __init__(self):
+                self.calls = []
+            def run(self, argv, **kwargs):
+                argv = [str(value) for value in argv]
+                self.calls.append(argv)
+                if argv[:2] == ['docker', 'info']:
+                    text = str(docker) if '--format' in argv else ''
+                elif argv[:2] == ['docker', 'ps']:
+                    selected = [row['Id'] for row in containers]
+                    if argv[-1].startswith('volume='):
+                        selected = [row['Id'] for row in containers if row['Mounts'][0]['Name'] == argv[-1].split('=', 1)[1]]
+                    text = '\n'.join(selected)
+                elif argv[-1] == 'info':
+                    text = 'WAZUH_VERSION="v4.14.1"\n'
+                elif argv[-1] == 'status':
+                    required = ('modulesd', 'logcollector', 'remoted', 'analysisd', 'execd', 'db', 'authd', 'apid')
+                    text = '\n'.join('wazuh-' + name + ' is running...' for name in required) + '\nwazuh-clusterd not running...\n'
+                    return subprocess.CompletedProcess(argv, 1, text, '')
+                else:
+                    raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, 0, text, '')
+            def json(self, argv, **kwargs):
+                self.calls.append(list(argv))
+                if argv[:2] == ['docker', 'inspect']:
+                    return containers
+                if argv[:3] == ['docker', 'image', 'inspect']:
+                    return [images[argv[-1]]]
+                if argv[:3] == ['docker', 'volume', 'inspect']:
+                    return [volumes[argv[-1]]]
+                if 'curl' in argv:
+                    return {'status': 'green'}
+                if argv[-1] in ('/usr/share/wazuh-dashboard/plugins/wazuh/package.json', '/usr/share/wazuh-indexer/VERSION.json'):
+                    return {'version': '4.14.1'}
+                raise AssertionError(argv)
+        native = Native()
+        return w.Central(root=root / 'private', managed_root=managed, runner=native), compose, native
+
+    def test_normal_discovery_accepts_the_complete_control_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            central, _, _ = self.central(Path(temporary))
+            self.assertEqual(central.discover()['version'], '4.14.1')
+
+    def test_discovery_rejects_real_compose_hardlink_without_touching_outside_alias(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            central, compose, native = self.central(root)
+            alias = root / 'operator-unrelated.yml'
+            os.link(compose, alias)
+            original = alias.read_bytes()
+            self.assertEqual(compose.stat().st_nlink, 2)
+            with self.assertRaisesRegex(w.Refused, 'hardlink'):
+                central.discover()
+            self.assertEqual(alias.read_bytes(), original)
+            self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
 
 
 class Commands:
@@ -182,7 +284,149 @@ class BackendTests(unittest.TestCase):
             central.check_agents('4.14.9')
 
 
+class CommonWriterTests(unittest.TestCase):
+    def test_all_writer_modes_and_roles_exclude_a_second_admitted_writer(self):
+        for first in ('agent', 'central'):
+            for mode in ('apply', 'recover', 'canary'):
+                with self.subTest(first=first, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                    writer = w.HostWriter(Path(temporary) / 'private')
+                    writer.claim('1' * 32, first, mode)
+                    for second in ('agent', 'central'):
+                        with self.assertRaisesRegex(w.Refused, 'another Wazuh writer'):
+                            writer.claim('2' * 32, second)
+                    with self.assertRaisesRegex(w.Refused, 'another Wazuh writer'):
+                        writer.claim('1' * 32, first)
+                    with self.assertRaisesRegex(w.Refused, 'exact active owner'):
+                        writer.release('2' * 32)
+                    self.assertEqual(writer.inspect()['writer']['owner'], '1' * 32)
+                    writer.release('1' * 32)
+
+    def test_interrupted_resume_needs_exact_owner_confirmation_and_journal_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            writer = w.HostWriter(root)
+            writer.claim('3' * 32, 'agent')
+            with self.assertRaisesRegex(w.Refused, 'confirmation'):
+                writer.resume('3' * 32, 'agent')
+            with self.assertRaisesRegex(w.Refused, 'does not match'):
+                writer.resume('4' * 32, 'agent', confirmed=True)
+            writer.resume('3' * 32, 'agent', confirmed=True)
+            tx = w.Agent('Debian', root=root)
+            with tx.lock(owner='3' * 32):
+                item = tx.begin('3' * 32, {'secret': 'SYNTHETIC_PRIVATE_VALUE'})
+            with self.assertRaisesRegex(w.Refused, 'unfinished component journal'):
+                writer.release('3' * 32)
+            self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', json.dumps(writer.inspect()))
+            with self.assertRaisesRegex(w.Refused, 'exact host-wide'):
+                tx.authorize_install('4' * 32)
+            with tx.lock(owner='3' * 32):
+                tx.finish(item, 'recovered-before-install')
+            writer.release('3' * 32)
+
+    def test_orphan_journal_attachment_requires_matching_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            tx = w.Transaction('central', root=root)
+            with tx.lock():
+                item = tx.begin('5' * 32, {})
+            writer = w.HostWriter(root)
+            with self.assertRaisesRegex(w.Refused, 'unfinished component journal'):
+                writer.claim('6' * 32, 'central')
+            with self.assertRaisesRegex(w.Refused, 'does not belong'):
+                writer.resume('6' * 32, 'central', 'recover', True)
+            writer.resume('5' * 32, 'central', 'recover', True)
+            with tx.lock(owner='5' * 32):
+                tx.finish(item, 'recovered-before-switch')
+            writer.release('5' * 32)
+
+    def test_parallel_stable_manager_readers_and_agent_host_writer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            w.private_dir(root)
+            barrier = threading.Barrier(2)
+            class Native(Commands):
+                def run(self, argv, **kwargs):
+                    barrier.wait(timeout=3)
+                    return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v4.14.9"\n', '')
+            central = w.Central(root=root, runner=Native())
+            for agent_writer in (False, True):
+                if agent_writer:
+                    w.HostWriter(root).claim('7' * 32, 'agent')
+                with ThreadPoolExecutor(2) as pool:
+                    results = list(pool.map(lambda _: central.observe_manager(), range(2)))
+                self.assertEqual(results, [{'version': '4.14.9'}] * 2)
+                if agent_writer:
+                    w.HostWriter(root).release('7' * 32)
+            w.HostWriter(root).claim('8' * 32, 'central')
+            with self.assertRaisesRegex(w.Refused, 'active Wazuh writer'):
+                central.observe_manager()
+            w.HostWriter(root).release('8' * 32)
+
+    def test_reader_finishes_before_writer_claim_then_new_read_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            entered, finish = threading.Event(), threading.Event()
+            class Native(Commands):
+                def run(self, argv, **kwargs):
+                    entered.set()
+                    if not finish.wait(3):
+                        raise AssertionError('reader barrier did not release')
+                    return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v4.14.1"\n', '')
+            central = w.Central(root=root, runner=Native())
+            writer = w.HostWriter(root)
+            with ThreadPoolExecutor(2) as pool:
+                read = pool.submit(central.observe_manager)
+                self.assertTrue(entered.wait(3))
+                claim = pool.submit(writer.claim, '9' * 32, 'central')
+                with self.assertRaises(TimeoutError):
+                    claim.result(timeout=0.1)
+                finish.set()
+                self.assertEqual(read.result(timeout=3), {'version': '4.14.1'})
+                self.assertEqual(claim.result(timeout=3)['owner'], '9' * 32)
+            with self.assertRaisesRegex(w.Refused, 'active Wazuh writer'):
+                central.observe_manager()
+            writer.release('9' * 32)
+
+    def test_policy_is_replanned_after_writer_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            native = Commands('Debian', '4.14.1-1')
+            agent = w.Agent('Debian', root=Path(temporary) / 'private', runner=native)
+            self.assertFalse(agent.check('4.14.1')['change'])
+            native.installed = '4.14.9-1'
+            w.HostWriter(agent.root).claim('a' * 32, 'agent')
+            with self.assertRaisesRegex(w.Refused, 'newer than the observed manager'):
+                agent.check('4.14.1', owner='a' * 32)
+            self.assertFalse(agent.path.exists())
+            w.HostWriter(agent.root).release('a' * 32)
+
+
 class JournalTests(unittest.TestCase):
+    def test_all_direct_file_deletions_use_the_durable_absence_primitive(self):
+        import ast
+        tree = ast.parse((REPO / 'playbooks/apply/files/wazuh-transaction.py').read_text())
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for call in ast.walk(function):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ('unlink', 'remove'):
+                    self.assertEqual(function.name, 'durable_unlink', 'native file absence must pass the durable publication barrier')
+
+    def test_durable_absence_replay_syncs_parent_even_when_already_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'pin'
+            path.write_text('target-only pin')
+            observed = []
+            original = w.sync_directory
+            def sync(directory):
+                self.assertFalse(path.exists())
+                original(directory)
+                observed.append(str(directory))
+            w.sync_directory = sync
+            try:
+                w.durable_unlink(path)
+                w.durable_unlink(path)
+            finally:
+                w.sync_directory = original
+            self.assertEqual(observed, [temporary, temporary])
+
     def test_every_published_phase_has_a_declared_recovery_action(self):
         import ast
         module = ast.parse((REPO / 'playbooks/apply/files/wazuh-transaction.py').read_text())
@@ -267,6 +511,26 @@ class FakeCentral(w.Central):
         self.compose.write_text('\n'.join('image: wazuh/' + s.replace('.', '-') + ':4.14.1' for s in w.SERVICES))
         self.fail = fail
         self.calls = []
+
+    def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
+        # Existing transaction tests enter through the real common owner API.
+        # An explicit recovery call in this fixture represents the operator's
+        # stopped-operation acknowledgement; production never infers it.
+        writer = w.HostWriter(self.root)
+        marker = writer.inspect()['writer']
+        if marker:
+            owner = marker['owner']
+        elif recover and self.active():
+            owner = self.active()['owner']
+            writer.resume(owner, 'central', 'recover', confirmed=True)
+        else:
+            owner = '1' * 32
+            writer.claim(owner, 'central')
+        try:
+            return super().execute(target, upgrade, preview, recover, owner)
+        finally:
+            if not self.active():
+                writer.release(owner)
 
     def discover(self):
         return {'directory': str(self.project), 'compose': str(self.compose), 'version': '4.14.1',
@@ -483,12 +747,15 @@ class AgentColdRecoveryTests(unittest.TestCase):
         # Map only the coordinator's fixed host paths into disposable local
         # files. Real GNU tar still creates, verifies and restores the archives.
         # Native package/service state is an explicit command harness.
-        for family in ('Debian', 'RedHat'):
-            with self.subTest(family=family), tempfile.TemporaryDirectory() as temporary:
+        for family, absent_pin in (('Debian', False), ('Debian', True), ('RedHat', False)):
+            with self.subTest(family=family, absent_pin=absent_pin), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 real_path = w.Path
-                real_sync_file, real_sync_tree = w.sync_file, w.sync_tree
-                sealed, restored = set(), set()
+                real_sync_file, real_sync_tree, real_sync_directory = w.sync_file, w.sync_tree, w.sync_directory
+                sealed, restored, synced_directories = set(), set(), set()
+                def sync_directory(filename):
+                    real_sync_directory(filename)
+                    synced_directories.add(str(filename))
                 def seal(filename):
                     real_sync_file(filename)
                     sealed.add(str(filename))
@@ -526,12 +793,16 @@ class AgentColdRecoveryTests(unittest.TestCase):
                             self_test.assertTrue({entry['archive'] for entry in item['archives']}.issubset(sealed))
                         if phase == 'restored':
                             self_test.assertTrue({str(path(value)) for value in item['paths']}.issubset(restored))
+                            if not item['pin_state']['present']:
+                                self_test.assertFalse(path(self.pin_path()).exists())
+                                self_test.assertIn(str(path(self.pin_path()).parent), synced_directories,
+                                                   'absent pin deletion must sync its parent before restored authority')
                         return super().write(item, phase)
                     def package_archives(self, installed, target):
                         return {release: {'path': root / (release + '.pkg'), 'sha256': w.digest(root / (release + '.pkg'))}
                                 for release in (installed, target)}
                 self_test = self
-                w.Path, w.sync_file, w.sync_tree = path, seal, barrier
+                w.Path, w.sync_file, w.sync_tree, w.sync_directory = path, seal, barrier, sync_directory
                 try:
                     for filename, content in {
                         '/var/ossec/etc/client.keys': '001 synthetic any SYNTHETIC_KEY_ONLY\n',
@@ -542,6 +813,8 @@ class AgentColdRecoveryTests(unittest.TestCase):
                         destination = path(filename)
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         destination.write_text(content)
+                    if absent_pin:
+                        path('/etc/apt/preferences.d/pilot-wazuh-agent').unlink()
                     path('/var/cache/apt/archives').mkdir(parents=True)
                     for release in ('4.14.1-1', '4.14.9-1'):
                         (root / (release + '.pkg')).write_text(release)
@@ -550,6 +823,7 @@ class AgentColdRecoveryTests(unittest.TestCase):
                     (agent.root / 'rpm-stage').mkdir(parents=True)
                     plan = w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True)
                     owner = 'c' * 32
+                    w.HostWriter(agent.root).claim(owner, 'agent')
                     agent.reserve(owner, plan)
                     agent.cold_backup(owner)
                     agent.authorize_install(owner)
@@ -557,6 +831,8 @@ class AgentColdRecoveryTests(unittest.TestCase):
                     path('/var/ossec/etc/ossec.conf').write_text('new migrated data')
                     path('/var/ossec/etc/client.keys').write_text('002 changed any SYNTHETIC_WRONG_KEY\n')
                     path('/etc/hosts').write_text('new hosts')
+                    if absent_pin:
+                        path('/etc/apt/preferences.d/pilot-wazuh-agent').write_text('target-only pin')
                     agent.activate(owner)
                     with self.assertRaisesRegex(w.Refused, 'identity changed'):
                         agent.commit(owner)
@@ -570,11 +846,19 @@ class AgentColdRecoveryTests(unittest.TestCase):
                     self.assertEqual(path('/var/ossec/etc/client.keys').read_text(), '001 synthetic any SYNTHETIC_KEY_ONLY\n')
                     self.assertTrue(native.active)
                     self.assertEqual(agent.active()['phase'], 'restored')
+                    if absent_pin:
+                        path(agent.pin_path()).write_text('simulate resurrected target pin')
+                        with self.assertRaisesRegex(w.Refused, 'version pin does not match'):
+                            agent.finish_recovery(owner)
+                        self.assertTrue(agent.path.exists())
+                        self.assertTrue(agent.prepare_recovery(owner)['need_commit'])
+                        self.assertFalse(path(agent.pin_path()).exists())
                     agent.finish_recovery(owner)
                     self.assertFalse(agent.path.exists())
+                    w.HostWriter(agent.root).release(owner)
                 finally:
                     w.Path = real_path
-                    w.sync_file, w.sync_tree = real_sync_file, real_sync_tree
+                    w.sync_file, w.sync_tree, w.sync_directory = real_sync_file, real_sync_tree, real_sync_directory
 
 
 class AgentRecoveryDispatchTests(unittest.TestCase):
@@ -596,10 +880,15 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                         calls.append('verify-old-state')
                     def validate_agent_archives(self, item):
                         calls.append('validate-all-archives')
+                    def restore_absence(self, item):
+                        calls.append('restore-absence')
+                    def verify_pin(self, item, target=False):
+                        calls.append('verify-target-pin' if target else 'verify-old-pin')
                 agent = Agent('RedHat', runner=Native(), root=root / 'backups')
                 (agent.root / 'rpm-stage').mkdir(parents=True)
                 package = root / 'old.rpm'
                 package.write_bytes(b'synthetic package; native signature is a separate test')
+                w.HostWriter(agent.root).claim('f' * 32, 'agent')
                 with agent.lock():
                     item = agent.begin('f' * 32, {'installed': '4.14.1-1', 'manager_host': 'synthetic-manager',
                                                 'packages': {'4.14.1-1': {'path': str(package), 'sha256': w.digest(package)}}})
@@ -615,7 +904,8 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                     self.assertTrue(result['reinstall'])
                     self.assertEqual(agent.active()['phase'], 'recovering')
                 else:
-                    self.assertEqual(calls, [])
+                    self.assertEqual(calls, ['verify-target-pin'] if action == 'verify-target'
+                                     else ['restore-absence', 'verify-old-pin'])
                     self.assertTrue(result['need_commit'])
                     self.assertEqual(agent.active()['phase'], phase)
 

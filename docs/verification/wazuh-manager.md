@@ -95,6 +95,21 @@ root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
 這是停止整個 single-node stack 的操作；期間中央停止接收與查詢事件。
 新增交易驗收尚待 candidate 的 target evidence；原 C1–C11 不代表交易已驗證。
 
+一般設定、新安裝、升級、回復與明示的 canary 都必須先取得同一個 host-wide
+writer owner，包含共享 coordinator copy 與 `/etc/hosts`；同主機 agent 也使用
+此 owner 協調，不能只各鎖自己的 upgrade helper。所有 native planning 必須
+在 claim 後重讀。穩定的 manager readers 使用共享鎖，可同時服務多個 agent，
+中央 writer 或未完成中央 journal 則拒絕外部讀取。
+
+controller 中斷後 marker 不自動失效。writer-inspect 動作提供 owner/phase；
+操作者須確認前次 controller 及所有遠端工作都已停止，再以單次
+`wazuh_writer_resume_owner` 指定相同 owner，並明示
+`wazuh_confirm_previous_operation_stopped=true`。有中央 journal 時再選擇
+`wazuh_recover=true`，journal owner 必須相同。沒有 TTL、PID 猜測或自動接管；
+任何未完成 journal 都阻止一般 release。正常的 early exit 必須先完成 durable
+writer release，不能用 end_host 跳過 cleanup。此協調只涵蓋本版 Wazuh
+entrypoints，其他角色、舊版 controller 或外部 root 修改仍須獨占維護時段。
+
 版本升級 run 保留現有設定，只完成版本交易；欲改 forwarding 等設定，必須另跑
 一般 apply。C12 是不注入事件的目前狀態原生 oracle，不把「曾產生 backup 檔」
 當作回復已成功的證明。首次開發 probe 已在 4.14.1 disposable manager 真跑；正式

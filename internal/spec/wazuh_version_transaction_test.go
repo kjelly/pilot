@@ -21,3 +21,10 @@ func TestAptExactVersionTaskBehavior(t *testing.T) {
 		t.Fatalf("real Ansible exact APT task controls failed: %v\n%s", err, output)
 	}
 }
+
+func TestWazuhWriterTaskGraph(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_writer_task_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("real Ansible Wazuh writer/delegation graph failed: %v\n%s", err, output)
+	}
+}

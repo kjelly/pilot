@@ -69,8 +69,12 @@ manager 的有效版本是相容性上限；repository 的最新版本不是部�
 探測錯誤、模糊對應或已安裝 agent 較新，都必須在設定、註冊與重啟之前拒絕。
 一般套用保留相容的既有 agent；新安裝固定完整套件版本。
 共同目標 `wazuh_version` 選填；升級另需單次 `wazuh_upgrade=true` 授權。
-本次限 Ubuntu 24.04 amd64 / AlmaLinux 9 x86_64、4.14.x agent，
-升級目標為 4.14.9-1，禁止自動降級。
+既有 agent 的版本變更還必須觀察到明確對應的 manager；省略 enrollment endpoint
+不能讓 row-only 套用繞過原有中央連線的相容性上限。無 manager 的一般保留與新安裝仍可使用。
+一般套用保留 Debian / RedHat family 支援，包含 Ubuntu 22.04；4.14.x agent
+升級目標為 4.14.9-1，禁止自動降級。目前升級實機驗證計畫涵蓋 Ubuntu 24.04
+amd64 / AlmaLinux 9 x86_64，其他平台與 Ubuntu 22.04 的實跑範圍需由各自
+candidate evidence 明列，不能把程式相容性當作已完成實機驗證。
 
 先備妥可重裝的舊套件，再停止 agent 並冷備份 `/var/ossec`、enrollment key、
 設定與服務狀態；備份未驗證不得替換套件。失敗需恢復原套件、資料與服務，
@@ -80,6 +84,28 @@ root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
 原 C1–C9 的成功不代表版本交易已被驗證。
 持久升級交易只接受已安裝且已 enrolled 的 agent；新安裝維持一般 exact-version
 安裝與既有 enrollment retry 契約，不建立升級 journal，也不宣稱提供 fresh rollback。
+
+所有 Wazuh 套用（包含一般設定、新安裝、升級與回復）都在第一個主機 mutation
+與共享 coordinator copy 之前取得同一個 host-wide writer owner，涵蓋同主機
+central、agent 與 `/etc/hosts`，直到設定、服務、原生驗證及 rescue 結束才釋放。
+取得 owner 後重新讀取套件與 manager 事實，先前的讀取不能當成 mutation 授權。
+manager 版本讀取使用共享 reader lock，允許正常 fleet forks 同時觀察穩定版本；
+中央 writer 或未完成中央交易會拒絕外部讀取。同主機 agent writer 不變更中央版本，
+因此不阻止穩定 manager readers。尚未結束的 agent journal 只允許相同 owner
+執行指定階段的自身驗證。
+
+controller 被中斷時 writer marker 保留，即使是沒有升級 journal 的一般套用。
+操作者須先透過 writer-inspect 動作確認 owner 與 journal，確認前次 controller
+及遠端 package/Compose 工作都已停止，再以單次 `wazuh_writer_resume_owner`
+指定同一 UUID，並明示 `wazuh_confirm_previous_operation_stopped=true`。
+若有升級 journal，`wazuh_recovery_owner` 也必須是同一 owner；不可換 token、
+按 PID 猜測、等待 TTL 或強制刪掉未知 marker。沒有未完成 journal 時，一般失敗
+可在所有 mutator/rescue 結束後釋放 owner，之後依原 retry 契約重跑。
+回復舊版不存在的 pin 時，刪除及 parent directory fsync 必須先於 restored phase；
+重播與完成回復還須驗證 pin 的存在/不存在及內容。
+
+此 ownership 契約只協調本版 Wazuh entrypoints；其他角色的重疊維護、舊版
+controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不能宣稱已自動隔離。
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|

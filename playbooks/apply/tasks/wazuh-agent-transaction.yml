@@ -2,15 +2,9 @@
 # Only entered for an explicitly authorized existing enrolled-agent upgrade.
 # The durable owner journal reserves the resource across Ansible subprocesses;
 # it is not a claim that an individual task's flock spans the whole play.
-- name: "Allocate this agent transaction's unique owner"
-  ansible.builtin.command:
-    argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
-  register: wazuh_agent_owner_result
-  changed_when: false
-
 - name: "Retain the transaction owner and reset recovery authority"
   ansible.builtin.set_fact:
-    wazuh_agent_transaction_owner: "{{ wazuh_agent_owner_result.stdout }}"
+    wazuh_agent_transaction_owner: "{{ wazuh_writer_owner }}"
     wazuh_agent_transaction_reserved: false
 
 - name: "Stage the exact signed old and new Debian agent packages before downtime"

@@ -144,377 +144,440 @@
           written in decimal without a sign, a fraction or leading zeros. Leave it unset for 514.
       tags: [always]
 
-    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
-      ansible.builtin.set_fact:
-        # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
-        siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
-        wazuh_docker_version: "{{ wazuh_docker_version | default(wazuh_version | default('4.14.1', true), true) }}"
-      tags: [always]
-
-    # Auto-fallback for the common single-inventory case: if the caller left
-    # siem_forward_host genuinely unset (no -e/group_vars/host_vars) and
-    # this inventory happens to define a log-server group, use that host's
-    # own connection address instead of silently leaving forwarding
-    # disabled. `pilot deploy`'s single-component wizard already offers
-    # this as an interactive prompt (deploy_catalog.go's wazuh-manager
-    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
-    # does not carry that wizard-level convenience) get the same default,
-    # mirroring restic-backup-apply.yml's own "Auto-detect backup
-    # destination host from this inventory's seaweedfs-s3 group" task.
-    - name: "Auto-detect SIEM forward host from this inventory's log-server group"
-      ansible.builtin.set_fact:
-        siem_forward_host: >-
-          {{ hostvars[(groups.get('log-server', []) | first)]['ansible_host']
-             | default(groups.get('log-server', []) | first, true) }}
-      when: >-
-        (siem_forward_host | default('') | length == 0)
-        and (groups.get('log-server', []) | length > 0)
-      tags: [always]
-
-    # Same fail-early gate as keycloak-db-apply.yml — a missing docker
-    # engine should fail here with a clear message, not five tasks later
-    # inside the compose module.
-    - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
-      ansible.builtin.command: docker info
-      register: docker_pre
-      changed_when: false
-      # check_mode: false makes this run for real even under --check, so a
-      # missing engine fails here with a clear message instead of five tasks
-      # later inside the compose module — but on a from-scratch host being
-      # site-wide-previewed before its first real apply, docker itself was
-      # never actually installed (docker-apply.yml defers the install to the
-      # real apply too), so rc!=0 here is expected and must not fail the
-      # mandatory check-mode gate.
-      failed_when: docker_pre.rc != 0 and not ansible_check_mode
-      check_mode: false
-      tags: [always]
-    - name: "Install the root-owned Wazuh transaction coordinator"
-      ansible.builtin.copy:
-        src: files/wazuh-transaction.py
-        dest: /usr/local/sbin/pilot-wazuh-transaction
-        owner: root
-        group: root
-        mode: "0700"
-      tags: [always]
-
-    - name: "Reset this play's selected manager replacement plan"
-      ansible.builtin.set_fact:
-        pilot_wazuh_manager_install_planned: false
-      tags: [always]
-
-  tasks:
-    - name: "Mark this run's selected Wazuh manager installation plan"
-      ansible.builtin.set_fact:
-        pilot_wazuh_manager_install_planned: true
-      tags: [C1, C2, C3]
-
-    - name: "Inspect compatibility or execute the explicitly authorized central upgrade"
-      ansible.builtin.script:
-        cmd: >-
-          files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
-          --legacy {{ wazuh_docker_version | quote }}
-          {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool)
-               and pilot_wazuh_manager_install_planned is defined
-               and pilot_wazuh_manager_install_planned) else '' }}
-          {{ '--preview' if ansible_check_mode else '' }}
-          {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
-        executable: python3
-      register: wazuh_central_transaction
-      changed_when: >-
-        not ansible_check_mode and
-        (wazuh_central_transaction.stdout | from_json).changed | bool
-      check_mode: false
-      when: not ansible_check_mode or docker_pre.rc == 0
-      tags: [always]
-      no_log: true
-
-    - name: "Record whether the central runtime probe was legitimately deferred"
-      ansible.builtin.set_fact:
-        pilot_wazuh_manager_preview_fresh: >-
-          {{ ansible_check_mode and
-             ((wazuh_central_transaction is skipped) or
-              ((wazuh_central_transaction.stdout | default('{}') | from_json).fresh | default(false))
-              or ((wazuh_central_transaction.stdout | default('{}') | from_json).planned_upgrade | default(false))) }}
-      tags: [always]
-
-    - name: "Gate: a fresh central stack requires selected container installation tasks"
+    - name: "Gate: interrupted writer resume requires its exact owner and stopped-operation confirmation"
       ansible.builtin.assert:
         that:
-          - pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned
-        fail_msg: "Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected"
-      when:
-        - not (wazuh_central_transaction is skipped)
-        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+          - wazuh_writer_resume_owner | default('') | length == 0 or wazuh_writer_resume_owner is match('^[a-f0-9]{32}$')
+          - wazuh_confirm_previous_operation_stopped | default(false) | string | lower in ['true', 'false']
+          - not (wazuh_recover | default(false) | bool) or wazuh_writer_resume_owner | default('') | length > 0
+          - not ansible_check_mode or not (wazuh_recover | default(false) | bool)
+        fail_msg: "Use the exact interrupted writer owner; recovery never takes over another operation"
       tags: [always]
 
-    - name: "Retain the active Compose directory after a controlled patch upgrade"
-      ansible.builtin.set_fact:
-        wazuh_single_node_dir: "{{ (wazuh_central_transaction.stdout | from_json).directory }}"
-      when:
-        - not ansible_check_mode
-        - (wazuh_central_transaction.stdout | from_json).directory is defined
-      tags: [always]
-
-    - name: "Finish the version-only transaction after verified upgrade or recovery"
-      ansible.builtin.meta: end_host
-      when:
-        - not ansible_check_mode
-        - >-
-          ((wazuh_central_transaction.stdout | from_json).changed | bool)
-          or (wazuh_recover | default(false) | bool)
-      tags: [always]
-
-    - name: "Step 0: Report whether SIEM forwarding is enabled this run"
-      ansible.builtin.debug:
-        msg: >-
-          {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
-             if siem_forwarding_enabled
-             else 'siem_forward_host not provided — skipping /etc/hosts pin and <syslog_output>; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
-
-    # Official hard requirement of the wazuh-indexer (OpenSearch) image —
-    # the one host-level knob this role cannot containerize (spec §5).
-    - name: "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)"
-      ansible.posix.sysctl:
-        name: vm.max_map_count
-        value: "262144"
-        sysctl_set: true
-        state: present
-
-    # Steps 2-5 build the real on-disk docker-compose project (download,
-    # unpack, generate certs); state directory created in Step 2 doesn't
-    # really exist under check mode, so get_url/unarchive/command fail
-    # outright on a from-scratch host rather than merely simulating. Deferred
-    # to the real apply, same pattern as the docker preflight above.
-    - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
-      ansible.builtin.file:
-        path: "{{ wazuh_docker_root }}"
-        state: directory
-        mode: "0755"
-      when:
-        - not ansible_check_mode
-        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
-
-    - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
-      tags: [C1, C2, C3]
-      ansible.builtin.get_url:
-        url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
-        dest: "{{ wazuh_docker_tarball }}"
-        mode: "0644"
-      when:
-        - not ansible_check_mode
-        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
-
-    - name: "Step 4: Unpack the release bundle (spec C1-C3)"
-      tags: [C1, C2, C3]
-      ansible.builtin.unarchive:
-        src: "{{ wazuh_docker_tarball }}"
-        dest: "{{ wazuh_docker_root }}"
-        remote_src: true
-        creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
-      when:
-        - not ansible_check_mode
-        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
-
-    # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
-    # compose file ships `- 443:5601` under the dashboard service, which
-    # collides with reverse-proxy/nginx on any host running both roles. Runs
-    # after the unpack (the file doesn't exist before it) and before compose
-    # up (Step 8), so the remapped port is what actually gets bound.
-    # ansible.builtin.replace is naturally idempotent — a rerun after the
-    # port is already remapped matches nothing and reports unchanged.
-    - name: "Step 4b: Remap the dashboard off host port 443 (avoids reverse-proxy/nginx conflict)"
-      tags: [C1]
-      ansible.builtin.replace:
-        path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
-        regexp: '^(\s*-\s*)443:5601\s*$'
-        replace: '\g<1>{{ wazuh_dashboard_host_port }}:5601'
-      when: not ansible_check_mode
-
-    # One-shot official cert generator (wazuh/wazuh-certs-generator) —
-    # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
-    # Idempotent via `creates` on the root CA it emits. Long-ish on first
-    # run (pulls the generator image).
-    - name: "Step 5: Generate the indexer TLS cert chain (official generator; spec C1-C3)"
-      tags: [C1, C2, C3]
+    - name: "Allocate an independent owner for this Wazuh apply"
       ansible.builtin.command:
-        cmd: docker compose -f generate-indexer-certs.yml run --rm generator
-        chdir: "{{ wazuh_single_node_dir }}"
-        creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
-      when:
-        - not ansible_check_mode
-        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
-
-
-    # Steps 6-11 configure/compose-up/health-check the project built above;
-    # none of that exists on a fresh host when Steps 2-5 were skipped in
-    # check mode, so the whole block (and its rescue) is deferred too — same
-    # convention as wazuh-fim-apply.yml's post-install config block.
-    - when: not ansible_check_mode
-      block:
-        - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
-          tags: [always]
-          ansible.builtin.include_tasks:
-            file: tasks/resolve-hosts-alias-target.yml
-            apply:
-              tags: [always]
-          vars:
-            hosts_alias_target_host: "{{ siem_forward_host | default('') }}"
-          when: siem_forwarding_enabled | bool
-
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
-          tags: [C10]
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ hosts_alias_resolved_ip }}\t{{ siem_forward_alias }}"
-            state: present
-          when: siem_forwarding_enabled | bool
-
-        # Wazuh's ossec.conf parser accepts multiple top-level
-        # <ossec_config> root blocks in one file and merges them —
-        # verified live in v1.0 (see runbook §5). We append our managed
-        # block to the HOST-side wazuh_manager.conf; the official manager
-        # image copies /wazuh-config-mount/etc/ossec.conf over
-        # /var/ossec/etc/ossec.conf on every container start, so the
-        # change reaches the live config on the next (re)start — Step 9
-        # restarts the manager service if the stack was already up.
-        - name: "Step 7: Append <syslog_output> block to wazuh_manager.conf (spec C11)"
-          tags: [C11]
-          ansible.builtin.blockinfile:
-            path: "{{ wazuh_manager_conf }}"
-            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
-            block: |
-              <ossec_config>
-                <syslog_output>
-                  <server>{{ siem_forward_alias }}</server>
-                  <port>{{ siem_forward_port }}</port>
-                  <format>default</format>
-                </syslog_output>
-              </ossec_config>
-          register: siem_forward_conf_result
-          when: siem_forwarding_enabled | bool
-
-        # Spec: docs/verification/wazuh-manager.md C1, C2, C3
-        # First run pulls ~3-4GB of official images and boots the indexer
-        # for the first time (index bootstrap ~1 minute) — the waits below
-        # absorb that.
-        - name: "Step 8: Compose up the official single-node project (spec C1-C3)"
-          tags: [C1, C2, C3]
-          community.docker.docker_compose_v2:
-            project_src: "{{ wazuh_single_node_dir }}"
-            project_name: "{{ wazuh_compose_project }}"
-            state: present
-          register: wazuh_compose_result
-
-        # Drift probe: is the forward block present in the LIVE config the
-        # manager actually loaded (inside the container), not just in the
-        # host-side source file? Gating a restart on "the host file changed
-        # this run" is NOT convergent — a previous run whose injection
-        # failed would never be repaired. The until-loop absorbs the
-        # first-boot race where cont-init is still copying the config.
-        - name: "Step 9: Probe the live in-container forward config (drift check; spec C11)"
-          tags: [C11]
-          ansible.builtin.command: >-
-            docker exec single-node-wazuh.manager-1
-            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
-          register: live_forward_probe
-          changed_when: false
-          failed_when: false
-          retries: 6
-          delay: 5
-          until: live_forward_probe.rc == 0
-          when: siem_forwarding_enabled | bool
-
-        # RECREATE, not restart — hit for real on vm-target (runbook §5):
-        # the official image's 0-wazuh-init deletes /var/ossec/data_tmp at
-        # the end of the FIRST boot; on a mere `docker restart` the script
-        # sees the (legitimately empty) multigroups permanent dir, tries to
-        # re-install it from the now-deleted data_tmp, exits 1 — and never
-        # reaches mount_files, so /wazuh-config-mount is NOT re-injected.
-        # A recreated container starts from a fresh image filesystem
-        # (data_tmp present) and runs the init to completion.
-        - name: "Step 9a: Recreate wazuh.manager so /wazuh-config-mount re-injects the config (spec C11)"
-          tags: [C11]
-          community.docker.docker_compose_v2:
-            project_src: "{{ wazuh_single_node_dir }}"
-            project_name: "{{ wazuh_compose_project }}"
-            state: present
-            recreate: always
-            services: [wazuh.manager]
-          when:
-            - siem_forwarding_enabled | bool
-            - live_forward_probe.rc != 0
-
-        # Convergence assertion: after a drift-triggered recreate the live
-        # config MUST contain the block — fail loudly (into the rescue)
-        # instead of leaving silent drift behind.
-        - name: "Step 9b: Assert the live forward config converged after recreate (spec C11)"
-          tags: [C11]
-          ansible.builtin.command: >-
-            docker exec single-node-wazuh.manager-1
-            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
-          register: live_forward_recheck
-          changed_when: false
-          retries: 12
-          delay: 5
-          until: live_forward_recheck.rc == 0
-          when:
-            - siem_forwarding_enabled | bool
-            - live_forward_probe.rc != 0
-
-        - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
-          tags: [C5, C6]
-          ansible.builtin.wait_for:
-            port: 1514
-            host: 127.0.0.1
-            timeout: 300
-
-        # 401-without-credentials proves OpenSearch + the security plugin
-        # finished bootstrapping, not merely that the container exists
-        # (spec C4). First boot takes ~1 minute.
-        - name: "Step 11: Wait for the indexer HTTPS API to answer 401 (spec C4)"
-          tags: [C4]
-          ansible.builtin.uri:
-            url: "https://127.0.0.1:9200"
-            validate_certs: false
-            status_code: 401
-          register: wazuh_indexer_ready
-          until: wazuh_indexer_ready.status == 401
-          retries: 60
-          delay: 5
-
-      rescue:
-        - name: "ROLLBACK — remove the siem forward managed block"
-          tags: [always]
-          ansible.builtin.blockinfile:
-            path: "{{ wazuh_manager_conf }}"
-            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
-            block: ""
-            state: absent
-
-        - name: "ROLLBACK — remove the /etc/hosts pin"
-          tags: [always]
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ siem_forward_alias }}$'
-            state: absent
-
-        - name: "ROLLBACK — surface the original failure"
-          tags: [always]
-          ansible.builtin.fail:
-            msg: >-
-              wazuh-manager apply FAILED (see task output above); the
-              /etc/hosts pin and <syslog_output> block were reverted.
-              Containers (if created) are left in place for inspection via
-              `docker logs single-node-wazuh.manager-1` /
-              `docker logs single-node-wazuh.indexer-1` — this rescue does
-              NOT tear down the compose project or the cert chain (Step
-              1-5); consult docs/runbooks/wazuh-manager.md §5 before
-              retrying.
-  post_tasks:
-    - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
-      ansible.builtin.command:
-        argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify]
+        argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+      register: wazuh_writer_uuid
       changed_when: false
-      when: not ansible_check_mode
-      tags: [C12]
+      check_mode: false
+      tags: [always]
+
+    - name: "Reset this play's writer ownership and completion state"
+      ansible.builtin.set_fact:
+        wazuh_writer_owner: "{{ wazuh_writer_resume_owner | default(wazuh_writer_uuid.stdout, true) }}"
+        wazuh_writer_claimed: false
+        wazuh_finish_host: false
+      tags: [always]
+  tasks:
+    - name: "Own all Wazuh mutations on this host through their final proofs"
+      block:
+        - name: "Claim the host-wide Wazuh writer before any shared coordinator copy or mutation"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py
+              {{ 'writer-resume' if (wazuh_writer_resume_owner | default('') | length > 0) else 'writer-claim' }}
+              --component central --owner {{ wazuh_writer_owner | quote }}
+              --mode {{ 'recover' if (wazuh_recover | default(false) | bool) else 'apply' }}
+              {{ '--confirm-previous-stopped' if (wazuh_confirm_previous_operation_stopped | default(false) | bool) else '' }}
+            executable: python3
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Record only this play's successful writer claim"
+          ansible.builtin.set_fact:
+            wazuh_writer_claimed: true
+          tags: [always]
+
+        - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+          ansible.builtin.set_fact:
+            # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
+            siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
+            wazuh_docker_version: "{{ wazuh_docker_version | default(wazuh_version | default('4.14.1', true), true) }}"
+          tags: [always]
+
+        # Auto-fallback for the common single-inventory case: if the caller left
+        # siem_forward_host genuinely unset (no -e/group_vars/host_vars) and
+        # this inventory happens to define a log-server group, use that host's
+        # own connection address instead of silently leaving forwarding
+        # disabled. `pilot deploy`'s single-component wizard already offers
+        # this as an interactive prompt (deploy_catalog.go's wazuh-manager
+        # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
+        # does not carry that wizard-level convenience) get the same default,
+        # mirroring restic-backup-apply.yml's own "Auto-detect backup
+        # destination host from this inventory's seaweedfs-s3 group" task.
+        - name: "Auto-detect SIEM forward host from this inventory's log-server group"
+          ansible.builtin.set_fact:
+            siem_forward_host: >-
+              {{ hostvars[(groups.get('log-server', []) | first)]['ansible_host']
+                 | default(groups.get('log-server', []) | first, true) }}
+          when: >-
+            (siem_forward_host | default('') | length == 0)
+            and (groups.get('log-server', []) | length > 0)
+          tags: [always]
+
+        # Same fail-early gate as keycloak-db-apply.yml — a missing docker
+        # engine should fail here with a clear message, not five tasks later
+        # inside the compose module.
+        - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
+          ansible.builtin.command: docker info
+          register: docker_pre
+          changed_when: false
+          # check_mode: false makes this run for real even under --check, so a
+          # missing engine fails here with a clear message instead of five tasks
+          # later inside the compose module — but on a from-scratch host being
+          # site-wide-previewed before its first real apply, docker itself was
+          # never actually installed (docker-apply.yml defers the install to the
+          # real apply too), so rc!=0 here is expected and must not fail the
+          # mandatory check-mode gate.
+          failed_when: docker_pre.rc != 0 and not ansible_check_mode
+          check_mode: false
+          tags: [always]
+        - name: "Install the root-owned Wazuh transaction coordinator"
+          ansible.builtin.copy:
+            src: files/wazuh-transaction.py
+            dest: /usr/local/sbin/pilot-wazuh-transaction
+            owner: root
+            group: root
+            mode: "0700"
+          tags: [always]
+
+        - name: "Reset this play's selected manager replacement plan"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_install_planned: false
+          tags: [always]
+
+        - name: "Mark this run's selected Wazuh manager installation plan"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_install_planned: true
+          tags: [C1, C2, C3]
+
+        - name: "Inspect compatibility or execute the explicitly authorized central upgrade"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
+              --legacy {{ wazuh_docker_version | quote }}
+              --owner {{ wazuh_writer_owner | quote }}
+              {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool)
+                   and pilot_wazuh_manager_install_planned is defined
+                   and pilot_wazuh_manager_install_planned) else '' }}
+              {{ '--preview' if ansible_check_mode else '' }}
+              {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
+            executable: python3
+          register: wazuh_central_transaction
+          changed_when: >-
+            not ansible_check_mode and
+            (wazuh_central_transaction.stdout | from_json).changed | bool
+          check_mode: false
+          when: not ansible_check_mode or docker_pre.rc == 0
+          tags: [always]
+          no_log: true
+
+        - name: "Record whether the central runtime probe was legitimately deferred"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_preview_fresh: >-
+              {{ ansible_check_mode and
+                 ((wazuh_central_transaction is skipped) or
+                  ((wazuh_central_transaction.stdout | default('{}') | from_json).fresh | default(false))
+                  or ((wazuh_central_transaction.stdout | default('{}') | from_json).planned_upgrade | default(false))) }}
+          tags: [always]
+
+        - name: "Gate: a fresh central stack requires selected container installation tasks"
+          ansible.builtin.assert:
+            that:
+              - pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned
+            fail_msg: "Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected"
+          when:
+            - not (wazuh_central_transaction is skipped)
+            - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+          tags: [always]
+
+        - name: "Retain the active Compose directory after a controlled patch upgrade"
+          ansible.builtin.set_fact:
+            wazuh_single_node_dir: "{{ (wazuh_central_transaction.stdout | from_json).directory }}"
+          when:
+            - not ansible_check_mode
+            - (wazuh_central_transaction.stdout | from_json).directory is defined
+          tags: [always]
+
+        - name: "Finish the version-only transaction after verified upgrade or recovery"
+          ansible.builtin.set_fact:
+            wazuh_finish_host: true
+          when:
+            - not ansible_check_mode
+            - >-
+              ((wazuh_central_transaction.stdout | from_json).changed | bool)
+              or (wazuh_recover | default(false) | bool)
+          tags: [always]
+
+        - name: "Apply the selected Wazuh tasks only after policy is recomputed under ownership"
+          when: not wazuh_finish_host
+          block:
+            - name: "Step 0: Report whether SIEM forwarding is enabled this run"
+              ansible.builtin.debug:
+                msg: >-
+                  {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
+                     if siem_forwarding_enabled
+                     else 'siem_forward_host not provided — skipping /etc/hosts pin and <syslog_output>; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
+
+            # Official hard requirement of the wazuh-indexer (OpenSearch) image —
+            # the one host-level knob this role cannot containerize (spec §5).
+            - name: "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)"
+              ansible.posix.sysctl:
+                name: vm.max_map_count
+                value: "262144"
+                sysctl_set: true
+                state: present
+
+            # Steps 2-5 build the real on-disk docker-compose project (download,
+            # unpack, generate certs); state directory created in Step 2 doesn't
+            # really exist under check mode, so get_url/unarchive/command fail
+            # outright on a from-scratch host rather than merely simulating. Deferred
+            # to the real apply, same pattern as the docker preflight above.
+            - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
+              ansible.builtin.file:
+                path: "{{ wazuh_docker_root }}"
+                state: directory
+                mode: "0755"
+              when:
+                - not ansible_check_mode
+                - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+
+            - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.get_url:
+                url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
+                dest: "{{ wazuh_docker_tarball }}"
+                mode: "0644"
+              when:
+                - not ansible_check_mode
+                - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+
+            - name: "Step 4: Unpack the release bundle (spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.unarchive:
+                src: "{{ wazuh_docker_tarball }}"
+                dest: "{{ wazuh_docker_root }}"
+                remote_src: true
+                creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+              when:
+                - not ansible_check_mode
+                - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+
+            # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
+            # compose file ships `- 443:5601` under the dashboard service, which
+            # collides with reverse-proxy/nginx on any host running both roles. Runs
+            # after the unpack (the file doesn't exist before it) and before compose
+            # up (Step 8), so the remapped port is what actually gets bound.
+            # ansible.builtin.replace is naturally idempotent — a rerun after the
+            # port is already remapped matches nothing and reports unchanged.
+            - name: "Step 4b: Remap the dashboard off host port 443 (avoids reverse-proxy/nginx conflict)"
+              tags: [C1]
+              ansible.builtin.replace:
+                path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+                regexp: '^(\s*-\s*)443:5601\s*$'
+                replace: '\g<1>{{ wazuh_dashboard_host_port }}:5601'
+              when: not ansible_check_mode
+
+            # One-shot official cert generator (wazuh/wazuh-certs-generator) —
+            # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
+            # Idempotent via `creates` on the root CA it emits. Long-ish on first
+            # run (pulls the generator image).
+            - name: "Step 5: Generate the indexer TLS cert chain (official generator; spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.command:
+                cmd: docker compose -f generate-indexer-certs.yml run --rm generator
+                chdir: "{{ wazuh_single_node_dir }}"
+                creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
+              when:
+                - not ansible_check_mode
+                - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+
+
+            # Steps 6-11 configure/compose-up/health-check the project built above;
+            # none of that exists on a fresh host when Steps 2-5 were skipped in
+            # check mode, so the whole block (and its rescue) is deferred too — same
+            # convention as wazuh-fim-apply.yml's post-install config block.
+            - when: not ansible_check_mode
+              block:
+                - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
+                  tags: [always]
+                  ansible.builtin.include_tasks:
+                    file: tasks/resolve-hosts-alias-target.yml
+                    apply:
+                      tags: [always]
+                  vars:
+                    hosts_alias_target_host: "{{ siem_forward_host | default('') }}"
+                  when: siem_forwarding_enabled | bool
+
+                - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
+                  tags: [C10]
+                  ansible.builtin.lineinfile:
+                    path: /etc/hosts
+                    regexp: '\s{{ siem_forward_alias }}$'
+                    line: "{{ hosts_alias_resolved_ip }}\t{{ siem_forward_alias }}"
+                    state: present
+                  when: siem_forwarding_enabled | bool
+
+                # Wazuh's ossec.conf parser accepts multiple top-level
+                # <ossec_config> root blocks in one file and merges them —
+                # verified live in v1.0 (see runbook §5). We append our managed
+                # block to the HOST-side wazuh_manager.conf; the official manager
+                # image copies /wazuh-config-mount/etc/ossec.conf over
+                # /var/ossec/etc/ossec.conf on every container start, so the
+                # change reaches the live config on the next (re)start — Step 9
+                # restarts the manager service if the stack was already up.
+                - name: "Step 7: Append <syslog_output> block to wazuh_manager.conf (spec C11)"
+                  tags: [C11]
+                  ansible.builtin.blockinfile:
+                    path: "{{ wazuh_manager_conf }}"
+                    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
+                    block: |
+                      <ossec_config>
+                        <syslog_output>
+                          <server>{{ siem_forward_alias }}</server>
+                          <port>{{ siem_forward_port }}</port>
+                          <format>default</format>
+                        </syslog_output>
+                      </ossec_config>
+                  register: siem_forward_conf_result
+                  when: siem_forwarding_enabled | bool
+
+                # Spec: docs/verification/wazuh-manager.md C1, C2, C3
+                # First run pulls ~3-4GB of official images and boots the indexer
+                # for the first time (index bootstrap ~1 minute) — the waits below
+                # absorb that.
+                - name: "Step 8: Compose up the official single-node project (spec C1-C3)"
+                  tags: [C1, C2, C3]
+                  community.docker.docker_compose_v2:
+                    project_src: "{{ wazuh_single_node_dir }}"
+                    project_name: "{{ wazuh_compose_project }}"
+                    state: present
+                  register: wazuh_compose_result
+
+                # Drift probe: is the forward block present in the LIVE config the
+                # manager actually loaded (inside the container), not just in the
+                # host-side source file? Gating a restart on "the host file changed
+                # this run" is NOT convergent — a previous run whose injection
+                # failed would never be repaired. The until-loop absorbs the
+                # first-boot race where cont-init is still copying the config.
+                - name: "Step 9: Probe the live in-container forward config (drift check; spec C11)"
+                  tags: [C11]
+                  ansible.builtin.command: >-
+                    docker exec single-node-wazuh.manager-1
+                    grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
+                  register: live_forward_probe
+                  changed_when: false
+                  failed_when: false
+                  retries: 6
+                  delay: 5
+                  until: live_forward_probe.rc == 0
+                  when: siem_forwarding_enabled | bool
+
+                # RECREATE, not restart — hit for real on vm-target (runbook §5):
+                # the official image's 0-wazuh-init deletes /var/ossec/data_tmp at
+                # the end of the FIRST boot; on a mere `docker restart` the script
+                # sees the (legitimately empty) multigroups permanent dir, tries to
+                # re-install it from the now-deleted data_tmp, exits 1 — and never
+                # reaches mount_files, so /wazuh-config-mount is NOT re-injected.
+                # A recreated container starts from a fresh image filesystem
+                # (data_tmp present) and runs the init to completion.
+                - name: "Step 9a: Recreate wazuh.manager so /wazuh-config-mount re-injects the config (spec C11)"
+                  tags: [C11]
+                  community.docker.docker_compose_v2:
+                    project_src: "{{ wazuh_single_node_dir }}"
+                    project_name: "{{ wazuh_compose_project }}"
+                    state: present
+                    recreate: always
+                    services: [wazuh.manager]
+                  when:
+                    - siem_forwarding_enabled | bool
+                    - live_forward_probe.rc != 0
+
+                # Convergence assertion: after a drift-triggered recreate the live
+                # config MUST contain the block — fail loudly (into the rescue)
+                # instead of leaving silent drift behind.
+                - name: "Step 9b: Assert the live forward config converged after recreate (spec C11)"
+                  tags: [C11]
+                  ansible.builtin.command: >-
+                    docker exec single-node-wazuh.manager-1
+                    grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
+                  register: live_forward_recheck
+                  changed_when: false
+                  retries: 12
+                  delay: 5
+                  until: live_forward_recheck.rc == 0
+                  when:
+                    - siem_forwarding_enabled | bool
+                    - live_forward_probe.rc != 0
+
+                - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
+                  tags: [C5, C6]
+                  ansible.builtin.wait_for:
+                    port: 1514
+                    host: 127.0.0.1
+                    timeout: 300
+
+                # 401-without-credentials proves OpenSearch + the security plugin
+                # finished bootstrapping, not merely that the container exists
+                # (spec C4). First boot takes ~1 minute.
+                - name: "Step 11: Wait for the indexer HTTPS API to answer 401 (spec C4)"
+                  tags: [C4]
+                  ansible.builtin.uri:
+                    url: "https://127.0.0.1:9200"
+                    validate_certs: false
+                    status_code: 401
+                  register: wazuh_indexer_ready
+                  until: wazuh_indexer_ready.status == 401
+                  retries: 60
+                  delay: 5
+
+              rescue:
+                - name: "ROLLBACK — remove the siem forward managed block"
+                  tags: [always]
+                  ansible.builtin.blockinfile:
+                    path: "{{ wazuh_manager_conf }}"
+                    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
+                    block: ""
+                    state: absent
+
+                - name: "ROLLBACK — remove the /etc/hosts pin"
+                  tags: [always]
+                  ansible.builtin.lineinfile:
+                    path: /etc/hosts
+                    regexp: '\s{{ siem_forward_alias }}$'
+                    state: absent
+
+                - name: "ROLLBACK — surface the original failure"
+                  tags: [always]
+                  ansible.builtin.fail:
+                    msg: >-
+                      wazuh-manager apply FAILED (see task output above); the
+                      /etc/hosts pin and <syslog_output> block were reverted.
+                      Containers (if created) are left in place for inspection via
+                      `docker logs single-node-wazuh.manager-1` /
+                      `docker logs single-node-wazuh.indexer-1` — this rescue does
+                      NOT tear down the compose project or the cert chain (Step
+                      1-5); consult docs/runbooks/wazuh-manager.md §5 before
+                      retrying.
+            - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify, --owner, "{{ wazuh_writer_owner }}"]
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [C12]
+      always:
+        - name: "Release only this exact writer after all mutators and recovery tasks have ended"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py writer-release --owner {{ wazuh_writer_owner | quote }}
+            executable: python3
+          changed_when: false
+          check_mode: false
+          when: wazuh_writer_claimed is defined and wazuh_writer_claimed | bool
+          tags: [always]
+
+    - name: "End the completed version or recovery operation after durable writer release"
+      ansible.builtin.meta: end_host
+      when: wazuh_finish_host
+      tags: [always]

@@ -81,6 +81,8 @@ def agent_plan(installed, manager, requested='', upgrade=False):
     if current and version(target) < version(current):
         raise Refused('Wazuh agent downgrade refused')
     change = bool(current and target != current)
+    if change and not manager:
+        raise Refused('controlled agent upgrade requires an observed manager version')
     if change and (not upgrade or target != '4.14.9'):
         raise Refused('agent upgrade requires wazuh_upgrade=true and target 4.14.9')
     return {'installed': installed, 'version': target, 'package': target + '-1' if change or not installed else installed,
@@ -149,6 +151,17 @@ def sync_tree(path):
     sync_directory(path.parent)
 
 
+def durable_unlink(path):
+    """Restore absence durably, including an already absent replay target."""
+    path = Path(path)
+    canonical(path.parent)
+    if path.exists() or path.is_symlink():
+        if path.is_dir() and not path.is_symlink():
+            raise Refused('absence restoration expected a file')
+        path.unlink()
+    sync_directory(path.parent)
+
+
 def private_dir(path):
     path = Path(path)
     # Reject symlink parents, including a symlink introduced at a prior step.
@@ -206,7 +219,144 @@ def atomic_json(path, value):
             os.close(directory)
     finally:
         if tmp.exists():
-            tmp.unlink()
+            durable_unlink(tmp)
+
+
+@contextlib.contextmanager
+def bounded_flock(filename, shared=False, timeout=30):
+    fd = os.open(filename, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise Refused('unsafe Wazuh coordinator lock')
+        until = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= until:
+                    raise Refused('Wazuh coordinator lock acquisition timed out') from exc
+                time.sleep(0.02)
+        yield
+    finally:
+        os.close(fd)
+
+
+class HostWriter:
+    """One durable owner for all Wazuh writers on this host, including hosts.
+
+    The short coordinator mutex precedes component mutexes. A marker survives
+    controller death; only explicit same-owner resume with stopped-operation
+    confirmation may continue it. No expiry, PID inference or token takeover.
+    """
+    def __init__(self, root=ROOT):
+        self.root = Path(root)
+        self.path = self.root / 'writer-active.json'
+
+    @contextlib.contextmanager
+    def mutex(self, shared=False):
+        private_dir(self.root)
+        with bounded_flock(self.root / 'coordinator.lock', shared=shared):
+            yield
+
+    def active(self):
+        if self.path.is_symlink():
+            raise Refused('unsafe Wazuh writer marker')
+        if not self.path.exists():
+            return None
+        info = self.path.stat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise Refused('unsafe Wazuh writer marker permissions')
+        try:
+            item = json.loads(self.path.read_text())
+            if (not re.fullmatch('[a-f0-9]{32}', item['owner'])
+                    or item['component'] not in ('central', 'agent')
+                    or item['mode'] not in ('apply', 'recover', 'canary')):
+                raise ValueError('invalid writer identity')
+            return item
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Refused('invalid Wazuh writer marker; explicit inspection required') from exc
+
+    def journals(self):
+        return [item for kind in ('central', 'agent')
+                if (item := Transaction(kind, root=self.root).active()) is not None]
+
+    @staticmethod
+    def identity(owner, component, mode):
+        if (not re.fullmatch('[a-f0-9]{32}', owner) or component not in ('central', 'agent')
+                or mode not in ('apply', 'recover', 'canary')):
+            raise Refused('invalid Wazuh writer identity')
+
+    def claim(self, owner, component, mode='apply'):
+        self.identity(owner, component, mode)
+        with self.mutex(shared=True):
+            if self.active():
+                raise Refused('another Wazuh writer owns this host; inspect and explicitly resume if interrupted')
+        with self.mutex():
+            if self.active():
+                raise Refused('another Wazuh writer owns this host; inspect and explicitly resume if interrupted')
+            if self.journals():
+                raise Refused('unfinished component journal prevents a new Wazuh writer')
+            if any((self.root / (kind + '-' + owner)).exists() for kind in ('central', 'agent')):
+                raise Refused('writer owner would reuse a retained transaction backup')
+            item = {'owner': owner, 'component': component, 'mode': mode}
+            atomic_json(self.path, item)
+            return item
+
+    def resume(self, owner, component, mode='apply', confirmed=False):
+        self.identity(owner, component, mode)
+        if not confirmed:
+            raise Refused('resume requires confirmation that the previous operation has stopped')
+        with self.mutex():
+            marker = self.active()
+            journals = self.journals()
+            if marker and (marker['owner'] != owner or marker['component'] != component):
+                raise Refused('interrupted writer owner or component does not match')
+            if any(item['owner'] != owner or item['kind'] != component for item in journals):
+                raise Refused('component journal does not belong to the interrupted writer')
+            if not marker and not journals:
+                raise Refused('no interrupted writer or matching component journal to resume')
+            item = {'owner': owner, 'component': component, 'mode': mode}
+            atomic_json(self.path, item)
+            return item
+
+    def release(self, owner):
+        with self.mutex():
+            marker = self.active()
+            if not marker or marker['owner'] != owner:
+                raise Refused('writer release requires its exact active owner')
+            if self.journals():
+                raise Refused('unfinished component journal prevents writer release')
+            durable_unlink(self.path)
+            return {'released': True}
+
+    def inspect(self):
+        with self.mutex(shared=True):
+            return {'writer': self.active(), 'journals': [
+                {'component': item['kind'], 'owner': item['owner'], 'phase': item['phase']}
+                for item in self.journals()]}
+
+    @contextlib.contextmanager
+    def guard(self, owner, component):
+        with self.mutex(shared=True):
+            marker = self.active()
+            if not marker or marker['owner'] != owner or marker['component'] != component:
+                raise Refused('operation requires the exact host-wide Wazuh writer owner')
+            yield
+
+    @contextlib.contextmanager
+    def reader(self, component, owner=None):
+        with self.mutex(shared=True):
+            marker = self.active()
+            if marker:
+                own = owner and marker['owner'] == owner and marker['component'] == component
+                stable_manager = component == 'central' and marker['component'] == 'agent'
+                if not own and not stable_manager:
+                    raise Refused('active Wazuh writer prevents a stable external read')
+            elif owner:
+                raise Refused('reader owner has no active Wazuh writer claim')
+            yield
 
 
 class Transaction:
@@ -217,8 +367,16 @@ class Transaction:
         self.path = self.root / (kind + '-active.json')
 
     @contextlib.contextmanager
-    def lock(self):
+    def lock(self, owner=None, reader=False):
         private_dir(self.root)
+        host = HostWriter(self.root)
+        scope = host.reader(self.kind, owner) if reader else host.guard(owner, self.kind) if owner is not None else contextlib.nullcontext()
+        with scope:
+            with self.component_lock(shared=reader):
+                yield
+
+    @contextlib.contextmanager
+    def component_lock(self, shared=False):
         fd = os.open(self.root / (self.kind + '.lock'),
                      os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
@@ -226,7 +384,7 @@ class Transaction:
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
                 raise Refused('unsafe transaction lock')
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise Refused('another Wazuh transaction is running') from exc
             yield
@@ -275,8 +433,7 @@ class Transaction:
 
     def finish(self, item, phase):
         self.write(item, phase)
-        self.path.unlink()
-        sync_directory(self.root)
+        durable_unlink(self.path)
 
     def capacity(self, paths, extra_bytes=0):
         size = 0
@@ -311,15 +468,28 @@ class Transaction:
             if source.is_dir():
                 shutil.rmtree(source)
             else:
-                source.unlink()
+                durable_unlink(source)
         self.r.run(['tar', '--acls', '--xattrs', '--xattrs-include=*', '--selinux', '--numeric-owner', '--same-owner',
                     '--same-permissions', '-xpf', archive, '-C', source.parent], timeout=1800)
         sync_tree(source)
 
 
 class Central(Transaction):
-    def __init__(self, **kwargs):
+    def __init__(self, managed_root=Path('/opt/pilot/wazuh-docker'), **kwargs):
         super().__init__('central', **kwargs)
+        # Internal filesystem seam for discovery tests; the CLI never exposes
+        # this setting and always enforces the production pilot-owned root.
+        self.managed_root = Path(managed_root)
+
+    def project_directory(self, directory):
+        directory = canonical(directory)
+        try:
+            relative = directory.relative_to(canonical(self.managed_root))
+        except ValueError as exc:
+            raise Refused('active Compose directory is outside the pilot-owned single-node layout') from exc
+        if not re.fullmatch(r'wazuh-docker-4\.14\.[0-9]+/single-node', str(relative)):
+            raise Refused('active Compose directory is outside the pilot-owned single-node layout')
+        return directory
 
     def image_provenance(self, image, repository, release):
         identities = image.get('RepoDigests') or []
@@ -364,7 +534,7 @@ class Central(Transaction):
         # This atomic read cannot observe a temporary upgraded manager that a
         # central transaction may still roll back. Supported transitions only
         # move forward, so a bound to this committed version remains safe.
-        with self.lock():
+        with self.lock(reader=True):
             self.idle()
             text = self.r.run(['docker', 'exec', 'single-node-wazuh.manager-1',
                                '/var/ossec/bin/wazuh-control', 'info'], timeout=30, operation='committed manager version').stdout
@@ -378,7 +548,7 @@ class Central(Transaction):
         if not re.fullmatch('[0-9]+', identifier) or not name or '\n' in name:
             raise Refused('invalid exact agent identity')
         version(expected)
-        with self.lock():
+        with self.lock(reader=True):
             self.idle()
             text = self.r.run(['docker', 'exec', 'single-node-wazuh.manager-1',
                                '/var/ossec/bin/agent_control', '-i', identifier], timeout=30).stdout
@@ -389,8 +559,10 @@ class Central(Transaction):
                 raise Refused('manager has not observed the exact active agent identity and version')
             return {'pass': True}
 
-    def verify(self, canary=False):
-        with self.lock():
+    def verify(self, canary=False, owner=None):
+        if canary and not owner:
+            raise Refused('canary requires host-wide central writer ownership')
+        with self.lock(owner=owner, reader=not canary):
             self.idle()
             state = self.discover()
             if not state:
@@ -434,8 +606,7 @@ class Central(Transaction):
         canonical(compose)
         if Path(compose).stat().st_nlink != 1:
             raise Refused('active Compose file has an outside hardlink alias')
-        if not re.fullmatch(r'/opt/pilot/wazuh-docker/wazuh-docker-4\.14\.[0-9]+/single-node', str(directory)):
-            raise Refused('active Compose directory is outside the pilot-owned single-node layout')
+        self.project_directory(directory)
         images = {}
         paths = {str(directory.resolve())}
         volume_names = set()
@@ -724,9 +895,7 @@ class Central(Transaction):
                 time.sleep(5)
 
     def validate_project_scope(self, item):
-        if not re.fullmatch(r'/opt/pilot/wazuh-docker/wazuh-docker-4\.14\.[0-9]+/single-node', item['directory']):
-            raise Refused('recovery project scope is invalid')
-        directory = canonical(item['directory'])
+        directory = self.project_directory(item['directory'])
         compose = canonical(item['compose'])
         if compose.parent != directory or (compose.exists() and (not compose.is_file() or compose.stat().st_nlink != 1)):
             raise Refused('recovery Compose file scope is invalid')
@@ -817,15 +986,17 @@ class Central(Transaction):
         self.canary()
         self.finish(item, 'recovered')
 
-    def execute(self, target, upgrade=False, preview=False, recover=False):
+    def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
         version(target)
         if preview and recover:
             raise Refused('check mode cannot execute central recovery')
-        with self.lock():
+        with self.lock(owner=owner):
             if recover:
                 item = self.active()
                 if not item:
                     raise Refused('no active central transaction to recover')
+                if item['owner'] != owner:
+                    raise Refused('central journal does not belong to the host writer owner')
                 action = CENTRAL_RECOVERY.get(item['phase'])
                 if action == 'resume-old':
                     self.recover_pre_switch(item)
@@ -877,7 +1048,7 @@ class Central(Transaction):
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['target_version'] = target
             state['target_images'] = target_images
-            item = self.begin(uuid.uuid4().hex, state)
+            item = self.begin(owner, state)
             try:
                 self.retain_images(item)
                 self.write(item, 'stopping')
@@ -928,6 +1099,37 @@ class Agent(Transaction):
             raise Refused('unsupported agent package backend')
         self.family = family
 
+    def pin_path(self):
+        return '/etc/apt/preferences.d/pilot-wazuh-agent' if self.family == 'Debian' else '/etc/yum.repos.d/wazuh.repo'
+
+    def capture_pin(self):
+        path = Path(self.pin_path())
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise Refused('unsafe agent pin state')
+        return {'path': self.pin_path(), 'present': path.exists(),
+                'sha256': digest(path) if path.exists() else None}
+
+    def verify_pin(self, item, target=False):
+        expected = item['target_pin_state'] if target else item['pin_state']
+        if expected['path'] != self.pin_path() or self.capture_pin() != expected:
+            raise Refused('agent version pin does not match the verified transaction state')
+
+    def restore_absence(self, item):
+        expected = [] if item['pin_state']['present'] else [self.pin_path()]
+        if item['absent_pins'] != expected or set(expected) & set(item['paths']):
+            raise Refused('agent absence restoration escaped its recorded scope')
+        for filename in expected:
+            durable_unlink(filename)
+
+    def verify_managed_pin(self, installed):
+        text = Path(self.pin_path()).read_text()
+        if self.family == 'Debian':
+            if ('Pin: version ' + installed + '\nPin-Priority: 1000' not in text
+                    or 'Pin: version *\nPin-Priority: -1' not in text):
+                raise Refused('agent effective version is not protected by the managed APT pin')
+        elif not re.search(r'^exclude\s*=\s*wazuh-agent\*\s*$', text, re.M):
+            raise Refused('agent effective version is not protected against unattended DNF changes')
+
     def installed(self):
         if self.family == 'Debian':
             result = self.r.run(['dpkg-query', '-W', '-f=${Status}\t${Version}\t${Architecture}', 'wazuh-agent'], allowed=(0, 1))
@@ -953,8 +1155,8 @@ class Agent(Transaction):
             raise Refused('unknown agent RPM architecture')
         return fields[0]
 
-    def check(self, manager='', requested='', upgrade=False):
-        with self.lock():
+    def check(self, manager='', requested='', upgrade=False, owner=None):
+        with self.lock(owner=owner, reader=True):
             self.idle()
             return agent_plan(self.installed(), manager, requested, upgrade)
 
@@ -991,7 +1193,7 @@ class Agent(Transaction):
         return result
 
     def reserve(self, owner, plan):
-        with self.lock():
+        with self.lock(owner=owner):
             self.idle()
             if not plan.get('installed') or not plan.get('change'):
                 raise Refused('durable agent transactions are only for existing enrolled-agent upgrades')
@@ -1004,7 +1206,7 @@ class Agent(Transaction):
             paths = ['/var/ossec'] if plan['installed'] else []
             if Path('/etc/hosts').exists():
                 paths.append('/etc/hosts')
-            pin = '/etc/apt/preferences.d/pilot-wazuh-agent' if self.family == 'Debian' else '/etc/yum.repos.d/wazuh.repo'
+            pin = self.pin_path()
             if Path(pin).is_symlink():
                 raise Refused('agent version pin became a symlink')
             if Path(pin).exists():
@@ -1015,7 +1217,8 @@ class Agent(Transaction):
             if enabled not in ('enabled', 'disabled'):
                 raise Refused('unsupported previous agent service enablement state')
             item = self.begin(owner, dict(plan, active=active, enabled=enabled, family=self.family,
-                                          paths=paths, absent_pins=[] if Path(pin).exists() else [pin], keys=digest(keys)))
+                                          paths=paths, absent_pins=[] if Path(pin).exists() else [pin],
+                                          pin_state=self.capture_pin(), keys=digest(keys)))
             item['packages'] = {}
             for release, artifact in packages.items():
                 if release not in (plan['installed'], plan['package']):
@@ -1030,7 +1233,7 @@ class Agent(Transaction):
             return {'backup': item['backup'], 'changed': False}
 
     def cold_backup(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('staged',))
             self.write(item, 'stopping')
             if item['installed']:
@@ -1048,7 +1251,7 @@ class Agent(Transaction):
             return {'changed': False}
 
     def authorize_install(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('backed-up',))
             for info in item['packages'].values():
                 if digest(info['path']) != info['sha256']:
@@ -1057,7 +1260,7 @@ class Agent(Transaction):
             return {'changed': False}
 
     def prepare_recovery(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner)
             action = AGENT_RECOVERY.get(item['phase'])
             if action == 'resume-old':
@@ -1067,6 +1270,9 @@ class Agent(Transaction):
                 self.finish(item, 'recovered-before-install')
                 return {'reinstall': False, 'restored': True, 'need_commit': False}
             if action in ('verify-old', 'verify-target'):
+                if action == 'verify-old':
+                    self.restore_absence(item)
+                self.verify_pin(item, target=action == 'verify-target')
                 return {'reinstall': False, 'restored': True, 'need_commit': True,
                         'manager_host': item.get('manager_host', '')}
             if action != 'restore-old':
@@ -1088,7 +1294,7 @@ class Agent(Transaction):
                     'need_commit': True, 'manager_host': item.get('manager_host', '')}
 
     def validate_agent_archives(self, item):
-        allowed = {'/var/ossec', '/etc/hosts', '/etc/apt/preferences.d/pilot-wazuh-agent', '/etc/yum.repos.d/wazuh.repo'}
+        allowed = {'/var/ossec', '/etc/hosts', self.pin_path()}
         if not set(item['paths']).issubset(allowed) or {entry['path'] for entry in item['archives']} != set(item['paths']):
             raise Refused('agent recovery path scope is invalid')
         disjoint(item['paths'], self.root)
@@ -1097,29 +1303,30 @@ class Agent(Transaction):
                 raise Refused('agent recovery archive validation failed before restoration')
 
     def restore_state(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('recovering',))
             self.validate_agent_archives(item)
             if item['installed'] and self.installed() != item['installed']:
                 raise Refused('old exact package has not been reinstalled')
             for entry in item['archives']:
                 self.restore(entry['path'], entry['archive'], entry['sha256'])
-            for path in item['absent_pins']:
-                Path(path).unlink(missing_ok=True)
+            self.restore_absence(item)
+            self.verify_pin(item)
             self.restore_service(item)
             self.check_identity(item)
             self.write(item, 'restored')
             return {'changed': True, 'restored': True, 'need_commit': True}
 
     def finish_recovery(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('restored', 'committed', 'recovered'))
             already_committed = item['phase'] == 'committed'
             expected = item['package'] if already_committed else item['installed']
             if self.installed() != expected:
                 raise Refused('restored package version changed before recovery commit')
             self.check_identity(item)
-            runtime = self.runtime()
+            self.verify_pin(item, target=already_committed)
+            runtime = self._runtime()
             if (already_committed and not runtime['active']) or (not already_committed and runtime['active'] != item['active']):
                 raise Refused('previous agent availability changed before recovery commit')
             self.finish(item, 'committed' if already_committed else 'recovered')
@@ -1139,10 +1346,11 @@ class Agent(Transaction):
     def verify_old_state(self, item):
         if self.installed() != item['installed']:
             raise Refused('previous exact agent package was not restored')
-        runtime = self.runtime()
+        runtime = self._runtime()
         if runtime['active'] != item['active']:
             raise Refused('previous native agent availability was not restored')
         self.check_identity(item)
+        self.verify_pin(item)
 
     def check_identity(self, item):
         keys = Path('/var/ossec/etc/client.keys')
@@ -1150,7 +1358,7 @@ class Agent(Transaction):
             raise Refused('agent enrollment identity changed')
 
     def commit(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('installing',))
             if self.installed() != item['package']:
                 raise Refused('agent effective package version does not match frozen target')
@@ -1160,16 +1368,20 @@ class Agent(Transaction):
             self.check_identity(item)
             if item['active'] and self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode != 0:
                 raise Refused('previously active agent is not active after upgrade')
+            self.verify_managed_pin(item['package'])
+            for filename in ('/var/ossec/etc/ossec.conf', '/var/ossec/etc/client.keys', '/etc/hosts', self.pin_path()):
+                sync_file(filename)
+            item['target_pin_state'] = self.capture_pin()
             self.finish(item, 'committed')
             return {'changed': True, 'backup': item['backup']}
 
     def activate(self, owner):
-        with self.lock():
+        with self.lock(owner=owner):
             item = self.owned(owner, ('installing',))
             self.restore_service(item)
             return {'changed': False}
 
-    def runtime(self):
+    def _runtime(self):
         package = self.installed()
         if not package:
             raise Refused('agent package is not installed')
@@ -1187,34 +1399,39 @@ class Agent(Transaction):
             result.update(id=fields[0], name=fields[1])
         return result
 
-    def verify(self):
-        with self.lock():
+    def runtime(self, owner=None):
+        with self.lock(owner=owner, reader=True):
+            item = self.active()
+            if item and (not owner or item['owner'] != owner):
+                raise Refused('external agent reader cannot inspect an incomplete transaction')
+            if item:
+                self.owned(owner, ('installing', 'restored', 'committed', 'recovered'))
+            return self._runtime()
+
+    def verify(self, owner=None):
+        with self.lock(owner=owner, reader=True):
             self.idle()
-            result = self.runtime()
+            result = self._runtime()
             if not result['active']:
                 raise Refused('agent native service is inactive')
             installed = self.installed()
-            if self.family == 'Debian':
-                pin = Path('/etc/apt/preferences.d/pilot-wazuh-agent').read_text()
-                if ('Pin: version ' + installed + '\nPin-Priority: 1000' not in pin
-                        or 'Pin: version *\nPin-Priority: -1' not in pin):
-                    raise Refused('agent effective version is not protected by the managed APT pin')
-            else:
-                repo = Path('/etc/yum.repos.d/wazuh.repo').read_text()
-                if not re.search(r'^exclude\s*=\s*wazuh-agent\*\s*$', repo, re.M):
-                    raise Refused('agent effective version is not protected against unattended DNF changes')
+            self.verify_managed_pin(installed)
             return dict(result, **{'pass': True})
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-reserve', 'agent-backup',
+    parser.add_argument('action', choices=['writer-inspect', 'writer-claim', 'writer-resume', 'writer-release',
+                                         'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
     parser.add_argument('--manager', default='')
     parser.add_argument('--family', choices=['Debian', 'RedHat'], default='Debian')
     parser.add_argument('--owner', default='')
+    parser.add_argument('--component', choices=['central', 'agent'], default='central')
+    parser.add_argument('--mode', choices=['apply', 'recover', 'canary'], default='apply')
+    parser.add_argument('--confirm-previous-stopped', action='store_true')
     parser.add_argument('--agent-id', default='')
     parser.add_argument('--agent-name', default='')
     parser.add_argument('--upgrade', action='store_true')
@@ -1225,22 +1442,38 @@ def main():
     if os.geteuid() != 0:
         parser.error('Wazuh transactions require root')
     try:
-        if args.action == 'manager-version':
+        if args.action == 'writer-inspect':
+            value = HostWriter().inspect()
+        elif args.action == 'writer-claim':
+            value = HostWriter().claim(args.owner, args.component, args.mode)
+        elif args.action == 'writer-resume':
+            value = HostWriter().resume(args.owner, args.component, args.mode, args.confirm_previous_stopped)
+        elif args.action == 'writer-release':
+            value = HostWriter().release(args.owner)
+        elif args.action == 'manager-version':
             value = Central().observe_manager()
         elif args.action == 'verify-agent':
             value = Central().verify_agent(args.agent_id, args.agent_name, args.version)
         elif args.action == 'central-verify':
-            value = Central().verify(args.canary)
+            if args.canary and not args.owner:
+                foreground = uuid.uuid4().hex
+                HostWriter().claim(foreground, 'central', 'canary')
+                try:
+                    value = Central().verify(True, foreground)
+                finally:
+                    HostWriter().release(foreground)
+            else:
+                value = Central().verify(args.canary, args.owner or None)
         elif args.action == 'central':
-            value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover)
+            value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner)
         else:
             agent = Agent(args.family)
             if args.action == 'agent-check':
-                value = agent.check(args.manager, args.version, args.upgrade)
+                value = agent.check(args.manager, args.version, args.upgrade, args.owner or None)
             elif args.action == 'agent-runtime':
-                value = agent.runtime()
+                value = agent.runtime(args.owner or None)
             elif args.action == 'agent-verify':
-                value = agent.verify()
+                value = agent.verify(args.owner or None)
             elif args.action == 'agent-reserve':
                 value = agent.reserve(args.owner, json.load(sys.stdin))
             else:
