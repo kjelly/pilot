@@ -212,7 +212,7 @@ func TestRegression_OsPatchSlaPolicyOrdering(t *testing.T) {
 		t.Fatalf("missing task %q", prefix)
 		return -1
 	}
-	if !(index("Step 2d:") < index("Step 5:") && index("Step 5:") < index("Step 2e:") && index("Step 2e:") < index("Step 3:")) {
+	if index("Step 2d:") >= index("Step 5:") || index("Step 5:") >= index("Step 2e:") || index("Step 2e:") >= index("Step 3:") {
 		t.Fatal("snapshot -> policy -> native validation -> upgrade ordering violated")
 	}
 	args, _ := osPatchSlaTask(t, "Step 3:")["ansible.builtin.command"].(map[string]any)
@@ -222,7 +222,7 @@ func TestRegression_OsPatchSlaPolicyOrdering(t *testing.T) {
 	}
 	for _, prefix := range []string{"Step 2e:", "Step 3d:"} {
 		if task := osPatchSlaTask(t, prefix); task["failed_when"] != nil || task["ignore_errors"] != nil {
-			t.Error(fmt.Sprintf("%s probe errors must fail: %v", prefix, task))
+			t.Errorf("%s probe errors must fail: %v", prefix, task)
 		}
 	}
 }
@@ -245,7 +245,7 @@ func TestOsPatchSla_NativeOriginMetadata(t *testing.T) {
 from types import SimpleNamespace as N
 def Cache():
     origins=[N(**x) for x in json.loads(os.environ['PATCH_METADATA'])]
-    if os.environ.get('PATCH_UNTRUSTED'): 
+    if os.environ.get('PATCH_UNTRUSTED'):
         for o in origins: o.trusted=False
     return [N(versions=[N(origins=origins)])]
 `,
