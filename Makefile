@@ -50,7 +50,7 @@ release:       	## Compile stripped release binary
 
 # -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
-	go test -count=1 -timeout 45m ./...
+	$(if $(filter 1,$(PILOT_COMPLETE_TEST_SUITES)),$(PILOT_COMPLETE_GO_ENV) )go test -count=1 -timeout 45m ./...
 
 # pilot-mcp runs on the user's machine, which may be macOS: cmd/pilot does
 # not build for darwin, so pilot-mcp must (spec 2026-10-30-pilot-mcp-remote-access §5.1).
@@ -85,15 +85,25 @@ lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
 # target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
 GO_TEST_PACKAGES ?= ./...
+# Full suites bypass orchestration and scrub only its private scope. Merely
+# using env -u before recursive make cannot clear command-line MAKEOVERRIDES.
+PILOT_COMPLETE_GO_ENV := env -u GO_TEST_RUN_REGEX -u GO_TEST_REPORT_DIR -u GO_TEST_JSON -u CI_SHARD_INDEX -u PILOT_COMPLETE_TEST_SUITES -u MAKEFLAGS -u MFLAGS
+ifeq ($(PILOT_COMPLETE_TEST_SUITES),1)
+GO_TEST_RACE_PREFIX = $(PILOT_COMPLETE_GO_ENV)
+GO_TEST_RACE_JSON =
+else
+GO_TEST_RACE_PREFIX = $(if $(or $(GO_TEST_REPORT_DIR),$(filter-out undefined,$(origin GO_TEST_RUN_REGEX))),python3 scripts/ci-go-test-shards.py record -- )
+GO_TEST_RACE_JSON = $(if $(filter 1,$(GO_TEST_JSON)), -json)
+endif
 test-race:     	## Run tests with the race detector (CI selects a package shard)
-	go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)
+	$(GO_TEST_RACE_PREFIX) go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)$(GO_TEST_RACE_JSON)
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
 # Stop after a failed normal suite; a successful validation requires both runs.
 test-all:      	## Run complete normal and race suites sequentially
-	$(MAKE) test
-	$(MAKE) test-race GO_TEST_PACKAGES=./...
+	$(MAKE) test PILOT_COMPLETE_TEST_SUITES=1
+	$(MAKE) test-race GO_TEST_PACKAGES=./... PILOT_COMPLETE_TEST_SUITES=1
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
@@ -129,6 +139,11 @@ test-callback: ## Run Python callback unit tests
 .PHONY: ci-workflow-test
 ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards.py'
+
+.PHONY: ci-go-runtime-test
+ci-go-runtime-test: ## Verify Go CI evidence against small real race binaries
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards_runtime.py'
 
 skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
 	@for skill in .agents/skills/*/; do \

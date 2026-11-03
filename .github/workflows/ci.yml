@@ -24,6 +24,8 @@ jobs:
     outputs:
       evidence_only: ${{ steps.diff.outputs.evidence_only }}
       reused_run_id: ${{ steps.diff.outputs.reused_run_id }}
+      go_test_matrix: ${{ steps.go_matrix.outputs.matrix }}
+      go_test_max_parallel: ${{ steps.go_matrix.outputs.max_parallel }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,6 +33,9 @@ jobs:
           ref: ${{ github.sha }}
       - name: Verify candidate reuse controls
         run: make ci-workflow-test
+      - name: Generate Go test matrix
+        id: go_matrix
+        run: python3 scripts/ci-go-test-shards.py matrix --github-output >> "$GITHUB_OUTPUT"
       - name: Find a successful full candidate run
         id: diff
         env:
@@ -43,8 +48,8 @@ jobs:
     if: needs.changes.outputs.evidence_only != 'true'
     strategy:
       fail-fast: false
-      matrix:
-        shard: [spec, cmd, rest]
+      max-parallel: ${{ fromJSON(needs.changes.outputs.go_test_max_parallel) }}
+      matrix: ${{ fromJSON(needs.changes.outputs.go_test_matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -72,7 +77,7 @@ jobs:
 
       - name: Select Go packages
         env:
-          PILOT_TEST_SHARD: ${{ matrix.shard }}
+          PILOT_TEST_SHARD: ${{ matrix.group }}
         run: |
           packages=$(bash scripts/ci-go-test-packages.sh "$PILOT_TEST_SHARD")
           echo "GO_TEST_PACKAGES=$(printf '%s\n' "$packages" | paste -sd ' ' -)" >> "$GITHUB_ENV"
@@ -85,14 +90,29 @@ jobs:
         # (warm cache) those took 32 s and about 155 s. A hung test then ends
         # in a Go stack dump that names it, not a silent job cancellation
         # (TestCIGoTestTimeoutFiresBeforeJobLimit).
+        env:
+          PILOT_TEST_SHARD: ${{ matrix.group }}
+          CI_SHARD_INDEX: ${{ matrix.index }}
+          GO_TEST_JSON: '1'
+          GO_TEST_REPORT_DIR: .verification/go-shard-${{ matrix.shard }}
         run: make test-race
 
+      - name: Upload Go shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-shard-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: .verification/go-shard-${{ matrix.shard }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Install PyYAML
-        if: matrix.shard == 'rest'
+        if: matrix.group == 'rest'
         run: python3 -m pip install pyyaml
 
       - name: ansible_callback unit tests
-        if: matrix.shard == 'rest'
+        if: matrix.group == 'rest'
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
@@ -101,12 +121,43 @@ jobs:
       # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
       # that drifts).
       - name: Agent skill unit tests (make skill-test)
-        if: matrix.shard == 'rest'
+        if: matrix.group == 'rest'
         run: make skill-test
 
       - name: Duplicate YAML key check (repo-wide)
-        if: matrix.shard == 'rest'
+        if: matrix.group == 'rest'
         run: python3 scripts/check-yaml-duplicate-keys.py
+
+      - name: Go CI evidence runtime tests
+        if: matrix.group == 'rest'
+        run: make ci-go-runtime-test
+
+  go-test-results:
+    name: Verify Go shard execution
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: go-shard-${{ github.run_attempt }}-*
+          path: .verification/go-shards
+      - name: Verify actual Go execution
+        run: python3 scripts/ci-go-test-shards.py verify-run .verification/go-shards --artifact-prefix "go-shard-${GITHUB_RUN_ATTEMPT}-" --output .verification/go-shards-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-shards-summary-${{ github.run_attempt }}
+          path: .verification/go-shards-summary.json
+          if-no-files-found: error
+          retention-days: 7
 
   playbook-lint:
     # L1 syntax (blocking) + duplicate-key check + L2 ansible-lint (advisory)
@@ -270,7 +321,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [changes, test, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
+    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
