@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -65,9 +62,7 @@ problems:
 }
 
 func Execute() error {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	return rootCmd.ExecuteContext(ctx)
+	return rootCmd.Execute()
 }
 
 // ExitCoder lets a RunE error carry a specific process exit code instead of

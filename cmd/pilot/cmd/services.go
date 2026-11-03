@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -93,6 +95,9 @@ func init() {
 	rootCmd.AddCommand(servicesCmd)
 	servicesCmd.AddCommand(servicesUpCmd, servicesStatusCmd, servicesDownCmd, servicesPurgeCmd)
 	servicesCmd.AddCommand(servicesRepairCmd, servicesConsumersCmd, servicesReleaseConsumerCmd)
+	for _, command := range servicesCmd.Commands() {
+		command.RunE = withServiceCommandSignals(command.RunE)
+	}
 	servicesRepairCmd.Flags().StringVar(&svcProfile, "profile", "dev-lite", "service profile name or YAML path")
 	servicesRepairCmd.Flags().StringVar(&svcNetwork, "network", "default", "libvirt network whose gateway receives service traffic")
 	servicesRepairCmd.Flags().BoolVar(&svcJSON, "json", false, "print machine-readable status")
@@ -106,6 +111,20 @@ func init() {
 	servicesUpCmd.Flags().BoolVar(&svcJSON, "json", false, "print machine-readable status")
 	servicesStatusCmd.Flags().BoolVar(&svcJSON, "json", false, "print machine-readable status")
 	servicesPurgeCmd.Flags().BoolVar(&svcConfirm, "confirm", false, "confirm removal of persistent service data")
+}
+
+// Only service handlers consistently observe command cancellation. Intercepting
+// signals at the root would suppress OS termination for unrelated handlers that
+// still use background contexts (for example, an interactive remote exec).
+func withServiceCommandSignals(run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		previous := cmd.Context()
+		ctx, stop := signal.NotifyContext(previous, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		cmd.SetContext(ctx)
+		defer cmd.SetContext(previous)
+		return run(cmd, args)
+	}
 }
 
 func runServicesUp(cmd *cobra.Command, _ []string) error {
