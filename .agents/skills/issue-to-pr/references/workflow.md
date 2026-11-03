@@ -29,6 +29,17 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
 - `INVALID` and `NEEDS_DECISION` need the reviewer's independent verdict and a reply on the Issue first ([Issue claims](issue-claims.md)). A claim raised again without new evidence after a confirmed dispute is `NEEDS_DECISION`, not another implementation or reply round.
 - If a post-PR CI check fails, repair on the same Draft PR branch; if unresolved report DRAFT_CI_BLOCKED and leave it Draft. Do not claim CI success. Only `mark_ready.py` moves a PR to Ready, and only after CI_PASSED on the exact HEAD with all follow-ups done.
 
+## Existing-PR disposition
+
+Handle the selected Issue only; do not create a duplicate PR or a new branch merely to confirm an existing fix.
+
+- Open PR: report `EXISTING_PR` and leave the Issue open. A closed-unmerged PR is not proof of resolution.
+- Merged PR: verify its merge status, read the current default-branch code and relevant Issue comments, and check that the fix remains present and satisfies the valid acceptance criteria. A PR title or Issue reference alone is insufficient. If resolution is partial, uncertain, or contradicted by newer reproduction evidence, leave the Issue open and explain the remaining gap.
+- Confirmed resolution: post a concise comment linking the merged PR and fixing revision, explain how it resolves the reported behavior, and state validation limits accurately. Do not claim new tests, runtime evidence, or CI results that were not obtained. Then close the Issue with reason `completed` and read it back to verify `CLOSED` / `COMPLETED`. The skill invocation authorizes this comment and closure; no additional confirmation is needed.
+- On retry, inspect the existing comments and state first; reuse an equivalent resolution comment rather than posting it again. Save its URL and the verified Issue state in the checkpoint and final report. Release any held claim. An API failure leaves the disposition incomplete and must be reported explicitly.
+
+This is an `EXISTING_PR` terminal path before implementation; it does not authorize creating a PR without the quality gate or treating a partial fix as complete.
+
 ## Dependency decisions
 
 - Use explicit `blocked by`, acceptance dependencies, related PR branches, and actual source prerequisites; mentions alone do not imply a hard dependency.
