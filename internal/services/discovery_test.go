@@ -143,7 +143,7 @@ func TestSharedDiscoveryRejectsIncompleteLegacyStateBeforeRender(t *testing.T) {
 			before := bundleHashes(t, s.Root)
 			runner := &fakeRunner{}
 			_, err := NewSharedManager(DiscoveryOptions{Directory: t.TempDir(), LegacyDirectories: []string{legacy}}, runner)
-			if err == nil || !(strings.Contains(err.Error(), "state") || strings.Contains(err.Error(), "credentials") || strings.Contains(err.Error(), "CA")) {
+			if err == nil || (!strings.Contains(err.Error(), "state") && !strings.Contains(err.Error(), "credentials") && !strings.Contains(err.Error(), "CA")) {
 				t.Fatalf("want specific adoption rejection, got %v", err)
 			}
 			if len(runner.calls) != 0 || !reflect.DeepEqual(before, bundleHashes(t, s.Root)) {
