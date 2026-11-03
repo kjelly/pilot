@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // The distro rsyslog policy handling of audit-log-forwarding-apply.yml: Step 1d (the
@@ -54,37 +57,39 @@ func step5Playbook(t *testing.T, dir string, withPreflight bool) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(raw)
-	pa := strings.Index(s, "    # Step 1d:")
-	pb := strings.Index(s, "    - block:\n        - name: \"Step 2:")
-	a := strings.Index(s, "        - name: \"Step 5: Render /etc/logrotate.d/syslog\"")
-	b := strings.Index(s, "        - name: \"Step 6a:")
-	if pa < 0 || pb < pa || a < 0 || b < a {
-		t.Fatal("cannot find Step 1d or Step 5 .. Step 6a in audit-log-forwarding-apply.yml")
+	tasks, err := step5SourceTasks(raw, withPreflight)
+	if err != nil {
+		t.Fatal(err)
 	}
-	pre := s[pa:pb]
-	if !withPreflight {
-		pre = ""
-	}
-	// the preflight is a play-level task (4 spaces); Step 5 is inside the block (8)
-	var indented []string
-	for _, l := range strings.Split(pre, "\n") {
-		if l != "" {
-			l = "    " + l
+	step5Walk(tasks, func(task map[string]any) {
+		if args, ok := task["ansible.builtin.copy"].(map[string]any); ok {
+			// Only literal root ownership is adapted for this unprivileged
+			// harness. The distro stat's uid/gid/mode expressions stay intact.
+			for _, key := range []string{"owner", "group"} {
+				if args[key] == "root" {
+					delete(args, key)
+				}
+			}
 		}
-		indented = append(indented, l)
+	})
+	block, err := yaml.Marshal(tasks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	block := strings.Join(indented, "\n") + s[a:b]
-	block = strings.ReplaceAll(block, "/etc/logrotate.d/rsyslog", filepath.Join(dir, "rsyslog"))
-	block = strings.ReplaceAll(block, "/etc/logrotate.d/syslog", filepath.Join(dir, "syslog"))
-	// not root here
-	block = regexp.MustCompile(`\n\s+owner: root\n\s+group: root`).ReplaceAllString(block, "")
+	text := strings.ReplaceAll(string(block), "/etc/logrotate.d/rsyslog", filepath.Join(dir, "rsyslog"))
+	text = strings.ReplaceAll(text, "/etc/logrotate.d/syslog", filepath.Join(dir, "syslog"))
 	for _, bad := range []string{"dest: /etc", "path: /etc", " /etc/logrotate.d/", "f=/etc/"} {
-		if strings.Contains(block, bad) {
-			t.Fatalf("the extracted block still touches %q:\n%s", bad, block)
+		if strings.Contains(text, bad) {
+			t.Fatalf("the extracted block still touches %q:\n%s", bad, text)
 		}
 	}
-	pb2 := "- hosts: localhost\n  gather_facts: false\n  vars:\n    audit_syslog_path: /var/log/syslog\n    audit_syslog_group: root\n    syslog_logrotate_rotate: 14\n    syslog_logrotate_maxage: 90\n  tasks:\n" + block
+	if err := yaml.Unmarshal([]byte(text), &tasks); err != nil {
+		t.Fatal(err)
+	}
+	play, err := yaml.Marshal([]any{map[string]any{"hosts": "localhost", "gather_facts": false, "vars": map[string]any{"audit_syslog_path": "/var/log/syslog", "audit_syslog_group": "root", "syslog_logrotate_rotate": 14, "syslog_logrotate_maxage": 90}, "tasks": tasks}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +102,213 @@ func step5Playbook(t *testing.T, dir string, withPreflight bool) string {
 	if !withPreflight {
 		name = "nopre.yml"
 	}
-	writeFile(t, filepath.Join(dir, name), pb2)
+	writeFile(t, filepath.Join(dir, name), string(play))
 	return filepath.Join(dir, name)
+}
+
+// Select the production action nodes rather than task labels, comments or the
+// first child of the caller's transaction. Keep the whole rewrite block so its
+// validation, conditions and always cleanup run unchanged under real Ansible.
+func step5SourceTasks(raw []byte, withPreflight bool) ([]any, error) {
+	var plays []map[string]any
+	if err := yaml.Unmarshal(raw, &plays); err != nil {
+		return nil, err
+	}
+	if len(plays) != 1 {
+		return nil, fmt.Errorf("expected one audit caller play, got %d", len(plays))
+	}
+	var preflight map[string]any
+	preCount, prePosition, position := 0, -1, 0
+	type chain struct {
+		tasks    []any
+		position int
+	}
+	var chains []chain
+	for _, section := range []string{"pre_tasks", "tasks"} {
+		step5Walk(plays[0][section], func(task map[string]any) {
+			position++
+			if step5Preflight(task) {
+				preflight, prePosition = task, position
+				preCount++
+			}
+			children, _ := task["block"].([]any)
+			var selected []any
+			var kinds []int
+			for _, value := range children {
+				child, _ := value.(map[string]any)
+				kind := 0
+				switch {
+				case step5ActionPath(child, "ansible.builtin.copy", "dest", "/etc/logrotate.d/syslog"):
+					kind = 1
+				case step5ActionPath(child, "ansible.builtin.stat", "path", "/etc/logrotate.d/rsyslog"):
+					kind = 2
+				case step5Rewrite(child):
+					kind = 3
+				}
+				if kind != 0 {
+					selected = append(selected, child)
+					kinds = append(kinds, kind)
+				}
+			}
+			if len(kinds) == 3 && kinds[0] == 1 && kinds[1] == 2 && kinds[2] == 3 {
+				chains = append(chains, chain{selected, position})
+			}
+		})
+	}
+	if preCount != 1 || len(chains) != 1 {
+		return nil, fmt.Errorf("expected one policy preflight and complete ordered render/stat/rewrite chain, got %d/%d", preCount, len(chains))
+	}
+	if prePosition >= chains[0].position {
+		return nil, fmt.Errorf("policy preflight must precede the caller mutation block")
+	}
+	var tasks []any
+	if withPreflight {
+		tasks = append(tasks, preflight)
+	}
+	return append(tasks, chains[0].tasks...), nil
+}
+
+func step5Walk(node any, visit func(map[string]any)) {
+	list, _ := node.([]any)
+	for _, value := range list {
+		task, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		visit(task)
+		for _, section := range []string{"block", "rescue", "always"} {
+			step5Walk(task[section], visit)
+		}
+	}
+}
+
+func step5ActionPath(task map[string]any, action, key, path string) bool {
+	args, _ := task[action].(map[string]any)
+	return args[key] == path
+}
+
+func step5Preflight(task map[string]any) bool {
+	args, _ := task["ansible.builtin.shell"].(map[string]any)
+	env, _ := task["environment"].(map[string]any)
+	cmd, _ := args["cmd"].(string)
+	stdin, _ := args["stdin"].(string)
+	return env["PILOT_CHECK_MODE"] != nil && strings.Contains(cmd, "f=/etc/logrotate.d/rsyslog") && strings.Contains(cmd, "logrotate -d") && strings.Contains(stdin, "logrotate-drop-path.awk")
+}
+
+func step5Rewrite(task map[string]any) bool {
+	children, ok := task["block"].([]any)
+	if !ok {
+		return false
+	}
+	temp, compute, install, remove, cleanup := false, false, false, false, false
+	step5Walk(children, func(child map[string]any) {
+		if _, ok := child["ansible.builtin.tempfile"]; ok && child["register"] == "distro_rsyslog_tmp" {
+			temp = true
+		}
+		if args, ok := child["ansible.builtin.shell"].(map[string]any); ok {
+			stdin, _ := args["stdin"].(string)
+			compute = compute || (child["register"] == "distro_rsyslog_without_audit_path" && strings.Contains(stdin, "logrotate-drop-path.awk"))
+		}
+		install = install || step5ActionPath(child, "ansible.builtin.copy", "dest", "/etc/logrotate.d/rsyslog")
+		remove = remove || step5ActionPath(child, "ansible.builtin.file", "path", "/etc/logrotate.d/rsyslog")
+	})
+	step5Walk(task["always"], func(child map[string]any) {
+		cleanup = cleanup || step5ActionPath(child, "ansible.builtin.file", "path", "{{ distro_rsyslog_tmp.path }}")
+	})
+	return temp && compute && install && remove && cleanup
+}
+
+func TestAuditLogForwardingStep5TaskExtraction(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "playbooks/apply/audit-log-forwarding-apply.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"renamed-and-inserted", "missing-preflight", "duplicate-preflight", "late-preflight", "missing-render", "missing-stat", "missing-cleanup"} {
+		t.Run(mode, func(t *testing.T) {
+			var plays []map[string]any
+			if err := yaml.Unmarshal(raw, &plays); err != nil {
+				t.Fatal(err)
+			}
+			play := plays[0]
+			var preflight map[string]any
+			var caller map[string]any
+			step5Walk(play["tasks"], func(task map[string]any) {
+				if step5Preflight(task) {
+					preflight = task
+				}
+				for _, value := range step5TaskList(task["block"]) {
+					child, _ := value.(map[string]any)
+					if step5ActionPath(child, "ansible.builtin.copy", "dest", "/etc/logrotate.d/syslog") {
+						caller = task
+					}
+				}
+			})
+			if preflight == nil || caller == nil {
+				t.Fatal("actual production anchors missing")
+			}
+			if mode == "missing-preflight" || mode == "late-preflight" {
+				var kept []any
+				for _, value := range step5TaskList(play["tasks"]) {
+					if task, _ := value.(map[string]any); !step5Preflight(task) {
+						kept = append(kept, value)
+					}
+				}
+				play["tasks"] = kept
+			}
+			if mode == "duplicate-preflight" || mode == "late-preflight" {
+				play["tasks"] = append(step5TaskList(play["tasks"]), preflight)
+			}
+			if mode == "missing-render" || mode == "missing-stat" {
+				var kept []any
+				for _, value := range step5TaskList(caller["block"]) {
+					child, _ := value.(map[string]any)
+					if mode == "missing-render" && step5ActionPath(child, "ansible.builtin.copy", "dest", "/etc/logrotate.d/syslog") || mode == "missing-stat" && step5ActionPath(child, "ansible.builtin.stat", "path", "/etc/logrotate.d/rsyslog") {
+						continue
+					}
+					kept = append(kept, value)
+				}
+				caller["block"] = kept
+			}
+			if mode == "missing-cleanup" {
+				for _, value := range step5TaskList(caller["block"]) {
+					child, _ := value.(map[string]any)
+					if step5Rewrite(child) {
+						delete(child, "always")
+					}
+				}
+			}
+			// Round-tripping removes all comments; labels and unrelated early
+			// tasks may change without losing the real module-action chain.
+			step5Walk(play["tasks"], func(task map[string]any) {
+				if _, ok := task["name"]; ok {
+					task["name"] = "renamed display label"
+				}
+			})
+			play["tasks"] = append([]any{map[string]any{"ansible.builtin.debug": map[string]any{"msg": "unrelated early task"}}}, step5TaskList(play["tasks"])...)
+			body, err := yaml.Marshal(plays)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, err := step5SourceTasks(body, true)
+			if mode != "renamed-and-inserted" {
+				if err == nil {
+					t.Fatal("incomplete/unsafe source chain accepted")
+				}
+				return
+			}
+			if err != nil || len(selected) != 4 {
+				t.Fatalf("semantic extraction depends on comments/display labels/first child: %v", err)
+			}
+			if !step5Preflight(selected[0].(map[string]any)) || !step5Rewrite(selected[3].(map[string]any)) {
+				t.Fatal("actual preflight or rewrite/always block was lost")
+			}
+		})
+	}
+}
+
+func step5TaskList(node any) []any {
+	list, _ := node.([]any)
+	return list
 }
 
 type step5Opts struct {

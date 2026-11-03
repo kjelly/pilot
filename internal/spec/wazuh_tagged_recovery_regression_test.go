@@ -104,9 +104,7 @@ func TestRegression_WazuhTaggedRELPRecovery(t *testing.T) {
 			if tc.early {
 				selected = append(selected, map[string]any{"ansible.builtin.fail": map[string]any{"msg": "PILOT_BEFORE_TLS_SNAPSHOT"}})
 			}
-			for _, task := range withPath(t, snapshots, "/etc/rsyslog.d", private) {
-				selected = append(selected, task)
-			}
+			selected = append(selected, withPath(t, snapshots, "/etc/rsyslog.d", private)...)
 			selected = append(selected,
 				map[string]any{"name": "Controlled private mutation", "no_log": true, "diff": false, "ansible.builtin.copy": map[string]any{"dest": "{{ item.path }}", "content": "{{ item.payload }}", "mode": "0640"}, "loop": mutations},
 				map[string]any{"ansible.builtin.copy": map[string]any{"dest": filepath.Join(root, "mutated"), "content": "mutation completed", "mode": "0600"}})

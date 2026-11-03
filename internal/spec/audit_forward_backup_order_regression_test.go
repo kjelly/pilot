@@ -1,8 +1,14 @@
 package spec
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // Compose the actual caller baseline, shared migration, caller render and ALL
@@ -13,12 +19,12 @@ import (
 func TestRegression_AuditForwardBaselinePrecedesSharedMigration(t *testing.T) {
 	for _, tool := range []string{"python3", "ansible-playbook"} {
 		if _, err := exec.LookPath(tool); err != nil {
-			t.Skip(err)
+			t.Fatal(err)
 		}
 	}
-	const code = `import copy,json,os,pathlib,shutil,subprocess,tempfile,yaml
-base=pathlib.Path('../../playbooks/apply').resolve()
-original=yaml.safe_load((base/'audit-log-forwarding-apply.yml').read_text())[0]
+	const code = `import copy,json,os,pathlib,shutil,subprocess,sys,tempfile
+documents=json.load(sys.stdin)
+original=documents['caller']
 def find(node,name):
  if isinstance(node,dict):
   if node.get('name')==name:return node
@@ -35,7 +41,7 @@ baseline_names=['Step 7: Snapshot the existing forward config','Step 7: Require 
 tls_name='Step 7: Provision the sender TLS profile and snapshot its material'
 render_name='Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)'
 validate_name='Step 7: Validate the effective rsyslog configuration before restart'
-helper=yaml.safe_load((base/'tasks/rsyslog-relp-tls.yml').read_text())
+helper=documents['tls']
 helper_names=[t['name'] for t in helper if t.get('name') in [
  'RELP: inspect the role\'s TLS files and desired profile','RELP: refuse symlinks and non-regular certificate files',
  'RELP: snapshot existing TLS files for rollback','RELP: record this snapshot\'s role',
@@ -62,7 +68,7 @@ for case in cases:
   private=root/'private';private.mkdir();tls=private/'pilot-relp-sender';tls.mkdir()
   conf=private/'99-siem-forward.conf';module=private/'09-pilot-omrelp.conf';backup=pathlib.Path(str(conf)+'.pre-audit-forwarding.bak')
   def adapt(node):
-   node=yaml.safe_load(yaml.safe_dump(copy.deepcopy(node)).replace('/etc/rsyslog.d',str(private)))
+   node=json.loads(json.dumps(copy.deepcopy(node)).replace('/etc/rsyslog.d',str(private)))
    def owners(n):
     if isinstance(n,dict):
      args=n.get('ansible.builtin.copy',{})
@@ -79,7 +85,7 @@ for case in cases:
   (root/'ansible.cfg').write_text('[defaults]\n')
   env=os.environ.copy();env.update(ANSIBLE_CONFIG=str(root/'ansible.cfg'),ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote'),ANSIBLE_FORKS='1')
   def execute(tasks,name,tag=''):
-   play=root/(name+'.yml');play.write_text(yaml.safe_dump([dict(hosts='all',gather_facts=False,vars=variables,tasks=tasks)],sort_keys=False))
+   play=root/(name+'.yml');play.write_text(json.dumps([dict(hosts='all',gather_facts=False,vars=variables,tasks=tasks)]))
    args=['ansible-playbook','-i','localhost,','-c','local','-vvv','--diff',str(play)]
    if tag:args+=['--tags',tag]
    if case.get('skip') and name=='run':args+=['--skip-tags','C16,C17']
@@ -105,8 +111,8 @@ for case in cases:
    if task['name']=='RELP: migrate the legacy audit-owned output module declaration' and case.get('fault')=='pre-migration':helpers.append({'ansible.builtin.fail':{'msg':'CONTROLLED_BEFORE_MIGRATION'}})
    helpers.append(adapt(task))
    if task['name']=='RELP: migrate the legacy audit-owned output module declaration' and case.get('fault')=='partial':helpers.append({'ansible.builtin.fail':{'msg':'CONTROLLED_PARTIAL_MIGRATION'}})
-  (root/'helper.yml').write_text(yaml.safe_dump(helpers,sort_keys=False))
-  (root/'restore.yml').write_text(yaml.safe_dump(adapt(yaml.safe_load((base/'tasks/rsyslog-relp-restore.yml').read_text())),sort_keys=False))
+  (root/'helper.yml').write_text(json.dumps(helpers))
+  (root/'restore.yml').write_text(json.dumps(adapt(documents['restore'])))
   block=[];late=[]
   if case.get('fault')=='before':block.append({'tags':['always'],'ansible.builtin.fail':{'msg':'CONTROLLED_BEFORE_CAPTURE'}})
   for task in outer['block']:
@@ -137,7 +143,7 @@ for case in cases:
     task.pop('ansible.builtin.systemd');task['ansible.builtin.command']={'argv':['python3','-c','import pathlib,sys;p=pathlib.Path(sys.argv[1]);assert (p/"validated").read_text()=="True";(p/"restarted").write_text("1")',str(root)]}
   tasks=[{'tags':['always'],'no_log':True,'ansible.builtin.set_fact':{'siem_forward_baseline_complete':True,'siem_forward_content_snapshot':{'content':'U1RBTEU='},'siem_forward_conf_result':{'changed':True},'siem_tls_snapshot_role':'sender','siem_tls_restore_result':{'changed':True}}},
    adapt(find(original,'Reset this run\'s audit and rsyslog recovery results')),
-   adapt(yaml.safe_load((base/'tasks/rsyslog-relp-inputs.yml').read_text())[0]),
+   adapt(documents['inputs'][0]),
    {'block':block,'rescue':rescue}]
   result=execute(tasks,'run',case['tag'])
   assert result.returncode!=0 and 'audit-log-forwarding apply failed' in result.stdout,'original caller failure was not retained'
@@ -163,7 +169,30 @@ for case in cases:
     if (root/name).exists():shutil.copy2(root/name,dest/name)
  finally:shutil.rmtree(root)
 `
-	if out, err := exec.Command("python3", "-c", code).CombinedOutput(); err != nil {
+	// Go owns YAML decoding, as in the rest of the spec tests. JSON is valid
+	// Ansible input and lets the controller run with Python's standard library
+	// only, even when CI's PATH Python differs from Ansible's environment.
+	documents := map[string]any{"caller": loadFirstPlay(t, "audit-log-forwarding-apply.yml")}
+	for key, name := range map[string]string{"tls": "rsyslog-relp-tls.yml", "restore": "rsyslog-relp-restore.yml", "inputs": "rsyslog-relp-inputs.yml"} {
+		raw, err := os.ReadFile(filepath.Join("../../playbooks/apply/tasks", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tasks []any
+		if err := yaml.Unmarshal(raw, &tasks); err != nil {
+			t.Fatal(err)
+		}
+		documents[key] = tasks
+	}
+	payload, err := json.Marshal(documents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// -I -S deliberately excludes site packages, proving PyYAML is not an
+	// incidental requirement of this actual twelve-case Ansible harness.
+	cmd := exec.Command("python3", "-I", "-S", "-c", code)
+	cmd.Stdin = bytes.NewReader(payload)
+	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("full audit caller recovery order: %v\n%s", err, out)
 	} else {
 		t.Log(string(out))
