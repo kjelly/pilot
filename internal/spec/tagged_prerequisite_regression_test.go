@@ -57,7 +57,10 @@ func TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", base, err)
 		}
-		tasks = expandIncludedSetters(tasks, filepath.Dir(path), filepath.Dir(path))
+		tasks, err = expandIncludedSetters(tasks, filepath.Dir(path), filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("%s: %v", base, err)
+		}
 		problems := findTaggedPrerequisiteViolations(tasks)
 		if _, allowed := taggedPrerequisiteAllowlist[base]; allowed {
 			if len(problems) == 0 {
@@ -260,15 +263,18 @@ func taskReadsVarUnguarded(item *yaml.Node, varName string) bool {
 //
 // Synthetic entries have no Node, so they are never checked as readers.
 // Paths resolve against the including file's directory, then baseDir.
-func expandIncludedSetters(tasks []playbookTask, fileDir, baseDir string) []playbookTask {
+func expandIncludedSetters(tasks []playbookTask, fileDir, baseDir string) ([]playbookTask, error) {
 	return expandIncludedSettersDepth(tasks, fileDir, baseDir, 0)
 }
 
-func expandIncludedSettersDepth(tasks []playbookTask, fileDir, baseDir string, depth int) []playbookTask {
+func expandIncludedSettersDepth(tasks []playbookTask, fileDir, baseDir string, depth int) ([]playbookTask, error) {
 	var out []playbookTask
 	for _, task := range tasks {
 		out = append(out, task)
-		file, apply, static := includedFile(task.Node)
+		file, apply, static, err := includedFile(task.Node)
+		if err != nil {
+			return nil, fmt.Errorf("task %q: %w", task.Name, err)
+		}
 		if file == "" || depth > 4 {
 			continue
 		}
@@ -289,7 +295,10 @@ func expandIncludedSettersDepth(tasks []playbookTask, fileDir, baseDir string, d
 		}
 		var inner []playbookTask
 		walkTaskList(doc.Content[0], nil, &inner)
-		inner = expandIncludedSettersDepth(inner, dir, baseDir, depth+1)
+		inner, err = expandIncludedSettersDepth(inner, dir, baseDir, depth+1)
+		if err != nil {
+			return nil, err
+		}
 		for _, in := range inner {
 			if len(in.SetsVars) == 0 {
 				continue
@@ -302,15 +311,19 @@ func expandIncludedSettersDepth(tasks []playbookTask, fileDir, baseDir string, d
 			})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // includedFile returns the static file an include_tasks/import_tasks task
 // loads, the tags its `apply` gives the included tasks, and whether it is
-// an import. It returns "" for any other task or a templated path.
-func includedFile(item *yaml.Node) (string, map[string]bool, bool) {
+// an import. Task args are merged first, then module arguments replace whole
+// keys (including apply), as ModuleArgsParser does; aliases work at each level.
+// It returns "" for any other task or a templated path, and an error for
+// argument forms that cannot be resolved statically instead of ignoring them.
+func includedFile(item *yaml.Node) (string, map[string]bool, bool, error) {
+	item = yamlDeref(item)
 	if item == nil || item.Kind != yaml.MappingNode {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	for i := 0; i+1 < len(item.Content); i += 2 {
 		k, v := item.Content[i].Value, item.Content[i+1]
@@ -318,32 +331,125 @@ func includedFile(item *yaml.Node) (string, map[string]bool, bool) {
 		if !static && k != "include_tasks" && k != "ansible.builtin.include_tasks" {
 			continue
 		}
-		apply := map[string]bool{}
+		args := map[string]*yaml.Node{}
+		merge := func(n *yaml.Node) error {
+			n = yamlDeref(n)
+			if n == nil || n.Tag == "!!null" {
+				return nil
+			}
+			if n.Kind != yaml.MappingNode {
+				return fmt.Errorf("%s arguments must be a static mapping", k)
+			}
+			for j := 0; j+1 < len(n.Content); j += 2 {
+				if n.Content[j].Value == "<<" {
+					return fmt.Errorf("%s arguments use unsupported merge key (<<:)", k)
+				}
+				args[n.Content[j].Value] = yamlDeref(n.Content[j+1])
+			}
+			return nil
+		}
+		if err := merge(yamlField(item, "args")); err != nil {
+			return "", nil, static, err
+		}
+		v = yamlDeref(v)
+		if v != nil && v.Kind == yaml.ScalarNode && v.Tag != "!!null" {
+			// Legacy k=v strings require Ansible's split_args parser. Refuse
+			// them rather than guessing at their effective file/apply values.
+			if strings.Contains(v.Value, "=") {
+				return "", nil, static, fmt.Errorf("%s uses unsupported key=value arguments", k)
+			}
+			args["_raw_params"] = v
+		} else if err := merge(v); err != nil {
+			return "", nil, static, err
+		}
+		fileNode := args["_raw_params"]
+		if fileNode == nil || fileNode.Value == "" {
+			fileNode = args["file"]
+		}
 		file := ""
-		switch v.Kind {
-		case yaml.ScalarNode:
-			file = v.Value
-		case yaml.MappingNode:
-			for j := 0; j+1 < len(v.Content); j += 2 {
-				switch v.Content[j].Value {
-				case "file":
-					file = v.Content[j+1].Value
-				case "apply":
-					a := v.Content[j+1]
-					for x := 0; x+1 < len(a.Content); x += 2 {
-						if a.Content[x].Value == "tags" {
-							collectTagValues(a.Content[x+1], apply)
-						}
-					}
+		if fileNode != nil {
+			if fileNode.Kind != yaml.ScalarNode {
+				return "", nil, static, fmt.Errorf("%s file must be a static scalar", k)
+			}
+			file = fileNode.Value
+		}
+		apply := map[string]bool{}
+		if a := args["apply"]; a != nil {
+			if a.Kind != yaml.MappingNode {
+				return "", nil, static, fmt.Errorf("%s apply must be a static mapping", k)
+			}
+			for j := 0; j+1 < len(a.Content); j += 2 {
+				if a.Content[j].Value == "<<" {
+					return "", nil, static, fmt.Errorf("%s apply uses unsupported merge key (<<:)", k)
 				}
 			}
+			var tags func(*yaml.Node, int) error
+			tags = func(n *yaml.Node, depth int) error {
+				if depth > 16 {
+					return fmt.Errorf("%s apply tags exceed nesting limit (possible alias cycle)", k)
+				}
+				n = yamlDeref(n)
+				if n == nil {
+					return nil
+				}
+				switch n.Kind {
+				case yaml.ScalarNode:
+					if strings.Contains(n.Value, "{{") {
+						return fmt.Errorf("%s apply tags must be static", k)
+					}
+				case yaml.SequenceNode:
+					for _, c := range n.Content {
+						if err := tags(c, depth+1); err != nil {
+							return err
+						}
+					}
+				default:
+					return fmt.Errorf("%s apply tags must be static scalars or a list", k)
+				}
+				return nil
+			}
+			tagNode := yamlField(a, "tags")
+			if err := tags(tagNode, 0); err != nil {
+				return "", nil, static, err
+			}
+			apply = convergenceTagSet(tagNode)
 		}
 		if strings.Contains(file, "{{") {
-			return "", nil, false
+			return "", nil, static, nil
 		}
-		return file, apply, static
+		return file, apply, static, nil
 	}
-	return "", nil, false
+	return "", nil, false, nil
+}
+
+func TestIncludedFileUnsupportedArguments(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"templated args", "include_tasks: child.yml\n      args: '{{ opts }}'", "arguments must be a static mapping"},
+		{"templated apply", "include_tasks: {file: child.yml, apply: '{{ opts }}'}", "apply must be a static mapping"},
+		{"templated tags", "include_tasks: {file: child.yml, apply: {tags: '{{ taglist }}'}}", "apply tags must be static"},
+		{"merged args", "include_tasks: child.yml\n      args: {<<: {apply: {tags: [always]}}}", "unsupported merge key"},
+		{"merged apply", "include_tasks: {file: child.yml, apply: {<<: {tags: [always]}}}", "unsupported merge key"},
+		{"invalid tag mapping", "include_tasks: {file: child.yml, apply: {tags: {always: true}}}", "apply tags must be static scalars or a list"},
+		{"cyclic tags", "include_tasks: {file: child.yml, apply: {tags: &cycle [*cycle]}}", "apply tags exceed nesting limit"},
+		{"legacy key=value", "include_tasks: file=child.yml", "unsupported key=value arguments"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte("- hosts: all\n  tasks:\n    - name: include\n      tags: [always]\n      " + tc.body + "\n")
+			tasks, err := parsePlaybookTasks(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = expandIncludedSetters(tasks, t.TempDir(), t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("setter expansion: got %v, want %q", err, tc.want)
+			}
+			_, err = scanAlwaysTaggedConvergence("p.yml", raw, t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("convergence scan: got %v, want %q", err, tc.want)
+			}
+		})
+	}
 }
 
 // includedTaskTags is the tag set under which a task inside an included
@@ -410,6 +516,36 @@ func TestExpandIncludedSetters(t *testing.T) {
     - name: resolve
       tags: [C10]
       include_tasks: {file: tasks/resolve.yml, apply: {tags: [C10]}}`, 0},
+		{"task args apply always", `
+    - name: resolve
+      tags: [always]
+      include_tasks: tasks/resolve.yml
+      args: {apply: {tags: [always]}}`, 0},
+		{"aliased apply mapping", `
+    - name: resolve
+      vars: {opts: &opts {tags: [always]}}
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: *opts}`, 0},
+		{"aliased apply tag list", `
+    - name: resolve
+      vars: {taglist: &taglist [always]}
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: {tags: *taglist}}`, 0},
+		{"module apply replaces args apply", `
+    - name: resolve
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: {tags: [C10]}}
+      args: {apply: {tags: [other]}}`, 0},
+		{"args apply cannot override module apply", `
+    - name: resolve
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: {tags: [other]}}
+      args: {apply: {tags: [C10]}}`, 1},
+		{"module apply replacement does not merge tags", `
+    - name: resolve
+      tags: [always]
+      include_tasks: {file: tasks/resolve.yml, apply: {become: false}}
+      args: {apply: {tags: [C10]}}`, 1},
 		{"import tagged with the reader's row", `
     - name: resolve
       tags: [C10]
@@ -426,7 +562,10 @@ func TestExpandIncludedSetters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tasks = expandIncludedSetters(tasks, dir, dir)
+			tasks, err = expandIncludedSetters(tasks, dir, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got := findTaggedPrerequisiteViolations(tasks); len(got) != tc.want {
 				t.Fatalf("got %d problems %v, want %d", len(got), got, tc.want)
 			}

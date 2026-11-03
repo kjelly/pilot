@@ -611,6 +611,57 @@ func TestAlwaysTaggedConvergenceFlagsThePre190Playbook(t *testing.T) {
 	}
 }
 
+// renderConvergenceTagShapes writes identical fixtures for the structural and
+// native-tool checks; only changed_when differs so the scanner names the leaves.
+func renderConvergenceTagShapes(t *testing.T, dir, changedWhen string) {
+	t.Helper()
+	files := map[string]string{"p.yml": convergenceTagShapesPlaybook}
+	for name, body := range convergenceTagShapeFiles {
+		files[name] = body
+	}
+	for name, body := range files {
+		body = strings.ReplaceAll(body, "@CW@", changedWhen)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// This check also runs without Ansible installed. The native oracle below
+// independently pins these expected selections to Ansible's behavior.
+func TestAlwaysTaggedConvergenceEffectiveArguments(t *testing.T) {
+	dir := t.TempDir()
+	renderConvergenceTagShapes(t, dir, "true")
+	checked := 0
+	for _, play := range strings.Split(convergenceTagShapesPlaybook, "\n- name: ") {
+		shape, _, _ := strings.Cut(play, " ")
+		want, check := map[string]int{
+			"s17": 1, "s18": 1, "s19": 1, "s20": 1, "s21": 0, "s22": 0,
+			"s23": 1, "s24": 1, "s25": 1, "s26": 1, "s27": 0, "s28": 0,
+		}[shape]
+		if !check {
+			continue
+		}
+		checked++
+		t.Run(strings.Split(play, "\n")[0], func(t *testing.T) {
+			raw := []byte(strings.ReplaceAll("- name: "+play, "@CW@", "true"))
+			scan, err := scanAlwaysTaggedConvergence("p.yml", raw, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scan.Violations) != want {
+				t.Fatalf("effective include arguments exposed %d non-convergent children, want %d: %v", len(scan.Violations), want, scan.Violations)
+			}
+			if want == 1 && scan.Violations[0].Key != "p.yml::include -> leaf-"+shape {
+				t.Fatalf("wrong included child: %v", scan.Violations)
+			}
+		})
+	}
+	if checked != 12 {
+		t.Fatalf("checked %d effective argument shapes, want 12", checked)
+	}
+}
+
 // convergenceTagShapesPlaybook is the playbook of
 // TestAlwaysTaggedConvergenceTagModelMatchesAnsible: one play per tag shape,
 // each with a leaf task (or an included file with one) named leaf-s<N>.
@@ -758,6 +809,114 @@ const convergenceTagShapesPlaybook = `
     - name: include
       tags: [always]
       ansible.builtin.include_tasks: s16-child.yml
+- name: s17 task args apply
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s17-child.yml
+      args: {apply: {tags: [always]}}
+
+- name: s18 apply alias
+  hosts: localhost
+  gather_facts: false
+  vars: {options: &apply_options {tags: [always]}}
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s18-child.yml, apply: *apply_options}
+
+- name: s19 apply tags alias
+  hosts: localhost
+  gather_facts: false
+  vars: {taglist: &taglist [always]}
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s19-child.yml, apply: {tags: *taglist}}
+
+- name: s20 module apply overrides task args
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s20-child.yml, apply: {tags: [always]}}
+      args: {apply: {tags: [x]}}
+
+- name: s21 task args cannot override module apply
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s21-child.yml, apply: {tags: [x]}}
+      args: {apply: {tags: [always]}}
+
+- name: s22 apply replacement is not a deep merge
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s22-child.yml, apply: {become: false}}
+      args: {apply: {tags: [always]}}
+
+- name: s23 args file and apply with null module
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks:
+      args: {file: s23-child.yml, apply: {tags: [always]}}
+
+- name: s24 module mapping alias
+  hosts: localhost
+  gather_facts: false
+  vars: {moduleopts: &moduleopts {file: s24-child.yml, apply: {tags: [always]}}}
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: *moduleopts
+
+- name: s25 module file overrides args file
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: {file: s25-child.yml}
+      args: {file: s25-other.yml, apply: {tags: [always]}}
+
+- name: s26 task args alias
+  hosts: localhost
+  gather_facts: false
+  vars: {options: &task_options {apply: {tags: [always]}}}
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s26-child.yml
+      args: *task_options
+
+- name: s27 task args apply still needs reachable line
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [x]
+      ansible.builtin.include_tasks: s27-child.yml
+      args: {apply: {tags: [always]}}
+
+- name: s28 removing task args apply leaves child unselected
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: include
+      tags: [always]
+      ansible.builtin.include_tasks: s28-child.yml
+
 `
 
 // convergenceTagShapeFiles are the task files convergenceTagShapesPlaybook
@@ -780,13 +939,27 @@ var convergenceTagShapeFiles = func() map[string]string {
 		"s10-child.yml": leaf("leaf-s10", ""), "s11-child.yml": leaf("leaf-s11", ""),
 		"s12-child.yml": leaf("leaf-s12", "[always]"), "s13-child.yml": leaf("leaf-s13", "[always]"),
 		"s14-child.yml": leaf("leaf-s14", ""), "s16-child.yml": leaf("leaf-s16", ""),
+		"s17-child.yml": leaf("leaf-s17", ""),
+		"s18-child.yml": leaf("leaf-s18", ""),
+		"s19-child.yml": leaf("leaf-s19", ""),
+		"s20-child.yml": leaf("leaf-s20", ""),
+		"s21-child.yml": leaf("leaf-s21", ""),
+		"s22-child.yml": leaf("leaf-s22", ""),
+		"s23-child.yml": leaf("leaf-s23", ""),
+		"s24-child.yml": leaf("leaf-s24", ""),
+		"s25-child.yml": leaf("leaf-s25", ""),
+		"s26-child.yml": leaf("leaf-s26", ""),
+		"s27-child.yml": leaf("leaf-s27", ""),
+		"s28-child.yml": leaf("leaf-s28", ""),
+		"s25-other.yml": leaf("leaf-s25b", ""),
 	}
 }()
 
 // TestAlwaysTaggedConvergenceTagModelMatchesAnsible pins the walker's tag
 // model against the real tool: for each shape in convergenceTagShapesPlaybook
 // (include lines with and without `apply`, includes in always blocks and
-// plays, nested includes, import_tasks, plain tasks, a block's always:
+// plays, nested includes, import_tasks, task args, aliases, conflicting apply
+// arguments (module keys replace task args), plain tasks, a block's always:
 // section) the leaf tasks that ansible-playbook actually runs under `--tags
 // nonexistent` are exactly the leaf tasks the lint reports as always-run.
 // The oracle is Ansible's own run (JSON callback), not the walker: the same
@@ -802,18 +975,7 @@ func TestAlwaysTaggedConvergenceTagModelMatchesAnsible(t *testing.T) {
 	if err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
-	render := func(dir, changedWhen string) {
-		files := map[string]string{"p.yml": convergenceTagShapesPlaybook}
-		for name, body := range convergenceTagShapeFiles {
-			files[name] = body
-		}
-		for name, body := range files {
-			body = strings.ReplaceAll(body, "@CW@", changedWhen)
-			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
+
 	root := t.TempDir()
 	ansibleDir, walkerDir := filepath.Join(root, "ansible"), filepath.Join(root, "walker")
 	for _, dir := range []string{ansibleDir, walkerDir} {
@@ -821,14 +983,21 @@ func TestAlwaysTaggedConvergenceTagModelMatchesAnsible(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	render(ansibleDir, "false")
-	render(walkerDir, "true")
+	renderConvergenceTagShapes(t, ansibleDir, "false")
+	renderConvergenceTagShapes(t, walkerDir, "true")
 
 	// Ansible's side: the leaf tasks that ran.
 	cmd := exec.Command(ansible, "-i", "localhost,", "-c", "local", "--tags", "nonexistent", filepath.Join(ansibleDir, "p.yml"))
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
 		"ANSIBLE_LOCAL_TEMP="+filepath.Join(root, "local-tmp"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(root, "remote-tmp"), "ANSIBLE_CACHE_PLUGIN=memory")
 	out, runErr := cmd.Output()
+	if runErr != nil {
+		var stderr []byte
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			stderr = exitErr.Stderr
+		}
+		t.Fatalf("ansible-playbook: %v\nstdout:\n%s\nstderr:\n%s", runErr, out, stderr)
+	}
 	var callback struct {
 		Plays []struct {
 			Tasks []struct {
@@ -840,9 +1009,6 @@ func TestAlwaysTaggedConvergenceTagModelMatchesAnsible(t *testing.T) {
 	}
 	if err := json.Unmarshal(out, &callback); err != nil {
 		t.Fatalf("parse the JSON callback output (ansible-playbook: %v): %v\n%s", runErr, err, out)
-	}
-	if runErr != nil {
-		t.Fatalf("ansible-playbook: %v\n%s", runErr, out)
 	}
 	leafName := regexp.MustCompile(`leaf-s[0-9]+[a-z]?`)
 	ran := map[string]bool{}
@@ -885,6 +1051,17 @@ func TestAlwaysTaggedConvergenceTagModelMatchesAnsible(t *testing.T) {
 				name, ran[name], walked[name], strings.TrimPrefix(strings.TrimRight(name, "ab"), "leaf-s"))
 		}
 	}
+	for _, name := range []string{"leaf-s17", "leaf-s18", "leaf-s19", "leaf-s20", "leaf-s23", "leaf-s24", "leaf-s25", "leaf-s26"} {
+		if !ran[name] {
+			t.Errorf("native argument control: %s must run", name)
+		}
+	}
+	for _, name := range []string{"leaf-s21", "leaf-s22", "leaf-s25b", "leaf-s27", "leaf-s28"} {
+		if ran[name] {
+			t.Errorf("native argument control: %s must remain unselected", name)
+		}
+	}
+	t.Logf("native Ansible oracle: %d plays, %d selected leaves, %d unselected leaves", len(callback.Plays), len(ran), len(universe)-len(ran))
 	// the run must have separated the shapes: the plain always task ran, the
 	// plain x task did not (a run that fails to load the playbook proves nothing)
 	if !ran["leaf-s8"] || ran["leaf-s9"] || len(ran) < 5 || len(ran) >= len(universe) {
@@ -995,9 +1172,8 @@ type convergenceWalker struct {
 //     an `always` include line with no `apply` in a plain play does not;
 //   - a rescue stays a rescue for everything below it, includes included.
 //
-// includedFile reads `apply: {tags: ...}` without following YAML aliases;
-// the repo's only aliases are in dns-apply.yml's task tags, which this walk
-// does follow.
+// includedFile resolves effective module/task arguments and YAML aliases;
+// unsupported argument forms fail closed in both callers of that helper.
 func scanAlwaysTaggedConvergence(playbook string, raw []byte, dir string) (convergenceScan, error) {
 	w := &convergenceWalker{playbook: playbook, baseDir: dir}
 	var doc yaml.Node
@@ -1079,7 +1255,10 @@ func (w *convergenceWalker) include(item *yaml.Node, eff map[string]bool, ctx co
 		return nil
 	}
 	name := taskDisplayName(item)
-	file, apply, static := includedFile(item)
+	file, apply, static, err := includedFile(item)
+	if err != nil {
+		return fmt.Errorf("%s: %q: %w", w.playbook, name, err)
+	}
 	if file == "" {
 		for _, key := range []string{"import_tasks", "ansible.builtin.import_tasks", "include_tasks", "ansible.builtin.include_tasks"} {
 			// An include line that is not always-selected cannot lead to an
