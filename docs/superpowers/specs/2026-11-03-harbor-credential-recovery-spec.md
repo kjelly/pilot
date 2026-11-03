@@ -16,6 +16,10 @@ HTTP fixtures prove only client behavior. No operational services are test targe
    administrator privilege. Check the stored database password through a native
    TCP PostgreSQL connection, independently of the Harbor API. No successful
    running status is returned after a credential failure.
+   The probe uses the database container's own hostname: native Harbor trusts
+   loopback, while its container-interface connection selects password
+   authentication. Keep the mandatory wrong-password control so trust cannot
+   silently become proof of a valid credential.
 3. Classify authentication (401), authorization (403 or insufficient privilege),
    unreachable and initializing/server failure separately. Generic server errors
    are not evidence of database corruption. Never include response bodies,

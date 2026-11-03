@@ -81,10 +81,12 @@ func TestInterruptedCredentialInitializationNeverGeneratesAgain(t *testing.T) {
 }
 
 type credentialRunner struct {
-	password  string
-	trust     bool
-	inputs    []string
-	mutations int
+	password    string
+	trust       bool
+	unavailable bool
+	authFailure string
+	inputs      []string
+	mutations   int
 }
 
 func (r *credentialRunner) Run(context.Context, string, string, ...string) (CommandResult, error) {
@@ -97,10 +99,22 @@ func (r *credentialRunner) RunInput(_ context.Context, _ string, input, name str
 	if name != "docker" || strings.Contains(strings.Join(args, " "), r.password) {
 		return CommandResult{}, errors.New("secret leaked in argv")
 	}
+	if r.unavailable {
+		return CommandResult{}, errors.New("SENTINEL-NATIVE-RUNNER-ERROR")
+	}
+	script := args[len(args)-1]
+	// Native Harbor 2.15.1 calibration: loopback trusts every password, while
+	// its container hostname selects the host-password rule. See testdata provenance.
+	if strings.Contains(script, "-h 127.0.0.1 ") {
+		return CommandResult{Stdout: "1\n"}, nil
+	}
+	if !strings.Contains(script, `-h "$(hostname)" `) {
+		return CommandResult{}, errors.New("unrecognized database authentication boundary")
+	}
 	if r.trust || input == r.password+"\n" {
 		return CommandResult{Stdout: "1\n"}, nil
 	}
-	return CommandResult{ExitCode: 2, Stderr: "password authentication failed SENTINEL-POSTGRES-SECRET"}, nil
+	return CommandResult{ExitCode: 2, Stderr: r.authFailure + "SENTINEL-POSTGRES-SECRET"}, nil
 }
 
 func credentialFixture(t *testing.T) (*Manager, Profile, *credentialRunner, string) {
@@ -108,7 +122,11 @@ func credentialFixture(t *testing.T) (*Manager, Profile, *credentialRunner, stri
 	m, p, _ := healthyLifecycleFixture(t)
 	admin, _ := readHarborAdminPassword(m.root)
 	database, _ := readSecret(filepath.Join(m.root, credentialPaths[1]))
-	runner := &credentialRunner{password: database}
+	authFailure, err := os.ReadFile("testdata/harbor-db-password-auth.stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &credentialRunner{password: database, authFailure: string(authFailure)}
 	m.runner = runner
 	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path == "/api/v2.0/users/current" {
@@ -200,6 +218,31 @@ func TestHarborDatabaseProbeRejectsTrustAndUsesStdin(t *testing.T) {
 	runner.trust = true
 	if err := m.harborDatabaseProbe(context.Background(), state, runner.password); err == nil || !strings.Contains(err.Error(), "negative control") {
 		t.Fatalf("trust accepted as password proof: %v", err)
+	}
+}
+
+func TestHarborDatabaseProbeUsesNativePasswordAuthenticationBoundary(t *testing.T) {
+	m, _, runner, _ := credentialFixture(t)
+	state, _ := m.current()
+	// Lock the observed counterexample into the oracle, rather than assuming
+	// that any TCP destination causes PostgreSQL to inspect a password.
+	for _, password := range []string{"incorrect-native-control", runner.password} {
+		result, err := runner.RunInput(context.Background(), m.root, password+"\n", "docker", "exec", "-i", "fixture-db", "sh", "-c", "psql -h 127.0.0.1 -d registry")
+		if err != nil || result.ExitCode != 0 || result.Stdout != "1\n" {
+			t.Fatal("fixture lost native loopback-trust semantics")
+		}
+	}
+	if err := m.harborDatabaseProbe(context.Background(), state, runner.password); err != nil {
+		t.Fatalf("native container-hostname authentication boundary must validate the correct password: %v", err)
+	}
+	err := m.harborDatabaseProbe(context.Background(), state, "incorrect-native-password")
+	if err == nil || !strings.Contains(err.Error(), "database authentication failed") || strings.Contains(err.Error(), "SENTINEL") || strings.Contains(err.Error(), "psql:") {
+		t.Fatalf("native password rejection was not safely classified: %v", err)
+	}
+	runner.unavailable = true
+	err = m.harborDatabaseProbe(context.Background(), state, runner.password)
+	if err == nil || !strings.Contains(err.Error(), "unreachable") || strings.Contains(err.Error(), "SENTINEL") {
+		t.Fatalf("unavailable database was not safely classified: %v", err)
 	}
 }
 

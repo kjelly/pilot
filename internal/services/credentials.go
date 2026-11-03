@@ -212,7 +212,9 @@ func (m *Manager) harborDatabaseProbe(ctx context.Context, state ServiceState, p
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return errors.New("services: database authentication control unavailable")
 	}
-	args := []string{"exec", "-i", "pilot-harbor-" + state.Profile + "-harbor-db", "sh", "-c", `IFS= read -r PGPASSWORD; export PGPASSWORD; export PGPASSFILE=/dev/null; unset PGSERVICE PGSERVICEFILE; exec psql -X -w -h 127.0.0.1 -p 5432 -U postgres -d registry -Atc 'SELECT 1'`}
+	// Harbor trusts loopback connections. Its own container hostname resolves
+	// to the container interface, where the password-authenticated rule applies.
+	args := []string{"exec", "-i", "pilot-harbor-" + state.Profile + "-harbor-db", "sh", "-c", `IFS= read -r PGPASSWORD; export PGPASSWORD; export PGPASSFILE=/dev/null; unset PGSERVICE PGSERVICEFILE; exec psql -X -w -h "$(hostname)" -p 5432 -U postgres -d registry -Atc 'SELECT 1'`}
 	negative, err := runner.RunInput(ctx, m.root, base64.RawURLEncoding.EncodeToString(nonce[:])+"\n", "docker", args...)
 	if err != nil || ctx.Err() != nil {
 		return errors.New("services: Harbor database unreachable; native authentication control failed")
