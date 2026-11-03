@@ -1578,8 +1578,7 @@ baseline whole-chain PASS is claimed. Historical2db quiet failure/trace showed
 recovery deferred until next engine input; it motivated the fixed heartbeat,
 not a universal claim about all librelp or audit clients.
 
-The primary machine prefix retains its append-only artifact location. Private
-raw failures and versioned receipts remain under the private root
+Private raw failures and versioned receipts remain under the private root
 `/home/kjelly/.cache/go-build/issue211-scratch/`. Principal artifacts:
 
 | Artifact relative to private root | SHA-256 |
