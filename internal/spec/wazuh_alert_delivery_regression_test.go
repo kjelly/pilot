@@ -214,6 +214,13 @@ source=root/'source/alerts/alerts.json';month=source.parent/'2026/Nov';month.mkd
 daily=month/'ossec-alerts-03.json';daily.write_text('');daily.chmod(0o640);os.link(daily,source)
 check_input=runpy.run_path('../../playbooks/files/pilot-wazuh-delivery')['check_input']
 rendered=(root/'sender.conf').read_text()
+assert 'module(load="immark"' not in rendered and 'action.writeAllMarkMessages' not in rendered,'TCP unexpectedly enabled heartbeat'
+# A test-only fallthrough witness makes removal/broadening of the production
+# whole-body drop observable, even though syslog normally has no file route.
+receiver=root/'receiver.conf';text=receiver.read_text();needle='    stop\n}\n\ninput('
+assert text.count(needle)==1
+text=text.replace(needle,'    action(type="omfile" file="'+str(root/'fallthrough.log')+'" template="RSYSLOG_SyslogProtocol23Format")\n'+needle,1)
+receiver.write_text(text)
 check_input(rendered,str(root/'source'))
 for before,after in [('File="'+str(source)+'"','File="/nonexistent/alerts.json"'),
                      ('Facility="local5"','Facility="local6"'),
@@ -240,11 +247,23 @@ def emit():
  nonce='PILOT-WAZUH-'+uuid.uuid4().hex
  record=json.loads(pathlib.Path('testdata/wazuh-alert-delivery/real-alert.json').read_text())
  record['full_log']=record['full_log'].replace('PILOT-WAZUH-'+'a'*32,nonce)
+ record['full_log']+=' PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1'
  with source.open('a') as f:f.write(json.dumps(record)+'\n')
  return nonce
 try:
  start('receiver');time.sleep(.3);start('sender');time.sleep(.5)
+ marker='PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1'
+ with socket.create_connection(('127.0.0.1',int(sys.argv[2]))) as stream:
+  for message in [marker,'prefix-'+marker]:
+   stream.sendall(('<46>1 2026-11-03T00:00:00Z fixture-host rsyslogd - - - '+message+'\n').encode())
+ deadline=time.monotonic()+5
+ while time.monotonic()<deadline:
+  witness=root/'fallthrough.log'
+  if witness.exists() and 'prefix-'+marker in witness.read_text():break
+  time.sleep(.1)
+ assert witness.exists() and witness.read_text().count(marker)==1,'exact marker drop failed or contains-match consumed nonreserved message'
  first=emit();wait(first)
+ assert marker in list((root/'out').glob('*/wazuh-alerts.log'))[0].read_text(),'valid JSON containing marker was dropped'
  old_inode=source.stat().st_ino;source.unlink();daily.rename(daily.with_suffix('.old'))
  daily.write_text('');daily.chmod(0o640);os.link(daily,source)
  assert source.stat().st_ino!=old_inode and source.stat().st_nlink==2
@@ -262,7 +281,7 @@ finally:
   text=path.read_text()
   if 'error during parsing' in text:print(text,file=sys.stderr)
 `
-	if out, err := exec.Command("python3", "-c", harness, root).CombinedOutput(); err != nil {
+	if out, err := exec.Command("python3", "-c", harness, root, strings.TrimSpace(string(port))).CombinedOutput(); err != nil {
 		t.Fatalf("native reader/receiver: %v\n%s", err, out)
 	}
 }

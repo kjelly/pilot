@@ -19,6 +19,14 @@ fail closed. A new challenge is required for every trial; stale historical alert
 cannot satisfy a different challenge. The receiver check waits at most 45 seconds
 for delivery, consumes the challenge, and returns a failure when transport is blocked.
 
+After a healthy RELP receiver becomes ready following its restart, the first single
+real engine alert must meet that same 45-second deadline without a second engine
+alert, operator wakeup, sender restart, or queue deletion. The production sender
+supplies fixed five-second native marks to its existing Wazuh action/client/queue
+so a quiet stream can process replies and reconnect autonomously. These reserved
+transport markers never become engine alerts or receiver log records. A valid JSON
+alert containing the marker text in `full_log` remains an alert and must be stored.
+
 Wazuh manager C11 verifies the local ingestion/transport configuration and loaded
 service; this cross-host spec is the delivery oracle. Both checks are required when
 forwarding is configured. Optional standalone deployments omit the delivery cross-check.
@@ -52,5 +60,7 @@ Required target evidence: fresh Ubuntu check/apply/verify/idempotency; generated
 real alert; positive/blocked/recovered delivery; rotation and manager recreation;
 colocation without self-forward loops; optional forwarding disabled; native parser
 and failure rollback; RELP security and existing audit/auth regression coverage.
+Also require the single-alert quiet receiver-restart arm, marker exclusion, foreign
+immark refusal, loaded-state restoration, and TCP/disabled heartbeat retirement.
 
 Current immutable candidate evidence: [latest](../evidence/wazuh-manager/LATEST.md).

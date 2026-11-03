@@ -75,6 +75,20 @@ year/month 目錄依序補 default ACL，未來子目錄繼承，避免只保護
 落盤確認且 reconnect 可能重複最後一筆；需要 authenticated acknowledged transport
 時選 RELP。log-server 的同一份 retention policy 涵蓋獨立 wazuh-alerts.log。
 
+啟用 RELP 時，固定五秒的 native immark 只進同一個 `pilotWazuhForward` /
+`wazuh_alerts` action、client、queue；不產生第二個 Wazuh engine alert，也不建立額外
+transport。這是稀疏輸出在 receiver 重啟後仍自主處理回應、重連與重送的必要條件。
+保留字 `PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1` 的 syslog/rsyslogd 整筆 marker
+在 receiver 寫檔前丟棄；JSON `full_log` 內包含相同字串仍須照常保存。TCP 與停用
+轉送不啟用這個 input。每分鐘 12 筆 marker 共用既有 queue 上限；不承諾任意長時間
+停機或 queue 已滿時仍有相同延遲。不得刪除 backlog 來恢復進度。
+
+immark 是 singleton；角色在 Wazuh/TLS mutation 前拒絕 foreign、重複、loaded-only
+或無法判定 ownership 的 module/include 設定，並以 native parser 驗證精確能力。
+只能重用本角色的固定設定，不能接管 operator 的 immark。C11 同時要求已載入的
+RELP heartbeat module/thread；active 或磁碟設定正確本身不代表 runtime 已更新。
+失敗時還原本次 snapshot，native validation 後重新載入原設定；不刪 queue/state。
+
 遷移或停用時會移除本 playbook 過去管理的 `<syslog_output>`，並 recreate manager
 讓 live config 同步；不改 operator 自行建立的其他輸出。C11 只證明本機有效 reader /
 transport 設定，**不證明 delivery**。啟用轉送必須同時通過

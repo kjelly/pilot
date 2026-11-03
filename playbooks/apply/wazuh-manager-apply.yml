@@ -241,6 +241,39 @@
       # mandatory check-mode gate.
       failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
+
+    - name: "Wazuh: install native RELP preflight prerequisites before configuration changes"
+      tags: [C10, C11]
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C10, C11]
+      vars:
+        pilot_apt_packages: [rsyslog, rsyslog-relp, openssl]
+        pilot_apt_component: wazuh-heartbeat-preflight
+      when: not ansible_check_mode and siem_forwarding_enabled | bool and siem_forward_transport == 'relp'
+
+    - name: "Wazuh: refuse foreign immark and unsupported heartbeat before Wazuh or TLS mutation"
+      tags: [C10, C11]
+      no_log: true
+      diff: false
+      ansible.builtin.script: "../files/pilot-wazuh-heartbeat preflight {{ 'relp' if siem_forwarding_enabled | bool and siem_forward_transport == 'relp' else 'retire' }}"
+      register: wazuh_heartbeat_preflight
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: "Gate: Wazuh requires exclusive native heartbeat support for RELP"
+      tags: [C10, C11]
+      ansible.builtin.assert:
+        that: (wazuh_heartbeat_preflight.rc | default(-1)) == 0
+        fail_msg: >-
+          Wazuh requires exclusive immark ownership within its managed reader;
+          enabled RELP additionally requires native support for its fixed five-second
+          named-action heartbeat. Foreign/unknown/loaded-only ownership or unsupported
+          native configuration was refused before Wazuh/TLS changes. Preserve
+          operator configuration and use a supported rsyslog pair.
+      when: not ansible_check_mode
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:

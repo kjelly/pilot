@@ -12,6 +12,7 @@ regressionTests:
   - internal/spec/wazuh_secret_output_regression_test.go
   - internal/spec/wazuh_rotation_acl_regression_test.go
   - internal/spec/wazuh_tagged_recovery_regression_test.go
+  - internal/spec/wazuh_heartbeat_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: docker, required: true, relation: sameHosts}

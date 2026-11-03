@@ -497,6 +497,11 @@
               template(name="SiemWazuhJSON" type="string" string="%msg:::drop-last-lf%\n")
 
               ruleset(name="siemReceiver") {
+                  # Reserved transport marker only; JSON containing this text
+                  # remains a real alert and continues to its normal route.
+                  if ($syslogfacility-text == 'syslog' and $programname == 'rsyslogd' and re_match($msg, '^[[:space:]]*PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1[[:space:]]*$')) then {
+                      stop
+                  }
                   if ($syslogfacility-text == 'local5' and $programname == 'pilot-wazuh-alert') then {
                       action(type="omfile" dynaFile="SiemWazuhPath" template="SiemWazuhJSON" createDirs="on")
                       stop

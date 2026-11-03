@@ -131,6 +131,14 @@
     group: root
     mode: "0755"
 
+- name: "Wazuh: install the fixed heartbeat runtime checker"
+  ansible.builtin.copy:
+    src: ../files/pilot-wazuh-heartbeat
+    dest: /usr/local/libexec/pilot-wazuh-heartbeat
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: "Wazuh: check isolated queue engine and native RELP capabilities"
   ansible.builtin.include_tasks: rsyslog-relp-capability.yml
   vars:
@@ -162,6 +170,7 @@
           target="siem-log-server" port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
           template="RSYSLOG_SyslogProtocol23Format"
       {% if siem_forward_transport == 'relp' %}
+          action.writeAllMarkMessages="on"
           tls="on" tls.authMode="name" tls.permittedPeer="{{ siem_relp_server_name }}"
           tls.caCert="/etc/rsyslog.d/pilot-relp-wazuh-sender/ca.pem"
           tls.myCert="/etc/rsyslog.d/pilot-relp-wazuh-sender/cert.pem"
@@ -183,6 +192,9 @@
           queue.saveOnShutdown="on" queue.discardSeverity="8")
         stop
       }
+      {% if siem_forward_transport == 'relp' %}
+      module(load="immark" interval="5" markMessageText="PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1" ruleset="pilotWazuhForward" use.syslogCall="off" use.markFlag="on")
+      {% endif %}
       input(type="imfile" File="{{ wazuh_logs_source }}/alerts/alerts.json"
         Tag="pilot-wazuh-alert:" Facility="local5" Severity="info"
         PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on"
@@ -201,7 +213,7 @@
     owner: root
     group: root
     mode: "0644"
-    content: "{{ {'enabled': (siem_forwarding_enabled | bool), 'source': (wazuh_logs_source | default('')), 'transport': siem_forward_transport} | to_nice_json }}"
+    content: "{{ {'enabled': (siem_forwarding_enabled | bool), 'source': (wazuh_logs_source | default('')), 'transport': siem_forward_transport, 'heartbeat_interval': (5 if siem_forwarding_enabled | bool and siem_forward_transport == 'relp' else 0)} | to_nice_json }}"
 
 - name: "Wazuh: validate native combined configuration"
   ansible.builtin.command: rsyslogd -N1
@@ -232,3 +244,9 @@
   when:
     - siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
     - wazuh_reload_pending.stdout | default('') == 'pending' or not (siem_forwarding_enabled | bool) or wazuh_apparmor_result is changed or wazuh_acl_result is changed
+
+- name: "Wazuh: verify the effective owned heartbeat after activation"
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/pilot-wazuh-heartbeat, runtime, "{{ siem_forward_transport }}"]
+  changed_when: false
+  when: siem_forwarding_enabled | bool

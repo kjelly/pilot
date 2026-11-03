@@ -153,6 +153,10 @@ def check_local():
     # Config/TLS/loaded-state check is intentionally local. Only the receiver
     # delivery mode can establish that a real alert reached disk.
     run('/usr/local/libexec/pilot-siem-relp-check', 'sender-config', 'wazuh-sender')
+    expected_interval = 5 if profile['transport'] == 'relp' else 0
+    if profile.get('heartbeat_interval') != expected_interval:
+        raise ValueError('desired transport heartbeat profile is missing or changed')
+    run('/usr/local/libexec/pilot-wazuh-heartbeat', 'runtime', profile['transport'])
     check_input(conf.read_text(), profile['source'])
 
 

@@ -90,6 +90,15 @@ messages or duplicate the last message after reconnect; select RELP when
 acknowledged authenticated transport is required. Neither mode promises survival
 of queue exhaustion or arbitrary abrupt host loss.
 
+Enabled RELP uses a fixed five-second native heartbeat through the same Wazuh
+action and queue; the receiver drops only its reserved whole-message marker.
+This keeps sparse output progressing after receiver restart. It adds 12 messages
+per minute to the existing queue budget and does not extend its outage capacity.
+An operator-owned immark module prevents enabling this integration; pilot fails
+before changing Wazuh/TLS configuration. Service socket activation can invalidate
+stop/start assumptions, so loaded configuration is established by validated
+restart and effective module/thread checks.
+
 Keep adequate disk space: Wazuh can stop generating alerts when Docker data fills
 while containers remain running. Official image default credentials must be
 rotated before production. Manager configuration injection requires container
