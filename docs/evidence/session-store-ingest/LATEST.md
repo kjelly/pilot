@@ -1,11 +1,7 @@
-# Session-store ingest：目前驗證狀態
+# session-store-ingest — latest actual-run evidence
 
-Issue #77 的修復候選尚未完成原生 target 驗收；此頁不表示候選已通過。
+| Record | Tested commit | Outcome | Finished (UTC) | Verify |
+|---|---|---|---|---|
+| [issue-77.md](issue-77.md) | `108b7f3cde06b8c80594ee2ea54df0b51122fabf` | success | 2026-11-03 16:31 | PASS 27/0/0 |
 
-2026-11-03 已在不可變基準 `07f55a6e11cb39be0988e3b032bfa144ed5ec387`
-重現原始問題：AlmaLinux 9 FreeIPA server 與 Ubuntu 24.04 client，後者同時執行
-真實 Wazuh。Wazuh dashboard 佔用主機 8443，session-store 以相同預設埠啟動時
-journal 回報 `address already in use`；apply 為 ok=51、changed=16、failed=1，
-五次 ingest 探測後 curl rc=60。FreeIPA 憑證狀態為 MONITORING。
-
-新的成功紀錄將由候選的正式 topology test 產生後更新本頁。
+Written by `pilot 0.2.0 vm-target topology --evidence-record`. Specs and runbooks link here; the record above is rewritten in place for each candidate of a change, and `git log -- docs/evidence/session-store-ingest` is the history.
