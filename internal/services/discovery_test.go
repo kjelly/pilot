@@ -143,7 +143,7 @@ func TestSharedDiscoveryRejectsIncompleteLegacyStateBeforeRender(t *testing.T) {
 			before := bundleHashes(t, s.Root)
 			runner := &fakeRunner{}
 			_, err := NewSharedManager(DiscoveryOptions{Directory: t.TempDir(), LegacyDirectories: []string{legacy}}, runner)
-			if err == nil || (!strings.Contains(err.Error(), "state") && !strings.Contains(err.Error(), "credentials") && !strings.Contains(err.Error(), "CA")) {
+			if err == nil || (!strings.Contains(err.Error(), "state") && !strings.Contains(err.Error(), "credential") && !strings.Contains(err.Error(), "CA")) {
 				t.Fatalf("want specific adoption rejection, got %v", err)
 			}
 			if len(runner.calls) != 0 || !reflect.DeepEqual(before, bundleHashes(t, s.Root)) {
@@ -363,6 +363,10 @@ func (r *sharedLifecycleRunner) Run(_ context.Context, dir, name string, args ..
 	return CommandResult{}, nil
 }
 
+func (r *sharedLifecycleRunner) RunInput(_ context.Context, dir, input, _ string, _ ...string) (CommandResult, error) {
+	return fixtureDatabaseResult(dir, input), nil
+}
+
 func TestSharedDiscoveryLifecycleAndInterruptedUpRetainIdentity(t *testing.T) {
 	dir := t.TempDir()
 	runner := &sharedLifecycleRunner{}
@@ -376,6 +380,13 @@ func TestSharedDiscoveryLifecycleAndInterruptedUpRetainIdentity(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
 	defer server.Close()
 	m.client = server.Client()
+	transport := m.client.Transport
+	m.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/api/v2.0/users/current" {
+			return jsonResponse(200, map[string]any{"username": "admin", "sysadmin_flag": true}), nil
+		}
+		return transport.RoundTrip(req)
+	})
 	// Failure after render/Compose but before successful seeding must retain
 	// the reserved instance and the original secret/CA bytes for retry.
 	profile := BuiltInDevLite()
@@ -404,9 +415,13 @@ func TestSharedDiscoveryLifecycleAndInterruptedUpRetainIdentity(t *testing.T) {
 	if !state.Running || state.InstanceID != failed.InstanceID || state.Generation != failed.Generation {
 		t.Fatalf("retry changed identity: %+v", state)
 	}
-	if !reflect.DeepEqual(before, bundleHashes(t, m.root)) {
+	afterRepair := bundleHashes(t, m.root)
+	delete(afterRepair, ".pilot-credential-binding.json")
+	delete(afterRepair, ".pilot-credential-binding.json.lock")
+	if !reflect.DeepEqual(before, afterRepair) {
 		t.Fatal("retry altered cache/credentials/CA")
 	}
+	before = bundleHashes(t, m.root)
 	if err := m.Down(context.Background()); err != nil {
 		t.Fatal(err)
 	}

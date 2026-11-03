@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,54 @@ var servicesRepairCmd = &cobra.Command{
 	RunE:  runServicesRepair,
 }
 
+var servicesCredentialsCmd = &cobra.Command{
+	Use:   "credentials",
+	Short: "Reassociate existing Harbor credentials without changing services",
+}
+
+var servicesCredentialsImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Validate and import an authorized existing Harbor secret file",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		kindValue, _ := cmd.Flags().GetString("kind")
+		source, _ := cmd.Flags().GetString("secret-file")
+		if source == "" {
+			return fmt.Errorf("services: --secret-file is required")
+		}
+		if source == "~" || strings.HasPrefix(source, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("services: cannot resolve secret source home directory")
+			}
+			if source == "~" {
+				source = home
+			} else {
+				source = filepath.Join(home, source[2:])
+			}
+		}
+		source, err := filepath.Abs(source)
+		if err != nil {
+			return fmt.Errorf("services: cannot resolve secret source path")
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(source))
+		if err != nil {
+			return fmt.Errorf("services: cannot resolve secret source directory")
+		}
+		source = filepath.Join(parent, filepath.Base(source))
+		kind := services.CredentialKind(kindValue)
+		m, err := newServiceManagerForCredential(cmd.Context(), kind)
+		if err != nil {
+			return err
+		}
+		if err := m.ImportCredential(cmd.Context(), kind, source); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "Harbor credential association validated and published; services retained")
+		return nil
+	},
+}
+
 var servicesConsumersCmd = &cobra.Command{
 	Use:   "consumers",
 	Short: "List durable VM consumer registrations, including pending provisioning",
@@ -93,10 +142,17 @@ var servicesReleaseConsumerCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(servicesCmd)
+	servicesCmd.AddCommand(servicesCredentialsCmd)
+	servicesCredentialsCmd.AddCommand(servicesCredentialsImportCmd)
+	servicesCredentialsImportCmd.Flags().String("kind", "harbor-admin", "existing credential identity: harbor-admin or harbor-database")
+	servicesCredentialsImportCmd.Flags().String("secret-file", "", "owned mode-0600 regular file containing the existing secret")
+	servicesCredentialsImportCmd.RunE = withServiceCommandSignals(servicesCredentialsImportCmd.RunE)
 	servicesCmd.AddCommand(servicesUpCmd, servicesStatusCmd, servicesDownCmd, servicesPurgeCmd)
 	servicesCmd.AddCommand(servicesRepairCmd, servicesConsumersCmd, servicesReleaseConsumerCmd)
 	for _, command := range servicesCmd.Commands() {
-		command.RunE = withServiceCommandSignals(command.RunE)
+		if command.RunE != nil {
+			command.RunE = withServiceCommandSignals(command.RunE)
+		}
 	}
 	servicesRepairCmd.Flags().StringVar(&svcProfile, "profile", "dev-lite", "service profile name or YAML path")
 	servicesRepairCmd.Flags().StringVar(&svcNetwork, "network", "default", "libvirt network whose gateway receives service traffic")

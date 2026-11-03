@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -53,6 +52,9 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return Bundle{}, fmt.Errorf("create service root: %w", err)
 	}
+	if err := prepareCredentials(root); err != nil {
+		return Bundle{}, err
+	}
 	for _, dir := range []string{"apt", "pulp/settings/certs", "pulp/pulp_storage", "pulp/pgsql", "pulp/containers", "pulp/container_build", "pulp/secrets", "harbor", "ca"} {
 		path := filepath.Join(root, dir)
 		if err := os.MkdirAll(path, 0o755); err != nil {
@@ -79,22 +81,22 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := writeAtomicMode(caKeyPath, caKeyPEM, 0o600); err != nil {
 		return Bundle{}, err
 	}
-	adminPassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
+	adminPassword, err := readSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Harbor admin password: %w", err)
 	}
-	databasePassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "database-password"))
+	databasePassword, err := readSecret(filepath.Join(root, "harbor", "secrets", "database-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Harbor database password: %w", err)
 	}
-	pulpAdminPassword, err := loadOrCreateSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
+	pulpAdminPassword, err := readSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Pulp admin password: %w", err)
 	}
 	if err := writeAtomicMode(filepath.Join(root, "pulp", "admin.env"), []byte("PULP_DEFAULT_ADMIN_PASSWORD="+pulpAdminPassword+"\n"), 0o600); err != nil {
 		return Bundle{}, fmt.Errorf("write Pulp admin environment: %w", err)
 	}
-	pulpSecretKey, err := loadOrCreateSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
+	pulpSecretKey, err := readSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Pulp secret key: %w", err)
 	}
@@ -211,9 +213,9 @@ func renderHarborYML(profile Profile, root, host, adminPassword, databasePasswor
 		"hostname: " + host,
 		"http:",
 		fmt.Sprintf("  port: %d", profile.Harbor.HTTPPort),
-		"harbor_admin_password: " + adminPassword,
+		"harbor_admin_password: " + strconv.Quote(adminPassword),
 		"database:",
-		"  password: " + databasePassword,
+		"  password: " + strconv.Quote(databasePassword),
 		"  max_idle_conns: 100",
 		"  max_open_conns: 900",
 		"jobservice:",
@@ -240,26 +242,6 @@ func renderHarborYML(profile Profile, root, host, adminPassword, databasePasswor
 		"    location: " + filepath.Join(root, "harbor", "logs"),
 		"", // Harbor installer fills the generated Compose topology.
 	}, "\n")
-}
-
-func loadOrCreateSecret(path string) (string, error) {
-	if b, err := os.ReadFile(path); err == nil {
-		value := strings.TrimSpace(string(b))
-		if value != "" {
-			return value, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	value := base64.RawURLEncoding.EncodeToString(b)
-	if err := writeAtomicMode(path, []byte(value+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return value, nil
 }
 
 func loadOrCreateCA(dir string) ([]byte, []byte, error) {
@@ -317,11 +299,15 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync service file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("install %s: %w", path, err)
 	}
-	return nil
+	return syncDirectory(filepath.Dir(path))
 }

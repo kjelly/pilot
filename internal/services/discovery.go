@@ -124,6 +124,19 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 
 // NewSharedManagerContext discovers a shared stack with cancelable lock waits.
 func NewSharedManagerContext(ctx context.Context, options DiscoveryOptions, runner CommandRunner) (*Manager, error) {
+	return newSharedManagerContext(ctx, options, runner, "")
+}
+
+// NewSharedManagerRecoveryContext bypasses only the selected Harbor file prerequisite.
+// The import operation rechecks ownership and all other prerequisites under lock.
+func NewSharedManagerRecoveryContext(ctx context.Context, options DiscoveryOptions, kind CredentialKind, runner CommandRunner) (*Manager, error) {
+	if _, err := kind.relativePath(); err != nil {
+		return nil, err
+	}
+	return newSharedManagerContext(ctx, options, runner, kind)
+}
+
+func newSharedManagerContext(ctx context.Context, options DiscoveryOptions, runner CommandRunner, recovery CredentialKind) (*Manager, error) {
 	global, err := composeLockContext(ctx)
 	if err != nil {
 		return nil, err
@@ -177,8 +190,8 @@ func NewSharedManagerContext(ctx context.Context, options DiscoveryOptions, runn
 			return nil, err
 		}
 		ownerErr := m.verifyRootOwner(current.InstanceID)
-		if ownerErr == nil && current.ComposePath != "" {
-			ownerErr = validateLegacyData(current)
+		if ownerErr == nil && current.Fingerprint != "" {
+			ownerErr = validateLegacyDataExcept(current, recovery)
 		}
 		rootLock.Close()
 		if ownerErr != nil {
@@ -341,16 +354,25 @@ func legacyState(dir string) (ServiceState, bool, error) {
 }
 
 func validateLegacyData(s ServiceState) error {
-	if _, err := os.Stat(s.ComposePath); err != nil {
-		return fmt.Errorf("services: legacy Compose root is unavailable: %w", err)
+	return validateLegacyDataExcept(s, "")
+}
+
+func validateLegacyDataExcept(s ServiceState, except CredentialKind) error {
+	if s.ComposePath != "" {
+		if _, err := os.Stat(s.ComposePath); err != nil {
+			return errors.New("services: legacy Compose root is unavailable")
+		}
 	}
-	for _, path := range []string{"ca/ca.pem", "ca/ca-key.pem", "harbor/secrets/admin-password", "harbor/secrets/database-password", "pulp/secrets/admin-password", "pulp/settings/secret-key"} {
+	if err := validateCredentialFiles(s.Root, except); err != nil {
+		return err
+	}
+	for _, path := range []string{"ca/ca.pem", "ca/ca-key.pem"} {
 		data, err := os.ReadFile(filepath.Join(s.Root, path))
 		if err != nil || len(data) == 0 {
-			return fmt.Errorf("services: legacy identity/credentials are unavailable at %s; restore them before adoption", filepath.Join(s.Root, path))
+			return errors.New("services: legacy identity/credentials are unavailable; restore the original CA")
 		}
 		if path == "ca/ca.pem" && s.Client.CAPEM != "" && string(data) != s.Client.CAPEM {
-			return fmt.Errorf("services: legacy CA does not match registered client at %s", s.Root)
+			return errors.New("services: legacy CA does not match registered client")
 		}
 	}
 	return nil
