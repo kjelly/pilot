@@ -129,6 +129,9 @@ func retirementQueryHarness(t *testing.T, status string) (string, string) {
 	if err := os.WriteFile(journal, stateBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(journal+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	helper, err := os.ReadFile("../../../playbooks/apply/files/freeipa-ssh-key-cache.py")
 	if err != nil {
 		t.Fatal(err)

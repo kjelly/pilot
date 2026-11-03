@@ -236,6 +236,23 @@ def update(state, action, data):
     raise ValueError("unknown journal action")
 
 
+def durability_barrier(stream, directory):
+    """Confirm the observed inode and its directory before reporting success."""
+    os.fsync(stream.fileno())
+    dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def read_state(stream):
+    state = json.load(stream)
+    if state["version"] != 1 or not isinstance(state["users"], dict):
+        raise ValueError("invalid SSH cache journal")
+    return state
+
+
 def journal(path, action, data):
     directory = os.path.dirname(path)
     if action in ("inspect", "plan", "retirement_status"):
@@ -243,12 +260,22 @@ def journal(path, action, data):
         # not create even a sidecar lock during preview/read-only discovery.
         try:
             with open(path, encoding="utf-8") as stream:
-                state = json.load(stream)
+                state = read_state(stream)
         except FileNotFoundError:
             state = {"version": 1, "domain": data["domain"], "users": {}}
-        if state["version"] != 1 or not isinstance(state["users"], dict):
-            raise ValueError("invalid SSH cache journal")
-        return update(state, action, data)
+        result = update(state, action, data)
+        if action != "retirement_status" or not result["settled"]:
+            return result
+        # A visible receipt may come from an interrupted directory fsync.
+        # Use the writer's EXISTING sidecar, re-read, and sync that same
+        # opened inode under LOCK_SH. Never create/replace state on a query.
+        with open(path + ".lock", "r", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            with open(path, encoding="utf-8") as stream:
+                result = update(read_state(stream), action, data)
+                if result["settled"]:
+                    durability_barrier(stream, directory)
+                return result
     os.makedirs(directory, mode=0o700, exist_ok=True)
     with open(path + ".lock", "a", encoding="utf-8") as lock:
         os.chmod(path + ".lock", 0o600)
@@ -256,15 +283,15 @@ def journal(path, action, data):
         existed = True
         try:
             with open(path, encoding="utf-8") as stream:
-                state = json.load(stream)
-            if state["version"] != 1 or not isinstance(state["users"], dict):
-                raise ValueError("invalid SSH cache journal")
+                state = read_state(stream)
         except FileNotFoundError:
             existed = False
             state = {"version": 1, "domain": data["domain"], "users": {}}
         before = json.dumps(state, sort_keys=True)
         result = update(state, action, data)
         if existed and json.dumps(state, sort_keys=True) == before:
+            with open(path, encoding="utf-8") as stream:
+                durability_barrier(stream, directory)
             return result
         fd, temporary = tempfile.mkstemp(prefix=".ssh-cache-", dir=directory)
         try:
@@ -273,11 +300,8 @@ def journal(path, action, data):
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-            dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
+            with open(path, encoding="utf-8") as stream:
+                durability_barrier(stream, directory)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

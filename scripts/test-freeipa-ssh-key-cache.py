@@ -10,6 +10,8 @@ from pathlib import Path
 import struct
 import tempfile
 import subprocess
+import stat
+import time
 import unittest
 from unittest import mock
 
@@ -228,19 +230,168 @@ class JournalTest(unittest.TestCase):
             # A directory-fsync failure occurs after the atomic replacement.
             Path(path).write_text(json.dumps(self.state))
             real_fsync = cache.os.fsync
-            calls = 0
             def fail_directory(fd):
-                nonlocal calls
-                calls += 1
-                if calls == 2:
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
                     raise OSError("injected after replace")
                 real_fsync(fd)
             with mock.patch.object(cache.os, "fsync", side_effect=fail_directory):
                 with self.assertRaisesRegex(OSError, "after replace"):
                     cache.journal(path, "retire", data)
+                visible = Path(path).read_bytes()
+                self.assertIn("b", json.loads(visible)["retired"])
+                with self.assertRaisesRegex(OSError, "after replace"):
+                    cache.journal(path, "retire", data)
+                with self.assertRaisesRegex(OSError, "after replace"):
+                    cache.journal(path, "retirement_status", {
+                        "domain": "ipa.test", "fqdn": "retired.ipa.test", "alias": "b", "stage": "sandbox"})
+                self.assertEqual(visible, Path(path).read_bytes())
             before = Path(path).read_bytes()
-            self.assertFalse(cache.journal(path, "retire", data)["changed"])
+            barriers = []
+            def record_sync(fd):
+                barriers.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+                real_fsync(fd)
+            with mock.patch.object(cache.os, "fsync", side_effect=record_sync):
+                self.assertFalse(cache.journal(path, "retire", data)["changed"])
+                self.assertTrue(cache.journal(path, "retirement_status", {
+                    "domain": "ipa.test", "fqdn": "retired.ipa.test", "alias": "b", "stage": "sandbox"})["settled"])
+            self.assertEqual(["file", "directory", "file", "directory"], barriers)
             self.assertEqual(before, Path(path).read_bytes())
+
+    def test_every_mutating_noop_confirms_file_and_directory_durability(self):
+        self.prepare([key()])
+        self.retire()
+        base = copy.deepcopy(self.state)
+        cases = [
+            ("prepare", {"hosts": ["a"], "users": []}, False),
+            ("settle", {"prepared": {}, "changed_users": []}, False),
+            ("ack", {"verified": []}, False),
+            ("auth_prepare", {}, True),
+            ("auth_settle", {"previous": True, "changed": False}, True),
+            ("auth_ack", {}, False),
+            ("retire", {"stage": "sandbox", "retirements": [self.retirement()]}, False),
+        ]
+        for action, args, auth_pending in cases:
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                state = copy.deepcopy(base)
+                state["auth_pending"] = auth_pending
+                path = os.path.join(directory, "journal.json")
+                original = json.dumps(state, sort_keys=True).encode()
+                Path(path).write_bytes(original)
+                Path(path + ".lock").touch(mode=0o600)
+                data = dict(args, domain="ipa.test")
+                real_sync = cache.os.fsync
+                seen = []
+                def sync(fd):
+                    kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+                    seen.append(kind)
+                    if kind == "directory":
+                        raise OSError("persistent directory EIO")
+                    real_sync(fd)
+                with mock.patch.object(cache.os, "fsync", side_effect=sync):
+                    with self.assertRaisesRegex(OSError, "persistent directory EIO", msg="no-op success must confirm durability"):
+                        cache.journal(path, action, data)
+                self.assertEqual(["file", "directory"], seen)
+                self.assertEqual(original, Path(path).read_bytes())
+                seen.clear()
+                def recovered(fd):
+                    seen.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+                    real_sync(fd)
+                with mock.patch.object(cache.os, "fsync", side_effect=recovered):
+                    result = cache.journal(path, action, data)
+                self.assertEqual(["file", "directory"], seen)
+                self.assertEqual(original, Path(path).read_bytes())
+                if action == "retire":
+                    self.assertFalse(result["changed"])
+
+    def test_status_requires_existing_lock_and_durability_but_inspection_is_pure(self):
+        self.prepare([key()])
+        self.retire()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.json")
+            Path(path).write_text(json.dumps(self.state))
+            query = {"domain": "ipa.test", "fqdn": "retired.ipa.test", "alias": "b", "stage": "sandbox"}
+            with self.assertRaises(FileNotFoundError):
+                cache.journal(path, "retirement_status", query)
+            self.assertEqual(["journal.json"], os.listdir(directory))
+            Path(path + ".lock").mkdir()
+            with self.assertRaises(IsADirectoryError):
+                cache.journal(path, "retirement_status", query)
+            Path(path + ".lock").rmdir()
+            Path(path + ".lock").touch(mode=0o600)
+            for fault in ("file", "directory"):
+                with self.subTest(fault=fault):
+                    def failed(fd):
+                        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+                        if kind == fault:
+                            raise OSError("required " + fault + " fsync failed")
+                    with mock.patch.object(cache.os, "fsync", side_effect=failed):
+                        with self.assertRaisesRegex(OSError, "required " + fault):
+                            cache.journal(path, "retirement_status", query)
+            with mock.patch.object(cache.os, "fsync", side_effect=AssertionError("pure read called fsync")), \
+                    mock.patch.object(cache.fcntl, "flock", side_effect=AssertionError("pure read took lock")):
+                cache.journal(path, "inspect", {"domain": "ipa.test"})
+                cache.journal(path, "plan", {"domain": "ipa.test", "stage": "sandbox", "inventory": [], "absent": []})
+
+    def test_retirement_file_fsync_failure_precedes_replace(self):
+        self.prepare([key()])
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.json")
+            original = json.dumps(self.state).encode()
+            Path(path).write_bytes(original)
+            with mock.patch.object(cache.os, "fsync", side_effect=OSError("file fsync EIO")), \
+                    mock.patch.object(cache.os, "replace") as replace:
+                with self.assertRaisesRegex(OSError, "file fsync EIO"):
+                    cache.journal(path, "retire", {"domain": "ipa.test", "stage": "sandbox", "retirements": [self.retirement()]})
+                replace.assert_not_called()
+            self.assertEqual(original, Path(path).read_bytes())
+
+    def test_settled_status_waits_for_writer_and_rereads_under_shared_lock(self):
+        self.prepare([key()])
+        self.retire()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.json")
+            ready = os.path.join(directory, "shared-lock-attempt")
+            Path(path).write_text(json.dumps(self.state))
+            query = {"domain": "ipa.test", "fqdn": "retired.ipa.test", "alias": "b", "stage": "sandbox"}
+            wrapper = """import fcntl,pathlib,runpy,sys
+real=fcntl.flock
+def observed(fd,how):
+ if how==fcntl.LOCK_SH: pathlib.Path(ready).write_text('attempted')
+ return real(fd,how)
+fcntl.flock=observed
+source,path,ready=sys.argv[1:]
+sys.argv=[source,'retirement_status',path]
+runpy.run_path(source,run_name='__main__')
+"""
+            with open(path + ".lock", "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                process = subprocess.Popen(["python3", "-c", wrapper, str(SOURCE), path, ready],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    process.stdin.write(json.dumps(query))
+                    process.stdin.close()
+                    process.stdin = None
+                    deadline = time.monotonic() + 5
+                    while not Path(ready).exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(Path(ready).exists(), "settled status did not acquire existing sidecar shared lock")
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        process.wait(timeout=.15)
+                    pending = copy.deepcopy(self.state)
+                    pending.pop("retired")
+                    pending["users"]["alice"]["pending"].append("b")
+                    replacement = Path(directory) / "replacement.json"
+                    replacement.write_text(json.dumps(pending))
+                    os.replace(replacement, path)
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    out, err = process.communicate(timeout=5)
+                    self.assertEqual(0, process.returncode, err)
+                    self.assertFalse(json.loads(out)["settled"], "status reused the pre-lock settled snapshot")
+                    self.assertEqual(pending, json.loads(Path(path).read_text()))
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
 
     def test_retirement_receipt_identity_and_stage_are_exact(self):
         self.prepare([key()])
