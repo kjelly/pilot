@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Create once with caller-selected existing labels and verify the result."""
 import argparse
+import csv
+import io
 import json
 import re
 import subprocess
@@ -36,7 +38,10 @@ def main():
         return 1
     args = ['issue', 'create', '--repo', a.repo, '--title', a.title, '--body-file', a.body_file]
     for label in a.label:
-        args += ['--label', label]
+        # gh's StringSlice flag parses each argument as CSV, even when repeated.
+        encoded = io.StringIO()
+        csv.writer(encoded, lineterminator='\n').writerow([label])
+        args += ['--label', encoded.getvalue()[:-1]]
     try:
         url = gh(*args).strip()
         expected = re.compile(r'https://github\.com/' + re.escape(a.repo) + r'/issues/([0-9]+)\Z', re.I)
