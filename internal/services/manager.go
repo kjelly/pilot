@@ -194,8 +194,8 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		if current.Generation == 0 {
 			current.Generation = 1
 		}
-		// Reserve identity and compatibility before rendering. A killed initial
-		// startup retries this registration and the original credentials in place.
+		// Reserve identity and compatibility before rendering. A killed
+		// registration reuses its identity without replacing credential files.
 		if current.Fingerprint == "" {
 			current.Root, current.Profile, current.Fingerprint, current.BindIP = m.root, profile.Name, fingerprint, bindIP.String()
 			if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return []ServiceState{current}, nil }); err != nil {

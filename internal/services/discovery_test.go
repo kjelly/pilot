@@ -487,6 +487,17 @@ func TestSharedDiscoveryAdoptedSourceIsHistoricalButRootRemainsAuthoritative(t *
 	if got.Fingerprint != registered.Fingerprint || got.InstanceID != registered.InstanceID {
 		t.Fatal("historical source replaced discovery identity")
 	}
+	if err := os.Remove(filepath.Join(legacy, "services.json")); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewSharedManager(opts, &fakeRunner{})
+	if err != nil {
+		t.Fatalf("deleted historical source vetoed discovery: %v", err)
+	}
+	afterDeletion, _ := reopened.current()
+	if afterDeletion.InstanceID != registered.InstanceID || afterDeletion.Root != registered.Root {
+		t.Fatal("deleted source changed registered physical instance")
+	}
 	if err := os.WriteFile(filepath.Join(s.Root, "ca/ca.pem"), []byte("changed physical CA"), 0600); err != nil {
 		t.Fatal(err)
 	}

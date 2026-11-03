@@ -15,7 +15,7 @@ additional health capabilities, and general cache-hit suites belong to follow-up
 | S1 | Two checkouts using different VM data directories discover the same default stack, instance ID, generation, endpoints and CA. | Separate CLI processes; compare status and nonsecret VM bootstrap contracts. |
 | S2 | Service discovery precedence is explicit services directory, service environment override, service config value, then the OS-user default. General data-directory overrides do not select a new stack. | Resolver integration tests with conflicting values. |
 | S3 | A compatible legacy stack is registered in place. Existing database/cache mounts, CA, private keys and credentials remain at their original paths and retain their bytes. VM state is untouched. | Actual mounted paths plus before/after hashes and cache/database usability. |
-| S4 | Interrupted initialization/adoption retries retain identity and data. Simultaneous processes cannot create different identities, overwrite credentials, or mutate one physical stack concurrently. | Independent subprocesses, crash/retry and canonical/symlink path aliases. |
+| S4 | Interrupted discovery initialization/registration and legacy adoption retry with the same identity and retain the complete valid existing stack. Simultaneous processes cannot create different identities, overwrite credentials, or mutate one physical stack concurrently. | Independent subprocesses, crash around registration, retry and canonical/symlink path aliases. |
 | S5 | Conflicting legacy roots, discovery ownership, profile fingerprints or bind endpoints fail before rendering or Compose mutation. Corrupt or missing state beside persistent data fails closed. | Specific errors, unchanged artifact hashes and zero runner calls. |
 | S6 | Up, status, down, purge and VM/topology bootstrap use the same discovery resolver. Down retains data; confirmed purge removes only the registered service bundle. | CLI wiring, manager lifecycle tests, isolated real-stack lifecycle. |
 | S7 | Default discovery creates one shared stack. An explicit services-directory override isolates the scope and does not automatically adopt the user's unrelated default legacy stack. | Two-process default test and isolated override counterexample. |
@@ -43,6 +43,13 @@ The legacy state is input to migration; the registered discovery state becomes
 authoritative. Old pilot binaries that do not implement discovery must not manage
 an adopted stack concurrently. Missing/corrupt discovery or legacy state beside
 existing persistent data requires operator diagnosis rather than fresh secrets.
+
+The interruption guarantee covers discovery registration and adoption of a
+complete legacy stack. Repairing incomplete first-ever bundle credentials is
+outside this change. In particular, the existing CA writer persists certificate
+and private key as separate files; a process killed between those writes can
+leave an incomplete pair that requires diagnosis. Identity reservation does not
+replace either file or claim to repair that pre-existing bootstrap boundary.
 
 ## Validation boundary and delivery evidence
 
