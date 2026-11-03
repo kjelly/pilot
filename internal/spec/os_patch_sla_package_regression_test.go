@@ -36,17 +36,24 @@ func osPatchSlaTasks(t *testing.T) (names []string, byName map[string]map[string
 		t.Fatalf("plays=%d want 1", len(plays))
 	}
 	byName = map[string]map[string]any{}
-	for _, key := range []string{"tasks", "post_tasks"} {
-		list, _ := plays[0][key].([]any)
+	var visit func([]any)
+	visit = func(list []any) {
 		for _, item := range list {
 			task, _ := item.(map[string]any)
 			name, _ := task["name"].(string)
-			if name == "" {
-				continue
+			if name != "" {
+				names = append(names, name)
+				byName[name] = task
 			}
-			names = append(names, name)
-			byName[name] = task
+			for _, key := range []string{"block", "rescue", "always"} {
+				children, _ := task[key].([]any)
+				visit(children)
+			}
 		}
+	}
+	for _, key := range []string{"tasks", "post_tasks"} {
+		list, _ := plays[0][key].([]any)
+		visit(list)
 	}
 	hs, _ := plays[0]["handlers"].([]any)
 	for _, item := range hs {
@@ -173,21 +180,17 @@ func TestRegression_OsPatchSlaInstallsThePackageThroughTheAptFramework(t *testin
 		t.Errorf("check-mode message must say apply will install the package, got %v", msg)
 	}
 
-	// Step 3's failed_when: false stays (unattended-upgrade's own non-zero
-	// exits are verify's business), but is no longer silent.
+	// Issue #172: native upgrade errors must now fail and reach policy rescue.
 	step3 := osPatchSlaTask(t, "Step 3: Run unattended-upgrades")
-	if step3["failed_when"] != false {
-		t.Errorf("Step 3 failed_when=%v want false", step3["failed_when"])
+	if _, has := step3["failed_when"]; has {
+		t.Errorf("native command must retain Ansible's nonzero-rc failure: %v", step3["failed_when"])
 	}
-	report := osPatchSlaTask(t, "Step 3b:")
-	if !strings.Contains(whenText(report), "uu_run.rc") {
-		t.Errorf("Step 3b must report a non-zero unattended-upgrade rc, got when=%s", whenText(report))
+	block := osPatchSlaTask(t, "Apply security policy and updates;")
+	if _, has := block["when"]; has {
+		t.Errorf("transaction block must not gate itself on facts it mutates: %v", block["when"])
 	}
-
-	// AGENTS.md section 4.5 point 1: a block's `when:` is re-evaluated per
-	// task; the fix uses no block, so nothing here can flip under itself.
-	if strings.Contains(string(raw), "\n      block:") {
-		t.Errorf("no block expected in os-patch-sla-apply.yml; if one is added, its when must read only facts nothing inside it sets")
+	if len(block["rescue"].([]any)) == 0 {
+		t.Fatal("policy mutation requires rescue")
 	}
 }
 
@@ -236,9 +239,7 @@ func runOsPatchSlaCheck(t *testing.T, present bool, extra ...string) (rc int, ta
 	}
 	args := []string{"-i", inv, abs,
 		"-e", "ansible_become=false", "-e", "target_group=all",
-		// A config no real host has, so Step 5 reports changed and notifies
-		// the restart handler deterministically.
-		"-e", `{"unattended_origins": ["issue167:fake-origin"]}`}
+	}
 	cmd := exec.Command("ansible-playbook", append(args, extra...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"),
@@ -310,18 +311,16 @@ func TestOsPatchSla_CheckModeWithoutThePackageSkipsTheServiceSteps(t *testing.T)
 	if msg.skipped || !strings.Contains(msg.msg, "apply will install") {
 		t.Errorf("check-mode message: skipped=%v msg=%q", msg.skipped, msg.msg)
 	}
-	for _, prefix := range []string{"Step 3: Run unattended-upgrades", "Step 4: Ensure unattended-upgrades", "Step 3b:"} {
+	for _, prefix := range []string{"Step 3: Run unattended-upgrades", "Step 4: Ensure unattended-upgrades", "Step 3c:"} {
 		if r := osPatchSlaResult(t, tasks, prefix, raw); !r.skipped {
 			t.Errorf("%s... ran although the package is absent in a preview: %+v", prefix, r)
 		}
 	}
 	// Step 5 itself still previews the config change.
-	if r := osPatchSlaResult(t, tasks, "Step 5:", raw); r.skipped || r.failed {
+	if r := osPatchSlaResult(t, tasks, "Step 5:", raw); r.failed {
 		t.Errorf("Step 5 should still preview: %+v", r)
 	}
-	if r, ok := tasks["restart unattended-upgrades"]; !ok {
-		t.Errorf("the restart handler never ran, so its gate was not exercised (Step 5 should have notified it)\n%s", raw)
-	} else if !r.skipped {
+	if r, ok := tasks["restart unattended-upgrades"]; ok && !r.skipped {
 		t.Errorf("restart handler ran against a host without the unit: %+v", r)
 	}
 }

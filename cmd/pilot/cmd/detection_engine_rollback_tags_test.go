@@ -399,12 +399,19 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 	const oldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\n"
 	const newBin = "#!/bin/sh\n# new build\n"
 	changed := regexp.MustCompile(`changed=(\d+)\b`)
-	backupStep := regexp.MustCompile(`TASK \[Step [3-6][:b-d]`) // Step 0* run on every apply
+	// every Step 3-6 task: 3, 3b-3e, 4, 4b-4f, 5, 5b-5e and 6 (Step 0* run on every apply)
+	backupStep := regexp.MustCompile(`TASK \[Step [3-6][a-f]?:`)
+	for _, step := range steps {
+		name, _ := step.(map[string]any)["name"].(string)
+		if !backupStep.MatchString("TASK [" + name + "]") {
+			t.Fatalf("backupStep %q does not match the real task %q: a run of it would go unnoticed in the unselected case", backupStep, name)
+		}
+	}
 	for _, tt := range []struct {
 		name        string
 		args        []string
 		step6       bool // the selection reaches Step 6
-		wantChanged int  // changed tasks of the first apply: Steps 4, 5 and 6
+		wantChanged int  // changed tasks of the first apply: Steps 4, 5 and 6 (none when Step 6 is not reached)
 	}{
 		{"no tags", nil, true, 4},
 		{"tagged", []string{"--tags", "tagged"}, true, 4},
@@ -468,14 +475,19 @@ func TestDetectionEngineSecondApplyChangedZero(t *testing.T) {
 				if string(got) != oldBin {
 					t.Errorf("binary changed although Step 6 was not selected")
 				}
-				if _, err := os.Stat(filepath.Join(backups, "pre-upgrade.db")); err == nil {
-					t.Errorf("a pre-upgrade backup was taken although Step 6 was not selected")
+				// Step 3e allocates backups/apply-*/ per run and Steps 4 and 5 write into it
+				if dbs, _ := filepath.Glob(filepath.Join(backups, "apply-*", "pre-upgrade.db")); len(dbs) != 0 {
+					t.Errorf("a pre-upgrade backup was taken although Step 6 was not selected: %v", dbs)
 				}
-				return
-			}
-			if string(got) != newBin {
+				if dirs, _ := filepath.Glob(filepath.Join(backups, "apply-*")); len(dirs) != 0 {
+					t.Errorf("a per-run backup directory was created although Step 6 was not selected: %v", dirs)
+				}
+			} else if string(got) != newBin {
 				t.Errorf("first apply did not install the new binary")
 			}
+			// kjelly/pilot#189: with the stale binary left in place, the run that does not
+			// reach Step 6 must report changed=0 both times, or pilot's second-apply check
+			// fails for every delivery that pulls this host in by dependency expansion.
 			if m := changed.FindStringSubmatch(first); m == nil || m[1] != fmt.Sprint(tt.wantChanged) {
 				t.Errorf("first apply: want changed=%d\n%s", tt.wantChanged, first)
 			}
