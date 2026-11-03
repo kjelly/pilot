@@ -475,7 +475,7 @@ func TestLegacyFailedSeedRecoveryReadsOnlyOriginalEndpoint(t *testing.T) {
 func TestStoppedRepairActivatesOnlyBoundRetainedConfiguration(t *testing.T) {
 	for _, imported := range []bool{false, true} {
 		t.Run(fmt.Sprint("imported=", imported), func(t *testing.T) {
-			m, p, _, admin := credentialFixture(t)
+			m, p, _, _ := credentialFixture(t)
 			runner := &sharedLifecycleRunner{}
 			m.runner = runner
 			if _, err := RenderBundle(p, m.root, net.ParseIP("127.0.0.1")); err != nil {
@@ -493,7 +493,7 @@ func TestStoppedRepairActivatesOnlyBoundRetainedConfiguration(t *testing.T) {
 			if imported {
 				// The externally changed admin is valid but differs from the original
 				// render. Import binds it privately without changing that render.
-				admin = "SENTINEL-new-existing-admin"
+				admin := "SENTINEL-new-existing-admin"
 				m.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					return jsonResponse(200, map[string]any{"username": "admin", "sysadmin_flag": true}), nil
 				})}
@@ -522,7 +522,7 @@ func TestStoppedRepairActivatesOnlyBoundRetainedConfiguration(t *testing.T) {
 			if err := m.Repair(context.Background(), p, net.ParseIP("127.0.0.1"), MaintenanceOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			var firstUp int = -1
+			firstUp := -1
 			for i, call := range runner.calls {
 				if strings.Contains(call, " up -d --wait") {
 					firstUp = i
