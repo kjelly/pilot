@@ -1,0 +1,23 @@
+# Dedicated disposable Ubuntu topology for the Wazuh delivery regression.
+# No cache service dependency: upstream official Wazuh images/bundle are used.
+nodes:
+  - name: i211-delivery-manager
+    base_image: ubuntu-24.04
+    memory: 8192
+    vcpus: 4
+    disk: 60
+    ssh_user: root
+    boot_timeout: 6m
+    ssh_timeout: 4m
+    groups: [docker, wazuh-manager]
+    wire: ["i211-delivery-receiver=siem-log-server"]
+  - name: i211-delivery-receiver
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    boot_timeout: 6m
+    ssh_timeout: 4m
+    groups: [log-server, audit-log-forwarding]
+    wire: [i211-delivery-manager]

@@ -756,9 +756,6 @@
               # Keep these stable filenames: they hold unsent audit history.
               # Plain TCP has no durable acknowledgement; queued delivery does
               # not guarantee that messages in flight at disconnect are stored.
-              {% if siem_forward_transport == 'relp' %}
-              module(load="omrelp" tls.tlsLib="gnutls")
-              {% endif %}
               local6.* action(
                 name="siem_audit" type="{{ 'omrelp' if siem_forward_transport == 'relp' else 'omfwd' }}" target="{{ siem_forward_alias }}"
                 port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"

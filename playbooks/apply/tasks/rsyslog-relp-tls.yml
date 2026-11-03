@@ -106,3 +106,40 @@
   when:
     - siem_tls_enabled | bool
     - not ansible_check_mode
+
+- name: "RELP: snapshot module declarations before sender migration"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /etc/rsyslog.d/09-pilot-omrelp.conf
+    - /etc/rsyslog.d/99-siem-forward.conf
+  register: siem_module_snapshot_stat
+  when: siem_tls_enabled | bool and siem_tls_role != 'receiver'
+
+- name: "RELP: retain sender module declarations for rollback"
+  ansible.builtin.slurp:
+    src: "{{ item.item }}"
+  loop: "{{ siem_module_snapshot_stat.results | default([]) | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
+  register: siem_module_snapshot
+  when: siem_tls_enabled | bool and siem_tls_role != 'receiver'
+
+- name: "RELP: migrate the legacy audit-owned output module declaration"
+  ansible.builtin.replace:
+    path: /etc/rsyslog.d/99-siem-forward.conf
+    regexp: '^\s*module\(load="omrelp" tls.tlsLib="gnutls"\)\s*$'
+    replace: '# omrelp is loaded once by 09-pilot-omrelp.conf'
+  when:
+    - siem_tls_enabled | bool and siem_tls_role != 'receiver'
+    - siem_module_snapshot_stat.results[1].stat.exists
+
+- name: "RELP: load the shared output module exactly once"
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/09-pilot-omrelp.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Shared by audit and Wazuh senders; retained during transport retirement.
+      module(load="omrelp" tls.tlsLib="gnutls")
+  register: siem_relp_module_result
+  when: siem_tls_enabled | bool and siem_tls_role != 'receiver'

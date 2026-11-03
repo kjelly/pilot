@@ -8,8 +8,7 @@
 # scan results in Wazuh 4.8+, and hand-rolling that cert chain is exactly
 # the risk the official bundle exists to remove (see spec §1 — same
 # tradeoff that picked wazuh-install.sh in v1.0). Then adds our own
-# additive <syslog_output> block (via the official /wazuh-config-mount
-# injection mechanism) to optionally forward alerts to the central SIEM
+# isolated host rsyslog imfile reader to optionally forward alerts to the central SIEM
 # (docs/verification/log-server.md).
 #
 # Pre-flight: docs/verification/docker.md 8/8 PASS (docker.io +
@@ -111,7 +110,7 @@
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
-    # siem_forward_port is rendered into syslog_output's <port> and shared with audit-log-forwarding's
+    # siem_forward_port is rendered into host rsyslog's omfwd action and shared with audit-log-forwarding's
     # sender on hosts in both groups: 2514.0, 0x9C4, a leading zero or 70000 would be read
     # differently or not at all. Checked before the fallback below so that 0
     # is refused instead of silently becoming 514; unset, null and "" mean
@@ -137,6 +136,8 @@
         # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
         siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
         wazuh_docker_version: "{{ wazuh_docker_version | default('4.14.1') }}"
+        siem_forward_transport: "{{ siem_forward_transport | default('tcp') }}"
+        siem_relp_port: "{{ siem_relp_port | default(20514) }}"
       tags: [always]
 
     # Auto-fallback for the common single-inventory case: if the caller left
@@ -159,6 +160,58 @@
         and (groups.get('log-server', []) | length > 0)
       tags: [always]
 
+    - name: "Gate: detect SELinux independently of optional Python bindings"
+      ansible.builtin.stat:
+        path: /sys/fs/selinux/enforce
+        get_checksum: false
+      register: wazuh_selinux_filesystem
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: Wazuh forwarding uses a supported host reader"
+      ansible.builtin.assert:
+        that:
+          - not (siem_forwarding_enabled | bool) or ansible_distribution == 'Ubuntu'
+          - not (siem_forwarding_enabled | bool) or not wazuh_selinux_filesystem.stat.exists
+        fail_msg: "The Wazuh host imfile reader currently supports Ubuntu without SELinux; standalone manager deployment remains available."
+      tags: [always]
+
+    - name: "Gate: validate Wazuh forwarding transport and mTLS inputs"
+      ansible.builtin.include_tasks:
+        file: tasks/rsyslog-relp-inputs.yml
+        apply:
+          tags: [always]
+      vars:
+        siem_tls_role: wazuh-sender
+        siem_tls_enabled: "{{ siem_forwarding_enabled | bool and siem_forward_transport == 'relp' }}"
+      tags: [always]
+
+    - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
+      ansible.builtin.assert:
+        that:
+          - >-
+            ((siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port) | string)
+            == (siem_forward_receiver_port | string)
+          - >-
+            siem_forward_transport != 'tcp' or
+            not (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
+          - >-
+            siem_forward_transport != 'relp' or
+            (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
+        fail_msg: >-
+          {{ inventory_hostname }} requires {{ siem_forward_transport }} to
+          {{ siem_forward_host }}:{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }},
+          but log-server {{ siem_forward_log_server }} has port {{ siem_forward_receiver_port }}.
+          Match the selected transport's port on both sides and enable the receiver's RELP listener for RELP.
+      vars:
+        siem_forward_target_name: "{{ (siem_forward_host | string | lower).rstrip('.') }}"
+        siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
+        siem_forward_receiver_port: "{{ (hostvars[siem_forward_log_server].siem_relp_port | default(20514) if siem_forward_transport == 'relp' else hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true)) if siem_forward_log_server else '' }}"
+      when:
+        - siem_forwarding_enabled | bool
+        # An empty for-loop renders as None, not "", in ansible-core 2.19.
+        - (siem_forward_log_server | default('', true)) | length > 0
+      tags: [always]
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
     # engine should fail here with a clear message, not five tasks later
     # inside the compose module.
@@ -181,7 +234,7 @@
         msg: >-
           {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
              if siem_forwarding_enabled
-             else 'siem_forward_host not provided — skipping /etc/hosts pin and <syslog_output>; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
+             else 'siem_forward_host not provided — disabling the managed imfile forwarder; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
 
     # Official hard requirement of the wazuh-indexer (OpenSearch) image —
     # the one host-level knob this role cannot containerize (spec §5).
@@ -255,6 +308,30 @@
     # convention as wazuh-fim-apply.yml's post-install config block.
     - when: not ansible_check_mode
       block:
+        - name: "Snapshot: inspect files before Wazuh forwarding mutation"
+          tags: [always]
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - /etc/hosts
+            - "{{ wazuh_manager_conf }}"
+            - /etc/rsyslog.d/31-pilot-wazuh.conf
+            - /etc/rsyslog.d/pilot-wazuh/profile.json
+            - /etc/apparmor.d/local/usr.sbin.rsyslogd
+          register: wazuh_forward_snapshot_stat
+
+        - name: "Snapshot: retain existing configuration content"
+          tags: [always]
+          ansible.builtin.slurp:
+            src: "{{ item.item }}"
+          loop: "{{ wazuh_forward_snapshot_stat.results | selectattr('stat.exists') | list }}"
+          register: wazuh_forward_snapshot
+
+        - name: "Snapshot: retain forwarding presence for disable transition"
+          tags: [always]
+          ansible.builtin.set_fact:
+            wazuh_forward_had_config: "{{ wazuh_forward_snapshot_stat.results[2].stat.exists }}"
+
         - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
           tags: [always]
           ansible.builtin.include_tasks:
@@ -266,7 +343,7 @@
           when: siem_forwarding_enabled | bool
 
         - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
-          tags: [C10]
+          tags: [C10, C11]
           ansible.builtin.lineinfile:
             path: /etc/hosts
             regexp: '\s{{ siem_forward_alias }}$'
@@ -274,29 +351,20 @@
             state: present
           when: siem_forwarding_enabled | bool
 
-        # Wazuh's ossec.conf parser accepts multiple top-level
-        # <ossec_config> root blocks in one file and merges them —
-        # verified live in v1.0 (see runbook §5). We append our managed
-        # block to the HOST-side wazuh_manager.conf; the official manager
-        # image copies /wazuh-config-mount/etc/ossec.conf over
-        # /var/ossec/etc/ossec.conf on every container start, so the
-        # change reaches the live config on the next (re)start — Step 9
-        # restarts the manager service if the stack was already up.
-        - name: "Step 7: Append <syslog_output> block to wazuh_manager.conf (spec C11)"
+        - name: "Step 7: Remove the legacy managed UDP syslog_output on migration or disable"
           tags: [C11]
           ansible.builtin.blockinfile:
             path: "{{ wazuh_manager_conf }}"
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
-            block: |
-              <ossec_config>
-                <syslog_output>
-                  <server>{{ siem_forward_alias }}</server>
-                  <port>{{ siem_forward_port }}</port>
-                  <format>default</format>
-                </syslog_output>
-              </ossec_config>
+            state: absent
           register: siem_forward_conf_result
-          when: siem_forwarding_enabled | bool
+
+        - name: "Step 7a: Retire the managed development-only delivery localfile"
+          tags: [C11]
+          ansible.builtin.blockinfile:
+            path: "{{ wazuh_manager_conf }}"
+            marker: "<!-- {mark} PILOT WAZUH DELIVERY PROBE -->"
+            state: absent
 
         # Spec: docs/verification/wazuh-manager.md C1, C2, C3
         # First run pulls ~3-4GB of official images and boots the indexer
@@ -310,34 +378,18 @@
             state: present
           register: wazuh_compose_result
 
-        # Drift probe: is the forward block present in the LIVE config the
-        # manager actually loaded (inside the container), not just in the
-        # host-side source file? Gating a restart on "the host file changed
-        # this run" is NOT convergent — a previous run whose injection
-        # failed would never be repaired. The until-loop absorbs the
-        # first-boot race where cont-init is still copying the config.
-        - name: "Step 9: Probe the live in-container forward config (drift check; spec C11)"
+        # /wazuh-config-mount/etc/ossec.conf is injected at container creation.
+        # Drift comparison covers migration, disable and interrupted earlier runs.
+        - name: "Step 9: Read the live manager configuration"
           tags: [C11]
-          ansible.builtin.command: >-
-            docker exec single-node-wazuh.manager-1
-            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
-          register: live_forward_probe
+          ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
+          register: wazuh_live_config
           changed_when: false
-          failed_when: false
-          retries: 6
+          retries: 12
           delay: 5
-          until: live_forward_probe.rc == 0
-          when: siem_forwarding_enabled | bool
+          until: wazuh_live_config.rc == 0
 
-        # RECREATE, not restart — hit for real on vm-target (runbook §5):
-        # the official image's 0-wazuh-init deletes /var/ossec/data_tmp at
-        # the end of the FIRST boot; on a mere `docker restart` the script
-        # sees the (legitimately empty) multigroups permanent dir, tries to
-        # re-install it from the now-deleted data_tmp, exits 1 — and never
-        # reaches mount_files, so /wazuh-config-mount is NOT re-injected.
-        # A recreated container starts from a fresh image filesystem
-        # (data_tmp present) and runs the init to completion.
-        - name: "Step 9a: Recreate wazuh.manager so /wazuh-config-mount re-injects the config (spec C11)"
+        - name: "Step 9a: Recreate the manager when managed configuration drifted"
           tags: [C11]
           community.docker.docker_compose_v2:
             project_src: "{{ wazuh_single_node_dir }}"
@@ -345,26 +397,28 @@
             state: present
             recreate: always
             services: [wazuh.manager]
-          when:
-            - siem_forwarding_enabled | bool
-            - live_forward_probe.rc != 0
+          when: >-
+            'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' in wazuh_live_config.stdout
+            or 'PILOT WAZUH DELIVERY PROBE' in wazuh_live_config.stdout
 
-        # Convergence assertion: after a drift-triggered recreate the live
-        # config MUST contain the block — fail loudly (into the rescue)
-        # instead of leaving silent drift behind.
-        - name: "Step 9b: Assert the live forward config converged after recreate (spec C11)"
+        - name: "Step 9b: Verify legacy UDP forwarding is absent in the live configuration"
           tags: [C11]
-          ansible.builtin.command: >-
-            docker exec single-node-wazuh.manager-1
-            grep -q "<server>{{ siem_forward_alias }}</server>" /var/ossec/etc/ossec.conf
-          register: live_forward_recheck
+          ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
+          register: wazuh_live_converged
           changed_when: false
-          retries: 12
+          retries: 24
           delay: 5
-          until: live_forward_recheck.rc == 0
-          when:
-            - siem_forwarding_enabled | bool
-            - live_forward_probe.rc != 0
+          until: >-
+            wazuh_live_converged.rc == 0
+            and 'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' not in wazuh_live_converged.stdout
+            and 'PILOT WAZUH DELIVERY PROBE' not in wazuh_live_converged.stdout
+
+        - name: "Step 9c: Configure isolated host imfile forwarding"
+          tags: [C10, C11]
+          ansible.builtin.include_tasks:
+            file: tasks/wazuh-alert-forward.yml
+            apply:
+              tags: [C10, C11]
 
         - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
           tags: [C5, C6]
@@ -388,30 +442,74 @@
           delay: 5
 
       rescue:
-        - name: "ROLLBACK — remove the siem forward managed block"
+        - name: "ROLLBACK — restore the previous files with their original metadata"
           tags: [always]
-          ansible.builtin.blockinfile:
-            path: "{{ wazuh_manager_conf }}"
-            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
-            block: ""
-            state: absent
+          ansible.builtin.copy:
+            dest: "{{ item.item.item }}"
+            content: "{{ item.content | b64decode }}"
+            owner: "{{ item.item.stat.uid }}"
+            group: "{{ item.item.stat.gid }}"
+            mode: "{{ item.item.stat.mode }}"
+          loop: "{{ wazuh_forward_snapshot.results | default([]) }}"
+          when: item.content is defined
 
-        - name: "ROLLBACK — remove the /etc/hosts pin"
+        - name: "ROLLBACK — remove only newly created configuration files"
           tags: [always]
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ siem_forward_alias }}$'
+          ansible.builtin.file:
+            path: "{{ item.item }}"
             state: absent
+          loop: "{{ wazuh_forward_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+
+        - name: "ROLLBACK — restore original narrow ACLs"
+          tags: [always]
+          ansible.builtin.command:
+            argv: [setfacl, --restore=-]
+            stdin: "{{ item.stdout }}"
+          loop: "{{ [wazuh_acl_snapshot | default({}), wazuh_file_acl_snapshot | default({})] }}"
+          when: item.stdout is defined
+
+        - name: "ROLLBACK — restore the Wazuh transport material"
+          tags: [always]
+          ansible.builtin.include_tasks: tasks/rsyslog-relp-restore.yml
+          when: siem_tls_snapshot_role | default('') == 'wazuh-sender'
+
+        - name: "ROLLBACK — reload restored AppArmor permissions"
+          tags: [always]
+          ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
+          when: wazuh_apparmor_result | default({}) is changed
+
+        - name: "ROLLBACK — load restored rsyslog configuration"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: rsyslog
+            state: restarted
+          when: wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped)
+
+        - name: "ROLLBACK — recreate manager with its restored source configuration"
+          tags: [always]
+          community.docker.docker_compose_v2:
+            project_src: "{{ wazuh_single_node_dir }}"
+            project_name: "{{ wazuh_compose_project }}"
+            state: present
+            recreate: always
+            services: [wazuh.manager]
+          when: wazuh_live_config is defined
+
+        - name: "ROLLBACK — verify the restored rsyslog service remains active"
+          tags: [always]
+          ansible.builtin.command: systemctl is-active --quiet rsyslog
+          changed_when: false
+          when: wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped)
+
+        - name: "ROLLBACK — wait for the restored manager agent listener"
+          tags: [always]
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 1514
+            timeout: 300
+          when: wazuh_live_config is defined
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]
           ansible.builtin.fail:
-            msg: >-
-              wazuh-manager apply FAILED (see task output above); the
-              /etc/hosts pin and <syslog_output> block were reverted.
-              Containers (if created) are left in place for inspection via
-              `docker logs single-node-wazuh.manager-1` /
-              `docker logs single-node-wazuh.indexer-1` — this rescue does
-              NOT tear down the compose project or the cert chain (Step
-              1-5); consult docs/runbooks/wazuh-manager.md §5 before
-              retrying.
+            msg: "wazuh-manager apply failed; previous configuration and captured ACLs were restored. Inspect the original failed task and service health before retrying."

@@ -1,4 +1,21 @@
 ---
+- name: "RELP rollback: restore previous sender module declarations"
+  ansible.builtin.copy:
+    dest: "{{ item.item.item }}"
+    content: "{{ item.content | b64decode }}"
+    owner: "{{ item.item.stat.uid }}"
+    group: "{{ item.item.stat.gid }}"
+    mode: "{{ item.item.stat.mode }}"
+  loop: "{{ siem_module_snapshot.results | default([]) }}"
+  when: item.content is defined and siem_tls_snapshot_role != 'receiver'
+
+- name: "RELP rollback: remove only a newly created shared module declaration"
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  loop: "{{ siem_module_snapshot_stat.results | default([]) | selectattr('stat.exists', 'defined') | rejectattr('stat.exists') | list }}"
+  when: siem_tls_snapshot_role != 'receiver'
+
 - name: "RELP rollback: restore the previous TLS files and profile"
   ansible.builtin.copy:
     dest: "{{ item.item.stat.path }}"

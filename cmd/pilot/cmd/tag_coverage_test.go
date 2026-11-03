@@ -303,6 +303,7 @@ var specTagMap = []specTagMapping{
 
 // Specs with no apply playbook in playbooks/apply/ at all.
 var tagCheckExemptSpecs = map[string]string{
+	"wazuh-alert-delivery.md":        "controller-orchestrated real-alert cross-check spanning manager and log-server; its fixture lives in playbooks/test/fixtures and consumes a unique receiver challenge",
 	"hello-localhost.md":             "smoke-test spec; its playbook lives in playbooks/test/",
 	"core-infra.md":                  "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
 	"sso-composition-example.md":     "documentation example of the spec-supplier pattern, never applied",

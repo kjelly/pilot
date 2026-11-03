@@ -50,9 +50,12 @@ are not required for this PoC's agent/FIM path:
 - UDP `514` is not used because no separate `log-server` is deployed.
 - TCP `443`, `9200`, and `55000` are dashboard/indexer/API management surfaces and should be
   restricted to an approved admin network.
-- If a separate `log-server` is enabled, add Wazuh manager → log-server UDP `514`, and
-  audit-log-forwarding clients → log-server TCP `siem_receiver_tcp_port` (default `514`; the
-  clients' `siem_forward_port` must match).
+- If `log-server` is enabled, Wazuh manager's **host rsyslog imfile** and
+  audit-log-forwarding clients use TCP `siem_receiver_tcp_port` (default `514`;
+  their `siem_forward_port` must match), or authenticated RELP/mTLS on
+  `siem_relp_port` (default TCP `20514`). When the receiver enables RELP, its
+  legacy TCP listener is loopback-only and remote senders must select RELP.
+  Wazuh's own UDP syslog output is retired; no new UDP firewall opening is required.
 
 ## Controlled outbound access
 

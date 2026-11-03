@@ -5,6 +5,8 @@
     siem_tls_snapshot_role: ""
     siem_tls_restore_result: {}
     siem_tls_remove_result: {}
+    siem_module_snapshot_stat: {}
+    siem_module_snapshot: {}
     rsyslog_selinux_any_port_changed: false
   tags: [always]
 
@@ -20,7 +22,7 @@
         (siem_relp_port | default(20514) | string) !=
         ((siem_receiver_tcp_port if siem_tls_role == 'receiver' else siem_forward_port) | string)
       - >-
-        not (siem_tls_enabled | bool) or siem_tls_role != 'sender' or
+        not (siem_tls_enabled | bool) or siem_tls_role == 'receiver' or
         (siem_relp_server_name | default('')) is match('^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+\Z')
       - >-
         not (siem_tls_enabled | bool) or siem_tls_role != 'receiver' or
