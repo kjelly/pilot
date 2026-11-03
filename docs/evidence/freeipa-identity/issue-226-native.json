@@ -1,0 +1,1114 @@
+{
+  "candidate": "e6f0e698d2efef46c1e6c1ed8a6a56a446741b91",
+  "tree": "e7d0ce0055fb11d9e588a305c12889da9f0a947f",
+  "verdict": "PASS",
+  "scope": "current candidate native matrix 1-6; baseline machine chain recorded separately by Root",
+  "checkpoints": [
+    {
+      "checkpoint": 1,
+      "verdict": "PASS",
+      "assertions": [
+        "exact keyA responder keysets on both clients for both synthetic users",
+        "strict keyA SSH allow 4/4",
+        "no pending work",
+        "baseline-A snapshot"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-1.log",
+      "log_sha256": "9dee66d45deba40c507591f5a544f31a43121cb8790666f2ddfb2e8f7b05bb0f",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-1-provenance.json",
+      "provenance_sha256": "4af5ee7fddcefbd444f31077828341f343249e1500b7801c50b770c48ffed9b4"
+    },
+    {
+      "checkpoint": 2,
+      "verdict": "PASS",
+      "assertions": [
+        "only retired VM suspended",
+        "real reconcile reports PARTIAL",
+        "exact two retired pending pairs persist",
+        "live keyB exact; B allow and A deny",
+        "pending-B all-running snapshot"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-2.log",
+      "log_sha256": "cdb7d8ef62555c5050d726ef37185530c5f3e2cdb059668bccd950ee24db835f",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-2-provenance.json",
+      "provenance_sha256": "6ecddf0c9b8efa438cf3a603a5809e762e6e374849f0794595b31c29d82573cd"
+    },
+    {
+      "checkpoint": 3,
+      "verdict": "PASS",
+      "assertions": [
+        "omitted inventory and cross-stage cases fail at intended early guard",
+        "journal bytes unchanged",
+        "native user attributes and keys unchanged; sentinel group absent"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-3.log",
+      "log_sha256": "5b8a78407cbdba6d8d9b1322d62dd4a573f758b4861bd895e8b079550ea0c258",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-3-provenance.json",
+      "provenance_sha256": "ab085878870664a57beac29f71b39214f4718d39b09cf2c659a4cf59004b807c"
+    },
+    {
+      "checkpoint": 4,
+      "verdict": "PASS",
+      "assertions": [
+        "direct absent host retires exact alias/FQDN/stage with discharged=2",
+        "omitted desired/native user preserved",
+        "no retired SSH or legacy refresh contact",
+        "host and owned DNS A absent",
+        "live B allow/A deny",
+        "repeat changed=0 and stable receipt"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-4.log",
+      "log_sha256": "ca11abf3c5ae7aaf9d4744b64d6fb0af465cf56c1d4a3fc9244bb51c97c3caad",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-4-provenance.json",
+      "provenance_sha256": "92a7eef1dbd4095bf4647d157edabade8d27a3ea972d2461df30aaa377da78bc"
+    },
+    {
+      "checkpoint": 5,
+      "verdict": "PASS",
+      "assertions": [
+        "inventory omission without mapping fails closed unchanged journal",
+        "exact authorized mapping permits native cleanup",
+        "same retirement/omitted-user/refresh/host/DNS/key invariants"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-5.log",
+      "log_sha256": "95c9c6a61be5a35844d5f2caafd7666442ef5857b83f55332ac7c1f6d27bc3ed",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-5-provenance.json",
+      "provenance_sha256": "328274885a2c79ab41478e4695901faa9dd1806d858a00be35acd3977753d348"
+    },
+    {
+      "checkpoint": 6,
+      "verdict": "PASS",
+      "assertions": [
+        "formal actual plan has zero blockers and exact original alias/FQDN",
+        "watcher prior-present then LDAP rc32 arms immutable fault",
+        "expected EPERM after host/DNS cleanup retains two pending pairs and no receipt",
+        "fault process stopped and immutable flag cleared before resume",
+        "same plan resumes host-already-absent and discharges=2",
+        "client unenrolled; inventory finalizer last",
+        "repeated resume already_completed with stable receipt",
+        "actual post-retirement C reconcile; exact liveC and C allow/B deny",
+        "omitted user preserved and retired pending pairs zero"
+      ],
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-6.log",
+      "log_sha256": "ed226f5fd5e55dbd84c73eab2d41ad01fc86c4f1283b9ebdd52a4da9c62ddb95",
+      "provenance_path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-6-provenance.json",
+      "provenance_sha256": "63f171b54c74f27d2f1e9b19ee7ba8836443579b95933b475acb553d56842fb1"
+    }
+  ],
+  "commands": [
+    {
+      "name": "baseline-a-keyset-i226-live-i226user",
+      "rc": 0,
+      "seconds": 0.446,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-keyset-i226-live-i226user.log",
+      "sha256": "481c9dc96a48a03dbaaa0d8662e6360f5195fffef9dc49c12d84c4fa07b51814",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-ssh-i226-live-i226user",
+      "rc": 0,
+      "seconds": 0.36,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-ssh-i226-live-i226user.log",
+      "sha256": "35ea12eb579af8a72d3909ade8e9b2bbddf4de18519ad7986cfc40729a6f772c",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-keyset-i226-live-i226omitted",
+      "rc": 0,
+      "seconds": 0.278,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-keyset-i226-live-i226omitted.log",
+      "sha256": "481c9dc96a48a03dbaaa0d8662e6360f5195fffef9dc49c12d84c4fa07b51814",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-ssh-i226-live-i226omitted",
+      "rc": 0,
+      "seconds": 0.333,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-ssh-i226-live-i226omitted.log",
+      "sha256": "e8f6422c102de5f8beeb30315828c53ba2fa09c9485dc5f3e7908c014fc2841d",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-keyset-i226-retired-i226user",
+      "rc": 0,
+      "seconds": 0.446,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-keyset-i226-retired-i226user.log",
+      "sha256": "e976519e4c416dfe19e87f4fe7da19d0b99e953a14d21a25c9e90f004cc2e143",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-ssh-i226-retired-i226user",
+      "rc": 0,
+      "seconds": 0.418,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-ssh-i226-retired-i226user.log",
+      "sha256": "1acbc20dca6c10ff2a9a3d7675254b4d62a7a733017d8b6a9661f8ee4e41a743",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-keyset-i226-retired-i226omitted",
+      "rc": 0,
+      "seconds": 0.28,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-keyset-i226-retired-i226omitted.log",
+      "sha256": "e976519e4c416dfe19e87f4fe7da19d0b99e953a14d21a25c9e90f004cc2e143",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-ssh-i226-retired-i226omitted",
+      "rc": 0,
+      "seconds": 0.369,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-ssh-i226-retired-i226omitted.log",
+      "sha256": "f4f82c5f6741e563f658257b4b31180086f98ee750e92bddc3c68ce3af604dbb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "baseline-a-journal",
+      "rc": 0,
+      "seconds": 0.328,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/baseline-a-journal.log",
+      "sha256": "f5e1eb14fa075f799937461e1316b8784be862c160ff8e3c0b5dbe289289e60f",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "snapshot-i226-e6f0e69-baseline-a",
+      "rc": 0,
+      "seconds": 6.242,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/snapshot-i226-e6f0e69-baseline-a.log",
+      "sha256": "67e58e047d2f65b5cdb4283eb91f261df0730f9e06cefd7c597c5f5dd72d76c9",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-optional-generate",
+      "rc": 0,
+      "seconds": 0.067,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-optional-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "suspend-retired",
+      "rc": 0,
+      "seconds": 0.018,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/suspend-retired.log",
+      "sha256": "571cd0e68aa74fb87581a9f649cbb616e86caf7a49ef061f94ea153a714e877c",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-reconcile-inventory-facts",
+      "rc": 0,
+      "seconds": 0.375,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-reconcile-inventory-facts.log",
+      "sha256": "dc0c8883edc3d56fc75113ac47e1e2ed4758b218b3672ba0cb16ee646d889afc",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-reconcile",
+      "rc": 1,
+      "seconds": 80.338,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-reconcile.log",
+      "sha256": "953c46442dc3ec588142c2d6a911ebc8f10b1258209387c741b14f6f93d0c675",
+      "expected_rc": 1,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "offline-b-journal",
+      "rc": 0,
+      "seconds": 0.224,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-live-keyset-i226user",
+      "rc": 0,
+      "seconds": 0.388,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-live-keyset-i226user.log",
+      "sha256": "38634935b1e6bc9e5df7eccfc059cffcc024b9a43ad403a90b62f16f1ef1201b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-live-keyset-i226omitted",
+      "rc": 0,
+      "seconds": 0.189,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-live-keyset-i226omitted.log",
+      "sha256": "38634935b1e6bc9e5df7eccfc059cffcc024b9a43ad403a90b62f16f1ef1201b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-live-ssh-b",
+      "rc": 0,
+      "seconds": 0.35,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-live-ssh-b.log",
+      "sha256": "25c120a9c89044cd3e77402335eecaa87729d179e8d529e4ddf8f4ef4bdb9e47",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "offline-b-live-ssh-a-denied",
+      "rc": 255,
+      "seconds": 0.077,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/offline-b-live-ssh-a-denied.log",
+      "sha256": "d9a4189c60d81e5ccf148dc1e4afeca3baf011716efffc01479fdf670078f120",
+      "expected_rc": 255,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "resume-retired",
+      "rc": 0,
+      "seconds": 0.015,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/resume-retired.log",
+      "sha256": "164eeae11df025f9f4080111c3a34bed56fa9e735923918437664cdddb2f5fc2",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "pending-b-required-generate",
+      "rc": 0,
+      "seconds": 0.073,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/pending-b-required-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "snapshot-i226-e6f0e69-pending-b",
+      "rc": 0,
+      "seconds": 3.463,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/snapshot-i226-e6f0e69-pending-b.log",
+      "sha256": "50c453e7654bde499931bd742f89dd516b25b429cf94b25df15c89ba5d93084f",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "early-guard-before-journal",
+      "rc": 0,
+      "seconds": 0.223,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/early-guard-before-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "early-guard-before-ldap",
+      "rc": 0,
+      "seconds": 0.714,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/early-guard-before-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "omitted-inventory-generate",
+      "rc": 0,
+      "seconds": 0.09,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/omitted-inventory-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "omitted-inventory-apply-inventory-facts",
+      "rc": 0,
+      "seconds": 0.348,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/omitted-inventory-apply-inventory-facts.log",
+      "sha256": "6464557d0002f0b566d60e757be3dcc96b6c25c4f04c00810945e72327cddea6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "omitted-inventory-apply",
+      "rc": 2,
+      "seconds": 3.594,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/omitted-inventory-apply.log",
+      "sha256": "19479761b0b80bdde65b8e5b148c6a1961ef898241a3bff6899cda056fdc75e5",
+      "expected_rc": 2,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "omitted-inventory-after-journal",
+      "rc": 0,
+      "seconds": 0.186,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/omitted-inventory-after-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "omitted-inventory-after-ldap",
+      "rc": 0,
+      "seconds": 1.02,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/omitted-inventory-after-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "wrong-stage-generate",
+      "rc": 0,
+      "seconds": 0.085,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/wrong-stage-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "wrong-stage-apply-inventory-facts",
+      "rc": 0,
+      "seconds": 0.353,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/wrong-stage-apply-inventory-facts.log",
+      "sha256": "d69ca26523409152b206615253d77a799b5eeaab47f63f6894ff2573ad5b8949",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "wrong-stage-apply",
+      "rc": 2,
+      "seconds": 5.207,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/wrong-stage-apply.log",
+      "sha256": "bc9fd7966ee5c98a1de960a0a5dd6e771c703f033262e20066c89115c6e62186",
+      "expected_rc": 2,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "wrong-stage-after-journal",
+      "rc": 0,
+      "seconds": 0.194,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/wrong-stage-after-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "wrong-stage-after-ldap",
+      "rc": 0,
+      "seconds": 0.978,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/wrong-stage-after-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "early-guard-restore-generate",
+      "rc": 0,
+      "seconds": 0.076,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/early-guard-restore-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-before-journal",
+      "rc": 0,
+      "seconds": 0.181,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-before-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-before-ldap",
+      "rc": 0,
+      "seconds": 1.222,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-before-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-absent-apply-inventory-facts",
+      "rc": 0,
+      "seconds": 0.359,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-absent-apply-inventory-facts.log",
+      "sha256": "dc0c8883edc3d56fc75113ac47e1e2ed4758b218b3672ba0cb16ee646d889afc",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-absent-apply",
+      "rc": 0,
+      "seconds": 43.352,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-absent-apply.log",
+      "sha256": "ad563f0a217ddde6605733b0fd21a7121e658a457108c8d30ec26c566297214e",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-after-journal",
+      "rc": 0,
+      "seconds": 0.341,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-after-journal.log",
+      "sha256": "08e862689a7439235cd95bb2f3c0a9f8f453a5b1478270b3c11ec0af52bf1c14",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-after-ldap",
+      "rc": 0,
+      "seconds": 1.19,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-after-ldap.log",
+      "sha256": "ace252849cd4bff0e46120ed6a871692cdb69f922ff961ddced80cb6c50de7cf",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-live-keyset",
+      "rc": 0,
+      "seconds": 0.273,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-live-keyset.log",
+      "sha256": "38634935b1e6bc9e5df7eccfc059cffcc024b9a43ad403a90b62f16f1ef1201b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-live-b-allow",
+      "rc": 0,
+      "seconds": 0.429,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-live-b-allow.log",
+      "sha256": "25c120a9c89044cd3e77402335eecaa87729d179e8d529e4ddf8f4ef4bdb9e47",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-live-a-deny",
+      "rc": 255,
+      "seconds": 0.124,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-live-a-deny.log",
+      "sha256": "d9a4189c60d81e5ccf148dc1e4afeca3baf011716efffc01479fdf670078f120",
+      "expected_rc": 255,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "direct-absent-noop-inventory-facts",
+      "rc": 0,
+      "seconds": 0.348,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-absent-noop-inventory-facts.log",
+      "sha256": "dc0c8883edc3d56fc75113ac47e1e2ed4758b218b3672ba0cb16ee646d889afc",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-absent-noop",
+      "rc": 0,
+      "seconds": 29.922,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-absent-noop.log",
+      "sha256": "5eb9c988a03b06c95ccafb8451d22ec32b37d30a7d2c25214ba7f9a36db6204f",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "direct-noop-journal",
+      "rc": 0,
+      "seconds": 0.268,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/direct-noop-journal.log",
+      "sha256": "4f83d83854c6d1d6e1a6cba11c2a3ba91dada22ad248744f4a85c5c0c99acc34",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-rollback",
+      "rc": 0,
+      "seconds": 14.972,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-rollback.log",
+      "sha256": "7681f279ec707af5a39030627f293652d2c33c6542629849a996ae4002f58967",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-generate",
+      "rc": 0,
+      "seconds": 0.085,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-before-journal",
+      "rc": 0,
+      "seconds": 0.235,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-before-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-before-ldap",
+      "rc": 0,
+      "seconds": 0.841,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-before-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-generate",
+      "rc": 0,
+      "seconds": 0.09,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-without-mapping-inventory-facts",
+      "rc": 0,
+      "seconds": 0.352,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-without-mapping-inventory-facts.log",
+      "sha256": "6464557d0002f0b566d60e757be3dcc96b6c25c4f04c00810945e72327cddea6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-without-mapping",
+      "rc": 2,
+      "seconds": 4.227,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-without-mapping.log",
+      "sha256": "bf29cf19bc51bd303c6d23e2440af842f43e359a3938cf5d5a2307306443435d",
+      "expected_rc": 2,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "removed-inventory-refused-journal",
+      "rc": 0,
+      "seconds": 0.258,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-refused-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-authorized-mapping-inventory-facts",
+      "rc": 0,
+      "seconds": 0.357,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-authorized-mapping-inventory-facts.log",
+      "sha256": "6464557d0002f0b566d60e757be3dcc96b6c25c4f04c00810945e72327cddea6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-authorized-mapping",
+      "rc": 0,
+      "seconds": 42.022,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-authorized-mapping.log",
+      "sha256": "5df7169764fbb5a2a77cb1138b1ed0b94c4f227d27eb4c285dd868c7a6769b46",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-after-journal",
+      "rc": 0,
+      "seconds": 0.321,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-after-journal.log",
+      "sha256": "3afa7213b7920bf7155e38816fa5838a0d1e0df6f4e6024b2283786b052158df",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-after-ldap",
+      "rc": 0,
+      "seconds": 1.154,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-after-ldap.log",
+      "sha256": "ace252849cd4bff0e46120ed6a871692cdb69f922ff961ddced80cb6c50de7cf",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-live-keyset",
+      "rc": 0,
+      "seconds": 0.215,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-live-keyset.log",
+      "sha256": "38634935b1e6bc9e5df7eccfc059cffcc024b9a43ad403a90b62f16f1ef1201b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-live-b-allow",
+      "rc": 0,
+      "seconds": 0.428,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-live-b-allow.log",
+      "sha256": "25c120a9c89044cd3e77402335eecaa87729d179e8d529e4ddf8f4ef4bdb9e47",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "removed-inventory-live-a-deny",
+      "rc": 255,
+      "seconds": 0.118,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/removed-inventory-live-a-deny.log",
+      "sha256": "d9a4189c60d81e5ccf148dc1e4afeca3baf011716efffc01479fdf670078f120",
+      "expected_rc": 255,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "formal-rollback",
+      "rc": 0,
+      "seconds": 14.755,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-rollback.log",
+      "sha256": "7681f279ec707af5a39030627f293652d2c33c6542629849a996ae4002f58967",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-generate",
+      "rc": 0,
+      "seconds": 0.085,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-generate.log",
+      "sha256": "2ac5a3f645971da1be28af14b593cd94a1d8bab082ed21d371731f57e13b4efb",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-before-journal",
+      "rc": 0,
+      "seconds": 0.279,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-before-journal.log",
+      "sha256": "b5a087118bf23fc0488ac0f3ab87f9215912c73ceb1d8ea9ccedcf35018a07d0",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-before-ldap",
+      "rc": 0,
+      "seconds": 0.516,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-before-ldap.log",
+      "sha256": "d1d7dd6d7dd9afedfdc9766edaa3d592f1924ee612072258c8be1c147e062154",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-plan",
+      "rc": 0,
+      "seconds": 7.364,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-plan.log",
+      "sha256": "d391c7c92f4b37e673dcd3ed0d385c1df89482acf1abbee272445b8332a6397c",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-arm-watcher",
+      "rc": 0,
+      "seconds": 0.523,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-arm-watcher.log",
+      "sha256": "bfdc357bb415890d20295e7ed9c9d90618dad0f328ec858d1c1379af8d1ab3d6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-interrupted-apply",
+      "rc": 1,
+      "seconds": 53.858,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-interrupted-apply.log",
+      "sha256": "2462cc79ceb8dac6748338e3581f0292c23eeda89b71b00241138f2d65ee4f75",
+      "expected_rc": 1,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "formal-disarm-watcher",
+      "rc": 0,
+      "seconds": 0.293,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-disarm-watcher.log",
+      "sha256": "fc9564ae0250a0b874079cf836ebe2f0c036772dead694513572863db0ea6892",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-interrupted-journal",
+      "rc": 0,
+      "seconds": 0.241,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-interrupted-journal.log",
+      "sha256": "b4a7733e4a8236e0623882696c4a63de47a104c4dfd70e3f6000194bb0be4483",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-interrupted-ldap",
+      "rc": 0,
+      "seconds": 1.148,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-interrupted-ldap.log",
+      "sha256": "ace252849cd4bff0e46120ed6a871692cdb69f922ff961ddced80cb6c50de7cf",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-resume",
+      "rc": 0,
+      "seconds": 111.102,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-resume.log",
+      "sha256": "9d4d0e9348067b0dfffc988fae583775a6d0df7cd0de06634740787a0442af2d",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-after-journal",
+      "rc": 0,
+      "seconds": 0.219,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-after-journal.log",
+      "sha256": "7d36dfa099b6677c67beaf3e1659a2903b9ce0e2a9738c7c95e50a6d1480f5d6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-after-ldap",
+      "rc": 0,
+      "seconds": 1.026,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-after-ldap.log",
+      "sha256": "ace252849cd4bff0e46120ed6a871692cdb69f922ff961ddced80cb6c50de7cf",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-keyset",
+      "rc": 0,
+      "seconds": 0.227,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-keyset.log",
+      "sha256": "38634935b1e6bc9e5df7eccfc059cffcc024b9a43ad403a90b62f16f1ef1201b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-b-allow",
+      "rc": 0,
+      "seconds": 0.451,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-b-allow.log",
+      "sha256": "25c120a9c89044cd3e77402335eecaa87729d179e8d529e4ddf8f4ef4bdb9e47",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-a-deny",
+      "rc": 255,
+      "seconds": 0.112,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-a-deny.log",
+      "sha256": "d9a4189c60d81e5ccf148dc1e4afeca3baf011716efffc01479fdf670078f120",
+      "expected_rc": 255,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "formal-client-unenrolled",
+      "rc": 0,
+      "seconds": 0.442,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-client-unenrolled.log",
+      "sha256": "8c09847f4f297c0912fca9802a95c9d33a9c7c8a1a070fc463e58d94dab670b7",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-repeat-resume",
+      "rc": 0,
+      "seconds": 0.049,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-repeat-resume.log",
+      "sha256": "c71f1a862bb8f0a91456da478958ef1d8bc42ac72dac4da2fd749e4b8a7971e3",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-repeat-journal",
+      "rc": 0,
+      "seconds": 0.206,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-repeat-journal.log",
+      "sha256": "7d36dfa099b6677c67beaf3e1659a2903b9ce0e2a9738c7c95e50a6d1480f5d6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-post-retirement-c-inventory-facts",
+      "rc": 0,
+      "seconds": 0.353,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-post-retirement-c-inventory-facts.log",
+      "sha256": "6464557d0002f0b566d60e757be3dcc96b6c25c4f04c00810945e72327cddea6",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-post-retirement-c",
+      "rc": 0,
+      "seconds": 77.916,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-post-retirement-c.log",
+      "sha256": "dc61c7c83c1eb0a980a9ebed9287e324ce73adce96a3386d71d56c77c6112333",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-c-keyset",
+      "rc": 0,
+      "seconds": 0.228,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-c-keyset.log",
+      "sha256": "ea4d3ad44c467b48f6a587d8a7aa083f0bc73a61768a1dba73c65d663497807b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-c-allow",
+      "rc": 0,
+      "seconds": 0.421,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-c-allow.log",
+      "sha256": "416b2e15f9f7a79e708905a4c3331383686fd04b056967838b6b8444608f8004",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-live-b-deny",
+      "rc": 255,
+      "seconds": 0.146,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-live-b-deny.log",
+      "sha256": "45b55faca8b88794a012c6a0d794c073a5b67ef55e386f451bb655f71140ed76",
+      "expected_rc": 255,
+      "outcome": "expected_failure"
+    },
+    {
+      "name": "formal-final-journal",
+      "rc": 0,
+      "seconds": 0.293,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-final-journal.log",
+      "sha256": "b7d5d2e8ab6812f7a011700033a3d759ce41ad75058217e7f320b5afb8fb8e9b",
+      "expected_rc": 0,
+      "outcome": "success"
+    },
+    {
+      "name": "formal-final-ldap",
+      "rc": 0,
+      "seconds": 1.305,
+      "log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/formal-final-ldap.log",
+      "sha256": "0779fd3f4eb7eb96ae33156b26498c306ccc204fe97d2cc0859b621aa3ffda16",
+      "expected_rc": 0,
+      "outcome": "success"
+    }
+  ],
+  "unexpected_failures": [
+    {
+      "classification": "controller_transport",
+      "checkpoint": 5,
+      "attempt": 1,
+      "resolved": true,
+      "receipt": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1/attempt.json"
+    }
+  ],
+  "unexpected_product_failures": [],
+  "controller_attempts": [
+    {
+      "classification": "controller_transport",
+      "checkpoint": 5,
+      "attempt": 1,
+      "driver_rc": 1,
+      "ansible_rc": 2,
+      "cause": "stale task-owned multiplexed SSH after snapshot rollback; nonmux native SSH succeeds",
+      "early_guard_executed": false,
+      "intervention": "SIGTERM verified own blocked SSH client then stalled Ansible worker/parent",
+      "journal_bytes_unchanged": true,
+      "native_ipa_state_unchanged": true,
+      "no_live_owned_children": true,
+      "archive": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1",
+      "commands": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1/commands.jsonl",
+      "original_complete_manifest": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1/commands-original.jsonl",
+      "checkpoint_log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1/checkpoint-5.log",
+      "resolved": true,
+      "resolution": "same frozen driver checkpoint5 retry PASS after task-only mux reset; checkpoint6 PASS",
+      "attempt_receipt": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/attempts/checkpoint5-controller-mux-1/attempt.json",
+      "attempt_receipt_sha256": "2707565c942dfeadd3155953778f8ed51a952b52c498fa7d622629fa0a297855",
+      "commands_sha256": "787874ecb77830618c05787ecb21a1e526045de70dfee9e387b37dac56b1be66",
+      "original_manifest_sha256": "1a60ee2e12dfbedc77b5fdd81cb550fb7a1be683ed0de0246df627b7af7b0063",
+      "checkpoint_log_sha256": "003c2e5a88c3e1a2c8f69bfefc38b1c3d6013ca3e5c9394f7f68587326f60f0c",
+      "retry_log": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/checkpoint-5.log",
+      "retry_log_sha256": "95c9c6a61be5a35844d5f2caafd7666442ef5857b83f55332ac7c1f6d27bc3ed"
+    }
+  ],
+  "controller_transport_resets": [
+    {
+      "path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/transport-reset-before-case6.json",
+      "sha256": "5fe85241681bce1026e40f093da92ed2110f0c943403f70506fb0655047473c7",
+      "receipt": {
+        "purpose": "task-owned controller mux reset; no product-state changes",
+        "time": 1793698062.6591077,
+        "script_sha256": "4ab260838f8cd3d09f75acd31597de9e49957148a1e3ef3835f2b1fc6d6aaaaf",
+        "commands": [
+          {
+            "alias": "i226-ipa",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.5"
+            ],
+            "rc": 0,
+            "stdout": "",
+            "stderr": "Exit request sent.\n"
+          },
+          {
+            "alias": "i226-live",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.6"
+            ],
+            "rc": 0,
+            "stdout": "",
+            "stderr": "Exit request sent.\n"
+          },
+          {
+            "alias": "i226-retired",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.4"
+            ],
+            "rc": 255,
+            "stdout": "",
+            "stderr": "Control socket connect(/home/kjelly/.cache/i226cp-vqn/3b1efbfb73c5d0348da1617a13b4240fe658c1bb): No such file or directory\n"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/transport-reset-before-retry5.json",
+      "sha256": "621304fed73e7b3e0e7479e70898020b41c6916cf784bd02b0f884ecee6b3351",
+      "receipt": {
+        "purpose": "task-owned controller mux reset; no product-state changes",
+        "time": 1793697969.0665374,
+        "script_sha256": "4ab260838f8cd3d09f75acd31597de9e49957148a1e3ef3835f2b1fc6d6aaaaf",
+        "commands": [
+          {
+            "alias": "i226-ipa",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.5"
+            ],
+            "rc": 0,
+            "stdout": "",
+            "stderr": "Exit request sent.\n"
+          },
+          {
+            "alias": "i226-live",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.6"
+            ],
+            "rc": 255,
+            "stdout": "",
+            "stderr": "Control socket connect(/home/kjelly/.cache/i226cp-vqn/af51ce7fc0693236c65b653341a88a4df0371ad2): No such file or directory\n"
+          },
+          {
+            "alias": "i226-retired",
+            "argv": [
+              "/usr/bin/ssh",
+              "-F",
+              "/dev/null",
+              "-o",
+              "ControlPath=/home/kjelly/.cache/i226cp-vqn/%C",
+              "-O",
+              "exit",
+              "-p",
+              "22",
+              "-l",
+              "root",
+              "192.168.122.4"
+            ],
+            "rc": 255,
+            "stdout": "",
+            "stderr": "Control socket connect(/home/kjelly/.cache/i226cp-vqn/3b1efbfb73c5d0348da1617a13b4240fe658c1bb): No such file or directory\n"
+          }
+        ]
+      }
+    }
+  ],
+  "public_fixture_hashes_at_completion": {
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/workspace-e6f0e69/.vault/roster-a.yaml": "d6f686b714929c8e068da76b22664c5e2eb8e8c4df970cb3fef38eb7d3b5ab08",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/workspace-e6f0e69/.vault/roster-b.yaml": "2ccc1b46d55dab22b99e6088e7e3f6d69e6edf6e440e9d68d21647cbb11c2810",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/workspace-e6f0e69/.vault/roster-c.yaml": "b7a4ce61e23a008bef5a5547eacc3eaed57b957550a5d10210e437b008d21254",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/keys/a.pub": "91e6d25d69296cf4ac9357afec5396bf7e723e97dfe09a59ff2c9185097d557b",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/keys/b.pub": "6969aca505da5f3a1ffa28a11045ba41e11ef24c9781400e919744f69e634e92",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/keys/c.pub": "af723f26dd51e4c61a42fd91516759f67c37018eddb42c8c8ba54c9aa8abae58",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/keys/known_hosts": "fc67ee46f5bc32e426e7664e11112efa2c016e00a706ad35eda8d7a63b536f21",
+    "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native_transport_reset-e6f0e69.py": "4ab260838f8cd3d09f75acd31597de9e49957148a1e3ef3835f2b1fc6d6aaaaf"
+  },
+  "closure": {
+    "unchanged": true,
+    "manifest_sha256": "2a66217bc1e99541f13691618c842d216e67f152d1896c9f5037849979fb6089",
+    "before": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/source-closure-before.json",
+    "after": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native-acceptance-e6f0e69/source-closure-after.json",
+    "excluded_prefixes": [
+      "docs/evidence/"
+    ]
+  },
+  "harness": {
+    "driver": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native_acceptance-e6f0e69.py",
+    "driver_sha256": "7e109fe4e7a83f275dc385d97b1ffdb1684205f210b9627babe0a6374629b26d",
+    "summary_driver": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/native_summary-e6f0e69.py",
+    "summary_driver_sha256": "c0c390677ac71195c7c93e5ec550b1597bdfa0f0d42d51881df9fc4de73e0edf"
+  },
+  "secret_inputs": {
+    "reference": "/home/kjelly/.cache/issue-to-pr/kjelly/pilot/226/workspace-e6f0e69/.vault/main.yaml",
+    "key_names": [
+      "ipa_admin_password",
+      "ipa_ds_password"
+    ],
+    "mode": "0o600",
+    "values_and_value_hashes": "excluded"
+  },
+  "limitations": [
+    "synthetic disposable i226 targets only",
+    "controller disk SSH control-path transport workaround recorded in checkpoint provenance",
+    "fault injection covers journal atomic replacement EPERM; helper/provider regressions separately cover persistent fsync EIO",
+    "older candidate outcomes excluded"
+  ]
+}
