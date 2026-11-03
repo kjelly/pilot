@@ -223,6 +223,7 @@
         wazuh_forward_snapshot: {results: []}
         wazuh_forward_snapshot_stat: {results: []}
         wazuh_rescue_syntax: {skipped: true}
+        wazuh_heartbeat_preflight: {skipped: true}
       tags: [always]
 
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
@@ -264,7 +265,7 @@
       when: not ansible_check_mode
 
     - name: "Gate: Wazuh requires exclusive native heartbeat support for RELP"
-      tags: [C10, C11]
+      tags: [always]
       ansible.builtin.assert:
         that: (wazuh_heartbeat_preflight.rc | default(-1)) == 0
         fail_msg: >-
@@ -273,7 +274,12 @@
           named-action heartbeat. Foreign/unknown/loaded-only ownership or unsupported
           native configuration was refused before Wazuh/TLS changes. Preserve
           operator configuration and use a supported rsyslog pair.
-      when: not ansible_check_mode
+      # The selected script must publish a fresh result. The always reset
+      # prevents a previous play's registered value from gating C1-only runs.
+      when:
+        - not ansible_check_mode
+        - wazuh_heartbeat_preflight is defined
+        - not (wazuh_heartbeat_preflight.skipped | default(false) | bool)
   tasks:
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:

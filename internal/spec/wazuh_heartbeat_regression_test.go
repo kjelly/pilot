@@ -94,26 +94,82 @@ func TestRegression_WazuhHeartbeatSelectedPreflightFailsBeforeMutation(t *testin
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Fatal("Ansible is required for selected heartbeat preflight coverage")
 	}
-	for _, selector := range []string{"full", "C10", "C11", "C1", "check"} {
-		t.Run(selector, func(t *testing.T) {
+	type trial struct {
+		selector, outcome, stale string
+		omitReset                bool
+	}
+	var trials []trial
+	for _, selector := range []string{"full", "C10", "C11"} {
+		for _, outcome := range []string{"foreign", "approved", "missing-rc"} {
+			trials = append(trials, trial{selector: selector, outcome: outcome})
+		}
+	}
+	trials = append(trials, trial{selector: "check", outcome: "foreign"}, trial{selector: "C1", outcome: "foreign"})
+	for _, stale := range []string{"success", "failure"} {
+		trials = append(trials, trial{selector: "C1", outcome: "foreign", stale: stale}, trial{selector: "C1", outcome: "foreign", stale: stale, omitReset: true})
+	}
+	for _, tc := range trials {
+		name := tc.selector + "/" + tc.outcome + "/prior-" + tc.stale
+		if tc.omitReset {
+			name += "/missing-reset-counterexample"
+		}
+		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			helper, _ := filepath.Abs("../../playbooks/files/pilot-wazuh-heartbeat")
-			foreign := filepath.Join(root, "foreign.conf")
-			if err := os.WriteFile(foreign, []byte("module(load=\"immark\")\n"), 0600); err != nil {
+			foreign := filepath.Join(root, "rsyslog.conf")
+			configuration := "module(load=\"immark\")\n"
+			if tc.outcome == "approved" {
+				configuration = "module(load=\"imuxsock\")\n"
+			}
+			if err := os.WriteFile(foreign, []byte(configuration), 0600); err != nil {
 				t.Fatal(err)
 			}
 			witness := filepath.Join(root, "guard-ran")
 			wrapper := filepath.Join(root, "guard.py")
-			code := "#!/usr/bin/python3\nimport pathlib,runpy\npathlib.Path(" + strconv.Quote(witness) + ").write_text('ran')\np=runpy.run_path(" + strconv.Quote(helper) + ")\np['ownership'](" + strconv.Quote(foreign) + ", pathlib.Path(" + strconv.Quote(filepath.Join(root, "31.conf")) + "), False)\n"
+			const privateOutput = "ISSUE211-PRIVATE-PREFLIGHT-SENTINEL"
+			code := "#!/usr/bin/python3\nimport pathlib,runpy\nprint(" + strconv.Quote(privateOutput) + ")\npathlib.Path(" + strconv.Quote(witness) + ").write_text('ran')\np=runpy.run_path(" + strconv.Quote(helper) + ")\np['ownership'](" + strconv.Quote(foreign) + ", pathlib.Path(" + strconv.Quote(filepath.Join(root, "31.conf")) + "), False)\n"
 			if err := os.WriteFile(wrapper, []byte(code), 0700); err != nil {
 				t.Fatal(err)
 			}
 			production := loadFirstPlay(t, "wazuh-manager-apply.yml")
+			reset := findNamedTask(t, production, "Reset per-run ACL journal completion state")
 			guard := findNamedTask(t, production, "Wazuh: refuse foreign immark and unsupported heartbeat before Wazuh or TLS mutation")
 			guard["ansible.builtin.script"] = wrapper
+			if tc.outcome == "missing-rc" {
+				// A registered non-command result proves that absence of rc is
+				// refused, rather than being confused with approval or skipping.
+				delete(guard, "ansible.builtin.script")
+				guard["ansible.builtin.debug"] = map[string]any{"msg": privateOutput}
+			}
 			gate := findNamedTask(t, production, "Gate: Wazuh requires exclusive native heartbeat support for RELP")
+			const approval = "ISSUE211-CURRENT-RUN-GATE-APPROVED"
+			gate["ansible.builtin.assert"].(map[string]any)["success_msg"] = approval
 			mutation := filepath.Join(root, "mutation")
-			play := []any{map[string]any{"hosts": "all", "gather_facts": false, "vars": map[string]any{"siem_forwarding_enabled": true, "siem_forward_transport": "relp"}, "tasks": []any{guard, gate, map[string]any{"name": "mutation must follow accepted preflight", "tags": []any{"C10", "C11"}, "ansible.builtin.copy": map[string]any{"content": "changed", "dest": mutation}}}}}
+			children := filepath.Join(root, "selected.yml")
+			child, err := yaml.Marshal([]any{map[string]any{"name": "selected mutation witness", "ansible.builtin.copy": map[string]any{"content": "changed", "dest": mutation}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(children, child, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Preserve the production pre_tasks boundary and actual include
+			// selector/apply tags; replace only its target-specific children.
+			include := findNamedTask(t, production, "Step 9c: Configure isolated host imfile forwarding")
+			include["ansible.builtin.include_tasks"].(map[string]any)["file"] = children
+			pre := []any{reset, guard, gate}
+			if tc.omitReset {
+				pre = []any{guard, gate}
+			}
+			play := []any{}
+			if tc.stale != "" {
+				rc := 0
+				if tc.stale == "failure" {
+					rc = 98
+				}
+				play = append(play, map[string]any{"hosts": "all", "gather_facts": false, "tasks": []any{map[string]any{"name": "prior play result on same host", "tags": []any{"always"}, "ansible.builtin.set_fact": map[string]any{"wazuh_heartbeat_preflight": map[string]any{"rc": rc, "skipped": false}}}}})
+			}
+			play = append(play, map[string]any{"hosts": "all", "gather_facts": false, "vars": map[string]any{"siem_forwarding_enabled": true, "siem_forward_transport": "relp"}, "pre_tasks": pre, "tasks": []any{include}})
 			body, err := yaml.Marshal(play)
 			if err != nil {
 				t.Fatal(err)
@@ -123,29 +179,40 @@ func TestRegression_WazuhHeartbeatSelectedPreflightFailsBeforeMutation(t *testin
 				t.Fatal(err)
 			}
 			args := []string{"-i", "localhost,", "-c", "local", path, "-vvv"}
-			if selector == "check" {
+			if tc.selector == "check" {
 				args = append(args, "--check", "--diff")
-			} else if selector != "full" {
-				args = append(args, "--tags", selector)
+			} else if tc.selector != "full" {
+				args = append(args, "--tags", tc.selector)
 			}
 			config := filepath.Join(root, "ansible.cfg")
-			_ = os.WriteFile(config, []byte("[defaults]\n"), 0600)
+			if err := os.WriteFile(config, []byte("[defaults]\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			cmd := exec.Command("ansible-playbook", args...)
 			cmd.Env = append(os.Environ(), "ANSIBLE_CONFIG="+config, "ANSIBLE_LOCAL_TEMP="+root)
 			out, runErr := cmd.CombinedOutput()
-			selected := selector == "full" || selector == "C10" || selector == "C11"
-			if selected && (runErr == nil || !strings.Contains(string(out), "exclusive immark ownership")) {
-				t.Fatalf("expected safe pre-mutation refusal: %v\n%s", runErr, out)
+			selected := tc.selector == "full" || tc.selector == "C10" || tc.selector == "C11"
+			refused := (selected && tc.outcome != "approved") || (tc.omitReset && tc.stale == "failure")
+			if refused && (runErr == nil || !strings.Contains(string(out), "exclusive immark ownership")) {
+				t.Fatalf("expected pre-mutation refusal at native ownership gate: %v\n%s", runErr, out)
 			}
-			if !selected && runErr != nil {
-				t.Fatalf("nonselected/check run must defer the native gate: %v\n%s", runErr, out)
+			if !refused && runErr != nil {
+				t.Fatalf("approved/nonselected/check run failed: %v\n%s", runErr, out)
+			}
+			if strings.Contains(string(out), privateOutput) {
+				t.Fatal("private preflight output leaked at verbose level3")
 			}
 			_, ran := os.Stat(witness)
-			if (ran == nil) != selected {
+			if (ran == nil) != (selected && tc.outcome != "missing-rc") {
 				t.Fatal("guard selection did not match C10/C11 real mutation")
 			}
-			if _, err := os.Stat(mutation); !os.IsNotExist(err) {
-				t.Fatal("configuration mutation ran before ownership approval")
+			approved := (selected && tc.outcome == "approved") || (tc.omitReset && tc.stale == "success")
+			if strings.Contains(string(out), approval) != approved {
+				t.Fatalf("gate did not honor current-run result; missing-reset counterexample=%t\n%s", tc.omitReset, out)
+			}
+			_, mutated := os.Stat(mutation)
+			if (mutated == nil) != (selected && tc.outcome == "approved") {
+				t.Fatal("selected include mutated without fresh approval or did not execute approved children")
 			}
 		})
 	}
