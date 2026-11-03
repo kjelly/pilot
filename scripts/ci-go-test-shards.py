@@ -323,8 +323,13 @@ def record(command, directory, group, index=None, config_path=CONFIG, weight_pat
         raise ValueError("record requires go test with -json")
     if "-race" not in command or "-count=1" not in command:
         raise ValueError("baseline requires -race -count=1")
-    forbidden = ("-run", "-skip", "-short", "-bench", "-fuzz", "-list", "-args")
-    if any(arg.split("=", 1)[0] in forbidden for arg in command[2:] + shlex.split(os.environ.get("GOFLAGS", ""))):
+    forbidden = {"run", "skip", "short", "bench", "fuzz", "list", "args"}
+    # Go accepts one/two dashes and the test.* aliases in argv and GOFLAGS.
+    # Check external options before prepare() adds our own shard selector.
+    options = (arg.split("=", 1)[0].lstrip("-").removeprefix("test.")
+               for arg in command[2:] + shlex.split(os.environ.get("GOFLAGS", ""))
+               if arg.startswith("-"))
+    if any(option in forbidden for option in options):
         raise ValueError("baseline must not filter the full suite")
     if group not in GROUPS:
         raise ValueError("unknown baseline group")

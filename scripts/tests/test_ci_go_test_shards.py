@@ -130,6 +130,29 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             shards.record(["go", "test", "-count=1", "-json"], self.root / "invalid", "spec")
 
+    def test_external_suite_filters_are_rejected_before_recording(self):
+        command = ["go", "test", "-race", "-count=1", "-json"]
+        cases = 0
+        for name in ("run", "skip", "short", "bench", "fuzz", "list", "args"):
+            for prefix in ("-", "--", "-test.", "--test."):
+                for arguments in ([prefix + name + "=value"], [prefix + name, "value"]):
+                    for source in ("argv", "GOFLAGS"):
+                        for index in (None, 0):
+                            cases += 1
+                            target = self.root / str(cases)
+                            with self.subTest(arguments=arguments, source=source, index=index), \
+                                    patch.dict(os.environ, GOFLAGS=" ".join(arguments) if source == "GOFLAGS" else ""), \
+                                    patch.object(shards, "identity", return_value={}) as identity, \
+                                    patch.object(shards, "prepare") as prepare, \
+                                    patch.object(shards.subprocess, "run") as run:
+                                with self.assertRaisesRegex(ValueError, "baseline must not filter the full suite"):
+                                    shards.record(command + (arguments if source == "argv" else []),
+                                                  target, "rest", index)
+                                identity.assert_not_called()
+                                prepare.assert_not_called()
+                                run.assert_not_called()
+                                self.assertFalse(target.exists())
+
 
 class PartitionTests(unittest.TestCase):
     def test_lpt_complete_deterministic_and_new_tests(self):

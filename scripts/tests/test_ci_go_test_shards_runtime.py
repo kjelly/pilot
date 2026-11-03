@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -70,6 +71,55 @@ func FuzzTiny(f *testing.F) { f.Add("seed"); f.Fuzz(func(t *testing.T, s string)
         self.assertFalse(report["success"])
         with self.assertRaises(ValueError):
             shards.verified_reports([directory / "report.json"])
+
+    def test_native_filter_aliases_are_refused_before_execution(self):
+        # A TestMain marker proves the guard refuses these accepted Go inputs
+        # before running the binary, including the rest group without discovery.
+        (self.root / "fixture_test.go").write_text('''package fixture
+import ("os"; "testing")
+func TestMain(m *testing.M) {
+    if err := os.WriteFile("executed", []byte("yes"), 0600); err != nil { panic(err) }
+    os.Exit(m.Run())
+}
+func TestAlways(t *testing.T) {}
+func TestFull(t *testing.T) { if testing.Short() { t.Skip("short omitted full test") } }
+''')
+        cases = [
+            ("argv", ["-test.run=^TestAlways$"], "filter"),
+            ("argv", ["-test.run", "^TestAlways$"], "filter"),
+            ("argv", ["--test.run=^TestAlways$"], "filter"),
+            ("argv", ["--run", "^TestAlways$"], "filter"),
+            ("argv", ["-test.short=true"], "short"),
+            ("argv", ["-test.short"], "short"),
+            ("argv", ["--test.short"], "short"),
+            ("GOFLAGS", ["-test.run=^TestAlways$"], "filter"),
+            ("GOFLAGS", ["--test.run=^TestAlways$"], "filter"),
+            ("GOFLAGS", ["-test.short=true"], "short"),
+            ("GOFLAGS", ["-test.short"], "short"),
+        ]
+        marker = self.root / "executed"
+        for number, (source, arguments, effect) in enumerate(cases):
+            with self.subTest(source=source, arguments=arguments), \
+                    patch.dict(os.environ, GOFLAGS=" ".join(arguments) if source == "GOFLAGS" else ""):
+                command = ["go", "test", "-race", "-count=1", "-json", "."]
+                if source == "argv":
+                    command.extend(arguments)
+                # Confirm native Go accepts the spelling and actually omits work.
+                native = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(native.returncode, 0, native.stdout + native.stderr)
+                self.assertTrue(marker.exists())
+                path = self.root / f"native-{number}.jsonl"
+                path.write_text(native.stdout)
+                rows = {row["name"]: row["verdict"] for row in shards.events_report(path)["tests"]}
+                self.assertEqual(rows, {"TestAlways": "pass"} if effect == "filter" else
+                                 {"TestAlways": "pass", "TestFull": "skip"})
+                marker.unlink()
+                for index in (None, 0):
+                    target = self.root / f"rejected-{number}-{index}"
+                    with self.assertRaisesRegex(ValueError, "baseline must not filter the full suite"):
+                        shards.record(command, target, "rest", index)
+                    self.assertFalse(marker.exists())
+                    self.assertFalse(target.exists())
 
     def command(self, group):
         package = {"spec": "./internal/spec", "cmd": "./cmd/pilot/cmd", "rest": "."}[group]
