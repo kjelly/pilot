@@ -35,78 +35,43 @@
     timeout: 180
   when: siem_forwarding_enabled | bool
 
-- name: "Wazuh: enumerate only required volume ancestors"
+- name: "Wazuh: ensure the ACL helper directory exists"
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: "0755"
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: install the bounded ACL transaction helper"
+  ansible.builtin.copy:
+    src: ../files/pilot-wazuh-acl
+    dest: /usr/local/libexec/pilot-wazuh-acl
+    owner: root
+    group: root
+    mode: "0755"
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: allocate a private transient ACL rollback journal"
+  ansible.builtin.tempfile:
+    state: file
+    path: /run
+    prefix: pilot-wazuh-acl-
+    suffix: .json
+  register: wazuh_acl_journal
+  changed_when: false
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: grant identity-aware reader ACLs including existing date directories"
   ansible.builtin.command:
     argv:
-      - python3
-      - -c
-      - "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print('\\n'.join(str(x) for x in reversed([p]+list(p.parents)[:-1])))"
+      - /usr/local/libexec/pilot-wazuh-acl
+      - grant
+      - "{{ wazuh_acl_journal.path }}"
       - "{{ wazuh_logs_source }}"
-  register: wazuh_acl_ancestors
-  changed_when: false
+      - syslog
+  register: wazuh_acl_result
+  changed_when: wazuh_acl_result.rc == 0 and (wazuh_acl_result.stdout | from_json).changed | bool
   when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: save the exact original ACLs for rollback"
-  ansible.builtin.command:
-    argv: "{{ ['getfacl', '-p'] + wazuh_acl_ancestors.stdout_lines + [wazuh_logs_source + '/alerts'] }}"
-  register: wazuh_acl_snapshot
-  changed_when: false
-  when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: allow only traversal through Docker volume ancestors"
-  ansible.posix.acl:
-    path: "{{ item }}"
-    entity: syslog
-    etype: user
-    permissions: x
-    state: present
-  loop: "{{ wazuh_acl_ancestors.stdout_lines | default([]) }}"
-  register: wazuh_ancestor_acl_result
-  when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: permit the reader to list the alerts directory"
-  ansible.posix.acl:
-    path: "{{ wazuh_logs_source }}/alerts"
-    entity: syslog
-    etype: user
-    permissions: rx
-    state: present
-  register: wazuh_alert_acl_result
-  when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: inherit reader access on newly rotated alert files"
-  ansible.posix.acl:
-    path: "{{ wazuh_logs_source }}/alerts"
-    entity: syslog
-    etype: user
-    permissions: rx
-    default: true
-    state: present
-  register: wazuh_default_acl_result
-  when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: detect the current alerts file"
-  ansible.builtin.stat:
-    path: "{{ wazuh_logs_source }}/alerts/alerts.json"
-  register: wazuh_alerts_stat
-  when: siem_forwarding_enabled | bool
-
-- name: "Wazuh: save current alert-file ACL for rollback"
-  ansible.builtin.command:
-    argv: [getfacl, -p, "{{ wazuh_logs_source }}/alerts/alerts.json"]
-  register: wazuh_file_acl_snapshot
-  changed_when: false
-  when: siem_forwarding_enabled | bool and wazuh_alerts_stat.stat.exists
-
-- name: "Wazuh: permit read access to the current alert file"
-  ansible.posix.acl:
-    path: "{{ wazuh_logs_source }}/alerts/alerts.json"
-    entity: syslog
-    etype: user
-    permissions: r
-    state: present
-  register: wazuh_file_acl_result
-  when: siem_forwarding_enabled | bool and wazuh_alerts_stat.stat.exists
 
 - name: "Wazuh: detect rsyslog AppArmor policy"
   ansible.builtin.stat:
@@ -262,4 +227,4 @@
     state: restarted
   when:
     - siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
-    - wazuh_reload_pending.stdout | default('') == 'pending' or not (siem_forwarding_enabled | bool) or wazuh_apparmor_result is changed or wazuh_ancestor_acl_result is changed or wazuh_file_acl_result is changed or wazuh_alert_acl_result is changed or wazuh_default_acl_result is changed
+    - wazuh_reload_pending.stdout | default('') == 'pending' or not (siem_forwarding_enabled | bool) or wazuh_apparmor_result is changed or wazuh_acl_result is changed

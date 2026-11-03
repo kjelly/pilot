@@ -70,7 +70,7 @@ func TestRegression_WazuhDeliveryTraceability(t *testing.T) {
 	text := string(data)
 	for _, invariant := range []string{`ruleset(name="pilotWazuhForward")`, `ruleset="pilotWazuhForward"`,
 		`Tag="pilot-wazuh-alert:" Facility="local5"`, `queue.filename="wazuh_alerts"`,
-		`PersistStateInterval="1"`, `freshStartTail="off"`, `default: true`} {
+		`PersistStateInterval="1"`, `freshStartTail="off"`, `pilot-wazuh-acl`} {
 		if !strings.Contains(text, invariant) {
 			t.Errorf("missing isolated ingestion/rotation invariant %s", invariant)
 		}
@@ -208,9 +208,10 @@ func TestRegression_WazuhNativeImfileDeliveryAndRotation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "rsyslogd"), binaryBytes, 0755); err != nil {
 		t.Fatal(err)
 	}
-	const harness = `import json,pathlib,runpy,socket,subprocess,sys,time,uuid
+	const harness = `import json,os,pathlib,runpy,socket,subprocess,sys,time,uuid
 root=pathlib.Path(sys.argv[1]); (root/'source/alerts').mkdir(parents=True);(root/'spool/state').mkdir(parents=True)
-source=root/'source/alerts/alerts.json'; source.write_text('')
+source=root/'source/alerts/alerts.json';month=source.parent/'2026/Nov';month.mkdir(parents=True)
+daily=month/'ossec-alerts-03.json';daily.write_text('');daily.chmod(0o640);os.link(daily,source)
 check_input=runpy.run_path('../../playbooks/files/pilot-wazuh-delivery')['check_input']
 rendered=(root/'sender.conf').read_text()
 check_input(rendered,str(root/'source'))
@@ -244,11 +245,13 @@ def emit():
 try:
  start('receiver');time.sleep(.3);start('sender');time.sleep(.5)
  first=emit();wait(first)
- source.rename(source.with_suffix('.old'));source.write_text('')
+ old_inode=source.stat().st_ino;source.unlink();daily.rename(daily.with_suffix('.old'))
+ daily.write_text('');daily.chmod(0o640);os.link(daily,source)
+ assert source.stat().st_ino!=old_inode and source.stat().st_nlink==2
  second=emit();wait(second)
  # The independent receiver ruleset must never write this source to audit/auth.
  assert not list((root/'out').glob('*/audit.log')) and not list((root/'out').glob('*/auth.log'))
- print('real imfile/TCP/omfile delivery and rename/recreate rotation passed')
+ print('real imfile/TCP/omfile delivery and fresh daily hardlink inode rotation passed')
 finally:
  for p in reversed(processes):
   p.terminate()

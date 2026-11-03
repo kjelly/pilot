@@ -69,7 +69,9 @@ fail-closed gate，不會重新標記 Docker volume 或放寬系統 policy。
 RELP mTLS → log-server `<siem_log_root>/<manager hostname>/wazuh-alerts.log`**。
 reader 用獨立 local5/tag/ruleset、state files 與 256MiB disk-assisted queue，
 不進 audit/auth 預設 forwarding ruleset。首次 reader 安裝會讀目前 alerts.json；
-不清除既有 state/queue。rotation 後由 default ACL 延續讀取權限。TCP 沒有接收端
+不清除既有 state/queue。Wazuh 在日期目錄建立新 inode 再 hardlink 成 current；reader 對現有實體
+year/month 目錄依序補 default ACL，未來子目錄繼承，避免只保護 alerts 根目錄而漏掉
+既有 month。只補目前 JSON 的 access ACL，不遞迴改歷史檔案。TCP 沒有接收端
 落盤確認且 reconnect 可能重複最後一筆；需要 authenticated acknowledged transport
 時選 RELP。log-server 的同一份 retention policy 涵蓋獨立 wazuh-alerts.log。
 
@@ -102,12 +104,9 @@ positive-logic verdict wrappers always return shell rc 0 and print 0/1.
 
 ## 3. Evidence
 
-Development target chain passed 23 rows and second apply changed=0. Native
-probes proved C11 remains locally healthy while blocked receiver delivery fails,
-then fresh-nonce delivery recovers. These are development results; the final
-immutable candidate evidence remains pending.
-The immutable candidate must run fresh check/apply/verify/idempotency plus the
-cross-host challenge. See [current evidence](../evidence/wazuh-manager/LATEST.md).
+Actual-run revisions, targets, verdicts and failure-path coverage are recorded in
+[current evidence](../evidence/wazuh-manager/LATEST.md). The immutable candidate
+must run fresh check/apply/verify/idempotency and the real-alert cross-host challenge.
 
 ## 4. PASS / FAIL
 
@@ -132,7 +131,9 @@ automatically unless that inventory omits the optional dependency.
 - Config injection uses `/wazuh-config-mount/etc/ossec.conf`; manager **recreation**
   is required because a plain restart can fail the official initialization path.
 - Reader permissions are scoped to volume traversal, alerts directory listing,
-  current JSON file read, and inherited read access on rotation. Docker parent
+  current JSON file read, and parent-first default ACLs on existing physical date
+  directories and future descendants. Shared-mask conflicts fail closed; existing
+  reader/other-principal effective rights are preserved. Docker parent
   directories never become world-readable. SELinux forwarding is fail-closed.
 - Queued delivery is bounded by the queue's disk cap. Abrupt host loss and queue
   exhaustion are outside the graceful-restart guarantee; operator monitoring is

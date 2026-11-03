@@ -212,6 +212,13 @@
         # An empty for-loop renders as None, not "", in ansible-core 2.19.
         - (siem_forward_log_server | default('', true)) | length > 0
       tags: [always]
+    - name: "Reset per-run ACL journal completion state"
+      ansible.builtin.set_fact:
+        wazuh_acl_journal_committed: false
+        wazuh_acl_journal: {}
+        wazuh_acl_restore_result: {}
+      tags: [always]
+
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
     # engine should fail here with a clear message, not five tasks later
     # inside the compose module.
@@ -451,6 +458,11 @@
           retries: 60
           delay: 5
 
+        - name: "Record that the ACL transaction completed successfully"
+          tags: [always]
+          ansible.builtin.set_fact:
+            wazuh_acl_journal_committed: true
+
       rescue:
         - name: "ROLLBACK — restore the previous files with their original metadata"
           tags: [always]
@@ -472,13 +484,15 @@
             state: absent
           loop: "{{ wazuh_forward_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
 
-        - name: "ROLLBACK — restore original narrow ACLs"
+        - name: "ROLLBACK — restore original ACLs only on the captured objects"
           tags: [always]
           ansible.builtin.command:
-            argv: [setfacl, --restore=-]
-            stdin: "{{ item.stdout }}"
-          loop: "{{ [wazuh_acl_snapshot | default({}), wazuh_file_acl_snapshot | default({})] }}"
-          when: item.stdout is defined
+            argv:
+              - /usr/local/libexec/pilot-wazuh-acl
+              - restore
+              - "{{ wazuh_acl_journal.path }}"
+          register: wazuh_acl_restore_result
+          when: wazuh_acl_journal.path is defined
 
         - name: "ROLLBACK — restore the Wazuh transport material"
           tags: [always]
@@ -529,3 +543,14 @@
           tags: [always]
           ansible.builtin.fail:
             msg: "wazuh-manager apply failed; previous configuration and captured ACLs were restored. Inspect the original failed task and service health before retrying."
+
+      always:
+        - name: "Retire the transient ACL journal only after commit or successful recovery"
+          tags: [always]
+          ansible.builtin.file:
+            path: "{{ wazuh_acl_journal.path }}"
+            state: absent
+          changed_when: false
+          when:
+            - wazuh_acl_journal.path is defined
+            - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0

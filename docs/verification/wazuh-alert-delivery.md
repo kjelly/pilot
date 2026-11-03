@@ -1,7 +1,7 @@
 # Verification Spec — Wazuh alert delivery
 
-Issue #211: native development command probes passed; final immutable candidate
-evidence is recorded separately.
+Acceptance contract for fresh real Wazuh alerts reaching the designated receiver.
+Actual-run outcomes are recorded in [current evidence](../evidence/wazuh-manager/LATEST.md).
 
 ## Acceptance contract
 
@@ -35,8 +35,7 @@ forwarding is configured. Optional standalone deployments omit the delivery cros
 |----|----------|-------|----------|---------|
 | C1 | functional | A newly generated real Wazuh alert reaches the designated receiver file before the fresh challenge expires | 0 | sh -c '/usr/local/libexec/pilot-wazuh-delivery delivery && echo 0 || echo 1' |
 
-The command was exercised through the real verify pipeline in positive, blocked
-and recovered development trials. The fixture must run before each verification, including blocked and
+The fixture must run before each verification, including blocked and
 recovery trials. Consuming a challenge prevents replay across separate verifies.
 Missing fixture/challenge is a failure, never a skipped or assumed success.
 

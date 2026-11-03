@@ -9,10 +9,8 @@ and [real alert delivery](../verification/wazuh-alert-delivery.md).
 
 ## 0.5 Current facts and evidence
 
-Issue #211 development validation passed all 23 rows and second apply changed=0.
-A native source-scoped transport block left the local C11 healthy while the
-fresh-nonce receiver row failed; delivery recovered after the block was removed.
-These development results do not replace the final immutable candidate evidence.
+Current immutable revision, tree, target facts, verdicts and failure-path coverage
+are recorded in the [current evidence](../evidence/wazuh-manager/LATEST.md).
 
 The dedicated reference topology is
 [wazuh-alert-delivery-topology.yaml](../topologies/wazuh-alert-delivery-topology.yaml):
@@ -26,10 +24,8 @@ TCP mode needs no forwarding secrets. RELP mode requires CA, client/server
 certificates and private keys from private deployment inputs, explicit peer DNS
 names, and matching sender/receiver ports. Never print secret values.
 
-Current immutable revision, tree, target facts and PASS/FAIL totals belong in the
-[current evidence](../evidence/wazuh-manager/LATEST.md), not historical transcripts
-inside this runbook. Existing July delivery anecdotes do not verify the repaired
-pipeline.
+The evidence record preserves the actual rendered inventory and alignment facts;
+this runbook keeps the supported operating contract.
 
 ## 1. Delivery behavior
 
@@ -72,8 +68,13 @@ controller-generated PASS receipt is used.
 
 ## 3. Recovery and limitations
 
-The apply snapshots managed configuration and narrow ACLs before mutation. Its
-rescue restores captured state and reloads the affected services. Topology test
+The apply snapshots managed configuration and narrow ACLs before mutation. The
+ACL transaction records object identities in a private transient `/run` journal.
+Rescue restores ACLs on the captured objects, cleans transaction-inherited grants
+on new date directories/files, and preserves their data. Replacement identities
+or conflicting concurrent ACL changes fail recovery explicitly and retain the
+journal for inspection; an old ACL is never applied to a replacement object.
+Configuration recovery reloads the affected services. Topology test
 also snapshots and rolls back its own disposable targets on failure. Inspect the
 original failed task and verify service availability after any recovery.
 

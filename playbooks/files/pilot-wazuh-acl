@@ -1,0 +1,393 @@
+#!/usr/bin/python3
+"""Bounded, identity-aware ACL transaction for Wazuh's daily hardlink producer."""
+
+import json
+import os
+import pathlib
+import pwd
+import re
+import stat
+import subprocess
+import sys
+
+
+def command(*args, data=None, descriptors=()):
+    return subprocess.run(args, input=data, text=True, capture_output=True,
+                          check=True, timeout=20, pass_fds=descriptors).stdout
+
+
+def permissions(value):
+    return sum(bit for char, bit in zip(value, (4, 2, 1)) if char != '-')
+
+
+def text_permissions(value):
+    return ''.join(char if value & bit else '-' for char, bit in zip('rwx', (4, 2, 1)))
+
+
+def parse(text):
+    result = {}
+    for line in text.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        token = line.split()[0]
+        key, value = token.rsplit(':', 1)
+        result[key] = permissions(value)
+    return result
+
+
+def serialized(acl):
+    return ''.join(key + ':' + text_permissions(value) + '\n' for key, value in acl.items())
+
+
+def defaults(acl):
+    return {key[8:]: value for key, value in acl.items() if key.startswith('default:')}
+
+
+class Object:
+    """Bind all ACL operations to one no-follow descriptor and known ancestors."""
+    def __init__(self, path, directory=None, anchors=None):
+        self.path = pathlib.Path(path)
+        if not self.path.is_absolute() or '..' in self.path.parts:
+            raise ValueError('ACL path must be absolute and normalized')
+        descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+        prefix = pathlib.Path('/')
+        try:
+            for index, part in enumerate(self.path.parts[1:]):
+                prefix /= part
+                last = index == len(self.path.parts) - 2
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                if not last or directory is True:
+                    flags |= os.O_DIRECTORY
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                info = os.fstat(descriptor)
+                expected = (anchors or {}).get(str(prefix))
+                if expected and expected['identity'] != [info.st_dev, info.st_ino]:
+                    raise ValueError('ACL object identity changed: ' + str(prefix))
+            self.info = os.fstat(descriptor)
+            self.directory = stat.S_ISDIR(self.info.st_mode)
+            if not (self.directory or stat.S_ISREG(self.info.st_mode)) or (directory is not None and directory != self.directory):
+                raise ValueError('managed ACL path must be a physical directory/regular file: ' + str(path))
+            self.fd = descriptor
+            self.identity = [self.info.st_dev, self.info.st_ino]
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        os.close(self.fd)
+
+    def read(self):
+        return parse(command('getfacl', '-cpn', '--', '/proc/self/fd/' + str(self.fd), descriptors=(self.fd,)))
+
+    def write(self, acl, default=None):
+        path = '/proc/self/fd/' + str(self.fd)
+        if default is None and self.directory:
+            command('setfacl', '-k', '--', path, descriptors=(self.fd,))
+        policy = acl if default is None else (defaults(acl) if default else {k: v for k, v in acl.items() if not k.startswith('default:')})
+        command('setfacl', '-n', *(['-d'] if default is True else []), '--set-file=-', '--', path,
+                data=serialized(policy), descriptors=(self.fd,))
+
+
+def identity(path, directory=False):
+    with Object(path, directory) as obj:
+        return obj.identity
+
+
+def read(path):
+    with Object(path) as obj:
+        return obj.read()
+
+
+def apply(path, acl, directory, anchors=None):
+    with Object(path, directory, anchors) as obj:
+        obj.write(acl)
+
+
+def years(root):
+    result = []
+    with Object(root, True) as obj:
+      for entry in os.scandir(obj.fd):
+        if re.fullmatch(r'[0-9]{4}', entry.name):
+            if not stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
+                raise ValueError('managed ACL path must be a physical directory: ' + entry.name)
+            result.append(pathlib.Path(root) / entry.name)
+    return sorted(result)
+
+
+def months(year):
+    result = []
+    with Object(year, True) as obj:
+      for entry in os.scandir(obj.fd):
+        if entry.name in ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'):
+            if not stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
+                raise ValueError('managed ACL path must be a physical directory: ' + entry.name)
+            result.append(pathlib.Path(year) / entry.name)
+    return sorted(result)
+
+
+def date_tree(root):
+    result = []
+    for year in years(root):
+        result.append(year)
+        result.extend(months(year))
+    return result
+
+
+def month_files(root):
+    for year in years(root):
+        for month in months(year):
+            with Object(month, True) as obj:
+                for entry in os.scandir(obj.fd):
+                    # Defaults apply to every regular output in the managed
+                    # month (JSON, text, checksums and archives). Baseline only
+                    # their identities; never grant historical file ACLs.
+                    if stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode):
+                        yield month / entry.name
+
+
+class Transaction:
+    def __init__(self, journal):
+        self.journal = pathlib.Path(journal)
+        self.state = {}
+
+    def save(self):
+        temporary = self.journal.with_suffix('.writing')
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(self.state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, self.journal)
+
+    def snapshot(self, path, directory, baseline=False):
+        key = str(path)
+        with Object(path, directory, self.state['entries']) as obj:
+            entry = self.state['entries'].get(key)
+            if entry:
+                return entry
+            acl = obj.read()
+            entry = {'identity': obj.identity, 'directory': directory, 'baseline': baseline,
+                     'before': acl, 'after': acl, 'touched': False}
+            self.state['entries'][key] = entry
+            self.save()
+            return entry
+
+    def effective(self, acl, path, info=None):
+        info = info if info is not None else os.lstat(path)
+        uid, gids = self.state['uid'], self.state['gids']
+        if uid == info.st_uid:
+            return acl['user:']
+        mask = acl.get('mask:', acl['group:'])
+        named = 'user:' + str(uid)
+        if named in acl:
+            return acl[named] & mask
+        group_rights = acl['group:'] if info.st_gid in gids else 0
+        matched = info.st_gid in gids
+        for key, value in acl.items():
+            if key.startswith('group:') and key != 'group:' and int(key[6:]) in gids:
+                matched = True
+                group_rights |= value
+        return group_rights & mask if matched else acl['other:']
+
+    def grant(self, path, required, default=False):
+        with Object(path, anchors=self.state['entries']) as obj:
+            entry = self.snapshot(path, obj.directory)
+            if entry['identity'] != obj.identity:
+                raise ValueError('ACL object changed during grant snapshot: ' + str(path))
+            current = obj.read()
+            if current != entry['after']:
+                raise ValueError('concurrent ACL change before grant: ' + str(path))
+            desired = dict(current)
+            policy = defaults(current) if default else dict(current)
+            if not default and self.effective(current, path, obj.info) & required == required:
+                return
+            if not default and obj.info.st_uid == self.state['uid']:
+                raise ValueError('reader minimum would require changing owner-mode permissions: ' + str(path))
+            if default and not policy:
+                policy = {key: current[key] for key in ('user:', 'group:', 'other:')}
+                policy['group:'] &= current.get('mask:', current['group:'])
+            mask = policy.get('mask:', policy['group:'])
+            reader = 'user:' + str(self.state['uid'])
+            effective = self.effective(policy, path, obj.info)
+            target = effective | required
+            new_mask = mask | target
+            for key, value in policy.items():
+                if key != reader and (key == 'group:' or key.startswith(('user:', 'group:')) and key != 'user:'):
+                    if (value & new_mask) != (value & mask):
+                        raise ValueError('reader grant would unmask another principal: ' + str(path))
+            policy[reader] = policy.get(reader, 0) | target
+            policy['mask:'] = new_mask
+            if default:
+                desired = {key: value for key, value in desired.items() if not key.startswith('default:')}
+                desired.update({'default:' + key: value for key, value in policy.items()})
+            else:
+                desired = policy
+            if desired != current:
+                entry['touched'] = True
+                entry['after'] = desired
+                self.save()
+                obj.write(desired, default)
+                if obj.read() != desired:
+                    raise ValueError('ACL grant did not converge: ' + str(path))
+                self.state['changed'] = True
+                self.save()
+                # Detect path replacement while still holding the original
+                # descriptor; no operation above can mutate the replacement.
+                with Object(path, obj.directory, self.state['entries']):
+                    pass
+
+    def begin(self, source, reader):
+        account = pwd.getpwnam(reader)
+        root = pathlib.Path(source) / 'alerts'
+        identity(root, True)
+        self.state = {'root': str(root), 'uid': account.pw_uid,
+                      'gids': sorted(set(os.getgrouplist(reader, account.pw_gid))),
+                      'entries': {}, 'changed': False, 'files_before': []}
+        self.save()
+        ancestors = list(reversed(list(pathlib.Path(source).parents)[:-1])) + [pathlib.Path(source)]
+        directories = ancestors + [root] + date_tree(root)
+        for path in directories:
+            self.snapshot(path, True, True)
+        current = root / 'alerts.json'
+        if current.exists() or current.is_symlink():
+            self.snapshot(current, False, True)
+        self.state['files_before'] = [identity(path) for path in month_files(root)]
+        if str(current) in self.state['entries']:
+            self.state['files_before'].append(self.state['entries'][str(current)]['identity'])
+        self.save()
+        for path in ancestors:
+            self.grant(path, 1)
+        self.grant(root, 5)
+        self.grant(root, 5, True)
+        # Rediscover only after protecting each parent. Children created later
+        # inherit protection; the initial snapshot list is not the grant list.
+        for year in years(root):
+            self.grant(year, 5, True)
+            for month in months(year):
+                self.grant(month, 5, True)
+        if current.exists() or current.is_symlink():
+            self.grant(current, 4)
+
+    def prior_default(self, path):
+        path = pathlib.Path(path)
+        while str(path) != self.state['root']:
+            entry = self.state['entries'].get(str(path))
+            if entry and entry['baseline']:
+                return defaults(entry['before'])
+            path = path.parent
+        return defaults(self.state['entries'][self.state['root']]['before'])
+
+    def clean_inherited(self, path, directory):
+        parent = str(pathlib.Path(path).parent)
+        parent_entry = self.state['entries'].get(parent)
+        # A later new parent inherits the same protected nearest ancestor.
+        while not parent_entry:
+            parent = str(pathlib.Path(parent).parent)
+            parent_entry = self.state['entries'].get(parent)
+        expected = defaults(parent_entry['after'])
+        prior = self.prior_default(pathlib.Path(path).parent)
+        if expected == prior:
+            return
+        with Object(path, directory, self.state['entries']) as obj:
+            acl = obj.read()
+            reader = 'user:' + str(self.state['uid'])
+            # An object discovered after the initial scan can have been born
+            # before its parent was protected. Its captured ACL then contains no
+            # inherited grant; undo only our recorded explicit mutation.
+            own = self.state['entries'].get(str(path))
+            if not directory:
+                own = next((entry for entry in self.state['entries'].values()
+                            if not entry['baseline'] and not entry['directory']
+                            and entry['identity'] == obj.identity), own)
+            if own and not own['baseline'] and own['before'].get(reader) != expected.get(reader):
+                if acl not in (own['before'], own['after']):
+                    raise ValueError('concurrent ACL on newly discovered object: ' + str(path))
+                obj.write(own['before'])
+                anchors = dict(self.state['entries'])
+                anchors[str(path)] = {'identity': obj.identity}
+                with Object(path, directory, anchors):
+                    pass
+                return
+            if acl.get(reader) != expected.get(reader):
+                raise ValueError('concurrent reader ACL on newly created object: ' + str(path))
+            desired = dict(acl)
+            if reader in prior:
+                desired[reader] = prior[reader]
+                desired['mask:'] = acl.get('mask:', acl['group:']) & prior.get('mask:', prior['group:'])
+                for key, value in acl.items():
+                    if key != reader and (key == 'group:' or key.startswith(('user:', 'group:')) and key != 'user:'):
+                        if (value & desired['mask:']) != (value & acl.get('mask:', acl['group:'])):
+                            raise ValueError('concurrent principal rights during inherited cleanup: ' + str(path))
+            else:
+                desired.pop(reader, None)  # Keep every other principal's effective rights.
+            if directory:
+                if defaults(acl) != expected:
+                    raise ValueError('concurrent default ACL on newly created directory: ' + str(path))
+                desired = {key: value for key, value in desired.items() if not key.startswith('default:')}
+                desired.update({'default:' + key: value for key, value in prior.items()})
+            obj.write(desired)
+            anchors = dict(self.state['entries'])
+            anchors[str(path)] = {'identity': obj.identity}
+            with Object(path, directory, anchors):
+                pass
+
+    def restore(self):
+        if not self.journal.read_text().strip():
+            return
+        self.state = json.loads(self.journal.read_text())
+        entries = self.state['entries']
+        if not any(entry['touched'] for entry in entries.values()):
+            return
+        errors = []
+        root = pathlib.Path(self.state['root'])
+        root_entry = entries.get(str(root))
+        # Never walk a replacement or symlinked root during recovery.
+        if not root_entry or identity(root, True) != root_entry['identity']:
+            raise ValueError('ACL rollback root identity changed; journal retained: ' + str(self.journal))
+        try:
+            new_files = [path for path in month_files(root) if identity(path) not in self.state['files_before']]
+            new_dirs = [path for path in date_tree(root) if str(path) not in entries or not entries[str(path)]['baseline']]
+            for path in new_files + sorted(new_dirs, key=lambda p: len(p.parts), reverse=True):
+                self.clean_inherited(path, path in new_dirs)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+        for path, entry in reversed(list(entries.items())):
+            if not entry['baseline'] or not entry['touched']:
+                continue
+            try:
+                with Object(path, entry['directory'], entries) as obj:
+                    current = obj.read()
+                    if current == entry['before']:
+                        continue
+                    if current != entry['after']:
+                        raise ValueError('concurrent ACL change during rollback: ' + path)
+                    obj.write(entry['before'])
+                    if obj.read() != entry['before']:
+                        raise ValueError('ACL rollback did not converge: ' + path)
+                    with Object(path, entry['directory'], entries):
+                        pass
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        if errors:
+            raise ValueError('ACL rollback incomplete; journal retained: ' + str(self.journal) + '; ' + '; '.join(errors))
+
+
+if __name__ == '__main__':
+    try:
+        transaction = Transaction(sys.argv[2])
+        if sys.argv[1] == 'grant':
+            transaction.begin(sys.argv[3], sys.argv[4])
+            print(json.dumps({'changed': transaction.state['changed']}))
+        elif sys.argv[1] == 'restore':
+            transaction.restore()
+        else:
+            raise ValueError('unknown ACL transaction mode')
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        print('Wazuh ACL transaction failed: ' + detail, file=sys.stderr)
+        sys.exit(1)
