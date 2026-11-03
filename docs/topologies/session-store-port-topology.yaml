@@ -4,7 +4,7 @@ services: local
 nodes:
   - name: i77-ipa
     base_image: almalinux-9
-    memory: 4096
+    memory: 4608
     vcpus: 2
     disk: 30
     ssh_timeout: 8m
@@ -12,9 +12,9 @@ nodes:
     groups: [freeipa-server]
   - name: i77-host
     base_image: ubuntu-24.04
-    memory: 6144
+    memory: 9216
     vcpus: 4
-    disk: 40
+    disk: 60
     ssh_timeout: 8m
     boot_timeout: 8m
     groups: [freeipa-client, docker, pilot-session-store, wazuh-manager]
