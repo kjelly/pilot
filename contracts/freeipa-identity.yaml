@@ -19,6 +19,7 @@ regressionTests:
   - cmd/pilot/cmd/tag_coverage_test.go
   - internal/spec/freeipa_identity_regression_test.go
   - internal/spec/freeipa_identity_ssh_cache_regression_test.go
+  - internal/spec/freeipa_identity_retirement_regression_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: sameHosts}
 hostCardinality: exactly-one

@@ -681,7 +681,9 @@ playbook 只認英文輸出。
     [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
     `ipa_identity_refresh_sssd_cache` 僅控制既有非金鑰授權更新；SSH 流程不受它停用。
     原 #115 實測的約 60 秒至超過 16 分鐘延遲仍是歷史基線，不能當作本次修正的驗收證據。
+  - **永久退役主機（#226）**：保留 canonical host entry，明確設為 `state: absent`；正常路徑使用 host decommission 的 plan/apply/resume。alias 由實際 inventory 的唯一 `ipa_client_fqdn` 或既有退役 receipt 綁定。已移除 inventory 的舊待辦必須提供單次精確 alias/FQDN/stage、原因與來源 mapping；缺席本身不授權丟棄。中央 host/DNS 清理確認後，journal 才記錄獨立的 `retired` audit 並解除該 alias 的待辦；離線與 deferred 主機繼續保留。退役 alias 不接受兩種 cache refresh，最終 gate 讀回最新 journal。舊 plan 無 alias 時只能由可信原 Host.Name 恢復，否則重新 plan 或明示 mapping recovery；不猜 FQDN 為 alias。欄位與完整 acceptance 邊界見 [退役契約](../verification/freeipa-identity.md#161-永久退役與-ssh-傳播待辦契約issue-226)。
   - 一次多把金鑰 → list 放多行即可。
+  - journal 的 I/O 錯誤必須修復後重試；已看得到退役 receipt 時仍不能略過持久化確認。無變更重試會同步既有 file/directory，退役狀態查詢也會在既有鎖下確認同步，失敗就拒絕完成。這些確認不改寫 receipt、epoch、金鑰或待辦。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
 - 金鑰走 `argv`（非 shell）傳入，內含空格/base64 不會被 shell 破壞。

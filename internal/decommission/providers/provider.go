@@ -37,6 +37,8 @@ type Provider interface {
 type InspectInput struct {
 	HostName string
 	FQDN     string
+	// InventoryAlias preserves the original host key when FQDN differs.
+	InventoryAlias string
 }
 
 // Inspection is one provider's read-only snapshot of live state for a host.
@@ -130,6 +132,8 @@ type StepRunner interface {
 type VerifyInput struct {
 	HostName string
 	FQDN     string
+	// InventoryAlias preserves the original host key when FQDN differs.
+	InventoryAlias string
 }
 
 // Verification is one provider's independently re-queried live-state

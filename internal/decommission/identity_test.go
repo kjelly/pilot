@@ -3,6 +3,7 @@ package decommission
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -22,10 +23,21 @@ type identityIPAExecutor struct {
 
 func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.Result, error) {
 	var target string
+	var controls map[string]string
 	for _, arg := range args {
 		if value, ok := strings.CutPrefix(arg, "pilot_decommission_target_fqdn="); ok {
 			target = value
 		}
+		var binding map[string]string
+		if json.Unmarshal([]byte(arg), &binding) == nil && binding["pilot_decommission_query"] != "" {
+			controls = binding
+			target = binding["pilot_decommission_target_fqdn"]
+		}
+	}
+	if controls["pilot_decommission_query"] == "ssh_retirement" {
+		raw, _ := json.Marshal(map[string]any{"schema_version": 1, "kind": "ssh_retirement", "fqdn": target,
+			"alias": controls["pilot_decommission_target_alias"], "stage": controls["pilot_decommission_retirement_stage"], "status": "settled"})
+		return &ansible.Result{Stdout: "PILOT_SSH_RETIREMENT_V1:" + base64.StdEncoding.EncodeToString(raw)}, nil
 	}
 	body := "ipa: ERROR: host not found"
 	if e.present {

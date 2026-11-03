@@ -237,7 +237,7 @@
       ansible.builtin.include_vars:
         file: "{{ freeipa_roster_file }}"
         name: freeipa_roster
-      when: freeipa_roster_file is defined
+      when: freeipa_roster_file is defined and freeipa_roster_file is not none
       no_log: true
       tags: [always]
 
@@ -885,6 +885,14 @@
         # change IPA. Read-only selections (inspect) never reach it. Recorded
         # even with ipa_identity_refresh_sssd_cache off, so turning it back on
         # delivers what changed meanwhile.
+        - name: "Validate durable SSH cache scope before managed mutations"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-ssh-cache-preflight.yml
+            apply:
+              tags: [always]
+          when: ansible_run_tags | intersect(['all', 'tagged', 'sshkeys'] + ipa_identity_cache_recovery_tags) | length > 0
+          tags: [always]
+
         - name: "Prepare legacy authorization cache recovery"
           ansible.builtin.command:
             argv:
@@ -1285,7 +1293,7 @@
               {{ (groups.get('freeipa-client', [])
                   + groups.get('freeipa-server', [])
                   + groups.get('freeipa-server-replica', [])
-                  + [inventory_hostname]) | unique | sort }}
+                  + [inventory_hostname]) | unique | difference(ipa_ssh_cache_retiring_aliases | default([])) | sort }}
           tags: [always, identity, users, sshkeys, client-cache]
 
         - name: "Gate: SSH cache targets must match the authorized stage"
@@ -1363,7 +1371,7 @@
           ansible.builtin.assert:
             that: item in hostvars
             fail_msg: "Pending SSH cache target {{ item }} is absent from this inventory; recovery remains pending"
-          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
+          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | difference(ipa_ssh_cache_retiring_aliases | default([])) }}"
           when:
             - not ansible_check_mode
             - ipa_ssh_cache_plan is defined
@@ -1377,7 +1385,7 @@
               - not ('staging' in hostvars[item].group_names and stage != 'staging')
               - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
             fail_msg: "Pending SSH cache target {{ item }} is outside the authorized stage={{ stage }}; recovery remains pending"
-          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | list }}"
+          loop: "{{ (ipa_ssh_cache_plan.stdout | default('{\"work\": []}') | from_json).work | map(attribute='host') | unique | difference(ipa_ssh_cache_retiring_aliases | default([])) }}"
           when:
             - not ansible_check_mode
             - ipa_ssh_cache_plan is defined
@@ -1405,6 +1413,7 @@
           when:
             - not ansible_check_mode
             - item.host not in (pilot_deferred_hosts | default([]))
+            - item.host not in (ipa_ssh_cache_retiring_aliases | default([]))
           tags: [identity, users, sshkeys, client-cache]
 
         - name: "Acknowledge verified SSH key cache pairs"
@@ -3571,6 +3580,23 @@
         # driven host_object pair here too, keyed off
         # pilot_decommission_target_fqdn directly like the three below, so
         # Plan()/Verify() get a real answer regardless of roster state.
+        - name: "Inspect durable SSH retirement for the query target (read-only)"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", retirement_status, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain, 'fqdn': pilot_decommission_target_fqdn, 'alias': pilot_decommission_target_alias | default(''), 'stage': pilot_decommission_retirement_stage | default('sandbox')} | to_json }}"
+          become: true
+          register: freeipa_decom_query_retirement
+          changed_when: false
+          check_mode: false
+          when: pilot_decommission_query | default('') == 'ssh_retirement'
+          tags: [freeipa_host_absent_inspect]
+
+        - name: "Print durable SSH retirement inspection for external tooling (read-only)"
+          ansible.builtin.debug:
+            msg: "PILOT_SSH_RETIREMENT_V1:{{ (freeipa_decom_query_retirement.stdout | from_json).observation | to_json | b64encode }}"
+          when: pilot_decommission_query | default('') == 'ssh_retirement'
+          tags: [freeipa_host_absent_inspect]
+
         - name: "Look up the current live host object for the query target host (read-only, decommission verify)"
           ansible.builtin.command:
             argv: [ipa, host-show, "{{ pilot_decommission_target_fqdn | default('') }}"]
@@ -3890,8 +3916,41 @@
             label: "{{ item.name }}"
           register: freeipa_absent_host_verify
           changed_when: false
-          failed_when:
-            - freeipa_absent_host_verify.rc == 0
+          failed_when: >-
+            freeipa_absent_host_verify.rc != 2
+            or 'not found' not in (freeipa_absent_host_verify.stderr | default(''))
+          tags: [identity, hosts]
+
+        - name: "Verify retired hosts no longer have the roster-owned DNS A value"
+          ansible.builtin.command:
+            argv:
+              - ipa
+              - dnsrecord-show
+              - "{{ ipa_domain }}"
+              - >-
+                {{ item.name | regex_replace('\.' + (ipa_domain | regex_escape) + '$', '') }}
+              - --all
+              - --raw
+          loop: "{{ freeipa_absent_hosts }}"
+          register: ipa_retired_dns_verify
+          changed_when: false
+          failed_when: >-
+            (ipa_retired_dns_verify.rc == 0 and item.ip_address in
+              ((ipa_retired_dns_verify.stdout | default('')) | regex_findall('(?im)^[ \t]*arecord: (.+)$')))
+            or (ipa_retired_dns_verify.rc != 0 and not
+              (ipa_retired_dns_verify.rc == 2 and (ipa_retired_dns_verify.stderr | default('')) is
+               search('(?m)^ipa: ERROR: (.+: DNS (resource record|zone) not found|DNS is not configured)$')))
+          when: not ansible_check_mode
+          tags: [identity, hosts]
+
+        - name: "Discharge authorized retired-host SSH obligations after verified cleanup"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", retire, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain, 'stage': stage, 'retirements': ipa_ssh_cache_retirements | default([])} | to_json }}"
+          become: true
+          register: ipa_ssh_cache_retirement
+          changed_when: (ipa_ssh_cache_retirement.stdout | from_json).changed
+          when: not ansible_check_mode
           tags: [identity, hosts]
 
         - name: "Settle legacy authorization cache recovery"
@@ -3968,7 +4027,8 @@
           ansible.builtin.set_fact:
             ipa_sudo_refresh_clients: >-
               {{ groups.get('freeipa-client', []) |
-                 reject('in', ipa_sudo_deferred_hosts) | list }}
+                 reject('in', ipa_sudo_deferred_hosts) |
+                 reject('in', ipa_ssh_cache_retiring_aliases | default([])) | list }}
           vars:
             ipa_sudo_deferred_hosts: >-
               {{ (pilot_deferred_hosts | default([]) | from_json)
@@ -4062,16 +4122,26 @@
             # The clients refreshed are the resolved list above, which is
             # defined whenever this task runs (same tags and the first two
             # conditions of the resolving task).
-            - groups.get('freeipa-client', []) | difference(ipa_sudo_refresh_clients) | length == 0
+            - groups.get('freeipa-client', []) | difference(ipa_ssh_cache_retiring_aliases | default([])) | difference(ipa_sudo_refresh_clients) | length == 0
           tags: [identity, client-cache]
+
+        - name: "Read current SSH obligations after propagation and retirement"
+          ansible.builtin.command:
+            argv: [python3, -c, "{{ ipa_ssh_cache_program }}", inspect, "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"]
+            stdin: "{{ {'domain': ipa_domain} | to_json }}"
+          become: true
+          register: ipa_ssh_cache_final
+          changed_when: false
+          when: not ansible_check_mode
+          tags: [identity, users, sshkeys, client-cache]
 
         - name: "Gate: every SSH key cache pair converged"
           ansible.builtin.assert:
-            that: (ipa_ssh_cache_ack.stdout | from_json).pending | length == 0
+            that: (ipa_ssh_cache_final.stdout | from_json).work | length == 0
             fail_msg: >-
               SSH key propagation PARTIAL; FreeIPA changes are retained.
               Retry this roster. Pending host/user pairs:
-              {{ (ipa_ssh_cache_ack.stdout | from_json).pending | to_json }}
+              {{ (ipa_ssh_cache_final.stdout | from_json).work | map(attribute='host') | list | to_json }}
           when: not ansible_check_mode
           tags: [identity, users, sshkeys, client-cache]
       always:

@@ -140,7 +140,9 @@ func TestRegression_IdentitySSHCacheNonKeyMutationCoverage(t *testing.T) {
 			if name, ok := task["name"].(string); ok {
 				named[name] = e
 			}
-			if reg, ok := task["register"].(string); ok && reg != "ipa_sshkey" {
+			// Retirement changes only the SSH journal; it neither changes IPA
+			// authorization nor establishes an authorization refresh receipt.
+			if reg, ok := task["register"].(string); ok && reg != "ipa_sshkey" && reg != "ipa_ssh_cache_retirement" {
 				if changed, exists := task["changed_when"]; exists && changed != false {
 					want = append(want, reg)
 					mutations = append(mutations, e)

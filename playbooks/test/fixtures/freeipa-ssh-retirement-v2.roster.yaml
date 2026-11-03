@@ -1,0 +1,63 @@
+---
+# Same v2 objects as freeipa-identity-v2.roster.yaml, with an explicit server
+# for repeated imports. The reentry regression locks this semantic equality.
+schema_version: 2
+freeipa:
+  server: "{{ issue226_server_fqdn }}"
+  admin:
+    principal: admin
+    password: "{{ ipa_admin_password }}"
+users:
+  - name: fixture-v2-user-a
+    state: present
+    ssh_keys: {authoritative: true, values: []}
+groups:
+  - name: team-fixture-v2
+    state: present
+    category: team
+    description: Schema v2 fixture team
+    membership:
+      authoritative: true
+      users: [fixture-v2-user-a]
+      groups: []
+hosts:
+  - name: fixture-v2-host-a.ipa.pilot.internal
+    state: present
+    ip_address: 192.168.122.60
+    description: Schema v2 fixture host
+hostgroups:
+  - name: hostgroup-fixture-v2-child
+    state: present
+    description: Schema v2 fixture child hostgroup
+    membership:
+      authoritative: true
+      hosts: [fixture-v2-host-a.ipa.pilot.internal]
+      hostgroups: []
+  - name: hostgroup-fixture-v2-parent
+    state: present
+    description: Schema v2 fixture parent hostgroup (nests the child)
+    membership:
+      authoritative: true
+      hosts: []
+      hostgroups: [hostgroup-fixture-v2-child]
+netgroups:
+  - name: ng-fixture-v2-nested
+    state: present
+    description: Schema v2 fixture nested netgroup
+    membership:
+      authoritative: true
+      users: []
+      groups: []
+      hosts: []
+      hostgroups: []
+      netgroups: []
+  - name: ng-fixture-v2-clients
+    state: present
+    description: Schema v2 fixture netgroup (every membership type)
+    membership:
+      authoritative: true
+      users: [fixture-v2-user-a]
+      groups: [team-fixture-v2]
+      hosts: [fixture-v2-host-a.ipa.pilot.internal]
+      hostgroups: [hostgroup-fixture-v2-parent]
+      netgroups: [ng-fixture-v2-nested]
