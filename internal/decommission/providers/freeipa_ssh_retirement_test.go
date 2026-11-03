@@ -107,4 +107,8 @@ func TestFreeIPAProvider_OldRetirementPlanNeedsTrustedAlias(t *testing.T) {
 	if _, err := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "transport-old"}); err == nil || !strings.Contains(err.Error(), "persisted FQDN differs") {
 		t.Fatalf("old fallback identity silently remapped instead of requiring re-plan: %v", err)
 	}
+	p.cfg.InventoryFQDN = "RETIRED.IPA.TEST."
+	if _, err := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "retired.ipa.test"}); err != nil {
+		t.Fatalf("equivalent ASCII FQDN case/trailing dot rejected: %v", err)
+	}
 }

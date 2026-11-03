@@ -263,7 +263,7 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 	case ActionFreeIPAIdentityApplyConverge:
 		alias := firstNonEmpty(step.Params["inventory_alias"], p.cfg.InventoryAlias)
 		if p.cfg.InventoryFQDN != "" &&
-			strings.ToLower(strings.TrimSuffix(step.TargetIdentity, ".")) != strings.ToLower(strings.TrimSuffix(p.cfg.InventoryFQDN, ".")) {
+			!strings.EqualFold(strings.TrimSuffix(step.TargetIdentity, "."), strings.TrimSuffix(p.cfg.InventoryFQDN, ".")) {
 			return nil, fmt.Errorf("freeipa-client: persisted FQDN differs from explicit current inventory identity; re-plan retirement without guessing the old alias mapping")
 		}
 		if step.Params["retirement_stage"] != "" && step.Params["retirement_stage"] != p.retirementStage() {
