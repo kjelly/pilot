@@ -336,7 +336,10 @@ func (m *Manager) ImportCredential(ctx context.Context, kind CredentialKind, sou
 			return errors.New("services: original Harbor credential directory unavailable")
 		}
 	}
-	if err := writeAtomicMode(target, []byte(password+"\n"), 0600); err != nil {
+	if err := writeAtomicModeContext(ctx, target, []byte(password+"\n"), 0600); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("services: credential publication interrupted; retry the validated import")
 	}
 	if err := syncDirectory(filepath.Join(m.root, "harbor")); err != nil {

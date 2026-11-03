@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -285,6 +286,13 @@ func loadOrCreateCA(dir string) ([]byte, []byte, error) {
 }
 
 func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
+	return writeAtomicModeContext(context.Background(), path, data, mode)
+}
+
+func writeAtomicModeContext(ctx context.Context, path string, data []byte, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".pilot-service-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create %s: %w", path, err)
@@ -305,6 +313,12 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
+	}
+	// Persistence can block long enough for graceful cancellation. This is
+	// the final cancellation boundary: invoking rename enters the irreversible
+	// commit window, and an already-entered syscall cannot be canceled safely.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("install %s: %w", path, err)

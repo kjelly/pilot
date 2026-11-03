@@ -39,9 +39,12 @@ HTTP fixtures prove only client behavior. No operational services are test targe
    fail until the complete set is restored. This avoids a circular prerequisite
    between two sequential imports. It never resets passwords, recreates services,
    seeds resources or deletes data.
-6. Failed validation preserves the previous association. Cancellation before
-   publication preserves the previous association. Atomic publication is the
-   commit point: interruption afterward leaves the validated candidate usable;
+6. Failed validation preserves the previous association. Cancellation is checked
+   again after temporary-file write, sync and close, immediately before invoking
+   rename; cancellation observed there removes the uncommitted temporary file
+   and preserves the previous association. Invoking rename enters a bounded
+   irreversible commit window: an already-entered syscall cannot safely be
+   canceled. Atomic publication is the commit point: interruption afterward leaves the validated candidate usable;
    retry validates again and completes without a service mutation. A durable
    nonsecret intent/completion audit distinguishes interrupted operations.
 7. Passwords travel neither in process arguments nor user-visible output. Native
