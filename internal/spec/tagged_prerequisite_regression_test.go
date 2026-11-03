@@ -383,36 +383,11 @@ func includedFile(item *yaml.Node) (string, map[string]bool, bool, error) {
 					return "", nil, static, fmt.Errorf("%s apply uses unsupported merge key (<<:)", k)
 				}
 			}
-			var tags func(*yaml.Node, int) error
-			tags = func(n *yaml.Node, depth int) error {
-				if depth > 16 {
-					return fmt.Errorf("%s apply tags exceed nesting limit (possible alias cycle)", k)
-				}
-				n = yamlDeref(n)
-				if n == nil {
-					return nil
-				}
-				switch n.Kind {
-				case yaml.ScalarNode:
-					if strings.Contains(n.Value, "{{") {
-						return fmt.Errorf("%s apply tags must be static", k)
-					}
-				case yaml.SequenceNode:
-					for _, c := range n.Content {
-						if err := tags(c, depth+1); err != nil {
-							return err
-						}
-					}
-				default:
-					return fmt.Errorf("%s apply tags must be static scalars or a list", k)
-				}
-				return nil
+			var err error
+			apply, err = convergenceTagSet(yamlField(a, "tags"))
+			if err != nil {
+				return "", nil, static, fmt.Errorf("%s apply %w", k, err)
 			}
-			tagNode := yamlField(a, "tags")
-			if err := tags(tagNode, 0); err != nil {
-				return "", nil, static, err
-			}
-			apply = convergenceTagSet(tagNode)
 		}
 		if strings.Contains(file, "{{") {
 			return "", nil, static, nil

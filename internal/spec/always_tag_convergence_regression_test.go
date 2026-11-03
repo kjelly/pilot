@@ -569,6 +569,116 @@ func TestAlwaysTaggedConvergenceFailsClosed(t *testing.T) {
 	}
 }
 
+// TestAlwaysTaggedConvergenceRejectsDynamicTags locks R1's fail-closed
+// contract. Native Ansible 2.19.2 executes the task/block/play scalar cases
+// as always-run (review-round1 evidence); this static lint must reject the
+// unresolved tags before using them to prune a task or an include.
+func TestAlwaysTaggedConvergenceRejectsDynamicTags(t *testing.T) {
+	dir := writeConvergenceTaskFiles(t)
+	cases := []struct{ name, raw string }{
+		{"task", "- hosts: all\n  vars: {selected_tags: [always]}\n  tasks:\n    - {name: leaf, tags: '{{ selected_tags }}', command: /bin/true, changed_when: true}\n"},
+		{"block", "- hosts: all\n  vars: {selected_tags: [always]}\n  tasks:\n    - tags: '{{ selected_tags }}'\n      block:\n        - {name: leaf, command: /bin/true, changed_when: true}\n"},
+		{"play", "- hosts: all\n  vars: {selected_tags: [always]}\n  tags: '{{ selected_tags }}'\n  tasks:\n    - {name: leaf, command: /bin/true, changed_when: true}\n"},
+		{"list element", "- hosts: all\n  tasks:\n    - {tags: [x, '{{ selected_tag }}'], command: /bin/true, changed_when: true}\n"},
+		{"scalar alias", "- hosts: all\n  vars: {taglist: &taglist '{{ selected_tags }}'}\n  tasks:\n    - {tags: *taglist, command: /bin/true, changed_when: true}\n"},
+		{"list alias", "- hosts: all\n  vars: {taglist: &taglist [x, '{{ selected_tag }}']}\n  tasks:\n    - {tags: *taglist, command: /bin/true, changed_when: true}\n"},
+		{"alias list element", "- hosts: all\n  vars: {tag: &tag '{{ selected_tag }}'}\n  tasks:\n    - {tags: [x, *tag], command: /bin/true, changed_when: true}\n"},
+		{"include line", "- hosts: all\n  tasks:\n    - tags: '{{ selected_tags }}'\n      include_tasks: {file: tasks/child.yml, apply: {tags: [always]}}\n"},
+		{"include block ancestor", "- hosts: all\n  tasks:\n    - tags: '{{ selected_tags }}'\n      block:\n        - include_tasks: tasks/child.yml\n"},
+		{"include play ancestor", "- hosts: all\n  tags: '{{ selected_tags }}'\n  tasks:\n    - include_tasks: tasks/child.yml\n"},
+		{"include apply alias", "- hosts: all\n  vars: {tag: &tag '{{ selected_tag }}'}\n  tasks:\n    - tags: [always]\n      include_tasks: {file: tasks/child.yml, apply: {tags: [*tag]}}\n"},
+		{"Jinja statement", "- hosts: all\n  tasks:\n    - {tags: '{% if flag %}always{% endif %}', command: /bin/true}\n"},
+		{"Jinja comment", "- hosts: all\n  tasks:\n    - {tags: 'always{# comment #}', command: /bin/true}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scan, err := scanAlwaysTaggedConvergence("p.yml", []byte(tc.raw), dir)
+			if err == nil || !strings.Contains(err.Error(), "tags must be static; unresolved Jinja") {
+				t.Fatalf("unresolved effective tags: error=%v violations=%v; want static-resolution rejection", err, scan.Violations)
+			}
+		})
+	}
+}
+
+func TestAlwaysTaggedConvergenceStaticTagBoundaries(t *testing.T) {
+	cases := []struct {
+		name, tag string
+		want      int
+		err       string
+	}{
+		{"literal", "always", 1, ""},
+		{"CSV", "'x, always'", 1, ""},
+		{"list", "[x, always]", 1, ""},
+		{"scalar alias", "*literal", 1, ""},
+		{"list alias", "*list", 1, ""},
+		{"alias element", "[x, *literal]", 1, ""},
+		{"row only", "C1", 0, ""},
+		{"empty list", "[]", 0, ""},
+		{"mapping", "{always: true}", 0, "tags must be static scalars or a list"},
+		{"boolean", "true", 0, "tags must be static scalars or a list"},
+		{"integer", "1", 0, "tags must be static scalars or a list"},
+		{"explicit null", "null", 0, "tags must be static scalars or a list"},
+		{"alias cycle", "&cycle [*cycle]", 0, "tags exceed nesting limit or contain an alias cycle"},
+		{"excessive nesting", strings.Repeat("[", 18) + "always" + strings.Repeat("]", 18), 0, "tags exceed nesting limit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "- hosts: all\n  vars: {literal: &literal always, list: &list [x, always]}\n  tasks:\n    - name: leaf\n      tags: " + tc.tag + "\n      command: /bin/true\n      changed_when: true\n"
+			scan, err := scanAlwaysTaggedConvergence("p.yml", []byte(raw), t.TempDir())
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err=%v, want %q", err, tc.err)
+				}
+			} else if err != nil || len(scan.Violations) != tc.want {
+				t.Fatalf("err=%v violations=%v, want %d", err, scan.Violations, tc.want)
+			}
+		})
+	}
+}
+
+func TestAlwaysTaggedConvergenceMalformedTaskLists(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"mapping.yml": "{command: /bin/true}\n", "scalar.yml": "- /bin/true\n", "empty.yml": ""} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct{ name, raw, want string }{
+		{"play item", "- all\n", "play entry must be a mapping"},
+		{"task mapping", "- hosts: all\n  tasks: {command: /bin/true}\n", "task list must be a sequence"},
+		{"task null", "- hosts: all\n  tasks: null\n", "task list must be a sequence"},
+		{"task scalar item", "- hosts: all\n  tasks: [/bin/true]\n", "task entry must be a mapping"},
+		{"block mapping", "- hosts: all\n  tasks:\n    - block: {command: /bin/true}\n", "task list must be a sequence"},
+		{"rescue mapping", "- hosts: all\n  tasks:\n    - block: []\n      rescue: {}\n", "task list must be a sequence"},
+		{"always mapping", "- hosts: all\n  tasks:\n    - block: []\n      always: {}\n", "task list must be a sequence"},
+		{"pre_tasks scalar", "- hosts: all\n  pre_tasks: /bin/true\n", "task list must be a sequence"},
+		{"post_tasks mapping", "- hosts: all\n  post_tasks: {}\n", "task list must be a sequence"},
+		{"task list alias cycle", "- hosts: all\n  tasks: &tasks\n    - block: *tasks\n", "cyclic or excessively nested task list"},
+		{"included mapping", "- hosts: all\n  tasks:\n    - {tags: [always], include_tasks: mapping.yml}\n", "included task list must be a sequence"},
+		{"included scalar item", "- hosts: all\n  tasks:\n    - {tags: [always], include_tasks: scalar.yml}\n", "task entry must be a mapping"},
+		{"included empty document", "- hosts: all\n  tasks:\n    - {tags: [always], include_tasks: empty.yml}\n", "included task list must be a sequence"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := scanAlwaysTaggedConvergence("p.yml", []byte(tc.raw), dir)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for name, raw := range map[string]string{
+		"unreachable include": "- hosts: all\n  tasks:\n    - {tags: [C1], include_tasks: mapping.yml}\n",
+		"rescue include":      "- hosts: all\n  tasks:\n    - block: []\n      rescue:\n        - {tags: [always], include_tasks: mapping.yml}\n",
+		"aliased task list":   "- hosts: all\n  vars: {steps: &steps [{tags: [C1], command: /bin/true}]}\n  tasks: *steps\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := scanAlwaysTaggedConvergence("p.yml", []byte(raw), dir); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestAlwaysTaggedConvergenceFlagsThePre190Playbook puts the pre-#190 tags
 // back on the real detection-engine playbook, in memory: every Step 3-5e
 // task goes from Step 6's tag to `always`. The scan must name the two tasks
@@ -1143,6 +1253,7 @@ type convergenceWalker struct {
 	playbook string
 	baseDir  string
 	scan     convergenceScan
+	lists    map[*yaml.Node]bool // active task lists, to reject structural alias cycles
 }
 
 // scanAlwaysTaggedConvergence walks one playbook's plays, following
@@ -1175,7 +1286,7 @@ type convergenceWalker struct {
 // includedFile resolves effective module/task arguments and YAML aliases;
 // unsupported argument forms fail closed in both callers of that helper.
 func scanAlwaysTaggedConvergence(playbook string, raw []byte, dir string) (convergenceScan, error) {
-	w := &convergenceWalker{playbook: playbook, baseDir: dir}
+	w := &convergenceWalker{playbook: playbook, baseDir: dir, lists: map[*yaml.Node]bool{}}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return w.scan, err
@@ -1190,12 +1301,16 @@ func scanAlwaysTaggedConvergence(playbook string, raw []byte, dir string) (conve
 	for _, item := range root.Content {
 		play := yamlDeref(item)
 		if play == nil || play.Kind != yaml.MappingNode {
-			continue
+			return w.scan, fmt.Errorf("%s: play entry must be a mapping", playbook)
 		}
 		if err := w.unsupported(play); err != nil {
 			return w.scan, err
 		}
-		ctx := convergenceCtx{tags: convergenceTagSet(yamlField(play, "tags")), reach: true, fileDir: dir}
+		tags, err := convergenceTagSet(yamlField(play, "tags"))
+		if err != nil {
+			return w.scan, fmt.Errorf("%s: play %q: %w", playbook, taskDisplayName(play), err)
+		}
+		ctx := convergenceCtx{tags: tags, reach: true, fileDir: dir}
 		for _, section := range []string{"pre_tasks", "tasks", "post_tasks"} {
 			if err := w.taskList(yamlField(play, section), ctx); err != nil {
 				return w.scan, err
@@ -1209,18 +1324,31 @@ func scanAlwaysTaggedConvergence(playbook string, raw []byte, dir string) (conve
 // taskList walks one task list, recursing into block/rescue/always and into
 // included task files.
 func (w *convergenceWalker) taskList(seq *yaml.Node, ctx convergenceCtx) error {
-	if seq == nil || seq.Kind != yaml.SequenceNode {
+	seq = yamlDeref(seq)
+	if seq == nil {
 		return nil
 	}
+	if seq.Kind != yaml.SequenceNode {
+		return fmt.Errorf("%s: line %d: task list must be a sequence", w.playbook, seq.Line)
+	}
+	if w.lists[seq] || len(w.lists) >= 64 {
+		return fmt.Errorf("%s: line %d: cyclic or excessively nested task list", w.playbook, seq.Line)
+	}
+	w.lists[seq] = true
+	defer delete(w.lists, seq)
 	for _, entry := range seq.Content {
 		item := yamlDeref(entry)
 		if item == nil || item.Kind != yaml.MappingNode {
-			continue
+			return fmt.Errorf("%s: task entry must be a mapping", w.playbook)
 		}
 		if err := w.unsupported(item); err != nil {
 			return err
 		}
-		eff := unionTags(ctx.tags, convergenceTagSet(yamlField(item, "tags")))
+		tags, err := convergenceTagSet(yamlField(item, "tags"))
+		if err != nil {
+			return fmt.Errorf("%s: task %q: %w", w.playbook, taskDisplayName(item), err)
+		}
+		eff := unionTags(ctx.tags, tags)
 		if block := yamlField(item, "block"); block != nil {
 			inner := ctx
 			inner.tags = eff
@@ -1302,7 +1430,7 @@ func (w *convergenceWalker) include(item *yaml.Node, eff map[string]bool, ctx co
 		return fmt.Errorf("%s: %s: %w", w.playbook, file, err)
 	}
 	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.SequenceNode {
-		return nil
+		return fmt.Errorf("%s: %s: included task list must be a sequence", w.playbook, file)
 	}
 	return w.taskList(doc.Content[0], child)
 }
@@ -1427,18 +1555,34 @@ func yamlField(m *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// convergenceTagSet reads a `tags:` value: a list, a string or a comma
-// separated string, each possibly behind an alias.
-func convergenceTagSet(n *yaml.Node) map[string]bool {
+// convergenceTagSet reads static strings, CSV strings and lists, following
+// aliases. Every convergence selection decision uses this checked reader:
+// unresolved Jinja, unsupported types and cycles must not look like absent tags.
+// Legacy collectTagValues/yamlTags readers retain their pre-existing models.
+func convergenceTagSet(n *yaml.Node) (map[string]bool, error) {
 	out := map[string]bool{}
-	var add func(n *yaml.Node)
-	add = func(n *yaml.Node) {
+	active := map[*yaml.Node]bool{}
+	var add func(n *yaml.Node, depth int) error
+	add = func(n *yaml.Node, depth int) error {
 		n = yamlDeref(n)
 		if n == nil {
-			return
+			return nil
 		}
+		if active[n] || depth > 16 {
+			return fmt.Errorf("tags exceed nesting limit or contain an alias cycle")
+		}
+		active[n] = true
+		defer delete(active, n)
 		switch n.Kind {
 		case yaml.ScalarNode:
+			if n.Tag != "!!str" {
+				return fmt.Errorf("tags must be static scalars or a list of strings")
+			}
+			for _, marker := range []string{"{{", "{%", "{#"} {
+				if strings.Contains(n.Value, marker) {
+					return fmt.Errorf("tags must be static; unresolved Jinja is unsupported")
+				}
+			}
 			for _, tag := range strings.Split(n.Value, ",") {
 				if tag = strings.TrimSpace(tag); tag != "" {
 					out[tag] = true
@@ -1446,12 +1590,19 @@ func convergenceTagSet(n *yaml.Node) map[string]bool {
 			}
 		case yaml.SequenceNode:
 			for _, c := range n.Content {
-				add(c)
+				if err := add(c, depth+1); err != nil {
+					return err
+				}
 			}
+		default:
+			return fmt.Errorf("tags must be static scalars or a list of strings")
 		}
+		return nil
 	}
-	add(n)
-	return out
+	if err := add(n, 0); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // unionTags returns a new set with the tags of both a and b.
