@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import ssl
 import subprocess
 import sys
 
@@ -93,11 +92,17 @@ def endpoint(config):
     if not isinstance(address, str) or not isinstance(ingest["tls_cert_file"], str):
         raise ValueError("generated ingest address/certificate path must be strings")
     port = int(address.rsplit(":", 1)[1])
-    cert = ssl._ssl._test_decode_cert(ingest["tls_cert_file"])
-    names = [name for kind, name in cert.get("subjectAltName", ()) if kind == "DNS"]
-    if len(names) != 1 or not re.fullmatch(r"[A-Za-z0-9.-]+", names[0]):
-        raise ValueError("ingest certificate must have exactly one concrete DNS SAN (the configured session_store_fqdn)")
-    return port, names[0], ingest["tls_cert_file"]
+    return port, ingest["tls_cert_file"]
+
+
+def configured_fqdn(args):
+    # Expected identity comes from operator configuration, never from the
+    # certificate being tested. Reusing a stale tracked certificate must fail.
+    fqdn = args.fqdn if args.fqdn is not None else Path(args.fqdn_file).read_text().removesuffix("\n")
+    label = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    if len(fqdn) > 253 or not re.fullmatch(label + r"(?:\." + label + r")*", fqdn):
+        raise ValueError("invalid configured ingest FQDN: " + repr(fqdn))
+    return fqdn
 
 
 def diagnostics(port, cert_file):
@@ -124,12 +129,20 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--port", type=int, help="read-only preflight before mutation")
     mode.add_argument("--config", help="deployed playbook-generated session-store.yaml")
+    identity = parser.add_mutually_exclusive_group()
+    identity.add_argument("--fqdn", help="configured ingest TLS hostname")
+    identity.add_argument("--fqdn-file", help="root-owned configured ingest hostname sidecar")
     parser.add_argument("--ca-file", default="/etc/ipa/ca.crt")
     args = parser.parse_args()
+    if args.config and args.fqdn is None and args.fqdn_file is None:
+        parser.error("--config requires exactly one of --fqdn or --fqdn-file")
+    if args.port is not None and (args.fqdn is not None or args.fqdn_file is not None):
+        parser.error("--port preflight does not accept TLS identity arguments")
     port, cert_file = args.port, None
     try:
         if args.config:
-            port, fqdn, cert_file = endpoint(args.config)
+            port, cert_file = endpoint(args.config)
+            fqdn = configured_fqdn(args)
         if not 1 <= port <= 65535:
             raise ValueError("invalid ingest port: " + str(port))
         check_owner(port, require_listener=bool(args.config))

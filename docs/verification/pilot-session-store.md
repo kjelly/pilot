@@ -24,6 +24,9 @@
 > 2026-09-24 per-host recording Phase 8：disk full（L18）已活體驗證、SS02 改成不含 `\|` 的指令，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)。
 > 2026-09-23 per-host recording Phase 7：新增 SS25（replay／export audit）與 SS26（metrics textfile）；candidate `31f5c23` 對 `phr-store` 實跑 SS24／SS26 probe PASS、第二次 apply `changed=0`，並以 root（非 auditor）觸發 replay 確認 `recording_replayed` denied audit event，見 [`docs/evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md`](../evidence/pilot-access-gateway/2026-09-23-phase7-read-audit-export-metrics.md)。
 
+目前有效的測試狀態、candidate revision、target 與未完成範圍，見
+[session-store ingest evidence](../evidence/session-store-ingest/LATEST.md)。
+
 ## 1. 目標系統
 
 | 項目 | 值 |
@@ -52,7 +55,7 @@
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
 | SS01 | config | config `KnownFields(true)`，未知欄位 fail — 由 `cmd/pilot-session-store` 的 `TestLoadConfigRejectsForbiddenFields` 涵蓋，非單一 shell 指令 | 0 | true |
-| SS02 | ingest | 原生服務 active，systemd MainPID 持有 deployed ingest.listen_addr 的每個 listener；讀取 deployed tls_cert_file 的單一 DNS SAN（設定的 FQDN），以 FreeIPA CA 與 hostname 驗證連到本機的 TLS，且 API 回應 4xx/5xx。其他服務即使用可信憑證回應也不得通過 | 0 | python3 /usr/local/libexec/pilot-session-store-health.py --config /etc/pilot/session-store.yaml |
+| SS02 | ingest | 原生服務 active，systemd MainPID 持有 deployed ingest.listen_addr 的每個 listener；以 root-owned session-store-fqdn 記錄的設定 FQDN 為預期身分（不從受測憑證自行選 SAN），以 FreeIPA CA 與 hostname 驗證連到本機的 TLS，且 API 回應 4xx/5xx。其他服務即使用可信憑證回應也不得通過 | 0 | python3 /usr/local/libexec/pilot-session-store-health.py --config /etc/pilot/session-store.yaml --fqdn-file /etc/pilot/session-store-fqdn |
 | SS03 | ingest auth | ingest API 只接受有效的 per-session PIT1 token（per-host recording spec §16/§21.2）；缺少、格式錯誤、簽章錯誤、過期、kid 不符（含舊式靜態 bearer）一律 401 — `cmd/pilot-session-store` 的 `TestIngestAPIRejectsInvalidSessionToken` 涵蓋，需要第二個未授權的 client，非單一 host 指令 | 0 | true |
 | SS04 | 權限分離 | ingest signing key 與 PIT1 token 完全沒有 read/replay 能力（不同 listener，read API 從不載入 signing key）— 結構性不存在，非單一 host 指令 | 0 | true |
 | SS05 | read socket | read/replay API 僅 Unix socket 存在 | 0 | test -S /run/pilot-session-store/session-store.sock |
@@ -114,7 +117,7 @@
 ## 5. Gotcha 記錄
 
 - **預設 ingest port 改為 18443**，避開同機 Wazuh dashboard 的 8443。舊安裝若未明確固定 port，重新 apply 會改到 18443；必須同步協調每台 Gateway 的 `pilot_access_gateway_recording_session_store_url`，session-store apply 不會自動改寫 Gateway URL。需要維持既有 8443 endpoint 時，明確設定 `pilot_session_store_ingest_port: 8443`，且確認該主機沒有其他角色使用它。
-- **preflight 不會保留 socket**：apply 在修改帳號、IPA、秘密或設定之前，拒絕已被其他 owner 佔用的 port；啟動後仍要檢查 active/MainPID、listener ownership 與 TLS，處理檢查後才發生的搶占。`NRestarts` 是累計診斷資訊，不要求歷史值為零。SS02 的 helper 讀取 apply 產生的 scalar ingest 設定格式與憑證 SAN，並非通用 YAML parser；無法解析時會拒絕，不能假裝通過。
+- **preflight 不會保留 socket**：apply 在修改帳號、IPA、秘密或設定之前，拒絕已被其他 owner 佔用的 port；啟動後仍要檢查 active/MainPID、listener ownership 與 TLS，處理檢查後才發生的搶占。`NRestarts` 是累計診斷資訊，不要求歷史值為零。SS02 的 helper 讀取 apply 產生的 scalar ingest 設定格式與獨立的 root-owned FQDN sidecar，並非通用 YAML parser；無法解析時會拒絕，不能假裝通過。
 
 - **read socket 不能沿用 Gateway/Directory 共用的 `/run/pilot`**：Gateway/Directory 的 socket 是透過 systemd `.socket` unit 的 `SocketUser`/`SocketGroup`/`SocketMode` 取得決定性權限；`pilot-session-store` 的 read API 是 Go process 自己直接 `net.Listen("unix", ...)`，沒有 socket activation。如果沿用共用的 `/run/pilot`（可能已經被 Gateway/Directory 的某個 unit 用**它們自己的** User/Group 建立過），這個 process 可能連 bind 都會因為目錄權限被拒絕。改用專屬的 `RuntimeDirectory=pilot-session-store` + `UMask=0007` + service unit 的 `Group=role-pilot-session-auditor` 三者搭配，才能讓 auditor group 成員真的連得上這個 socket（Unix domain socket 的 `connect()` 需要對 socket 檔案有 write 權限，不是只要 read/search）。
 - **`ipa-getcert request` 的 argv 陷阱**：沿用 `playbooks/apply/tasks/internal-endpoint-cert-request.yml` 已經踩過的坑——一定要用 `argv:`（list）不能用 free-form 字串（`-C` 的值含空白會被 shlex 截斷）；`-o`/`-O` 是單一 `user:group` 字串，不是分開的 group flag；`-w` 會同步等到憑證核發完成，不需要另外寫 poll-until-issued 迴圈。

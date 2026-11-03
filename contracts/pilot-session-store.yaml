@@ -58,7 +58,7 @@ lifecycle:
 traceability:
   mode: mapped
   rows:
-    "docs/verification/pilot-session-store.md#SS02": {tags: [SS_service], reason: "active native MainPID owns configured listener; strict local TLS against configured certificate DNS identity and FreeIPA CA"}
+    "docs/verification/pilot-session-store.md#SS02": {tags: [SS_service], reason: "active native MainPID owns configured listener; strict local TLS against configured expected FQDN identity and FreeIPA CA"}
     "docs/verification/pilot-session-store.md#SS05": {tags: [SS_service], reason: "read/replay socket existence probe"}
     "docs/verification/pilot-session-store.md#SS17": {tags: [SS_storage], reason: "no task in this playbook ever writes recording state anywhere except the declared state dir — this check just confirms that structural placement on a live host"}
     "docs/verification/pilot-session-store.md#SS24": {tags: [SS24], reason: "signing key install task (0400, store user) plus the task removing the former static bearer token file"}

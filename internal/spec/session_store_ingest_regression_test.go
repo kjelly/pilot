@@ -35,7 +35,7 @@ func TestSessionStorePortContract(t *testing.T) {
 			t.Errorf("unexpected row contract: %+v", row)
 		}
 		if row.ID == "SS02" {
-			want := "python3 /usr/local/libexec/pilot-session-store-health.py --config /etc/pilot/session-store.yaml"
+			want := "python3 /usr/local/libexec/pilot-session-store-health.py --config /etc/pilot/session-store.yaml --fqdn-file /etc/pilot/session-store-fqdn"
 			if row.Command != want {
 				t.Errorf("SS02 must check deployed endpoint: %q", row.Command)
 			}
@@ -100,6 +100,31 @@ func TestSessionStorePortContract(t *testing.T) {
 	if !seen {
 		t.Fatal("missing before-mutation port preflight")
 	}
+	var sidecar, health map[string]any
+	for _, item := range plays[0]["tasks"].([]any) {
+		task := item.(map[string]any)
+		if copy, ok := task["ansible.builtin.copy"].(map[string]any); ok && copy["dest"] == "/etc/pilot/session-store-fqdn" {
+			sidecar = task
+		}
+		if command, ok := task["ansible.builtin.command"].(map[string]any); ok && strings.Contains(fmt.Sprint(command["argv"]), "pilot-session-store-health.py") {
+			health = task
+		}
+	}
+	if sidecar == nil || health == nil {
+		t.Fatal("missing configured identity sidecar or health reader")
+	}
+	copy := sidecar["ansible.builtin.copy"].(map[string]any)
+	if copy["owner"] != "root" || copy["group"] != "root" || copy["mode"] != "0644" || copy["content"] != "{{ session_store_effective_fqdn }}\n" {
+		t.Errorf("identity must be authoritative root-owned configured FQDN: %v", copy)
+	}
+	for _, tag := range append(health["tags"].([]any), "SS_config") {
+		if !strings.Contains(fmt.Sprint(sidecar["tags"]), fmt.Sprint(tag)) {
+			t.Errorf("sidecar missing reader/config selector %s", tag)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(health["ansible.builtin.command"]), "--fqdn {{ session_store_effective_fqdn }}") {
+		t.Error("apply health must use the configured TLS identity")
+	}
 }
 
 // This harness uses a real TLS listener, curl and kernel socket ownership.
@@ -117,7 +142,7 @@ func TestSessionStoreIngestHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(77), Subject: pkix.Name{CommonName: "configured.store.test"}, DNSNames: []string{"configured.store.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(77), Subject: pkix.Name{CommonName: "configured.store.test"}, DNSNames: []string{"configured.store.test", "alternate.store.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
@@ -165,10 +190,48 @@ func TestSessionStoreIngestHealth(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
-	args := []string{"--config", config, "--ca-file", certFile}
+	args := []string{"--config", config, "--ca-file", certFile, "--fqdn", "configured.store.test"}
 	setState(os.Getpid(), "active")
 	if out, err := run(args...); err != nil {
 		t.Fatalf("configured identity/nondefault port: %v\n%s", err, out)
+	}
+	fqdnFile := filepath.Join(dir, "session-store-fqdn")
+	if err := os.WriteFile(fqdnFile, []byte("alternate.store.test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fileArgs := []string{"--config", config, "--ca-file", certFile, "--fqdn-file", fqdnFile}
+	if out, err := run(fileArgs...); err != nil {
+		t.Fatalf("configured sidecar/multi-SAN matching identity: %v %s", err, out)
+	}
+	wrongIdentityArgs := []string{"--config", config, "--ca-file", certFile, "--fqdn", "expected.store.test"}
+	if out, err := run(wrongIdentityArgs...); err == nil || !strings.Contains(out, "curl rc=60") || !strings.Contains(out, "expected.store.test") {
+		t.Fatalf("trusted wrong SAN accepted/wrong reason (explicit): %v %s", err, out)
+	}
+	if err := os.WriteFile(fqdnFile, []byte("expected.store.test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(fileArgs...); err == nil || !strings.Contains(out, "curl rc=60") || !strings.Contains(out, "expected.store.test") {
+		t.Fatalf("trusted wrong SAN accepted/wrong reason (sidecar): %v %s", err, out)
+	}
+	for _, value := range []string{"", "bad name.test\n", "https://store.test\n", " configured.store.test\n", "store.test\nsecond.test\n"} {
+		if err := os.WriteFile(fqdnFile, []byte(value), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := run(fileArgs...); err == nil || !strings.Contains(out, "invalid configured ingest FQDN") {
+			t.Fatalf("malformed sidecar accepted/wrong reason %q: %v %s", value, err, out)
+		}
+	}
+	if err := os.Remove(fqdnFile); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(fileArgs...); err == nil || !strings.Contains(out, fqdnFile) {
+		t.Fatalf("missing sidecar accepted/wrong reason: %v %s", err, out)
+	}
+	if out, err := run("--config", config); err == nil || !strings.Contains(out, "requires exactly one") {
+		t.Fatalf("missing identity argument accepted/wrong reason: %v %s", err, out)
+	}
+	if out, err := run(append(args, "--fqdn-file", fqdnFile)...); err == nil || !strings.Contains(out, "not allowed with argument") {
+		t.Fatalf("ambiguous identity arguments accepted/wrong reason: %v %s", err, out)
 	}
 	if out, err := run("--port", port); err != nil {
 		t.Fatalf("healthy self reapply preflight: %v\n%s", err, out)
@@ -223,7 +286,7 @@ func TestSessionStoreIngestHealth(t *testing.T) {
 		t.Fatalf("stopped service accepted/wrong reason: %v %s", err, out)
 	}
 	setState(os.Getpid(), "active")
-	if out, err := run("--config", filepath.Join(dir, "missing.yaml")); err == nil || !strings.Contains(out, "missing.yaml") {
+	if out, err := run("--config", filepath.Join(dir, "missing.yaml"), "--fqdn", "configured.store.test"); err == nil || !strings.Contains(out, "missing.yaml") {
 		t.Fatalf("missing config accepted/wrong reason: %v %s", err, out)
 	}
 	wrongCA := *tmpl
@@ -237,7 +300,7 @@ func TestSessionStoreIngestHealth(t *testing.T) {
 	if err := os.WriteFile(wrongCAFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wrongDER}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := run("--config", config, "--ca-file", wrongCAFile); err == nil || !strings.Contains(out, "curl rc=60") {
+	if out, err := run("--config", config, "--ca-file", wrongCAFile, "--fqdn", "configured.store.test"); err == nil || !strings.Contains(out, "curl rc=60") {
 		t.Fatalf("wrong CA accepted/wrong reason: %v %s", err, out)
 	}
 	// Mutation control: removing just the ownership predicate makes the
