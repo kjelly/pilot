@@ -22,8 +22,13 @@ func TestRegression_WazuhCredentialBearingTasksSuppressOutputAndDiff(t *testing.
 			"ROLLBACK — restore the previous files with their original metadata",
 			"ROLLBACK — validate the restored rsyslog configuration",
 		},
-		"tasks/wazuh-alert-forward.yml":  {"Wazuh: inspect the actual container logs mount"},
-		"audit-log-forwarding-apply.yml": {"ROLLBACK — validate the restored rsyslog configuration"},
+		"tasks/wazuh-alert-forward.yml": {"Wazuh: inspect the actual container logs mount"},
+		"audit-log-forwarding-apply.yml": {
+			"Step 7: Capture current-run forward config bytes",
+			"Step 7: Keep the existing forward config for rollback",
+			"ROLLBACK — restore the previous siem forward config",
+			"ROLLBACK — validate the restored rsyslog configuration",
+		},
 		"tasks/rsyslog-relp-tls.yml": {
 			"RELP: snapshot existing TLS files for rollback",
 			"RELP: retain sender module declarations for rollback",

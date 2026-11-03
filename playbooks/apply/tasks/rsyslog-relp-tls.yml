@@ -1,5 +1,8 @@
 ---
-# Runs inside the caller's block/rescue. Reset every per-include register;
+# Runs inside the caller's block/rescue. Sender mode can mutate both
+# 09-pilot-omrelp.conf and 99-siem-forward.conf; a caller that also owns 99
+# must capture its own baseline before including this helper.
+# Reset every per-include register;
 # a receiver and a sender may share a host in the same Ansible process.
 - name: "RELP: inspect the private directory without following symlinks"
   ansible.builtin.stat:
