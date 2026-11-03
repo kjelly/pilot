@@ -11,16 +11,16 @@ import (
 
 func TestFreeIPAProvider_InterruptedRetirementRequiresJournalReceipt(t *testing.T) {
 	const fqdn = "retired.ipa.pilot.internal"
-	for _, observation := range []string{"SSH_RETIREMENT=pending", "SSH_RETIREMENT=settled", "", "SSH_RETIREMENT=unknown"} {
+	for _, observation := range []string{"pending", "settled", "", "unknown"} {
 		t.Run(observation, func(t *testing.T) {
 			exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
 				if queryKind(args) == "host_object" {
 					return &ansible.Result{Stdout: "HOST_INSPECT[" + fqdn + "]: ipa: ERROR: " + fqdn + ": host not found"}, nil
 				}
-				if !hasArgs(args, []string{"-e", `{"pilot_decommission_target_alias":"client-old"}`}) {
+				if queryControl(args, "pilot_decommission_target_alias") != "client-old" {
 					t.Fatalf("query lost persisted inventory alias: %v", args)
 				}
-				return &ansible.Result{Stdout: "HOST_INSPECT[" + fqdn + "]: " + observation}, nil
+				return &ansible.Result{Stdout: retirementReply(args, observation)}, nil
 			}}
 			p := NewFreeIPAClientProvider(FreeIPAClientProviderConfig{Executor: exec})
 			step, err := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge,
@@ -29,8 +29,8 @@ func TestFreeIPAProvider_InterruptedRetirementRequiresJournalReceipt(t *testing.
 				t.Fatal(err)
 			}
 			converged, err := step.Inspect(context.Background())
-			wantError := observation == "" || strings.HasSuffix(observation, "unknown")
-			if (err != nil) != wantError || converged != (observation == "SSH_RETIREMENT=settled") {
+			wantError := observation == "" || observation == "unknown"
+			if (err != nil) != wantError || converged != (observation == "settled") {
 				t.Fatalf("Inspect = (%v, %v), observation %q", converged, err, observation)
 			}
 			if len(exec.calls) != 2 {
@@ -42,7 +42,7 @@ func TestFreeIPAProvider_InterruptedRetirementRequiresJournalReceipt(t *testing.
 
 func TestFreeIPAProvider_RetirementAliasSurvivesPlanSerialization(t *testing.T) {
 	p, _ := testProvider(t, func(args []string) (*ansible.Result, error) {
-		if queryKind(args) == "host_object" && !hasArgs(args, []string{"-e", "pilot_decommission_target_fqdn=web1.ipa.pilot.internal"}) {
+		if queryKind(args) == "host_object" && queryControl(args, "pilot_decommission_target_fqdn") != "web1.ipa.pilot.internal" {
 			t.Fatalf("Plan queried transport alias instead of actual inventory FQDN: %v", args)
 		}
 		return &ansible.Result{Stdout: hostShowClean}, nil
@@ -86,10 +86,10 @@ func TestFreeIPAProvider_OldRetirementPlanNeedsTrustedAlias(t *testing.T) {
 				if queryKind(args) == "host_object" {
 					return &ansible.Result{Stdout: "HOST_INSPECT[retired.ipa.test]: host not found"}, nil
 				}
-				if !hasArgs(args, []string{"-e", `{"pilot_decommission_target_alias":"original-transport"}`}) {
+				if queryControl(args, "pilot_decommission_target_alias") != "original-transport" {
 					t.Fatalf("recovery did not bind trusted original alias: %v", args)
 				}
-				return &ansible.Result{Stdout: "HOST_INSPECT[retired.ipa.test]: SSH_RETIREMENT=pending"}, nil
+				return &ansible.Result{Stdout: retirementReply(args, "pending")}, nil
 			}}})
 		step, err := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "retired.ipa.test"})
 		if err != nil {

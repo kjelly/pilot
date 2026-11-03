@@ -3593,7 +3593,7 @@
 
         - name: "Print durable SSH retirement inspection for external tooling (read-only)"
           ansible.builtin.debug:
-            msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: SSH_RETIREMENT={{ 'settled' if (freeipa_decom_query_retirement.stdout | from_json).settled else 'pending' }}"
+            msg: "PILOT_SSH_RETIREMENT_V1:{{ (freeipa_decom_query_retirement.stdout | from_json).observation | to_json | b64encode }}"
           when: pilot_decommission_query | default('') == 'ssh_retirement'
           tags: [freeipa_host_absent_inspect]
 

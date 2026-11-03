@@ -135,7 +135,10 @@ def update(state, action, data):
                    and r["stage"] == data["stage"]]
         settled = bool(matches) and all(
             not any(p["host"] == r["alias"] for p in work(state)) for r in matches)
-        return {"settled": settled, "retirements": matches}
+        return {"settled": settled, "retirements": matches, "observation": {
+            "schema_version": 1, "kind": "ssh_retirement",
+            "fqdn": data["fqdn"].lower(), "alias": data.get("alias", ""),
+            "stage": data["stage"], "status": "settled" if settled else "pending"}}
     if action == "plan":
         return {"work": work(state), "retirements": retirement_plan(state, data)}
     if action == "retire":

@@ -2,6 +2,8 @@ package providers
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -34,6 +36,9 @@ func (f *fakeAnsibleExecutor) Run(_ context.Context, args ...string) (*ansible.R
 }
 
 func argsContain(args []string, substr string) bool {
+	if key, value, ok := strings.Cut(substr, "="); ok && strings.HasPrefix(key, "pilot_decommission_") {
+		return strings.Contains(queryControl(args, key), value)
+	}
 	for _, a := range args {
 		if strings.Contains(a, substr) {
 			return true
@@ -43,12 +48,32 @@ func argsContain(args []string, substr string) bool {
 }
 
 func queryKind(args []string) string {
+	return queryControl(args, "pilot_decommission_query")
+}
+
+func queryControl(args []string, key string) string {
+	var value string
 	for _, a := range args {
-		if strings.HasPrefix(a, "pilot_decommission_query=") {
-			return strings.TrimPrefix(a, "pilot_decommission_query=")
+		if text, ok := strings.CutPrefix(a, key+"="); ok {
+			value = text
+		}
+		var binding map[string]string
+		if json.Unmarshal([]byte(a), &binding) == nil {
+			if text, ok := binding[key]; ok {
+				value = text
+			}
 		}
 	}
-	return ""
+	return value
+}
+
+func retirementReply(args []string, status string) string {
+	observation := sshRetirementObservation{SchemaVersion: 1, Kind: "ssh_retirement",
+		FQDN:  strings.ToLower(queryControl(args, "pilot_decommission_target_fqdn")),
+		Alias: queryControl(args, "pilot_decommission_target_alias"),
+		Stage: queryControl(args, "pilot_decommission_retirement_stage"), Status: status}
+	raw, _ := json.Marshal(observation)
+	return "PILOT_SSH_RETIREMENT_V1:" + base64.StdEncoding.EncodeToString(raw)
 }
 
 // These fixtures mirror the REAL combined HOST_INSPECT text
@@ -108,11 +133,7 @@ func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error))
 		// Retirement-specific tests below use the executor directly so missing,
 		// pending and erroneous observations cannot acquire this default.
 		if queryKind(args) == "ssh_retirement" {
-			for _, arg := range args {
-				if fqdn, ok := strings.CutPrefix(arg, "pilot_decommission_target_fqdn="); ok {
-					return &ansible.Result{Stdout: "HOST_INSPECT[" + fqdn + "]: SSH_RETIREMENT=settled"}, nil
-				}
-			}
+			return &ansible.Result{Stdout: retirementReply(args, "settled")}, nil
 		}
 		res, err := fn(args)
 		if err == nil && res != nil && queryKind(args) != "" && !hostInspectMarkerPattern.MatchString(res.Stdout) {
@@ -121,11 +142,7 @@ func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error))
 			if strings.TrimSpace(body) == "" {
 				body = "Number of entries returned 0"
 			}
-			for _, arg := range args {
-				if fqdn, ok := strings.CutPrefix(arg, "pilot_decommission_target_fqdn="); ok {
-					copy.Stdout = "HOST_INSPECT[" + fqdn + "]: " + body
-				}
-			}
+			copy.Stdout = "HOST_INSPECT[" + queryControl(args, "pilot_decommission_target_fqdn") + "]: " + body
 			res = &copy
 		}
 		return res, err

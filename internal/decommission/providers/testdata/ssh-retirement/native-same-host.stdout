@@ -1,0 +1,9 @@
+TASK [Print live host inspection for external tooling (read-only)] *************
+ok: [i226-ipa] => (item=retired.ipa.pilot.internal) => {
+    "msg": "HOST_INSPECT[retired.ipa.pilot.internal]:  ipa: ERROR: retired.ipa.pilot.internal: host not found ------------------\n0 services matched\n------------------\n----------------------------\nNumber of entries returned 0\n---------------------------- "
+}
+
+TASK [Print durable SSH retirement inspection for external tooling (read-only)] ***
+ok: [i226-ipa] => {
+    "msg": "HOST_INSPECT[retired.ipa.pilot.internal]: SSH_RETIREMENT=pending"
+}

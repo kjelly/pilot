@@ -543,14 +543,7 @@ func (p *FreeIPAClientProvider) retirementSettled(ctx context.Context, fqdn, ali
 	if err != nil {
 		return false, err
 	}
-	observation := strings.TrimSpace(inspectionFor(res.Stdout, fqdn))
-	if observation == "SSH_RETIREMENT=settled" {
-		return true, nil
-	}
-	if observation == "SSH_RETIREMENT=pending" {
-		return false, nil
-	}
-	return false, fmt.Errorf("unrecognized SSH retirement observation for %s", fqdn)
+	return retirementObservation(res.Stdout, fqdn, alias, p.retirementStage())
 }
 
 func (p *FreeIPAClientProvider) retirementStage() string {
@@ -822,19 +815,17 @@ func (p *FreeIPAClientProvider) queryWithAlias(ctx context.Context, kind, fqdn, 
 		args = append(args, "-i", p.cfg.ServerInventory)
 	}
 	args = append(args, "--tags", "freeipa_host_absent_inspect")
-	args = append(args, "-e", "pilot_decommission_query="+kind)
-	args = append(args, "-e", "pilot_decommission_target_fqdn="+fqdn)
-	if kind == "ssh_retirement" {
-		args = append(args, "-e", "pilot_decommission_retirement_stage="+p.retirementStage())
-	}
 	args = append(args, p.cfg.ExtraArgs...)
-	if alias != "" {
-		binding, err := json.Marshal(map[string]string{"pilot_decommission_target_alias": alias})
-		if err != nil {
-			return nil, err
-		}
-		args = append(args, "-e", string(binding))
+	// These are provider-owned controls. One final extra-vars map must win
+	// over both inline settings and @vars files supplied by the caller.
+	binding, err := json.Marshal(map[string]string{
+		"pilot_decommission_query": kind, "pilot_decommission_target_fqdn": fqdn,
+		"pilot_decommission_target_alias": alias, "pilot_decommission_retirement_stage": p.retirementStage(),
+	})
+	if err != nil {
+		return nil, err
 	}
+	args = append(args, "-e", string(binding))
 	// No stage: this read-only query also runs during `plan`, which takes
 	// no stage confirmation, and freeipa-identity-apply.yml skips its group
 	// cross-check when freeipa_host_absent_inspect is the only tag.
@@ -854,6 +845,12 @@ func (p *FreeIPAClientProvider) queryWithAlias(ctx context.Context, kind, fqdn, 
 	// #105).
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("freeipa-client %s query for %s: ansible-playbook exited %d: %s", kind, fqdn, res.ExitCode, ansibleFailureDetail(res))
+	}
+	if kind == "ssh_retirement" {
+		if _, err := retirementObservation(res.Stdout, fqdn, alias, p.retirementStage()); err != nil {
+			return nil, err
+		}
+		return res, nil
 	}
 	// Ansible also exits zero when no server matches its inventory pattern.
 	// Only this target's explicit observation can prove anything about it;
