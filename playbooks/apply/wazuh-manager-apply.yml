@@ -77,6 +77,18 @@
     # clients cannot avoid using.
     wazuh_dashboard_host_port: 8443
   pre_tasks:
+    - name: "Gate: common and legacy Wazuh release inputs agree"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (wazuh_version | default('') | length == 0)
+            or (wazuh_docker_version | default('') | length == 0)
+            or wazuh_version == wazuh_docker_version
+          - wazuh_upgrade | default(false) | string | lower in ['true', 'false']
+          - wazuh_recover | default(false) | string | lower in ['true', 'false']
+        fail_msg: "Wazuh version inputs conflict, or wazuh_upgrade is not a boolean"
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -136,7 +148,7 @@
       ansible.builtin.set_fact:
         # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
         siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
-        wazuh_docker_version: "{{ wazuh_docker_version | default('4.14.1') }}"
+        wazuh_docker_version: "{{ wazuh_docker_version | default(wazuh_version | default('4.14.1', true), true) }}"
       tags: [always]
 
     # Auto-fallback for the common single-inventory case: if the caller left
@@ -175,7 +187,83 @@
       # mandatory check-mode gate.
       failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
+      tags: [always]
+    - name: "Install the root-owned Wazuh transaction coordinator"
+      ansible.builtin.copy:
+        src: files/wazuh-transaction.py
+        dest: /usr/local/sbin/pilot-wazuh-transaction
+        owner: root
+        group: root
+        mode: "0700"
+      tags: [always]
+
+    - name: "Reset this play's selected manager replacement plan"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_install_planned: false
+      tags: [always]
+
   tasks:
+    - name: "Mark this run's selected Wazuh manager installation plan"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_install_planned: true
+      tags: [C1, C2, C3]
+
+    - name: "Inspect compatibility or execute the explicitly authorized central upgrade"
+      ansible.builtin.script:
+        cmd: >-
+          files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
+          --legacy {{ wazuh_docker_version | quote }}
+          {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool)
+               and pilot_wazuh_manager_install_planned is defined
+               and pilot_wazuh_manager_install_planned) else '' }}
+          {{ '--preview' if ansible_check_mode else '' }}
+          {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
+        executable: python3
+      register: wazuh_central_transaction
+      changed_when: >-
+        not ansible_check_mode and
+        (wazuh_central_transaction.stdout | from_json).changed | bool
+      check_mode: false
+      when: not ansible_check_mode or docker_pre.rc == 0
+      tags: [always]
+      no_log: true
+
+    - name: "Record whether the central runtime probe was legitimately deferred"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_preview_fresh: >-
+          {{ ansible_check_mode and
+             ((wazuh_central_transaction is skipped) or
+              ((wazuh_central_transaction.stdout | default('{}') | from_json).fresh | default(false))
+              or ((wazuh_central_transaction.stdout | default('{}') | from_json).planned_upgrade | default(false))) }}
+      tags: [always]
+
+    - name: "Gate: a fresh central stack requires selected container installation tasks"
+      ansible.builtin.assert:
+        that:
+          - pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned
+        fail_msg: "Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected"
+      when:
+        - not (wazuh_central_transaction is skipped)
+        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
+      tags: [always]
+
+    - name: "Retain the active Compose directory after a controlled patch upgrade"
+      ansible.builtin.set_fact:
+        wazuh_single_node_dir: "{{ (wazuh_central_transaction.stdout | from_json).directory }}"
+      when:
+        - not ansible_check_mode
+        - (wazuh_central_transaction.stdout | from_json).directory is defined
+      tags: [always]
+
+    - name: "Finish the version-only transaction after verified upgrade or recovery"
+      ansible.builtin.meta: end_host
+      when:
+        - not ansible_check_mode
+        - >-
+          ((wazuh_central_transaction.stdout | from_json).changed | bool)
+          or (wazuh_recover | default(false) | bool)
+      tags: [always]
+
     - name: "Step 0: Report whether SIEM forwarding is enabled this run"
       ansible.builtin.debug:
         msg: >-
@@ -202,7 +290,9 @@
         path: "{{ wazuh_docker_root }}"
         state: directory
         mode: "0755"
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
 
     - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
       tags: [C1, C2, C3]
@@ -210,7 +300,9 @@
         url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
         dest: "{{ wazuh_docker_tarball }}"
         mode: "0644"
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
 
     - name: "Step 4: Unpack the release bundle (spec C1-C3)"
       tags: [C1, C2, C3]
@@ -219,7 +311,9 @@
         dest: "{{ wazuh_docker_root }}"
         remote_src: true
         creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
 
     # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
     # compose file ships `- 443:5601` under the dashboard service, which
@@ -246,7 +340,9 @@
         cmd: docker compose -f generate-indexer-certs.yml run --rm generator
         chdir: "{{ wazuh_single_node_dir }}"
         creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
 
 
     # Steps 6-11 configure/compose-up/health-check the project built above;
@@ -415,3 +511,10 @@
               NOT tear down the compose project or the cert chain (Step
               1-5); consult docs/runbooks/wazuh-manager.md §5 before
               retrying.
+  post_tasks:
+    - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify]
+      changed_when: false
+      when: not ansible_check_mode
+      tags: [C12]

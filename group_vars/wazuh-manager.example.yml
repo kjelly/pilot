@@ -43,3 +43,9 @@ siem_forward_host: ""
 #  audit-log-forwarding group 時,這個值也會用在它的 rsyslog TCP 轉送,而那
 #  個埠必須等於 log-server 的 siem_receiver_tcp_port。
 # wazuh_docker_version: "4.14.1"
+# Optional common release shared with agents; conflicts with an explicitly
+# different wazuh_docker_version are rejected. Existing installations require
+# one-time wazuh_upgrade=true to change release; only 4.14.1 -> 4.14.9 is supported.
+# wazuh_version: "4.14.9"
+# Controlled upgrade stops all three containers and retains a complete cold
+# backup under /var/backups/pilot/wazuh. Normal apply never cleans backups.

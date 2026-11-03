@@ -1,0 +1,124 @@
+---
+# Only entered for an explicitly authorized existing enrolled-agent upgrade.
+# The durable owner journal reserves the resource across Ansible subprocesses;
+# it is not a claim that an individual task's flock spans the whole play.
+- name: "Allocate this agent transaction's unique owner"
+  ansible.builtin.command:
+    argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+  register: wazuh_agent_owner_result
+  changed_when: false
+
+- name: "Retain the transaction owner and reset recovery authority"
+  ansible.builtin.set_fact:
+    wazuh_agent_transaction_owner: "{{ wazuh_agent_owner_result.stdout }}"
+    wazuh_agent_transaction_reserved: false
+
+- name: "Stage the exact signed old and new Debian agent packages before downtime"
+  ansible.builtin.include_tasks: apt-package-install.yml
+  vars:
+    pilot_apt_packages: [wazuh-agent]
+    pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_stage_version} }}"
+    pilot_apt_stage_only: true
+    pilot_apt_policy: tolerant
+    pilot_apt_component: wazuh-fim-stage
+    pilot_apt_required_sources:
+      - {id: pilot-wazuh, class: pilot, source_file: /etc/apt/sources.list.d/wazuh.list}
+  loop: "{{ ([wazuh_agent_version_plan.installed] if wazuh_agent_version_plan.installed else []) + [wazuh_agent_version_plan.package] }}"
+  loop_control:
+    loop_var: wazuh_agent_stage_version
+  when: ansible_os_family == 'Debian'
+
+- name: "Create root-only RPM package staging directory"
+  ansible.builtin.file:
+    path: /var/backups/pilot/wazuh/rpm-stage
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: ansible_os_family == 'RedHat'
+
+- name: "Stage the exact signed old and new RPM agent packages before downtime"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['timeout', '--kill-after=30', '900', 'dnf', '-y', '--disableexcludes=wazuh',
+          '--setopt=gpgcheck=1', '--setopt=localpkg_gpgcheck=1',
+          'reinstall' if wazuh_agent_stage_version == wazuh_agent_version_plan.installed else 'install',
+          '--downloadonly', '--downloaddir=/var/backups/pilot/wazuh/rpm-stage',
+          'wazuh-agent-' + wazuh_agent_stage_version + '.x86_64'] }}
+  loop: "{{ ([wazuh_agent_version_plan.installed] if wazuh_agent_version_plan.installed else []) + [wazuh_agent_version_plan.package] }}"
+  loop_control:
+    loop_var: wazuh_agent_stage_version
+  changed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: "Reserve, cold-backup, replace and verify the agent transaction"
+  block:
+    - name: "Reserve the agent only after exact artifacts and capacity have been verified"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-reserve, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+        stdin: >-
+          {{ wazuh_agent_version_plan | combine({'manager_host': wazuh_manager_probe_host
+               if (wazuh_enrollment_enabled | bool) else ''}) | to_json }}
+      changed_when: false
+      no_log: true
+
+    - name: "Grant this run recovery ownership"
+      ansible.builtin.set_fact:
+        wazuh_agent_transaction_reserved: true
+
+    - name: "Stop the agent and verify its cold state backup before replacement"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-backup, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+      changed_when: false
+      no_log: true
+
+    - name: "Authorize replacement only for the verified backup and owner"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-install, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+      changed_when: false
+      no_log: true
+
+    - name: "Install the frozen Debian target through the shared APT framework"
+      ansible.builtin.include_tasks: apt-package-install.yml
+      vars:
+        pilot_apt_packages: [wazuh-agent]
+        pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_version_plan.package} }}"
+        pilot_apt_policy_rc_d: 101
+        pilot_apt_component: wazuh-fim-upgrade
+        pilot_apt_required_sources:
+          - {id: pilot-wazuh, class: pilot, source_file: /etc/apt/sources.list.d/wazuh.list}
+      when: ansible_os_family == 'Debian'
+
+    - name: "Install the exact signed RPM target"
+      ansible.builtin.dnf:
+        name: "wazuh-agent-{{ wazuh_agent_version_plan.package }}.x86_64"
+        state: present
+        disable_excludes: wazuh
+        disable_gpg_check: false
+      when: ansible_os_family == 'RedHat'
+
+    - name: "Commit the version pin while cold-backup recovery still owns it"
+      ansible.builtin.include_tasks: wazuh-agent-pin.yml
+
+    - name: "Restore prior agent service availability while retaining recovery authority"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-activate, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+      changed_when: false
+      no_log: true
+
+  rescue:
+    - name: "Recover this run's owned agent transaction"
+      ansible.builtin.include_tasks:
+        file: wazuh-agent-recover.yml
+        apply:
+          tags: [always]
+      when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+      tags: [always]
+
+    - name: "Surface the failed agent transaction after verified recovery"
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh agent transaction failed. Inspect the preceding failure and the
+          private retained transaction under /var/backups/pilot/wazuh. A recovery
+          task failure preserves the journal and must be resolved explicitly.
+      tags: [always]

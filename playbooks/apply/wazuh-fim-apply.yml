@@ -88,10 +88,50 @@
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
+    - name: "Gate: explicit agent recovery needs its exact owner and cannot run in check mode"
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - wazuh_recovery_owner is match('^[a-f0-9]{32}$')
+        fail_msg: "Agent recovery requires its durable owner token and a real authorized run"
+      when: wazuh_recovery_owner | default('') | length > 0
+      tags: [always]
+
+    - name: "Install the coordinator for explicit interrupted-agent recovery"
+      ansible.builtin.copy:
+        src: files/wazuh-transaction.py
+        dest: /usr/local/sbin/pilot-wazuh-transaction
+        owner: root
+        group: root
+        mode: "0700"
+      when: wazuh_recovery_owner | default('') | length > 0
+      tags: [always]
+
+    - name: "Select the explicit durable recovery owner without stale per-play facts"
+      ansible.builtin.set_fact:
+        wazuh_agent_transaction_owner: "{{ wazuh_recovery_owner }}"
+      when: wazuh_recovery_owner | default('') | length > 0
+      tags: [always]
+
+    - name: "Use the sanctioned owned-agent recovery path"
+      ansible.builtin.include_tasks:
+        file: tasks/wazuh-agent-recover.yml
+        apply:
+          tags: [always]
+      when: wazuh_recovery_owner | default('') | length > 0
+      tags: [always]
+
+    - name: "End this host after explicit interrupted-agent recovery"
+      ansible.builtin.meta: end_host
+      when: wazuh_recovery_owner | default('') | length > 0
+      tags: [always]
+
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
         wazuh_fim_directories: "{{ wazuh_fim_directories | default(['/etc', '/boot']) }}"
         wazuh_repo_channel: "{{ wazuh_repo_channel | default('4.x') }}"
+        wazuh_agent_transaction_reserved: false
+        pilot_wazuh_agent_install_selected: false
       tags: [always]
 
     # Auto-fallback for the common single-inventory case: if the caller left
@@ -113,6 +153,120 @@
         (wazuh_manager_host | default('') | length == 0)
         and (groups.get('wazuh-manager', []) | length > 0)
       tags: [always]
+
+    - name: "Gate: Wazuh upgrade authorization must be a boolean"
+      ansible.builtin.assert:
+        that:
+          - wazuh_upgrade | default(false) | string | lower in ['true', 'false']
+          - ansible_architecture == 'x86_64'
+          - >-
+            (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
+            or (ansible_distribution == 'AlmaLinux' and ansible_distribution_major_version == '9')
+        fail_msg: "Wazuh version transactions support Ubuntu 24.04 amd64 or AlmaLinux 9 x86_64"
+      tags: [always]
+
+    - name: "Resolve the exact inventory manager used for native version observation"
+      ansible.builtin.set_fact:
+        wazuh_manager_probe_host: >-
+          {{ wazuh_manager_inventory_host | default(
+               (groups.get('wazuh-manager', []) | first)
+               if groups.get('wazuh-manager', []) | length == 1 else '', true) }}
+      tags: [always]
+
+    - name: "Gate: enrollment endpoint maps to exactly one inventory manager"
+      ansible.builtin.assert:
+        that:
+          - wazuh_manager_probe_host in hostvars
+          - >-
+            wazuh_manager_host in [wazuh_manager_probe_host,
+              hostvars[wazuh_manager_probe_host].ansible_host | default(wazuh_manager_probe_host)]
+        fail_msg: "Set wazuh_manager_inventory_host to the exact inventory host matching wazuh_manager_host"
+      when: wazuh_enrollment_enabled | bool
+      tags: [always]
+
+    - name: "Observe the manager's effective native Wazuh version before any agent mutation"
+      ansible.builtin.script:
+        cmd: files/wazuh-transaction.py manager-version
+        executable: python3
+      delegate_to: "{{ wazuh_manager_probe_host }}"
+      register: wazuh_observed_manager
+      changed_when: false
+      check_mode: false
+      when:
+        - wazuh_enrollment_enabled | bool
+        - >-
+          not (ansible_check_mode and
+            hostvars[wazuh_manager_probe_host].pilot_wazuh_manager_install_planned | default(false) | bool
+            and hostvars[wazuh_manager_probe_host].pilot_wazuh_manager_preview_fresh | default(false) | bool)
+      tags: [always]
+
+    - name: "Gate: native manager version is known"
+      ansible.builtin.assert:
+        that:
+          - (wazuh_observed_manager.stdout | from_json).version is match('^4[.]14[.][0-9]+$')
+        fail_msg: "Unknown effective Wazuh manager version; refusing agent mutation"
+      when:
+        - wazuh_enrollment_enabled | bool
+        - not (wazuh_observed_manager is skipped)
+      tags: [always]
+
+    - name: "Resolve the observed manager version or explicitly deferred fresh preview"
+      ansible.builtin.set_fact:
+        wazuh_observed_manager_version: >-
+          {{ (wazuh_observed_manager.stdout | from_json).version
+             if not (wazuh_observed_manager is skipped) else '' }}
+      tags: [always]
+
+    - name: "Check installed and requested agent compatibility against the observed manager"
+      ansible.builtin.script:
+        cmd: >-
+          files/wazuh-transaction.py agent-check --family {{ ansible_os_family | quote }}
+          --manager {{ wazuh_observed_manager_version | quote }}
+          --version {{ wazuh_version | default('') | quote }}
+          {{ '--upgrade' if (wazuh_upgrade | default(false) | bool) else '' }}
+        executable: python3
+      register: wazuh_agent_version_check
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Retain the frozen exact agent package plan"
+      ansible.builtin.set_fact:
+        wazuh_agent_version_plan: "{{ wazuh_agent_version_check.stdout | from_json }}"
+      tags: [always]
+
+    - name: "Mark this run's selected exact agent package installation"
+      ansible.builtin.set_fact:
+        pilot_wazuh_agent_install_selected: true
+      tags: [C1, C2]
+
+    - name: "Gate: a fresh agent requires selected package installation tasks"
+      ansible.builtin.assert:
+        that:
+          - >-
+            not wazuh_agent_version_plan.install or
+            (pilot_wazuh_agent_install_selected is defined and pilot_wazuh_agent_install_selected)
+        fail_msg: "Fresh Wazuh agent tasks require C1/C2 package installation to be selected"
+      when: not ansible_check_mode
+      tags: [always]
+
+    - name: "Install the root-owned Wazuh transaction coordinator"
+      ansible.builtin.copy:
+        src: files/wazuh-transaction.py
+        dest: /usr/local/sbin/pilot-wazuh-transaction
+        owner: root
+        group: root
+        mode: "0700"
+      tags: [C1, C2]
+
+    - name: "Install the shared exact Debian artifact verifier for transaction preflight"
+      ansible.builtin.copy:
+        src: files/apt-exact-stage.py
+        dest: /usr/local/sbin/apt-exact-stage.py
+        owner: root
+        group: root
+        mode: "0700"
+      tags: [C1, C2]
   tasks:
     - name: "Step 0: Report whether manager enrollment is enabled this run"
       ansible.builtin.debug:
@@ -172,14 +326,14 @@
     # wazuh-agent available") rather than merely simulating the install.
     # Deferred to the real apply, same pattern as seaweedfs-s3-apply.yml's
     # C5/C6/C7 guards.
-    - name: "Step 4: Install wazuh-agent + auditd (Debian apt; spec C1, C2)"
+    - name: "Step 4: Install auditd (Debian apt; spec C2)"
       tags: [C1, C2]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
           tags: [C1, C2]
       vars:
-        pilot_apt_packages: [wazuh-agent, auditd]
+        pilot_apt_packages: [auditd]
         pilot_apt_policy: tolerant
         pilot_apt_component: wazuh-fim
         pilot_apt_required_sources:
@@ -192,10 +346,10 @@
         - ansible_os_family == 'Debian'
         - not ansible_check_mode
 
-    - name: "Step 4: Install wazuh-agent + auditd (RedHat yum; spec C1, C2)"
+    - name: "Step 4: Install audit provider (RedHat dnf; spec C2)"
       tags: [C1, C2]
       ansible.builtin.dnf:
-        name: [wazuh-agent, audit]
+        name: [audit]
         state: present
         update_cache: "{{ (wazuh_yum_repo | default({})) is changed }}"
       register: dnf_wazuh_agent
@@ -204,6 +358,54 @@
       when:
         - ansible_os_family == 'RedHat'
         - not ansible_check_mode
+
+    - name: "Step 4a: Install a fresh exact Debian agent through the sanctioned APT framework"
+      ansible.builtin.include_tasks:
+        file: tasks/apt-package-install.yml
+        apply:
+          tags: [C1, C2]
+      vars:
+        pilot_apt_packages: [wazuh-agent]
+        pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_version_plan.package} }}"
+        pilot_apt_policy_rc_d: 101
+        pilot_apt_component: wazuh-fim
+        pilot_apt_required_sources:
+          - {id: pilot-wazuh, class: pilot, source_file: /etc/apt/sources.list.d/wazuh.list}
+      tags: [C1, C2]
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'Debian'
+        - wazuh_agent_version_plan.install
+
+    - name: "Step 4a: Install a fresh exact signed RPM agent"
+      ansible.builtin.dnf:
+        name: "wazuh-agent-{{ wazuh_agent_version_plan.package }}.x86_64"
+        state: present
+        disable_excludes: wazuh
+        disable_gpg_check: false
+      tags: [C1, C2]
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+        - wazuh_agent_version_plan.install
+
+    - name: "Step 4a: Explicit enrolled-agent upgrade under a durable transaction (spec C1)"
+      ansible.builtin.include_tasks:
+        file: tasks/wazuh-agent-transaction.yml
+        apply:
+          tags: [C1, C2]
+      tags: [C1, C2]
+      when:
+        - not ansible_check_mode
+        - wazuh_agent_version_plan.change
+
+    - name: "Step 4b: Prevent unattended agent version drift (spec C1)"
+      ansible.builtin.include_tasks:
+        file: tasks/wazuh-agent-pin.yml
+        apply:
+          tags: [C1]
+      when: not ansible_check_mode
+      tags: [C1]
 
     # Steps 5-11 configure/enroll/start the agent installed above; none of
     # that state exists on a fresh host when Step 4 was skipped in check
@@ -318,7 +520,64 @@
             or (wazuh_address_result | default({})) is changed
             or (wazuh_agent_auth_result is defined and wazuh_agent_auth_result is changed)
 
+        - name: "Step 11b: Inspect native agent version and enrollment after all selected operations"
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-runtime, --family, "{{ ansible_os_family }}"]
+          register: wazuh_agent_final_runtime
+          changed_when: false
+          when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+          no_log: true
+
+        - name: "Step 11c: Controlled upgrades require native agent availability"
+          ansible.builtin.assert:
+            that:
+              - (wazuh_agent_final_runtime.stdout | from_json).active
+            fail_msg: "Controlled Wazuh agent upgrade did not produce an active agent"
+          when:
+            - wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+            - wazuh_agent_version_plan.change
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+
+        - name: "Step 11d: Manager must observe the exact active agent identity and version before commit"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py verify-agent
+              --agent-id {{ (wazuh_agent_final_runtime.stdout | from_json).id | quote }}
+              --agent-name {{ (wazuh_agent_final_runtime.stdout | from_json).name | quote }}
+              --version {{ (wazuh_agent_final_runtime.stdout | from_json).version | quote }}
+            executable: python3
+          delegate_to: "{{ wazuh_manager_probe_host }}"
+          register: wazuh_agent_final_registry
+          changed_when: false
+          until: wazuh_agent_final_registry is succeeded
+          retries: 12
+          delay: 5
+          when:
+            - wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+            - wazuh_enrollment_enabled | bool
+            - (wazuh_agent_final_runtime.stdout | from_json).active
+            - (wazuh_agent_final_runtime.stdout | from_json).id is defined
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+          no_log: true
+
+        - name: "Step 11e: Commit only after selected configuration, enrollment and native verification"
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-commit, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner | default('') }}"]
+          changed_when: false
+          when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+          no_log: true
+
       rescue:
+        - name: "ROLLBACK — recover the owned version transaction including original configuration"
+          ansible.builtin.include_tasks:
+            file: tasks/wazuh-agent-recover.yml
+            apply:
+              tags: [always]
+          when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
+          tags: [always]
+
         - name: "ROLLBACK — remove the FIM whodata managed block"
           tags: [always]
           ansible.builtin.blockinfile:
@@ -326,6 +585,7 @@
             marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-fim-apply.yml FIM whodata) -->"
             block: ""
             state: absent
+          when: wazuh_agent_transaction_reserved is not defined or not (wazuh_agent_transaction_reserved | bool)
 
         - name: "ROLLBACK — remove the /etc/hosts pin"
           tags: [always]
@@ -333,12 +593,14 @@
             path: /etc/hosts
             regexp: '\s{{ wazuh_manager_alias }}$'
             state: absent
+          when: wazuh_agent_transaction_reserved is not defined or not (wazuh_agent_transaction_reserved | bool)
 
         - name: "ROLLBACK — restart wazuh-agent with the FIM block removed"
           tags: [always]
           ansible.builtin.systemd:
             name: wazuh-agent
             state: restarted
+          when: wazuh_agent_transaction_reserved is not defined or not (wazuh_agent_transaction_reserved | bool)
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]

@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-fim（Wazuh agent：檔案完整性監控 FIM + auditd who-data）
 
-> 版本：v1.2
+> 版本：v1.3
 > 對齊規範：pilot 通用 config-only 服務規範；註冊目標為
 > `docs/verification/wazuh-manager.md`（Wazuh 中央伺服器），兩份 spec 搭配構成
 > 一組 Shape 3（agent+server）；`wazuh-manager.md` 再選填轉送至
@@ -27,6 +27,8 @@
 | `wazuh_manager_host` | 中央 Wazuh manager（`wazuh-manager` 角色）的 IP 或 FQDN；套用時會被 pin 進 `/etc/hosts` 的 `wazuh-manager` 別名，並用於 agent 註冊（`agent-auth`） | 否 | 空字串（不註冊） |
 | `wazuh_fim_directories` | FIM whodata 監控的目錄清單（list）；**可依主機覆寫**，讓不同主機監控不同路徑（例：web 主機加 `/var/www`，DB 主機加 `/etc/mysql`） | 否 | `["/etc", "/boot"]` |
 | `wazuh_repo_channel` | `packages.wazuh.com` apt repo 版本 channel | 否 | `4.x` |
+| `wazuh_version` | 選填共同 release；新安裝固定該版本，既有升級另需單次授權 | 否 | 未設定（保留相容既有 agent；新安裝採觀察到的 manager release，無 manager 時 4.14.1） |
+| `wazuh_manager_inventory_host` | 與 enrollment endpoint 精確對應、可 SSH 探測原生版本的 inventory host | 否 | inventory `wazuh-manager` group 唯一 host |
 
 > **`wazuh_manager_host` 選填**：跟 `audit-log-forwarding.md` 的 `siem_forward_host`
 > 同一個設計理由——manager 不一定先於 agent 存在。未提供時，apply 仍會安裝
@@ -59,6 +61,25 @@
 > 機制本身確實有生效」。
 
 ## 2. Checklist
+
+### 版本與受控升級驗收契約（Issue #244）
+
+manager 的有效版本是相容性上限；repository 的最新版本不是部署目標。
+有 manager 時，套用前必須從 inventory 中明確對應的 manager 主機讀取有效版本；
+探測錯誤、模糊對應或已安裝 agent 較新，都必須在設定、註冊與重啟之前拒絕。
+一般套用保留相容的既有 agent；新安裝固定完整套件版本。
+共同目標 `wazuh_version` 選填；升級另需單次 `wazuh_upgrade=true` 授權。
+本次限 Ubuntu 24.04 amd64 / AlmaLinux 9 x86_64、4.14.x agent，
+升級目標為 4.14.9-1，禁止自動降級。
+
+先備妥可重裝的舊套件，再停止 agent 並冷備份 `/var/ossec`、enrollment key、
+設定與服務狀態；備份未驗證不得替換套件。失敗需恢復原套件、資料與服務，
+確認原 identity；恢復失敗不可報成功。未完成的持久交易阻止一般套用。
+root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
+升級期間 agent 暫停收送事件。新增交易驗收尚待 candidate 的 target evidence；
+原 C1–C9 的成功不代表版本交易已被驗證。
+持久升級交易只接受已安裝且已 enrolled 的 agent；新安裝維持一般 exact-version
+安裝與既有 enrollment retry 契約，不建立升級 journal，也不宣稱提供 fresh rollback。
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|

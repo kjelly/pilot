@@ -11,6 +11,12 @@
 #
 # Interface (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §14):
 #   pilot_apt_packages            : list[str], required
+#   pilot_apt_versions            : optional {package: exact Debian version}
+#   pilot_apt_stage_only          : download/reinstall only; never install
+#   pilot_apt_allow_downgrade     : default false; recovery must opt in
+#   pilot_apt_policy_rc_d         : optional service-start policy during install
+#   pilot_apt_recovery_artifact   : retained .deb from an owned recovering agent
+#                                  manifest; never downloads or trusts caller hashes
 #   pilot_apt_component            : str, required (evidence/log label only)
 #   pilot_apt_policy               : tolerant|strict|offline, default tolerant
 #   pilot_apt_required_sources     : list of
@@ -52,6 +58,10 @@
       - pilot_apt_packages | length > 0
       - pilot_apt_component is defined
       - pilot_apt_component | length > 0
+      - (pilot_apt_versions | default({})) is mapping
+      - (pilot_apt_versions | default({})).keys() | difference(pilot_apt_packages) | length == 0
+      - not (pilot_apt_stage_only | default(false) | bool) or (pilot_apt_policy | default('tolerant')) != 'offline'
+      - not (pilot_apt_stage_only | default(false) | bool) or (pilot_apt_packages | difference((pilot_apt_versions | default({})).keys()) | length == 0)
       - (pilot_apt_policy | default('tolerant')) in ['tolerant', 'strict', 'offline']
       - (pilot_apt_required_sources | default([]) | selectattr('class', 'equalto', 'pilot') | list
          | rejectattr('source_file', 'defined') | list | length) == 0
@@ -78,6 +88,29 @@
     _pilot_apt_stale_metadata: false
     _pilot_apt_stale_unrecovered: false
     pilot_apt_download_probe_result: {}
+    _pilot_apt_missing: []
+    _pilot_apt_versions: "{{ pilot_apt_versions | default({}) }}"
+    _pilot_apt_stage_only: "{{ pilot_apt_stage_only | default(false) | bool }}"
+    _pilot_apt_has_candidate: "{{ pilot_apt_recovery_artifact is defined }}"
+    _pilot_apt_mode: "{{ 'retained_recovery' if pilot_apt_recovery_artifact is defined else 'cache_hit' }}"
+
+- name: "APT package install ({{ pilot_apt_component }}) — verify private recovery authority and artifact"
+  ansible.builtin.script:
+    cmd: >-
+      ../files/apt-exact-stage.py --recovery {{ pilot_apt_recovery_artifact | quote }}
+      {{ _pilot_apt_versions | to_json | quote }}
+    executable: python3
+  changed_when: false
+  when: pilot_apt_recovery_artifact is defined
+
+- name: "APT package install ({{ pilot_apt_component }}) — validate exact package versions"
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$')
+      - item.value is string
+      - item.value is match('^[0-9][a-zA-Z0-9.+:~_-]*$')
+    fail_msg: "apt-package-install: invalid exact package/version requirement"
+  loop: "{{ _pilot_apt_versions | dict2items }}"
 
 - name: "APT package install ({{ pilot_apt_component }}) — read installed-package facts"
   ansible.builtin.package_facts:
@@ -86,7 +119,20 @@
 
 - name: "APT package install ({{ pilot_apt_component }}) — compute missing packages"
   ansible.builtin.set_fact:
-    _pilot_apt_missing: "{{ pilot_apt_packages | reject('in', ansible_facts.packages.keys() | list) | list }}"
+    _pilot_apt_missing: >-
+      {{ _pilot_apt_missing +
+         [item + ('=' + _pilot_apt_versions[item] if item in _pilot_apt_versions else '')] }}
+  loop: "{{ pilot_apt_packages }}"
+  vars:
+    _pilot_apt_base_name: "{{ item.split(':')[0] }}"
+    _pilot_apt_matching_installed: >-
+      {{ (ansible_facts.packages.get(_pilot_apt_base_name, [])
+          | selectattr('arch', 'equalto', item.split(':')[1]) | list)
+         if ':' in item else ansible_facts.packages.get(_pilot_apt_base_name, []) }}
+  when: >-
+    _pilot_apt_stage_only or _pilot_apt_matching_installed | length == 0
+    or (item in _pilot_apt_versions and
+        _pilot_apt_versions[item] not in (_pilot_apt_matching_installed | map(attribute='version') | list))
 
 - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS(already_present)"
   ansible.builtin.debug:
@@ -100,22 +146,26 @@
   block:
     - name: "APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)"
       ansible.builtin.command:
-        cmd: "apt-cache policy {{ item }}"
+        argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
       loop: "{{ _pilot_apt_missing }}"
       loop_control:
         label: "{{ item }}"
       register: _pilot_apt_cache_check
       changed_when: false
+      failed_when: false
       check_mode: false
+      when: pilot_apt_recovery_artifact is not defined
 
     - name: "APT package install ({{ pilot_apt_component }}) — determine candidate availability"
       ansible.builtin.set_fact:
         _pilot_apt_has_candidate: >-
           {{ (_pilot_apt_cache_check.results
+              | selectattr('rc', 'equalto', 0)
               | rejectattr('stdout', 'search', 'Candidate: \(none\)')
               | selectattr('stdout', 'truthy')
               | list | length) == (_pilot_apt_missing | length) }}
         _pilot_apt_mode: cache_hit
+      when: pilot_apt_recovery_artifact is not defined
 
     # Stale-metadata probe (spec.md §5 tolerant: "install 顯示 metadata
     # stale → global refresh → retry install"); see apt-download-probe.yml.
@@ -126,6 +176,7 @@
       when:
         - _pilot_apt_has_candidate
         - _pilot_apt_policy != 'offline'
+        - pilot_apt_recovery_artifact is not defined
 
     - name: "APT package install ({{ pilot_apt_component }}) — cached candidate download 404 means stale metadata (take the refresh path)"
       ansible.builtin.set_fact:
@@ -166,18 +217,20 @@
 
         - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)"
           ansible.builtin.command:
-            cmd: "apt-cache policy {{ item }}"
+            argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
           loop: "{{ _pilot_apt_missing }}"
           loop_control:
             label: "{{ item }}"
           register: _pilot_apt_cache_check
           changed_when: false
+          failed_when: false
           check_mode: false
 
         - name: "APT package install ({{ pilot_apt_component }}) — determine post-global-refresh candidate"
           ansible.builtin.set_fact:
             _pilot_apt_has_candidate: >-
               {{ (_pilot_apt_cache_check.results
+                  | selectattr('rc', 'equalto', 0)
                   | rejectattr('stdout', 'search', 'Candidate: \(none\)')
                   | selectattr('stdout', 'truthy')
                   | list | length) == (_pilot_apt_missing | length) }}
@@ -235,12 +288,13 @@
 
             - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)"
               ansible.builtin.command:
-                cmd: "apt-cache policy {{ item }}"
+                argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
               loop: "{{ _pilot_apt_missing }}"
               loop_control:
                 label: "{{ item }}"
               register: _pilot_apt_cache_check
               changed_when: false
+              failed_when: false
               check_mode: false
               when: pilot_apt_scoped_refresh_result.required_sources_healthy
 
@@ -249,6 +303,7 @@
                 _pilot_apt_has_candidate: >-
                   {{ pilot_apt_scoped_refresh_result.required_sources_healthy and
                      (_pilot_apt_cache_check.results
+                      | selectattr('rc', 'equalto', 0)
                       | rejectattr('stdout', 'search', 'Candidate: \(none\)')
                       | selectattr('stdout', 'truthy')
                       | list | length) == (_pilot_apt_missing | length) }}
@@ -289,10 +344,28 @@
             - not _pilot_apt_has_candidate
             - not (_pilot_apt_policy == 'tolerant')
 
+    - name: "APT package install ({{ pilot_apt_component }}) — stage-only requires a successful authenticated download"
+      ansible.builtin.assert:
+        that:
+          - (pilot_apt_download_probe_result.rc | default(-1)) == 0
+        fail_msg: "apt-package-install: staging failed; no package mutation was attempted"
+      when: _pilot_apt_stage_only
+
+    - name: "APT package install ({{ pilot_apt_component }}) — verify staged exact package identity and metadata SHA256"
+      ansible.builtin.script:
+        cmd: "../files/apt-exact-stage.py {{ _pilot_apt_versions | to_json | quote }}"
+        executable: python3
+      register: pilot_apt_staged_packages
+      changed_when: false
+      when: _pilot_apt_stage_only
+
     - name: "APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)"
       ansible.builtin.apt:
-        name: "{{ _pilot_apt_missing }}"
+        name: "{{ _pilot_apt_missing if pilot_apt_recovery_artifact is not defined else omit }}"
+        deb: "{{ pilot_apt_recovery_artifact | default(omit) }}"
         state: present
+        allow_downgrade: "{{ pilot_apt_allow_downgrade | default(false) | bool }}"
+        policy_rc_d: "{{ pilot_apt_policy_rc_d | default(omit) }}"
       environment:
         DEBIAN_FRONTEND: noninteractive
       register: _pilot_apt_install
@@ -301,6 +374,7 @@
         not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
       retries: "{{ pilot_apt_lock_retries | default(6) }}"
       delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+      when: not _pilot_apt_stage_only
 
     - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS"
       ansible.builtin.debug:

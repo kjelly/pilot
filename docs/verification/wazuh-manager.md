@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-manager（Wazuh 中央伺服器：FIM/who-data 告警引擎 + CVE 弱點掃描 + 選填轉送 SIEM，Docker 部署）
 
-> 版本：v2.0
+> 版本：v2.1
 > 對齊規範：pilot 通用 config-only 服務規範；為 `wazuh-fim.md`（agent 端 FIM +
 > auditd who-data）提供中央分析/告警引擎，轉送目標為 `docs/verification/log-server.md`
 > （rsyslog 中央接收端）。三份 spec 搭配構成一組 Shape 3（agent → manager →
@@ -53,6 +53,7 @@
 | `siem_forward_host` | 中央 SIEM（`log-server`）的 IP 或 FQDN；套用時會被 pin 進 `/etc/hosts` 的 `siem-log-server` 別名，供 `<syslog_output>` 使用 | 否 | 空字串（不轉送） |
 | `siem_forward_port` | Wazuh manager 轉送告警的目的埠（UDP，`<syslog_output><port>`） | 否 | `514` |
 | `wazuh_docker_version` | 官方 `wazuh-docker` 發行包版本（GitHub tag `v<版本>`，同時決定三個官方 image 的 tag） | 否 | `4.14.1`（本 spec 實測版本；見 §7） |
+| `wazuh_version` | 選填共同 release；與明示 `wazuh_docker_version` 衝突時拒絕 | 否 | 未設定（沿用既有版本契約） |
 
 > `siem_forward_host` 沿用 `audit-log-forwarding.md` 同一個變數名稱與別名機制
 > （`siem-log-server`）：兩份 spec 轉的都是同一個 SIEM 目的地，統一命名讓一套
@@ -65,7 +66,43 @@
 > 重建容器或重新產生憑證（`<syslog_output>` 注入走官方
 > `/wazuh-config-mount` 機制 + 重啟 manager 容器）。
 
+共同版本輸入 `wazuh_version` 選填，無值時沿用既有 `wazuh_docker_version`
+契約；兩者同時設定且不同時拒絕。`wazuh_upgrade=true`、`wazuh_recover=true`
+是單次操作授權，不是 inventory 預設。
+
 ## 2. Checklist
+
+### 版本與受控升級驗收契約（Issue #244）
+
+manager、indexer、dashboard 的 Wazuh release 必須完全一致（包含 patch）。
+manager 讀取 control info、dashboard 讀取 Wazuh plugin package.json、indexer
+讀取原生 `/usr/share/wazuh-indexer/VERSION.json`；同時檢查官方 image 的不可變
+identity 與發行 provenance，不能拿底層 OpenSearch 版本代替 Wazuh release。
+running 或可變 image tag 不足以證明版本與資料健康。
+既有 `wazuh_docker_version` 預設 4.14.1 不變；共同目標 `wazuh_version` 選填，
+同時指定兩者必須一致。升級另需單次 `wazuh_upgrade=true` 授權；
+本次唯一支援的中央轉換為 4.14.1 → 4.14.9，其餘轉換與降級在停機前拒絕。
+
+交易獨占 inspect、quiesce、backup、switch、verify、rollback 全程。
+停機前先檢查舊版本、目標 images、資料與備份容量。停止三個元件後，
+冷備份全部實際 project persistent volumes、bind mount 設定、憑證、Compose
+設定及原 image identities；驗證備份後才同時切換。保留操作者設定、
+credentials、憑證及 enrollment identity。成功需驗證有效版本、可用性及既有資料。
+失敗時停止新版，恢復原資料與設定，以原 image identities 啟動，並驗證
+舊版可用性及代表性資料。只改回舊 tag 不算恢復，恢復失敗必須明確回報。
+未完成的持久交易阻止一般套用，只能進入明確的同交易 recovery 流程。
+root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
+這是停止整個 single-node stack 的操作；期間中央停止接收與查詢事件。
+新增交易驗收尚待 candidate 的 target evidence；原 C1–C11 不代表交易已驗證。
+
+版本升級 run 保留現有設定，只完成版本交易；欲改 forwarding 等設定，必須另跑
+一般 apply。C12 是不注入事件的目前狀態原生 oracle，不把「曾產生 backup 檔」
+當作回復已成功的證明。首次開發 probe 已在 4.14.1 disposable manager 真跑；正式
+candidate 仍須另驗證 fresh、upgrade、故障回復與 idempotency。canary 以唯一
+synthetic nonce 從原生 analysis socket 注入，必須以 agent `000`、精確 rule
+`5760`（上游 `5716` 的 Failed password 子規則）進入 indexer；不發出真實登入。
+canary 只在明確授權的版本交易與 opt-in fixture 執行，普通 C12 不注入事件。
+canary 涵蓋 analysis → Filebeat → indexer，agent transport 另由 topology 實測。
 
 | ID  | Category  | Check                                                              | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
@@ -80,8 +117,9 @@
 | C9  | functional| 規則引擎可比對出一筆已知規則並判定為需告警（`wazuh-logtest` 灌入一行完整的 sshd 失敗登入 syslog 訊息，不需要真實 agent） | 0 | sh -c 'printf "%s\n" "Jul  6 00:00:00 wazuh-fim sshd[12345]: Failed password for invalid user test from 10.0.0.9 port 12345 ssh2" | docker exec -i single-node-wazuh.manager-1 timeout 15 /var/ossec/bin/wazuh-logtest 2>&1 | grep -qF "Alert to be generated." && echo 0 || echo 1' |
 | C10 | forward   | `/etc/hosts` 已 pin `siem-log-server` 別名                            | 0        | getent hosts siem-log-server >/dev/null 2>&1; echo $? |
 | C11 | forward   | 容器內生效中的 `ossec.conf` 含指向 `siem-log-server` 的 `<syslog_output>` 區塊（證明 host 端設定注入 + 容器重啟後真的生效，不只是 host 檔案改了） | 0 | sh -c 'docker exec single-node-wazuh.manager-1 grep -qE "<server>siem-log-server</server>" /var/ossec/etc/ossec.conf && echo 0 || echo 1' |
+| C12 | functional | 三個原生 Wazuh release 相同、沒有未完成交易、所有 retained agent 版本不超過 manager，且 native daemon / indexer API 健康 | 0 | sh -c '/usr/local/sbin/pilot-wazuh-transaction central-verify >/dev/null && echo 0 || echo 1' |
 
-> C1–C11 全部用**正邏輯 rc**（`; echo $?` 或 `sh -c '... && echo 0 || echo 1'`
+> C1–C12 全部用**正邏輯 rc**（`; echo $?` 或 `sh -c '... && echo 0 || echo 1'`
 > 外殼），讓外層指令恆回 0，避免 ansible ad-hoc 把「沒監聽/沒命中」的合法
 > FAIL 判定結果誤判成 task FAILED 而把 rc 吃掉
 > （見 `verification-spec-template.md` 陷阱 1）。
@@ -128,18 +166,18 @@
 
 - 工具：`go run ./cmd/pilot vm-target verify --name wazuh-manager docs/verification/wazuh-manager.md`
 - 輸出格式：`.verification/wazuh-manager-<UTC>.{ndjson,md}`
-- 預期 row 數：11（C1–C11）
+- 預期 row 數：12（C1–C12）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C11 `status=pass` → **PASS**
+- 全部 C1–C12 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| C10, C11 | 這兩條的前提是套用時提供了 `siem_forward_host`（見 §1.5，選填）。若 log server 尚未存在、套用時未帶這個變數，playbook 會跳過轉送設定，C10/C11 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應只驗證 C1–C9（本機告警引擎 + CVE 掃描），待 log server 就緒、補跑一次 apply 帶上 `siem_forward_host` 後再驗全部 11 條 | 無 log server 的獨立部署 / log server 尚未就緒的過渡期 | 補上 `siem_forward_host` 並重新 apply 後即解除 |
+| C10, C11 | 這兩條的前提是套用時提供了 `siem_forward_host`（見 §1.5，選填）。若 log server 尚未存在、套用時未帶這個變數，playbook 會跳過轉送設定，C10/C11 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應驗證 C1–C9 與 C12（本機告警引擎、CVE、原生版本與 registry），待 log server 就緒、補跑一次 apply 帶上 `siem_forward_host` 後再驗全部 12 條 | 無 log server 的獨立部署 / log server 尚未就緒的過渡期 | 補上 `siem_forward_host` 並重新 apply 後即解除 |
 | — | **磁碟全滿會靜默吃掉所有告警，這是 v1.0 實測 vm-target 踩到的真事故，不是理論風險**：v1.0 第一次實測用了 20GB 磁碟，CVE feed 下載/解壓當下瞬間衝到 100% 磁碟用量，`wazuh-db`/`wazuh-analysisd` 持續報 `SQLite: database or disk is full`，**但服務狀態全程顯示正常**——只有告警安靜地生不出來。Docker 部署下 CVE feed 位於 `wazuh_queue` named volume（`/var/lib/docker/volumes/single-node_wazuh_queue/`），磁碟壓力相同，container `running` 狀態同樣不會反映這種內部寫入失敗。診斷方式：`docker exec single-node-wazuh.manager-1 tail -n 40 /var/ossec/logs/ossec.log` 看 `disk is full` 字樣，或直接 `df -h /`。修法：磁碟給足（§1 的官方建議），這就是為何 §7 SOP 把 vm-target 磁碟從其他 spec 慣用的 20GB 提高到 60GB | 所有環境 | 永久（設計如此的容量規劃提醒，非暫時偏差） |
 | — | **官方 compose 檔的管理者密碼是寫死的出廠預設值**（indexer `admin`/`SecretPassword`、API `wazuh-wui`/`MyS3cr37P450r.*-`、dashboard `kibanaserver`/`kibanaserver`），本 playbook 不改它們——這跟 v1.0（官方安裝腳本隨機產生密碼）是一個**安全性上的退步**，屬 Docker 化的已知取捨：官方變更 indexer 密碼的流程需要 bcrypt hash 進 `internal_users.yml` + 跑 `securityadmin` 重新載入 + 同步改 compose 三處 env，官方文件有完整步驟但不是一個變數就能帶過的事。sandbox/demo 可接受（9200/443/55000 只在實驗網段）；**正式站台上線前必須照官方文件把三組密碼全部改掉**，屬部署後手動加固項目，本 spec 不驗證 | sandbox / demo | 正式站台上線前依官方文件變更全部出廠密碼 |
 | — | `vm.max_map_count=262144` 是 **host 層級** sysctl（官方 indexer 的硬性要求），由 apply playbook 以 `ansible.posix.sysctl` 持久化設定——這是本角色唯一必須碰主機設定的地方，容器本身無法自帶 | 所有環境 | 永久（官方要求，非暫時偏差） |
@@ -162,6 +200,7 @@
 | C9 | 無獨立 apply task（規則引擎的功能性自證，verify 時才觸發 `wazuh-logtest`） | — |
 | C10 | `lineinfile /etc/hosts` pin `siem-log-server` | 必須在 `<syslog_output>` render 之前 |
 | C11 | `blockinfile` 插入 `<syslog_output>` 區塊到 host 端 `config/wazuh_cluster/wazuh_manager.conf`（檔案末端新增一個 `<ossec_config>` 區塊；Wazuh 的 XML parser 允許同一份檔案有多個 `<ossec_config>` 根節點並全部合併，v1.0 已實測——見 `docs/runbooks/wazuh-manager.md` §5）→ **漂移偵測**：`docker exec` 探測容器內生效的 `ossec.conf` 是否含轉送區塊，缺了就 **recreate**（不是 restart）manager 容器並硬斷言收斂 | 只新增管理區塊，不動官方出廠 `wazuh_manager.conf` 的其餘預設設定。**必須 recreate 不能 restart**：官方 image 的 `0-wazuh-init` 在首次開機結尾刪掉 `/var/ossec/data_tmp`，單純 restart 時 init 腳本會因空的 `multigroups` 目錄找不到 `data_tmp` 而 exit 1，永遠跑不到 `mount_files`（config 注入）——vm-target 實測踩到的雷，見 runbook §5 |
+| C12 | root-only coordinator 的 read-only native verification | 普通驗證不注入 canary；版本交易另在 commit 前驗新事件與舊資料，故障時以 cold backup 回復 |
 
 ## 7. SOP
 

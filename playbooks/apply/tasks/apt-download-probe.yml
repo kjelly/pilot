@@ -41,7 +41,11 @@
 
 - name: "APT download probe ({{ pilot_apt_probe_stage }}) — apt-get install --download-only, never installs"
   ansible.builtin.command:
-    argv: "{{ _pilot_apt_probe_argv + _pilot_apt_missing }}"
+    argv: >-
+      {{ _pilot_apt_probe_argv
+         + (['--reinstall'] if (_pilot_apt_stage_only | default(false) | bool) else [])
+         + (['--allow-downgrades'] if (pilot_apt_allow_downgrade | default(false) | bool) else [])
+         + _pilot_apt_missing }}
   vars:
     _pilot_apt_probe_argv:
       - timeout
@@ -51,6 +55,8 @@
       - -y
       - -o
       - DPkg::Lock::Timeout=60
+      - -o
+      - APT::Get::AllowUnauthenticated=false
       - install
       - --download-only
   register: _pilot_apt_download_probe

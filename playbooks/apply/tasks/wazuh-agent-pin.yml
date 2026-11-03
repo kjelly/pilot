@@ -1,0 +1,24 @@
+---
+- name: "Pin the effective Debian agent version and exclude all other versions"
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/pilot-wazuh-agent
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Package: wazuh-agent
+      Pin: version {{ wazuh_agent_version_plan.package }}
+      Pin-Priority: 1000
+
+      Package: wazuh-agent
+      Pin: version *
+      Pin-Priority: -1
+  when: ansible_os_family == 'Debian'
+
+- name: "Exclude agent RPMs from unattended repository updates"
+  ansible.builtin.lineinfile:
+    path: /etc/yum.repos.d/wazuh.repo
+    insertafter: '^\[wazuh\]$'
+    regexp: '^exclude='
+    line: 'exclude=wazuh-agent*'
+  when: ansible_os_family == 'RedHat'
