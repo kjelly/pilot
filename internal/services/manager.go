@@ -59,6 +59,9 @@ func (osCommandRunner) Run(ctx context.Context, dir, name string, args ...string
 
 // ServiceState is the persisted identity and health summary for one profile.
 type ServiceState struct {
+	InstanceID        string       `json:"instance_id,omitempty"`
+	Generation        uint64       `json:"generation,omitempty"`
+	AdoptedFrom       []string     `json:"adopted_from,omitempty"`
 	Profile           string       `json:"profile"`
 	Fingerprint       string       `json:"fingerprint"`
 	Root              string       `json:"root"`
@@ -72,6 +75,8 @@ type ServiceState struct {
 
 // Status is the user-facing service health summary.
 type Status struct {
+	InstanceID  string        `json:"instance_id,omitempty"`
+	Generation  uint64        `json:"generation,omitempty"`
 	Configured  bool          `json:"configured"`
 	Running     bool          `json:"running"`
 	Profile     string        `json:"profile,omitempty"`
@@ -93,6 +98,7 @@ type Manager struct {
 	dataDir string
 	root    string
 	store   *statefile.Store[ServiceState]
+	shared  bool
 	runner  CommandRunner
 	now     func() time.Time
 	client  *http.Client
@@ -103,6 +109,10 @@ type Manager struct {
 func NewManager(dataDir string, runner CommandRunner) (*Manager, error) {
 	if dataDir == "" {
 		return nil, errors.New("services: data directory is required")
+	}
+	dataDir, err := CanonicalDirectory(dataDir)
+	if err != nil {
+		return nil, err
 	}
 	store, err := statefile.New[ServiceState](dataDir, "services.json", serviceStateVersion, "services")
 	if err != nil {
@@ -117,6 +127,11 @@ func NewManager(dataDir string, runner CommandRunner) (*Manager, error) {
 // Up renders and starts the service bundle on bindIP. It is idempotent for an
 // unchanged profile and refuses to silently replace a different profile.
 func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error {
+	unlock, err := m.operation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := profile.Validate(); err != nil {
 		return err
 	}
@@ -125,6 +140,18 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		return err
 	}
 	current, currentErr := m.current()
+	if currentErr != nil {
+		return currentErr
+	}
+	if bindIP == nil || bindIP.IsUnspecified() {
+		return errors.New("services: service bind IP is required")
+	}
+	if current.BindIP != "" && current.BindIP != bindIP.String() {
+		return fmt.Errorf("services: bind endpoint conflict (registered=%s requested=%s); use the existing network", current.BindIP, bindIP)
+	}
+	if current.Root != "" && current.Root != m.root {
+		return fmt.Errorf("services: registered root conflict (%s != %s)", current.Root, m.root)
+	}
 	legacyFingerprint := ""
 	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint {
 		// The OCI registry type is derivable for the built-in profile. Accept
@@ -138,6 +165,43 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	}
 	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint && current.Fingerprint != legacyFingerprint {
 		return fmt.Errorf("services: profile fingerprint mismatch (running=%s requested=%s); purge or use the existing profile", current.Fingerprint, fingerprint)
+	}
+	if m.shared {
+		if err := m.checkComposeOwnership(ctx, profile.Name); err != nil {
+			return err
+		}
+		if current.Root == "" {
+			data, err := hasServiceData(m.root)
+			if err != nil {
+				return err
+			}
+			if data {
+				return errors.New("services: persistent service data appeared without discovery state; restore or adopt its original state before startup")
+			}
+		} else if current.ComposePath != "" {
+			if err := validateLegacyData(current); err != nil {
+				return err
+			}
+		}
+		identity, err := m.claimRoot(current.InstanceID)
+		if err != nil {
+			return err
+		}
+		if current.InstanceID != "" && current.InstanceID != identity {
+			return errors.New("services: physical root identity differs from discovery")
+		}
+		current.InstanceID = identity
+		if current.Generation == 0 {
+			current.Generation = 1
+		}
+		// Reserve identity and compatibility before rendering. A killed
+		// registration reuses its identity without replacing credential files.
+		if current.Fingerprint == "" {
+			current.Root, current.Profile, current.Fingerprint, current.BindIP = m.root, profile.Name, fingerprint, bindIP.String()
+			if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return []ServiceState{current}, nil }); err != nil {
+				return err
+			}
+		}
 	}
 	// A missing state file is not itself evidence that live containers are
 	// stale. Compose can reconcile a clean or externally restored bundle
@@ -222,11 +286,55 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		return fmt.Errorf("services: seed cache resources: %w", err)
 	}
 	seededClient.CAPEM = bundle.Client.CAPEM
+	seededClient.InstanceID, seededClient.Generation = current.InstanceID, current.Generation
 	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: seededClient, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
+	state.InstanceID, state.Generation = current.InstanceID, current.Generation
+	state.AdoptedFrom = current.AdoptedFrom
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
 }
+
+// checkComposeOwnership rejects a colliding global Compose identity before a
+// fresh registry can render credentials or rebind an existing project's mounts.
+func (m *Manager) checkComposeOwnership(ctx context.Context, profile string) error {
+	for _, project := range []struct{ name, dir string }{
+		{"pilot-services-" + profile, m.root},
+		{"pilot-harbor-" + profile, filepath.Join(m.root, "harbor", "installer")},
+	} {
+		out, err := m.runner.Run(ctx, m.dataDir, "docker", "ps", "-a", "--filter", "label=com.docker.compose.project="+project.name, "--format", "{{.ID}}")
+		if err != nil {
+			return fmt.Errorf("services: inspect Compose ownership: %w", err)
+		}
+		if out.ExitCode != 0 {
+			return errors.New("services: cannot inspect Compose ownership; Docker query failed")
+		}
+		for _, id := range strings.Fields(out.Stdout) {
+			if !containerIDRE.MatchString(id) {
+				return errors.New("services: invalid container identity in Docker ownership query")
+			}
+			labels, err := m.runner.Run(ctx, m.dataDir, "docker", "inspect", id, "--format", "{{json .Config.Labels}}")
+			if err != nil {
+				return fmt.Errorf("services: inspect Compose labels: %w", err)
+			}
+			if labels.ExitCode != 0 {
+				return errors.New("services: cannot inspect Compose ownership; container query failed")
+			}
+			var values map[string]string
+			if err := json.Unmarshal([]byte(labels.Stdout), &values); err != nil {
+				return fmt.Errorf("services: decode Compose ownership: %w", err)
+			}
+			workdir, err := CanonicalDirectory(values["com.docker.compose.project.working_dir"])
+			configPath, configErr := CanonicalDirectory(values["com.docker.compose.project.config_files"])
+			if err != nil || configErr != nil || workdir != project.dir || configPath != filepath.Join(project.dir, "docker-compose.yml") || values["com.docker.compose.project"] != project.name {
+				return fmt.Errorf("services: Compose project %s root conflict; existing containers belong to another service directory; use its --services-dir or --services-adopt-from", project.name)
+			}
+		}
+	}
+	return nil
+}
+
+var containerIDRE = regexp.MustCompile(`^[a-fA-F0-9]+$`)
 
 // ensurePulpSettingsAccess repairs the modes of bind-mounted Pulp settings
 // after a container-managed retry or image upgrade. Docker may own those
@@ -295,14 +403,20 @@ func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string
 
 // Status returns persisted state and live Compose status where available.
 func (m *Manager) Status(ctx context.Context) (Status, error) {
+	unlock, err := m.operation()
+	if err != nil {
+		return Status{}, err
+	}
+	defer unlock()
 	state, err := m.current()
 	if err != nil {
 		return Status{}, err
 	}
 	if state.Fingerprint == "" {
-		return Status{}, nil
+		return Status{Root: m.root, InstanceID: state.InstanceID, Generation: state.Generation}, nil
 	}
 	result := Status{Configured: true, Running: state.Running, Profile: state.Profile, Fingerprint: state.Fingerprint, BindIP: state.BindIP, Root: state.Root}
+	result.InstanceID, result.Generation = state.InstanceID, state.Generation
 	if state.ComposePath == "" {
 		return result, nil
 	}
@@ -315,12 +429,26 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 
 // Down stops services and retains all persistent content.
 func (m *Manager) Down(ctx context.Context) error {
+	unlock, err := m.operation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return m.down(ctx)
+}
+
+func (m *Manager) down(ctx context.Context) error {
 	state, err := m.current()
 	if err != nil {
 		return err
 	}
 	if state.ComposePath == "" {
 		return nil
+	}
+	if m.shared {
+		if err := m.checkComposeOwnership(ctx, state.Profile); err != nil {
+			return err
+		}
 	}
 	project := "pilot-services-" + state.Profile
 	if result, err := m.runner.Run(ctx, m.root, "docker", "compose", "-f", state.ComposePath, "-p", project, "down"); err != nil {
@@ -352,7 +480,12 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 	if !confirmed {
 		return errors.New("services: purge requires explicit confirmation")
 	}
-	if err := m.Down(ctx); err != nil {
+	unlock, err := m.operation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := m.down(ctx); err != nil {
 		return err
 	}
 	// Detach the live root first. os.RemoveAll can fail part-way through a
@@ -362,7 +495,13 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 	if err := os.Rename(m.root, staged); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("services: stage purge data: %w", err)
 	}
-	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return nil, nil }); err != nil {
+	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+		if !m.shared || len(states) == 0 {
+			return nil, nil
+		}
+		state := ServiceState{Root: m.root, InstanceID: states[0].InstanceID, Generation: states[0].Generation + 1, AdoptedFrom: states[0].AdoptedFrom}
+		return []ServiceState{state}, nil
+	}); err != nil {
 		return fmt.Errorf("services: clear state after detaching data: %w", err)
 	}
 	if _, err := os.Stat(staged); errors.Is(err, os.ErrNotExist) {
@@ -376,6 +515,11 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 
 // ClientConfig returns the last successful non-secret client contract.
 func (m *Manager) ClientConfig(ctx context.Context) (ClientConfig, error) {
+	unlock, err := m.operation()
+	if err != nil {
+		return ClientConfig{}, err
+	}
+	defer unlock()
 	state, err := m.current()
 	if err != nil {
 		return ClientConfig{}, err
