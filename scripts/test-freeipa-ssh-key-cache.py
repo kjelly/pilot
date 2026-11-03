@@ -177,6 +177,54 @@ class JournalTest(unittest.TestCase):
             cache.update(self.state, "plan", foreign)
         self.assertEqual(["a", "b"], self.state["users"]["alice"]["pending"])
 
+    def test_plan_requires_cleanup_without_old_work_and_only_exempts_exact_settled_receipt(self):
+        data = {"domain": "ipa.test", "stage": "sandbox", "inventory": [],
+                "absent": [{"name": "retired.ipa.test"}],
+                "retirements": [self.retirement()]}
+        self.assertEqual(["b"], cache.update(self.state, "plan", data)["cleanup_required"])
+        self.prepare([key()])
+        self.ack(cache.work(self.state))
+        self.assertEqual(["b"], cache.update(self.state, "plan", data)["cleanup_required"])
+        self.retire()
+        self.assertEqual([], cache.update(self.state, "plan", data)["cleanup_required"])
+        self.state["users"]["alice"]["pending"] = ["b"]
+        self.assertEqual(["b"], cache.update(self.state, "plan", data)["cleanup_required"])
+        self.state["users"]["alice"]["pending"] = []
+        self.state["retired"]["b"]["alias"] = "other"
+        self.assertEqual(["b"], cache.update(self.state, "plan", data)["cleanup_required"])
+        for field, value, error in (("fqdn", "other.ipa.test", "conflicts with durable receipt"),
+                                    ("stage", "prod", "outside authorized stage")):
+            self.state["retired"]["b"] = dict(self.retirement(), **{field: value})
+            with self.assertRaisesRegex(ValueError, error):
+                cache.update(self.state, "plan", data)
+
+    def test_settled_plan_requires_existing_lock_and_file_directory_durability(self):
+        self.retire()
+        data = {"domain": "ipa.test", "stage": "sandbox", "inventory": [],
+                "absent": [{"name": "retired.ipa.test"}],
+                "retirements": [self.retirement()]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.json")
+            Path(path).write_text(json.dumps(self.state))
+            before = Path(path).read_bytes()
+            with self.assertRaises(FileNotFoundError):
+                cache.journal(path, "plan", data)
+            self.assertFalse(Path(path + ".lock").exists())
+            Path(path + ".lock").touch()
+            for fail_at in (1, 2):
+                calls = []
+                def fail_sync(fd):
+                    calls.append(fd)
+                    if len(calls) == fail_at:
+                        raise OSError("injected plan fsync failure")
+                with mock.patch.object(cache.os, "fsync", side_effect=fail_sync):
+                    with self.assertRaisesRegex(OSError, "injected plan fsync failure"):
+                        cache.journal(path, "plan", data)
+                self.assertEqual(fail_at, len(calls))
+                self.assertEqual(before, Path(path).read_bytes())
+            self.assertEqual([], cache.journal(path, "plan", data)["cleanup_required"])
+            self.assertEqual(before, Path(path).read_bytes())
+
     def test_readonly_inspection_and_atomic_retirement_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "missing", "journal.json")

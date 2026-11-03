@@ -45,15 +45,13 @@
     ipa_ssh_cache_retiring_aliases: "{{ (ipa_ssh_cache_preflight.stdout | from_json).retirements | map(attribute='alias') | list }}"
   tags: [always]
 
-- name: "Gate: pending retirement requires the selected central cleanup"
+- name: "Gate: unfinished retirement requires the selected central cleanup"
   ansible.builtin.assert:
     that:
       - ansible_run_tags | intersect(['all', 'tagged', 'identity', 'hosts']) | length > 0
       - ansible_skip_tags | intersect(['identity', 'hosts']) | length == 0
-    fail_msg: "Pending SSH cache target retirement requires identity/hosts cleanup in this selection; recovery remains pending"
-  when: >-
-    (ipa_ssh_cache_preflight.stdout | from_json).work | map(attribute='host') |
-      intersect(ipa_ssh_cache_retiring_aliases) | length > 0
+    fail_msg: "Unfinished SSH cache target retirement requires identity/hosts cleanup in this selection; recovery remains pending"
+  when: (ipa_ssh_cache_preflight.stdout | from_json).cleanup_required | length > 0
   tags: [always]
 
 - name: "Gate: existing pending SSH cache targets exist before mutation"

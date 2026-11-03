@@ -138,6 +138,140 @@ func TestRegression_IdentityRetirementPreflightRuntime(t *testing.T) {
 	}
 }
 
+// Run the real production preflight include with Ansible's actual tag selection.
+// The sentinel proves refusal precedes any managed mutation; journal bytes (or
+// absence) are a separate oracle. Native FreeIPA/SSSD behavior is a VM gate.
+func TestRegression_IdentityRetirementCleanupSelection(t *testing.T) {
+	helper, err := os.ReadFile("../../playbooks/apply/files/freeipa-ssh-key-cache.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := identityTasks(t, []string{retirementPreflight})
+	include := production[0].(map[string]any)["ansible.builtin.include_tasks"].(map[string]any)
+	include["file"], err = filepath.Abs("../../playbooks/apply/tasks/freeipa-ssh-cache-preflight.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"no-journal", "converged", "old-pending", "settled", "receipt-pending"} {
+		for _, selector := range []string{"all", "tagged", "identity", "hosts", "users", "sshkeys", "client-cache", "identity-skip-hosts", "identity-skip-identity"} {
+			t.Run(state+"/"+selector, func(t *testing.T) {
+				dir := t.TempDir()
+				journal := filepath.Join(dir, "journal.json")
+				pending := []string{}
+				if state == "old-pending" || state == "receipt-pending" {
+					pending = []string{"old"}
+				}
+				data := map[string]any{"version": 1, "domain": "ipa.test", "auth_pending": false,
+					"users": map[string]any{"omitted": map[string]any{"keys": []string{}, "epoch": "unchanged", "hosts": []string{"old"}, "pending": pending}}}
+				if state == "settled" || state == "receipt-pending" {
+					data["retired"] = map[string]any{"old": map[string]any{"alias": "old", "fqdn": "retired.ipa.test", "stage": "sandbox",
+						"reason": "approved", "origin": "test-plan", "result": "retired", "discharged": 1, "recorded_at": 1}}
+					// An actual writer creates this sidecar. Completed receipt
+					// exemptions must confirm durability through that same lock.
+					if err := os.WriteFile(journal+".lock", nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				initial, err := json.Marshal(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state != "no-journal" {
+					if err := os.WriteFile(journal, initial, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				vars := map[string]any{"stage": "sandbox", "ipa_domain": "ipa.test", "ipa_ssh_cache_program": string(helper),
+					"ipa_identity_ssh_cache_state_file": journal,
+					"ipa_identity_cache_recovery_tags":  []string{"identity", "users", "passwords", "groups", "hosts", "client-cache", "C9", "C13"},
+					"freeipa_roster":                    map[string]any{"hosts": []any{map[string]any{"name": "retired.ipa.test", "state": "absent"}}}}
+				tasks := []any{map[string]any{"name": "enrolled retiring client", "tags": []string{"always"},
+					"ansible.builtin.add_host": map[string]any{"name": "old", "groups": "freeipa-client", "ipa_client_fqdn": "retired.ipa.test"}}}
+				tasks = append(tasks, production...)
+				marker := filepath.Join(dir, "mutation")
+				tasks = append(tasks, map[string]any{"name": "managed mutation sentinel", "tags": []string{"always"},
+					"ansible.builtin.command": map[string]any{"argv": []string{"touch", marker}}})
+				args := []string{"--tags", selector}
+				if strings.HasPrefix(selector, "identity-skip-") {
+					args = []string{"--tags", "identity", "--skip-tags", strings.TrimPrefix(selector, "identity-skip-")}
+				}
+				result := runGatewayTasks(t, dir, tasks, vars, nil, args...)
+				allowed := state == "settled" || slices.Contains([]string{"all", "tagged", "identity", "hosts"}, selector)
+				_, markerErr := os.Stat(marker)
+				if (markerErr == nil) != allowed {
+					t.Fatalf("retirement cleanup mutation sentinel: allowed=%v stat=%v rc=%d failures=%v", allowed, markerErr, result.rc, result.failures)
+				}
+				if (result.rc == 0) != allowed {
+					t.Fatalf("allowed=%v rc=%d failures=%v\n%s", allowed, result.rc, result.failures, result.raw)
+				}
+				if !allowed && !strings.Contains(fmt.Sprint(result.failures), "Unfinished SSH cache target retirement requires") {
+					t.Fatalf("wrong refusal: %v", result.failures)
+				}
+				got, err := os.ReadFile(journal)
+				if state == "no-journal" {
+					if !os.IsNotExist(err) {
+						t.Fatalf("preflight created journal: %v", err)
+					}
+				} else if err != nil || string(got) != string(initial) {
+					t.Fatalf("preflight changed journal: %v %s", err, got)
+				}
+				if state != "settled" && state != "receipt-pending" {
+					if _, err := os.Stat(journal + ".lock"); !os.IsNotExist(err) {
+						t.Fatalf("preflight created lock: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRegression_IdentityRetirementRepeatedPreflightResetsAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	helper, err := os.ReadFile("../../playbooks/apply/files/freeipa-ssh-key-cache.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := identityTasks(t, []string{retirementPreflight})
+	include := production[0].(map[string]any)["ansible.builtin.include_tasks"].(map[string]any)
+	include["file"], err = filepath.Abs("../../playbooks/apply/tasks/freeipa-ssh-cache-preflight.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := filepath.Join(dir, "settled.json")
+	unfinished := filepath.Join(dir, "unfinished.json")
+	completed := `{"version":1,"domain":"ipa.test","users":{},"retired":{"old":{"alias":"old","fqdn":"retired.ipa.test","stage":"sandbox","reason":"approved","origin":"test-plan"}}}`
+	fresh := `{"version":1,"domain":"ipa.test","users":{}}`
+	for path, body := range map[string]string{settled: completed, unfinished: fresh, settled + ".lock": ""} {
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vars := map[string]any{"stage": "sandbox", "ipa_domain": "ipa.test", "ipa_ssh_cache_program": string(helper),
+		"ipa_identity_ssh_cache_state_file": settled, "ipa_identity_cache_recovery_tags": []string{"identity", "users"},
+		"freeipa_roster":                     map[string]any{"hosts": []any{map[string]any{"name": "retired.ipa.test", "state": "absent"}}},
+		"ipa_identity_ssh_cache_retirements": []any{map[string]any{"alias": "old", "fqdn": "retired.ipa.test", "stage": "sandbox", "reason": "approved", "origin": "test-plan"}}}
+	tasks := append([]any{}, production...)
+	tasks = append(tasks, map[string]any{"name": "next imported identity scope", "tags": []string{"always"},
+		"ansible.builtin.set_fact": map[string]any{"ipa_identity_ssh_cache_state_file": unfinished}})
+	tasks = append(tasks, production...)
+	marker := filepath.Join(dir, "mutation")
+	tasks = append(tasks, map[string]any{"name": "managed mutation sentinel", "tags": []string{"always"},
+		"ansible.builtin.command": map[string]any{"argv": []string{"touch", marker}}})
+	result := runGatewayTasks(t, dir, tasks, vars, nil, "--tags", "users")
+	if result.rc == 0 || !strings.Contains(fmt.Sprint(result.failures), "Unfinished SSH cache target retirement requires") {
+		t.Fatalf("stale completed receipt authorized a later scope: rc=%d failures=%v\n%s", result.rc, result.failures, result.raw)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("mutation sentinel reached: %v", err)
+	}
+	for path, body := range map[string]string{settled: completed, unfinished: fresh} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != body {
+			t.Fatalf("journal changed: %s %v", got, err)
+		}
+	}
+}
+
 func TestRegression_IdentityRetirementRefreshAndFinalReadback(t *testing.T) {
 	tasks := identityTasks(t, []string{"Resolve enrolled SSH key cache targets", sudoRefreshResolve,
 		"Read current SSH obligations after propagation and retirement", "Gate: every SSH key cache pair converged"})

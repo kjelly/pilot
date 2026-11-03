@@ -140,7 +140,18 @@ def update(state, action, data):
             "fqdn": data["fqdn"].lower(), "alias": data.get("alias", ""),
             "stage": data["stage"], "status": "settled" if settled else "pending"}}
     if action == "plan":
-        return {"work": work(state), "retirements": retirement_plan(state, data)}
+        retirements = retirement_plan(state, data)
+        pending = {pair["host"] for pair in work(state)}
+        receipts = state.get("retired", {})
+        # Exclusion from future propagation needs cleanup even when there is
+        # no old work. Only an exact, completed receipt permits partial runs.
+        cleanup_required = [item["alias"] for item in retirements
+                            if item["alias"] in pending
+                            or item["alias"] not in receipts
+                            or any(receipts[item["alias"]].get(k) != item[k]
+                                   for k in ("alias", "fqdn", "stage"))]
+        return {"work": work(state), "retirements": retirements,
+                "cleanup_required": cleanup_required}
     if action == "retire":
         items = data["retirements"]
         retired = state.get("retired", {})
@@ -264,7 +275,14 @@ def journal(path, action, data):
         except FileNotFoundError:
             state = {"version": 1, "domain": data["domain"], "users": {}}
         result = update(state, action, data)
-        if action != "retirement_status" or not result["settled"]:
+        def trusts_receipt(result):
+            if action == "retirement_status":
+                return result["settled"]
+            if action == "plan":
+                return len(result["retirements"]) > len(result["cleanup_required"])
+            return False
+
+        if not trusts_receipt(result):
             return result
         # A visible receipt may come from an interrupted directory fsync.
         # Use the writer's EXISTING sidecar, re-read, and sync that same
@@ -273,7 +291,7 @@ def journal(path, action, data):
             fcntl.flock(lock, fcntl.LOCK_SH)
             with open(path, encoding="utf-8") as stream:
                 result = update(read_state(stream), action, data)
-                if result["settled"]:
+                if trusts_receipt(result):
                     durability_barrier(stream, directory)
                 return result
     os.makedirs(directory, mode=0o700, exist_ok=True)
