@@ -1,0 +1,78 @@
+# Read-only scope validation, before the first managed identity mutation.
+- name: "Reset the SSH cache inventory identity index"
+  ansible.builtin.set_fact:
+    ipa_ssh_cache_inventory: []
+  tags: [always]
+
+- name: "Index actual SSH cache inventory identities"
+  ansible.builtin.set_fact:
+    ipa_ssh_cache_inventory: >-
+      {{ ipa_ssh_cache_inventory + [{'alias': item,
+          'fqdn': hostvars[item].ipa_client_fqdn | default('') | lower,
+          'stage': ('ambiguous' if 'prod' in hostvars[item].group_names and 'staging' in hostvars[item].group_names else
+                    'prod' if 'prod' in hostvars[item].group_names else
+                    'staging' if 'staging' in hostvars[item].group_names else 'sandbox')}] }}
+  loop: "{{ groups.get('all', []) }}"
+  tags: [always]
+
+- name: "Inspect durable SSH work and bind authorized retirements"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ ipa_ssh_cache_program }}"
+      - plan
+      - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
+    stdin: >-
+      {{ {'domain': ipa_domain, 'stage': stage,
+          'inventory': ipa_ssh_cache_inventory,
+          'absent': freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list,
+          'retirements': (ipa_identity_ssh_cache_retirements | default([])) +
+            ([{'alias': pilot_decommission_retiring_alias,
+               'fqdn': pilot_decommission_retiring_fqdn, 'stage': stage,
+               'reason': 'operator-authorized host decommission',
+               'origin': 'pilot-host-decommission'}]
+             if pilot_decommission_retiring_alias | default('') | length > 0 else [])} | to_json }}
+  become: true
+  check_mode: false
+  changed_when: false
+  register: ipa_ssh_cache_preflight
+  tags: [always]
+
+- name: "Resolve authorized retirement aliases"
+  ansible.builtin.set_fact:
+    ipa_ssh_cache_retirements: "{{ (ipa_ssh_cache_preflight.stdout | from_json).retirements }}"
+    ipa_ssh_cache_retiring_aliases: "{{ (ipa_ssh_cache_preflight.stdout | from_json).retirements | map(attribute='alias') | list }}"
+  tags: [always]
+
+- name: "Gate: pending retirement requires the selected central cleanup"
+  ansible.builtin.assert:
+    that:
+      - ansible_run_tags | intersect(['all', 'tagged', 'identity', 'hosts']) | length > 0
+      - ansible_skip_tags | intersect(['identity', 'hosts']) | length == 0
+    fail_msg: "Pending SSH cache target retirement requires identity/hosts cleanup in this selection; recovery remains pending"
+  when: >-
+    (ipa_ssh_cache_preflight.stdout | from_json).work | map(attribute='host') |
+      intersect(ipa_ssh_cache_retiring_aliases) | length > 0
+  tags: [always]
+
+- name: "Gate: existing pending SSH cache targets exist before mutation"
+  ansible.builtin.assert:
+    that: item in hostvars
+    fail_msg: "Pending SSH cache target {{ item }} is absent from this inventory; recovery remains pending"
+  loop: "{{ (ipa_ssh_cache_preflight.stdout | from_json).work | map(attribute='host') | unique | difference(ipa_ssh_cache_retiring_aliases) }}"
+  tags: [always]
+
+- name: "Gate: existing and current SSH cache targets match stage before mutation"
+  ansible.builtin.assert:
+    that:
+      - not ('prod' in hostvars[item].group_names and stage != 'prod')
+      - not ('staging' in hostvars[item].group_names and stage != 'staging')
+      - not (stage in ['staging', 'prod'] and stage not in hostvars[item].group_names)
+    fail_msg: "Pending/current SSH cache target {{ item }} is outside the authorized stage={{ stage }}; recovery remains pending"
+  loop: >-
+    {{ ((ipa_ssh_cache_preflight.stdout | from_json).work | map(attribute='host') | list
+        + groups.get('freeipa-client', []) + groups.get('freeipa-server', [])
+        + groups.get('freeipa-server-replica', []) + [inventory_hostname])
+       | unique | difference(ipa_ssh_cache_retiring_aliases) }}
+  tags: [always]

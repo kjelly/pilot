@@ -59,7 +59,7 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	if _, err := p.Inspect(ctx, InspectInput{HostName: "c1"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, step := range []Step{{Action: ActionFreeIPAClientUninstall, TargetIdentity: "c1"}, {Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal"}} {
+	for _, step := range []Step{{Action: ActionFreeIPAClientUninstall, TargetIdentity: "c1"}, {Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "c1"}}} {
 		ex, err := p.ExecutorForStep(step)
 		if err != nil {
 			t.Fatal(err)
@@ -87,7 +87,7 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	stop := errors.New("prod needs --confirm-prod")
 	exec.calls = nil
 	p.cfg.ServerStageArgs = func() ([]string, error) { return nil, stop }
-	ex, _ := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal"})
+	ex, _ := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "c1"}})
 	if err := ex.Execute(ctx); !errors.Is(err, stop) {
 		t.Fatalf("Execute with a stage error = %v, want it to wrap %v", err, stop)
 	}

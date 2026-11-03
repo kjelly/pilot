@@ -18,7 +18,12 @@ import (
 // and both planning and execution use the production provider implementations.
 type decommissionRosterFixtureRunner struct{ stdout string }
 
-func (r decommissionRosterFixtureRunner) Run(context.Context, ...string) (*ansible.Result, error) {
+func (r decommissionRosterFixtureRunner) Run(_ context.Context, args ...string) (*ansible.Result, error) {
+	for _, arg := range args {
+		if arg == "pilot_decommission_query=ssh_retirement" {
+			return &ansible.Result{Stdout: "HOST_INSPECT[pwc-host2.ipa.pilot.internal]: SSH_RETIREMENT=settled"}, nil
+		}
+	}
 	return &ansible.Result{Stdout: r.stdout}, nil
 }
 

@@ -39,6 +39,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -88,6 +89,11 @@ type ansibleExecutor interface {
 // exactly what it's configured with.
 type FreeIPAClientProviderConfig struct {
 	Executor ansibleExecutor
+	// InventoryAlias is the original plan host key, supplied by the trusted
+	// workspace caller; it recovers pre-retirement-schema persisted steps.
+	InventoryAlias string
+	// RetirementStage is the retiring host's actual inventory environment.
+	RetirementStage string
 
 	ClientInventory string // targets the retiring host for local cleanup
 	ServerInventory string // targets the FreeIPA server for central convergence
@@ -227,9 +233,9 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 			ErrUnknownServicePrincipal, fqdn, strings.Join(unknown, ", "))
 	}
 
-	rosterStepParams := map[string]string(nil)
+	rosterStepParams := map[string]string{"inventory_alias": hostName, "retirement_stage": p.retirementStage()}
 	if p.RosterPathSet(in) {
-		rosterStepParams = map[string]string{"roster_path": in.RosterPath}
+		rosterStepParams["roster_path"] = in.RosterPath
 	}
 
 	return []Step{
@@ -252,7 +258,11 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 	case ActionFreeIPARosterHostAbsent:
 		return &freeipaRosterAbsentStep{provider: p, fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPAIdentityApplyConverge:
-		return &freeipaIdentityConvergeStep{provider: p, fqdn: step.TargetIdentity}, nil
+		alias := firstNonEmpty(step.Params["inventory_alias"], p.cfg.InventoryAlias)
+		if step.Params["retirement_stage"] != "" && step.Params["retirement_stage"] != p.retirementStage() {
+			return nil, fmt.Errorf("freeipa-client: retirement stage changed; re-plan against current inventory")
+		}
+		return &freeipaIdentityConvergeStep{provider: p, fqdn: step.TargetIdentity, alias: alias}, nil
 	default:
 		return nil, fmt.Errorf("freeipa-client: unknown planned step action %q — programming/version-skew error, not a normal runtime condition", step.Action)
 	}
@@ -362,17 +372,24 @@ func validateDecommissionRosterSource(rosterPath string, inventoryPaths ...strin
 type freeipaIdentityConvergeStep struct {
 	provider *FreeIPAClientProvider
 	fqdn     string
+	alias    string
 }
 
 // Inspect reuses the same live host-object query Verify uses: converged
 // means the FreeIPA host object is already absent (e.g. a resume after
 // this step's host-del already ran).
 func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error) {
+	if e.alias == "" {
+		return false, fmt.Errorf("freeipa-client: original inventory alias missing; re-plan retirement or supply an explicit authorized alias/FQDN mapping through identity reconcile")
+	}
 	res, err := e.provider.queryHostObject(ctx, e.fqdn)
 	if err != nil {
 		return false, err
 	}
-	return notFoundPattern.MatchString(inspectionFor(res.Stdout, e.fqdn)), nil
+	if !notFoundPattern.MatchString(inspectionFor(res.Stdout, e.fqdn)) {
+		return false, nil
+	}
+	return e.provider.retirementSettled(ctx, e.fqdn, e.alias)
 }
 
 // Execute runs the real central reconciler (playbooks/apply/freeipa-
@@ -386,6 +403,17 @@ func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
 		args = append(args, "-i", e.provider.cfg.ServerInventory)
 	}
 	args = append(args, e.provider.cfg.ExtraArgs...)
+	if e.alias == "" {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: persisted inventory alias missing; re-plan retirement", e.fqdn)
+	}
+	binding, err := json.Marshal(map[string]string{
+		"pilot_decommission_retiring_alias": e.alias,
+		"pilot_decommission_retiring_fqdn":  e.fqdn,
+	})
+	if err != nil {
+		return err
+	}
+	args = append(args, "-e", string(binding))
 	args, stageErr := withStage(args, e.provider.cfg.ServerStageArgs)
 	if stageErr != nil {
 		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, stageErr)
@@ -489,8 +517,37 @@ func (p *FreeIPAClientProvider) Verify(ctx context.Context, in VerifyInput) ([]V
 			Detail: detail,
 		})
 	}
+	settled, err := p.retirementSettled(ctx, fqdn, firstNonEmpty(in.InventoryAlias, firstNonEmpty(p.cfg.InventoryAlias, in.HostName)))
+	if err != nil {
+		return nil, fmt.Errorf("freeipa-client verify %s: SSH retirement: %w", fqdn, err)
+	}
+	out = append(out, Verification{Provider: FreeIPAClientProviderID,
+		Kind: "ssh_cache_retirement", Identity: fqdn, Status: statusForAbsence(settled),
+		Active: !settled, Detail: "durable retirement receipt and zero retired-host pending pairs"})
 
 	return out, nil
+}
+
+func (p *FreeIPAClientProvider) retirementSettled(ctx context.Context, fqdn, alias string) (bool, error) {
+	if alias == "" {
+		return false, fmt.Errorf("original inventory alias missing for SSH retirement verification; re-plan against the original host identity")
+	}
+	res, err := p.queryWithAlias(ctx, "ssh_retirement", fqdn, alias)
+	if err != nil {
+		return false, err
+	}
+	observation := strings.TrimSpace(inspectionFor(res.Stdout, fqdn))
+	if observation == "SSH_RETIREMENT=settled" {
+		return true, nil
+	}
+	if observation == "SSH_RETIREMENT=pending" {
+		return false, nil
+	}
+	return false, fmt.Errorf("unrecognized SSH retirement observation for %s", fqdn)
+}
+
+func (p *FreeIPAClientProvider) retirementStage() string {
+	return firstNonEmpty(p.cfg.RetirementStage, "sandbox")
 }
 
 // ---- shared live-query plumbing -----------------------------------------
@@ -749,6 +806,10 @@ func (p *FreeIPAClientProvider) queryHostObject(ctx context.Context, fqdn string
 // playbooks/apply/freeipa-identity-apply.yml, tagged so it only runs the
 // relevant read-only lookup (never a mutating task).
 func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*ansible.Result, error) {
+	return p.queryWithAlias(ctx, kind, fqdn, "")
+}
+
+func (p *FreeIPAClientProvider) queryWithAlias(ctx context.Context, kind, fqdn, alias string) (*ansible.Result, error) {
 	args := []string{p.cfg.IdentityApplyPlaybook}
 	if p.cfg.ServerInventory != "" {
 		args = append(args, "-i", p.cfg.ServerInventory)
@@ -756,7 +817,17 @@ func (p *FreeIPAClientProvider) query(ctx context.Context, kind, fqdn string) (*
 	args = append(args, "--tags", "freeipa_host_absent_inspect")
 	args = append(args, "-e", "pilot_decommission_query="+kind)
 	args = append(args, "-e", "pilot_decommission_target_fqdn="+fqdn)
+	if kind == "ssh_retirement" {
+		args = append(args, "-e", "pilot_decommission_retirement_stage="+p.retirementStage())
+	}
 	args = append(args, p.cfg.ExtraArgs...)
+	if alias != "" {
+		binding, err := json.Marshal(map[string]string{"pilot_decommission_target_alias": alias})
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-e", string(binding))
+	}
 	// No stage: this read-only query also runs during `plan`, which takes
 	// no stage confirmation, and freeipa-identity-apply.yml skips its group
 	// cross-check when freeipa_host_absent_inspect is the only tag.

@@ -1,0 +1,19 @@
+---
+# Establish unchanged identity-spec fixtures, then the external synthetic
+# lifecycle roster. Only for fresh disposable targets, before retirement.
+- name: Establish legacy identity verification fixtures
+  ansible.builtin.import_playbook: freeipa-identity-fixtures.yml
+  vars:
+    freeipa_roster_file: null
+
+- name: Establish canonical identity verification fixtures
+  ansible.builtin.import_playbook: freeipa-identity-canonical-fixtures.yml
+
+- name: Establish nested identity verification fixtures
+  ansible.builtin.import_playbook: freeipa-identity-v2-fixtures.yml
+
+- name: Apply the synthetic SSH retirement lifecycle roster
+  ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml
+  vars:
+    target_group: "{{ fixtures_target_group | default('freeipa-server') }}"
+    freeipa_roster_file: "{{ issue226_roster_file }}"

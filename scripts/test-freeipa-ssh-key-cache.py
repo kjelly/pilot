@@ -2,11 +2,14 @@
 """Journal/crash tests. Real SSSD/SSH acceptance is a separate VM gate."""
 import base64
 import copy
+import fcntl
 import importlib.util
+import json
 import os
 from pathlib import Path
 import struct
 import tempfile
+import subprocess
 import unittest
 from unittest import mock
 
@@ -103,6 +106,148 @@ class JournalTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "concurrent"):
             self.settle(first)
         self.assertEqual(before, self.state)
+
+    def retirement(self, **overrides):
+        return dict(alias="b", fqdn="retired.ipa.test", stage="sandbox",
+                    reason="approved permanent retirement", origin="plan-226", **overrides)
+
+    def retire(self, items=None):
+        return cache.update(self.state, "retire", {"domain": "ipa.test",
+            "stage": "sandbox", "retirements": items or [self.retirement()]})
+
+    def test_retirement_exact_omitted_users_and_stable_audit(self):
+        self.settle(self.prepare([key()], ["a", "b", "b-10", "offline"]), True)
+        self.state["users"]["omitted"] = copy.deepcopy(self.state["users"]["alice"])
+        self.state["auth_pending"] = True
+        before = copy.deepcopy(self.state)
+        result = self.retire()
+        self.assertTrue(result["changed"])
+        self.assertEqual(2, result["retired"]["b"]["discharged"])
+        self.assertEqual("retired", result["retired"]["b"]["result"])
+        self.assertTrue(self.state["auth_pending"])
+        for name, entry in self.state["users"].items():
+            self.assertEqual(["a", "b-10", "offline"], entry["pending"])
+            self.assertEqual(before["users"][name]["keys"], entry["keys"])
+            self.assertEqual(before["users"][name]["hosts"], entry["hosts"])
+            self.assertNotEqual(before["users"][name]["epoch"], entry["epoch"])
+        settled = copy.deepcopy(self.state)
+        self.assertFalse(self.retire()["changed"])
+        self.assertEqual(settled, self.state)
+
+    def test_retirement_rejects_late_settle_ack_and_resurrection(self):
+        prepared = self.prepare([key()])
+        pairs = self.settle(prepared, True)
+        self.retire()
+        before = copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError, "concurrent"):
+            self.settle(prepared)
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.ack(pairs)
+        with self.assertRaisesRegex(ValueError, "retired alias reuse"):
+            self.prepare([])
+        self.assertEqual(before, self.state)
+        # A fresh live receipt can still finish remaining work.
+        self.assertEqual([], self.ack(self.settle(self.prepare([key()], ["a"])) ))
+
+    def test_retirement_mapping_is_exact_and_stage_bound(self):
+        self.prepare([key()])
+        data = {"domain": "ipa.test", "stage": "sandbox",
+            "absent": [{"name": "RETIRED.ipa.test"}], "inventory": [
+                {"alias": "b", "fqdn": "retired.ipa.test", "stage": "sandbox"},
+                {"alias": "b-10", "fqdn": "other.ipa.test", "stage": "sandbox"}]}
+        self.assertEqual(["b"], [r["alias"] for r in cache.update(self.state, "plan", data)["retirements"]])
+        self.assertEqual(2, len(cache.work(self.state)))
+        duplicate = copy.deepcopy(data)
+        duplicate["inventory"].append(dict(duplicate["inventory"][0], alias="other"))
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            cache.update(self.state, "plan", duplicate)
+        data["inventory"] = []
+        self.assertEqual([], cache.update(self.state, "plan", data)["retirements"])
+        data["retirements"] = [self.retirement()]
+        self.assertEqual([self.retirement()], cache.update(self.state, "plan", data)["retirements"])
+        data["retirements"][0]["stage"] = "prod"
+        with self.assertRaisesRegex(ValueError, "authorized stage"):
+            cache.update(self.state, "plan", data)
+        self.assertEqual(["a", "b"], self.state["users"]["alice"]["pending"])
+
+    def test_readonly_inspection_and_atomic_retirement_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "missing", "journal.json")
+            self.assertEqual([], cache.journal(path, "inspect", {"domain": "ipa.test"})["work"])
+            self.assertFalse(Path(path).parent.exists())
+            self.assertFalse(cache.journal(path, "retirement_status", {
+                "domain": "ipa.test", "fqdn": "retired.ipa.test", "alias": "b", "stage": "sandbox"})["settled"])
+            self.assertFalse(Path(path).parent.exists())
+            self.prepare([key()])
+            path = os.path.join(directory, "journal.json")
+            Path(path).write_text(json.dumps(self.state))
+            data = {"domain": "ipa.test", "stage": "sandbox", "retirements": [self.retirement()]}
+            original = Path(path).read_bytes()
+            with mock.patch.object(cache.os, "replace", side_effect=OSError("injected before commit")):
+                with self.assertRaisesRegex(OSError, "before commit"):
+                    cache.journal(path, "retire", data)
+            self.assertEqual(original, Path(path).read_bytes())
+            # A fresh process recovers and commits; retry observes one receipt.
+            command = ["python3", str(SOURCE), "retire", path]
+            first = subprocess.run(command, input=json.dumps(data), text=True, capture_output=True, check=True)
+            self.assertTrue(json.loads(first.stdout)["changed"])
+            second = subprocess.run(command, input=json.dumps(data), text=True, capture_output=True, check=True)
+            self.assertFalse(json.loads(second.stdout)["changed"])
+            self.assertEqual(1, len(json.loads(Path(path).read_text())["retired"]))
+
+    def test_retirement_uses_process_lock_and_recovers_after_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.prepare([key()])
+            path = os.path.join(directory, "journal.json")
+            Path(path).write_text(json.dumps(self.state))
+            data = {"domain": "ipa.test", "stage": "sandbox", "retirements": [self.retirement()]}
+            with open(path + ".lock", "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                process = subprocess.Popen(["python3", str(SOURCE), "retire", path],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    process.stdin.write(json.dumps(data))
+                    process.stdin.close()
+                    process.stdin = None
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        process.wait(timeout=0.15)
+                    self.assertNotIn("retired", json.loads(Path(path).read_text()))
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    out, err = process.communicate(timeout=5)
+                    self.assertEqual(0, process.returncode, err)
+                    self.assertTrue(json.loads(out)["changed"])
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+            # A directory-fsync failure occurs after the atomic replacement.
+            Path(path).write_text(json.dumps(self.state))
+            real_fsync = cache.os.fsync
+            calls = 0
+            def fail_directory(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected after replace")
+                real_fsync(fd)
+            with mock.patch.object(cache.os, "fsync", side_effect=fail_directory):
+                with self.assertRaisesRegex(OSError, "after replace"):
+                    cache.journal(path, "retire", data)
+            before = Path(path).read_bytes()
+            self.assertFalse(cache.journal(path, "retire", data)["changed"])
+            self.assertEqual(before, Path(path).read_bytes())
+
+    def test_retirement_receipt_identity_and_stage_are_exact(self):
+        self.prepare([key()])
+        self.retire()
+        query = {"domain": "ipa.test", "fqdn": "RETIRED.ipa.test", "alias": "b", "stage": "sandbox"}
+        self.assertTrue(cache.update(self.state, "retirement_status", query)["settled"])
+        for field, other in (("fqdn", "other.ipa.test"), ("alias", "b-10"), ("stage", "prod")):
+            self.assertFalse(cache.update(self.state, "retirement_status", dict(query, **{field: other}))["settled"])
+        reuse = {"domain": "ipa.test", "stage": "sandbox", "absent": [{"name": "retired.ipa.test"}],
+                 "inventory": [{"alias": "b", "fqdn": "new.ipa.test", "stage": "sandbox"}]}
+        with self.assertRaisesRegex(ValueError, "identity/stage mismatch"):
+            cache.update(self.state, "plan", reuse)
 
     def auth(self, action, **data):
         return cache.update(self.state, action, dict(data, domain="ipa.test"))

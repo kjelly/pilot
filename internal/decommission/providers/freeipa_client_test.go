@@ -104,6 +104,16 @@ func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error))
 	// boundary now requires the playbook's envelope too; already-captured
 	// Ansible output keeps its original bytes and target markers.
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
+		// Existing central residue fixtures model a completed journal lifecycle.
+		// Retirement-specific tests below use the executor directly so missing,
+		// pending and erroneous observations cannot acquire this default.
+		if queryKind(args) == "ssh_retirement" {
+			for _, arg := range args {
+				if fqdn, ok := strings.CutPrefix(arg, "pilot_decommission_target_fqdn="); ok {
+					return &ansible.Result{Stdout: "HOST_INSPECT[" + fqdn + "]: SSH_RETIREMENT=settled"}, nil
+				}
+			}
+		}
 		res, err := fn(args)
 		if err == nil && res != nil && queryKind(args) != "" && !hostInspectMarkerPattern.MatchString(res.Stdout) {
 			copy := *res
@@ -614,7 +624,7 @@ func TestFreeIPAProvider_TombstoneDoesNotHideTheTarget(t *testing.T) {
 
 	t.Run("converge step is not done while the host exists", func(t *testing.T) {
 		p, _ := testProvider(t, exec)
-		ex, err := p.ExecutorForStep(Step{Provider: FreeIPAClientProviderID, Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "pwr-host3.ipa.pilot.internal"})
+		ex, err := p.ExecutorForStep(Step{Provider: FreeIPAClientProviderID, Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "pwr-host3.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "pwr-host3"}})
 		if err != nil {
 			t.Fatal(err)
 		}
