@@ -18,6 +18,14 @@
 
 ---
 
+## GitHub Issue 標籤
+
+建立本 repo 的 Issue（包含其他 skill 建立的 follow-up）前，必須依照
+`.agents/skills/issue-filing/SKILL.md` 查詢現有 labels、選擇適用標籤，
+並在建立後讀回驗證。無法選擇或驗證時須明確回報，不可假稱完成。
+
+---
+
 ## 0. 為什麼有這份檔
 
 2026-07-01 這個 repo 出了一次 spec-vs-inventory 不一致的事故：
