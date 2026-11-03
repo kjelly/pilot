@@ -20,8 +20,10 @@ func TestRegression_WazuhCredentialBearingTasksSuppressOutputAndDiff(t *testing.
 			"Step 9: Read the live manager configuration",
 			"Step 9b: Verify legacy UDP forwarding is absent in the live configuration",
 			"ROLLBACK — restore the previous files with their original metadata",
+			"ROLLBACK — validate the restored rsyslog configuration",
 		},
-		"tasks/wazuh-alert-forward.yml": {"Wazuh: inspect the actual container logs mount"},
+		"tasks/wazuh-alert-forward.yml":  {"Wazuh: inspect the actual container logs mount"},
+		"audit-log-forwarding-apply.yml": {"ROLLBACK — validate the restored rsyslog configuration"},
 		"tasks/rsyslog-relp-tls.yml": {
 			"RELP: snapshot existing TLS files for rollback",
 			"RELP: retain sender module declarations for rollback",

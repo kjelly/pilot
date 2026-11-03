@@ -1,9 +1,13 @@
 ---
 # Included after compose is up, inside wazuh-manager's snapshot/rescue block.
 - name: "Wazuh: install the host reader and ACL tools"
-  ansible.builtin.package:
-    name: "{{ ['rsyslog', 'acl', 'rsyslog-relp', 'openssl'] if siem_forward_transport == 'relp' else ['rsyslog', 'acl'] }}"
-    state: present
+  ansible.builtin.include_tasks:
+    file: apt-package-install.yml
+    apply:
+      tags: [C10, C11]
+  vars:
+    pilot_apt_packages: "{{ ['rsyslog', 'acl', 'rsyslog-relp', 'openssl'] if siem_forward_transport == 'relp' else ['rsyslog', 'acl'] }}"
+    pilot_apt_component: wazuh-alert-forwarding
   when: siem_forwarding_enabled | bool
 
 - name: "Wazuh: inspect the actual container logs mount"

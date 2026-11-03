@@ -217,6 +217,12 @@
         wazuh_acl_journal_committed: false
         wazuh_acl_journal: {}
         wazuh_acl_restore_result: {}
+        wazuh_apparmor_result: {}
+        wazuh_reload_pending: {skipped: true}
+        wazuh_live_config: {skipped: true}
+        wazuh_forward_snapshot: {results: []}
+        wazuh_forward_snapshot_stat: {results: []}
+        wazuh_rescue_syntax: {skipped: true}
       tags: [always]
 
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
@@ -492,28 +498,54 @@
               - restore
               - "{{ wazuh_acl_journal.path }}"
           register: wazuh_acl_restore_result
-          when: wazuh_acl_journal.path is defined
+          when:
+            - wazuh_acl_journal is defined
+            - wazuh_acl_journal.path is defined
 
         - name: "ROLLBACK — restore the Wazuh transport material"
           tags: [always]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-relp-restore.yml
             apply:
+              tags: [always]
               no_log: true
               diff: false
-          when: siem_tls_snapshot_role | default('') == 'wazuh-sender'
+          when:
+            - siem_tls_snapshot_role is defined
+            - siem_tls_snapshot_role == 'wazuh-sender'
 
         - name: "ROLLBACK — reload restored AppArmor permissions"
           tags: [always]
           ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
-          when: wazuh_apparmor_result | default({}) is changed
+          when:
+            - wazuh_apparmor_result is defined
+            - wazuh_apparmor_result is changed
+
+        - name: "ROLLBACK — validate the restored rsyslog configuration"
+          tags: [always]
+          no_log: true
+          diff: false
+          ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
+          register: wazuh_rescue_syntax
+          changed_when: false
+          failed_when: false
+          when: >-
+            (wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped))
+            or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'wazuh-sender' and
+                ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
+                 or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)
+                 or (siem_module_restore_result is defined and siem_module_restore_result is changed)
+                 or (siem_module_remove_result is defined and siem_module_remove_result is changed)))
 
         - name: "ROLLBACK — load restored rsyslog configuration"
           tags: [always]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
-          when: wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped)
+          when:
+            - wazuh_rescue_syntax is defined
+            - not (wazuh_rescue_syntax is skipped)
+            - wazuh_rescue_syntax.rc == 0
 
         - name: "ROLLBACK — recreate manager with its restored source configuration"
           tags: [always]
@@ -523,13 +555,13 @@
             state: present
             recreate: always
             services: [wazuh.manager]
-          when: wazuh_live_config is defined
+          when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
 
         - name: "ROLLBACK — verify the restored rsyslog service remains active"
           tags: [always]
           ansible.builtin.command: systemctl is-active --quiet rsyslog
           changed_when: false
-          when: wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped)
+          when: wazuh_rescue_syntax is defined and not (wazuh_rescue_syntax is skipped)
 
         - name: "ROLLBACK — wait for the restored manager agent listener"
           tags: [always]
@@ -537,7 +569,7 @@
             host: 127.0.0.1
             port: 1514
             timeout: 300
-          when: wazuh_live_config is defined
+          when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
 
         - name: "ROLLBACK — surface the original failure"
           tags: [always]
@@ -552,5 +584,6 @@
             state: absent
           changed_when: false
           when:
+            - wazuh_acl_journal is defined
             - wazuh_acl_journal.path is defined
             - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0

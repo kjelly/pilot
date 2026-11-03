@@ -1013,6 +1013,8 @@
         # loaded-state checks. Validate the restored global config first.
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
+          no_log: true
+          diff: false
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
           register: siem_forward_rescue_syntax
           changed_when: false
@@ -1028,7 +1030,9 @@
               or (siem_forward_rsyslog_restart_result is failed)
               or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'sender' and
                   ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
-                   or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)))
+                   or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)
+                   or (siem_module_restore_result is defined and siem_module_restore_result is changed)
+                   or (siem_module_remove_result is defined and siem_module_remove_result is changed)))
 
         - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]

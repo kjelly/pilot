@@ -3,7 +3,7 @@
 nodes:
   - name: i211-delivery-manager
     base_image: ubuntu-24.04
-    memory: 8192
+    memory: 9216
     vcpus: 4
     disk: 60
     ssh_user: root
@@ -13,9 +13,9 @@ nodes:
     wire: ["i211-delivery-receiver=siem-log-server"]
   - name: i211-delivery-receiver
     base_image: ubuntu-24.04
-    memory: 2048
+    memory: 2304
     vcpus: 2
-    disk: 20
+    disk: 24
     ssh_user: root
     boot_timeout: 6m
     ssh_timeout: 4m

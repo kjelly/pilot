@@ -7,6 +7,8 @@
     siem_tls_remove_result: {}
     siem_module_snapshot_stat: {}
     siem_module_snapshot: {}
+    siem_module_restore_result: {}
+    siem_module_remove_result: {}
     rsyslog_selinux_any_port_changed: false
   tags: [always]
 

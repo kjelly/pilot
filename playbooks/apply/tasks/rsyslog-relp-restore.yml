@@ -9,6 +9,7 @@
     group: "{{ item.item.stat.gid }}"
     mode: "{{ item.item.stat.mode }}"
   loop: "{{ siem_module_snapshot.results | default([]) }}"
+  register: siem_module_restore_result
   when: item.content is defined and siem_tls_snapshot_role != 'receiver'
 
 - name: "RELP rollback: remove only a newly created shared module declaration"
@@ -16,6 +17,7 @@
     path: "{{ item.item }}"
     state: absent
   loop: "{{ siem_module_snapshot_stat.results | default([]) | selectattr('stat.exists', 'defined') | rejectattr('stat.exists') | list }}"
+  register: siem_module_remove_result
   when: siem_tls_snapshot_role != 'receiver'
 
 - name: "RELP rollback: restore the previous TLS files and profile"
