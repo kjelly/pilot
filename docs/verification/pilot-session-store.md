@@ -45,14 +45,14 @@
 | `pilot_session_store_key_id` | 加密金鑰識別碼(metadata，不是金鑰本身) | 是 |
 | `pilot_session_store_master_key` | AES-256 master key，64 hex 字元，vault 提供 | 是（secret） |
 | `pilot_session_store_ingest_signing_key` | per-session ingest token（PIT1）的 HMAC signing key，64 hex 字元，vault 提供；與 pilot-access-gateway 使用同一個值（per-host recording spec §16）。取代舊的 `pilot_session_store_ingest_token`（已移除） | 是（secret） |
-| `pilot_session_store_ingest_port` | ingest HTTPS 監聽 port，預設 8443 | 否 |
+| `pilot_session_store_ingest_port` | ingest HTTPS 監聽 port，預設 18443；明確設定的 override 保留 | 否 |
 
 ## 2. Checklist
 
 | ID | Category | Check | Expected | Command |
 |----|----------|-------|----------|---------|
 | SS01 | config | config `KnownFields(true)`，未知欄位 fail — 由 `cmd/pilot-session-store` 的 `TestLoadConfigRejectsForbiddenFields` 涵蓋，非單一 shell 指令 | 0 | true |
-| SS02 | ingest | ingest API 僅 TLS，真的能用 FreeIPA CA 驗證（TLS handshake 成功、API 回應 4xx/5xx 即代表 TLS 層通過；指令不含 `\|`，避免 Markdown 跳脫後的字面 `\|` 讓整條 pipeline 失效） | 0 | sh -c 'code=$(curl --silent --show-error --cacert /etc/ipa/ca.crt --max-time 5 --output /dev/null --write-out "%{http_code}" https://$(hostname -f):8443/v1/sessions/start); case "$code" in 4??) exit 0;; 5??) exit 0;; *) exit 1;; esac' |
+| SS02 | ingest | 原生服務 active，systemd MainPID 持有 deployed ingest.listen_addr 的每個 listener；讀取 deployed tls_cert_file 的單一 DNS SAN（設定的 FQDN），以 FreeIPA CA 與 hostname 驗證連到本機的 TLS，且 API 回應 4xx/5xx。其他服務即使用可信憑證回應也不得通過 | 0 | python3 /usr/local/libexec/pilot-session-store-health.py --config /etc/pilot/session-store.yaml |
 | SS03 | ingest auth | ingest API 只接受有效的 per-session PIT1 token（per-host recording spec §16/§21.2）；缺少、格式錯誤、簽章錯誤、過期、kid 不符（含舊式靜態 bearer）一律 401 — `cmd/pilot-session-store` 的 `TestIngestAPIRejectsInvalidSessionToken` 涵蓋，需要第二個未授權的 client，非單一 host 指令 | 0 | true |
 | SS04 | 權限分離 | ingest signing key 與 PIT1 token 完全沒有 read/replay 能力（不同 listener，read API 從不載入 signing key）— 結構性不存在，非單一 host 指令 | 0 | true |
 | SS05 | read socket | read/replay API 僅 Unix socket 存在 | 0 | test -S /run/pilot-session-store/session-store.sock |
@@ -112,6 +112,9 @@
 - **corrupt payload 活體重驗**：`TestStoreReplayTamperedCiphertextFails` 已在單元測試層級驗證過(竄改 ciphertext byte 會讓 AES-GCM 認證失敗)，但沒有對活體 DB 檔案獨立重跑過。
 
 ## 5. Gotcha 記錄
+
+- **預設 ingest port 改為 18443**，避開同機 Wazuh dashboard 的 8443。舊安裝若未明確固定 port，重新 apply 會改到 18443；必須同步協調每台 Gateway 的 `pilot_access_gateway_recording_session_store_url`，session-store apply 不會自動改寫 Gateway URL。需要維持既有 8443 endpoint 時，明確設定 `pilot_session_store_ingest_port: 8443`，且確認該主機沒有其他角色使用它。
+- **preflight 不會保留 socket**：apply 在修改帳號、IPA、秘密或設定之前，拒絕已被其他 owner 佔用的 port；啟動後仍要檢查 active/MainPID、listener ownership 與 TLS，處理檢查後才發生的搶占。`NRestarts` 是累計診斷資訊，不要求歷史值為零。SS02 的 helper 讀取 apply 產生的 scalar ingest 設定格式與憑證 SAN，並非通用 YAML parser；無法解析時會拒絕，不能假裝通過。
 
 - **read socket 不能沿用 Gateway/Directory 共用的 `/run/pilot`**：Gateway/Directory 的 socket 是透過 systemd `.socket` unit 的 `SocketUser`/`SocketGroup`/`SocketMode` 取得決定性權限；`pilot-session-store` 的 read API 是 Go process 自己直接 `net.Listen("unix", ...)`，沒有 socket activation。如果沿用共用的 `/run/pilot`（可能已經被 Gateway/Directory 的某個 unit 用**它們自己的** User/Group 建立過），這個 process 可能連 bind 都會因為目錄權限被拒絕。改用專屬的 `RuntimeDirectory=pilot-session-store` + `UMask=0007` + service unit 的 `Group=role-pilot-session-auditor` 三者搭配，才能讓 auditor group 成員真的連得上這個 socket（Unix domain socket 的 `connect()` 需要對 socket 檔案有 write 權限，不是只要 read/search）。
 - **`ipa-getcert request` 的 argv 陷阱**：沿用 `playbooks/apply/tasks/internal-endpoint-cert-request.yml` 已經踩過的坑——一定要用 `argv:`（list）不能用 free-form 字串（`-C` 的值含空白會被 shlex 截斷）；`-o`/`-O` 是單一 `user:group` 字串，不是分開的 group flag；`-w` 會同步等到憑證核發完成，不需要另外寫 poll-until-issued 迴圈。

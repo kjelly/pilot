@@ -48,7 +48,7 @@ func TestPerHostRecordingTopologyMatchesScript(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"https://" + groups["pilot-session-store"][0] + ".ipa.pilot.internal:8443",
+		"https://" + groups["pilot-session-store"][0] + ".ipa.pilot.internal:18443",
 		"PILOT_INPUT_GATEWAY_ID=", "PILOT_INPUT_GATEWAY_SCOPE=",
 		"docs/topologies/per-host-recording-topology.yaml", "playbooks/test/per-host-recording-topology.yml",
 	} {

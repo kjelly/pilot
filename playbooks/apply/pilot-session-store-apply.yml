@@ -116,7 +116,7 @@
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
     - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
       ansible.builtin.set_fact:
-        pilot_session_store_ingest_port: "{{ pilot_session_store_ingest_port | default(8443) }}"
+        pilot_session_store_ingest_port: "{{ pilot_session_store_ingest_port | default(18443) }}"
       tags: [always]
 
     # SS10 (spec.md §28.5): retention_days has no implicit default — a
@@ -146,6 +146,17 @@
           (vault, 64 hex chars; the same value every pilot-access-gateway
           uses). The static pilot_session_store_ingest_token is no longer
           used.
+      tags: [always]
+
+    # Inspect the real socket before account, IPA, secret or config mutations.
+    # Allow a healthy self-reapply; never stop the incumbent to free this port.
+    # A later process can still race this check, so readiness rechecks ownership.
+    - name: "Preflight: ingest port is free or owned by the active session-store MainPID"
+      ansible.builtin.script:
+        cmd: 'files/pilot-session-store-health.py --port {{ pilot_session_store_ingest_port | int }}'
+        executable: python3
+      changed_when: false
+      check_mode: false
       tags: [always]
 
     - name: "Resolve local artifact paths (relative = repo-root relative)"
@@ -522,6 +533,15 @@
         mode: "0755"
       tags: [SS_service]
 
+    - name: "Install the session-store endpoint health checker"
+      ansible.builtin.copy:
+        src: files/pilot-session-store-health.py
+        dest: /usr/local/libexec/pilot-session-store-health.py
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [SS_service, SS02]
+
     - name: "Install pilot-session-store binary"
       ansible.builtin.copy:
         src: "{{ pilot_session_store_binary_abs_path }}"
@@ -696,41 +716,23 @@
         (session_store_retention_timer_unit.changed or session_store_retention_service_unit.changed))
       tags: [SS_retention]
 
-    # SS02 (spec.md §28.1/§28.2): capability probe — a real TLS
-    # connection, trusting the FreeIPA integrated CA, must reach the
-    # ingest API (any response, even 404/401, proves TLS+listener are
-    # live; skipped under --check for the same reason every other apply
-    # playbook's own service-start tasks are).
-    - name: "Capability probe: ingest API answers over TLS (trusting the FreeIPA CA)"
+    # SS02: Type=simple start success is not readiness. The checker reads
+    # the deployed config and certificate identity, checks active/MainPID
+    # socket ownership and performs strict CA/hostname-verified local TLS.
+    # Failures include curl rc/stderr, systemd state, journal, ss and getcert;
+    # NRestarts is diagnostic history and is never required to be zero.
+    - name: "Capability probe: active session-store owns the configured ingest listener and answers over trusted TLS"
       ansible.builtin.command:
         argv:
-          - curl
-          - --silent
-          - --show-error
-          - --cacert
-          - /etc/ipa/ca.crt
-          - --max-time
-          - "5"
-          - --output
-          - /dev/null
-          - --write-out
-          - "%{http_code}"
-          - "https://{{ session_store_effective_fqdn }}:{{ pilot_session_store_ingest_port }}/v1/sessions/start"
+          - python3
+          - /usr/local/libexec/pilot-session-store-health.py
+          - --config
+          - /etc/pilot/session-store.yaml
       register: session_store_ingest_probe
       changed_when: false
       retries: 5
       delay: 2
       until: session_store_ingest_probe.rc == 0
-      when: not ansible_check_mode
-      tags: [SS_service, SS02]
-
-    - name: "Gate: ingest API answered (any HTTP status — proves TLS handshake + listener are live)"
-      ansible.builtin.assert:
-        that:
-          - session_store_ingest_probe.stdout | int >= 400
-        fail_msg: >-
-          Ingest API at {{ session_store_effective_fqdn }}:{{ pilot_session_store_ingest_port }}
-          did not answer with an HTTP status (got: {{ session_store_ingest_probe.stdout }}).
       when: not ansible_check_mode
       tags: [SS_service, SS02]
 
