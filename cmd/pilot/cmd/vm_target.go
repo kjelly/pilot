@@ -170,12 +170,12 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	serviceBootstrap, err := resolveVMServiceBootstrap(context.Background(), vtServices, vtNetwork)
+	serviceBootstrap, err := resolveVMServiceBootstrap(cmd.Context(), vtServices, vtNetwork)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "▶ provisioning VM %s (this can take a minute while it boots)…\n", vtName)
-	tgt, err := m.Up(context.Background(), vmtarget.Options{
+	tgt, err := m.Up(cmd.Context(), vmtarget.Options{
 		Name:          vtName,
 		BaseImage:     vtBaseImage,
 		SSHUser:       vtSSHUser,
@@ -218,7 +218,7 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	m, err := newServiceManager()
+	m, err := newServiceManagerContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -240,18 +240,19 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 		return nil, fmt.Errorf("vm-target: services are bound to %s but network %q gateway is %s", client.HostIP, network, bindIP)
 	}
 	return &vmtarget.ServiceBootstrap{
-		InstanceID:        client.InstanceID,
-		Generation:        client.Generation,
-		Profile:           client.Profile,
-		Fingerprint:       client.Fingerprint,
-		HostIP:            client.HostIP,
-		Hostname:          client.Hostname,
-		AptProxyURL:       client.AptProxyURL,
-		RPMBaseURL:        client.RPMBaseURL,
-		RPMRepositories:   client.RPMRepositories,
-		RegistryMirrorURL: client.RegistryMirrorURL,
-		RegistryProjects:  client.RegistryProjects,
-		CAPEM:             client.CAPEM,
+		DiscoveryDirectory: m.Directory(),
+		InstanceID:         client.InstanceID,
+		Generation:         client.Generation,
+		Profile:            client.Profile,
+		Fingerprint:        client.Fingerprint,
+		HostIP:             client.HostIP,
+		Hostname:           client.Hostname,
+		AptProxyURL:        client.AptProxyURL,
+		RPMBaseURL:         client.RPMBaseURL,
+		RPMRepositories:    client.RPMRepositories,
+		RegistryMirrorURL:  client.RegistryMirrorURL,
+		RegistryProjects:   client.RegistryProjects,
+		CAPEM:              client.CAPEM,
 	}, nil
 }
 
@@ -278,7 +279,7 @@ func runVtDown(cmd *cobra.Command, args []string) error {
 	if _, err := m.Get(context.Background(), vtName); err != nil {
 		return err
 	}
-	if err := m.Down(context.Background(), vtName); err != nil {
+	if err := m.Down(cmd.Context(), vtName); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "✓ target %s down\n", vtName)

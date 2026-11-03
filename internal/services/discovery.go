@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"syscall"
+	"time"
 
 	"github.com/kjelly/pilot/internal/statefile"
 )
@@ -55,35 +57,74 @@ func CanonicalDirectory(path string) (string, error) {
 }
 
 func lockOperation(path string) (*os.File, error) {
+	return lockOperationContext(context.Background(), path)
+}
+
+func lockOperationContext(ctx context.Context, path string) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("services: open operation lock: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), path)
-	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
 		f.Close()
-		return nil, fmt.Errorf("services: lock operation: %w", err)
+		return nil, fmt.Errorf("services: operation lock must be a regular file: %s", path)
 	}
-	return f, nil
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
+		f.Close()
+		return nil, errors.New("services: operation lock must have one name and belong to the current OS user")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			f.Close()
+			return nil, err
+		}
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN && err != syscall.EINTR {
+			f.Close()
+			return nil, fmt.Errorf("services: lock operation: %w", err)
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			f.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func rootLockPath(root string) string {
 	return filepath.Join(filepath.Dir(root), "."+filepath.Base(root)+".services-operation.lock")
 }
 
-func composeLock() (*os.File, error) {
+func composeLockContext(ctx context.Context) (*os.File, error) {
 	// Compose identities share the host Docker namespace, independently of
 	// HOME, TMPDIR, checkouts and directory overrides.
-	return lockOperation(fmt.Sprintf("/tmp/pilot-services-compose-%d.lock", os.Getuid()))
+	return lockOperationContext(ctx, fmt.Sprintf("/tmp/pilot-services-compose-%d.lock", os.Getuid()))
 }
 
 // NewSharedManager discovers or adopts one host stack without relocating data.
 // LegacyDirectories is a bounded caller-supplied list, never a recursive scan.
 func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager, error) {
-	global, err := composeLock()
+	return NewSharedManagerContext(context.Background(), options, runner)
+}
+
+// NewSharedManagerContext discovers a shared stack with cancelable lock waits.
+func NewSharedManagerContext(ctx context.Context, options DiscoveryOptions, runner CommandRunner) (*Manager, error) {
+	global, err := composeLockContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +133,7 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 	if err != nil {
 		return nil, err
 	}
-	lk, err := lockOperation(filepath.Join(dir, ".services-operation.lock"))
+	lk, err := lockOperationContext(ctx, filepath.Join(dir, ".services-operation.lock"))
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +172,7 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 		return nil, errors.New("services: registered Harbor root conflict")
 	}
 	if current.Fingerprint != "" {
-		rootLock, err := lockOperation(rootLockPath(root))
+		rootLock, err := lockOperationContext(ctx, rootLockPath(root))
 		if err != nil {
 			return nil, err
 		}
@@ -205,7 +246,7 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 		return m, nil
 	}
 	m.root = adopted.Root
-	rootLock, err := lockOperation(rootLockPath(m.root))
+	rootLock, err := lockOperationContext(ctx, rootLockPath(m.root))
 	if err != nil {
 		return nil, err
 	}
@@ -372,10 +413,14 @@ func (m *Manager) verifyRootOwner(expected string) error {
 // operation serializes the whole physical service transaction, rather than just
 // the final state write. Root ownership is checked again after taking both locks.
 func (m *Manager) operation() (func(), error) {
+	return m.operationContext(context.Background())
+}
+
+func (m *Manager) operationContext(ctx context.Context) (func(), error) {
 	var global *os.File
 	if m.shared {
 		var err error
-		global, err = composeLock()
+		global, err = composeLockContext(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -385,7 +430,7 @@ func (m *Manager) operation() (func(), error) {
 			global.Close()
 		}
 	}
-	discovery, err := lockOperation(filepath.Join(m.dataDir, ".services-operation.lock"))
+	discovery, err := lockOperationContext(ctx, filepath.Join(m.dataDir, ".services-operation.lock"))
 	if err != nil {
 		closeGlobal()
 		return nil, err
@@ -399,7 +444,7 @@ func (m *Manager) operation() (func(), error) {
 	if m.shared && state.Root != "" {
 		m.root = state.Root
 	}
-	root, err := lockOperation(rootLockPath(m.root))
+	root, err := lockOperationContext(ctx, rootLockPath(m.root))
 	if err != nil {
 		discovery.Close()
 		closeGlobal()
