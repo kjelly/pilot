@@ -451,3 +451,81 @@ func TestSharedDiscoveryCanonicalMissingLeaf(t *testing.T) {
 		t.Fatalf("missing leaf lost canonical ancestor: %s", got)
 	}
 }
+
+func TestSharedDiscoveryAdoptedSourceIsHistoricalButRootRemainsAuthoritative(t *testing.T) {
+	legacy, dir := t.TempDir(), t.TempDir()
+	s := legacyFixture(t, legacy)
+	opts := DiscoveryOptions{Directory: dir, AdoptFrom: legacy}
+	m, err := NewSharedManager(opts, &fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, _ := m.current()
+	// Reproduce the pre-seeding fingerprint transition accepted by Up. The
+	// old source snapshot cannot veto the authoritative registered revision.
+	p := BuiltInDevLite()
+	for i := range p.OCI.Registries {
+		p.OCI.Registries[i].Type = ""
+	}
+	oldFingerprint, _ := p.Fingerprint()
+	source, err := NewManager(legacy, &fakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+		states[0].Fingerprint = oldFingerprint
+		states[0].Client.Fingerprint = oldFingerprint
+		return states, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err = NewSharedManager(opts, &fakeRunner{})
+	if err != nil {
+		t.Fatalf("stale source vetoed migration: %v", err)
+	}
+	got, _ := m.current()
+	if got.Fingerprint != registered.Fingerprint || got.InstanceID != registered.InstanceID {
+		t.Fatal("historical source replaced discovery identity")
+	}
+	if err := os.WriteFile(filepath.Join(s.Root, "ca/ca.pem"), []byte("changed physical CA"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSharedManager(opts, &fakeRunner{}); err == nil || !strings.Contains(err.Error(), "CA does not match") {
+		t.Fatalf("ignoring source hid physical CA drift: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.Root, "ca/ca.pem"), []byte(s.Client.CAPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(s.Root, ".pilot-services-owner.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSharedManager(opts, &fakeRunner{}); err == nil || !strings.Contains(err.Error(), "ownership is unavailable") {
+		t.Fatalf("ignoring source hid root ownership drift: %v", err)
+	}
+}
+
+func TestSharedDiscoveryPurgeDoesNotReadoptHistoricalLegacyState(t *testing.T) {
+	legacy, dir := t.TempDir(), t.TempDir()
+	s := legacyFixture(t, legacy)
+	opts := DiscoveryOptions{Directory: dir, AdoptFrom: legacy}
+	runner := &sharedLifecycleRunner{}
+	m, err := NewSharedManager(opts, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := m.current()
+	if err := m.Purge(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewSharedManager(opts, runner)
+	if err != nil {
+		t.Fatalf("purge retried stale legacy registration: %v", err)
+	}
+	status, err := reopened.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Configured || status.Root != s.Root || status.InstanceID != before.InstanceID || status.Generation != before.Generation+1 {
+		t.Fatalf("purge lost migration authority: %+v", status)
+	}
+}

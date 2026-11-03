@@ -61,6 +61,7 @@ func (osCommandRunner) Run(ctx context.Context, dir, name string, args ...string
 type ServiceState struct {
 	InstanceID        string       `json:"instance_id,omitempty"`
 	Generation        uint64       `json:"generation,omitempty"`
+	AdoptedFrom       []string     `json:"adopted_from,omitempty"`
 	Profile           string       `json:"profile"`
 	Fingerprint       string       `json:"fingerprint"`
 	Root              string       `json:"root"`
@@ -288,6 +289,7 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	seededClient.InstanceID, seededClient.Generation = current.InstanceID, current.Generation
 	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: seededClient, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
 	state.InstanceID, state.Generation = current.InstanceID, current.Generation
+	state.AdoptedFrom = current.AdoptedFrom
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
@@ -497,7 +499,7 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 		if !m.shared || len(states) == 0 {
 			return nil, nil
 		}
-		state := ServiceState{Root: m.root, InstanceID: states[0].InstanceID, Generation: states[0].Generation + 1}
+		state := ServiceState{Root: m.root, InstanceID: states[0].InstanceID, Generation: states[0].Generation + 1, AdoptedFrom: states[0].AdoptedFrom}
 		return []ServiceState{state}, nil
 	}); err != nil {
 		return fmt.Errorf("services: clear state after detaching data: %w", err)

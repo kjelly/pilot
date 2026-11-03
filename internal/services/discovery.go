@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 
 	"github.com/kjelly/pilot/internal/statefile"
@@ -129,12 +130,27 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 	if current.HarborComposePath != "" && current.HarborComposePath != filepath.Join(root, "harbor", "installer", "docker-compose.yml") {
 		return nil, errors.New("services: registered Harbor root conflict")
 	}
+	if current.Fingerprint != "" {
+		rootLock, err := lockOperation(rootLockPath(root))
+		if err != nil {
+			return nil, err
+		}
+		ownerErr := m.verifyRootOwner(current.InstanceID)
+		if ownerErr == nil && current.ComposePath != "" {
+			ownerErr = validateLegacyData(current)
+		}
+		rootLock.Close()
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+	}
 	candidates := options.LegacyDirectories
 	if options.AdoptFrom != "" {
 		candidates = append(append([]string{}, candidates...), options.AdoptFrom)
 	}
 	seen := map[string]bool{dir: true}
 	var adopted *ServiceState
+	var adoptedFrom []string
 	for _, candidate := range candidates {
 		legacyDir, err := CanonicalDirectory(candidate)
 		if err != nil {
@@ -144,6 +160,11 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 			continue
 		}
 		seen[legacyDir] = true
+		// Once registered, shared state is authoritative. The original input
+		// remains a historical snapshot after upgrades, down or purge.
+		if current.Root != "" && slices.Contains(current.AdoptedFrom, legacyDir) {
+			continue
+		}
 		legacy, found, err := legacyState(legacyDir)
 		if err != nil {
 			return nil, err
@@ -167,6 +188,7 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 			return nil, fmt.Errorf("services: conflicting legacy service roots %s and %s; select an explicit --services-adopt-from with an isolated --services-dir", adopted.Root, legacy.Root)
 		}
 		adopted = &legacy
+		adoptedFrom = append(adoptedFrom, legacyDir)
 	}
 	if current.Root != "" {
 		if current.InstanceID == "" {
@@ -196,6 +218,7 @@ func NewSharedManager(options DiscoveryOptions, runner CommandRunner) (*Manager,
 		return nil, err
 	}
 	adopted.InstanceID, adopted.Generation = identity, 1
+	adopted.AdoptedFrom = adoptedFrom
 	adopted.Client.InstanceID, adopted.Client.Generation = identity, 1
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return []ServiceState{*adopted}, nil }); err != nil {
 		return nil, err
@@ -328,6 +351,24 @@ func (m *Manager) claimRoot(expected string) (string, error) {
 	return identity, err
 }
 
+func (m *Manager) verifyRootOwner(expected string) error {
+	if _, err := os.Stat(filepath.Join(m.root, ".pilot-services-owner.json")); err != nil {
+		return fmt.Errorf("services: registered physical root ownership is unavailable; restore discovery/owner state before continuing: %w", err)
+	}
+	store, err := statefile.New[rootOwner](m.root, ".pilot-services-owner.json", 1, "services-owner")
+	if err != nil {
+		return err
+	}
+	owners, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if len(owners) != 1 || owners[0].Discovery != m.dataDir || expected == "" || owners[0].InstanceID != expected {
+		return errors.New("services: physical root ownership differs from discovery; use the owning --services-dir")
+	}
+	return nil
+}
+
 // operation serializes the whole physical service transaction, rather than just
 // the final state write. Root ownership is checked again after taking both locks.
 func (m *Manager) operation() (func(), error) {
@@ -365,7 +406,7 @@ func (m *Manager) operation() (func(), error) {
 		return nil, err
 	}
 	if m.shared && state.Fingerprint != "" {
-		if _, err := m.claimRoot(state.InstanceID); err != nil {
+		if err := m.verifyRootOwner(state.InstanceID); err != nil {
 			root.Close()
 			discovery.Close()
 			closeGlobal()
