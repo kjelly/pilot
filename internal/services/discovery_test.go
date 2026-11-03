@@ -396,7 +396,7 @@ func TestSharedDiscoveryLifecycleAndInterruptedUpRetainIdentity(t *testing.T) {
 		return b.Client, err
 	}
 	for i := 0; i < 2; i++ {
-		if err := m.Up(context.Background(), profile, net.ParseIP("192.168.122.1")); err != nil {
+		if err := m.Repair(context.Background(), profile, net.ParseIP("192.168.122.1"), MaintenanceOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -525,7 +525,7 @@ func TestSharedDiscoveryPurgeDoesNotReadoptHistoricalLegacyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := m.current()
-	if err := m.Purge(context.Background(), true); err != nil {
+	if err := m.PurgeWithOptions(context.Background(), true, MaintenanceOptions{AcknowledgeLegacyClients: true}); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := NewSharedManager(opts, runner)

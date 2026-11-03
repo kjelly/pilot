@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,10 @@ import (
 
 // newServiceManager is shared by every lifecycle command and VM consumer.
 func newServiceManager() (*services.Manager, error) {
+	return newServiceManagerContext(context.Background())
+}
+
+func newServiceManagerContext(ctx context.Context) (*services.Manager, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("services: load config: %w", err)
@@ -31,7 +36,7 @@ func newServiceManager() (*services.Manager, error) {
 	if servicesDir == "" && os.Getenv("PILOT_SERVICES_DIR") == "" && cfg.ServicesDir == config.Default().ServicesDir {
 		options.LegacyDirectories = []string{config.Default().DataDir, resolvePilotDataDir(), cfg.DataDir}
 	}
-	return services.NewSharedManager(options, nil)
+	return services.NewSharedManagerContext(ctx, options, nil)
 }
 
 // The local state files each command family keeps in the data dir.

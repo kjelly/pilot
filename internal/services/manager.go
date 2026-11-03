@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,6 +72,8 @@ type ServiceState struct {
 	BindIP            string       `json:"bind_ip"`
 	Running           bool         `json:"running"`
 	UpdatedAt         time.Time    `json:"updated_at"`
+	ConsumerTracking  bool         `json:"consumer_tracking,omitempty"`
+	Consumers         []Consumer   `json:"consumers,omitempty"`
 }
 
 // Status is the user-facing service health summary.
@@ -127,7 +130,16 @@ func NewManager(dataDir string, runner CommandRunner) (*Manager, error) {
 // Up renders and starts the service bundle on bindIP. It is idempotent for an
 // unchanged profile and refuses to silently replace a different profile.
 func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error {
-	unlock, err := m.operation()
+	return m.up(ctx, profile, bindIP, false, MaintenanceOptions{})
+}
+
+// Repair explicitly reconciles a compatible stack after verifying maintenance is safe.
+func (m *Manager) Repair(ctx context.Context, profile Profile, bindIP net.IP, options MaintenanceOptions) error {
+	return m.up(ctx, profile, bindIP, true, options)
+}
+
+func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair bool, options MaintenanceOptions) error {
+	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -158,6 +170,7 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		// the pre-seeding fingerprint once so an existing persistent bundle can
 		// be upgraded without purging its cache.
 		legacy := profile
+		legacy.OCI.Registries = slices.Clone(profile.OCI.Registries)
 		for i := range legacy.OCI.Registries {
 			legacy.OCI.Registries[i].Type = ""
 		}
@@ -165,6 +178,22 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	}
 	if currentErr == nil && current.Fingerprint != "" && current.Fingerprint != fingerprint && current.Fingerprint != legacyFingerprint {
 		return fmt.Errorf("services: profile fingerprint mismatch (running=%s requested=%s); purge or use the existing profile", current.Fingerprint, fingerprint)
+	}
+	if repair {
+		if err := maintenanceAllowed(current, options); err != nil {
+			return err
+		}
+	} else if current.Fingerprint != "" {
+		if !current.Running || current.Fingerprint != fingerprint || current.Client.Fingerprint != fingerprint || len(current.Client.RPMRepositories) == 0 {
+			return errors.New("services: existing stack needs explicit services repair; ordinary startup cannot reconcile stopped, incomplete or older state")
+		}
+		if err := m.probeEndpoints(ctx, current); err != nil {
+			return fmt.Errorf("services: existing stack needs explicit services repair; refusing mutation after health probe: %w", err)
+		}
+		return nil
+	}
+	if len(current.Consumers) != 0 {
+		return errors.New("services: incomplete discovery has registered consumers; restore its successful contract before startup")
 	}
 	if m.shared {
 		if err := m.checkComposeOwnership(ctx, profile.Name); err != nil {
@@ -197,19 +226,17 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 		// Reserve identity and compatibility before rendering. A killed
 		// registration reuses its identity without replacing credential files.
 		if current.Fingerprint == "" {
+			current.ConsumerTracking = true
 			current.Root, current.Profile, current.Fingerprint, current.BindIP = m.root, profile.Name, fingerprint, bindIP.String()
 			if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) { return []ServiceState{current}, nil }); err != nil {
 				return err
 			}
 		}
 	}
-	// A missing state file is not itself evidence that live containers are
-	// stale. Compose can reconcile a clean or externally restored bundle
-	// without interrupting its first-time migrations. Force recreation only
-	// for an unreadable state or a previously registered stack that failed its
-	// health probes below.
-	forceRecreate := currentErr != nil
-	recoverHarbor := false
+	// Recreation belongs only to explicit repair. A failed ordinary attach
+	// has already returned without granting mutation authority.
+	forceRecreate := repair && current.Fingerprint != ""
+	recoverHarbor := forceRecreate
 	// Older service state did not record the per-repository RPM endpoints. Force
 	// one recreation on upgrade so the Pulp admin env file is consumed by the
 	// container instead of silently keeping an old unauthenticated instance.
@@ -219,6 +246,16 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	if currentErr == nil && current.Running && m.probeEndpoints(ctx, current) != nil {
 		forceRecreate = true
 		recoverHarbor = true
+	}
+	if repair && current.Fingerprint != "" {
+		if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+			for i := range states {
+				states[i].Running = false
+			}
+			return states, nil
+		}); err != nil {
+			return err
+		}
 	}
 	bundle, err := RenderBundle(profile, m.root, bindIP)
 	if err != nil {
@@ -290,6 +327,7 @@ func (m *Manager) Up(ctx context.Context, profile Profile, bindIP net.IP) error 
 	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: seededClient, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
 	state.InstanceID, state.Generation = current.InstanceID, current.Generation
 	state.AdoptedFrom = current.AdoptedFrom
+	state.ConsumerTracking = current.ConsumerTracking || current.Fingerprint == ""
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
@@ -403,7 +441,7 @@ func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string
 
 // Status returns persisted state and live Compose status where available.
 func (m *Manager) Status(ctx context.Context) (Status, error) {
-	unlock, err := m.operation()
+	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -429,11 +467,23 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 
 // Down stops services and retains all persistent content.
 func (m *Manager) Down(ctx context.Context) error {
-	unlock, err := m.operation()
+	return m.DownWithOptions(ctx, MaintenanceOptions{})
+}
+
+// DownWithOptions stops a stack, with explicit acknowledgement for legacy guests.
+func (m *Manager) DownWithOptions(ctx context.Context, options MaintenanceOptions) error {
+	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	state, err := m.current()
+	if err != nil {
+		return err
+	}
+	if err := maintenanceAllowed(state, options); err != nil {
+		return err
+	}
 	return m.down(ctx)
 }
 
@@ -477,14 +527,26 @@ func (m *Manager) down(ctx context.Context) error {
 // Purge stops services and removes the persistent bundle only with explicit
 // confirmation. It is intentionally not recoverable from the local disk.
 func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
+	return m.PurgeWithOptions(ctx, confirmed, MaintenanceOptions{})
+}
+
+// PurgeWithOptions removes a stack only after consumer and legacy safety checks.
+func (m *Manager) PurgeWithOptions(ctx context.Context, confirmed bool, options MaintenanceOptions) error {
 	if !confirmed {
 		return errors.New("services: purge requires explicit confirmation")
 	}
-	unlock, err := m.operation()
+	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	state, err := m.current()
+	if err != nil {
+		return err
+	}
+	if err := maintenanceAllowed(state, options); err != nil {
+		return err
+	}
 	if err := m.down(ctx); err != nil {
 		return err
 	}
@@ -515,7 +577,7 @@ func (m *Manager) Purge(ctx context.Context, confirmed bool) error {
 
 // ClientConfig returns the last successful non-secret client contract.
 func (m *Manager) ClientConfig(ctx context.Context) (ClientConfig, error) {
-	unlock, err := m.operation()
+	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return ClientConfig{}, err
 	}
