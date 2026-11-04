@@ -1,0 +1,20 @@
+# Disposable Issue #77 coexistence target. Secrets and the discovered IPA
+# address belong in external test vars, not in this topology.
+services: local
+nodes:
+  - name: i77-ipa
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server]
+  - name: i77-host
+    base_image: ubuntu-24.04
+    memory: 9216
+    vcpus: 4
+    disk: 60
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client, docker, pilot-session-store, wazuh-manager]

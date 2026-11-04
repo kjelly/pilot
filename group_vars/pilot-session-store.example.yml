@@ -66,7 +66,7 @@ pilot_session_store_key_id: "v1"
 # Ingest HTTPS 監聽的 port。改這個值時,pilot-access-gateway 那邊
 # group_vars/host_vars 的 pilot_access_gateway_recording_session_store_url
 # 也要跟著改。
-# pilot_session_store_ingest_port: 8443
+# pilot_session_store_ingest_port: 18443
 
 # ----------------------------------------------------------------------------
 # pilot-access-gateway 那端的對應設定(由 pilot-access-gateway 的 group vars
@@ -85,3 +85,8 @@ pilot_session_store_key_id: "v1"
 # node_exporter 的 textfile 目錄(/var/lib/node_exporter/textfile,由
 # host-monitoring 建立)時,store 會自動寫出 pilot_session_store.prom;
 # 沒有時只印出說明、不影響套用。
+
+# Upgrade boundary: an unpinned old installation moves from 8443 to 18443 on
+# re-apply. Coordinate every gateway's pilot_access_gateway_recording_session_store_url separately;
+# this playbook does not rewrite gateway URLs. To retain the old endpoint,
+# explicitly set pilot_session_store_ingest_port: 8443 (only if free on this host).
