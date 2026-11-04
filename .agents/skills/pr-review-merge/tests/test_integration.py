@@ -26,6 +26,13 @@ if a[:2] == ['pr', 'view']:
     d['view_count'] = d.get('view_count', 0) + 1
     if d.get('race_on_view') == d['view_count']:
         d['view']['headRefOid'] = 'c'*40
+    names = d.get('base_name_on_view', {})
+    count = str(d['view_count'])
+    if count in names:
+        if names[count] is None:
+            d['view'].pop('baseRefName', None)
+        else:
+            d['view']['baseRefName'] = names[count]
     emit(d['view'])
 if a[:2] == ['pr', 'checks']:
     persist()
@@ -263,6 +270,91 @@ class Integration(unittest.TestCase):
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state().get('comments'))
         self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_base_name_changes_before_action_never_write(self):
+        # Both branch names resolve to the same live SHA. Only branch identity changes.
+        for mode in ('base_mismatch', 'base_behind', 'merge', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'3': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed immediately before action', out['error'])
+                    self.assertFalse(out['executed'])
+                    state = self.state()
+                    self.assertFalse(state['view']['isDraft'])
+                    self.assertEqual(state['view']['state'], 'OPEN')
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in state['calls']))
+
+    def test_base_name_changes_during_confirmation_wait_without_writes(self):
+        for mode in ('base_mismatch', 'base_behind'):
+            with self.subTest(mode=mode):
+                d = fixture()
+                if mode == 'base_mismatch':
+                    d['live_base'] = 'c'*40
+                else:
+                    d['ancestor'] = False
+                d['base_name_on_view'] = {'2': 'release'}
+                self.fixture_file.write_text(json.dumps(d))
+                self.evidence_file.write_text('{}')
+                proc, out = self.actor(execute=True)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertEqual(out['outcome'], 'WAITING')
+                self.assertIn('changed while confirming', ' '.join(out['gate']['reasons']))
+                self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                     for a in self.state()['calls']))
+
+    def test_base_name_changes_during_final_gate_wait_without_writes(self):
+        for fail_ci in (False, True):
+            for name in ('release', None, '', 7):
+                with self.subTest(fail_ci=fail_ci, name=name):
+                    d = fixture()
+                    d['base_name_on_view'] = {'2': name}
+                    if fail_ci:
+                        d['checks'][0]['bucket'] = 'fail'
+                    self.fixture_file.write_text(json.dumps(d))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'WAITING')
+                    self.assertIn('changed during live gate', ' '.join(out['gate']['reasons']))
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in self.state()['calls']))
+
+    def test_base_name_changes_after_comment_prevent_draft(self):
+        for mode in ('base_mismatch', 'base_behind', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'4': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed after comment', out['error'])
+                    self.assertTrue(out['comment_posted'])
+                    self.assertFalse(out['executed'])
+                    self.assertFalse(self.state()['view']['isDraft'])
+                    writes = [a[1] for a in self.state()['calls'] if a[:2] in
+                              (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+                    self.assertEqual(writes, ['comment'])
 
     def test_failed_ci_draft(self):
         self.patch(checks=[{'name':'lint','state':'FAILURE','bucket':'fail'}])

@@ -94,11 +94,16 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
             out["outcome"] = "DRY_RUN_" + gate["decision"]
         return out
     try:
+        # A branch name is part of the confirmed identity, even when two tips share a SHA.
+        base_name = gate.get("base_name")
+        if not isinstance(base_name, str) or not base_name:
+            raise GitHubError("Gate base branch identity unavailable")
         # Prevent a concurrent actor or last-moment update to the PR state.
         view = pr_view(repo, number)
         if view.get("state") != "OPEN" or view.get("isDraft") is not False or \
            view.get("headRefOid") != gate["head_sha"] or view.get("baseRefOid") != gate["base_sha"] or \
-           branch_head(repo, view["baseRefName"]) != gate["live_base_sha"]:
+           view.get("baseRefName") != base_name or \
+           branch_head(repo, base_name) != gate["live_base_sha"]:
             raise GitHubError("PR state/HEAD/Base changed immediately before action")
         if gate["decision"] == "DRAFT":
             # Ensure explanation is available before modifying the PR status.
@@ -108,7 +113,7 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
             current = pr_view(repo, number)
             if any(current.get(k) != view.get(k) for k in
                    ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
-                    branch_head(repo, current["baseRefName"]) != gate["live_base_sha"]:
+                    branch_head(repo, base_name) != gate["live_base_sha"]:
                 raise GitHubError("PR state/HEAD/Base changed after comment; retry live gate")
             run_gh(["pr", "ready", str(number), "-R", repo.raw, "--undo"])
             after = pr_view(repo, number)

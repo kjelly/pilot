@@ -80,7 +80,9 @@ class GateTests(unittest.TestCase):
                         client=Fake() if gh is None else gh)
 
     def test_merge_full_pass(self):
-        self.assertEqual(self.gate()['decision'], 'MERGE')
+        result = self.gate()
+        self.assertEqual(result['decision'], 'MERGE')
+        self.assertEqual(result['base_name'], 'main')
 
     def test_skip_draft(self):
         f = Fake(); f.v['isDraft'] = True
@@ -93,6 +95,32 @@ class GateTests(unittest.TestCase):
         self.assertIn(B, result['reasons'][0])
         self.assertIn(f.live_base, result['reasons'][0])
         self.assertIn('pr-ready', result['reasons'][0])
+
+    def test_missing_or_malformed_base_name_waits(self):
+        for name in (None, '', 7, []):
+            with self.subTest(name=name):
+                f = Fake(); f.v['baseRefName'] = name
+                result = self.gate(gh=f)
+                self.assertEqual(result['decision'], 'WAITING')
+                self.assertIn('base branch name unavailable', ' '.join(result['reasons']))
+
+    def test_actor_missing_gate_base_identity_fails_closed(self):
+        from unittest import mock
+        import apply_decision
+        for decision in ('DRAFT', 'MERGE'):
+            for name in (None, '', 7, []):
+                with self.subTest(decision=decision, name=name):
+                    gate = {'decision': decision, 'head_sha': H, 'base_sha': B, 'live_base_sha': B}
+                    if name is not None:
+                        gate['base_name'] = name
+                    with mock.patch.object(apply_decision, 'evaluate', return_value=gate), \
+                         mock.patch.object(apply_decision, 'pr_view') as read, \
+                         mock.patch.object(apply_decision, 'run_gh') as write:
+                        result = apply_decision._perform_locked(Repo.parse('acme/demo'), 42, {}, 'merge', True)
+                    self.assertEqual(result['outcome'], 'ERROR')
+                    self.assertIn('Gate base branch identity unavailable', result['error'])
+                    read.assert_not_called()
+                    write.assert_not_called()
 
     def test_base_ref_unavailable_waits(self):
         f = Fake()

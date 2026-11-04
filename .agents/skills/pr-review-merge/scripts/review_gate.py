@@ -266,7 +266,8 @@ def check_base_alignment(client: Any, repo: Repo, number: int, view: dict[str, A
             raise GitHubError("PR/base branch changed while confirming base alignment; retry live gate")
     elif client.branch_head(repo, base_name) != live_base:
         raise GitHubError("Live base branch changed during ancestry verification; retry live gate")
-    return {"live_base_sha": live_base, "base_mismatch": mismatch, "base_behind": behind}
+    return {"base_name": base_name, "live_base_sha": live_base,
+            "base_mismatch": mismatch, "base_behind": behind}
 
 
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
@@ -496,12 +497,16 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     try:
         second = client.pr_view(repo, number)
         if second.get("state") != "OPEN" or second.get("isDraft") is not False or \
-            second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"]:
-            missing.append("PR HEAD/Base/state changed during live gate")
+            second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"] or \
+            second.get("baseRefName") != result["base_name"]:
+            reasons.append("PR HEAD/Base/branch/state changed during live gate")
+            return result
         if client.branch_head(repo, base_name) != live_base:
-            missing.append("Live base branch changed during gate; rerun to classify current base state")
+            reasons.append("Live base branch changed during gate; rerun to classify current base state")
+            return result
     except (GitHubError, ValueError, KeyError) as exc:
-        missing.append(f"Could not recheck PR version: {exc}")
+        reasons.append(f"Could not recheck PR version: {exc}")
+        return result
 
     # Confirmed blocker is actionable only if evidence is current and API state is known.
     # An independent review with incomplete coverage can still supply *positive* blocking evidence.
