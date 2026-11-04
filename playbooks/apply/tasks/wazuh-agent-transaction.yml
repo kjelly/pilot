@@ -10,6 +10,8 @@
 - name: "Validate restorable agent sources and private staging paths before package downloads"
   ansible.builtin.command:
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-stage, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+    stdin: "{{ wazuh_agent_version_plan | to_json }}"
+  register: wazuh_agent_stage_result
   changed_when: false
   no_log: true
 
@@ -19,6 +21,8 @@
     pilot_apt_packages: [wazuh-agent]
     pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_stage_version} }}"
     pilot_apt_stage_only: true
+    pilot_apt_wazuh_owner: "{{ wazuh_agent_transaction_owner }}"
+    pilot_apt_wazuh_source: /etc/apt/sources.list.d/wazuh.list
     pilot_apt_policy: tolerant
     pilot_apt_component: wazuh-fim-stage
     pilot_apt_required_sources:
@@ -31,7 +35,7 @@
 - name: "Stage the exact signed old and new RPM agent packages before downtime"
   ansible.builtin.command:
     argv: >-
-      {{ ['timeout', '--kill-after=30', '900', 'dnf', '-y', '--disableexcludes=wazuh',
+      {{ ['timeout', '--kill-after=30', '900', 'dnf', '-c', (wazuh_agent_stage_result.stdout | from_json).dnf_configs[wazuh_agent_stage_version], '-y', '--disableexcludes=wazuh',
           '--setopt=gpgcheck=1', '--setopt=localpkg_gpgcheck=1',
           'reinstall' if wazuh_agent_stage_version == wazuh_agent_version_plan.installed else 'install',
           '--downloadonly', '--downloaddir=/var/backups/pilot/wazuh/rpm-stage',
@@ -49,7 +53,9 @@
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-reserve, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
         stdin: >-
           {{ wazuh_agent_version_plan | combine({'manager_host': wazuh_manager_probe_host
-               if (wazuh_enrollment_enabled | bool) else ''}) | to_json }}
+               if (wazuh_enrollment_enabled | bool) else '',
+               'prerequisite_plugin_present': ((wazuh_dnf_prerequisite_state.stdout | from_json).prerequisite_plugin_present
+                 if ansible_os_family == 'RedHat' else none)}) | to_json }}
       changed_when: false
       no_log: true
 
@@ -66,6 +72,7 @@
     - name: "Authorize replacement only for the verified backup and owner"
       ansible.builtin.command:
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-install, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+      register: wazuh_agent_install_result
       changed_when: false
       no_log: true
 
@@ -75,6 +82,8 @@
         pilot_apt_packages: [wazuh-agent]
         pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_version_plan.package} }}"
         pilot_apt_policy_rc_d: 101
+        pilot_apt_installation_artifact: "{{ (wazuh_agent_install_result.stdout | from_json).package_path }}"
+        pilot_apt_wazuh_owner: "{{ wazuh_agent_transaction_owner }}"
         pilot_apt_component: wazuh-fim-upgrade
         pilot_apt_required_sources:
           - {id: pilot-wazuh, class: pilot, source_file: /etc/apt/sources.list.d/wazuh.list}
@@ -82,7 +91,8 @@
 
     - name: "Install the exact signed RPM target"
       ansible.builtin.dnf:
-        name: "wazuh-agent-{{ wazuh_agent_version_plan.package }}.x86_64"
+        name: "{{ (wazuh_agent_install_result.stdout | from_json).package_path }}"
+        conf_file: "{{ (wazuh_agent_install_result.stdout | from_json).dnf_conf_file }}"
         state: present
         disable_excludes: wazuh
         disable_gpg_check: false

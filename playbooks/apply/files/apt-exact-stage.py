@@ -64,6 +64,8 @@ def verify(versions, cache=Path('/var/cache/apt/archives')):
         metadata = [item for item in records(run(['apt-cache', 'show', package + '=' + version]))
                     if item.get('Package') == name and item.get('Version') == version
                     and item.get('Architecture') in (arch, 'all') and item.get('SHA256') and item.get('Filename')]
+        if len({item['SHA256'] for item in metadata}) > 1:
+            raise ValueError('ambiguous authenticated same-version package payloads')
         matched = None
         for item in metadata:
             path = cache / Path(item['Filename']).name
@@ -88,7 +90,48 @@ def verify(versions, cache=Path('/var/cache/apt/archives')):
     return artifacts
 
 
-def verify_recovery(filename, versions, root=Path('/var/backups/pilot/wazuh')):
+def verify_wazuh_source(versions, source_file='/etc/apt/sources.list.d/wazuh.list'):
+    """Bind the payload to the declared authenticated official index.
+
+    python3-apt is the native APT index/record parser. No preference interpreter
+    or origin label supplied by a competing repository is trusted here.
+    """
+    import apt_pkg
+    source = safe_path(source_file)
+    if not __import__('re').fullmatch(r'deb \[signed-by=/usr/share/keyrings/wazuh[.]gpg\] https://packages[.]wazuh[.]com/4[.]x/apt/ stable main\n', source.read_text()):
+        raise ValueError('unknown declared Wazuh APT source')
+    apt_pkg.init_config(); apt_pkg.init_system()
+    cache, sources = apt_pkg.Cache(None), apt_pkg.SourceList()
+    sources.read_main_list()
+    result = {}
+    for package, version in versions.items():
+        if package != 'wazuh-agent':
+            raise ValueError('official Wazuh source check cannot authorize other packages')
+        matches = [item for item in cache[package].version_list if item.ver_str == version and item.arch in ('amd64', 'all')]
+        payloads, official = set(), []
+        for item in matches:
+            for location in item.file_list:
+                index = sources.find_index(location[0])
+                if index is None:
+                    continue  # The installed dpkg status record is not a provider.
+                record = apt_pkg.PackageRecords(cache)
+                if not record.lookup(location):
+                    raise ValueError('native APT provider record is unreadable')
+                fields = next(records(record.record))
+                checksum = fields.get('SHA256')
+                if not checksum:
+                    raise ValueError('APT provider has no SHA256 payload binding')
+                payloads.add(checksum)
+                uri = index.archive_uri(record.filename)
+                if index.is_trusted and uri.startswith('https://packages.wazuh.com/4.x/apt/'):
+                    official.append({'sha256': checksum, 'uri': uri, 'source': source_file})
+        if len(payloads) != 1 or not official or {item['sha256'] for item in official} != payloads:
+            raise ValueError('missing or ambiguous authenticated official Wazuh payload provider')
+        result[version] = official[0]
+    return result
+
+
+def verify_recovery(filename, versions, root=Path('/var/backups/pilot/wazuh'), installation=False, require_cache_name=False):
     """Trust an archive only through the coordinator's private recovery manifest.
 
     The original stage verified APT metadata and the manifest froze its digest.
@@ -108,22 +151,26 @@ def verify_recovery(filename, versions, root=Path('/var/backups/pilot/wazuh')):
         raise ValueError('unsafe recovery manifest')
     item = json.loads(manifest.read_text())
     active = json.loads(safe_path(parent.parent / 'agent-active.json').read_text())
-    if active.get('owner') != item.get('owner') or active.get('phase') != 'recovering':
+    phase = 'installing' if installation else 'recovering'
+    if active.get('owner') != item.get('owner') or active.get('phase') != phase:
         raise ValueError('recovery owner is no longer active')
-    if item['phase'] != 'recovering' or item['family'] != 'Debian' or item['kind'] != 'agent':
+    if item['phase'] != phase or item['family'] != 'Debian' or item['kind'] != 'agent':
         raise ValueError('recovery is not authorized')
-    if versions != {'wazuh-agent': item['installed']}:
+    version = item['package'] if installation else item['installed']
+    if versions != {'wazuh-agent': version}:
         raise ValueError('recovery target does not match the saved package')
-    expected = item['packages'][item['installed']]
+    expected = item['packages'][version]
     if expected['path'] != str(path) or str(parent) != item['backup']:
         raise ValueError('recovery archive identity mismatch')
     checksum = hashlib.sha256(path.read_bytes()).hexdigest()
     if checksum != expected['sha256']:
         raise ValueError('recovery artifact checksum mismatch')
     fields = run(['dpkg-deb', '--show', '--showformat=${Package}\n${Version}\n${Architecture}', str(path)]).splitlines()
-    if fields != ['wazuh-agent', item['installed'], 'amd64']:
+    if fields != ['wazuh-agent', version, 'amd64']:
         raise ValueError('recovery artifact package identity mismatch')
-    return {'path': str(path), 'version': item['installed'], 'sha256': checksum}
+    if require_cache_name and path.name != 'wazuh-agent_' + version + '_amd64.deb':
+        raise ValueError('retained recovery artifact is not its exact native APT cache basename')
+    return {'path': str(path), 'version': version, 'sha256': checksum}
 
 
 if __name__ == '__main__':
@@ -132,9 +179,17 @@ if __name__ == '__main__':
             result = {'cache': str(validate_cache())}
         elif len(sys.argv) == 4 and sys.argv[1] == '--recovery':
             result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]))
+        elif len(sys.argv) == 4 and sys.argv[1] == '--installation':
+            result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]), installation=True)
+        elif len(sys.argv) == 4 and sys.argv[1] == '--recovery-cache':
+            result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]), require_cache_name=True)
         else:
             result = verify(json.loads(sys.argv[1]))
+            if len(sys.argv) == 4 and sys.argv[2] == '--wazuh-source':
+                providers = verify_wazuh_source(json.loads(sys.argv[1]), sys.argv[3])
+                if any(item['sha256'] != providers[item['version']]['sha256'] for item in result):
+                    raise ValueError('staged artifact differs from official authenticated source')
         print(json.dumps(result, sort_keys=True))
-    except (ValueError, KeyError, OSError, subprocess.SubprocessError):
+    except (ValueError, KeyError, OSError, ImportError, SystemError, subprocess.SubprocessError):
         print('exact staged Debian package verification failed', file=sys.stderr)
         sys.exit(1)

@@ -18,7 +18,8 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 class ExactTaskTests(unittest.TestCase):
-    def run_case(self, installed, versions=None, stage=False, cache_error=False, held=False, packages=None, cache_refusal=False):
+    def run_case(self, installed, versions=None, stage=False, cache_error=False, held=False, packages=None, cache_refusal=False,
+                 owner=False, owner_refusal=False, retained=False, force_recovery=False, installer_failure=False):
         with tempfile.TemporaryDirectory(prefix='pilot-apt-exact-') as temporary:
             root = Path(temporary)
             tasks = root / 'tasks'
@@ -33,11 +34,16 @@ class ExactTaskTests(unittest.TestCase):
                         task.pop('ansible.builtin.package_facts')
                         task['ansible.builtin.set_fact'] = {'ansible_facts': {'packages': installed}}
                     if 'ansible.builtin.apt' in task:
-                        task.pop('ansible.builtin.apt')
-                        task['ansible.builtin.command'] = {'argv': ['apt-harness-install', '{{ _pilot_apt_missing | to_json }}']}
+                        params = task.pop('ansible.builtin.apt')
+                        task['ansible.builtin.command'] = {'argv': ['apt-harness-install', '{{ _pilot_apt_missing | to_json }}'] +
+                            ([params['deb'], params['allow_change_held_packages'], params['allow_downgrade']] if retained else [])}
+                    command = task.get('ansible.builtin.command', {})
+                    if command.get('argv', [''])[0] == '/usr/local/sbin/pilot-wazuh-transaction':
+                        command['argv'][0] = 'harness-wazuh-policy'
                     if task['name'].endswith(('verify staged exact package identity and metadata SHA256',
                                               'validate exact-version output paths before downloading',
-                                              'validate exact-version cache paths before any installer')):
+                                              'validate exact-version cache paths before any installer',
+                                              'verify private recovery authority and artifact')):
                         task.pop('ansible.builtin.script')
                         if cache_refusal and 'validate exact-version' in task['name']:
                             task['ansible.builtin.fail'] = {'msg': 'controlled cache boundary refusal'}
@@ -65,11 +71,15 @@ if name=='apt-cache':
   print('Package: partial-metadata'); sys.exit(100)
  if args[0]=='show': print('Package: wazuh-agent\\nVersion: 4.14.9-1\\nArchitecture: amd64')
  else: print('wazuh-agent:\\n  Candidate: 4.14.9-1')
-if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1':
+if name=='harness-wazuh-policy' and os.environ.get('PILOT_APT_HARNESS_OWNER_REFUSAL')=='1':
+ print('controlled wrong-owner/phase refusal',file=sys.stderr); sys.exit(1)
+if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_INSTALL_FAILURE')=='1' and '--no-download' in args:
+ print('controlled owned reinstall failure',file=sys.stderr); sys.exit(100)
+if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1' and '--allow-change-held-packages' not in args:
  print('E: Held packages were changed and -y was used without --allow-change-held-packages.',file=sys.stderr); sys.exit(100)
 ''')
             executable.chmod(0o755)
-            for name in ('apt-cache', 'apt-get', 'apt-harness-install'):
+            for name in ('apt-cache', 'apt-get', 'apt-harness-install', 'harness-wazuh-policy'):
                 (tools / name).symlink_to(executable)
             inputs = {'pilot_apt_packages': packages or ['wazuh-agent'],
                       'pilot_apt_component': 'exact-version-harness',
@@ -77,6 +87,12 @@ if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1':
                       'pilot_apt_stage_only': stage}
             if versions is not None:
                 inputs['pilot_apt_versions'] = versions
+            if owner:
+                inputs['pilot_apt_wazuh_owner'] = 'd' * 32
+            if retained:
+                inputs['pilot_apt_recovery_artifact' if force_recovery else 'pilot_apt_installation_artifact'] = '/private/wazuh-agent_' + versions['wazuh-agent'] + '_amd64.deb'
+            if force_recovery:
+                inputs.update(pilot_apt_reinstall_retained=True, pilot_apt_allow_downgrade=True, pilot_apt_policy_rc_d=101)
             playbook = root / 'test.yml'
             playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'connection': 'local',
                                                'gather_facts': False, 'vars': inputs,
@@ -89,6 +105,8 @@ if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1':
                                PILOT_APT_HARNESS_LOG=str(log),
                                PILOT_APT_HARNESS_CACHE_ERROR='1' if cache_error else '0',
                                PILOT_APT_HARNESS_HELD='1' if held else '0')
+            environment['PILOT_APT_HARNESS_OWNER_REFUSAL'] = '1' if owner_refusal else '0'
+            environment['PILOT_APT_HARNESS_INSTALL_FAILURE'] = '1' if installer_failure else '0'
             result = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(playbook)],
                                     cwd=root, env=environment, capture_output=True, text=True, timeout=90)
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -148,6 +166,49 @@ if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1':
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('staging failed', result.stdout)
         self.assertFalse(any(call[0] == 'apt-harness-install' for call in calls))
+
+    def test_owned_held_stage_authorizes_only_exact_version_and_refusal_precedes_download(self):
+        for refused in (False, True):
+            result, calls = self.run_case({'wazuh-agent': [{'version': '4.14.1-1', 'arch': 'amd64'}]},
+                                          {'wazuh-agent': '4.14.9-1'}, stage=True, held=True,
+                                          owner=True, owner_refusal=refused)
+            self.assertEqual(result.returncode == 0, not refused, result.stdout + result.stderr)
+            policy = [call for call in calls if call[:2] == ['harness-wazuh-policy', 'agent-apt-plan']]
+            self.assertEqual(len(policy), 1)
+            self.assertIn('--stage', policy[0]); self.assertIn('4.14.9-1', policy[0])
+            downloads = [call for call in calls if call[0] == 'apt-get']
+            self.assertEqual(bool(downloads), not refused)
+            if downloads: self.assertIn('--allow-change-held-packages', downloads[0])
+            self.assertFalse(any(call[0] == 'apt-harness-install' for call in calls))
+
+    def test_retained_target_uses_deb_without_resolving_repository_again(self):
+        for refused in (False, True):
+            result, calls = self.run_case({'wazuh-agent': [{'version': '4.14.1-1', 'arch': 'amd64'}]},
+                                          {'wazuh-agent': '4.14.9-1'}, owner=True, retained=True, owner_refusal=refused)
+            self.assertEqual(result.returncode == 0, not refused, result.stdout + result.stderr)
+            self.assertFalse(any(call[0] in ('apt-get', 'apt-cache') for call in calls))
+            policy = next(call for call in calls if call[:2] == ['harness-wazuh-policy', 'agent-apt-plan'])
+            self.assertIn('/private/wazuh-agent_4.14.9-1_amd64.deb', policy); self.assertNotIn('--stage', policy)
+            installs = [call for call in calls if call[0] == 'apt-harness-install']
+            self.assertEqual(bool(installs), not refused)
+            if installs:
+                self.assertEqual(installs[0][2:], ['/private/wazuh-agent_4.14.9-1_amd64.deb', 'True', 'False'])
+
+    def test_same_version_recovery_reinstalls_and_always_restores_owned_policy_hook(self):
+        for failed in (False, True):
+            result, calls = self.run_case({'wazuh-agent': [{'version': '4.14.1-1', 'arch': 'amd64'}]},
+                                          {'wazuh-agent': '4.14.1-1'}, owner=True, retained=True,
+                                          force_recovery=True, installer_failure=failed)
+            self.assertEqual(result.returncode == 0, not failed, result.stdout + result.stderr)
+            installs = [call for call in calls if call[0] == 'apt-get']
+            self.assertEqual(len(installs), 1)
+            for token in ('--no-download', '--reinstall', '--allow-change-held-packages', '--allow-downgrades',
+                          'APT::Get::AllowUnauthenticated=false', '/private/wazuh-agent_4.14.1-1_amd64.deb', 'Dir::Cache::archives=/private/'):
+                self.assertIn(token, installs[0])
+            actions = [call[1] for call in calls if call[0] == 'harness-wazuh-policy']
+            self.assertEqual(actions, ['agent-apt-plan', 'agent-hook-prepare', 'agent-hook-cleanup'])
+            self.assertEqual(calls[-1][1], 'agent-hook-cleanup', 'installer failure must not strand global policy')
+            self.assertFalse(any(call[0] in ('apt-cache', 'apt-harness-install') for call in calls))
 
 
 if __name__ == '__main__':

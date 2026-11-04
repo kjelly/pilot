@@ -97,8 +97,13 @@ root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
 拒絕。此交易不支援刪除、重建 mount root。backup store 可位於一般獨立 filesystem，
 但不得有 subtree/bind ancestry、子 mount、或與來源互為實體 alias。discovery、
 停機前與回復前共用相同 layout 檢查；留存 archives 限於原 transaction 的 private directory。
+整個 project 與每個 persistent source 的所有 lstat entry 都須形成封閉 capture set：
+內部 symlink 完整解析後仍在此集合，regular-file inode 的所有 hardlink 名稱都已
+捕捉。同 volume 的完整 hardlink group 可以保留；未知外部名稱、外部資料 symlink
+或未支援的 special file 在授予停機權限前拒絕。冷資料另封存內容 hash、ownership、
+mode、ACL/xattrs 與 link groups，恢復後須先驗證完整集合再啟動與提交。
 這是停止整個 single-node stack 的操作；期間中央停止接收與查詢事件。
-新增交易驗收尚待 candidate 的 target evidence；原 C1–C11 不代表交易已驗證。
+交易驗收必須有 candidate-bound target evidence；原 C1–C11 不代表交易已驗證。
 
 一般設定、新安裝、升級、回復與明示的 canary 都必須先取得同一個 host-wide
 writer owner，包含共享 coordinator copy 與 `/etc/hosts`；同主機 agent 也使用
@@ -118,7 +123,7 @@ entrypoints，其他角色、舊版 controller 或外部 root 修改仍須獨占
 版本升級 run 保留現有設定，只完成版本交易；欲改 forwarding 等設定，必須另跑
 一般 apply。C12 是不注入事件的目前狀態原生 oracle，不把「曾產生 backup 檔」
 當作回復已成功的證明。首次開發 probe 已在 4.14.1 disposable manager 真跑；正式
-candidate 仍須另驗證 fresh、upgrade、故障回復與 idempotency。canary 以唯一
+candidate 驗收須涵蓋 fresh、upgrade、故障回復與 idempotency。canary 以唯一
 synthetic nonce 從原生 analysis socket 注入，必須以 agent `000`、精確 rule
 `5760`（上游 `5716` 的 Failed password 子規則）進入 indexer；不發出真實登入。
 canary 只在明確授權的版本交易與 opt-in fixture 執行，普通 C12 不注入事件。

@@ -83,6 +83,133 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(w.agent_plan('', '')['package'], '4.14.1-1')
 
 
+class NativePackageGuardTests(unittest.TestCase):
+    def test_apt_hold_is_the_effective_guard_even_when_foreign_priority_changes_candidate(self):
+        class Native:
+            def __init__(self): self.held = True; self.calls = []
+            def run(self, argv, **kwargs):
+                self.calls.append(argv)
+                if argv[0] == 'dpkg': text = 'wazuh-agent\t' + ('hold' if self.held else 'install') + '\n'
+                elif argv[:2] == ['apt-mark', 'showhold']: text = 'unrelated-held\n' + ('wazuh-agent\n' if self.held else '')
+                elif argv[:2] == ['apt-mark', 'hold']: self.held = True; text = ''
+                elif argv[:2] == ['apt-cache', 'policy']: text = '  Installed: 4.14.1-1\n  Candidate: 4.14.9-1\n'
+                else: raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, 0, text, '')
+        native = Native(); guard = w.PackageGuard('Debian', native)
+        result = guard.verify('4.14.1-1')
+        self.assertEqual(result['candidate'], '4.14.9-1', 'do not pretend APT priorities freeze the candidate')
+        native.held = False
+        with self.assertRaisesRegex(w.Refused, 'native APT hold'):
+            guard.verify('4.14.1-1')
+        # The policy ownership boundary is separately tested with real files.
+        guard.ownership = lambda: {}
+        guard.protect('4.14.1-1')
+        self.assertIn(['apt-mark', 'hold', 'wazuh-agent'], native.calls)
+        self.assertFalse(any('unrelated-held' in argv for argv in native.calls))
+
+    def test_apt_scoped_plan_rejects_unrelated_packages_and_wrong_target(self):
+        class Native:
+            def __init__(self, output): self.output = output
+            def run(self, argv, **kwargs):
+                self.argv = argv
+                return subprocess.CompletedProcess(argv, 0, self.output, '')
+        good = 'Inst wazuh-agent [4.14.1-1] (4.14.9-1 native [amd64])\nConf wazuh-agent (4.14.9-1 native [amd64])\n'
+        native = Native(good); guard = w.PackageGuard('Debian', native)
+        self.assertTrue(guard.apt_plan('4.14.9-1')['authorized'])
+        self.assertIn('--allow-change-held-packages', native.argv)
+        for output in (good + 'Inst other-held (2 native [amd64])\n', good + 'Remv foreign [1]\n',
+                       good.replace('4.14.9-1', '4.14.10-1'), ''):
+            native.output = output
+            with self.assertRaises(w.Refused): guard.apt_plan('4.14.9-1')
+        native.output = good
+        self.assertTrue(guard.apt_plan('4.14.9-1', '/private/wazuh-agent_4.14.9-1_amd64.deb')['authorized'])
+        self.assertIn('Dir::Cache::archives=/private/', native.argv)
+        self.assertIn('--no-download', native.argv)
+        self.assertIn('APT::Keep-Downloaded-Packages=true', native.argv)
+        with self.assertRaisesRegex(w.Refused, 'unsupported native APT cache basename'):
+            guard.apt_plan('4.14.9-1', '/private/renamed.deb')
+
+    def test_resolving_dnf_oracle_requires_loaded_plugin_exact_target_and_no_dependencies(self):
+        package = {'name': 'wazuh-agent', 'version': '4.14.9-1', 'epoch': '0', 'arch': 'x86_64'}
+        plan = {'plugins': ['versionlock'], 'install': [package], 'remove': []}
+        w.PackageGuard.validate_dnf_plan(plan, '4.14.9-1')
+        for broken in ({**plan, 'plugins': []}, {**plan, 'install': []},
+                       {**plan, 'install': [package, {**package, 'name': 'foreign'}]},
+                       {**plan, 'remove': [{**package, 'name': 'foreign'}]}):
+            with self.assertRaises(w.Refused): w.PackageGuard.validate_dnf_plan(broken, '4.14.9-1')
+        with self.assertRaisesRegex(w.Refused, 'permits a replacement'):
+            w.PackageGuard.validate_dnf_plan(plan, '4.14.1-1', unchanged=True)
+
+    def test_rpm_provider_requires_official_hash_and_rejects_competing_same_nevra(self):
+        official = {'repo': 'wazuh', 'url': 'https://packages.wazuh.com/4.x/yum/wazuh-agent.rpm',
+                    'sha256': 'a' * 64, 'checksum_type': 'sha256', 'gpgcheck': True,
+                    'gpgkey': ['https://packages.wazuh.com/key/GPG-KEY-WAZUH'],
+                    'baseurl': ['https://packages.wazuh.com/4.x/yum/']}
+        guard = w.PackageGuard('RedHat', Commands('RedHat'))
+        records = [official]
+        guard.dnf_native = lambda payload: records
+        self.assertEqual(guard.official_rpm_provider({'config': 'private'}, '4.14.9-1')['sha256'], 'a' * 64)
+        for records in ([{**official, 'repo': 'foreign'}],
+                        [official, {**official, 'repo': 'foreign', 'sha256': 'b' * 64}],
+                        [official, {**official, 'repo': 'foreign', 'sha256': 'invalid'}],
+                        [{**official, 'gpgcheck': False}], [{**official, 'gpgkey': ['https://other/key']}], []):
+            with self.assertRaises(w.Refused): guard.official_rpm_provider({'config': 'private'}, '4.14.9-1')
+
+    def test_dnf_prerequisite_refuses_latent_disabled_redirected_and_foreign_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); folder = root / 'dnf'; (folder / 'plugins').mkdir(parents=True)
+            main = folder / 'dnf.conf'; main.write_text('[main]\nplugins=1\n'); main.chmod(0o644)
+            plugin = folder / 'plugins/versionlock.conf'; locks = folder / 'plugins/versionlock.list'
+            real_path = w.Path
+            def path(value):
+                value = str(value)
+                return folder / value.removeprefix('/etc/dnf').lstrip('/') if value == '/etc/dnf' or value.startswith('/etc/dnf/') else real_path(value)
+            guard = w.PackageGuard('RedHat', Commands('RedHat'), root / 'private')
+            guard.dnf_native = lambda payload: [['wazuh-agent']] if payload['action'] == 'names' else None
+            w.Path = path
+            try:
+                self.assertFalse(guard.ownership()['plugin']['present'])
+                locks.write_text('unrelated-0:1-1.x86_64\n'); locks.chmod(0o644)
+                with self.assertRaisesRegex(w.Refused, 'activate latent global rules'): guard.ownership()
+                locks.write_text('')
+                for settings, error in (('[main]\nenabled=0\nlocklist=/etc/dnf/plugins/versionlock.list\n', 'disabled'),
+                                        ('[main]\nenabled=1\nlocklist=/outside/rules\n', 'redirected')):
+                    plugin.write_text(settings); plugin.chmod(0o644)
+                    with self.assertRaisesRegex(w.Refused, error): guard.ownership()
+                plugin.write_text('[main]\nenabled=1\nlocklist=/etc/dnf/plugins/versionlock.list\n')
+                locks.write_text('wazuh-agent-*\n')
+                with self.assertRaisesRegex(w.Refused, 'foreign versionlock ownership'): guard.ownership()
+                main.write_text('[main]\nplugins=0\n')
+                with self.assertRaisesRegex(w.Refused, 'plugins are disabled'): guard.ownership()
+            finally: w.Path = real_path
+
+    def test_live_external_unix_endpoint_is_refused_without_guessing_reload(self):
+        # Kernel socket/proc records are explicit fixtures; this sandbox does
+        # not permit AF_UNIX bind. The ownership parser and gate stay real.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); proc = root / 'proc'; (proc / 'net').mkdir(parents=True)
+            (proc / '123/fd').mkdir(parents=True)
+            (proc / '123/fd/5').symlink_to('socket:[42]')
+            (proc / '123/exe').symlink_to('/usr/bin/python3')
+            source = root / 'state'; source.mkdir()
+            records = proc / 'net/unix'
+            records.write_text('Num RefCount Protocol Flags Type St Inode Path\n1: 1 0 0 0002 01 42 ' + str(source / 'audit') + '\n')
+            real_path = w.Path
+            def path(value):
+                value = str(value)
+                return proc / value.removeprefix('/proc').lstrip('/') if value == '/proc' or value.startswith('/proc/') else real_path(value)
+            capture = {'nodes': {str(source / 'audit'): {'type': 'socket'}}}
+            w.Path = path
+            try:
+                with self.assertRaisesRegex(w.Refused, 'live external agent endpoint'):
+                    w.agent_socket_gate(capture)
+                with self.assertRaisesRegex(w.Refused, 'remain active after quiescence'):
+                    w.agent_socket_gate(capture, stopped=True)
+                records.write_text('Num RefCount Protocol Flags Type St Inode Path\n')
+                w.agent_socket_gate(capture, stopped=True)
+            finally: w.Path = real_path
+
+
 class NativeComposeControlTests(unittest.TestCase):
     """Real Compose parser/config hashing; no daemon, containers or network."""
     def test_version_only_graph_and_anchor_side_effect(self):
@@ -198,17 +325,18 @@ class DiscoveryFilesystemTests(unittest.TestCase):
 
     def test_discovery_rejects_real_compose_hardlink_without_touching_outside_alias(self):
         import os
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            central, compose, native = self.central(root)
-            alias = root / 'operator-unrelated.yml'
-            os.link(compose, alias)
-            original = alias.read_bytes()
-            self.assertEqual(compose.stat().st_nlink, 2)
-            with self.assertRaisesRegex(w.Refused, 'hardlink'):
-                central.discover()
-            self.assertEqual(alias.read_bytes(), original)
-            self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
+        for location in ('outside', 'inside-captured-project'):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                central, compose, native = self.central(root)
+                alias = (root if location == 'outside' else compose.parent) / 'operator-unrelated.yml'
+                os.link(compose, alias)
+                original = alias.read_bytes()
+                self.assertEqual(compose.stat().st_nlink, 2)
+                with self.assertRaisesRegex(w.Refused, 'hardlink'):
+                    central.discover()
+                self.assertEqual(alias.read_bytes(), original)
+                self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
 
 
 class Commands:
@@ -249,7 +377,39 @@ class Commands:
         raise AssertionError(argv)
 
 
+class PackagePolicyHarness:
+    """Native package-policy seam for filesystem/phase tests only.
+
+    The real PackageGuard is tested separately, including native container
+    resolving controls. Capture, tar, restoration and ownership stay real here.
+    """
+    nevra = staticmethod(w.PackageGuard.nevra)
+    def __init__(self, native): self.native = native
+    def snapshot(self): return {'installed': self.native.installed, 'held': False}
+    def same_context(self, before, after): return before == after
+    def ownership(self): return {}
+    def protect(self, *args, **kwargs): return {}
+    def verify(self, *args, **kwargs): return {}
+    def restore_prior(self, *args, **kwargs): return None
+    def overlay(self, owner, package, installed=''): return {'config': package}
+    def official_rpm_provider(self, overlay, package): return {'synthetic': package}
+    def official_rpm_keyring(self, owner): return {}
+    def verify_overlay(self, overlay, owner): return overlay['config']
+    def verify_official_rpm(self, *args): return None
+    def artifact_plan(self, overlay, owner, *args, **kwargs): return overlay['config']
+
+
 class BackendTests(unittest.TestCase):
+    def test_native_held_dpkg_status_remains_an_installed_compatible_agent(self):
+        class Native(Commands):
+            def run(self, argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, 'hold ok installed\t4.14.1-1\tamd64', '')
+        agent = w.Agent('Debian', runner=Native())
+        self.assertEqual(agent.installed(), '4.14.1-1')
+        with tempfile.TemporaryDirectory() as temporary:
+            agent.root = Path(temporary) / 'private'
+            self.assertFalse(agent.check('4.14.9')['change'])
+
     def test_known_absent_and_unknown_query_failure_are_distinct(self):
         for family in ('Debian', 'RedHat'):
             native = Commands(family, '')
@@ -605,14 +765,14 @@ class CentralTransactionTests(unittest.TestCase):
             original = central.compose.read_bytes()
             interrupted = False
             restore = central.restore
-            def fault(source, archive, checksum):
+            def fault(source, archive, checksum, **kwargs):
                 nonlocal interrupted
                 if not interrupted:
                     interrupted = True
                     import shutil
                     shutil.rmtree(source)
                     raise w.Refused('injected interruption after destination removal')
-                return restore(source, archive, checksum)
+                return restore(source, archive, checksum, **kwargs)
             central.restore = fault
             with self.assertRaisesRegex(w.Refused, 'AND recovery failed'):
                 central.execute('4.14.9', True)
@@ -693,9 +853,9 @@ class CentralTransactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             central = FakeCentral(Path(temp), fail=True)
             restore = central.restore
-            def corrupt(source, archive, checksum):
+            def corrupt(source, archive, checksum, **kwargs):
                 Path(archive).write_bytes(b'corrupt')
-                return restore(source, archive, checksum)
+                return restore(source, archive, checksum, **kwargs)
             central.restore = corrupt
             with self.assertRaisesRegex(w.Refused, 'AND recovery failed'):
                 central.execute('4.14.9', True)
@@ -729,16 +889,22 @@ class ExactArtifactTests(unittest.TestCase):
             checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
             original = apt.run
             identity = ['wazuh-agent', '4.14.9-1', 'amd64']
+            conflicting_payload = False
             def command(argv):
                 if argv[0] == 'dpkg':
                     return 'amd64\n'
                 if argv[0] == 'apt-cache':
-                    return '\n'.join(['Package: wazuh-agent', 'Version: 4.14.9-1', 'Architecture: amd64',
-                                      'Filename: pool/' + artifact.name, 'SHA256: ' + checksum])
+                    record = '\n'.join(['Package: wazuh-agent', 'Version: 4.14.9-1', 'Architecture: amd64',
+                                        'Filename: pool/' + artifact.name, 'SHA256: ' + checksum])
+                    return record + ('\n\n' + record.replace(checksum, 'a' * 64) if conflicting_payload else '')
                 return '\n'.join(identity)
             apt.run = command
             try:
                 self.assertEqual(apt.verify({'wazuh-agent': '4.14.9-1'}, root)[0]['sha256'], checksum)
+                conflicting_payload = True
+                with self.assertRaisesRegex(ValueError, 'ambiguous authenticated'):
+                    apt.verify({'wazuh-agent': '4.14.9-1'}, root)
+                conflicting_payload = False
                 identity[1] = '4.14.10-1'
                 with self.assertRaises(ValueError):
                     apt.verify({'wazuh-agent': '4.14.9-1'}, root)
@@ -824,7 +990,7 @@ class RestoreScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             real_path, old_mounts = w.Path, MOUNT_NAMESPACE['text']
-            mapped = ('/var/ossec', '/etc/hosts', '/etc/apt/preferences.d', '/etc/yum.repos.d', '/var/cache/apt/archives')
+            mapped = ('/var/ossec', '/etc/hosts', '/etc/apt/preferences.d', '/etc/yum.repos.d', '/var/cache/apt/archives', '/etc/audit/plugins.d', '/etc/dnf', '/usr/sbin/policy-rc.d')
             def path(value):
                 value = str(value)
                 return root / 'host' / value.lstrip('/') if any(value == p or value.startswith(p + '/') for p in mapped) else real_path(value)
@@ -835,6 +1001,8 @@ class RestoreScopeTests(unittest.TestCase):
                 def run(self, argv, **kwargs):
                     if argv[0] == 'du':
                         argv = [*argv[:-1], str(path(argv[-1]))]
+                    if argv[0] == '/var/ossec/bin/wazuh-control':
+                        return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v' + self.installed.rsplit('-', 1)[0] + '"\n', '')
                     if argv[0] == 'systemctl':
                         self.calls.append(list(argv))
                         if argv[1] in ('stop', 'start'):
@@ -843,6 +1011,7 @@ class RestoreScopeTests(unittest.TestCase):
                                                            'enabled' if argv[1] == 'is-enabled' else '', '')
                     return super().run(argv, **kwargs)
             class Agent(w.Agent):
+                def guard(self): return PackagePolicyHarness(self.r)
                 def package_archives(self, installed, target):
                     # Signed/native package identity has independent controls;
                     # this call-chain fixture supplies verified artifact bytes.
@@ -857,6 +1026,9 @@ class RestoreScopeTests(unittest.TestCase):
                     destination = path(name); destination.parent.mkdir(parents=True, exist_ok=True); destination.write_text(content)
                 (root / 'stage').mkdir(mode=0o700)
                 path('/var/cache/apt/archives').mkdir(parents=True)
+                path('/etc/audit/plugins.d').mkdir(parents=True)
+                path('/etc/dnf/plugins').mkdir(parents=True)
+                path('/usr/sbin/policy-rc.d').parent.mkdir(parents=True)
                 for release in ('4.14.1-1', '4.14.9-1'):
                     (root / 'stage' / (release + '.pkg')).write_text(release)
                 native = Native()
@@ -887,7 +1059,7 @@ class RestoreScopeTests(unittest.TestCase):
                     else:
                         shutil.move(victim, alias)
                         victim.symlink_to(alias, target_is_directory=alias.is_dir())
-                    with self.assertRaisesRegex(w.Refused, 'symlink|single-link'):
+                    with self.assertRaisesRegex(w.Refused, 'symlink|single-link|uncaptured external hardlink'):
                         agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
                     self.assertFalse(agent.path.exists(), 'unsafe source must never acquire reserve authority')
                     self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
@@ -992,6 +1164,8 @@ class RestoreScopeTests(unittest.TestCase):
             apt.run = lambda argv: 'wazuh-agent\n4.14.1-1\namd64'
             try:
                 self.assertEqual(apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)['version'], '4.14.1-1')
+                with self.assertRaisesRegex(ValueError, 'native APT cache basename'):
+                    apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root, require_cache_name=True)
                 parent.chmod(0o755)
                 with self.assertRaisesRegex(ValueError, 'unsafe recovery directory'):
                     apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)
@@ -1002,6 +1176,30 @@ class RestoreScopeTests(unittest.TestCase):
                     apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)
             finally:
                 apt.run = previous
+
+    def test_retained_debian_target_and_recovery_have_distinct_phase_and_version_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = w.private_dir(Path(temporary) / 'private'); parent = w.private_dir(root / ('agent-' + 'd' * 32))
+            old, new = parent / 'old.deb', parent / 'new.deb'; old.write_bytes(b'verified old bytes'); new.write_bytes(b'verified target bytes')
+            item = {'owner': 'd' * 32, 'phase': 'installing', 'family': 'Debian', 'kind': 'agent',
+                    'installed': '4.14.1-1', 'package': '4.14.9-1', 'backup': str(parent),
+                    'packages': {'4.14.1-1': {'path': str(old), 'sha256': w.digest(old)},
+                                 '4.14.9-1': {'path': str(new), 'sha256': w.digest(new)}}}
+            previous = apt.run
+            apt.run = lambda argv: 'wazuh-agent\n' + ('4.14.1-1' if argv[-1] == str(old) else '4.14.9-1') + '\namd64'
+            try:
+                for phase in ('installing', 'recovering'):
+                    item['phase'] = phase; w.atomic_json(parent / 'manifest.json', item); w.atomic_json(root / 'agent-active.json', item)
+                    artifact, version = (new, '4.14.9-1') if phase == 'installing' else (old, '4.14.1-1')
+                    self.assertEqual(apt.verify_recovery(artifact, {'wazuh-agent': version}, root, installation=phase == 'installing')['version'], version)
+                    with self.assertRaises(ValueError):
+                        apt.verify_recovery(artifact, {'wazuh-agent': version}, root, installation=phase != 'installing')
+                    with self.assertRaises(ValueError):
+                        apt.verify_recovery(new if phase == 'recovering' else old, {'wazuh-agent': version}, root, installation=phase == 'installing')
+                    active = dict(item, owner='e' * 32); w.atomic_json(root / 'agent-active.json', active)
+                    with self.assertRaisesRegex(ValueError, 'owner is no longer active'):
+                        apt.verify_recovery(artifact, {'wazuh-agent': version}, root, installation=phase == 'installing')
+            finally: apt.run = previous
 
     def test_central_discovery_rejects_volume_mounts_and_backup_bind_alias(self):
         for target in ('volume-root', 'volume-descendant', 'project-root', 'backup-alias'):
@@ -1044,7 +1242,7 @@ class AgentColdRecoveryTests(unittest.TestCase):
                 def barrier(filename):
                     real_sync_tree(filename)
                     restored.add(str(filename))
-                mapped = ('/var/ossec', '/etc/hosts', '/etc/apt/preferences.d', '/etc/yum.repos.d', '/var/cache/apt/archives')
+                mapped = ('/var/ossec', '/etc/hosts', '/etc/apt/preferences.d', '/etc/yum.repos.d', '/var/cache/apt/archives', '/etc/audit/plugins.d', '/etc/dnf', '/usr/sbin/policy-rc.d')
                 def path(value):
                     value = str(value)
                     if any(value == prefix or value.startswith(prefix + '/') for prefix in mapped):
@@ -1068,6 +1266,7 @@ class AgentColdRecoveryTests(unittest.TestCase):
                             return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v' + self.installed.rsplit('-', 1)[0] + '"\n', '')
                         return super().run(argv, **kwargs)
                 class LocalAgent(w.Agent):
+                    def guard(self): return PackagePolicyHarness(self.r)
                     def write(self, item, phase):
                         if phase == 'staged':
                             self_test.assertTrue({entry['path'] for entry in item['packages'].values()}.issubset(sealed))
@@ -1098,6 +1297,9 @@ class AgentColdRecoveryTests(unittest.TestCase):
                     if absent_pin:
                         path('/etc/apt/preferences.d/pilot-wazuh-agent').unlink()
                     path('/var/cache/apt/archives').mkdir(parents=True)
+                    path('/etc/audit/plugins.d').mkdir(parents=True)
+                    path('/etc/dnf/plugins').mkdir(parents=True)
+                    path('/usr/sbin/policy-rc.d').parent.mkdir(parents=True)
                     for release in ('4.14.1-1', '4.14.9-1'):
                         (root / (release + '.pkg')).write_text(release)
                     native = Native()
@@ -1143,6 +1345,387 @@ class AgentColdRecoveryTests(unittest.TestCase):
                     w.sync_file, w.sync_tree, w.sync_directory = real_sync_file, real_sync_tree, real_sync_directory
 
 
+class CaptureClosureTests(unittest.TestCase):
+    def test_unreadable_or_changing_complete_metadata_never_grants_reserve_authority(self):
+        from unittest.mock import patch
+        for fault in ('unreadable', 'changed-earlier-root'):
+            with self.subTest(fault=fault), RestoreScopeTests().agent() as (agent, native, path, root):
+                original = w.ClosedCapture.attrs
+                changed = False
+                def attrs(filename):
+                    nonlocal changed
+                    if str(filename) == str(path('/etc/hosts')):
+                        if fault == 'unreadable': raise OSError('synthetic denied metadata')
+                        if not changed:
+                            path('/var/ossec/etc/ossec.conf').write_text('changed during complete capture')
+                            changed = True
+                    return original(filename)
+                with patch.object(w.ClosedCapture, 'attrs', side_effect=attrs):
+                    with self.assertRaisesRegex(w.Refused, 'metadata is unreadable|metadata changed'):
+                        agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                self.assertIsNone(agent.active())
+                self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+
+    def test_external_descendant_data_alias_is_rejected_by_reserve_before_authority(self):
+        import shutil
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family), RestoreScopeTests().agent(family) as (agent, native, path, root):
+                outside = root / 'external-queue'; outside.mkdir()
+                state = outside / 'data'; state.write_text('old persistent data')
+                path('/var/ossec/queue').symlink_to(outside, target_is_directory=True)
+                # Real tar demonstrates the original incomplete-capture bug:
+                # restoring the alias cannot restore its external effective data.
+                archive = root / 'incomplete.tar'
+                subprocess.run(['tar', '-cpf', str(archive), '-C', str(path('/var/ossec').parent), 'ossec'], check=True, capture_output=True)
+                state.write_text('new state survives incomplete restore')
+                shutil.rmtree(path('/var/ossec'))
+                subprocess.run(['tar', '-xpf', str(archive), '-C', str(path('/var/ossec').parent)], check=True, capture_output=True)
+                self.assertEqual(state.read_text(), 'new state survives incomplete restore')
+                with self.assertRaisesRegex(w.Refused, 'symlink escapes'):
+                    agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                self.assertIsNone(agent.active())
+                self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+
+    def test_closed_internal_symlinks_and_complete_hardlinks_survive_real_recovery(self):
+        import os
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family), RestoreScopeTests().agent(family) as (agent, native, path, root):
+                conf = path('/var/ossec/etc/af_wazuh.conf'); conf.write_text('active component audit config')
+                plugin = path('/etc/audit/plugins.d/af_wazuh.conf'); os.link(conf, plugin)
+                os.setxattr(conf, 'user.issue244', b'preserved audit config attribute')
+                data = path('/var/ossec/closed-data'); data.mkdir()
+                (data / 'old').write_text('old persistent queue')
+                os.link(data / 'old', data / 'other-name')
+                path('/var/ossec/queue').symlink_to('closed-data', target_is_directory=True)
+                owner = 'd' * 32
+                agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                agent.cold_backup(owner)
+                capture = agent.active()['capture']
+                self.assertIn(sorted([str(conf), str(plugin)]), capture['hardlinks'])
+                agent.authorize_install(owner)
+                native.installed = '4.14.9-1'
+                (data / 'old').write_text('migrated new data')
+                conf.write_text('new plugin config')
+                agent.prepare_recovery(owner); native.installed = '4.14.1-1'
+                agent.restore_state(owner)
+                self.assertEqual((path('/var/ossec/queue') / 'old').read_text(), 'old persistent queue')
+                self.assertEqual(conf.read_text(), 'active component audit config')
+                self.assertEqual((conf.stat().st_dev, conf.stat().st_ino), (plugin.stat().st_dev, plugin.stat().st_ino))
+                self.assertEqual(conf.stat().st_nlink, 2)
+                self.assertEqual(os.getxattr(plugin, 'user.issue244'), b'preserved audit config attribute')
+                agent.finish_recovery(owner)
+
+    def test_unknown_third_audit_alias_refuses_admission_and_pre_stop_recheck(self):
+        import os
+        for boundary in ('admission', 'staged'):
+            with self.subTest(boundary=boundary), RestoreScopeTests().agent() as (agent, native, path, root):
+                conf = path('/var/ossec/etc/af_wazuh.conf'); conf.write_text('old plugin')
+                os.link(conf, path('/etc/audit/plugins.d/af_wazuh.conf'))
+                if boundary == 'staged':
+                    agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                os.link(conf, root / 'uncaptured-third-link')
+                with self.assertRaisesRegex(w.Refused, 'uncaptured external hardlink'):
+                    if boundary == 'admission':
+                        agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                    else: agent.cold_backup('d' * 32)
+                self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+                self.assertEqual(agent.active()['phase'] if agent.active() else None, 'staged' if boundary == 'staged' else None)
+
+    def test_discovery_checks_all_volume_descendants_and_complete_link_groups(self):
+        import os
+        for mutation in ('closed-pair', 'third-alias', 'external-symlink'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); central, _, native = DiscoveryFilesystemTests().central(root)
+                volume = next((root / 'docker-data/volumes').glob('*/_data'))
+                data = volume / 'data'; data.write_text('persistent central data')
+                os.link(data, volume / 'alias')
+                if mutation == 'third-alias': os.link(data, root / 'outside-data')
+                if mutation == 'external-symlink': (volume / 'queue').symlink_to(root, target_is_directory=True)
+                if mutation == 'closed-pair':
+                    self.assertEqual(central.discover()['version'], '4.14.1')
+                else:
+                    with self.assertRaisesRegex(w.Refused, 'uncaptured external hardlink|symlink escapes|dangling symlink'):
+                        central.discover()
+                self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
+
+    def test_content_seal_and_symlink_component_resolution_are_discriminating(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = root / 'source'; source.mkdir()
+            (source / 'data').write_text('old'); (source / 'nested').mkdir()
+            (source / 'valid').symlink_to('nested/../data')
+            capture = w.ClosedCapture.take({str(source): 'directory'}, root / 'private', sealed=True)
+            self.assertEqual(capture['nodes'][str(source / 'valid')]['resolved'], str(source / 'data'))
+            (source / 'data').write_text('new')
+            with self.assertRaisesRegex(w.Refused, 'differs from'):
+                w.ClosedCapture.verify(capture, root / 'private')
+            (source / 'nested/link').symlink_to(root, target_is_directory=True)
+            (source / 'escape').symlink_to('nested/link/../outside')
+            with self.assertRaisesRegex(w.Refused, 'symlink escapes'):
+                w.ClosedCapture.take({str(source): 'directory'}, root / 'private')
+
+
+class AuditNativeObservationTests(unittest.TestCase):
+    def test_proc_identity_parser_preserves_real_usrmerge_executable_and_argv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); process = root / '100'; process.mkdir()
+            fields = ['S', '1'] + ['0'] * 17 + ['4242']
+            (process / 'stat').write_text('100 (auditd) ' + ' '.join(fields))
+            (process / 'cmdline').write_bytes(b'/sbin/auditd\0')
+            (process / 'exe').symlink_to('/usr/sbin/auditd')
+            real_path = w.Path
+            w.Path = lambda value: root / str(value).removeprefix('/proc').lstrip('/') if str(value) == '/proc' else real_path(value)
+            try:
+                self.assertEqual(w.AuditRuntime.process(100), {'pid': 100, 'ppid': 1, 'start': '4242',
+                                 'exe': '/usr/sbin/auditd', 'argv': ['/sbin/auditd']})
+            finally: w.Path = real_path
+
+    def test_real_native_connection_watch_parser_and_executed_binary_countercontrol(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); (root / 'proc/102').mkdir(parents=True); (root / 'ossec/bin').mkdir(parents=True)
+            binary = root / 'ossec/bin/wazuh-syscheckd'; binary.write_bytes(b'installed target native executable')
+            running = root / 'old-executed'; running.write_bytes(binary.read_bytes())
+            (root / 'proc/102/exe').symlink_to(running)
+            endpoint = str(root / 'ossec/queue/sockets/audit')
+            class Native:
+                def __init__(self): self.connected = True; self.watch = True
+                def run(self, argv, **kwargs):
+                    if argv[0] == 'ss':
+                        text = ('u_str ESTAB 0 0 ' + endpoint + ' 100 * 200 users:(("audisp-af_unix",pid=101,fd=4))\n'
+                                'u_str ESTAB 0 0 * 200 * ' + ('100' if self.connected else '999') + ' users:(("wazuh-syscheckd",pid=102,fd=7))')
+                    else: text = '-a always,exit -F dir=/etc -F key=wazuh_fim' if self.watch else 'No rules'
+                    return subprocess.CompletedProcess(argv, 0, text, '')
+            native = Native(); runtime = w.AuditRuntime(native)
+            runtime.process = lambda pid: {'pid': pid, 'exe': '/var/ossec/bin/wazuh-syscheckd'}
+            real_path = w.Path
+            def path(value):
+                value = str(value)
+                if value == '/proc': return root / 'proc'
+                if value == '/var/ossec' or value.startswith('/var/ossec/'): return root / 'ossec' / value.removeprefix('/var/ossec').lstrip('/')
+                return real_path(value)
+            w.Path = path
+            proof = {'listener': {'pid': 101}, 'watches': ['-a always,exit -F dir=/etc -F key=wazuh_fim']}
+            try:
+                self.assertEqual(runtime.ready(proof), proof['watches'])
+                for fault in ('connection', 'kernel-watch'):
+                    native.connected, native.watch = fault != 'connection', fault != 'kernel-watch'
+                    with patch.object(w.time, 'monotonic', side_effect=[0, 61]):
+                        with self.assertRaisesRegex(w.Refused, 'readiness timed out'): runtime.ready(proof)
+                native.connected = native.watch = True
+                binary.write_bytes(b'new package installed while old native process still executes')
+                with self.assertRaisesRegex(w.Refused, 'executed audit client differs'): runtime.ready(proof)
+            finally: w.Path = real_path
+
+
+class PreservedAuditRuntimeTests(unittest.TestCase):
+    """Real tar/prune/link recovery; kernel/socket/process probes are a harness.
+
+    AF_UNIX bind is unavailable in this sandbox, so the single filesystem
+    endpoint is a real regular sentinel whose reported native type is socket.
+    The restoration algorithm, inode/security comparisons and archive guard
+    remain production code. Root's native VM proof is separately required.
+    """
+    @contextlib.contextmanager
+    def fixture(self):
+        import os
+        with RestoreScopeTests().agent() as (agent, native, path, root):
+            endpoint = path('/var/ossec/queue/sockets/audit'); endpoint.parent.mkdir(parents=True)
+            endpoint.write_text('external socket sentinel must not be unlinked')
+            endpoint.chmod(0o640); os.setxattr(endpoint, 'user.issue244', b'live endpoint metadata')
+            conf = path('/var/ossec/etc/af_wazuh.conf'); conf.write_text('active = yes\n')
+            os.link(conf, path('/etc/audit/plugins.d/af_wazuh.conf'))
+            class Runtime(w.AuditRuntime):
+                def __init__(self, runner):
+                    super().__init__(runner); self.boot_id = 'same-native-boot'; self.listener_start = '100'; self.kernel_setting = '1'; self.readiness = []
+                def node(self, filename):
+                    value = super().node(filename)
+                    if filename == endpoint:
+                        value['type'] = __import__('stat').S_IFSOCK
+                        value['links'] = filename.stat().st_nlink
+                    return value
+                def boot(self): return self.boot_id
+                def audit_processes(self):
+                    return ({'pid': 100, 'ppid': 1, 'start': '99', 'exe': '/usr/sbin/auditd', 'argv': ['/sbin/auditd']},
+                            {'pid': 101, 'ppid': 100, 'start': self.listener_start, 'exe': '/usr/sbin/audisp-af_unix',
+                             'argv': ['/sbin/audisp-af_unix', '0640', str(endpoint)]})
+                def kernel(self): return {'pid': '100', 'enabled': self.kernel_setting, 'lost': '0'}
+                def ready(self, proof):
+                    self.readiness.append(native.installed)
+                    return ['-a always,exit -F dir=/etc -F key=wazuh_fim']
+            runtime = Runtime(native)
+            agent.audit_runtime = lambda: runtime
+            yield agent, native, path, root, runtime
+
+    def test_real_preserving_restore_replays_after_prune_interruption(self):
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted), self.fixture() as (agent, native, path, root, runtime):
+                owner = 'd' * 32
+                anchors = {str(name): runtime.node(name) for name in runtime.anchors()}
+                agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                agent.cold_backup(owner); agent.authorize_install(owner)
+                native.installed = '4.14.9-1'; agent.activate(owner)
+                sentinel = path('/var/ossec/new-migrated-state'); sentinel.write_text('new state must disappear')
+                path('/var/ossec/etc/ossec.conf').write_text('new config')
+                agent.prepare_recovery(owner); native.installed = '4.14.1-1'
+                original_prune = runtime.prune
+                fired = False
+                def prune(source, proof):
+                    nonlocal fired
+                    original_prune(source, proof)
+                    if source == path('/var/ossec') and not fired:
+                        fired = True
+                        raise w.Refused('controlled crash after preserving prune before extract')
+                if interrupted:
+                    runtime.prune = prune
+                    with self.assertRaisesRegex(w.Refused, 'controlled crash after preserving prune'):
+                        agent.restore_state(owner)
+                    self.assertEqual(agent.active()['phase'], 'recovering')
+                    self.assertTrue(path('/var/ossec/queue/sockets/audit').exists())
+                    self.assertFalse(path('/var/ossec/etc/ossec.conf').exists())
+                    self.assertEqual({str(name): runtime.node(name) for name in runtime.anchors()}, anchors)
+                    agent.prepare_recovery(owner)
+                    runtime.prune = original_prune
+                try:
+                    agent.restore_state(owner)
+                except (OSError, w.Refused):
+                    self.assertTrue(runtime.endpoint().exists(), 'restoration deleted the live external endpoint')
+                    raise
+                self.assertFalse(sentinel.exists())
+                self.assertEqual(path('/var/ossec/etc/ossec.conf').read_text(), 'original data')
+                self.assertEqual({str(name): runtime.node(name) for name in runtime.anchors()}, anchors)
+                internal = path('/var/ossec/etc/af_wazuh.conf'); external = path('/etc/audit/plugins.d/af_wazuh.conf')
+                self.assertEqual((internal.stat().st_dev, internal.stat().st_ino), (external.stat().st_dev, external.stat().st_ino))
+                self.assertEqual(internal.stat().st_nlink, 2)
+                agent.finish_recovery(owner)
+                self.assertFalse(agent.path.exists())
+                self.assertIn('4.14.9-1', runtime.readiness); self.assertIn('4.14.1-1', runtime.readiness)
+
+    def test_changed_boot_listener_anchor_or_security_refuses_before_stop_or_restore(self):
+        import os
+        for phase in ('staged', 'installing'):
+            for fault in ('boot', 'listener-start', 'endpoint-inode', 'anchor-security', 'kernel'):
+                with self.subTest(phase=phase, fault=fault), self.fixture() as (agent, native, path, root, runtime):
+                    owner = 'd' * 32
+                    agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                    if phase == 'installing': agent.cold_backup(owner); agent.authorize_install(owner)
+                    if fault == 'boot': runtime.boot_id = 'different-boot'
+                    if fault == 'listener-start': runtime.listener_start = 'reused-pid-new-process'
+                    if fault == 'endpoint-inode':
+                        endpoint = runtime.endpoint(); endpoint.rename(endpoint.with_name('old-socket')); endpoint.write_text('replacement endpoint')
+                    if fault == 'anchor-security': os.chmod(runtime.endpoint().parent, 0o700)
+                    if fault == 'kernel': runtime.kernel_setting = '2'
+                    stops = sum(call[:2] == ['systemctl', 'stop'] for call in native.calls)
+                    with self.assertRaisesRegex(w.Refused, 'endpoint/process/security/boot proof changed'):
+                        (agent.cold_backup if phase == 'staged' else agent.prepare_recovery)(owner)
+                    self.assertEqual(agent.active()['phase'], phase)
+                    self.assertEqual(sum(call[:2] == ['systemctl', 'stop'] for call in native.calls), stops)
+                    self.assertEqual(path('/var/ossec/etc/ossec.conf').read_text(), 'original data')
+
+    def test_sealed_archive_cannot_replace_live_socket_or_redirect_ancestor(self):
+        import io,tarfile
+        for member_name,kind in (('ossec/queue/sockets/audit', 'file'), ('ossec/queue', 'symlink')):
+            with self.subTest(member=member_name), self.fixture() as (agent, native, path, root, runtime):
+                owner = 'd' * 32
+                agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                agent.cold_backup(owner); agent.authorize_install(owner)
+                item = agent.active(); entry = next(entry for entry in item['archives'] if entry['path'] == '/var/ossec')
+                # Model an invalid archive producer with matching recorded digest;
+                # the semantic scope guard must still refuse before any restore.
+                with tarfile.open(entry['archive'], 'r:') as archive:
+                    saved = [(member, archive.extractfile(member).read() if member.isfile() else None) for member in archive]
+                with tarfile.open(entry['archive'], 'w:') as archive:
+                    for member, content in saved:
+                        if kind == 'symlink' and member.name.rstrip('/') == member_name:
+                            member.type = tarfile.SYMTYPE; member.linkname = '/outside'; member.size = 0; content = None
+                        archive.addfile(member, io.BytesIO(content) if content is not None else None)
+                    if kind == 'file':
+                        member = tarfile.TarInfo(member_name); member.size = 3
+                        archive.addfile(member, io.BytesIO(b'bad'))
+                entry['sha256'] = w.digest(entry['archive']); agent.write(item, 'installing')
+                before = runtime.node(runtime.endpoint())
+                with self.assertRaisesRegex(w.Refused, 'sealed archive'):
+                    agent.prepare_recovery(owner)
+                self.assertEqual(agent.active()['phase'], 'installing')
+                self.assertEqual(runtime.node(runtime.endpoint()), before)
+                self.assertEqual(path('/var/ossec/etc/ossec.conf').read_text(), 'original data')
+
+
+class PolicyHookRecoveryTests(unittest.TestCase):
+    def test_original_policy_or_absence_is_durably_replayed_independent_of_broken_audit(self):
+        import os
+        from unittest.mock import patch
+        for present in (False, True):
+            with self.subTest(present=present), PreservedAuditRuntimeTests().fixture() as (agent, native, path, root, runtime):
+                filename = path(agent.POLICY_HOOK)
+                if present:
+                    filename.write_text('#!/bin/sh\n# original operator policy\nexit 0\n'); filename.chmod(0o750)
+                    os.setxattr(filename, 'user.issue244', b'original policy metadata')
+                    original = w.ClosedCapture.take({str(filename): 'file'}, agent.root, sealed=True)
+                owner = 'd' * 32
+                agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True)); agent.cold_backup(owner); agent.authorize_install(owner)
+                agent.hook_prepare(owner)
+                self.assertEqual(filename.read_text(), agent.POLICY_TEMP)
+                with self.assertRaisesRegex(w.Refused, 'confirmation previous installer jobs stopped'):
+                    agent.hook_cleanup(owner)
+                with self.assertRaises(w.Refused): agent.hook_cleanup('e' * 32, True)
+                runtime.boot_id = 'unsupported new boot'
+                with self.assertRaisesRegex(w.Refused, 'endpoint/process/security/boot proof changed'):
+                    agent.prepare_recovery(owner)
+                synced, original_sync = [], w.sync_directory
+                def sync(value): synced.append(str(value)); original_sync(value)
+                with patch.object(w, 'sync_directory', side_effect=sync):
+                    try:
+                        agent.hook_cleanup(owner, True)
+                    except w.Refused:
+                        self.fail('known owned global hook cleanup was stranded behind a failed component proof')
+                    agent.hook_cleanup(owner, True)  # exact replay, including durable absence
+                self.assertIn(str(filename.parent), synced)
+                if not present:
+                    self.assertGreaterEqual(synced.count(str(filename.parent)), 2, 'absence replay must sync parent even when already absent')
+                if present: w.ClosedCapture.verify(original, agent.root)
+                else: self.assertFalse(filename.exists())
+                self.assertEqual(agent.active()['phase'], 'installing')
+                agent.hook_verify(agent.active())
+                with self.assertRaisesRegex(w.Refused, 'endpoint/process/security/boot proof changed'):
+                    agent.prepare_recovery(owner)
+                with self.assertRaisesRegex(w.Refused, 'unfinished component journal'):
+                    w.HostWriter(agent.root).release(owner)
+
+    def test_partial_temporary_creation_and_unknown_foreign_hook_drift(self):
+        for fault in ('prepared-600', 'moved-away', 'foreign'):
+            with self.subTest(fault=fault), RestoreScopeTests().agent() as (agent, native, path, root):
+                hook = path(agent.POLICY_HOOK); hook.write_text('original hook'); hook.chmod(0o755)
+                owner = 'd' * 32
+                agent.reserve(owner, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True)); agent.cold_backup(owner); agent.authorize_install(owner)
+                agent.hook_prepare(owner)
+                if fault == 'prepared-600': hook.chmod(0o600)
+                if fault == 'moved-away': hook.unlink()
+                if fault == 'foreign': hook.write_text('unknown foreign hook change')
+                if fault == 'foreign':
+                    with self.assertRaisesRegex(w.Refused, 'unknown foreign policy hook drift'):
+                        agent.hook_cleanup(owner, True)
+                    self.assertEqual(hook.read_text(), 'unknown foreign hook change')
+                else:
+                    agent.hook_cleanup(owner, True)
+                    self.assertEqual(hook.read_text(), 'original hook')
+                self.assertEqual(agent.active()['phase'], 'installing')
+
+    def test_policy_hook_scope_and_aliases_refuse_before_reservation(self):
+        import os,shutil
+        for fault in ('symlink', 'hardlink', 'ancestor', 'bind-mount'):
+            with self.subTest(fault=fault), RestoreScopeTests().agent() as (agent, native, path, root):
+                hook = path(agent.POLICY_HOOK); hook.write_text('old hook'); hook.chmod(0o755)
+                if fault == 'symlink': hook.rename(root / 'outside'); hook.symlink_to(root / 'outside')
+                if fault == 'hardlink': os.link(hook, root / 'outside')
+                if fault == 'ancestor':
+                    parent = hook.parent; shutil.move(parent, root / 'outside'); parent.symlink_to(root / 'outside', target_is_directory=True)
+                if fault == 'bind-mount': MOUNT_NAMESPACE['text'] += f'2 1 8:1 {hook} {hook} rw - ext4 /dev/synthetic rw\n'
+                with self.assertRaisesRegex(w.Refused, 'symlink|single-link|unsupported mount'):
+                    agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                self.assertIsNone(agent.active())
+                self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+
+
 class AgentRecoveryDispatchTests(unittest.TestCase):
     def test_all_durable_phases_have_bounded_recovery_authority(self):
         for phase, action in w.AGENT_RECOVERY.items():
@@ -1156,6 +1739,9 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                             return subprocess.CompletedProcess(argv, 0, '', '')
                         return super().run(argv, **kwargs)
                 class Agent(w.Agent):
+                    def guard(self): return PackagePolicyHarness(self.r)
+                    def authorize_rpm(self, owner, recovery=False): return {}
+                    def audit_check(self, *args, **kwargs): return None
                     def validate_agent_layout(self, item, recovery=False):
                         calls.append('validate-layout')
                     def restore_service(self, item):

@@ -4,14 +4,18 @@
 Central transactions hold flock for their complete lifetime. Agent transactions
 span Ansible package tasks: a durable owner/phase journal reserves the resource,
 and each transition checks that owner under flock. Debian installation remains
-in apt-package-install.yml, including recovery; this module never invokes APT.
+in apt-package-install.yml, including recovery; this module only probes APT
+plans and never performs an APT/dpkg installation.
 """
 import argparse
 import contextlib
+import configparser
 import copy
 import fcntl
 import hashlib
 import importlib.util
+import io
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -20,8 +24,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
+from urllib.parse import urlsplit
 
 
 ROOT = Path('/var/backups/pilot/wazuh')
@@ -270,7 +276,7 @@ def path_shape(filename, kind, missing=False):
     info = path.lstat()
     if kind == 'directory' and not stat.S_ISDIR(info.st_mode):
         raise Refused('transaction source must be a real directory')
-    if kind == 'file' and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+    if kind in ('file', 'linked-file') and (not stat.S_ISREG(info.st_mode) or (kind == 'file' and info.st_nlink != 1)):
         raise Refused('transaction source must be a regular single-link file')
     return path
 
@@ -305,6 +311,783 @@ def private_file(filename, parent):
     if path.stat().st_uid != os.geteuid():
         raise Refused('retained artifact has a different owner')
     return path
+
+
+class ClosedCapture:
+    """A no-dereference, complete inode/link inventory of bounded roots.
+
+    Runtime sockets are inventoried but are not persistent archive contents.
+    Their owning runtime must separately prove quiescence or exact endpoint
+    preservation; this class never follows an external target to expand scope.
+    """
+    @staticmethod
+    def identity(info):
+        return [info.st_dev, info.st_ino, info.st_nlink, info.st_mode,
+                info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+    @staticmethod
+    def attrs(path):
+        return {name: hashlib.sha256(os.getxattr(path, name, follow_symlinks=False)).hexdigest()
+                for name in sorted(os.listxattr(path, follow_symlinks=False))}
+
+    @staticmethod
+    def file_hash(path, expected):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            if ClosedCapture.identity(os.fstat(fd)) != expected:
+                raise Refused('capture file changed while being read')
+            value = hashlib.sha256()
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                value.update(chunk)
+            if ClosedCapture.identity(os.fstat(fd)) != expected:
+                raise Refused('capture file changed while being read')
+            return value.hexdigest()
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def resolve_link(path, nodes, roots):
+        # Resolve components in kernel order. Normalizing '..' before resolving
+        # a preceding symlink would incorrectly accept paths with external
+        # effective targets.
+        current, pending, links = Path('/'), list(path.parts[1:]), 0
+        while pending:
+            part = pending.pop(0)
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                current = current.parent
+                continue
+            candidate = current / part
+            node = nodes.get(str(candidate))
+            if node is None:
+                if not any(candidate in root.parents for root in roots):
+                    raise Refused('capture symlink escapes or has an unrecorded target')
+                current = candidate
+                continue
+            if node['type'] == 'symlink':
+                links += 1
+                if links > 40:
+                    raise Refused('capture symlink resolution exceeded its bound')
+                target = node['target']
+                if target.startswith('/'):
+                    current = Path('/')
+                pending = target.split('/') + pending
+            else:
+                if pending and node['type'] != 'directory':
+                    raise Refused('capture symlink traverses a non-directory')
+                current = candidate
+        if str(current) not in nodes:
+            raise Refused('capture contains a dangling symlink')
+        return str(current)
+
+    @classmethod
+    def take(cls, specs, backup, missing=(), sealed=False):
+        restore_sources(specs, backup, missing=missing)
+        roots = {str(path_shape(name, kind, missing=name in missing)): kind for name, kind in specs.items()}
+        nodes, groups, absent = {}, {}, []
+        def walk(path):
+            info = path.lstat()
+            before = cls.identity(info)
+            if stat.S_ISDIR(info.st_mode): kind = 'directory'
+            elif stat.S_ISREG(info.st_mode): kind = 'file'
+            elif stat.S_ISLNK(info.st_mode): kind = 'symlink'
+            elif stat.S_ISSOCK(info.st_mode): kind = 'socket'
+            else: raise Refused('capture contains an unsupported special file')
+            node = {'type': kind, 'identity': before, 'mode': stat.S_IMODE(info.st_mode),
+                    'uid': info.st_uid, 'gid': info.st_gid, 'mtime_ns': info.st_mtime_ns,
+                    'xattrs': cls.attrs(path)}
+            if kind == 'file':
+                node['size'] = info.st_size
+                group = groups.setdefault((info.st_dev, info.st_ino), [])
+                group.append(str(path))
+                if sealed:
+                    node['sha256'] = cls.file_hash(path, before) if len(group) == 1 else nodes[group[0]]['sha256']
+            elif kind == 'symlink':
+                node['target'] = os.readlink(path)
+            nodes[str(path)] = node
+            if kind == 'directory':
+                with os.scandir(path) as entries:
+                    children = sorted(entry.name for entry in entries)
+                for name in children:
+                    walk(path / name)
+            if cls.identity(path.lstat()) != before or cls.attrs(path) != node['xattrs']:
+                raise Refused('capture metadata changed during the complete walk')
+        try:
+            for name in roots:
+                path = Path(name)
+                if path.exists(): walk(path)
+                else: absent.append(name)
+            # Recheck all entries, including earlier roots, before accepting the
+            # complete graph. Nothing unreadable or newly changed is omitted.
+            for name, node in nodes.items():
+                if cls.identity(Path(name).lstat()) != node['identity'] or cls.attrs(name) != node['xattrs']:
+                    raise Refused('capture metadata changed before closure was sealed')
+            for aliases in groups.values():
+                if any(nodes[name]['identity'][2] != len(aliases) for name in aliases):
+                    raise Refused('capture has an uncaptured external hardlink alias')
+            for name, node in nodes.items():
+                if node['type'] == 'symlink':
+                    node['resolved'] = cls.resolve_link(Path(name), nodes, [Path(root) for root in roots])
+        except OSError as exc:
+            raise Refused('complete capture metadata is unreadable or changed') from exc
+        return {'roots': roots, 'nodes': nodes, 'absent': sorted(absent), 'sealed': sealed,
+                'hardlinks': sorted(sorted(aliases) for aliases in groups.values() if len(aliases) > 1)}
+
+    @staticmethod
+    def persistent(capture, deferred=()):
+        deferred = set(deferred)
+        return {'roots': {name: kind for name, kind in capture['roots'].items() if name not in deferred},
+                'absent': [name for name in capture['absent'] if name not in deferred],
+                'hardlinks': capture['hardlinks'],
+                'nodes': {name: {key: value for key, value in node.items() if key != 'identity'}
+                          for name, node in capture['nodes'].items() if node['type'] != 'socket' and name not in deferred}}
+
+    @classmethod
+    def verify(cls, expected, backup, deferred=()):
+        if not expected.get('sealed'):
+            raise Refused('cold capture was not content-sealed')
+        actual = cls.take(expected['roots'], backup, missing=expected['absent'], sealed=True)
+        if cls.persistent(actual, deferred) != cls.persistent(expected, deferred):
+            raise Refused('persistent capture differs from its verified cold state')
+        return actual
+
+    @classmethod
+    def relink(cls, expected, backup, deferred=()):
+        # Extracted per-root archives may contain independent copies of a
+        # cross-root inode. Validate every copy before changing any link.
+        actual = cls.take(expected['roots'], backup, missing=expected['absent'], sealed=True)
+        for aliases in expected['hardlinks']:
+            for name in aliases:
+                old, new = expected['nodes'][name], actual['nodes'].get(name)
+                if not new or any(new.get(key) != old.get(key) for key in ('type', 'sha256', 'mode', 'uid', 'gid', 'xattrs', 'size')):
+                    raise Refused('restored hardlink member differs from the sealed old file')
+        for aliases in expected['hardlinks']:
+            first = Path(aliases[0])
+            for name in aliases[1:]:
+                path = Path(name)
+                if (path.stat().st_dev, path.stat().st_ino) != (first.stat().st_dev, first.stat().st_ino):
+                    durable_unlink(path)
+                    os.link(first, path, follow_symlinks=False)
+                    sync_file(path)
+        for name, node in sorted(expected['nodes'].items(), key=lambda pair: len(Path(pair[0]).parts), reverse=True):
+            if node['type'] == 'directory':
+                info = Path(name).lstat()
+                os.utime(name, ns=(info.st_atime_ns, node['mtime_ns']), follow_symlinks=False)
+                sync_directory(name)
+        cls.verify(expected, backup, deferred)
+
+
+def agent_socket_gate(capture, stopped=False, preserved=None):
+    """Fail closed on external runtime writers; never archive a live endpoint.
+
+    The only supported external writer is the separately proven exact audit
+    listener. Other endpoints must belong to Wazuh, then disappear at stop.
+    """
+    paths = {name for name, node in capture['nodes'].items() if node['type'] == 'socket'}
+    active = {}
+    try:
+        for line in Path('/proc/net/unix').read_text().splitlines()[1:]:
+            fields = line.split(maxsplit=7)
+            if len(fields) == 8 and fields[7] in paths:
+                active.setdefault(fields[7], set()).add(fields[6])
+        endpoint = str(Path('/var/ossec/queue/sockets/audit'))
+        if stopped and set(active) - ({endpoint} if preserved else set()):
+            raise Refused('agent runtime endpoints remain active after quiescence')
+        for name, inodes in active.items():
+            owners = set()
+            for process in Path('/proc').iterdir():
+                if not process.name.isdecimal(): continue
+                try:
+                    for descriptor in (process / 'fd').iterdir():
+                        if os.readlink(descriptor) in {'socket:[' + inode + ']' for inode in inodes}:
+                            owners.add((int(process.name), os.readlink(process / 'exe')))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+            allowed = {(preserved['listener']['pid'], preserved['listener']['exe'])} if preserved and name == endpoint else None
+            if not owners or (owners != allowed if allowed else any(not value.startswith('/var/ossec/bin/') for _, value in owners)):
+                raise Refused('controlled upgrade cannot restore an unknown live external agent endpoint')
+    except OSError as exc:
+        raise Refused('agent runtime endpoint ownership is unreadable') from exc
+
+
+class AuditRuntime:
+    """Preserve one demonstrated same-boot external endpoint, never recreate it.
+
+    Native feasibility: exact old/target packages, audit processes, directory
+    anchors and a genuine who-data event were independently probed before this
+    implementation. Final candidate/platform evidence remains separate.
+    """
+    def __init__(self, runner): self.r = runner
+
+    @staticmethod
+    def endpoint(): return Path('/var/ossec/queue/sockets/audit')
+
+    @classmethod
+    def anchors(cls):
+        endpoint = cls.endpoint()
+        return [Path('/var/ossec'), endpoint.parent.parent, endpoint.parent, endpoint]
+
+    @staticmethod
+    def node(path):
+        info = path.lstat()
+        value = {'device': info.st_dev, 'inode': info.st_ino, 'type': stat.S_IFMT(info.st_mode),
+                'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
+                'xattrs': ClosedCapture.attrs(path)}
+        if stat.S_ISSOCK(info.st_mode): value['links'] = info.st_nlink
+        return value
+
+    @staticmethod
+    def boot(): return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+    @staticmethod
+    def process(pid):
+        path = Path('/proc') / str(pid)
+        fields = (path / 'stat').read_text().rsplit(') ', 1)[1].split()
+        return {'pid': int(pid), 'ppid': int(fields[1]), 'start': fields[19],
+                'exe': os.readlink(path / 'exe'),
+                'argv': (path / 'cmdline').read_bytes().decode().rstrip('\0').split('\0')}
+
+    def audit_processes(self):
+        value = self.r.run(['systemctl', 'show', 'auditd', '-p', 'MainPID', '--value'], timeout=30,
+                           operation='native audit daemon identity').stdout.strip()
+        if not value.isdecimal() or int(value) <= 1:
+            raise Refused('audit daemon identity is unavailable')
+        audit, listeners = self.process(int(value)), []
+        if audit['exe'] != '/usr/sbin/auditd':
+            raise Refused('unsupported audit daemon executable')
+        for path in Path('/proc').iterdir():
+            if not path.name.isdecimal(): continue
+            try: process = self.process(int(path.name))
+            except (FileNotFoundError, ProcessLookupError): continue
+            if process['ppid'] == audit['pid'] and process['exe'] == '/usr/sbin/audisp-af_unix' and str(self.endpoint()) in process['argv']:
+                listeners.append(process)
+        if len(listeners) != 1:
+            raise Refused('exact external audit listener is missing or ambiguous')
+        return audit, listeners[0]
+
+    def kernel(self):
+        text = self.r.run(['auditctl', '-s'], timeout=30, operation='native kernel audit settings').stdout
+        values = {}
+        for line in text.splitlines():
+            fields = line.split(maxsplit=1)
+            if len(fields) == 2:
+                if fields[0] in values: raise Refused('ambiguous kernel audit status')
+                values[fields[0]] = fields[1]
+        keys = ('enabled', 'failure', 'pid', 'rate_limit', 'backlog_limit', 'backlog_wait_time', 'loginuid_immutable', 'lost')
+        if not set(keys).issubset(values) or values['enabled'] not in ('1', '2'):
+            raise Refused('unknown kernel audit settings')
+        return {key: values[key] for key in keys}
+
+    def ready(self, proof):
+        deadline = time.monotonic() + 60
+        while True:
+            lines = self.r.run(['ss', '-xHap'], timeout=15, operation='native audit client connection').stdout.splitlines()
+            servers = [line.split() for line in lines if str(self.endpoint()) in line and 'u_str' in line and 'ESTAB' in line
+                       and ('pid=' + str(proof['listener']['pid']) + ',') in line]
+            clients = [line.split() for line in lines if 'wazuh-syscheckd' in line and 'u_str' in line and 'ESTAB' in line]
+            paired = [client for server in servers for client in clients if len(server) > 7 and len(client) > 7
+                      and server[5] == client[7] and server[7] == client[5]]
+            pids = {int(value) for client in paired for value in re.findall(r'pid=([0-9]+)', ' '.join(client))}
+            text = self.r.run(['auditctl', '-l'], timeout=15, operation='native Wazuh audit watches').stdout
+            watches = sorted(line for line in text.splitlines() if re.search(r'(?:key=|\-k\s+)wazuh_fim(?:\s|$)', line))
+            if len(pids) == 1 and watches and set(proof.get('watches', [])).issubset(watches):
+                process = self.process(pids.pop())
+                if process['exe'] != '/var/ossec/bin/wazuh-syscheckd' or digest(Path('/proc') / str(process['pid']) / 'exe') != digest(Path('/var/ossec/bin/wazuh-syscheckd')):
+                    raise Refused('executed audit client differs from the installed native binary')
+                return watches
+            if time.monotonic() >= deadline:
+                raise Refused('native Wazuh audit client/watch readiness timed out')
+            time.sleep(0.5)
+
+    def snapshot(self, capture):
+        endpoint = self.endpoint()
+        if not endpoint.exists():
+            plugin = Path('/etc/audit/plugins.d/af_wazuh.conf')
+            if plugin.exists() and re.search(r'^\s*active\s*=\s*yes\s*$', plugin.read_text(), re.M):
+                raise Refused('configured external audit endpoint is unavailable before upgrade')
+            agent_socket_gate(capture)
+            return None
+        nodes = {str(path): self.node(path_shape(path, 'directory' if path != endpoint else 'socket')) for path in self.anchors()}
+        if any(value['type'] != (stat.S_IFSOCK if name == str(endpoint) else stat.S_IFDIR) for name, value in nodes.items()):
+            raise Refused('unsupported audit runtime anchor type')
+        if nodes[str(endpoint)]['links'] != 1:
+            raise Refused('external audit socket has an unowned hardlink alias')
+        audit, listener = self.audit_processes()
+        proof = {'boot': self.boot(), 'anchors': nodes, 'audit': audit, 'listener': listener, 'kernel': self.kernel()}
+        if proof['kernel']['pid'] != str(audit['pid']):
+            raise Refused('kernel audit daemon differs from native service identity')
+        agent_socket_gate(capture, preserved=proof)
+        proof['watches'] = self.ready(proof)
+        return proof
+
+    def check(self, proof, capture, stopped=False, ready=False):
+        if proof:
+            if (set(proof['anchors']) != {str(path) for path in self.anchors()} or self.boot() != proof['boot']
+                    or any(self.node(path) != proof['anchors'][str(path)] for path in self.anchors())
+                    or self.audit_processes() != (proof['audit'], proof['listener']) or self.kernel() != proof['kernel']):
+                raise Refused('preserved audit endpoint/process/security/boot proof changed; explicit recovery required')
+            if ready: self.ready(proof)
+        agent_socket_gate(capture, stopped=stopped, preserved=proof)
+
+    def validate_archive(self, source, archive, capture, proof):
+        if not proof: return
+        source = Path(source)
+        expected = {name for name, node in capture['nodes'].items() if (Path(name) == source or source in Path(name).parents)
+                    and node['type'] != 'socket' and Path(name) != self.endpoint()}
+        seen = set()
+        try:
+            with tarfile.open(archive, 'r:') as stream:
+                for member in stream:
+                    relative = Path(member.name)
+                    target = source.parent / relative
+                    name = str(target)
+                    if relative.is_absolute() or '..' in relative.parts or name in seen or name not in expected:
+                        raise Refused('sealed archive escaped its exact persistent capture set')
+                    seen.add(name)
+                    node = capture['nodes'][name]
+                    if (target == self.endpoint() or (target in self.endpoint().parents and not member.isdir())
+                            or (node['type'] == 'directory' and not member.isdir())
+                            or (node['type'] == 'symlink' and (not member.issym() or member.linkname != node['target']))
+                            or (node['type'] == 'file' and not (member.isfile() or member.islnk()))):
+                        raise Refused('sealed archive would replace a live anchor or persistent type')
+                    if member.islnk():
+                        linked = Path(member.linkname)
+                        other = str(source.parent / linked)
+                        if linked.is_absolute() or '..' in linked.parts or not any(name in group and other in group for group in capture['hardlinks']):
+                            raise Refused('sealed archive hardlink escaped its captured inode group')
+                    if node['type'] == 'file':
+                        content = stream.extractfile(member)
+                        if content is None:
+                            raise Refused('sealed archive file payload is unavailable')
+                        checksum = hashlib.sha256()
+                        for chunk in iter(lambda: content.read(1024 * 1024), b''): checksum.update(chunk)
+                        if checksum.hexdigest() != node['sha256']:
+                            raise Refused('sealed archive payload differs from its cold content proof')
+                if seen != expected:
+                    raise Refused('sealed archive omitted persistent captured entries')
+        except (tarfile.TarError, OSError) as exc:
+            raise Refused('sealed persistent archive is unreadable') from exc
+
+    def prune(self, source, proof):
+        # Called only after complete source/archive validation and stopped
+        # Wazuh. Keep each exact real ancestor and the socket inode in place.
+        endpoint = self.endpoint()
+        for entry in os.scandir(source):
+            child = Path(entry.path)
+            if child == endpoint: continue
+            if child in endpoint.parents:
+                if self.node(child) != proof['anchors'][str(child)]:
+                    raise Refused('live audit ancestor changed before preserving prune')
+                self.prune(child, proof)
+            elif entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(child)
+                sync_directory(child.parent)
+            else:
+                durable_unlink(child)
+
+
+def atomic_text(path, text, private=False, mtime_ns=None):
+    """Durable policy replacement; retain existing owner/mode/ACL/xattrs."""
+    path = path_shape(path, 'file', missing=True)
+    original = path.stat() if path.exists() else None
+    if original and original.st_uid != os.geteuid():
+        raise Refused('policy file has a foreign owner')
+    tmp = path.with_name(path.name + '.' + uuid.uuid4().hex)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        written = tmp.stat()
+        if original and not private:
+            shutil.copystat(path, tmp, follow_symlinks=False)
+            os.chown(tmp, original.st_uid, original.st_gid)
+        else:
+            tmp.chmod(0o600 if private else 0o644)
+        if mtime_ns is not None:
+            info = tmp.stat()
+            os.utime(tmp, ns=(info.st_atime_ns, mtime_ns), follow_symlinks=False)
+        elif original and not private:
+            os.utime(tmp, ns=(written.st_atime_ns, written.st_mtime_ns), follow_symlinks=False)
+        sync_file(tmp)
+        os.replace(tmp, path)
+        sync_directory(path.parent)
+    finally:
+        if tmp.exists():
+            durable_unlink(tmp)
+
+
+DNF_POLICY_PLAN = r'''
+import json,sys,dnf,dnf.subject,hawkey
+p=json.load(sys.stdin)
+if p['action']=='names':
+ result=[]
+ for pattern in p['patterns']:
+  values=list(dnf.subject.Subject(pattern.lstrip('!')).get_nevra_possibilities(forms=[hawkey.FORM_NEVRA,hawkey.FORM_NEVR,hawkey.FORM_NEV,hawkey.FORM_NA,hawkey.FORM_NAME]))
+  if not values: raise ValueError('invalid foreign lock')
+  result.append(sorted(set(v.name for v in values if v.name)))
+ print(json.dumps(result)); sys.exit(0)
+with dnf.Base() as base:
+ base.conf.read(p['config'])
+ if not base.conf.plugins or base.conf.installroot!='/': raise ValueError('unsupported plugin/install context')
+ base.conf.cacheonly=p.get('cacheonly',True)
+ base.conf.disable_excludes=['wazuh']
+ base.init_plugins(); base.pre_configure_plugins(); base.read_all_repos(); base.configure_plugins()
+ loaded=sorted(plugin.name for plugin in base._plugins.plugins)
+ if 'versionlock' not in loaded: raise ValueError('versionlock not loaded')
+ base.fill_sack(load_system_repo=True,load_available_repos=not bool(p.get('artifact')))
+ if p['action']=='providers':
+  version,release=p['package'].rsplit('-',1)
+  values=base.sack.query(flags=hawkey.IGNORE_EXCLUDES).available().filter(name='wazuh-agent',epoch=0,version=version,release=release,arch='x86_64')
+  result=[]
+  for value in values:
+   algorithm,checksum=value.returnIdSum(); repo=base.repos[value.reponame]
+   result.append({'repo':value.reponame,'url':value.remote_location(),'checksum_type':algorithm,'sha256':checksum,
+                  'gpgcheck':bool(repo.gpgcheck),'gpgkey':list(repo.gpgkey),'baseurl':list(repo.baseurl)})
+  print(json.dumps(result)); sys.exit(0)
+ if p['action']=='upgrade': base.upgrade('wazuh-agent')
+ elif p.get('artifact'):
+  values=base.add_remote_rpms([p['artifact']],strict=True)
+  if len(values)!=1: raise ValueError('invalid local package set')
+  if p.get('reinstall'): base.package_reinstall(values[0])
+  elif p.get('downgrade'): base.package_downgrade(values[0],strict=True)
+  else: base.package_upgrade(values[0])
+ elif p.get('reinstall'): base.reinstall(p['spec'])
+ else: base.install(p['spec'],strict=True)
+ base.resolve(allow_erasing=False)
+ def package(value): return {'name':value.name,'version':value.version+'-'+value.release,'epoch':str(value.epoch or '0'),'arch':value.arch}
+ print(json.dumps({'plugins':loaded,'install':[package(v) for v in base.transaction.install_set],
+                   'remove':[package(v) for v in base.transaction.remove_set]}))
+'''
+
+
+class PackageGuard:
+    """Native hold/versionlock enforcement, with Wazuh-only scoped overrides.
+
+    DNF plugin lifecycle and transaction sets follow the supported DNF 4 API:
+    https://dnf.readthedocs.io/en/latest/api_base.html
+    https://github.com/rpm-software-management/dnf-plugins-core/blob/4.3.0/plugins/versionlock.py
+    No resolving plan performs a package transaction.
+    """
+    BEGIN = '# BEGIN PILOT WAZUH VERSIONLOCK\n'
+    END = '# END PILOT WAZUH VERSIONLOCK\n'
+    MAIN = '/etc/dnf/dnf.conf'
+    PLUGIN = '/etc/dnf/plugins/versionlock.conf'
+    LOCKS = '/etc/dnf/plugins/versionlock.list'
+    PREF = '/etc/apt/preferences.d/pilot-wazuh-agent'
+
+    def __init__(self, family, runner, root=ROOT):
+        self.family, self.r, self.root = family, runner, Path(root)
+
+    @staticmethod
+    def parser(text):
+        value = configparser.ConfigParser(interpolation=None, strict=True)
+        try:
+            value.read_string(text)
+        except configparser.Error as exc:
+            raise Refused('ambiguous native package policy configuration') from exc
+        return value
+
+    @staticmethod
+    def file_state(filename):
+        path = path_shape(filename, 'file', missing=True)
+        if not path.exists(): return {'present': False}
+        info = path.stat()
+        if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise Refused('native package policy permissions are unsafe')
+        return {'present': True, 'text': path.read_text(), 'sha256': digest(path),
+                'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
+                'mtime_ns': info.st_mtime_ns, 'xattrs': ClosedCapture.attrs(path)}
+
+    def split_locks(self, text):
+        if not text.count(self.BEGIN) and not text.count(self.END):
+            return text, None
+        if text.count(self.BEGIN) != 1 or text.count(self.END) != 1:
+            raise Refused('ambiguous owned versionlock block')
+        before, rest = text.split(self.BEGIN)
+        owned, after = rest.split(self.END)
+        if not re.fullmatch(r'wazuh-agent-0:4\.14\.(?:0|[1-9][0-9]*)-[1-9][0-9]*\.x86_64\n', owned):
+            raise Refused('unknown owned Wazuh versionlock rule')
+        return before + after, owned.strip()
+
+    def lock_text(self, original, package):
+        foreign, _ = self.split_locks(original)
+        return foreign + ('' if not foreign or foreign.endswith('\n') else '\n') + self.BEGIN + self.nevra(package) + '\n' + self.END
+
+    @staticmethod
+    def nevra(package):
+        if not re.fullmatch(r'4\.14\.(?:0|[1-9][0-9]*)-[1-9][0-9]*', package):
+            raise Refused('unknown exact Wazuh package for native guard')
+        return 'wazuh-agent-0:' + package + '.x86_64'
+
+    def dnf_native(self, payload):
+        return self.r.json([sys.executable, '-c', DNF_POLICY_PLAN], input=json.dumps(payload), timeout=300,
+                           operation='native DNF versionlock resolving plan')
+
+    def dnf_context(self, dependency_optional=False):
+        main = self.file_state(self.MAIN)
+        if not main['present']:
+            raise Refused('native DNF main configuration is absent')
+        parsed = self.parser(main['text'])
+        if not parsed.has_section('main') or not parsed.getboolean('main', 'plugins', fallback=True):
+            raise Refused('global DNF plugins are disabled')
+        section = parsed['main']
+        if (section.get('installroot', '/') != '/' or section.get('pluginconfpath', '/etc/dnf/plugins').strip() != '/etc/dnf/plugins'
+                or 'pluginpath' in section or 'include' in section):
+            raise Refused('redirected or unknown native DNF plugin context')
+        plugin = self.file_state(self.PLUGIN)
+        if not plugin['present']:
+            if dependency_optional:
+                latent = self.file_state(self.LOCKS)
+                if any(line.strip() and not line.lstrip().startswith('#') for line in latent.get('text', '').splitlines()):
+                    raise Refused('installing versionlock would activate latent global rules')
+                return {'main': main, 'plugin': plugin, 'locks': latent}
+            raise Refused('native versionlock dependency/configuration is absent')
+        settings = self.parser(plugin['text'])
+        if (not settings.has_section('main') or not settings.getboolean('main', 'enabled', fallback=True)
+                or settings.get('main', 'locklist', fallback='') != self.LOCKS):
+            raise Refused('disabled or redirected native versionlock configuration')
+        locks = self.file_state(self.LOCKS)
+        foreign, owned = self.split_locks(locks.get('text', ''))
+        patterns = [line.strip() for line in foreign.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+        if patterns:
+            names = self.dnf_native({'action': 'names', 'patterns': patterns})
+            if len(names) != len(patterns) or any(not values for values in names):
+                raise Refused('unknown foreign versionlock rule')
+            if any(fnmatch.fnmatchcase('wazuh-agent', value) for values in names for value in values):
+                raise Refused('foreign versionlock ownership overlaps Wazuh')
+        return {'main': main, 'plugin': plugin, 'locks': locks, 'foreign': foreign, 'owned': owned}
+
+    def apt_state(self):
+        selection = self.r.run(['dpkg', '--get-selections', 'wazuh-agent'], timeout=30,
+                               operation='native Wazuh dpkg selection').stdout
+        match = re.fullmatch(r'wazuh-agent(?::amd64)?\s+(hold|install)\s*', selection)
+        holds = self.r.run(['apt-mark', 'showhold'], timeout=30, operation='native APT holds').stdout.splitlines()
+        held = any(value in ('wazuh-agent', 'wazuh-agent:amd64') for value in holds)
+        if not match or (match[1] == 'hold') != held:
+            raise Refused('native APT/dpkg hold observations disagree')
+        text = self.r.run(['apt-cache', 'policy', 'wazuh-agent'], timeout=30,
+                          operation='effective APT agent candidate/priorities').stdout
+        installed = re.findall(r'^\s*Installed:\s*(\S+)\s*$', text, re.M)
+        candidate = re.findall(r'^\s*Candidate:\s*(\S+)\s*$', text, re.M)
+        if len(installed) != 1 or len(candidate) != 1:
+            raise Refused('unknown effective APT agent policy')
+        return {'selection': match[1], 'held': held, 'holds': sorted(holds),
+                'installed': installed[0], 'candidate': candidate[0]}
+
+    def ownership(self):
+        if self.family == 'Debian':
+            pref = self.file_state(self.PREF)
+            if pref['present'] and not re.fullmatch(
+                    r'Package: wazuh-agent\nPin: version 4\.14\.(?:0|[1-9][0-9]*)-[1-9][0-9]*\nPin-Priority: 1000\n\n'
+                    r'Package: wazuh-agent\nPin: version \*\nPin-Priority: -1\n', pref['text']):
+                raise Refused('foreign ownership at the managed APT preference path')
+            return {'preference': pref}
+        return self.dnf_context(dependency_optional=True)
+
+    def snapshot(self):
+        self.ownership()
+        if self.family == 'Debian':
+            return dict(self.apt_state(), preference=self.file_state(self.PREF))
+        return self.dnf_context()
+
+    def same_context(self, before, after):
+        if self.family == 'Debian':
+            return {k: v for k, v in before.items() if k != 'candidate'} == {k: v for k, v in after.items() if k != 'candidate'}
+        return before == after
+
+    def protect(self, package, require_installed=True):
+        self.nevra(package)
+        self.ownership()
+        if self.family == 'Debian':
+            if not self.apt_state()['held']:
+                self.r.run(['apt-mark', 'hold', 'wazuh-agent'], timeout=60, operation='hold only Wazuh agent')
+            if not require_installed:
+                if not self.apt_state()['held']:
+                    raise Refused('recovery did not establish the native Wazuh hold')
+                return {'guard': 'apt-hold'}
+        else:
+            context = self.dnf_context()
+            content = self.lock_text(context['locks'].get('text', ''), package)
+            if content != context['locks'].get('text', ''):
+                atomic_text(self.LOCKS, content)
+        return self.verify(package)
+
+    def verify(self, package):
+        self.nevra(package)
+        if self.family == 'Debian':
+            state = self.apt_state()
+            if not state['held'] or state['installed'] != package:
+                raise Refused('effective agent is not protected by its native APT hold')
+            return {'guard': 'apt-hold', 'candidate': state['candidate']}
+        context = self.dnf_context()
+        if context['owned'] != self.nevra(package):
+            raise Refused('native global Wazuh versionlock differs from installed package')
+        plan = self.dnf_native({'action': 'upgrade', 'config': self.MAIN, 'cacheonly': True})
+        self.validate_dnf_plan(plan, package, unchanged=True)
+        return {'guard': 'dnf-global-versionlock'}
+
+    @staticmethod
+    def validate_dnf_plan(plan, package, unchanged=False):
+        if 'versionlock' not in plan.get('plugins', []):
+            raise Refused('resolving DNF transaction did not load versionlock')
+        install, remove = plan['install'], plan['remove']
+        if unchanged and (install or remove):
+            raise Refused('native versionlock permits a replacement transaction')
+        for value in [*install, *remove]:
+            if value['name'] != 'wazuh-agent' or value['epoch'] != '0' or value['arch'] != 'x86_64':
+                raise Refused('native Wazuh transaction changes an unsupported dependency/package')
+        if not unchanged and (len(install) != 1 or install[0]['version'] != package):
+            raise Refused('native DNF plan did not select the exact authorized agent')
+
+    def apt_plan(self, package, artifact=''):
+        self.nevra(package)
+        argv = ['apt-get', '-s', '-o', 'APT::Get::AllowUnauthenticated=false', '--no-install-recommends',
+                '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold',
+                '--no-remove', '--allow-change-held-packages', '--reinstall']
+        if artifact:
+            if Path(artifact).name != 'wazuh-agent_' + package + '_amd64.deb':
+                raise Refused('retained artifact has an unsupported native APT cache basename')
+            argv += ['--allow-downgrades', '--no-download', '-o', 'Dir::Cache::archives=' + str(Path(artifact).parent) + '/',
+                     '-o', 'APT::Keep-Downloaded-Packages=true']
+        argv += ['install', artifact or 'wazuh-agent=' + package]
+        text = self.r.run(argv, timeout=180, operation='native Wazuh-only APT held-change plan').stdout
+        selected = []
+        for line in text.splitlines():
+            if line.startswith(('Remv ', 'Purg ')):
+                raise Refused('authorized APT plan removes packages')
+            if line.startswith('Inst '):
+                match = re.match(r'^Inst (\S+)(?: \[[^\]]*\])? \((\S+)', line)
+                if not match or match[1] not in ('wazuh-agent', 'wazuh-agent:amd64') or match[2] != package:
+                    raise Refused('authorized APT plan changes another held package or dependency')
+                selected.append(match[2])
+            elif line.startswith('Conf ') and line.split()[1] not in ('wazuh-agent', 'wazuh-agent:amd64'):
+                raise Refused('authorized APT plan configures an unrelated package')
+        if selected != [package]:
+            raise Refused('native APT plan did not select exactly the authorized Wazuh package')
+        return {'authorized': True}
+
+    def overlay(self, owner, package, installed=''):
+        context = self.dnf_context()
+        folder = private_dir(self.root / ('agent-policy-' + owner))
+        plugins = private_dir(folder / ('plugins-' + package))
+        locks = plugins / 'versionlock.list'
+        plugin = plugins / 'versionlock.conf'
+        config = folder / ('dnf-' + package + '.conf')
+        atomic_text(locks, self.lock_text(context['locks'].get('text', ''), package), private=True)
+        settings = self.parser(context['plugin']['text']); settings.set('main', 'locklist', str(locks))
+        stream = io.StringIO(); settings.write(stream); atomic_text(plugin, stream.getvalue(), private=True)
+        settings = self.parser(context['main']['text'])
+        before = {section: dict(settings[section]) for section in settings.sections()}
+        settings.set('main', 'pluginconfpath', '/etc/dnf/plugins, ' + str(plugins))
+        after = {section: dict(settings[section]) for section in settings.sections()}
+        after['main'].pop('pluginconfpath', None); before['main'].pop('pluginconfpath', None)
+        if before != after:
+            raise Refused('private DNF override changed unrelated native configuration')
+        stream = io.StringIO(); settings.write(stream); atomic_text(config, stream.getvalue(), private=True)
+        result = {'owner': owner, 'package': package, 'config': str(config),
+                  'files': {str(path): digest(path) for path in (config, plugin, locks)},
+                  'foreign': context['foreign'], 'main_sha256': context['main']['sha256'],
+                  'plugin_sha256': context['plugin']['sha256']}
+        for path in (config, plugin, locks): private_file(path, path.parent)
+        plan = self.dnf_native({'action': 'install', 'config': str(config), 'spec': self.nevra(package),
+                                'reinstall': package == installed, 'cacheonly': False})
+        self.validate_dnf_plan(plan, package)
+        return result
+
+    def verify_overlay(self, overlay, owner):
+        if overlay['owner'] != owner:
+            raise Refused('private DNF policy belongs to another writer')
+        folder = canonical(self.root / ('agent-policy-' + owner))
+        self.nevra(overlay['package'])
+        expected = {str(folder / ('dnf-' + overlay['package'] + '.conf')),
+                    str(folder / ('plugins-' + overlay['package']) / 'versionlock.conf'),
+                    str(folder / ('plugins-' + overlay['package']) / 'versionlock.list')}
+        if set(overlay['files']) != expected or overlay['config'] != str(folder / ('dnf-' + overlay['package'] + '.conf')):
+            raise Refused('private DNF overlay escaped its exact owned artifact set')
+        for name, checksum in overlay['files'].items():
+            path = private_file(name, Path(name).parent)
+            if folder not in path.parents or digest(path) != checksum:
+                raise Refused('private DNF policy fingerprint/scope changed')
+        context = self.dnf_context()
+        if (context['foreign'] != overlay['foreign'] or context['main']['sha256'] != overlay['main_sha256']
+                or context['plugin']['sha256'] != overlay['plugin_sha256']):
+            raise Refused('foreign/global DNF policy changed during the owned override')
+        return overlay['config']
+
+    def artifact_plan(self, overlay, owner, artifact, package, recovery=False, reinstall=False):
+        config = self.verify_overlay(overlay, owner)
+        plan = self.dnf_native({'action': 'install', 'config': config, 'artifact': str(artifact),
+                                'downgrade': recovery, 'reinstall': reinstall, 'cacheonly': True})
+        self.validate_dnf_plan(plan, package)
+        return config
+
+    def official_rpm_provider(self, overlay, package):
+        records = self.dnf_native({'action': 'providers', 'config': overlay['config'], 'package': package, 'cacheonly': False})
+        hashes = {item['sha256'] for item in records if item.get('checksum_type') == 'sha256' and re.fullmatch('[a-f0-9]{64}', item.get('sha256', ''))}
+        if not records or len(hashes) != 1 or any(item.get('checksum_type') != 'sha256' or item.get('sha256') not in hashes for item in records):
+            raise Refused('missing or ambiguous same-NEVRA RPM payload providers')
+        def official(value, base=False):
+            parsed = urlsplit(value or '')
+            if parsed.scheme != 'https' or parsed.netloc != 'packages.wazuh.com' or parsed.query or parsed.fragment:
+                return False
+            return parsed.path.rstrip('/') == '/4.x/yum' if base else parsed.path.startswith('/4.x/yum/')
+        allowed = [item for item in records if item['repo'] == 'wazuh' and official(item['url'])
+                   and item['gpgcheck'] and item['gpgkey'] == ['https://packages.wazuh.com/key/GPG-KEY-WAZUH']
+                   and item['baseurl'] and all(official(value, base=True) for value in item['baseurl'])]
+        if not allowed or any(item['sha256'] not in hashes for item in allowed):
+            raise Refused('RPM payload is not bound to the declared official Wazuh source')
+        return allowed[0]
+
+    def official_rpm_keyring(self, owner):
+        folder = private_dir(self.root / ('agent-policy-' + owner))
+        key = folder / ('official-wazuh-' + uuid.uuid4().hex + '.key')
+        self.r.run(['curl', '--fail', '--silent', '--show-error', '--max-time', '30', '--proto', '=https',
+                    '--output', key, 'https://packages.wazuh.com/key/GPG-KEY-WAZUH'], timeout=40,
+                   operation='authenticated official Wazuh public key')
+        private_file(key, folder); key.chmod(0o600); sync_file(key)
+        database = private_dir(folder / ('official-keyring-' + uuid.uuid4().hex))
+        self.r.run(['rpm', '--dbpath', database, '--initdb'], operation='initialize private vendor keyring')
+        self.r.run(['rpm', '--dbpath', database, '--import', key], operation='import only official Wazuh key')
+        sync_tree(database)
+        return {'key': str(key), 'sha256': digest(key), 'database': str(database)}
+
+    def verify_official_rpm(self, path, provider, keyring, owner):
+        folder = canonical(self.root / ('agent-policy-' + owner))
+        key = private_file(keyring['key'], folder)
+        database = path_shape(keyring['database'], 'directory')
+        if database.parent != folder or digest(key) != keyring['sha256'] or digest(path) != provider['sha256']:
+            raise Refused('official RPM provider/key/payload identity changed')
+        text = self.r.run(['rpmkeys', '--dbpath', database, '-Kv', path], timeout=60,
+                          operation='RPM signature against only official Wazuh key').stdout
+        if not re.search(r'Signature.*: OK', text):
+            raise Refused('RPM is not signed by the authenticated official Wazuh key')
+
+    def restore_prior(self, before):
+        if self.family == 'Debian':
+            self.r.run(['apt-mark', 'hold' if before['held'] else 'unhold', 'wazuh-agent'], timeout=60,
+                       operation='restore only previous Wazuh hold selection')
+            if self.apt_state()['selection'] != before['selection']:
+                raise Refused('previous native Wazuh selection was not restored')
+            if self.file_state(self.PREF) != before['preference']:
+                raise Refused('previous managed APT preference state was not restored')
+            return
+        current = self.dnf_context()
+        if current['foreign'] != before['foreign'] or current['main']['sha256'] != before['main']['sha256'] or current['plugin']['sha256'] != before['plugin']['sha256']:
+            raise Refused('refusing to overwrite changed foreign DNF policy')
+        saved = before['locks']
+        if saved['present']:
+            atomic_text(self.LOCKS, saved['text'], mtime_ns=saved['mtime_ns'])
+        else:
+            durable_unlink(self.LOCKS)
+        after = self.dnf_context()
+        if after['locks'] != saved:
+            raise Refused('previous global versionlock state was not restored')
 
 
 def atomic_json(path, value):
@@ -558,21 +1341,34 @@ class Transaction:
             raise Refused('insufficient backup capacity before downtime')
         return size
 
-    def archive(self, source, dest):
+    def archive(self, source, dest, capture=None, excluded=()):
         source = Path(source)
-        restore_sources({str(source): 'directory' if source.is_dir() else 'file'}, self.root)
+        kind = 'directory' if source.is_dir() else 'linked-file'
+        if capture is None:
+            capture = ClosedCapture.take({str(source): kind}, self.root, sealed=True)
+        if str(canonical(source)) not in capture['roots']:
+            raise Refused('archive source escaped its complete cold capture')
+        restore_sources({str(source): kind}, self.root)
         path_shape(Path(dest).parent, 'directory')
         if Path(dest).exists() or Path(dest).is_symlink():
             raise Refused('archive destination already exists')
         self.r.run(['tar', '--acls', '--xattrs', '--xattrs-include=*', '--selinux', '--numeric-owner', '--sparse',
+                    *['--exclude=' + str(Path(path).relative_to(source.parent)) for path in excluded],
                     '-cpf', dest, '-C', source.parent, source.name], timeout=1800)
         self.r.run(['tar', '-tf', dest], timeout=300)
         checksum = digest(dest)
         sync_file(dest)
         return checksum
 
-    def restore(self, source, archive, checksum):
-        restore_sources({str(source): 'directory' if Path(source).is_dir() else 'file'}, self.root, missing=(str(source),))
+    def restore(self, source, archive, checksum, capture=None, runtime=None, proof=None):
+        kind = 'directory' if Path(source).is_dir() else 'linked-file'
+        if capture is None:
+            ClosedCapture.take({str(source): kind}, self.root, missing=(str(source),))
+        else:
+            if str(canonical(source)) not in capture['roots']:
+                raise Refused('restore source escaped its complete cold capture')
+            ClosedCapture.take(capture['roots'], self.root, missing=tuple(capture['roots']))
+        restore_sources({str(source): kind}, self.root, missing=(str(source),))
         private_file(archive, Path(archive).parent)
         if digest(archive) != checksum:
             raise Refused('backup checksum mismatch; refusing restore')
@@ -580,7 +1376,9 @@ class Transaction:
         archive = canonical(archive)
         disjoint([source], self.root)
         if source.exists():
-            if source.is_dir():
+            if runtime and proof and source == Path('/var/ossec'):
+                runtime.prune(source, proof)
+            elif source.is_dir():
                 shutil.rmtree(source)
             else:
                 durable_unlink(source)
@@ -759,7 +1557,7 @@ class Central(Transaction):
         if len(releases) != 1:
             raise Refused('central components have mixed Wazuh releases')
         release = releases.pop()
-        restore_sources({path: 'directory' for path in paths}, self.root)
+        capture = ClosedCapture.take({path: 'directory' for path in paths}, self.root)
         for name in volume_names:
             consumers = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + name], timeout=30).stdout.split()
             if not consumers or not set(consumers).issubset(set(ids)):
@@ -767,7 +1565,8 @@ class Central(Transaction):
         self.health(release, images)
         return {'directory': str(directory), 'compose': compose, 'images': images,
                 'version': release, 'paths': sorted(paths), 'volumes': sorted(volume_names),
-                'docker_root': str(docker_root), 'compose_sha256': digest(compose)}
+                'docker_root': str(docker_root), 'compose_sha256': digest(compose),
+                'admission_capture': capture}
 
     def check_agents(self, target):
         listing = self.r.run(['docker', 'exec', 'single-node-wazuh.manager-1',
@@ -1034,9 +1833,13 @@ class Central(Transaction):
         if set(item['paths']) != expected_paths:
             raise Refused('recovery source paths escaped the recorded owned project')
         restore_sources({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
+        ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
 
     def validate_restore_scope(self, item):
         self.validate_project_scope(item)
+        expected_roots = {str(canonical(path)): 'directory' for path in item['paths']}
+        if item['capture']['roots'] != expected_roots or not item['capture']['sealed']:
+            raise Refused('central cold capture escaped its exact source set')
         if {entry['path'] for entry in item['archives']} != set(item['paths']):
             raise Refused('recovery archive scope does not match recorded sources')
         for entry in item['archives']:
@@ -1088,7 +1891,8 @@ class Central(Transaction):
                    operation='load retained old image artifacts')
         self.quiesce_for_restore(item)
         for entry in item['archives']:
-            self.restore(entry['path'], entry['archive'], entry['sha256'])
+            self.restore(entry['path'], entry['archive'], entry['sha256'], capture=item['capture'])
+        ClosedCapture.relink(item['capture'], self.root)
         if digest(item['compose']) != item['compose_sha256']:
             raise Refused('restored Compose selectors differ from the old durable configuration')
         self.validate_persisted_graph(item)
@@ -1102,6 +1906,7 @@ class Central(Transaction):
         self.wait(item['version'], item['images'])
         self.check_data(item['data'])
         self.canary()
+        ClosedCapture.take(item['capture']['roots'], self.root)
         self.finish(item, 'recovered')
 
     def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
@@ -1166,11 +1971,11 @@ class Central(Transaction):
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['target_version'] = target
             state['target_images'] = target_images
-            restore_sources({path: 'directory' for path in state['paths']}, self.root)
+            state['admission_capture'] = ClosedCapture.take({path: 'directory' for path in state['paths']}, self.root)
             item = self.begin(owner, state)
             try:
                 self.retain_images(item)
-                restore_sources({path: 'directory' for path in item['paths']}, self.root)
+                ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root)
                 self.write(item, 'stopping')
                 self.compose_run(item, 'stop', '--timeout', '60')
                 for image in item['images'].values():
@@ -1178,10 +1983,14 @@ class Central(Transaction):
                     if stopped['State']['Running']:
                         raise Refused('central component did not quiesce')
                 self.assert_volume_consumers(item)
+                item['capture'] = ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, sealed=True)
+                self.write(item, 'stopping')
                 item['archives'] = []
                 for index, path in enumerate(item['paths']):
                     archive = str(Path(item['backup']) / ('state-' + str(index) + '.tar'))
-                    item['archives'].append({'path': path, 'archive': archive, 'sha256': self.archive(path, archive)})
+                    item['archives'].append({'path': path, 'archive': archive,
+                                             'sha256': self.archive(path, archive, capture=item['capture'])})
+                ClosedCapture.verify(item['capture'], self.root)
                 self.write(item, 'backed-up')
                 # Preserve the active config, credentials and certificates;
                 # the supported patch transition changes only image selectors.
@@ -1197,6 +2006,7 @@ class Central(Transaction):
                 self.wait(target, target_images)
                 self.check_data(item['data'])
                 item['canary'] = self.canary()
+                ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root)
                 self.finish(item, 'committed')
                 return {'changed': True, 'version': target, 'directory': item['directory'], 'backup': item['backup']}
             except Exception as failure:
@@ -1213,6 +2023,8 @@ class Central(Transaction):
 
 
 class Agent(Transaction):
+    POLICY_HOOK = '/usr/sbin/policy-rc.d'
+    POLICY_TEMP = '#!/bin/sh\nexit 101\n'
     def __init__(self, family, **kwargs):
         super().__init__('agent', **kwargs)
         if family not in ('Debian', 'RedHat'):
@@ -1222,28 +2034,283 @@ class Agent(Transaction):
     def pin_path(self):
         return '/etc/apt/preferences.d/pilot-wazuh-agent' if self.family == 'Debian' else '/etc/yum.repos.d/wazuh.repo'
 
+    def guard(self):
+        return PackageGuard(self.family, self.r, self.root)
+
+    def audit_runtime(self): return AuditRuntime(self.r)
+
+    def audit_check(self, item, stopped=False, ready=False, capture=None):
+        self.audit_runtime().check(item.get('audit_runtime'), capture or self.capture_sources(recovery=True), stopped, ready)
+
+    def hook_original(self, item):
+        """Validate only sealed hook material; independent of live audit/data."""
+        if self.family != 'Debian' or 'policy_hook' not in item: return None
+        hook = item['policy_hook']
+        path = path_shape(self.POLICY_HOOK, 'file', missing=True)
+        if hook['path'] != self.POLICY_HOOK or hook['temporary_sha256'] != hashlib.sha256(self.POLICY_TEMP.encode()).hexdigest():
+            raise Refused('policy hook authority escaped its exact resource')
+        expected = item['capture']['nodes'].get(str(path))
+        if bool(expected) != hook['present'] or expected != hook['node']:
+            raise Refused('original policy hook differs from sealed cold capture')
+        if hook['present']:
+            entry = hook['archive']
+            if entry not in item['archives'] or entry['path'] != self.POLICY_HOOK:
+                raise Refused('policy hook archive escaped its original transaction')
+            private_file(entry['archive'], item['backup'])
+            if digest(entry['archive']) != entry['sha256']:
+                raise Refused('original policy hook archive checksum mismatch')
+            try:
+                with tarfile.open(entry['archive'], 'r:') as archive:
+                    members = archive.getmembers()
+                    if len(members) != 1 or members[0].name != path.name or not members[0].isfile():
+                        raise Refused('original policy hook archive is not a single regular file')
+                    content = archive.extractfile(members[0])
+                    if content is None or hashlib.sha256(content.read()).hexdigest() != expected['sha256']:
+                        raise Refused('original policy hook payload is not its sealed bytes')
+            except tarfile.TarError as exc:
+                raise Refused('original policy hook archive is unreadable') from exc
+        elif str(path) not in item['capture']['absent'] or hook['archive'] is not None:
+            raise Refused('policy hook absence is not its sealed original state')
+        return hook
+
+    def hook_matches(self, hook):
+        path = path_shape(self.POLICY_HOOK, 'file', missing=True)
+        if not path.exists(): return not hook['present']
+        if not hook['present']: return False
+        actual = ClosedCapture.take({str(path): 'file'}, self.root, sealed=True)['nodes'][str(path)]
+        return {key: value for key, value in actual.items() if key != 'identity'} == {key: value for key, value in hook['node'].items() if key != 'identity'}
+
+    def hook_current_owned(self, hook):
+        if self.hook_matches(hook): return
+        path = path_shape(self.POLICY_HOOK, 'file', missing=True)
+        # A stopped native module may have moved the original aside or be
+        # between atomic creation and chmod. These are recorded owned gaps.
+        if not path.exists(): return
+        info = path.stat()
+        if (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in (0o600, 0o755)
+                or digest(path) != hook['temporary_sha256']):
+            raise Refused('unknown foreign policy hook drift; refusing overwrite')
+
+    def hook_prepare(self, owner):
+        with self.lock(owner=owner):
+            item = self.owned(owner, ('installing', 'recovering'))
+            self.audit_check(item, stopped=True)
+            hook = self.hook_original(item)
+            if hook is None: raise Refused('installer has no sealed policy hook authority')
+            self.hook_current_owned(hook)
+            item['hook_state'] = 'preparing'
+            self.write(item, item['phase'])
+            atomic_text(self.POLICY_HOOK, self.POLICY_TEMP, private=True)
+            path = path_shape(self.POLICY_HOOK, 'file'); path.chmod(0o755); sync_file(path)
+            item['hook_state'] = 'prepared'
+            self.write(item, item['phase'])
+            return {'prepared': True}
+
+    def hook_cleanup(self, owner, confirmed=False):
+        if not confirmed:
+            raise Refused('policy hook cleanup requires confirmation previous installer jobs stopped')
+        with self.lock(owner=owner):
+            item = self.owned(owner)
+            hook = self.hook_original(item)
+            if hook is None: return {'changed': False}
+            self.hook_current_owned(hook)
+            if hook['present']:
+                if not self.hook_matches(hook):
+                    entry = hook['archive']
+                    self.restore(self.POLICY_HOOK, entry['archive'], entry['sha256'])
+                else:
+                    sync_file(Path(self.POLICY_HOOK))
+            else:
+                durable_unlink(self.POLICY_HOOK)
+            if not self.hook_matches(hook):
+                raise Refused('original global policy hook was not restored')
+            item['hook_state'] = 'restored'
+            self.write(item, item['phase'])
+            return {'changed': False, 'restored': True}
+
+    def hook_verify(self, item):
+        hook = self.hook_original(item)
+        if hook is not None and not self.hook_matches(hook):
+            raise Refused('original global policy hook must be restored before native proof')
+
+    def policy_stage_file(self, owner):
+        if not re.fullmatch('[a-f0-9]{32}', owner):
+            raise Refused('invalid policy-stage owner')
+        return self.root / ('agent-policy-' + owner) / 'stage.json'
+
+    def prepare_policy_stage(self, owner, plan):
+        actual = agent_plan(self.installed(), plan['manager'], plan['version'], True)
+        if not actual['change'] or any(plan[key] != actual[key] for key in ('installed', 'version', 'package', 'manager', 'change')):
+            raise Refused('policy stage does not match the native compatible upgrade plan')
+        guard = self.guard()
+        before = guard.snapshot()
+        if self.family == 'Debian' and before['installed'] != plan['installed']:
+            raise Refused('native APT installed policy differs from the package probe')
+        folder = private_dir(self.policy_stage_file(owner).parent)
+        overlays = {}
+        providers, keyring = {}, None
+        if self.family == 'RedHat':
+            for package in (plan['installed'], plan['package']):
+                overlays[package] = guard.overlay(owner, package, plan['installed'])
+                providers[package] = guard.official_rpm_provider(overlays[package], package)
+            keyring = guard.official_rpm_keyring(owner)
+        item = {'owner': owner, 'family': self.family, 'installed': plan['installed'], 'package': plan['package'],
+                'policy_before': before, 'overlays': overlays, 'providers': providers, 'keyring': keyring}
+        atomic_json(folder / 'stage.json', item)
+        return item
+
+    def load_policy_stage(self, owner):
+        filename = self.policy_stage_file(owner)
+        private_file(filename, filename.parent)
+        item = json.loads(filename.read_text())
+        if item['owner'] != owner or item['family'] != self.family:
+            raise Refused('policy stage belongs to another writer/backend')
+        self.guard().nevra(item['installed']); self.guard().nevra(item['package'])
+        if self.family == 'RedHat':
+            if set(item['overlays']) != {item['installed'], item['package']}:
+                raise Refused('policy stage has an unsupported package set')
+            for overlay in item['overlays'].values():
+                self.guard().verify_overlay(overlay, owner)
+        return item
+
+    def authorize_apt(self, owner, package, stage=False, artifact=''):
+        with self.lock(owner=owner):
+            if self.family != 'Debian':
+                raise Refused('APT authorization requires the Debian backend')
+            item = self.active()
+            if stage:
+                if item:
+                    raise Refused('package downloads cannot reuse installation/recovery authority')
+                prepared = self.load_policy_stage(owner)
+                if artifact or package not in (prepared['installed'], prepared['package']):
+                    raise Refused('APT stage escaped its exact prepared versions')
+                if self.installed() != prepared['installed'] or not self.guard().same_context(prepared['policy_before'], self.guard().snapshot()):
+                    raise Refused('native package/policy changed since stage admission')
+            else:
+                item = self.owned(owner, ('installing', 'recovering'))
+                self.audit_check(item, stopped=True)
+                expected = item['package'] if item['phase'] == 'installing' else item['installed']
+                info = item['packages'].get(expected)
+                if package != expected or not info or artifact != info['path']:
+                    raise Refused('APT installation escaped its exact owned retained artifact')
+                private_file(artifact, item['backup'])
+                if digest(artifact) != info['sha256']:
+                    raise Refused('authorized APT artifact changed')
+            return self.guard().apt_plan(package, artifact)
+
+    def authorize_rpm(self, owner, recovery=False):
+        item = self.owned(owner, ('recovering',) if recovery else ('installing',))
+        package = item['installed'] if recovery else item['package']
+        self.validate_packages(item)
+        artifact = item['packages'][package]['path']
+        guard = self.guard()
+        guard.verify_official_rpm(artifact, item['packages'][package]['provider'], item['policy_stage']['keyring'], owner)
+        config = guard.artifact_plan(item['policy_stage']['overlays'][package], owner, artifact, package,
+                                     recovery=recovery and self.installed() != package, reinstall=self.installed() == package)
+        return {'package_path': artifact, 'dnf_conf_file': config,
+                'dnf_action': 'reinstall' if self.installed() == package else 'downgrade' if recovery else 'install'}
+
+    def protect_package(self, owner):
+        with self.lock(owner=owner):
+            item = self.active()
+            package = self.installed()
+            if item:
+                self.owned(owner, ('installing',))
+                self.audit_check(item)
+                if package != item['package']:
+                    raise Refused('cannot advance native protection before the exact target is installed')
+            return self.guard().protect(package)
+
+    def policy_ownership(self, owner):
+        with self.lock(owner=owner):
+            if self.active():
+                self.owned(owner, ('installing',))
+                self.audit_check(self.active())
+            state = self.guard().ownership()
+            return {'checked': True, 'prerequisite_plugin_present': state.get('plugin', {}).get('present')}
+
+    def fresh_rpm(self, owner, plan):
+        with self.lock(owner=owner):
+            self.idle()
+            if self.family != 'RedHat' or self.installed() or plan != agent_plan('', plan['manager'], plan['version']):
+                raise Refused('fresh RPM stage requires the current compatible fresh plan')
+            guard = self.guard()
+            overlay = guard.overlay(owner, plan['package'])
+            provider = guard.official_rpm_provider(overlay, plan['package'])
+            keyring = guard.official_rpm_keyring(owner)
+            folder = private_dir(self.root / ('rpm-fresh-' + owner))
+            for path in folder.iterdir(): private_file(path, folder)
+            self.r.run(['dnf', '-c', overlay['config'], '-y', '--disableexcludes=wazuh',
+                        '--setopt=gpgcheck=1', '--setopt=localpkg_gpgcheck=1', 'install', '--downloadonly',
+                        '--downloaddir=' + str(folder), guard.nevra(plan['package'])], timeout=900,
+                       operation='stage exact official fresh Wazuh RPM')
+            matches = []
+            for path in folder.glob('*.rpm'):
+                private_file(path, folder)
+                if digest(path) == provider['sha256']: matches.append(path)
+            if len(matches) != 1:
+                raise Refused('fresh RPM stage does not contain one exact official payload')
+            path = matches[0]
+            guard.verify_official_rpm(path, provider, keyring, owner)
+            fields = self.r.run(['rpm', '-qp', '--qf', '%{NAME}\n%{VERSION}-%{RELEASE}\n%{ARCH}', path]).stdout.splitlines()
+            if fields != ['wazuh-agent', plan['package'], 'x86_64']:
+                raise Refused('fresh official RPM package identity mismatch')
+            config = guard.verify_overlay(overlay, owner)
+            return {'package_path': str(path), 'dnf_conf_file': config}
+
+    def source_specs(self):
+        specs = {'/var/ossec': 'directory', '/etc/hosts': 'file', self.pin_path(): 'file',
+                 '/etc/audit/plugins.d/af_wazuh.conf': 'linked-file'}
+        if self.family == 'RedHat':
+            specs.update({PackageGuard.MAIN: 'file', PackageGuard.PLUGIN: 'file', PackageGuard.LOCKS: 'file'})
+        else:
+            specs[self.POLICY_HOOK] = 'file'
+        return specs
+
+    def capture_sources(self, sealed=False, recovery=False):
+        specs = self.source_specs()
+        path_shape(Path('/etc/audit/plugins.d/af_wazuh.conf').parent, 'directory')
+        missing = tuple(specs) if recovery else tuple(name for name in specs if name != '/var/ossec')
+        capture = ClosedCapture.take(specs, self.root, missing=missing, sealed=sealed)
+        self.managed_files(capture, missing=recovery)
+        plugin = str(Path('/etc/audit/plugins.d/af_wazuh.conf'))
+        if plugin in capture['nodes'] and not recovery:
+            internal = ClosedCapture.resolve_link(Path('/var/ossec/etc/af_wazuh.conf'), capture['nodes'],
+                                                 [Path(root) for root in capture['roots']])
+            if sorted([plugin, internal]) not in capture['hardlinks']:
+                raise Refused('component audit plugin must be the exact captured two-link pair')
+        return capture
+
     def source_paths(self):
-        specs = {'/var/ossec': 'directory', '/etc/hosts': 'file', self.pin_path(): 'file'}
-        restore_sources(specs, self.root, missing=('/etc/hosts', self.pin_path()))
-        self.managed_files()
+        specs = self.source_specs()
+        self.capture_sources()
         return [name for name in specs if Path(name).exists()]
 
-    def managed_files(self, missing=False):
+    def managed_files(self, capture=None, missing=False):
         # These files are directly read/written by enrollment/configuration;
         # preserving only an alias would omit their effective old contents.
+        if capture is None:
+            capture = ClosedCapture.take(self.source_specs(), self.root, missing=tuple(self.source_specs()) if missing else
+                                         tuple(name for name in self.source_specs() if name != '/var/ossec'))
         for filename in ('/var/ossec/etc/client.keys', '/var/ossec/etc/ossec.conf'):
-            path_shape(filename, 'file', missing=missing)
+            try:
+                effective = ClosedCapture.resolve_link(Path(filename), capture['nodes'], [Path(root) for root in capture['roots']])
+            except Refused:
+                if missing:
+                    continue
+                raise
+            if capture['nodes'][effective]['type'] != 'file':
+                raise Refused('managed agent identity/configuration must resolve to a captured regular file')
 
     def validate_agent_layout(self, item, recovery=False):
         pin = self.pin_path()
-        expected = {'/var/ossec'} | ({'/etc/hosts'} if '/etc/hosts' in item['paths'] else set())
-        if item['pin_state']['present']:
-            expected.add(pin)
-        if set(item['paths']) != expected or item['pin_state']['path'] != pin:
+        expected = set(self.source_specs()) - set(item['absent_sources'])
+        if (set(item['paths']) != expected or '/var/ossec' not in expected
+                or len(item['absent_sources']) != len(set(item['absent_sources']))
+                or not set(item['absent_sources']).issubset(set(self.source_specs()) - {'/var/ossec'})
+                or item['pin_state']['path'] != pin or item['pin_state']['present'] != (pin in expected)):
             raise Refused('agent selected recovery sources escaped their exact allowed scope')
-        restore_sources({'/var/ossec': 'directory', '/etc/hosts': 'file', pin: 'file'}, self.root,
-                        missing=('/var/ossec', '/etc/hosts', pin) if recovery else ('/etc/hosts', pin))
-        self.managed_files(missing=recovery)
+        self.capture_sources(recovery=recovery)
         if not recovery and set(self.source_paths()) != expected:
             raise Refused('agent source presence changed before cold backup')
 
@@ -1265,7 +2332,7 @@ class Agent(Transaction):
                              self.pin_path(): 'file', cache: 'directory'}, self.root,
                             missing=('/etc/hosts', self.pin_path()))
 
-    def stage_preflight(self, owner):
+    def stage_preflight(self, owner, plan=None):
         with self.lock(owner=owner):
             self.idle()
             self.source_paths()
@@ -1277,7 +2344,11 @@ class Agent(Transaction):
                 # Do not let stale aliases become DNF output destinations.
                 for path in cache.glob('*'):
                     private_file(path, cache)
-            return {'ready': True}
+            result = {'ready': True}
+            if plan is not None:
+                prepared = self.prepare_policy_stage(owner, plan)
+                result['dnf_configs'] = {package: value['config'] for package, value in prepared['overlays'].items()}
+            return result
 
     def capture_pin(self):
         path = path_shape(self.pin_path(), 'file', missing=True)
@@ -1293,20 +2364,15 @@ class Agent(Transaction):
 
     def restore_absence(self, item):
         self.validate_agent_layout(item, recovery=True)
-        expected = [] if item['pin_state']['present'] else [self.pin_path()]
+        expected = item['absent_sources']
         if item['absent_pins'] != expected or set(expected) & set(item['paths']):
             raise Refused('agent absence restoration escaped its recorded scope')
         for filename in expected:
-            durable_unlink(filename)
+            if self.family != 'RedHat' or filename != PackageGuard.LOCKS:
+                durable_unlink(filename)
 
     def verify_managed_pin(self, installed):
-        text = Path(self.pin_path()).read_text()
-        if self.family == 'Debian':
-            if ('Pin: version ' + installed + '\nPin-Priority: 1000' not in text
-                    or 'Pin: version *\nPin-Priority: -1' not in text):
-                raise Refused('agent effective version is not protected by the managed APT pin')
-        elif not re.search(r'^exclude\s*=\s*wazuh-agent\*\s*$', text, re.M):
-            raise Refused('agent effective version is not protected against unattended DNF changes')
+        return self.guard().verify(installed)
 
     def installed(self):
         if self.family == 'Debian':
@@ -1318,7 +2384,7 @@ class Agent(Transaction):
                     raise Refused('Debian installed-package probe failed')
                 return ''
             fields = result.stdout.split('\t')
-            if len(fields) != 3 or fields[0] != 'install ok installed' or fields[2] != 'amd64':
+            if len(fields) != 3 or fields[0] not in ('install ok installed', 'hold ok installed') or fields[2] != 'amd64':
                 raise Refused('unknown agent package state or architecture')
             return fields[1]
         result = self.r.run(['rpm', '-q', '--qf', '%{VERSION}-%{RELEASE}\t%{ARCH}', 'wazuh-agent'], allowed=(0, 1))
@@ -1354,8 +2420,12 @@ class Agent(Transaction):
                 for release in (installed, target):
                     if release:
                         verified = module.verify({'wazuh-agent': release})[0]
-                        result[release] = {'path': Path(verified['path']), 'sha256': verified['sha256']}
-            except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+                        provider = module.verify_wazuh_source({'wazuh-agent': release})[release]
+                        if (provider['sha256'] != verified['sha256']
+                                or Path(verified['path']).name != 'wazuh-agent_' + release + '_amd64.deb'):
+                            raise ValueError('official provider differs from staged bytes')
+                        result[release] = {'path': Path(verified['path']), 'sha256': verified['sha256'], 'provider': provider}
+            except (ValueError, KeyError, OSError, ImportError, SystemError, subprocess.SubprocessError) as exc:
                 raise Refused('exact staged Debian artifact failed authenticated metadata validation') from exc
             return result
         cache = self.root / 'rpm-stage'
@@ -1363,13 +2433,25 @@ class Agent(Transaction):
         if cache.stat().st_uid != os.geteuid() or stat.S_IMODE(cache.stat().st_mode) != 0o700:
             raise Refused('unsafe private RPM staging directory')
         for path in cache.glob('*.rpm'):
+            private_file(path, cache)
+        marker = HostWriter(self.root).active()
+        if not marker or marker['component'] != 'agent':
+            raise Refused('RPM verification requires its exact agent writer')
+        prepared = self.load_policy_stage(marker['owner'])
+        for path in cache.glob('*.rpm'):
             path = private_file(path, cache)
             signature = self.r.run(['rpmkeys', '-Kv', path]).stdout
             if not re.search(r'Signature.*: OK', signature):
                 raise Refused('staged RPM lacks a verified trusted signature')
             value = self.r.run(['rpm', '-qp', '--qf', '%{NAME}\n%{VERSION}-%{RELEASE}\n%{ARCH}', path]).stdout.splitlines()
             if len(value) == 3 and value[0] == 'wazuh-agent' and value[2] == 'x86_64':
-                result[value[1]] = {'path': path, 'sha256': digest(path)}
+                if value[1] not in (installed, target):
+                    continue
+                provider = prepared['providers'][value[1]]
+                self.guard().verify_official_rpm(path, provider, prepared['keyring'], marker['owner'])
+                if value[1] in result and result[value[1]]['sha256'] != digest(path):
+                    raise Refused('ambiguous staged same-NEVRA RPM bytes')
+                result[value[1]] = {'path': path, 'sha256': digest(path), 'provider': provider}
         for expected in (installed, target):
             if expected and expected not in result:
                 raise Refused('exact signed package artifact missing before downtime')
@@ -1382,12 +2464,18 @@ class Agent(Transaction):
                 raise Refused('durable agent transactions are only for existing enrolled-agent upgrades')
             if self.installed() != plan['installed']:
                 raise Refused('installed package changed since compatibility probe')
-            paths = self.source_paths()
+            admission = self.capture_sources()
+            runtime = self.audit_runtime().snapshot(admission)
+            paths = [name for name in self.source_specs() if Path(name).exists()]
             self.validate_stage_scope()
             keys = Path('/var/ossec/etc/client.keys')
-            path_shape(keys, 'file')
             if keys.stat().st_size == 0:
                 raise Refused('controlled upgrade requires an existing enrolled agent identity')
+            effective_keys = ClosedCapture.resolve_link(keys, admission['nodes'], [Path(root) for root in admission['roots']])
+            keys_hash = ClosedCapture.file_hash(effective_keys, admission['nodes'][effective_keys]['identity'])
+            if not self.policy_stage_file(owner).exists():
+                self.prepare_policy_stage(owner, plan)
+            prepared = self.load_policy_stage(owner)
             packages = self.package_archives(plan['installed'], plan['package'])
             for release, artifact in packages.items():
                 if release in (plan['installed'], plan['package']):
@@ -1395,6 +2483,9 @@ class Agent(Transaction):
                     if retained_source.stat().st_uid != os.geteuid():
                         raise Refused('staged package has a different owner')
             pin = self.pin_path()
+            policy_before = self.guard().snapshot()
+            if not self.guard().same_context(prepared['policy_before'], policy_before):
+                raise Refused('native package policy changed between staging and reservation')
             self.capacity(paths)
             active = self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode == 0
             enabled = self.r.run(['systemctl', 'is-enabled', 'wazuh-agent'], allowed=(0, 1, 3, 4)).stdout.strip()
@@ -1402,9 +2493,17 @@ class Agent(Transaction):
                 raise Refused('unsupported previous agent service enablement state')
             if self.source_paths() != paths:
                 raise Refused('agent source presence changed before reservation')
+            admission = self.capture_sources()
+            self.audit_runtime().check(runtime, admission)
+            if digest(keys) != keys_hash:
+                raise Refused('agent identity changed before reservation')
+            plugin_present = Path('/etc/audit/plugins.d/af_wazuh.conf').exists()
+            absent = [name for name in self.source_specs() if name not in paths]
             item = self.begin(owner, dict(plan, active=active, enabled=enabled, family=self.family,
-                                          paths=paths, absent_pins=[] if Path(pin).exists() else [pin],
-                                          pin_state=self.capture_pin(), keys=digest(keys)))
+                                          paths=paths, absent_pins=absent, absent_sources=absent,
+                                          audit_plugin_present=plugin_present, admission_capture=admission,
+                                          pin_state=self.capture_pin(), keys=keys_hash,
+                                          policy_before=policy_before, policy_stage=prepared, audit_runtime=runtime))
             item['packages'] = {}
             for release, artifact in packages.items():
                 if release not in (plan['installed'], plan['package']):
@@ -1418,7 +2517,8 @@ class Agent(Transaction):
                 if digest(destination) != artifact['sha256']:
                     raise Refused('signed package changed between staging and private retention')
                 sync_file(destination)
-                item['packages'][release] = {'path': str(destination), 'sha256': artifact['sha256']}
+                item['packages'][release] = {'path': str(destination), 'sha256': artifact['sha256'],
+                                             'provider': artifact.get('provider')}
             self.write(item, 'staged')
             return {'backup': item['backup'], 'changed': False}
 
@@ -1426,6 +2526,7 @@ class Agent(Transaction):
         with self.lock(owner=owner):
             item = self.owned(owner, ('staged',))
             self.validate_agent_layout(item)
+            self.audit_check(item)
             self.verify_pin(item)
             self.validate_packages(item)
             self.write(item, 'stopping')
@@ -1433,10 +2534,17 @@ class Agent(Transaction):
                 self.r.run(['systemctl', 'stop', 'wazuh-agent'], timeout=90)
                 if self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode == 0:
                     raise Refused('agent failed to quiesce')
+            item['capture'] = self.capture_sources(sealed=True)
+            self.audit_check(item, stopped=True, capture=item['capture'])
+            self.write(item, 'stopping')
             item['archives'] = []
             for index, path in enumerate(item['paths']):
                 archive = str(Path(item['backup']) / ('agent-state-' + str(index) + '.tar'))
-                item['archives'].append({'path': path, 'archive': archive, 'sha256': self.archive(path, archive)})
+                excluded = [AuditRuntime.endpoint()] if item['audit_runtime'] and Path(path) == Path('/var/ossec') else []
+                item['archives'].append({'path': path, 'archive': archive,
+                                         'sha256': self.archive(path, archive, capture=item['capture'], excluded=excluded)})
+            ClosedCapture.verify(item['capture'], self.root)
+            self.validate_agent_archives(item)
             keys = Path('/var/ossec/etc/client.keys')
             if (digest(keys) if keys.is_file() else None) != item['keys']:
                 raise Refused('agent identity changed before cold backup completed')
@@ -1447,13 +2555,26 @@ class Agent(Transaction):
         with self.lock(owner=owner):
             item = self.owned(owner, ('backed-up',))
             self.validate_agent_archives(item)
+            ClosedCapture.verify(item['capture'], self.root)
+            self.audit_check(item, stopped=True)
+            if self.family == 'Debian':
+                path = str(Path(self.POLICY_HOOK))
+                node = item['capture']['nodes'].get(path)
+                item['policy_hook'] = {'path': self.POLICY_HOOK, 'present': node is not None, 'node': node,
+                                       'archive': next((entry for entry in item['archives'] if entry['path'] == self.POLICY_HOOK), None),
+                                       'temporary_sha256': hashlib.sha256(self.POLICY_TEMP.encode()).hexdigest()}
             self.write(item, 'installing')
-            return {'changed': False}
+            self.guard().protect(item['installed'])
+            result = {'changed': False, 'package_path': item['packages'][item['package']]['path']}
+            if self.family == 'RedHat':
+                result.update(self.authorize_rpm(owner))
+            return result
 
     def prepare_recovery(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner)
             self.validate_agent_layout(item, recovery=True)
+            self.audit_check(item)
             action = AGENT_RECOVERY.get(item['phase'])
             if action == 'resume-old':
                 # No package/data restore authority exists before a cold backup.
@@ -1473,38 +2594,60 @@ class Agent(Transaction):
                 raise Refused('fresh install failed; explicit cleanup required, journal retained')
             # Validate ALL old state before even a recovery package mutation.
             self.validate_agent_archives(item)
+            self.hook_verify(item)
             old = item['packages'].get(item['installed'])
             if item['installed'] and (not old or digest(old['path']) != old['sha256']):
                 raise Refused('old agent package is unavailable; journal retained')
             self.r.run(['systemctl', 'stop', 'wazuh-agent'], timeout=90)
+            self.audit_check(item, stopped=True)
             self.write(item, 'recovering')
-            return {'reinstall': bool(item['installed']), 'version': item['installed'],
+            self.guard().protect(item['installed'], require_installed=False)
+            result = {'reinstall': bool(item['installed']), 'version': item['installed'],
                     'package_path': old['path'] if old else '', 'restored': False,
                     'need_commit': True, 'manager_host': item.get('manager_host', '')}
+            if self.family == 'RedHat':
+                result.update(self.authorize_rpm(owner, recovery=True))
+            return result
 
     def validate_agent_archives(self, item):
         self.validate_agent_layout(item, recovery=True)
         self.validate_packages(item)
-        allowed = {'/var/ossec', '/etc/hosts', self.pin_path()}
+        allowed = set(self.source_specs())
         if not set(item['paths']).issubset(allowed) or {entry['path'] for entry in item['archives']} != set(item['paths']):
             raise Refused('agent recovery path scope is invalid')
         disjoint(item['paths'], self.root)
+        if item['capture']['roots'] != {str(Path(name)): kind for name, kind in self.source_specs().items()} or not item['capture']['sealed']:
+            raise Refused('agent cold capture escaped its exact bounded source set')
+        if item['capture']['absent'] != sorted(str(Path(name)) for name in item['absent_sources']):
+            raise Refused('agent cold capture absence differs from the admitted sources')
         for entry in item['archives']:
             private_file(entry['archive'], item['backup'])
             if canonical(entry['archive']).parent != canonical(item['backup']) or digest(entry['archive']) != entry['sha256']:
                 raise Refused('agent recovery archive validation failed before restoration')
+            self.audit_runtime().validate_archive(entry['path'], entry['archive'], item['capture'], item.get('audit_runtime'))
 
     def restore_state(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('recovering',))
             self.validate_agent_archives(item)
+            self.hook_verify(item)
             if item['installed'] and self.installed() != item['installed']:
                 raise Refused('old exact package has not been reinstalled')
+            self.audit_check(item, stopped=True)
             for entry in item['archives']:
-                self.restore(entry['path'], entry['archive'], entry['sha256'])
+                self.restore(entry['path'], entry['archive'], entry['sha256'], capture=item['capture'],
+                             runtime=self.audit_runtime(), proof=item.get('audit_runtime'))
             self.restore_absence(item)
+            # Native protection stays on old while availability/identity are
+            # proved; its exact original state is restored at final recovery.
+            self.guard().protect(item['installed'])
+            deferred = [str(Path(PackageGuard.LOCKS))] if self.family == 'RedHat' else []
+            ClosedCapture.relink(item['capture'], self.root, deferred=deferred)
             self.verify_pin(item)
+            self.hook_verify(item)
+            self.audit_check(item, stopped=True)
             self.restore_service(item)
+            self.audit_check(item, ready=item['active'])
             self.check_identity(item)
             self.write(item, 'restored')
             return {'changed': True, 'restored': True, 'need_commit': True}
@@ -1523,6 +2666,12 @@ class Agent(Transaction):
             runtime = self._runtime()
             if (already_committed and not runtime['active']) or (not already_committed and runtime['active'] != item['active']):
                 raise Refused('previous agent availability changed before recovery commit')
+            self.audit_check(item, ready=runtime['active'])
+            self.hook_verify(item)
+            if already_committed:
+                self.guard().verify(item['package'])
+            else:
+                self.guard().restore_prior(item['policy_before'])
             self.finish(item, 'committed' if already_committed else 'recovered')
             return {'changed': False, 'restored': not already_committed}
 
@@ -1545,8 +2694,11 @@ class Agent(Transaction):
             raise Refused('previous native agent availability was not restored')
         self.check_identity(item)
         self.verify_pin(item)
+        self.hook_verify(item)
+        self.audit_check(item, ready=item['active'])
 
     def check_identity(self, item):
+        self.capture_sources()
         keys = Path('/var/ossec/etc/client.keys')
         if (digest(keys) if keys.is_file() else None) != item.get('keys'):
             raise Refused('agent enrollment identity changed')
@@ -1565,6 +2717,8 @@ class Agent(Transaction):
             if item['active'] and self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode != 0:
                 raise Refused('previously active agent is not active after upgrade')
             self.verify_managed_pin(item['package'])
+            self.audit_check(item, ready=item['active'])
+            self.hook_verify(item)
             for filename in ('/var/ossec/etc/ossec.conf', '/var/ossec/etc/client.keys', '/etc/hosts', self.pin_path()):
                 sync_file(filename)
             item['target_pin_state'] = self.capture_pin()
@@ -1574,7 +2728,9 @@ class Agent(Transaction):
     def activate(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('installing',))
+            self.audit_check(item)
             self.restore_service(item)
+            self.audit_check(item, ready=item['active'])
             return {'changed': False}
 
     def _runtime(self):
@@ -1619,7 +2775,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['writer-inspect', 'writer-claim', 'writer-resume', 'writer-release',
                                          'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
-                                         'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate'])
+                                         'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate',
+                                         'agent-policy-check', 'agent-protect', 'agent-apt-plan', 'agent-rpm-fresh',
+                                         'agent-hook-prepare', 'agent-hook-cleanup'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
     parser.add_argument('--manager', default='')
@@ -1634,6 +2792,8 @@ def main():
     parser.add_argument('--preview', action='store_true')
     parser.add_argument('--recover', action='store_true')
     parser.add_argument('--canary', action='store_true')
+    parser.add_argument('--stage', action='store_true')
+    parser.add_argument('--artifact', default='')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Wazuh transactions require root')
@@ -1667,7 +2827,19 @@ def main():
             if args.action == 'agent-check':
                 value = agent.check(args.manager, args.version, args.upgrade, args.owner or None)
             elif args.action == 'agent-stage':
-                value = agent.stage_preflight(args.owner)
+                value = agent.stage_preflight(args.owner, json.load(sys.stdin))
+            elif args.action == 'agent-policy-check':
+                value = agent.policy_ownership(args.owner)
+            elif args.action == 'agent-protect':
+                value = agent.protect_package(args.owner)
+            elif args.action == 'agent-apt-plan':
+                value = agent.authorize_apt(args.owner, args.version, args.stage, args.artifact)
+            elif args.action == 'agent-rpm-fresh':
+                value = agent.fresh_rpm(args.owner, json.load(sys.stdin))
+            elif args.action == 'agent-hook-prepare':
+                value = agent.hook_prepare(args.owner)
+            elif args.action == 'agent-hook-cleanup':
+                value = agent.hook_cleanup(args.owner, args.confirm_previous_stopped)
             elif args.action == 'agent-runtime':
                 value = agent.runtime(args.owner or None)
             elif args.action == 'agent-verify':

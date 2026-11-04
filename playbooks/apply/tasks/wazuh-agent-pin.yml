@@ -1,4 +1,10 @@
 ---
+- name: "Refuse foreign native package policy ownership before managed writes"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+  changed_when: false
+  no_log: true
+
 - name: "Pin the effective Debian agent version and exclude all other versions"
   ansible.builtin.copy:
     dest: /etc/apt/preferences.d/pilot-wazuh-agent
@@ -15,10 +21,8 @@
       Pin-Priority: -1
   when: ansible_os_family == 'Debian'
 
-- name: "Exclude agent RPMs from unattended repository updates"
-  ansible.builtin.lineinfile:
-    path: /etc/yum.repos.d/wazuh.repo
-    insertafter: '^\[wazuh\]$'
-    regexp: '^exclude='
-    line: 'exclude=wazuh-agent*'
-  when: ansible_os_family == 'RedHat'
+- name: "Protect the installed version with a native APT hold or global DNF versionlock"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-protect, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+  changed_when: false
+  no_log: true

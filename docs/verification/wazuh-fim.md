@@ -72,13 +72,18 @@ manager 的有效版本是相容性上限；repository 的最新版本不是部�
 既有 agent 的版本變更還必須觀察到明確對應的 manager；省略 enrollment endpoint
 不能讓 row-only 套用繞過原有中央連線的相容性上限。無 manager 的一般保留與新安裝仍可使用。
 一般套用保留 Debian / RedHat family 支援，包含 Ubuntu 22.04；4.14.x agent
-升級目標為 4.14.9-1，禁止自動降級。目前升級實機驗證計畫涵蓋 Ubuntu 24.04
-amd64 / AlmaLinux 9 x86_64，其他平台與 Ubuntu 22.04 的實跑範圍需由各自
+升級目標為 4.14.9-1，禁止自動降級。升級平台驗收涵蓋 Ubuntu 24.04
+amd64 / AlmaLinux 9 x86_64，其他平台與 Ubuntu 22.04 的實跑範圍須由各自
 candidate evidence 明列，不能把程式相容性當作已完成實機驗證。
 
 先備妥可重裝的舊套件，再停止 agent 並冷備份 `/var/ossec`、enrollment key、
 設定與服務狀態；備份未驗證不得替換套件。失敗需恢復原套件、資料與服務，
 確認原 identity；恢復失敗不可報成功。未完成的持久交易阻止一般套用。
+舊套件 metadata 仍顯示相同版本時，回復也必須真正重新安裝留存的舊套件，
+不能讓 package module 的 already-present 成為省略回復的理由。Debian 的
+no-download reinstall 使用該留存檔的 native cache basename 與同一個 private
+cache directory，原生計畫不得順便設定其他 package；EL 同版本使用 reinstall，
+新版退回舊版使用 downgrade，兩者都沿用已驗證的 private policy／artifact。
 root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
 受控交易只接受可由冷 tar 備份後刪除、重建的 layout：`/var/ossec` 必須是
 真實目錄，既有 `/etc/hosts` 與版本 pin 必須是 regular single-link file，全部
@@ -86,10 +91,45 @@ root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
 在 reserve 與停機之前拒絕；不支援刪除、重建 mount root。
 備份 store 可位於獨立的一般 filesystem，但不得有 subtree/bind ancestry、
 子 mount、或與來源互為實體 alias。來源 layout 在 staging、冷備份前與回復前重驗。
+檢查涵蓋所有選取樹的每個 lstat entry：內部 symlink 的完整解析目標必須留在
+capture set；每組 regular-file inode 的所有 hardlink 名稱都必須被捕捉。未知外部
+資料 alias、FIFO/device 或不完整 inode group 直接拒絕，不能只備份連結本身。
+元件的 `/etc/audit/plugins.d/af_wazuh.conf` 與 `/var/ossec/etc/af_wazuh.conf`
+是明列的共同 capture set，回復須重建並驗證原兩個名稱的 hardlink identity。
+live 外部 runtime 只支援已確認的 `/var/ossec/queue/sockets/audit`：記錄並保留
+該 socket 與三個真實祖先目錄的 device/inode/security metadata，以及 auditd、
+audisp listener 的 PID/start/exe/argv、boot 與 kernel audit settings。其他外部
+endpoint／writer 直接拒絕。回復時只 prune 其他 persistent objects；sealed archive
+不得置換 socket 或把祖先轉成 alias。套件替換、回復重播與原服務啟動後都重驗。
+boot／listener／anchor 改變時保留 journal 並拒絕自動回復，不猜測 HUP／respawn。
+啟用 audit plugin 卻缺少健康 endpoint 的舊主機，須先完成明確的前置修復。
 套件 staging 目錄及其祖先也須通過型別與 alias 檢查；留存套件只從精確的
 root-only transaction directory 使用，回復不寫回 global package cache。
-升級期間 agent 暫停收送事件。新增交易驗收尚待 candidate 的 target evidence；
+Debian 交易同時冷備份 `/usr/sbin/policy-rc.d` 的內容、metadata 或不存在狀態。
+安裝時的暫時101 hook 只在同 owner／phase 下生效；installer 返回後必須以 sealed
+原狀清理，並在 native 成功 proof 前驗證。若 audit boot／endpoint 已變而阻止
+資料回復，確認舊 installer 工作停止後，仍可獨立恢復這個 global hook；component
+journal 繼續保留失敗狀態。未知 foreign hook drift 必須拒絕覆寫。
+升級期間 agent 暫停收送事件。交易驗收必須有 candidate-bound target evidence；
 原 C1–C9 的成功不代表版本交易已被驗證。
+有保留 audit endpoint 的交易，提交還須觀察已安裝 binary 對應的實際 syscheck
+process、它與原 listener 的 connected stream 及原 kernel who-data watches。
+這些是本機提交條件，不等同事件送達；正式 candidate／失敗回復驗收另須在
+明示的測試 fixture 產生新 nonce，於 manager index 驗證新的 who-data event 與
+audit user/process attribution。產品流程不自行寫入任意操作者監控目錄來造事件。
+完成套用後，Debian 以 native dpkg／APT hold 防止 ordinary updater 漂移，
+保留 APT preference 作為額外限制；不宣稱 preference 能壓過外部更高 priority。
+EL 依賴啟用的全域 DNF versionlock plugin 與精確 owned rule，原生 resolving
+transaction 必須證明規則有效；其他 package 的 lock 不得被移除或停用。
+versionlock dependency 安裝屬一般準備，失敗的 Wazuh 升級不移除新引入的 dependency；
+升級原狀指的是準備完成後 admission 的套件、資料及 hold／lock／設定快照，
+不是整台主機回到 invocation 前。準備前記錄 plugin presence，遇 disabled、redirected、
+foreign Wazuh ownership，或尚未安裝 plugin 卻已有待啟用的 lock 規則時先拒絕。
+升級只對 Wazuh 使用同一份 fingerprinted private policy 與已驗證的留存套件；
+同版本有不同 authenticated payload hash、非官方 provider 或 unknown plugin context
+均拒絕。回復保留原 hold／owned-rule／foreign-rule／設定及不存在狀態。
+APT 的明示套件替換可能清除 hold，交易須重新設定並驗證 hold 後才可完成；
+不宣稱授權套件替換的每個瞬間都有 hold。
 持久升級交易只接受已安裝且已 enrolled 的 agent；新安裝維持一般 exact-version
 安裝與既有 enrollment retry 契約，不建立升級 journal，也不宣稱提供 fresh rollback。
 
@@ -114,10 +154,13 @@ controller 被中斷時 writer marker 保留，即使是沒有升級 journal 的
 
 此 ownership 契約只協調本版 Wazuh entrypoints；其他角色的重疊維護、舊版
 controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不能宣稱已自動隔離。
+受控套件交易的獨占時段也包含 apt/dnf 的自動更新工作；操作者須先讓它們停止，
+本流程不自動停用主機的 updater 排程。installing／recovering journal 涵蓋套件替換
+及重新建立 native guard 的間隔，中斷時只可同 owner 明確回復。
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
-| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qx 'install ok installed'; fi |
+| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qxE '(install|hold) ok installed'; fi |
 | C2  | package   | `auditd`／EL `audit` 已安裝（who-data provider 依賴）                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
 | C3  | service   | `wazuh-agent.service` 為 active                                        | 0        | systemctl is-active wazuh-agent >/dev/null 2>&1; echo $? |
 | C4  | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
@@ -145,7 +188,7 @@ controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不
 > `docs/runbooks/wazuh-fim.md` §4（在這台觸發變更、去 manager 讀 alerts 驗證、
 > 再去 log-server 讀檔驗證轉送）。
 > C10 的確切 shell 已在 disposable Ubuntu 24.04 與 AlmaLinux 9 的 4.14.1
-> native agent 上執行並回傳 0；新 candidate 的正式 target evidence 仍待執行。
+> native agent 上探測過；正式驗收須以各 candidate 的 target evidence 證明目前契約。
 > 此 row 驗證本機有效版本、pin 與可用性；manager 上限及遠端 identity 另由
 > apply 的跨主機 probe 與 topology evidence 驗證，不能由 C10 單獨推論。
 > 一般／fresh／既有主機的 C10-only 套用在 writer 內執行 stable agent-verify；
@@ -178,7 +221,7 @@ controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不
 
 | Spec ID | Apply task | 備註 |
 |---------|------------|------|
-| C1 | `add wazuh apt repo + GPG key` → `install wazuh-agent` | apt-only |
+| C1 | `add wazuh apt repo + GPG key` → `install wazuh-agent` | apt-only || if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qxE '(install|hold) ok installed'; fi |
 | C2 | `install auditd` | who-data provider=audit 的執行期依賴 |
 | C3 | `ensure wazuh-agent enabled+started` | 只在設定檔真的變更或剛完成註冊時才重啟 |
 | C4 | `ensure auditd enabled+started` | — |

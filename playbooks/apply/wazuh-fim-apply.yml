@@ -393,10 +393,21 @@
                 - ansible_os_family == 'Debian'
                 - not ansible_check_mode
 
-            - name: "Step 4: Install audit provider (RedHat dnf; spec C2)"
+            - name: "Step 4: Refuse unsafe DNF policy before introducing the versionlock prerequisite"
+              tags: [C1, C2]
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, RedHat, --owner, "{{ wazuh_writer_owner }}"]
+              register: wazuh_dnf_prerequisite_state
+              changed_when: false
+              no_log: true
+              when:
+                - ansible_os_family == 'RedHat'
+                - not ansible_check_mode
+
+            - name: "Step 4: Install audit provider and native versionlock prerequisite (RedHat dnf; spec C2)"
               tags: [C1, C2]
               ansible.builtin.dnf:
-                name: [audit]
+                name: [audit, python3-dnf-plugin-versionlock]
                 state: present
                 update_cache: "{{ (wazuh_yum_repo | default({})) is changed }}"
               register: dnf_wazuh_agent
@@ -414,6 +425,7 @@
               vars:
                 pilot_apt_packages: [wazuh-agent]
                 pilot_apt_versions: "{{ {'wazuh-agent': wazuh_agent_version_plan.package} }}"
+                pilot_apt_wazuh_source: /etc/apt/sources.list.d/wazuh.list
                 pilot_apt_policy_rc_d: 101
                 pilot_apt_component: wazuh-fim
                 pilot_apt_required_sources:
@@ -424,9 +436,23 @@
                 - ansible_os_family == 'Debian'
                 - wazuh_agent_version_plan.install
 
-            - name: "Step 4a: Install a fresh exact signed RPM agent"
+            - name: "Step 4a: Bind the fresh RPM to its official source, signature and exact bytes"
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-rpm-fresh, --family, RedHat, --owner, "{{ wazuh_writer_owner }}"]
+                stdin: "{{ wazuh_agent_version_plan | to_json }}"
+              register: wazuh_agent_fresh_rpm
+              changed_when: false
+              no_log: true
+              tags: [C1, C2]
+              when:
+                - not ansible_check_mode
+                - ansible_os_family == 'RedHat'
+                - wazuh_agent_version_plan.install
+
+            - name: "Step 4a: Install the retained fresh exact signed RPM agent"
               ansible.builtin.dnf:
-                name: "wazuh-agent-{{ wazuh_agent_version_plan.package }}.x86_64"
+                name: "{{ (wazuh_agent_fresh_rpm.stdout | from_json).package_path }}"
+                conf_file: "{{ (wazuh_agent_fresh_rpm.stdout | from_json).dnf_conf_file }}"
                 state: present
                 disable_excludes: wazuh
                 disable_gpg_check: false
