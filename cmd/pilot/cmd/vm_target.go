@@ -216,10 +216,6 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtarget.ServiceBootstrap, error) {
-	return resolveVMServiceBootstrapFor(ctx, ref, network, nil)
-}
-
 func resolveVMServiceBootstrapFor(ctx context.Context, ref, network string, required services.Requirements) (*vmtarget.ServiceBootstrap, error) {
 	if _, err := services.NormalizeRequirements(required); err != nil {
 		return nil, err

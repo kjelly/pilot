@@ -191,14 +191,3 @@ func (s ServiceBootstrap) RenderCloudInit() (string, error) {
 	}
 	return b.String(), nil
 }
-
-func pulpStatusURL(rpmURL string) string {
-	u, err := url.Parse(rpmURL)
-	if err != nil {
-		return strings.TrimRight(rpmURL, "/") + "/pulp/api/v3/status/"
-	}
-	u.Path = "/pulp/api/v3/status/"
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
