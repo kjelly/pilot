@@ -12,15 +12,146 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 )
+
+// These two consumers deploy the store without a port override. Check only
+// their current procedure, not historical snapshots or explicit-port fixtures.
+// Actual inventory alignment and gateway recording remain target-run checks.
+func TestSessionStoreRecordingConsumerDefaults(t *testing.T) {
+	read := func(path string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile("../../" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	var contract struct {
+		GroupVars []struct {
+			Name    string
+			Default int
+		} `yaml:"groupVars"`
+	}
+	if err := yaml.Unmarshal(read("contracts/pilot-session-store.yaml"), &contract); err != nil {
+		t.Fatal(err)
+	}
+	defaultPort := 0
+	for _, v := range contract.GroupVars {
+		if v.Name == "pilot_session_store_ingest_port" {
+			defaultPort = v.Default
+		}
+	}
+	if defaultPort == 0 {
+		t.Fatal("missing ingest port default")
+	}
+	for _, tc := range []struct {
+		name, consumer, topology, playbook string
+	}{
+		{"per-host wrapper", "scripts/per-host-recording-topology-test.sh", "docs/topologies/per-host-recording-topology.yaml", "playbooks/test/per-host-recording-topology.yml"},
+		{"transport procedure", "docs/runbooks/pilot-access-transport.md", "docs/topologies/pilot-access-transport-topology.yaml", "playbooks/test/pilot-access-transport-e2e.yml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var topology struct {
+				Vars  map[string]any
+				Nodes []struct {
+					Name   string
+					Groups []string
+					Wire   []string
+					Vars   map[string]any
+				}
+			}
+			if err := yaml.Unmarshal(read(tc.topology), &topology); err != nil {
+				t.Fatal(err)
+			}
+			assertDefault := func(where string, vars map[string]any) {
+				t.Helper()
+				if value, ok := vars["pilot_session_store_ingest_port"]; ok {
+					t.Errorf("%s overrides ingest port with %v; consumer must be checked against its effective port", where, value)
+				}
+			}
+			assertDefault(tc.topology, topology.Vars)
+			store := ""
+			for _, node := range topology.Nodes {
+				assertDefault(tc.topology+":"+node.Name, node.Vars)
+				for _, group := range node.Groups {
+					if group == "pilot-session-store" {
+						if store != "" {
+							t.Fatal("consumer topology must have exactly one store")
+						}
+						store = node.Name
+					}
+				}
+			}
+			if store == "" {
+				t.Fatal("consumer topology has no session store")
+			}
+			// The gateway's actual topology wire declares the store's DNS name.
+			storeFQDN := ""
+			for _, node := range topology.Nodes {
+				for _, group := range node.Groups {
+					if group == "pilot-access-gateway" {
+						for _, wire := range node.Wire {
+							if name, fqdn, ok := strings.Cut(wire, "="); ok && name == store {
+								storeFQDN = fqdn
+							}
+						}
+					}
+				}
+			}
+			if storeFQDN == "" {
+				t.Fatal("gateway has no topology wire to its session store")
+			}
+			var imports []struct {
+				Playbook string `yaml:"ansible.builtin.import_playbook"`
+				Vars     map[string]any
+			}
+			if err := yaml.Unmarshal(read(tc.playbook), &imports); err != nil {
+				t.Fatal(err)
+			}
+			storeImports := 0
+			for _, imported := range imports {
+				if imported.Playbook == "../apply/pilot-session-store-apply.yml" {
+					storeImports++
+					assertDefault(tc.playbook, imported.Vars)
+				}
+			}
+			if storeImports != 1 {
+				t.Fatalf("store imports=%d, want 1", storeImports)
+			}
+			current := string(read(tc.consumer))
+			if strings.HasSuffix(tc.consumer, ".md") {
+				_, section, ok := strings.Cut(current, "## 3. Verification\n")
+				if !ok {
+					t.Fatal("missing current verification procedure")
+				}
+				current, _, _ = strings.Cut(section, "\n## ")
+			}
+			assignment := regexp.MustCompile("pilot_access_gateway_recording_session_store_url=(https://[^\\s\"`]+)")
+			urls := assignment.FindAllStringSubmatch(current, -1)
+			if len(urls) != 1 {
+				t.Fatalf("current recording URL assignments=%d, want 1", len(urls))
+			}
+			endpoint, err := url.Parse(urls[0][1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if endpoint.Hostname() != storeFQDN || endpoint.Port() != strconv.Itoa(defaultPort) {
+				t.Errorf("%s current recording URL %s must use topology store %s and contract default port %d (store import has no override)", tc.consumer, endpoint, storeFQDN, defaultPort)
+			}
+		})
+	}
+}
 
 func TestSessionStorePortContract(t *testing.T) {
 	s, err := Parse("../../docs/verification/pilot-session-store.md")
