@@ -1,0 +1,9 @@
+- name: Fixture same-host leaf on the provider host only
+  hosts: "{{ target_group | default('fixture-leaf') }}"
+  gather_facts: false
+  tasks:
+    - name: Write the leaf's observable marker
+      ansible.builtin.copy:
+        dest: /var/tmp/pilot-issue-251-leaf
+        content: "leaf\n"
+        mode: '0600'

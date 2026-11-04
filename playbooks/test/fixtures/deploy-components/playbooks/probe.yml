@@ -1,0 +1,28 @@
+- name: Read native per-host scope after selected CLI execution
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Require the intended two-node topology facts
+      ansible.builtin.assert:
+        that:
+          - groups['fixture-consumer'] | length == 1
+          - groups['fixture-provider'] | length == 1
+          - groups['fixture-consumer'][0] != groups['fixture-provider'][0]
+          - groups['fixture-leaf'] | sort == (groups['fixture-consumer'] + groups['fixture-provider']) | sort
+          - groups['fixture-support'] == groups['fixture-consumer']
+          - groups['fixture-unrelated'] == groups['fixture-provider']
+    - name: Read observable fixture markers
+      ansible.builtin.stat:
+        path: "/var/tmp/pilot-issue-251-{{ item }}"
+      loop: [consumer, provider, leaf]
+      register: issue251_markers
+    - name: Require fresh/preview state or exact applied host placement
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.stat.exists ==
+            ((issue251_probe_state == 'applied') and
+             (((item.item == 'consumer') and (inventory_hostname in groups['fixture-consumer'])) or
+              ((item.item in ['provider', 'leaf']) and (inventory_hostname in groups['fixture-provider']))))
+        fail_msg: "Unexpected {{ item.item }} marker on {{ inventory_hostname }}"
+      loop: "{{ issue251_markers.results }}"

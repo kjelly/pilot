@@ -1,0 +1,18 @@
+- name: Fixture consumer on host A
+  hosts: "{{ target_group | default('fixture-consumer') }}"
+  gather_facts: false
+  tasks:
+    - name: Read the managed provider's effective state before the consumer
+      ansible.builtin.stat:
+        path: /var/tmp/pilot-issue-251-provider
+      delegate_to: "{{ groups['fixture-provider'][0] }}"
+      register: issue251_provider
+    - name: Require the managed provider before consumer apply
+      ansible.builtin.assert:
+        that: issue251_provider.stat.exists
+      when: not ansible_check_mode
+    - name: Write the consumer's observable marker
+      ansible.builtin.copy:
+        dest: /var/tmp/pilot-issue-251-consumer
+        content: "consumer\n"
+        mode: '0600'

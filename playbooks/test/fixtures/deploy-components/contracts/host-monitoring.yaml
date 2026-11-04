@@ -1,0 +1,12 @@
+schemaVersion: 1
+id: host-monitoring
+role: fixture-leaf
+specs: [{path: acceptance.md, rows: {all: true}}]
+playbooks: {apply: playbooks/leaf.yml}
+dependencies: []
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 1, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+verification: {autoDeploy: false}
+site: {include: false, order: 1, vars: {}, tags: [], optIn: true}

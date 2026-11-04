@@ -1,0 +1,6 @@
+- name: Support-only dependency must never be applied
+  hosts: "{{ target_group | default('fixture-support') }}"
+  gather_facts: false
+  tasks:
+    - ansible.builtin.fail:
+        msg: Support-only provider edge was incorrectly promoted to an apply edge
