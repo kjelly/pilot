@@ -130,7 +130,7 @@
             ipa_gateway_lifecycle_readonly: "{{ gateway_scope_plan_only | bool or ansible_check_mode }}"
             ipa_gateway_lifecycle_request:
               scope: "{{ gateway_scope }}"
-              hosts: "{{ gateway_scope_hosts | default([]) }}"
+              hosts: "{{ [] if gateway_scope_automember_action == 'disable' else gateway_scope_hosts | default([]) }}"
               automember: "{{ gateway_scope_automember_action }}"
               adopt_id: "{{ gateway_scope_adopt_id | default('') }}"
               adopt_automember_id: "{{ gateway_scope_adopt_automember_id | default('') }}"

@@ -300,7 +300,6 @@ class Lifecycle:
         name, action = 'pilot-target-' + scope, data.get('automember', 'none')
         if action not in ('none', 'enable', 'disable'):
             raise ValueError('invalid automember action')
-        desired, blocked = self.resolve_host_identities(data.get('hosts', []), state['retired'])
         group = self.show('hostgroup', name, raw=True)
         adopt = data.get('adopt_id', '').lower()
         if group is not None and not self.owned(state, name, group):
@@ -319,14 +318,32 @@ class Lifecycle:
             self.auto_rule(preview, name, adopt_id=adopt_auto, readonly=True)
         elif self.show('automember', name, type='hostgroup', raw=True) is not None:
             raise ValueError('unproven dangling automember rule blocks gateway group creation')
+        # Rule-only disable has no desired membership input. Inherited stale
+        # hosts, current members and retirement exclusions must not become
+        # prerequisites or mutations immediately before deleting this rule.
+        if action == 'disable':
+            if group is None or readonly:
+                return dict(changed=False)
+            if not self.owned(state, name, group):
+                state['scopes'][name] = dict(group=name, scope=scope, id=self.group_id(group))
+                self.store.save(state)
+                self.changed = True
+            rule = self.auto_rule(state, name, adopt_id=adopt_auto)
+            if rule is not None:
+                self.mutate('automember_del', name, type='hostgroup')
+            if 'automember_id' in state['scopes'][name]:
+                # Also finish bookkeeping after a lost deletion reply.
+                state['scopes'][name].pop('automember_id')
+                self.store.save(state)
+                self.changed = True
+            return dict(changed=self.changed)
+        desired, blocked = self.resolve_host_identities(data.get('hosts', []), state['retired'])
         current = [] if group is None else [fqdn(host) for host in self.show('hostgroup', name).get('member_host', [])]
         plan = dict(add=sorted(set(desired) - set(current)), remove=sorted(set(current) - set(desired)),
                     keep=sorted(set(desired) & set(current)), blocked=blocked)
         if readonly:
             return dict(plan, changed=False)
         if group is None:
-            if action == 'disable':
-                return dict(changed=False)
             group = self.mutate('hostgroup_add', name, description='Pilot Access Gateway target scope: ' + scope, all=True, raw=True)['result']
         if not self.owned(state, name, group):
             state['scopes'][name] = dict(group=name, scope=scope, id=self.group_id(group))
@@ -342,22 +359,17 @@ class Lifecycle:
         # enabling its inclusive condition or changing membership.
         for host in sorted(state['retired']):
             self.exclude(state, name, host)
-        if action != 'disable':
-            for host in plan['remove']:
-                self.mutate('hostgroup_remove_member', name, host=[host])
-            for host in plan['add']:
-                self.mutate('hostgroup_add_member', name, host=[host])
-            observed = self.show('hostgroup', name)
-            if observed is None or sorted(observed.get('member_host', [])) != desired:
-                raise ValueError('gateway scope membership did not converge')
+        for host in plan['remove']:
+            self.mutate('hostgroup_remove_member', name, host=[host])
+        for host in plan['add']:
+            self.mutate('hostgroup_add_member', name, host=[host])
+        observed = self.show('hostgroup', name)
+        if observed is None or sorted(observed.get('member_host', [])) != desired:
+            raise ValueError('gateway scope membership did not converge')
         if action == 'enable':
             rule = self.show('automember', name, type='hostgroup', raw=True)
             if 'fqdn=.*' not in rule.get('automemberinclusiveregex', []):
                 self.mutate('automember_add_condition', name, type='hostgroup', key='fqdn', automemberinclusiveregex=['.*'])
-        elif action == 'disable' and self.show('automember', name, type='hostgroup', raw=True) is not None:
-            self.mutate('automember_del', name, type='hostgroup')
-            state['scopes'][name].pop('automember_id', None)
-            self.store.save(state)
         return dict(plan, changed=self.changed)
 
 

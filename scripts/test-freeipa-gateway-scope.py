@@ -221,6 +221,89 @@ class LifecycleTest(unittest.TestCase):
                 helper.publish(self.state, dict(scope='i227-capture', hosts=['keep']), False)
         self.assertEqual([], self.model.mutations)
 
+    def disable_helper(self):
+        model = self.model
+
+        class RuleOnlyAPI:
+            def __getitem__(unused, command):
+                original = model[command]
+
+                def call(name, **options):
+                    if (command not in ('hostgroup_show', 'automember_show', 'automember_del')
+                            or (command == 'hostgroup_show' and not options.get('raw'))):
+                        raise AssertionError('disable touched host/membership/exclusion API: ' + command)
+                    return original(name, **options)
+                return call
+        return gateway.Lifecycle(RuleOnlyAPI(), NotFound, self.store, lambda dn: model.rule_ids[dn])
+
+    def test_disable_is_rule_only_for_stale_malformed_and_ambiguous_inherited_hosts(self):
+        self.state['retired'][self.model.a] = {'status': 'pending'}
+        before_retired = copy.deepcopy(self.state['retired'])
+        before_hosts = set(self.model.hosts)
+        values = (['deleted.ipa227.test'], ['ambiguous'], ['192.0.2.7'], 'malformed', None, {'bad': True})
+        for inherited in values:
+            with self.subTest(inherited=inherited):
+                rule = capture('automember_show', True, 0)['result']
+                self.model.rules[self.model.name] = rule
+                self.state['scopes'][self.model.name]['automember_id'] = self.model.auto_id
+                self.model.mutations = []
+                result = self.disable_helper().publish(self.state, self.publish('disable') | {'hosts': inherited}, False)
+                self.assertTrue(result['changed'])
+                self.assertNotIn(self.model.name, self.model.rules)
+                self.assertEqual(['automember_del'], [command for command, name, options in self.model.mutations])
+                self.assertEqual(before_hosts, self.model.hosts)
+                self.assertEqual(before_retired, self.state['retired'])
+                self.assertEqual(before_retired, self.persisted()['retired'])
+                self.assertFalse(self.disable_helper().publish(self.state, self.publish('disable') | {'hosts': inherited}, False)['changed'])
+
+    def test_disable_readonly_and_ownership_failures_never_touch_membership(self):
+        before = Path(self.path).read_bytes()
+        self.assertFalse(self.disable_helper().publish(self.state, self.publish('disable') | {'hosts': ['deleted.ipa227.test']}, True)['changed'])
+        self.assertEqual(before, Path(self.path).read_bytes())
+        self.assertEqual([], self.model.mutations)
+        for kind in ('unknown', 'group-recreated', 'rule-recreated'):
+            with self.subTest(kind=kind):
+                state = copy.deepcopy(self.state)
+                if kind == 'unknown':
+                    state['scopes'] = {}
+                elif kind == 'group-recreated':
+                    state['scopes'][self.model.name]['id'] = '00000000-0000-0000-0000-000000000001'
+                else:
+                    state['scopes'][self.model.name]['automember_id'] = '00000000-0000-0000-0000-000000000002'
+                with self.assertRaisesRegex(ValueError, 'unproven'):
+                    self.disable_helper().publish(state, self.publish('disable') | {'hosts': ['deleted.ipa227.test']}, False)
+                self.assertEqual([], self.model.mutations)
+                self.assertIn(self.model.name, self.model.rules)
+
+    def test_disable_exact_adoption_and_lost_delete_reply_retry(self):
+        self.state['scopes'] = {}
+        request = self.publish('disable', adopt_id=self.model.group['ipaUniqueID'][0], adopt_automember_id=self.model.auto_id)
+        self.model.fail_after = 'automember_del'
+        with self.assertRaisesRegex(RuntimeError, 'lost reply'):
+            self.disable_helper().publish(self.state, request, False)
+        self.assertNotIn(self.model.name, self.model.rules)
+        self.assertIn('automember_id', self.persisted()['scopes'][self.model.name])
+        self.model.fail_after = None
+        self.state = self.persisted()
+        self.assertTrue(self.disable_helper().publish(self.state, request, False)['changed'])
+        self.assertNotIn('automember_id', self.persisted()['scopes'][self.model.name])
+        self.assertFalse(self.disable_helper().publish(self.state, request, False)['changed'])
+
+    def test_old_unconditional_resolver_breaks_rule_only_disable_negative_control(self):
+        source = SOURCE.read_text()
+        anchor = "        group = self.show('hostgroup', name, raw=True)\n        adopt = data.get('adopt_id', '').lower()"
+        self.assertEqual(1, source.count(anchor))
+        mutant = source.replace(anchor, "        self.resolve_host_identities(data.get('hosts', []), state['retired'])\n" + anchor)
+        namespace = {'__name__': 'gateway_disable_negative_control'}
+        exec(compile(mutant, str(SOURCE), 'exec'), namespace)
+        helper, calls = self.short_helper(failure=NotFound(), short='deleted')
+        old = namespace['Lifecycle'](helper.api, NotFound, self.store, helper.rule_id)
+        with self.assertRaisesRegex(ValueError, 'legacy short host is missing or ambiguous'):
+            old.publish(self.state, self.publish('disable') | {'hosts': ['deleted']}, False)
+        self.assertEqual(['deleted'], calls)
+        self.assertEqual([], self.model.mutations)
+        self.assertIn(self.model.name, self.model.rules)
+
     def retirement(self):
         return {'retirements': [dict(fqdn=self.model.a, alias='retire', stage='sandbox',
                                     reason='operator approved', origin='test-plan')]}

@@ -109,6 +109,74 @@ func TestRegression_GatewayLifecyclePreservesFailureAndStructuredChange(t *testi
 	}
 }
 
+func TestRegression_GatewayDisableMasksInheritedHostsAtTaskBoundary(t *testing.T) {
+	publisherSource, err := os.ReadFile("../../playbooks/apply/gateway-scope-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	includeSource, err := os.ReadFile("../../playbooks/apply/tasks/freeipa-gateway-scope-lifecycle.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"disable-stale", "disable-malformed", "disable-undefined", "none", "enable"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			var plays []map[string]any
+			if err := yaml.Unmarshal(publisherSource, &plays); err != nil {
+				t.Fatal(err)
+			}
+			var publication map[string]any
+			for _, value := range plays[0]["tasks"].([]any) {
+				if block, ok := value.(map[string]any)["block"].([]any); ok {
+					for _, task := range block {
+						if task.(map[string]any)["name"] == "Publish the owned gateway scope under its lifecycle lock" {
+							publication = task.(map[string]any)
+						}
+					}
+				}
+			}
+			if publication == nil {
+				t.Fatal("production publisher boundary missing")
+			}
+			var include []map[string]any
+			if err := yaml.Unmarshal(includeSource, &include); err != nil {
+				t.Fatal(err)
+			}
+			expected := []string{"keep.ipa227.test"}
+			action := scenario
+			if strings.HasPrefix(scenario, "disable-") {
+				action, expected = "disable", []string{}
+			}
+			program := "import json,sys; data=json.load(sys.stdin); assert data['hosts']==json.loads(sys.argv[1]); print(json.dumps({'changed':False}))"
+			rawExpected, _ := json.Marshal(expected)
+			delete(include[1], "become")
+			include[1]["ansible.builtin.command"].(map[string]any)["argv"] = []string{"python3", "-c", program, string(rawExpected)}
+			body, err := yaml.Marshal(include)
+			if err != nil {
+				t.Fatal(err)
+			}
+			includePath := filepath.Join(dir, "request-observer.yml")
+			if err := os.WriteFile(includePath, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			publication["ansible.builtin.include_tasks"].(map[string]any)["file"] = includePath
+			vars := map[string]any{"ipa_server_fqdn": "ipa.ipa227.test", "freeipa_domain": "ipa227.test", "gateway_scope": "i227", "gateway_scope_plan_only": true, "gateway_scope_automember_action": action, "gateway_scope_hosts": []string{"keep.ipa227.test"}}
+			switch scenario {
+			case "disable-stale":
+				vars["gateway_scope_hosts"] = []string{"deleted.ipa227.test", "ambiguous"}
+			case "disable-malformed":
+				vars["gateway_scope_hosts"] = map[string]any{"not": "a host list"}
+			case "disable-undefined":
+				delete(vars, "gateway_scope_hosts")
+			}
+			result := runGatewayTasks(t, dir, []any{publication}, vars, nil)
+			if result.rc != 0 {
+				t.Fatalf("publisher action=%s must send the correct action-specific host input: failures=%v stderr=%s", scenario, result.failures, result.stderr)
+			}
+		})
+	}
+}
+
 func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.T) {
 	source, err := os.ReadFile("../../playbooks/test/fixtures/gateway-scope-retirement-fixtures.yml")
 	if err != nil {
