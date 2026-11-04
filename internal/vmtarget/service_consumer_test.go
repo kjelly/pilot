@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -16,15 +17,128 @@ import (
 	"github.com/kjelly/pilot/internal/statefile"
 )
 
-func registeredServiceFixture(t *testing.T) (*services.Manager, *ServiceBootstrap) {
+type serviceConsumerProbes struct {
+	mu                        sync.Mutex
+	identity                  bool
+	adminAllowed, adminDenied int
+	databaseLog               string
+	root                      string
+}
+
+func (p *serviceConsumerProbes) assertCounts(t *testing.T, allowed, denied, dbAllowed, dbDenied int) {
+	t.Helper()
+	p.mu.Lock()
+	gotAllowed, gotDenied := p.adminAllowed, p.adminDenied
+	p.mu.Unlock()
+	data, err := os.ReadFile(p.databaseLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotDBAllowed, gotDBDenied int
+	for _, outcome := range strings.Fields(string(data)) {
+		switch outcome {
+		case "db-allow":
+			gotDBAllowed++
+		case "db-deny":
+			gotDBDenied++
+		default:
+			t.Fatalf("unexpected service command outcome: %s", outcome)
+		}
+	}
+	if gotAllowed != allowed || gotDenied != denied || gotDBAllowed != dbAllowed || gotDBDenied != dbDenied {
+		t.Fatalf("payload-free probe outcomes: admin allow/deny=%d/%d, database allow/deny=%d/%d; want %d/%d,%d/%d", gotAllowed, gotDenied, gotDBAllowed, gotDBDenied, allowed, denied, dbAllowed, dbDenied)
+	}
+}
+
+func registeredServiceFixture(t *testing.T) (*services.Manager, *ServiceBootstrap, *serviceConsumerProbes) {
 	t.Helper()
 	legacy, discovery := t.TempDir(), t.TempDir()
 	bundle, err := services.RenderBundle(services.BuiltInDevLite(), services.DataRoot(legacy), net.ParseIP("127.0.0.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	adminBytes, err := os.ReadFile(filepath.Join(bundle.Root, "harbor/secrets/admin-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Capture server authority before any test can corrupt the managed association.
+	adminPassword := strings.TrimSpace(string(adminBytes))
+	shimDir := t.TempDir()
+	probes := &serviceConsumerProbes{identity: true, databaseLog: filepath.Join(shimDir, "probe-outcomes"), root: bundle.Root}
+	if err := os.WriteFile(probes.databaseLog, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2.0/users/current" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		user, password, ok := r.BasicAuth()
+		probes.mu.Lock()
+		defer probes.mu.Unlock()
+		if !ok || user != "admin" || password != adminPassword {
+			probes.adminDenied++
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		probes.adminAllowed++
+		if probes.identity {
+			_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
+		}
+	}))
 	t.Cleanup(server.Close)
+	databaseBytes, err := os.ReadFile(filepath.Join(bundle.Root, "harbor/secrets/database-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedDatabase := filepath.Join(shimDir, "expected-database-password")
+	if err := os.WriteFile(expectedDatabase, databaseBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The real manager is reconstructed inside central registration. A PATH
+	// shim covers every instance and never forwards a command to host Docker.
+	const readonlyProbe = `IFS= read -r PGPASSWORD; export PGPASSWORD; export PGPASSFILE=/dev/null; unset PGSERVICE PGSERVICEFILE; exec psql -X -w -h "$(hostname)" -p 5432 -U postgres -d registry -Atc 'SELECT 1'`
+	probeCommand := filepath.Join(shimDir, "readonly-probe")
+	if err := os.WriteFile(probeCommand, []byte(readonlyProbe), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const dockerShim = `#!/bin/sh
+reject() { printf '%s\n' unexpected-docker >> "$PILOT_TEST_SERVICE_PROBE_LOG"; exit 99; }
+[ "$#" -eq 6 ] || reject
+[ "$1" = exec ] && [ "$2" = -i ] && [ "$3" = pilot-harbor-dev-lite-harbor-db ] && [ "$4" = sh ] && [ "$5" = -c ] || reject
+expected_command=$(cat "$PILOT_TEST_SERVICE_DB_COMMAND") || reject
+[ "$6" = "$expected_command" ] || reject
+IFS= read -r candidate || reject
+IFS= read -r expected < "$PILOT_TEST_SERVICE_DB_EXPECTED" || reject
+if [ "$PILOT_TEST_SERVICE_DB_TRUST_ALL" = 1 ] || [ "$candidate" = "$expected" ]; then
+  printf '%s\n' db-allow >> "$PILOT_TEST_SERVICE_PROBE_LOG"
+  printf '1\n'
+else
+  printf '%s\n' db-deny >> "$PILOT_TEST_SERVICE_PROBE_LOG"
+  printf 'password authentication failed\n' >&2
+  exit 2
+fi
+`
+	if err := os.WriteFile(filepath.Join(shimDir, "docker"), []byte(dockerShim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shimDir, "sudo"), []byte("#!/bin/sh\nprintf '%s\\n' unexpected-sudo >> \"$PILOT_TEST_SERVICE_PROBE_LOG\"\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PILOT_TEST_SERVICE_PROBE_LOG", probes.databaseLog)
+	t.Setenv("PILOT_TEST_SERVICE_DB_COMMAND", probeCommand)
+	t.Setenv("PILOT_TEST_SERVICE_DB_EXPECTED", expectedDatabase)
+	t.Setenv("PILOT_TEST_SERVICE_DB_TRUST_ALL", "")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(probes.databaseLog)
+		if err != nil {
+			t.Error(err)
+		}
+		if strings.Contains(string(data), "unexpected-") {
+			t.Error("service fixture rejected an unexpected Docker/sudo command")
+		}
+	})
 	client := bundle.Client
 	client.AptProxyURL, client.RPMBaseURL, client.RegistryMirrorURL = server.URL, server.URL, server.URL
 	store, err := statefile.New[services.ServiceState](legacy, "services.json", 1, "services")
@@ -44,7 +158,8 @@ func registeredServiceFixture(t *testing.T) (*services.Manager, *ServiceBootstra
 	if err != nil {
 		t.Fatal(err)
 	}
-	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM}
+	probes.assertCounts(t, 1, 0, 1, 1)
+	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM}, probes
 }
 
 // The shim reads pilot's generated XML, and models the UUID/name lists used by
@@ -64,7 +179,7 @@ undefine) rm -f "$0.domain"; exit 0 ;;
 `
 
 func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(t *testing.T) {
-	serviceManager, bootstrap := registeredServiceFixture(t)
+	serviceManager, bootstrap, probes := registeredServiceFixture(t)
 	m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
 	target, err := m.Up(context.Background(), Options{Name: "service-vm", BaseImage: base, Services: bootstrap})
 	if err != nil {
@@ -73,6 +188,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if target.ServiceConsumer == nil {
 		t.Fatal("central Up did not register guest")
 	}
+	probes.assertCounts(t, 2, 0, 2, 2)
 	if _, err := uuid.Parse(target.ServiceConsumer.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +218,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if err != nil || client.InstanceID != bootstrap.InstanceID {
 		t.Fatalf("VM teardown interrupted cache: %+v %v", client, err)
 	}
+	probes.assertCounts(t, 3, 0, 3, 3)
 	if err := reopened.Down(context.Background(), target.Name); err != nil {
 		t.Fatalf("repeated teardown: %v", err)
 	}
@@ -110,7 +227,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 func TestVMServiceConsumerProbeFailureAndForeignUUIDRetainStateAndRegistration(t *testing.T) {
 	for _, fault := range []string{"query-error", "foreign-uuid", "undefine-error"} {
 		t.Run(fault, func(t *testing.T) {
-			serviceManager, bootstrap := registeredServiceFixture(t)
+			serviceManager, bootstrap, _ := registeredServiceFixture(t)
 			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
 			target, err := m.Up(context.Background(), Options{Name: "guarded-service-vm", BaseImage: base, Services: bootstrap})
 			if err != nil {
@@ -153,5 +270,55 @@ func TestVMServiceConsumerMissingIdentityRefusesBeforeDomainCreation(t *testing.
 	targets, err := m.store.Load()
 	if err != nil || len(targets) != 0 {
 		t.Fatalf("rejected guest persisted target: %+v %v", targets, err)
+	}
+}
+
+func TestVMServiceConsumerCredentialFailureRefusesRegistrationAndDomainCreation(t *testing.T) {
+	for _, fault := range []string{"wrong-admin", "wrong-database", "missing-current-identity", "trust-all-database"} {
+		t.Run(fault, func(t *testing.T) {
+			serviceManager, bootstrap, probes := registeredServiceFixture(t)
+			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
+			want := "authentication failed"
+			adminAllowed, adminDenied, dbAllowed, dbDenied := 2, 0, 1, 3
+			switch fault {
+			case "wrong-admin", "wrong-database":
+				rel := "harbor/secrets/database-password"
+				if fault == "wrong-admin" {
+					rel = "harbor/secrets/admin-password"
+					adminAllowed, adminDenied, dbDenied = 1, 1, 1
+				}
+				if err := os.WriteFile(filepath.Join(probes.root, rel), []byte("SENTINEL-wrong-association\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-current-identity":
+				probes.mu.Lock()
+				probes.identity = false
+				probes.mu.Unlock()
+				want = "invalid current-user identity"
+				dbDenied = 1
+			case "trust-all-database":
+				t.Setenv("PILOT_TEST_SERVICE_DB_TRUST_ALL", "1")
+				want = "negative control"
+				dbAllowed, dbDenied = 2, 1
+			}
+			_, err := m.Up(context.Background(), Options{Name: "credential-rejected-vm", BaseImage: base, Services: bootstrap})
+			if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "SENTINEL") {
+				t.Fatalf("credential fault did not reject central registration safely: %v", err)
+			}
+			consumers, err := serviceManager.Consumers(context.Background())
+			if err != nil || len(consumers) != 0 {
+				t.Fatalf("credential failure registered a consumer: %+v %v", consumers, err)
+			}
+			targets, err := m.store.Load()
+			if err != nil || len(targets) != 0 {
+				t.Fatalf("credential failure persisted VM state: %+v %v", targets, err)
+			}
+			for _, path := range []string{os.Getenv("PILOT_VIRSH_BIN") + ".domain", filepath.Join(m.vmDir, "credential-rejected-vm")} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatal("credential failure created domain or target artifacts")
+				}
+			}
+			probes.assertCounts(t, adminAllowed, adminDenied, dbAllowed, dbDenied)
+		})
 	}
 }

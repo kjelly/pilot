@@ -27,7 +27,9 @@ func healthyLifecycleFixture(t *testing.T) (*Manager, Profile, *sharedLifecycleR
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
+	}))
 	t.Cleanup(server.Close)
 	if err := manager.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		states[0].BindIP = "127.0.0.1"
@@ -236,6 +238,10 @@ func (r processLifecycleRunner) Run(_ context.Context, dir, name string, args ..
 		return CommandResult{}, err
 	}
 	return (&sharedLifecycleRunner{}).Run(context.Background(), dir, name, args...)
+}
+
+func (r processLifecycleRunner) RunInput(_ context.Context, dir, input, _ string, _ ...string) (CommandResult, error) {
+	return fixtureDatabaseResult(dir, input), nil
 }
 
 func TestLifecycleProcessHelper(t *testing.T) {
@@ -454,7 +460,9 @@ func TestConcurrentLifecycleUpReusesPublishedResult(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(installer, "install.sh"), []byte("fixture"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
+	}))
 	defer server.Close()
 	command := func() *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLifecycleProcessHelper$")

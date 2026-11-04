@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -106,27 +105,19 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 }
 
 func readHarborAdminPassword(root string) (string, error) {
-	b, err := os.ReadFile(path.Join(root, "harbor", "secrets", "admin-password"))
+	value, err := readSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
 	if err != nil {
 		return "", fmt.Errorf("read Harbor admin password: %w", err)
 	}
-	password := strings.TrimSpace(string(b))
-	if password == "" {
-		return "", errors.New("read Harbor admin password: admin password is empty")
-	}
-	return password, nil
+	return value, nil
 }
 
 func readPulpAdminPassword(root string) (string, error) {
-	b, err := os.ReadFile(path.Join(root, "pulp", "secrets", "admin-password"))
+	value, err := readSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
 	if err != nil {
 		return "", fmt.Errorf("read Pulp admin password: %w", err)
 	}
-	password := strings.TrimSpace(string(b))
-	if password == "" {
-		return "", errors.New("read Pulp admin password: admin password is empty")
-	}
-	return password, nil
+	return value, nil
 }
 
 func readCAPEM(root string) (string, error) {
@@ -458,23 +449,25 @@ func apiJSONResponse(ctx context.Context, client *http.Client, method, rawURL st
 	if password != "" {
 		req.SetBasicAuth("admin", password)
 	}
-	resp, err := client.Do(req)
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := safeClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("API endpoint unreachable")
 	}
 	defer resp.Body.Close()
 	b, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if readErr != nil {
-		return nil, readErr
+		return nil, errors.New("API response read failed")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	if output == nil || len(b) == 0 {
 		return resp.Header, nil
 	}
 	if err := json.Unmarshal(b, output); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, errors.New("decode response failed")
 	}
 	return resp.Header, nil
 }

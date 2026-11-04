@@ -114,8 +114,17 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
+	}))
 	defer server.Close()
+	// Executable fixture for the native readonly DB protocol; target evidence
+	// separately exercises real PostgreSQL authentication.
+	if err := os.WriteFile(filepath.Join(home, "docker"), []byte("#!/bin/sh\nIFS= read -r candidate\nIFS= read -r expected < \"$PILOT_TEST_DB_SECRET\"\nif [ \"$candidate\" = \"$expected\" ]; then printf '1\\n'; else printf 'password authentication failed' >&2; exit 2; fi\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", home+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PILOT_TEST_DB_SECRET", filepath.Join(bundle.Root, "harbor/secrets/database-password"))
 	client := bundle.Client
 	client.AptProxyURL = server.URL
 	client.RPMBaseURL = server.URL
