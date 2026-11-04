@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,6 +32,32 @@ var gatewayScopeEffects = []string{"identity.hostgroups", "access.hbac"}
 
 const gatewayScopeApplyPlaybook = "playbooks/apply/gateway-scope-apply.yml"
 
+func appendGatewayScopeAdoption(args []string, id string) ([]string, error) {
+	if id == "" {
+		return args, nil
+	}
+	if !regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`).MatchString(id) {
+		return nil, fmt.Errorf("adopt-group-id must be the inspected exact live ipauniqueid UUID")
+	}
+	return append(args, "-e", "gateway_scope_adopt_id="+strings.ToLower(id)), nil
+}
+
+func appendGatewayScopeAutomemberAdoption(args []string, groupID, ruleID string) ([]string, error) {
+	var err error
+	args, err = appendGatewayScopeAdoption(args, groupID)
+	if err != nil || ruleID == "" {
+		return args, err
+	}
+	if groupID == "" {
+		return nil, fmt.Errorf("adopt-automember-id also requires the exact adopt-group-id")
+	}
+	validated, err := appendGatewayScopeAdoption(nil, ruleID)
+	if err != nil {
+		return nil, fmt.Errorf("adopt-automember-id must be the inspected exact LDAP entryUUID")
+	}
+	return append(args, "-e", strings.Replace(validated[1], "gateway_scope_adopt_id=", "gateway_scope_adopt_automember_id=", 1)), nil
+}
+
 const (
 	gatewayScopeAllHostsKeyword = "all"
 	gatewayScopeAllHostsGroup   = "freeipa-client"
@@ -45,6 +72,8 @@ var (
 	gatewayScopeTargetGroup string
 	gatewayScopeVaultFile   string
 	gatewayScopeTimeout     time.Duration
+	gatewayScopeAdoptID     string
+	gatewayScopeAdoptAutoID string
 )
 
 var gatewayScopeCmd = &cobra.Command{
@@ -97,6 +126,8 @@ var gatewayScopeDisableAutoCmd = &cobra.Command{
 
 func init() {
 	for _, sub := range []*cobra.Command{gatewayScopePlanCmd, gatewayScopeReconcileCmd} {
+		sub.Flags().StringVar(&gatewayScopeAdoptID, "adopt-group-id", "", "explicitly adopt an existing scope hostgroup by its inspected exact ipauniqueid")
+		sub.Flags().StringVar(&gatewayScopeAdoptAutoID, "adopt-automember-id", "", "explicitly adopt its existing automember rule by inspected exact LDAP entryUUID (also requires adopt-group-id)")
 		sub.Flags().StringVar(&gatewayScopeDirFlag, "dir", ".", "workspace directory containing inventory.yml and .vault/main.yaml (matches `pilot deploy --dir`)")
 		sub.Flags().StringVar(&gatewayScopeFlag, "scope", "", "gateway scope name, e.g. gpu (required)")
 		sub.Flags().StringSliceVar(&gatewayScopeHostsFlag, "hosts", nil, "desired FQDNs for pilot-target-<scope> (comma-separated), or 'all' to use the inventory freeipa-client group (required)")
@@ -108,6 +139,8 @@ func init() {
 		_ = sub.MarkFlagRequired("hosts")
 	}
 	for _, sub := range []*cobra.Command{gatewayScopeEnableAutoCmd, gatewayScopeDisableAutoCmd} {
+		sub.Flags().StringVar(&gatewayScopeAdoptID, "adopt-group-id", "", "explicitly adopt an existing scope hostgroup by its inspected exact ipauniqueid")
+		sub.Flags().StringVar(&gatewayScopeAdoptAutoID, "adopt-automember-id", "", "explicitly adopt its existing automember rule by inspected exact LDAP entryUUID (also requires adopt-group-id)")
 		sub.Flags().StringVar(&gatewayScopeDirFlag, "dir", ".", "workspace directory containing inventory.yml and .vault/main.yaml (matches `pilot deploy --dir`)")
 		sub.Flags().StringVar(&gatewayScopeFlag, "scope", "", "gateway scope name, e.g. gpu (required)")
 		sub.Flags().StringVarP(&gatewayScopeInventory, "inventory", "i", "inventory.yml", "inventory path (relative to --dir unless absolute)")
@@ -312,6 +345,10 @@ func runGatewayScope(cmd *cobra.Command, planOnly bool) error {
 	if err != nil {
 		return err
 	}
+	args, err = appendGatewayScopeAutomemberAdoption(args, gatewayScopeAdoptID, gatewayScopeAdoptAutoID)
+	if err != nil {
+		return err
+	}
 	runner := ansible.NewRunner()
 	runner.Timeout = gatewayScopeTimeout
 	runner.Env = runtime.Env
@@ -461,6 +498,10 @@ func runGatewayScopeAutomember(cmd *cobra.Command, enable bool) error {
 	}
 
 	args, err := buildGatewayScopeAutomemberArgs(gatewayScopeFlag, hosts, action, inventory, gatewayScopeTargetGroup, vaultFile)
+	if err != nil {
+		return err
+	}
+	args, err = appendGatewayScopeAutomemberAdoption(args, gatewayScopeAdoptID, gatewayScopeAdoptAutoID)
 	if err != nil {
 		return err
 	}

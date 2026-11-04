@@ -44,7 +44,11 @@ func hasAnyStage(call []string) bool {
 func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
 		if queryKind(args) != "" {
-			return &ansible.Result{Stdout: "HOST_INSPECT[c1.ipa.pilot.internal]: host not found"}, nil
+			body := "host not found"
+			if queryKind(args) == "gateway_scope" {
+				body = "GATEWAY_SCOPE_READY=true"
+			}
+			return &ansible.Result{Stdout: "HOST_INSPECT[" + queryControl(args, "pilot_decommission_target_fqdn") + "]: " + body}, nil
 		}
 		return &ansible.Result{Stdout: "IPA_CLIENT_ENROLLED=true"}, nil
 	}}
@@ -71,16 +75,18 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	if _, err := p.query(ctx, "host_object", "c1.ipa.pilot.internal"); err != nil {
 		t.Fatal(err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("got %d ansible-playbook calls, want 4", len(exec.calls))
+	if len(exec.calls) != 6 {
+		t.Fatalf("got %d ansible-playbook calls, want 6 including both read-only pre-uninstall probes", len(exec.calls))
 	}
-	for i, want := range [][]string{hostStageArgs, hostStageArgs, serverStageArgs} {
+	for i, want := range map[int][]string{0: hostStageArgs, 3: hostStageArgs, 4: serverStageArgs} {
 		if !hasArgs(exec.calls[i], want) {
 			t.Errorf("call %d = %v, want %v", i, exec.calls[i], want)
 		}
 	}
-	if hasAnyStage(exec.calls[3]) {
-		t.Errorf("read-only query call %v carries a stage", exec.calls[3])
+	for _, i := range []int{1, 2, 5} {
+		if hasAnyStage(exec.calls[i]) {
+			t.Errorf("read-only query call %v carries a stage", exec.calls[i])
+		}
 	}
 
 	// A stage error stops the run before ansible-playbook starts.

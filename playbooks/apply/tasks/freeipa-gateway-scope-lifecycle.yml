@@ -1,0 +1,32 @@
+# One root-owned authority serializes gateway publication and retirement.
+# The canonical identity roster server and the gateway inventory primary
+# resolve to the same explicit server; a replica never gets a local ledger.
+- name: "Gate: gateway lifecycle has one designated FreeIPA authority"
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+      - ipa_gateway_lifecycle_authority | default('') | length > 0
+    fail_msg: >-
+      Select exactly the designated FreeIPA server. Set ipa_server_fqdn in
+      gateway inventory or freeipa.server in the identity roster; gateway
+      lifecycle state cannot be split across replicas.
+  tags: [always]
+
+- name: "Run the serialized gateway scope lifecycle"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "{{ lookup('file', playbook_dir ~ '/files/freeipa-gateway-scope.py') }}"
+      - "{{ ipa_gateway_lifecycle_operation }}"
+      - /var/lib/pilot-identity/gateway-scopes.json
+    stdin: >-
+      {{ ipa_gateway_lifecycle_request | combine({
+           'domain': freeipa_domain | default((freeipa_roster | default({})).get('freeipa', {}).get('domain', '')),
+           'authority': ipa_gateway_lifecycle_authority,
+           'readonly': ipa_gateway_lifecycle_readonly | default(ansible_check_mode)}) | to_json }}
+  become: true
+  check_mode: false
+  register: ipa_gateway_lifecycle_result
+  changed_when: (ipa_gateway_lifecycle_result.stdout | from_json).changed | bool
+  tags: [always]

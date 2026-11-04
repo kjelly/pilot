@@ -235,6 +235,9 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 		return nil, fmt.Errorf("%w: host %s still has service principal(s) managed by it: %s — clean them up via their owning component (e.g. internal-endpoint HTTP/<fqdn>, NFS nfs/<fqdn>) before retrying host decommission (spec.md §16.6)",
 			ErrUnknownServicePrincipal, fqdn, strings.Join(unknown, ", "))
 	}
+	if err := p.gatewayScopePreflight(ctx, fqdn); err != nil {
+		return nil, fmt.Errorf("freeipa-client plan %s: %w", hostName, err)
+	}
 
 	rosterStepParams := map[string]string{"inventory_alias": hostName, "retirement_stage": p.retirementStage()}
 	if p.RosterPathSet(in) {
@@ -296,6 +299,20 @@ func (e *freeipaUninstallStep) Inspect(ctx context.Context) (bool, error) {
 // Execute runs the real client-side uninstall playbook (no --tags
 // inspect this time — the mutating tasks are what we want).
 func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
+	// Plans can be resumed after live ownership changes. Revalidate before
+	// uninstall so an unknown independent gateway membership cannot strand
+	// an already-unenrolled client behind the central deletion gate.
+	unknown, fqdn, _, err := e.provider.discoverUnknownServicePrincipals(ctx,
+		firstNonEmpty(e.provider.cfg.InventoryFQDN, e.hostName))
+	if err != nil {
+		return err
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("%w: %s", ErrUnknownServicePrincipal, strings.Join(unknown, ", "))
+	}
+	if err := e.provider.gatewayScopePreflight(ctx, fqdn); err != nil {
+		return err
+	}
 	args := []string{e.provider.cfg.DecommissionPlaybook}
 	if e.provider.cfg.ClientInventory != "" {
 		args = append(args, "-i", e.provider.cfg.ClientInventory)
@@ -800,6 +817,17 @@ func unknownServicePrincipals(stdout, fqdn string) []string {
 
 func (p *FreeIPAClientProvider) queryHostObject(ctx context.Context, fqdn string) (*ansible.Result, error) {
 	return p.query(ctx, "host_object", fqdn)
+}
+
+func (p *FreeIPAClientProvider) gatewayScopePreflight(ctx context.Context, fqdn string) error {
+	res, err := p.query(ctx, "gateway_scope", fqdn)
+	if err != nil {
+		return fmt.Errorf("gateway scope ownership preflight: %w", err)
+	}
+	if !strings.Contains(inspectionFor(res.Stdout, fqdn), "GATEWAY_SCOPE_READY=true") {
+		return fmt.Errorf("gateway scope ownership preflight: missing affirmative target observation")
+	}
+	return nil
 }
 
 // query issues one read-only central-plane discovery call against
