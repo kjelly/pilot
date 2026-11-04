@@ -249,6 +249,18 @@ def inspect_reader():
     files = reader_files() if pathlib.Path('/etc/rsyslog.conf').exists() else {}
     calls = [(name, attrs, filename) for filename, text in files.items()
              for name, attrs in declarations(text, ('module', 'input', 'action', 'global'))]
+    # Legacy imfile has a process-global mutable input builder. Its
+    # $InputFile*/$InputRunFileMonitor state is not represented by modern
+    # input() declarations, so it cannot prove absence or cursor exclusivity.
+    # Do not migrate it, infer a namespace, or treat it as never configured.
+    for text in files.values():
+        if any(kind == 'word' and (word.lower().startswith('$inputfile')
+                                  or word.lower() == '$inputrunfilemonitor')
+               for kind, word in tokens(text)):
+            raise ValueError('unknown legacy imfile input ownership')
+    if any(name == '$modload' and pathlib.PurePath(attrs['value']).name.lower() in ('imfile', 'imfile.so')
+           for name, attrs, _ in calls):
+        raise ValueError('unknown legacy imfile module ownership')
     owned_text = files.get(str(OWNER), '')
     inputs = [(attrs, filename) for name, attrs, filename in calls
               if name == 'input' and attrs.get('type', '').lower() == 'imfile']

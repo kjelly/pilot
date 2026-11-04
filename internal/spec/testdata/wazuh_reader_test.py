@@ -450,6 +450,23 @@ class ReaderInspectionTests(unittest.TestCase):
                 argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-f\0/foreign.conf\0')
                 with self.assertRaisesRegex(ValueError,'default-config selection'):
                     inspect()
+
+                # Unknown legacy imfile declarations must never become an
+                # apparently absent reader just because its FD is closed.
+                argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
+                owner.unlink();profile.unlink()
+                legacy_cases=[
+                    '$ModLoad imfile\n$InputFileName /native-source/alerts/alerts.json\n$InputRunFileMonitor\n',
+                    'module(load="imfile")\n$InputFileName /native-source/alerts/alerts.json\n$InputRunFileMonitor\n',
+                    '$ModLoad /usr/lib/rsyslog/imfile.so\n',
+                    '$InputFileBindRuleset other\n$InputFileStateFile old-cursor\n']
+                for text in legacy_cases:
+                    extra.write_text(text)
+                    with self.assertRaisesRegex(ValueError,'legacy imfile'):
+                        inspect()
+                extra.write_text('$ModLoad imuxsock\n# $InputFileName /native-source/alerts/alerts.json\n'
+                                 'set $.example = "$InputRunFileMonitor";\n')
+                self.assertEqual(inspect()['mode'],'never','unrelated legacy module/comments/strings remain available')
             self.assertTrue(all(command[0] in ('systemctl','date','rsyslogd') for command in calls))
             self.assertFalse(any(item in ('start','stop','restart','reload') for command in calls for item in command))
 
