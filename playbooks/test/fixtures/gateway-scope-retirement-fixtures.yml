@@ -85,7 +85,10 @@
               - -c
               - "{{ lookup('file', playbook_dir ~ '/files/gateway-scope-retirement-setup.py') }}"
           register: issue227_fixture_authorization
-          changed_when: (issue227_fixture_authorization.stdout | from_json).changed | bool
+          # A failed native call may have partly changed IPA and prints only
+          # stderr. Preserve that original failure instead of parsing empty
+          # stdout and replacing it with a secondary JSON error.
+          changed_when: issue227_fixture_authorization.rc != 0 or ((issue227_fixture_authorization.stdout | from_json).changed | bool)
           when: not ansible_check_mode
 
         - name: Publish readiness only after successful fixture setup

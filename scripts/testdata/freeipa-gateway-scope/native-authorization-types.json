@@ -1,0 +1,124 @@
+{
+  "captured_at": "2026-11-04",
+  "source": "Root native-types.json, type descriptors captured before JSON serialization",
+  "source_sha256": "1fb221cadf4bb251700e42d21a4bf8af367f34d9cb484053cb58357893d01158",
+  "records": [
+    {
+      "request": {
+        "command": "hbacrule_show",
+        "args": [
+          "i227-type-probe"
+        ],
+        "options": {
+          "all": true
+        }
+      },
+      "attributes": {
+        "ipaenabledflag": {
+          "value": [
+            true
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "bool"
+              }
+            ]
+          }
+        },
+        "memberuser_user": {
+          "value": [
+            "admin"
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "str"
+              }
+            ]
+          }
+        },
+        "memberhost_hostgroup": {
+          "value": [
+            "ipaservers"
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "str"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "command": "hbacrule_show",
+        "args": [
+          "allow_all"
+        ],
+        "options": {
+          "all": true
+        }
+      },
+      "attributes": {
+        "ipaenabledflag": {
+          "value": [
+            true
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "bool"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "command": "sudorule_show",
+        "args": [
+          "i227-type-probe"
+        ],
+        "options": {
+          "all": true
+        }
+      },
+      "attributes": {
+        "cmdcategory": {
+          "value": [
+            "all"
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "str"
+              }
+            ]
+          }
+        },
+        "ipaenabledflag": {
+          "value": [
+            true
+          ],
+          "native_type": {
+            "type": "tuple",
+            "items": [
+              {
+                "type": "bool"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

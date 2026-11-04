@@ -20,6 +20,60 @@ func TestRegression_GatewayScopeLifecycleModel(t *testing.T) {
 	}
 }
 
+func TestRegression_GatewayRetirementFixtureNativeSequenceBehavior(t *testing.T) {
+	command := exec.Command("python3", "../../scripts/test-gateway-scope-retirement-fixture.py", "-v")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("exact fixture script native-type behavior: %v\n%s", err, output)
+	}
+}
+
+func TestRegression_GatewayRetirementFixturePreservesNativeFailure(t *testing.T) {
+	source, err := os.ReadFile("../../playbooks/test/fixtures/gateway-scope-retirement-fixtures.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plays []map[string]any
+	if err := yaml.Unmarshal(source, &plays); err != nil {
+		t.Fatal(err)
+	}
+	block := plays[3]["tasks"].([]any)[0].(map[string]any)["block"].([]any)
+	task := block[2].(map[string]any)
+	task["ansible.builtin.command"].(map[string]any)["argv"] = []string{"/bin/sh", "-c", "echo fixture-native-failure >&2; exit 7"}
+	result := runGatewayTasks(t, t.TempDir(), []any{task}, nil, nil)
+	if result.rc == 0 || len(result.failures) != 1 {
+		t.Fatalf("native fixture failure was swallowed: rc=%d failures=%v", result.rc, result.failures)
+	}
+	var callback struct {
+		Plays []struct {
+			Tasks []struct {
+				Hosts map[string]struct {
+					RC                int    `json:"rc"`
+					Stderr            string `json:"stderr"`
+					Changed           bool   `json:"changed"`
+					ChangedWhenResult any    `json:"changed_when_result"`
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(result.raw), &callback); err != nil {
+		t.Fatal(err)
+	}
+	observations := 0
+	for _, play := range callback.Plays {
+		for _, task := range play.Tasks {
+			for _, host := range task.Hosts {
+				observations++
+				if host.RC != 7 || host.Stderr != "fixture-native-failure" || !host.Changed || host.ChangedWhenResult != nil {
+					t.Fatalf("preserve native rc/stderr and possible partial mutation without secondary JSON failure: %+v", host)
+				}
+			}
+		}
+	}
+	if observations != 1 {
+		t.Fatalf("missing native failure observation: %d", observations)
+	}
+}
+
 func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.T) {
 	source, err := os.ReadFile("../../playbooks/test/fixtures/gateway-scope-retirement-fixtures.yml")
 	if err != nil {
