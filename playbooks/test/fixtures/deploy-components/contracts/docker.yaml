@@ -1,0 +1,19 @@
+schemaVersion: 1
+id: docker
+role: fixture-provider
+specs: [{path: acceptance.md, rows: {all: true}}]
+playbooks: {apply: playbooks/provider.yml}
+dependencies:
+  - {component: host-monitoring, required: true, relation: sameHosts}
+  - {component: dcgm-exporter, required: true, relation: providerEndpoint}
+bindings:
+  - {input: fixture_support_host, requiredWhenDependencySelected: true, sourceSelection: exactlyOne, from: {component: dcgm-exporter, endpoint: api}}
+groupVars:
+  - {name: fixture_support_host, type: string, required: true, secret: false}
+endpoints: [{name: api, scheme: http, port: 8080}]
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 1, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+verification: {autoDeploy: false}
+site: {include: false, order: 2, vars: {}, tags: [], optIn: true}
