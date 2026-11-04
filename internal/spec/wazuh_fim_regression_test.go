@@ -7,7 +7,7 @@ import (
 )
 
 // TestRegression_WazuhFimSpec locks the structure of
-// docs/verification/wazuh-fim.md (v1.1 — Wazuh agent FIM/syscheck with
+// docs/verification/wazuh-fim.md (v1.4 — Wazuh agent FIM/syscheck with
 // whodata on a per-host-overridable directory list, auditd-backed who-data
 // attribution, optional enrollment against
 // docs/verification/wazuh-manager.md):
@@ -21,6 +21,7 @@ import (
 //	C7      /etc/hosts pins the wazuh-manager alias
 //	C8      <address> in ossec.conf points at the wazuh-manager alias
 //	C9      client.keys populated (agent-auth registration completed)
+//	C10     native/package version equality, exact pin, service and stable journal
 //
 // Cross-row invariants locked below:
 //
@@ -51,7 +52,7 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -87,6 +88,14 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 	// C9 must use the `sh -c '... && echo 0 || echo 1'` form.
 	if !strings.Contains(cmd["C9"], "&& echo 0") || !strings.Contains(cmd["C9"], "|| echo 1") {
 		t.Errorf("C9 must use the `... && echo 0 || echo 1` form, got %q", cmd["C9"])
+	}
+	for _, token := range []string{"agent-verify", "--family", "/etc/debian_version", "/etc/redhat-release", "&& echo 0", "|| echo 1"} {
+		if !strings.Contains(cmd["C10"], token) {
+			t.Errorf("C10 native effective-state probe lacks %q", token)
+		}
+	}
+	if !NeedsBecome(s.Rows[len(s.Rows)-1]) {
+		t.Error("C10 root-only coordinator must execute with verify privilege escalation")
 	}
 
 	// C5 must gate on check_all+whodata attributes together, but must NOT

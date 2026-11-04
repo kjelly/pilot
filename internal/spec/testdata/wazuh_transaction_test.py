@@ -4,6 +4,7 @@ Native command harnesses are explicitly separate from VM/systemd evidence.
 Cold-backup recovery tests use real GNU tar and actual changed filesystem data.
 """
 import importlib.util
+import contextlib
 import json
 from pathlib import Path
 import subprocess
@@ -25,6 +26,13 @@ def load(name, filename):
 
 w = load('wazuh_transaction', 'playbooks/apply/files/wazuh-transaction.py')
 apt = load('apt_exact_stage', 'playbooks/apply/files/apt-exact-stage.py')
+
+# No test creates host mounts. Feed the real mountinfo decoder an explicit
+# disposable namespace, independent of the runner's sandbox/bind ancestry.
+# Scope counterexamples replace this data, never the production validator.
+RealMountTable = w.MountTable
+MOUNT_NAMESPACE = {'text': '1 0 8:1 / / rw - ext4 /dev/synthetic rw\n'}
+w.MountTable = lambda text=None: RealMountTable(MOUNT_NAMESPACE['text'] if text is None else text)
 
 
 class PolicyTests(unittest.TestCase):
@@ -491,7 +499,7 @@ class JournalTests(unittest.TestCase):
                         pass
             link = Path(temp) / 'alias'
             link.symlink_to(tx.root, target_is_directory=True)
-            with self.assertRaisesRegex(w.Refused, 'unsafe'):
+            with self.assertRaisesRegex(w.Refused, 'transaction path contains a symlink'):
                 with w.Transaction('central', root=link).lock():
                     pass
 
@@ -742,6 +750,280 @@ class ExactArtifactTests(unittest.TestCase):
                 apt.run = original
 
 
+class RestoreScopeTests(unittest.TestCase):
+    def test_backup_bind_alias_is_rejected_before_private_metadata_changes(self):
+        import stat
+        with tempfile.TemporaryDirectory() as temporary:
+            backup = Path(temporary) / 'backup'; backup.mkdir(); backup.chmod(0o775)
+            original = MOUNT_NAMESPACE['text']
+            MOUNT_NAMESPACE['text'] += f'2 1 8:1 /var/ossec/data {backup} rw - ext4 /dev/synthetic rw\n'
+            try:
+                with self.assertRaisesRegex(w.Refused, 'subtree or bind-mount ancestry'):
+                    w.HostWriter(backup).claim('d' * 32, 'agent')
+                with self.assertRaisesRegex(w.Refused, 'subtree or bind-mount ancestry'):
+                    with w.Transaction('agent', root=backup).lock(owner='d' * 32):
+                        pass
+                self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o775)
+                self.assertEqual(list(backup.iterdir()), [])
+            finally:
+                MOUNT_NAMESPACE['text'] = original
+
+    def test_mountinfo_decodes_paths_and_keeps_unrelated_kernel_object_mounts(self):
+        table = RealMountTable('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n'
+                               '2 1 8:1 /source\\040with\\134slash /dest\\011tab rw - ext4 /dev/synthetic rw\n'
+                               '3 1 0:5 net:[42] /run/netns/test rw - nsfs nsfs rw\n')
+        self.assertEqual(table.rows[1]['root'], Path('/source with\\slash'))
+        self.assertEqual(table.rows[1]['point'], Path('/dest\ttab'))
+        self.assertEqual(table.physical(Path('/ordinary')), ('8:1', Path('/ordinary')))
+        with self.assertRaisesRegex(w.Refused, 'non-filesystem'):
+            table.physical(Path('/run/netns/test'))
+        for invalid in ('', 'not mountinfo', '1 0 invalid / / rw - ext4 disk rw'):
+            with self.assertRaises(w.Refused):
+                RealMountTable(invalid)
+
+    def test_physical_alias_and_distinct_backup_filesystem(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, backup = root / 'source', root / 'backup'
+            source.mkdir(); backup.mkdir()
+            base = MOUNT_NAMESPACE['text']
+            # An ordinary distinct backup filesystem is supported.
+            table = RealMountTable(base + f'2 1 9:1 / {backup} rw - xfs /dev/backup rw\n')
+            w.restore_sources({str(source): 'directory'}, backup, mounts=table)
+            # Whole-filesystem bind aliases can have root=/; physical device
+            # paths still detect overlap even when lexical paths are disjoint.
+            table = RealMountTable(base + f'2 1 8:1 / {backup} rw - ext4 /dev/synthetic rw\n')
+            with self.assertRaisesRegex(w.Refused, 'physical filesystem alias'):
+                w.restore_sources({str(source): 'directory'}, backup, mounts=table)
+            table = RealMountTable(base + f'2 1 8:1 {source} {backup} rw - ext4 /dev/synthetic rw\n')
+            with self.assertRaisesRegex(w.Refused, 'subtree or bind-mount ancestry'):
+                w.restore_sources({str(source): 'directory'}, backup, mounts=table)
+            alias = root / 'alias'; (alias / 'child').mkdir(parents=True)
+            table = RealMountTable(base + f'2 1 8:1 {source} {alias} rw - ext4 /dev/synthetic rw\n')
+            with self.assertRaisesRegex(w.Refused, 'physical filesystem alias'):
+                w.restore_sources({str(source): 'directory', str(alias / 'child'): 'directory'}, backup, mounts=table)
+
+    def test_real_tar_top_level_symlink_omits_data_but_coordinator_refuses_before_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, link = root / 'data', root / 'ossec'
+            data.mkdir(); (data / 'retained-state').write_text('must survive')
+            link.symlink_to(data, target_is_directory=True)
+            native_archive = root / 'unsafe.tar'
+            subprocess.run(['tar', '-cpf', str(native_archive), '-C', str(root), 'ossec'], check=True, capture_output=True)
+            members = subprocess.check_output(['tar', '-tf', str(native_archive)], text=True).splitlines()
+            self.assertEqual(members, ['ossec'])
+            private = w.private_dir(root / 'private')
+            with self.assertRaisesRegex(w.Refused, 'symlink'):
+                w.Transaction('agent', root=private).archive(link, private / 'safe.tar')
+            self.assertFalse((private / 'safe.tar').exists())
+            self.assertEqual((data / 'retained-state').read_text(), 'must survive')
+
+    @contextlib.contextmanager
+    def agent(self, family='Debian'):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_path, old_mounts = w.Path, MOUNT_NAMESPACE['text']
+            mapped = ('/var/ossec', '/etc/hosts', '/etc/apt/preferences.d', '/etc/yum.repos.d', '/var/cache/apt/archives')
+            def path(value):
+                value = str(value)
+                return root / 'host' / value.lstrip('/') if any(value == p or value.startswith(p + '/') for p in mapped) else real_path(value)
+            class Native(Commands):
+                def __init__(self):
+                    super().__init__(family, '4.14.1-1')
+                    self.active = True
+                def run(self, argv, **kwargs):
+                    if argv[0] == 'du':
+                        argv = [*argv[:-1], str(path(argv[-1]))]
+                    if argv[0] == 'systemctl':
+                        self.calls.append(list(argv))
+                        if argv[1] in ('stop', 'start'):
+                            self.active = argv[1] == 'start'
+                        return subprocess.CompletedProcess(argv, 0 if self.active or argv[1] != 'is-active' else 3,
+                                                           'enabled' if argv[1] == 'is-enabled' else '', '')
+                    return super().run(argv, **kwargs)
+            class Agent(w.Agent):
+                def package_archives(self, installed, target):
+                    # Signed/native package identity has independent controls;
+                    # this call-chain fixture supplies verified artifact bytes.
+                    return {v: {'path': root / 'stage' / (v + '.pkg'), 'sha256': w.digest(root / 'stage' / (v + '.pkg'))}
+                            for v in (installed, target)}
+            w.Path = path
+            try:
+                for name, content in {'/var/ossec/etc/client.keys': '001 synthetic any TEST_KEY\n',
+                                      '/var/ossec/etc/ossec.conf': 'original data', '/etc/hosts': 'original hosts',
+                                      '/etc/apt/preferences.d/pilot-wazuh-agent': 'original pin',
+                                      '/etc/yum.repos.d/wazuh.repo': 'original repo'}.items():
+                    destination = path(name); destination.parent.mkdir(parents=True, exist_ok=True); destination.write_text(content)
+                (root / 'stage').mkdir(mode=0o700)
+                path('/var/cache/apt/archives').mkdir(parents=True)
+                for release in ('4.14.1-1', '4.14.9-1'):
+                    (root / 'stage' / (release + '.pkg')).write_text(release)
+                native = Native()
+                agent = Agent(family, root=root / 'private', runner=native)
+                w.HostWriter(agent.root).claim('d' * 32, 'agent')
+                yield agent, native, path, root
+            finally:
+                w.Path = real_path
+                MOUNT_NAMESPACE['text'] = old_mounts
+
+    def test_agent_reserve_rejects_every_selected_symlink_and_file_alias_before_authority(self):
+        import os, shutil
+        for family in ('Debian', 'RedHat'):
+            for selected in ('/var/ossec', '/etc/hosts', 'pin', 'pin-parent', 'absent-pin-parent', 'hosts-hardlink',
+                             '/var/ossec/etc/ossec.conf', 'config-hardlink', 'key-parent'):
+                with self.subTest(family=family, selected=selected), self.agent(family) as (agent, native, path, root):
+                    name = agent.pin_path() if selected in ('pin', 'pin-parent', 'absent-pin-parent') else selected
+                    victim = path(name if selected != 'hosts-hardlink' else '/etc/hosts')
+                    if selected == 'config-hardlink': victim = path('/var/ossec/etc/ossec.conf')
+                    if selected == 'key-parent': victim = path('/var/ossec/etc')
+                    if selected in ('pin-parent', 'absent-pin-parent'):
+                        if selected == 'absent-pin-parent':
+                            victim.unlink()
+                        victim = victim.parent
+                    alias = root / 'outside'
+                    if selected in ('hosts-hardlink', 'config-hardlink'):
+                        os.link(victim, alias)
+                    else:
+                        shutil.move(victim, alias)
+                        victim.symlink_to(alias, target_is_directory=alias.is_dir())
+                    with self.assertRaisesRegex(w.Refused, 'symlink|single-link'):
+                        agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                    self.assertFalse(agent.path.exists(), 'unsafe source must never acquire reserve authority')
+                    self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+                    self.assertTrue(native.active)
+
+    def test_agent_reserve_rejects_root_and_descendant_mounts_before_authority(self):
+        for family in ('Debian', 'RedHat'):
+            for name in ('/var/ossec', '/var/ossec/nested', '/etc/hosts', 'pin', '/var/cache/apt/archives'):
+                if family == 'RedHat' and name == '/var/cache/apt/archives':
+                    continue
+                with self.subTest(family=family, name=name), self.agent(family) as (agent, native, path, _):
+                    point = path(agent.pin_path() if name == 'pin' else name)
+                    MOUNT_NAMESPACE['text'] += f'2 1 8:1 {point} {point} rw - ext4 /dev/synthetic rw\n'
+                    with self.assertRaisesRegex(w.Refused, 'unsupported mount or nested mount'):
+                        agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                    self.assertFalse(agent.path.exists(), 'mounted source must never acquire reserve authority')
+                    self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
+
+    def test_agent_revalidates_staged_sources_and_all_recovery_inputs_before_stop(self):
+        for boundary in ('cold', 'recovery', 'retained-package', 'retained-parent'):
+            with self.subTest(boundary=boundary), self.agent() as (agent, native, path, root):
+                agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                if boundary != 'cold':
+                    agent.cold_backup('d' * 32)
+                before = sum(call[:2] == ['systemctl', 'stop'] for call in native.calls)
+                if boundary == 'retained-parent':
+                    item = agent.active()
+                    item['packages']['4.14.1-1']['path'] = str(root / 'stage/4.14.1-1.pkg')
+                    agent.write(item, item['phase'])
+                elif boundary == 'retained-package':
+                    package = Path(next(iter(agent.active()['packages'].values()))['path'])
+                    package.unlink(); package.symlink_to(root / 'stage/4.14.1-1.pkg')
+                else:
+                    point = path('/var/ossec/nested')
+                    MOUNT_NAMESPACE['text'] += f'2 1 8:1 {point} {point} rw - ext4 /dev/synthetic rw\n'
+                phase = agent.active()['phase']
+                with self.assertRaisesRegex(w.Refused, 'unsupported mount|symlink|exact private directory'):
+                    (agent.cold_backup if boundary == 'cold' else agent.prepare_recovery)('d' * 32)
+                self.assertEqual(agent.active()['phase'], phase)
+                self.assertEqual(sum(call[:2] == ['systemctl', 'stop'] for call in native.calls), before)
+
+    def test_rpm_staging_refuses_cache_and_artifact_aliases_before_native_tools(self):
+        import os
+        for target in ('stage-directory', 'artifact-symlink', 'artifact-hardlink'):
+            with self.subTest(target=target), self.agent('RedHat') as (fixture, native, _, root):
+                agent = w.Agent('RedHat', root=fixture.root, runner=native)
+                agent.stage_preflight('d' * 32)
+                stage = agent.root / 'rpm-stage'
+                outside = root / 'outside.rpm'; outside.write_bytes(b'outside package bytes')
+                if target == 'stage-directory':
+                    stage.rmdir(); stage.symlink_to(root, target_is_directory=True)
+                elif target == 'artifact-symlink':
+                    (stage / 'old.rpm').symlink_to(outside)
+                else:
+                    os.link(outside, stage / 'old.rpm')
+                with self.assertRaisesRegex(w.Refused, 'symlink|single-link'):
+                    agent.stage_preflight('d' * 32)
+                with self.assertRaisesRegex(w.Refused, 'symlink|single-link'):
+                    agent.package_archives('4.14.1-1', '4.14.9-1')
+                self.assertFalse(any(call[0] == 'rpmkeys' for call in native.calls))
+                self.assertEqual(outside.read_bytes(), b'outside package bytes')
+
+    def test_debian_cache_ancestor_and_artifact_aliases_refuse_before_metadata(self):
+        import os
+        for target in ('cache-ancestor', 'artifact-symlink', 'artifact-hardlink'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                cache = root / 'real/cache'; cache.mkdir(parents=True)
+                cache.chmod(0o755)
+                outside = root / 'outside.deb'; outside.write_bytes(b'outside package bytes')
+                self.assertEqual(apt.validate_cache(cache), cache)
+                if target == 'cache-ancestor':
+                    (root / 'link').symlink_to(root / 'real', target_is_directory=True)
+                    cache = root / 'link/cache'
+                elif target == 'artifact-symlink':
+                    (cache / 'old.deb').symlink_to(outside)
+                else:
+                    os.link(outside, cache / 'old.deb')
+                with self.assertRaisesRegex(ValueError, 'symlink|untrusted'):
+                    apt.validate_cache(cache)
+                previous = apt.run
+                calls = []
+                apt.run = lambda argv: calls.append(argv)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'symlink|untrusted'):
+                        apt.verify({'wazuh-agent': '4.14.1-1'}, cache)
+                    self.assertEqual(calls, [])
+                finally:
+                    apt.run = previous
+
+    def test_private_debian_recovery_checks_every_ancestor_and_manifest_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = w.private_dir(Path(temporary) / 'private')
+            parent = w.private_dir(root / ('agent-' + 'd' * 32))
+            artifact = parent / 'old.deb'; artifact.write_bytes(b'verified old package bytes')
+            item = {'owner': 'd' * 32, 'phase': 'recovering', 'family': 'Debian', 'kind': 'agent',
+                    'installed': '4.14.1-1', 'backup': str(parent),
+                    'packages': {'4.14.1-1': {'path': str(artifact), 'sha256': w.digest(artifact)}}}
+            w.atomic_json(parent / 'manifest.json', item)
+            w.atomic_json(root / 'agent-active.json', item)
+            previous = apt.run
+            apt.run = lambda argv: 'wazuh-agent\n4.14.1-1\namd64'
+            try:
+                self.assertEqual(apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)['version'], '4.14.1-1')
+                parent.chmod(0o755)
+                with self.assertRaisesRegex(ValueError, 'unsafe recovery directory'):
+                    apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)
+                parent.chmod(0o700)
+                manifest = parent / 'manifest.json'
+                manifest.rename(parent / 'real-manifest.json'); manifest.symlink_to(parent / 'real-manifest.json')
+                with self.assertRaisesRegex(ValueError, 'symlink ancestor'):
+                    apt.verify_recovery(artifact, {'wazuh-agent': '4.14.1-1'}, root)
+            finally:
+                apt.run = previous
+
+    def test_central_discovery_rejects_volume_mounts_and_backup_bind_alias(self):
+        for target in ('volume-root', 'volume-descendant', 'project-root', 'backup-alias'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                central, compose, native = DiscoveryFilesystemTests().central(root)
+                baseline = MOUNT_NAMESPACE['text']
+                point = root / 'docker-data/volumes/single-node_volume_0/_data'
+                if target == 'volume-descendant': point = point / 'nested'
+                if target == 'project-root': point = compose.parent
+                mount_root = point
+                if target == 'backup-alias': point = central.root
+                MOUNT_NAMESPACE['text'] += f'2 1 8:1 {mount_root} {point} rw - ext4 /dev/synthetic rw\n'
+                try:
+                    with self.assertRaisesRegex(w.Refused, 'unsupported mount|subtree or bind-mount ancestry'):
+                        central.discover()
+                    self.assertFalse(central.path.exists())
+                    self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
+                finally:
+                    MOUNT_NAMESPACE['text'] = baseline
+
+
 class AgentColdRecoveryTests(unittest.TestCase):
     def test_real_cold_state_and_identity_restored_for_both_backends(self):
         # Map only the coordinator's fixed host paths into disposable local
@@ -874,6 +1156,8 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                             return subprocess.CompletedProcess(argv, 0, '', '')
                         return super().run(argv, **kwargs)
                 class Agent(w.Agent):
+                    def validate_agent_layout(self, item, recovery=False):
+                        calls.append('validate-layout')
                     def restore_service(self, item):
                         calls.append('restore-service')
                     def verify_old_state(self, item):
@@ -894,6 +1178,7 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                                                 'packages': {'4.14.1-1': {'path': str(package), 'sha256': w.digest(package)}}})
                     agent.write(item, phase)
                 result = agent.prepare_recovery('f' * 32)
+                self.assertEqual(calls.pop(0), 'validate-layout')
                 if action == 'resume-old':
                     self.assertEqual(calls, ['restore-service', 'verify-old-state'])
                     self.assertFalse(agent.path.exists())

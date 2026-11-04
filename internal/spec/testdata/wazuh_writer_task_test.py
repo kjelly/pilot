@@ -4,6 +4,7 @@ Native package/Docker/config/service actions are explicit no-op substitutes.
 Writer claim/resume/release and post-claim agent policy use the real production
 Python library and real flock/files in a disposable directory. These tests
 prove graph ordering, cleanup and optional-manager semantics, not daemon health.
+Mount namespace data is synthetic; the real production decoder still runs.
 """
 import json
 import os
@@ -19,6 +20,8 @@ REPO = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location('wazuh_owner_library', REPO / 'playbooks/apply/files/wazuh-transaction.py')
 W = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(W)
+MOUNT_TABLE = W.MountTable
+W.MountTable = lambda: MOUNT_TABLE('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
 
 
 WORKER = '''import argparse,importlib.util,json,sys,subprocess
@@ -30,6 +33,7 @@ for field in ('confirm-previous-stopped','upgrade','preview','recover','canary')
  p.add_argument('--'+field,action='store_true')
 a=p.parse_args(); settings=json.loads(Path(SETTINGS).read_text())
 s=importlib.util.spec_from_file_location('production',settings['library']); w=importlib.util.module_from_spec(s); s.loader.exec_module(w)
+mount_table=w.MountTable; w.MountTable=lambda: mount_table('1 0 8:1 / / rw - ext4 /dev/synthetic rw\\n')
 host=w.HostWriter(settings['root'])
 with open(settings['log'],'a') as out: out.write(json.dumps({'action':a.action,'owner':a.owner,'name':a.name})+'\\n')
 class Native:
@@ -43,10 +47,12 @@ try:
  elif a.action=='agent-check':
   if settings.get('policy_failure'): raise w.Refused('controlled policy refusal')
   result=w.Agent('Debian',root=settings['root'],runner=Native()).check(a.manager,a.version,a.upgrade,a.owner or None)
+ elif a.action=='manager-version':
+  with host.reader('central'): result={'version':'4.14.9'}
  elif a.action=='central':
   with host.guard(a.owner,'central'): result={'changed':settings['central_change'],'fresh':False,'directory':settings['project'],'version':'4.14.9'}
- elif a.action=='central-verify':
-  with host.reader('central',a.owner or None): result={'pass':True}
+ elif a.action in ('central-verify','agent-verify'):
+  with host.reader('central' if a.action=='central-verify' else 'agent',a.owner or None): result={'pass':True}
  elif a.action=='native-mutation':
   marker=host.inspect()['writer']
   with host.guard(marker['owner'],settings['component']): result={'native_action_substituted':True}
@@ -146,6 +152,7 @@ class WriterTaskGraphTests(unittest.TestCase):
     def test_actual_no_manager_graph_full_and_check_preserves_optional_enrollment(self):
         for installed, flags in (('4.14.1-1', ()), ('4.14.1-1', ('--check',)),
                                  ('4.14.1-1', ('--tags', 'C1')), ('4.14.1-1', ('--tags', 'C5')),
+                                 ('4.14.1-1', ('--tags', 'C10')),
                                  ('', ()), ('', ('--check',))):
             result, events, state = self.graph(flags=flags, installed=installed)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -155,6 +162,10 @@ class WriterTaskGraphTests(unittest.TestCase):
             self.assertLess(actions.index('writer-claim'), actions.index('agent-check'))
             self.assertEqual(actions[-1], 'writer-release')
             self.assertNotIn('manager-version', actions)
+            if '--check' in flags:
+                self.assertNotIn('agent-verify', actions, 'fresh preview cannot claim native post-install proof')
+            elif not flags or 'C10' in flags:
+                self.assertEqual(actions[-2], 'agent-verify')
 
     def test_early_policy_failure_releases_only_its_completed_operation(self):
         result, events, state = self.graph(scenario='early-fail')
@@ -170,6 +181,18 @@ class WriterTaskGraphTests(unittest.TestCase):
         self.assertIn('controlled agent upgrade requires an observed manager version', result.stdout)
         self.assertIsNone(state['writer'])
         self.assertEqual([item['action'] for item in events], ['writer-claim', 'agent-check', 'writer-release'])
+
+    def test_C10_only_verifies_current_state_without_granting_package_upgrade_authority(self):
+        result, events, state = self.graph(flags=('--tags', 'C10', '-e', 'wazuh_version=4.14.9',
+                                                 '-e', 'wazuh_upgrade=true', '-e', 'wazuh_manager_host=localhost',
+                                                 '-e', 'wazuh_manager_inventory_host=localhost'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(state['writer'])
+        actions = [item['action'] for item in events]
+        self.assertEqual(actions[:3], ['writer-claim', 'manager-version', 'agent-check'])
+        self.assertEqual(actions[-2:], ['agent-verify', 'writer-release'])
+        self.assertFalse(any(item['name'].startswith('Step 4') for item in events),
+                         'C10 must not select package installation, upgrade or pin writers')
 
     def test_failed_claim_never_runs_mutators_or_releases_the_other_owner(self):
         result, events, state = self.graph(scenario='failed-claim')

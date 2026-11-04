@@ -1,7 +1,7 @@
 """Run the production APT selection/Jinja/include graph in real Ansible.
 
 Only package_facts, the final package mutation and the separately tested native
-artifact-verifier task are substituted. Fake apt-cache/apt-get record actual
+artifact/cache path verifier tasks are substituted. Fake apt-cache/apt-get record actual
 argv. This harness does not claim native APT, signatures or VM installation.
 """
 import json
@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 class ExactTaskTests(unittest.TestCase):
-    def run_case(self, installed, versions=None, stage=False, cache_error=False, held=False, packages=None):
+    def run_case(self, installed, versions=None, stage=False, cache_error=False, held=False, packages=None, cache_refusal=False):
         with tempfile.TemporaryDirectory(prefix='pilot-apt-exact-') as temporary:
             root = Path(temporary)
             tasks = root / 'tasks'
@@ -35,14 +35,23 @@ class ExactTaskTests(unittest.TestCase):
                     if 'ansible.builtin.apt' in task:
                         task.pop('ansible.builtin.apt')
                         task['ansible.builtin.command'] = {'argv': ['apt-harness-install', '{{ _pilot_apt_missing | to_json }}']}
-                    if task['name'].endswith('verify staged exact package identity and metadata SHA256'):
+                    if task['name'].endswith(('verify staged exact package identity and metadata SHA256',
+                                              'validate exact-version output paths before downloading',
+                                              'validate exact-version cache paths before any installer')):
                         task.pop('ansible.builtin.script')
-                        task['ansible.builtin.debug'] = {'msg': 'native artifact validation has an independent behavioral test'}
+                        if cache_refusal and 'validate exact-version' in task['name']:
+                            task['ansible.builtin.fail'] = {'msg': 'controlled cache boundary refusal'}
+                        else:
+                            task['ansible.builtin.debug'] = {'msg': 'native artifact/cache validation has an independent behavioral test'}
                     for block in ('block', 'rescue', 'always'):
                         if block in task:
                             rewrite(task[block])
             rewrite(graph)
             filename.write_text(yaml.safe_dump(graph, sort_keys=False))
+            download = tasks / 'apt-download-probe.yml'
+            download_graph = yaml.safe_load(download.read_text())
+            rewrite(download_graph)
+            download.write_text(yaml.safe_dump(download_graph, sort_keys=False))
             tools = root / 'bin'
             tools.mkdir()
             log = root / 'commands.jsonl'
@@ -91,6 +100,13 @@ if name=='apt-get' and os.environ.get('PILOT_APT_HARNESS_HELD')=='1':
             result, calls = self.run_case(installed, versions)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(calls, [])
+
+    def test_cache_scope_failure_precedes_any_exact_download_or_install(self):
+        result, calls = self.run_case({'wazuh-agent': [{'version': '4.14.1-1', 'arch': 'amd64'}]},
+                                      {'wazuh-agent': '4.14.9-1'}, stage=True, cache_refusal=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('controlled cache boundary refusal', result.stdout)
+        self.assertFalse(any(call[0] in ('apt-get', 'apt-harness-install') for call in calls))
 
     def test_exact_upgrade_uses_frozen_spec_in_query_and_install(self):
         installed = {'wazuh-agent': [{'version': '4.14.1-1', 'arch': 'amd64'}]}

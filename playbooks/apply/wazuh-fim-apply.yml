@@ -573,7 +573,7 @@
                   register: wazuh_agent_final_runtime
                   changed_when: false
                   when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
-                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10]
                   no_log: true
 
                 - name: "Step 11c: Controlled upgrades require native agent availability"
@@ -584,7 +584,7 @@
                   when:
                     - wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
                     - wazuh_agent_version_plan.change
-                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10]
 
                 - name: "Step 11d: Manager must observe the exact active agent identity and version before commit"
                   ansible.builtin.script:
@@ -605,7 +605,7 @@
                     - wazuh_enrollment_enabled | bool
                     - (wazuh_agent_final_runtime.stdout | from_json).active
                     - (wazuh_agent_final_runtime.stdout | from_json).id is defined
-                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10]
                   no_log: true
 
                 - name: "Step 11e: Commit only after selected configuration, enrollment and native verification"
@@ -613,7 +613,15 @@
                     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-commit, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner | default('') }}"]
                   changed_when: false
                   when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
-                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9]
+                  tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10]
+                  no_log: true
+
+                - name: "Step 11f: Verify the stable native agent release, pin and availability (spec C10)"
+                  ansible.builtin.command:
+                    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-verify, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+                  changed_when: false
+                  when: not (wazuh_agent_transaction_reserved | default(false) | bool)
+                  tags: [C10]
                   no_log: true
 
               rescue:

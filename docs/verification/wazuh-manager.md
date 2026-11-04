@@ -92,6 +92,11 @@ credentials、憑證及 enrollment identity。成功需驗證有效版本、可�
 舊版可用性及代表性資料。只改回舊 tag 不算恢復，恢復失敗必須明確回報。
 未完成的持久交易阻止一般套用，只能進入明確的同交易 recovery 流程。
 root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
+中央 project 與所有選取的 volume data source 必須是真實目錄且祖先沒有 symlink；
+來源本身或子樹有 mount（包含同裝置 bind mount）時，在授予 reserve／停機權限前
+拒絕。此交易不支援刪除、重建 mount root。backup store 可位於一般獨立 filesystem，
+但不得有 subtree/bind ancestry、子 mount、或與來源互為實體 alias。discovery、
+停機前與回復前共用相同 layout 檢查；留存 archives 限於原 transaction 的 private directory。
 這是停止整個 single-node stack 的操作；期間中央停止接收與查詢事件。
 新增交易驗收尚待 candidate 的 target evidence；原 C1–C11 不代表交易已驗證。
 

@@ -203,6 +203,110 @@ def disjoint(paths, backup):
                 raise Refused('transaction backup sources overlap')
 
 
+class MountTable:
+    """The current host mount namespace, including same-device bind mounts."""
+    def __init__(self, text=None):
+        if text is None:
+            text = Path('/proc/self/mountinfo').read_text()
+        self.rows = []
+        for line in text.splitlines():
+            fields, separator, filesystem = line.partition(' - ')
+            fields, filesystem = fields.split(), filesystem.split()
+            if not separator or len(fields) < 6 or len(filesystem) < 3 or not re.fullmatch(r'[0-9]+:[0-9]+', fields[2]):
+                raise Refused('unknown host mount namespace')
+            decode = lambda value: re.sub(r'\\(040|011|012|134)', lambda m: chr(int(m[1], 8)), value)
+            root, point = Path(decode(fields[3])), Path(decode(fields[4]))
+            if not point.is_absolute() or '..' in root.parts or '..' in point.parts:
+                raise Refused('non-canonical host mount namespace')
+            # Kernel object mounts (e.g. nsfs net:[inode]) have no filesystem
+            # root. Keep their mountpoint for descendant rejection, and refuse
+            # physical mapping only if a selected path actually uses one.
+            root = root if root.is_absolute() else None
+            self.rows.append({'device': fields[2], 'root': root, 'point': point,
+                              'writable': 'rw' in fields[5].split(',')})
+        if not self.rows:
+            raise Refused('empty host mount namespace')
+
+    def containing(self, path):
+        candidates = [row for row in self.rows if path == row['point'] or row['point'] in path.parents]
+        if not candidates:
+            raise Refused('path has no known enclosing host mount')
+        depth = max(len(row['point'].parts) for row in candidates)
+        selected = [row for row in candidates if len(row['point'].parts) == depth]
+        if len({(row['device'], row['root'], row['writable']) for row in selected}) != 1:
+            raise Refused('selected path has ambiguous stacked mounts')
+        return selected[0]
+
+    def physical(self, path):
+        row = self.containing(path)
+        if row['root'] is None:
+            raise Refused('selected path has a non-filesystem mount root')
+        if not row['writable']:
+            raise Refused('selected recovery filesystem is read-only')
+        return row['device'], row['root'] / path.relative_to(row['point'])
+
+    def backup(self, root):
+        root = canonical(root)
+        row = self.containing(root)
+        if not row['writable']:
+            raise Refused('backup filesystem is read-only')
+        if row['root'] != Path('/'):
+            raise Refused('backup store has unsupported subtree or bind-mount ancestry')
+        if any(root in mount['point'].parents for mount in self.rows):
+            raise Refused('backup store contains an unsupported nested mount')
+        return root
+
+
+def path_shape(filename, kind, missing=False):
+    """Validate every ancestor before following a selected source or artifact."""
+    path = canonical(filename)
+    for parent in path.parents:
+        if parent.exists() and not parent.is_dir():
+            raise Refused('transaction path has a non-directory ancestor')
+    if not path.exists():
+        if missing:
+            return path
+        raise Refused('required transaction source is absent')
+    info = path.lstat()
+    if kind == 'directory' and not stat.S_ISDIR(info.st_mode):
+        raise Refused('transaction source must be a real directory')
+    if kind == 'file' and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+        raise Refused('transaction source must be a regular single-link file')
+    return path
+
+
+def restore_sources(specs, backup, missing=(), mounts=None):
+    """Reject layouts the bounded tar/delete/recreate recovery cannot restore.
+
+    Sources may live below ordinary filesystem mounts, but a selected root or
+    descendant mount cannot be deleted/recreated. Compare mount-backed physical
+    paths too, so a backup bind alias cannot evade lexical overlap checks.
+    """
+    mounts = mounts or MountTable()
+    backup = mounts.backup(path_shape(backup, 'directory', missing=True))
+    paths = [path_shape(name, kind, missing=name in missing) for name, kind in specs.items()]
+    disjoint(paths, backup)
+    for path in paths:
+        if any(row['point'] == path or path in row['point'].parents for row in mounts.rows):
+            raise Refused('transaction source contains an unsupported mount or nested mount')
+    physical = [mounts.physical(path) for path in [*paths, backup]]
+    for index, (device, path) in enumerate(physical):
+        for other_device, other in physical[index + 1:]:
+            if device == other_device and (path == other or path in other.parents or other in path.parents):
+                raise Refused('transaction source or backup has a physical filesystem alias')
+
+
+def private_file(filename, parent):
+    path = path_shape(filename, 'file')
+    parent = path_shape(parent, 'directory')
+    info = parent.stat()
+    if path.parent != parent or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise Refused('retained artifact escaped its exact private directory')
+    if path.stat().st_uid != os.geteuid():
+        raise Refused('retained artifact has a different owner')
+    return path
+
+
 def atomic_json(path, value):
     tmp = path.with_name(path.name + '.' + uuid.uuid4().hex)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -256,6 +360,7 @@ class HostWriter:
 
     @contextlib.contextmanager
     def mutex(self, shared=False):
+        MountTable().backup(path_shape(self.root, 'directory', missing=True))
         private_dir(self.root)
         with bounded_flock(self.root / 'coordinator.lock', shared=shared):
             yield
@@ -368,6 +473,7 @@ class Transaction:
 
     @contextlib.contextmanager
     def lock(self, owner=None, reader=False):
+        MountTable().backup(path_shape(self.root, 'directory', missing=True))
         private_dir(self.root)
         host = HostWriter(self.root)
         scope = host.reader(self.kind, owner) if reader else host.guard(owner, self.kind) if owner is not None else contextlib.nullcontext()
@@ -426,7 +532,10 @@ class Transaction:
         self.idle()
         if not re.fullmatch('[a-f0-9]{32}', owner):
             raise Refused('invalid transaction owner')
-        backup = private_dir(self.root / (self.kind + '-' + owner))
+        destination = self.root / (self.kind + '-' + owner)
+        if destination.exists() or destination.is_symlink():
+            raise Refused('transaction would reuse retained recovery material')
+        backup = private_dir(destination)
         item = dict(state, kind=self.kind, owner=owner, backup=str(backup))
         self.write(item, 'reserved')
         return item
@@ -451,6 +560,10 @@ class Transaction:
 
     def archive(self, source, dest):
         source = Path(source)
+        restore_sources({str(source): 'directory' if source.is_dir() else 'file'}, self.root)
+        path_shape(Path(dest).parent, 'directory')
+        if Path(dest).exists() or Path(dest).is_symlink():
+            raise Refused('archive destination already exists')
         self.r.run(['tar', '--acls', '--xattrs', '--xattrs-include=*', '--selinux', '--numeric-owner', '--sparse',
                     '-cpf', dest, '-C', source.parent, source.name], timeout=1800)
         self.r.run(['tar', '-tf', dest], timeout=300)
@@ -459,6 +572,8 @@ class Transaction:
         return checksum
 
     def restore(self, source, archive, checksum):
+        restore_sources({str(source): 'directory' if Path(source).is_dir() else 'file'}, self.root, missing=(str(source),))
+        private_file(archive, Path(archive).parent)
         if digest(archive) != checksum:
             raise Refused('backup checksum mismatch; refusing restore')
         source = canonical(source)
@@ -644,7 +759,7 @@ class Central(Transaction):
         if len(releases) != 1:
             raise Refused('central components have mixed Wazuh releases')
         release = releases.pop()
-        disjoint(sorted(paths), self.root)
+        restore_sources({path: 'directory' for path in paths}, self.root)
         for name in volume_names:
             consumers = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + name], timeout=30).stdout.split()
             if not consumers or not set(consumers).issubset(set(ids)):
@@ -918,6 +1033,7 @@ class Central(Transaction):
             expected_paths.add(str(expected))
         if set(item['paths']) != expected_paths:
             raise Refused('recovery source paths escaped the recorded owned project')
+        restore_sources({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
 
     def validate_restore_scope(self, item):
         self.validate_project_scope(item)
@@ -926,11 +1042,13 @@ class Central(Transaction):
         for entry in item['archives']:
             if canonical(entry['archive']).parent != canonical(item['backup']):
                 raise Refused('recovery archive escaped the retained backup')
+            private_file(entry['archive'], item['backup'])
         # Validate every archive before stopping any currently running stack.
         for entry in item['archives']:
             if digest(entry['archive']) != entry['sha256']:
                 raise Refused('recovery archive checksum mismatch')
         image_archive = item['image_archive']
+        private_file(image_archive['path'], item['backup'])
         if (canonical(image_archive['path']).parent != canonical(item['backup'])
                 or digest(image_archive['path']) != image_archive['sha256']):
             raise Refused('old image archive checksum or scope mismatch')
@@ -1048,9 +1166,11 @@ class Central(Transaction):
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['target_version'] = target
             state['target_images'] = target_images
+            restore_sources({path: 'directory' for path in state['paths']}, self.root)
             item = self.begin(owner, state)
             try:
                 self.retain_images(item)
+                restore_sources({path: 'directory' for path in item['paths']}, self.root)
                 self.write(item, 'stopping')
                 self.compose_run(item, 'stop', '--timeout', '60')
                 for image in item['images'].values():
@@ -1102,8 +1222,65 @@ class Agent(Transaction):
     def pin_path(self):
         return '/etc/apt/preferences.d/pilot-wazuh-agent' if self.family == 'Debian' else '/etc/yum.repos.d/wazuh.repo'
 
+    def source_paths(self):
+        specs = {'/var/ossec': 'directory', '/etc/hosts': 'file', self.pin_path(): 'file'}
+        restore_sources(specs, self.root, missing=('/etc/hosts', self.pin_path()))
+        self.managed_files()
+        return [name for name in specs if Path(name).exists()]
+
+    def managed_files(self, missing=False):
+        # These files are directly read/written by enrollment/configuration;
+        # preserving only an alias would omit their effective old contents.
+        for filename in ('/var/ossec/etc/client.keys', '/var/ossec/etc/ossec.conf'):
+            path_shape(filename, 'file', missing=missing)
+
+    def validate_agent_layout(self, item, recovery=False):
+        pin = self.pin_path()
+        expected = {'/var/ossec'} | ({'/etc/hosts'} if '/etc/hosts' in item['paths'] else set())
+        if item['pin_state']['present']:
+            expected.add(pin)
+        if set(item['paths']) != expected or item['pin_state']['path'] != pin:
+            raise Refused('agent selected recovery sources escaped their exact allowed scope')
+        restore_sources({'/var/ossec': 'directory', '/etc/hosts': 'file', pin: 'file'}, self.root,
+                        missing=('/var/ossec', '/etc/hosts', pin) if recovery else ('/etc/hosts', pin))
+        self.managed_files(missing=recovery)
+        if not recovery and set(self.source_paths()) != expected:
+            raise Refused('agent source presence changed before cold backup')
+
+    def validate_packages(self, item):
+        if set(item['packages']) != {item['installed'], item['package']}:
+            raise Refused('retained exact package set changed')
+        for info in item['packages'].values():
+            path = private_file(info['path'], item['backup'])
+            if digest(path) != info['sha256']:
+                raise Refused('retained package checksum mismatch')
+
+    def validate_stage_scope(self):
+        if self.family == 'Debian':
+            # A cache bind alias into agent data is also an output-scope escape,
+            # even though it has no symlink components. Debian package writes
+            # remain entirely in the sanctioned framework.
+            cache = '/var/cache/apt/archives'
+            restore_sources({'/var/ossec': 'directory', '/etc/hosts': 'file',
+                             self.pin_path(): 'file', cache: 'directory'}, self.root,
+                            missing=('/etc/hosts', self.pin_path()))
+
+    def stage_preflight(self, owner):
+        with self.lock(owner=owner):
+            self.idle()
+            self.source_paths()
+            self.validate_stage_scope()
+            if self.family == 'RedHat':
+                cache = self.root / 'rpm-stage'
+                path_shape(cache, 'directory', missing=True)
+                private_dir(cache)
+                # Do not let stale aliases become DNF output destinations.
+                for path in cache.glob('*'):
+                    private_file(path, cache)
+            return {'ready': True}
+
     def capture_pin(self):
-        path = Path(self.pin_path())
+        path = path_shape(self.pin_path(), 'file', missing=True)
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise Refused('unsafe agent pin state')
         return {'path': self.pin_path(), 'present': path.exists(),
@@ -1115,6 +1292,7 @@ class Agent(Transaction):
             raise Refused('agent version pin does not match the verified transaction state')
 
     def restore_absence(self, item):
+        self.validate_agent_layout(item, recovery=True)
         expected = [] if item['pin_state']['present'] else [self.pin_path()]
         if item['absent_pins'] != expected or set(expected) & set(item['paths']):
             raise Refused('agent absence restoration escaped its recorded scope')
@@ -1164,6 +1342,7 @@ class Agent(Transaction):
         # The sanctioned package framework populates this authenticated cache
         # before reserve/quiesce. Copy exact old and new artifacts privately.
         result = {}
+        self.validate_stage_scope()
         if self.family == 'Debian':
             filename = Path(__file__).with_name('apt-exact-stage.py')
             spec = importlib.util.spec_from_file_location('pilot_apt_exact_stage', filename)
@@ -1180,7 +1359,11 @@ class Agent(Transaction):
                 raise Refused('exact staged Debian artifact failed authenticated metadata validation') from exc
             return result
         cache = self.root / 'rpm-stage'
-        for path in cache.glob('**/*.rpm'):
+        path_shape(cache, 'directory')
+        if cache.stat().st_uid != os.geteuid() or stat.S_IMODE(cache.stat().st_mode) != 0o700:
+            raise Refused('unsafe private RPM staging directory')
+        for path in cache.glob('*.rpm'):
+            path = private_file(path, cache)
             signature = self.r.run(['rpmkeys', '-Kv', path]).stdout
             if not re.search(r'Signature.*: OK', signature):
                 raise Refused('staged RPM lacks a verified trusted signature')
@@ -1199,23 +1382,26 @@ class Agent(Transaction):
                 raise Refused('durable agent transactions are only for existing enrolled-agent upgrades')
             if self.installed() != plan['installed']:
                 raise Refused('installed package changed since compatibility probe')
+            paths = self.source_paths()
+            self.validate_stage_scope()
             keys = Path('/var/ossec/etc/client.keys')
-            if not keys.is_file() or keys.stat().st_size == 0:
+            path_shape(keys, 'file')
+            if keys.stat().st_size == 0:
                 raise Refused('controlled upgrade requires an existing enrolled agent identity')
             packages = self.package_archives(plan['installed'], plan['package'])
-            paths = ['/var/ossec'] if plan['installed'] else []
-            if Path('/etc/hosts').exists():
-                paths.append('/etc/hosts')
+            for release, artifact in packages.items():
+                if release in (plan['installed'], plan['package']):
+                    retained_source = path_shape(artifact['path'], 'file')
+                    if retained_source.stat().st_uid != os.geteuid():
+                        raise Refused('staged package has a different owner')
             pin = self.pin_path()
-            if Path(pin).is_symlink():
-                raise Refused('agent version pin became a symlink')
-            if Path(pin).exists():
-                paths.append(pin)
             self.capacity(paths)
             active = self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode == 0
             enabled = self.r.run(['systemctl', 'is-enabled', 'wazuh-agent'], allowed=(0, 1, 3, 4)).stdout.strip()
             if enabled not in ('enabled', 'disabled'):
                 raise Refused('unsupported previous agent service enablement state')
+            if self.source_paths() != paths:
+                raise Refused('agent source presence changed before reservation')
             item = self.begin(owner, dict(plan, active=active, enabled=enabled, family=self.family,
                                           paths=paths, absent_pins=[] if Path(pin).exists() else [pin],
                                           pin_state=self.capture_pin(), keys=digest(keys)))
@@ -1223,8 +1409,12 @@ class Agent(Transaction):
             for release, artifact in packages.items():
                 if release not in (plan['installed'], plan['package']):
                     continue
+                path_shape(artifact['path'], 'file')
                 destination = Path(item['backup']) / artifact['path'].name
+                if destination.exists() or destination.is_symlink():
+                    raise Refused('retained package destination already exists')
                 shutil.copy2(artifact['path'], destination)
+                private_file(destination, item['backup'])
                 if digest(destination) != artifact['sha256']:
                     raise Refused('signed package changed between staging and private retention')
                 sync_file(destination)
@@ -1235,6 +1425,9 @@ class Agent(Transaction):
     def cold_backup(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('staged',))
+            self.validate_agent_layout(item)
+            self.verify_pin(item)
+            self.validate_packages(item)
             self.write(item, 'stopping')
             if item['installed']:
                 self.r.run(['systemctl', 'stop', 'wazuh-agent'], timeout=90)
@@ -1253,15 +1446,14 @@ class Agent(Transaction):
     def authorize_install(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('backed-up',))
-            for info in item['packages'].values():
-                if digest(info['path']) != info['sha256']:
-                    raise Refused('staged package checksum mismatch')
+            self.validate_agent_archives(item)
             self.write(item, 'installing')
             return {'changed': False}
 
     def prepare_recovery(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner)
+            self.validate_agent_layout(item, recovery=True)
             action = AGENT_RECOVERY.get(item['phase'])
             if action == 'resume-old':
                 # No package/data restore authority exists before a cold backup.
@@ -1286,19 +1478,19 @@ class Agent(Transaction):
                 raise Refused('old agent package is unavailable; journal retained')
             self.r.run(['systemctl', 'stop', 'wazuh-agent'], timeout=90)
             self.write(item, 'recovering')
-            if old:
-                cache = Path('/var/cache/apt/archives') if self.family == 'Debian' else self.root / 'rpm-stage'
-                shutil.copy2(old['path'], cache / Path(old['path']).name)
             return {'reinstall': bool(item['installed']), 'version': item['installed'],
                     'package_path': old['path'] if old else '', 'restored': False,
                     'need_commit': True, 'manager_host': item.get('manager_host', '')}
 
     def validate_agent_archives(self, item):
+        self.validate_agent_layout(item, recovery=True)
+        self.validate_packages(item)
         allowed = {'/var/ossec', '/etc/hosts', self.pin_path()}
         if not set(item['paths']).issubset(allowed) or {entry['path'] for entry in item['archives']} != set(item['paths']):
             raise Refused('agent recovery path scope is invalid')
         disjoint(item['paths'], self.root)
         for entry in item['archives']:
+            private_file(entry['archive'], item['backup'])
             if canonical(entry['archive']).parent != canonical(item['backup']) or digest(entry['archive']) != entry['sha256']:
                 raise Refused('agent recovery archive validation failed before restoration')
 
@@ -1320,6 +1512,8 @@ class Agent(Transaction):
     def finish_recovery(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('restored', 'committed', 'recovered'))
+            self.validate_agent_layout(item, recovery=True)
+            self.managed_files()
             already_committed = item['phase'] == 'committed'
             expected = item['package'] if already_committed else item['installed']
             if self.installed() != expected:
@@ -1360,6 +1554,8 @@ class Agent(Transaction):
     def commit(self, owner):
         with self.lock(owner=owner):
             item = self.owned(owner, ('installing',))
+            self.validate_agent_layout(item, recovery=True)
+            self.managed_files()
             if self.installed() != item['package']:
                 raise Refused('agent effective package version does not match frozen target')
             native = self.r.run(['/var/ossec/bin/wazuh-control', 'info'], timeout=30).stdout
@@ -1422,7 +1618,7 @@ class Agent(Transaction):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['writer-inspect', 'writer-claim', 'writer-resume', 'writer-release',
-                                         'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-reserve', 'agent-backup',
+                                         'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
@@ -1470,6 +1666,8 @@ def main():
             agent = Agent(args.family)
             if args.action == 'agent-check':
                 value = agent.check(args.manager, args.version, args.upgrade, args.owner or None)
+            elif args.action == 'agent-stage':
+                value = agent.stage_preflight(args.owner)
             elif args.action == 'agent-runtime':
                 value = agent.runtime(args.owner or None)
             elif args.action == 'agent-verify':

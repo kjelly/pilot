@@ -144,6 +144,16 @@
 - name: "APT package install ({{ pilot_apt_component }}) — resolve a candidate, refreshing only if required"
   when: _pilot_apt_missing | length > 0
   block:
+    - name: "APT package install ({{ pilot_apt_component }}) — validate exact-version cache paths before any installer"
+      ansible.builtin.script:
+        cmd: "../files/apt-exact-stage.py --cache-preflight"
+        executable: python3
+      changed_when: false
+      check_mode: false
+      when:
+        - _pilot_apt_versions | length > 0
+        - pilot_apt_recovery_artifact is not defined
+
     - name: "APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)"
       ansible.builtin.command:
         argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]

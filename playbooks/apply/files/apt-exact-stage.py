@@ -28,7 +28,34 @@ def records(text):
         yield record
 
 
+def safe_path(filename, directory=False):
+    path = Path(filename)
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('non-canonical artifact path')
+    for parent in (path, *path.parents):
+        if parent.is_symlink():
+            raise ValueError('artifact path contains a symlink ancestor')
+        if parent != path and parent.exists() and not parent.is_dir():
+            raise ValueError('artifact path has a non-directory ancestor')
+    info = path.lstat()
+    if directory:
+        valid = stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o022
+    else:
+        valid = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    if not valid or info.st_uid != os.geteuid():
+        raise ValueError('untrusted artifact type, permissions or ownership')
+    return path
+
+
+def validate_cache(cache=Path('/var/cache/apt/archives')):
+    cache = safe_path(cache, directory=True)
+    for path in cache.glob('*.deb'):
+        safe_path(path)
+    return cache
+
+
 def verify(versions, cache=Path('/var/cache/apt/archives')):
+    cache = validate_cache(cache)
     artifacts = []
     architecture = run(['dpkg', '--print-architecture']).strip()
     for package, version in versions.items():
@@ -40,8 +67,9 @@ def verify(versions, cache=Path('/var/cache/apt/archives')):
         matched = None
         for item in metadata:
             path = cache / Path(item['Filename']).name
-            if path.is_symlink() or not path.is_file():
+            if not path.exists():
                 continue
+            safe_path(path)
             check = hashlib.sha256()
             with path.open('rb') as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b''):
@@ -60,28 +88,26 @@ def verify(versions, cache=Path('/var/cache/apt/archives')):
     return artifacts
 
 
-def verify_recovery(filename, versions):
+def verify_recovery(filename, versions, root=Path('/var/backups/pilot/wazuh')):
     """Trust an archive only through the coordinator's private recovery manifest.
 
     The original stage verified APT metadata and the manifest froze its digest.
     Recovery must work after repository metadata changes or disappears.
     """
-    path = Path(filename)
-    if path.is_symlink() or not path.is_file():
-        raise ValueError('unsafe recovery artifact')
+    path = safe_path(filename)
     parent = path.parent
-    if parent.parent != Path('/var/backups/pilot/wazuh') or not parent.name.startswith('agent-'):
+    if parent.parent != root or not parent.name.startswith('agent-'):
         raise ValueError('artifact outside private agent transaction')
     for directory in (parent, parent.parent):
-        info = directory.lstat()
+        info = safe_path(directory, directory=True).lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
             raise ValueError('unsafe recovery directory')
     manifest = parent / 'manifest.json'
-    info = manifest.lstat()
+    info = safe_path(manifest).lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise ValueError('unsafe recovery manifest')
     item = json.loads(manifest.read_text())
-    active = json.loads((parent.parent / 'agent-active.json').read_text())
+    active = json.loads(safe_path(parent.parent / 'agent-active.json').read_text())
     if active.get('owner') != item.get('owner') or active.get('phase') != 'recovering':
         raise ValueError('recovery owner is no longer active')
     if item['phase'] != 'recovering' or item['family'] != 'Debian' or item['kind'] != 'agent':
@@ -102,7 +128,9 @@ def verify_recovery(filename, versions):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) == 4 and sys.argv[1] == '--recovery':
+        if len(sys.argv) == 2 and sys.argv[1] == '--cache-preflight':
+            result = {'cache': str(validate_cache())}
+        elif len(sys.argv) == 4 and sys.argv[1] == '--recovery':
             result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]))
         else:
             result = verify(json.loads(sys.argv[1]))

@@ -7,6 +7,12 @@
     wazuh_agent_transaction_owner: "{{ wazuh_writer_owner }}"
     wazuh_agent_transaction_reserved: false
 
+- name: "Validate restorable agent sources and private staging paths before package downloads"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-stage, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+  changed_when: false
+  no_log: true
+
 - name: "Stage the exact signed old and new Debian agent packages before downtime"
   ansible.builtin.include_tasks: apt-package-install.yml
   vars:
@@ -21,15 +27,6 @@
   loop_control:
     loop_var: wazuh_agent_stage_version
   when: ansible_os_family == 'Debian'
-
-- name: "Create root-only RPM package staging directory"
-  ansible.builtin.file:
-    path: /var/backups/pilot/wazuh/rpm-stage
-    state: directory
-    owner: root
-    group: root
-    mode: "0700"
-  when: ansible_os_family == 'RedHat'
 
 - name: "Stage the exact signed old and new RPM agent packages before downtime"
   ansible.builtin.command:

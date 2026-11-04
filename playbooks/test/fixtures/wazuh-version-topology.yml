@@ -1,8 +1,16 @@
 ---
 # Immutable candidate wrapper for the real manager -> agent ordering.
 # Selectors remain inherited from the actual component imports.
+- name: Install the fresh manager's Docker prerequisite first
+  ansible.builtin.import_playbook: ../../apply/docker-apply.yml
+  tags: [docker]
+
 - name: Deploy the central Wazuh stack first
   ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
+  vars:
+    # Configuration assertions C10/C11 only. There is no SIEM receiver and no
+    # claim of SIEM delivery; agent -> central transport is tested separately.
+    siem_forward_host: "127.0.0.1"
   tags: [wazuh-manager]
 
 - name: Deploy compatible Wazuh agents second
