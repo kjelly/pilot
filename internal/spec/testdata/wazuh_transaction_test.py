@@ -1010,7 +1010,9 @@ class FakeCentral(w.Central):
         item['image_archive'] = {'path': str(archive), 'sha256': w.digest(archive)}
         self.write(item, item['phase'])
 
-    def quiesce_for_restore(self, item, remove=True):
+    def quiesce_for_restore(self, item, remove=True, inspect_only=False):
+        if inspect_only:
+            return
         self.calls.append((item['phase'], ('down',)))
 
     def wait(self, release, images):
@@ -1875,8 +1877,9 @@ class LiveLayoutTests(unittest.TestCase):
                         self.calls.append((item['phase'], args))
                         if args[0] == 'stop': self.running = False
                         if args[0] == 'up': self.running = True
-                    def quiesce_for_restore(self, item, remove=True):
-                        self.running = False;super().quiesce_for_restore(item, remove)
+                    def quiesce_for_restore(self, item, remove=True, inspect_only=False):
+                        if not inspect_only:self.running = False
+                        super().quiesce_for_restore(item, remove, inspect_only=inspect_only)
                 central = ActiveCentral(Path(temporary), fail=recovery)
                 log = central.volume / '00-live.log';log.write_text('old log')
                 trigger = central.volume / '99-trigger';trigger.write_text('stable')

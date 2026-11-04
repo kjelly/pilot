@@ -558,9 +558,9 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                         if item['phase']=='switching':
                             (self.volume/'alerts/alerts.json').write_bytes(b'OLD1\nTARGET2_AFTER_BACKUP\n')
                             with (self.spool/'wazuh_alerts.00000001').open('ab') as queue:queue.write(b'TARGET2_AFTER_BACKUP\n')
-                def quiesce_for_restore(self,item,remove=True):
-                    self.producing=False
-                    super().quiesce_for_restore(item,remove)
+                def quiesce_for_restore(self,item,remove=True,inspect_only=False):
+                    if not inspect_only:self.producing=False
+                    super().quiesce_for_restore(item,remove,inspect_only=inspect_only)
             central=Central(root);owner='1'*32;w.HostWriter(central.root).claim(owner,'central')
             user=type('NativeUser',(),{'pw_uid':os.geteuid()})()
             group=type('NativeGroup',(),{'gr_gid':os.getegid()})()

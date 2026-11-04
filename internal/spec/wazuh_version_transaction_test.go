@@ -60,3 +60,11 @@ func TestWazuhEndpointBinding(t *testing.T) {
 		t.Fatalf("Wazuh endpoint binding controls failed: %v\\n%s", err, output)
 	}
 }
+
+// Whole production rollback callers, not a manually promoted source fallback.
+func TestWazuhRecoveryEntryAuthority(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_recovery_entry_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh recovery entry authority controls failed: %v\\n%s", err, output)
+	}
+}

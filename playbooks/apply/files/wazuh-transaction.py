@@ -1808,6 +1808,8 @@ class ReaderNamespace:
         mode = observed.get('mode_candidate')
         if mode not in ('never', 'disabled', 'enabled'):
             raise Refused('unknown reader baseline candidate')
+        if mode == 'never' and (self.spool.exists() or self.spool.is_symlink()):
+            raise Refused('retained Wazuh data cannot be classified as never configured')
         for resource in observed['resources']:
             if (not isinstance(resource, dict) or set(resource) != {'kind','attrs','workdirectory','file'}
                     or not isinstance(resource['attrs'], dict)
@@ -2384,7 +2386,21 @@ class Reader:
             raise Refused('invalid reader phase transition')
         value = self.use(item)
         if phase != value['phase'] and phase not in READER_TRANSITIONS[value['phase']]:
-            raise Refused('reader phase cannot grant this next effect')
+            reentry = (value.get('mode'), value['phase'], phase) in (
+                ('disabled', 'producers-start-intent', 'queue-sealed'),
+                ('enabled', 'exposure-intent', 'reader-stopped'))
+            if not reentry:
+                raise Refused('reader phase cannot grant this next effect')
+            active = self.t.owned(item.get('owner'), ('recovering',))
+            marker = HostWriter(self.t.root).active()
+            if (not marker or marker['owner'] != active['owner'] or marker['component'] != 'central'
+                    or active.get('reader', {}).get('mode') != value['mode']
+                    or active.get('reader', {}).get('phase') != value['phase']):
+                raise Refused('reader reentry lacks the matching durable recovery context')
+            # Only pause writes these edges: after qualified StopProof for the
+            # enabled branch, or after producer/FD exclusion and a fresh,
+            # durable CURRENT seal for the disabled branch. No new effect
+            # authority is inferred from an in-memory phase/proof flag.
         value['phase'] = phase
         if phase.startswith('cursor-') and value.get('generation'):
             value['generation']['phase'] = phase
@@ -2466,9 +2482,13 @@ class Reader:
                 if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
                         after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
                     raise Refused('producer source changed after producer freeze')
-                self.write(item, 'drained')
-                self.write(item, 'reader-stop-intent')
-                value['exit'] = self.units.stop(proof)
+                recorded_stop = value['phase'] == 'reader-stop-intent'
+                if not recorded_stop:
+                    self.write(item, 'drained')
+                    self.write(item, 'reader-stop-intent')
+                # Reconcile an existing intent against the same freshly
+                # observed invocation/drain, never rewind its durable phase.
+                value['exit'] = self.units.stop(proof, requested=recorded_stop)
             elif state['ActiveState'] == 'inactive' and (
                     value.get('exit') or value['phase'] == 'reader-stop-intent'):
                 value['exit'] = self.units.stop(value['units'], requested=True)
@@ -3090,7 +3110,7 @@ class Central(Transaction):
             if (not actual and not allow_empty) or not actual.issubset(expected):
                 raise Refused('persistent volume acquired a foreign consumer')
 
-    def quiesce_for_restore(self, item, remove=True):
+    def quiesce_for_restore(self, item, remove=True, inspect_only=False):
         """Replayable even when a previous restore removed live Compose files."""
         ids = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter',
                          'label=com.docker.compose.project=single-node'], timeout=30).stdout.split()
@@ -3124,6 +3144,8 @@ class Central(Transaction):
             consumers = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + name], timeout=30).stdout.split()
             if not set(consumers).issubset(set(ids)):
                 raise Refused('recovery volume has a foreign consumer')
+        if inspect_only:
+            return
         self.r.run(['docker', 'stop', '--time', '60', *ids], timeout=120, operation='quiesce owned recovery containers')
         states = self.r.json(['docker', 'inspect', *ids], timeout=30)
         if any(container['State']['Running'] for container in states):
@@ -3352,10 +3374,24 @@ class Central(Transaction):
         self.finish(item, item['phase'])
 
     def rollback(self, item):
-        self.validate_restore_scope(item)
+        # Only the durable journal supplies cold restore authority. A caller's
+        # in-memory phase/paths cannot promote an incomplete or foreign state.
+        phases = tuple(phase for phase, action in CENTRAL_RECOVERY.items() if action == 'restore-old')
+        active = self.owned(item.get('owner'), phases)
+        writer = HostWriter(self.root).active()
+        if (not writer or writer['owner'] != active['owner']
+                or writer['component'] != 'central' or writer['mode'] not in ('apply', 'recover')
+                or item.get('backup') != active.get('backup')):
+            raise Refused('cold recovery journal and host writer authority differ')
+        self.validate_restore_scope(active)
+        self.quiesce_for_restore(active, inspect_only=True)
+        # The fully validated intent must precede every consumer of absent-
+        # manager source authority. A failed boundary leaves this retryable.
+        self.write(active, 'recovering')
+        item.clear()
+        item.update(active)
         if 'reader' in item:
             self.reader.boundary(item)
-        self.write(item, 'recovering')
         self.r.run(['docker', 'image', 'load', '--input', item['image_archive']['path']], timeout=1800,
                    operation='load retained old image artifacts')
         if 'reader' in item:
