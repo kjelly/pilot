@@ -2,6 +2,8 @@
 
 這是 **Skill + 原生 subagents + fail-closed Quality Gate**，不是會獨立執行的排程 daemon。呼叫 Skill 的 Agent 需要實際具備 Git、GitHub CLI、Python 與必要的網路權限，才能執行修復、驗證、push、Ready transition。未達品質門檻時不得轉 Ready；絕不自動 merge 或繞過 branch protection。
 
+Ready 前必須包含最新 `main`：gate 獨立讀取遠端 base tip，確認它是 PR HEAD 的祖先，並核對 PR Base SHA。尚未包含時先將已確認的最新 base 合併到原 PR 分支，再跑相關驗證/CI 與新的獨立審查；沒有衝突也要檢查。讀取失敗或對齊無法確認時維持 Draft。
+
 ## 安裝（repo 內建，不另外安裝）
 
 這個 skill 是 pilot repository 專用，沒有全域安裝與安裝腳本。canonical 內容就是

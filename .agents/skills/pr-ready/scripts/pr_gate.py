@@ -115,12 +115,8 @@ def stale_detail(ctx: Any, value: Any) -> str:
         return ""
 
 
-def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
-    """Use the same base-manifest/target-run verifier as the final merge gate.
-
-    This does not relax this workflow's HEAD-bound local receipts or independent
-    review. All three workflows ship together in this repository.
-    """
+def merge_gate_modules() -> tuple[Any, Any]:
+    """Load the shared remote verifiers from the shipped merge skill."""
     scripts = Path(__file__).resolve().parents[2] / "pr-review-merge" / "scripts"
     sys.path.insert(0, str(scripts))
     try:
@@ -133,17 +129,39 @@ def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: s
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             spec.loader.exec_module(module)
+        import gh_runtime
+        return module, gh_runtime
+    finally:
+        sys.path.pop(0)
+
+
+def base_alignment_errors(pr: dict[str, Any], repo: str) -> list[str]:
+    """Ready and merge use the same live-base ancestry requirement."""
+    try:
+        module, client = merge_gate_modules()
+        result = module.check_base_alignment(client, client.Repo.parse(repo), pr["number"], pr)
+        if result["base_mismatch"]:
+            return [f"PR Base SHA {pr['baseRefOid']} differs from live {pr['baseRefName']} SHA {result['live_base_sha']}"]
+        if result["base_behind"]:
+            return [f"PR HEAD {pr['headRefOid']} does not include live {pr['baseRefName']} SHA "
+                    f"{result['live_base_sha']}; integrate the latest base and rerun validation/CI and independent review"]
+        return []
+    except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
+        return [f"Base alignment verification unavailable: {exc}"]
+
+
+def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
+    """Use the same base-manifest/target-run verifier as the final merge gate."""
+    try:
+        module, gh_runtime = merge_gate_modules()
         head, base = pr.get("headRefOid"), pr.get("baseRefOid")
         if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(base, str) or not SHA.fullmatch(base):
             return ["Current HEAD/base SHA unavailable for target evidence validation"]
-        import gh_runtime
         gaps, _ = module.check_target_validation(gh_runtime, gh_runtime.Repo.parse(repo), head, base, evidence,
                                                 base_name=pr.get("baseRefName"))
         return gaps
     except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
         return [f"Target evidence validation unavailable: {exc}"]
-    finally:
-        sys.path.pop(0)
 
 
 # `gh pr checks --required` on a branch without required checks (no branch protection or ruleset
@@ -903,6 +921,7 @@ def main() -> int:
                 pending.extend(lifecycle.pending)
             if pins is not None:
                 errors.extend(pins.verify(snapshot, args.evidence, evidence, args.worktree, args.base_remote))
+            errors.extend(base_alignment_errors(snapshot.pr, args.repo))
             return errors, pending, list(ctx.accepted) if ctx is not None else []
 
         while True:
@@ -942,6 +961,9 @@ def main() -> int:
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
+                    alignment_errors = base_alignment_errors(after_pr, args.repo)
+                    if alignment_errors:
+                        raise GateError("Ready invoked but post-action verification failed: " + "; ".join(alignment_errors))
                     if pins is not None:
                         errors = pins.verify(after, args.evidence, evidence, args.worktree, args.base_remote)
                         sha, branch, dirty = check_local(args.worktree)

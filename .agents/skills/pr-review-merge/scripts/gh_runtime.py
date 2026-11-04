@@ -143,13 +143,34 @@ def branch_head(repo: Repo, name: str) -> str:
     """Resolve the live branch; pullRequest.baseRefOid can lag after another PR merges."""
     if not isinstance(name, str) or not name:
         raise GitHubError("Live base branch name unavailable")
-    data = gh_json(["api", *host_args(repo),
-                    f"repos/{repo.owner}/{repo.name}/branches/{quote(name, safe='')}"])
-    commit = data.get("commit") if isinstance(data, dict) else None
-    sha = commit.get("sha") if isinstance(commit, dict) else None
-    if not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
+    data = gh_json(["api", *host_args(repo), "-H", "Cache-Control: no-cache",
+                    f"repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(name, safe='')}"])
+    obj = data.get("object") if isinstance(data, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(obj, dict) or obj.get("type") != "commit" or \
+            not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
         raise GitHubError("Live base branch SHA unavailable")
     return sha
+
+
+def is_ancestor(repo: Repo, base: str, head: str) -> bool:
+    """Check commit ancestry from compare metadata, independent of its file-list limit."""
+    if not (COMMIT_SHA.fullmatch(base) and COMMIT_SHA.fullmatch(head)):
+        raise ValueError("is_ancestor needs two full lowercase commit SHAs")
+    data = gh_json(["api", *host_args(repo), f"repos/{repo.owner}/{repo.name}/compare/{base}...{head}"])
+    try:
+        status, behind = data["status"], data["behind_by"]
+        merge_base = data["merge_base_commit"]["sha"]
+        if status not in ("ahead", "behind", "identical", "diverged") or type(behind) is not int or behind < 0 \
+                or not isinstance(merge_base, str) or not COMMIT_SHA.fullmatch(merge_base):
+            raise ValueError("compare metadata")
+        if status in ("ahead", "identical") and behind == 0 and merge_base == base:
+            return True
+        if status in ("behind", "diverged") and behind > 0 and merge_base != base:
+            return False
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GitHubError("Invalid ancestry comparison response") from exc
+    raise GitHubError("Inconsistent ancestry comparison response")
 
 
 def _not_found(cp: subprocess.CompletedProcess[str]) -> bool:

@@ -26,6 +26,13 @@ if a[:2] == ['pr', 'view']:
     d['view_count'] = d.get('view_count', 0) + 1
     if d.get('race_on_view') == d['view_count']:
         d['view']['headRefOid'] = 'c'*40
+    names = d.get('base_name_on_view', {})
+    count = str(d['view_count'])
+    if count in names:
+        if names[count] is None:
+            d['view'].pop('baseRefName', None)
+        else:
+            d['view']['baseRefName'] = names[count]
     emit(d['view'])
 if a[:2] == ['pr', 'checks']:
     persist()
@@ -41,8 +48,22 @@ if a[0] == 'api' and '/rules/branches/' in a[-1]:
     if d.get('rules_error'):
         print('rules denied', file=sys.stderr); persist(); sys.exit(1)
     emit([d.get('rules', [])])
+if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
+    d['ref_count'] = d.get('ref_count', 0) + 1
+    if d.get('ref_error'):
+        persist(); print('ref unavailable', file=sys.stderr); sys.exit(1)
+    if d.get('race_on_ref') == d['ref_count']:
+        d['live_base'] = 'd'*40
+    emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and '/compare/' in a[-1] and a[-1] not in d.get('api', {}):
+    if d.get('ancestry_error'):
+        persist(); print('comparison unavailable', file=sys.stderr); sys.exit(1)
+    base, head = a[-1].split('/compare/')[1].split('...')
+    aligned = d.get('ancestor', True)
+    emit({'status': 'ahead' if aligned else 'diverged', 'behind_by': 0 if aligned else 1,
+          'merge_base_commit': {'sha': base if aligned else 'e'*40}})
 if a[0] == 'api' and ('/contents/' in a[-1] or '/compare/' in a[-1]):
     # Answers recorded from real `gh api` calls (fixtures/github_api.json); anything else is
     # GitHub's real 404 for a path or commit it does not have.
@@ -174,6 +195,167 @@ class Integration(unittest.TestCase):
         calls=[a[1] for a in d['calls'] if a[0]=='pr' and a[1] in ('comment','ready','merge')]
         self.assertEqual(calls,['comment','ready'])
 
+    def test_base_mismatch_comments_then_drafts_without_review(self):
+        self.patch(live_base='c'*40)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('c'*40, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_base_mismatch_comment_failure_preserves_ready(self):
+        self.patch(live_base='c'*40, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_behind_head_comments_then_drafts_without_review(self):
+        self.patch(ancestor=False)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(HEAD, d['comments'][0])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_behind_head_comment_failure_preserves_ready(self):
+        self.patch(ancestor=False, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_ancestry_unavailable_never_mutates(self):
+        self.patch(ancestry_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_ancestry_gate_never_mutates(self):
+        self.patch(ancestor=False, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_head_repaired_during_comment_prevents_draft(self):
+        self.patch(ancestor=False, race_on_view=4)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertTrue(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+        self.assertFalse(any(a[:2] == ['pr', 'ready'] for a in self.state()['calls']))
+
+    def test_base_ref_unavailable_never_mutates(self):
+        self.patch(ref_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_mismatch_gate_never_mutates(self):
+        self.patch(live_base='c'*40, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_base_name_changes_before_action_never_write(self):
+        # Both branch names resolve to the same live SHA. Only branch identity changes.
+        for mode in ('base_mismatch', 'base_behind', 'merge', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'3': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed immediately before action', out['error'])
+                    self.assertFalse(out['executed'])
+                    state = self.state()
+                    self.assertFalse(state['view']['isDraft'])
+                    self.assertEqual(state['view']['state'], 'OPEN')
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in state['calls']))
+
+    def test_base_name_changes_during_confirmation_wait_without_writes(self):
+        for mode in ('base_mismatch', 'base_behind'):
+            with self.subTest(mode=mode):
+                d = fixture()
+                if mode == 'base_mismatch':
+                    d['live_base'] = 'c'*40
+                else:
+                    d['ancestor'] = False
+                d['base_name_on_view'] = {'2': 'release'}
+                self.fixture_file.write_text(json.dumps(d))
+                self.evidence_file.write_text('{}')
+                proc, out = self.actor(execute=True)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertEqual(out['outcome'], 'WAITING')
+                self.assertIn('changed while confirming', ' '.join(out['gate']['reasons']))
+                self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                     for a in self.state()['calls']))
+
+    def test_base_name_changes_during_final_gate_wait_without_writes(self):
+        for fail_ci in (False, True):
+            for name in ('release', None, '', 7):
+                with self.subTest(fail_ci=fail_ci, name=name):
+                    d = fixture()
+                    d['base_name_on_view'] = {'2': name}
+                    if fail_ci:
+                        d['checks'][0]['bucket'] = 'fail'
+                    self.fixture_file.write_text(json.dumps(d))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'WAITING')
+                    self.assertIn('changed during live gate', ' '.join(out['gate']['reasons']))
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in self.state()['calls']))
+
+    def test_base_name_changes_after_comment_prevent_draft(self):
+        for mode in ('base_mismatch', 'base_behind', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'4': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed after comment', out['error'])
+                    self.assertTrue(out['comment_posted'])
+                    self.assertFalse(out['executed'])
+                    self.assertFalse(self.state()['view']['isDraft'])
+                    writes = [a[1] for a in self.state()['calls'] if a[:2] in
+                              (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+                    self.assertEqual(writes, ['comment'])
+
     def test_failed_ci_draft(self):
         self.patch(checks=[{'name':'lint','state':'FAILURE','bucket':'fail'}])
         proc,out=self.actor(execute=True)
@@ -225,6 +407,13 @@ class Integration(unittest.TestCase):
         proc,out=self.actor(execute=True)
         self.assertEqual(out['outcome'],'ERROR')
         self.assertFalse(any(a[:2]==['pr','merge'] for a in self.state()['calls']))
+
+    def test_base_moves_during_successful_ancestry_check_never_mutates(self):
+        self.patch(race_on_ref=2)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(any(a[:2] == ['pr', 'merge'] for a in self.state()['calls']))
 
     def test_draft_comment_failure_prevents_downgrade(self):
         self.patch(fail_comment=True, checks=[{'name':'unit','state':'FAILURE','bucket':'fail'}])

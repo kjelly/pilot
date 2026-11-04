@@ -52,10 +52,25 @@ elif args[:2] == ["pr", "checks"]:
     sys.exit(1 if checks[0]["bucket"] == "fail" else 0)
 elif args[0] == "api" and (state / "api.json").exists() and any(
         k in args[-1] for k in json.loads((state / "api.json").read_text())):
-    # state/api.json maps a substring of the endpoint (contents, compare, git/trees, branches) to the
+    # state/api.json maps a substring of the endpoint (contents, compare, git/trees, git/ref) to the
     # JSON body gh would print; the first matching key answers.
     table = json.loads((state / "api.json").read_text())
     print(json.dumps(next(table[k] for k in table if k in args[-1])))
+elif args[0] == "api" and "/git/ref/heads/" in args[-1]:
+    if (state / "ref_error").exists():
+        print("ref unavailable", file=sys.stderr); sys.exit(1)
+    bases = json.loads((state / "bases.json").read_text()) if (state / "bases.json").exists() else [sha]
+    call = len((state / "views.log").read_text().split()) - 1
+    print(json.dumps({"object": {"type": "commit", "sha": bases[min(call, len(bases) - 1)]}}))
+elif args[0] == "api" and "/compare/" in args[-1]:
+    if (state / "ancestry_error").exists():
+        print("comparison unavailable", file=sys.stderr); sys.exit(1)
+    base, head = args[-1].split("/compare/")[1].split("...")
+    result = {"status": "identical" if base == head else "ahead", "behind_by": 0,
+              "merge_base_commit": {"sha": base}}
+    if (state / "ancestry.json").exists():
+        result = json.loads((state / "ancestry.json").read_text())
+    print(json.dumps(result))
 elif args[0] == "api" and "/contents/" in args[-1]:
     manifest = state / "manifest.json"
     if manifest.exists():
@@ -200,11 +215,37 @@ class CLIMockTests(unittest.TestCase):
             self.assertIn("target_validation is missing", " ".join(json.loads(blocked.stdout)["errors"]))
             self.assertFalse((t / "ready").exists())
 
+    def test_latest_base_must_be_an_ancestor_before_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.make_pr(t)
+            (t / "ancestry.json").write_text(json.dumps({"status": "diverged", "behind_by": 1,
+                "merge_base_commit": {"sha": BASE}}))
+            blocked = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(2, blocked.returncode, blocked.stdout)
+            self.assertIn("does not include live main", " ".join(json.loads(blocked.stdout)["errors"]))
+            self.assertFalse((t / "ready").exists())
+            (t / "ancestry.json").unlink()
+            passed = self.gate(repo, evidence, env, "--ready")
+            self.assertEqual(0, passed.returncode, passed.stdout)
+            self.assertTrue((t / "ready").exists())
+
+    def test_unavailable_base_or_ancestry_keeps_draft(self):
+        for flag in ("ref_error", "ancestry_error"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, _, evidence, env = self.make_pr(t)
+                (t / flag).touch()
+                blocked = self.gate(repo, evidence, env, "--ready")
+                self.assertEqual(2, blocked.returncode, blocked.stdout)
+                self.assertIn("Base alignment verification unavailable", " ".join(json.loads(blocked.stdout)["errors"]))
+                self.assertFalse((t / "ready").exists())
+
     def target_api(self, t, head, live=BASE):
         """GitHub's answers for a reviewed reuse of the run at CANDIDATE after main advanced to BASE."""
         (t / "manifest.json").write_text(json.dumps(TARGET_MANIFEST))
         api = {f"contents/{ART}?ref={head}": contents(ART, b"| Tested candidate | `ccccccc` |\n"),
-               "branches/main": {"commit": {"sha": live}},
+               "git/ref/heads/main": {"object": {"type": "commit", "sha": live}},
                f"compare/{CANDIDATE}...{head}": compare("ahead", 0, CANDIDATE, [ART, OTHER]),
                f"compare/{BASE}...{head}": compare("ahead", 0, BASE, [ART, APP]),
                f"compare/{CANDIDATE}...{BASE}": compare("diverged", 1, FORK, [OTHER]),
