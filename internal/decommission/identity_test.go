@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,9 +19,12 @@ import (
 // The real provider resolves the authoritative name; this boundary models
 // the host object disappearing when its central cleanup step runs.
 type identityIPAExecutor struct {
-	present        bool
-	fqdn           string
-	gatewayTargets []string
+	present             bool
+	fqdn                string
+	gatewayTargets      []string
+	canonicalRejections []string
+	queryError          bool
+	malformedHost       bool
 }
 
 func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.Result, error) {
@@ -37,7 +42,27 @@ func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.R
 	}
 	if controls["pilot_decommission_query"] == "gateway_scope" {
 		e.gatewayTargets = append(e.gatewayTargets, target)
+		// Exercise the exact production helper's independent canonical boundary.
+		// A blanket READY response would mask the short-alias recovery defect.
+		helper, err := filepath.Abs("../../playbooks/apply/files/freeipa-gateway-scope.py")
+		if err != nil {
+			return nil, err
+		}
+		out, err := exec.Command("python3", "-c", "import runpy,sys; runpy.run_path(sys.argv[1])['fqdn'](sys.argv[2])", helper, target).CombinedOutput()
+		if err != nil {
+			if !strings.Contains(string(out), "ValueError: an explicit canonical FQDN is required") {
+				return nil, fmt.Errorf("native canonical oracle failed unexpectedly: %w: %s", err, out)
+			}
+			e.canonicalRejections = append(e.canonicalRejections, target)
+			return &ansible.Result{ExitCode: 2, Stderr: "native canonical oracle rejected target: " + string(out)}, nil
+		}
 		return &ansible.Result{Stdout: "HOST_INSPECT[" + target + "]: GATEWAY_SCOPE_READY=true"}, nil
+	}
+	if e.queryError {
+		return &ansible.Result{ExitCode: 2, Stderr: "native host query unavailable"}, nil
+	}
+	if e.malformedHost {
+		return &ansible.Result{Stdout: "HOST_INSPECT[" + target + "]: Number of entries returned 0"}, nil
 	}
 	if controls["pilot_decommission_query"] == "ssh_retirement" {
 		raw, _ := json.Marshal(map[string]any{"schema_version": 1, "kind": "ssh_retirement", "fqdn": target,
@@ -60,9 +85,11 @@ type identityIPAProvider struct {
 	executor            *identityIPAExecutor
 	verificationBlocked bool
 	cleanupTarget       string
+	verificationTargets []string
 }
 
 func (p *identityIPAProvider) Verify(_ context.Context, in providers.VerifyInput) ([]providers.Verification, error) {
+	p.verificationTargets = append(p.verificationTargets, in.FQDN)
 	status := "pass"
 	if p.verificationBlocked {
 		status = "active_residue"
@@ -175,7 +202,7 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 				result, err := Apply(context.Background(), ApplyInput{Plan: plan, PlanInputForFreshness: planInput,
 					DecommissionID: "identity", StartedAt: fixedNow(), Now: fixedNow, Store: store})
 				if err != nil || result.Status != "completed" {
-					t.Fatalf("Apply = %+v, %v", result, err)
+					t.Fatalf("Apply = %+v, %v; native canonical rejections=%v", result, err, exec.canonicalRejections)
 				}
 				if exec.present {
 					t.Fatal("fixture did not delete the authoritative host object")
@@ -183,6 +210,8 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 				if result.Receipt.Host != hostName || result.Receipt.FQDN != want {
 					t.Fatalf("receipt identity = %q / %q, want %q / %q", result.Receipt.Host, result.Receipt.FQDN, hostName, want)
 				}
+				assertGatewayScopeQueriesTarget(t, exec.gatewayTargets, want)
+				assertGatewayScopeQueriesTarget(t, provider.verificationTargets, want)
 				assertPlanIdentity(t, db, plan.ID, want)
 				reader, err := sql.Open("sqlite", path)
 				if err != nil {
@@ -197,16 +226,20 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				queries := len(exec.gatewayTargets)
 				replay, err := Apply(context.Background(), ApplyInput{Plan: loaded})
 				if err != nil || replay.Status != "already_completed" || replay.Receipt.FQDN != want {
 					t.Fatalf("replay = %+v, %v", replay, err)
+				}
+				if len(exec.gatewayTargets) != queries {
+					t.Fatal("completed replay performed another gateway query")
 				}
 			})
 		}
 	}
 }
 
-func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
+func TestHostIdentity_BoundLifecycleRejectsIdentityChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		hostName   string
@@ -214,10 +247,12 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 		present    bool
 		want       string
 		wantSource providers.HostIdentitySource
+		wantStale  bool
 	}{
-		{"fresh name differs from alias", "Client", "NEW.Example.TEST", true, "new.example.test", providers.HostIdentityAuthoritative},
-		{"authoritative name equals alias", "ALIAS.example.test", "ALIAS.Example.TEST", true, "alias.example.test", providers.HostIdentityAuthoritative},
-		{"fallback name equals alias", "ALIAS.example.test", "", false, "old.example.test", providers.HostIdentityFallback},
+		{"changed live canonical", "Client", "NEW.Example.TEST", true, "new.example.test", providers.HostIdentityAuthoritative, true},
+		{"new live name equals alias but differs from plan", "ALIAS.example.test", "ALIAS.Example.TEST", true, "alias.example.test", providers.HostIdentityAuthoritative, true},
+		{"unchanged live canonical", "Client", "OLD.Example.TEST", true, "old.example.test", providers.HostIdentityAuthoritative, false},
+		{"confirmed native absence", "ALIAS.example.test", "", false, "old.example.test", providers.HostIdentityRecovered, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hostName, want := tc.hostName, tc.want
@@ -249,12 +284,23 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 			}
 			assertPlanIdentity(t, db, plan.ID, "old.example.test")
 
-			// Step targets are already outside the plan hash. A fresh authoritative
-			// resolution can therefore change without invalidating this plan, and
-			// metadata must follow the fresh steps that Apply actually executes.
+			// Step identities are outside the approval hash. Lifecycle replans
+			// must therefore bind the prior canonical name independently.
 			exec.fqdn, exec.present = tc.freshName, tc.present
 			gatewayStart := len(exec.gatewayTargets)
-			fresh, err := CheckFreshness(context.Background(), input, plan.PlanHash)
+			bound := input
+			bound.previousPlan = plan
+			fresh, err := CheckFreshness(context.Background(), bound, plan.PlanHash)
+			if tc.wantStale {
+				if ClassOf(err) != ErrPlanStale {
+					t.Fatalf("changed live identity error = %v, want plan_stale", err)
+				}
+				_, err = Apply(context.Background(), ApplyInput{Plan: plan, PlanInputForFreshness: input, Now: fixedNow})
+				if ClassOf(err) != ErrPlanStale || provider.cleanupTarget != "" || len(exec.gatewayTargets) != gatewayStart {
+					t.Fatalf("identity drift reached cleanup/preflight: err=%v target=%q queries=%v", err, provider.cleanupTarget, exec.gatewayTargets)
+				}
+				return
+			}
 			if err != nil || fresh.InventoryRevision != plan.InventoryRevision || fresh.PlanHash != plan.PlanHash {
 				t.Fatalf("fresh plan = %+v, %v; expected unchanged inventory and hash", fresh, err)
 			}
@@ -262,12 +308,6 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 				t.Fatalf("fresh identity source = %q, want %q", source, tc.wantSource)
 			}
 			gatewayWant := want
-			if !tc.present {
-				// This read-only probe has only the current alias fallback once
-				// IPA reports absence. The lifecycle must still preserve the
-				// previously authoritative plan/receipt identity asserted below.
-				gatewayWant = strings.ToLower(hostName)
-			}
 			assertGatewayScopeQueriesTarget(t, exec.gatewayTargets[gatewayStart:], gatewayWant)
 			result, err := Apply(context.Background(), ApplyInput{Plan: plan, PlanInputForFreshness: input,
 				DecommissionID: "identity-change", StartedAt: fixedNow(), Now: fixedNow, Store: store})

@@ -44,7 +44,9 @@ func hasAnyStage(call []string) bool {
 func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
 		if queryKind(args) != "" {
-			body := "host not found"
+			// Native host-show resolves the short transport alias; this fixture
+			// must not turn an unclassified string into an absence observation.
+			body := "Host name: c1.ipa.pilot.internal\n0 services matched"
 			if queryKind(args) == "gateway_scope" {
 				body = "GATEWAY_SCOPE_READY=true"
 			}

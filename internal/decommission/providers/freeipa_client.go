@@ -201,20 +201,34 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 	}
 	hostName := in.HostName
 	fqdn := strings.ToLower(strings.TrimSuffix(firstNonEmpty(p.cfg.InventoryFQDN, firstNonEmpty(in.FQDN, hostName)), "."))
+	recovery, err := p.recoveryFQDN(in)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve the host's real, authoritative FQDN from a live query FIRST
 	// (see resolveAuthoritativeFQDN's doc comment) — fqdn above may be no
 	// more than a short inventory name (hosts.yml key), and both the
 	// roster mutation below and the ownership check need the real one to
 	// ever actually match anything.
-	unknown, resolvedFQDN, authoritative, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
+	unknown, resolvedFQDN, authoritative, absent, err := p.discoverUnknownServicePrincipals(ctx, fqdn)
 	if err != nil {
 		return nil, fmt.Errorf("freeipa-client plan %s: service principal discovery: %w", hostName, err)
 	}
 	fqdn = resolvedFQDN
+	if recovery != "" {
+		if authoritative && fqdn != recovery {
+			return nil, fmt.Errorf("live FreeIPA identity differs from the persisted retirement identity; re-plan required")
+		}
+		if absent {
+			fqdn = recovery
+		}
+	}
 	identitySource := HostIdentityFallback
 	if authoritative {
 		identitySource = HostIdentityAuthoritative
+	} else if recovery != "" && absent {
+		identitySource = HostIdentityRecovered
 	}
 
 	if p.RosterPathSet(in) {
@@ -245,7 +259,8 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 	}
 
 	return []Step{
-		{Provider: FreeIPAClientProviderID, Phase: "local_cleanup", Action: ActionFreeIPAClientUninstall, TargetIdentity: hostName},
+		{Provider: FreeIPAClientProviderID, Phase: "local_cleanup", Action: ActionFreeIPAClientUninstall, TargetIdentity: hostName,
+			Params: map[string]string{"retirement_fqdn": fqdn, "inventory_alias": hostName, "retirement_stage": p.retirementStage()}},
 		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPARosterHostAbsent, TargetIdentity: fqdn, HostIdentitySource: identitySource, Params: rosterStepParams},
 		{Provider: FreeIPAClientProviderID, Phase: "central_cleanup", Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: fqdn, HostIdentitySource: identitySource, Params: rosterStepParams},
 	}, nil
@@ -260,7 +275,8 @@ func (p *FreeIPAClientProvider) Plan(ctx context.Context, in PlanInput) ([]Step,
 func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error) {
 	switch step.Action {
 	case ActionFreeIPAClientUninstall:
-		return &freeipaUninstallStep{provider: p, hostName: step.TargetIdentity}, nil
+		return &freeipaUninstallStep{provider: p, hostName: step.TargetIdentity,
+			fqdn: step.Params["retirement_fqdn"], stage: step.Params["retirement_stage"]}, nil
 	case ActionFreeIPARosterHostAbsent:
 		return &freeipaRosterAbsentStep{provider: p, fqdn: step.TargetIdentity, rosterPath: step.Params["roster_path"]}, nil
 	case ActionFreeIPAIdentityApplyConverge:
@@ -283,6 +299,8 @@ func (p *FreeIPAClientProvider) ExecutorForStep(step Step) (StepExecutor, error)
 type freeipaUninstallStep struct {
 	provider *FreeIPAClientProvider
 	hostName string
+	fqdn     string
+	stage    string
 }
 
 // Inspect reuses Provider.Inspect's own enrollment marker check — Found
@@ -302,10 +320,24 @@ func (e *freeipaUninstallStep) Execute(ctx context.Context) error {
 	// Plans can be resumed after live ownership changes. Revalidate before
 	// uninstall so an unknown independent gateway membership cannot strand
 	// an already-unenrolled client behind the central deletion gate.
-	unknown, fqdn, _, err := e.provider.discoverUnknownServicePrincipals(ctx,
+	unknown, fqdn, authoritative, absent, err := e.provider.discoverUnknownServicePrincipals(ctx,
 		firstNonEmpty(e.provider.cfg.InventoryFQDN, e.hostName))
 	if err != nil {
 		return err
+	}
+	if e.fqdn != "" {
+		bound, err := e.provider.recoveryFQDN(PlanInput{HostName: e.hostName, RetirementIdentity: &RetirementIdentity{
+			InventoryAlias: e.hostName, Stage: e.stage, FQDN: e.fqdn,
+		}})
+		if err != nil {
+			return err
+		}
+		if authoritative && fqdn != bound {
+			return fmt.Errorf("live FreeIPA identity changed after planning; re-plan before uninstall")
+		}
+		if absent {
+			fqdn = bound
+		}
 	}
 	if len(unknown) > 0 {
 		return fmt.Errorf("%w: %s", ErrUnknownServicePrincipal, strings.Join(unknown, ", "))
@@ -736,20 +768,29 @@ func unescapedQuote(s string) int {
 // fqdn input may be no more than a short inventory name, and every other
 // step Plan builds downstream (roster mutation, identity-apply
 // convergence) needs the real one, not that possibly-short guess.
-// authoritative records whether the existing host-name parser found a
-// live identity, distinguishing an equal-valued inventory fallback.
-func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) (unknown []string, resolvedFQDN string, authoritative bool, err error) {
+// authoritative requires one valid live native identity. absent requires
+// the native IPA host-not-found observation; malformed rc0 output is neither.
+func (p *FreeIPAClientProvider) discoverUnknownServicePrincipals(ctx context.Context, fqdn string) (unknown []string, resolvedFQDN string, authoritative, absent bool, err error) {
 	res, err := p.queryHostObject(ctx, fqdn)
 	if err != nil {
-		return nil, fqdn, false, err
+		return nil, fqdn, false, false, err
 	}
 	host := inspectionFor(res.Stdout, fqdn)
-	if notFoundPattern.MatchString(host) {
-		return nil, fqdn, false, nil // host object already gone -- nothing to check, nothing to resolve
+	nameFields := hostObjectNamePattern.FindAllStringSubmatch(host, -1)
+	if nativeHostNotFoundPattern.MatchString(host) && len(nameFields) == 0 {
+		return nil, fqdn, false, true, nil
 	}
-	resolved := authoritativeFQDN(host)
-	return unknownServicePrincipals(host, fqdn), resolveAuthoritativeFQDN(host, fqdn), resolved != "", nil
+	if len(nameFields) != 1 || nativeHostNotFoundPattern.MatchString(host) {
+		return nil, fqdn, false, false, fmt.Errorf("host query returned no unambiguous native host identity or NotFound observation")
+	}
+	resolved, err := CanonicalFreeIPAFQDN(nameFields[0][1])
+	if err != nil {
+		return nil, fqdn, false, false, fmt.Errorf("malformed live FreeIPA host identity: %w", err)
+	}
+	return unknownServicePrincipals(host, resolved), resolved, true, false, nil
 }
+
+var nativeHostNotFoundPattern = regexp.MustCompile(`(?i)ipa:\s*ERROR:\s*(?:[a-z0-9_.-]+:\s*)?host not found\b`)
 
 // resolveAuthoritativeFQDN prefers `ipa host-show`'s own "Host name:"
 // field over the fqdn a caller supplied when asking for this query.

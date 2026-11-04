@@ -174,9 +174,9 @@ type Plan struct {
 
 	Host        HostSnapshot
 	Environment string
-	// FQDN is descriptive identity metadata, retained after FreeIPA's host
-	// object disappears. It does not select execution targets or affect
-	// computePlanHash/approval: those still use freshly derived inputs.
+	// FQDN retains identity after FreeIPA deletes the host. It is excluded
+	// from the approval hash; recovery therefore validates the host/inventory
+	// binding and persisted step identities before using it on native NotFound.
 	FQDN string `json:",omitempty"`
 
 	Components      []ComponentPlan
