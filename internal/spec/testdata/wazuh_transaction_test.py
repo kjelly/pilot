@@ -12,6 +12,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import unittest
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -377,6 +378,248 @@ class Commands:
         raise AssertionError(argv)
 
 
+class PrivateRpmKeyringTests(unittest.TestCase):
+    """Real private filesystem/scope; explicit native SELinux/RPM substitute.
+
+    The model reproduces only the observed rpmdb_t/var_t failure and vendor
+    key distinction. The separate owned Alma probe supplies actual native MAC
+    and signature evidence; these tests are not a VM acceptance receipt.
+    """
+    OWNER = 'e' * 32
+
+    @contextlib.contextmanager
+    def fixture(self, state='Enforcing'):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'; w.private_dir(root)
+            class Native:
+                def __init__(native):
+                    native.calls = []; native.contexts = {}; native.state = state
+                    native.policy = 'system_u:object_r:rpm_var_lib_t:s0'
+                    native.dbpath = '/var/lib/rpm'; native.failure = None
+                    native.chcon_effect = 'type'; native.keys = ['gpg-pubkey-29111145-591cd381']
+                    native.installed = '4.14.1-1'
+                def context(native, path):
+                    return native.contexts.get(str(path), 'unconfined_u:object_r:var_t:s0')
+                def run(native, argv, **kwargs):
+                    argv = [str(value) for value in argv]; native.calls.append(argv); text = ''; rc = 0
+                    if native.failure == argv[0]: raise w.Refused('injected missing/failed native tool: ' + argv[0])
+                    if argv[0] == 'getenforce': text = native.state
+                    elif argv[0] == 'matchpathcon': text = native.policy
+                    elif argv[:2] == ['rpm', '--eval']: text = native.dbpath
+                    elif argv[0] == 'chcon':
+                        self.assertEqual(argv[1:3], ['--type=rpm_var_lib_t', '--'])
+                        self.assertEqual(len(argv), 4, 'only the exact new directory may be labeled')
+                        path = Path(argv[3]); self.assertEqual(list(path.iterdir()), [])
+                        if native.chcon_effect == 'type':
+                            parts = native.context(path).split(':', 3); parts[2] = 'rpm_var_lib_t'
+                            native.contexts[str(path)] = ':'.join(parts)
+                        elif native.chcon_effect == 'user':
+                            native.contexts[str(path)] = 'system_u:object_r:rpm_var_lib_t:s0'
+                    elif argv[0] == 'curl':
+                        Path(argv[argv.index('--output') + 1]).write_bytes(b'HTTPS authenticated official public key fixture')
+                    elif argv[0] == 'rpm' and '--dbpath' in argv:
+                        db = Path(argv[argv.index('--dbpath') + 1])
+                        if '--initdb' in argv:
+                            if native.state == 'Enforcing' and native.context(db).split(':')[2] != 'rpm_var_lib_t':
+                                raise w.Refused('modeled native rpmdb_t write denied on var_t')
+                            for name in ('.rpm.lock', 'rpmdb.sqlite', 'rpmdb.sqlite-wal', 'rpmdb.sqlite-shm'):
+                                child = db / name; child.write_bytes(b'private SQLite native fixture'); child.chmod(0o644)
+                                native.contexts[str(child)] = native.context(db)
+                        elif '--import' not in argv: text = '\n'.join(native.keys) + '\n'
+                    elif argv[0] == 'rpmkeys':
+                        if '--dbpath' in argv and not Path(argv[-1]).read_bytes().startswith(b'official:'):
+                            text = 'RSA/SHA256 Signature, key ID b86b3716: NOKEY\n'; rc = 1
+                        else: text = 'RSA/SHA256 Signature, key ID 29111145: OK\n'
+                    elif argv[:2] == ['rpm', '-q']: text = native.installed + '\tx86_64' if native.installed else 'package wazuh-agent is not installed'; rc = 0 if native.installed else 1
+                    elif argv[:2] == ['rpm', '-qp']:
+                        text = 'wazuh-agent\n' + Path(argv[-1]).read_bytes().decode().split(':')[1] + '\nx86_64'
+                    elif argv[0] == 'dnf':
+                        folder = Path(next(value.split('=', 1)[1] for value in argv if value.startswith('--downloaddir=')))
+                        (folder / 'fresh.rpm').write_bytes(b'official:4.14.9-1')
+                    else: raise AssertionError(argv)
+                    if rc not in kwargs.get('allowed', (0,)):
+                        raise w.Refused('modeled native RPM signature NOKEY')
+                    return subprocess.CompletedProcess(argv, rc, text, '')
+            native = Native(); guard = w.PackageGuard('RedHat', native, root)
+            original = w.os.getxattr
+            def xattr(path, name, **kwargs):
+                if name == 'security.selinux': return (native.context(path) + '\0').encode()
+                return original(path, name, **kwargs)
+            with mock.patch.object(w.os, 'getxattr', side_effect=xattr):
+                yield root, native, guard
+
+    def test_shared_builder_prepares_before_init_import_and_proves_native_children(self):
+        for state in ('Enforcing', 'Permissive', 'Disabled'):
+            with self.subTest(state=state), self.fixture(state) as (_, native, guard):
+                ring = guard.official_rpm_keyring(self.OWNER)
+                commands = [call[0] for call in native.calls]
+                first_init = next(i for i, call in enumerate(native.calls) if '--initdb' in call)
+                first_import = next(i for i, call in enumerate(native.calls) if '--import' in call)
+                self.assertLess(first_init, first_import)
+                if state == 'Disabled':
+                    self.assertNotIn('chcon', commands); self.assertNotIn('matchpathcon', commands)
+                    self.assertIsNone(ring['context'])
+                else:
+                    self.assertLess(commands.index('chcon'), first_init)
+                    self.assertEqual(ring['context'], 'unconfined_u:object_r:rpm_var_lib_t:s0')
+                    self.assertTrue(all(native.context(child) == ring['context'] for child in Path(ring['database']).iterdir()))
+                self.assertEqual(ring['keys'], ['gpg-pubkey-29111145-591cd381'])
+                self.assertTrue(all('--dbpath' in call for call in native.calls if '--import' in call))
+                artifact = Path(ring['database']).parent / 'official.rpm'; artifact.write_bytes(b'official:4.14.9-1')
+                guard.verify_official_rpm(artifact, {'sha256': w.digest(artifact)}, ring, self.OWNER)
+                self.assertTrue(all('--dbpath' in call for call in native.calls if call[0] == 'rpmkeys'))
+
+    def test_policy_state_tools_or_type_change_refuse_before_any_init_or_import(self):
+        cases = [('state', 'unknown'), ('failure', 'getenforce'), ('failure', 'matchpathcon'),
+                 ('failure', 'chcon'), ('policy', 'system_u:object_r:var_t:s0'), ('policy', 'bad context'),
+                 ('dbpath', '/operator/redirected-db'), ('chcon_effect', 'ignored'), ('chcon_effect', 'user')]
+        for field, value in cases:
+            with self.subTest(field=field, value=value), self.fixture() as (_, native, guard):
+                setattr(native, field, value)
+                with self.assertRaises(w.Refused): guard.official_rpm_keyring(self.OWNER)
+                self.assertFalse(any('--initdb' in call or '--import' in call for call in native.calls))
+
+    def test_preparation_withdrawal_reproduces_enforcing_init_denial(self):
+        with self.fixture() as (_, native, guard):
+            with mock.patch.object(guard, 'prepare_rpm_keyring', return_value=None):
+                with self.assertRaisesRegex(w.Refused, 'rpmdb_t write denied on var_t'):
+                    guard.official_rpm_keyring(self.OWNER)
+            self.assertTrue(any('--initdb' in call for call in native.calls))
+            self.assertFalse(any('--import' in call for call in native.calls))
+
+    def test_existing_or_nonempty_database_never_gains_relabel_authority(self):
+        with self.fixture() as (root, native, guard):
+            ring = guard.official_rpm_keyring(self.OWNER); native.calls.clear()
+            with self.assertRaisesRegex(w.Refused, 'new empty'):
+                guard.prepare_rpm_keyring(ring['database'], self.OWNER)
+            self.assertFalse(any(call[0] == 'chcon' for call in native.calls))
+            # An existing empty UUID collision is still refused before relabel.
+            collision = Path(ring['database']).parent / ('official-keyring-' + 'a' * 32); collision.mkdir(mode=0o700)
+            with mock.patch.object(w.uuid, 'uuid4', return_value=type('UUID', (), {'hex': 'a' * 32})()):
+                with self.assertRaisesRegex(w.Refused, 'exclusive new'):
+                    guard.official_rpm_keyring(self.OWNER)
+            self.assertEqual(list(collision.iterdir()), [])
+            self.assertFalse(any(call[0] == 'chcon' for call in native.calls))
+
+    def test_retained_label_inventory_or_native_child_shape_drift_never_repairs_or_verifies_signature(self):
+        cases = ('directory-label', 'child-label', 'missing-child', 'child-symlink', 'child-hardlink',
+                 'unexpected-child', 'writable-child', 'extra-key', 'directory-symlink', 'foreign-owner', 'mount')
+        for case in cases:
+            with self.subTest(case=case), self.fixture() as (root, native, guard):
+                ring = guard.official_rpm_keyring(self.OWNER); db = Path(ring['database'])
+                artifact = db.parent / 'official.rpm'; artifact.write_bytes(b'official:4.14.9-1')
+                native.calls.clear(); namespace = MOUNT_NAMESPACE['text']
+                with contextlib.ExitStack() as stack:
+                    if case == 'directory-label': native.contexts[str(db)] = 'unconfined_u:object_r:var_t:s0'
+                    elif case == 'child-label': native.contexts[str(db / 'rpmdb.sqlite')] = 'unconfined_u:object_r:var_t:s0'
+                    elif case == 'missing-child': (db / 'rpmdb.sqlite').unlink()
+                    elif case == 'child-symlink':
+                        (db / 'rpmdb.sqlite').unlink(); (db / 'rpmdb.sqlite').symlink_to(artifact)
+                    elif case == 'child-hardlink': w.os.link(db / 'rpmdb.sqlite', db.parent / 'foreign-alias')
+                    elif case == 'unexpected-child': (db / 'foreign').write_bytes(b'foreign')
+                    elif case == 'writable-child': (db / 'rpmdb.sqlite').chmod(0o666)
+                    elif case == 'extra-key': native.keys.append('gpg-pubkey-b86b3716-61e69f29')
+                    elif case == 'directory-symlink':
+                        moved = db.with_name('outside'); db.rename(moved); db.symlink_to(moved, target_is_directory=True)
+                    elif case == 'foreign-owner': stack.enter_context(mock.patch.object(w.os, 'geteuid', return_value=w.os.geteuid() + 1))
+                    else: MOUNT_NAMESPACE['text'] += f'2 1 8:1 / {db} rw - ext4 /dev/synthetic rw\n'
+                    try:
+                        with self.assertRaises(w.Refused):
+                            guard.verify_official_rpm(artifact, {'sha256': w.digest(artifact)}, ring, self.OWNER)
+                    finally: MOUNT_NAMESPACE['text'] = namespace
+                self.assertFalse(any(call[0] in ('chcon', 'rpmkeys') or '--import' in call for call in native.calls))
+
+    def test_retained_context_native_tool_failure_does_not_relabel_or_fall_back(self):
+        for field, value in (('state', 'unknown'), ('policy', 'system_u:object_r:var_t:s0'),
+                             ('failure', 'getenforce'), ('failure', 'matchpathcon')):
+            with self.subTest(field=field, value=value), self.fixture() as (_, native, guard):
+                ring = guard.official_rpm_keyring(self.OWNER)
+                artifact = Path(ring['database']).parent / 'official.rpm'; artifact.write_bytes(b'official:4.14.9-1')
+                native.calls.clear(); setattr(native, field, value)
+                with self.assertRaises(w.Refused):
+                    guard.verify_official_rpm(artifact, {'sha256': w.digest(artifact)}, ring, self.OWNER)
+                self.assertFalse(any(call[0] in ('chcon', 'rpmkeys') or '--import' in call for call in native.calls))
+
+    def test_actual_cold_and_recovery_entrypoints_refuse_label_drift_before_stop_or_data_restore(self):
+        for boundary in ('cold', 'prepare-recovery', 'restore-state'):
+            with self.subTest(boundary=boundary), RestoreScopeTests().agent('RedHat') as (agent, daemon, path, _):
+                with self.fixture() as (_, native, _):
+                    guard = w.PackageGuard('RedHat', native, agent.root)
+                    ring = guard.official_rpm_keyring('d' * 32)
+                    plan = w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True)
+                    agent.reserve('d' * 32, plan)
+                    item = agent.active(); item['policy_stage']['keyring'] = ring; agent.write(item, item['phase'])
+                    harness = PackagePolicyHarness(daemon)
+                    harness.verify_rpm_keyring = guard.verify_rpm_keyring
+                    agent.guard = lambda: harness
+                    if boundary != 'cold':
+                        agent.cold_backup('d' * 32)
+                        agent.authorize_install('d' * 32)
+                        daemon.installed = '4.14.9-1'; daemon.active = True
+                        if boundary == 'restore-state':
+                            item = agent.active(); agent.write(item, 'recovering')
+                    native.contexts[ring['database']] = 'unconfined_u:object_r:var_t:s0'
+                    before = sum(call[:2] == ['systemctl', 'stop'] for call in daemon.calls)
+                    phase = agent.active()['phase']
+                    config = path('/var/ossec/etc/ossec.conf'); config.write_text('changed live state must not be restored on refusal')
+                    action = {'cold': agent.cold_backup, 'prepare-recovery': agent.prepare_recovery,
+                              'restore-state': agent.restore_state}[boundary]
+                    with self.assertRaisesRegex(w.Refused, 'SELinux context drift'):
+                        action('d' * 32)
+                    self.assertEqual(agent.active()['phase'], phase, 'strong recovery journal must be retained')
+                    self.assertEqual(sum(call[:2] == ['systemctl', 'stop'] for call in daemon.calls), before)
+                    self.assertTrue(daemon.active)
+                    self.assertEqual(config.read_text(), 'changed live state must not be restored on refusal')
+
+    def test_vendor_only_signature_remains_required_even_for_matching_provider_hash(self):
+        with self.fixture() as (_, native, guard):
+            ring = guard.official_rpm_keyring(self.OWNER)
+            artifact = Path(ring['database']).parent / 'foreign-alma.rpm'; artifact.write_bytes(b'foreign:3.1.5-8.el9')
+            native.calls.clear()
+            with self.assertRaisesRegex(w.Refused, 'NOKEY'):
+                guard.verify_official_rpm(artifact, {'sha256': w.digest(artifact)}, ring, self.OWNER)
+            self.assertEqual(len([call for call in native.calls if call[0] == 'rpmkeys']), 1)
+            self.assertIn('--dbpath', native.calls[-1])
+
+    def test_fresh_stage_admission_forward_and_recovery_share_private_verification(self):
+        with self.fixture() as (root, native, guard):
+            native.installed = ''
+            guard.overlay = lambda owner, package, installed='': {'config': package}
+            def provider(overlay, package):
+                return {'sha256': __import__('hashlib').sha256(('official:' + package).encode()).hexdigest()}
+            guard.official_rpm_provider = provider
+            guard.verify_overlay = lambda overlay, owner: overlay['config']
+            guard.snapshot = lambda: {'installed': native.installed}
+            guard.artifact_plan = lambda overlay, owner, *args, **kwargs: overlay['config']
+            agent = w.Agent('RedHat', runner=native, root=root); agent.guard = lambda: guard
+            owner = self.OWNER; w.HostWriter(root).claim(owner, 'agent', 'apply')
+            fresh = agent.fresh_rpm(owner, w.agent_plan('', '4.14.9'))
+            self.assertEqual(w.digest(fresh['package_path']), provider({}, '4.14.9-1')['sha256'])
+            self.assertTrue(any(call[0] == 'chcon' for call in native.calls))
+            native.installed = '4.14.1-1'
+            plan = w.agent_plan(native.installed, '4.14.9', '4.14.9', True)
+            prepared = agent.prepare_policy_stage(owner, plan)
+            stage = w.private_dir(root / 'rpm-stage')
+            for package in (plan['installed'], plan['package']): (stage / (package + '.rpm')).write_bytes(('official:' + package).encode())
+            packages = agent.package_archives(plan['installed'], plan['package'])
+            item = {'owner': owner, 'installed': plan['installed'], 'package': plan['package'],
+                    'backup': str(stage), 'policy_stage': prepared,
+                    'packages': {release: {**value, 'path': str(value['path'])} for release, value in packages.items()}}
+            for recovery in (False, True):
+                item['phase'] = 'recovering' if recovery else 'installing'
+                with mock.patch.object(agent, 'owned', return_value=item):
+                    agent.authorize_rpm(owner, recovery=recovery)
+            private_checks = [call for call in native.calls if call[0] == 'rpmkeys' and '--dbpath' in call]
+            self.assertEqual(len(private_checks), 5, 'fresh + staged old/new + forward + recovery all require private signatures')
+            native.contexts[prepared['keyring']['database']] = 'unconfined_u:object_r:var_t:s0'
+            native.calls.clear()
+            for entry in (lambda: agent.validate_packages(item), lambda: agent.authorize_rpm(owner),
+                          lambda: agent.authorize_rpm(owner, recovery=True)):
+                with mock.patch.object(agent, 'owned', return_value=item):
+                    with self.assertRaisesRegex(w.Refused, 'SELinux context drift'): entry()
+            self.assertFalse(any(call[0] in ('chcon', 'rpmkeys', 'systemctl', 'dnf') for call in native.calls))
+
+
 class PackagePolicyHarness:
     """Native package-policy seam for filesystem/phase tests only.
 
@@ -396,6 +639,7 @@ class PackagePolicyHarness:
     def official_rpm_keyring(self, owner): return {}
     def verify_overlay(self, overlay, owner): return overlay['config']
     def verify_official_rpm(self, *args): return None
+    def verify_rpm_keyring(self, *args): return None
     def artifact_plan(self, overlay, owner, *args, **kwargs): return overlay['config']
 
 

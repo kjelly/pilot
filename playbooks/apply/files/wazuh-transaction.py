@@ -1044,24 +1044,126 @@ class PackageGuard:
             raise Refused('RPM payload is not bound to the declared official Wazuh source')
         return allowed[0]
 
+    def rpm_keyring_scope(self, database, owner):
+        if not re.fullmatch('[a-f0-9]{32}', owner):
+            raise Refused('invalid private RPM keyring owner')
+        root = path_shape(self.root, 'directory')
+        folder = path_shape(root / ('agent-policy-' + owner), 'directory')
+        database = path_shape(database, 'directory')
+        if (database.parent != folder or not re.fullmatch('official-keyring-[a-f0-9]{32}', database.name)
+                or any(path.stat().st_uid != os.geteuid() or stat.S_IMODE(path.stat().st_mode) != 0o700
+                       for path in (root, folder, database))):
+            raise Refused('private RPM keyring escaped its exact root-owned private scope')
+        MountTable().backup(root)
+        return database
+
+    def rpm_keyring_type(self):
+        state = self.r.run(['getenforce'], timeout=30, operation='observe native SELinux state for private RPM DB').stdout.strip()
+        if state == 'Disabled':
+            return None
+        if state not in ('Enforcing', 'Permissive'):
+            raise Refused('unknown native SELinux state for private RPM DB')
+        native = self.r.run(['rpm', '--eval', '%{_dbpath}'], timeout=30, operation='observe native RPM database path').stdout.strip()
+        if native not in ('/var/lib/rpm', '/usr/lib/sysimage/rpm'):
+            raise Refused('unsupported native RPM database policy path')
+        policy = self.r.run(['matchpathcon', '-n', '--', native], timeout=30,
+                            operation='observe installed native RPM database SELinux policy').stdout.strip()
+        if self.rpm_context_parts(policy)[2] != 'rpm_var_lib_t':
+            raise Refused('unsupported native RPM database SELinux policy type')
+        return 'rpm_var_lib_t'
+
+    @staticmethod
+    def rpm_context_parts(value):
+        parts = value.split(':', 3)
+        if (len(parts) != 4 or any(not re.fullmatch('[A-Za-z0-9_]+', field) for field in parts[:3])
+                or not re.fullmatch(r's[0-9]+(?:-s[0-9]+)?(?::c[0-9]+(?:[.,]c?[0-9]+)*)?', parts[3])):
+            raise Refused('invalid native private RPM DB SELinux context')
+        return parts
+
+    @classmethod
+    def rpm_context(cls, path):
+        try:
+            value = os.getxattr(path, 'security.selinux', follow_symlinks=False).decode().rstrip('\0')
+        except (OSError, UnicodeError) as exc:
+            raise Refused('native private RPM DB SELinux context is unavailable') from exc
+        cls.rpm_context_parts(value)
+        return value
+
+    def prepare_rpm_keyring(self, database, owner):
+        # Only the newly created, still empty exact directory may be labeled.
+        # Retained DBs are verified below and never silently repaired.
+        database = self.rpm_keyring_scope(database, owner)
+        if any(database.iterdir()):
+            raise Refused('private RPM DB context preparation requires a new empty directory')
+        native_type = self.rpm_keyring_type()
+        if native_type is None:
+            return None
+        before = self.rpm_context_parts(self.rpm_context(database))
+        self.r.run(['chcon', '--type=' + native_type, '--', database], timeout=30,
+                   operation='prepare exact private RPM database SELinux type')
+        after = self.rpm_context(database)
+        parts = self.rpm_context_parts(after)
+        if parts[2] != native_type or before[:2] + before[3:] != parts[:2] + parts[3:]:
+            raise Refused('private RPM DB type preparation changed native user/range or failed')
+        sync_directory(database)
+        return after
+
+    def verify_rpm_keyring(self, keyring, owner):
+        database = self.rpm_keyring_scope(keyring['database'], owner)
+        folder = database.parent
+        key = private_file(keyring['key'], folder)
+        if digest(key) != keyring['sha256']:
+            raise Refused('authenticated private RPM key changed')
+        native_type = self.rpm_keyring_type()
+        if native_type is not None:
+            context = self.rpm_context(database)
+            if self.rpm_context_parts(context)[2] != native_type or context != keyring.get('context'):
+                raise Refused('retained private RPM DB SELinux context drift; journal retained')
+        children = list(database.iterdir())
+        allowed = {'.rpm.lock', 'rpmdb.sqlite', 'rpmdb.sqlite-shm', 'rpmdb.sqlite-wal'}
+        if not {'.rpm.lock', 'rpmdb.sqlite'}.issubset({path.name for path in children}):
+            raise Refused('private RPM DB is missing native SQLite/lock artifacts')
+        for path in children:
+            private_file(path, database)
+            if path.name not in allowed or path.stat().st_mode & 0o022:
+                raise Refused('unsupported private RPM database artifact shape or permissions')
+            if native_type is not None and self.rpm_context(path) != context:
+                raise Refused('retained private RPM DB child SELinux context drift; journal retained')
+        keys = self.r.run(['rpm', '--dbpath', database, '-qa', '--qf', '%{NAME}-%{VERSION}-%{RELEASE}\n'], timeout=60,
+                          operation='verify private vendor-only public-key inventory').stdout.splitlines()
+        if (len(keys) != 1 or not re.fullmatch('gpg-pubkey-[a-f0-9]+-[a-f0-9]+', keys[0])
+                or keys != keyring.get('keys')):
+            raise Refused('private RPM DB vendor-only key inventory changed')
+        return database
+
     def official_rpm_keyring(self, owner):
+        if not re.fullmatch('[a-f0-9]{32}', owner):
+            raise Refused('invalid private RPM keyring owner')
         folder = private_dir(self.root / ('agent-policy-' + owner))
         key = folder / ('official-wazuh-' + uuid.uuid4().hex + '.key')
         self.r.run(['curl', '--fail', '--silent', '--show-error', '--max-time', '30', '--proto', '=https',
                     '--output', key, 'https://packages.wazuh.com/key/GPG-KEY-WAZUH'], timeout=40,
                    operation='authenticated official Wazuh public key')
         private_file(key, folder); key.chmod(0o600); sync_file(key)
-        database = private_dir(folder / ('official-keyring-' + uuid.uuid4().hex))
+        database = folder / ('official-keyring-' + uuid.uuid4().hex)
+        try:
+            database.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise Refused('private RPM DB creation requires an exclusive new directory') from exc
+        sync_directory(folder)
+        context = self.prepare_rpm_keyring(database, owner)
         self.r.run(['rpm', '--dbpath', database, '--initdb'], operation='initialize private vendor keyring')
         self.r.run(['rpm', '--dbpath', database, '--import', key], operation='import only official Wazuh key')
+        keys = self.r.run(['rpm', '--dbpath', database, '-qa', '--qf', '%{NAME}-%{VERSION}-%{RELEASE}\n'], timeout=60,
+                          operation='record private vendor-only public-key inventory').stdout.splitlines()
+        result = {'key': str(key), 'sha256': digest(key), 'database': str(database), 'context': context, 'keys': keys}
+        self.verify_rpm_keyring(result, owner)
         sync_tree(database)
-        return {'key': str(key), 'sha256': digest(key), 'database': str(database)}
+        return result
 
     def verify_official_rpm(self, path, provider, keyring, owner):
-        folder = canonical(self.root / ('agent-policy-' + owner))
-        key = private_file(keyring['key'], folder)
-        database = path_shape(keyring['database'], 'directory')
-        if database.parent != folder or digest(key) != keyring['sha256'] or digest(path) != provider['sha256']:
+        database = self.verify_rpm_keyring(keyring, owner)
+        if digest(path) != provider['sha256']:
             raise Refused('official RPM provider/key/payload identity changed')
         text = self.r.run(['rpmkeys', '--dbpath', database, '-Kv', path], timeout=60,
                           operation='RPM signature against only official Wazuh key').stdout
@@ -2447,6 +2549,8 @@ class Agent(Transaction):
             raise Refused('agent source presence changed before cold backup')
 
     def validate_packages(self, item):
+        if self.family == 'RedHat':
+            self.guard().verify_rpm_keyring(item['policy_stage']['keyring'], item['owner'])
         if set(item['packages']) != {item['installed'], item['package']}:
             raise Refused('retained exact package set changed')
         for info in item['packages'].values():
