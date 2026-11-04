@@ -40,7 +40,18 @@ class ReaderFilesystemTests(unittest.TestCase):
         profile.write_text(json.dumps({'enabled':False,'source':str(root/'old-source'),'transport':'tcp'}))
         self.enterContext(mock.patch.object(w.Reader,'SPOOL',spool))
         self.enterContext(mock.patch.object(w.Reader,'PROFILE',profile))
+        source=root/'old-source';source.mkdir(exist_ok=True)
+        central.discover=lambda:{'paths':[str(source)],'images':{}}
+        self.enterContext(mock.patch.object(w.Reader,'source',lambda _,state:str(source)))
+        def native_observation(_,loaded=True):
+            current=json.loads(profile.read_text())
+            return {'schema':2,'mode_candidate':'enabled' if current['enabled'] else 'disabled',
+                    'files':{},'profile':current,'profile_sha256':w.digest(profile),'pid':0,
+                    'resources':[],'authorization':'UNVALIDATED_OBSERVATIONS'}
+        self.enterContext(mock.patch.object(w.Reader,'observe',native_observation))
+
         reader = w.Reader(central)
+        central.reader = reader
         reader.source_users=lambda *args,**kwargs:None  # native proc leaf, separately modeled below
         data = w.ReaderData(spool)
         try:
@@ -58,7 +69,7 @@ class ReaderFilesystemTests(unittest.TestCase):
     def test_current_queue_survives_real_old_source_restore_and_cursor_reset(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); central,reader,item,spool,queue,_=self.fixture(root)
-            source=root/'old-source';source.mkdir();(source/'alerts').write_bytes(b'OLD1\n')
+            source=root/'old-source';source.mkdir(exist_ok=True);(source/'alerts').write_bytes(b'OLD1\n')
             old=root/'old.tar'
             checksum=central.archive(source,old)
             reader.pause(item)
@@ -167,8 +178,6 @@ class ReaderFilesystemTests(unittest.TestCase):
             operation='6'*32
             # Native inspector/tool identity is a declared leaf substitute;
             # actual queue/generation/receipt/locks remain real throughout retry.
-            self.enterContext(mock.patch.object(w.Reader,'inspect',lambda _: {
-                'mode':'disabled','profile':{'source':str(root/'old-source')}}))
             self.enterContext(mock.patch.object(w.Reader,'verify_tools',lambda _:None))
             receipt.operation(owner,operation,'admit',ack=True)
             receipt.operation(owner,operation,'expose')
@@ -248,9 +257,7 @@ class ReaderFilesystemTests(unittest.TestCase):
                 (spool/'state'/'imfile-state:456').write_text('new offset')
                 w.HostWriter(central.root).release(owner);owner='5'*32
                 w.HostWriter(central.root).claim(owner,'central')
-                with mock.patch.object(w.Reader,'inspect',lambda _: {
-                        'mode':'disabled','profile':{'source':str(root/'old-source')}}), \
-                     mock.patch.object(w.Reader,'verify_tools',lambda _:None):
+                with mock.patch.object(w.Reader,'verify_tools',lambda _:None):
                     receipt.operation(owner,'6'*32,'admit',ack=True)
                     current=receipt.inspect()
                     self.assertTrue(current['ever_exposed'])
@@ -333,6 +340,11 @@ class SelectedReceiptGraphTests(unittest.TestCase):
                     'w=importlib.util.module_from_spec(s);s.loader.exec_module(w)\n'
                     'w.Reader.SPOOL=Path('+repr(str(spool))+');w.Reader.PROFILE=Path('+repr(str(profile))+')\n'
                     'c=w.Central(root=Path('+repr(str(central.root))+'))\n'
+                    'source=Path('+repr(str(root/'old-source'))+')\n'
+                    'c.discover=lambda:{"paths":[str(source)],"images":{}}\n'
+                    'w.Reader.source=lambda self,state:str(source)\n'
+                    'w.Reader.observe=lambda self,loaded=True:{"schema":2,"mode_candidate":"disabled","files":{},"profile":json.loads(w.Reader.PROFILE.read_text()),"pid":0,"resources":[],"authorization":"UNVALIDATED_OBSERVATIONS"}\n'
+
                     'with open('+repr(str(events))+',"a") as f:f.write(sys.argv[1]+"\\n")\n'
                     'try:\n'
                     ' result=w.ReplayReceipt(c).operation('+repr(owner)+','+repr(operation)+',sys.argv[1].removeprefix("reader-enable-"),ack=True)\n'
@@ -396,7 +408,9 @@ class SelectedReceiverIdentityTests(unittest.TestCase):
                 reader=w.Reader(central,request={'selected':True,'enabled':True,
                     'host':'receiver.example.test','address':desired,'port':514,'transport':'tcp'},ack=True)
                 reader.SPOOL=root/'absent-spool'
-                reader.inspect=lambda:{'mode':'enabled','pid':42,'files':{},'profile_sha256':'nativehash',
+                reader.observe=lambda loaded=True:{'schema':2,'mode_candidate':'enabled',
+                    'authorization':'UNVALIDATED_OBSERVATIONS','resources':[],
+                    'pid':42,'files':{},'profile_sha256':'nativehash',
                     'profile':{'enabled':True,'source':str(source),'transport':'tcp'},'action':{'port':'514'}}
                 reader.source=lambda _:str(source)
                 reader.source_users=lambda *args,**kwargs:None
@@ -504,8 +518,9 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                     return super().run(argv,**kwargs)
             class ActualReader(w.Reader):
                 def source_users(self,*args,**kwargs):pass
-                def inspect(self):
-                    return {'schema':1,'mode':'enabled','profile':{'enabled':True,'source':str(self.t.volume),'transport':'tcp'},
+                def observe(self,loaded=True):
+                    return {'schema':2,'mode_candidate':'enabled',
+                            'authorization':'UNVALIDATED_OBSERVATIONS','resources':[],'profile':{'enabled':True,'source':str(self.t.volume),'transport':'tcp'},
                             'profile_sha256':w.digest(self.PROFILE),'pid':self.units.pid if self.units.active else 0,
                             'action':{'port':'514','queue.type':'LinkedList'},
                             'files':{str(self.t.forward):w.digest(self.t.forward)}}
@@ -567,58 +582,121 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
 
 
 
-class ReaderPhysicalNamespaceTests(unittest.TestCase):
-    def test_real_physical_aliases_absent_descendants_and_mountinfo_are_not_disjoint(self):
-        import runpy
-        helper=runpy.run_path(str(existing.REPO/'playbooks/files/pilot-wazuh-heartbeat'))
-        classify=helper['reader_namespace']
+
+
+class ReaderSourceRecoveryAuthorityTests(unittest.TestCase):
+    def test_removed_container_source_requires_real_owned_journal_backup_and_fresh_volume(self):
+        import tarfile
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);managed=root/'managed';managed.mkdir()
-            state=managed/'state';state.mkdir()
-            other=root/'other';other.mkdir()
-            self.assertTrue(classify(str(state),[managed]))
-            self.assertTrue(classify(str(managed/'absent'/'state'),[managed]))
-            self.assertFalse(classify(str(other),[managed]))
-            self.assertFalse(classify(str(root),[managed]),'common parent alone grants no child access')
-            for alias in (str(state)+'/.',str(managed)+'//state'):
-                with self.assertRaisesRegex(ValueError,'noncanonical'):
-                    classify(alias,[managed])
-            link=root/'linked';link.symlink_to(managed,target_is_directory=True)
-            with self.assertRaisesRegex(ValueError,'alias'):
-                classify(str(link/'state'),[managed])
-            source=managed/'source';source.write_text('owned')
-            os.link(source,other/'foreign-name')
-            with self.assertRaisesRegex(ValueError,'alias'):
-                classify(str(other/'foreign-name'),[managed],pattern=True)
-            with self.assertRaisesRegex(ValueError,'alias'):
-                classify(str(other/'*'),[managed],pattern=True)
-            original=Path.read_text
-            def mountinfo(path,*args,**kwargs):
-                if str(path)=='/proc/self/mountinfo':
-                    return '1 0 8:1 /managed '+str(other)+' rw - ext4 /dev/test rw\n'
-                return original(path,*args,**kwargs)
-            with mock.patch.object(Path,'read_text',mountinfo):
-                with self.assertRaisesRegex(ValueError,'subtree mount'):
-                    classify(str(other/'missing-state'),[managed])
+            root=Path(temporary);central,_,native=existing.DiscoveryFilesystemTests().central(root)
+            state=central.discover();reader=w.Reader(central)
+            source=reader.source(state)
+            owner='8'*32;w.HostWriter(central.root).claim(owner,'central',mode='apply')
+            item=central.begin(owner,state)
+            item['capture']=w.ClosedCapture.take({path:'directory' for path in item['paths']},central.root,sealed=True)
+            item['archives']=[]
+            for ordinal,path in enumerate(item['paths']):
+                archive=Path(item['backup'])/(str(ordinal)+'.tar')
+                with tarfile.open(archive,'x') as output:output.add(path,arcname=Path(path).name)
+                archive.chmod(0o600)
+                item['archives'].append({'path':path,'archive':str(archive),'sha256':w.digest(archive)})
+            image=Path(item['backup'])/'images.tar';image.write_bytes(b'explicit synthetic native-image leaf')
+            image.chmod(0o600);item['image_archive']={'path':str(image),'sha256':w.digest(image)}
+            central.write(item,'recovering')
+            original=native.run
+            def removed(argv,**kwargs):
+                if 'label=com.docker.compose.service=wazuh.manager' in argv:
+                    return subprocess.CompletedProcess(argv,0,'','')
+                return original(argv,**kwargs)
+            with mock.patch.object(native,'run',removed):
+                # Real validate_restore_scope, private artifacts and source
+                # ownership run; only Docker facts are native substitutes.
+                self.assertEqual(reader.source(item),source)
+                self.assertEqual(w.HostWriter(central.root).active()['mode'],'apply')
+                Path(source).rmdir()  # interrupted delete/recreate recovery
+                reader.PROC=root/'empty-proc';reader.PROC.mkdir()
+                self.assertEqual(reader.source(item),source)
+                reader.source_users(item,source,producers=False,reader_fds=False)
+
+                wrong=dict(item,owner='9'*32)
+                with self.assertRaisesRegex(w.Refused,'owner or phase'):reader.source(wrong)
+                central.write(item,'backed-up')
+                with self.assertRaisesRegex(w.Refused,'owner or phase'):reader.source(item)
+                central.write(item,'recovering')
+                (Path(item['archives'][0]['archive'])).write_bytes(b'corrupt')
+                with self.assertRaisesRegex(w.Refused,'checksum'):reader.source(item)
+                w.durable_unlink(central.path)
+                with self.assertRaisesRegex(w.Refused,'owner or phase'):reader.source(item)
+
+
+class ReaderPhysicalNamespaceTests(unittest.TestCase):
+    def test_projection_patterns_and_readonly_disjoint_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'producer';source.mkdir()
+            (source/'alerts').mkdir();(source/'alerts/current.json').write_text('data')
+            spool=root/'spool';outside=root/'outside';outside.mkdir()
+            layout=w.ScopeLayout.inspect({str(source):'directory'},root/'private')
+            # Explicit mount models, not real bind mounts. Full-filesystem bind
+            # root=/ projects a different spelling into a protected descendant.
+            text=('1 0 8:1 / / rw - ext4 /dev/model rw\n'
+                  '2 1 8:1 / '+str(outside)+' ro - ext4 /dev/model ro\n')
+            mounts=w.MountTable(text)
+            policy=w.ReaderNamespace(source,spool,layout,mounts)
+            self.assertTrue(policy.literal(str(source/'alerts/current.json')))
+            self.assertTrue(policy.pattern(str(source/'alerts/current.json')))
+            self.assertTrue(policy.pattern(str(source/'future'/'*.json')))
+            self.assertFalse(policy.pattern(str(root/'unrelated'/'*.json')))
+            alias=outside/str(source/'alerts/current.json').lstrip('/')
+            self.assertTrue(policy.literal(str(alias)),'whole-filesystem bind descendant must project into source')
+            self.assertFalse(policy.literal(str(outside/'unrelated-input')))
+            mounts.project(outside/'unrelated-input')  # pure projection supports RO
+            with self.assertRaisesRegex(w.Refused,'read-only'):
+                mounts.physical(outside/'unrelated-input')
+            for value in (str(source)+'/alerts/.',str(root)+'/producer//alerts',
+                          'relative/state','$dynamic'):
+                with self.assertRaises(w.Refused):policy.pattern(value)
+            observed={'schema':2,'authorization':'UNVALIDATED_OBSERVATIONS',
+                      'mode_candidate':'never','files':{'trusted':'a'*64},'resources':[
+                {'kind':'action','attrs':{'queue.filename':'foreign'},
+                 'workdirectory':str(root),'file':'trusted'},
+                {'kind':'input','attrs':{'type':'imfile','file':str(root/'wazuh-disjoint'/'*.log')},
+                 'workdirectory':str(root),'file':'trusted'}]}
+            self.assertEqual(policy.resources(observed)['mode'],'never')
+            observed['resources'][0]['attrs']['queue.filename']='../spool/wazuh_alerts'
+            with self.assertRaisesRegex(w.Refused,'queue filename'):policy.resources(observed)
+            observed['resources']=[{'kind':'ruleset','attrs':{
+                'name':'foreign','queue.filename':str(alias)},'workdirectory':None,'file':'trusted'}]
+            with self.assertRaisesRegex(w.Refused,'protected physical'):policy.resources(observed)
 
 
 class ReaderInspectionTests(unittest.TestCase):
-    def test_actual_include_graph_exclusivity_default_argv_and_readonly_mode(self):
+    def fixture(self, root, configured=False, enabled=False):
         import runpy
         import types
-        import hashlib
         helper=runpy.run_path(str(existing.REPO/'playbooks/files/pilot-wazuh-heartbeat'))
         inspect=helper['inspect_reader'];env=inspect.__globals__
-        real_path=Path
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);parts=root/'rsyslog.d';parts.mkdir()
-            global_config=root/'rsyslog.conf'
-            owner=parts/'31-pilot-wazuh.conf'
-            extra=parts/'90-operator.conf'
-            profile_dir=parts/'pilot-wazuh';profile_dir.mkdir()
-            profile=profile_dir/'profile.json'
-            profile.write_text(json.dumps({'enabled':True,'transport':'tcp','source':'/native-source','heartbeat_interval':0}))
-            global_config.write_text('$IncludeConfig '+str(parts/'*.conf')+'\n')
+        parts=root/'rsyslog.d';parts.mkdir()
+        config=root/'rsyslog.conf';owner=parts/'31-pilot-wazuh.conf'
+        extra=parts/'90-operator.conf';profile_dir=parts/'pilot-wazuh';profile_dir.mkdir()
+        extra.write_text('# unrelated baseline include\n')
+        profile=profile_dir/'profile.json'
+        docker=root/'docker';source=docker/'volumes/single-node_logs/_data';source.mkdir(parents=True)
+        # Actual native-shaped closed pairs, all under one generic producer
+        # root whose spelling need not contain "wazuh".
+        groups=(('alerts/alerts.json','alerts/2026/Nov/ossec-alerts-04.json'),
+                ('alerts/alerts.log','alerts/2026/Nov/ossec-alerts-04.log'),
+                ('archives/archives.log','archives/2026/Nov/ossec-archive-04.log'),
+                ('firewall/firewall.log','firewall/2026/Nov/ossec-firewall-04.log'))
+        for current,dated in groups:
+            first,second=source/current,source/dated
+            first.parent.mkdir(parents=True,exist_ok=True);second.parent.mkdir(parents=True,exist_ok=True)
+            first.write_text('synthetic native record\n');os.link(first,second)
+        (source/'internal').symlink_to('alerts/alerts.json')
+        config.write_text('$WorkDirectory '+str(root/'shared-parent')+'\n$IncludeConfig '+str(parts/'*.conf')+'\n')
+        (root/'shared-parent').mkdir()
+        if configured:
+            profile.write_text(json.dumps({'enabled':enabled,'transport':'tcp','source':str(source),'heartbeat_interval':0}))
+        if enabled:
             owner.write_text(helper['HEADER']+'\n'
                 'module(load="imfile" statefile.directory="/var/spool/rsyslog/pilot-wazuh/state")\n'
                 'ruleset(name="pilotWazuhForward") {\n'
@@ -626,92 +704,197 @@ class ReaderInspectionTests(unittest.TestCase):
                 'queue.filename="wazuh_alerts" queue.spoolDirectory="/var/spool/rsyslog/pilot-wazuh" '
                 'queue.type="LinkedList" queue.saveOnShutdown="on" queue.discardSeverity="8" '
                 'queue.maxDiskSpace="256m" queue.size="10000")\n}\n'
-                'input(type="imfile" File="/native-source/alerts/alerts.json" ruleset="pilotWazuhForward" '
+                'input(type="imfile" File="'+str(source)+'/alerts/alerts.json" ruleset="pilotWazuhForward" '
                 'PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on")\n')
-            maps=root/'maps';maps.write_text('')
-            argv=root/'cmdline';argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
-            def path(value,*parts):
-                name=str(real_path(value,*parts))
-                return {'/etc/rsyslog.conf':global_config,'/proc/42/maps':maps,
-                        '/proc/42/cmdline':argv}.get(name,real_path(value,*parts))
-            calls=[]
-            def native(command,**kwargs):
+        maps=root/'maps';maps.write_text('')
+        argv=root/'cmdline';argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
+        checker=root/'checker';checker.write_bytes((existing.REPO/'playbooks/files/pilot-wazuh-heartbeat').read_bytes());checker.chmod(0o700)
+        real_path=Path
+        def path(value,*parts):
+            name=str(real_path(value,*parts))
+            return {'/etc/rsyslog.conf':config,'/proc/42/maps':maps,
+                    '/proc/42/cmdline':argv}.get(name,real_path(value,*parts))
+        calls=[]
+        def native(command,**kwargs):
+            calls.append(command)
+            if command[:2]==['systemctl','show']:
+                text='2030-01-01 00:00:00 UTC' if 'ActiveEnterTimestamp' in command else '42\n'
+            elif command[0]=='date':text='1893456000.0\n'
+            elif command[:2]==['rsyslogd','-N1']:text=''
+            else:raise AssertionError('undeclared native call '+repr(command))
+            return subprocess.CompletedProcess(command,0,text,'')
+        original_stat=Path.stat
+        def trusted_metadata(filename,*args,**kwargs):
+            info=original_stat(filename,*args,**kwargs)
+            # Only native control-code/config ownership is synthesized.
+            # Private journals and daemon data retain actual inode metadata.
+            if any(Path(filename)==area or area in Path(filename).parents
+                   for area in (root/'private',root/'spool',docker)):
+                return info
+            attributes={key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
+            attributes['st_uid']=0;attributes['st_mode']=info.st_mode & ~0o022
+            return types.SimpleNamespace(**attributes)
+        env['OWNER']=owner;env['pathlib']=types.SimpleNamespace(Path=path,PurePath=__import__('pathlib').PurePath)
+        self.enterContext(mock.patch.object(Path,'stat',trusted_metadata))
+        self.enterContext(mock.patch.object(env['subprocess'],'run',native))
+        state={'paths':[str(source)],'images':{},'docker_root':str(docker)}
+        class Native:
+            def run(self,command,**kwargs):
                 calls.append(command)
-                if command[:2]==['systemctl','show']:
-                    text='2030-01-01 00:00:00 UTC' if 'ActiveEnterTimestamp' in command else '42\n'
-                elif command[0]=='date':text='1893456000.0\n'
-                elif command[:2]==['rsyslogd','-N1']:text=''
-                else:raise AssertionError('undeclared native call '+repr(command))
+                if command[:3]==['docker','ps','-aq']:text='c'*64+'\n'
+                elif command[:2]==['docker','info']:text=str(docker)+'\n'
+                elif command==['/usr/local/libexec/pilot-wazuh-delivery','local']:text='native leaf'
+                else:raise AssertionError('undeclared coordinator command '+repr(command))
                 return subprocess.CompletedProcess(command,0,text,'')
-            original_stat=Path.stat
-            def trusted_metadata(filename,*args,**kwargs):
-                info=original_stat(filename,*args,**kwargs)
-                # Explicit synthetic root-owned config fixture. Preserve real
-                # inode/link/type/bytes; no chmod/chown on controller ancestors.
-                attributes={key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
-                attributes['st_uid']=0;attributes['st_mode']=info.st_mode & ~0o022
-                return types.SimpleNamespace(**attributes)
-            env['OWNER']=owner
-            env['pathlib']=types.SimpleNamespace(Path=path,PurePath=__import__('pathlib').PurePath)
-            old_stat=Path.stat
-            with mock.patch.object(Path,'stat',trusted_metadata),mock.patch.object(env['subprocess'],'run',native):
-                before={str(filename):hashlib.sha256(filename.read_bytes()).hexdigest()
-                        for filename in (global_config,owner,profile,argv,maps)}
-                value=inspect()
-                self.assertEqual(value['mode'],'enabled')
-                self.assertIn(str(global_config),value['files'])
-                self.assertIn(str(owner),value['files'])
-                after={filename:hashlib.sha256(real_path(filename).read_bytes()).hexdigest() for filename in before}
-                self.assertEqual(before,after,'inspect-reader wrote a configuration or state file')
-                extra.write_text('input(type="imfile" File="/other-input" ruleset="foreign")\n')
-                with self.assertRaisesRegex(ValueError,'exclusive owned imfile'):
-                    inspect()
-                extra.unlink()
-                argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-f\0/foreign.conf\0')
-                with self.assertRaisesRegex(ValueError,'default-config selection'):
-                    inspect()
+            def json(self,command,**kwargs):
+                calls.append(command)
+                if str(command[0])==str(checker):
+                    return inspect(cold='--cold' in command)
+                if command[:2]==['docker','inspect']:
+                    return [{'Config':{'Labels':{'com.docker.compose.project':'single-node',
+                                                  'com.docker.compose.service':'wazuh.manager'}},
+                             'Mounts':[{'Destination':'/var/ossec/logs','Type':'volume',
+                                        'Name':'single-node_logs','Source':str(source)}]}]
+                if command[:3]==['docker','volume','inspect']:
+                    return [{'Driver':'local','Options':{},'Labels':{'com.docker.compose.project':'single-node'},
+                             'Mountpoint':str(source)}]
+                raise AssertionError('undeclared native JSON command '+repr(command))
+        central=w.Central(root=root/'private',runner=Native())
+        central.discover=lambda:state  # native Compose/health leaf only
+        reader=w.Reader(central,checker_hash=w.digest(checker),ack=True)
+        reader.CHECKER=checker;reader.PROFILE=profile;reader.CONFIG=owner;reader.SPOOL=root/'spool'
+        reader.source_users=lambda *args,**kwargs:None  # native FD leaf
+        reader.fds=lambda *args,**kwargs:[]              # native FD leaf
+        reader.qualify=lambda baseline:{'engine':'native-qualified-leaf'}
+        reader.verify_tools=lambda:None
+        reader.units.admit=lambda:{'units':'native-policy-leaf'}
+        return reader,state,inspect,extra,profile,owner,source,argv,calls
 
-                # Unknown legacy imfile declarations must never become an
-                # apparently absent reader just because its FD is closed.
-                argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
-                owner.unlink();profile.unlink()
-                legacy_cases=[
-                    '$ModLoad imfile\n$InputFileName /native-source/alerts/alerts.json\n$InputRunFileMonitor\n',
-                    'module(load="imfile")\n$InputFileName /native-source/alerts/alerts.json\n$InputRunFileMonitor\n',
-                    '$ModLoad /usr/lib/rsyslog/imfile.so\n',
-                    '$InputFileBindRuleset other\n$InputFileStateFile old-cursor\n']
-                for text in legacy_cases:
-                    extra.write_text(text)
-                    with self.assertRaisesRegex(ValueError,'legacy imfile'):
-                        inspect()
-                extra.write_text('$ModLoad imuxsock\n# $InputFileName /native-source/alerts/alerts.json\n'
-                                 'set $.example = "$InputRunFileMonitor";\n')
-                self.assertEqual(inspect()['mode'],'never','unrelated legacy module/comments/strings remain available')
-                for declaration in (
-                    'module(load="imfile" statefile.directory="/var/spool/rsyslog/pilot-wazuh/state/.")',
-                    'module(load="imfile" statefile.directory="/var/spool//rsyslog/pilot-wazuh/state")',
-                    'action(type="omfwd" queue.spoolDirectory="/var/spool/rsyslog/pilot-wazuh/.")',
-                    'module(load="imfile" statefile.directory="relative/state")',
-                    'input(type="imfile" File="$dynamic")',
-                    'action(type="omfwd" queue.filename="../pilot-wazuh/wazuh_alerts")',
-                    'action(type="omfwd" queue.filename="$dynamic")',
+    def test_actual_inspect_admit_accepts_native_closed_pairs_append_and_internal_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);reader,state,inspect,extra,profile,owner,source,argv,calls=self.fixture(root,True,True)
+            raw=inspect()
+            self.assertNotIn('mode',raw,'standalone facts cannot authorize absence/custody')
+            self.assertEqual(raw['authorization'],'UNVALIDATED_OBSERVATIONS')
+            before={str(path):w.digest(path) for path in (owner,profile)}
+            original=w.ClosedCapture.attrs
+            appended=[]
+            def append_during_walk(path):
+                if Path(path)==source/'alerts/alerts.json' and not appended:
+                    with Path(path).open('a') as stream:stream.write('live append\n')
+                    appended.append(True)
+                return original(path)
+            with mock.patch.object(w.ClosedCapture,'attrs',append_during_walk):
+                self.assertEqual(reader.admit(state)['mode'],'enabled')
+            self.assertTrue(appended)
+            extra.write_text('action(type="omfwd" queue.filename="foreign" queue.spoolDirectory="'+str(reader.SPOOL)+'")\n')
+            with self.assertRaisesRegex(w.Refused,'protected physical'):reader.admit(state)
+            extra.write_text('action(type="omfwd" queue.filename="wazuh-named-disjoint")\n')
+            self.assertEqual(reader.admit(state)['mode'],'enabled')
+            self.assertEqual(before,{str(path):w.digest(Path(path)) for path in before})
+            os.link(source/'alerts/alerts.json',root/'external-third')
+            with self.assertRaisesRegex(w.Refused,'alias'):
+                reader.admit(state)
+            (root/'external-third').unlink()
+            (source/'external').symlink_to(root/'outside')
+            with self.assertRaisesRegex(w.Refused,'capture'):
+                reader.admit(state)
+
+
+    def test_pending_receipt_refreshes_actual_source_and_pinned_observer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);reader,state,inspect,extra,profile,owner_config,source,argv,calls=self.fixture(root,True,False)
+            spool=reader.SPOOL;spool.mkdir(mode=0o700);(spool/'state').mkdir(mode=0o700)
+            self.enterContext(mock.patch.object(w.Reader,'SPOOL',spool))
+            self.enterContext(mock.patch.object(w.Reader,'PROFILE',profile))
+            self.enterContext(mock.patch.object(w.Reader,'CHECKER',reader.CHECKER))
+
+            (spool/'state'/'native-offset').write_text('old offset')
+            (spool/'wazuh_alerts.00000001').write_text('retained')
+            central=reader.t;central.reader=reader
+            user=type('NativeUser',(),{'pw_uid':os.geteuid()})()
+            group=type('NativeGroup',(),{'gr_gid':os.getegid()})()
+            owner='1'*32;w.HostWriter(central.root).claim(owner,'central')
+            with mock.patch.object(w.pwd,'getpwnam',return_value=user),mock.patch.object(w.grp,'getgrnam',return_value=group):
+                state['reader']=reader.admit(state)
+            item=central.begin(owner,state)
+            # Declared native producer-stop leaf; persistent custody phases,
+            # journals, queues, cursor renames and proofs remain production.
+            reader.write(item,'producer-stop-intent');reader.write(item,'producers-stopped')
+            reader.pause(item)
+            item['reader']['data_epoch']='2'*32;reader.retire_cursor(item);reader.final(item)
+            central.finish(item,'recovered');w.HostWriter(central.root).release(owner)
+            owner='3'*32;w.HostWriter(central.root).claim(owner,'central')
+            receipt=w.ReplayReceipt(central);before=receipt.path.read_bytes()
+            real_json=central.r.json
+            def wrong_volume(command,**kwargs):
+                value=real_json(command,**kwargs)
+                if command[:3]==['docker','volume','inspect']:
+                    value[0]['Mountpoint']=str(root/'foreign-volume')
+                return value
+            with mock.patch.object(w.Reader,'CHECKER',reader.CHECKER),mock.patch.object(w.Reader,'PROFILE',profile),mock.patch.object(w.Reader,'SPOOL',spool):
+                with mock.patch.object(central.r,'json',wrong_volume):
+                    with self.assertRaisesRegex(w.Refused,'current owned selected volume'):
+                        receipt.operation(owner,'4'*32,'admit',ack=True)
+                self.assertEqual(receipt.path.read_bytes(),before)
+                self.assertEqual(list(central.root.glob('reader-replay-ack-*')),[])
+                real_stat=Path.stat
+                def unsafe_parent(path,*args,**kwargs):
+                    info=real_stat(path,*args,**kwargs)
+                    if Path(path)==profile.parent:
+                        import types
+                        fields={key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
+                        fields['st_mode'] |= 0o022
+                        return types.SimpleNamespace(**fields)
+                    return info
+                with mock.patch.object(Path,'stat',unsafe_parent):
+                    with self.assertRaisesRegex(ValueError,'profile ancestors'):
+                        receipt.operation(owner,'4'*32,'admit',ack=True)
+
+                receipt.operation(owner,'4'*32,'admit',ack=True)
+                self.assertFalse(receipt.inspect()['ever_exposed'])
+
+    def test_actual_inspect_admit_covers_literals_empty_globs_contexts_and_disjoint_names(self):
+        for configured in (False,True):
+            with self.subTest(configured=configured),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);reader,state,inspect,extra,profile,owner,source,argv,calls=self.fixture(root,configured,False)
+                expected='disabled' if configured else 'never'
+                unrelated=root/'wazuh-named-disjoint.log';unrelated.write_text('unrelated')
+                extra.write_text('module(load="imfile")\ninput(type="imfile" File="'+str(unrelated)+'")\n'
+                                 'ruleset(name="foreign" queue.filename="other") {\n'
+                                 'action(type="omfwd" queue.filename="foreign")\n}\n'
+                                 '$ActionQueueFileName old-foreign\n')
+                self.assertEqual(reader.admit(state)['mode'],expected)
+                secret='UNRELATED_CREDENTIAL_SENTINEL'
+                extra.write_text('action(type="omfwd" target="127.0.0.1" password="'+secret+'" queue.filename="foreign")\n')
+                self.assertNotIn(secret,json.dumps(inspect()))
+                for selector in (str(source/'alerts/alerts.json'),str(source/'future'/'*.json')):
+                    extra.write_text('module(load="imfile")\ninput(type="imfile" File="'+selector+'")\n')
+                    with self.assertRaisesRegex(w.Refused,'protected physical'):
+                        reader.admit(state)
+                for text in (
+                    'module(load="imfile" statefile.directory="'+str(reader.SPOOL)+'/state/.")\n',
+                    'global(workDirectory="'+str(reader.SPOOL)+'")\naction(type="omfwd" queue.filename="foreign")\n',
+                    'ruleset(name="foreign" queue.spoolDirectory="'+str(reader.SPOOL)+'" queue.filename="foreign") {}\n',
+                    'action(type="omfwd" queue.filename="../spool/foreign")\n',
+                    'input(type="imfile" File="$dynamic")\n',
+                    'main_queue(queue.type="Disk")\n',
+                    '$MainMsgQueueSaveOnShutdown on\n',
 
                 ):
-                    extra.write_text(declaration+'\n')
-                    with self.assertRaisesRegex(ValueError,'namespace'):
-                        inspect()
-                extra.write_text('module(load="imfile" statefile.directory="/unrelated-state")\n'
-                                 'input(type="imfile" File="/unrelated-source/*.json")\n')
-                self.assertEqual(inspect()['mode'],'never')
-                extra.write_text('module(load="imfile" statefile.directory="/unrelated-state")\n'
-                                 'input(type="imfile" File="/unrelated-source/*.json")\n'
-                                 'action(type="omfwd" queue.filename="foreign" queue.spoolDirectory="/var/spool/rsyslog")\n')
-                self.assertEqual(inspect()['mode'],'never','shared parent plus disjoint native queue basename is not ownership')
-                profile.write_text(json.dumps({'enabled':False,'transport':'tcp','source':'/native-source'}))
-                self.assertEqual(inspect()['mode'],'disabled')
-
-            self.assertTrue(all(command[0] in ('systemctl','date','rsyslogd') for command in calls))
-            self.assertFalse(any(item in ('start','stop','restart','reload') for command in calls for item in command))
+                    extra.write_text(text)
+                    with self.assertRaises((w.Refused,ValueError)):reader.admit(state)
+                original_config=(root/'rsyslog.conf').read_text()
+                (root/'rsyslog.conf').write_text('$WorkDirectory '+str(reader.SPOOL)+'\n$IncludeConfig '+str(root/'rsyslog.d'/'*.conf')+'\n')
+                extra.write_text('ruleset(name="foreign" queue.filename="persisted") {}\n')
+                with self.assertRaisesRegex(w.Refused,'protected physical'):reader.admit(state)
+                (root/'rsyslog.conf').write_text(original_config)
+                extra.write_text('$ModLoad imfile\n$InputFileName '+str(unrelated)+'\n$InputRunFileMonitor\n')
+                with self.assertRaisesRegex(ValueError,'legacy imfile'):reader.admit(state)
+                extra.write_text('# valid disjoint include\n')
+                os.link(root/'rsyslog.conf',root/'external-config-alias')
+                with self.assertRaisesRegex(ValueError,'unsafe reader configuration'):
+                    reader.admit(state)
 
 
 class SourceProcessClosureTests(unittest.TestCase):

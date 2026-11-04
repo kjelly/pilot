@@ -18,7 +18,7 @@ endpoint=importlib.util.module_from_spec(spec);spec.loader.exec_module(endpoint)
 class EndpointTests(unittest.TestCase):
     def test_identity_uses_inventory_evidence_and_canonical_numeric_transport(self):
         records=[{'name':'manager-a','address':'192.0.2.15','fqdn':'manager.example.test'}]
-        for raw in ('manager-a','manager.example.test','192.0.2.15'):
+        for raw in ('manager-a','manager.example.test','MANAGER.Example.TEST','192.0.2.15'):
             request={'raw':raw,'records':records,'manager':'manager-a'}
             chosen=endpoint.select(request)
             self.assertEqual(chosen['transport'],'192.0.2.15')
@@ -28,9 +28,11 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(endpoint.bind(dict(request,resolved='2001:db8::15'))['address'],'2001:db8::15')
         for raw,changes in (
             ('unknown.example.test',{}),
+            ('MANAGER-A',{}),
             ('192.0.2.16',{}),
             ('manager.example.test',{'manager':'manager-b'}),
             ('manager.example.test',{'records':records+[dict(records[0],name='manager-b')]}),
+            ('manager.example.test',{'records':records+[dict(records[0],name='manager-b',fqdn='MANAGER.EXAMPLE.TEST')]}),
             ('manager-a',{'records':records+[{'name':'manager-b','address':'192.0.2.15','fqdn':'other.test'}]}),
         ):
             request=dict(raw=raw,records=records,manager='manager-a',**{})
@@ -63,12 +65,18 @@ class EndpointTests(unittest.TestCase):
                 'manager-a':{'ansible_host':'192.0.2.15','ansible_fqdn':'manager.example.test'},
                 'manager-b':{'ansible_host':'192.0.2.16','ansible_fqdn':'other.example.test'},
                 'manager-external':{'ansible_host':'192.0.2.17','ansible_fqdn':'external.example.test'},
-                'manager-six':{'ansible_host':'2001:db8::15','ansible_fqdn':'six.example.test'}},
+                'manager-six':{'ansible_host':'2001:db8::15','ansible_fqdn':'six.example.test'},
+                'manager-local':{'ansible_host':'localhost','ansible_fqdn':'local.example.test'},
+                'manager-collision':{'ansible_host':'192.0.2.18','ansible_fqdn':'MANAGER.EXAMPLE.TEST'}},
                 'children':{'wazuh-manager':{'hosts':{'manager-a':{},'manager-b':{}}}}}}
             inv=root/'inventory.yml';inv.write_text(yaml.safe_dump(inventory))
             cases=[
                 ('numeric','192.0.2.15','manager-a',True,'192.0.2.15'),
                 ('fqdn','manager.example.test','manager-a',True,'192.0.2.15'),
+                ('mixed-case-fqdn','MANAGER.Example.TEST','manager-a',True,'192.0.2.15'),
+                ('mixed-case-hostname','LOCALHOST','manager-local',True,'127.0.0.1'),
+                ('normalized-collision','manager.example.test','manager-collision',False,None),
+                ('opaque-key-case','MANAGER-A','manager-a',False,None),
                 ('alias','manager-a','manager-a',True,'192.0.2.15'),
                 ('outside-group-fqdn','external.example.test','manager-external',True,'192.0.2.17'),
                 ('canonical-ipv6','2001:0db8:0:0:0:0:0:15','manager-six',True,'2001:db8::15'),

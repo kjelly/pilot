@@ -244,68 +244,89 @@ def reader_files(root='/etc/rsyslog.conf'):
     return contents
 
 
-def reader_namespace(value, protected, pattern=False):
-    """Classify literal physical namespaces; unfamiliar aliases are not absence."""
-    if (not isinstance(value, str) or not value.startswith('/') or
-            any(c in value for c in '$%\\\x00') or value.startswith('//') or
-            os.path.normpath(value) != value):
-        raise ValueError('unknown or noncanonical reader data namespace')
-    wildcard = next((i for i, part in enumerate(pathlib.PurePath(value).parts)
-                     if any(c in part for c in '*?[')), None)
-    if wildcard is not None and not pattern:
-        raise ValueError('dynamic reader data namespace')
-    if wildcard is not None:
-        matches = glob.glob(value)
-        if len(matches) > 2048:
-            raise ValueError('reader source namespace exceeds qualified bound')
-        related = False
-        for match in matches:
-            related |= reader_namespace(match, protected)
-        if related:
-            return True
-    prefix = pathlib.Path(*pathlib.PurePath(value).parts[:wildcard]) if wildcard is not None else pathlib.Path(value)
-    existing = prefix
-    while not existing.exists() and not existing.is_symlink():
-        if existing == existing.parent:
-            raise ValueError('reader namespace has no physical anchor')
-        existing = existing.parent
-    if existing.is_file() and existing.stat().st_nlink != 1:
-        raise ValueError('aliased reader source namespace')
-    for node in (existing, *existing.parents):
-        if node.is_symlink() or node.resolve() != node.absolute():
-            raise ValueError('aliased reader data namespace')
-    # Subtree mounts can alias a protected tree under an unrelated spelling.
-    # A normal distinct filesystem root remains supported; bind/subtree roots
-    # cannot establish disjointness for this bounded inspector.
-    for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
-        fields = line.split()
-        if len(fields) < 7:
-            raise ValueError('unknown reader mount namespace')
-        def decode(field):
-            return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), field)
-        root, mount = decode(fields[3]), decode(fields[4])
-        if root != '/' and (str(existing) == mount or str(existing).startswith(mount.rstrip('/') + '/')):
-            raise ValueError('reader namespace uses an unsupported subtree mount')
-    for target in protected:
-        target = pathlib.Path(target)
-        name = str(target)
-        if pattern:
-            if fnmatch.fnmatchcase(name, value):
-                return True
-        elif value == name or value.startswith(name.rstrip('/') + '/'):
-            return True
-        if existing.exists() and target.exists():
-            info = existing.stat()
-            for node in (target, *target.parents):
-                other = node.stat()
-                if (info.st_dev, info.st_ino) == (other.st_dev, other.st_ino):
-                    # Sharing / or an ordinary common ancestor is not aliasing.
-                    if str(existing) != str(node):
-                        raise ValueError('physical reader namespace alias')
-    return False
+
+def reader_resources(files, root='/etc/rsyslog.conf'):
+    """Typed ordered resource observations, never filesystem authorization."""
+    result, seen, workdirs = [], set(), []
+    workdir = None
+    fields = {'load', 'type', 'file', 'name', 'ruleset', 'statefile.directory',
+              'queue.filename', 'queue.spooldirectory', 'queue.type', 'queue.saveonshutdown',
+              'statefile', 'workdirectory'}
+    def visit(filename, depth=0):
+        nonlocal workdir
+        filename = str(pathlib.Path(filename))
+        if filename not in files or filename in seen or depth > 16:
+            raise ValueError('reader declaration closure changed')
+        seen.add(filename)
+        ts, i = tokens(files[filename]), 0
+        while i < len(ts):
+            kind, name = ts[i];name = name.lower()
+            if kind == 'word' and name in ('$includeconfig', '$workdirectory',
+                    '$actionqueuefilename', '$mainmsgqueuefilename', '$rulesetqueuefilename'):
+                if i + 1 >= len(ts) or ts[i + 1][0] not in ('word', 'string'):
+                    raise ValueError('unknown reader legacy resource')
+                value = ts[i + 1][1];i += 2
+                if name == '$includeconfig':
+                    for path in sorted(glob.glob(value)):
+                        visit(path, depth + 1)
+                elif name == '$workdirectory':
+                    workdir = value;workdirs.append(value)
+                else:
+                    result.append({'kind': 'queue', 'attrs': {'queue.filename': value},
+                                   'workdirectory': workdir, 'file': filename})
+                continue
+            if kind == 'word' and name in ('include', 'module', 'input', 'action',
+                                            'global', 'ruleset', 'main_queue'):
+                if i + 1 >= len(ts) or ts[i + 1][0] != '(':
+                    raise ValueError('unknown reader resource declaration')
+                attrs, i = {}, i + 2
+                while i < len(ts) and ts[i][0] != ')':
+                    if (i + 2 >= len(ts) or ts[i][0] != 'word' or ts[i + 1][0] != '='
+                            or ts[i + 2][0] not in ('word', 'string', 'escaped-string')):
+                        raise ValueError('nonliteral reader resource declaration')
+                    key, value = ts[i][1].lower(), ts[i + 2][1]
+                    if key in attrs:
+                        raise ValueError('duplicate reader resource parameter')
+                    if key in fields and ts[i + 2][0] == 'escaped-string':
+                        raise ValueError('escaped reader resource identity')
+                    attrs[key] = value;i += 3
+                if i >= len(ts):
+                    raise ValueError('unterminated reader resource declaration')
+                i += 1
+                if name == 'include':
+                    for path in sorted(glob.glob(attrs.get('file', ''))):
+                        visit(path, depth + 1)
+                elif name == 'global' and 'workdirectory' in attrs:
+                    workdir = attrs['workdirectory'];workdirs.append(workdir)
+                # Do not export unrelated action credentials or config bytes.
+                selected = {key: value for key, value in attrs.items() if key in fields}
+                if name != 'include':
+                    result.append({'kind': name, 'attrs': selected,
+                                   'workdirectory': workdir, 'file': filename})
+                continue
+            if kind == 'word' and name.startswith(('$actionqueue', '$mainmsgqueue', '$rulesetqueue')):
+                # Unknown legacy resource builders cannot imply absence.
+                if 'directory' in name or 'filename' in name:
+                    raise ValueError('unknown legacy queue namespace context')
+                field = 'queue.saveonshutdown' if name.endswith('saveonshutdown') else (
+                    'queue.type' if name.endswith('type') else None)
+                if field:
+                    if i + 1 >= len(ts) or ts[i + 1][0] not in ('word', 'string'):
+                        raise ValueError('unknown legacy queue resource')
+                    result.append({'kind':'queue','attrs':{field:ts[i + 1][1]},
+                                   'workdirectory':workdir,'file':filename})
+                    i += 2
+                    continue
+            i += 1
+        if len(result) > 2048:
+            raise ValueError('reader resource observations exceed bound')
+    visit(root)
+    if seen != set(files) or len(set(workdirs)) > 1:
+        raise ValueError('ambiguous inherited reader work directory')
+    return result
 
 
-def inspect_reader():
+def inspect_reader(cold=False):
     """Private typed metadata, not a delivery/graceful-save certificate."""
     profile = OWNER.parent / 'pilot-wazuh/profile.json'
     files = reader_files() if pathlib.Path('/etc/rsyslog.conf').exists() else {}
@@ -323,43 +344,15 @@ def inspect_reader():
     if any(name == '$modload' and pathlib.PurePath(attrs['value']).name.lower() in ('imfile', 'imfile.so')
            for name, attrs, _ in calls):
         raise ValueError('unknown legacy imfile module ownership')
-    protected = ['/var/spool/rsyslog/pilot-wazuh']
-    if profile.exists() and not profile.is_symlink():
-        source_hint = json.loads(profile.read_text()).get('source')
-        if source_hint:
-            # The profile itself is independently validated below.
-            reader_namespace(source_hint, [], pattern=False)
-            protected.append(source_hint)
-    namespace_owned = False
-    for name, attrs, _ in calls:
-        for field in ('statefile.directory', 'queue.spooldirectory', 'workdirectory'):
-            if field in attrs:
-                namespace_owned |= reader_namespace(attrs[field], protected)
-        if name == 'input' and attrs.get('type', '').lower() == 'imfile':
-            value = attrs.get('file')
-            if not value:
-                raise ValueError('unknown imfile source namespace')
-            namespace_owned |= reader_namespace(value, protected, pattern=True)
-        if 'queue.filename' in attrs:
-            filename = attrs['queue.filename']
-            if filename.startswith('/'):
-                namespace_owned |= reader_namespace(filename, protected)
-            elif (filename in ('.', '..') or not re.fullmatch(r'[A-Za-z0-9_.:-]+', filename)):
-                raise ValueError('unknown relative reader queue filename namespace')
-            # Native relative basenames are anchored in their declared spool
-            # (or global work directory); a disjoint queue in a shared parent
-            # does not acquire the exclusive pilot-wazuh child namespace.
-
+    resources = reader_resources(files) if files else []
     owned_text = files.get(str(OWNER), '')
     inputs = [(attrs, filename) for name, attrs, filename in calls
               if name == 'input' and attrs.get('type', '').lower() == 'imfile']
     owned_inputs = [(attrs, filename) for attrs, filename in inputs
-                    if filename == str(OWNER) or attrs.get('ruleset') == 'pilotWazuhForward'
-                    or 'wazuh' in attrs.get('file', '').lower()]
+                    if filename == str(OWNER) or attrs.get('ruleset') == 'pilotWazuhForward']
     actions = [attrs for name, attrs, filename in calls
                if name == 'action' and (attrs.get('name') == 'wazuh_alerts'
                                        or attrs.get('queue.filename') == 'wazuh_alerts'
-                                       or attrs.get('queue.spooldirectory') == '/var/spool/rsyslog/pilot-wazuh'
                                        or filename == str(OWNER))]
     modules = [attrs for name, attrs, filename in calls
                if name == 'module' and pathlib.PurePath(attrs.get('load', '')).name in ('imfile', 'imfile.so')]
@@ -375,41 +368,44 @@ def inspect_reader():
         if argv not in ([b'/usr/sbin/rsyslogd', b'-n', b'-iNONE'],
                         [b'/usr/sbin/rsyslogd', b'-n']):
             raise ValueError('unknown actual reader default-config selection')
-        stamp = subprocess.run(['systemctl', 'show', '--timestamp=us', '-p',
-                                'ActiveEnterTimestamp', '--value', 'rsyslog.service'],
-                               capture_output=True, text=True, timeout=15)
-        epoch = subprocess.run(['date', '-d', stamp.stdout.strip(), '+%s.%N'],
-                               capture_output=True, text=True, timeout=15)
-        if stamp.returncode or epoch.returncode:
-            raise ValueError('unknown loaded reader configuration time')
-        latest = [pathlib.Path(filename).stat().st_mtime for filename in files]
-        if profile.exists():
-            latest.append(profile.stat().st_mtime)
-        if latest and max(latest) > float(epoch.stdout):
-            raise ValueError('reader profile/include changes are not loaded')
+        if not cold:
+            stamp = subprocess.run(['systemctl', 'show', '--timestamp=us', '-p',
+                                    'ActiveEnterTimestamp', '--value', 'rsyslog.service'],
+                                   capture_output=True, text=True, timeout=15)
+            epoch = subprocess.run(['date', '-d', stamp.stdout.strip(), '+%s.%N'],
+                                   capture_output=True, text=True, timeout=15)
+            if stamp.returncode or epoch.returncode:
+                raise ValueError('unknown loaded reader configuration time')
+            latest = [pathlib.Path(filename).stat().st_mtime for filename in files]
+            if profile.exists():
+                latest.append(profile.stat().st_mtime)
+            if latest and max(latest) > float(epoch.stdout):
+                raise ValueError('reader profile/include changes are not loaded')
     hashes = {filename: hashlib.sha256(text.encode()).hexdigest() for filename, text in files.items()}
-    base = {'schema': 1, 'files': hashes, 'pid': int(pid), 'imfile_inputs': [attrs for attrs, _ in inputs]}
+    base = {'schema': 2, 'files': hashes, 'pid': int(pid), 'imfile_inputs': [{'file': attrs.get('file', '')} for attrs, _ in inputs],
+            'resources': resources, 'authorization': 'UNVALIDATED_OBSERVATIONS'}
     if not profile.exists() and not profile.is_symlink():
-        if (OWNER.exists() or OWNER.is_symlink() or owned_text or owned_inputs or actions
-                or namespace_owned):
+        if OWNER.exists() or OWNER.is_symlink() or owned_text or owned_inputs or actions:
             raise ValueError('Wazuh reader without owned profile')
-        return dict(base, mode='never', profile=None)
+        return dict(base, mode_candidate='never', profile=None)
     if (profile.is_symlink() or not profile.is_file() or profile.resolve() != profile.absolute()
             or profile.stat().st_uid != 0 or profile.stat().st_nlink != 1
             or profile.stat().st_mode & 0o022):
         raise ValueError('unsafe Wazuh reader profile')
+    if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in profile.parents):
+        raise ValueError('unsafe Wazuh reader profile ancestors')
     value = json.loads(profile.read_text())
     if (type(value.get('enabled')) is not bool or value.get('transport') not in ('tcp', 'relp')
             or not isinstance(value.get('source'), str)):
         raise ValueError('unknown Wazuh reader profile shape')
+    value = {key: value[key] for key in ('enabled', 'transport', 'source', 'heartbeat_interval') if key in value}
     base.update(profile=value, profile_sha256=hashlib.sha256(profile.read_bytes()).hexdigest())
     if not value['enabled']:
-        if (owned_text or owned_inputs or actions
-                or namespace_owned):
+        if owned_text or owned_inputs or actions:
             raise ValueError('disabled profile still has Wazuh input/action/cursor access')
         # Loaded FDs are independently inspected by the transaction against
         # the actual central volume; profile strings alone cannot prove absence.
-        return dict(base, mode='disabled')
+        return dict(base, mode_candidate='disabled')
     if (not owned_text.startswith(HEADER + '\n') or len(owned_inputs) != 1
             or len(inputs) != 1 or len(actions) != 1 or len(modules) != 1):
         raise ValueError('Wazuh cursor is not an exclusive owned imfile namespace')
@@ -431,7 +427,7 @@ def inspect_reader():
             or action.get('queue.maxdiskspace') != '256m'
             or action.get('queue.size') != '10000'):
         raise ValueError('unsupported owned reader input/action semantics')
-    if not int(pid):
+    if not int(pid) and not cold:
         raise ValueError('enabled reader has no live native invocation')
     # The qualified fixed build defaults to an8192-byte message bound.
     # Larger/unknown overrides invalidate the queue memory-save/capacity bound.
@@ -447,17 +443,25 @@ def inspect_reader():
     expected = 'omrelp' if value['transport'] == 'relp' else 'omfwd'
     if action.get('type') != expected:
         raise ValueError('reader transport differs from profile')
-    ownership('/etc/rsyslog.conf', OWNER, int(pid) > 0 and
+    ownership('/etc/rsyslog.conf', OWNER, not cold and int(pid) > 0 and
               'immark.so' in pathlib.Path('/proc/' + pid + '/maps').read_text())
-    runtime(OWNER, value['transport'], pid)
+    if not cold:
+        runtime(OWNER, value['transport'], pid)
     native('/etc/rsyslog.conf')
-    return dict(base, mode='enabled', input=source, action=action,
+    observed_action = {key: action[key] for key in (
+        'name', 'type', 'target', 'port', 'queue.filename', 'queue.spooldirectory',
+        'queue.type', 'queue.saveonshutdown', 'queue.discardseverity', 'queue.maxdiskspace',
+        'queue.size', 'queue.diskqueuetype', 'tls.permittedpeer', 'action.writeallmarkmessages')
+        if key in action}
+    return dict(base, mode_candidate='enabled', action=observed_action,
                 config_sha256=hashlib.sha256(owned_text.encode()).hexdigest())
 
 def main():
     mode = sys.argv[1]
     if mode == 'inspect-reader':
-        print(json.dumps(inspect_reader(), sort_keys=True))
+        if sys.argv[2:] not in ([], ['--cold']):
+            raise ValueError('unknown reader inspection arguments')
+        print(json.dumps(inspect_reader(cold=bool(sys.argv[2:])), sort_keys=True))
         return
     if mode == 'preflight':
         transport = sys.argv[2]

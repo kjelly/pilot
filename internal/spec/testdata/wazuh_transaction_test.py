@@ -276,7 +276,8 @@ class DiscoveryFilesystemTests(unittest.TestCase):
                                                      'com.docker.compose.project.working_dir': str(project),
                                                      'com.docker.compose.project.config_files': str(compose),
                                                      'com.docker.compose.config-hash': 'a' * 64}},
-                               'Mounts': [{'Type': 'volume', 'Name': name, 'Source': str(mount)}]})
+                               'Mounts': [{'Type': 'volume', 'Name': name, 'Source': str(mount),
+                                           'Destination': '/var/ossec/logs' if service == 'wazuh.manager' else '/data'}]})
             images[image] = {'Id': image, 'Size': 1024,
                              'RepoDigests': ['wazuh/' + service.replace('.', '-') + '@' + image]}
             volumes[name] = {'Driver': 'local', 'Options': None, 'Mountpoint': str(mount),
@@ -291,6 +292,8 @@ class DiscoveryFilesystemTests(unittest.TestCase):
                     text = str(docker) if '--format' in argv else ''
                 elif argv[:2] == ['docker', 'ps']:
                     selected = [row['Id'] for row in containers]
+                    if 'label=com.docker.compose.service=wazuh.manager' in argv:
+                        selected = [row['Id'] for row in containers if row['Config']['Labels']['com.docker.compose.service']=='wazuh.manager']
                     if argv[-1].startswith('volume='):
                         selected = [row['Id'] for row in containers if row['Mounts'][0]['Name'] == argv[-1].split('=', 1)[1]]
                     text = '\n'.join(selected)
@@ -306,7 +309,7 @@ class DiscoveryFilesystemTests(unittest.TestCase):
             def json(self, argv, **kwargs):
                 self.calls.append(list(argv))
                 if argv[:2] == ['docker', 'inspect']:
-                    return containers
+                    return [row for row in containers if row['Id'] in argv[2:]]
                 if argv[:3] == ['docker', 'image', 'inspect']:
                     return [images[argv[-1]]]
                 if argv[:3] == ['docker', 'volume', 'inspect']:
@@ -930,6 +933,10 @@ class FakeCentral(w.Central):
         # All native Docker/proc inspection is an explicit command-model leaf.
         # Real files/tar/layout/version policy remain production code.
         reader.source = lambda state: str(self.volume)
+        reader.observe = lambda loaded=True: {
+            'schema':2,'mode_candidate':'never','files':{},'profile':None,'pid':0,
+            'resources':[],'authorization':'UNVALIDATED_OBSERVATIONS'}
+
         reader.source_users = lambda *args, **kwargs: None
         return reader
 

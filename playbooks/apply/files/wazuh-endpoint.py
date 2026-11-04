@@ -24,11 +24,29 @@ def address(value):
     return values.pop()
 
 
+def dns_identity(value):
+    # Inventory keys remain opaque. Only explicitly DNS-valued fields use
+    # case-insensitive ASCII label identity; terminal-dot policy is unchanged.
+    if not isinstance(value, str) or not value or numeric(value) is not None:
+        return None
+    try:
+        value.encode('ascii')
+    except UnicodeEncodeError:
+        return None
+    return value.lower()
+
+
 def select(request):
     raw = request['raw']
+    if not isinstance(raw, str) or not raw:
+        raise ValueError('empty endpoint identity')
     records = request['records']
-    matches = [item for item in records if raw in
-               (item['name'], item['address'], item.get('fqdn', ''))]
+    raw_dns = dns_identity(raw)
+    matches = [item for item in records if raw == item['name']
+               or raw in (item['address'], item.get('fqdn', None))
+               or (numeric(raw) is not None and numeric(raw) == numeric(item['address']))
+               or (raw_dns is not None and raw_dns in
+                   (dns_identity(item['address']), dns_identity(item.get('fqdn', ''))))]
     if len(matches) > 1:
         raise ValueError('ambiguous inventory endpoint association')
     if request.get('manager') and not matches and numeric(raw) is None:

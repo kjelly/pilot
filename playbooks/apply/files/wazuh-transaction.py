@@ -17,6 +17,7 @@ import ipaddress
 import importlib.util
 import io
 import fnmatch
+import glob
 import json
 import os
 import pwd
@@ -246,13 +247,18 @@ class MountTable:
             raise Refused('selected path has ambiguous stacked mounts')
         return selected[0]
 
-    def physical(self, path):
+    def project(self, path):
+        """Read-only physical identity; this grants no recovery/write authority."""
         row = self.containing(path)
         if row['root'] is None:
             raise Refused('selected path has a non-filesystem mount root')
+        return row['device'], row['root'] / path.relative_to(row['point'])
+
+    def physical(self, path):
+        row = self.containing(path)
         if not row['writable']:
             raise Refused('selected recovery filesystem is read-only')
-        return row['device'], row['root'] / path.relative_to(row['point'])
+        return self.project(path)
 
     def backup(self, root):
         root = canonical(root)
@@ -1729,6 +1735,129 @@ class ReaderData:
             os.close(fd)
 
 
+class ReaderNamespace:
+    """One coordinator authority for live source closure and physical extent."""
+    def __init__(self, source, spool, layout, mounts=None, owner_config=Path('/etc/rsyslog.d/31-pilot-wazuh.conf')):
+        self.owner_config = str(owner_config)
+        self.source, self.spool = Path(source), Path(spool)
+        self.layout, self.mounts = layout, mounts or MountTable()
+        self.roots = (self.source, self.spool)
+        self.projected = [self.mounts.project(path) for path in self.roots]
+        self.inodes = {tuple(node['scope_identity'][:2]) for node in layout['nodes'].values()
+                       if node['type'] == 'file'}
+
+    def path(self, value):
+        if (not isinstance(value, str) or not value.startswith('/') or value.startswith('//')
+                or os.path.normpath(value) != value or any(c in value for c in '$%\\\x00')):
+            raise Refused('unknown noncanonical reader resource namespace')
+        path = Path(value)
+        if self.source == path or self.source in path.parents:
+            # Only the already closed producer tree may contain supported
+            # internal symlinks. External selectors cannot follow aliases.
+            resolved = path.resolve()
+            if resolved != self.source and self.source not in resolved.parents:
+                raise Refused('reader selector escaped the closed producer source')
+            return resolved
+        return canonical(path)
+
+    def literal(self, value):
+        path = self.path(value)
+        device, physical = self.mounts.project(path)
+        if any(device == target_device and (physical == target or target in physical.parents)
+               for target_device, target in self.projected):
+            return True
+        if path.exists() and path.is_file():
+            info = path.stat()
+            if (info.st_dev, info.st_ino) in self.inodes:
+                return True
+        return False
+
+    def pattern(self, value):
+        self.path(value)
+        if not isinstance(value, str) or '**' in value:
+            raise Refused('unknown recursive reader source pattern')
+        parts = Path(value).parts
+        first = next((i for i, part in enumerate(parts) if glob.has_magic(part)), None)
+        if first is None:
+            return self.literal(value)
+        if any(part.count('[') != part.count(']') for part in parts):
+            raise Refused('unknown reader source pattern syntax')
+        prefix = self.path(str(Path(*parts[:first])))
+        device, physical = self.mounts.project(prefix)
+        candidate = (*physical.parts, *parts[first:])
+        for target_device, target in self.projected:
+            # Component matching preserves native path separators. Even an
+            # empty future glob below a protected root cannot prove absence.
+            if device == target_device and len(candidate) >= len(target.parts):
+                if all(fnmatch.fnmatchcase(actual, pattern)
+                       for actual, pattern in zip(target.parts, candidate)):
+                    return True
+        for count, match in enumerate(glob.iglob(value)):
+            if count >= 2048:
+                raise Refused('reader source pattern exceeds qualified bound')
+            if self.literal(match):
+                return True
+        return False
+
+    def resources(self, observed):
+        if (observed.get('schema') != 2
+                or observed.get('authorization') != 'UNVALIDATED_OBSERVATIONS'
+                or not isinstance(observed.get('resources'), list)
+                or len(observed['resources']) > 2048):
+            raise Refused('reader observations lack the pinned typed resource protocol')
+        mode = observed.get('mode_candidate')
+        if mode not in ('never', 'disabled', 'enabled'):
+            raise Refused('unknown reader baseline candidate')
+        for resource in observed['resources']:
+            if (not isinstance(resource, dict) or set(resource) != {'kind','attrs','workdirectory','file'}
+                    or not isinstance(resource['attrs'], dict)
+                    or resource['file'] not in observed.get('files', {})):
+                raise Refused('unknown typed reader declaration')
+            kind, attrs, anchor = resource['kind'], resource['attrs'], resource['workdirectory']
+            related = False
+            if kind == 'input' and attrs.get('type', '').lower() == 'imfile':
+                if not attrs.get('file'):
+                    raise Refused('unknown imfile source selector')
+                related |= self.pattern(attrs['file'])
+                if 'statefile' in attrs:
+                    state = attrs['statefile']
+                    if not state.startswith('/'):
+                        raise Refused('unsupported explicit relative imfile state file')
+                    related |= self.literal(state)
+            if kind == 'module' and Path(attrs.get('load', '')).name in ('imfile', 'imfile.so'):
+                directory = attrs.get('statefile.directory') or anchor
+                if not directory:
+                    raise Refused('unknown inherited imfile state directory')
+                related |= self.literal(directory)
+            if 'queue.spooldirectory' in attrs:
+                # Directory alone is an anchor, not recursive queue access.
+                anchor = attrs['queue.spooldirectory']
+                self.path(anchor)
+            filename = attrs.get('queue.filename')
+            if filename is not None:
+                if filename.startswith('/'):
+                    location = filename
+                else:
+                    if (not anchor or filename in ('.', '..')
+                            or not re.fullmatch(r'[A-Za-z0-9_.:-]+', filename)):
+                        raise Refused('unknown inherited reader queue filename')
+                    location = str(self.path(anchor) / filename)
+                related |= self.literal(location)
+            elif (attrs.get('queue.type', '').lower() == 'disk'
+                  or attrs.get('queue.saveonshutdown', '').lower() in ('on', 'true', '1')):
+                raise Refused('unknown native persistent queue filename')
+            reserved = ((kind == 'input' and attrs.get('ruleset') == 'pilotWazuhForward')
+                        or (kind == 'module' and Path(attrs.get('load', '')).name in ('imfile', 'imfile.so'))
+                        or (kind == 'action' and attrs.get('name') == 'wazuh_alerts')
+                        or (kind == 'ruleset' and attrs.get('name') == 'pilotWazuhForward'))
+            owned = mode == 'enabled' and resource['file'] == self.owner_config and reserved
+            if related and not owned:
+                raise Refused('unowned reader declarations access a protected physical namespace')
+            if kind == 'ruleset' and attrs.get('name') == 'pilotWazuhForward' and not owned:
+                raise Refused('unowned reader still declares its reserved ruleset')
+        return dict(observed, mode=mode)
+
+
 class ReaderUnits:
     """Narrow native unit protocol. A stop request is never a save proof."""
     SERVICE, SOCKET = 'rsyslog.service', 'syslog.socket'
@@ -1955,36 +2084,105 @@ class Reader:
                     raise Refused('reader control-code target has foreign ownership or permissions')
         return {'control_code_scope': True, 'create_directory': not folder.exists()}
 
-    def inspect(self):
+    def observe(self, loaded=True):
         # Old journals and fresh unmanaged hosts need no adjacent helper.
         resources = any(path.exists() or path.is_symlink() for path in
-                        (self.PROFILE, self.CONFIG, self.SPOOL))
+                        (self.PROFILE, self.CONFIG, self.SPOOL, Path('/etc/rsyslog.conf')))
         if not self.checker_hash:
             if resources:
                 raise Refused('configured reader requires the pinned inspection helper')
-            return {'schema': 1, 'mode': 'never', 'files': {}, 'profile': None, 'pid': 0}
+            return {'schema': 2, 'mode_candidate': 'never', 'files': {}, 'profile': None,
+                    'pid': 0, 'resources': [], 'authorization': 'UNVALIDATED_OBSERVATIONS'}
         path_shape(self.CHECKER, 'file')
         info = self.CHECKER.stat()
+        if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in self.CHECKER.parents):
+            raise Refused('reader inspection helper has untrusted ancestors')
         if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(self.CHECKER) != self.checker_hash:
             raise Refused('reader inspection helper differs from tracked source')
-        return self.r.json([self.CHECKER, 'inspect-reader'], timeout=40,
+        return self.r.json([self.CHECKER, 'inspect-reader'] + ([] if loaded else ['--cold']), timeout=40,
                            operation='inspect effective owned reader baseline')
 
+    def inspect(self, state=None, loaded=True):
+        # Discovery has no registry-bound C12 gate: original version skew may
+        # legitimately be the baseline being repaired/restored.
+        state = state if state is not None else self.t.discover()
+        source = self.source(state)
+        missing = (source,) if not Path(source).exists() and state.get('phase') == 'recovering' else ()
+        layout = ScopeLayout.inspect({source: 'directory'}, self.t.root, missing=missing)
+        mounts = MountTable()
+        observed = self.observe(loaded=loaded)
+        result = ReaderNamespace(source, self.SPOOL, layout, mounts, self.CONFIG).resources(observed)
+        if result['mode'] != 'never' and result.get('profile', {}).get('source') not in (source, ''):
+            raise Refused('owned reader profile source differs from actual Docker source')
+        result['source_proof'] = {'source': source, 'helper': self.checker_hash,
+                                  'root_identity': layout['nodes'].get(source, {}).get('scope_identity'),
+                                  'physical': [str(value) for value in mounts.project(Path(source))]}
+        return result
+
     def source(self, state):
-        # Bind directly to the actual manager's selected mount, not a stale
-        # profile path. Native inspect has private output under no_log.
-        manager = self.r.json(['docker', 'inspect', state['images']['wazuh.manager']['container']],
-                              timeout=30, operation='reader actual producer mount')[0]
-        values = [entry['Source'] for entry in manager['Mounts']
-                  if entry['Destination'] == '/var/ossec/logs']
-        if len(values) != 1 or values[0] not in state['paths']:
-            raise Refused('reader producer source is not an observed persistent root')
-        return values[0]
+        """Fresh Docker source authority, independent of profile/request text."""
+        ids = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter',
+                          'label=com.docker.compose.project=single-node', '--filter',
+                          'label=com.docker.compose.service=wazuh.manager'], timeout=30,
+                         operation='current reader producer identity').stdout.split()
+        if len(ids) == 1:
+            container = self.r.json(['docker', 'inspect', ids[0]], timeout=30,
+                                    operation='reader actual producer mount')[0]
+            labels = container['Config']['Labels']
+            if (labels.get('com.docker.compose.project') != 'single-node'
+                    or labels.get('com.docker.compose.service') != 'wazuh.manager'):
+                raise Refused('reader producer is outside the owned project')
+            values = [entry for entry in container['Mounts']
+                      if entry['Destination'] == '/var/ossec/logs']
+            if len(values) != 1 or values[0]['Type'] != 'volume':
+                raise Refused('reader producer lacks one owned logs volume')
+            binding = {'name': values[0]['Name'], 'path': values[0]['Source']}
+        elif not ids:
+            # Containers may be absent only during genuine cold rollback.
+            # The private active journal, writer, all backup artifacts and fresh
+            # volume/root ownership jointly authorize this narrow fallback.
+            owner = state.get('owner')
+            active = self.t.owned(owner, ('recovering',))
+            writer = HostWriter(self.t.root).active()
+            if (active.get('kind') != 'central' or not writer
+                    or writer['owner'] != owner or writer['component'] != 'central'
+                    or state.get('backup') != active.get('backup')):
+                raise Refused('absent reader producer lacks owned recovery authority')
+            self.t.validate_restore_scope(active)
+            binding = active.get('reader_source_volume')
+            if not binding:
+                raise Refused('cold journal lacks native logs volume binding')
+        else:
+            raise Refused('reader producer inventory is ambiguous')
+        if (not isinstance(binding, dict) or set(binding) != {'name','path'}
+                or not re.fullmatch(r'single-node_[A-Za-z0-9_.-]+', binding['name'])):
+            raise Refused('unknown reader source volume binding')
+        volume = self.r.json(['docker', 'volume', 'inspect', binding['name']], timeout=30,
+                             operation='current reader source volume ownership')[0]
+        docker_root = canonical(self.r.run(['docker', 'info', '--format', '{{.DockerRootDir}}'],
+                                           timeout=30, operation='current reader Docker data root').stdout.strip())
+        expected = docker_root / 'volumes' / binding['name'] / '_data'
+        if (volume.get('Driver') != 'local' or volume.get('Options')
+                or volume.get('Labels', {}).get('com.docker.compose.project') != 'single-node'
+                or canonical(volume['Mountpoint']) != expected
+                or canonical(binding['path']) != expected or str(expected) not in state['paths']
+                or (state.get('docker_root') and canonical(state['docker_root']) != docker_root)):
+            raise Refused('reader source is not the current owned selected volume')
+        recorded = state.get('reader_source_volume')
+        if recorded and recorded != binding:
+            raise Refused('reader source volume changed during the owned operation')
+        state['reader_source_volume'] = binding
+        return str(expected)
 
 
     def source_users(self, state, source, reader_pid=None, producers=True, reader_fds=True):
         """Account for actual source inodes across namespaces, not FD spelling."""
-        layout = ScopeLayout.inspect({str(source): 'directory'}, self.t.root)
+        missing = ()
+        if not Path(source).exists():
+            if state.get('phase') != 'recovering' or self.source(state) != str(source):
+                raise Refused('absent producer source lacks validated cold recovery authority')
+            missing = (str(source),)
+        layout = ScopeLayout.inspect({str(source): 'directory'}, self.t.root, missing=missing)
         inodes = {tuple(node['scope_identity'][:2]) for node in layout['nodes'].values()
                   if node['type'] == 'file'}
         containers = {entry['container'] for entry in state['images'].values()} if producers else set()
@@ -2064,7 +2262,7 @@ class Reader:
         return dict(qualification, sha256=digest(engine))
 
     def admit(self, state, preview=False):
-        observed = self.inspect()
+        observed = self.inspect(state)
         mode = observed['mode']
         if mode not in ('never', 'disabled', 'enabled'):
             raise Refused('unknown reader baseline mode')
@@ -2104,10 +2302,9 @@ class Reader:
         result = {'schema': 1, 'mode': mode, 'phase': 'admitted', 'cycle': 0,
                   'generation': None, 'checkpoints': [], 'checker_sha256': self.checker_hash,
                   'baseline': observed, 'ack': self.ack, 'request': self.request,
-                  'source': self.source(state) if mode != 'never' else None}
+                  'source': observed['source_proof']['source']}
         if mode == 'never':
-            source = self.source(state)
-            result['source'] = source
+            source = result['source']
             self.source_users(state, source, observed['pid'] or None, reader_fds=False)
             if observed['pid'] and (self.fds(observed['pid'], source)
                     or any(fnmatch.fnmatchcase(str(Path(source) / 'alerts/alerts.json'), entry.get('file', ''))
@@ -2198,11 +2395,11 @@ class Reader:
     def boundary(self, item, running=False):
         value = self.use(item)
         if value['mode'] == 'never':
-            current = self.inspect()
+            current = self.inspect(item, loaded=running)
             if current['mode'] != 'never':
                 raise Refused('reader appeared during version-only transaction')
             return
-        current = self.inspect() if running else None
+        current = self.inspect(item, loaded=running)
         baseline = value['baseline']
         # inspect-reader runtime checks require an active reader. Cold boundary
         # checks immutable physical config/profile hashes without invoking it.
@@ -2340,6 +2537,7 @@ class Reader:
         value = self.use(item)
         if value['mode'] == 'never' or not value.get('spool_identity'):
             return
+        self.boundary(item)
         self.unchanged_queue(item)
         if not value.get('cursor_present') and not value.get('queue_present'):
             return
@@ -2515,6 +2713,7 @@ class ReplayReceipt:
 
     def publish(self, item):
         reader = item['reader']
+        self.t.reader.inspect(item, loaded=False)
         ReaderData.custody(Reader.SPOOL, reader['spool_identity'], reader['generation'],
                            reader['checkpoints'][-1] if reader['checkpoints'] else None, cold=True)
         value = {'schema': 1, 'kind': 'LOCAL_REPLAY_ACK', 'central_owner': item['owner'],
@@ -2543,16 +2742,14 @@ class ReplayReceipt:
     def custody(self, value, native=True):
         if type(value.get('ever_exposed')) is not bool:
             raise Refused('unknown replay exposure provenance')
+        proof = Reader(self.t, value.get('checker_sha256', ''),
+                       {'tools': value.get('tools', {})})
+        observed = proof.inspect(loaded=native)
+        if observed['source_proof']['source'] != value['source']:
+            raise Refused('pending replay actual Docker source changed')
         ReaderData.custody(Reader.SPOOL, value['spool_identity'], value['generation'],
                            value['checkpoint'], cold=not value['ever_exposed'])
         if value['ever_exposed']:
-            current = json.loads(canonical(Reader.PROFILE).read_text())
-            if current.get('source') != value['source']:
-                raise Refused('exposed replay lost its recorded producer source')
-        if value['ever_exposed'] and native:
-            proof = Reader(self.t, value.get('checker_sha256', ''),
-                           {'tools': value.get('tools', {})})
-            observed = proof.inspect()
             if (observed.get('mode') not in ('enabled', 'disabled')
                     or observed.get('profile', {}).get('source') != value['source']):
                 raise Refused('exposed replay lost its native profile provenance')
