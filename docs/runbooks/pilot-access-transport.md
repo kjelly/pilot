@@ -143,12 +143,15 @@ Snapshot of the reference environment used for the latest verified run
   require `CONFIRM_DISPOSABLE=yes` and must never be pointed at a real host.
   The `recording` phase records into the topology's session store (`tx-store`):
   set `pilot_access_gateway_recording_mode=terminal_output` and
-  `pilot_access_gateway_recording_session_store_url=https://tx-store.ipa.pilot.internal:8443`
+  `pilot_access_gateway_recording_session_store_url=https://tx-store.ipa.pilot.internal:18443`
   on the gateway, and give the script `STORE_HOST`/`STORE_ADMIN_KEY`.
 - Audit: `journalctl -t pilot-access-gateway -o cat` on the gateway shows one
   JSON line per event. Each session produces
   `gateway_transport_requested` → `connected` → `closed` (target IP, bytes,
   duration). Refusals produce `gateway_transport_denied`.
+
+Latest ingest-port consumer validation:
+[session-store ingest evidence](../evidence/session-store-ingest/LATEST.md).
 
 ## 4. Rollback
 

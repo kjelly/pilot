@@ -240,6 +240,36 @@ def _test_assessment(tests: Any, expected_head: str) -> tuple[list[str], list[st
     return defects, gaps, has_pass
 
 
+def check_base_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) -> dict[str, Any]:
+    """Require the live base tip in HEAD; confirm an operational Draft reason with fresh reads."""
+    base_name = view.get("baseRefName")
+    if not isinstance(base_name, str) or not base_name:
+        raise GitHubError("Live base branch name unavailable")
+    head, base = view.get("headRefOid"), view.get("baseRefOid")
+    if not _sha(head) or not _sha(base):
+        raise GitHubError("Invalid PR HEAD/Base SHA")
+    live_base = client.branch_head(repo, base_name)
+    if not _sha(live_base):
+        raise GitHubError("Invalid live base branch SHA")
+    mismatch = live_base != base
+    behind = False
+    if not mismatch:
+        ancestor = client.is_ancestor(repo, live_base, head)
+        if type(ancestor) is not bool:
+            raise GitHubError("Base ancestry unavailable")
+        behind = not ancestor
+    if mismatch or behind:
+        confirm = client.pr_view(repo, number)
+        if any(confirm.get(k) != view.get(k) for k in
+               ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
+                client.branch_head(repo, base_name) != live_base:
+            raise GitHubError("PR/base branch changed while confirming base alignment; retry live gate")
+    elif client.branch_head(repo, base_name) != live_base:
+        raise GitHubError("Live base branch changed during ancestry verification; retry live gate")
+    return {"base_name": base_name, "live_base_sha": live_base,
+            "base_mismatch": mismatch, "base_behind": behind}
+
+
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
     # Importing from the module allows replacing a client during tests.
     if client is None:
@@ -262,6 +292,23 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         return result
     if view.get("isDraft") is not False or not _sha(result["head_sha"]) or not _sha(result["base_sha"]):
         reasons.append("Invalid PR state or missing HEAD/Base SHA")
+        return result
+
+    # Operational hand-off: metadata equality alone does not prove HEAD includes main.
+    try:
+        result.update(check_base_alignment(client, repo, number, view))
+        base_name, live_base = view["baseRefName"], result["live_base_sha"]
+        if result["base_mismatch"] or result["base_behind"]:
+            result["decision"] = "DRAFT"
+            detail = (f"PR Base SHA {result['base_sha']} differs from live {base_name} SHA {live_base}. "
+                      if result["base_mismatch"] else
+                      f"PR HEAD {result['head_sha']} does not include live {base_name} SHA {live_base}. ")
+            reasons.append(
+                detail + "Use pr-ready to reconcile the base state and integrate the verified latest base, "
+                "then rerun affected validation/CI and independent review on the updated HEAD/Base before Ready.")
+            return result
+    except (GitHubError, ValueError, KeyError) as exc:
+        reasons.append(f"Unable to verify live base branch: {exc}")
         return result
 
     # Stale review evidence must never drive a destructive operation.
@@ -450,10 +497,16 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     try:
         second = client.pr_view(repo, number)
         if second.get("state") != "OPEN" or second.get("isDraft") is not False or \
-            second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"]:
-            missing.append("PR HEAD/Base/state changed during live gate")
+            second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"] or \
+            second.get("baseRefName") != result["base_name"]:
+            reasons.append("PR HEAD/Base/branch/state changed during live gate")
+            return result
+        if client.branch_head(repo, base_name) != live_base:
+            reasons.append("Live base branch changed during gate; rerun to classify current base state")
+            return result
     except (GitHubError, ValueError, KeyError) as exc:
-        missing.append(f"Could not recheck PR version: {exc}")
+        reasons.append(f"Could not recheck PR version: {exc}")
+        return result
 
     # Confirmed blocker is actionable only if evidence is current and API state is known.
     # An independent review with incomplete coverage can still supply *positive* blocking evidence.

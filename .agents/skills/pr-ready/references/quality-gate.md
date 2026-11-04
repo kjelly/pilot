@@ -22,3 +22,12 @@
 - Pending is a typed CI state, never inferred from an error string. Pending checks always wait with `--wait`, including reviewer-confirmed nonrequired exemptions; any other blocker stops immediately. Terminal nonrequired exemptions retain their established policy; required checks cannot be exempted. Missing, malformed or unknown check metadata and API errors block. Default waiting has no timeout; explicit timeout/cancellation records `WAIT-INTERRUPTED` in the per-PR `wait-status.json`, separate from the orchestrator checkpoint. Keep the active session monitoring the process; pending alone is not an end condition.
 
 - Wait mode reads `GET /repos/OWNER/REPO/actions/runs?head_sha=HEAD&per_page=100` with `gh api --paginate --slurp` and checks `total_count` against all returned records. It waits on unfinished workflows even when every visible check passes. Run identity metadata stays pinned; new runs/higher attempts are checked, disappeared records or regressed attempts block, and previously active superseded attempts are queried by `/actions/runs/ID/attempts/ATTEMPT` until completed. Final preflight and postverification repeat this lifecycle check. Unknown/missing/malformed metadata, incomplete pages or API failures block; a verifiably empty run list supports repositories using external checks. Terminal historical workflow conclusions prove settlement only: current visible/required check quality and terminal nonrequired exemptions retain their existing policy.
+
+# Live base alignment
+
+Before GATE-PASS or Ready, independently resolve the remote base tip and prove it
+is an ancestor of PR HEAD; also require PR Base SHA to equal that tip. SHA equality
+of HEAD and main is unnecessary. Use the shared merge gate's alignment verifier
+on each poll, final preflight and post-action check. Missing ancestry or metadata
+alignment keeps Draft even for conflict-free PRs. Integrate the latest verified
+base, rerun affected checks/CI and obtain fresh independent review before retrying.

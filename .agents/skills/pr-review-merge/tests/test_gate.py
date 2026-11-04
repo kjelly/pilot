@@ -42,6 +42,15 @@ class Fake:
         # {(base, head): compare result as gh_runtime.compare returns it}
         self.compares = {}
         self.calls = []
+        self.live_base = B
+        self.ancestor = True
+
+    def is_ancestor(self, repo, base, head):
+        self.calls.append(('is_ancestor', base, head))
+        return self.ancestor
+
+    def branch_head(self, repo, branch):
+        return self.live_base
 
     def file_at(self, repo, path, ref):
         self.calls.append(('file_at', path, ref))
@@ -71,11 +80,96 @@ class GateTests(unittest.TestCase):
                         client=Fake() if gh is None else gh)
 
     def test_merge_full_pass(self):
-        self.assertEqual(self.gate()['decision'], 'MERGE')
+        result = self.gate()
+        self.assertEqual(result['decision'], 'MERGE')
+        self.assertEqual(result['base_name'], 'main')
 
     def test_skip_draft(self):
         f = Fake(); f.v['isDraft'] = True
         self.assertEqual(self.gate(gh=f)['decision'], 'SKIP')
+
+    def test_base_ref_mismatch_drafts_even_without_review(self):
+        f = Fake(); f.live_base = 'c' * 40
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(f.live_base, result['reasons'][0])
+        self.assertIn('pr-ready', result['reasons'][0])
+
+    def test_missing_or_malformed_base_name_waits(self):
+        for name in (None, '', 7, []):
+            with self.subTest(name=name):
+                f = Fake(); f.v['baseRefName'] = name
+                result = self.gate(gh=f)
+                self.assertEqual(result['decision'], 'WAITING')
+                self.assertIn('base branch name unavailable', ' '.join(result['reasons']))
+
+    def test_actor_missing_gate_base_identity_fails_closed(self):
+        from unittest import mock
+        import apply_decision
+        for decision in ('DRAFT', 'MERGE'):
+            for name in (None, '', 7, []):
+                with self.subTest(decision=decision, name=name):
+                    gate = {'decision': decision, 'head_sha': H, 'base_sha': B, 'live_base_sha': B}
+                    if name is not None:
+                        gate['base_name'] = name
+                    with mock.patch.object(apply_decision, 'evaluate', return_value=gate), \
+                         mock.patch.object(apply_decision, 'pr_view') as read, \
+                         mock.patch.object(apply_decision, 'run_gh') as write:
+                        result = apply_decision._perform_locked(Repo.parse('acme/demo'), 42, {}, 'merge', True)
+                    self.assertEqual(result['outcome'], 'ERROR')
+                    self.assertIn('Gate base branch identity unavailable', result['error'])
+                    read.assert_not_called()
+                    write.assert_not_called()
+
+    def test_base_ref_unavailable_waits(self):
+        f = Fake()
+        def unavailable(repo, branch):
+            raise GitHubError('permission denied')
+        f.branch_head = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_head_missing_latest_base_drafts_without_review(self):
+        f = Fake(); f.ancestor = False
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertTrue(result['base_behind'])
+        self.assertIn(H, result['reasons'][0])
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(('is_ancestor', B, H), f.calls)
+
+    def test_unknown_ancestry_waits(self):
+        f = Fake(); f.ancestor = None
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_ancestry_api_failure_waits(self):
+        f = Fake()
+        def unavailable(*args):
+            raise GitHubError('comparison unavailable')
+        f.is_ancestor = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_base_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        refs = iter([B, 'c' * 40])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
+
+    def test_head_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        original = f.pr_view
+        def moving(repo, number):
+            v = original(repo, number)
+            if f.counter > 1:
+                v['headRefOid'] = 'c' * 40
+            return v
+        f.pr_view = moving
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
+
+    def test_base_ref_mismatch_changes_during_confirmation_waits(self):
+        f = Fake(); refs = iter(['c' * 40, B])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
     def test_stale_head(self):
         e = sample(); e['head_sha'] = B

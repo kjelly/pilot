@@ -198,8 +198,8 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh, e, _ = self.fixture()
         gh.branch_head = lambda repo, name: A
         r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("WAITING", r["decision"])
-        self.assertIn("PR base metadata is stale", " ".join(r["reasons"]))
+        self.assertEqual("DRAFT", r["decision"])
+        self.assertIn("differs from live", " ".join(r["reasons"]))
 
     def test_fresh_target_attestation_cannot_hide_stale_overall_review_base(self):
         gh, e, trees = self.fixture()
@@ -210,8 +210,8 @@ class TargetReuseRemoteTests(unittest.TestCase):
         gh.compares[(R, current)] = {"ancestor": False, "merge_base": A, "files": [OTHER]}
         e["target_validation"]["target_reuse"]["base_sha"] = current
         r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("WAITING", r["decision"])
-        self.assertIn("independent review base must match live base", " ".join(r["reasons"]))
+        self.assertEqual("DRAFT", r["decision"])
+        self.assertIn("differs from live", " ".join(r["reasons"]))
 
     def reasons(self, gh, e):
         r = evaluate(REPO, 42, e, client=gh)
@@ -284,15 +284,17 @@ class TargetReuseRemoteTests(unittest.TestCase):
 
 class GitTreeAdapterTests(unittest.TestCase):
     def test_live_branch_head_is_resolved_and_malformed_answers_fail_closed(self):
-        with mock.patch.object(gh_runtime, "gh_json", return_value={"commit": {"sha": B}}) as call:
+        with mock.patch.object(gh_runtime, "gh_json", return_value={"object": {"type": "commit", "sha": B}}) as call:
             self.assertEqual(B, gh_runtime.branch_head(REPO, "release/main"))
             self.assertIn("release%2Fmain", call.call_args.args[0][-1])
-        for data in ({}, {"commit": []}, {"commit": {"sha": "main"}}, []):
+            self.assertIn("Cache-Control: no-cache", call.call_args.args[0])
+        for data in ({}, {"object": []}, {"object": {"sha": "main"}},
+                     {"object": {"type": "tag", "sha": B}}, []):
             with self.subTest(data=data), mock.patch.object(gh_runtime, "gh_json", return_value=data):
                 with self.assertRaises(gh_runtime.GitHubError):
                     gh_runtime.branch_head(REPO, "main")
         for name in ("", None):
-            with self.subTest(name=name), mock.patch.object(gh_runtime, "gh_json", return_value={"commit": {"sha": B}}):
+            with self.subTest(name=name), mock.patch.object(gh_runtime, "gh_json", return_value={"object": {"type": "commit", "sha": B}}):
                 with self.assertRaisesRegex(gh_runtime.GitHubError, "branch name unavailable"):
                     gh_runtime.branch_head(REPO, name)
 

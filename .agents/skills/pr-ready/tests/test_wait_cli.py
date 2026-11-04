@@ -84,6 +84,12 @@ elif args[:2] == ["api", "graphql"]:
     print(json.dumps({"data": {"repository": {"pullRequest": {
         field: {"nodes": plan.get(field, []), "pageInfo": {"hasNextPage": False, "endCursor": None}}
     }}}}))
+elif args[0] == "api" and "/git/ref/heads/" in args[-1]:
+    print(json.dumps({"object": {"type": "commit", "sha": plan.get("live_base", plan.get("pr", {}).get("baseRefOid", sha))}}))
+elif args[0] == "api" and "/compare/" in args[-1]:
+    base, head = args[-1].split("/compare/")[1].split("...")
+    print(json.dumps(plan.get("ancestry", {"status": "identical" if base == head else "ahead",
+        "behind_by": 0, "merge_base_commit": {"sha": base}})))
 elif args[0] == "api" and "/contents/" in args[-1]:
     if "manifest" in plan:
         print(json.dumps({"type": "file", "path": ".github/pr-evidence.json", "encoding": "base64",
@@ -162,6 +168,12 @@ class WaitCLITests(unittest.TestCase):
         self.assertIn(needle, " ".join(events[-1]["errors"]))
         self.assertFalse((t / "ready").exists())
         return events
+
+    def test_main_advances_before_final_ready_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            self.assert_blocked(t, [plan(PASS, LINT), plan(PASS, LINT, live_base='d' * 40)],
+                                'differs from live main')
 
     def test_pending_to_pass_runs_ready_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:

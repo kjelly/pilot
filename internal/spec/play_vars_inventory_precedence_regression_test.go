@@ -369,7 +369,7 @@ var playVarsCases = []playVarsCase{
 	{"log-server-apply.yml", "log-server", map[string]any{
 		"siem_log_root": "/var/log/siem", "siem_receiver_tcp_port": "514",
 		"siem_logrotate_rotate": 14, "siem_logrotate_maxage": 90}},
-	{"pilot-session-store-apply.yml", "pilot-session-store", map[string]any{"pilot_session_store_ingest_port": 8443}},
+	{"pilot-session-store-apply.yml", "pilot-session-store", map[string]any{"pilot_session_store_ingest_port": 18443}},
 	{"prometheus-apply.yml", "prometheus", map[string]any{
 		"docker_network_name": "pilot-metrics", "thanos_s3_alias": "thanos-s3-backend", "thanos_s3_port": 8333,
 		"prometheus_alert_rules_file": "files/pilot-alert-rules-seed.yml",
