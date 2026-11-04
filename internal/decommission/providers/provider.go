@@ -61,6 +61,9 @@ type PlanInput struct {
 	// content — it is only ever read, never written, during Plan (spec.md
 	// §10.1: planning itself must not mutate anything).
 	RosterPath string
+	// RetirementIdentity is a lifecycle-validated previous-plan binding. Only
+	// genuine native absence permits its use; live discovery must agree.
+	RetirementIdentity *RetirementIdentity
 }
 
 // Step is one planned, typed provider action (spec.md §8.1). It
@@ -93,6 +96,7 @@ type HostIdentitySource string
 const (
 	HostIdentityAuthoritative HostIdentitySource = "authoritative"
 	HostIdentityFallback      HostIdentitySource = "inventory_fallback"
+	HostIdentityRecovered     HostIdentitySource = "persisted_retirement"
 )
 
 // StepExecutor is one planned Step's real Inspect-then-Execute contract

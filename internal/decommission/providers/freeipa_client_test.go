@@ -129,6 +129,9 @@ func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error))
 	// boundary now requires the playbook's envelope too; already-captured
 	// Ansible output keeps its original bytes and target markers.
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
+		if queryKind(args) == "gateway_scope" {
+			return &ansible.Result{Stdout: "HOST_INSPECT[" + queryControl(args, "pilot_decommission_target_fqdn") + "]: GATEWAY_SCOPE_READY=true"}, nil
+		}
 		// Existing central residue fixtures model a completed journal lifecycle.
 		// Retirement-specific tests below use the executor directly so missing,
 		// pending and erroneous observations cannot acquire this default.
