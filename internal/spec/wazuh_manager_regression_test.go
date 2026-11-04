@@ -7,64 +7,14 @@ import (
 	"testing"
 )
 
-// TestRegression_WazuhManagerSpec locks the structure of
-// docs/verification/wazuh-manager.md (v2.0 — Dockerized Wazuh single-node
-// manager+indexer+dashboard from the OFFICIAL wazuh-docker release bundle,
-// FIM/who-data rule engine, CVE vulnerability-detection, optional syslog
-// forward to docs/verification/log-server.md):
+// TestRegression_WazuhManagerSpec locks the local Dockerized Wazuh stack
+// contract. C1-C9 cover containers, readiness, capacity and the rule engine;
+// C10 pins the host destination; C11 checks the loaded host imfile pipeline.
+// Real cross-host delivery is independently covered by wazuh-alert-delivery.md
+// and its captured-alert/oracle/native-rsyslog regression tests.
 //
-//	C1/C2/C3 manager + indexer + dashboard containers running
-//	C4       indexer HTTPS API answers 401 without credentials (security
-//	         plugin actually bootstrapped, not merely container-exists)
-//	C5/C6    agent port 1514 + enrollment port 1515 listening
-//	C7       vulnerability-detection (CVE scanning) enabled in the LIVE
-//	         in-container ossec.conf (proves /wazuh-config-mount injection)
-//	C8       disk headroom >= 5GB (CVE feed occupies ~7-9GB; see §5 incident)
-//	C9       wazuh-logtest (docker exec -i) matches a real named rule and
-//	         flags it alert-worthy
-//	C10/C11  /etc/hosts pins siem-log-server + the live in-container
-//	         ossec.conf contains the <syslog_output> forward block
-//
-// Cross-row invariants locked below:
-//
-//   - C1-C11 must all use positive-logic rc (never a reverse-logic grep
-//     with a numeric expected) per verification-spec-template.md trap 1.
-//   - Container/functional rows must use the `sh -c '... && echo 0 ||
-//     echo 1'` form so the outer command always exits 0 regardless of
-//     match outcome.
-//   - No row may use docker Go-template syntax (`{{ ... }}`) — ansible
-//     ad-hoc would eat it as Jinja. Container liveness goes through
-//     `docker ps --filter` instead of `docker inspect -f '{{...}}'`.
-//   - Rows probing the manager must address the deterministic compose
-//     container name single-node-wazuh.manager-1 (project name is pinned
-//     in the apply playbook; spec commands are static text).
-//   - C9 must feed wazuh-logtest a REALISTIC full syslog line (timestamp +
-//     hostname + `sshd[pid]:` prefix) via `docker exec -i` — a live
-//     vm-target run (v1.0) found that a bare message with no syslog header
-//     fails to match any named decoder and falls through to the generic
-//     "Unknown problem" rule (id 1002, level 2), which would make a naive
-//     check for the substring "level:" pass even when the rule engine
-//     hasn't actually matched anything meaningful. The check must instead
-//     assert the string "Alert to be generated." which wazuh-logtest only
-//     prints once the matched rule's level clears the alert threshold.
-//   - C10/C11 must reference the `siem-log-server` alias (not a raw
-//     site-specific IP/host), same design as audit-log-forwarding.md.
-//   - C7 and C11 must verify the LIVE config inside the container
-//     (/var/ossec/etc/ossec.conf via docker exec), not just the host-side
-//     file — the host file changing proves nothing until the official
-//     entrypoint re-injects it on container (re)start.
-//   - No row may use ~active (matches inactive as a substring).
-//   - siem_forward_host must be OPTIONAL: the apply playbook must not
-//     hard-fail when it's omitted (local alerting + CVE scanning is
-//     independent of whether a log server exists yet).
-//   - The apply playbook must deploy from the official wazuh-docker
-//     release bundle (official cert-generator one-shot + official compose
-//     project) — NOT the v1.0 wazuh-install.sh host install, and NOT a
-//     hand-rolled trio of docker_container tasks with a hand-built TLS
-//     chain (CVE scanning in Wazuh 4.8+ requires the indexer, and
-//     hand-rolling indexer certs is high-risk; see spec §1).
-//   - The apply playbook must set vm.max_map_count (official indexer
-//     hard requirement — the one host-level knob containers can't carry).
+// This remains a single-host target_group spec: inventory alignment is proved
+// by the actual topology run and target_group selection, not a static host map.
 func TestRegression_WazuhManagerSpec(t *testing.T) {
 	const specPath = "../../docs/verification/wazuh-manager.md"
 	s, err := Parse(specPath)
@@ -126,14 +76,14 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 		}
 	}
 
-	// C7/C9/C11 must probe the LIVE config/engine inside the deterministic
+	// C7/C9 must probe the LIVE config/engine inside the deterministic
 	// manager container, not the host-side copy of the file.
-	for _, id := range []string{"C7", "C9", "C11"} {
+	for _, id := range []string{"C7", "C9"} {
 		if !strings.Contains(cmd[id], "docker exec") || !strings.Contains(cmd[id], "single-node-wazuh.manager-1") {
 			t.Errorf("%s must `docker exec` into single-node-wazuh.manager-1, got %q", id, cmd[id])
 		}
 	}
-	for _, id := range []string{"C7", "C11"} {
+	for _, id := range []string{"C7"} {
 		if !strings.Contains(cmd[id], "/var/ossec/etc/ossec.conf") {
 			t.Errorf("%s must grep the live in-container /var/ossec/etc/ossec.conf, got %q", id, cmd[id])
 		}
@@ -155,8 +105,8 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 		t.Errorf("C9 must not assert on the capitalized \"Level:\" string (not present in wazuh-logtest output; also matches the generic no-decoder-match rule 1002), got %q", cmd["C9"])
 	}
 
-	// C10/C11 must reference the site-independent siem-log-server alias.
-	for _, id := range []string{"C10", "C11"} {
+	// C10 must reference the site-independent host destination alias.
+	for _, id := range []string{"C10"} {
 		if !strings.Contains(cmd[id], "siem-log-server") {
 			t.Errorf("%s must reference the siem-log-server alias, got %q", id, cmd[id])
 		}
@@ -209,9 +159,13 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 	// mount_files runs and /wazuh-config-mount is never re-injected — found
 	// live on vm-target (runbook §5); a restart-based task always looks
 	// green while silently leaving the old config loaded.
-	if strings.Contains(applyRaw, "state: restarted") {
-		t.Errorf("wazuh-manager-apply.yml must not use `state: restarted` (official image init dies on restart; use recreate: always)")
+	if strings.Contains(applyRaw, "state: restarted\n            services: [wazuh.manager]") {
+		t.Error("manager configuration must use container recreation")
 	}
+	if !strings.Contains(cmd["C11"], "pilot-wazuh-delivery local") {
+		t.Error("C11 must check the loaded host imfile pipeline")
+	}
+
 	// Comment lines may reference wazuh-install.sh as v1.0 history; no
 	// executable (non-comment) line may.
 	for _, line := range strings.Split(applyRaw, "\n") {

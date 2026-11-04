@@ -1,0 +1,182 @@
+#!/usr/bin/python3
+"""Local pipeline checks and a controller-orchestrated, one-use delivery oracle."""
+
+import datetime
+import json
+import os
+import pathlib
+import re
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+CHALLENGE = pathlib.Path('/run/pilot-wazuh-delivery.json')
+PROFILE = pathlib.Path('/etc/rsyslog.d/pilot-wazuh/profile.json')
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, capture_output=True, timeout=20, **kwargs).stdout
+
+
+def alert_matches(line, nonce):
+    try:
+        # omfile writes the JSON payload without a syslog envelope.
+        value = json.loads(line)
+        return (nonce in value['full_log'] and bool(value['rule']['id'])
+                and bool(value['agent']['id']))
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def scan(path, nonce):
+    # Bound each scan. A fresh challenge only needs the current tail, not
+    # historical archives. A flood beyond this bound fails rather than passes.
+    with path.open('rb') as stream:
+        size = stream.seek(0, 2)
+        stream.seek(max(0, size - 8 * 1024 * 1024))
+        if stream.tell():
+            stream.readline()
+        return any(alert_matches(line, nonce) for line in stream)
+
+
+def challenge(root, hostname):
+    root = pathlib.Path(root)
+    if not root.is_absolute() or not re.fullmatch(r'[A-Za-z0-9_.-]+', hostname):
+        raise ValueError('invalid receiver output path or hostname')
+    nonce = 'PILOT-WAZUH-' + uuid.uuid4().hex
+    payload = {'nonce': nonce, 'created': time.time(),
+               'output': str(root / hostname / 'wazuh-alerts.log')}
+    # /run is root-owned; exclusive temporary creation and replacement also
+    # discard any previous trial. Never use a controller-generated PASS receipt.
+    temporary = CHALLENGE.with_suffix('.' + uuid.uuid4().hex)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(payload, stream)
+    os.replace(temporary, CHALLENGE)
+    print(nonce)
+
+
+def inject(nonce):
+    if not re.fullmatch(r'PILOT-WAZUH-[a-f0-9]{32}', nonce):
+        raise ValueError('invalid challenge nonce')
+    profile = json.loads(PROFILE.read_text())
+    line = (datetime.datetime.now().strftime('%b %d %H:%M:%S') +
+            ' pilot-delivery sshd[211]: Failed password for invalid user ' +
+            nonce + ' from 192.0.2.211 port 2222 ssh2\n')
+    run('docker', 'exec', '-i', 'single-node-wazuh.manager-1',
+        'sh', '-c', 'cat >> /var/ossec/logs/active-responses.log', input=line.encode())
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        try:
+            if scan(pathlib.Path(profile['source']) / 'alerts/alerts.json', nonce):
+                print('generated')
+                return
+        except FileNotFoundError:
+            pass
+        time.sleep(1)
+    raise ValueError('the real Wazuh engine did not generate the challenge alert')
+
+
+def check_delivery():
+    # Atomically claim this challenge; concurrent/repeated verifies cannot
+    # reuse it. A failed trial is consumed too, so recovery needs a new nonce.
+    claimed = CHALLENGE.with_suffix('.checking-' + uuid.uuid4().hex)
+    os.rename(CHALLENGE, claimed)
+    try:
+        state = claimed.stat()
+        if state.st_uid != 0 or state.st_mode & 0o077:
+            raise ValueError('challenge must be private and root-owned')
+        value = json.loads(claimed.read_text())
+        nonce, created = value['nonce'], value['created']
+        if not re.fullmatch(r'PILOT-WAZUH-[a-f0-9]{32}', nonce):
+            raise ValueError('invalid nonce')
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if not 0 <= time.time() - created <= 180:
+                raise ValueError('missing fresh challenge')
+            try:
+                if scan(pathlib.Path(value['output']), nonce):
+                    return
+            except FileNotFoundError:
+                pass
+            time.sleep(1)
+        raise ValueError('fresh alert was not delivered to the receiver file')
+    finally:
+        claimed.unlink()
+
+
+def check_input(text, source):
+    """Compare the actual rendered input to its separately recorded source."""
+    bodies = re.findall(r'\binput\(([^)]*)\)', text)
+    if len(bodies) != 1:
+        raise ValueError('exactly one dedicated Wazuh input is required')
+    pairs = re.findall(r'([\w.]+)\s*=\s*("[^"\n]*")', bodies[0])
+    values = {key.lower(): json.loads(value) for key, value in pairs}
+    if len(values) != len(pairs):
+        raise ValueError('duplicate Wazuh input parameter')
+    required = {'type': 'imfile', 'file': str(pathlib.Path(source) / 'alerts/alerts.json'),
+                'tag': 'pilot-wazuh-alert:', 'facility': 'local5', 'severity': 'info',
+                'persiststateinterval': '1', 'freshstarttail': 'off',
+                'reopenontruncate': 'on', 'ruleset': 'pilotWazuhForward'}
+    if any(values.get(key) != value for key, value in required.items()):
+        raise ValueError('Wazuh input does not match the desired source/routing profile')
+    if 'ruleset(name="pilotWazuhForward")' not in text:
+        raise ValueError('dedicated Wazuh ruleset is missing')
+
+
+def check_local():
+    profile = json.loads(PROFILE.read_text())
+    conf = pathlib.Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
+    if not profile['enabled']:
+        raise ValueError('forwarding is disabled')
+    run('rsyslogd', '-N1')
+    pid = run('systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog').decode().strip()
+    if int(pid) <= 0 or 'imfile.so' not in pathlib.Path('/proc/' + pid + '/maps').read_text():
+        raise ValueError('imfile is not loaded')
+    stamp = run('systemctl', 'show', '--timestamp=us', '-p',
+                'ActiveEnterTimestamp', '--value', 'rsyslog').decode().strip()
+    started = float(run('date', '-d', stamp, '+%s.%N'))
+    if started < max(conf.stat().st_mtime, PROFILE.stat().st_mtime):
+        raise ValueError('rsyslog configuration was not loaded')
+    info = json.loads(run('docker', 'inspect', 'single-node-wazuh.manager-1'))[0]
+    sources = [m['Source'] for m in info['Mounts'] if m['Destination'] == '/var/ossec/logs']
+    if sources != [profile['source']]:
+        raise ValueError('manager mount source changed; reapply required')
+    source = pathlib.Path(profile['source']) / 'alerts/alerts.json'
+    run('runuser', '-u', 'syslog', '--', 'test', '-r', str(source))
+    live = run('docker', 'exec', 'single-node-wazuh.manager-1',
+               'cat', '/var/ossec/etc/ossec.conf').decode()
+    if 'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' in live:
+        raise ValueError('legacy UDP forward is still active')
+    # Config/TLS/loaded-state check is intentionally local. Only the receiver
+    # delivery mode can establish that a real alert reached disk.
+    run('/usr/local/libexec/pilot-siem-relp-check', 'sender-config', 'wazuh-sender')
+    expected_interval = 5 if profile['transport'] == 'relp' else 0
+    if profile.get('heartbeat_interval') != expected_interval:
+        raise ValueError('desired transport heartbeat profile is missing or changed')
+    run('/usr/local/libexec/pilot-wazuh-heartbeat', 'runtime', profile['transport'])
+    check_input(conf.read_text(), profile['source'])
+
+
+def main():
+    mode = sys.argv[1]
+    if mode == 'challenge':
+        challenge(*sys.argv[2:4])
+    elif mode == 'inject':
+        inject(sys.argv[2])
+    elif mode == 'delivery':
+        check_delivery()
+    elif mode == 'local':
+        check_local()
+    else:
+        raise ValueError('unknown mode')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
+        print('Wazuh verification failed: ' + str(error), file=sys.stderr)
+        sys.exit(1)

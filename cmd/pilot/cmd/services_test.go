@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kjelly/pilot/internal/services"
+	"github.com/kjelly/pilot/internal/statefile"
 )
 
 func TestServicesCLIConstructorHonorsCommandCancellation(t *testing.T) {
@@ -119,5 +123,110 @@ func TestDiscoverLibvirtNetworkAddressErrorsWithoutGateway(t *testing.T) {
 	t.Setenv("PILOT_VIRSH_BIN", shim)
 	if _, err := discoverLibvirtNetworkAddress(context.Background(), "default"); err == nil {
 		t.Fatal("missing gateway must fail")
+	}
+}
+
+func TestServicesConsumerCLIWithoutManagementMaterial(t *testing.T) {
+	for _, missing := range []string{"harbor/secrets/admin-password", "ca/ca-key.pem", "pulp/settings/secret-key"} {
+		t.Run(missing, func(t *testing.T) {
+			legacy, discovery := t.TempDir(), t.TempDir()
+			bundle, err := services.RenderBundle(services.BuiltInDevLite(), services.DataRoot(legacy), net.ParseIP("127.0.0.1"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := statefile.New[services.ServiceState](legacy, "services.json", 1, "services")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Mutate(func([]services.ServiceState) ([]services.ServiceState, error) {
+				return []services.ServiceState{{Profile: bundle.Client.Profile, Fingerprint: bundle.Client.Fingerprint, Root: bundle.Root, ComposePath: bundle.ComposePath, Client: bundle.Client, BindIP: "127.0.0.1", Running: true, ConsumerTracking: true}}, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := services.NewSharedManager(services.DiscoveryOptions{Directory: discovery, AdoptFrom: legacy}, nil); err != nil {
+				t.Fatal(err)
+			}
+			// Model two already registered VMs; bookkeeping must never probe or
+			// start the native services to list/release these durable records.
+			store, err = statefile.New[services.ServiceState](discovery, "services.json", 1, "services")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wanted []services.Consumer
+			if err := store.Mutate(func(states []services.ServiceState) ([]services.ServiceState, error) {
+				for _, id := range []string{"exact-consumer-one", "exact-consumer-two"} {
+					wanted = append(wanted, services.Consumer{ID: id, Name: id, StateDirectory: legacy, DiscoveryDirectory: discovery, InstanceID: states[0].InstanceID, Generation: states[0].Generation})
+				}
+				states[0].Consumers = wanted
+				return states, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(bundle.Root, missing)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PILOT_SERVICES_DIR", discovery)
+			oldDir, oldAdopt, oldCfg := servicesDir, servicesAdoptFrom, cfgFile
+			oldID, oldConfirm := svcConsumerID, svcConfirmInterruption
+			oldCtx, oldOut, oldErr := rootCmd.Context(), rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
+			oldListCtx, oldReleaseCtx := servicesConsumersCmd.Context(), servicesReleaseConsumerCmd.Context()
+			servicesDir, servicesAdoptFrom, cfgFile = "", "", ""
+			var stdout, stderr bytes.Buffer
+			rootCmd.SetOut(&stdout)
+			rootCmd.SetErr(&stderr)
+			t.Cleanup(func() {
+				servicesDir, servicesAdoptFrom, cfgFile = oldDir, oldAdopt, oldCfg
+				svcConsumerID, svcConfirmInterruption = oldID, oldConfirm
+				rootCmd.SetArgs(nil)
+				rootCmd.SetContext(oldCtx)
+				servicesConsumersCmd.SetContext(oldListCtx)
+				servicesReleaseConsumerCmd.SetContext(oldReleaseCtx)
+				rootCmd.SetOut(oldOut)
+				rootCmd.SetErr(oldErr)
+			})
+			execute := func(args ...string) error {
+				stdout.Reset()
+				stderr.Reset()
+				rootCmd.SetArgs(args)
+				// Cobra retains child contexts across repeated executions in tests.
+				// Earlier cancellation tests must not supply this command's context.
+				servicesConsumersCmd.SetContext(context.Background())
+				servicesReleaseConsumerCmd.SetContext(context.Background())
+				return rootCmd.ExecuteContext(context.Background())
+			}
+			list := func() []services.Consumer {
+				t.Helper()
+				if err := execute("services", "consumers"); err != nil {
+					t.Fatalf("listing consumers requires unavailable management material: %v", err)
+				}
+				var got []services.Consumer
+				if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			if got := list(); len(got) != 2 || got[0] != wanted[0] || got[1] != wanted[1] {
+				t.Fatalf("listing lost durable identities: %+v", got)
+			}
+			if err := execute("services", "release-consumer", "--id", wanted[0].ID, "--confirm-interruption=false"); err == nil || !strings.Contains(err.Error(), "confirm-interruption") {
+				t.Errorf("release did not enforce interruption confirmation: %v", err)
+			}
+			if got := list(); len(got) != 2 {
+				t.Fatal("unconfirmed release changed registrations")
+			}
+			if err := execute("services", "release-consumer", "--id", wanted[0].ID, "--confirm-interruption"); err != nil {
+				t.Fatalf("exact confirmed release requires unavailable management material: %v", err)
+			}
+			if got := list(); len(got) != 1 || got[0] != wanted[1] {
+				t.Fatalf("exact release changed another consumer: %+v", got)
+			}
+			if _, err := newServiceManagerContext(context.Background()); err == nil {
+				t.Fatal("bookkeeping weakened management discovery prerequisites")
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("bookkeeping recreated management material")
+			}
+		})
 	}
 }

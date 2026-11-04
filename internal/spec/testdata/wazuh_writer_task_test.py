@@ -112,7 +112,8 @@ class WriterTaskGraphTests(unittest.TestCase):
                         if key in task:
                             rewrite(task[key])
                     if 'ansible.builtin.script' in task:
-                        cmd = task['ansible.builtin.script']['cmd']
+                        script = task['ansible.builtin.script']
+                        cmd = script if isinstance(script, str) else script['cmd']
                         if 'wazuh-transaction.py' in cmd:
                             del task['ansible.builtin.script']
                             tail = cmd[cmd.index('wazuh-transaction.py') + len('wazuh-transaction.py'):]
@@ -225,6 +226,8 @@ class WriterTaskGraphTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([item['action'] for item in events][-2:], ['central', 'writer-release'])
         self.assertIsNone(state['writer'])
+        self.assertFalse(any(event['name'].startswith(('Wazuh:', 'Step ', 'Snapshot:')) for event in events),
+                         'version-only completion must not run incoming forwarding mutators')
 
     def test_ordinary_central_config_and_final_proof_remain_under_writer(self):
         result, events, state = self.graph(role='wazuh-manager', scenario='central-normal')
@@ -233,6 +236,23 @@ class WriterTaskGraphTests(unittest.TestCase):
         self.assertIn('native-mutation', actions[actions.index('central') + 1:])
         self.assertEqual(actions[-2:], ['central-verify', 'writer-release'])
         self.assertIsNone(state['writer'])
+
+    def test_incoming_forwarding_prerequisites_and_selected_writes_hold_the_host_writer(self):
+        for selection in ((), ('--tags', 'C10'), ('--tags', 'C11')):
+            flags = selection + ('-e', 'siem_forward_host=127.0.0.1', '-e', 'siem_forward_transport=relp')
+            result, events, state = self.graph(role='wazuh-manager', scenario='central-normal', flags=flags)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(events[0]['action'], 'writer-claim')
+            self.assertEqual(events[-1]['action'], 'writer-release')
+            self.assertIsNone(state['writer'])
+            names = [event['name'] for event in events]
+            package = names.index('Wazuh: install native RELP preflight prerequisites before configuration changes')
+            heartbeat = names.index('Wazuh: refuse foreign immark and unsupported heartbeat before Wazuh or TLS mutation')
+            forward = names.index('Step 9c: Configure isolated host imfile forwarding')
+            central = next(i for i, event in enumerate(events) if event['action'] == 'central')
+            self.assertLess(central, package); self.assertLess(package, heartbeat); self.assertLess(heartbeat, forward)
+            # Every native replacement uses the actual HostWriter.guard; no
+            # controller package/service/config action executes in this model.
 
     def test_fresh_selection_refusal_keeps_ownership_through_early_exit(self):
         result, events, state = self.graph(installed='', flags=('--skip-tags', 'C1,C2'))

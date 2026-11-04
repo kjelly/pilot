@@ -140,6 +140,12 @@
       ansible.builtin.set_fact:
         audit_rules_result: {}
         siem_forward_conf_result: {}
+        siem_forward_snapshot: {}
+        siem_forward_content_snapshot: {}
+        siem_forward_backup_result: {}
+        siem_forward_baseline_complete: false
+        siem_forward_restore_result: {}
+        siem_forward_remove_result: {}
         rsyslog_selinux_port_label: {}
         siem_forward_rsyslog_start_result: {}
         siem_forward_rsyslog_restart_result: {}
@@ -304,10 +310,13 @@
       ansible.builtin.shell:
         cmd: |
           set -u
+          # Ansible writes the complete helper to stdin even on early exits.
+          # Drain it without replacing the original shell exit status.
+          trap 'cat >/dev/null' EXIT
           f=/etc/logrotate.d/rsyslog
           test -e "$f" || exit 0
           d=$(mktemp -d) || exit 1
-          trap 'rm -rf "$d"' EXIT
+          trap 'cat >/dev/null; rm -rf "$d"' EXIT
           awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin "$f" > "$d/policy" || exit $?
           # nothing but blanks and comments left: Step 5d removes the file, nothing to check
           LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' "$d/policy" || exit 0
@@ -330,6 +339,65 @@
       check_mode: false
 
     - block:
+        # The TLS helper may migrate this same file into 09-pilot-omrelp.conf.
+        # Both owners must capture the same pre-mutation state. A persistent
+        # .bak alone never authorizes recovery of a later run.
+        - name: "Step 7: Snapshot the existing forward config"
+          tags: [always]
+          ansible.builtin.stat:
+            path: "{{ siem_forward_conf }}"
+          register: siem_forward_snapshot
+
+        - name: "Step 7: Require a regular managed forward config"
+          tags: [C16, C17]
+          ansible.builtin.assert:
+            that:
+              - not siem_forward_snapshot.stat.exists or siem_forward_snapshot.stat.isreg
+            fail_msg: "The managed forward configuration must be a regular file."
+          when: siem_forwarding_enabled | bool
+
+        - name: "Step 7: Capture current-run forward config bytes"
+          tags: [C16, C17]
+          no_log: true
+          diff: false
+          ansible.builtin.slurp:
+            src: "{{ siem_forward_conf }}"
+          register: siem_forward_content_snapshot
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_snapshot.stat.exists
+            - not ansible_check_mode
+
+        - name: "Step 7: Keep the existing forward config for rollback"
+          tags: [C16, C17]
+          no_log: true
+          diff: false
+          ansible.builtin.copy:
+            content: "{{ siem_forward_content_snapshot.content | b64decode }}"
+            dest: "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
+            owner: root
+            group: root
+            mode: "0600"
+          register: siem_forward_backup_result
+          when:
+            - siem_forwarding_enabled | bool
+            - siem_forward_snapshot.stat.exists
+            - not ansible_check_mode
+          changed_when: false
+
+        - name: "Step 7: Record a complete current-run forward baseline"
+          tags: [C16, C17]
+          ansible.builtin.set_fact:
+            siem_forward_baseline_complete: true
+          when:
+            - siem_forwarding_enabled | bool
+            - not ansible_check_mode
+            - >-
+              not siem_forward_snapshot.stat.exists or
+              (siem_forward_content_snapshot is defined and siem_forward_content_snapshot is not skipped
+               and siem_forward_content_snapshot is succeeded and siem_forward_backup_result is defined
+               and siem_forward_backup_result is not skipped and siem_forward_backup_result is succeeded)
+
         - name: "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)"
           tags: [C3, C4, C5, C6, C7, C8, C9]
           ansible.builtin.template:
@@ -468,6 +536,8 @@
               tags: [C20]
               ansible.builtin.shell:
                 cmd: |
+                  # A failed redirection/awk must still consume Ansible's input.
+                  trap 'cat >/dev/null' EXIT
                   awk -v drop={{ audit_syslog_path | quote }} -f /dev/stdin /etc/logrotate.d/rsyslog > {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} &&
                   { LC_ALL=C grep -aqE '^[[:space:]]*[^[:space:]#]' {{ (distro_rsyslog_tmp.path ~ '/policy') | quote }} && echo keep || echo empty; }
                 executable: /bin/bash
@@ -722,25 +792,6 @@
             group: root
             mode: "0755"
 
-        - name: "Step 7: Snapshot the existing forward config"
-          tags: [always]
-          ansible.builtin.stat:
-            path: "{{ siem_forward_conf }}"
-          register: siem_forward_snapshot
-
-        - name: "Step 7: Keep the existing forward config for rollback"
-          tags: [C16, C17]
-          ansible.builtin.copy:
-            src: "{{ siem_forward_conf }}"
-            dest: "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
-            remote_src: true
-            mode: "0644"
-          when:
-            - siem_forwarding_enabled | bool
-            - siem_forward_snapshot.stat.exists
-          # A backup is recovery metadata, not a managed-state change.
-          changed_when: false
-
         - name: "Step 7: Render 99-siem-forward.conf (local6.* + auth,authpriv.* -> siem-log-server)"
           tags: [C16, C17]
           ansible.builtin.copy:
@@ -756,9 +807,6 @@
               # Keep these stable filenames: they hold unsent audit history.
               # Plain TCP has no durable acknowledgement; queued delivery does
               # not guarantee that messages in flight at disconnect are stored.
-              {% if siem_forward_transport == 'relp' %}
-              module(load="omrelp" tls.tlsLib="gnutls")
-              {% endif %}
               local6.* action(
                 name="siem_audit" type="{{ 'omrelp' if siem_forward_transport == 'relp' else 'omfwd' }}" target="{{ siem_forward_alias }}"
                 port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
@@ -989,15 +1037,22 @@
 
         - name: "ROLLBACK — restore the previous siem forward config"
           tags: [always]
+          no_log: true
+          diff: false
           ansible.builtin.copy:
-            src: "{{ siem_forward_conf }}.pre-audit-forwarding.bak"
+            content: "{{ siem_forward_content_snapshot.content | b64decode }}"
             dest: "{{ siem_forward_conf }}"
-            remote_src: true
-            mode: "0644"
+            owner: "{{ siem_forward_snapshot.stat.uid }}"
+            group: "{{ siem_forward_snapshot.stat.gid }}"
+            mode: "{{ siem_forward_snapshot.stat.mode }}"
+          register: siem_forward_restore_result
           when:
-            - siem_forward_conf_result is defined
-            - siem_forward_conf_result is changed
+            - siem_forward_baseline_complete is defined and siem_forward_baseline_complete | bool
+            - siem_forward_conf_result is defined and siem_forward_conf_result is changed
+            - siem_forward_snapshot is defined and siem_forward_snapshot.stat is defined
             - siem_forward_snapshot.stat.exists
+            - siem_forward_content_snapshot is defined and siem_forward_content_snapshot.content is defined
+            - siem_forward_content_snapshot is not skipped and siem_forward_content_snapshot is succeeded
             - not ansible_check_mode
 
         - name: "ROLLBACK — remove siem forward config only on first apply"
@@ -1005,9 +1060,11 @@
           ansible.builtin.file:
             path: "{{ siem_forward_conf }}"
             state: absent
+          register: siem_forward_remove_result
           when:
-            - siem_forward_conf_result is defined
-            - siem_forward_conf_result is changed
+            - siem_forward_baseline_complete is defined and siem_forward_baseline_complete | bool
+            - siem_forward_conf_result is defined and siem_forward_conf_result is changed
+            - siem_forward_snapshot is defined and siem_forward_snapshot.stat is defined
             - not siem_forward_snapshot.stat.exists
             - not ansible_check_mode
 
@@ -1016,6 +1073,8 @@
         # loaded-state checks. Validate the restored global config first.
         - name: "ROLLBACK — validate the restored rsyslog configuration"
           tags: [always]
+          no_log: true
+          diff: false
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
           register: siem_forward_rescue_syntax
           changed_when: false
@@ -1029,9 +1088,13 @@
               or (siem_forward_rsyslog_start_result is failed)
               or (siem_forward_rsyslog_restart_result is changed)
               or (siem_forward_rsyslog_restart_result is failed)
+              or (siem_forward_restore_result is defined and siem_forward_restore_result is changed)
+              or (siem_forward_remove_result is defined and siem_forward_remove_result is changed)
               or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'sender' and
                   ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
-                   or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)))
+                   or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)
+                   or (siem_module_restore_result is defined and siem_module_restore_result is changed)
+                   or (siem_module_remove_result is defined and siem_module_remove_result is changed)))
 
         - name: "ROLLBACK — restart rsyslog with the restored configuration"
           tags: [always]

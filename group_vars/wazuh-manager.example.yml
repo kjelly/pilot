@@ -39,7 +39,7 @@ siem_forward_host: ""
 
 # 以下通常不用填,會沿用 playbook 內建預設:
 # siem_forward_port: "514"
-#  siem_forward_port 是 Wazuh syslog_output(UDP)的目的埠。同一台主機也在
+#  siem_forward_port 是 host rsyslog TCP 的目的埠。同一台主機也在
 #  audit-log-forwarding group 時,這個值也會用在它的 rsyslog TCP 轉送,而那
 #  個埠必須等於 log-server 的 siem_receiver_tcp_port。
 # wazuh_docker_version: "4.14.1"
@@ -49,3 +49,11 @@ siem_forward_host: ""
 # wazuh_version: "4.14.9"
 # Controlled upgrade stops all three containers and retains a complete cold
 # backup under /var/backups/pilot/wazuh. Normal apply never cleans backups.
+
+# Host rsyslog imfile ships real alerts.json over the existing transport.
+# C11 checks local loaded state; wazuh-alert-delivery.md checks the actual receiver file.
+# siem_forward_transport: tcp  # or relp (mTLS mandatory)
+# siem_relp_port: 20514
+# siem_relp_server_name: logs.example.test
+# Supply siem_relp_ca_pem / siem_relp_cert_pem / siem_relp_key_pem from private inputs.
+# Never put private-key PEM in this example or a committed inventory.

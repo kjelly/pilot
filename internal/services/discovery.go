@@ -20,6 +20,7 @@ import (
 type DiscoveryOptions struct {
 	Directory         string
 	LegacyDirectories []string
+	ConsumptionOnly   bool
 	AdoptFrom         string
 }
 
@@ -191,7 +192,11 @@ func newSharedManagerContext(ctx context.Context, options DiscoveryOptions, runn
 		}
 		ownerErr := m.verifyRootOwner(current.InstanceID)
 		if ownerErr == nil && current.Fingerprint != "" {
-			ownerErr = validateLegacyDataExcept(current, recovery)
+			if options.ConsumptionOnly {
+				ownerErr = validateConsumptionData(current)
+			} else {
+				ownerErr = validateLegacyDataExcept(current, recovery)
+			}
 		}
 		rootLock.Close()
 		if ownerErr != nil {

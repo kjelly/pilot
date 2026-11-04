@@ -68,10 +68,11 @@ def params(body):
 def check_config(profile):
     text = pathlib.Path(profile['config']).read_text()
     enabled, role = profile['enabled'], profile['role']
-    if role == 'sender':
+    if role in ('sender', 'wazuh-sender'):
         actions = [params(body) for body in re.findall(r'action\(([^)]*)\)', text)]
-        actions = [p for p in actions if p.get('name') in ('siem_audit', 'siem_auth')]
-        if {p['name'] for p in actions} != {'siem_audit', 'siem_auth'} or len(actions) != 2:
+        names = {'wazuh_alerts'} if role == 'wazuh-sender' else {'siem_audit', 'siem_auth'}
+        actions = [p for p in actions if p.get('name') in names]
+        if {p['name'] for p in actions} != names or len(actions) != len(names):
             raise ValueError('both forwarding actions must exist')
         for action in actions:
             required = {'type': 'omrelp' if enabled else 'omfwd',
@@ -198,8 +199,8 @@ def main():
     mode = sys.argv[1]
     if mode not in ('material', 'pending', 'sender', 'receiver', 'sender-config'):
         raise ValueError('unknown check mode')
-    role = sys.argv[2] if mode in ('material', 'pending') else ('receiver' if mode == 'receiver' else 'sender')
-    if role not in ('sender', 'receiver'):
+    role = sys.argv[2] if mode in ('material', 'pending') or (mode == 'sender-config' and len(sys.argv) > 2) else ('receiver' if mode == 'receiver' else 'sender')
+    if role not in ('sender', 'receiver', 'wazuh-sender'):
         raise ValueError('unknown role')
     profile = read_profile(role)
     if mode == 'material':

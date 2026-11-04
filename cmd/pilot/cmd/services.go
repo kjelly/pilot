@@ -116,7 +116,7 @@ var servicesConsumersCmd = &cobra.Command{
 	Use:   "consumers",
 	Short: "List durable VM consumer registrations, including pending provisioning",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		m, err := newServiceManagerContext(cmd.Context())
+		m, err := newConsumptionServiceManager(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -132,7 +132,7 @@ var servicesReleaseConsumerCmd = &cobra.Command{
 	Use:   "release-consumer",
 	Short: "Release one exact registration, accepting interruption risk for its VM",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		m, err := newServiceManagerContext(cmd.Context())
+		m, err := newConsumptionServiceManager(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -220,7 +220,7 @@ func runServiceStart(cmd *cobra.Command, repair bool) error {
 }
 
 func runServicesStatus(cmd *cobra.Command, _ []string) error {
-	m, err := newServiceManagerContext(cmd.Context())
+	m, err := newConsumptionServiceManager(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -266,6 +266,11 @@ func printServiceStatus(cmd *cobra.Command, status services.Status) error {
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "host services: running=%t profile=%s bind_ip=%s\n", status.Running, status.Profile, status.BindIP)
+	for _, c := range []services.Capability{services.APT, services.RPM, services.OCI} {
+		if observation, ok := status.Capabilities[c]; ok {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s: initialization=%s health=%s:%s management_auth=%s:%s data=%s:%s observed_at=%s\n", c, observation.Initialization.State, observation.Health.State, observation.Health.Reason, observation.ManagementAuth.State, observation.ManagementAuth.Reason, observation.Data.State, observation.Data.Reason, observation.ObservedAt.Format(time.RFC3339))
+		}
+	}
 	for _, item := range status.Services {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %-20s %s\n", item.Name, item.State)
 	}

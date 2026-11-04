@@ -19,10 +19,18 @@ func newServiceManager() (*services.Manager, error) {
 }
 
 func newServiceManagerContext(ctx context.Context) (*services.Manager, error) {
-	return newServiceManagerForCredential(ctx, "")
+	return newServiceManagerOptions(ctx, "", false)
+}
+
+func newConsumptionServiceManager(ctx context.Context) (*services.Manager, error) {
+	return newServiceManagerOptions(ctx, "", true)
 }
 
 func newServiceManagerForCredential(ctx context.Context, kind services.CredentialKind) (*services.Manager, error) {
+	return newServiceManagerOptions(ctx, kind, false)
+}
+
+func newServiceManagerOptions(ctx context.Context, kind services.CredentialKind, consuming bool) (*services.Manager, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("services: load config: %w", err)
@@ -34,7 +42,7 @@ func newServiceManagerForCredential(ctx context.Context, kind services.Credentia
 	if servicesDir != "" {
 		dir = servicesDir
 	}
-	options := services.DiscoveryOptions{Directory: dir, AdoptFrom: servicesAdoptFrom}
+	options := services.DiscoveryOptions{Directory: dir, AdoptFrom: servicesAdoptFrom, ConsumptionOnly: consuming}
 	// An explicit isolated registry must never adopt the user's default live
 	// cache accidentally. Migration there requires an explicit source.
 	if servicesDir == "" && os.Getenv("PILOT_SERVICES_DIR") == "" && cfg.ServicesDir == config.Default().ServicesDir {

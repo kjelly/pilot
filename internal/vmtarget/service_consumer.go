@@ -20,7 +20,7 @@ func (m *Manager) registerServiceConsumer(ctx context.Context, target *Target, b
 	if bootstrap.DiscoveryDirectory == "" || bootstrap.InstanceID == "" || bootstrap.Generation == 0 {
 		return errors.New("vmtarget: services require shared discovery identity for durable guest protection")
 	}
-	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory}, nil)
+	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory, ConsumptionOnly: true}, nil)
 	if err != nil {
 		return err
 	}
@@ -28,9 +28,13 @@ func (m *Manager) registerServiceConsumer(ctx context.Context, target *Target, b
 	if err != nil {
 		return err
 	}
-	consumer := services.Consumer{ID: uuid.NewString(), Name: target.Name, StateDirectory: stateDir, DiscoveryDirectory: manager.Directory(), InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation}
-	expected := services.ClientConfig{InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation, Profile: bootstrap.Profile, Fingerprint: bootstrap.Fingerprint, HostIP: bootstrap.HostIP, Hostname: bootstrap.Hostname, AptProxyURL: bootstrap.AptProxyURL, RPMBaseURL: bootstrap.RPMBaseURL, RPMRepositories: bootstrap.RPMRepositories, RegistryMirrorURL: bootstrap.RegistryMirrorURL, RegistryProjects: bootstrap.RegistryProjects, CAPEM: bootstrap.CAPEM}
-	if err := manager.RegisterConsumer(ctx, expected, consumer); err != nil {
+	consumer := services.Consumer{Capabilities: services.RequirementKey(bootstrap.Requirements), ID: uuid.NewString(), Name: target.Name, StateDirectory: stateDir, DiscoveryDirectory: manager.Directory(), InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation}
+	expected := services.ClientConfig{InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation, Profile: bootstrap.Profile, Fingerprint: bootstrap.Fingerprint, HostIP: bootstrap.HostIP, Hostname: bootstrap.Hostname, AptProxyURL: bootstrap.AptProxyURL, RPMBaseURL: bootstrap.RPMBaseURL, RPMRepositories: bootstrap.RPMRepositories, RegistryMirrorURL: bootstrap.RegistryMirrorURL, RegistryProjects: bootstrap.RegistryProjects, CAPEM: bootstrap.CAPEM, DataProbes: bootstrap.DataProbes}
+	profile, err := bootstrap.physicalProfile()
+	if err != nil {
+		return err
+	}
+	if err := manager.RegisterConsumerWithPolicy(ctx, expected, consumer, bootstrap.Requirements, profile, bootstrap.DataProbes); err != nil {
 		return err
 	}
 	target.ServiceConsumer = &consumer
@@ -122,7 +126,7 @@ func (m *Manager) teardownServiceConsumer(ctx context.Context, target *Target) e
 	}
 	m.cleanupTargetArtifacts(ctx, target)
 	consumer := *target.ServiceConsumer
-	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: consumer.DiscoveryDirectory}, nil)
+	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: consumer.DiscoveryDirectory, ConsumptionOnly: true}, nil)
 	if err != nil {
 		return err
 	}
@@ -130,4 +134,16 @@ func (m *Manager) teardownServiceConsumer(ctx context.Context, target *Target) e
 		return fmt.Errorf("vmtarget: release verified consumer: %w", err)
 	}
 	return nil
+}
+
+func (bootstrap ServiceBootstrap) physicalProfile() (services.Profile, error) {
+	if bootstrap.PhysicalProfile != nil {
+		return *bootstrap.PhysicalProfile, nil
+	}
+	profile := services.BuiltInDevLite()
+	fingerprint, e := profile.Fingerprint()
+	if e == nil && bootstrap.Profile == profile.Name && bootstrap.Fingerprint == fingerprint {
+		return profile, nil
+	}
+	return services.Profile{}, errors.New("vmtarget: explicit physical service profile is required")
 }
