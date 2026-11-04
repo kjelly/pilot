@@ -8,6 +8,11 @@ playbooks:
   apply: playbooks/apply/wazuh-manager-apply.yml
 regressionTests:
   - internal/spec/wazuh_manager_regression_test.go
+  - internal/spec/wazuh_alert_delivery_regression_test.go
+  - internal/spec/wazuh_secret_output_regression_test.go
+  - internal/spec/wazuh_rotation_acl_regression_test.go
+  - internal/spec/wazuh_tagged_recovery_regression_test.go
+  - internal/spec/wazuh_heartbeat_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: docker, required: true, relation: sameHosts}
@@ -22,6 +27,12 @@ resources: {minCPU: 4, minRAMMiB: 8192, minDiskGiB: 50, diskPaths: [/var/lib/doc
 groupVars:
   - {name: siem_forward_host, type: string, required: false, default: "", secret: false}
   - {name: siem_forward_port, type: integer, required: false, default: 514, secret: false}
+  - {name: siem_forward_transport, type: string, required: false, default: tcp, secret: false}
+  - {name: siem_relp_port, type: integer, required: false, default: 20514, secret: false}
+  - {name: siem_relp_server_name, type: string, required: false, secret: false}
+  - {name: siem_relp_ca_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_cert_pem, type: string, required: false, secret: false}
+  - {name: siem_relp_key_pem, type: string, required: false, secret: true}
   - {name: wazuh_docker_version, type: string, required: false, default: "4.14.1", secret: false}
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}

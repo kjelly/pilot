@@ -1,0 +1,242 @@
+#!/usr/bin/python3
+"""Bounded Wazuh-only immark ownership, native capability and loaded-state gate."""
+import collections
+import glob
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+MARK = 'PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1'
+OWNER = pathlib.Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
+HEADER = '# Managed by wazuh-manager-apply.yml. Never enter the default ruleset.'
+PARAMS = {'load': 'immark', 'interval': '5', 'markmessagetext': MARK,
+          'ruleset': 'pilotWazuhForward', 'use.syslogcall': 'off', 'use.markflag': 'on'}
+DEFINITION = ('module(load="immark" interval="5" markMessageText="' + MARK +
+              '" ruleset="pilotWazuhForward" use.syslogCall="off" use.markFlag="on")')
+
+
+def tokens(text):
+    """Only identify literal module/include declarations, never execute config."""
+    result = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c.isspace():
+            i += 1
+        elif c == '#':
+            i = text.find('\n', i) if '\n' in text[i:] else len(text)
+        elif text.startswith('/*', i):
+            end = text.find('*/', i + 2)
+            if end < 0:
+                raise ValueError('unterminated configuration comment')
+            i = end + 2
+        elif c in '\"\'':
+            quote, value, escaped = c, '', False
+            i += 1
+            while i < len(text) and text[i] != quote:
+                if text[i] == '\\':
+                    escaped = True
+                    i += 1
+                    if i == len(text):
+                        raise ValueError('unterminated configuration escape')
+                value += text[i]
+                i += 1
+            if i == len(text):
+                raise ValueError('unterminated configuration string')
+            result.append(('escaped-string' if escaped else 'string', value))
+            i += 1
+        elif c in '()={}[],;':
+            result.append((c, c))
+            i += 1
+        else:
+            start = i
+            while i < len(text) and not text[i].isspace() and text[i] not in '()={}[],;#\"\'':
+                # Legacy absolute include globs contain /* as path text.
+                # Outside a path, a comment is a token separator (including
+                # module/* comment */(load=...), not part of the identifier.
+                if text.startswith('/*', i) and text[start] != '/':
+                    break
+                i += 1
+            if i == start:
+                raise ValueError('unsupported configuration token')
+            result.append(('word', text[start:i]))
+    return result
+
+
+def declarations(text, call_names=('module', 'include')):
+    ts, result, i = tokens(text), [], 0
+    while i < len(ts):
+        kind, name = ts[i]
+        name = name.lower()
+        if kind == 'word' and name in ('$modload', '$includeconfig'):
+            if i + 1 == len(ts) or ts[i + 1][0] not in ('word', 'string'):
+                raise ValueError('unknown legacy module/include declaration')
+            result.append((name, {'value': ts[i + 1][1]}))
+            i += 2
+        elif kind == 'word' and name in call_names:
+            if i + 1 == len(ts) or ts[i + 1][0] != '(':
+                raise ValueError('unknown module/include syntax')
+            i += 2
+            attrs = {}
+            while i < len(ts) and ts[i][0] != ')':
+                if (i + 2 >= len(ts) or ts[i][0] != 'word' or ts[i + 1][0] != '='
+                        or ts[i + 2][0] not in ('string', 'escaped-string', 'word')):
+                    raise ValueError('nonliteral module/include arguments')
+                key, value = ts[i][1].lower(), ts[i + 2][1]
+                if key in attrs:
+                    raise ValueError('duplicate module/include argument')
+                if key in ('load', 'file') and ts[i + 2][0] != 'string':
+                    raise ValueError('nonliteral module/include identity')
+                attrs[key] = value
+                i += 3
+            if i == len(ts):
+                raise ValueError('unterminated module/include declaration')
+            result.append((name, attrs))
+            i += 1
+        else:
+            i += 1
+    return result
+
+
+def is_immark(value):
+    return pathlib.PurePath(value).name.lower() in ('immark', 'immark.so')
+
+
+def ownership(root, owner, loaded):
+    """Conservatively inspect the complete static include closure."""
+    pending, seen, marks, total = [(pathlib.Path(root), 0)], set(), [], 0
+    owner = pathlib.Path(owner)
+    while pending:
+        path, depth = pending.pop()
+        if depth > 16 or len(seen) >= 256 or path in seen:
+            raise ValueError('repeated, cyclic or oversized include closure')
+        if not path.is_file() or path.is_symlink() or path.resolve() != path.absolute():
+            raise ValueError('nonphysical configuration include')
+        seen.add(path)
+        text = path.read_text()
+        total += len(text)
+        if total > 2 * 1024 * 1024:
+            raise ValueError('oversized configuration include closure')
+        for name, attrs in declarations(text):
+            if name in ('module', '$modload'):
+                identity = attrs.get('load') if name == 'module' else attrs['value']
+                if not identity or any(c in identity for c in '$%\\'):
+                    raise ValueError('unknown module identity')
+                if is_immark(identity):
+                    canonical = (path == owner and text.startswith(HEADER + '\n')
+                                 and name == 'module' and attrs == PARAMS)
+                    if not canonical:
+                        raise ValueError('foreign immark configuration; operator ownership is preserved')
+                    marks.append(path)
+            else:
+                if name == 'include' and (set(attrs) - {'file', 'mode'}):
+                    raise ValueError('unsupported include arguments')
+                if name == 'include' and attrs.get('mode', 'abort-if-missing') not in ('optional', 'abort-if-missing'):
+                    raise ValueError('unknown include mode')
+                pattern = attrs.get('file') if name == 'include' else attrs['value']
+                if (not pattern or not pattern.startswith('/') or '$' in pattern
+                        or '%' in pattern or '\\' in pattern or '..' in pathlib.PurePath(pattern).parts):
+                    raise ValueError('unknown include identity')
+                paths = glob.glob(pattern)
+                if not paths and attrs.get('mode') != 'optional':
+                    raise ValueError('unresolved configuration include')
+                pending.extend((pathlib.Path(p), depth + 1) for p in sorted(paths))
+    if len(marks) > 1 or (loaded and not marks):
+        raise ValueError('duplicate or loaded-only unowned immark')
+    return bool(marks)
+
+
+def retirement(owner, profile):
+    """Inspect only the reader being replaced, never govern outside immark."""
+    owner, profile = pathlib.Path(owner), pathlib.Path(profile)
+    own_mark = ownership(owner, owner, False) if owner.exists() or owner.is_symlink() else False
+    if profile.is_symlink():
+        raise ValueError('unknown managed heartbeat profile ownership')
+    previous = json.loads(profile.read_text()) if profile.exists() else {}
+    if not isinstance(previous, dict):
+        raise ValueError('unknown managed heartbeat profile')
+    return previous.get('heartbeat_interval') == 5 and not own_mark
+
+
+def native(config):
+    result = subprocess.run(['rsyslogd', '-N1', '-f', str(config)],
+                            capture_output=True, text=True, timeout=30)
+    text = result.stdout + result.stderr
+    if result.returncode or re.search(r'unknown|not known|not found|already loaded|duplicate|using default ruleset', text, re.I):
+        raise ValueError('unsupported native Wazuh heartbeat capability')
+    # Identical baseline messages (e.g. existing native insecure-default
+    # diagnostics for this nonactivating, secret-free loopback probe) are not
+    # attributed to immark. Any additional diagnostic rejects the capability.
+    return collections.Counter(re.sub(r'\bline\s+\d+', 'line <n>', line.strip())
+                               for line in text.splitlines() if line.strip())
+
+
+def capability():
+    with tempfile.TemporaryDirectory(prefix='pilot-wazuh-heartbeat-', dir='/etc/rsyslog.d') as directory:
+        config = pathlib.Path(directory) / 'capability.probe'
+        base = ('module(load="omrelp")\n'
+                'ruleset(name="pilotWazuhForward" queue.type="LinkedList") {\n'
+                ' action(name="wazuh_alerts" type="omrelp" target="127.0.0.1" port="20514"'
+                ' tls.permanentFailureDisablesAction="off" MARK_PARAMETER)\n}\n')
+        config.write_text(base.replace('MARK_PARAMETER', ''))
+        baseline = native(config)
+        config.write_text(base.replace('MARK_PARAMETER', 'action.writeAllMarkMessages="on"') + DEFINITION + '\n')
+        if native(config) - baseline:
+            raise ValueError('new native Wazuh heartbeat diagnostics; refusing configuration changes')
+
+
+def runtime(config, transport, pid):
+    calls = declarations(pathlib.Path(config).read_text(), ('module', 'action'))
+    marks = [attrs for name, attrs in calls
+             if name == 'module' and is_immark(attrs.get('load', ''))]
+    if transport == 'relp':
+        actions = [attrs for name, attrs in calls if name == 'action' and attrs.get('name') == 'wazuh_alerts']
+        if (marks != [PARAMS] or len(actions) != 1 or actions[0].get('type') != 'omrelp'
+                or actions[0].get('action.writeallmarkmessages') != 'on'):
+            raise ValueError('fixed RELP heartbeat configuration is missing or changed')
+        if 'immark.so' not in pathlib.Path('/proc/' + pid + '/maps').read_text():
+            raise ValueError('immark is not loaded')
+        if not any('immark' in (p / 'comm').read_text() for p in pathlib.Path('/proc/' + pid + '/task').iterdir()):
+            raise ValueError('native immark timer thread is missing')
+    elif marks:
+        raise ValueError('owned heartbeat must be absent for TCP')
+
+
+def main():
+    mode = sys.argv[1]
+    if mode == 'preflight':
+        transport = sys.argv[2]
+        if transport not in ('relp', 'retire'):
+            raise ValueError('unknown heartbeat ownership mode')
+        if transport == 'retire':
+            uncertain = retirement(OWNER, OWNER.parent / 'pilot-wazuh/profile.json')
+            if uncertain:
+                if not shutil.which('rsyslogd'):
+                    raise ValueError('owned heartbeat profile without inspectable runtime')
+                pid = subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog']).decode().strip()
+                if int(pid) > 0 and 'immark.so' in pathlib.Path('/proc/' + pid + '/maps').read_text():
+                    raise ValueError('loaded-only heartbeat has uncertain ownership; preserving runtime')
+            print('Owned reader retirement accepted; unrelated operator immark is not managed')
+            return
+        pid = subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog']).decode().strip()
+        loaded = int(pid) > 0 and 'immark.so' in pathlib.Path('/proc/' + pid + '/maps').read_text()
+        ownership('/etc/rsyslog.conf', OWNER, loaded)
+        capability()
+        print('Wazuh heartbeat ownership and native capability accepted')
+    elif mode == 'runtime':
+        pid = subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'rsyslog']).decode().strip()
+        runtime(OWNER, sys.argv[2], pid)
+    else:
+        raise ValueError('unknown heartbeat check')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
+        print('Wazuh heartbeat refused: ' + str(error), file=sys.stderr)
+        sys.exit(1)
