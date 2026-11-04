@@ -156,6 +156,106 @@ synthetic nonce 從原生 analysis socket 注入，必須以 agent `000`、精�
 canary 只在明確授權的版本交易與 opt-in fixture 執行，普通 C12 不注入事件。
 canary 涵蓋 analysis → Filebeat → indexer，agent transport 另由 topology 實測。
 
+#### Host reader、current queue 與回復後 replay
+
+啟用 host forwarding 的中央版本交易，另需單次明示
+`wazuh_ack_rsyslog_downtime_and_replay=true`；此 boolean 預設為 false。
+它確認 shared rsyslog／socket 停機及 restored current file 的 replay／duplicates，
+並確認操作者已排除同機 audit-log-forwarding、log-server、其他 rsyslog mutator、
+套件／policy 維護及外部 service/socket 操作，涵蓋整個交易、中斷及 recovery 時段。
+這是合作式獨占維護假設；Wazuh writer 只序列化參與本協定的 Wazuh entrypoints，
+沒有跨角色 global lock。boundary fingerprints 可偵測漂移，不能取代此假設。
+ack 不取代 upgrade、exact owner 或 stopped-operation confirmation；同 owner
+journal recovery 沿用原授權。no-op／check 不停 reader，也不要求未使用的 pause 授權。
+
+停機前須有同版本一般 apply 收斂的 owned forwarding baseline：profile、
+transport／TLS、input／ruleset／action、exclusive cursor namespace、queue 與 loaded
+runtime 一致，啟用時 C11 健康。須資格化實際選定的 native engine 與 queue file family，
+包含選用的 diskQueueType=disk 或 LinkedList，不能從其中一種的實驗推論另一種，
+也不能悄改 transport／engine。版本交易不兼做 legacy UDP 遷移或目的地／TLS／profile
+變更；已知不支援的 layout、activation、ownership、engine 或混合轉換在停機前拒絕。
+符合 baseline、owner 與 ack 的 configured upgrade 須有 reader lifecycle 支援。
+
+- **從未設定**：須證明 Wazuh-owned profile/input、相關 FD/activation、cursor、queue 均不存在，
+  才可走無 reader pause/replay 的 standalone 路徑；不能把未知狀態當作未設定。
+- **已停用且收斂**：證明 owned input／heartbeat／FD 已卸載，保留 queue/cursor 且不自動
+  啟用。成功 switch、未 cold restore 時原樣保留，不另停 shared service 或建立 replay receipt。
+  cold restore 可能失效的 retained cursor 須在交易停機前取得 ack，並在無 owned 存取的
+  offline 狀態 archive／retire／發布空 generation。cursor 與 queue 皆不存在時記錄確切 absence；
+  cursor 缺少但 queue 非空仍須保留 queue，不人工 drain。另一輪 cold restore 記錄另一個 generation。
+- **已啟用**：完整執行下列 pause/resume/recovery 與 receiver 驗收，不以停用替代。
+
+停用狀態 cold restore 後仍有 retained cursor/queue 者，須在中央 finalize 前持久保存 root-owned
+replay-pending receipt，綁定 source/profile、current cursor generation 與 queued-resource
+identities；它不授予自動啟用權限。之後 ordinary apply 真正要求 re-enable 時，是新的操作：
+須再次明示同一 boolean，並在任何 config／restart mutation 前驗 receipt 與目前 layout。
+只有 enabled 收斂及適用的 writer/config/runtime/delivery 驗證成功後才清除 receipt；
+失敗保留 receipt 與本次 recovery authority，不靜默覆寫未知 receipt。
+
+需要 shared pause 的 unit 支援範圍限 Ubuntu 24.04 的實際 canonical `rsyslog.service` 與
+`syslog.socket` 關係：default-config ExecStart、無額外 drop-in／activation，
+service enabled/active，socket STATIC/active，Datagram `/run/systemd/journal/syslog`、
+RemoveOnStop=no；每次 admission 重讀 unit fragments、依賴／aliases、engine、
+有效 include graph、loaded MAC/profile 與 prior states。未知 override 或 graph 停機前拒絕。
+先凍結 producer，再持久記錄 pause intent，以同一組 owned systemd jobs 請求停止 socket
+與 service；Requires 關係可能連帶停止 service，不能假設兩次 stop 中間它仍運作。
+不 enable/disable STATIC socket、不改 unit policy；依原 active 狀態與 native dependency
+順序恢復，並驗原 enablement 未變。RemoveOnStop=no 可留下 socket pathname：
+驗收須有 jobs 完成、原 invocation/process/cgroup 與 reader/queue FDs 消失、kernel socket
+不再被持有／接收／觸發 activation；pathname 消失既非必要亦非充分條件。
+
+先停止三個 Wazuh producer 以凍結 rotation，再有界驗 current inode/length 與完整紀錄
+邊界，以 dev/inode 辨 hardlink。只分類 admitted Wazuh input 的 data FDs；其他已宣告
+shared inputs 不是 Wazuh FDs。已知 noncurrent FDs 須完整 drain 並綁定來源，
+unknown/deleted/unread candidates 不可略過。FD position 只是必要的 read-progress bound，
+不是 read-ahead 已入 queue 的證明；另需資格化 native graceful shutdown 與 durable queue closure。
+停止的 rc/active=false 不足；既有 90s stop timeout 與 SendSIGKILL=yes 可能強制結束程序。
+須驗 Result、ExecMainCode/ExecMainStatus、確切 invocation exit 與 cgroup/FD/job 證據；
+timeout、實際 forced kill、未知 exit 或 survivor 均不算 graceful save。
+首次 switch 前若 dynamic drain/stop 失敗只在 producer 停止後才可見，保留原資料與 owner/journal，
+僅在安全時走 pre-switch recovery。target 已 exposed 時保留當下 custody，未取得新的 stop/queue
+proof 不得 restore；晚期失敗本身不授予 switch/delete/cold restore 權限。
+
+冷備份／回復仍驗既有 15-root 與全部實際 persistent sources、原 images、內容、
+ownership、ACL/xattrs 及 link closure；ordinary ACL journal 不跨新舊 inode 重播。
+rollback 先再次凍結 producer、graceful-stop reader，seal 此時 **CURRENT durable queue**：
+fsync/hash 並在 Docker 舊資料 restore 前後維持相同 bytes/identities，直到 reader restart。
+不以初始 checkpoint 覆蓋、不刪除／人工 drain／改名 queue。停機前須預留容量，
+保留 CURRENT queue 的 private sealed evidence-only copy 供外部 nonce/hash oracle 使用；
+此 copy 永遠不是 restore authority，不得 replay 到 live queue。payload 留在目標 root-only
+private store，僅輸出 typed nonce/hash booleans；不公開 queue、設定或 key 的原文。
+
+正常成功升級保留 native cursor。cold restore 後，對 quiescent/exclusive 的 owned cursor
+先 archive/checksum/fsync，再以同 filesystem 原子 rename 保留舊 generation、發布空新 generation。
+每個 reader boundary 在 effect 前持久記錄 typed intent，effect 後 fsync proof，包含
+old/prepared/retired/new identities、queue custody、unit/invocation 與 producer 狀態。
+在請求任何會 activation reader 的 socket/service start **之前**標記 generation 可能已 exposed；
+retry 不 reset 可能已讀取的
+generation，不在 activation 後還原 retired cursor。若 exposed 後必須再次 restore data，
+須重新 quiesce、seal 當時 CURRENT queue，另建 recorded generation，不重用初始 queue proof。
+恢復有效 config／transport／heartbeat、ACL/current-file watchability 的 reader，再啟動 producer；
+驗 rotation、原 unit/socket states、適用的 C11/C12 與 boundary fingerprints。
+未知 identities、alias/mount、namespace drift 或保存失敗保留 custody，不猜測或接管 foreign state。
+版本／資料／identity 與 reader 最終 proof、必要的 replay receipt 全部 durable 後，才 finalize、
+移除 journal 並 exact-owner release；完成／unlink 中斷可冪等銜接，不刪未知 owner。
+
+回復允許 restored current file 至少一次重讀及 duplicates，沒有 exactly-once 或整體排序承諾。
+保存範圍是最後成功 graceful checkpoint 中 **仍在 CURRENT durable queue 的完整紀錄**，
+加上可重讀的 restored current file；不承諾 unread/not-yet-queued、partial/uncommitted、
+noncurrent 歷史、shared-input 停機期間未保留的流量，或 TCP 已出 queue 但 receiver 尚未
+確認落盤的 network window。queue cap、突發主機損失與 receiver 故障仍適用原 transport 邊界。
+
+candidate-bound 故障驗收須在 backup 完成且 target runtime 真正運作後，以獨立 fixture
+產生 target-only real-engine nonce；它不在舊 source/archive，卻在 rollback 的 CURRENT
+sealed queue evidence，且 hashes 對應 restore 前後的 live queue。receiver 在 checkpoint／
+restore 時不可接收；恢復 transport 後，target nonce 必須先抵達實際 receiver，再產生並驗證
+另一個 fresh old-runtime nonce，同驗 C11/C12、舊資料／設定／identity、安全 metadata 與 replay counts。
+每次 delivery challenge 獨立且不可重用；資格化所選 TCP/RELP 與 native engine，不悄改選擇。
+本機 C11、isolated engine prototype、停用／從未設定情境都不替代 enabled recovery delivery。
+不新增在任意 operator monitored directory 寫測試資料的 runtime hook；既有 retained-agent
+版本 bound、native package protection、agent audit/enrollment、host owner 與 sealed cold recovery
+保證均不得減弱。整條不可變 candidate/native chain 與相關故障驗收完成前，不宣稱本契約通過。
+
 | ID  | Category  | Check                                                              | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
 | C1  | container | manager 容器（`single-node-wazuh.manager-1`）為 running                | 0        | sh -c 'docker ps --filter name=wazuh.manager --filter status=running -q | grep -q . && echo 0 || echo 1' |
