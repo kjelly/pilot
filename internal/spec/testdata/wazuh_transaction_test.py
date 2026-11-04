@@ -1605,7 +1605,7 @@ class CaptureClosureTests(unittest.TestCase):
                             changed = True
                     return original(filename)
                 with patch.object(w.ClosedCapture, 'attrs', side_effect=attrs):
-                    with self.assertRaisesRegex(w.Refused, 'metadata is unreadable|metadata changed'):
+                    with self.assertRaisesRegex(w.Refused, 'metadata is unreadable|metadata changed|layout namespace is unreadable|file changed'):
                         agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
                 self.assertIsNone(agent.active())
                 self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
@@ -1675,7 +1675,7 @@ class CaptureClosureTests(unittest.TestCase):
                 self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
                 self.assertEqual(agent.active()['phase'] if agent.active() else None, 'staged' if boundary == 'staged' else None)
 
-    def test_discovery_checks_all_volume_descendants_and_complete_link_groups(self):
+    def test_explicit_admission_checks_all_volume_descendants_and_complete_link_groups(self):
         import os
         for mutation in ('closed-pair', 'third-alias', 'external-symlink'):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
@@ -1686,10 +1686,13 @@ class CaptureClosureTests(unittest.TestCase):
                 if mutation == 'third-alias': os.link(data, root / 'outside-data')
                 if mutation == 'external-symlink': (volume / 'queue').symlink_to(root, target_is_directory=True)
                 if mutation == 'closed-pair':
-                    self.assertEqual(central.discover()['version'], '4.14.1')
+                    state = central.discover()
+                    self.assertEqual(state['version'], '4.14.1')
+                    w.ScopeLayout.inspect({name: 'directory' for name in state['paths']}, central.root)
                 else:
+                    state = central.discover()
                     with self.assertRaisesRegex(w.Refused, 'uncaptured external hardlink|symlink escapes|dangling symlink'):
-                        central.discover()
+                        w.ScopeLayout.inspect({name: 'directory' for name in state['paths']}, central.root)
                 self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
 
     def test_content_seal_and_symlink_component_resolution_are_discriminating(self):
@@ -1706,6 +1709,222 @@ class CaptureClosureTests(unittest.TestCase):
             (source / 'escape').symlink_to('nested/link/../outside')
             with self.assertRaisesRegex(w.Refused, 'symlink escapes'):
                 w.ClosedCapture.take({str(source): 'directory'}, root / 'private')
+
+
+class LiveLayoutTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def append_on(self, trigger, log, enabled=lambda: True):
+        # A real writer thread, deterministically admitted between the log's
+        # lstat and the final complete-walk verification. No synthetic stat.
+        original = w.ClosedCapture.attrs
+        writes = []
+        def attrs(filename):
+            if str(filename) == str(trigger) and enabled():
+                failures = []
+                def append():
+                    try:
+                        with log.open('a') as stream:
+                            stream.write('real active log append\n'); stream.flush()
+                        writes.append(log.stat().st_size)
+                    except BaseException as exc: failures.append(exc)
+                thread = threading.Thread(target=append);thread.start();thread.join(3)
+                self.assertFalse(thread.is_alive(), 'controlled writer did not finish')
+                if failures: raise failures[0]
+            return original(filename)
+        with mock.patch.object(w.ClosedCapture, 'attrs', side_effect=attrs):
+            yield writes
+
+    def test_regular_append_is_live_layout_only_and_strict_cold_capture_still_refuses(self):
+        for reader in ('layout', 'strict-unsealed', 'strict-sealed'):
+            with self.subTest(reader=reader), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = root / 'source'; source.mkdir()
+                log = source / '00-live.log'; log.write_text('old log\n')
+                trigger = source / '99-trigger'; trigger.write_text('static')
+                specs = {str(source): 'directory'}; backup = root / 'backups'
+                with self.append_on(trigger, log) as writes:
+                    if reader == 'layout':
+                        layout = w.ScopeLayout.inspect(specs, backup)
+                        self.assertFalse(layout['sealed']);self.assertEqual(layout['purpose'], 'live-layout-only')
+                        with self.assertRaisesRegex(w.Refused, 'not content-sealed'):
+                            w.ClosedCapture.verify(layout, backup)
+                        with self.assertRaisesRegex(w.Refused, 'content-sealed cold capture'):
+                            w.Transaction('agent', root=backup).archive(source, backup / 'forbidden.tar', capture=layout)
+                    else:
+                        with self.assertRaisesRegex(w.Refused, 'capture metadata changed'):
+                            w.ClosedCapture.take(specs, backup, sealed=reader == 'strict-sealed')
+                self.assertTrue(writes, 'the real file must change during the walk')
+
+    def test_namespace_rotation_membership_and_missing_nodes_remain_inconclusive(self):
+        for mutation in ('rotation', 'added-child', 'removed-node', 'new-link-alias', 'unreadable'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = root / 'source'; source.mkdir()
+                log = source / '00-live.log'; log.write_text('old log')
+                trigger = source / '99-trigger'; trigger.write_text('stable')
+                original = w.ClosedCapture.attrs; changed = False
+                def attrs(filename):
+                    nonlocal changed
+                    if str(filename) == str(trigger) and not changed:
+                        changed = True
+                        if mutation == 'rotation':
+                            log.rename(source / 'old.log');log.write_text('new log inode')
+                        elif mutation == 'added-child': (source / 'unseen').write_text('new')
+                        elif mutation == 'removed-node': log.unlink()
+                        elif mutation == 'new-link-alias': w.os.link(log, root / 'outside-alias')
+                        else: raise OSError('bounded unreadable metadata')
+                    return original(filename)
+                with mock.patch.object(w.ClosedCapture, 'attrs', side_effect=attrs):
+                    with self.assertRaisesRegex(w.Refused, 'layout.*changed|layout.*unreadable'):
+                        w.ScopeLayout.inspect({str(source): 'directory'}, root / 'private')
+                self.assertTrue(changed)
+
+    def test_readonly_central_health_never_recursively_inspects_live_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            central, _, native = DiscoveryFilesystemTests().central(Path(temporary))
+            checked = []; central.check_agents = lambda target: checked.append(target)
+            with mock.patch.object(w.ClosedCapture, 'take', side_effect=w.Refused('strict capture invoked on live data')):
+                with mock.patch.object(w.ScopeLayout, 'inspect', side_effect=AssertionError('C12 performed a data-tree walk')):
+                    result = central.verify()
+            self.assertEqual(result, {'pass': True, 'version': '4.14.1'})
+            self.assertEqual(checked, ['4.14.1'])
+            self.assertTrue(any(call[-1] == 'info' for call in native.calls))
+            self.assertFalse(any(call[1] in ('stop', 'rm') for call in native.calls))
+
+    def test_readonly_health_with_real_appends_has_no_live_content_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary);central, _, native = DiscoveryFilesystemTests().central(root)
+            volume = next((root / 'docker-data/volumes').glob('*/_data'))
+            log = volume / '00-live.log';log.write_text('running')
+            trigger = volume / '99-trigger';trigger.write_text('stable')
+            central.check_agents = lambda target: None
+            original = native.run; writes = []
+            def run(argv, **kwargs):
+                def append():
+                    with log.open('a') as stream:stream.write('native observation active append\n')
+                    writes.append(log.stat().st_size)
+                writer=threading.Thread(target=append);writer.start();writer.join(3)
+                self.assertFalse(writer.is_alive())
+                return original(argv, **kwargs)
+            native.run = run
+            # If the old recursive snapshot is restored, this second real
+            # writer deterministically mutates its earlier log node mid-walk.
+            with self.append_on(trigger, log):
+                self.assertTrue(central.verify()['pass'])
+            self.assertTrue(writes)
+
+    def test_native_recovery_scope_validation_is_nonfreezing_before_quiescence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);central,_,_=DiscoveryFilesystemTests().central(root)
+            state=central.discover();state['backup']=str(w.private_dir(central.root/'retained'))
+            volume=next((root/'docker-data/volumes').glob('*/_data'))
+            log=volume/'00-live.log';log.write_text('running')
+            trigger=volume/'99-trigger';trigger.write_text('stable')
+            with self.append_on(trigger,log) as writes:
+                central.validate_project_scope(state)
+            self.assertTrue(writes)
+
+    def test_pre_switch_and_finalized_completion_use_live_layout_after_restart(self):
+        for method in ('recover_pre_switch', 'complete_finalized'):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as temporary:
+                central = FakeCentral(Path(temporary))
+                log = central.volume / '00-live.log';log.write_text('running')
+                trigger = central.volume / '99-trigger';trigger.write_text('stable')
+                owner = '1' * 32;w.HostWriter(central.root).claim(owner, 'central')
+                with central.lock(owner=owner):
+                    state=central.discover();state['data']=central.data()
+                    item=central.begin(owner,state)
+                    if method=='complete_finalized':central.write(item,'recovered')
+                    with self.append_on(trigger, log) as writes:
+                        getattr(central,method)(item)
+                    self.assertTrue(writes)
+                self.assertFalse(central.path.exists());w.HostWriter(central.root).release(owner)
+
+    def test_mutating_data_after_agent_stop_cannot_grant_cold_backup_authority(self):
+        with RestoreScopeTests().agent() as (agent,native,path,_):
+            logs=path('/var/ossec/logs');logs.mkdir()
+            log=logs/'ossec.log';log.write_text('old')
+            owner='d'*32;agent.reserve(owner,w.agent_plan('4.14.1-1','4.14.9','4.14.9',True))
+            with self.append_on(path('/etc/hosts'),log,lambda:not native.active) as writes:
+                with self.assertRaisesRegex(w.Refused,'capture metadata changed'):
+                    agent.cold_backup(owner)
+            self.assertTrue(writes);self.assertEqual(agent.active()['phase'],'stopping')
+            self.assertNotIn('archives',agent.active())
+            self.assertFalse(list(Path(agent.active()['backup']).glob('*.tar')))
+
+    def test_central_live_admission_and_poststart_commit_and_recovery_allow_data_append(self):
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery), tempfile.TemporaryDirectory() as temporary:
+                class ActiveCentral(FakeCentral):
+                    running = True
+                    def compose_run(self, item, *args, **kwargs):
+                        self.calls.append((item['phase'], args))
+                        if args[0] == 'stop': self.running = False
+                        if args[0] == 'up': self.running = True
+                    def quiesce_for_restore(self, item):
+                        self.running = False;super().quiesce_for_restore(item)
+                central = ActiveCentral(Path(temporary), fail=recovery)
+                log = central.volume / '00-live.log';log.write_text('old log')
+                trigger = central.volume / '99-trigger';trigger.write_text('stable')
+                with self.append_on(trigger, log, lambda: central.running) as writes:
+                    if recovery:
+                        with self.assertRaisesRegex(w.Refused, 'previous images, data and availability recovered'):
+                            central.execute('4.14.9', upgrade=True)
+                    else:
+                        self.assertTrue(central.execute('4.14.9', upgrade=True)['changed'])
+                self.assertGreaterEqual(len(writes), 3)
+                self.assertFalse(central.path.exists())
+                manifest = json.loads(next(central.root.glob('central-*/manifest.json')).read_text())
+                self.assertEqual(manifest['phase'], 'recovered' if recovery else 'committed')
+                self.assertEqual((central.volume / 'document').read_text(), 'original indexed data')
+
+    def test_agent_live_admission_activate_commit_and_recovery_use_layout_but_cold_stays_strict(self):
+        for family in ('Debian', 'RedHat'):
+            for recovery in (False, True):
+                with self.subTest(family=family, recovery=recovery), RestoreScopeTests().agent(family) as (agent, native, path, _):
+                    logs = path('/var/ossec/logs');logs.mkdir()
+                    log = logs / 'ossec.log';log.write_text('old running log')
+                    trigger = path('/etc/hosts')
+                    owner = 'd' * 32;plan = w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True)
+                    sync_file = w.sync_file
+                    with self.append_on(trigger, log, lambda: native.active) as writes:
+                        agent.reserve(owner, plan);agent.cold_backup(owner);agent.authorize_install(owner)
+                        native.installed = '4.14.9-1'
+                        agent.activate(owner)
+                        if recovery:
+                            agent.prepare_recovery(owner);native.installed = '4.14.1-1'
+                            agent.restore_state(owner);agent.finish_recovery(owner)
+                        else:
+                            with mock.patch.object(w, 'sync_file', side_effect=lambda name: sync_file(path(name))):
+                                agent.commit(owner)
+                    self.assertGreaterEqual(len(writes), 3)
+                    self.assertTrue(native.active);self.assertFalse(agent.path.exists())
+
+    def test_live_layout_does_not_relax_exact_managed_key_or_config_hashes(self):
+        for selected in ('/var/ossec/etc/client.keys', '/var/ossec/etc/ossec.conf'):
+            with self.subTest(selected=selected), RestoreScopeTests().agent() as (agent, native, path, _):
+                original = w.ClosedCapture.attrs; changed = False
+                def attrs(filename):
+                    nonlocal changed
+                    if str(filename) == str(path('/etc/hosts')) and not changed:
+                        path(selected).write_text('changed managed contents during layout');changed = True
+                    return original(filename)
+                with mock.patch.object(w.ClosedCapture, 'attrs', side_effect=attrs):
+                    with self.assertRaisesRegex(w.Refused, 'capture file changed'):
+                        agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                self.assertIsNone(agent.active());self.assertTrue(native.active)
+
+    def test_layout_keeps_pre_stop_external_links_and_mount_refusals(self):
+        for mutation in ('symlink', 'external-hardlink', 'nested-mount'):
+            with self.subTest(mutation=mutation), RestoreScopeTests().agent() as (agent, native, path, root):
+                data = path('/var/ossec/queue-data');data.write_text('persistent')
+                if mutation == 'symlink': path('/var/ossec/queue').symlink_to(root, target_is_directory=True)
+                elif mutation == 'external-hardlink': w.os.link(data, root / 'uncaptured-alias')
+                else:
+                    mount = path('/var/ossec/nested');mount.mkdir()
+                    MOUNT_NAMESPACE['text'] += f'2 1 8:1 / {mount} rw - ext4 /dev/synthetic rw\n'
+                with self.assertRaisesRegex(w.Refused, 'symlink escapes|dangling symlink|uncaptured external hardlink|unsupported mount'):
+                    agent.reserve('d' * 32, w.agent_plan('4.14.1-1', '4.14.9', '4.14.9', True))
+                self.assertIsNone(agent.active());self.assertTrue(native.active)
+                self.assertFalse(any(call[:2] == ['systemctl','stop'] for call in native.calls))
 
 
 class AuditNativeObservationTests(unittest.TestCase):
@@ -2038,7 +2257,7 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
         for phase, action in w.AGENT_RECOVERY.items():
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                calls = []
+                calls = []; self_test = self
                 class Native(Commands):
                     def run(self, argv, **kwargs):
                         calls.append(str(argv[0]) + ':' + str(argv[1]))
@@ -2057,6 +2276,10 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                         calls.append('verify-old-state')
                     def validate_agent_archives(self, item):
                         calls.append('validate-all-archives')
+                    def capture_sources(self, sealed=False, recovery=False):
+                        self_test.assertTrue(sealed and recovery)
+                        calls.append('strict-cold-sources')
+                        return {'sealed': True}
                     def restore_absence(self, item):
                         calls.append('restore-absence')
                     def verify_pin(self, item, target=False):
@@ -2079,6 +2302,7 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                 elif action == 'restore-old':
                     self.assertEqual(calls[0], 'validate-all-archives')
                     self.assertIn('systemctl:stop', calls)
+                    self.assertGreater(calls.index('strict-cold-sources'), calls.index('systemctl:stop'))
                     self.assertTrue(result['reinstall'])
                     self.assertEqual(agent.active()['phase'], 'recovering')
                 else:

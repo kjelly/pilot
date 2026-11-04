@@ -385,6 +385,18 @@ class ClosedCapture:
         return str(current)
 
     @classmethod
+    def close_links(cls, nodes, groups, roots):
+        # Shared closure policy for live namespace inspection and strict cold
+        # capture. Neither walk may omit an outside alias or follow its data.
+        for aliases in groups.values():
+            if any(nodes[name]['identity'][2] != len(aliases) for name in aliases):
+                raise Refused('capture has an uncaptured external hardlink alias')
+        for name, node in nodes.items():
+            if node['type'] == 'symlink':
+                node['resolved'] = cls.resolve_link(Path(name), nodes, [Path(root) for root in roots])
+        return sorted(sorted(aliases) for aliases in groups.values() if len(aliases) > 1)
+
+    @classmethod
     def take(cls, specs, backup, missing=(), sealed=False):
         restore_sources(specs, backup, missing=missing)
         roots = {str(path_shape(name, kind, missing=name in missing)): kind for name, kind in specs.items()}
@@ -426,16 +438,11 @@ class ClosedCapture:
             for name, node in nodes.items():
                 if cls.identity(Path(name).lstat()) != node['identity'] or cls.attrs(name) != node['xattrs']:
                     raise Refused('capture metadata changed before closure was sealed')
-            for aliases in groups.values():
-                if any(nodes[name]['identity'][2] != len(aliases) for name in aliases):
-                    raise Refused('capture has an uncaptured external hardlink alias')
-            for name, node in nodes.items():
-                if node['type'] == 'symlink':
-                    node['resolved'] = cls.resolve_link(Path(name), nodes, [Path(root) for root in roots])
+            hardlinks = cls.close_links(nodes, groups, roots)
         except OSError as exc:
             raise Refused('complete capture metadata is unreadable or changed') from exc
         return {'roots': roots, 'nodes': nodes, 'absent': sorted(absent), 'sealed': sealed,
-                'hardlinks': sorted(sorted(aliases) for aliases in groups.values() if len(aliases) > 1)}
+                'hardlinks': hardlinks}
 
     @staticmethod
     def persistent(capture, deferred=()):
@@ -479,6 +486,72 @@ class ClosedCapture:
                 os.utime(name, ns=(info.st_atime_ns, node['mtime_ns']), follow_symlinks=False)
                 sync_directory(name)
         cls.verify(expected, backup, deferred)
+
+
+class ScopeLayout:
+    """Non-freezing admission only; never a recoverable content snapshot.
+
+    Ordinary file appends may change size/timestamps. Every observed namespace
+    entry, directory membership, alias and mount must still be accounted for.
+    The strict identity retained on each node is used only to hash selected
+    managed key/config files separately, not to freeze a running data tree.
+    """
+    @staticmethod
+    def identity(info):
+        return [info.st_dev, info.st_ino, info.st_nlink, stat.S_IFMT(info.st_mode)]
+
+    @classmethod
+    def inspect(cls, specs, backup, missing=()):
+        restore_sources(specs, backup, missing=missing)
+        roots = {str(path_shape(name, kind, missing=name in missing)): kind for name, kind in specs.items()}
+        nodes, groups, absent = {}, {}, []
+        def children(path):
+            with os.scandir(path) as entries:
+                return sorted(entry.name for entry in entries)
+        def walk(path):
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode): kind = 'directory'
+            elif stat.S_ISREG(info.st_mode): kind = 'file'
+            elif stat.S_ISLNK(info.st_mode): kind = 'symlink'
+            elif stat.S_ISSOCK(info.st_mode): kind = 'socket'
+            else: raise Refused('layout contains an unsupported special file')
+            node = {'type': kind, 'scope_identity': cls.identity(info),
+                    'identity': ClosedCapture.identity(info), 'xattrs': ClosedCapture.attrs(path)}
+            if kind == 'file':
+                groups.setdefault((info.st_dev, info.st_ino), []).append(str(path))
+            elif kind == 'symlink':
+                node['target'] = os.readlink(path)
+            elif kind == 'directory':
+                node['children'] = children(path)
+            nodes[str(path)] = node
+            if kind == 'directory':
+                for name in node['children']:
+                    walk(path / name)
+            check(path, node)
+        def check(path, node):
+            if cls.identity(path.lstat()) != node['scope_identity']:
+                raise Refused('live layout namespace changed during inspection')
+            if node['type'] == 'symlink' and os.readlink(path) != node['target']:
+                raise Refused('live layout symlink target changed during inspection')
+            if node['type'] == 'directory' and children(path) != node['children']:
+                raise Refused('live layout directory membership changed during inspection')
+        try:
+            for name in roots:
+                path = Path(name)
+                if os.path.lexists(path): walk(path)
+                else: absent.append(name)
+            for name, node in nodes.items():
+                check(Path(name), node)
+            if any(os.path.lexists(name) for name in absent):
+                raise Refused('live layout absent source appeared during inspection')
+            # Refresh root/ancestor/mount/physical-disjoint checks after the
+            # complete namespace walk too. No mutable file data is frozen.
+            restore_sources(specs, backup, missing=missing)
+            hardlinks = ClosedCapture.close_links(nodes, groups, roots)
+        except OSError as exc:
+            raise Refused('complete live layout namespace is unreadable or changed') from exc
+        return {'roots': roots, 'nodes': nodes, 'absent': sorted(absent),
+                'hardlinks': hardlinks, 'sealed': False, 'purpose': 'live-layout-only'}
 
 
 def agent_socket_gate(capture, stopped=False, preserved=None):
@@ -1448,6 +1521,8 @@ class Transaction:
         kind = 'directory' if source.is_dir() else 'linked-file'
         if capture is None:
             capture = ClosedCapture.take({str(source): kind}, self.root, sealed=True)
+        if not capture.get('sealed'):
+            raise Refused('archive requires a content-sealed cold capture')
         if str(canonical(source)) not in capture['roots']:
             raise Refused('archive source escaped its complete cold capture')
         restore_sources({str(source): kind}, self.root)
@@ -1659,7 +1734,7 @@ class Central(Transaction):
         if len(releases) != 1:
             raise Refused('central components have mixed Wazuh releases')
         release = releases.pop()
-        capture = ClosedCapture.take({path: 'directory' for path in paths}, self.root)
+        restore_sources({path: 'directory' for path in paths}, self.root)
         for name in volume_names:
             consumers = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'volume=' + name], timeout=30).stdout.split()
             if not consumers or not set(consumers).issubset(set(ids)):
@@ -1667,8 +1742,7 @@ class Central(Transaction):
         self.health(release, images)
         return {'directory': str(directory), 'compose': compose, 'images': images,
                 'version': release, 'paths': sorted(paths), 'volumes': sorted(volume_names),
-                'docker_root': str(docker_root), 'compose_sha256': digest(compose),
-                'admission_capture': capture}
+                'docker_root': str(docker_root), 'compose_sha256': digest(compose)}
 
     def check_agents(self, target):
         listing = self.r.run(['docker', 'exec', 'single-node-wazuh.manager-1',
@@ -1935,7 +2009,7 @@ class Central(Transaction):
         if set(item['paths']) != expected_paths:
             raise Refused('recovery source paths escaped the recorded owned project')
         restore_sources({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
-        ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
+        ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'])
 
     def validate_restore_scope(self, item):
         self.validate_project_scope(item)
@@ -1970,6 +2044,7 @@ class Central(Transaction):
         self.wait(item['version'], item['images'])
         self.check_data(item['data'])
         self.canary()
+        ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
         self.finish(item, 'recovered-before-switch')
 
     def complete_finalized(self, item):
@@ -1983,6 +2058,7 @@ class Central(Transaction):
         if digest(item['compose']) != expected_hash:
             raise Refused('finalized Compose configuration no longer matches its durable version selectors')
         self.validate_persisted_graph(item, target=item['phase'] == 'committed')
+        ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
         self.check_data(item['data'])
         self.finish(item, item['phase'])
 
@@ -1992,6 +2068,7 @@ class Central(Transaction):
         self.r.run(['docker', 'image', 'load', '--input', item['image_archive']['path']], timeout=1800,
                    operation='load retained old image artifacts')
         self.quiesce_for_restore(item)
+        ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'], sealed=True)
         for entry in item['archives']:
             self.restore(entry['path'], entry['archive'], entry['sha256'], capture=item['capture'])
         ClosedCapture.relink(item['capture'], self.root)
@@ -2008,7 +2085,7 @@ class Central(Transaction):
         self.wait(item['version'], item['images'])
         self.check_data(item['data'])
         self.canary()
-        ClosedCapture.take(item['capture']['roots'], self.root)
+        ScopeLayout.inspect(item['capture']['roots'], self.root)
         self.finish(item, 'recovered')
 
     def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
@@ -2043,6 +2120,7 @@ class Central(Transaction):
                         'directory': state['directory']}
             if not upgrade or (state['version'], target) != ('4.14.1', '4.14.9'):
                 raise Refused('only explicit central 4.14.1 -> 4.14.9 upgrade is supported')
+            state['admission_capture'] = ScopeLayout.inspect({path: 'directory' for path in state['paths']}, self.root)
             image_bytes = sum(image['size'] for image in state['images'].values())
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['data'] = self.data()
@@ -2073,11 +2151,11 @@ class Central(Transaction):
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['target_version'] = target
             state['target_images'] = target_images
-            state['admission_capture'] = ClosedCapture.take({path: 'directory' for path in state['paths']}, self.root)
+            state['admission_capture'] = ScopeLayout.inspect({path: 'directory' for path in state['paths']}, self.root)
             item = self.begin(owner, state)
             try:
                 self.retain_images(item)
-                ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root)
+                ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
                 self.write(item, 'stopping')
                 self.compose_run(item, 'stop', '--timeout', '60')
                 for image in item['images'].values():
@@ -2093,6 +2171,7 @@ class Central(Transaction):
                     item['archives'].append({'path': path, 'archive': archive,
                                              'sha256': self.archive(path, archive, capture=item['capture'])})
                 ClosedCapture.verify(item['capture'], self.root)
+                self.validate_restore_scope(item)
                 self.write(item, 'backed-up')
                 # Preserve the active config, credentials and certificates;
                 # the supported patch transition changes only image selectors.
@@ -2108,7 +2187,7 @@ class Central(Transaction):
                 self.wait(target, target_images)
                 self.check_data(item['data'])
                 item['canary'] = self.canary()
-                ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root)
+                ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
                 self.finish(item, 'committed')
                 return {'changed': True, 'version': target, 'directory': item['directory'], 'backup': item['backup']}
             except Exception as failure:
@@ -2505,8 +2584,9 @@ class Agent(Transaction):
         specs = self.source_specs()
         path_shape(Path('/etc/audit/plugins.d/af_wazuh.conf').parent, 'directory')
         missing = tuple(specs) if recovery else tuple(name for name in specs if name != '/var/ossec')
-        capture = ClosedCapture.take(specs, self.root, missing=missing, sealed=sealed)
-        self.managed_files(capture, missing=recovery)
+        capture = (ClosedCapture.take(specs, self.root, missing=missing, sealed=True) if sealed
+                   else ScopeLayout.inspect(specs, self.root, missing=missing))
+        capture['managed_files'] = self.managed_files(capture, missing=recovery)
         plugin = str(Path('/etc/audit/plugins.d/af_wazuh.conf'))
         if plugin in capture['nodes'] and not recovery:
             internal = ClosedCapture.resolve_link(Path('/var/ossec/etc/af_wazuh.conf'), capture['nodes'],
@@ -2524,8 +2604,9 @@ class Agent(Transaction):
         # These files are directly read/written by enrollment/configuration;
         # preserving only an alias would omit their effective old contents.
         if capture is None:
-            capture = ClosedCapture.take(self.source_specs(), self.root, missing=tuple(self.source_specs()) if missing else
+            capture = ScopeLayout.inspect(self.source_specs(), self.root, missing=tuple(self.source_specs()) if missing else
                                          tuple(name for name in self.source_specs() if name != '/var/ossec'))
+        managed = {}
         for filename in ('/var/ossec/etc/client.keys', '/var/ossec/etc/ossec.conf'):
             try:
                 effective = ClosedCapture.resolve_link(Path(filename), capture['nodes'], [Path(root) for root in capture['roots']])
@@ -2535,6 +2616,9 @@ class Agent(Transaction):
                 raise
             if capture['nodes'][effective]['type'] != 'file':
                 raise Refused('managed agent identity/configuration must resolve to a captured regular file')
+            managed[str(Path(filename))] = {'effective': effective,
+                                          'sha256': ClosedCapture.file_hash(effective, capture['nodes'][effective]['identity'])}
+        return managed
 
     def validate_agent_layout(self, item, recovery=False):
         pin = self.pin_path()
@@ -2835,7 +2919,10 @@ class Agent(Transaction):
             if item['installed'] and (not old or digest(old['path']) != old['sha256']):
                 raise Refused('old agent package is unavailable; journal retained')
             self.r.run(['systemctl', 'stop', 'wazuh-agent'], timeout=90)
-            self.audit_check(item, stopped=True)
+            if self.r.run(['systemctl', 'is-active', 'wazuh-agent'], allowed=(0, 3, 4)).returncode == 0:
+                raise Refused('agent failed to quiesce before recovery')
+            cold = self.capture_sources(sealed=True, recovery=True)
+            self.audit_check(item, stopped=True, capture=cold)
             self.write(item, 'recovering')
             self.guard().protect(item['installed'], require_installed=False)
             result = {'reinstall': bool(item['installed']), 'version': item['installed'],
@@ -2934,9 +3021,9 @@ class Agent(Transaction):
         self.audit_check(item, ready=item['active'])
 
     def check_identity(self, item):
-        self.capture_sources()
-        keys = Path('/var/ossec/etc/client.keys')
-        if (digest(keys) if keys.is_file() else None) != item.get('keys'):
+        layout = self.capture_sources()
+        keys = layout['managed_files'].get(str(Path('/var/ossec/etc/client.keys')))
+        if (keys['sha256'] if keys else None) != item.get('keys'):
             raise Refused('agent enrollment identity changed')
 
     def commit(self, owner):
