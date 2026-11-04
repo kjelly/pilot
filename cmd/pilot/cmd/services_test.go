@@ -170,6 +170,7 @@ func TestServicesConsumerCLIWithoutManagementMaterial(t *testing.T) {
 			oldDir, oldAdopt, oldCfg := servicesDir, servicesAdoptFrom, cfgFile
 			oldID, oldConfirm := svcConsumerID, svcConfirmInterruption
 			oldCtx, oldOut, oldErr := rootCmd.Context(), rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
+			oldListCtx, oldReleaseCtx := servicesConsumersCmd.Context(), servicesReleaseConsumerCmd.Context()
 			servicesDir, servicesAdoptFrom, cfgFile = "", "", ""
 			var stdout, stderr bytes.Buffer
 			rootCmd.SetOut(&stdout)
@@ -179,6 +180,8 @@ func TestServicesConsumerCLIWithoutManagementMaterial(t *testing.T) {
 				svcConsumerID, svcConfirmInterruption = oldID, oldConfirm
 				rootCmd.SetArgs(nil)
 				rootCmd.SetContext(oldCtx)
+				servicesConsumersCmd.SetContext(oldListCtx)
+				servicesReleaseConsumerCmd.SetContext(oldReleaseCtx)
 				rootCmd.SetOut(oldOut)
 				rootCmd.SetErr(oldErr)
 			})
@@ -186,6 +189,10 @@ func TestServicesConsumerCLIWithoutManagementMaterial(t *testing.T) {
 				stdout.Reset()
 				stderr.Reset()
 				rootCmd.SetArgs(args)
+				// Cobra retains child contexts across repeated executions in tests.
+				// Earlier cancellation tests must not supply this command's context.
+				servicesConsumersCmd.SetContext(context.Background())
+				servicesReleaseConsumerCmd.SetContext(context.Background())
 				return rootCmd.ExecuteContext(context.Background())
 			}
 			list := func() []services.Consumer {
