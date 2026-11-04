@@ -120,41 +120,18 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := writeAtomicMode(harborPath, []byte(renderHarborYML(profile, root, host, adminPassword, databasePassword)), 0o600); err != nil {
 		return Bundle{}, err
 	}
-	fingerprint, err := profile.Fingerprint()
+	client, err := profile.ClientContract(bindIP, string(caPEM))
 	if err != nil {
 		return Bundle{}, err
 	}
-	projects := make(map[string]string, len(profile.OCI.Registries))
-	for _, registry := range profile.OCI.Registries {
-		projects[registry.Name] = fmt.Sprintf("http://%s:%d/%s", serviceHostname, profile.Harbor.HTTPPort, registry.ProxyProject)
-	}
-	rpmRepositories := make(map[string]string, len(profile.RPM.Repos))
-	for _, repo := range profile.RPM.Repos {
-		rpmRepositories[repo.Name] = fmt.Sprintf("http://%s:8080/pulp/content/%s/%s", serviceHostname, profile.Name, repo.Name)
-	}
-	rpmBaseURL := ""
-	for _, repo := range profile.RPM.Repos {
-		rpmBaseURL = rpmRepositories[repo.Name]
-		break
-	}
+
 	return Bundle{
 		Root:             root,
 		ComposePath:      composePath,
 		HarborConfigPath: harborPath,
 		CAPEMPath:        caPath,
 		CAKeyPath:        caKeyPath,
-		Client: ClientConfig{
-			Profile:           profile.Name,
-			Fingerprint:       fingerprint,
-			HostIP:            host,
-			Hostname:          serviceHostname,
-			AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
-			RPMBaseURL:        rpmBaseURL,
-			RPMRepositories:   rpmRepositories,
-			RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
-			RegistryProjects:  projects,
-			CAPEM:             string(caPEM),
-		},
+		Client:           client,
 	}, nil
 }
 

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -298,10 +299,15 @@ func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -309,7 +315,7 @@ func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
 	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	})}
-	if _, err := m.ClientConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "unreachable") {
+	if _, err := m.ClientConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "transport-or-timeout") {
 		t.Fatalf("expected fail-closed probe error, got %v", err)
 	}
 }
@@ -319,21 +325,26 @@ func TestClientConfigProbesAllServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1")); err != nil {
-		t.Fatal(err)
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
 	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	var paths []string
+	var pathsMu sync.Mutex
 	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		pathsMu.Lock()
 		paths = append(paths, req.URL.Path)
-		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`{"username":"admin","sysadmin_flag":true}`)), Header: make(http.Header), Request: req}, nil
+		pathsMu.Unlock()
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(fixtureBody(req.URL.Path))), Header: make(http.Header), Request: req}, nil
 	})}
 	if _, err := m.ClientConfig(context.Background()); err != nil {
 		t.Fatal(err)

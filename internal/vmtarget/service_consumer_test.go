@@ -2,9 +2,12 @@ package vmtarget
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +23,7 @@ import (
 type serviceConsumerProbes struct {
 	mu                        sync.Mutex
 	identity                  bool
+	dataDown                  bool
 	adminAllowed, adminDenied int
 	databaseLog               string
 	root                      string
@@ -70,7 +74,14 @@ func registeredServiceFixture(t *testing.T) (*services.Manager, *ServiceBootstra
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v2.0/users/current" {
-			w.WriteHeader(http.StatusOK)
+			probes.mu.Lock()
+			down := probes.dataDown
+			probes.mu.Unlock()
+			if down && strings.Contains(r.URL.Path, "/manifests/") {
+				w.WriteHeader(503)
+				return
+			}
+			_, _ = w.Write([]byte(vmServiceFixtureBody(r.URL.Path)))
 			return
 		}
 		user, password, ok := r.BasicAuth()
@@ -140,7 +151,8 @@ fi
 		}
 	})
 	client := bundle.Client
-	client.AptProxyURL, client.RPMBaseURL, client.RegistryMirrorURL = server.URL, server.URL, server.URL
+	client.DataProbes = nil // Genuine pre-policy canonical client.
+	installServiceFixtureRoute(t, server.URL)
 	store, err := statefile.New[services.ServiceState](legacy, "services.json", 1, "services")
 	if err != nil {
 		t.Fatal(err)
@@ -154,12 +166,14 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err = manager.ClientConfig(context.Background())
+	profile := services.BuiltInDevLite()
+	profile.DataProbes = vmServiceDescriptors()
+	client, err = manager.ClientConfigForProfile(context.Background(), profile, net.ParseIP("127.0.0.1"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	probes.assertCounts(t, 1, 0, 1, 1)
-	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM}, probes
+	probes.assertCounts(t, 1, 0, 0, 0)
+	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM, PhysicalProfile: &profile, DataProbes: profile.ClientDataProbes()}, probes
 }
 
 // The shim reads pilot's generated XML, and models the UUID/name lists used by
@@ -188,7 +202,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if target.ServiceConsumer == nil {
 		t.Fatal("central Up did not register guest")
 	}
-	probes.assertCounts(t, 2, 0, 2, 2)
+	probes.assertCounts(t, 2, 0, 0, 0)
 	if _, err := uuid.Parse(target.ServiceConsumer.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -214,11 +228,11 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if err != nil || len(consumers) != 0 {
 		t.Fatalf("verified teardown retained registration: %+v %v", consumers, err)
 	}
-	client, err := serviceManager.ClientConfig(context.Background())
+	client, err := serviceManager.ClientConfigForProfile(context.Background(), *bootstrap.PhysicalProfile, net.ParseIP(bootstrap.HostIP), bootstrap.Requirements)
 	if err != nil || client.InstanceID != bootstrap.InstanceID {
 		t.Fatalf("VM teardown interrupted cache: %+v %v", client, err)
 	}
-	probes.assertCounts(t, 3, 0, 3, 3)
+	probes.assertCounts(t, 3, 0, 0, 0)
 	if err := reopened.Down(context.Background(), target.Name); err != nil {
 		t.Fatalf("repeated teardown: %v", err)
 	}
@@ -273,52 +287,248 @@ func TestVMServiceConsumerMissingIdentityRefusesBeforeDomainCreation(t *testing.
 	}
 }
 
-func TestVMServiceConsumerCredentialFailureRefusesRegistrationAndDomainCreation(t *testing.T) {
-	for _, fault := range []string{"wrong-admin", "wrong-database", "missing-current-identity", "trust-all-database"} {
+func TestVMServiceConsumerManagementFailureRequiresIndependentDataProof(t *testing.T) {
+	for _, fault := range []string{"wrong-admin", "wrong-database", "missing-current-identity", "trust-all-database", "data-failure"} {
 		t.Run(fault, func(t *testing.T) {
-			serviceManager, bootstrap, probes := registeredServiceFixture(t)
+			manager, bootstrap, probes := registeredServiceFixture(t)
 			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
-			want := "authentication failed"
-			adminAllowed, adminDenied, dbAllowed, dbDenied := 2, 0, 1, 3
 			switch fault {
 			case "wrong-admin", "wrong-database":
-				rel := "harbor/secrets/database-password"
-				if fault == "wrong-admin" {
-					rel = "harbor/secrets/admin-password"
-					adminAllowed, adminDenied, dbDenied = 1, 1, 1
+				rel := "harbor/secrets/admin-password"
+				if fault == "wrong-database" {
+					rel = "harbor/secrets/database-password"
 				}
-				if err := os.WriteFile(filepath.Join(probes.root, rel), []byte("SENTINEL-wrong-association\n"), 0600); err != nil {
-					t.Fatal(err)
+				if e := os.WriteFile(filepath.Join(probes.root, rel), []byte("SENTINEL-wrong\n"), 0600); e != nil {
+					t.Fatal(e)
 				}
 			case "missing-current-identity":
 				probes.mu.Lock()
 				probes.identity = false
 				probes.mu.Unlock()
-				want = "invalid current-user identity"
-				dbDenied = 1
 			case "trust-all-database":
 				t.Setenv("PILOT_TEST_SERVICE_DB_TRUST_ALL", "1")
-				want = "negative control"
-				dbAllowed, dbDenied = 2, 1
+			case "data-failure":
+				probes.mu.Lock()
+				probes.dataDown = true
+				probes.mu.Unlock()
 			}
-			_, err := m.Up(context.Background(), Options{Name: "credential-rejected-vm", BaseImage: base, Services: bootstrap})
-			if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "SENTINEL") {
-				t.Fatalf("credential fault did not reject central registration safely: %v", err)
+			target, e := m.Up(context.Background(), Options{Name: "independent-service-vm", BaseImage: base, Services: bootstrap})
+			consumers, ce := manager.Consumers(context.Background())
+			if ce != nil {
+				t.Fatal(ce)
 			}
-			consumers, err := serviceManager.Consumers(context.Background())
-			if err != nil || len(consumers) != 0 {
-				t.Fatalf("credential failure registered a consumer: %+v %v", consumers, err)
+			if fault == "data-failure" {
+				if e == nil || !strings.Contains(e.Error(), "required oci") || len(consumers) != 0 {
+					t.Fatalf("failed data proof accepted: %v %+v", e, consumers)
+				}
+				targets, _ := m.store.Load()
+				if len(targets) != 0 {
+					t.Fatal("failed readiness created VM state")
+				}
+				return
 			}
-			targets, err := m.store.Load()
-			if err != nil || len(targets) != 0 {
-				t.Fatalf("credential failure persisted VM state: %+v %v", targets, err)
+			if e != nil || target.ServiceConsumer == nil || len(consumers) != 1 {
+				t.Fatalf("proven data rejected by management association: %v %+v", e, consumers)
 			}
-			for _, path := range []string{os.Getenv("PILOT_VIRSH_BIN") + ".domain", filepath.Join(m.vmDir, "credential-rejected-vm")} {
-				if _, err := os.Stat(path); !os.IsNotExist(err) {
-					t.Fatal("credential failure created domain or target artifacts")
+			data, _ := os.ReadFile(probes.databaseLog)
+			if len(data) != 0 {
+				t.Fatal("consuming readiness ran a management database probe")
+			}
+		})
+	}
+}
+
+const vmFixtureManifest = `{"schemaVersion":2,"layers":[]}`
+
+func vmServiceDescriptors() map[services.Capability]services.DataProbe {
+	sum := sha256.Sum256([]byte(vmFixtureManifest))
+	digest := hex.EncodeToString(sum[:])
+	return map[services.Capability]services.DataProbe{services.APT: {Resource: "http://upstream.invalid/dists/noble/InRelease", Contains: "PGP SIGNED MESSAGE"}, services.RPM: {Resource: "/pulp/content/test/repodata/repomd.xml", Contains: "<repomd"}, services.OCI: {Resource: "/v2/test/manifests/sha256:" + digest, SHA256: digest}}
+}
+func vmServiceFixtureBody(path string) string {
+	switch path {
+	case "/acng-report.html":
+		return "<html><title>Apt-Cacher NG Command And Control Page</title></html>"
+	case "/pulp/api/v3/status/":
+		return `{"database_connection":{"connected":true},"online_workers":[{"name":"test-worker"}],"online_content_apps":[{"name":"test-content"}]}`
+	case "/api/v2.0/health":
+		return `{"status":"healthy","components":[{"name":"core","status":"healthy"},{"name":"database","status":"healthy"},{"name":"registry","status":"healthy"}]}`
+	case "/pulp/api/v3/users/":
+		return `{"results":[]}`
+	}
+	if strings.Contains(path, "InRelease") {
+		return "PGP SIGNED MESSAGE"
+	}
+	if strings.Contains(path, "repomd.xml") {
+		return "<repomd/>"
+	}
+	if strings.Contains(path, "/manifests/") {
+		return vmFixtureManifest
+	}
+	return ""
+}
+
+// Route real HTTP requests to the native-response fixture while preserving the
+// production canonical endpoint contract and HTTP Host header.
+func installServiceFixtureRoute(t *testing.T, target string) {
+	t.Helper()
+	base := http.DefaultTransport
+	u, e := url.Parse(target)
+	if e != nil {
+		t.Fatal(e)
+	}
+	http.DefaultTransport = serviceFixtureTransport(func(r *http.Request) (*http.Response, error) {
+		clone := r.Clone(r.Context())
+		copyURL := *r.URL
+		clone.URL = &copyURL
+		clone.URL.Scheme = u.Scheme
+		clone.URL.Host = u.Host
+		if clone.Host == "" {
+			clone.Host = r.URL.Host
+		}
+		return base.RoundTrip(clone)
+	})
+	t.Cleanup(func() { http.DefaultTransport = base })
+}
+
+type serviceFixtureTransport func(*http.Request) (*http.Response, error)
+
+func (f serviceFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestVMServiceConsumerPhysicalTamperingRefusesBeforeDomainCreation(t *testing.T) {
+	for _, fault := range []string{"profile-name", "upstream", "bind", "endpoint", "generation", "ca", "owner", "state-endpoint"} {
+		t.Run(fault, func(t *testing.T) {
+			_, bootstrap, probes := registeredServiceFixture(t)
+			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
+			switch fault {
+			case "profile-name", "upstream":
+				profile := *bootstrap.PhysicalProfile
+				if fault == "profile-name" {
+					profile.Name = "other"
+				} else {
+					profile.Apt.Upstream += "/other"
+				}
+				bootstrap.PhysicalProfile = &profile
+			case "bind":
+				bootstrap.HostIP = "127.0.0.2"
+			case "endpoint":
+				bootstrap.RegistryMirrorURL = "http://foreign.invalid:8081"
+			case "generation":
+				bootstrap.Generation++
+			case "ca":
+				bootstrap.CAPEM = "not-a-certificate"
+			case "owner":
+				path := filepath.Join(probes.root, ".pilot-services-owner.json")
+				data, e := os.ReadFile(path)
+				if e != nil {
+					t.Fatal(e)
+				}
+				data = []byte(strings.ReplaceAll(string(data), bootstrap.InstanceID, "foreign-owner"))
+				if e = os.WriteFile(path, data, 0600); e != nil {
+					t.Fatal(e)
+				}
+			case "state-endpoint":
+				store, e := statefile.New[services.ServiceState](bootstrap.DiscoveryDirectory, "services.json", 1, "services")
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = store.Mutate(func(s []services.ServiceState) ([]services.ServiceState, error) {
+					s[0].Client.AptProxyURL = "http://foreign.invalid:3142"
+					return s, nil
+				}); e != nil {
+					t.Fatal(e)
 				}
 			}
-			probes.assertCounts(t, adminAllowed, adminDenied, dbAllowed, dbDenied)
+			_, e := m.Up(context.Background(), Options{Name: "tamper-service-vm", BaseImage: base, Services: bootstrap})
+			if e == nil {
+				t.Fatal("tampered direct Manager.Up contract accepted")
+			}
+			targets, e := m.store.Load()
+			if e != nil || len(targets) != 0 {
+				t.Fatalf("rejected physical contract created target state: %v", e)
+			}
+			if _, e = os.Stat(os.Getenv("PILOT_VIRSH_BIN") + ".domain"); !os.IsNotExist(e) {
+				t.Fatal("rejected physical contract created domain")
+			}
+			probes.assertCounts(t, 1, 0, 0, 0)
 		})
+	}
+}
+
+// Consumer bookkeeping needs public stack identity, not management secrets. The
+// virsh shim exercises central Up/Down and deferred provisioning cleanup; native
+// domain/service execution is covered separately by candidate target evidence.
+func TestVMServiceConsumerMissingManagementMaterialLifecycle(t *testing.T) {
+	for _, missing := range []string{"harbor/secrets/admin-password", "ca/ca-key.pem", "pulp/settings/secret-key"} {
+		for _, flow := range []string{"down", "retry", "provision-failure"} {
+			t.Run(missing+"/"+flow, func(t *testing.T) {
+				serviceManager, bootstrap, probes := registeredServiceFixture(t)
+				path := filepath.Join(probes.root, missing)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := services.NewSharedManagerContext(context.Background(), services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory}, nil); err == nil {
+					t.Fatal("management discovery accepted missing management material")
+				}
+				body := serviceConsumerVirsh + happyVirsh
+				if flow == "provision-failure" {
+					body = "start) echo synthetic-start-failure >&2; exit 1 ;;\n" + body
+				}
+				m, base := newTestManager(t, body)
+				const name = "missing-management-service-vm"
+				target, err := m.Up(context.Background(), Options{Name: name, BaseImage: base, Services: bootstrap})
+				if flow == "provision-failure" {
+					if err == nil || !strings.Contains(err.Error(), "synthetic-start-failure") {
+						t.Fatalf("expected failure after domain definition: %v", err)
+					}
+				} else {
+					if err != nil || target.ServiceConsumer == nil {
+						t.Fatalf("independent data proof did not permit provisioning: %v", err)
+					}
+					if flow == "retry" {
+						dir := filepath.Dir(os.Getenv("PILOT_VIRSH_BIN"))
+						writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", "case \"$1\" in\nundefine) exit 1 ;;\n"+serviceConsumerVirsh+happyVirsh+"\nesac")
+						if err := m.Down(context.Background(), name); err == nil || !strings.Contains(err.Error(), "undefine failed") {
+							t.Fatalf("failed teardown did not retain registration: %v", err)
+						}
+						consumers, err := serviceManager.Consumers(context.Background())
+						if err != nil || len(consumers) != 1 || consumers[0] != *target.ServiceConsumer {
+							t.Fatalf("retry lost exact durable registration: %+v %v", consumers, err)
+						}
+						if _, err := m.Get(context.Background(), name); err != nil {
+							t.Fatal("failed teardown discarded retry state")
+						}
+						writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", "case \"$1\" in\n"+serviceConsumerVirsh+happyVirsh+"\nesac")
+					}
+					if err := m.Down(context.Background(), name); err != nil {
+						t.Fatalf("verified teardown requires unavailable management material: %v", err)
+					}
+				}
+				consumers, err := serviceManager.Consumers(context.Background())
+				if err != nil || len(consumers) != 0 {
+					t.Fatalf("verified domain removal retained durable registration: %+v %v", consumers, err)
+				}
+				targets, err := m.store.Load()
+				if err != nil || len(targets) != 0 {
+					t.Fatalf("verified cleanup retained target state: %+v %v", targets, err)
+				}
+				for _, removed := range []string{os.Getenv("PILOT_VIRSH_BIN") + ".domain", filepath.Join(m.vmDir, name), path} {
+					if _, err := os.Stat(removed); !os.IsNotExist(err) {
+						t.Fatalf("cleanup retained artifacts or recreated management material %s: %v", removed, err)
+					}
+				}
+				if err := m.Down(context.Background(), name); err != nil {
+					t.Fatalf("repeated teardown: %v", err)
+				}
+				// The fixture's initial authenticated probe always ran. During Up,
+				// an absent admin secret makes its management probe unavailable;
+				// all other cases still authenticate once without touching the DB.
+				adminProbes := 2
+				if missing == "harbor/secrets/admin-password" {
+					adminProbes = 1
+				}
+				probes.assertCounts(t, adminProbes, 0, 0, 0)
+			})
+		}
 	}
 }

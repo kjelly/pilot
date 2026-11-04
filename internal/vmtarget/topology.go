@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kjelly/pilot/internal/services"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -15,19 +16,20 @@ import (
 // (for RenderGroupedInventory), and which peers must be pinned into its
 // /etc/hosts (for `vm-target wire`).
 type TopologyNode struct {
-	Name          string   `yaml:"name"`
-	BaseImage     string   `yaml:"base_image"`
-	SSHUser       string   `yaml:"ssh_user"`
-	VCPUs         int      `yaml:"vcpus"`
-	MemoryMB      int      `yaml:"memory"`
-	DiskGB        int      `yaml:"disk"`
-	Network       string   `yaml:"network"`
-	Hosts         []string `yaml:"hosts"`
-	Groups        []string `yaml:"groups"`
-	Wire          []string `yaml:"wire"`
-	SSHTimeout    string   `yaml:"ssh_timeout"`  // e.g. "8m"; empty = Manager default (2m)
-	BootTimeout   string   `yaml:"boot_timeout"` // e.g. "8m"; empty = Manager default (3m)
-	KeepOnFailure bool     `yaml:"keep_on_failure"`
+	ServiceCapabilities services.Requirements `yaml:"service_capabilities,omitempty"`
+	Name                string                `yaml:"name"`
+	BaseImage           string                `yaml:"base_image"`
+	SSHUser             string                `yaml:"ssh_user"`
+	VCPUs               int                   `yaml:"vcpus"`
+	MemoryMB            int                   `yaml:"memory"`
+	DiskGB              int                   `yaml:"disk"`
+	Network             string                `yaml:"network"`
+	Hosts               []string              `yaml:"hosts"`
+	Groups              []string              `yaml:"groups"`
+	Wire                []string              `yaml:"wire"`
+	SSHTimeout          string                `yaml:"ssh_timeout"`  // e.g. "8m"; empty = Manager default (2m)
+	BootTimeout         string                `yaml:"boot_timeout"` // e.g. "8m"; empty = Manager default (3m)
+	KeepOnFailure       bool                  `yaml:"keep_on_failure"`
 }
 
 // TopologySpec is the top-level shape of a `vm-target topology` YAML
@@ -36,8 +38,9 @@ type TopologyNode struct {
 // group inventory, and /etc/hosts wiring are all driven from one file
 // instead of hand-assembled shell commands.
 type TopologySpec struct {
-	Services string         `yaml:"services,omitempty"`
-	Nodes    []TopologyNode `yaml:"nodes"`
+	ServiceCapabilities services.Requirements `yaml:"service_capabilities,omitempty"`
+	Services            string                `yaml:"services,omitempty"`
+	Nodes               []TopologyNode        `yaml:"nodes"`
 }
 
 // LoadTopologySpec reads and validates a topology YAML file.
@@ -67,8 +70,14 @@ func (s *TopologySpec) Validate() error {
 	if s.Services != "" && s.Services != "none" && s.Services != "local" && strings.TrimSpace(s.Services) != s.Services {
 		return errors.New("services must be none, local, or a profile path without surrounding whitespace")
 	}
+	if _, err := services.NormalizeRequirements(s.ServiceCapabilities); err != nil {
+		return err
+	}
 	names := make(map[string]bool, len(s.Nodes))
 	for _, n := range s.Nodes {
+		if _, err := services.NormalizeRequirements(n.ServiceCapabilities); err != nil {
+			return fmt.Errorf("node %q: %w", n.Name, err)
+		}
 		if n.Name == "" {
 			return errors.New("every node needs a name")
 		}
@@ -174,4 +183,31 @@ func (n TopologyNode) ToOptions() (Options, error) {
 		opt.BootTimeout = d
 	}
 	return opt, nil
+}
+
+// RequirementsFor returns a node override, the topology selection, or legacy all.
+func (s *TopologySpec) RequirementsFor(n TopologyNode) services.Requirements {
+	if n.ServiceCapabilities != nil {
+		return n.ServiceCapabilities
+	}
+	return s.ServiceCapabilities
+}
+func (s *TopologySpec) ServiceRequirements() (services.Requirements, error) {
+	seen := map[services.Capability]bool{}
+	for _, n := range s.Nodes {
+		r, e := services.NormalizeRequirements(s.RequirementsFor(n))
+		if e != nil {
+			return nil, e
+		}
+		for _, c := range r {
+			seen[c] = true
+		}
+	}
+	out := services.Requirements{}
+	for _, c := range []services.Capability{services.APT, services.RPM, services.OCI} {
+		if seen[c] {
+			out = append(out, c)
+		}
+	}
+	return services.NormalizeRequirements(out)
 }

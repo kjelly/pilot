@@ -252,7 +252,7 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 				errs[i] = operr
 				return
 			}
-			opt.Services = serviceBootstrap
+			opt.Services = serviceBootstrapForNode(serviceBootstrap, spec, n)
 			tgt, uerr := nm.Up(ctx, opt)
 			if uerr != nil {
 				errs[i] = fmt.Errorf("node %q: %w", n.Name, uerr)
@@ -336,7 +336,11 @@ func resolveTopologyServiceBootstrap(ctx context.Context, spec *vmtarget.Topolog
 			return nil, fmt.Errorf("topology services: all nodes must use the same libvirt network (got %q and %q)", network, n.Network)
 		}
 	}
-	return resolveVMServiceBootstrap(ctx, spec.Services, network)
+	required, err := spec.ServiceRequirements()
+	if err != nil {
+		return nil, err
+	}
+	return resolveVMServiceBootstrapFor(ctx, spec.Services, network, required)
 }
 
 // ---- down ---------------------------------------------------------------
@@ -728,7 +732,7 @@ func provisionEphemeralTopology(ctx context.Context, spec *vmtarget.TopologySpec
 			// The CLI policy controls the whole ephemeral workflow. A
 			// node-level YAML keep_on_failure cannot leak a default-cleanup run.
 			opt.KeepOnFailure = keepOnFailure
-			opt.Services = serviceBootstrap
+			opt.Services = serviceBootstrapForNode(serviceBootstrap, spec, n)
 			printf("▶ provisioning %s...\n", n.Name)
 			t, err := nm.Up(ctx, opt)
 			if err != nil {
@@ -1097,4 +1101,13 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	fmt.Fprintln(out, "✓ Ephemeral topology removed")
 	return nil
+}
+
+func serviceBootstrapForNode(shared *vmtarget.ServiceBootstrap, spec *vmtarget.TopologySpec, n vmtarget.TopologyNode) *vmtarget.ServiceBootstrap {
+	if shared == nil {
+		return nil
+	}
+	out := *shared
+	out.Requirements = spec.RequirementsFor(n)
+	return &out
 }

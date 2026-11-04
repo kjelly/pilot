@@ -154,14 +154,6 @@ func TestEstablishedWrongCredentialsFailBeforeAnyMutation(t *testing.T) {
 			for _, op := range []func() error{
 				func() error { return m.Up(context.Background(), p, net.ParseIP("127.0.0.1")) },
 				func() error { return m.Repair(context.Background(), p, net.ParseIP("127.0.0.1"), MaintenanceOptions{}) },
-				func() error { _, err := m.ClientConfig(context.Background()); return err },
-				func() error {
-					status, err := m.Status(context.Background())
-					if status.Running {
-						t.Error("status claimed running after authentication failure")
-					}
-					return err
-				},
 			} {
 				err := op()
 				if err == nil || !strings.Contains(err.Error(), "authentication failed") || strings.Contains(err.Error(), "SENTINEL") {

@@ -80,21 +80,22 @@ func init() {
 // ---- shared flags ---------------------------------------------------------
 
 var (
-	vtName          string
-	vtBaseImage     string
-	vtSSHUser       string
-	vtVCPUs         int
-	vtMemoryMB      int
-	vtDiskGB        int
-	vtNetwork       string
-	vtHosts         []string
-	vtVMDir         string
-	vtSnapTag       string
-	vtRollTag       string
-	vtSSHTimeout    time.Duration
-	vtBootTimeout   time.Duration
-	vtKeepOnFailure bool
-	vtServices      string
+	vtName                string
+	vtBaseImage           string
+	vtSSHUser             string
+	vtVCPUs               int
+	vtMemoryMB            int
+	vtDiskGB              int
+	vtNetwork             string
+	vtHosts               []string
+	vtVMDir               string
+	vtSnapTag             string
+	vtRollTag             string
+	vtSSHTimeout          time.Duration
+	vtBootTimeout         time.Duration
+	vtKeepOnFailure       bool
+	vtServiceCapabilities string
+	vtServices            string
 
 	// run batch/preflight flags (see runVtRun)
 	vtDiscover        string
@@ -156,6 +157,7 @@ func init() {
 	vtUpCmd.Flags().DurationVar(&vtSSHTimeout, "ssh-timeout", 0, "override SSH readiness timeout (default 2m)")
 	vtUpCmd.Flags().DurationVar(&vtBootTimeout, "boot-timeout", 0, "override boot/IP-acquisition timeout (default 3m)")
 	vtUpCmd.Flags().BoolVar(&vtKeepOnFailure, "keep-on-failure", false, "keep the VM and its on-disk files/state on provisioning failure for investigation")
+	vtUpCmd.Flags().StringVar(&vtServiceCapabilities, "service-capabilities", "", "required cache capabilities: apt,rpm,oci (omitted: all)")
 	vtUpCmd.Flags().StringVar(&vtServices, "services", "none", "host service profile: none, local, or a profile YAML path")
 }
 
@@ -170,7 +172,15 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	serviceBootstrap, err := resolveVMServiceBootstrap(cmd.Context(), vtServices, vtNetwork)
+	var required services.Requirements
+	if cmd.Flags().Changed("service-capabilities") {
+		var parseErr error
+		required, parseErr = services.ParseRequirements(vtServiceCapabilities)
+		if parseErr != nil {
+			return parseErr
+		}
+	}
+	serviceBootstrap, err := resolveVMServiceBootstrapFor(cmd.Context(), vtServices, vtNetwork, required)
 	if err != nil {
 		return err
 	}
@@ -206,7 +216,10 @@ func runVtUp(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtarget.ServiceBootstrap, error) {
+func resolveVMServiceBootstrapFor(ctx context.Context, ref, network string, required services.Requirements) (*vmtarget.ServiceBootstrap, error) {
+	if _, err := services.NormalizeRequirements(required); err != nil {
+		return nil, err
+	}
 	if ref == "" || ref == "none" {
 		return nil, nil
 	}
@@ -218,28 +231,16 @@ func resolveVMServiceBootstrap(ctx context.Context, ref, network string) (*vmtar
 	if err != nil {
 		return nil, err
 	}
-	m, err := newServiceManagerContext(ctx)
+	m, err := newConsumptionServiceManager(ctx)
 	if err != nil {
 		return nil, err
 	}
-	client, err := m.ClientConfig(ctx)
+	client, err := m.ClientConfigForProfile(ctx, profile, bindIP, required)
 	if err != nil {
 		return nil, err
-	}
-	if client.Profile != profile.Name {
-		return nil, fmt.Errorf("vm-target: requested services profile %q but host is running %q", profile.Name, client.Profile)
-	}
-	fingerprint, err := profile.Fingerprint()
-	if err != nil {
-		return nil, err
-	}
-	if client.Fingerprint != fingerprint {
-		return nil, fmt.Errorf("vm-target: services profile fingerprint mismatch (registered=%s requested=%s)", client.Fingerprint, fingerprint)
-	}
-	if client.HostIP != "" && client.HostIP != bindIP.String() {
-		return nil, fmt.Errorf("vm-target: services are bound to %s but network %q gateway is %s", client.HostIP, network, bindIP)
 	}
 	return &vmtarget.ServiceBootstrap{
+		PhysicalProfile: &profile, Requirements: required, DataProbes: profile.ClientDataProbes(),
 		DiscoveryDirectory: m.Directory(),
 		InstanceID:         client.InstanceID,
 		Generation:         client.Generation,

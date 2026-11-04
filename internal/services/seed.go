@@ -35,10 +35,6 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	fingerprint, err := profile.Fingerprint()
-	if err != nil {
-		return ClientConfig{}, err
-	}
 	host := bindIP.String()
 	pulpBase := "http://" + net.JoinHostPort(host, "8080") + "/pulp/api/v3"
 	harborBase := "http://" + net.JoinHostPort(host, strconv.Itoa(profile.Harbor.HTTPPort)) + "/api/v2.0"
@@ -51,7 +47,6 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		return ClientConfig{}, err
 	}
 
-	rpmURLs := make(map[string]string, len(profile.RPM.Repos))
 	for _, repo := range profile.RPM.Repos {
 		remote, err := reconcilePulpRemote(ctx, client, pulpBase, profile.Name, repo, pulpPassword)
 		if err != nil {
@@ -67,10 +62,8 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		if _, err := reconcilePulpDistribution(ctx, client, pulpBase, profile.Name, repo, repository, pulpPassword); err != nil {
 			return ClientConfig{}, err
 		}
-		rpmURLs[repo.Name] = fmt.Sprintf("http://%s:8080/pulp/content/%s/%s", serviceHostname, profile.Name, repo.Name)
 	}
 
-	projects := make(map[string]string, len(profile.OCI.Registries))
 	for _, registry := range profile.OCI.Registries {
 		registryID, err := reconcileHarborRegistry(ctx, client, harborBase, registry, adminPassword)
 		if err != nil {
@@ -79,29 +72,12 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		if err := reconcileHarborProject(ctx, client, harborBase, registry, registryID, profile.Storage.MaxBytes, adminPassword); err != nil {
 			return ClientConfig{}, err
 		}
-		projects[registry.Name] = fmt.Sprintf("http://%s:%d/%s", serviceHostname, profile.Harbor.HTTPPort, registry.ProxyProject)
-	}
-	baseURL := ""
-	for _, repo := range profile.RPM.Repos {
-		baseURL = rpmURLs[repo.Name]
-		break
 	}
 	caPEM, err := readCAPEM(root)
 	if err != nil {
 		return ClientConfig{}, fmt.Errorf("read service CA: %w", err)
 	}
-	return ClientConfig{
-		Profile:           profile.Name,
-		Fingerprint:       fingerprint,
-		HostIP:            host,
-		Hostname:          serviceHostname,
-		AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
-		RPMBaseURL:        baseURL,
-		RPMRepositories:   rpmURLs,
-		RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
-		RegistryProjects:  projects,
-		CAPEM:             caPEM,
-	}, nil
+	return profile.ClientContract(bindIP, caPEM)
 }
 
 func readHarborAdminPassword(root string) (string, error) {

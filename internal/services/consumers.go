@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -24,6 +25,7 @@ func LockConsumerDomain(ctx context.Context, name string) (func(), error) {
 // Consumer is a durable claim for a VM that can outlive its provisioning process.
 // ID is the guest domain UUID, never a PID or an expiring process lease.
 type Consumer struct {
+	Capabilities       string `json:"capabilities,omitempty"`
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
 	StateDirectory     string `json:"state_directory"`
@@ -53,6 +55,31 @@ func (m *Manager) Directory() string { return m.dataDir }
 
 // RegisterConsumer atomically verifies a successful client contract and blocks maintenance.
 func (m *Manager) RegisterConsumer(ctx context.Context, expected ClientConfig, consumer Consumer) error {
+	return m.RegisterConsumerFor(ctx, expected, consumer, nil)
+}
+
+func (m *Manager) RegisterConsumerFor(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements) error {
+	return m.registerConsumer(ctx, expected, consumer, required, nil, nil)
+}
+
+// RegisterConsumerWithPolicy carries explicit physical profile and readonly policy.
+func (m *Manager) RegisterConsumerWithPolicy(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements, profile Profile, policy ProbePolicy) error {
+	return m.registerConsumer(ctx, expected, consumer, required, &profile, policy)
+}
+
+func (m *Manager) registerConsumer(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements, profile *Profile, policy ProbePolicy) error {
+	if _, err := NormalizeRequirements(required); err != nil {
+		return err
+	}
+	if consumer.Capabilities != "" {
+		declared, err := ParseRequirements(consumer.Capabilities)
+		if err != nil || !slices.Equal(declared, mustNormalizeRequirements(required)) {
+			return errors.New("services: consumer capability declaration differs from request")
+		}
+	} else if required != nil && !slices.Equal(mustNormalizeRequirements(required), Requirements{APT, RPM, OCI}) {
+		return errors.New("services: consumer capability declaration is required")
+	}
+
 	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return err
@@ -65,17 +92,37 @@ func (m *Manager) RegisterConsumer(ctx context.Context, expected ClientConfig, c
 	if !m.shared || consumer.ID == "" || consumer.Name == "" || consumer.StateDirectory == "" || consumer.DiscoveryDirectory != m.dataDir || consumer.InstanceID != state.InstanceID || consumer.Generation != state.Generation {
 		return errors.New("services: consumer identity does not match shared discovery")
 	}
-	actual := state.Client
-	if actual.HostIP == "" {
-		actual.HostIP = state.BindIP
+	if profile != nil {
+		if err := validatePhysicalProfile(state, *profile, net.ParseIP(expected.HostIP)); err != nil {
+			return err
+		}
+	} else {
+		if err := validateConsumptionData(state); err != nil {
+			return err
+		}
+		policy = compatibilityPolicy(state)
 	}
-	if !state.Running || !reflect.DeepEqual(expected, actual) {
+	actual := registeredClient(state)
+	if !reflect.DeepEqual(canonicalClient(expected), canonicalClient(actual)) {
 		return errors.New("services: consumer client contract is stale or stack is stopped")
 	}
-	if err := m.probeEndpoints(ctx, state); err != nil {
+	if policy == nil {
+		return errors.New("services: missing-descriptor: explicit validated physical profile and probe policy are required")
+	}
+	if err := policy.validate(required); err != nil {
 		return err
 	}
-	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+	observed := m.observeCapabilities(ctx, stateWithPolicy(state, policy))
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := requireCapabilities(observed, required); err != nil {
+		return err
+	}
+	return m.store.MutateContext(ctx, func(states []ServiceState) ([]ServiceState, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(states) != 1 {
 			return nil, errors.New("services: missing consumer discovery state")
 		}

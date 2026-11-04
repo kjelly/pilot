@@ -27,12 +27,14 @@
 package statefile
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // envelope is the on-disk JSON shape.
@@ -135,9 +137,19 @@ func (s *Store[T]) Save(targets []T) error {
 
 // saveLocked is Save without lock acquisition; the caller must hold the lock.
 func (s *Store[T]) saveLocked(targets []T) error {
+	return s.saveLockedContext(context.Background(), targets)
+}
+
+func (s *Store[T]) saveLockedContext(ctx context.Context, targets []T) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(envelope[T]{Version: s.version, Targets: targets}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("%s: marshal state: %w", s.label, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(s.dir, "."+s.label+"-*.json.tmp")
 	if err != nil {
@@ -152,6 +164,10 @@ func (s *Store[T]) saveLocked(targets []T) error {
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("%s: close temp: %w", s.label, err)
+	}
+	if err := ctx.Err(); err != nil {
+		os.Remove(tmpName)
+		return err
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
 		os.Remove(tmpName)
@@ -171,11 +187,21 @@ func (s *Store[T]) saveLocked(targets []T) error {
 // held: keep it a quick in-memory transform — it must not call back into
 // this Store and must not do slow I/O.
 func (s *Store[T]) Mutate(fn func(targets []T) ([]T, error)) error {
-	f, err := s.lock(syscall.LOCK_EX)
+	return s.MutateContext(context.Background(), fn)
+}
+
+// MutateContext bounds lock waits and rejects cancellation before publication.
+// The final check precedes atomic rename; an already-entered rename cannot be
+// interrupted or rolled back by subsequent cancellation.
+func (s *Store[T]) MutateContext(ctx context.Context, fn func(targets []T) ([]T, error)) error {
+	f, err := s.lockContext(ctx, syscall.LOCK_EX)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	targets, err := s.loadLocked()
 	if err != nil {
 		return err
@@ -184,5 +210,40 @@ func (s *Store[T]) Mutate(fn func(targets []T) ([]T, error)) error {
 	if err != nil {
 		return err
 	}
-	return s.saveLocked(next)
+	return s.saveLockedContext(ctx, next)
+}
+
+func (s *Store[T]) lockContext(ctx context.Context, how int) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ctx.Done() == nil {
+		return s.lock(how)
+	}
+	f, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("%s: open state lock: %w", s.label, err)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			f.Close()
+			return nil, err
+		}
+		err = syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN && err != syscall.EINTR {
+			f.Close()
+			return nil, fmt.Errorf("%s: lock state: %w", s.label, err)
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			f.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
