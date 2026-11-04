@@ -270,13 +270,13 @@ func validateURL(label, raw string, httpsOnly bool) error {
 	return nil
 }
 
-// Fingerprint returns a stable content hash for profile identity and state
-// invalidation. yaml.v3 preserves struct field order, so map ordering cannot
-// change this value.
+// Fingerprint binds physical stack configuration. Readonly data_probes are
+// excluded so consumer verification can evolve without recreating shared data.
 func (p Profile) Fingerprint() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	p.DataProbes = nil // Consumer verification policy never changes physical cache identity.
 	b, err := yaml.Marshal(p)
 	if err != nil {
 		return "", fmt.Errorf("marshal profile: %w", err)

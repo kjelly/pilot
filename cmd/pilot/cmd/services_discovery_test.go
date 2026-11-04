@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"context"
+	"go.yaml.in/yaml/v3"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/services"
@@ -114,13 +117,19 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	requests := &atomic.Int64{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		if r.URL.Path == "/acng-report.html" {
 			_, _ = w.Write([]byte("<html><title>Apt-Cacher NG Command And Control Page</title></html>"))
 			return
 		}
 		if strings.Contains(r.URL.Path, "InRelease") {
 			_, _ = w.Write([]byte("-----BEGIN PGP SIGNED MESSAGE-----"))
+			return
+		}
+		if r.URL.Path == "/api/v2.0/users/current" {
+			w.WriteHeader(401)
 			return
 		}
 		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
@@ -134,9 +143,8 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	t.Setenv("PATH", home+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PILOT_TEST_DB_SECRET", filepath.Join(bundle.Root, "harbor/secrets/database-password"))
 	client := bundle.Client
-	client.AptProxyURL = server.URL
-	client.RPMBaseURL = server.URL
-	client.RegistryMirrorURL = server.URL
+	client.DataProbes = nil // Real pre-238 client: policy must come from loaded profile.
+	installCLIServiceFixtureRoute(t, server.URL)
 	store, err := statefile.New[services.ServiceState](servicesAdoptFrom, "services.json", 1, "services")
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +172,44 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	if first.InstanceID == "" || second.InstanceID != first.InstanceID || first.Generation != second.Generation || second.CAPEM != first.CAPEM || second.AptProxyURL != first.AptProxyURL {
 		t.Fatalf("VM consumers selected different services: %+v %+v", first, second)
 	}
+	for _, fault := range []string{"name", "upstream", "endpoint", "bind"} {
+		t.Run("reject-"+fault, func(t *testing.T) {
+			changed := profile
+			bindXML := []byte("#!/bin/sh\necho '<network><ip address=\"127.0.0.1\"/></network>'\n")
+			switch fault {
+			case "name":
+				changed.Name = "other"
+			case "upstream":
+				changed.Apt.Upstream += "/other"
+			case "endpoint":
+				changed.Apt.Port++
+			case "bind":
+				if err := os.WriteFile(virsh, []byte("#!/bin/sh\necho '<network><ip address=\"127.0.0.2\"/></network>'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := os.WriteFile(virsh, bindXML, 0700); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			path := filepath.Join(home, "profile-"+fault+".yaml")
+			data, err := yaml.Marshal(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			beforeRequests := requests.Load()
+			if _, err = resolveVMServiceBootstrapFor(context.Background(), path, "default", services.Requirements{services.APT}); err == nil {
+				t.Fatal("CLI accepted incompatible physical profile")
+			}
+			if requests.Load() != beforeRequests {
+				t.Fatal("CLI probed before checking loaded physical profile/bind")
+			}
+		})
+	}
 	cloud, err := second.RenderCloudInit()
 	if err != nil {
 		t.Fatal(err)
@@ -186,3 +232,28 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 		}
 	}
 }
+
+func installCLIServiceFixtureRoute(t *testing.T, target string) {
+	t.Helper()
+	base := http.DefaultTransport
+	u, e := url.Parse(target)
+	if e != nil {
+		t.Fatal(e)
+	}
+	http.DefaultTransport = cliServiceFixtureTransport(func(r *http.Request) (*http.Response, error) {
+		clone := r.Clone(r.Context())
+		copyURL := *r.URL
+		clone.URL = &copyURL
+		clone.URL.Scheme = u.Scheme
+		clone.URL.Host = u.Host
+		if clone.Host == "" {
+			clone.Host = r.URL.Host
+		}
+		return base.RoundTrip(clone)
+	})
+	t.Cleanup(func() { http.DefaultTransport = base })
+}
+
+type cliServiceFixtureTransport func(*http.Request) (*http.Response, error)
+
+func (f cliServiceFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

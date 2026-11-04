@@ -285,6 +285,7 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 		return err
 	}
 	if m.shared && current.ComposePath == "" {
+		bundle.Client.InstanceID, bundle.Client.Generation = current.InstanceID, current.Generation
 		current.ComposePath, current.Client = bundle.ComposePath, bundle.Client
 		if err := m.store.Mutate(func([]ServiceState) ([]ServiceState, error) { return []ServiceState{current}, nil }); err != nil {
 			return err

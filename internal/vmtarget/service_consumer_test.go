@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -150,8 +151,8 @@ fi
 		}
 	})
 	client := bundle.Client
-	client.DataProbes = vmServiceDescriptors()
-	client.AptProxyURL, client.RPMBaseURL, client.RegistryMirrorURL = server.URL, server.URL, server.URL
+	client.DataProbes = nil // Genuine pre-policy canonical client.
+	installServiceFixtureRoute(t, server.URL)
 	store, err := statefile.New[services.ServiceState](legacy, "services.json", 1, "services")
 	if err != nil {
 		t.Fatal(err)
@@ -165,12 +166,14 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err = manager.ClientConfig(context.Background())
+	profile := services.BuiltInDevLite()
+	profile.DataProbes = vmServiceDescriptors()
+	client, err = manager.ClientConfigForProfile(context.Background(), profile, net.ParseIP("127.0.0.1"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	probes.assertCounts(t, 1, 0, 0, 0)
-	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM, DataProbes: client.DataProbes}, probes
+	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM, PhysicalProfile: &profile, DataProbes: profile.ClientDataProbes()}, probes
 }
 
 // The shim reads pilot's generated XML, and models the UUID/name lists used by
@@ -225,7 +228,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if err != nil || len(consumers) != 0 {
 		t.Fatalf("verified teardown retained registration: %+v %v", consumers, err)
 	}
-	client, err := serviceManager.ClientConfig(context.Background())
+	client, err := serviceManager.ClientConfigForProfile(context.Background(), *bootstrap.PhysicalProfile, net.ParseIP(bootstrap.HostIP), bootstrap.Requirements)
 	if err != nil || client.InstanceID != bootstrap.InstanceID {
 		t.Fatalf("VM teardown interrupted cache: %+v %v", client, err)
 	}
@@ -363,4 +366,91 @@ func vmServiceFixtureBody(path string) string {
 		return vmFixtureManifest
 	}
 	return ""
+}
+
+// Route real HTTP requests to the native-response fixture while preserving the
+// production canonical endpoint contract and HTTP Host header.
+func installServiceFixtureRoute(t *testing.T, target string) {
+	t.Helper()
+	base := http.DefaultTransport
+	u, e := url.Parse(target)
+	if e != nil {
+		t.Fatal(e)
+	}
+	http.DefaultTransport = serviceFixtureTransport(func(r *http.Request) (*http.Response, error) {
+		clone := r.Clone(r.Context())
+		copyURL := *r.URL
+		clone.URL = &copyURL
+		clone.URL.Scheme = u.Scheme
+		clone.URL.Host = u.Host
+		if clone.Host == "" {
+			clone.Host = r.URL.Host
+		}
+		return base.RoundTrip(clone)
+	})
+	t.Cleanup(func() { http.DefaultTransport = base })
+}
+
+type serviceFixtureTransport func(*http.Request) (*http.Response, error)
+
+func (f serviceFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestVMServiceConsumerPhysicalTamperingRefusesBeforeDomainCreation(t *testing.T) {
+	for _, fault := range []string{"profile-name", "upstream", "bind", "endpoint", "generation", "ca", "owner", "state-endpoint"} {
+		t.Run(fault, func(t *testing.T) {
+			_, bootstrap, probes := registeredServiceFixture(t)
+			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
+			switch fault {
+			case "profile-name", "upstream":
+				profile := *bootstrap.PhysicalProfile
+				if fault == "profile-name" {
+					profile.Name = "other"
+				} else {
+					profile.Apt.Upstream += "/other"
+				}
+				bootstrap.PhysicalProfile = &profile
+			case "bind":
+				bootstrap.HostIP = "127.0.0.2"
+			case "endpoint":
+				bootstrap.RegistryMirrorURL = "http://foreign.invalid:8081"
+			case "generation":
+				bootstrap.Generation++
+			case "ca":
+				bootstrap.CAPEM = "not-a-certificate"
+			case "owner":
+				path := filepath.Join(probes.root, ".pilot-services-owner.json")
+				data, e := os.ReadFile(path)
+				if e != nil {
+					t.Fatal(e)
+				}
+				data = []byte(strings.ReplaceAll(string(data), bootstrap.InstanceID, "foreign-owner"))
+				if e = os.WriteFile(path, data, 0600); e != nil {
+					t.Fatal(e)
+				}
+			case "state-endpoint":
+				store, e := statefile.New[services.ServiceState](bootstrap.DiscoveryDirectory, "services.json", 1, "services")
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = store.Mutate(func(s []services.ServiceState) ([]services.ServiceState, error) {
+					s[0].Client.AptProxyURL = "http://foreign.invalid:3142"
+					return s, nil
+				}); e != nil {
+					t.Fatal(e)
+				}
+			}
+			_, e := m.Up(context.Background(), Options{Name: "tamper-service-vm", BaseImage: base, Services: bootstrap})
+			if e == nil {
+				t.Fatal("tampered direct Manager.Up contract accepted")
+			}
+			targets, e := m.store.Load()
+			if e != nil || len(targets) != 0 {
+				t.Fatalf("rejected physical contract created target state: %v", e)
+			}
+			if _, e = os.Stat(os.Getenv("PILOT_VIRSH_BIN") + ".domain"); !os.IsNotExist(e) {
+				t.Fatal("rejected physical contract created domain")
+			}
+			probes.assertCounts(t, 1, 0, 0, 0)
+		})
+	}
 }

@@ -75,3 +75,22 @@ not promised to be interruptible. Canceled status returns partial observations
 with `running=false` and the context error, skipping Compose inspection when
 already canceled. An internal probe deadline remains a capability failure and
 does not cancel unrelated successful requirements.
+
+Probe policy is readonly consumer verification configuration, separate from the
+physical profile identity. Only `data_probes` is excluded from the physical
+fingerprint; endpoint, upstream, storage and other existing fields remain bound.
+An explicit loaded profile must match registered name, physical fingerprint,
+bind address and the pure generated endpoint contract before any probe runs.
+Its effective policy is carried separately through bootstrap and registration;
+registration compares the canonical client identity without policy and observes
+a state copy with that policy. This never backfills persisted client state or
+requires management repair. Compatibility derivation is allowed only for an
+exact built-in physical profile match, never merely a matching name.
+
+A first-render intermediate client must receive the already reserved instance
+and generation before persistence. A subsequent unrelated initialization failure
+leaves `running=false`, while independently proven APT can still be consumed.
+Owner, CA, generation and canonical endpoint checks remain mandatory. Legacy
+clients without descriptors can use an explicit verified profile's APT policy;
+missing OCI descriptors still fail closed. Adding/changing readonly probe policy
+must not require purge, recreate or management authentication.

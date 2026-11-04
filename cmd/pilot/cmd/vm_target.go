@@ -235,25 +235,12 @@ func resolveVMServiceBootstrapFor(ctx context.Context, ref, network string, requ
 	if err != nil {
 		return nil, err
 	}
-	client, err := m.ClientConfigFor(ctx, required)
+	client, err := m.ClientConfigForProfile(ctx, profile, bindIP, required)
 	if err != nil {
 		return nil, err
-	}
-	if client.Profile != profile.Name {
-		return nil, fmt.Errorf("vm-target: requested services profile %q but host is running %q", profile.Name, client.Profile)
-	}
-	fingerprint, err := profile.Fingerprint()
-	if err != nil {
-		return nil, err
-	}
-	if client.Fingerprint != fingerprint {
-		return nil, fmt.Errorf("vm-target: services profile fingerprint mismatch (registered=%s requested=%s)", client.Fingerprint, fingerprint)
-	}
-	if client.HostIP != "" && client.HostIP != bindIP.String() {
-		return nil, fmt.Errorf("vm-target: services are bound to %s but network %q gateway is %s", client.HostIP, network, bindIP)
 	}
 	return &vmtarget.ServiceBootstrap{
-		Requirements: required, DataProbes: client.DataProbes,
+		PhysicalProfile: &profile, Requirements: required, DataProbes: profile.ClientDataProbes(),
 		DiscoveryDirectory: m.Directory(),
 		InstanceID:         client.InstanceID,
 		Generation:         client.Generation,

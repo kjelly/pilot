@@ -299,10 +299,15 @@ func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Root: m.root, Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{DataProbes: fixtureDescriptors(), AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -320,13 +325,15 @@ func TestClientConfigProbesAllServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1")); err != nil {
-		t.Fatal(err)
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
 	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Root: m.root, Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{DataProbes: fixtureDescriptors(), AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)

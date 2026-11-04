@@ -38,6 +38,7 @@ type ServiceBootstrap struct {
 	RegistryMirrorURL  string
 	RegistryProjects   map[string]string
 	CAPEM              string
+	PhysicalProfile    *services.Profile
 	Requirements       services.Requirements
 	DataProbes         map[services.Capability]services.DataProbe
 }

@@ -181,14 +181,19 @@ func (m *Manager) readProbeHeaders(ctx context.Context, raw, host, secret, beare
 	client.Timeout = probeRequestTimeout
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if proxy != nil && (m.client.Transport == nil || isHTTPTransport(m.client.Transport)) {
-		base, ok := m.client.Transport.(*http.Transport)
-		if !ok || base == nil {
-			base = http.DefaultTransport.(*http.Transport)
+		baseTransport := m.client.Transport
+		if baseTransport == nil {
+			baseTransport = http.DefaultTransport
 		}
-		transport := base.Clone()
-		transport.Proxy = http.ProxyURL(proxy)
-		defer transport.CloseIdleConnections()
-		client.Transport = transport
+		base, ok := baseTransport.(*http.Transport)
+		if !ok {
+			client.Transport = baseTransport
+		} else {
+			transport := base.Clone()
+			transport.Proxy = http.ProxyURL(proxy)
+			defer transport.CloseIdleConnections()
+			client.Transport = transport
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -389,20 +394,10 @@ func (m *Manager) ClientConfigFor(ctx context.Context, required Requirements) (C
 	if s.Fingerprint == "" {
 		return ClientConfig{}, errors.New("services: service stack is not configured")
 	}
-	observed := m.observeCapabilities(ctx, s)
-	if ctx.Err() != nil {
-		return ClientConfig{}, ctx.Err()
-	}
-	if e = requireCapabilities(observed, required); e != nil {
+	if e := validateConsumptionData(s); e != nil {
 		return ClientConfig{}, e
 	}
-	if s.Client.HostIP == "" {
-		s.Client.HostIP = s.BindIP
-	}
-	if err := ctx.Err(); err != nil {
-		return ClientConfig{}, err
-	}
-	return s.Client, nil
+	return m.clientConfigWithPolicy(ctx, s, compatibilityPolicy(s), required)
 }
 
 // validateConsumptionData retains physical identity/CA checks without management secrets.

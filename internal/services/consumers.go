@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -58,6 +59,15 @@ func (m *Manager) RegisterConsumer(ctx context.Context, expected ClientConfig, c
 }
 
 func (m *Manager) RegisterConsumerFor(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements) error {
+	return m.registerConsumer(ctx, expected, consumer, required, nil, nil)
+}
+
+// RegisterConsumerWithPolicy carries explicit physical profile and readonly policy.
+func (m *Manager) RegisterConsumerWithPolicy(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements, profile Profile, policy ProbePolicy) error {
+	return m.registerConsumer(ctx, expected, consumer, required, &profile, policy)
+}
+
+func (m *Manager) registerConsumer(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements, profile *Profile, policy ProbePolicy) error {
 	if _, err := NormalizeRequirements(required); err != nil {
 		return err
 	}
@@ -82,14 +92,27 @@ func (m *Manager) RegisterConsumerFor(ctx context.Context, expected ClientConfig
 	if !m.shared || consumer.ID == "" || consumer.Name == "" || consumer.StateDirectory == "" || consumer.DiscoveryDirectory != m.dataDir || consumer.InstanceID != state.InstanceID || consumer.Generation != state.Generation {
 		return errors.New("services: consumer identity does not match shared discovery")
 	}
-	actual := state.Client
-	if actual.HostIP == "" {
-		actual.HostIP = state.BindIP
+	if profile != nil {
+		if err := validatePhysicalProfile(state, *profile, net.ParseIP(expected.HostIP)); err != nil {
+			return err
+		}
+	} else {
+		if err := validateConsumptionData(state); err != nil {
+			return err
+		}
+		policy = compatibilityPolicy(state)
 	}
-	if !reflect.DeepEqual(expected, actual) {
+	actual := registeredClient(state)
+	if !reflect.DeepEqual(canonicalClient(expected), canonicalClient(actual)) {
 		return errors.New("services: consumer client contract is stale or stack is stopped")
 	}
-	observed := m.observeCapabilities(ctx, state)
+	if policy == nil {
+		return errors.New("services: missing-descriptor: explicit validated physical profile and probe policy are required")
+	}
+	if err := policy.validate(required); err != nil {
+		return err
+	}
+	observed := m.observeCapabilities(ctx, stateWithPolicy(state, policy))
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
