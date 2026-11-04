@@ -1726,6 +1726,69 @@ class PolicyHookRecoveryTests(unittest.TestCase):
                 self.assertFalse(any(call[:2] == ['systemctl', 'stop'] for call in native.calls))
 
 
+class OrdinaryConfigAuthorityTests(unittest.TestCase):
+    def test_restore_only_actual_changed_selected_files_with_complete_metadata(self):
+        import os
+        with RestoreScopeTests().agent() as (agent, native, path, root):
+            config, hosts = path('/var/ossec/etc/ossec.conf'), path('/etc/hosts')
+            config.chmod(0o640); os.setxattr(config, 'user.issue244', b'prior metadata')
+            old = w.ClosedCapture.take({str(config): 'file'}, agent.root, sealed=True)
+            snapshot = w.ConfigSnapshots('d' * 32, 'a' * 32, runner=native, root=agent.root)
+            snapshot.save('config', '/var/ossec/etc/ossec.conf'); snapshot.save('hosts', '/etc/hosts')
+            config.write_text('partial failure changed config'); config.chmod(0o600)
+            hosts.write_text('unselected preexisting hosts sentinel')
+            result = snapshot.restore(['config'])
+            self.assertEqual(result, {'restored': ['config'], 'services': []})
+            w.ClosedCapture.verify(old, agent.root)
+            self.assertEqual(hosts.read_text(), 'unselected preexisting hosts sentinel')
+            self.assertEqual(snapshot.restore(['config']), {'restored': [], 'services': []})
+            other = w.ConfigSnapshots('d' * 32, 'b' * 32, runner=native, root=agent.root)
+            with self.assertRaisesRegex(w.Refused, 'no snapshot for selected resource'): other.restore(['config'])
+            self.assertEqual(other.restore([]), {'restored': [], 'services': []})
+            self.assertFalse(any(call[:2] == ['systemctl', 'restart'] for call in native.calls))
+
+    def test_selected_service_restores_active_enabled_without_unselected_audit_restart(self):
+        with RestoreScopeTests().agent() as (agent, native, path, root):
+            class Services:
+                def __init__(self):
+                    self.units = {'wazuh-agent': {'active': False, 'enabled': 'disabled'}, 'auditd': {'active': True, 'enabled': 'enabled'}}
+                    self.calls = []
+                    self.refuse_stop = False
+                def run(self, argv, **kwargs):
+                    if argv[0] != 'systemctl': return native.run(argv, **kwargs)
+                    operation, unit = argv[1:3]; state = self.units[unit]; self.calls.append((operation, unit))
+                    if operation == 'is-active': return subprocess.CompletedProcess(argv, 0 if state['active'] else 3, '', '')
+                    if operation == 'is-enabled': return subprocess.CompletedProcess(argv, 0, state['enabled'], '')
+                    if operation == 'show': return subprocess.CompletedProcess(argv, 0, 'yes' if self.refuse_stop else 'no', '')
+                    if operation in ('start', 'stop'): state['active'] = operation == 'start'
+                    if operation in ('enable', 'disable'): state['enabled'] = 'enabled' if operation == 'enable' else 'disabled'
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+            services = Services()
+            snapshot = w.ConfigSnapshots('d' * 32, 'a' * 32, runner=services, root=agent.root)
+            snapshot.save('agent-service')
+            services.units['wazuh-agent'] = {'active': True, 'enabled': 'enabled'}
+            snapshot.restore(['agent-service'])
+            self.assertEqual(services.units['wazuh-agent'], {'active': False, 'enabled': 'disabled'})
+            self.assertFalse(any(unit == 'auditd' for operation, unit in services.calls))
+            services.refuse_stop = True
+            another = w.ConfigSnapshots('d' * 32, 'b' * 32, runner=services, root=agent.root)
+            with self.assertRaisesRegex(w.Refused, 'cannot be safely restored after start'):
+                another.save('agent-service')
+
+    def test_snapshot_rejects_unbounded_file_alias_before_any_mutation_authority(self):
+        import os
+        for kind in ('symlink', 'hardlink'):
+            with self.subTest(kind=kind), RestoreScopeTests().agent() as (agent, native, path, root):
+                config = path('/var/ossec/etc/ossec.conf'); outside = root / 'outside'
+                if kind == 'hardlink': os.link(config, outside)
+                else: config.rename(outside); config.symlink_to(outside)
+                snapshot = w.ConfigSnapshots('d' * 32, 'a' * 32, runner=native, root=agent.root)
+                with self.assertRaisesRegex(w.Refused, 'symlink|single-link'): snapshot.save('config', '/var/ossec/etc/ossec.conf')
+                self.assertEqual(outside.read_text(), 'original data')
+                with self.assertRaisesRegex(w.Refused, 'outside its bounded resource'):
+                    snapshot.save('config', '/operator/other-file')
+
+
 class AgentRecoveryDispatchTests(unittest.TestCase):
     def test_all_durable_phases_have_bounded_recovery_authority(self):
         for phase, action in w.AGENT_RECOVERY.items():

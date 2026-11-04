@@ -27,7 +27,7 @@ W.MountTable = lambda: MOUNT_TABLE('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
 WORKER = '''import argparse,importlib.util,json,sys,subprocess
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('action')
-for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name'):
+for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name','operation','resource','path','resources'):
  p.add_argument('--'+field,default='')
 for field in ('confirm-previous-stopped','upgrade','preview','recover','canary'):
  p.add_argument('--'+field,action='store_true')
@@ -53,6 +53,8 @@ try:
   with host.guard(a.owner,'central'): result={'changed':settings['central_change'],'fresh':False,'directory':settings['project'],'version':'4.14.9'}
  elif a.action in ('central-verify','agent-verify'):
   with host.reader('central' if a.action=='central-verify' else 'agent',a.owner or None): result={'pass':True}
+ elif a.action in ('agent-config-save','agent-config-restore','agent-policy-check'):
+  with host.guard(a.owner,'agent'): result={'saved':a.resource}
  elif a.action=='native-mutation':
   marker=host.inspect()['writer']
   with host.guard(marker['owner'],settings['component']): result={'native_action_substituted':True}

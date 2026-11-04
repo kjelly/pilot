@@ -2022,6 +2022,138 @@ class Central(Transaction):
                 raise Refused('central upgrade failed; previous images, data and availability recovered') from failure
 
 
+class ConfigSnapshots:
+    """Bounded ordinary config/service rollback within one selected invocation.
+
+    These are private snapshots, not upgrade journals or package authority.
+    The caller supplies only resources it selected/attempted this invocation;
+    a new operation UUID prevents a resumed verifier using an older snapshot.
+    """
+    FILES = {'config': '/var/ossec/etc/ossec.conf', 'hosts': '/etc/hosts'}
+    SERVICES = {'agent-service': 'wazuh-agent', 'audit-service': 'auditd'}
+
+    def __init__(self, owner, operation, runner=None, root=ROOT, paths=None):
+        if not all(re.fullmatch('[a-f0-9]{32}', value or '') for value in (owner, operation)):
+            raise Refused('invalid ordinary configuration snapshot identity')
+        self.owner, self.operation, self.r, self.root = owner, operation, runner or Runner(), Path(root)
+        # Internal filesystem seam; the CLI exposes only the fixed resources.
+        self.paths = paths or self.FILES
+        self.folder = self.root / ('normal-' + owner + '-' + operation)
+        self.manifest = self.folder / 'manifest.json'
+
+    def state(self):
+        if not self.manifest.exists():
+            return {'owner': self.owner, 'operation': self.operation, 'resources': {}}
+        private_file(self.manifest, self.folder)
+        item = json.loads(self.manifest.read_text())
+        if item['owner'] != self.owner or item['operation'] != self.operation or not set(item['resources']).issubset(self.FILES.keys() | self.SERVICES.keys()):
+            raise Refused('ordinary snapshot identity or resource scope changed')
+        return item
+
+    @contextlib.contextmanager
+    def lock(self):
+        with HostWriter(self.root).guard(self.owner, 'agent'):
+            transaction = Transaction('agent', runner=self.r, root=self.root)
+            with transaction.component_lock():
+                transaction.idle()
+                yield transaction
+
+    def service(self, unit):
+        active = self.r.run(['systemctl', 'is-active', unit], allowed=(0, 3, 4), timeout=30).returncode == 0
+        enabled = self.r.run(['systemctl', 'is-enabled', unit], allowed=(0, 1, 3, 4), timeout=30).stdout.strip()
+        if enabled not in ('enabled', 'disabled'):
+            raise Refused('unsupported prior ordinary service enablement state')
+        return {'active': active, 'enabled': enabled}
+
+    def save(self, resource, selected_path=''):
+        if resource not in self.FILES and resource not in self.SERVICES:
+            raise Refused('unknown ordinary Wazuh resource')
+        if selected_path and selected_path != self.FILES.get(resource):
+            raise Refused('ordinary configuration path is outside its bounded resource')
+        with self.lock() as transaction:
+            private_dir(self.folder)
+            item = self.state()
+            if resource not in item['resources']:
+                if resource in self.FILES:
+                    path = str(Path(self.paths[resource]))
+                    capture = ClosedCapture.take({path: 'file'}, self.root, missing=(path,), sealed=True)
+                    entry = {'path': path, 'capture': capture, 'archive': None, 'sha256': None}
+                    if not capture['absent']:
+                        archive = self.folder / (resource + '.tar')
+                        entry.update(archive=str(archive), sha256=transaction.archive(path, archive, capture=capture))
+                    item['resources'][resource] = entry
+                else:
+                    unit = self.SERVICES[resource]
+                    previous = self.service(unit)
+                    if not previous['active']:
+                        stoppable = self.r.run(['systemctl', 'show', unit, '-p', 'RefuseManualStop', '--value'], timeout=30).stdout.strip()
+                        if stoppable != 'no':
+                            raise Refused('inactive ordinary service cannot be safely restored after start')
+                    item['resources'][resource] = previous
+                atomic_json(self.manifest, item)
+            return {'saved': resource}
+
+    def restore(self, resources):
+        if (not isinstance(resources, list) or len(resources) != len(set(resources))
+                or not set(resources).issubset(self.FILES.keys() | self.SERVICES.keys())):
+            raise Refused('invalid ordinary rollback resource authority')
+        if not resources: return {'restored': [], 'services': []}
+        with self.lock() as transaction:
+            item = self.state()
+            if not set(resources).issubset(item['resources']):
+                raise Refused('ordinary rollback has no snapshot for selected resource')
+            current = {}
+            # Check every selected source and archive before changing any file.
+            for resource in resources:
+                if resource not in self.FILES: continue
+                entry = item['resources'][resource]
+                path = str(Path(self.paths[resource]))
+                if entry['path'] != path or entry['capture']['roots'] != {path: 'file'} or not entry['capture']['sealed']:
+                    raise Refused('ordinary snapshot escaped its fixed file scope')
+                absent = entry['capture']['absent']
+                if (absent not in ([], [path]) or bool(entry['archive']) == bool(absent)
+                        or set(entry['capture']['nodes']) != (set() if absent else {path})):
+                    raise Refused('ordinary snapshot presence is inconsistent')
+                current[resource] = ClosedCapture.take({path: 'file'}, self.root, missing=(path,), sealed=True)
+                if entry['archive']:
+                    if entry['archive'] != str(self.folder / (resource + '.tar')):
+                        raise Refused('ordinary archive escaped its snapshot directory')
+                    private_file(entry['archive'], self.folder)
+                    if digest(entry['archive']) != entry['sha256']:
+                        raise Refused('ordinary snapshot checksum changed')
+            restored, services = [], []
+            for resource in resources:
+                if resource not in self.FILES: continue
+                entry = item['resources'][resource]
+                if ClosedCapture.persistent(current[resource]) == ClosedCapture.persistent(entry['capture']): continue
+                if entry['archive']:
+                    transaction.restore(entry['path'], entry['archive'], entry['sha256'])
+                else:
+                    durable_unlink(entry['path'])
+                ClosedCapture.verify(entry['capture'], self.root)
+                restored.append(resource)
+            for resource in resources:
+                if resource not in self.SERVICES: continue
+                unit, before = self.SERVICES[resource], item['resources'][resource]
+                if not isinstance(before.get('active'), bool) or before.get('enabled') not in ('enabled', 'disabled'):
+                    raise Refused('ordinary snapshot service state is invalid')
+                actual = self.service(unit)
+                if actual['enabled'] != before['enabled']:
+                    self.r.run(['systemctl', 'enable' if before['enabled'] == 'enabled' else 'disable', unit], timeout=60)
+                    services.append(resource)
+                if actual['active'] != before['active']:
+                    self.r.run(['systemctl', 'start' if before['active'] else 'stop', unit], timeout=90)
+                    services.append(resource)
+                elif resource == 'agent-service' and before['active'] and restored:
+                    # Only a service selected/attempted by this invocation can
+                    # have loaded its changed config. Never restart auditd.
+                    self.r.run(['systemctl', 'restart', unit], timeout=90)
+                    services.append(resource)
+                if self.service(unit) != before:
+                    raise Refused('selected ordinary service state was not restored')
+            return {'restored': sorted(restored), 'services': sorted(set(services))}
+
+
 class Agent(Transaction):
     POLICY_HOOK = '/usr/sbin/policy-rc.d'
     POLICY_TEMP = '#!/bin/sh\nexit 101\n'
@@ -2777,7 +2909,7 @@ def main():
                                          'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate',
                                          'agent-policy-check', 'agent-protect', 'agent-apt-plan', 'agent-rpm-fresh',
-                                         'agent-hook-prepare', 'agent-hook-cleanup'])
+                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-config-save', 'agent-config-restore'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
     parser.add_argument('--manager', default='')
@@ -2794,6 +2926,10 @@ def main():
     parser.add_argument('--canary', action='store_true')
     parser.add_argument('--stage', action='store_true')
     parser.add_argument('--artifact', default='')
+    parser.add_argument('--operation', default='')
+    parser.add_argument('--resource', default='')
+    parser.add_argument('--path', default='')
+    parser.add_argument('--resources', default='[]')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Wazuh transactions require root')
@@ -2822,6 +2958,9 @@ def main():
                 value = Central().verify(args.canary, args.owner or None)
         elif args.action == 'central':
             value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner)
+        elif args.action in ('agent-config-save', 'agent-config-restore'):
+            snapshot = ConfigSnapshots(args.owner, args.operation)
+            value = snapshot.save(args.resource, args.path) if args.action == 'agent-config-save' else snapshot.restore(json.loads(args.resources))
         else:
             agent = Agent(args.family)
             if args.action == 'agent-check':
