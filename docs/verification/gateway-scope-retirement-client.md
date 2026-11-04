@@ -9,7 +9,7 @@ targets:
   roles: [freeipa-client]
   hostScope: per-host
   platforms:
-    - {os: almalinux, versions: ["9"]}
+    - {os: ubuntu, versions: ["24.04"]}
 inputs: []
 traceability: {components: []}
 defaults:

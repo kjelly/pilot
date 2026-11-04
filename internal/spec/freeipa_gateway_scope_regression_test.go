@@ -95,11 +95,11 @@ func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.
 
 func TestRegression_GatewayRetirementSpecsUseEffectiveRoleScopedOracles(t *testing.T) {
 	for _, tc := range []struct {
-		name, role string
-		expected   []string
+		name, role, os, version string
+		expected                []string
 	}{
-		{"server", "freeipa-server", []string{"scope-preserved-retiring-member-absent", "retiring-host-absent"}},
-		{"client", "freeipa-client", []string{"survivor-sshd-account-allowed", "0"}},
+		{"server", "freeipa-server", "almalinux", "9", []string{"scope-preserved-retiring-member-absent", "retiring-host-absent"}},
+		{"client", "freeipa-client", "ubuntu", "24.04", []string{"survivor-sshd-account-allowed", "0"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec, err := Parse("../../docs/verification/gateway-scope-retirement-" + tc.name + ".md")
@@ -108,6 +108,9 @@ func TestRegression_GatewayRetirementSpecsUseEffectiveRoleScopedOracles(t *testi
 			}
 			if spec.SchemaVersion != 2 || !slices.Equal(spec.Roles, []string{tc.role}) || len(spec.Rows) != 2 {
 				t.Fatalf("scope/row contract changed: %+v", spec)
+			}
+			if len(spec.Platforms) != 1 || spec.Platforms[0].OS != tc.os || !slices.Equal(spec.Platforms[0].Versions, []string{tc.version}) {
+				t.Fatalf("%s acceptance must declare its actual %s %s target: %+v", tc.role, tc.os, tc.version, spec.Platforms)
 			}
 			for index, row := range spec.Rows {
 				if row.ID != fmt.Sprint("C", index+1) || !row.VerifyOnly || row.Become == nil || !*row.Become {
