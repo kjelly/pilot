@@ -1,0 +1,6 @@
+- name: Unselected colocated role must never be applied
+  hosts: "{{ target_group | default('fixture-unrelated') }}"
+  gather_facts: false
+  tasks:
+    - ansible.builtin.fail:
+        msg: An unrelated role on the provider host was incorrectly applied

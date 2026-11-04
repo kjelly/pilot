@@ -1,0 +1,51 @@
+- name: Host-monitoring repair fault and effective-state oracle
+  hosts: host-monitoring
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require an explicit bounded test operation
+      ansible.builtin.assert:
+        that: issue251_probe_state in ['remove', 'absent', 'healthy']
+    - name: Remove only the bcrypt tool package from a dedicated test host
+      ansible.builtin.apt:
+        name: apache2-utils
+        state: absent
+      when: issue251_probe_state == 'remove'
+    - name: Probe the actual htpasswd executable
+      ansible.builtin.command: sh -c 'command -v htpasswd'
+      register: issue251_htpasswd
+      changed_when: false
+      failed_when: false
+    - name: Check executable state
+      ansible.builtin.assert:
+        that:
+          - (issue251_htpasswd.rc == 0) == (issue251_probe_state == 'healthy')
+    - name: Check unauthenticated metrics are rejected
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9100/metrics
+        status_code: 401
+      when: issue251_probe_state == 'healthy'
+    - name: Check the native service is active
+      ansible.builtin.command: systemctl is-active node_exporter
+      changed_when: false
+      when: issue251_probe_state == 'healthy'
+    - name: Check the native service is enabled for boot
+      ansible.builtin.command: systemctl is-enabled node_exporter
+      changed_when: false
+      when: issue251_probe_state == 'healthy'
+    - name: Check authenticated native metrics are served
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9100/metrics
+        url_username: "{{ node_exporter_basic_auth_user | default('prometheus') }}"
+        url_password: "{{ node_exporter_basic_auth_password }}"
+        force_basic_auth: true
+        return_content: true
+        status_code: 200
+      register: issue251_metrics
+      no_log: true
+      when: issue251_probe_state == 'healthy'
+    - name: Require real node metrics behind authentication
+      ansible.builtin.assert:
+        that: "'node_uname_info' in issue251_metrics.content"
+      no_log: true
+      when: issue251_probe_state == 'healthy'

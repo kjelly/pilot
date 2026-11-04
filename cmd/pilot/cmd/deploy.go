@@ -45,6 +45,7 @@ var deployTimeoutFlag string
 var deployActionFlag string
 var deployShowExperimental bool
 var deployPlanComponents []string
+var deployComponentFlags []string
 var deployActionsPath string
 var deployPresentation bool
 var deployTracePath string
@@ -191,6 +192,7 @@ func init() {
 	deployCmd.Flags().StringVarP(&deployInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
 	deployCmd.Flags().StringVar(&deployTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限，Go duration 格式(例如 45m、1h30m)；跑得比這個久會被強制中止")
 	deployCmd.Flags().StringVar(&deployActionFlag, "action", "apply", "contract lifecycle action: apply, upgrade, or decommission (only declared actions may run)")
+	deployCmd.Flags().StringArrayVar(&deployComponentFlags, "component", nil, "deploy a contract component instead of the scope/component prompts; repeatable")
 	deployCmd.Flags().BoolVar(&deployShowExperimental, "show-experimental", false, "include experimental contract components after their evidence requirement is reviewed")
 	deployCmd.Flags().StringVar(&deployActionsPath, "actions", "", "以 JSON scenario 自動回答 deploy TUI prompts")
 	deployCmd.Flags().BoolVar(&deployPresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
@@ -333,6 +335,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if deployActionsPath != "" {
+		if len(deployComponentFlags) > 0 {
+			return fmt.Errorf("--component 不能與 --actions 同時使用(scenario 自己回答 component)")
+		}
 		if limitFlag != "" {
 			return fmt.Errorf("--limit 不能與 --actions 同時使用(scenario 自己回答 limit)")
 		}
@@ -352,6 +357,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
+	// Validate the entire explicit selection before preparing controller state,
+	// regenerating inventory, or migrating any roster. A bad final ID must not
+	// leave side effects from an earlier valid ID.
+	if len(deployComponentFlags) > 0 {
+		if _, _, err := selectedDeployCatalog(deployComponentFlags, deployActionFlag); err != nil {
+			return err
+		}
+	}
 
 	// --force and --preview-only answer every prompt through the automation
 	// driver, so it must be installed before the TTY gate: that is what lets
@@ -360,7 +373,7 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 	// after-preview apply question keeps its default No.
 	var defaults *promptAutomation
 	if deployForceFlag || deployPreviewOnlyFlag {
-		defaults = &promptAutomation{useDefaults: true, forceApply: deployForceFlag}
+		defaults = &promptAutomation{useDefaults: true, forceApply: deployForceFlag, previewOnly: deployPreviewOnlyFlag && len(deployComponentFlags) > 0}
 		oldPrompt := activePromptAutomation
 		activePromptAutomation = defaults
 		defer func() { activePromptAutomation = oldPrompt }()
@@ -441,12 +454,15 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out)
 	}
 
-	scopeIdx, err := runSelectPrompt(promptScope, "要佈署什麼？", []string{
-		"全站部署(site.yml) — 一次套用 inventory 裡已經填好機器的所有元件",
-		"單一元件 — 從清單挑一支 apply playbook",
-	})
-	if err != nil {
-		return abortOrErr(err)
+	scopeIdx := 1
+	if len(deployComponentFlags) == 0 {
+		scopeIdx, err = runSelectPrompt(promptScope, "要佈署什麼？", []string{
+			"全站部署(site.yml) — 一次套用 inventory 裡已經填好機器的所有元件",
+			"單一元件 — 從清單挑一支 apply playbook",
+		})
+		if err != nil {
+			return abortOrErr(err)
+		}
 	}
 
 	if scopeIdx == 0 {
@@ -455,6 +471,11 @@ func runDeployInteractive(cmd *cobra.Command, args []string) error {
 		err = runCatalogPlaybookDeploy(ctx, runner, out, inv, deployActionFlag, false, snapshot)
 	}
 	if deployPreviewOnlyFlag {
+		if len(deployComponentFlags) > 0 {
+			// The batch already accounted for every planned preview, including
+			// deferred playbooks. A single passing preview is insufficient.
+			return err
+		}
 		return previewOnlyResult(out, err, defaults.previewPassed)
 	}
 	return abortOrErr(err)
@@ -1545,9 +1566,12 @@ func prepareReconcileExecutionPlan(ctx context.Context, playbook, inv, limit, ta
 	if err != nil {
 		return reconcileExecutionPlan{}, err
 	}
-	chain, err := deploymentDependencyChain(catalog, components)
-	if err != nil {
-		return reconcileExecutionPlan{}, err
+	var chain []contract.Contract
+	if isComponentApply(catalog, components, playbook) {
+		chain, err = deploymentDependencyChain(catalog, components)
+		if err != nil {
+			return reconcileExecutionPlan{}, err
+		}
 	}
 	dependencyLimits, err := deploymentDependencyLimits(catalog, components, scope)
 	if err != nil {
@@ -3377,6 +3401,76 @@ func printSiteTopology(out io.Writer, inv string, snapshot deployInventorySnapsh
 
 // ---- catalog playbook flow --------------------------------------------------
 
+// workflowCatalogEntries is the shared eligibility policy for the TUI and CLI.
+func workflowCatalogEntries(catalog contract.Catalog, reconcileOnly bool) []deployPlaybook {
+	var entries []deployPlaybook
+	for _, entry := range deployCatalog {
+		if catalogEntryInWorkflow(entry, reconcileOnly) && (deployShowExperimental || !deployEntryExperimental(entry, catalog)) {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// selectedDeployCatalog resolves contract IDs, including aggregate menu entries
+// such as core-infra-provider's ntp role. It never interprets IDs as Ansible tags.
+func selectedDeployCatalog(ids []string, action string) (contract.Catalog, []deployPlaybook, error) {
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return contract.Catalog{}, nil, err
+	}
+	loader, err := contract.NewLoader(root)
+	if err != nil {
+		return contract.Catalog{}, nil, err
+	}
+	catalog, err := loader.LoadDefaultCatalog()
+	if err != nil {
+		return contract.Catalog{}, nil, err
+	}
+	entries, err := selectDeployComponents(catalog, ids, action)
+	return catalog, entries, err
+}
+
+func selectDeployComponents(catalog contract.Catalog, ids []string, action string) ([]deployPlaybook, error) {
+	if action != "apply" && action != "upgrade" && action != "decommission" {
+		return nil, fmt.Errorf("--action must be apply, upgrade, or decommission")
+	}
+	byID := make(map[string]deployPlaybook)
+	var available []string
+	for _, entry := range workflowCatalogEntries(catalog, false) {
+		for _, id := range entryComponentIDs(entry) {
+			if _, ok := catalog.Component(id); !ok {
+				continue
+			}
+			resolved := entry
+			if len(entry.InfraRoles) > 0 {
+				resolved.InfraRoles = []string{id}
+			}
+			byID[id] = resolved
+			available = append(available, id)
+		}
+	}
+	seen := make(map[string]bool)
+	var selected []deployPlaybook
+	for _, id := range ids {
+		entry, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("--component %q is not an available deploy component (available: %s)", id, strings.Join(available, ", "))
+		}
+		if _, err := selectedActionPlaybook(catalog, []string{id}, action); err != nil {
+			return nil, err
+		}
+		if !seen[id] {
+			selected = append(selected, entry)
+			seen[id] = true
+		}
+	}
+	if _, err := delivery.PlanComponents(catalog, ids, deployShowExperimental); err != nil {
+		return nil, err
+	}
+	return selected, nil
+}
+
 func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, reconcileOnly bool, snapshot deployInventorySnapshot) error {
 	if action != "apply" && action != "upgrade" && action != "decommission" {
 		return fmt.Errorf("--action must be apply, upgrade, or decommission")
@@ -3401,19 +3495,16 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 	if err != nil {
 		return err
 	}
-	entries := make([]deployPlaybook, 0, len(deployCatalog))
+	entries := workflowCatalogEntries(catalog, reconcileOnly)
 	labels := make([]string, 0, len(deployCatalog))
-	for _, p := range deployCatalog {
-		// Day-2-only reconcilers retain their dedicated workflow. Components
-		// supporting both install and configuration explicitly opt into Deploy;
-		// menu policy is shared with the automation schema.
-		if !catalogEntryInWorkflow(p, reconcileOnly) {
-			continue
+	explicitDeploy := !reconcileOnly && len(deployComponentFlags) > 0
+	if explicitDeploy {
+		entries, err = selectDeployComponents(catalog, deployComponentFlags, action)
+		if err != nil {
+			return err
 		}
-		if !deployShowExperimental && deployEntryExperimental(p, catalog) {
-			continue
-		}
-		entries = append(entries, p)
+	}
+	for _, p := range entries {
 		labels = append(labels, deployMenuLabel(p, catalog))
 	}
 	if len(entries) == 0 {
@@ -3423,7 +3514,12 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		return fmt.Errorf("no contract components are available; use --show-experimental only after reviewing their evidence requirements")
 	}
 	var selectedIndexes []int
-	if reconcileOnly && len(reconcileComponentFlags) > 0 {
+	if explicitDeploy {
+		for i := range entries {
+			selectedIndexes = append(selectedIndexes, i)
+		}
+		fmt.Fprintf(out, "已由 --component 選擇 %d 個 deploy 元件，將依序執行。\n", len(selectedIndexes))
+	} else if reconcileOnly && len(reconcileComponentFlags) > 0 {
 		selectedIndexes, err = reconcileComponentIndexes(entries, reconcileComponentFlags)
 		if err != nil {
 			return err
@@ -3446,7 +3542,7 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		selectedIndexes = []int{idx}
 	}
 	var batchInputs *catalogBatchInputs
-	if reconcileOnly && len(selectedIndexes) > 1 {
+	if (reconcileOnly || explicitDeploy) && len(selectedIndexes) > 1 {
 		selectedEntries := make([]deployPlaybook, 0, len(selectedIndexes))
 		for _, idx := range selectedIndexes {
 			if idx < 0 || idx >= len(entries) {
@@ -3468,12 +3564,15 @@ func runCatalogPlaybookDeploy(ctx context.Context, runner *ansible.Runner, out i
 		if len(selectedIndexes) > 1 {
 			fmt.Fprintf(out, "\n── 執行第 %d/%d 個元件 ──\n", i+1, len(selectedIndexes))
 		}
-		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs, snapshot, reconcileOnly, &reconcileRequests); err != nil {
+		if err := runCatalogPlaybookDeployEntry(ctx, runner, out, inv, action, catalog, entries[idx], batchInputs, snapshot, reconcileOnly || explicitDeploy, &reconcileRequests); err != nil {
 			return err
 		}
 	}
 	if reconcileOnly {
 		return executeCatalogReconcileBatch(ctx, runner, out, reconcileRequests)
+	}
+	if explicitDeploy {
+		return executeCatalogBatch(ctx, runner, out, reconcileRequests, outbound.OperationDeploy)
 	}
 	return nil
 }
@@ -3503,7 +3602,7 @@ func reconcileComponentIndexes(entries []deployPlaybook, keys []string) ([]int, 
 }
 
 // catalogBatchInputs contains prompts whose answer applies to every selected
-// reconcile component. Component-specific target/stage/host questions remain
+// component. Component-specific target/stage/host questions remain
 // in runCatalogPlaybookDeployEntry because their values can legitimately
 // differ between entries.
 type catalogBatchInputs struct {
@@ -3514,7 +3613,7 @@ type catalogBatchInputs struct {
 }
 
 // catalogDeploymentRequest is the fully answered, but not yet executed,
-// payload for one catalog entry. Reconcile collects every selected request
+// payload for one catalog entry. Batches collect every selected request
 // first so one authorization can cover the complete dependency plan.
 type catalogDeploymentRequest struct {
 	playbook             string
@@ -3570,7 +3669,7 @@ func catalogBatchVaultHint(entries []deployPlaybook) string {
 	return strings.Join(hints, "；")
 }
 
-func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs, snapshot deployInventorySnapshot, reconcileOnly bool, reconcileRequests *[]catalogDeploymentRequest) error {
+func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, out io.Writer, inv, action string, catalog contract.Catalog, entry deployPlaybook, batchInputs *catalogBatchInputs, snapshot deployInventorySnapshot, collectRequest bool, requests *[]catalogDeploymentRequest) error {
 	if entry.Note != "" {
 		fmt.Fprintf(out, "ℹ️  %s\n", entry.Note)
 	}
@@ -3578,9 +3677,13 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 	var extraVars []string
 	componentHints := []string{entry.Key}
 	if len(entry.InfraRoles) > 0 {
-		roleIdx, err := runSelectPrompt(promptInfraRole, "選擇角色(infra_role)", entry.InfraRoles)
-		if err != nil {
-			return err
+		roleIdx := 0
+		if len(deployComponentFlags) == 0 || len(entry.InfraRoles) != 1 {
+			var err error
+			roleIdx, err = runSelectPrompt(promptInfraRole, "選擇角色(infra_role)", entry.InfraRoles)
+			if err != nil {
+				return err
+			}
 		}
 		role := entry.InfraRoles[roleIdx]
 		extraVars = append(extraVars, "infra_role="+role)
@@ -3758,11 +3861,11 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 		workspaceDir:         workspaceDir,
 		acceptedAutoHostVars: append([]acceptedAutoHostVar(nil), acceptedAutoHostVars...),
 	}
-	if reconcileOnly {
-		if reconcileRequests == nil {
-			return fmt.Errorf("internal error: reconcile request collector is nil")
+	if collectRequest {
+		if requests == nil {
+			return fmt.Errorf("internal error: catalog request collector is nil")
 		}
-		*reconcileRequests = append(*reconcileRequests, request)
+		*requests = append(*requests, request)
 		return nil
 	}
 
@@ -3797,6 +3900,10 @@ func runCatalogPlaybookDeployEntry(ctx context.Context, runner *ansible.Runner, 
 }
 
 func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, out io.Writer, requests []catalogDeploymentRequest) error {
+	return executeCatalogBatch(ctx, runner, out, requests, outbound.OperationReconcile)
+}
+
+func executeCatalogBatch(ctx context.Context, runner *ansible.Runner, out io.Writer, requests []catalogDeploymentRequest, operation outbound.OperationKind) error {
 	if len(requests) == 0 {
 		return fmt.Errorf("internal error: reconcile batch has no selected requests")
 	}
@@ -3816,7 +3923,7 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		plannedPlaybooks += len(plan.Chain) + 1
 	}
 
-	fmt.Fprintln(out, "═══ Reconcile batch execution plan ═══")
+	fmt.Fprintf(out, "═══ %s batch execution plan ═══\n", operation)
 	for i, plan := range plans {
 		fmt.Fprintf(out, "── 選取項目 %d/%d ──\n", i+1, len(plans))
 		renderReconcileExecutionPlan(out, plan)
@@ -3867,7 +3974,7 @@ func executeCatalogReconcileBatch(ctx context.Context, runner *ansible.Runner, o
 		Inventory:              requests[0].inv,
 		ExtraVars:              requests[0].extraVars,
 		Vault:                  requests[0].vault,
-		Operation:              outbound.OperationReconcile,
+		Operation:              operation,
 		WorkflowID:             workflowID,
 		RequestedComponents:    requestedComponents,
 		ExecutedComponents:     componentIDsFromResults(agg.Results),
