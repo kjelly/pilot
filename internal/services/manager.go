@@ -40,7 +40,12 @@ type CommandResult struct {
 type osCommandRunner struct{}
 
 func (osCommandRunner) Run(ctx context.Context, dir, name string, args ...string) (CommandResult, error) {
+	return (osCommandRunner{}).RunInput(ctx, dir, "", name, args...)
+}
+
+func (osCommandRunner) RunInput(ctx context.Context, dir, input, name string, args ...string) (CommandResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Dir = dir
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -183,6 +188,22 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 		if err := maintenanceAllowed(current, options); err != nil {
 			return err
 		}
+		if current.Fingerprint != "" {
+			if err := m.validateHarborCredentials(ctx, current); err != nil {
+				if current.Running || !errors.Is(err, errHarborUnreachable) {
+					return err
+				}
+				if err := m.validateStoppedCredentialBinding(); err != nil {
+					return err
+				}
+				if err := m.activateRetainedBundle(ctx, current); err != nil {
+					return err
+				}
+				if err := m.validateHarborCredentials(ctx, current); err != nil {
+					return err
+				}
+			}
+		}
 	} else if current.Fingerprint != "" {
 		if !current.Running || current.Fingerprint != fingerprint || current.Client.Fingerprint != fingerprint || len(current.Client.RPMRepositories) == 0 {
 			return errors.New("services: existing stack needs explicit services repair; ordinary startup cannot reconcile stopped, incomplete or older state")
@@ -261,6 +282,12 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 	if err != nil {
 		return err
 	}
+	if m.shared && current.ComposePath == "" {
+		current.ComposePath, current.Client = bundle.ComposePath, bundle.Client
+		if err := m.store.Mutate(func([]ServiceState) ([]ServiceState, error) { return []ServiceState{current}, nil }); err != nil {
+			return err
+		}
+	}
 	if err := m.requireCompose(ctx); err != nil {
 		return err
 	}
@@ -273,7 +300,7 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 	installerDir := filepath.Join(bundle.Root, "harbor", "installer")
 	harborCompose := filepath.Join(installerDir, "docker-compose.yml")
 	if result, err := m.runner.Run(ctx, installerDir, "sudo", "-n", "./prepare"); err != nil {
-		return fmt.Errorf("services: prepare harbor: %w", err)
+		return errors.New("services: prepare harbor command unavailable")
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("services: prepare harbor failed: %s", redact(result.Stderr))
 	}
@@ -286,7 +313,7 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 		composeArgs = append(composeArgs, "--force-recreate", "--remove-orphans")
 	}
 	if result, err := m.runner.Run(ctx, m.root, "docker", composeArgs...); err != nil {
-		return fmt.Errorf("services: start compose: %w", err)
+		return errors.New("services: start compose command unavailable")
 	} else if result.ExitCode != 0 {
 		// A Pulp worker can remain unhealthy after a bind-mounted setting
 		// directory is repaired. Recreate this Compose project once so each
@@ -296,7 +323,7 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 		retryArgs := []string{"compose", "-f", bundle.ComposePath, "-p", project, "up", "-d", "--wait", "--force-recreate", "--remove-orphans"}
 		retry, retryErr := m.runner.Run(ctx, m.root, "docker", retryArgs...)
 		if retryErr != nil {
-			return fmt.Errorf("services: start compose failed: %s; recreate services: %w", firstFailure, retryErr)
+			return errors.New("services: start compose failed; recreate services command unavailable")
 		}
 		if retry.ExitCode != 0 {
 			return fmt.Errorf("services: start compose failed: %s; recreate services failed: %s", firstFailure, redact(retry.Stderr))
@@ -323,6 +350,9 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 		return fmt.Errorf("services: seed cache resources: %w", err)
 	}
 	seededClient.CAPEM = bundle.Client.CAPEM
+	if err := m.recordCredentialBinding(""); err != nil {
+		return err
+	}
 	seededClient.InstanceID, seededClient.Generation = current.InstanceID, current.Generation
 	state := ServiceState{Profile: profile.Name, Fingerprint: fingerprint, Root: m.root, ComposePath: bundle.ComposePath, HarborComposePath: harborComposePath(bundle), Client: seededClient, BindIP: bindIP.String(), Running: true, UpdatedAt: m.now().UTC()}
 	state.InstanceID, state.Generation = current.InstanceID, current.Generation
@@ -331,6 +361,40 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
+}
+
+// activateRetainedBundle is the bounded offline-auth exception for explicit
+// stopped→repair. It never renders, prepares, recreates, removes or seeds. Live
+// authentication must succeed afterward before ordinary reconciliation begins.
+func (m *Manager) activateRetainedBundle(ctx context.Context, state ServiceState) error {
+	harbor := state.HarborComposePath
+	if harbor == "" {
+		harbor = filepath.Join(m.root, "harbor/installer/docker-compose.yml")
+	}
+	for _, path := range []string{state.ComposePath, harbor} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return errors.New("services: retained stopped Compose configuration unavailable")
+		}
+	}
+	if m.shared {
+		if err := m.checkComposeOwnership(ctx, state.Profile); err != nil {
+			return err
+		}
+	}
+	for _, command := range []struct {
+		dir, name string
+		args      []string
+	}{
+		{m.root, "docker", []string{"compose", "-f", state.ComposePath, "-p", "pilot-services-" + state.Profile, "up", "-d", "--wait"}},
+		{filepath.Dir(harbor), "sudo", []string{"-n", "docker", "compose", "-f", harbor, "-p", "pilot-harbor-" + state.Profile, "up", "-d", "--wait"}},
+	} {
+		result, err := m.runner.Run(ctx, command.dir, command.name, command.args...)
+		if err != nil || result.ExitCode != 0 {
+			return errors.New("services: retained stopped service activation failed; credential validation not completed")
+		}
+	}
+	return nil
 }
 
 // checkComposeOwnership rejects a colliding global Compose identity before a
@@ -342,7 +406,7 @@ func (m *Manager) checkComposeOwnership(ctx context.Context, profile string) err
 	} {
 		out, err := m.runner.Run(ctx, m.dataDir, "docker", "ps", "-a", "--filter", "label=com.docker.compose.project="+project.name, "--format", "{{.ID}}")
 		if err != nil {
-			return fmt.Errorf("services: inspect Compose ownership: %w", err)
+			return errors.New("services: inspect Compose ownership command unavailable")
 		}
 		if out.ExitCode != 0 {
 			return errors.New("services: cannot inspect Compose ownership; Docker query failed")
@@ -353,7 +417,7 @@ func (m *Manager) checkComposeOwnership(ctx context.Context, profile string) err
 			}
 			labels, err := m.runner.Run(ctx, m.dataDir, "docker", "inspect", id, "--format", "{{json .Config.Labels}}")
 			if err != nil {
-				return fmt.Errorf("services: inspect Compose labels: %w", err)
+				return errors.New("services: inspect Compose labels command unavailable")
 			}
 			if labels.ExitCode != 0 {
 				return errors.New("services: cannot inspect Compose ownership; container query failed")
@@ -384,7 +448,7 @@ func (m *Manager) ensurePulpSettingsAccess(ctx context.Context, root string) err
 	certs := filepath.Join(settings, "certs")
 	result, err := m.runner.Run(ctx, root, "sudo", "-n", "chmod", "0755", settings, certs)
 	if err != nil {
-		return fmt.Errorf("services: set Pulp settings directory access: %w", err)
+		return errors.New("services: set Pulp settings directory access command unavailable")
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("services: set Pulp settings directory access failed: %s", redact(result.Stderr))
@@ -406,7 +470,7 @@ func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string
 	}
 	result, err := m.runner.Run(ctx, dir, "sudo", up...)
 	if err != nil {
-		return fmt.Errorf("services: start harbor: %w", err)
+		return errors.New("services: start harbor command unavailable")
 	}
 	if result.ExitCode == 0 {
 		return nil
@@ -422,7 +486,7 @@ func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string
 	// turning a genuine configuration error into an unbounded restart loop.
 	result, err = m.runner.Run(ctx, dir, "sudo", "-n", "docker", "compose", "-f", harborCompose, "-p", project, "down", "--remove-orphans")
 	if err != nil {
-		return fmt.Errorf("services: start harbor failed: %s; recover Harbor topology: %w", firstFailure, err)
+		return errors.New("services: start harbor failed; recover Harbor topology command unavailable")
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("services: start harbor failed: %s; recover Harbor topology failed: %s", firstFailure, redact(result.Stderr))
@@ -431,7 +495,7 @@ func (m *Manager) startHarbor(ctx context.Context, harborCompose, profile string
 	up = append([]string{"-n", "docker", "compose", "-f", harborCompose, "-p", project, "up", "-d", "--wait"}, "--force-recreate", "--remove-orphans")
 	result, err = m.runner.Run(ctx, dir, "sudo", up...)
 	if err != nil {
-		return fmt.Errorf("services: recover Harbor topology: %w", err)
+		return errors.New("services: recover Harbor topology command unavailable")
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("services: recover Harbor topology failed after initial startup failure (%s): %s", firstFailure, redact(result.Stderr))
@@ -455,6 +519,12 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	}
 	result := Status{Configured: true, Running: state.Running, Profile: state.Profile, Fingerprint: state.Fingerprint, BindIP: state.BindIP, Root: state.Root}
 	result.InstanceID, result.Generation = state.InstanceID, state.Generation
+	if state.Running {
+		if err := m.validateHarborCredentials(ctx, state); err != nil {
+			result.Running = false
+			return result, err
+		}
+	}
 	if state.ComposePath == "" {
 		return result, nil
 	}
@@ -502,14 +572,14 @@ func (m *Manager) down(ctx context.Context) error {
 	}
 	project := "pilot-services-" + state.Profile
 	if result, err := m.runner.Run(ctx, m.root, "docker", "compose", "-f", state.ComposePath, "-p", project, "down"); err != nil {
-		return fmt.Errorf("services: stop compose: %w", err)
+		return errors.New("services: stop compose command unavailable")
 	} else if result.ExitCode != 0 {
 		return fmt.Errorf("services: stop compose failed: %s", redact(result.Stderr))
 	}
 	if state.HarborComposePath != "" {
 		harborProject := "pilot-harbor-" + state.Profile
 		if result, err := m.runner.Run(ctx, filepath.Dir(state.HarborComposePath), "sudo", "-n", "docker", "compose", "-f", state.HarborComposePath, "-p", harborProject, "down"); err != nil {
-			return fmt.Errorf("services: stop harbor: %w", err)
+			return errors.New("services: stop harbor command unavailable")
 		} else if result.ExitCode != 0 {
 			return fmt.Errorf("services: stop harbor failed: %s", redact(result.Stderr))
 		}
@@ -630,24 +700,28 @@ func (m *Manager) probeEndpoints(ctx context.Context, state ServiceState) error 
 		}
 		resp, err := m.client.Do(req)
 		if err != nil {
-			return fmt.Errorf("services: %s is unreachable: %w", probe.name, err)
+			return fmt.Errorf("services: %s is unreachable", probe.name)
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		if resp.StatusCode >= http.StatusInternalServerError {
-			return fmt.Errorf("services: %s health probe returned HTTP %s", probe.name, resp.Status)
+			return fmt.Errorf("services: %s health probe returned HTTP %d", probe.name, resp.StatusCode)
 		}
 	}
-	return nil
+	return m.validateHarborCredentials(ctx, state)
 }
 
 func serviceProbeURL(raw string, bindIP net.IP, path string) (string, error) {
+	if bindIP == nil || bindIP.IsUnspecified() {
+		return "", errors.New("invalid bind IP")
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Port() == "" {
 		return "", errors.New("missing scheme or port")
 	}
 	u.Host = net.JoinHostPort(bindIP.String(), u.Port())
 	u.Path = path
+	u.User = nil
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
@@ -850,5 +924,5 @@ func within(root, path string) bool {
 }
 
 func redact(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(s, "password", "[redacted]"), "secret", "[redacted]")
+	return "[service command output suppressed]"
 }

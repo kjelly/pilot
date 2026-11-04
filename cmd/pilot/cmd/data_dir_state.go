@@ -19,6 +19,10 @@ func newServiceManager() (*services.Manager, error) {
 }
 
 func newServiceManagerContext(ctx context.Context) (*services.Manager, error) {
+	return newServiceManagerForCredential(ctx, "")
+}
+
+func newServiceManagerForCredential(ctx context.Context, kind services.CredentialKind) (*services.Manager, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("services: load config: %w", err)
@@ -35,6 +39,9 @@ func newServiceManagerContext(ctx context.Context) (*services.Manager, error) {
 	// cache accidentally. Migration there requires an explicit source.
 	if servicesDir == "" && os.Getenv("PILOT_SERVICES_DIR") == "" && cfg.ServicesDir == config.Default().ServicesDir {
 		options.LegacyDirectories = []string{config.Default().DataDir, resolvePilotDataDir(), cfg.DataDir}
+	}
+	if kind != "" {
+		return services.NewSharedManagerRecoveryContext(ctx, options, kind, nil)
 	}
 	return services.NewSharedManagerContext(ctx, options, nil)
 }
