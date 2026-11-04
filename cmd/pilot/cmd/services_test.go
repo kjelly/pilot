@@ -210,7 +210,7 @@ func TestServicesConsumerCLIWithoutManagementMaterial(t *testing.T) {
 				t.Fatalf("listing lost durable identities: %+v", got)
 			}
 			if err := execute("services", "release-consumer", "--id", wanted[0].ID, "--confirm-interruption=false"); err == nil || !strings.Contains(err.Error(), "confirm-interruption") {
-				t.Fatalf("missing management material bypassed release confirmation: %v", err)
+				t.Errorf("release did not enforce interruption confirmation: %v", err)
 			}
 			if got := list(); len(got) != 2 {
 				t.Fatal("unconfirmed release changed registrations")
