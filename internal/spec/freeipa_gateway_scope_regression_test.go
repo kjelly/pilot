@@ -118,9 +118,10 @@ func TestRegression_GatewayLifecyclePreservesFailureAndStructuredChange(t *testi
 			task := tasks[1]
 			delete(task, "become")
 			script := `printf '%s' '{"changed":false}'`
-			if scenario == "changed" {
+			switch scenario {
+			case "changed":
 				script = `printf '%s' '{"changed":true}'`
-			} else if scenario == "failure" {
+			case "failure":
 				script = "echo lifecycle-native-failure >&2; exit 7"
 			}
 			task["ansible.builtin.command"].(map[string]any)["argv"] = []string{"/bin/sh", "-c", script}
@@ -271,9 +272,10 @@ func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.
 			marker := filepath.Join(dir, "fixture-mutation")
 			tasks := []any{guard, map[string]any{"name": "fixture mutation sentinel", "tags": []string{"always"}, "ansible.builtin.command": map[string]any{"argv": []string{"touch", marker}}}}
 			var args []string
-			if selection == "tags" {
+			switch selection {
+			case "tags":
 				args = []string{"--tags", "identity"}
-			} else if selection == "skip-tags" {
+			case "skip-tags":
 				args = []string{"--skip-tags", "fixtures"}
 			}
 			result := runGatewayTasks(t, dir, tasks, nil, nil, args...)
