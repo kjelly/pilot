@@ -28,5 +28,5 @@
   become: true
   check_mode: false
   register: ipa_gateway_lifecycle_result
-  changed_when: (ipa_gateway_lifecycle_result.stdout | from_json).changed | bool
+  changed_when: ipa_gateway_lifecycle_result.rc != 0 or ((ipa_gateway_lifecycle_result.stdout | from_json).changed | bool)
   tags: [always]

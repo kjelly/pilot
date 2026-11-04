@@ -13,3 +13,9 @@ with `admin`/`ipaservers`; those values do not prove the lifecycle fixture's
 scope correctness. Behavioral tests reconstruct the captured sequence types,
 then supply explicit synthetic scoped policy values and execute the real
 fixture script. The source capture fingerprint is included in the metadata.
+
+`native-short-host.json` preserves the real native `host_show('keep')` FQDN
+result and its before-JSON tuple/str descriptor from the same disposable
+authority on 2026-11-04. Unrelated host attributes are omitted. Tests exercise
+both native tuples and JSON lists, with explicit malformed/ambiguous semantic
+counterexamples and a separate live same-short identity in another domain.

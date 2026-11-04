@@ -75,6 +75,14 @@ pilot gateway-scope reconcile --scope gpu --hosts all --dir <workspace>
 
 ## 1.7 Scope ownership and host retirement acceptance
 
+- 所有發布入口使用同一份 resolved inventory snapshot；inventory alias 有明確
+  `ipa_client_fqdn` 時先映射並正規化，絕不拿 `ansible_host`/IP 當身分。gateway
+  alias 及其已知 canonical identity 均排除，canonical FQDN 去重。legacy IPA
+  short host 由 native host lookup 解析成唯一 FQDN，缺失或歧義時要求明確 mapping，
+  不猜 domain。整批 identity 在任何 scope mutation 前解析完畢。
+- 明確 canonical/mapped 的 retired FQDN 在 lookup 前即被 durable barrier 阻擋，
+  所以已刪除 host 的 stale inventory 不會破壞安全過濾。short host 則先查權威
+  canonical identity 再比對完整 FQDN；不得只因 basename 相同便排除不同的 live host。
 - `/var/lib/pilot-identity/gateway-scopes.json` 是 root-owned lifecycle ledger，
   綁定 domain、唯一 authority、scope 與 live hostgroup immutable ID；automember
   額外綁定 LDAP `entryUUID` 與 exact target group。名稱前綴或 description 不足以證明擁有權。

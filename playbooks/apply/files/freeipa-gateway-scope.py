@@ -8,6 +8,7 @@ operator-supplied exact ipauniqueid adoption; recreation invalidates ownership.
 import contextlib
 import fcntl
 import json
+import ipaddress
 import os
 import re
 import socket
@@ -17,8 +18,18 @@ import tempfile
 
 
 def fqdn(value):
-    value = value.lower().rstrip('.')
-    if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', value) or '.' not in value:
+    if not isinstance(value, str):
+        raise ValueError('an explicit canonical FQDN is required')
+    value = value.strip().lower().removesuffix('.')
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        raise ValueError('a host identity cannot be a transport IP address')
+    if (len(value) > 253 or '.' not in value
+            or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+                   for label in value.split('.'))):
         raise ValueError('an explicit canonical FQDN is required')
     return value
 
@@ -106,6 +117,52 @@ class Lifecycle:
         if len(values) != 1 or not re.fullmatch(r'[0-9a-fA-F-]{36}', values[0]):
             raise ValueError('live hostgroup immutable ID unavailable')
         return values[0].lower()
+
+    def resolve_host_identities(self, requested, retired):
+        """Keep show() strict; this is the native legacy-short compatibility boundary.
+
+        Explicit/mapped canonical retirements are filtered before lookup, even
+        after their host object was deleted. Short names need a live native
+        resolution; no suffix or retired-basename guessing grants an identity.
+        """
+        resolved, blocked = set(), set()
+        guidance = '; use the exact canonical FQDN or inventory ipa_client_fqdn mapping'
+        for raw in requested:
+            if not isinstance(raw, str):
+                raise ValueError('invalid gateway host identity' + guidance)
+            host = raw.strip().lower()
+            if '.' in host:
+                canonical = fqdn(host)
+                if canonical in retired:
+                    blocked.add(canonical)
+                    continue
+                if self.show('host', canonical) is None:
+                    raise ValueError('gateway host not found: ' + canonical + guidance)
+            else:
+                if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', host):
+                    raise ValueError('invalid legacy short host identity: ' + host + guidance)
+                try:
+                    response = self.api['host_show'](host, all=True)
+                except self.not_found:
+                    raise ValueError('legacy short host is missing or ambiguous: ' + host + guidance) from None
+                except Exception as error:
+                    raise ValueError('native legacy short lookup failed for ' + host + ': ' + str(error) + guidance) from error
+                result = response.get('result') if isinstance(response, dict) else None
+                names = result.get('fqdn') if isinstance(result, dict) else None
+                if (type(names) not in (list, tuple) or len(names) != 1
+                        or type(names[0]) is not str):
+                    raise ValueError('native short-host lookup has no unique canonical FQDN: ' + host + guidance)
+                try:
+                    canonical = fqdn(names[0])
+                except ValueError as error:
+                    raise ValueError('invalid native identity for short ' + host + ': ' + str(error) + guidance) from error
+                if canonical.split('.', 1)[0] != host:
+                    raise ValueError('native short-host lookup returned a different resource: ' + host + guidance)
+            if canonical in retired:
+                blocked.add(canonical)
+            else:
+                resolved.add(canonical)
+        return sorted(resolved), sorted(blocked)
 
     def owned(self, state, name, group):
         entry = state['scopes'].get(name)
@@ -243,6 +300,7 @@ class Lifecycle:
         name, action = 'pilot-target-' + scope, data.get('automember', 'none')
         if action not in ('none', 'enable', 'disable'):
             raise ValueError('invalid automember action')
+        desired, blocked = self.resolve_host_identities(data.get('hosts', []), state['retired'])
         group = self.show('hostgroup', name, raw=True)
         adopt = data.get('adopt_id', '').lower()
         if group is not None and not self.owned(state, name, group):
@@ -261,10 +319,9 @@ class Lifecycle:
             self.auto_rule(preview, name, adopt_id=adopt_auto, readonly=True)
         elif self.show('automember', name, type='hostgroup', raw=True) is not None:
             raise ValueError('unproven dangling automember rule blocks gateway group creation')
-        desired = sorted({fqdn(host) for host in data.get('hosts', [])} - set(state['retired']))
         current = [] if group is None else [fqdn(host) for host in self.show('hostgroup', name).get('member_host', [])]
         plan = dict(add=sorted(set(desired) - set(current)), remove=sorted(set(current) - set(desired)),
-                    keep=sorted(set(desired) & set(current)), blocked=sorted(set(data.get('hosts', [])) & set(state['retired'])))
+                    keep=sorted(set(desired) & set(current)), blocked=blocked)
         if readonly:
             return dict(plan, changed=False)
         if group is None:

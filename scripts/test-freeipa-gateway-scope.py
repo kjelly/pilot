@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 SOURCE = Path(__file__).resolve().parents[1] / 'playbooks/apply/files/freeipa-gateway-scope.py'
 SPEC = importlib.util.spec_from_file_location('gateway_scope', SOURCE)
@@ -18,6 +19,7 @@ gateway = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gateway)
 
 CAPTURES = json.loads((Path(__file__).parent / 'testdata/freeipa-gateway-scope/native-api.json').read_text())
+SHORT_CAPTURE = json.loads((Path(__file__).parent / 'testdata/freeipa-gateway-scope/native-short-host.json').read_text())
 
 
 def capture(command, raw=None, occurrence=0):
@@ -131,6 +133,93 @@ class LifecycleTest(unittest.TestCase):
     def helper(self):
         return gateway.Lifecycle(self.model, NotFound, self.store,
                                  lambda dn: self.model.rule_ids[dn])
+
+    def short_helper(self, response=None, failure=None, short='keep'):
+        model = self.model
+        calls = []
+
+        class API:
+            def __getitem__(unused, command):
+                original = model[command]
+
+                def call(name, **options):
+                    if command == 'host_show':
+                        calls.append(name)
+                        if name == short:
+                            if failure is not None:
+                                raise failure
+                            return copy.deepcopy(response if response is not None else SHORT_CAPTURE['result'])
+                    return original(name, **options)
+                return call
+
+        return gateway.Lifecycle(API(), NotFound, self.store, lambda dn: model.rule_ids[dn]), calls
+
+    def test_native_short_identity_lists_and_tuples_publish_only_canonical_hosts(self):
+        self.assertEqual('tuple', SHORT_CAPTURE['native_fqdn_type']['type'])
+        for container in (list, tuple):
+            with self.subTest(container=container):
+                response = copy.deepcopy(SHORT_CAPTURE['result'])
+                response['result']['fqdn'] = container(response['result']['fqdn'])
+                helper, calls = self.short_helper(response)
+                result = helper.publish(self.state, dict(scope='i227-capture', hosts=['KEEP', 'keep.ipa227.test', 'keep']), False)
+                self.assertEqual({'keep.ipa227.test'}, self.model.hosts)
+                self.assertEqual([], result['blocked'])
+                self.assertIn('keep', calls)
+                for command, name, options in self.model.mutations:
+                    if command.startswith('hostgroup_') and 'host' in options:
+                        self.assertTrue(all('.' in host for host in options['host']))
+
+    def test_short_identity_failures_block_complete_batch_before_mutation(self):
+        failures = [
+            ({'result': {}}, None, 'no unique canonical FQDN'),
+            ({'result': {'fqdn': 'keep.ipa227.test'}}, None, 'no unique canonical FQDN'),
+            ({'result': {'fqdn': ['keep.ipa227.test', 'keep.other.test']}}, None, 'no unique canonical FQDN'),
+            ({'result': {'fqdn': ['different.ipa227.test']}}, None, 'different resource'),
+            ({'result': {'fqdn': ['keep..test']}}, None, 'canonical FQDN'),
+            ({'result': {'fqdn': ['192.0.2.9']}}, None, 'transport IP'),
+            (None, NotFound(), 'missing or ambiguous'),
+            (None, RuntimeError('native discovery unavailable'), 'native discovery unavailable'),
+        ]
+        for response, failure, reason in failures:
+            with self.subTest(reason=reason, response=response):
+                helper, calls = self.short_helper(response, failure)
+                before = Path(self.path).read_bytes()
+                with self.assertRaisesRegex((ValueError, RuntimeError), reason):
+                    helper.publish(self.state, dict(scope='i227-capture', hosts=[self.model.b, 'keep']), False)
+                self.assertEqual([], self.model.mutations)
+                self.assertEqual(before, Path(self.path).read_bytes())
+        for value in ('192.0.2.9', '2001:db8::1', 'bad_host', 'keep..test', 'keep.ipa227.test..'):
+            with self.subTest(value=value):
+                helper, calls = self.short_helper()
+                with self.assertRaises(ValueError):
+                    helper.publish(self.state, dict(scope='i227-capture', hosts=[value]), False)
+                self.assertEqual([], calls)
+                self.assertEqual([], self.model.mutations)
+
+    def test_canonical_retirement_filters_before_lookup_and_short_uses_exact_native_identity(self):
+        self.state['retired'][self.model.a] = {'status': 'detached'}
+        helper, calls = self.short_helper()
+        desired, blocked = helper.resolve_host_identities([self.model.a.upper() + '.'], self.state['retired'])
+        self.assertEqual(([], [self.model.a]), (desired, blocked))
+        self.assertEqual([], calls)
+        short = self.model.a.split('.')[0]
+        # A native result for a genuinely different live same-short host is
+        # not a retirement receipt for the old domain; basename is no oracle.
+        other = short + '.other.test'
+        helper, calls = self.short_helper({'result': {'fqdn': (other,)}}, short=short)
+        self.assertEqual(([other], []), helper.resolve_host_identities([short], self.state['retired']))
+        helper, calls = self.short_helper({'result': {'fqdn': (self.model.a,)}}, short=short)
+        self.assertEqual(([], [self.model.a]), helper.resolve_host_identities([short], self.state['retired']))
+        self.assertEqual([short], calls)
+
+    def test_legacy_raw_short_rejection_negative_control(self):
+        helper, calls = self.short_helper()
+        def old_boundary(requested, retired):
+            return sorted({gateway.fqdn(host) for host in requested} - set(retired)), []
+        with mock.patch.object(helper, 'resolve_host_identities', side_effect=old_boundary):
+            with self.assertRaisesRegex(ValueError, 'canonical FQDN'):
+                helper.publish(self.state, dict(scope='i227-capture', hosts=['keep']), False)
+        self.assertEqual([], self.model.mutations)
 
     def retirement(self):
         return {'retirements': [dict(fqdn=self.model.a, alias='retire', stage='sandbox',

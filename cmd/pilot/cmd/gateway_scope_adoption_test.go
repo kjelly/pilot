@@ -38,6 +38,9 @@ func TestGatewayScopePlanFrontendPassesExplicitAdoption(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ansible-playbook"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"_meta\":{\"hostvars\":{}},\"all\":{}}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PILOT_GATEWAY_SCOPE_ARGS", argsPath)
 	originalScope, originalHosts, originalVault := gatewayScopeFlag, gatewayScopeHostsFlag, gatewayScopeVaultFile

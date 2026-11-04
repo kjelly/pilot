@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -285,36 +287,103 @@ func resolveGatewayScopeHosts(ctx context.Context, inventory string, requested [
 	if err != nil {
 		return nil, false, err
 	}
-	if !expandAll {
-		return normalized, false, nil
-	}
-
-	groups, err := resolveInventoryGroups(ctx, inventory)
+	snapshot, err := loadDeployInventorySnapshot(ctx, inventory)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve %q from inventory: %w", gatewayScopeAllHostsKeyword, err)
+		return nil, false, fmt.Errorf("resolve gateway host identities from inventory: %w", err)
 	}
-	hosts := groups[gatewayScopeAllHostsGroup]
-	if len(hosts) == 0 {
+	hosts := normalized
+	if expandAll {
+		hosts = snapshot.Groups[gatewayScopeAllHostsGroup]
+	}
+	if expandAll && len(hosts) == 0 {
 		return nil, false, fmt.Errorf("resolve %q from inventory: group %q is missing or empty", gatewayScopeAllHostsKeyword, gatewayScopeAllHostsGroup)
 	}
-	gateways := make(map[string]bool, len(groups[gatewayScopeAllExcludeGroup]))
-	for _, h := range groups[gatewayScopeAllExcludeGroup] {
-		gateways[h] = true
-	}
-	filtered := make([]string, 0, len(hosts))
-	for _, h := range hosts {
-		if !gateways[h] {
-			filtered = append(filtered, h)
+	aliases := map[string]map[string]bool{}
+	for _, group := range snapshot.Groups {
+		for _, alias := range group {
+			key := strings.ToLower(strings.TrimSuffix(alias, "."))
+			if aliases[key] == nil {
+				aliases[key] = map[string]bool{}
+			}
+			aliases[key][alias] = true
 		}
 	}
-	if len(filtered) == 0 {
-		return nil, false, fmt.Errorf("resolve %q from inventory group %q: every member is also a %q host (nothing left to publish as a target)", gatewayScopeAllHostsKeyword, gatewayScopeAllHostsGroup, gatewayScopeAllExcludeGroup)
+	for alias := range snapshot.HostVars {
+		key := strings.ToLower(strings.TrimSuffix(alias, "."))
+		if aliases[key] == nil {
+			aliases[key] = map[string]bool{}
+		}
+		aliases[key][alias] = true
 	}
-	expandedHosts, err := validateExpandedGatewayScopeHosts(filtered)
-	if err != nil {
-		return nil, false, fmt.Errorf("resolve %q from inventory group %q: %w", gatewayScopeAllHostsKeyword, gatewayScopeAllHostsGroup, err)
+	resolve := func(value string) (string, error) {
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
+		matches := aliases[key]
+		if len(matches) > 1 {
+			return "", fmt.Errorf("ambiguous inventory alias %q; use a unique exact ipa_client_fqdn mapping", value)
+		}
+		for alias := range matches {
+			if raw, exists := snapshot.HostVars[alias]["ipa_client_fqdn"]; exists {
+				mapped, ok := raw.(string)
+				if !ok || !validGatewayScopeIdentity(mapped, true) {
+					return "", fmt.Errorf("inventory alias %q has malformed ipa_client_fqdn; provide an exact canonical FQDN, never ansible_host/IP", alias)
+				}
+				return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(mapped), ".")), nil
+			}
+		}
+		if !validGatewayScopeIdentity(value, false) {
+			return "", fmt.Errorf("invalid gateway host identity %q; use an exact FQDN or inventory ipa_client_fqdn mapping, never ansible_host/IP", value)
+		}
+		return key, nil
 	}
-	return expandedHosts, true, nil
+	gateways, gatewayFQDNs := map[string]bool{}, map[string]bool{}
+	for _, alias := range snapshot.Groups[gatewayScopeAllExcludeGroup] {
+		gateways[strings.ToLower(strings.TrimSuffix(alias, "."))] = true
+		_, mapped := snapshot.HostVars[alias]["ipa_client_fqdn"]
+		if mapped || strings.Contains(alias, ".") {
+			identity, err := resolve(alias)
+			if err != nil {
+				return nil, false, err
+			}
+			gatewayFQDNs[identity] = true
+		}
+	}
+	unique := map[string]bool{}
+	for _, value := range hosts {
+		if gateways[strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))] {
+			continue
+		}
+		identity, err := resolve(value)
+		if err != nil {
+			return nil, false, err
+		}
+		if !gatewayFQDNs[identity] {
+			unique[identity] = true
+		}
+	}
+	if len(unique) == 0 {
+		return nil, false, fmt.Errorf("no gateway targets remain after excluding %q hosts and their known canonical identities", gatewayScopeAllExcludeGroup)
+	}
+	resolved := make([]string, 0, len(unique))
+	for identity := range unique {
+		resolved = append(resolved, identity)
+	}
+	sort.Strings(resolved)
+	return resolved, expandAll, nil
+}
+
+var gatewayScopeDNSLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func validGatewayScopeIdentity(raw string, requireFQDN bool) bool {
+	value := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if value == "" || len(value) > 253 || net.ParseIP(value) != nil || (requireFQDN && !strings.Contains(value, ".")) {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !gatewayScopeDNSLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func runGatewayScope(cmd *cobra.Command, planOnly bool) error {

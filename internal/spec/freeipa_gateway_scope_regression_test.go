@@ -74,6 +74,41 @@ func TestRegression_GatewayRetirementFixturePreservesNativeFailure(t *testing.T)
 	}
 }
 
+func TestRegression_GatewayLifecyclePreservesFailureAndStructuredChange(t *testing.T) {
+	source, err := os.ReadFile("../../playbooks/apply/tasks/freeipa-gateway-scope-lifecycle.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"failure", "unchanged", "changed"} {
+		t.Run(scenario, func(t *testing.T) {
+			var tasks []map[string]any
+			if err := yaml.Unmarshal(source, &tasks); err != nil {
+				t.Fatal(err)
+			}
+			task := tasks[1]
+			delete(task, "become")
+			script := `printf '%s' '{"changed":false}'`
+			if scenario == "changed" {
+				script = `printf '%s' '{"changed":true}'`
+			} else if scenario == "failure" {
+				script = "echo lifecycle-native-failure >&2; exit 7"
+			}
+			task["ansible.builtin.command"].(map[string]any)["argv"] = []string{"/bin/sh", "-c", script}
+			vars := map[string]any{"ipa_gateway_lifecycle_request": map[string]any{}, "ipa_gateway_lifecycle_authority": "ipa.ipa227.test", "freeipa_domain": "ipa227.test"}
+			result := runGatewayTasks(t, t.TempDir(), []any{task}, vars, nil)
+			if (result.rc != 0) != (scenario == "failure") {
+				t.Fatalf("wrong lifecycle status for %s: rc=%d failures=%v", scenario, result.rc, result.failures)
+			}
+			if result.changed["Run the serialized gateway scope lifecycle"] != (scenario != "unchanged") {
+				t.Fatalf("lifecycle must retain structured change or conservatively report partial failure: %v", result.changed)
+			}
+			if scenario == "failure" && (!strings.Contains(result.raw, `"rc": 7`) || !strings.Contains(result.raw, `"stderr": "lifecycle-native-failure"`) || strings.Contains(result.raw, "changed_when_result")) {
+				t.Fatal("lifecycle failure lost its original rc/stderr or acquired a secondary JSON error")
+			}
+		})
+	}
+}
+
 func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.T) {
 	source, err := os.ReadFile("../../playbooks/test/fixtures/gateway-scope-retirement-fixtures.yml")
 	if err != nil {
