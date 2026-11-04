@@ -1,0 +1,12 @@
+schemaVersion: 1
+id: os-patch-sla
+role: fixture-unrelated
+specs: [{path: acceptance.md, rows: {all: true}}]
+playbooks: {apply: playbooks/unrelated.yml}
+dependencies: []
+hostCardinality: one-or-more
+resources: {minCPU: 1, minRAMMiB: 1, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+verification: {autoDeploy: false}
+site: {include: false, order: 5, vars: {}, tags: [], optIn: true}

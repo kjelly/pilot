@@ -1,0 +1,17 @@
+schemaVersion: 1
+id: dns
+role: fixture-consumer
+specs: [{path: acceptance.md, rows: {all: true}}]
+playbooks: {apply: playbooks/consumer.yml}
+dependencies:
+  - {component: docker, required: true, relation: providerEndpoint, applyBeforeConsumer: true}
+bindings:
+  - {input: fixture_provider_host, requiredWhenDependencySelected: true, sourceSelection: exactlyOne, from: {component: docker, endpoint: api}}
+groupVars:
+  - {name: fixture_provider_host, type: string, required: true, secret: false}
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 1, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+verification: {autoDeploy: false}
+site: {include: false, order: 3, vars: {}, tags: [], optIn: true}
