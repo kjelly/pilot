@@ -13,6 +13,101 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type gatewayCommandObservation struct {
+	RC                int    `json:"rc"`
+	Stderr            string `json:"stderr"`
+	Changed           bool   `json:"changed"`
+	Failed            bool   `json:"failed"`
+	ChangedWhenResult any    `json:"changed_when_result"`
+}
+
+// Ansible callbacks may omit/null this diagnostic or emit the evaluated
+// boolean. A conditional-error payload is never a successful changed result.
+func checkGatewayCommandObservation(raw string, want gatewayCommandObservation) (gatewayCommandObservation, error) {
+	var callback struct {
+		Plays []struct {
+			Tasks []struct {
+				Hosts map[string]gatewayCommandObservation
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(raw), &callback); err != nil {
+		return gatewayCommandObservation{}, err
+	}
+	var observations []gatewayCommandObservation
+	for _, play := range callback.Plays {
+		for _, task := range play.Tasks {
+			for _, host := range task.Hosts {
+				observations = append(observations, host)
+			}
+		}
+	}
+	if len(observations) != 1 {
+		return gatewayCommandObservation{}, fmt.Errorf("expected one command observation, got %d", len(observations))
+	}
+	got := observations[0]
+	switch value := got.ChangedWhenResult.(type) {
+	case nil:
+	case bool:
+		if value != want.Changed {
+			return got, fmt.Errorf("changed_when_result boolean %t does not match expected changed=%t", value, want.Changed)
+		}
+	default:
+		return got, fmt.Errorf("changed_when_result contains a conditional-error payload (%T)", value)
+	}
+	if got.RC != want.RC || got.Stderr != want.Stderr || got.Changed != want.Changed || got.Failed != want.Failed {
+		return got, fmt.Errorf("unexpected command observation: got %+v, want %+v", got, want)
+	}
+	return got, nil
+}
+
+func TestRegression_GatewayScopeChangedWhenObservationTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name, diagnostic string
+		changed, failed  bool
+		valid            bool
+	}{
+		{"missing", "", true, true, true},
+		{"null", "null", true, true, true},
+		{"true failure", "true", true, true, true},
+		{"true changed success", "true", true, false, true},
+		{"false unchanged success", "false", false, false, true},
+		{"null unchanged success", "null", false, false, true},
+		{"missing unchanged success", "", false, false, true},
+		{"string true", `"true"`, true, true, false},
+		{"padded string true", `" true"`, true, true, false},
+		{"conditional error", `"Error while evaluating from_json: Expecting value"`, true, true, false},
+		{"map", `{"error":"from_json"}`, true, true, false},
+		{"array", `["from_json"]`, true, true, false},
+		{"number", "1", true, true, false},
+		{"true mismatch", "true", false, false, false},
+		{"false mismatch", "false", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := gatewayCommandObservation{Changed: tc.changed, Failed: tc.failed}
+			if tc.failed {
+				want.RC, want.Stderr = 7, "native-failure"
+			}
+			host, _ := json.Marshal(want)
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(host, &fields); err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, "changed_when_result")
+			if tc.diagnostic != "" {
+				fields["changed_when_result"] = json.RawMessage(tc.diagnostic)
+			}
+			raw, err := json.Marshal(map[string]any{"plays": []any{map[string]any{"tasks": []any{map[string]any{"hosts": map[string]any{"localhost": fields}}}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := checkGatewayCommandObservation(string(raw), want); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v observation=%s err=%v", tc.valid, raw, err)
+			}
+		})
+	}
+}
+
 func TestRegression_GatewayScopeLifecycleModel(t *testing.T) {
 	command := exec.Command("python3", "../../scripts/test-freeipa-gateway-scope.py")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -69,38 +164,34 @@ func TestRegression_GatewayRetirementFixturePreservesNativeFailure(t *testing.T)
 	block := plays[3]["tasks"].([]any)[0].(map[string]any)["block"].([]any)
 	task := block[2].(map[string]any)
 	task["ansible.builtin.command"].(map[string]any)["argv"] = []string{"/bin/sh", "-c", "echo fixture-native-failure >&2; exit 7"}
-	result := runGatewayTasks(t, t.TempDir(), []any{task}, nil, nil)
-	if result.rc == 0 || len(result.failures) != 1 {
-		t.Fatalf("native fixture failure was swallowed: rc=%d failures=%v", result.rc, result.failures)
-	}
-	var callback struct {
-		Plays []struct {
-			Tasks []struct {
-				Hosts map[string]struct {
-					RC                int    `json:"rc"`
-					Stderr            string `json:"stderr"`
-					Changed           bool   `json:"changed"`
-					ChangedWhenResult any    `json:"changed_when_result"`
-				}
+	for _, control := range []string{"guarded", "unguarded-json-negative-control"} {
+		t.Run(control, func(t *testing.T) {
+			if control != "guarded" {
+				task["changed_when"] = "(issue227_fixture_authorization.stdout | from_json).changed | bool"
 			}
-		}
-	}
-	if err := json.Unmarshal([]byte(result.raw), &callback); err != nil {
-		t.Fatal(err)
-	}
-	observations := 0
-	for _, play := range callback.Plays {
-		for _, task := range play.Tasks {
-			for _, host := range task.Hosts {
-				observations++
-				if host.RC != 7 || host.Stderr != "fixture-native-failure" || !host.Changed || host.ChangedWhenResult != nil {
-					t.Fatalf("preserve native rc/stderr and possible partial mutation without secondary JSON failure: %+v", host)
-				}
+			result := runGatewayTasks(t, t.TempDir(), []any{task}, nil, nil)
+			if result.rc == 0 || len(result.failures) != 1 {
+				t.Fatalf("native fixture failure was swallowed: rc=%d failures=%v", result.rc, result.failures)
 			}
-		}
+			want := gatewayCommandObservation{RC: 7, Stderr: "fixture-native-failure", Changed: true, Failed: true}
+			got, err := checkGatewayCommandObservation(result.raw, want)
+			if control == "guarded" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				assertGatewayConditionalError(t, got, want, err)
+			}
+		})
 	}
-	if observations != 1 {
-		t.Fatalf("missing native failure observation: %d", observations)
+}
+
+func assertGatewayConditionalError(t *testing.T, got, want gatewayCommandObservation, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "changed_when_result contains a conditional-error payload") ||
+		!strings.Contains(fmt.Sprint(got.ChangedWhenResult), "from_json") ||
+		got.RC != want.RC || got.Stderr != want.Stderr || !got.Failed || !got.Changed {
+		t.Fatalf("unguarded JSON must fail specifically with its conditional error while retaining native failure: observation=%+v err=%v", got, err)
 	}
 }
 
@@ -133,8 +224,26 @@ func TestRegression_GatewayLifecyclePreservesFailureAndStructuredChange(t *testi
 			if result.changed["Run the serialized gateway scope lifecycle"] != (scenario != "unchanged") {
 				t.Fatalf("lifecycle must retain structured change or conservatively report partial failure: %v", result.changed)
 			}
-			if scenario == "failure" && (!strings.Contains(result.raw, `"rc": 7`) || !strings.Contains(result.raw, `"stderr": "lifecycle-native-failure"`) || strings.Contains(result.raw, "changed_when_result")) {
-				t.Fatal("lifecycle failure lost its original rc/stderr or acquired a secondary JSON error")
+			want := gatewayCommandObservation{Changed: scenario != "unchanged", Failed: scenario == "failure"}
+			if scenario == "failure" {
+				want.RC, want.Stderr = 7, "lifecycle-native-failure"
+				if len(result.failures) != 1 {
+					t.Fatalf("expected exactly one failed command: %v", result.failures)
+				}
+			}
+			if _, err := checkGatewayCommandObservation(result.raw, want); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "failure" {
+				t.Run("unguarded-json-negative-control", func(t *testing.T) {
+					task["changed_when"] = "(ipa_gateway_lifecycle_result.stdout | from_json).changed | bool"
+					negative := runGatewayTasks(t, t.TempDir(), []any{task}, vars, nil)
+					if negative.rc == 0 || len(negative.failures) != 1 {
+						t.Fatalf("negative control must retain the failed execution: rc=%d failures=%v", negative.rc, negative.failures)
+					}
+					got, err := checkGatewayCommandObservation(negative.raw, want)
+					assertGatewayConditionalError(t, got, want, err)
+				})
 			}
 		})
 	}
