@@ -454,3 +454,81 @@ func TestVMServiceConsumerPhysicalTamperingRefusesBeforeDomainCreation(t *testin
 		})
 	}
 }
+
+// Consumer bookkeeping needs public stack identity, not management secrets. The
+// virsh shim exercises central Up/Down and deferred provisioning cleanup; native
+// domain/service execution is covered separately by candidate target evidence.
+func TestVMServiceConsumerMissingManagementMaterialLifecycle(t *testing.T) {
+	for _, missing := range []string{"harbor/secrets/admin-password", "ca/ca-key.pem", "pulp/settings/secret-key"} {
+		for _, flow := range []string{"down", "retry", "provision-failure"} {
+			t.Run(missing+"/"+flow, func(t *testing.T) {
+				serviceManager, bootstrap, probes := registeredServiceFixture(t)
+				path := filepath.Join(probes.root, missing)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := services.NewSharedManagerContext(context.Background(), services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory}, nil); err == nil {
+					t.Fatal("management discovery accepted missing management material")
+				}
+				body := serviceConsumerVirsh + happyVirsh
+				if flow == "provision-failure" {
+					body = "start) echo synthetic-start-failure >&2; exit 1 ;;\n" + body
+				}
+				m, base := newTestManager(t, body)
+				const name = "missing-management-service-vm"
+				target, err := m.Up(context.Background(), Options{Name: name, BaseImage: base, Services: bootstrap})
+				if flow == "provision-failure" {
+					if err == nil || !strings.Contains(err.Error(), "synthetic-start-failure") {
+						t.Fatalf("expected failure after domain definition: %v", err)
+					}
+				} else {
+					if err != nil || target.ServiceConsumer == nil {
+						t.Fatalf("independent data proof did not permit provisioning: %v", err)
+					}
+					if flow == "retry" {
+						dir := filepath.Dir(os.Getenv("PILOT_VIRSH_BIN"))
+						writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", "case \"$1\" in\nundefine) exit 1 ;;\n"+serviceConsumerVirsh+happyVirsh+"\nesac")
+						if err := m.Down(context.Background(), name); err == nil || !strings.Contains(err.Error(), "undefine failed") {
+							t.Fatalf("failed teardown did not retain registration: %v", err)
+						}
+						consumers, err := serviceManager.Consumers(context.Background())
+						if err != nil || len(consumers) != 1 || consumers[0] != *target.ServiceConsumer {
+							t.Fatalf("retry lost exact durable registration: %+v %v", consumers, err)
+						}
+						if _, err := m.Get(context.Background(), name); err != nil {
+							t.Fatal("failed teardown discarded retry state")
+						}
+						writeShim(t, dir, "virsh", "PILOT_VIRSH_BIN", "case \"$1\" in\n"+serviceConsumerVirsh+happyVirsh+"\nesac")
+					}
+					if err := m.Down(context.Background(), name); err != nil {
+						t.Fatalf("verified teardown requires unavailable management material: %v", err)
+					}
+				}
+				consumers, err := serviceManager.Consumers(context.Background())
+				if err != nil || len(consumers) != 0 {
+					t.Fatalf("verified domain removal retained durable registration: %+v %v", consumers, err)
+				}
+				targets, err := m.store.Load()
+				if err != nil || len(targets) != 0 {
+					t.Fatalf("verified cleanup retained target state: %+v %v", targets, err)
+				}
+				for _, removed := range []string{os.Getenv("PILOT_VIRSH_BIN") + ".domain", filepath.Join(m.vmDir, name), path} {
+					if _, err := os.Stat(removed); !os.IsNotExist(err) {
+						t.Fatalf("cleanup retained artifacts or recreated management material %s: %v", removed, err)
+					}
+				}
+				if err := m.Down(context.Background(), name); err != nil {
+					t.Fatalf("repeated teardown: %v", err)
+				}
+				// The fixture's initial authenticated probe always ran. During Up,
+				// an absent admin secret makes its management probe unavailable;
+				// all other cases still authenticate once without touching the DB.
+				adminProbes := 2
+				if missing == "harbor/secrets/admin-password" {
+					adminProbes = 1
+				}
+				probes.assertCounts(t, adminProbes, 0, 0, 0)
+			})
+		}
+	}
+}

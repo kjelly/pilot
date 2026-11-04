@@ -126,7 +126,7 @@ func (m *Manager) teardownServiceConsumer(ctx context.Context, target *Target) e
 	}
 	m.cleanupTargetArtifacts(ctx, target)
 	consumer := *target.ServiceConsumer
-	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: consumer.DiscoveryDirectory}, nil)
+	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: consumer.DiscoveryDirectory, ConsumptionOnly: true}, nil)
 	if err != nil {
 		return err
 	}

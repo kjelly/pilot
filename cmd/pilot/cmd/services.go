@@ -116,7 +116,7 @@ var servicesConsumersCmd = &cobra.Command{
 	Use:   "consumers",
 	Short: "List durable VM consumer registrations, including pending provisioning",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		m, err := newServiceManagerContext(cmd.Context())
+		m, err := newConsumptionServiceManager(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -132,7 +132,7 @@ var servicesReleaseConsumerCmd = &cobra.Command{
 	Use:   "release-consumer",
 	Short: "Release one exact registration, accepting interruption risk for its VM",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		m, err := newServiceManagerContext(cmd.Context())
+		m, err := newConsumptionServiceManager(cmd.Context())
 		if err != nil {
 			return err
 		}
