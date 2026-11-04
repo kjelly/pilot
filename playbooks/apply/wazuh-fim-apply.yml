@@ -183,6 +183,7 @@
                 wazuh_repo_channel: "{{ wazuh_repo_channel | default('4.x') }}"
                 wazuh_agent_transaction_reserved: false
                 pilot_wazuh_agent_install_selected: false
+                wazuh_manager_bound_address: ""
               tags: [always]
 
             # Auto-fallback for the common single-inventory case: if the caller left
@@ -222,14 +223,29 @@
                        if groups.get('wazuh-manager', []) | length == 1 else '', true) }}
               tags: [always]
 
-            - name: "Gate: enrollment endpoint maps to exactly one inventory manager"
+            - name: "Gate: native manager observation uses an inventory manager"
               ansible.builtin.assert:
                 that:
                   - wazuh_manager_probe_host in hostvars
-                  - >-
-                    wazuh_manager_host in [wazuh_manager_probe_host,
-                      hostvars[wazuh_manager_probe_host].ansible_host | default(wazuh_manager_probe_host)]
-                fail_msg: "Set wazuh_manager_inventory_host to the exact inventory host matching wazuh_manager_host"
+                fail_msg: "Enrollment requires one exact inventory manager before native observation"
+              when: wazuh_enrollment_enabled | bool
+              tags: [always]
+
+            - name: "Bind enrollment to its unique trusted inventory manager"
+              ansible.builtin.include_tasks:
+                file: tasks/wazuh-endpoint-resolve.yml
+                apply:
+                  tags: [always]
+              vars:
+                wazuh_endpoint_value: "{{ wazuh_manager_host }}"
+                wazuh_endpoint_inventory: "{{ (groups.get('wazuh-manager', []) + [wazuh_manager_probe_host]) | unique }}"
+                wazuh_endpoint_manager: "{{ wazuh_manager_probe_host }}"
+              when: wazuh_enrollment_enabled | bool
+              tags: [always]
+
+            - name: "Retain the manager transport bound before native observation"
+              ansible.builtin.set_fact:
+                wazuh_manager_bound_address: "{{ wazuh_endpoint_address }}"
               when: wazuh_enrollment_enabled | bool
               tags: [always]
 
@@ -536,12 +552,8 @@
                     # alias even though this task itself reports "changed".
                 - name: "Step 5b: Resolve wazuh_manager_host for the /etc/hosts pin (spec C7)"
                   tags: [C7]
-                  ansible.builtin.include_tasks:
-                    file: tasks/resolve-hosts-alias-target.yml
-                    apply:
-                      tags: [C7]
-                  vars:
-                    hosts_alias_target_host: "{{ wazuh_manager_host | default('') }}"
+                  ansible.builtin.set_fact:
+                    hosts_alias_resolved_ip: "{{ wazuh_manager_bound_address }}"
                   when: wazuh_enrollment_enabled | bool
 
                 - name: "Own selected Step 6 resource changes"

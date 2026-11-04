@@ -7,6 +7,7 @@ prove graph ordering, cleanup and optional-manager semantics, not daemon health.
 Mount namespace data is synthetic; the real production decoder still runs.
 """
 import json
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -90,6 +91,11 @@ class WriterTaskGraphTests(unittest.TestCase):
                                             'project': str(root / 'project'), 'policy_failure': scenario == 'early-fail'}))
             worker = root / 'worker.py'
             worker.write_text('SETTINGS=' + repr(str(settings)) + '\n' + WORKER)
+            (root/'tasks').mkdir();(root/'files').mkdir()
+            for helper in ('wazuh-endpoint-resolve.yml','resolve-hosts-alias-target.yml'):
+                shutil.copy2(REPO/'playbooks/apply/tasks'/helper,root/'tasks'/helper)
+            shutil.copy2(REPO/'playbooks/apply/files/wazuh-endpoint.py',root/'files/wazuh-endpoint.py')
+
             play = yaml.safe_load((REPO / 'playbooks/apply' / (role + '-apply.yml')).read_text())[0]
             play.update(connection='local', become=False, gather_facts=False)
             play['vars'].update(target_group='all', ansible_os_family='Debian', ansible_architecture='x86_64',
@@ -135,6 +141,10 @@ class WriterTaskGraphTests(unittest.TestCase):
                     elif 'ansible.builtin.include_tasks' in task:
                         include = task['ansible.builtin.include_tasks']
                         filename = include if isinstance(include, str) else include['file']
+                        if Path(filename).name == 'wazuh-endpoint-resolve.yml':
+                            if isinstance(include,str):task['ansible.builtin.include_tasks']=str(root/'tasks'/Path(filename).name)
+                            else:include['file']=str(root/'tasks'/Path(filename).name)
+                            continue
                         action = 'controlled-recovery-failure' if scenario == 'failed-recover' and 'wazuh-agent-recover' in filename else 'native-mutation'
                         replace_action(task, action)
                     elif 'ansible.builtin.stat' in task:
@@ -157,7 +167,12 @@ class WriterTaskGraphTests(unittest.TestCase):
             config.write_text('[defaults]\nfact_caching=memory\nretry_files_enabled=false\n')
             env = dict(os.environ, ANSIBLE_CONFIG=str(config), ANSIBLE_LOCAL_TEMP=str(root / 'local'),
                        ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_CACHE_PLUGIN='memory')
-            run = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(filename), *flags], env=env,
+            inventory=root/'inventory.yml'
+            # Explicit manager identity evidence for the managed scenario.
+            hosts={'localhost':{'ansible_connection':'local','ansible_host':'127.0.0.1'}}
+            groups={'wazuh-manager':{'hosts':{'localhost':{}}}} if 'wazuh_manager_host=localhost' in flags else {}
+            inventory.write_text(yaml.safe_dump({'all':{'hosts':hosts,'children':groups}}))
+            run = subprocess.run(['ansible-playbook', '-i', str(inventory), str(filename), *flags], env=env,
                                  cwd=root, text=True, capture_output=True, timeout=90)
             log = root / 'events.jsonl'
             events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []

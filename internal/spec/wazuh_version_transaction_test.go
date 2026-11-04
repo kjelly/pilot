@@ -51,3 +51,12 @@ func TestWazuhReaderCustodyBehavior(t *testing.T) {
 		t.Fatalf("Wazuh reader custody controls failed: %v\n%s", err, output)
 	}
 }
+
+// Endpoint identity is exercised through the actual shared resolver and
+// ScriptModule, with only inventory/transport data supplied by the fixture.
+func TestWazuhEndpointBinding(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_endpoint_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh endpoint binding controls failed: %v\\n%s", err, output)
+	}
+}

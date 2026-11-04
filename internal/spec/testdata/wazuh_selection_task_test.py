@@ -65,8 +65,9 @@ class SelectionGraphTests(unittest.TestCase):
                                              'fault_resource': fault[0] if fault else ''}))
             worker = REPO / 'internal/spec/testdata/wazuh_selection_backend.py'
             tasks = root / 'tasks'; tasks.mkdir()
-            for pattern in ('apt-*.yml', 'wazuh-agent-*.yml', 'resolve-hosts-alias-target.yml'):
+            for pattern in ('apt-*.yml', 'wazuh-agent-*.yml', 'wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
                 for source in (SOURCE / 'tasks').glob(pattern): shutil.copy2(source, tasks / source.name)
+            (root/'files').mkdir();shutil.copy2(SOURCE/'files/wazuh-endpoint.py',root/'files/wazuh-endpoint.py')
             play = yaml.safe_load((SOURCE / 'wazuh-fim-apply.yml').read_text())[0]
             play.update(connection='local', become=False, gather_facts=False)
             play['vars'].update(target_group='all', ansible_os_family=family, ansible_architecture='x86_64',
@@ -108,6 +109,7 @@ class SelectionGraphTests(unittest.TestCase):
                             tail = script.split('wazuh-transaction.py', 1)[1]
                             del task['ansible.builtin.script']
                             task['ansible.builtin.command'] = {'cmd': 'python3 ' + str(worker) + ' ' + str(settings) + ' ' + tail}
+                        elif 'wazuh-endpoint.py' in script: pass
                         elif '--cache-preflight' in script:
                             replace(task, 'metadata')
                         else:
@@ -151,7 +153,11 @@ class SelectionGraphTests(unittest.TestCase):
                 filename = wrapper
             config = root / 'ansible.cfg'; config.write_text('[defaults]\nfact_caching=memory\nretry_files_enabled=false\n')
             env = dict(os.environ, ANSIBLE_CONFIG=str(config), ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_CACHE_PLUGIN='memory')
-            run = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(filename), *flags], cwd=root, env=env, capture_output=True, text=True, timeout=120)
+            inventory=root/'inventory.yml'
+            inventory.write_text(yaml.safe_dump({'all':{'hosts':{'localhost':{
+                'ansible_connection':'local','ansible_host':'127.0.0.1'}},'children':
+                {'wazuh-manager':{'hosts':{'localhost':{}}}} if managed else {}}}))
+            run = subprocess.run(['ansible-playbook', '-i', str(inventory), str(filename), *flags], cwd=root, env=env, capture_output=True, text=True, timeout=120)
             events = [json.loads(line) for line in events_file.read_text().splitlines()] if events_file.exists() else []
             state = json.loads(state_file.read_text()); state['ownership'] = actor.inspect()
             state['before'] = before; state['after'] = {name: metadata(Path(value)) for name, value in paths.items()}

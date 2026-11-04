@@ -221,7 +221,7 @@ controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不
 
 | Spec ID | Apply task | 備註 |
 |---------|------------|------|
-| C1 | `add wazuh apt repo + GPG key` → `install wazuh-agent` | apt-only || if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qxE '(install|hold) ok installed'; fi |
+| C1 | Debian APT／RedHat DNF repository + signed exact `wazuh-agent` install family | 共用 manager 相容性 gate；既有版本保留、明示升級及 native package protection |
 | C2 | `install auditd` | who-data provider=audit 的執行期依賴 |
 | C3 | `ensure wazuh-agent enabled+started` | 只在設定檔真的變更或剛完成註冊時才重啟 |
 | C4 | `ensure auditd enabled+started` | — |

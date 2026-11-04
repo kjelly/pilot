@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Bounded Wazuh-only immark ownership, native capability and loaded-state gate."""
 import collections
+import fnmatch
 import glob
 import hashlib
 import json
@@ -243,6 +244,67 @@ def reader_files(root='/etc/rsyslog.conf'):
     return contents
 
 
+def reader_namespace(value, protected, pattern=False):
+    """Classify literal physical namespaces; unfamiliar aliases are not absence."""
+    if (not isinstance(value, str) or not value.startswith('/') or
+            any(c in value for c in '$%\\\x00') or value.startswith('//') or
+            os.path.normpath(value) != value):
+        raise ValueError('unknown or noncanonical reader data namespace')
+    wildcard = next((i for i, part in enumerate(pathlib.PurePath(value).parts)
+                     if any(c in part for c in '*?[')), None)
+    if wildcard is not None and not pattern:
+        raise ValueError('dynamic reader data namespace')
+    if wildcard is not None:
+        matches = glob.glob(value)
+        if len(matches) > 2048:
+            raise ValueError('reader source namespace exceeds qualified bound')
+        related = False
+        for match in matches:
+            related |= reader_namespace(match, protected)
+        if related:
+            return True
+    prefix = pathlib.Path(*pathlib.PurePath(value).parts[:wildcard]) if wildcard is not None else pathlib.Path(value)
+    existing = prefix
+    while not existing.exists() and not existing.is_symlink():
+        if existing == existing.parent:
+            raise ValueError('reader namespace has no physical anchor')
+        existing = existing.parent
+    if existing.is_file() and existing.stat().st_nlink != 1:
+        raise ValueError('aliased reader source namespace')
+    for node in (existing, *existing.parents):
+        if node.is_symlink() or node.resolve() != node.absolute():
+            raise ValueError('aliased reader data namespace')
+    # Subtree mounts can alias a protected tree under an unrelated spelling.
+    # A normal distinct filesystem root remains supported; bind/subtree roots
+    # cannot establish disjointness for this bounded inspector.
+    for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 7:
+            raise ValueError('unknown reader mount namespace')
+        def decode(field):
+            return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), field)
+        root, mount = decode(fields[3]), decode(fields[4])
+        if root != '/' and (str(existing) == mount or str(existing).startswith(mount.rstrip('/') + '/')):
+            raise ValueError('reader namespace uses an unsupported subtree mount')
+    for target in protected:
+        target = pathlib.Path(target)
+        name = str(target)
+        if pattern:
+            if fnmatch.fnmatchcase(name, value):
+                return True
+        elif value == name or value.startswith(name.rstrip('/') + '/'):
+            return True
+        if existing.exists() and target.exists():
+            info = existing.stat()
+            for node in (target, *target.parents):
+                other = node.stat()
+                if (info.st_dev, info.st_ino) == (other.st_dev, other.st_ino):
+                    # Sharing / or an ordinary common ancestor is not aliasing.
+                    if str(existing) != str(node):
+                        raise ValueError('physical reader namespace alias')
+    return False
+
+
 def inspect_reader():
     """Private typed metadata, not a delivery/graceful-save certificate."""
     profile = OWNER.parent / 'pilot-wazuh/profile.json'
@@ -261,6 +323,33 @@ def inspect_reader():
     if any(name == '$modload' and pathlib.PurePath(attrs['value']).name.lower() in ('imfile', 'imfile.so')
            for name, attrs, _ in calls):
         raise ValueError('unknown legacy imfile module ownership')
+    protected = ['/var/spool/rsyslog/pilot-wazuh']
+    if profile.exists() and not profile.is_symlink():
+        source_hint = json.loads(profile.read_text()).get('source')
+        if source_hint:
+            # The profile itself is independently validated below.
+            reader_namespace(source_hint, [], pattern=False)
+            protected.append(source_hint)
+    namespace_owned = False
+    for name, attrs, _ in calls:
+        for field in ('statefile.directory', 'queue.spooldirectory', 'workdirectory'):
+            if field in attrs:
+                namespace_owned |= reader_namespace(attrs[field], protected)
+        if name == 'input' and attrs.get('type', '').lower() == 'imfile':
+            value = attrs.get('file')
+            if not value:
+                raise ValueError('unknown imfile source namespace')
+            namespace_owned |= reader_namespace(value, protected, pattern=True)
+        if 'queue.filename' in attrs:
+            filename = attrs['queue.filename']
+            if filename.startswith('/'):
+                namespace_owned |= reader_namespace(filename, protected)
+            elif (filename in ('.', '..') or not re.fullmatch(r'[A-Za-z0-9_.:-]+', filename)):
+                raise ValueError('unknown relative reader queue filename namespace')
+            # Native relative basenames are anchored in their declared spool
+            # (or global work directory); a disjoint queue in a shared parent
+            # does not acquire the exclusive pilot-wazuh child namespace.
+
     owned_text = files.get(str(OWNER), '')
     inputs = [(attrs, filename) for name, attrs, filename in calls
               if name == 'input' and attrs.get('type', '').lower() == 'imfile']
@@ -302,7 +391,7 @@ def inspect_reader():
     base = {'schema': 1, 'files': hashes, 'pid': int(pid), 'imfile_inputs': [attrs for attrs, _ in inputs]}
     if not profile.exists() and not profile.is_symlink():
         if (OWNER.exists() or OWNER.is_symlink() or owned_text or owned_inputs or actions
-                or any(item.get('statefile.directory') == '/var/spool/rsyslog/pilot-wazuh/state' for item in modules)):
+                or namespace_owned):
             raise ValueError('Wazuh reader without owned profile')
         return dict(base, mode='never', profile=None)
     if (profile.is_symlink() or not profile.is_file() or profile.resolve() != profile.absolute()
@@ -316,7 +405,7 @@ def inspect_reader():
     base.update(profile=value, profile_sha256=hashlib.sha256(profile.read_bytes()).hexdigest())
     if not value['enabled']:
         if (owned_text or owned_inputs or actions
-                or any(item.get('statefile.directory') == '/var/spool/rsyslog/pilot-wazuh/state' for item in modules)):
+                or namespace_owned):
             raise ValueError('disabled profile still has Wazuh input/action/cursor access')
         # Loaded FDs are independently inspected by the transaction against
         # the actual central volume; profile strings alone cannot prove absence.

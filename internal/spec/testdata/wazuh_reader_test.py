@@ -36,7 +36,8 @@ class ReaderFilesystemTests(unittest.TestCase):
         (state / 'imfile-state:123456').write_text('old cursor offset')
         queue = spool / 'wazuh_alerts.00000001'
         queue.write_bytes(b'OLD1\nTARGET2_AFTER_BACKUP\n')
-        profile = root / 'profile.json'; profile.write_text('{"enabled":false}')
+        profile = root / 'profile.json'
+        profile.write_text(json.dumps({'enabled':False,'source':str(root/'old-source'),'transport':'tcp'}))
         self.enterContext(mock.patch.object(w.Reader,'SPOOL',spool))
         self.enterContext(mock.patch.object(w.Reader,'PROFILE',profile))
         reader = w.Reader(central)
@@ -164,6 +165,11 @@ class ReaderFilesystemTests(unittest.TestCase):
             with self.assertRaisesRegex(w.Refused,'fresh acknowledged invocation'):
                 receipt.operation(owner,operation,'complete')
             operation='6'*32
+            # Native inspector/tool identity is a declared leaf substitute;
+            # actual queue/generation/receipt/locks remain real throughout retry.
+            self.enterContext(mock.patch.object(w.Reader,'inspect',lambda _: {
+                'mode':'disabled','profile':{'source':str(root/'old-source')}}))
+            self.enterContext(mock.patch.object(w.Reader,'verify_tools',lambda _:None))
             receipt.operation(owner,operation,'admit',ack=True)
             receipt.operation(owner,operation,'expose')
             # Native availability is an explicit leaf substitute; all receipt
@@ -193,6 +199,72 @@ class ReaderFilesystemTests(unittest.TestCase):
             with self.assertRaisesRegex(w.Refused,'owner mismatch'):
                 receipt.operation(owner,'4'*32,'failed')
             self.assertEqual(before,receipt.path.read_bytes())
+
+    def test_pending_cold_custody_rejects_mutation_at_admit_expose_and_final_publish(self):
+        changes = ('truncate', 'remove', 'rename', 'replace', 'symlink', 'hardlink')
+        for stage in ('publish', 'admit', 'expose'):
+            for change in changes:
+                with self.subTest(stage=stage, change=change), tempfile.TemporaryDirectory() as temporary:
+                    root=Path(temporary);central,reader,item,spool,queue,_=self.fixture(root)
+                    reader.pause(item);item['reader']['data_epoch']='2'*32;reader.retire_cursor(item)
+                    receipt=w.ReplayReceipt(central)
+                    if stage != 'publish':
+                        reader.final(item);central.finish(item,'recovered')
+                        w.HostWriter(central.root).claim('3'*32,'central')
+                        if stage == 'expose':
+                            receipt.operation('3'*32,'4'*32,'admit',ack=True)
+                    before=receipt.path.read_bytes() if receipt.path.exists() else None
+                    if change=='truncate':queue.write_bytes(b'')
+                    elif change=='remove':queue.unlink()
+                    elif change=='rename':queue.rename(spool/'unrelated')
+                    elif change=='replace':
+                        payload=queue.read_bytes();queue.unlink();queue.write_bytes(payload)
+                    elif change=='symlink':
+                        queue.rename(root/'outside');queue.symlink_to(root/'outside')
+                    else:os.link(queue,root/'outside')
+                    with self.assertRaises((w.Refused,OSError)):
+                        if stage=='publish':reader.final(item)
+                        else:receipt.operation('3'*32,'4'*32,stage,ack=True)
+                    self.assertEqual(receipt.path.read_bytes() if receipt.path.exists() else None,before)
+                    self.assertEqual(list(central.root.glob('reader-replay-ack-*')),[])
+
+    def test_cold_empty_and_absent_queue_and_live_consumed_retry_keep_generation(self):
+        for mode in ('unchanged','empty','absent'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);central,reader,item,spool,queue,_=self.fixture(root)
+                if mode=='empty':queue.write_bytes(b'')
+                if mode=='absent':queue.unlink()
+                reader.pause(item);item['reader']['data_epoch']='2'*32;reader.retire_cursor(item);reader.final(item)
+                central.finish(item,'recovered');receipt=w.ReplayReceipt(central)
+                owner='3'*32;operation='4'*32
+                w.HostWriter(central.root).claim(owner,'central')
+                receipt.operation(owner,operation,'admit',ack=True)
+                receipt.operation(owner,operation,'expose');receipt.operation(owner,operation,'failed')
+                generation=receipt.inspect()['generation']
+                # Actual native consumption and new writes are allowed only
+                # after durable exposure, under the same generation/provenance.
+                if queue.exists():queue.unlink()
+                (spool/'wazuh_alerts.00000002').write_bytes(b'new native queue')
+                (spool/'state'/'imfile-state:456').write_text('new offset')
+                w.HostWriter(central.root).release(owner);owner='5'*32
+                w.HostWriter(central.root).claim(owner,'central')
+                with mock.patch.object(w.Reader,'inspect',lambda _: {
+                        'mode':'disabled','profile':{'source':str(root/'old-source')}}), \
+                     mock.patch.object(w.Reader,'verify_tools',lambda _:None):
+                    receipt.operation(owner,'6'*32,'admit',ack=True)
+                    current=receipt.inspect()
+                    self.assertTrue(current['ever_exposed'])
+                    self.assertEqual(current['generation'],generation)
+                    self.assertTrue(current['attempts'][0]['failed'])
+                    receipt.operation(owner,'6'*32,'expose')
+                    # Native C11 is a leaf substitute, not a queue validator.
+                    with mock.patch.object(receipt.r,'run',return_value=subprocess.CompletedProcess([],0,'','')):
+                        receipt.operation(owner,'6'*32,'verify')
+                    receipt.operation(owner,'6'*32,'complete')
+                history=json.loads((central.root/('reader-replay-ack-'+'6'*32+'.json')).read_text())
+                self.assertTrue(history['ever_exposed'])
+                self.assertEqual(history['generation'],generation)
+                self.assertTrue((spool/'state'/'imfile-state:456').exists())
 
     def test_invalid_phase_never_grants_cursor_effect_and_all_phases_have_reconciliation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -229,6 +301,118 @@ class RepairOutcomeTests(unittest.TestCase):
                 self.assertFalse(any(args[0]=='stop' for _,args in central.calls))
                 self.assertIsNone(central.active())
 
+
+
+
+class SelectedReceiptGraphTests(unittest.TestCase):
+    fixture = ReaderFilesystemTests.fixture
+    # Reuse only fixture construction, not inherited test execution.
+    def test_selected_ordinary_chokepoints_stop_before_config_or_activation(self):
+        import shlex
+        import yaml
+        from wazuh_manager_script_args_test import picked
+        source=yaml.safe_load((existing.REPO/'playbooks/apply/wazuh-manager-apply.yml').read_text())[0]
+        forward=yaml.safe_load((existing.REPO/'playbooks/apply/tasks/wazuh-alert-forward.yml').read_text())
+        expose=next(task for task in forward if task['name']=='Wazuh: durably record potential replay cursor exposure before activation')
+        with tempfile.TemporaryDirectory(prefix='wazuh-receipt-graph-') as temporary:
+            workspace=Path(temporary);plays=[];expectations=[]
+            for tag,change in (('C10','before'),('C11','before'),('C12','before'),
+                               ('C10','between'),('C11','between'),('C10','none')):
+                root=workspace/(tag+change);root.mkdir()
+                central,reader,item,spool,queue,profile=self.fixture(root)
+                reader.pause(item);item['reader']['data_epoch']='2'*32
+                reader.retire_cursor(item);reader.final(item);central.finish(item,'recovered')
+                owner='3'*32;operation='4'*32;w.HostWriter(central.root).claim(owner,'central')
+                receipt=w.ReplayReceipt(central);before=receipt.path.read_bytes()
+                if change=='before':queue.unlink()
+                events=root/'calls'
+                worker=root/'worker.py'
+                worker.write_text(
+                    'import importlib.util,json,sys\nfrom pathlib import Path\n'
+                    's=importlib.util.spec_from_file_location("product",'+repr(str(existing.REPO/'playbooks/apply/files/wazuh-transaction.py'))+')\n'
+                    'w=importlib.util.module_from_spec(s);s.loader.exec_module(w)\n'
+                    'w.Reader.SPOOL=Path('+repr(str(spool))+');w.Reader.PROFILE=Path('+repr(str(profile))+')\n'
+                    'c=w.Central(root=Path('+repr(str(central.root))+'))\n'
+                    'with open('+repr(str(events))+',"a") as f:f.write(sys.argv[1]+"\\n")\n'
+                    'try:\n'
+                    ' result=w.ReplayReceipt(c).operation('+repr(owner)+','+repr(operation)+',sys.argv[1].removeprefix("reader-enable-"),ack=True)\n'
+                    ' print(json.dumps(result))\n'
+                    'except w.Refused:\n print("typed custody refusal");sys.exit(2)\n')
+                admit=picked(source,'Admit selected ordinary enable against any pending local replay receipt')
+                expression=admit['ansible.builtin.command']['argv']
+                admit['ansible.builtin.command']['argv']=expression.replace(
+                    "'/usr/local/sbin/pilot-wazuh-transaction'", "'python3', "+repr(str(worker)))
+                exposure=copy.deepcopy(expose)
+                exposure['ansible.builtin.command']['argv']=['python3',str(worker)]+exposure['ansible.builtin.command']['argv'][1:]
+                tasks=[picked(source,"Reset this play's actual forwarding selection"),
+                       picked(source,'Mark selected forwarding intent without granting container authority'),admit]
+                config_marker=root/'selected-config-mutation'
+                tasks.append({'ansible.builtin.copy':{'dest':str(config_marker),'content':'selected','mode':'0600'},'tags':['C10','C11']})
+                if change=='between':
+                    tasks.append({'ansible.builtin.file':{'path':str(queue),'state':'absent'},'tags':['C10','C11']})
+                exposure_file=root/'exposure.yml'
+                exposure_file.write_text(yaml.safe_dump([exposure],sort_keys=False))
+                include=picked(source,'Step 9c: Configure isolated host imfile forwarding')
+                include['ansible.builtin.include_tasks']['file']=str(exposure_file)
+                tasks.append(include)
+                marker=root/'configuration-or-activation'
+                tasks.append({'ansible.builtin.copy':{'dest':str(marker),'content':'selected','mode':'0600'},'tags':['C10','C11']})
+                # Execute each actual selection separately, preserving no_log.
+                play=workspace/(tag+change+'.yml')
+                play.write_text(yaml.safe_dump([{'hosts':'localhost','connection':'local','gather_facts':False,
+                    'vars':{'siem_forwarding_enabled':True,'pilot_wazuh_manager_preview_fresh':False,
+                            'wazuh_writer_owner':owner,'wazuh_reader_operation':{'stdout':operation},
+                            'wazuh_reader_enable_admitted':True,'wazuh_ack_rsyslog_downtime_and_replay':True},
+                    'tasks':tasks}],sort_keys=False))
+                run=subprocess.run(['ansible-playbook','-i','localhost,',str(play),'--tags',tag],
+                    cwd=existing.REPO,capture_output=True,text=True,timeout=90,
+                    env=dict(os.environ,ANSIBLE_CONFIG=str(existing.REPO/'ansible.cfg'),
+                        ANSIBLE_CACHE_PLUGIN='memory',ANSIBLE_LOCAL_TEMP=str(root/'local'),
+                        ANSIBLE_REMOTE_TEMP=str(root/'remote')))
+                self.assertEqual(run.returncode,0 if change=='none' or tag=='C12' else 2,(tag,change,run.stdout,run.stderr))
+                self.assertEqual(marker.exists(),change=='none')
+                self.assertEqual(config_marker.exists(),change!='before')
+                if change=='before':
+                    self.assertEqual(receipt.path.read_bytes(),before)
+                    self.assertEqual(events.exists(),tag!='C12')
+                if change=='between':
+                    self.assertFalse(receipt.inspect()['ever_exposed'])
+                    self.assertEqual(events.read_text().splitlines(),['reader-enable-admit','reader-enable-expose'])
+                self.assertEqual(list(central.root.glob('reader-replay-ack-*')),[])
+
+
+class SelectedReceiverIdentityTests(unittest.TestCase):
+    def test_numeric_pin_matches_bound_transport_not_raw_host_and_changes_refuse(self):
+        for pin,desired,success in (
+            ('192.0.2.15','192.0.2.15',True),
+            ('2001:0db8:0:0:0:0:0:15','2001:db8::15',True),
+            ('192.0.2.16','192.0.2.15',False),
+            ('not-an-address','192.0.2.15',False),
+            ('192.0.2.15 siem-log-server\n192.0.2.15','192.0.2.15',False),
+        ):
+            with self.subTest(pin=pin),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);central=Journal(root/'private')
+                source=root/'source';source.mkdir()
+                reader=w.Reader(central,request={'selected':True,'enabled':True,
+                    'host':'receiver.example.test','address':desired,'port':514,'transport':'tcp'},ack=True)
+                reader.SPOOL=root/'absent-spool'
+                reader.inspect=lambda:{'mode':'enabled','pid':42,'files':{},'profile_sha256':'nativehash',
+                    'profile':{'enabled':True,'source':str(source),'transport':'tcp'},'action':{'port':'514'}}
+                reader.source=lambda _:str(source)
+                reader.source_users=lambda *args,**kwargs:None
+                reader.qualify=lambda _: {'engine':'native-leaf'}
+                reader.verify_tools=lambda:None
+                reader.units.admit=lambda: {'native':'unit-leaf'}
+                original=Path.read_text
+                def text(path,*args,**kwargs):
+                    if str(path)=='/etc/hosts':return pin+' siem-log-server\n'
+                    return original(path,*args,**kwargs)
+                with mock.patch.object(Path,'read_text',text),mock.patch.object(reader.r,'run',
+                        return_value=subprocess.CompletedProcess([],0,'native C11','')):
+                    if success:self.assertEqual(reader.admit({'paths':[]})['mode'],'enabled')
+                    else:
+                        with self.assertRaisesRegex(w.Refused,'receiver address'):
+                            reader.admit({'paths':[]})
 
 
 class ReaderUnitOutcomeTests(unittest.TestCase):
@@ -382,6 +566,42 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
             w.HostWriter(central.root).release(owner)
 
 
+
+class ReaderPhysicalNamespaceTests(unittest.TestCase):
+    def test_real_physical_aliases_absent_descendants_and_mountinfo_are_not_disjoint(self):
+        import runpy
+        helper=runpy.run_path(str(existing.REPO/'playbooks/files/pilot-wazuh-heartbeat'))
+        classify=helper['reader_namespace']
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);managed=root/'managed';managed.mkdir()
+            state=managed/'state';state.mkdir()
+            other=root/'other';other.mkdir()
+            self.assertTrue(classify(str(state),[managed]))
+            self.assertTrue(classify(str(managed/'absent'/'state'),[managed]))
+            self.assertFalse(classify(str(other),[managed]))
+            self.assertFalse(classify(str(root),[managed]),'common parent alone grants no child access')
+            for alias in (str(state)+'/.',str(managed)+'//state'):
+                with self.assertRaisesRegex(ValueError,'noncanonical'):
+                    classify(alias,[managed])
+            link=root/'linked';link.symlink_to(managed,target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'alias'):
+                classify(str(link/'state'),[managed])
+            source=managed/'source';source.write_text('owned')
+            os.link(source,other/'foreign-name')
+            with self.assertRaisesRegex(ValueError,'alias'):
+                classify(str(other/'foreign-name'),[managed],pattern=True)
+            with self.assertRaisesRegex(ValueError,'alias'):
+                classify(str(other/'*'),[managed],pattern=True)
+            original=Path.read_text
+            def mountinfo(path,*args,**kwargs):
+                if str(path)=='/proc/self/mountinfo':
+                    return '1 0 8:1 /managed '+str(other)+' rw - ext4 /dev/test rw\n'
+                return original(path,*args,**kwargs)
+            with mock.patch.object(Path,'read_text',mountinfo):
+                with self.assertRaisesRegex(ValueError,'subtree mount'):
+                    classify(str(other/'missing-state'),[managed])
+
+
 class ReaderInspectionTests(unittest.TestCase):
     def test_actual_include_graph_exclusivity_default_argv_and_readonly_mode(self):
         import runpy
@@ -410,10 +630,10 @@ class ReaderInspectionTests(unittest.TestCase):
                 'PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on")\n')
             maps=root/'maps';maps.write_text('')
             argv=root/'cmdline';argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
-            def path(value):
-                name=str(value)
+            def path(value,*parts):
+                name=str(real_path(value,*parts))
                 return {'/etc/rsyslog.conf':global_config,'/proc/42/maps':maps,
-                        '/proc/42/cmdline':argv}.get(name,real_path(value))
+                        '/proc/42/cmdline':argv}.get(name,real_path(value,*parts))
             calls=[]
             def native(command,**kwargs):
                 calls.append(command)
@@ -467,6 +687,29 @@ class ReaderInspectionTests(unittest.TestCase):
                 extra.write_text('$ModLoad imuxsock\n# $InputFileName /native-source/alerts/alerts.json\n'
                                  'set $.example = "$InputRunFileMonitor";\n')
                 self.assertEqual(inspect()['mode'],'never','unrelated legacy module/comments/strings remain available')
+                for declaration in (
+                    'module(load="imfile" statefile.directory="/var/spool/rsyslog/pilot-wazuh/state/.")',
+                    'module(load="imfile" statefile.directory="/var/spool//rsyslog/pilot-wazuh/state")',
+                    'action(type="omfwd" queue.spoolDirectory="/var/spool/rsyslog/pilot-wazuh/.")',
+                    'module(load="imfile" statefile.directory="relative/state")',
+                    'input(type="imfile" File="$dynamic")',
+                    'action(type="omfwd" queue.filename="../pilot-wazuh/wazuh_alerts")',
+                    'action(type="omfwd" queue.filename="$dynamic")',
+
+                ):
+                    extra.write_text(declaration+'\n')
+                    with self.assertRaisesRegex(ValueError,'namespace'):
+                        inspect()
+                extra.write_text('module(load="imfile" statefile.directory="/unrelated-state")\n'
+                                 'input(type="imfile" File="/unrelated-source/*.json")\n')
+                self.assertEqual(inspect()['mode'],'never')
+                extra.write_text('module(load="imfile" statefile.directory="/unrelated-state")\n'
+                                 'input(type="imfile" File="/unrelated-source/*.json")\n'
+                                 'action(type="omfwd" queue.filename="foreign" queue.spoolDirectory="/var/spool/rsyslog")\n')
+                self.assertEqual(inspect()['mode'],'never','shared parent plus disjoint native queue basename is not ownership')
+                profile.write_text(json.dumps({'enabled':False,'transport':'tcp','source':'/native-source'}))
+                self.assertEqual(inspect()['mode'],'disabled')
+
             self.assertTrue(all(command[0] in ('systemctl','date','rsyslogd') for command in calls))
             self.assertFalse(any(item in ('start','stop','restart','reload') for command in calls for item in command))
 

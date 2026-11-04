@@ -13,6 +13,7 @@ import configparser
 import copy
 import fcntl
 import hashlib
+import ipaddress
 import importlib.util
 import io
 import fnmatch
@@ -1695,6 +1696,27 @@ class ReaderData:
     def queue(self, copy_to=None):
         return self.files(self.fd, 'wazuh_alerts', copy_to)
 
+    @classmethod
+    def custody(cls, spool, identity, generation=None, checkpoint=None, cold=False):
+        """CURRENT cold bytes before first exposure; live layout afterwards."""
+        data = cls(spool)
+        try:
+            if data.stamp != identity:
+                raise Refused('CURRENT reader queue changed before resume')
+            if generation:
+                actual = data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False))
+                if actual != generation['new']:
+                    raise Refused('pending cursor generation changed')
+                with data.directory() as state:
+                    data.layout(state)
+            if cold:
+                if checkpoint is None or data.queue() != checkpoint['queue']:
+                    raise Refused('CURRENT reader queue changed before resume')
+            else:
+                data.layout(data.fd, queue=True)
+        finally:
+            data.close()
+
     @contextlib.contextmanager
     def directory(self, name='state'):
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
@@ -2064,7 +2086,12 @@ class Reader:
                     hostlines = Path('/etc/hosts').read_text().splitlines()
                     addresses = [line.split('#', 1)[0].split()[0] for line in hostlines
                                  if 'siem-log-server' in line.split('#', 1)[0].split()[1:]]
-                    if addresses != [self.request.get('host')]:
+                    try:
+                        pinned = [str(ipaddress.ip_address(value)) for value in addresses]
+                        desired = str(ipaddress.ip_address(self.request['address']))
+                    except (ValueError, KeyError, TypeError) as exc:
+                        raise Refused('unknown numeric receiver address binding') from exc
+                    if pinned != [desired]:
                         raise Refused('mixed receiver address and version transition refused')
                     if profile['transport'] == 'relp':
                         tls = Path('/etc/rsyslog.d/pilot-relp-wazuh-sender')
@@ -2306,13 +2333,8 @@ class Reader:
             return
         if not value['checkpoints']:
             raise Refused('cold restore lacks CURRENT queue authority')
-        data = ReaderData(self.SPOOL)
-        try:
-            if data.stamp != value['spool_identity'] or data.queue() != value['checkpoints'][-1]['queue']:
-                raise Refused('CURRENT reader queue changed before resume')
-        finally:
-            data.close()
-
+        ReaderData.custody(self.SPOOL, value['spool_identity'],
+                           checkpoint=value['checkpoints'][-1], cold=True)
 
     def retire_cursor(self, item):
         value = self.use(item)
@@ -2493,12 +2515,23 @@ class ReplayReceipt:
 
     def publish(self, item):
         reader = item['reader']
+        ReaderData.custody(Reader.SPOOL, reader['spool_identity'], reader['generation'],
+                           reader['checkpoints'][-1] if reader['checkpoints'] else None, cold=True)
         value = {'schema': 1, 'kind': 'LOCAL_REPLAY_ACK', 'central_owner': item['owner'],
                  'source': reader['source'], 'profile_sha256': reader['baseline']['profile_sha256'],
                  'spool_identity': reader['spool_identity'], 'generation': reader['generation'],
                  'checkpoint': reader['checkpoints'][-1] if reader['checkpoints'] else None,
-                 'status': 'pending', 'attempt': None, 'tools': reader['request'].get('tools', {})}
+                 'status': 'pending', 'attempt': None, 'ever_exposed': False, 'attempts': [],
+                 'checker_sha256': reader['checker_sha256'],
+                 'tools': reader['request'].get('tools', {})}
         existing = self.inspect()
+        if existing and existing.get('generation') == value['generation']:
+            # Publication cannot erase prior exposure within this generation.
+            if 'ever_exposed' not in existing:
+                raise Refused('unknown replay exposure provenance')
+            value['ever_exposed'] = existing['ever_exposed']
+            value['attempts'] = existing.get('attempts', [])
+            value['attempt'] = existing.get('attempt')
         if existing and existing['central_owner'] != item['owner']:
             # A new disabled restore must explicitly carry forward the prior
             # receipt, never discard unacknowledged custody.
@@ -2506,6 +2539,24 @@ class ReplayReceipt:
                 raise Refused('unknown earlier replay receipt prevents finalization')
             value['previous'] = digest(self.path)
         atomic_json(self.path, value)
+
+    def custody(self, value, native=True):
+        if type(value.get('ever_exposed')) is not bool:
+            raise Refused('unknown replay exposure provenance')
+        ReaderData.custody(Reader.SPOOL, value['spool_identity'], value['generation'],
+                           value['checkpoint'], cold=not value['ever_exposed'])
+        if value['ever_exposed']:
+            current = json.loads(canonical(Reader.PROFILE).read_text())
+            if current.get('source') != value['source']:
+                raise Refused('exposed replay lost its recorded producer source')
+        if value['ever_exposed'] and native:
+            proof = Reader(self.t, value.get('checker_sha256', ''),
+                           {'tools': value.get('tools', {})})
+            observed = proof.inspect()
+            if (observed.get('mode') not in ('enabled', 'disabled')
+                    or observed.get('profile', {}).get('source') != value['source']):
+                raise Refused('exposed replay lost its native profile provenance')
+            proof.verify_tools()
 
     def operation(self, owner, operation, action, ack=False, preview=False):
         if not re.fullmatch('[a-f0-9]{32}', operation):
@@ -2526,26 +2577,21 @@ class ReplayReceipt:
                     prior = value.get('attempt') or {}
                     current = json.loads(Reader.PROFILE.read_text())
                     permitted = (prior.get('verified_profile_sha256') == current_hash
-                                 or (prior.get('owner') == owner and prior.get('exposed')))
+                                 or value.get('ever_exposed') is True)
                     if (not permitted or current.get('enabled') is not True
                             or current.get('source') != value['source']):
                         raise Refused('pending replay profile changed outside its recorded enable attempt')
                     Reader(self.t, request={'tools': value.get('tools', {})}).verify_tools()
                     self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
                                operation='reconcile previous local replay enable attempt')
-                if not Reader.SPOOL.exists():
-                    raise Refused('pending reader spool disappeared')
-                data = ReaderData(Reader.SPOOL)
-                try:
-                    if data.stamp != value['spool_identity']:
-                        raise Refused('pending replay spool identity changed')
-                    generation = value['generation']
-                    if generation and data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != generation['new']:
-                        raise Refused('pending cursor generation changed')
-                finally:
-                    data.close()
+                self.custody(value)
                 if preview:
                     return {'pending': True, 'planned': True}
+                if value.get('attempt'):
+                    attempts = value.get('attempts', [])
+                    if len(attempts) >= 256:
+                        raise Refused('replay attempt history exceeds supported bound')
+                    value['attempts'] = attempts + [value['attempt']]
                 value['attempt'] = {'owner': owner, 'operation': operation, 'exposed': False}
             else:
                 if (value.get('attempt') or {}).get('owner') != owner or (value.get('attempt') or {}).get('operation') != operation:
@@ -2553,10 +2599,17 @@ class ReplayReceipt:
                 if value['attempt'].get('failed') and action in ('expose', 'verify', 'complete'):
                     raise Refused('failed local enable requires a fresh acknowledged invocation')
                 if action == 'expose':
+                    # Native loaded-profile admission occurred before selected
+                    # configuration writes. Here the new config may correctly
+                    # await activation; queue/generation/source custody must
+                    # still hold before any reader can consume it.
+                    self.custody(value, native=False)
+                    value['ever_exposed'] = True
                     value['attempt']['exposed'] = True
                 elif action == 'failed':
                     value['attempt']['failed'] = True
                 elif action == 'verify':
+                    self.custody(value)
                     proof = Reader(self.t, request={'tools': value.get('tools', {})})
                     proof.verify_tools()
                     self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
@@ -2566,14 +2619,7 @@ class ReplayReceipt:
                     if (not value['attempt'].get('verified_profile_sha256')
                             or digest(canonical(Reader.PROFILE)) != value['attempt']['verified_profile_sha256']):
                         raise Refused('local replay enable has not passed its precommit native proof')
-                    generation = value.get('generation')
-                    if generation:
-                        data = ReaderData(Reader.SPOOL)
-                        try:
-                            if data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != generation['new']:
-                                raise Refused('verified replay cursor generation changed before commit')
-                        finally:
-                            data.close()
+                    self.custody(value)
                     value['status'] = 'locally_acknowledged'
                     history = self.t.root / ('reader-replay-ack-' + operation + '.json')
                     if history.exists():

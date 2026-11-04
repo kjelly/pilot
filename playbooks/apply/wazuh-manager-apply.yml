@@ -303,6 +303,28 @@
             pilot_wazuh_reader_selected: true
           tags: [C10, C11]
 
+        - name: "Reset this invocation's bound receiver transport"
+          ansible.builtin.set_fact:
+            wazuh_receiver_bound_address: ""
+          tags: [always]
+
+        - name: "Bind selected forwarding transport independently from TLS identity"
+          ansible.builtin.include_tasks:
+            file: tasks/wazuh-endpoint-resolve.yml
+            apply:
+              tags: [always]
+          vars:
+            wazuh_endpoint_value: "{{ siem_forward_host }}"
+            wazuh_endpoint_manager: ""
+          when: (pilot_wazuh_reader_selected | bool) and (siem_forwarding_enabled | bool) and not (wazuh_recover | default(false) | bool)
+          tags: [always]
+
+        - name: "Retain the receiver address before version and receipt admission"
+          ansible.builtin.set_fact:
+            wazuh_receiver_bound_address: "{{ wazuh_endpoint_address }}"
+          when: (pilot_wazuh_reader_selected | bool) and (siem_forwarding_enabled | bool) and not (wazuh_recover | default(false) | bool)
+          tags: [always]
+
         - name: "Bind desired forwarding and tracked proof code to this version inspection"
           ansible.builtin.set_fact:
             wazuh_reader_tools:
@@ -318,6 +340,7 @@
               selected: "{{ pilot_wazuh_reader_selected | bool }}"
               enabled: "{{ siem_forwarding_enabled | bool }}"
               host: "{{ siem_forward_host | default('') }}"
+              address: "{{ wazuh_receiver_bound_address }}"
               transport: "{{ siem_forward_transport }}"
               port: "{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
               peer: "{{ siem_relp_server_name | default('') }}"
@@ -638,12 +661,8 @@
 
                 - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
                   tags: [always]
-                  ansible.builtin.include_tasks:
-                    file: tasks/resolve-hosts-alias-target.yml
-                    apply:
-                      tags: [always]
-                  vars:
-                    hosts_alias_target_host: "{{ siem_forward_host | default('') }}"
+                  ansible.builtin.set_fact:
+                    hosts_alias_resolved_ip: "{{ wazuh_receiver_bound_address }}"
                   when: siem_forwarding_enabled | bool
 
                 - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"

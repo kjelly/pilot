@@ -48,5 +48,6 @@ wazuh_manager_host: ""
 # wazuh_version: "4.14.9"
 # Exact inventory host used to observe the manager's native version over SSH.
 # Auto-derived only when the wazuh-manager group contains exactly one host.
-# Its ansible_host or inventory name must equal wazuh_manager_host.
+# The endpoint must uniquely match its inventory name, ansible_host, gathered FQDN,
+# or canonical numeric connection address; arbitrary DNS coincidence is insufficient.
 # wazuh_manager_inventory_host: "wazuh-manager-1"

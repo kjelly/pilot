@@ -103,14 +103,14 @@ class ManagerScriptArgumentTests(unittest.TestCase):
      wrapper={'block':[command],'rescue':[{'ansible.builtin.set_fact':{'script_case_rescued':True},'tags':['always']}],'tags':['always']}
      tools={'pilot-wazuh-delivery':'a'*64,'pilot-siem-relp-check':'c'*64}
      values={'wazuh_writer_owner':OWNER,'docker_pre':{'rc':0},'siem_forwarding_enabled':False,
-             'siem_forward_host':'','siem_forward_transport':'tcp','siem_forward_port':'514',
+             'wazuh_receiver_bound_address':'','siem_forward_host':'','siem_forward_transport':'tcp','siem_forward_port':'514',
              'siem_relp_port':20514,'wazuh_reader_tools':tools,'wazuh_reader_checker_hash':'b'*64,**variables}
      record={'ansible.builtin.copy':{'content':"{{ {'rc': wazuh_central_transaction.rc, 'rescued': script_case_rescued} | to_json }}",'dest':str(result_path),'mode':'0600'},'check_mode':False,'tags':['always']}
      plays.append({'name':stem,'hosts':stem,'connection':'local','gather_facts':False,'vars':values,
                    'tasks':[gate,defaults,reset,mark,reset_reader,mark_reader,reader_request,{'ansible.builtin.set_fact':{'script_case_rescued':False},'tags':['always']},wrapper,record]})
      argv=['central','--version',common,'--legacy',legacy,'--owner',values['wazuh_writer_owner']]
      selected=not flags or '--tags' not in flags or flags[flags.index('--tags')+1] in ('C10','C11')
-     wanted={'selected':selected,'enabled':False,'host':'','transport':'tcp','port':'514','peer':'',
+     wanted={'selected':selected,'enabled':False,'host':'','address':'','transport':'tcp','port':'514','peer':'',
              'tls':{'ca.pem':__import__('hashlib').sha256(b'').hexdigest(),
                     'cert.pem':__import__('hashlib').sha256(b'').hexdigest(),
                     'key.pem':__import__('hashlib').sha256(b'').hexdigest()},'tools':tools}
