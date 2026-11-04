@@ -345,11 +345,11 @@ func vmServiceDescriptors() map[services.Capability]services.DataProbe {
 func vmServiceFixtureBody(path string) string {
 	switch path {
 	case "/acng-report.html":
-		return "<html>Apt-Cacher-NG</html>"
+		return "<html><title>Apt-Cacher NG Command And Control Page</title></html>"
 	case "/pulp/api/v3/status/":
 		return `{"database_connection":{"connected":true},"online_workers":[{"name":"test-worker"}],"online_content_apps":[{"name":"test-content"}]}`
 	case "/api/v2.0/health":
-		return `{"status":"healthy","components":[{"status":"healthy"}]}`
+		return `{"status":"healthy","components":[{"name":"core","status":"healthy"},{"name":"database","status":"healthy"},{"name":"registry","status":"healthy"}]}`
 	case "/pulp/api/v3/users/":
 		return `{"results":[]}`
 	}

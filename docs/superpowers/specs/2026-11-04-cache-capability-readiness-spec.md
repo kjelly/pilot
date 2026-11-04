@@ -24,7 +24,12 @@ Native health parsing must reject 200/unhealthy, initializing and malformed
 bodies, authentication denial, 5xx and transport failures. Pulp requires a connected
 database and live workers/content applications; Redis is optional when Pulp caching
 is disabled and is not an unconditional readiness requirement. Harbor requires healthy
-aggregate and component status. APT requires the native apt-cacher-ng report.
+aggregate status and unique, named healthy components including core/database/registry.
+APT requires the native report title (case/whitespace normalized). Management
+authentication requires typed current-admin identity or a nonnull Pulp users
+array with named users; an authenticated empty users array is valid. Anonymous
+registry token readers require an object and string-valued nonnull token fields
+on host and guest, and reject malformed/trailing JSON.
 Data descriptors in the profile specify an actual APT proxy resource, Pulp
 repository metadata/package, or immutable Harbor manifest/blob. Responses must
 match a configured SHA-256 or content marker; OCI always requires a digest.

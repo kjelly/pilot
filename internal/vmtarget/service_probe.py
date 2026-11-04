@@ -55,6 +55,11 @@ try:
             raise ValueError('unsafe registry token scope')
         token_url = urllib.parse.urlunsplit((realm.scheme, realm.netloc, realm.path, urllib.parse.urlencode({'scope': params['scope'], 'service': params['service']}), ''))
         payload = json.loads(read(token_url))
+        if not isinstance(payload, dict):
+            raise ValueError('invalid registry token object')
+        for field in ('token', 'access_token'):
+            if payload.get(field) is not None and not isinstance(payload[field], str):
+                raise ValueError('invalid registry token field')
         token = payload.get('token') or payload.get('access_token')
         if not isinstance(token, str) or not token or len(token) > 65536 or '\r' in token or '\n' in token:
             raise ValueError('invalid registry token')

@@ -128,3 +128,39 @@ func TestGuestDataProbeHasHardTotalDeadline(t *testing.T) {
 		t.Fatalf("cloud-init omitted hard deadline: %v", e)
 	}
 }
+
+func TestGuestRegistryTokenCriticalSchemaParity(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "probe.py")
+	if e := os.WriteFile(script, []byte(serviceProbePython), 0600); e != nil {
+		t.Fatal(e)
+	}
+	for _, test := range []struct {
+		name, body string
+		ready      bool
+	}{
+		{"token", `{"token":"synthetic"}`, true}, {"access", `{"access_token":"synthetic"}`, true}, {"null-fallback", `{"token":null,"access_token":"synthetic"}`, true}, {"empty-fallback", `{"token":"","access_token":"synthetic"}`, true}, {"zero-fallback", `{"token":0,"access_token":"synthetic"}`, false}, {"false-fallback", `{"token":false,"access_token":"synthetic"}`, false}, {"array-fallback", `{"token":[],"access_token":"synthetic"}`, false}, {"object-fallback", `{"token":{},"access_token":"synthetic"}`, false}, {"wrong-alternate", `{"token":"synthetic","access_token":0}`, false}, {"null", `null`, false}, {"array", `[]`, false}, {"empty-object", `{}`, false}, {"trailing", `{"token":"synthetic"} trailing`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			descriptor := vmServiceDescriptors()[services.OCI]
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/service/token" {
+					_, _ = w.Write([]byte(test.body))
+					return
+				}
+				if r.Header.Get("Authorization") == "Bearer synthetic" {
+					_, _ = w.Write([]byte(vmFixtureManifest))
+					return
+				}
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
+				w.WriteHeader(401)
+			}))
+			defer server.Close()
+			config, _ := json.Marshal(map[string]string{"capability": "oci", "endpoint": server.URL, "resource": descriptor.Resource, "sha256": descriptor.SHA256})
+			out, e := exec.Command("python3", script, string(config)).CombinedOutput()
+			if (e == nil) != test.ready {
+				t.Fatalf("guest token schema ready=%t want=%t: %v %s", e == nil, test.ready, e, out)
+			}
+		})
+	}
+}

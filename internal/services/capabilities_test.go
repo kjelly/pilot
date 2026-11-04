@@ -30,7 +30,7 @@ func fixtureBody(path string) string {
 	case "/pulp/api/v3/status/":
 		return `{"database_connection":{"connected":true},"redis_connection":{"connected":false},"online_workers":[{"name":"test-worker"}],"online_content_apps":[{"name":"test-content"}]}`
 	case "/api/v2.0/health":
-		return `{"status":"healthy","components":[{"name":"core","status":"healthy"}]}`
+		return `{"status":"healthy","components":[{"name":"core","status":"healthy"},{"name":"database","status":"healthy"},{"name":"registry","status":"healthy"}]}`
 	case "/api/v2.0/users/current":
 		return `{"username":"admin","sysadmin_flag":true}`
 	case "/pulp/api/v3/users/":
@@ -138,7 +138,7 @@ func TestCapabilitySelectionIndependentDataReadiness(t *testing.T) {
 }
 func TestNativeHealthRejectsStatusOnlyAndInitializing(t *testing.T) {
 	for _, c := range []Capability{APT, RPM, OCI} {
-		for _, body := range []string{"", `{}`, `not-json`, `{"status":"unhealthy","components":[{"status":"healthy"}]}`, `{"database_connection":{"connected":true},"online_workers":[],"online_content_apps":[]}`} {
+		for _, body := range []string{"", `{}`, `not-json`, `{"status":"unhealthy","components":[{"name":"core","status":"healthy"},{"name":"database","status":"healthy"},{"name":"registry","status":"healthy"}]}`, `{"database_connection":{"connected":true},"online_workers":[],"online_content_apps":[]}`} {
 			if nativeHealth(c, []byte(body)) {
 				t.Fatalf("%s accepted unhealthy/malformed: %s", c, body)
 			}

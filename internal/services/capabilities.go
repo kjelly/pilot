@@ -203,25 +203,34 @@ func (m *Manager) readProbeHeaders(ctx context.Context, raw, host, secret, beare
 }
 func nativeHealth(c Capability, body []byte) bool {
 	if c == APT {
-		return (strings.Contains(strings.ToLower(string(body)), "apt-cacher-ng") || strings.Contains(strings.ToLower(string(body)), "apt-cacher ng")) && strings.Contains(strings.ToLower(string(body)), "<html")
+		matches := aptReportTitle.FindSubmatch(body)
+		if len(matches) != 2 {
+			return false
+		}
+		return strings.Join(strings.Fields(strings.ToLower(string(matches[1]))), " ") == "apt-cacher ng command and control page"
 	}
+
 	if c == OCI {
 		var v struct {
 			Status     string `json:"status"`
 			Components []struct {
+				Name   string `json:"name"`
 				Status string `json:"status"`
 			} `json:"components"`
 		}
 		if json.Unmarshal(body, &v) != nil || v.Status != "healthy" || len(v.Components) == 0 {
 			return false
 		}
-		for _, x := range v.Components {
-			if x.Status != "healthy" {
+		seen := map[string]bool{}
+		for _, component := range v.Components {
+			if strings.TrimSpace(component.Name) == "" || seen[component.Name] || component.Status != "healthy" {
 				return false
 			}
+			seen[component.Name] = true
 		}
-		return true
+		return seen["core"] && seen["database"] && seen["registry"]
 	}
+
 	var v struct {
 		Database struct {
 			Connected bool `json:"connected"`
@@ -297,26 +306,12 @@ func (m *Manager) observeCapability(ctx context.Context, s ServiceState, c Capab
 				o.ManagementAuth = failed("transport-or-timeout")
 			} else if code != 200 {
 				o.ManagementAuth = failed(fmt.Sprintf("http-%d", code))
+			} else if !validManagementIdentity(c, body) {
+				o.ManagementAuth = failed("malformed-or-invalid-management-identity")
 			} else {
-				var v map[string]json.RawMessage
-				if json.Unmarshal(body, &v) != nil {
-					o.ManagementAuth = failed("malformed-response")
-				} else if c == OCI {
-					var username string
-					var admin bool
-					_ = json.Unmarshal(v["username"], &username)
-					_ = json.Unmarshal(v["sysadmin_flag"], &admin)
-					if username != "admin" || !admin {
-						o.ManagementAuth = failed("management-identity-rejected")
-					} else {
-						o.ManagementAuth = good()
-					}
-				} else if v["results"] == nil {
-					o.ManagementAuth = failed("malformed-response")
-				} else {
-					o.ManagementAuth = good()
-				}
+				o.ManagementAuth = good()
 			}
+
 		}
 	}
 	descriptor, ok := s.Client.DataProbes[c]
@@ -503,4 +498,33 @@ func RequirementKey(r Requirements) string {
 		out[i] = string(c)
 	}
 	return strings.Join(out, ",")
+}
+
+var aptReportTitle = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title>`)
+
+func validManagementIdentity(c Capability, body []byte) bool {
+	if c == OCI {
+		var v struct {
+			Username string `json:"username"`
+			Admin    bool   `json:"sysadmin_flag"`
+		}
+		return json.Unmarshal(body, &v) == nil && v.Username == "admin" && v.Admin
+	}
+	if c == RPM {
+		var v struct {
+			Results []struct {
+				Username string `json:"username"`
+			} `json:"results"`
+		}
+		if json.Unmarshal(body, &v) != nil || v.Results == nil {
+			return false
+		}
+		for _, user := range v.Results {
+			if strings.TrimSpace(user.Username) == "" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

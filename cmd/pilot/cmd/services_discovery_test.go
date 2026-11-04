@@ -116,7 +116,7 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/acng-report.html" {
-			_, _ = w.Write([]byte("<html>Apt-Cacher NG</html>"))
+			_, _ = w.Write([]byte("<html><title>Apt-Cacher NG Command And Control Page</title></html>"))
 			return
 		}
 		if strings.Contains(r.URL.Path, "InRelease") {
