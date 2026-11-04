@@ -168,13 +168,27 @@ canary 涵蓋 analysis → Filebeat → indexer，agent transport 另由 topolog
 ack 不取代 upgrade、exact owner 或 stopped-operation confirmation；同 owner
 journal recovery 沿用原授權。no-op／check 不停 reader，也不要求未使用的 pause 授權。
 
-停機前須有同版本一般 apply 收斂的 owned forwarding baseline：profile、
-transport／TLS、input／ruleset／action、exclusive cursor namespace、queue 與 loaded
-runtime 一致，啟用時 C11 健康。須資格化實際選定的 native engine 與 queue file family，
+停機前以唯讀 admission 資格化同 effective version 的目前 owned forwarding baseline：
+profile、transport／TLS、input／ruleset／action、exclusive cursor namespace、queue 與
+loaded runtime 一致，啟用時本機 C11 健康；不要求舊版 ordinary apply 或整體 C12 曾成功。
+原 manager 4.14.1／registered agents 4.14.9 的 repair 仍以目標 4.14.9 對所有 retained
+agents 作版本上界檢查，未知版本仍拒絕。須資格化實際選定的 native engine 與 queue file family，
 包含選用的 diskQueueType=disk 或 LinkedList，不能從其中一種的實驗推論另一種，
 也不能悄改 transport／engine。版本交易不兼做 legacy UDP 遷移或目的地／TLS／profile
 變更；已知不支援的 layout、activation、ownership、engine 或混合轉換在停機前拒絕。
 符合 baseline、owner 與 ack 的 configured upgrade 須有 reader lifecycle 支援。
+真正 version-only selection 保留目前實際設定：從未有 host reader、僅 legacy container UDP
+者可先完成版本 repair，不在交易內遷移 host forwarding；既有健康 reader 則保留其目前
+profile。欲改目的地／TLS／profile 的 mixed request 必須拒絕，先以 current profile 作版本
+交易，再另以新版 ordinary apply 收斂，不能靜默忽略或混入設定變更。
+
+原先已有 manager／agent skew 的故障回復可恢復精確舊資料、images、設定與 native availability，
+但不能宣稱 fleet 健康。相同已觀察到的原始 skew 須持久標記
+`restored_preexisting_incompatible_baseline`、`overall_success=false`、`c12_pass=false`；
+所有實體恢復與 reader custody 證明完成後可 finalize／release exact owner，不因已知舊 skew
+永久留鎖。真正 restore／reader／identity 失敗或未知 registry 仍留存 journal。明示 recovery
+須回報 degraded 非零結果，完成後另以新 owner 明示重試 upgrade；recover 不自動升級中央
+或降級 agents。C12 永遠驗目前實際版本相容性，不因回復完成而變成 PASS。
 
 - **從未設定**：須證明 Wazuh-owned profile/input、相關 FD/activation、cursor、queue 均不存在，
   才可走無 reader pause/replay 的 standalone 路徑；不能把未知狀態當作未設定。
@@ -189,8 +203,13 @@ runtime 一致，啟用時 C11 健康。須資格化實際選定的 native engin
 replay-pending receipt，綁定 source/profile、current cursor generation 與 queued-resource
 identities；它不授予自動啟用權限。之後 ordinary apply 真正要求 re-enable 時，是新的操作：
 須再次明示同一 boolean，並在任何 config／restart mutation 前驗 receipt 與目前 layout。
-只有 enabled 收斂及適用的 writer/config/runtime/delivery 驗證成功後才清除 receipt；
-失敗保留 receipt 與本次 recovery authority，不靜默覆寫未知 receipt。
+此 receipt 只記錄本機 replay ACK／cursor generation／queue custody，不是遠端 delivery
+certificate。新 ACK 且本次 selected local mutation 已提交、原生 enabled convergence／C11
+成功後，持久保留 acknowledged history，再解除 pending admission；不刪 queue，receiver
+outage 本身不阻止本機 ACK 完成。selected mutation/rescue 尚未完成時不得清除 pending；
+失敗保留 receipt 與本次 recovery authority，不靜默覆寫未知 receipt。其後獨立 C12 或遠端
+challenge 失敗仍如實回報，不重設已 exposed generation。candidate 的 target-only queued nonce
+及 fresh event 實際 receiver 驗收仍是必要且獨立的證據，不能以此 local receipt 代替。
 
 需要 shared pause 的 unit 支援範圍限 Ubuntu 24.04 的實際 canonical `rsyslog.service` 與
 `syslog.socket` 關係：default-config ExecStart、無額外 drop-in／activation，
