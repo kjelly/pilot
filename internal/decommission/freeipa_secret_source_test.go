@@ -16,14 +16,29 @@ import (
 	"github.com/kjelly/pilot/internal/decommission/providers"
 )
 
-// Return an unchanged captured Ansible transcript. No live host is contacted,
-// and both planning and execution use the production provider implementations.
-type decommissionRosterFixtureRunner struct{ stdout string }
+// Existing IPA probes return an unchanged captured Ansible transcript;
+// protocol-only observations below bind their actual query target. No live
+// host is contacted, and planning/execution use the production providers.
+type decommissionRosterFixtureRunner struct {
+	stdout         string
+	gatewayTargets []string
+}
 
-func (r decommissionRosterFixtureRunner) Run(_ context.Context, args ...string) (*ansible.Result, error) {
+func (r *decommissionRosterFixtureRunner) Run(_ context.Context, args ...string) (*ansible.Result, error) {
 	for _, arg := range args {
 		var controls map[string]string
-		if json.Unmarshal([]byte(arg), &controls) == nil && controls["pilot_decommission_query"] == "ssh_retirement" {
+		if json.Unmarshal([]byte(arg), &controls) != nil {
+			continue
+		}
+		if controls["pilot_decommission_query"] == "gateway_scope" {
+			target := controls["pilot_decommission_target_fqdn"]
+			if target == "" {
+				return nil, fmt.Errorf("gateway preflight fixture requires its actual target binding")
+			}
+			r.gatewayTargets = append(r.gatewayTargets, target)
+			return &ansible.Result{Stdout: "HOST_INSPECT[" + target + "]: GATEWAY_SCOPE_READY=true"}, nil
+		}
+		if controls["pilot_decommission_query"] == "ssh_retirement" {
 			raw, _ := json.Marshal(map[string]any{"schema_version": 1, "kind": "ssh_retirement",
 				"fqdn": controls["pilot_decommission_target_fqdn"], "alias": controls["pilot_decommission_target_alias"],
 				"stage": controls["pilot_decommission_retirement_stage"], "status": "settled"})
@@ -39,7 +54,7 @@ func TestDecommissionRosterSourceBoundary(t *testing.T) {
 			for _, nested := range []bool{false, true} {
 				for _, late := range []bool{false, true} {
 					t.Run(fmt.Sprintf("%s/%s/nested=%t/late=%t", kind, tree, nested, late), func(t *testing.T) {
-						in, roster, original := setupDecommissionRosterSource(t, kind)
+						in, roster, original, runner := setupDecommissionRosterSource(t, kind)
 						alias := filepath.Join(in.WorkspaceDir, tree)
 						if nested {
 							if err := os.Mkdir(alias, 0o700); err != nil {
@@ -67,6 +82,9 @@ func TestDecommissionRosterSourceBoundary(t *testing.T) {
 								t.Fatalf("unexpected planning blocker: %+v", blockerDetails(plan))
 							}
 						} else {
+							if kind == "freeipa-client" {
+								assertGatewayScopeQueriesTarget(t, runner.gatewayTargets, "pwc-host2.ipa.pilot.internal")
+							}
 							if late {
 								installAlias()
 							}
@@ -92,13 +110,16 @@ func TestDecommissionRosterSourceBoundary(t *testing.T) {
 func TestDecommissionRosterSourceExternalAllowed(t *testing.T) {
 	for _, kind := range []string{"freeipa-client", "freeipa-nfs-server"} {
 		t.Run(kind, func(t *testing.T) {
-			in, roster, original := setupDecommissionRosterSource(t, kind)
+			in, roster, original, runner := setupDecommissionRosterSource(t, kind)
 			plan, err := PlanHost(context.Background(), in)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if plan.Blocked() {
 				t.Fatalf("safe source blocked: %+v", blockerDetails(plan))
+			}
+			if kind == "freeipa-client" {
+				assertGatewayScopeQueriesTarget(t, runner.gatewayTargets, "pwc-host2.ipa.pilot.internal")
 			}
 			if err := executeComponents(context.Background(), plan, in.Providers); err != nil {
 				t.Fatal(err)
@@ -129,7 +150,7 @@ func TestDecommissionRosterSourceExternalAllowed(t *testing.T) {
 	}
 }
 
-func setupDecommissionRosterSource(t *testing.T, kind string) (PlanInput, string, []byte) {
+func setupDecommissionRosterSource(t *testing.T, kind string) (PlanInput, string, []byte, *decommissionRosterFixtureRunner) {
 	t.Helper()
 	const target = "pwc-host2.ipa.pilot.internal"
 	workspace, external := t.TempDir(), t.TempDir()
@@ -151,7 +172,7 @@ func setupDecommissionRosterSource(t *testing.T, kind string) (PlanInput, string
 	}
 	// The captured pwc-host2 block proves an absent host with zero services;
 	// the other host's HTTP principal remains in the untouched transcript.
-	runner := decommissionRosterFixtureRunner{stdout: string(captured)}
+	runner := &decommissionRosterFixtureRunner{stdout: string(captured)}
 	var provider providers.Provider
 	if kind == "freeipa-client" {
 		provider = providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
@@ -176,5 +197,5 @@ func setupDecommissionRosterSource(t *testing.T, kind string) (PlanInput, string
 	return PlanInput{
 		WorkspaceDir: workspace, HostName: target, Catalog: newCatalog(t, component), Now: fixedNow,
 		Providers: map[string]providers.Provider{kind: provider}, RetentionDispositions: dispositions,
-	}, roster, []byte(fixture)
+	}, roster, []byte(fixture), runner
 }

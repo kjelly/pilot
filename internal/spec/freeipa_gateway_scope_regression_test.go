@@ -20,6 +20,36 @@ func TestRegression_GatewayScopeLifecycleModel(t *testing.T) {
 	}
 }
 
+func TestRegression_GatewayScopeAuthorityInventoryContract(t *testing.T) {
+	source, err := os.ReadFile("../../contracts/pilot-gateway-scope.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		GroupVars []struct{ Name string } `yaml:"groupVars"`
+	}
+	if err := yaml.Unmarshal(source, &contract); err != nil {
+		t.Fatal(err)
+	}
+	canonical := false
+	for _, input := range contract.GroupVars {
+		if input.Name == "ipa_server_fqdn" {
+			t.Fatal("derived/one-shot IPA alias must not become a global inventory input")
+		}
+		canonical = canonical || input.Name == "freeipa_server_fqdn"
+	}
+	if !canonical {
+		t.Fatal("canonical freeipa_server_fqdn authority input is missing")
+	}
+	document, err := os.ReadFile("../../docs/verification/pilot-gateway-scope.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(document), "| `freeipa_server_fqdn` |") || strings.Contains(string(document), "| `ipa_server_fqdn`") {
+		t.Fatal("inventory-input table must document the canonical authority; keep one-shot alias compatibility outside it")
+	}
+}
+
 func TestRegression_GatewayRetirementFixtureNativeSequenceBehavior(t *testing.T) {
 	command := exec.Command("python3", "../../scripts/test-gateway-scope-retirement-fixture.py", "-v")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -118,7 +148,7 @@ func TestRegression_GatewayDisableMasksInheritedHostsAtTaskBoundary(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"disable-stale", "disable-malformed", "disable-undefined", "none", "enable"} {
+	for _, scenario := range []string{"disable-stale", "disable-malformed", "disable-undefined", "none", "enable", "canonical-authority", "one-shot-authority"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			var plays []map[string]any
@@ -144,13 +174,20 @@ func TestRegression_GatewayDisableMasksInheritedHostsAtTaskBoundary(t *testing.T
 			}
 			expected := []string{"keep.ipa227.test"}
 			action := scenario
+			if scenario == "canonical-authority" || scenario == "one-shot-authority" {
+				action = "none"
+			}
 			if strings.HasPrefix(scenario, "disable-") {
 				action, expected = "disable", []string{}
 			}
-			program := "import json,sys; data=json.load(sys.stdin); assert data['hosts']==json.loads(sys.argv[1]); print(json.dumps({'changed':False}))"
+			authority := "ipa.ipa227.test"
+			if scenario == "one-shot-authority" {
+				authority = "override.ipa227.test"
+			}
+			program := "import json,sys; data=json.load(sys.stdin); assert data['hosts']==json.loads(sys.argv[1]); assert data['authority']==sys.argv[2]; print(json.dumps({'changed':False}))"
 			rawExpected, _ := json.Marshal(expected)
 			delete(include[1], "become")
-			include[1]["ansible.builtin.command"].(map[string]any)["argv"] = []string{"python3", "-c", program, string(rawExpected)}
+			include[1]["ansible.builtin.command"].(map[string]any)["argv"] = []string{"python3", "-c", program, string(rawExpected), authority}
 			body, err := yaml.Marshal(include)
 			if err != nil {
 				t.Fatal(err)
@@ -160,7 +197,7 @@ func TestRegression_GatewayDisableMasksInheritedHostsAtTaskBoundary(t *testing.T
 				t.Fatal(err)
 			}
 			publication["ansible.builtin.include_tasks"].(map[string]any)["file"] = includePath
-			vars := map[string]any{"ipa_server_fqdn": "ipa.ipa227.test", "freeipa_domain": "ipa227.test", "gateway_scope": "i227", "gateway_scope_plan_only": true, "gateway_scope_automember_action": action, "gateway_scope_hosts": []string{"keep.ipa227.test"}}
+			vars := map[string]any{"freeipa_server_fqdn": "ipa.ipa227.test", "freeipa_domain": "ipa227.test", "gateway_scope": "i227", "gateway_scope_plan_only": true, "gateway_scope_automember_action": action, "gateway_scope_hosts": []string{"keep.ipa227.test"}}
 			switch scenario {
 			case "disable-stale":
 				vars["gateway_scope_hosts"] = []string{"deleted.ipa227.test", "ambiguous"}
@@ -168,6 +205,8 @@ func TestRegression_GatewayDisableMasksInheritedHostsAtTaskBoundary(t *testing.T
 				vars["gateway_scope_hosts"] = map[string]any{"not": "a host list"}
 			case "disable-undefined":
 				delete(vars, "gateway_scope_hosts")
+			case "one-shot-authority":
+				vars["ipa_server_fqdn"] = authority
 			}
 			result := runGatewayTasks(t, dir, []any{publication}, vars, nil)
 			if result.rc != 0 {

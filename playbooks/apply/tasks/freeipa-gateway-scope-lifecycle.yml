@@ -7,7 +7,7 @@
       - ansible_play_hosts_all | length == 1
       - ipa_gateway_lifecycle_authority | default('') | length > 0
     fail_msg: >-
-      Select exactly the designated FreeIPA server. Set ipa_server_fqdn in
+      Select exactly the designated FreeIPA server. Set freeipa_server_fqdn in
       gateway inventory or freeipa.server in the identity roster; gateway
       lifecycle state cannot be split across replicas.
   tags: [always]

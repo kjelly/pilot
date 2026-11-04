@@ -21,7 +21,6 @@ dependencies:
 hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
-  - {name: ipa_server_fqdn, type: string, required: false, secret: false}
   - {name: freeipa_server_fqdn, type: string, required: false, secret: false}
   - {name: freeipa_domain, type: string, required: false, secret: false}
   - {name: gateway_scope, type: string, required: true, secret: false}

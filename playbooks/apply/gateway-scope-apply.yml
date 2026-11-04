@@ -2,7 +2,7 @@
 # The shared server-side lifecycle binds domain/scope/exact immutable group ID
 # in a root-owned durable ledger. Names/descriptions never establish ownership.
 # Existing legacy groups require explicit gateway_scope_adopt_id after the
-# operator inspects their live ipauniqueid. ipa_server_fqdn designates the
+# operator inspects their live ipauniqueid. freeipa_server_fqdn designates the
 # single authority; selecting a replica or multiple servers fails closed.
 #
 # Publication and identity retirement share the full probe/mutate/journal

@@ -17,8 +17,9 @@ import (
 // The real provider resolves the authoritative name; this boundary models
 // the host object disappearing when its central cleanup step runs.
 type identityIPAExecutor struct {
-	present bool
-	fqdn    string
+	present        bool
+	fqdn           string
+	gatewayTargets []string
 }
 
 func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.Result, error) {
@@ -33,6 +34,10 @@ func (e *identityIPAExecutor) Run(_ context.Context, args ...string) (*ansible.R
 			controls = binding
 			target = binding["pilot_decommission_target_fqdn"]
 		}
+	}
+	if controls["pilot_decommission_query"] == "gateway_scope" {
+		e.gatewayTargets = append(e.gatewayTargets, target)
+		return &ansible.Result{Stdout: "HOST_INSPECT[" + target + "]: GATEWAY_SCOPE_READY=true"}, nil
 	}
 	if controls["pilot_decommission_query"] == "ssh_retirement" {
 		raw, _ := json.Marshal(map[string]any{"schema_version": 1, "kind": "ssh_retirement", "fqdn": target,
@@ -103,6 +108,7 @@ func TestHostIdentity_MetadataSurvivesCleanupAndResume(t *testing.T) {
 				if err != nil || plan.Blocked() {
 					t.Fatalf("PlanHost = %+v, %v", plan, err)
 				}
+				assertGatewayScopeQueriesTarget(t, exec.gatewayTargets, want)
 				path := filepath.Join(t.TempDir(), "identity.db")
 				db, err := pstore.Open(path)
 				if err != nil {
@@ -230,6 +236,7 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 			if err != nil || plan.Blocked() {
 				t.Fatalf("PlanHost = %+v, %v", plan, err)
 			}
+			assertGatewayScopeQueriesTarget(t, exec.gatewayTargets, "old.example.test")
 			path := filepath.Join(t.TempDir(), "identity-change.db")
 			db, err := pstore.Open(path)
 			if err != nil {
@@ -246,6 +253,7 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 			// resolution can therefore change without invalidating this plan, and
 			// metadata must follow the fresh steps that Apply actually executes.
 			exec.fqdn, exec.present = tc.freshName, tc.present
+			gatewayStart := len(exec.gatewayTargets)
 			fresh, err := CheckFreshness(context.Background(), input, plan.PlanHash)
 			if err != nil || fresh.InventoryRevision != plan.InventoryRevision || fresh.PlanHash != plan.PlanHash {
 				t.Fatalf("fresh plan = %+v, %v; expected unchanged inventory and hash", fresh, err)
@@ -253,6 +261,14 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 			if _, source := freeIPAPlanIdentity(fresh); source != tc.wantSource {
 				t.Fatalf("fresh identity source = %q, want %q", source, tc.wantSource)
 			}
+			gatewayWant := want
+			if !tc.present {
+				// This read-only probe has only the current alias fallback once
+				// IPA reports absence. The lifecycle must still preserve the
+				// previously authoritative plan/receipt identity asserted below.
+				gatewayWant = strings.ToLower(hostName)
+			}
+			assertGatewayScopeQueriesTarget(t, exec.gatewayTargets[gatewayStart:], gatewayWant)
 			result, err := Apply(context.Background(), ApplyInput{Plan: plan, PlanInputForFreshness: input,
 				DecommissionID: "identity-change", StartedAt: fixedNow(), Now: fixedNow, Store: store})
 			if err != nil || result.Status != "completed" {
@@ -275,6 +291,21 @@ func TestHostIdentity_FreshAuthoritativeIdentityWins(t *testing.T) {
 				t.Fatalf("retired fqdn = %q, %v, want actual cleanup identity %q", retired, err, want)
 			}
 		})
+	}
+}
+
+// This is the provider's explicit protocol observation, not IPA CLI output.
+// Keep importer fixtures honest about the mandatory preflight and its actual
+// authoritative/fallback identity, rather than returning a generic pass.
+func assertGatewayScopeQueriesTarget(t *testing.T, targets []string, want string) {
+	t.Helper()
+	if len(targets) == 0 {
+		t.Fatal("mandatory gateway_scope ownership query was not issued")
+	}
+	for _, target := range targets {
+		if strings.ToLower(strings.TrimSuffix(target, ".")) != want {
+			t.Fatalf("gateway_scope target=%q, want actual resolved identity %q", target, want)
+		}
 	}
 }
 

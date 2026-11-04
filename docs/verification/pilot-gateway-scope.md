@@ -26,10 +26,14 @@
 | `gateway_scope_hosts` | 該 scope 目標主機 FQDN 清單，需以 `-e '{"gateway_scope_hosts": [...]}'` 的 JSON 物件形式傳入（`-e gateway_scope_hosts=[...]` 這種寫法會被 Ansible 當成純字串，不會被解析成 list）；透過 `pilot gateway-scope plan/reconcile` 時也可指定字面值 `all`，由 controller 展開成指定 inventory 的 `freeipa-client` group | 是 |
 | `ipa_admin_password` | kinit admin 用；只能來自 vault (`-e @~/.vault/main.yaml`) | 是 |
 | `gateway_scope_plan_only` | `true` 時只讀 diff、不寫入（對應 `pilot gateway-scope plan`）；預設 `false`（對應 `reconcile`） | 否 |
-| `ipa_server_fqdn` / `freeipa_server_fqdn` | 唯一指定的 FreeIPA authority，優先使用前者、可沿用既有 server inventory 的後者；發布與 identity retirement 必須使用同一台 server，不能分散 ledger 到 replica | 擇一 |
+| `freeipa_server_fqdn` | inventory 中唯一指定的 FreeIPA authority；發布與 identity retirement 必須使用同一台 server，不能分散 ledger 到 replica | 是 |
 | `freeipa_domain` | 可選的 domain cross-check；未提供時直接讀 authority 的原生 IPA 設定，ledger 綁定同一個實際 domain | 否 |
 | `gateway_scope_adopt_id` | 既有 scope group 的明確接管授權，值必須等於操作者查得的 live `ipauniqueid`；CLI 對應 `--adopt-group-id` | 僅接管既有 group 時 |
 | `gateway_scope_adopt_automember_id` | 既有 automember rule 的明確接管授權，值必須等於 local LDAP 的 live `entryUUID`，並同時指定 group adoption ID；CLI 對應 `--adopt-automember-id` | 僅接管既有 automember 時 |
+
+`ipa_server_fqdn` 保留為單次呼叫的明確 extra-vars override，優先於 canonical 值；
+它不是 inventory contract 的輸入，group_vars/host_vars 請使用 `freeipa_server_fqdn`。
+identity roster 的 authority 仍由 `freeipa.server` 指定。
 
 此驗收文件記錄的具體情境：`gateway_scope=gpu`，`gateway_scope_hosts=["gpu-a.ipa.pilot.internal","gpu-b.ipa.pilot.internal"]`（與 pilot-access-gateway Phase 0-5 evidence 使用的同一組真實 FreeIPA fixture 一致）。
 
