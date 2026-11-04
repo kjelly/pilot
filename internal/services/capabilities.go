@@ -286,7 +286,7 @@ func (m *Manager) observeCapability(ctx context.Context, s ServiceState, c Capab
 			path = "/api/v2.0/users/current"
 		} else {
 			secret, e = readPulpAdminPassword(s.Root)
-			path = "/pulp/api/v3/users/?limit=1"
+			path = "/pulp/api/v3/users/"
 		}
 		if e != nil {
 			o.ManagementAuth = failed("credential-unavailable")

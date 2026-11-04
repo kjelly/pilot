@@ -312,3 +312,15 @@ func TestCapturedNativeHealthSchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthyPulpManagementObservationUsesNativeUsersPath(t *testing.T) {
+	m, _, _ := healthyLifecycleFixture(t)
+	s, e := m.current()
+	if e != nil {
+		t.Fatal(e)
+	}
+	observed := m.observeCapabilities(context.Background(), s)
+	if observed[RPM].ManagementAuth.State != "ready" {
+		t.Fatalf("healthy Pulp management path not authenticated: %+v", observed[RPM].ManagementAuth)
+	}
+}

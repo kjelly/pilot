@@ -81,8 +81,8 @@ func TestServicesCredentialImportThroughCobra(t *testing.T) {
 	if !strings.Contains(stdout.String(), "credential-unavailable") {
 		t.Fatal("status did not report unavailable management credential")
 	}
-	if err := execute("services", "up"); err == nil {
-		t.Fatal("management up accepted missing secret")
+	if _, err := newServiceManagerContext(context.Background()); err == nil || !strings.Contains(err.Error(), "credential") {
+		t.Fatalf("management discovery did not reject missing credential for its actual prerequisite: %v", err)
 	}
 
 	if err := execute("services", "credentials", "import", "--secret-file", source); err != nil {
