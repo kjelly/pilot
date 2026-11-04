@@ -143,11 +143,12 @@ def branch_head(repo: Repo, name: str) -> str:
     """Resolve the live branch; pullRequest.baseRefOid can lag after another PR merges."""
     if not isinstance(name, str) or not name:
         raise GitHubError("Live base branch name unavailable")
-    data = gh_json(["api", *host_args(repo),
-                    f"repos/{repo.owner}/{repo.name}/branches/{quote(name, safe='')}"])
-    commit = data.get("commit") if isinstance(data, dict) else None
-    sha = commit.get("sha") if isinstance(commit, dict) else None
-    if not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
+    data = gh_json(["api", *host_args(repo), "-H", "Cache-Control: no-cache",
+                    f"repos/{repo.owner}/{repo.name}/git/ref/heads/{quote(name, safe='')}"])
+    obj = data.get("object") if isinstance(data, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(obj, dict) or obj.get("type") != "commit" or \
+            not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
         raise GitHubError("Live base branch SHA unavailable")
     return sha
 

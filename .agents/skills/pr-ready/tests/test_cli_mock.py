@@ -52,7 +52,7 @@ elif args[:2] == ["pr", "checks"]:
     sys.exit(1 if checks[0]["bucket"] == "fail" else 0)
 elif args[0] == "api" and (state / "api.json").exists() and any(
         k in args[-1] for k in json.loads((state / "api.json").read_text())):
-    # state/api.json maps a substring of the endpoint (contents, compare, git/trees, branches) to the
+    # state/api.json maps a substring of the endpoint (contents, compare, git/trees, git/ref) to the
     # JSON body gh would print; the first matching key answers.
     table = json.loads((state / "api.json").read_text())
     print(json.dumps(next(table[k] for k in table if k in args[-1])))
@@ -204,7 +204,7 @@ class CLIMockTests(unittest.TestCase):
         """GitHub's answers for a reviewed reuse of the run at CANDIDATE after main advanced to BASE."""
         (t / "manifest.json").write_text(json.dumps(TARGET_MANIFEST))
         api = {f"contents/{ART}?ref={head}": contents(ART, b"| Tested candidate | `ccccccc` |\n"),
-               "branches/main": {"commit": {"sha": live}},
+               "git/ref/heads/main": {"object": {"type": "commit", "sha": live}},
                f"compare/{CANDIDATE}...{head}": compare("ahead", 0, CANDIDATE, [ART, OTHER]),
                f"compare/{BASE}...{head}": compare("ahead", 0, BASE, [ART, APP]),
                f"compare/{CANDIDATE}...{BASE}": compare("diverged", 1, FORK, [OTHER]),

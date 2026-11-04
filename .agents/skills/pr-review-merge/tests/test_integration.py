@@ -41,6 +41,13 @@ if a[0] == 'api' and '/rules/branches/' in a[-1]:
     if d.get('rules_error'):
         print('rules denied', file=sys.stderr); persist(); sys.exit(1)
     emit([d.get('rules', [])])
+if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
+    d['ref_count'] = d.get('ref_count', 0) + 1
+    if d.get('ref_error'):
+        persist(); print('ref unavailable', file=sys.stderr); sys.exit(1)
+    if d.get('race_on_ref') == d['ref_count']:
+        d['live_base'] = 'd'*40
+    emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
 if a[0] == 'api' and ('/contents/' in a[-1] or '/compare/' in a[-1]):
@@ -173,6 +180,40 @@ class Integration(unittest.TestCase):
         self.assertIn('pkg/a.go:34',d['comments'][0])
         calls=[a[1] for a in d['calls'] if a[0]=='pr' and a[1] in ('comment','ready','merge')]
         self.assertEqual(calls,['comment','ready'])
+
+    def test_base_mismatch_comments_then_drafts_without_review(self):
+        self.patch(live_base='c'*40)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('c'*40, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_base_mismatch_comment_failure_preserves_ready(self):
+        self.patch(live_base='c'*40, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_base_ref_unavailable_never_mutates(self):
+        self.patch(ref_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_mismatch_gate_never_mutates(self):
+        self.patch(live_base='c'*40, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
 
     def test_failed_ci_draft(self):
         self.patch(checks=[{'name':'lint','state':'FAILURE','bucket':'fail'}])

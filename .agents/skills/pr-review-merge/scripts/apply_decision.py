@@ -15,7 +15,7 @@ from typing import Any
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
-from gh_runtime import GitHubError, Repo, pr_view, run_gh
+from gh_runtime import GitHubError, Repo, branch_head, pr_view, run_gh
 from review_gate import evaluate, load_evidence, resolve_repo
 
 
@@ -25,12 +25,17 @@ def comment_text(result: dict[str, Any]) -> str:
     excerpt = "\n".join(f"- {reason[:1200]}" for reason in reasons[:40])
     if len(reasons) > 40:
         excerpt += f"\n- ... {len(reasons)-40} more items in local evidence"
+    identity_label = "Observed" if result.get("base_mismatch") else "Reviewed"
+    base_next = (" For this base SHA mismatch, use `pr-ready` to reconcile PR metadata with the live "
+                 "base branch and integrate the verified latest base if needed."
+                 if result.get("base_mismatch") else "")
     return ("## Automated PR review: Draft required\n\n"
-            f"Reviewed HEAD: `{result['head_sha']}`  \n"
-            f"Reviewed Base: `{result['base_sha']}`\n\n"
+            f"{identity_label} HEAD: `{result['head_sha']}`  \n"
+            f"{identity_label} Base: `{result['base_sha']}`\n\n"
             "### Blocking issues / verification notes\n\n" + excerpt + "\n\n"
             "**Next steps:** Address blocking findings, rerun affected tests and CI, "
-            "and request independent review on the updated HEAD/Base before marking Ready.\n\n"
+            "and request independent review on the updated HEAD/Base before marking Ready."
+            + base_next + "\n\n"
             "This comment is an automated technical review, not a human approval.\n")
 
 
@@ -89,7 +94,8 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
         # Prevent a concurrent actor or last-moment update to the PR state.
         view = pr_view(repo, number)
         if view.get("state") != "OPEN" or view.get("isDraft") is not False or \
-           view.get("headRefOid") != gate["head_sha"] or view.get("baseRefOid") != gate["base_sha"]:
+           view.get("headRefOid") != gate["head_sha"] or view.get("baseRefOid") != gate["base_sha"] or \
+           branch_head(repo, view["baseRefName"]) != gate["live_base_sha"]:
             raise GitHubError("PR state/HEAD/Base changed immediately before action")
         if gate["decision"] == "DRAFT":
             # Ensure explanation is available before modifying the PR status.

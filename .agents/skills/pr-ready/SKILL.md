@@ -114,8 +114,15 @@ to answer. These rules remove that cost without weakening a gate:
    reviewers split by layer doubled the cost and still missed the defects the merge review
    found afterwards.
 5. **Integrate the base branch only when forced**: when GitHub reports the PR
-   `CONFLICTING` (no `pull_request` CI runs then) or when the user asks, never
-   proactively. A conflict confined to Markdown (changelog rows, runbook wording) is a
+   `CONFLICTING` (no `pull_request` CI runs then), when `pr-review-merge` returned it
+   to Draft for a confirmed PR Base/live-base SHA mismatch, or when the user asks,
+   never proactively. For that hand-off, independently read the current base ref,
+   reconcile PR metadata and integrate the verified latest base if needed using
+   the checkout contract; do not merge an unverified name just to refresh metadata.
+   Before Ready, require PR Base SHA to equal the live base tip, rerun affected
+   validation/CI and obtain fresh independent review on the updated HEAD/Base.
+   If access or metadata still prevents reconciliation, keep Draft with the exact
+   observed SHAs and blocker. A conflict confined to Markdown (changelog rows, runbook wording) is a
    non-execution edit: keep the target evidence through `target_reuse`
    (`$SNAP/.agents/skills/_shared/target-evidence-reuse.md`), rerun the touched-package
    receipts and a delta review. A conflict in an execution-affecting file is a new

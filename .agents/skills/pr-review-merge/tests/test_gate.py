@@ -42,6 +42,10 @@ class Fake:
         # {(base, head): compare result as gh_runtime.compare returns it}
         self.compares = {}
         self.calls = []
+        self.live_base = B
+
+    def branch_head(self, repo, branch):
+        return self.live_base
 
     def file_at(self, repo, path, ref):
         self.calls.append(('file_at', path, ref))
@@ -76,6 +80,26 @@ class GateTests(unittest.TestCase):
     def test_skip_draft(self):
         f = Fake(); f.v['isDraft'] = True
         self.assertEqual(self.gate(gh=f)['decision'], 'SKIP')
+
+    def test_base_ref_mismatch_drafts_even_without_review(self):
+        f = Fake(); f.live_base = 'c' * 40
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(f.live_base, result['reasons'][0])
+        self.assertIn('pr-ready', result['reasons'][0])
+
+    def test_base_ref_unavailable_waits(self):
+        f = Fake()
+        def unavailable(repo, branch):
+            raise GitHubError('permission denied')
+        f.branch_head = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_base_ref_mismatch_changes_during_confirmation_waits(self):
+        f = Fake(); refs = iter(['c' * 40, B])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
     def test_stale_head(self):
         e = sample(); e['head_sha'] = B

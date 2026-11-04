@@ -264,6 +264,36 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reasons.append("Invalid PR state or missing HEAD/Base SHA")
         return result
 
+    # Operational hand-off, independent of semantic review: pr-ready must reconcile
+    # inconsistent base metadata before a complete review can authorize a merge.
+    try:
+        base_name = view.get("baseRefName")
+        if not isinstance(base_name, str) or not base_name:
+            raise GitHubError("Live base branch name unavailable")
+        live_base = client.branch_head(repo, base_name)
+        if not _sha(live_base):
+            raise GitHubError("Invalid live base branch SHA")
+        result["live_base_sha"] = live_base
+        if live_base != result["base_sha"]:
+            # Confirm both identities before drafting; concurrent PR/ref movement
+            # must not turn a transient observation into a repair request.
+            confirm = client.pr_view(repo, number)
+            if any(confirm.get(k) != view.get(k) for k in
+                   ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
+                    client.branch_head(repo, base_name) != live_base:
+                reasons.append("PR/base branch changed while confirming base SHA mismatch; retry live gate")
+                return result
+            result["decision"] = "DRAFT"
+            result["base_mismatch"] = True
+            reasons.append(
+                f"PR Base SHA {result['base_sha']} differs from live {base_name} SHA {live_base}. "
+                "Use pr-ready to reconcile the base state, integrate the verified latest base if needed, "
+                "then rerun affected validation/CI and independent review on the updated HEAD/Base before Ready.")
+            return result
+    except (GitHubError, ValueError, KeyError) as exc:
+        reasons.append(f"Unable to verify live base branch: {exc}")
+        return result
+
     # Stale review evidence must never drive a destructive operation.
     if not isinstance(evidence, dict) or evidence.get("schema_version") != 1 or \
        not isinstance(evidence.get("repo"), str) or evidence["repo"].lower() != repo.raw.lower() or evidence.get("pr") != number:
@@ -452,6 +482,8 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         if second.get("state") != "OPEN" or second.get("isDraft") is not False or \
             second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"]:
             missing.append("PR HEAD/Base/state changed during live gate")
+        if client.branch_head(repo, base_name) != live_base:
+            missing.append("Live base branch changed during gate; rerun to classify current base state")
     except (GitHubError, ValueError, KeyError) as exc:
         missing.append(f"Could not recheck PR version: {exc}")
 
