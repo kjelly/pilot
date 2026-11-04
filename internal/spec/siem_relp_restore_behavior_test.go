@@ -142,24 +142,29 @@ func TestRegression_SIEMTLSRollbackReloadsChangedMaterial(t *testing.T) {
 		return tasks
 	}
 	var snapshot []map[string]any
+	var moduleSnapshot []map[string]any
 	for _, task := range read("rsyslog-relp-tls.yml") {
 		switch task["name"] {
 		case "RELP: inspect the role's TLS files and desired profile", "RELP: refuse symlinks and non-regular certificate files", "RELP: snapshot existing TLS files for rollback", "RELP: record this snapshot's role":
 			snapshot = append(snapshot, task)
+		case "RELP: snapshot module declarations before sender migration", "RELP: retain sender module declarations for rollback":
+			moduleSnapshot = append(moduleSnapshot, task)
 		}
 	}
 	if len(snapshot) != 4 {
 		t.Fatal("missing production snapshot tasks")
 	}
 	for _, tc := range []struct {
-		name, mode string
-		change     bool
-		restart    bool
-		pending    bool
+		name, mode   string
+		change       bool
+		restart      bool
+		pending      bool
+		moduleChange bool
 	}{
-		{"changed TLS restore reloads validated state", "valid", true, true, false},
-		{"invalid global restore leaves loaded daemon", "fatal", true, false, true},
-		{"unchanged TLS restore leaves loaded daemon", "valid", false, false, false},
+		{"changed TLS restore reloads validated state", "valid", true, true, false, false},
+		{"invalid global restore leaves loaded daemon", "fatal", true, false, true, false},
+		{"unchanged TLS restore leaves loaded daemon", "valid", false, false, false, false},
+		{"module-only audit rollback validates and reloads", "valid", false, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -179,19 +184,22 @@ func TestRegression_SIEMTLSRollbackReloadsChangedMaterial(t *testing.T) {
 			const shim = `import os,pathlib,sys
 d=pathlib.Path(os.environ['TLS_RELOAD_CASE_DIR']);a=sys.argv[1:]
 if pathlib.Path(sys.argv[0]).name=='rsyslogd':
+ (d/'validated').write_text('1')
  sys.exit(1 if os.environ['TLS_RELOAD_CASE_MODE']=='fatal' else 0)
 if a[0]=='show':
  if 'MainPID' in a:print('1234')
  elif 'ActiveEnterTimestamp' in a:print('2099-01-01 00:00:00 UTC' if (d/'restarted').exists() else '2000-01-01 00:00:00 UTC')
  else:print('LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled')
 elif a[0]=='is-enabled':print('enabled')
-elif a[0]=='restart':(d/'restarted').write_text('1')
+elif a[0]=='restart':
+ assert (d/'validated').exists(), 'restart preceded restored-config validation'
+ (d/'restarted').write_text('1')
 else:raise RuntimeError(a)
 `
 			for _, name := range []string{"systemctl", "rsyslogd"} {
 				write(filepath.Join(bin, name), "#!"+python+"\n"+shim, 0700)
 			}
-			config := filepath.Join(dir, "forward.conf")
+			config := filepath.Join(private, "99-siem-forward.conf")
 			files := []string{config}
 			for _, name := range []string{"ca.pem", "cert.pem", "key.pem", "profile.json"} {
 				files = append(files, filepath.Join(tlsDir, name))
@@ -204,6 +212,13 @@ else:raise RuntimeError(a)
 			}
 			tasks := []any{read("rsyslog-relp-inputs.yml")[0]}
 			tasks = append(tasks, withPath(t, snapshot, "/etc/rsyslog.d", private)...)
+			if tc.moduleChange {
+				if len(moduleSnapshot) != 2 {
+					t.Fatal("missing module snapshot tasks")
+				}
+				tasks = append(tasks, withPath(t, moduleSnapshot, "/etc/rsyslog.d", private)...)
+				tasks = append(tasks, map[string]any{"ansible.builtin.copy": map[string]any{"dest": config, "content": "new module configuration", "mode": "0600"}})
+			}
 			if tc.change {
 				tasks = append(tasks, map[string]any{"ansible.builtin.copy": map[string]any{"dest": filepath.Join(tlsDir, "key.pem"), "content": "new invalid key", "mode": "0600"}})
 			}
@@ -211,7 +226,7 @@ else:raise RuntimeError(a)
 			play := loadFirstPlay(t, "audit-log-forwarding-apply.yml")
 			tasks = append(tasks, findNamedTask(t, play, "ROLLBACK — validate the restored rsyslog configuration"), findNamedTask(t, play, "ROLLBACK — restart rsyslog with the restored configuration"))
 			env := map[string]any{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH"), "TLS_RELOAD_CASE_DIR": dir, "TLS_RELOAD_CASE_MODE": tc.mode}
-			body, err := yaml.Marshal([]any{map[string]any{"hosts": "all", "gather_facts": false, "environment": env, "vars": map[string]any{"siem_tls_role": "sender", "siem_forward_rsyslog_start_result": map[string]any{}, "siem_forward_rsyslog_restart_result": map[string]any{}}, "tasks": tasks}})
+			body, err := yaml.Marshal([]any{map[string]any{"hosts": "all", "gather_facts": false, "environment": env, "vars": map[string]any{"siem_tls_role": "sender", "siem_tls_enabled": true, "siem_forward_rsyslog_start_result": map[string]any{}, "siem_forward_rsyslog_restart_result": map[string]any{}}, "tasks": tasks}})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,0 +1,252 @@
+---
+# Included after compose is up, inside wazuh-manager's snapshot/rescue block.
+- name: "Wazuh: install the host reader and ACL tools"
+  ansible.builtin.include_tasks:
+    file: apt-package-install.yml
+    apply:
+      tags: [C10, C11]
+  vars:
+    pilot_apt_packages: "{{ ['rsyslog', 'acl', 'rsyslog-relp', 'openssl'] if siem_forward_transport == 'relp' else ['rsyslog', 'acl'] }}"
+    pilot_apt_component: wazuh-alert-forwarding
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: inspect the actual container logs mount"
+  # Container Config.Env can contain indexer/API credentials.
+  no_log: true
+  diff: false
+  community.docker.docker_container_info:
+    name: single-node-wazuh.manager-1
+  register: wazuh_forward_container
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: resolve the actual logs source"
+  ansible.builtin.set_fact:
+    wazuh_logs_source: "{{ (wazuh_forward_container.container.Mounts | selectattr('Destination', 'equalto', '/var/ossec/logs') | map(attribute='Source') | list | first) }}"
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: validate the Docker mount path before ACL/config interpolation"
+  ansible.builtin.assert:
+    that:
+      - wazuh_logs_source is match('^/[A-Za-z0-9_./-]+\Z')
+      - "'..' not in wazuh_logs_source.split('/')"
+      - wazuh_logs_source != '/'
+    fail_msg: "Wazuh requires a real absolute logs-volume Source without metacharacters."
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: wait for the real manager alerts directory"
+  ansible.builtin.wait_for:
+    path: "{{ wazuh_logs_source }}/alerts"
+    timeout: 180
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: ensure the ACL helper directory exists"
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: "0755"
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: install the bounded ACL transaction helper"
+  ansible.builtin.copy:
+    src: ../files/pilot-wazuh-acl
+    dest: /usr/local/libexec/pilot-wazuh-acl
+    owner: root
+    group: root
+    mode: "0755"
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: allocate a private transient ACL rollback journal"
+  ansible.builtin.tempfile:
+    state: file
+    path: /run
+    prefix: pilot-wazuh-acl-
+    suffix: .json
+  register: wazuh_acl_journal
+  changed_when: false
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: grant identity-aware reader ACLs including existing date directories"
+  ansible.builtin.command:
+    argv:
+      - /usr/local/libexec/pilot-wazuh-acl
+      - grant
+      - "{{ wazuh_acl_journal.path }}"
+      - "{{ wazuh_logs_source }}"
+      - syslog
+  register: wazuh_acl_result
+  changed_when: wazuh_acl_result.rc == 0 and (wazuh_acl_result.stdout | from_json).changed | bool
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: detect rsyslog AppArmor policy"
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/usr.sbin.rsyslogd
+  register: wazuh_apparmor_policy
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: grant exact-volume AppArmor reader access"
+  ansible.builtin.blockinfile:
+    path: /etc/apparmor.d/local/usr.sbin.rsyslogd
+    create: true
+    mode: "0644"
+    marker: "# {mark} PILOT WAZUH ALERT READER"
+    block: |
+      {{ wazuh_logs_source }}/alerts/ r,
+      {{ wazuh_logs_source }}/alerts/alerts.json r,
+  register: wazuh_apparmor_result
+  when: siem_forwarding_enabled | bool and wazuh_apparmor_policy.stat.exists
+
+- name: "Wazuh: reload the combined AppArmor profile"
+  ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
+  when: wazuh_apparmor_result is changed
+
+- name: "Wazuh: create independent reader state and queue directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: syslog
+    group: syslog
+    mode: "0700"
+  loop: [/var/spool/rsyslog/pilot-wazuh, /var/spool/rsyslog/pilot-wazuh/state]
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: create private configuration directory"
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/pilot-wazuh
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Wazuh: create verification helper directory"
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: "0755"
+
+- name: "Wazuh: install local and delivery verification helper"
+  ansible.builtin.copy:
+    src: ../files/pilot-wazuh-delivery
+    dest: /usr/local/libexec/pilot-wazuh-delivery
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Wazuh: install the fixed heartbeat runtime checker"
+  ansible.builtin.copy:
+    src: ../files/pilot-wazuh-heartbeat
+    dest: /usr/local/libexec/pilot-wazuh-heartbeat
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Wazuh: check isolated queue engine and native RELP capabilities"
+  ansible.builtin.include_tasks: rsyslog-relp-capability.yml
+  vars:
+    siem_forward_conf: /etc/rsyslog.d/31-pilot-wazuh.conf
+    siem_queue_spool: /var/spool/rsyslog/pilot-wazuh
+    siem_forward_action_names: [wazuh_alerts]
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: provision isolated transport credentials and profile"
+  ansible.builtin.include_tasks: rsyslog-relp-tls.yml
+  vars:
+    siem_tls_role: wazuh-sender
+    siem_tls_enabled: "{{ siem_forward_transport == 'relp' }}"
+    siem_tls_config: /etc/rsyslog.d/31-pilot-wazuh.conf
+    siem_tls_owner: syslog
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: render the isolated imfile reader and forward action"
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/31-pilot-wazuh.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by wazuh-manager-apply.yml. Never enter the default ruleset.
+      module(load="imfile" statefile.directory="/var/spool/rsyslog/pilot-wazuh/state")
+      ruleset(name="pilotWazuhForward") {
+        action(name="wazuh_alerts" type="{{ 'omrelp' if siem_forward_transport == 'relp' else 'omfwd' }}"
+          target="siem-log-server" port="{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
+          template="RSYSLOG_SyslogProtocol23Format"
+      {% if siem_forward_transport == 'relp' %}
+          action.writeAllMarkMessages="on"
+          tls="on" tls.authMode="name" tls.permittedPeer="{{ siem_relp_server_name }}"
+          tls.caCert="/etc/rsyslog.d/pilot-relp-wazuh-sender/ca.pem"
+          tls.myCert="/etc/rsyslog.d/pilot-relp-wazuh-sender/cert.pem"
+          tls.myPrivKey="/etc/rsyslog.d/pilot-relp-wazuh-sender/key.pem"
+          tls.priorityString="NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"
+          tls.permanentFailureDisablesAction="off" timeout="5" conn.timeout="3"
+          queue.timeoutShutdown="1000" queue.timeoutActionCompletion="10000"
+      {% else %}
+          protocol="tcp" ResendLastMSGOnReconnect="on"
+      {% endif %}
+      {% if siem_forward_queue_engine == 'disk' %}
+          queue.diskQueueType="disk"
+      {% endif %}
+          action.resumeRetryCount="-1" action.resumeInterval="1" action.resumeIntervalMax="10"
+          queue.type="LinkedList" queue.filename="wazuh_alerts"
+          queue.spoolDirectory="/var/spool/rsyslog/pilot-wazuh"
+          queue.size="10000" queue.highWatermark="8000" queue.lowWatermark="2000"
+          queue.maxDiskSpace="256m" queue.maxFileSize="1m"
+          queue.saveOnShutdown="on" queue.discardSeverity="8")
+        stop
+      }
+      {% if siem_forward_transport == 'relp' %}
+      module(load="immark" interval="5" markMessageText="PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1" ruleset="pilotWazuhForward" use.syslogCall="off" use.markFlag="on")
+      {% endif %}
+      input(type="imfile" File="{{ wazuh_logs_source }}/alerts/alerts.json"
+        Tag="pilot-wazuh-alert:" Facility="local5" Severity="info"
+        PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on"
+        addMetadata="off" ruleset="pilotWazuhForward")
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: remove only the managed reader when forwarding is disabled"
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/31-pilot-wazuh.conf
+    state: absent
+  when: not (siem_forwarding_enabled | bool)
+
+- name: "Wazuh: record the desired reader state"
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/pilot-wazuh/profile.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ {'enabled': (siem_forwarding_enabled | bool), 'source': (wazuh_logs_source | default('')), 'transport': siem_forward_transport, 'heartbeat_interval': (5 if siem_forwarding_enabled | bool and siem_forward_transport == 'relp' else 0)} | to_nice_json }}"
+
+- name: "Wazuh: validate native combined configuration"
+  ansible.builtin.command: rsyslogd -N1
+  changed_when: false
+  when: siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
+
+- name: "Wazuh: detect pending reader/TLS/config reload"
+  ansible.builtin.shell:
+    executable: /bin/sh
+    cmd: |
+      started=$(date -d "$(systemctl show --timestamp=us -p ActiveEnterTimestamp --value rsyslog)" +%s.%N) || { echo pending; exit 0; }
+      find /etc/rsyslog.d/pilot-wazuh /etc/rsyslog.d/pilot-relp-wazuh-sender /etc/rsyslog.d/31-pilot-wazuh.conf /etc/rsyslog.d/09-pilot-omrelp.conf -type f -printf '%T@\n' 2>/dev/null | awk -v s="$started" '$1 > s {p=1} END {if(p) print "pending"}'
+  register: wazuh_reload_pending
+  changed_when: false
+  when: siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
+
+- name: "Wazuh: start the host reader"
+  ansible.builtin.systemd:
+    name: rsyslog
+    enabled: true
+    state: started
+  when: siem_forwarding_enabled | bool
+
+- name: "Wazuh: load reader state after changes or interrupted deployment"
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+  when:
+    - siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
+    - wazuh_reload_pending.stdout | default('') == 'pending' or not (siem_forwarding_enabled | bool) or wazuh_apparmor_result is changed or wazuh_acl_result is changed
+
+- name: "Wazuh: verify the effective owned heartbeat after activation"
+  ansible.builtin.command:
+    argv: [/usr/local/libexec/pilot-wazuh-heartbeat, runtime, "{{ siem_forward_transport }}"]
+  changed_when: false
+  when: siem_forwarding_enabled | bool

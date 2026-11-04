@@ -1,0 +1,22 @@
+---
+# Integrated fresh topology test: deterministic product apply followed by an
+# ephemeral real-alert challenge. The receiver verification consumes the nonce.
+- name: Install Docker on the manager
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+  vars:
+    target_group: wazuh-manager
+- name: Configure the designated central receiver
+  ansible.builtin.import_playbook: ../apply/log-server-apply.yml
+  vars:
+    target_group: log-server
+- name: Configure receiver local audit/auth self-forwarding
+  ansible.builtin.import_playbook: ../apply/audit-log-forwarding-apply.yml
+  vars:
+    target_group: log-server
+- name: Configure Wazuh and its host imfile sender
+  ansible.builtin.import_playbook: ../apply/wazuh-manager-apply.yml
+  vars:
+    target_group: wazuh-manager
+- name: Prepare a new real-alert delivery challenge
+  ansible.builtin.import_playbook: fixtures/wazuh-alert-delivery-fixtures.yml
+  when: not ansible_check_mode

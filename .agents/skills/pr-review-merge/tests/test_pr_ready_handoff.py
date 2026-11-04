@@ -10,12 +10,14 @@ import importlib.util
 import itertools
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'scripts'))
 from gh_runtime import Repo  # noqa: E402
 from review_gate import evaluate as prm_evaluate  # noqa: E402
+import review_gate  # noqa: E402
 from test_gate import Fake, sample  # noqa: E402
 
 MANIFEST = '.github/pr-evidence.json'
@@ -54,6 +56,19 @@ def ready_evidence(failing, unresolved, exempt_threads):
 
 
 class HandoffTests(unittest.TestCase):
+    def test_both_workflows_require_latest_base_ancestry(self):
+        for aligned in (True, False):
+            with self.subTest(aligned=aligned):
+                gh = Fake(); gh.ancestor = aligned; gh.Repo = Repo
+                draft_view = dict(gh.v, isDraft=True)
+                gh.v = draft_view
+                with mock.patch.object(pr_ready, 'merge_gate_modules', return_value=(review_gate, gh)):
+                    errors = pr_ready.base_alignment_errors(draft_view, 'acme/demo')
+                self.assertEqual(not aligned, bool(errors))
+                gh.v = dict(gh.v, isDraft=False)
+                result = prm_evaluate(Repo.parse('acme/demo'), 42, sample(), client=gh)
+                self.assertEqual('MERGE' if aligned else 'DRAFT', result['decision'])
+
     def states(self):
         """GitHub states a PR can be in when pr-ready runs; this repository has no required checks."""
         for bucket, thread_resolved, decision, exempt_check, exempt_thread, required in itertools.product(
