@@ -29,6 +29,15 @@ func TestWazuhWriterTaskGraph(t *testing.T) {
 	}
 }
 
+// Exercise the installed script action and its actual shell: splitting a
+// rendered command in Python would hide newlines retained by ScriptModule.
+func TestWazuhManagerScriptArguments(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_manager_script_args_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("real Ansible manager script argument controls failed: %v\n%s", err, output)
+	}
+}
+
 func TestWazuhSelectionTaskGraph(t *testing.T) {
 	cmd := exec.Command("python3", "testdata/wazuh_selection_task_test.py")
 	if output, err := cmd.CombinedOutput(); err != nil {

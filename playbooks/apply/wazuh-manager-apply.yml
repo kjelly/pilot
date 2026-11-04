@@ -258,9 +258,7 @@
               files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
               --legacy {{ wazuh_docker_version | quote }}
               --owner {{ wazuh_writer_owner | quote }}
-              {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool)
-                   and pilot_wazuh_manager_install_planned is defined
-                   and pilot_wazuh_manager_install_planned) else '' }}
+              {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool) and pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned) else '' }}
               {{ '--preview' if ansible_check_mode else '' }}
               {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
             executable: python3
